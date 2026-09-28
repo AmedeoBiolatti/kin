@@ -993,6 +993,12 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
                         (LogFields{{.name = "spirv_size", .value = std::to_string(desc.spirv.size)}}));
         return {};
     }
+    if (desc.num_samplers > MaxShaderSamplers) {
+        KIN_LOG_ERROR_F("render", "create_shader: too many samplers",
+                        (LogFields{{.name = "samplers", .value = std::to_string(desc.num_samplers)},
+                                   {.name = "max", .value = std::to_string(MaxShaderSamplers)}}));
+        return {};
+    }
     gpu::GpuShader shader = gpu::GpuShader::from_bytes(
         _device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
         std::span<const u8>{desc.spirv.code, desc.spirv.size},
@@ -1009,16 +1015,22 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
 }
 
 void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params) {
-    draw_shader_surface(rect, handle, params, Texture{}, Texture{});
+    draw_shader_surface(rect, handle, params, std::span<const Texture>{});
 }
 
 void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                                                const Texture& source) {
-    draw_shader_surface(rect, handle, params, source, Texture{});
+    draw_shader_surface(rect, handle, params, std::span<const Texture>{&source, 1});
 }
 
 void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                                                const Texture& source0, const Texture& source1) {
+    const std::array<Texture, 2> sources{source0, source1};
+    draw_shader_surface(rect, handle, params, std::span<const Texture>{sources});
+}
+
+void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
+                                               std::span<const Texture> sources) {
     if (handle.value == 0 || handle.value > _shaders.size() || rect.w <= 0.0f || rect.h <= 0.0f) {
         return;
     }
@@ -1027,23 +1039,26 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         return;
     }
     ensure_frame();
-    // Resolve a kin Texture -> (GpuTexture handle, sampler); null when invalid so the
-    // batch substitutes the default white texture / default sampler.
-    const auto resolve = [this](const Texture& src, SDL_GPUTexture*& tex, SDL_GPUSampler*& smp) {
+    // `sources[i]` -> fragment sampler i. An invalid source leaves the binding null,
+    // which the batch replaces with the white texture and default sampler. Slots the
+    // shader declares beyond the sources are bound the same way, so it never samples
+    // an unbound slot.
+    const auto resolve = [this](const Texture& src) {
+        SDL_GPUTextureSamplerBinding binding{};
         if (const auto* backend = as_gpu(src.backend().get());
             backend && backend->texture()) {
-            tex = backend->texture().handle();
-            smp = backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+            binding.texture = backend->texture().handle();
+            binding.sampler = backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
         }
+        return binding;
     };
-    // `source0` -> fragment sampler 0 (backdrop refraction etc.); `source1` -> sampler 1
-    // (2-input materials: cross-dissolve, bloom combine). A null source1 binds no slot 1.
-    SDL_GPUTexture* tex0 = nullptr;
-    SDL_GPUSampler* smp0 = nullptr;
-    SDL_GPUTexture* tex1 = nullptr;
-    SDL_GPUSampler* smp1 = nullptr;
-    resolve(source0, tex0, smp0);
-    resolve(source1, tex1, smp1);
+    const std::size_t slots = std::min<std::size_t>(
+        std::max<std::size_t>({sources.size(), shader.samplers(), 1}), MaxShaderSamplers);
+    const SDL_GPUTextureSamplerBinding slot0 = sources.empty() ? SDL_GPUTextureSamplerBinding{} : resolve(sources[0]);
+    std::array<SDL_GPUTextureSamplerBinding, MaxShaderSamplers - 1> extra{};
+    for (std::size_t i = 1; i < slots && i < sources.size(); ++i) {
+        extra[i - 1] = resolve(sources[i]);
+    }
     // Quad over `rect` (uv 0..1, white vertex color) tagged with the material fragment
     // shader + the ShaderParams uniform (fragment slot 0).
     const f32 x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.w, y1 = rect.y + rect.h;
@@ -1056,9 +1071,9 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         {x0, y1, 0.0f, 1.0f, 255, 255, 255, 255},
     }};
     apply_view_offset(verts);
-    _batch.push(verts, shader.handle(), tex0, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha),
+    _batch.push(verts, shader.handle(), slot0.texture, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha),
                 params.uniforms.data(), static_cast<u32>(params.uniforms.size() * sizeof(f32)),
-                smp0, tex1, smp1);
+                slot0.sampler, std::span<const SDL_GPUTextureSamplerBinding>{extra.data(), slots - 1});
 }
 
 void GpuRenderer2DBackend::set_post_process(std::span<const PostProcessPass> passes) {
@@ -1106,12 +1121,18 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
             continue;
         }
         _batch.begin(*write, SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f}, /*do_clear=*/true);
-        SDL_GPUTexture* tex1 = pass.sample_original ? _scene.handle() : nullptr;
-        SDL_GPUSampler* smp1 = pass.sample_original ? _sampler_linear : nullptr;
+        // Slot 1 is the original scene when requested; any other declared slots get
+        // the white texture so the pass never samples an unbound slot.
+        std::array<SDL_GPUTextureSamplerBinding, MaxShaderSamplers - 1> extra{};
+        if (pass.sample_original) {
+            extra[0] = {_scene.handle(), _sampler_linear};
+        }
+        const std::size_t extra_count = std::min<std::size_t>(
+            std::max<std::size_t>(sh.samplers(), pass.sample_original ? 2u : 1u) - 1, extra.size());
         _batch.push(verts, sh.handle(), read->handle(), full, gpu::GpuBlendMode::Replace,
                     pass.params.uniforms.data(),
                     static_cast<u32>(pass.params.uniforms.size() * sizeof(f32)),
-                    _sampler_linear, tex1, smp1);
+                    _sampler_linear, std::span<const SDL_GPUTextureSamplerBinding>{extra.data(), extra_count});
 
         gpu::GpuGeometryBatch::FlushContext ctx{};
         ctx.vertex_shader = _vertex_shader.handle();

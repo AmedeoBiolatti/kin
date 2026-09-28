@@ -15,7 +15,7 @@ class GpuDevice;
 class GpuShader {
 public:
     GpuShader() = default;
-    GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader);
+    GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader, u32 samplers = 0);
     ~GpuShader();
 
     GpuShader(const GpuShader&) = delete;
@@ -35,6 +35,8 @@ public:
                                u32 samplers = 0);
 
     SDL_GPUShader* handle() const { return _shader; }
+    // Fragment sampler slots the shader declares; draws must bind all of them.
+    u32 samplers() const { return _samplers; }
     explicit operator bool() const { return _shader != nullptr; }
 
 private:
@@ -42,6 +44,7 @@ private:
 
     SDL_GPUDevice* _device = nullptr;
     SDL_GPUShader* _shader = nullptr;
+    u32 _samplers = 0;
 };
 
 std::vector<u8> read_shader_file(const std::filesystem::path& path);

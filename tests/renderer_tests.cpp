@@ -14,8 +14,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -142,6 +145,26 @@ public:
     kin::Vec2i last_update_at{};
     kin::Vec2i last_update_size{};
     int texture_updates = 0;
+    // Only the fixed-arity forms: the list form stays the interface default, which
+    // is what a backend without wider sampler support gets.
+    using kin::IRenderer2DBackend::draw_shader_surface;
+    void draw_shader_surface(kin::Rectf, kin::ShaderHandle, const kin::ShaderParams&) override {
+        shader_draw_sources.push_back(0);
+    }
+    void draw_shader_surface(kin::Rectf, kin::ShaderHandle, const kin::ShaderParams&,
+                             const kin::Texture& source) override {
+        shader_draw_sources.push_back(1);
+        last_shader_source0 = source;
+    }
+    void draw_shader_surface(kin::Rectf, kin::ShaderHandle, const kin::ShaderParams&,
+                             const kin::Texture& source0, const kin::Texture& source1) override {
+        shader_draw_sources.push_back(2);
+        last_shader_source0 = source0;
+        last_shader_source1 = source1;
+    }
+    std::vector<int> shader_draw_sources;
+    kin::Texture last_shader_source0;
+    kin::Texture last_shader_source1;
     void draw_texture(const kin::Texture& texture, kin::Rectf dest) override {
         assert(texture);
         last_texture_dest = dest;
@@ -886,6 +909,108 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
     }
 }
 
+void test_shader_surface_sources_on_fake_backend() {
+    std::vector<kin::LogEvent> log_events;
+    kin::set_logger_config({
+        .min_level = kin::LogLevel::Debug,
+        .format = kin::LogFormat::Text,
+        .sdl_sink = false,
+        .memory_events = &log_events,
+    });
+
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    // Distinct widths tell the sources apart.
+    const std::array<kin::u8, 12> white{255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255};
+    const std::array<kin::Texture, 3> sources{
+        renderer.create_texture_from_rgba(white.data(), {1, 1}),
+        renderer.create_texture_from_rgba(white.data(), {2, 1}),
+        renderer.create_texture_from_rgba(white.data(), {3, 1}),
+    };
+    const kin::Rectf rect{0.0f, 0.0f, 8.0f, 8.0f};
+    const kin::ShaderHandle shader{1};
+    const kin::ShaderParams params{};
+
+    // A backend without list support gets the first two sources.
+    renderer.draw_shader_surface(rect, shader, params, std::span<const kin::Texture>{sources});
+    assert(raw->shader_draw_sources == std::vector<int>{2});
+    assert((raw->last_shader_source0.size() == kin::Vec2i{1, 1}));
+    assert((raw->last_shader_source1.size() == kin::Vec2i{2, 1}));
+    renderer.draw_shader_surface(rect, shader, params, std::span<const kin::Texture>{sources.data(), 1});
+    renderer.draw_shader_surface(rect, shader, params, std::span<const kin::Texture>{});
+    assert((raw->shader_draw_sources == std::vector<int>{2, 1, 0}));
+
+    // More sources than sampler slots is rejected before it reaches the backend.
+    const std::vector<kin::Texture> too_many(kin::MaxShaderSamplers + 1, sources[0]);
+    renderer.draw_shader_surface(rect, shader, params, too_many);
+    assert(raw->shader_draw_sources.size() == 3);
+    assert(has_log_event(log_events, "render", "draw_shader_surface: too many sources"));
+    kin::set_logger_config({.sdl_sink = false});
+}
+
+void test_gpu_shader_surface_binds_every_source() {
+    constexpr std::string_view test_name = "test_gpu_shader_surface_binds_every_source";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "four_sources.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-shader-sources-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        std::ifstream file(spv, std::ios::binary);
+        const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        desc.num_samplers = 4;
+        const kin::ShaderHandle shader = renderer->create_shader(desc);
+        assert(shader);
+
+        // The shader adds slot 0's red, slot 1's green, slot 2's blue and slot 3's
+        // grey, so every slot shows in the result only if it is bound correctly.
+        const auto solid = [&](kin::u8 r, kin::u8 g, kin::u8 b) {
+            const std::array<kin::u8, 4> px{r, g, b, 255};
+            return renderer->create_texture_from_rgba(px.data(), {1, 1});
+        };
+        const std::array<kin::Texture, 4> sources{
+            solid(200, 0, 0), solid(0, 150, 0), solid(0, 0, 100), solid(40, 40, 40)};
+        kin::RenderTarget target = renderer->create_render_target({8, 8}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> pixels;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 8.0f, 8.0f}, shader, {}, std::span<const kin::Texture>{sources});
+            assert(renderer->read_rgba({0.0f, 0.0f, 8.0f, 8.0f}, pixels, size));
+        }
+        assert(pixel_near(pixels, size, 4, 4, kin::Color::rgb(240, 190, 140)));
+
+        // With two sources, the two slots left over are bound white instead of unbound.
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 8.0f, 8.0f}, shader, {}, sources[0], sources[1]);
+            assert(renderer->read_rgba({0.0f, 0.0f, 8.0f, 8.0f}, pixels, size));
+        }
+        assert(pixel_near(pixels, size, 4, 4, kin::Color::rgb(255, 255, 255)));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_post_process_degrades_on_fake_backend() {
     auto backend = std::make_unique<FakeBackend>();
     kin::Renderer2D renderer{std::move(backend)};
@@ -908,6 +1033,7 @@ void test_post_process_degrades_on_fake_backend() {
 int main() {
     test_facade_with_fake_backend();
     test_post_process_degrades_on_fake_backend();
+    test_shader_surface_sources_on_fake_backend();
     test_sprite_sheet();
     test_sprite_catalog_resolves_refs_and_sheets();
     test_sdl_backend_smoke();
@@ -921,5 +1047,6 @@ int main() {
     test_gpu_native_coordinates_disable_logical_presentation();
     test_gpu_logical_transforms_are_immediate();
     test_gpu_native_pixel_size_and_pointer_mapping();
+    test_gpu_shader_surface_binds_every_source();
     return 0;
 }

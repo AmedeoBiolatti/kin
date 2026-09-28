@@ -18,6 +18,10 @@ struct ShaderHandle {
     friend constexpr bool operator==(ShaderHandle, ShaderHandle) = default;
 };
 
+// Most textures one material shader can sample (fragment sampler slots 0..15),
+// the per-stage limit SDL_GPU guarantees on every backend.
+inline constexpr u32 MaxShaderSamplers = 16;
+
 // A single precompiled fragment-shader binary in one GPU format. The backend
 // picks the blob matching the device's supported format (SDL_GetGPUShaderFormats).
 struct ShaderBlob {
@@ -33,12 +37,15 @@ struct ShaderBlob {
 // the fragment input is `float4 v_color : COLOR0; float2 v_uv : TEXCOORD0`, the
 // output is `SV_Target`, and an optional uniform block is `cbuffer : register(b0, space3)`
 // (fed from ShaderParams via slot 0). Provide whichever precompiled formats you have.
+// The textures passed to draw_shader_surface() bind in order at sampler slots 0, 1,
+// 2, ... (`register(tN, space2)`, or `layout(set = 2, binding = N)` in GLSL). Slots the
+// shader declares but the draw leaves out are bound to a 1x1 white texture.
 struct ShaderDesc {
     ShaderBlob spirv;            // Vulkan
     ShaderBlob dxil;             // D3D12
     ShaderBlob dxbc;             // D3D11
     ShaderBlob msl;              // Metal
-    u32 num_samplers = 1;        // SDL binds the drawn texture at sampler slot 0
+    u32 num_samplers = 1;        // sampler slots the shader declares, 1..MaxShaderSamplers
     u32 num_uniform_buffers = 0; // fragment uniform buffers (ShaderParams -> slot 0)
     const char* entrypoint = "main";
 };

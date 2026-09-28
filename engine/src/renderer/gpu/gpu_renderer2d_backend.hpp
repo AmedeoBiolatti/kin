@@ -111,6 +111,8 @@ public:
                              const Texture& source) override;
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                              const Texture& source0, const Texture& source1) override;
+    void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
+                             std::span<const Texture> sources) override;
 
     void set_post_process(std::span<const PostProcessPass> passes) override;
 

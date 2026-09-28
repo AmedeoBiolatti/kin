@@ -21,8 +21,8 @@ std::runtime_error sdl_error(std::string_view prefix) {
 
 } // namespace
 
-GpuShader::GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader)
-    : _device(device), _shader(shader) {}
+GpuShader::GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader, u32 samplers)
+    : _device(device), _shader(shader), _samplers(samplers) {}
 
 GpuShader::~GpuShader() {
     release();
@@ -30,7 +30,8 @@ GpuShader::~GpuShader() {
 
 GpuShader::GpuShader(GpuShader&& other) noexcept
     : _device(std::exchange(other._device, nullptr)),
-      _shader(std::exchange(other._shader, nullptr)) {}
+      _shader(std::exchange(other._shader, nullptr)),
+      _samplers(std::exchange(other._samplers, 0u)) {}
 
 GpuShader& GpuShader::operator=(GpuShader&& other) noexcept {
     if (this == &other) {
@@ -39,6 +40,7 @@ GpuShader& GpuShader::operator=(GpuShader&& other) noexcept {
     release();
     _device = std::exchange(other._device, nullptr);
     _shader = std::exchange(other._shader, nullptr);
+    _samplers = std::exchange(other._samplers, 0u);
     return *this;
 }
 
@@ -64,7 +66,7 @@ GpuShader GpuShader::from_bytes(GpuDevice& device, SDL_GPUShaderStage stage,
     if (!shader) {
         throw sdl_error("SDL_CreateGPUShader failed");
     }
-    return GpuShader{device.handle(), shader};
+    return GpuShader{device.handle(), shader, samplers};
 }
 
 GpuShader GpuShader::from_file(GpuDevice& device, SDL_GPUShaderStage stage,
@@ -82,6 +84,7 @@ void GpuShader::release() {
     }
     _device = nullptr;
     _shader = nullptr;
+    _samplers = 0;
 }
 
 std::vector<u8> read_shader_file(const std::filesystem::path& path) {

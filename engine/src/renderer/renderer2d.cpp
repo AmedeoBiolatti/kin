@@ -381,6 +381,17 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     _backend->draw_shader_surface(rect, shader, params, source0, source1);
 }
 
+void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                     std::span<const Texture> sources) {
+    if (sources.size() > MaxShaderSamplers) {
+        KIN_LOG_ERROR_F("render", "draw_shader_surface: too many sources",
+                        (LogFields{{.name = "sources", .value = std::to_string(sources.size())},
+                                   {.name = "max", .value = std::to_string(MaxShaderSamplers)}}));
+        return;
+    }
+    _backend->draw_shader_surface(rect, shader, params, sources);
+}
+
 void Renderer2D::set_post_process(std::span<const PostProcessPass> passes) {
     _backend->set_post_process(passes);
 }

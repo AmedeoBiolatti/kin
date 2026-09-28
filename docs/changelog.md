@@ -7,6 +7,17 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- `draw_shader_surface()` takes a list of source textures, bound at fragment
+  sampler slots 0, 1, 2, ... up to `MaxShaderSamplers` (16); previously at most
+  two.
+
+### Changed
+
+- On the SDL_GPU backend, sampler slots a material shader declares but a draw
+  leaves empty are bound to a white texture instead of being left unbound.
+
 ## [0.1.0] — 2026-09-28
 
 First public release.

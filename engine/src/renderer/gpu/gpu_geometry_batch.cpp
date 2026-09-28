@@ -2,6 +2,8 @@
 
 #include "gpu_pipeline_cache.hpp"
 
+#include <algorithm>
+#include <cassert>
 #include <cstring>
 
 namespace kin::gpu {
@@ -10,6 +12,10 @@ namespace {
 
 bool same_scissor(const SDL_Rect& a, const SDL_Rect& b) {
     return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+bool same_binding(const SDL_GPUTextureSamplerBinding& a, const SDL_GPUTextureSamplerBinding& b) {
+    return a.texture == b.texture && a.sampler == b.sampler;
 }
 
 } // namespace
@@ -21,15 +27,17 @@ void GpuGeometryBatch::begin(const GpuTexture& target, SDL_FColor clear, bool do
     _vertices.clear();
     _ranges.clear();
     _uniform_bytes.clear();
+    _extra_bindings.clear();
 }
 
 void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* fragment,
                             SDL_GPUTexture* texture, SDL_Rect scissor, GpuBlendMode blend,
                             const void* uniform, u32 uniform_size, SDL_GPUSampler* sampler,
-                            SDL_GPUTexture* texture2, SDL_GPUSampler* sampler2) {
+                            std::span<const SDL_GPUTextureSamplerBinding> extra) {
     if (tris.empty()) {
         return;
     }
+    assert(extra.size() < MaxShaderSamplers);
     const u32 first = static_cast<u32>(_vertices.size());
     _vertices.insert(_vertices.end(), tris.begin(), tris.end());
 
@@ -37,8 +45,10 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
                               _ranges.back().fragment == fragment &&
                               _ranges.back().texture == texture &&
                               _ranges.back().sampler == sampler &&
-                              _ranges.back().texture2 == texture2 &&
-                              _ranges.back().sampler2 == sampler2 &&
+                              _ranges.back().extra_count == extra.size() &&
+                              std::equal(extra.begin(), extra.end(),
+                                         _extra_bindings.begin() + _ranges.back().extra_offset,
+                                         same_binding) &&
                               _ranges.back().blend == blend &&
                               _ranges.back().uniform_size == 0 &&
                               same_scissor(_ranges.back().scissor, scissor);
@@ -51,8 +61,9 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
     range.fragment = fragment;
     range.texture = texture;
     range.sampler = sampler;
-    range.texture2 = texture2;
-    range.sampler2 = sampler2;
+    range.extra_offset = static_cast<u32>(_extra_bindings.size());
+    range.extra_count = static_cast<u32>(extra.size());
+    _extra_bindings.insert(_extra_bindings.end(), extra.begin(), extra.end());
     range.scissor = scissor;
     range.blend = blend;
     range.first_vertex = first;
@@ -119,10 +130,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     SDL_GPUGraphicsPipeline* bound_pipeline = nullptr;
     SDL_Rect bound_scissor{};
     bool have_scissor = false;
-    SDL_GPUTexture* bound_tex0 = nullptr;
-    SDL_GPUSampler* bound_smp0 = nullptr;
-    SDL_GPUTexture* bound_tex1 = nullptr;
-    SDL_GPUSampler* bound_smp1 = nullptr;
+    SDL_GPUTextureSamplerBinding bound_bindings[MaxShaderSamplers]{};
     u32 bound_binding_count = 0;
 
     for (const Range& range : _ranges) {
@@ -155,27 +163,22 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
                                            range.uniform_size);
         }
 
-        SDL_GPUTextureSamplerBinding tex_bindings[2]{};
+        SDL_GPUTextureSamplerBinding tex_bindings[MaxShaderSamplers]{};
         tex_bindings[0].texture = range.texture ? range.texture : ctx.white_texture;
         tex_bindings[0].sampler = range.sampler ? range.sampler : ctx.sampler;
-        u32 binding_count = 1;
-        if (range.texture2) {
-            tex_bindings[1].texture = range.texture2;
-            tex_bindings[1].sampler = range.sampler2 ? range.sampler2 : ctx.sampler;
-            binding_count = 2;
+        const u32 binding_count = 1 + range.extra_count;
+        for (u32 i = 0; i < range.extra_count; ++i) {
+            const SDL_GPUTextureSamplerBinding& extra = _extra_bindings[range.extra_offset + i];
+            tex_bindings[1 + i].texture = extra.texture ? extra.texture : ctx.white_texture;
+            tex_bindings[1 + i].sampler = extra.sampler ? extra.sampler : ctx.sampler;
         }
         // Rebind samplers whenever they differ — or whenever the pipeline was just
         // rebound, so we never rely on descriptor bindings persisting across a pipeline
         // change (keeps the elision provably pixel-neutral).
         if (pipeline_changed || binding_count != bound_binding_count ||
-            tex_bindings[0].texture != bound_tex0 || tex_bindings[0].sampler != bound_smp0 ||
-            (binding_count == 2 &&
-             (tex_bindings[1].texture != bound_tex1 || tex_bindings[1].sampler != bound_smp1))) {
+            !std::equal(tex_bindings, tex_bindings + binding_count, bound_bindings, same_binding)) {
             SDL_BindGPUFragmentSamplers(pass, 0, tex_bindings, binding_count);
-            bound_tex0 = tex_bindings[0].texture;
-            bound_smp0 = tex_bindings[0].sampler;
-            bound_tex1 = tex_bindings[1].texture;
-            bound_smp1 = tex_bindings[1].sampler;
+            std::copy(tex_bindings, tex_bindings + binding_count, bound_bindings);
             bound_binding_count = binding_count;
         }
 
@@ -191,6 +194,7 @@ void GpuGeometryBatch::reset() {
     _vertices.clear();
     _ranges.clear();
     _uniform_bytes.clear();
+    _extra_bindings.clear();
 }
 
 } // namespace kin::gpu

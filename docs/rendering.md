@@ -166,6 +166,36 @@ statemachine hero
   transition run -> idle when bool:moving == false mode replace
 ```
 
+## Custom Shaders
+
+A material shader is a fragment shader drawn over a rectangle. Create it once
+from precompiled bytecode, then draw it with `draw_shader_surface()`:
+
+```cpp
+kin::ShaderDesc desc;
+desc.spirv = {bytes.data(), static_cast<kin::u32>(bytes.size())};
+desc.num_samplers = 3;        // texture slots the shader declares
+desc.num_uniform_buffers = 1; // ShaderParams, when the shader has a uniform block
+kin::ShaderHandle shader = renderer.create_shader(desc);
+
+const std::array<kin::Texture, 3> sources{albedo, heights, shadows};
+kin::ShaderParams params;
+params.uniforms[0] = time;
+renderer.draw_shader_surface(rect, shader, params, sources);
+```
+
+`sources[i]` binds at fragment sampler slot `i`, up to `kin::MaxShaderSamplers`
+(16). In GLSL that is `layout(set = 2, binding = i) uniform sampler2D ...`, and
+the uniform block is `layout(set = 3, binding = 0)`. Slots the shader declares
+but the draw does not fill are bound to a 1x1 white texture. Overloads taking no
+texture, one texture, or two textures are shorthands for the same call.
+`ShaderParams` holds 16 floats.
+
+Shaders need `capabilities().materials_2d`. The SDL_GPU backend supports all of
+the above. The SDL renderer's `gpu` driver draws shader surfaces without source
+textures, and other backends draw nothing, so check the capability and provide a
+fallback. `engine/shaders/` has working examples.
+
 ## Performance And Data Layout Notes
 
 Rendering should keep hot per-frame components small and push editor/debug
