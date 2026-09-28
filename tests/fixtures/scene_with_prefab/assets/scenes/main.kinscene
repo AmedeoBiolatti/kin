@@ -1,0 +1,35 @@
+{
+  "schema": "kin.scene/1",
+  "name": "FixtureMain",
+  "script": "scripts/main.lua",
+  "clear_color": [
+    8,
+    8,
+    18
+  ],
+  "entities": [
+    {
+      "id": "game_state",
+      "name": "Game State",
+      "components": {
+        "SampleClock": {
+          "tick": 0.0
+        },
+        "Timer": {
+          "duration": 0.25,
+          "elapsed": 0.0,
+          "repeating": true,
+          "finished": false,
+          "ticks": 0
+        }
+      }
+    }
+  ],
+  "prefabs": [
+    {
+      "id": "main_prefab",
+      "asset": "prefabs/sample.kinprefab",
+      "name": "sample"
+    }
+  ]
+}

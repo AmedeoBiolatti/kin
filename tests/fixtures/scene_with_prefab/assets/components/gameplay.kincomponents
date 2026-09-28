@@ -1,0 +1,17 @@
+{
+  "schema": "kin.components/1",
+  "components": [
+    {
+      "name": "SampleClock",
+      "fields": [
+        {
+          "name": "tick",
+          "kind": "f32",
+          "default": 0.0,
+          "label": "Tick",
+          "category": "Gameplay"
+        }
+      ]
+    }
+  ]
+}

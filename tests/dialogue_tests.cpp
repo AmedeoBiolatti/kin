@@ -1,0 +1,140 @@
+#include <kin/assets/asset_manager.hpp>
+#include <kin/dialogue/dialogue.hpp>
+#include <kin/dialogue/dialogue_graph.hpp>
+
+#include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+namespace {
+
+using namespace kin;
+
+DialogueDocument make_document() {
+    DialogueDocument doc{
+        .id = "fixture",
+        .start_node = "start",
+        .speakers = {{.id = "npc", .name = "Guide", .name_color = Color::rgb(128, 226, 160)}},
+    };
+    doc.nodes.push_back({
+        .id = "start",
+        .kind = DialogueNodeKind::Line,
+        .line = {.speaker_id = "npc", .text_markup = "Hello", .next = "choice"},
+    });
+    doc.nodes.push_back({
+        .id = "choice",
+        .kind = DialogueNodeKind::Choice,
+        .choices = {
+            {.id = "yes",
+             .text_markup = "Yes",
+             .target = "event",
+             .effects = {
+                 {.kind = DialogueEffectKind::SetBool, .key = "accepted", .value = {.value = true}},
+                 {.kind = DialogueEffectKind::AddNumber, .key = "score", .value = {.value = 2.0}},
+                 {.kind = DialogueEffectKind::EmitEvent, .key = "choice.accepted"},
+             }},
+            {.id = "locked",
+             .text_markup = "Locked",
+             .target = "end",
+             .conditions = {{.kind = DialogueConditionKind::Number,
+                             .key = "score",
+                             .compare = DialogueCompare::GreaterEqual,
+                             .value = {.value = 10.0}}}},
+        },
+    });
+    doc.nodes.push_back({
+        .id = "event",
+        .kind = DialogueNodeKind::Event,
+        .target = "end",
+        .event_id = "met.guide",
+    });
+    doc.nodes.push_back({.id = "end", .kind = DialogueNodeKind::End});
+    return doc;
+}
+
+void test_linear_choice_effects_and_events() {
+    DialogueDocument doc = make_document();
+    DialoguePlayer player;
+    player.start(doc);
+    DialogueViewModel view = player.current_view();
+    assert(view.active);
+    assert(view.text_markup == "Hello");
+    assert(view.speaker_name == "Guide");
+
+    player.advance();
+    view = player.current_view();
+    assert(view.choices.size() == 1);
+    assert(view.choices[0].id == "yes");
+
+    assert(player.choose("yes"));
+    assert(player.state().ended);
+    assert(std::get<bool>(player.state().variables.at("accepted").value));
+    assert(std::get<f64>(player.state().variables.at("score").value) == 2.0);
+    const std::vector<DialogueEvent> events = player.consume_events();
+    assert(events.size() == 2);
+    assert(events[0].id == "choice.accepted");
+    assert(events[1].id == "met.guide");
+}
+
+void test_snapshot_restore_and_invalid_target() {
+    DialogueDocument doc = make_document();
+    DialoguePlayer player;
+    player.start(doc);
+    player.advance();
+    DialogueStateSnapshot snapshot = player.snapshot();
+
+    DialoguePlayer restored;
+    restored.restore(doc, snapshot);
+    assert(restored.current_view().choices.size() == 1);
+    assert(restored.state().current_node == "choice");
+
+    DialogueDocument broken = doc;
+    broken.nodes[0].line.next = "missing";
+    player.start(broken);
+    player.advance();
+    assert(player.state().ended);
+    const std::vector<DialogueEvent> events = player.consume_events();
+    assert(!events.empty());
+    assert(events.back().id == "dialogue.missing_node");
+}
+
+void test_json_roundtrip_asset_and_graph() {
+    DialogueDocument doc = make_document();
+    const std::string json = dialogue_to_json(doc);
+    DialogueLoadResult parsed = parse_dialogue(json);
+    assert(parsed.ok());
+    assert(parsed.document->nodes.size() == doc.nodes.size());
+    assert(parsed.document->speakers.size() == doc.speakers.size());
+
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_dialogue_tests";
+    std::filesystem::create_directories(dir);
+    const std::filesystem::path file = dir / "fixture.kindialogue";
+    std::string error;
+    assert(save_dialogue(doc, file, &error));
+    DialogueLoadResult loaded = load_dialogue(file);
+    assert(loaded.ok());
+    assert(loaded.document->id == "fixture");
+
+    AssetManager assets{dir};
+    std::shared_ptr<const DialogueDocument> asset = assets.load<DialogueDocument>("fixture.kindialogue");
+    assert(asset);
+    assert(asset->start_node == "start");
+    assets.discover();
+    const AssetMetadata* metadata = assets.metadata("fixture.kindialogue");
+    assert(metadata);
+    assert(metadata->type == AssetType::Dialogue);
+
+    ui2::NodeGraph graph = dialogue_to_node_graph(doc);
+    assert(graph.nodes.size() == doc.nodes.size());
+    assert(!graph.edges.empty());
+}
+
+} // namespace
+
+int main() {
+    test_linear_choice_effects_and_events();
+    test_snapshot_restore_and_invalid_target();
+    test_json_roundtrip_asset_and_graph();
+    return 0;
+}

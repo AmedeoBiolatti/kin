@@ -1,0 +1,250 @@
+#include <kin/platform/app.hpp>
+
+#include <kin/platform/log.hpp>
+
+#include <SDL3/SDL.h>
+
+#include <algorithm>
+#include <cstdlib>
+#include <string_view>
+#include <stdexcept>
+#include <string>
+#include <utility>
+
+namespace kin {
+namespace {
+
+std::string_view app_mode_name(AppMode mode) {
+    return mode == AppMode::Headless ? "headless" : "windowed";
+}
+
+} // namespace
+
+App::App(AppConfig config)
+    : _config(config) {
+    // KIN_RENDER_BACKEND=gpu keeps the real video driver even headless, so a
+    // --server --render capture can go through the GPU backend the game
+    // actually ships on (its window is created hidden either way).
+    const char* backend = std::getenv("KIN_RENDER_BACKEND");
+    if (headless() && !(backend && std::string_view(backend) == "gpu")) {
+        SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+    }
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        const std::string error = std::string("SDL_Init failed: ") + SDL_GetError();
+        KIN_LOG_ERROR_F("runtime",
+                        "app initialization failed",
+                        (LogFields{
+                            {.name = "mode", .value = std::string{app_mode_name(_config.mode)}},
+                            {.name = "error", .value = error},
+                        }));
+        throw std::runtime_error(error);
+    }
+    KIN_LOG_INFO_F("runtime",
+                   "app initialized",
+                   (LogFields{
+                       {.name = "mode", .value = std::string{app_mode_name(_config.mode)}},
+                       {.name = "fixed_dt", .value = std::to_string(_config.fixed_dt)},
+                       {.name = "max_frame_time", .value = std::to_string(_config.max_frame_time)},
+                       {.name = "max_steps", .value = std::to_string(_config.max_steps)},
+                       {.name = "vsync", .value = _config.vsync ? "true" : "false"},
+                   }));
+}
+
+App::~App() {
+    KIN_LOG_INFO_F("runtime",
+                   "app shutdown",
+                   (LogFields{{.name = "windows", .value = std::to_string(_windows.size())}}));
+    _windows.clear();
+    SDL_Quit();
+}
+
+Window& App::create_window(const WindowConfig& config) {
+    auto window = std::make_unique<Window>(config);
+    Window& result = *window;
+    _windows.push_back(std::move(window));
+    KIN_LOG_INFO_F("runtime",
+                   "window created",
+                   (LogFields{
+                       {.name = "title", .value = std::string{config.title}},
+                       {.name = "width", .value = std::to_string(config.width)},
+                       {.name = "height", .value = std::to_string(config.height)},
+                       {.name = "resizable", .value = config.resizable ? "true" : "false"},
+                       {.name = "hidden", .value = config.hidden ? "true" : "false"},
+                       {.name = "borderless", .value = config.borderless ? "true" : "false"},
+                       {.name = "id", .value = std::to_string(result.id())},
+                   }));
+    return result;
+}
+
+Window* App::find_window(WindowId id) {
+    const auto found = std::ranges::find_if(_windows, [id](const auto& window) {
+        return window->id() == id;
+    });
+
+    return found == _windows.end() ? nullptr : found->get();
+}
+
+const Window* App::find_window(WindowId id) const {
+    const auto found = std::ranges::find_if(_windows, [id](const auto& window) {
+        return window->id() == id;
+    });
+
+    return found == _windows.end() ? nullptr : found->get();
+}
+
+i32 App::window_count() const {
+    return static_cast<i32>(_windows.size());
+}
+
+i32 App::open_window_count() const {
+    return static_cast<i32>(std::ranges::count_if(_windows, [](const auto& window) {
+        return !window->close_requested();
+    }));
+}
+
+void App::handle_window_close(WindowId window_id) {
+    Window* window = find_window(window_id);
+    if (window) {
+        window->request_close();
+    }
+
+    if (open_window_count() == 0) {
+        _running = false;
+    }
+}
+
+void App::pump_events() {
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        _input.process_native_event(&event);
+
+        if (event.type == SDL_EVENT_QUIT) {
+            _running = false;
+        } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+            handle_window_close(static_cast<WindowId>(event.window.windowID));
+        }
+    }
+}
+
+void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)> render) {
+    _running = true;
+    const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
+    const f32 max_frame_time = std::max(0.0f, _config.max_frame_time);
+    const i32 max_steps = std::max(1, _config.max_steps);
+    f32 accumulator = 0.0f;
+    u64 last = SDL_GetTicksNS();
+    bool advance_input = true;
+    i32 frames = 0;
+
+    KIN_LOG_INFO_F("runtime",
+                   "app loop started",
+                   (LogFields{
+                       {.name = "mode", .value = std::string{app_mode_name(_config.mode)}},
+                       {.name = "fixed_dt", .value = std::to_string(fixed_dt)},
+                       {.name = "max_frame_time", .value = std::to_string(max_frame_time)},
+                       {.name = "max_steps", .value = std::to_string(max_steps)},
+                   }));
+
+    while (_running) {
+        ++frames;
+        const u64 now = SDL_GetTicksNS();
+        const f32 raw_frame_time = static_cast<f32>(now - last) / 1'000'000'000.0f;
+        last = now;
+        const f32 frame_time = std::min(raw_frame_time, max_frame_time);
+        // time_scale paces real time into the accumulator (game-speed control);
+        // it never changes fixed_dt or step contents, so determinism holds.
+        accumulator += frame_time * _time_scale;
+        _frame_stats = {
+            .raw_frame_time = raw_frame_time,
+            .clamped_frame_time = frame_time,
+            .accumulator_before_update = accumulator,
+            .accumulator_after_update = accumulator,
+            .alpha = 0.0f,
+            .update_steps = 0,
+            .hit_max_steps = false,
+        };
+
+        _input.begin_frame(advance_input);
+        pump_events();
+
+        i32 steps = 0;
+        while (_running && accumulator >= fixed_dt && steps < max_steps) {
+            update(fixed_dt);
+            accumulator -= fixed_dt;
+            ++steps;
+            _frame_stats.update_steps = steps;
+            _frame_stats.accumulator_after_update = accumulator;
+            if (steps == 1) {
+                // Consume the KEYBOARD edges after the FIRST fixed step so navigation
+                // read in update() does not re-fire in later steps or in render()
+                // (ui2's MenuScene reads nav in both update() and render()). Mouse,
+                // text and wheel edges are intentionally preserved: render-time
+                // immediate UI (ui2 reads clicks via mouse_frame_pressed in render())
+                // is the sole consumer of those, so clearing them here dropped roughly
+                // half of all clicks — whichever frames ran a fixed step. Held state in
+                // _key_cur/_mouse_cur is left intact regardless.
+                _input.advance_keyboard_edges();
+            }
+        }
+        if (steps == max_steps && accumulator >= fixed_dt) {
+            // We exhausted the step budget with time still backlogged: drop it to
+            // avoid a spiral of death. If the loop instead drained naturally on
+            // its last allowed step (accumulator < fixed_dt), there is no backlog
+            // to discard and the leftover feeds the render interpolation alpha.
+            accumulator = 0.0f;
+            _frame_stats.hit_max_steps = true;
+            _frame_stats.accumulator_after_update = accumulator;
+        }
+
+        if (_running) {
+            _frame_stats.alpha = fixed_dt > 0.0f ? accumulator / fixed_dt : 0.0f;
+            render(_frame_stats.alpha);
+        }
+
+        if (!headless() && !_config.vsync && _config.yield_when_unpaced) {
+            SDL_Delay(1);
+        }
+        advance_input = steps > 0;
+    }
+    KIN_LOG_INFO_F("runtime",
+                   "app loop stopped",
+                   (LogFields{{.name = "frames", .value = std::to_string(frames)}}));
+}
+
+void App::run_for(i32 frames, std::function<void(f32 dt, i32 frame)> update) {
+    run_for(frames, std::move(update), [](f32) {});
+}
+
+void App::run_for(i32 frames,
+                  std::function<void(f32 dt, i32 frame)> update,
+                  std::function<void(f32 alpha)> render) {
+    _running = true;
+    KIN_LOG_INFO_F("runtime",
+                   "fixed frame run started",
+                   (LogFields{{.name = "max_frames", .value = std::to_string(frames)}}));
+    i32 frames_run = 0;
+    for (i32 frame = 0; _running && frame < frames; ++frame) {
+        ++frames_run;
+        _frame_stats = {
+            .raw_frame_time = _config.fixed_dt,
+            .clamped_frame_time = _config.fixed_dt,
+            .accumulator_before_update = _config.fixed_dt,
+            .accumulator_after_update = 0.0f,
+            .alpha = 0.0f,
+            .update_steps = 1,
+            .hit_max_steps = false,
+        };
+        _input.begin_frame();
+        pump_events();
+        update(_config.fixed_dt, frame);
+        if (_running) {
+            render(0.0f);
+        }
+    }
+    KIN_LOG_INFO_F("runtime",
+                   "fixed frame run stopped",
+                   (LogFields{{.name = "frames", .value = std::to_string(frames_run)}}));
+}
+
+} // namespace kin

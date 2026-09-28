@@ -1,0 +1,73 @@
+#pragma once
+
+#include <kin/core/types.hpp>
+
+#include <array>
+
+namespace kin {
+
+// Custom 2D material shaders (e.g. a lava/glass panel). Implemented on the SDL
+// "gpu" render driver (SDL 3.4 render-GPU-state); capabilities().materials_2d is
+// true only there. On any other backend draw_shader_surface() is a no-op and the
+// UI layer supplies a fallback fill, so callers degrade gracefully.
+
+struct ShaderHandle {
+    u64 value = 0;
+
+    explicit operator bool() const { return value != 0; }
+    friend constexpr bool operator==(ShaderHandle, ShaderHandle) = default;
+};
+
+// A single precompiled fragment-shader binary in one GPU format. The backend
+// picks the blob matching the device's supported format (SDL_GetGPUShaderFormats).
+struct ShaderBlob {
+    const u8* code = nullptr;
+    u32 size = 0;
+
+    bool valid() const { return code != nullptr && size > 0; }
+};
+
+// Describes a custom fragment-shader material to create_shader(). Author the
+// shader once in HLSL matching SDL's 2D-GPU contract — the drawn texture binds to
+// `Texture2D u_texture : register(t0, space2)` / `SamplerState : register(s0, space2)`,
+// the fragment input is `float4 v_color : COLOR0; float2 v_uv : TEXCOORD0`, the
+// output is `SV_Target`, and an optional uniform block is `cbuffer : register(b0, space3)`
+// (fed from ShaderParams via slot 0). Provide whichever precompiled formats you have.
+struct ShaderDesc {
+    ShaderBlob spirv;            // Vulkan
+    ShaderBlob dxil;             // D3D12
+    ShaderBlob dxbc;             // D3D11
+    ShaderBlob msl;              // Metal
+    u32 num_samplers = 1;        // SDL binds the drawn texture at sampler slot 0
+    u32 num_uniform_buffers = 0; // fragment uniform buffers (ShaderParams -> slot 0)
+    const char* entrypoint = "main";
+};
+
+// Uniform block fed to the shader's `cbuffer : register(b0, space3)`. Layout is
+// up to the shader author; 16 floats (64 bytes) covers four float4 registers.
+struct ShaderParams {
+    std::array<f32, 16> uniforms{};
+};
+
+// Engine-shipped fragment shaders, compiled to SPIR-V in KIN_GPU_SHADER_DIR and loaded
+// on demand via Renderer2D::builtin_shader(). Post-fx are single-input except BloomCombine
+// (samples blurred + original). Transition shaders take a progress uniform; Crossfade is
+// 2-input (A + B). Returns a null handle on backends without material support (degrade).
+enum class BuiltinShader {
+    // --- post-processing ---
+    Vignette,
+    ColorGrade,
+    Scanline,
+    Chroma,
+    BloomBright,
+    BloomBlur,
+    BloomCombine, // 2-input: blurred bright-pass + original scene
+    // --- scene transitions ---
+    TransitionDissolve,
+    TransitionPixelate,
+    TransitionWipe,
+    TransitionIris,
+    TransitionCrossfade, // 2-input: outgoing + incoming
+};
+
+} // namespace kin

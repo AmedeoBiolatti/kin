@@ -1,0 +1,79 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "sample",
+  "name": "Sample",
+  "root": "root",
+  "entities": [
+    {
+      "id": "root",
+      "name": "sample_root",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 0,
+            "y": 0
+          },
+          "rotation": 0
+        }
+      }
+    },
+    {
+      "id": "back",
+      "name": "sample_back",
+      "parent": "root",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 268,
+            "y": 138
+          },
+          "rotation": 0
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 104,
+            "y": 104
+          },
+          "color": {
+            "r": 70,
+            "g": 36,
+            "b": 128,
+            "a": 255
+          },
+          "layer": 1,
+          "order": 1,
+          "visible": true
+        }
+      }
+    },
+    {
+      "id": "core",
+      "name": "sample_core",
+      "parent": "root",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 294,
+            "y": 164
+          },
+          "rotation": 0
+        },
+        "RectRenderer": {
+          "size": {
+            "x": 52,
+            "y": 52
+          },
+          "color": {
+            "r": 210,
+            "g": 150,
+            "b": 50,
+            "a": 255
+          },
+          "layer": 2,
+          "order": 4,
+          "visible": true
+        }
+      }
+    }
+  ]
+}

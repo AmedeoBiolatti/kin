@@ -1,0 +1,35 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+Testing/
+
+# MSVC artifacts
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+
+# Local agent/editor state
+.claude/
+.agents/
+.cache/
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
