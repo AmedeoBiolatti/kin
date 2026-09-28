@@ -13,10 +13,10 @@ small, stays honest about its scope, and grows alongside the games built with it
 > few small demos (`games/`) and two performance examples (`examples/`). APIs
 > are young and may change between minor versions.
 
-![Signal Siege: 1,200 enemies, projectiles and HUD in an arena survival game](docs/images/signal_siege.png)
+![Signal Siege: the player ship, centered, fires at three kinds of enemies closing in across an industrial arena](docs/images/signal_siege.png)
 
-<sub>Signal Siege under stress load (1,200 enemies). Captured by the engine itself, headless:
-<code>signal_siege --headless --stress --seed 7 --frames 600 --capture-frame 600 --screenshot out.png</code></sub>
+<sub>Signal Siege, an arena survival example. Rendered headless by the engine itself, then cropped around the player:
+<code>signal_siege --headless --enemies 300 --seed 7 --width 2560 --height 1600 --frames 1200 --capture-frame 1200 --screenshot out.png</code></sub>
 
 ## Features
 
