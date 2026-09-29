@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # ci/** branches run CI on push, so workflow changes can be tried before a PR.
+    branches: [main, 'ci/**']
   pull_request:
   workflow_dispatch:
 
@@ -42,14 +43,7 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build pkg-config \
-            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev \
-            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
-            libdecor-0-dev libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
-            libdrm-dev libgbm-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
-            libdbus-1-dev libudev-dev libibus-1.0-dev
+        run: .github/scripts/install-linux-deps.sh
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
@@ -67,3 +61,32 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure -j 4 --timeout 300
+
+  # The SDL_GPU backend's tests skip without a GPU, so the jobs above never run
+  # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
+  # virtual X display, and requires them to run.
+  gpu:
+    name: Linux GPU (lavapipe)
+    runs-on: ubuntu-24.04
+    env:
+      SDL_VIDEO_DRIVER: x11
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+      KIN_REQUIRE_GPU_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        # glslc compiles the GPU backend's shaders; without them it cannot start.
+        run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers glslc xvfb
+
+      - name: Configure
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
+
+      - name: Build
+        run: cmake --build build --parallel 4 --target kin_renderer_tests
+
+      - name: Test
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-renderer$' --output-on-failure --timeout 300
