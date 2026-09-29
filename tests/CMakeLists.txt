@@ -20,6 +20,7 @@ function(kin_add_test target test_name)
 endfunction()
 
 kin_add_test(kin_core_tests kin-core SOURCES core_tests.cpp)
+kin_add_test(kin_jobs_tests kin-jobs SOURCES jobs_tests.cpp)
 kin_add_test(kin_instrumentation_tests kin-instrumentation
     SOURCES instrumentation_tests.cpp
     LIBRARIES kin::core_allocation_instrumentation

@@ -27,7 +27,8 @@ small, stays honest about its scope, and grows alongside the games built with it
   post-processing, and an animation system with state machines.
 - **UI (ui2)** — immediate-style widgets, layout, and themes.
 - **Physics** with Box2D, **scripting** in Lua (sol2), **audio**, **pathfinding**,
-  **dialogue**, **save data**, and hot-reloadable **assets**.
+  **dialogue**, **save data**, hot-reloadable **assets**, and **background jobs**
+  and parallel loops on a worker pool.
 - **Agent interface** — every game gets deterministic headless runs with a JSON
   report, a line-JSON/HTTP control server, screenshots, and profiling from the
   same command-line flags ([docs/agent_interface.md](docs/agent_interface.md)).
@@ -136,7 +137,7 @@ Kin has no install rules yet, so `find_package(kin)` is not supported.
 |---|---|
 | Agents and automation | [agent_interface](docs/agent_interface.md), [testing](docs/testing.md), [profiling](docs/profiling.md) |
 | ECS | [entities](docs/ecs_entities.md), [components](docs/ecs_components.md), [data components](docs/ecs_data_components.md), [systems](docs/ecs_systems.md), [events](docs/ecs_events.md), [prefabs](docs/ecs_prefabs.md), [inspection](docs/ecs_inspection.md), [editor workflow](docs/ecs_editor_workflow.md) |
-| Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md) |
+| Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [background jobs](docs/jobs.md) |
 | Project | [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing

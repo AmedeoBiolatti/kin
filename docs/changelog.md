@@ -7,6 +7,13 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- `JobSystem` (`kin/core/jobs.hpp`): background jobs with `Job<T>` handles,
+  results applied in submission order by `pump()` / `drain()`, cancellation
+  through `std::stop_token`, and `parallel_for`. Background jobs use at most
+  part of the workers, so parallel loops always have threads.
+
 ## [0.1.0] — 2026-09-28
 
 First public release.
