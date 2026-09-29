@@ -59,6 +59,7 @@ add_library(kin_engine STATIC
     src/renderer/render_profile.cpp
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp
+    src/renderer/lighting.cpp
     src/renderer/post_blur.cpp
     src/renderer/renderer2d.cpp
     src/renderer/static_texture_layer.cpp
