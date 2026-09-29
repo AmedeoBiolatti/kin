@@ -9,6 +9,8 @@ namespace {
 // serially instead of waiting on the run that contains it.
 thread_local bool t_in_parallel_for = false;
 
+std::atomic<JobSystem*> g_default_override{nullptr};
+
 struct ParallelScope {
     bool previous = t_in_parallel_for;
     ParallelScope() { t_in_parallel_for = true; }
@@ -16,6 +18,20 @@ struct ParallelScope {
 };
 
 } // namespace
+
+JobSystem& default_job_system() {
+    if (JobSystem* installed = g_default_override.load(std::memory_order_acquire)) {
+        return *installed;
+    }
+    // Deliberately never deleted: systems that use it may be destroyed during
+    // static destruction, after a function-local object would already be gone.
+    static JobSystem* built_in = new JobSystem{};
+    return *built_in;
+}
+
+void set_default_job_system(JobSystem* jobs) {
+    g_default_override.store(jobs, std::memory_order_release);
+}
 
 JobSystem::JobSystem(JobSystemConfig config) {
     const i32 hardware = static_cast<i32>(std::max(1u, std::thread::hardware_concurrency()));

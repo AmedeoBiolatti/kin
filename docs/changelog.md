@@ -21,6 +21,13 @@ releases may change APIs.
 
 - On the SDL_GPU backend, sampler slots a material shader declares but a draw
   leaves empty are bound to a white texture instead of being left unbound.
+- The ECS scheduler, `AssetServer` and `PathServer` run on one shared job
+  system, `default_job_system()`, instead of each starting its own threads.
+  `set_default_job_system()` replaces it; each also accepts its own pool. The
+  `worker_count` settings now limit how much work each runs at once.
+- `AssetServer` and `PathServer` drains do queued work on the calling thread
+  while they wait. Destroying either drops work that has not started instead
+  of finishing it first.
 
 ## [0.1.0] — 2026-09-28
 

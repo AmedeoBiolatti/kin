@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/jobs.hpp>
 #include <kin/core/types.hpp>
 #include <kin/pathfinding/pathfinding.hpp>
 
@@ -122,8 +123,12 @@ struct PathQuery;
 using PathTileCost = std::function<i32(const NavGridSnapshot& nav, Vec2i tile, const PathQuery& query)>;
 
 struct PathServerConfig {
-    // Worker thread count; clamped to >= 1.
+    // Most requests solved at once on the job system; clamped to >= 1. drain()
+    // also solves on the calling thread while it waits.
     i32 worker_count = 1;
+    // Where requests are solved. Null: default_job_system(), shared with the
+    // rest of kin.
+    JobSystem* jobs = nullptr;
     // Cache bucket edge in world units; 0 disables the result cache.
     f32 cache_bucket_world = 0.0f;
     // When true, submit() can hand out an immediate provisional waypoint chain.
@@ -295,15 +300,21 @@ private:
     CacheKey cache_key_for(const PathQuery& query) const;
     const std::vector<Vec2f>* cached_locked(const PathQuery& query) const;
     std::vector<Vec2f> solve(const Job& job) const;
-    void worker_loop(std::stop_token stop);
+    // Admitted requests are solved by up to _max_tasks tasks on the job system,
+    // each taking requests until none are left. Call with _mutex held.
+    void start_tasks_locked();
+    void run_task();
+    // Solves one admitted request on the calling thread; false when none is left.
+    bool solve_one_admitted();
     void wait_admitted_complete(std::unique_lock<std::mutex>& lock);
     std::vector<PathServerResult> collect_completed_locked();
 
     PathServerConfig _config;
+    JobSystem* _jobs = nullptr;
+    i32 _max_tasks = 1;
     std::shared_ptr<const NavGridSnapshot> _snapshot{};
 
     mutable std::mutex _mutex;
-    std::condition_variable_any _work_cv;
     std::condition_variable _done_cv;
     // Queued per submission order (ascending id); admission filters by lane.
     std::deque<Job> _queued;
@@ -311,10 +322,12 @@ private:
     std::vector<Job> _completed;
     std::unordered_map<u64, PathStatus> _tracked;
     std::unordered_map<CacheKey, std::vector<Vec2f>, CacheKeyHash> _cache;
-    i32 _active_workers = 0;
+    i32 _active_workers = 0; // requests being solved now
+    i32 _tasks = 0;          // tasks submitted and not yet finished
+    std::vector<kin::Job<void>> _task_handles;
+    bool _stopping = false;
     u64 _next_id = 1;
     PathServerStats _stats{};
-    std::vector<std::jthread> _workers;
 };
 
 } // namespace kin

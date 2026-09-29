@@ -88,20 +88,75 @@ bool NavGridSnapshot::segment_clear(Vec2f a, Vec2f b, Vec2i ignore_a, Vec2i igno
 // ---- PathServer -----------------------------------------------------------
 
 PathServer::PathServer(PathServerConfig config)
-    : _config(std::move(config)) {
-    const i32 worker_count = std::max(1, _config.worker_count);
-    _workers.reserve(static_cast<std::size_t>(worker_count));
-    for (i32 i = 0; i < worker_count; ++i) {
-        _workers.emplace_back([this](std::stop_token stop) { worker_loop(stop); });
+    : _config(std::move(config)),
+      _jobs(_config.jobs ? _config.jobs : &default_job_system()),
+      _max_tasks(std::max(1, _config.worker_count)) {}
+
+PathServer::~PathServer() {
+    // Requests not yet being solved are dropped. Tasks still queued on the job
+    // system never run; running ones finish their current request and stop.
+    std::vector<kin::Job<void>> tasks;
+    {
+        std::scoped_lock lock{_mutex};
+        _stopping = true;
+        _admitted.clear();
+        tasks.swap(_task_handles);
+    }
+    for (kin::Job<void>& task : tasks) {
+        task.cancel();
+    }
+    for (kin::Job<void>& task : tasks) {
+        task.wait();
     }
 }
 
-PathServer::~PathServer() {
-    for (std::jthread& worker : _workers) {
-        worker.request_stop();
+void PathServer::start_tasks_locked() {
+    std::erase_if(_task_handles, [](const kin::Job<void>& task) { return task.ready(); });
+    // Tasks not solving a request will take the next admitted ones; start another
+    // only when there are more admitted requests than such idle tasks.
+    while (!_stopping && _tasks < _max_tasks && static_cast<i32>(_admitted.size()) > _tasks - _active_workers) {
+        ++_tasks;
+        _task_handles.push_back(_jobs->run([this] { run_task(); }));
     }
-    _work_cv.notify_all();
-    // std::jthread destructors join.
+}
+
+void PathServer::run_task() {
+    std::unique_lock lock{_mutex};
+    for (;;) {
+        if (_stopping || _admitted.empty()) {
+            --_tasks;
+            break;
+        }
+        Job job = std::move(_admitted.front());
+        _admitted.pop_front();
+        ++_active_workers;
+        lock.unlock();
+        job.path = solve(job);
+        job.computed = true;
+        lock.lock();
+        _completed.push_back(std::move(job));
+        --_active_workers;
+        if (_admitted.empty() && _active_workers == 0) {
+            _done_cv.notify_all();
+        }
+    }
+}
+
+bool PathServer::solve_one_admitted() {
+    std::unique_lock lock{_mutex};
+    if (_admitted.empty()) {
+        return false;
+    }
+    Job job = std::move(_admitted.front());
+    _admitted.pop_front();
+    ++_active_workers;
+    lock.unlock();
+    job.path = solve(job);
+    job.computed = true;
+    lock.lock();
+    _completed.push_back(std::move(job));
+    --_active_workers;
+    return true;
 }
 
 void PathServer::set_snapshot(std::shared_ptr<const NavGridSnapshot> snapshot) {
@@ -235,9 +290,9 @@ i32 PathServer::admit(u32 lane, i32 budget) {
             it = _queued.erase(it);
             ++admitted;
         }
-    }
-    if (admitted > 0) {
-        _work_cv.notify_all();
+        if (admitted > 0) {
+            start_tasks_locked();
+        }
     }
     return admitted;
 }
@@ -302,19 +357,25 @@ std::vector<PathServerResult> PathServer::collect_completed_locked() {
 void PathServer::drain(DrainMode mode, const ResultSink& sink) {
     const auto wait_start = std::chrono::steady_clock::now();
     std::vector<PathServerResult> results;
+    if (mode == DrainMode::DrainToQuiescent) {
+        std::scoped_lock lock{_mutex};
+        while (!_queued.empty()) {
+            const auto tracked = _tracked.find(_queued.front().request_id);
+            if (tracked != _tracked.end() && tracked->second != PathStatus::Cancelled) {
+                tracked->second = PathStatus::Admitted;
+            }
+            _admitted.push_back(std::move(_queued.front()));
+            _queued.pop_front();
+        }
+        start_tasks_locked();
+    }
+    // Solve admitted requests here too instead of only waiting: the job
+    // system's workers may all be busy with other jobs, and results are applied
+    // in request-id order whoever solved them.
+    while (solve_one_admitted()) {
+    }
     {
         std::unique_lock lock{_mutex};
-        if (mode == DrainMode::DrainToQuiescent) {
-            while (!_queued.empty()) {
-                const auto tracked = _tracked.find(_queued.front().request_id);
-                if (tracked != _tracked.end() && tracked->second != PathStatus::Cancelled) {
-                    tracked->second = PathStatus::Admitted;
-                }
-                _admitted.push_back(std::move(_queued.front()));
-                _queued.pop_front();
-            }
-            _work_cv.notify_all();
-        }
         wait_admitted_complete(lock);
         _stats.last_barrier_wait_ms =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count() / 1'000'000.0;
@@ -457,31 +518,6 @@ std::vector<Vec2f> PathServer::solve(const Job& job) const {
         }
     }
     return path;
-}
-
-void PathServer::worker_loop(std::stop_token stop) {
-    std::unique_lock lock{_mutex};
-    for (;;) {
-        _work_cv.wait(lock, stop, [this]() { return !_admitted.empty(); });
-        if (stop.stop_requested() && _admitted.empty()) {
-            return;
-        }
-        if (_admitted.empty()) {
-            continue;
-        }
-        Job job = std::move(_admitted.front());
-        _admitted.pop_front();
-        ++_active_workers;
-        lock.unlock();
-        job.path = solve(job);
-        job.computed = true;
-        lock.lock();
-        _completed.push_back(std::move(job));
-        --_active_workers;
-        if (_admitted.empty() && _active_workers == 0) {
-            _done_cv.notify_all();
-        }
-    }
 }
 
 } // namespace kin

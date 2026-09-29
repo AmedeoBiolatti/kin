@@ -3,6 +3,7 @@
 #include <kin/assets/asset_handle.hpp>
 #include <kin/assets/asset_manager.hpp>
 #include <kin/assets/load_job.hpp>
+#include <kin/core/jobs.hpp>
 #include <kin/core/types.hpp>
 
 #include <algorithm>
@@ -58,8 +59,10 @@ struct AssetServerStats {
 };
 
 struct AssetServerConfig {
-    // Number of background worker threads. 0 picks a small default.
+    // Most loads running at once. 0 picks a small default (2).
     int worker_count = 0;
+    // Where loads run. Null: default_job_system(), shared with the rest of kin.
+    JobSystem* jobs = nullptr;
 };
 
 // Async loader signature. Distinct from AssetManager's synchronous Loader<T>:
@@ -182,18 +185,25 @@ private:
     bool ready_key(const std::string& key, std::set<std::string>& visiting) const;
     u64 next_request_id() { return _next_id++; }
     void enqueue(std::unique_ptr<LoadJob> job);
-    void worker_loop(std::stop_token stop);
+    // Loads run on up to _max_tasks tasks on the job system, each taking queued
+    // loads until none are left. Call with _mutex held.
+    void start_tasks_locked();
+    void run_task();
+    // Runs one queued load on the calling thread; false when none is queued.
+    bool run_one_queued();
 
     AssetManager& _manager;
+    JobSystem* _jobs = nullptr;
+    int _max_tasks = 2;
 
     mutable std::mutex _mutex;
-    std::condition_variable _cv;      // wakes workers
     std::condition_variable _done_cv; // wakes the main thread during drain
     std::deque<std::unique_ptr<LoadJob>> _queue;
     std::vector<std::unique_ptr<LoadJob>> _completed;
-    int _active = 0;
+    int _active = 0;  // loads running now
+    int _tasks = 0;   // tasks submitted and not yet finished
+    std::vector<Job<void>> _task_handles;
     bool _stopping = false;
-    std::vector<std::jthread> _workers;
 
     u64 _next_id = 1;
     // One server-owned record keeps lifecycle and dependency edges together.

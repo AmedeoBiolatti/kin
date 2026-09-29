@@ -89,6 +89,10 @@ higher ids than the parents that spawn them, so the apply/event order is identic
 run-to-run regardless of how worker threads were scheduled. This keeps headless
 runs deterministic, consistent with Kin's charter.
 
+Loads run on the shared job system (`kin::default_job_system()`, or
+`AssetServerConfig::jobs`), at most `worker_count` at a time. While draining, the
+calling thread runs queued loads too, so a busy job system cannot stall it.
+
 ## Frame integration
 
 `AssetServer` is game-owned. Drive it yourself by calling `pump()` each frame, or

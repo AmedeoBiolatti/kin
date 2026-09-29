@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <latch>
+#include <future>
 #include <filesystem>
 #include <fstream>
 #include <variant>
@@ -687,6 +689,33 @@ int main() {
         assert(server.load_state<kin::GameInfo>("game.kininfo") == kin::LoadState::Loaded);
         assert(server.load_state<kin::DialogueDocument>("missing.kindialogue") == kin::LoadState::Failed);
         assert(!server.ready<kin::GameInfo>("game.kininfo")); // gated on failed dep
+    }
+
+    // drain() runs queued loads itself, so a job system busy with other jobs
+    // cannot stall it: here its only background slot is held until the end.
+    {
+        kin::JobSystem busy{{.workers = 2, .max_background = 1}};
+        std::promise<void> gate;
+        std::latch started{1};
+        std::shared_future<void> open = gate.get_future().share();
+        kin::Job<void> blocker = busy.run([&started, open] {
+            started.count_down();
+            open.wait();
+        });
+        started.wait();
+        {
+            kin::AssetManager busy_assets{dir};
+            kin::AssetServer server{busy_assets, {.worker_count = 2, .jobs = &busy}};
+            kin::register_sprite_catalog_async_loader(server);
+            server.load_async<kin::SpriteCatalog>("hero.kinsprites");
+            server.drain();
+            assert(server.ready<kin::SpriteCatalog>("hero.kinsprites"));
+            // Destroying the server with a load queued on the busy pool does not wait for it.
+            server.load_async<kin::GameInfo>("game.kininfo");
+        }
+        assert(!blocker.ready());
+        gate.set_value();
+        blocker.wait();
     }
 
     run_anim_asset_loader_tests();
