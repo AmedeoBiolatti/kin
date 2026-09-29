@@ -499,7 +499,7 @@ bool EcsWorld::run_frame(f32 dt, SystemExecutionMode mode) {
 }
 
 EcsSystemRegistry::EcsSystemRegistry(EcsWorld& world)
-    : _world(&world) {
+    : _world(&world), _jobs(&default_job_system()) {
     for (SystemPhase phase : phases) {
         const std::string name = phase_entity_name(phase);
         _phase_entities[phase_index(phase)] = _world->raw().entity(name.c_str());
@@ -905,78 +905,6 @@ EcsSystemRegistry::SystemRunResult EcsSystemRegistry::execute_record(SystemRecor
     }
 }
 
-EcsSystemRegistry::NativeWorkerPool::~NativeWorkerPool() {
-    {
-        std::lock_guard lock{_mutex};
-        _stop = true;
-    }
-    _cv_work.notify_all();
-    for (std::thread& thread : _threads) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
-}
-
-void EcsSystemRegistry::NativeWorkerPool::ensure_workers(i32 desired) {
-    while (static_cast<i32>(_threads.size()) < desired) {
-        _threads.emplace_back([this] { worker_loop(); });
-    }
-}
-
-void EcsSystemRegistry::NativeWorkerPool::worker_loop() {
-    u64 seen_generation = 0;
-    std::unique_lock lock{_mutex};
-    for (;;) {
-        _cv_work.wait(lock, [&] { return _stop || (_generation != seen_generation && _current != nullptr); });
-        if (_stop) {
-            return;
-        }
-        seen_generation = _generation;
-        std::shared_ptr<RunState> state = _current;
-        lock.unlock();
-        if (state != nullptr) {
-            for (i32 index = state->next.fetch_add(1); index < state->count; index = state->next.fetch_add(1)) {
-                state->job(index);
-                if (state->completed.fetch_add(1) + 1 == state->count) {
-                    std::lock_guard done_lock{_mutex};
-                    _cv_done.notify_all();
-                }
-            }
-        }
-        lock.lock();
-    }
-}
-
-void EcsSystemRegistry::NativeWorkerPool::run(i32 count, const std::function<void(i32)>& job) {
-    if (count <= 0) {
-        return;
-    }
-    if (count == 1) {
-        job(0);
-        return;
-    }
-    auto state = std::make_shared<RunState>();
-    state->job = job;
-    state->count = count;
-    const i32 hardware_threads = static_cast<i32>(std::max(1u, std::thread::hardware_concurrency()));
-    {
-        std::lock_guard lock{_mutex};
-        // The calling thread participates, so keep at most count - 1 helpers.
-        ensure_workers(std::min(count - 1, std::max(1, hardware_threads - 1)));
-        _current = state;
-        ++_generation;
-    }
-    _cv_work.notify_all();
-    for (i32 index = state->next.fetch_add(1); index < count; index = state->next.fetch_add(1)) {
-        state->job(index);
-        state->completed.fetch_add(1);
-    }
-    std::unique_lock lock{_mutex};
-    _cv_done.wait(lock, [&] { return state->completed.load(std::memory_order_acquire) >= state->count; });
-    _current = nullptr;
-}
-
 EcsSystemRegistry::SystemRunResult EcsSystemRegistry::execute_native_parallel_record(SystemRecord& record,
                                                                                     f32 dt,
                                                                                     EcsCommandBuffer* commands) {
@@ -1008,10 +936,11 @@ EcsSystemRegistry::SystemRunResult EcsSystemRegistry::execute_native_parallel_re
             serial.estimated_work_ms = estimated_ms;
             return serial;
         }
-        const i32 hardware_threads = static_cast<i32>(std::max(1u, std::thread::hardware_concurrency()));
+        // The job system's workers plus this thread, which joins in.
+        const i32 available_threads = _jobs->worker_count() + 1;
         const i32 worker_limit = _execution_tuning.max_workers > 0
-            ? std::min(_execution_tuning.max_workers, hardware_threads)
-            : hardware_threads;
+            ? std::min(_execution_tuning.max_workers, available_threads)
+            : available_threads;
         const i32 worker_count = std::max(1, std::min(matched_entities, std::max(worker_limit, 1)));
         if (worker_count <= 1) {
             SystemRunResult serial = execute_record(record, dt, false, commands, false);
@@ -1045,7 +974,7 @@ EcsSystemRegistry::SystemRunResult EcsSystemRegistry::execute_native_parallel_re
         std::mutex error_mutex;
         std::string worker_error;
         try {
-            _native_worker_pool.run(worker_count, [&](i32 i) {
+            _jobs->parallel_for(worker_count, [&](i32 i) {
                 try {
                     auto runner = _world->raw().system(entity_from_id(*_world, record.flecs_id)).run_worker(i, worker_count, dt);
                     runner.stage(stages[static_cast<std::size_t>(i)]);
@@ -1648,7 +1577,7 @@ bool EcsSystemRegistry::run_parallel_batch(SystemScheduleSnapshot& schedule, Sys
             batch.worker_count = static_cast<i32>(records.size());
             std::string launch_error;
             try {
-                _native_worker_pool.run(static_cast<i32>(records.size()), [&](i32 index) {
+                _jobs->parallel_for(static_cast<i32>(records.size()), [&](i32 index) {
                     const std::size_t i = static_cast<std::size_t>(index);
                     results[i] = execute_record(*records[i], dt, false, command_buffers[i].get(), true);
                     results[i].decision = SystemExecutionDecision::ParallelAcrossSystems;

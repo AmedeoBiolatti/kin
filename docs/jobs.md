@@ -4,8 +4,13 @@
 in the background, and loops split across cores.
 
 ```cpp
-kin::JobSystem jobs;                      // one worker per core, minus the main thread
+kin::JobSystem& jobs = kin::default_job_system(); // the pool kin itself uses
+kin::JobSystem mine;                              // or a separate one
 ```
+
+Most games should use `kin::default_job_system()`: the ECS scheduler, the asset
+server and the path server all run on it, so the whole program has one worker
+per core instead of each system starting its own threads.
 
 ## Background jobs
 
@@ -78,10 +83,23 @@ exception is rethrown after the loop.
 
 Background jobs may use at most `max_background` workers at once (half of them by
 default). `parallel_for` always takes priority, so a long background job never
-leaves a frame's parallel loop without threads:
+leaves a frame's parallel loop without threads. The ECS scheduler's parallel
+systems run through `parallel_for`; asset loads and path searches are background
+jobs.
+
+A job system busy with other work never stalls a frame: `AssetServer::drain()`
+and `PathServer::drain()` do queued work on the calling thread while they wait,
+and apply results in request order whoever computed them.
+
+To size the shared pool yourself, install one before creating worlds or servers
+(they keep the pool they started with) and keep it alive while they exist:
 
 ```cpp
-kin::JobSystem jobs{{.workers = 7, .max_background = 2}};
+kin::JobSystem jobs{{.workers = 6, .max_background = 2}};
+kin::set_default_job_system(&jobs);
 ```
+
+Or give a single system its own pool: `world.systems().set_job_system(pool)`,
+or the `jobs` field of `AssetServerConfig` and `PathServerConfig`.
 
 `jobs.stats()` reports queued, running and not-yet-applied jobs.

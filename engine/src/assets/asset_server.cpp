@@ -17,60 +17,62 @@ std::string_view load_state_name(LoadState state) {
 }
 
 AssetServer::AssetServer(AssetManager& manager, AssetServerConfig config)
-    : _manager(manager) {
-    int workers = config.worker_count;
-    if (workers <= 0) {
-        const unsigned hw = std::thread::hardware_concurrency();
-        workers = static_cast<int>(std::min(2u, hw == 0 ? 1u : hw));
-        if (workers < 1) {
-            workers = 1;
-        }
-    }
-    _workers.reserve(static_cast<std::size_t>(workers));
-    for (int i = 0; i < workers; ++i) {
-        _workers.emplace_back([this](std::stop_token stop) { worker_loop(stop); });
-    }
+    : _manager(manager),
+      _jobs(config.jobs ? config.jobs : &default_job_system()),
+      _max_tasks(config.worker_count > 0 ? config.worker_count : 2) {
     KIN_LOG_INFO_F("asset",
                    "asset server created",
-                   (LogFields{{.name = "workers", .value = std::to_string(workers)}}));
+                   (LogFields{{.name = "max_loads", .value = std::to_string(_max_tasks)}}));
 }
 
 AssetServer::~AssetServer() {
+    // Unstarted loads are dropped. Tasks still queued on the job system never
+    // run; running ones finish their current load and stop.
+    std::vector<Job<void>> tasks;
     {
         std::lock_guard<std::mutex> lock(_mutex);
         _stopping = true;
+        _queue.clear();
+        tasks.swap(_task_handles);
     }
-    _cv.notify_all();
-    // std::jthread destructors request stop and join.
-    _workers.clear();
+    for (Job<void>& task : tasks) {
+        task.cancel();
+    }
+    for (Job<void>& task : tasks) {
+        task.wait();
+    }
 }
 
 void AssetServer::enqueue(std::unique_ptr<LoadJob> job) {
-    {
-        std::lock_guard<std::mutex> lock(_mutex);
-        _queue.push_back(std::move(job));
-    }
-    _cv.notify_one();
+    std::lock_guard<std::mutex> lock(_mutex);
+    _queue.push_back(std::move(job));
+    start_tasks_locked();
 }
 
-void AssetServer::worker_loop(std::stop_token stop) {
+void AssetServer::start_tasks_locked() {
+    std::erase_if(_task_handles, [](const Job<void>& task) { return task.ready(); });
+    // Tasks not running a load will take the next queued ones; start another
+    // only when there are more queued loads than such idle tasks.
+    while (!_stopping && _tasks < _max_tasks && static_cast<int>(_queue.size()) > _tasks - _active) {
+        ++_tasks;
+        _task_handles.push_back(_jobs->run([this] { run_task(); }));
+    }
+}
+
+void AssetServer::run_task() {
     for (;;) {
         std::unique_ptr<LoadJob> job;
         {
-            std::unique_lock<std::mutex> lock(_mutex);
-            _cv.wait(lock, [&] {
-                return _stopping || stop.stop_requested() || !_queue.empty();
-            });
-            if ((_stopping || stop.stop_requested()) && _queue.empty()) {
-                return;
+            std::lock_guard<std::mutex> lock(_mutex);
+            if (_stopping || _queue.empty()) {
+                --_tasks;
+                break;
             }
             job = std::move(_queue.front());
             _queue.pop_front();
             ++_active;
         }
-
         job->run_off_thread();
-
         {
             std::lock_guard<std::mutex> lock(_mutex);
             _completed.push_back(std::move(job));
@@ -78,6 +80,27 @@ void AssetServer::worker_loop(std::stop_token stop) {
         }
         _done_cv.notify_all();
     }
+    _done_cv.notify_all();
+}
+
+bool AssetServer::run_one_queued() {
+    std::unique_ptr<LoadJob> job;
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_queue.empty()) {
+            return false;
+        }
+        job = std::move(_queue.front());
+        _queue.pop_front();
+        ++_active;
+    }
+    job->run_off_thread();
+    {
+        std::lock_guard<std::mutex> lock(_mutex);
+        _completed.push_back(std::move(job));
+        --_active;
+    }
+    return true;
 }
 
 namespace {
@@ -115,6 +138,10 @@ void AssetServer::pump(PumpMode mode) {
     // the next generation, so the global apply/event order is deterministic
     // regardless of how worker threads were scheduled.
     for (;;) {
+        // Help with the queued loads instead of only waiting: the job system's
+        // workers may all be busy with other jobs.
+        while (run_one_queued()) {
+        }
         std::vector<std::unique_ptr<LoadJob>> batch;
         {
             std::unique_lock<std::mutex> lock(_mutex);

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <set>
+#include <mutex>
 #include <chrono>
 #include <cstdio>
 #include <deque>
@@ -1257,6 +1259,27 @@ void test_parallel_for_workers_runs_each_index_exactly_once() {
     }
 }
 
+void test_registry_runs_on_its_job_system() {
+    kin::EcsWorld world;
+    assert(&world.systems().job_system() == &kin::default_job_system());
+
+    // With a one-worker pool, parallel work runs on at most two threads: that
+    // worker and the caller.
+    kin::JobSystem pool{{.workers = 1}};
+    world.systems().set_job_system(pool);
+    assert(&world.systems().job_system() == &pool);
+    std::mutex ids_mutex;
+    std::set<std::thread::id> ids;
+    std::atomic<kin::i32> hits{0};
+    world.systems().parallel_for_workers(64, [&](kin::i32) {
+        hits.fetch_add(1);
+        std::lock_guard lock{ids_mutex};
+        ids.insert(std::this_thread::get_id());
+    });
+    assert(hits.load() == 64);
+    assert(!ids.empty() && ids.size() <= 2);
+}
+
 void test_failed_parallel_worker_command_buffer_is_not_flushed() {
     kin::EcsWorld world;
     register_components(world);
@@ -1349,6 +1372,7 @@ int main() {
     test_native_parallel_partitions_each_entity_exactly_once();
     test_native_parallel_is_deterministic();
     test_parallel_for_workers_runs_each_index_exactly_once();
+    test_registry_runs_on_its_job_system();
     test_small_native_workload_chooses_serial_by_default();
     test_mixed_native_task_batch_reports_actual_decisions();
     test_native_parallel_failure_restores_stage_state();

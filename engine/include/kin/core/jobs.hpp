@@ -242,6 +242,17 @@ private:
     std::vector<std::thread> _workers;
 };
 
+// The pool kin's own systems share: the ECS scheduler's parallel systems, the
+// asset server and the path server, unless one is given another. Games can use
+// it too. Created on first use with default settings, and kept until the program
+// exits (never destroyed, so nothing can outlive it).
+JobSystem& default_job_system();
+
+// Makes `jobs` the pool default_job_system() returns; null restores the
+// built-in one. Call it before creating worlds or servers, which keep the pool
+// they started with, and keep `jobs` alive while any of them exists.
+void set_default_job_system(JobSystem* jobs);
+
 template<typename F, typename Then>
 auto JobSystem::submit(F&& work, Then&& then) {
     constexpr bool takes_stop = std::is_invocable_v<std::decay_t<F>&, std::stop_token>;

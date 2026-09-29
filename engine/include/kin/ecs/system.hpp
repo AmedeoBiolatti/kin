@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/jobs.hpp>
 #include <kin/core/types.hpp>
 #include <kin/ecs/component.hpp>
 #include <kin/ecs/world.hpp>
@@ -653,12 +654,17 @@ public:
     void set_execution_tuning(SystemExecutionTuning tuning) { _execution_tuning = tuning; }
 
     // Runs job(worker_index) for worker_index in [0, worker_count) on the
-    // persistent worker pool and blocks until all jobs complete. For game code
-    // that partitions its own data (snapshot compute passes) — avoids paying
-    // per-frame std::thread spawn costs. The job must not touch the registry.
+    // registry's job system and blocks until all jobs complete. For game code
+    // that partitions its own data (snapshot compute passes). The job must not
+    // touch the registry.
     void parallel_for_workers(i32 worker_count, const std::function<void(i32)>& job) {
-        _native_worker_pool.run(worker_count, job);
+        _jobs->parallel_for(worker_count, job);
     }
+
+    // The job system parallel systems run on: default_job_system() unless set.
+    // Set it before running systems; it must outlive the registry.
+    JobSystem& job_system() const { return *_jobs; }
+    void set_job_system(JobSystem& jobs) { _jobs = &jobs; }
     // Emits one human-readable execution-decision row per parallel-eligible
     // system into the sink ("exec.<id>" -> "parallel x16" / "serial: <reason>"),
     // so silently-serialized parallelism is visible in the debug overlay. No-op
@@ -750,43 +756,6 @@ private:
     std::vector<SystemRecord*> sorted_records(SystemPhase* phase = nullptr);
     std::vector<const SystemRecord*> sorted_records(SystemPhase* phase = nullptr) const;
 
-    // Persistent worker pool for ParallelWithinNativeSystem runs. Spawning
-    // std::threads per system per frame costs milliseconds; the pool keeps
-    // workers parked on a condition variable between runs instead.
-    class NativeWorkerPool {
-    public:
-        NativeWorkerPool() = default;
-        ~NativeWorkerPool();
-        NativeWorkerPool(const NativeWorkerPool&) = delete;
-        NativeWorkerPool& operator=(const NativeWorkerPool&) = delete;
-
-        // Invokes job(index) once for every index in [0, count); the calling
-        // thread participates and the call returns when all jobs finished.
-        void run(i32 count, const std::function<void(i32)>& job);
-
-    private:
-        // One parallel run's bookkeeping. Workers capture the shared_ptr when
-        // they wake, so a late worker from a previous run can never touch the
-        // counters or job of a newer run.
-        struct RunState {
-            std::function<void(i32)> job;
-            std::atomic<i32> next{0};
-            std::atomic<i32> completed{0};
-            i32 count = 0;
-        };
-
-        void ensure_workers(i32 desired);
-        void worker_loop();
-
-        std::vector<std::thread> _threads;
-        std::mutex _mutex;
-        std::condition_variable _cv_work;
-        std::condition_variable _cv_done;
-        std::shared_ptr<RunState> _current;
-        u64 _generation = 0;
-        bool _stop = false;
-    };
-
     EcsWorld* _world = nullptr;
     std::vector<SystemRecord> _records;
     std::array<flecs::entity, system_phase_count> _phase_entities;
@@ -794,7 +763,7 @@ private:
     std::string _last_error;
     SystemScheduleSnapshot _last_schedule;
     SystemExecutionTuning _execution_tuning;
-    NativeWorkerPool _native_worker_pool;
+    JobSystem* _jobs = nullptr;
 };
 
 } // namespace kin
