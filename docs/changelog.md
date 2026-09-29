@@ -12,6 +12,10 @@ releases may change APIs.
 - `draw_shader_surface()` takes a list of source textures, bound at fragment
   sampler slots 0, 1, 2, ... up to `MaxShaderSamplers` (16); previously at most
   two.
+- `JobSystem` (`kin/core/jobs.hpp`): background jobs with `Job<T>` handles,
+  results applied in submission order by `pump()` / `drain()`, cancellation
+  through `std::stop_token`, and `parallel_for`. Background jobs use at most
+  part of the workers, so parallel loops always have threads.
 
 ### Changed
 
