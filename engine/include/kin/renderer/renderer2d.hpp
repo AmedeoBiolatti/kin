@@ -12,6 +12,7 @@
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -169,6 +170,10 @@ public:
                              const Texture& source);
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                              const Texture& source0, const Texture& source1);
+    // `sources[i]` binds at fragment sampler i. More than MaxShaderSamplers sources
+    // is an error: it is logged and nothing is drawn.
+    void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                             std::span<const Texture> sources);
     void draw_line(Vec2f a, Vec2f b, Color color);
     void draw_line(Vec2f a, Vec2f b, u8 r, u8 g, u8 b_color, u8 a_color = 255);
 

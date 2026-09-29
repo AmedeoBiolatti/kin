@@ -58,6 +58,23 @@ kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp)
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
+# Test-only material shaders for the GPU renderer tests. Without glslc (found by the
+# engine) they are not compiled and the tests that need them skip.
+set(_kin_test_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+target_compile_definitions(kin_renderer_tests PRIVATE KIN_TEST_SHADER_DIR="${_kin_test_shader_dir}")
+if(KIN_GLSLC)
+    file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
+    add_custom_command(
+        OUTPUT "${_kin_test_shader_dir}/four_sources.frag.spv"
+        COMMAND "${KIN_GLSLC}" -fshader-stage=fragment
+                -o "${_kin_test_shader_dir}/four_sources.frag.spv"
+                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/four_sources.frag.glsl"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/four_sources.frag.glsl"
+        COMMENT "glslc: four_sources.frag.glsl -> four_sources.frag.spv"
+        VERBATIM)
+    add_custom_target(kin_test_shaders DEPENDS "${_kin_test_shader_dir}/four_sources.frag.spv")
+    add_dependencies(kin_renderer_tests kin_test_shaders)
+endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 kin_add_test(kin_isometric_demo_tests kin-isometric-demo SOURCES isometric_demo_tests.cpp)
 kin_add_test(kin_tilemap_tests kin-tilemap SOURCES tilemap_tests.cpp)

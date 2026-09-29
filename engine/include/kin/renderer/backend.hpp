@@ -158,6 +158,20 @@ public:
         draw_shader_surface(rect, shader, params, source0);
     }
 
+    // As above, with any number of sources: `sources[i]` binds at fragment sampler i
+    // (at most MaxShaderSamplers; Renderer2D rejects longer lists). The default keeps
+    // the first two and delegates, so backends without wider support degrade unchanged.
+    virtual void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                     std::span<const Texture> sources) {
+        if (sources.empty()) {
+            draw_shader_surface(rect, shader, params);
+        } else if (sources.size() == 1) {
+            draw_shader_surface(rect, shader, params, sources[0]);
+        } else {
+            draw_shader_surface(rect, shader, params, sources[0], sources[1]);
+        }
+    }
+
     // Set the full-scene post-processing chain applied at present() time. Default is a
     // no-op (no shader/RT support) so the backend presents the scene unprocessed.
     // The chain persists until set again; pass an empty span to clear it.
