@@ -227,6 +227,18 @@ void test_parallel_for() {
     assert(caught);
 }
 
+void test_default_job_system() {
+    kin::JobSystem& built_in = kin::default_job_system();
+    assert(&kin::default_job_system() == &built_in);
+    assert(built_in.worker_count() >= 1);
+    kin::JobSystem mine{{.workers = 1}};
+    kin::set_default_job_system(&mine);
+    assert(&kin::default_job_system() == &mine);
+    kin::set_default_job_system(nullptr);
+    assert(&kin::default_job_system() == &built_in);
+    assert(built_in.run([] { return 5; }).get() == 5);
+}
+
 void test_destructor_cancels_and_stops() {
     kin::Job<int> queued;
     kin::Job<int> running;
@@ -259,5 +271,6 @@ int main() {
     test_background_limit();
     test_parallel_for();
     test_destructor_cancels_and_stops();
+    test_default_job_system();
     return 0;
 }

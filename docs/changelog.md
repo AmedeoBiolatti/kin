@@ -14,6 +14,16 @@ releases may change APIs.
   through `std::stop_token`, and `parallel_for`. Background jobs use at most
   part of the workers, so parallel loops always have threads.
 
+### Changed
+
+- The ECS scheduler, `AssetServer` and `PathServer` run on one shared job
+  system, `default_job_system()`, instead of each starting its own threads.
+  `set_default_job_system()` replaces it; each also accepts its own pool. The
+  `worker_count` settings now limit how much work each runs at once.
+- `AssetServer` and `PathServer` drains do queued work on the calling thread
+  while they wait. Destroying either drops work that has not started instead
+  of finishing it first.
+
 ## [0.1.0] — 2026-09-28
 
 First public release.

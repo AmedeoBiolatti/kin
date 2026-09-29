@@ -6,6 +6,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <future>
+#include <latch>
 #include <memory>
 #include <vector>
 
@@ -362,9 +364,10 @@ void test_cancel_semantics() {
 // Keystone: a scripted 200-request sequence with interleaved admit budgets and
 // a mid-sequence snapshot bump must drain byte-identically for any worker
 // count. This is the property the whole design exists to provide.
-kin::u64 run_scripted_sequence(kin::i32 worker_count) {
+kin::u64 run_scripted_sequence(kin::i32 worker_count, kin::JobSystem* jobs = nullptr) {
     kin::PathServer server{{
         .worker_count = worker_count,
+        .jobs = jobs,
         .cache_bucket_world = TileSize * 4.0f,
         .enable_provisional = true,
         .max_join_connector_world = TileSize * 4.0f,
@@ -508,6 +511,69 @@ void test_run_vs_run_keystone() {
     REQUIRE(parallel == parallel_again);
 }
 
+// A pool whose only background slot is held by a job that waits on a gate the
+// test controls, so none of the server's tasks can start.
+struct BlockedPool {
+    kin::JobSystem jobs{{.workers = 2, .max_background = 1}};
+    std::promise<void> gate;
+    std::latch started{1};
+    kin::Job<void> blocker;
+
+    BlockedPool() {
+        std::shared_future<void> open = gate.get_future().share();
+        blocker = jobs.run([this, open] {
+            started.count_down();
+            open.wait();
+        });
+        started.wait();
+    }
+    ~BlockedPool() { gate.set_value(); }
+};
+
+void test_drain_solves_when_the_pool_is_busy() {
+    // drain() solves admitted requests itself, so a pool busy with other jobs
+    // cannot stall it, and the results are the same as on a free pool.
+    BlockedPool pool;
+    const kin::u64 starved = run_scripted_sequence(4, &pool.jobs);
+    REQUIRE(starved == run_scripted_sequence(4));
+    REQUIRE(!pool.blocker.ready()); // the blocker held its slot throughout
+}
+
+void test_destroying_a_server_with_pending_work() {
+    // Admitted work whose tasks cannot start is dropped, not waited for.
+    BlockedPool pool;
+    {
+        kin::PathServer server{{.worker_count = 2, .jobs = &pool.jobs}};
+        server.set_snapshot(make_snapshot(1));
+        for (int i = 0; i < 10; ++i) {
+            kin::PathQuery query;
+            query.start_world = tile_world(2, i % 12);
+            query.goal_world = tile_world(18, 11 - i % 12);
+            server.submit(query);
+        }
+        REQUIRE(server.admit(0, 10) == 10);
+    }
+    REQUIRE(pool.jobs.stats().queued == 0); // the server's tasks were cancelled
+}
+
+void test_servers_share_the_default_pool() {
+    kin::JobSystem mine{{.workers = 1}};
+    kin::set_default_job_system(&mine);
+    REQUIRE(&kin::default_job_system() == &mine);
+    kin::PathServer server{{.worker_count = 2}};
+    kin::set_default_job_system(nullptr);
+    REQUIRE(&kin::default_job_system() != &mine);
+    // The server kept the pool it was created with.
+    server.set_snapshot(make_snapshot(1));
+    kin::PathQuery query;
+    query.start_world = tile_world(2, 2);
+    query.goal_world = tile_world(18, 2);
+    server.submit(query);
+    int delivered = 0;
+    server.drain(kin::PathServer::DrainMode::DrainToQuiescent, [&](kin::PathServerResult&&) { ++delivered; });
+    REQUIRE(delivered == 1);
+}
+
 } // namespace
 
 int main() {
@@ -526,6 +592,9 @@ int main() {
     test_cancel_semantics();
     test_tile_cost_hook_prefers_wide_route();
     test_run_vs_run_keystone();
+    test_drain_solves_when_the_pool_is_busy();
+    test_destroying_a_server_with_pending_work();
+    test_servers_share_the_default_pool();
     std::printf("path_server_tests: all tests passed\n");
     return 0;
 }
