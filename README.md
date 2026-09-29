@@ -26,9 +26,10 @@ small, stays honest about its scope, and grows alongside the games built with it
 - **2D rendering on SDL3** — sprites, tilemaps (including isometric), particles,
   post-processing, and an animation system with state machines.
 - **UI (ui2)** — immediate-style widgets, layout, and themes.
-- **Physics** with Box2D, **scripting** in Lua (sol2), **audio**, **pathfinding**,
-  **dialogue**, **save data**, hot-reloadable **assets**, and **background jobs**
-  and parallel loops on a worker pool.
+- **Physics** with Box2D, **scripting** in Lua (sol2), **audio**, **pathfinding**
+  (square and hex grids), **hex grid** coordinates and layouts, **dialogue**,
+  **save data**, hot-reloadable **assets**, and **background jobs** and parallel
+  loops on a worker pool.
 - **Agent interface** — every game gets deterministic headless runs with a JSON
   report, a line-JSON/HTTP control server, screenshots, and profiling from the
   same command-line flags ([docs/agent_interface.md](docs/agent_interface.md)).
@@ -82,6 +83,8 @@ tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 - `games/ecs_systems_demo`, `games/ecs_graph_demo`, `games/ecs_parallel_bench` —
   the ECS system scheduler, from a simple pipeline to parallel batches.
 - `games/isometric_demo` — isometric tilemap rendering and draw ordering.
+- `games/hex_demo` — hex coordinates, picking, movement range and A* paths in
+  all four hex layouts.
 - [examples/](examples/README.md) — **Signal Siege**, an arena survival game, and
   **Run Observatory**, a simulated LLM training tracker. Both support
   interactive use, seeded headless runs, screenshots, and benchmark workloads
@@ -137,7 +140,7 @@ Kin has no install rules yet, so `find_package(kin)` is not supported.
 |---|---|
 | Agents and automation | [agent_interface](docs/agent_interface.md), [testing](docs/testing.md), [profiling](docs/profiling.md) |
 | ECS | [entities](docs/ecs_entities.md), [components](docs/ecs_components.md), [data components](docs/ecs_data_components.md), [systems](docs/ecs_systems.md), [events](docs/ecs_events.md), [prefabs](docs/ecs_prefabs.md), [inspection](docs/ecs_inspection.md), [editor workflow](docs/ecs_editor_workflow.md) |
-| Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [background jobs](docs/jobs.md) |
+| Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [background jobs](docs/jobs.md), [hex grids](docs/hex_grids.md) |
 | Project | [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing

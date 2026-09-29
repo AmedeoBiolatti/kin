@@ -17,6 +17,7 @@ add_library(kin_engine STATIC
     src/assets/asset_manager.cpp
     src/assets/asset_server.cpp
     src/assets/image.cpp
+    src/core/hex.cpp
     src/core/instrumentation.cpp
     src/core/jobs.cpp
     src/core/json.cpp
@@ -47,6 +48,7 @@ add_library(kin_engine STATIC
     src/particles/particle_catalog.cpp
     src/particles/particle_field.cpp
     src/particles/particle_system.cpp
+    src/pathfinding/hex_pathfinding.cpp
     src/pathfinding/path_server.cpp
     src/pathfinding/pathfinding.cpp
     src/physics/debug_render.cpp
