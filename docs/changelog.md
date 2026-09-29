@@ -16,6 +16,12 @@ releases may change APIs.
   results applied in submission order by `pump()` / `drain()`, cancellation
   through `std::stop_token`, and `parallel_for`. Background jobs use at most
   part of the workers, so parallel loops always have threads.
+- Hex grids: axial coordinates, directions, distance, rotation, rings, ranges
+  and lines (`kin/core/hex.hpp`); `HexLayout` for pixel and offset-cell
+  conversion in pointy-top and flat-top, odd and even offset layouts.
+- Hex pathfinding: `HexGridNav`, `find_path` (A*) and `reachable_cells`
+  (movement range).
+- `games/hex_demo`, and a hex grids guide (`docs/hex_grids.md`).
 
 ### Changed
 
