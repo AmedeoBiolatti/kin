@@ -196,6 +196,44 @@ the above. The SDL renderer's `gpu` driver draws shader surfaces without source
 textures, and other backends draw nothing, so check the capability and provide a
 fallback. `engine/shaders/` has working examples.
 
+## Lighting
+
+`kin::LightLayer` lights a scene after it is drawn: everything in an area is
+multiplied by an ambient colour plus the light of each `kin::Light2D`.
+
+![The lighting demo at night: lamps, a campfire, a cyan crystal and a flashlight beam](images/lighting_demo.png)
+
+```cpp
+kin::LightLayer lighting;                         // keep it; it caches a texture
+
+renderer.clear(sky);
+draw_world(renderer);
+const std::array<kin::Light2D, 2> lights{{
+    {.position = lamp, .radius = 150.0f, .color = kin::Color::rgb(255, 200, 120)},
+    {.position = fire, .radius = 190.0f, .color = kin::Color::rgb(255, 130, 50),
+     .intensity = 1.3f},
+}};
+lighting.apply(renderer, {0.0f, 0.0f, 960.0f, 540.0f}, night_ambient, lights);
+draw_ui(renderer);                                // drawn after: not darkened
+```
+
+- A light is brightest at `position` and fades smoothly to nothing at `radius`.
+  `intensity` scales it, up to 4.
+- Lights add up, and the result can exceed the ambient; a white ambient is
+  daylight and leaves the scene as drawn.
+- `shape` replaces the round falloff with a texture stretched over the light's
+  `2 * radius` square, rotated by `rotation` degrees: its alpha is how much light
+  reaches each point. Use it for flashlight cones, spotlights or window light.
+- Positions are in the coordinates `apply()` is called in. With a camera, convert
+  them to screen positions first.
+- `resolution` (default 0.5) is the light map's size relative to the area. Lights
+  are smooth, so half resolution is plenty.
+
+`apply()` needs render targets and blend modes, which the software and GPU
+backends both have; it uses no shaders. Where they are missing it returns
+`false` and leaves the scene unlit. `games/lighting_demo` has lamps, a campfire, a
+coloured crystal and a flashlight, with a day/night cycle.
+
 ## Performance And Data Layout Notes
 
 Rendering should keep hot per-frame components small and push editor/debug

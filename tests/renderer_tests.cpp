@@ -1,5 +1,6 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
@@ -1011,6 +1012,111 @@ void test_gpu_shader_surface_binds_every_source() {
     }
 }
 
+// Draws `scene` into a 64 x 64 target, lights it, and reads it back.
+std::vector<kin::u8> lit_scene(kin::Renderer2D& renderer, kin::LightLayer& layer, kin::Color scene,
+                               kin::Color ambient, std::span<const kin::Light2D> lights) {
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    assert(target.valid());
+    const auto bind = renderer.scoped_render_target(target);
+    renderer.clear(scene);
+    assert(layer.apply(renderer, {0.0f, 0.0f, 64.0f, 64.0f}, ambient, lights, 1.0f));
+    std::vector<kin::u8> pixels;
+    kin::Vec2i size{};
+    assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
+    assert((size == kin::Vec2i{64, 64}));
+    return pixels;
+}
+
+// Shared by the software (SDL) and GPU backend tests: both must light the same way.
+void check_lighting(kin::Renderer2D& renderer) {
+    constexpr kin::Vec2i size{64, 64};
+    kin::LightLayer layer;
+    const kin::Color white = kin::Color::rgb(255, 255, 255);
+    const kin::Color ambient = kin::Color::rgb(40, 40, 40);
+
+    // Ambient alone multiplies the scene.
+    std::vector<kin::u8> px = lit_scene(renderer, layer, kin::Color::rgb(200, 100, 50), kin::Color::rgb(128, 128, 128), {});
+    assert(pixel_near(px, size, 32, 32, kin::Color::rgb(100, 50, 25), 3));
+
+    // A red light: full at its centre, smoothly less towards its edge, none beyond.
+    const std::array<kin::Light2D, 1> red{{{.position = {16.0f, 32.0f}, .radius = 16.0f, .color = kin::Color::rgb(255, 0, 0)}}};
+    px = lit_scene(renderer, layer, white, ambient, red);
+    assert(pixel_near(px, size, 16, 32, kin::Color::rgb(255, 40, 40), 4));
+    // Pixel 24's centre is 8.5 from the light: alpha (1 - (8.5 / 16)^2)^2 = 0.515.
+    assert(pixel_near(px, size, 24, 32, kin::Color::rgb(40 + 131, 40, 40), 10));
+    assert(pixel_near(px, size, 48, 32, ambient, 2));
+    assert(pixel_near(px, size, 16, 4, ambient, 2));
+
+    // Intensity above 1 adds the colour again.
+    const std::array<kin::Light2D, 1> bright{{{.position = {32.0f, 32.0f}, .radius = 16.0f,
+                                               .color = kin::Color::rgb(100, 0, 0), .intensity = 2.0f}}};
+    px = lit_scene(renderer, layer, white, ambient, bright);
+    assert(pixel_near(px, size, 32, 32, kin::Color::rgb(240, 40, 40), 6));
+
+    // A shape replaces the round falloff: here only its left half lets light through.
+    const std::array<kin::u8, 16> half_open{255, 255, 255, 255, 255, 255, 255, 255,
+                                            255, 255, 255, 0, 255, 255, 255, 0};
+    kin::Light2D shaped{.position = {32.0f, 32.0f}, .radius = 16.0f, .color = kin::Color::rgb(0, 200, 0),
+                        .shape = renderer.create_texture_from_rgba(half_open.data(), {4, 1})};
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&shaped, 1});
+    assert(pixel_near(px, size, 24, 32, kin::Color::rgb(40, 240, 40), 6));
+    assert(pixel_near(px, size, 40, 32, ambient, 6));
+    shaped.rotation = 180.0f; // now the right half is lit
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&shaped, 1});
+    assert(pixel_near(px, size, 24, 32, ambient, 6));
+    assert(pixel_near(px, size, 40, 32, kin::Color::rgb(40, 240, 40), 6));
+
+    // Lights entirely outside the area change nothing; ones partly inside still count.
+    const std::array<kin::Light2D, 2> edges{{
+        {.position = {-100.0f, 32.0f}, .radius = 20.0f, .color = kin::Color::rgb(0, 0, 255)},
+        {.position = {70.0f, 32.0f}, .radius = 16.0f, .color = kin::Color::rgb(0, 0, 255)},
+    }};
+    px = lit_scene(renderer, layer, white, ambient, edges);
+    assert(pixel_near(px, size, 2, 32, ambient, 2));
+    // Pixel 63's centre is 6.5 from the light at x = 70: alpha 0.697.
+    assert(pixel_near(px, size, 63, 32, kin::Color::rgb(40, 40, 40 + 178), 10));
+}
+
+void test_lighting_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "lighting-test", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    check_lighting(renderer);
+}
+
+void test_lighting_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_lighting_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-lighting-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        check_lighting(*renderer);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+void test_lighting_declines_without_render_targets() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::LightLayer layer;
+    const std::array<kin::Light2D, 1> light{{{.position = {8.0f, 8.0f}}}};
+    const int draws_before = raw->texture_draws;
+    assert(!layer.apply(renderer, {0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgb(20, 20, 20), light));
+    assert(raw->texture_draws == draws_before);
+}
+
 void test_post_process_degrades_on_fake_backend() {
     auto backend = std::make_unique<FakeBackend>();
     kin::Renderer2D renderer{std::move(backend)};
@@ -1048,5 +1154,8 @@ int main() {
     test_gpu_logical_transforms_are_immediate();
     test_gpu_native_pixel_size_and_pointer_mapping();
     test_gpu_shader_surface_binds_every_source();
+    test_lighting_on_software_backend();
+    test_lighting_on_gpu_backend();
+    test_lighting_declines_without_render_targets();
     return 0;
 }

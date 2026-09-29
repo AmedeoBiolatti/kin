@@ -24,7 +24,7 @@ small, stays honest about its scope, and grows alongside the games built with it
   data-defined components, prefabs, events, a system scheduler with dependency
   graphs and parallel batches, and live world inspection.
 - **2D rendering on SDL3** — sprites, tilemaps (including isometric), particles,
-  post-processing, and an animation system with state machines.
+  2D lighting, post-processing, and an animation system with state machines.
 - **UI (ui2)** — immediate-style widgets, layout, and themes.
 - **Physics** with Box2D, **scripting** in Lua (sol2), **audio**, **pathfinding**
   (square and hex grids), **hex grid** coordinates and layouts, **dialogue**,
@@ -85,6 +85,7 @@ tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 - `games/isometric_demo` — isometric tilemap rendering and draw ordering.
 - `games/hex_demo` — hex coordinates, picking, movement range and A* paths in
   all four hex layouts.
+- `games/lighting_demo` — ambient light, point lights and a flashlight at night.
 - [examples/](examples/README.md) — **Signal Siege**, an arena survival game, and
   **Run Observatory**, a simulated LLM training tracker. Both support
   interactive use, seeded headless runs, screenshots, and benchmark workloads

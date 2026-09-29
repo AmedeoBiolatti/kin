@@ -22,6 +22,10 @@ releases may change APIs.
 - Hex pathfinding: `HexGridNav`, `find_path` (A*) and `reachable_cells`
   (movement range).
 - `games/hex_demo`, and a hex grids guide (`docs/hex_grids.md`).
+- 2D lighting: `LightLayer` multiplies a drawn scene by an ambient colour plus
+  `Light2D` point lights, optionally shaped by a texture (cones, spotlights).
+  Works on the software and GPU backends without shaders.
+- `games/lighting_demo`: lamps, a campfire, a flashlight and a day/night cycle.
 
 ### Changed
 
