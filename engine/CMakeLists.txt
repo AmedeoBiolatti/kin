@@ -18,6 +18,7 @@ add_library(kin_engine STATIC
     src/assets/asset_server.cpp
     src/assets/image.cpp
     src/core/instrumentation.cpp
+    src/core/jobs.cpp
     src/core/json.cpp
     src/core/json_value.cpp
     src/core/profile.cpp
