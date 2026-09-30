@@ -74,14 +74,26 @@ void AudioEngine::update(f32 dt) {
         return;
     }
 
-    const i32 queued = _backend->queued_frames();
-    const i32 wanted = std::max(0, _config.queue_target_frames - queued);
+    // A device consumes queued audio in real time, so mix what it lacks. A
+    // silent (null) backend consumes nothing, so voices advance by elapsed time
+    // instead; otherwise they would never finish, and one-shots would pile up
+    // until every voice and instance limit was taken.
+    const i32 wanted = _backend->available()
+        ? std::max(0, _config.queue_target_frames - _backend->queued_frames())
+        : static_cast<i32>(std::lround(std::max(0.0f, dt) * static_cast<f32>(_backend->sample_rate())));
     if (wanted > 0) {
         mix_frames(_catalog, wanted);
     }
 }
 
+void AudioEngine::add_clip(std::string_view clip_id, AudioClip clip) {
+    _memory_clips.insert_or_assign(std::string{clip_id}, std::move(clip));
+}
+
 const AudioClip* AudioEngine::load_clip(const AudioCatalog& catalog, std::string_view clip_id) {
+    if (const auto found = _memory_clips.find(std::string{clip_id}); found != _memory_clips.end()) {
+        return found->second.valid() ? &found->second : nullptr;
+    }
     const std::filesystem::path path = catalog.resolve_clip_path(clip_id);
     if (path.empty()) {
         KIN_LOG_WARN_F("audio",

@@ -267,7 +267,36 @@ void test_ecs_audio_bridge_and_animation_events() {
 
 } // namespace
 
+// A synthesized clip registered with add_clip plays through a cue with no
+// catalog clip entry, mixes into the backend, and loops when the cue does.
+void test_memory_clips() {
+    kin::AudioEngine audio = make_test_engine();
+    std::vector<kin::f32> samples(480 * 2);
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        samples[i] = 0.25f * std::sin(static_cast<float>(i / 2) * 0.1f);
+    }
+    audio.add_clip("tone", kin::make_memory_audio_clip("tone", samples, 2, 48000));
+
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "sfx"});
+    catalog.add_cue({.id = "blip", .clips = {"tone"}, .bus = "sfx"});
+    catalog.add_cue({.id = "hum", .clips = {"tone"}, .category = kin::AudioCategory::Ambient, .bus = "sfx", .loop = true});
+    catalog.add_cue({.id = "silence", .clips = {"nothing"}, .bus = "sfx"});
+
+    const kin::AudioHandle blip = audio.play(catalog, {.cue = "blip"});
+    const kin::AudioHandle hum = audio.play(catalog, {.cue = "hum"});
+    assert(blip && hum);
+    assert(!audio.play(catalog, {.cue = "silence"}));
+    for (int i = 0; i < 10; ++i) {
+        audio.update(1.0f / 60.0f); // 0.17 s: longer than the 10 ms clip
+    }
+    assert(audio.stats().mixed_frames > 480);
+    assert(!audio.playing(blip));
+    assert(audio.playing(hum));
+}
+
 int main() {
+    test_memory_clips();
     test_catalog_roundtrip_and_loader();
     test_spatial_audio();
     test_voice_priority_caps_and_instances();

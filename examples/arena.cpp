@@ -117,7 +117,7 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
     if (length(input.move) > 0) player = add(player, mul(unit(input.move), dt * (_dash > 0 ? _stats.dash_speed : _stats.move)));
     player.x = std::clamp(player.x, 20.0f, 3052.0f); player.y = std::clamp(player.y, 20.0f, 2028.0f);
     if (input.fire && _fire <= 0 && shots.size() < 8190) {
-        _muzzle = .045f;
+        _muzzle = .045f; event(ArenaEvent::Kind::Fire, player);
         _fire = std::max(.02f,std::max(.05f, .13f - collected * .002f) * _stats.fire);
         const Vec2f direction = unit(input.aim);
         shots.push_back({player, mul(direction, _stats.shot_speed), _stats.shot_life, false});
@@ -138,6 +138,7 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
         e.cooldown -= dt;
         if (e.kind == 2 && distance < 650 && e.cooldown <= 0 && shots.size() < 8192) {
             shots.push_back({t.pos, mul(unit(toward), 180), 4, true}); e.cooldown = 3;
+            event(ArenaEvent::Kind::EnemyFire, t.pos, e.kind);
         }
         if (distance < 22 && _hurt <= 0 && _dash <= 0 && !invincible) {
             health -= std::max(1,8-_stats.armor); _hurt = .35f; event(ArenaEvent::Kind::Hurt, player);

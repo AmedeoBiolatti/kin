@@ -52,6 +52,10 @@ public:
     AudioEngine(std::unique_ptr<IAudioBackend> backend, AudioEngineConfig config = {});
 
     void update(f32 dt);
+    // Registers a clip made in memory (e.g. synthesized, or from make_memory_audio_clip)
+    // under a clip id, which cues then name like a file-backed clip; it needs no
+    // catalog entry and takes precedence over one with the same id.
+    void add_clip(std::string_view clip_id, AudioClip clip);
     AudioHandle play(const AudioCatalog& catalog, const AudioPlayRequest& request);
     void stop(AudioHandle handle, f32 fade = 0.0f);
     void stop_bus(std::string_view bus, f32 fade = 0.0f);
@@ -102,6 +106,7 @@ private:
     u64 _next_handle = 1;
     std::vector<Voice> _voices;
     std::unordered_map<std::string, AudioClip> _clip_cache;
+    std::unordered_map<std::string, AudioClip> _memory_clips;
     std::unordered_map<std::string, f32> _bus_overrides;
     AudioEngineStats _stats;
 };
