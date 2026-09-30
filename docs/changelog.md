@@ -26,9 +26,16 @@ releases may change APIs.
   `Light2D` point lights, optionally shaped by a texture (cones, spotlights).
   Works on the software and GPU backends without shaders.
 - `games/lighting_demo`: lamps, a campfire, a flashlight and a day/night cycle.
+- Data textures for shaders: `create_texture(size, format, pixels)` with
+  `TextureFormat::R16Uint`, `Rg16Uint` and `R32Float` (on backends with
+  `capabilities().data_textures`); `update_texture()` writes in the texture's
+  format.
+- Shader uniform blocks up to `MaxShaderUniformFloats` (4096 floats, 16 KiB).
 
 ### Changed
 
+- `ShaderParams::uniforms` is a `std::vector<f32>` (16 floats by default)
+  instead of a `std::array<f32, 16>`. Indexing it is unchanged.
 - On the SDL_GPU backend, sampler slots a material shader declares but a draw
   leaves empty are bound to a white texture instead of being left unbound.
 - The ECS scheduler, `AssetServer` and `PathServer` run on one shared job

@@ -48,6 +48,33 @@ Vec2i Texture::size() const {
     return _backend ? _backend->size() : Vec2i{};
 }
 
+TextureFormat Texture::format() const {
+    return _backend ? _backend->format() : TextureFormat::Rgba8;
+}
+
+namespace {
+
+// Data textures hold numbers for shaders; sampling one as an image is invalid.
+bool drawable(const Texture& texture) {
+    if (texture.format() == TextureFormat::Rgba8) {
+        return true;
+    }
+    KIN_LOG_ERROR("render", "draw_texture: data textures can only be read by shaders");
+    return false;
+}
+
+bool valid_params(const ShaderParams& params) {
+    if (params.uniforms.size() <= MaxShaderUniformFloats) {
+        return true;
+    }
+    KIN_LOG_ERROR_F("render", "shader params too large",
+                    (LogFields{{.name = "floats", .value = std::to_string(params.uniforms.size())},
+                               {.name = "max", .value = std::to_string(MaxShaderUniformFloats)}}));
+    return false;
+}
+
+} // namespace
+
 Renderer2D::ViewportGuard::ViewportGuard(Renderer2D& renderer, Rectf rect)
     : _renderer(&renderer) {
     _renderer->push_viewport(rect);
@@ -265,6 +292,22 @@ bool Renderer2D::update_texture(const Texture& texture, Vec2i at, Vec2i size, co
     }
 }
 
+Texture Renderer2D::create_texture(Vec2i size, TextureFormat format, const void* pixels) {
+    if (size.x <= 0 || size.y <= 0) {
+        return {};
+    }
+    if (format != TextureFormat::Rgba8 && !capabilities().data_textures) {
+        KIN_LOG_ERROR("render", "create_texture: this backend has no data texture formats");
+        return {};
+    }
+    try {
+        return _backend->create_texture(size, format, pixels);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "texture creation failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+}
+
 Texture Renderer2D::create_texture_from_rgba(const u8* pixels, Vec2i size) {
     try {
         return _backend->create_texture_from_rgba(pixels, size);
@@ -281,19 +324,27 @@ Texture Renderer2D::create_texture_from_rgba(const u8* pixels, Vec2i size) {
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf dest) {
-    _backend->draw_texture(texture, dest);
+    if (drawable(texture)) {
+        _backend->draw_texture(texture, dest);
+    }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest) {
-    _backend->draw_texture(texture, source, dest);
+    if (drawable(texture)) {
+        _backend->draw_texture(texture, source, dest);
+    }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) {
-    _backend->draw_texture(texture, source, dest, tint);
+    if (drawable(texture)) {
+        _backend->draw_texture(texture, source, dest, tint);
+    }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) {
-    _backend->draw_texture(texture, source, dest, tint, rotation, pivot);
+    if (drawable(texture)) {
+        _backend->draw_texture(texture, source, dest, tint, rotation, pivot);
+    }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Vec2f pos, Vec2f size) {
@@ -368,21 +419,30 @@ ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
 }
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params) {
-    _backend->draw_shader_surface(rect, shader, params);
+    if (valid_params(params)) {
+        _backend->draw_shader_surface(rect, shader, params);
+    }
 }
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                                      const Texture& source) {
-    _backend->draw_shader_surface(rect, shader, params, source);
+    if (valid_params(params)) {
+        _backend->draw_shader_surface(rect, shader, params, source);
+    }
 }
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                                      const Texture& source0, const Texture& source1) {
-    _backend->draw_shader_surface(rect, shader, params, source0, source1);
+    if (valid_params(params)) {
+        _backend->draw_shader_surface(rect, shader, params, source0, source1);
+    }
 }
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                                      std::span<const Texture> sources) {
+    if (!valid_params(params)) {
+        return;
+    }
     if (sources.size() > MaxShaderSamplers) {
         KIN_LOG_ERROR_F("render", "draw_shader_surface: too many sources",
                         (LogFields{{.name = "sources", .value = std::to_string(sources.size())},
@@ -393,6 +453,11 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
 }
 
 void Renderer2D::set_post_process(std::span<const PostProcessPass> passes) {
+    for (const PostProcessPass& pass : passes) {
+        if (!valid_params(pass.params)) {
+            return; // the previous chain stays
+        }
+    }
     _backend->set_post_process(passes);
 }
 

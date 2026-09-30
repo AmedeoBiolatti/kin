@@ -147,14 +147,25 @@ GpuTexture GpuDevice::create_render_texture(u32 width, u32 height, SDL_GPUTextur
 }
 
 GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 height) {
-    if (!pixels || width == 0 || height == 0) {
+    if (!pixels) {
         throw std::runtime_error("create_texture_from_rgba failed: invalid arguments");
+    }
+    return create_texture(pixels, width, height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 4);
+}
+
+GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
+                                     u32 texel_bytes) {
+    if (width == 0 || height == 0 || texel_bytes == 0) {
+        throw std::runtime_error("create_texture failed: invalid arguments");
     }
 
     SDL_GPUTextureCreateInfo texture_info{};
     texture_info.type = SDL_GPU_TEXTURETYPE_2D;
-    texture_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    texture_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    texture_info.format = format;
+    texture_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    if (format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM) {
+        texture_info.usage |= SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    }
     texture_info.width = width;
     texture_info.height = height;
     texture_info.layer_count_or_depth = 1;
@@ -166,7 +177,7 @@ GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
 
-    const u32 byte_count = width * height * 4;
+    const u32 byte_count = width * height * texel_bytes;
     SDL_GPUTransferBufferCreateInfo transfer_info{};
     transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     transfer_info.size = byte_count;
@@ -183,7 +194,11 @@ GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 
         SDL_ReleaseGPUTexture(_device, raw_texture);
         throw sdl_error("SDL_MapGPUTransferBuffer failed");
     }
-    std::memcpy(mapped, pixels, byte_count);
+    if (pixels) {
+        std::memcpy(mapped, pixels, byte_count);
+    } else {
+        std::memset(mapped, 0, byte_count);
+    }
     SDL_UnmapGPUTransferBuffer(_device, transfer);
 
     SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(_device);
@@ -215,14 +230,15 @@ GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 
     }
 
     SDL_ReleaseGPUTransferBuffer(_device, transfer);
-    return GpuTexture{_device, raw_texture, width, height, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM};
+    return GpuTexture{_device, raw_texture, width, height, format};
 }
 
-void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels) {
-    if (!texture || !pixels || w == 0 || h == 0) {
+void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
+                               u32 texel_bytes) {
+    if (!texture || !pixels || w == 0 || h == 0 || texel_bytes == 0) {
         throw std::runtime_error("update_texture failed: invalid arguments");
     }
-    const u32 byte_count = w * h * 4;
+    const u32 byte_count = w * h * texel_bytes;
     SDL_GPUTransferBufferCreateInfo transfer_info{};
     transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     transfer_info.size = byte_count;

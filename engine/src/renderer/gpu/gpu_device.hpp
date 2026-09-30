@@ -44,9 +44,14 @@ public:
     GpuTexture create_render_texture(u32 width, u32 height,
                                      SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID);
     GpuTexture create_texture_from_rgba(const u8* pixels, u32 width, u32 height);
-    // Uploads `pixels` (RGBA8, tightly packed) over the w x h region at (x, y) of an
-    // RGBA8 texture, ordered after the frames submitted before it.
-    void update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels);
+    // A sampled texture of `format` (`texel_bytes` per texel) filled from `pixels`,
+    // or with zeros when null. RGBA8 textures can also be render targets.
+    GpuTexture create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
+                              u32 texel_bytes);
+    // Uploads `pixels` (tightly packed, `texel_bytes` per texel) over the w x h
+    // region at (x, y), ordered after the frames submitted before it.
+    void update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
+                        u32 texel_bytes = 4);
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
     void upload_buffer(GpuFrame& frame, GpuBuffer& buffer, const void* data, u32 size);

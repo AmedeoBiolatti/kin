@@ -189,7 +189,33 @@ renderer.draw_shader_surface(rect, shader, params, sources);
 the uniform block is `layout(set = 3, binding = 0)`. Slots the shader declares
 but the draw does not fill are bound to a 1x1 white texture. Overloads taking no
 texture, one texture, or two textures are shorthands for the same call.
-`ShaderParams` holds 16 floats.
+
+`ShaderParams::uniforms` holds 16 floats by default. Resize it for more, up to
+`kin::MaxShaderUniformFloats` (4096, 16 KiB). Declare arrays in the shader as
+`vec4`s: std140 pads each element of a `float` array to 16 bytes.
+
+### Data textures
+
+Besides `Rgba8`, textures can hold numbers for shaders to read:
+
+```cpp
+std::vector<std::uint16_t> heights(cols * rows);    // one 16-bit value per cell
+kin::Texture height_map =
+    renderer.create_texture({cols, rows}, kin::TextureFormat::R16Uint, heights.data());
+renderer.update_texture(height_map, {x, y}, {1, 1},
+                        reinterpret_cast<const kin::u8*>(&new_height));
+```
+
+| Format | Bytes per texel | GLSL |
+| --- | --- | --- |
+| `R16Uint` | 2 | `usampler2D`, `.r` |
+| `Rg16Uint` | 4 | `usampler2D`, `.rg` |
+| `R32Float` | 4 | `sampler2D`, `.r` |
+
+Read them with `texelFetch(tex, ivec2(x, y), 0)`: they are never filtered.
+They need `capabilities().data_textures` (the SDL_GPU backend), are only for
+shaders (`draw_texture()` refuses them), and every slot that expects one must be
+given one, since an empty slot is bound to the white `Rgba8` texture.
 
 Shaders need `capabilities().materials_2d`. The SDL_GPU backend supports all of
 the above. The SDL renderer's `gpu` driver draws shader surfaces without source

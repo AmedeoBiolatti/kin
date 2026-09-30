@@ -138,8 +138,14 @@ public:
 
     Texture create_texture_from_rgba(const u8* pixels, i32 width, i32 height);
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size);
-    // Replace part of a texture made by create_texture_from_rgba in place: the
-    // `size` texels at `at` from `pixels` (RGBA8, tightly packed). Much cheaper
+    // A texture of any TextureFormat, filled from `pixels` (size.x * size.y texels
+    // of texture_format_bytes(format) each, rows top to bottom) or with zeros when
+    // null. The data formats need capabilities().data_textures: without it this
+    // logs and returns an invalid texture. Data textures are only for shaders;
+    // draw_texture() refuses them.
+    Texture create_texture(Vec2i size, TextureFormat format, const void* pixels = nullptr);
+    // Replace part of a texture in place: the `size` texels at `at` from `pixels`,
+    // tightly packed in the texture's format (texture_format_bytes each). Much cheaper
     // than making the texture again when only part of it changes. False when the
     // backend cannot (the software backend) or the region is outside the texture;
     // the texture is then unchanged, and the caller makes a new one.

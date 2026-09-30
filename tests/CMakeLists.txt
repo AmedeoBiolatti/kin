@@ -66,15 +66,19 @@ set(_kin_test_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_compile_definitions(kin_renderer_tests PRIVATE KIN_TEST_SHADER_DIR="${_kin_test_shader_dir}")
 if(KIN_GLSLC)
     file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
-    add_custom_command(
-        OUTPUT "${_kin_test_shader_dir}/four_sources.frag.spv"
-        COMMAND "${KIN_GLSLC}" -fshader-stage=fragment
-                -o "${_kin_test_shader_dir}/four_sources.frag.spv"
-                "${CMAKE_CURRENT_SOURCE_DIR}/shaders/four_sources.frag.glsl"
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/four_sources.frag.glsl"
-        COMMENT "glslc: four_sources.frag.glsl -> four_sources.frag.spv"
-        VERBATIM)
-    add_custom_target(kin_test_shaders DEPENDS "${_kin_test_shader_dir}/four_sources.frag.spv")
+    set(_kin_test_spv)
+    foreach(_name four_sources data_formats)
+        add_custom_command(
+            OUTPUT "${_kin_test_shader_dir}/${_name}.frag.spv"
+            COMMAND "${KIN_GLSLC}" -fshader-stage=fragment
+                    -o "${_kin_test_shader_dir}/${_name}.frag.spv"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.frag.glsl"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.frag.glsl"
+            COMMENT "glslc: ${_name}.frag.glsl -> ${_name}.frag.spv"
+            VERBATIM)
+        list(APPEND _kin_test_spv "${_kin_test_shader_dir}/${_name}.frag.spv")
+    endforeach()
+    add_custom_target(kin_test_shaders DEPENDS ${_kin_test_spv})
     add_dependencies(kin_renderer_tests kin_test_shaders)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)

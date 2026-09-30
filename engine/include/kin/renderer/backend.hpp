@@ -25,6 +25,8 @@ struct RendererBackendCapabilities {
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
     bool rendering_3d = false;
+    // create_texture() accepts the data formats (R16Uint, Rg16Uint, R32Float).
+    bool data_textures = false;
 };
 
 struct RendererBackendStats {
@@ -101,6 +103,19 @@ public:
     virtual Vec2f logical_to_window(Vec2f logical) const = 0;
 
     virtual Texture create_texture_from_rgba(const u8* pixels, Vec2i size) = 0;
+    // A texture of `format`, filled from `pixels` (size.x * size.y texels, rows
+    // top to bottom) or with zeros when null. The default handles Rgba8 only and
+    // returns an invalid texture for the data formats.
+    virtual Texture create_texture(Vec2i size, TextureFormat format, const void* pixels) {
+        if (format != TextureFormat::Rgba8) {
+            return {};
+        }
+        if (pixels) {
+            return create_texture_from_rgba(static_cast<const u8*>(pixels), size);
+        }
+        const std::vector<u8> zeros(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 4u, 0);
+        return create_texture_from_rgba(zeros.data(), size);
+    }
     // Replace the texels of a `size` region at `at` of `texture` with `pixels`
     // (RGBA8, tightly packed, row by row). False when the backend cannot update a
     // texture in place: the caller then makes a new one. Default: false.
