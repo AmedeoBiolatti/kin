@@ -140,6 +140,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.mouse` | `{x, y, button?, mode?, wheel?, space?}` | Move the pointer; optionally click or scroll. |
 | `input.text` | `{text}` | Deliver text input for the next tick. |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
+| `frame.timing` | `{reset?}` | Update and render wall time over the last 600 ticks: `last`, `mean` and `max`, in ms. `reset` clears the history after reporting. |
 | `ping` | none | `{"pong": true}`. |
 | `server.shutdown` | none | `{"bye": true}` and stop the server. |
 
@@ -153,7 +154,10 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 
 Injected input (`input.action`, `input.mouse`, `input.text`) is queued and applied
 on the next `sim.tick`, after `begin_frame`, so the scene observes it that frame.
-A `press` is a one-frame tap that is auto-released afterward; use `hold` and
+A `press` is a tap: held for that tick and released at the start of the next
+one, which sees the release, as with a real button. A ui2 click completes on that
+second tick. ui2 also resolves hover from the previous frame, so to click a
+widget, move the pointer there and tick once before the `press`. Use `hold` and
 `release` for sustained input.
 
 `input.mouse` coordinates default to game logical space. Pass `"space":"window"`

@@ -27,17 +27,19 @@ struct GameWindowInfo {
     bool borderless = false;
 };
 
+// Every member has a default, so a designated initializer can leave any out
+// without -Wmissing-field-initializers warnings.
 struct GameInfo {
-    std::string id;
+    std::string id{};
     std::string title = "Kin";
-    std::string version;
-    std::string description;
-    std::string author;
-    GameWindowInfo window;
+    std::string version{};
+    std::string description{};
+    std::string author{};
+    GameWindowInfo window{};
     bool headless_supported = true;
-    std::vector<std::string> tags;
-    std::vector<GameInfoField> fields;
-    std::optional<InputMap> input_map;
+    std::vector<std::string> tags{};
+    std::vector<GameInfoField> fields{};
+    std::optional<InputMap> input_map{};
 };
 
 WindowedAppConfig window_config(const GameInfo& info);

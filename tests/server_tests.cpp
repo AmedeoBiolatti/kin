@@ -8,6 +8,7 @@
 #include <kin/platform/log.hpp>
 #include <kin/runtime/scene_server.hpp>
 #include <kin/scene/scene_manager.hpp>
+#include <kin/ui2/context.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -84,6 +85,37 @@ public:
 private:
     kin::i32 _clicks = 0;
     std::string _typed;
+};
+
+// A ui2 region at (10, 10, 40, 20) that counts clicks, and a count of the
+// "jump" action's release edges.
+class ClickProbeScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "ClickProbe"; }
+
+    // Injected actions act through their bindings, so "jump" needs one.
+    void on_enter(kin::SceneContext& ctx) override { ctx.input.bind("jump", kin::Key::Space); }
+
+    void update(kin::SceneContext& ctx) override {
+        _ui.begin(ctx.input, ctx.renderer);
+        if (_ui.region(kin::ui2::make_id("button"), {10.0f, 10.0f, 40.0f, 20.0f}).clicked) {
+            ++_clicks;
+        }
+        _ui.end();
+        if (ctx.input.released("jump")) {
+            ++_jump_releases;
+        }
+    }
+
+    void write_report(kin::JsonWriter& json) const override {
+        json.field("clicks", _clicks);
+        json.field("jump_releases", _jump_releases);
+    }
+
+private:
+    kin::ui2::Context _ui;
+    kin::i32 _clicks = 0;
+    kin::i32 _jump_releases = 0;
 };
 
 kin::Animation make_server_animation(std::string name) {
@@ -491,6 +523,54 @@ void test_ui_snapshot_and_pointer_input() {
     assert(after_text->find("state")->string_at("typed") == "hello");
 }
 
+void test_press_completes_a_ui2_click_and_frame_timing() {
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<ClickProbeScene>());
+
+    // Hover for a step (ui2 resolves hover from the previous frame), then tap:
+    // the button is down for one step and released at the start of the next,
+    // where the click completes.
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"input.mouse","params":{"x":20,"y":20}})" "\n"
+        R"({"id":2,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":3,"method":"input.mouse","params":{"x":20,"y":20,"button":"left","mode":"press"}})" "\n"
+        R"({"id":4,"method":"input.action","params":{"name":"jump"}})" "\n"
+        R"({"id":5,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":6,"method":"scene.current"})" "\n"
+        R"({"id":7,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":8,"method":"scene.current"})" "\n"
+        R"({"id":9,"method":"frame.timing","params":{"reset":true}})" "\n"
+        R"({"id":10,"method":"frame.timing"})" "\n"
+        R"({"id":11,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "click", .width = 64, .height = 64},
+        .mode = kin::ServerMode::Driven,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    const std::string text = out.str();
+
+    const kin::JsonValue* pressed = response_result(text, 6);
+    assert(pressed != nullptr);
+    assert(pressed->find("state")->int_at("clicks") == 0);        // still down
+    assert(pressed->find("state")->int_at("jump_releases") == 0);
+    const kin::JsonValue* released = response_result(text, 8);
+    assert(released != nullptr);
+    assert(released->find("state")->int_at("clicks") == 1);
+    assert(released->find("state")->int_at("jump_releases") == 1);
+
+    const kin::JsonValue* timing = response_result(text, 9);
+    assert(timing != nullptr);
+    assert(timing->int_at("frames") == 3);
+    assert(timing->int_at("window") == 600);
+    assert(timing->find("mean")->find("total_ms")->as_number() >= 0.0);
+    assert(timing->find("max")->find("update_ms")->as_number() >= timing->find("mean")->find("update_ms")->as_number());
+    const kin::JsonValue* after_reset = response_result(text, 10);
+    assert(after_reset != nullptr && after_reset->int_at("frames") == 0);
+}
+
 void test_sim_reset() {
     std::vector<kin::LogEvent> log_events;
     kin::set_logger_config({
@@ -668,6 +748,7 @@ int main() {
     test_animation_diagnostics_endpoint();
     test_animation_diagnostics_endpoint_missing_provider_errors();
     test_ui_snapshot_and_pointer_input();
+    test_press_completes_a_ui2_click_and_frame_timing();
     test_sim_reset();
     test_sim_reset_unsupported_without_factory();
     test_view_screenshot();

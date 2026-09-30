@@ -10,6 +10,7 @@
 #include <kin/ui2/widgets.hpp>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -63,6 +64,9 @@ public:
 
     struct TooltipOptions {
         u64 delay_frames = 30;
+        // Once a tooltip has shown, another shows at once if hovered within this
+        // many frames, so moving along a row of controls does not wait each time.
+        u64 warm_frames = 20;
         UiPadding padding{8.0f, 5.0f, 8.0f, 5.0f};
         Vec2f offset{8.0f, 8.0f};
         TextStyle text_style{};
@@ -431,6 +435,8 @@ private:
 
     Id _tooltip_candidate{};
     u64 _tooltip_first_frame = 0;
+    std::optional<u64> _tooltip_shown_frame; // last frame any tooltip was visible
+    bool _tooltip_warm = false;              // the candidate skips the delay
 
     struct DragState {
         Id source{};

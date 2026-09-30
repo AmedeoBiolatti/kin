@@ -3526,6 +3526,43 @@ void test_tooltip_delay_and_bounds() {
     assert(result.bounds.h > 0.0f);
 }
 
+void test_tooltip_warm_up() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id first = ui2::make_id("first");
+    const ui2::Id second = ui2::make_id("second");
+    ui2::Context::TooltipOptions options;
+    options.delay_frames = 5;
+    options.warm_frames = 3;
+    const auto frame = [&](Vec2f pointer, ui2::Id id, Rectf anchor) {
+        input.begin_frame();
+        input.set_mouse_pos(pointer);
+        ui.begin(input, renderer);
+        const ui2::Context::TooltipResult result = ui.tooltip(id, anchor, "tip", options);
+        ui.end();
+        return result.visible;
+    };
+    const Rectf a{0, 0, 30, 30};
+    const Rectf b{40, 0, 30, 30};
+
+    // The first tooltip waits for its delay.
+    bool shown = false;
+    int frames = 0;
+    while (!shown && frames < 20) {
+        shown = frame({10, 10}, first, a);
+        ++frames;
+    }
+    assert(shown && frames > 5);
+    // Moving straight to the next control shows its tooltip at once.
+    assert(frame({50, 10}, second, b));
+    // After the pointer rests elsewhere past warm_frames, the delay is back.
+    for (int i = 0; i < 4; ++i) {
+        frame({200, 200}, second, b);
+    }
+    assert(!frame({10, 10}, first, a));
+}
+
 void test_drag_source_and_drop_target() {
     Input input;
     Renderer2D renderer = make_renderer();
@@ -5836,6 +5873,7 @@ int main() {
     test_prompt_label_chip_and_prompt_row();
     test_world_overlay_projection_helpers();
     test_tooltip_delay_and_bounds();
+    test_tooltip_warm_up();
     test_drag_source_and_drop_target();
     test_minimal_feedback_widgets();
     test_advanced_text_parse_layout_and_draw();

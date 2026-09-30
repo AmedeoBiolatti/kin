@@ -261,10 +261,11 @@ response is one line: `{"id": <echoed>, "result": {...}}` or
 | `view.screenshot {path?}` | Render the current scene and save a PNG; returns path + dimensions. |
 | `sim.tick {count}` | Advance N fixed-timestep frames; returns the frame counter. |
 | `sim.reset {seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
-| `input.action {name, mode}` | Queue an action `press` (one-frame tap), `hold`, or `release` for the next tick. |
+| `input.action {name, mode}` | Queue an action `press` (a tap, released at the start of the next tick), `hold`, or `release` for the next tick. |
 | `input.mouse {x, y, button?, mode?, wheel?, space?}` | Move the pointer and optionally click/scroll; coordinates default to logical space unless `space` is specified. |
 | `input.text {text}` | Deliver a text-input string for the next tick. |
 | `server.status` | Frame counter, fixed dt, scene depth, failure flag. |
+| `frame.timing {reset?}` | Update and render time over the last 600 ticks (last, mean, max). |
 | `ping` / `server.shutdown` | Liveness check / stop the server. |
 
 In **driven** mode time only advances on `sim.tick`, so a run is fully
@@ -283,7 +284,8 @@ scene under test.
 when driving native window-pixel overlays such as the F1 debug panel.
 
 Pointer and text injection follow the same after-`begin_frame` timing as
-`input.action`, so a one-frame `press` is auto-released and does not linger.
+`input.action`. A `press` is released at the start of the next tick, so a ui2
+click completes then; hover the widget for a tick before pressing.
 
 ### HTTP transport
 

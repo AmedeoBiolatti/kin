@@ -31,6 +31,10 @@ releases may change APIs.
   `capabilities().data_textures`); `update_texture()` writes in the texture's
   format.
 - Shader uniform blocks up to `MaxShaderUniformFloats` (4096 floats, 16 KiB).
+- `frame.timing` server command: update and render time over the last 600
+  ticks.
+- ui2 tooltips warm up: once one has shown, the next shows at once
+  (`TooltipOptions::warm_frames`).
 
 ### Changed
 
@@ -45,6 +49,14 @@ releases may change APIs.
 - `AssetServer` and `PathServer` drains do queued work on the calling thread
   while they wait. Destroying either drops work that has not started instead
   of finishing it first.
+- Every `GameInfo` member has a default, so designated initializers can omit
+  any without `-Wmissing-field-initializers` warnings.
+
+### Fixed
+
+- A scripted `press` (`input.mouse`, `input.action`) is released at the start
+  of the next tick instead of at the end of its own, so the release is seen and
+  ui2 clicks complete. Before, a pressed button never produced a click.
 
 ## [0.1.0] — 2026-09-28
 
