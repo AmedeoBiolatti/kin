@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -1106,6 +1107,115 @@ void test_lighting_on_gpu_backend() {
     }
 }
 
+void test_shader_params_and_formats_on_software_backends() {
+    std::vector<kin::LogEvent> log_events;
+    kin::set_logger_config({
+        .min_level = kin::LogLevel::Debug,
+        .format = kin::LogFormat::Text,
+        .sdl_sink = false,
+        .memory_events = &log_events,
+    });
+
+    // 16 floats by default; more than MaxShaderUniformFloats is refused.
+    assert(kin::ShaderParams{}.uniforms.size() == 16);
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D fake{std::move(backend)};
+    kin::ShaderParams big;
+    big.uniforms.resize(kin::MaxShaderUniformFloats);
+    fake.draw_shader_surface({0.0f, 0.0f, 8.0f, 8.0f}, kin::ShaderHandle{1}, big);
+    assert(raw->shader_draw_sources.size() == 1);
+    big.uniforms.resize(kin::MaxShaderUniformFloats + 1);
+    fake.draw_shader_surface({0.0f, 0.0f, 8.0f, 8.0f}, kin::ShaderHandle{1}, big);
+    assert(raw->shader_draw_sources.size() == 1);
+    assert(has_log_event(log_events, "render", "shader params too large"));
+
+    // Rgba8 textures work everywhere; the software backend has no data formats.
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "formats-test", .width = 16, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    assert(!renderer.capabilities().data_textures);
+    const kin::Texture rgba = renderer.create_texture({3, 2}, kin::TextureFormat::Rgba8);
+    assert(rgba.valid() && (rgba.size() == kin::Vec2i{3, 2}) && rgba.format() == kin::TextureFormat::Rgba8);
+    assert(!renderer.create_texture({3, 2}, kin::TextureFormat::R16Uint).valid());
+    assert(has_log_event(log_events, "render", "create_texture: this backend has no data texture formats"));
+    assert(!renderer.create_texture({0, 2}, kin::TextureFormat::Rgba8).valid());
+    static_assert(kin::texture_format_bytes(kin::TextureFormat::R16Uint) == 2);
+    static_assert(kin::texture_format_bytes(kin::TextureFormat::Rg16Uint) == 4);
+    kin::set_logger_config({.sdl_sink = false});
+}
+
+void test_gpu_data_textures_and_large_uniforms() {
+    constexpr std::string_view test_name = "test_gpu_data_textures_and_large_uniforms";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "data_formats.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-formats-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().data_textures);
+
+        std::ifstream file(spv, std::ios::binary);
+        const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        desc.num_samplers = 3;
+        desc.num_uniform_buffers = 1;
+        const kin::ShaderHandle shader = renderer->create_shader(desc);
+        assert(shader);
+
+        const std::array<std::uint16_t, 1> r16{32768};
+        const std::array<std::uint16_t, 4> rg16{65535, 0, 0, 65535}; // texel (1, 0) has green 65535
+        const std::array<float, 1> r32f{0.25f};
+        const std::array<kin::Texture, 3> sources{
+            renderer->create_texture({1, 1}, kin::TextureFormat::R16Uint, r16.data()),
+            renderer->create_texture({2, 1}, kin::TextureFormat::Rg16Uint, rg16.data()),
+            renderer->create_texture({1, 1}, kin::TextureFormat::R32Float, r32f.data()),
+        };
+        for (const kin::Texture& t : sources) {
+            assert(t.valid());
+        }
+        assert(sources[1].format() == kin::TextureFormat::Rg16Uint);
+        kin::ShaderParams params;
+        params.uniforms.resize(32);
+        params.uniforms[21] = 0.25f; // u[5].y: past the old 16-float limit
+
+        kin::RenderTarget target = renderer->create_render_target({8, 8}, kin::ScaleMode::Nearest);
+        const auto draw = [&] {
+            std::vector<kin::u8> pixels;
+            kin::Vec2i size{};
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 8.0f, 8.0f}, shader, params, std::span<const kin::Texture>{sources});
+            // A data texture is not an image: draw_texture refuses it.
+            renderer->draw_texture(sources[2], kin::Rectf{0.0f, 0.0f, 8.0f, 8.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 8.0f, 8.0f}, pixels, size));
+            return pixels;
+        };
+        assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(128, 255, 128), 2));
+
+        // update_texture writes in the texture's own format.
+        const std::array<float, 1> half{0.5f};
+        assert(renderer->update_texture(sources[2], {0, 0}, {1, 1}, reinterpret_cast<const kin::u8*>(half.data())));
+        assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(128, 255, 191), 2));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_lighting_declines_without_render_targets() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -1154,6 +1264,8 @@ int main() {
     test_gpu_logical_transforms_are_immediate();
     test_gpu_native_pixel_size_and_pointer_mapping();
     test_gpu_shader_surface_binds_every_source();
+    test_shader_params_and_formats_on_software_backends();
+    test_gpu_data_textures_and_large_uniforms();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

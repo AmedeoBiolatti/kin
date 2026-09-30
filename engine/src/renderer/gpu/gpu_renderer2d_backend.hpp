@@ -29,12 +29,14 @@ namespace gpu {
 class GpuTextureBackend : public ITextureBackend {
 public:
     explicit GpuTextureBackend(GpuTexture texture, bool premultiplied = false,
-                               ScaleMode scale = ScaleMode::Nearest)
+                               ScaleMode scale = ScaleMode::Nearest,
+                               TextureFormat format = TextureFormat::Rgba8)
         : ITextureBackend(ITextureBackend::Kind::Gpu),
-          _texture(std::move(texture)), _premultiplied(premultiplied), _scale(scale) {}
+          _texture(std::move(texture)), _premultiplied(premultiplied), _scale(scale), _format(format) {}
     Vec2i size() const override {
         return {static_cast<i32>(_texture.width()), static_cast<i32>(_texture.height())};
     }
+    TextureFormat format() const override { return _format; }
     const GpuTexture& texture() const { return _texture; }
     // Render targets store premultiplied alpha; sampling them out uses the
     // premultiplied blend (matches the SDL backend's BLEND_PREMULTIPLIED).
@@ -49,6 +51,7 @@ private:
     GpuTexture _texture;
     bool _premultiplied = false;
     mutable ScaleMode _scale = ScaleMode::Nearest;
+    TextureFormat _format = TextureFormat::Rgba8;
 };
 } // namespace gpu
 
@@ -79,6 +82,7 @@ public:
     Vec2f logical_to_window(Vec2f logical) const override;
 
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
+    Texture create_texture(Vec2i size, TextureFormat format, const void* pixels) override;
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     void draw_texture(const Texture& texture, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
@@ -149,6 +153,7 @@ private:
     gpu::GpuShader _fragment_shader;
     SDL_GPUSampler* _sampler_linear = nullptr;  // render targets / blur
     SDL_GPUSampler* _sampler_nearest = nullptr; // default for uploaded textures (crisp text/pixel art)
+    bool _data_textures = false; // the device can sample R16_UINT, R16G16_UINT and R32_FLOAT
     gpu::GpuTexture _white;
     gpu::GpuTexture _scene;
     Vec2i _scene_size{};

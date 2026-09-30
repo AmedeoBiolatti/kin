@@ -3,6 +3,7 @@
 #include <kin/core/types.hpp>
 
 #include <array>
+#include <vector>
 
 namespace kin {
 
@@ -50,10 +51,17 @@ struct ShaderDesc {
     const char* entrypoint = "main";
 };
 
-// Uniform block fed to the shader's `cbuffer : register(b0, space3)`. Layout is
-// up to the shader author; 16 floats (64 bytes) covers four float4 registers.
+// Most floats a ShaderParams block may hold: 16 KiB, the uniform-block size every
+// Vulkan device guarantees.
+inline constexpr u32 MaxShaderUniformFloats = 4096;
+
+// Uniform block fed to the shader's `cbuffer : register(b0, space3)` (GLSL:
+// `layout(set = 3, binding = 0) uniform`). Layout is up to the shader author.
+// 16 floats (four vec4s) by default; resize for more, up to
+// MaxShaderUniformFloats. Declare arrays as vec4s: std140 pads each element of a
+// float array to 16 bytes.
 struct ShaderParams {
-    std::array<f32, 16> uniforms{};
+    std::vector<f32> uniforms = std::vector<f32>(16, 0.0f);
 };
 
 // Engine-shipped fragment shaders, compiled to SPIR-V in KIN_GPU_SHADER_DIR and loaded

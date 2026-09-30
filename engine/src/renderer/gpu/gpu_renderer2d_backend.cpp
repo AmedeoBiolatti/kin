@@ -187,6 +187,12 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     sampler_info.min_filter = SDL_GPU_FILTER_NEAREST;
     sampler_info.mag_filter = SDL_GPU_FILTER_NEAREST;
     _sampler_nearest = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
+    _data_textures = true;
+    for (const SDL_GPUTextureFormat format :
+         {SDL_GPU_TEXTUREFORMAT_R16_UINT, SDL_GPU_TEXTUREFORMAT_R16G16_UINT, SDL_GPU_TEXTUREFORMAT_R32_FLOAT}) {
+        _data_textures = _data_textures && SDL_GPUTextureSupportsFormat(_device.handle(), format, SDL_GPU_TEXTURETYPE_2D,
+                                                                        SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    }
 
     const std::array<u8, 4> white{255, 255, 255, 255};
     _white = _device.create_texture_from_rgba(white.data(), 1, 1);
@@ -224,6 +230,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .gradients = true,
         .text = false,
         .rendering_3d = false,
+        .data_textures = _data_textures,
     };
 }
 
@@ -540,13 +547,37 @@ Texture GpuRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
     return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex))};
 }
 
+namespace {
+
+SDL_GPUTextureFormat sdl_format(TextureFormat format) {
+    switch (format) {
+    case TextureFormat::Rgba8: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    case TextureFormat::R16Uint: return SDL_GPU_TEXTUREFORMAT_R16_UINT;
+    case TextureFormat::Rg16Uint: return SDL_GPU_TEXTUREFORMAT_R16G16_UINT;
+    case TextureFormat::R32Float: return SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+    }
+    return SDL_GPU_TEXTUREFORMAT_INVALID;
+}
+
+} // namespace
+
+Texture GpuRenderer2DBackend::create_texture(Vec2i size, TextureFormat format, const void* pixels) {
+    if (size.x <= 0 || size.y <= 0 || (format != TextureFormat::Rgba8 && !_data_textures)) {
+        return {};
+    }
+    gpu::GpuTexture tex = _device.create_texture(pixels, static_cast<u32>(size.x), static_cast<u32>(size.y),
+                                                 sdl_format(format), texture_format_bytes(format));
+    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Nearest, format)};
+}
+
 bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) {
     const auto* backend = as_gpu(texture.backend().get());
     if (!backend || !backend->texture()) {
         return false;
     }
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
-                           static_cast<u32>(size.x), static_cast<u32>(size.y), pixels);
+                           static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
+                           texture_format_bytes(backend->format()));
     return true;
 }
 
@@ -1048,7 +1079,9 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         if (const auto* backend = as_gpu(src.backend().get());
             backend && backend->texture()) {
             binding.texture = backend->texture().handle();
-            binding.sampler = backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+            // Integer textures cannot be filtered, and 32-bit floats may not be.
+            const bool linear = backend->scale_mode() == ScaleMode::Linear && backend->format() == TextureFormat::Rgba8;
+            binding.sampler = linear ? _sampler_linear : _sampler_nearest;
         }
         return binding;
     };
