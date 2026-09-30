@@ -1,5 +1,6 @@
 #include <kin/ui2/text.hpp>
 
+#include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -512,6 +514,9 @@ private:
         const f32 space_advance = (atlas->glyphs[static_cast<std::size_t>(' ')].advance > 0.0f
             ? atlas->glyphs[static_cast<std::size_t>(' ')].advance
             : atlas->line_height * 0.5f) * inv;
+        // Advances and kerning follow the font, so text draws as wide as
+        // measure() (TTF_GetStringSize) says and carets and selections line up.
+        Uint32 previous = 0;
         for (char ch : text) {
             if (ch == '\r') {
                 continue;
@@ -519,14 +524,21 @@ private:
             if (ch == '\n') {
                 cursor.x = pos.x;
                 cursor.y += line_height;
+                previous = 0;
                 continue;
             }
             if (ch == '\t') {
                 cursor.x += space_advance * 4.0f;
+                previous = 0;
                 continue;
             }
 
             const auto value = static_cast<unsigned char>(ch);
+            int kerning = 0;
+            if (previous != 0 && TTF_GetGlyphKerning(font, previous, value, &kerning)) {
+                cursor.x += static_cast<f32>(kerning) * inv;
+            }
+            previous = value;
             const CachedGlyph& glyph = atlas->glyphs[static_cast<std::size_t>(value)];
             if (glyph.drawable) {
                 // Pixel-snap the destination: the glyph atlas is integer-sized, so an
@@ -542,7 +554,7 @@ private:
                                        static_cast<f32>(glyph.size.y) * inv},
                                       color);
             }
-            cursor.x += std::max(glyph.advance * inv, space_advance);
+            cursor.x += glyph.advance > 0.0f ? glyph.advance * inv : space_advance;
         }
         return true;
     }
@@ -815,6 +827,90 @@ std::vector<std::string> wrap_text(const Font& font, std::string_view text, Text
         push_line(std::move(line));
     }
 
+    return lines;
+}
+
+std::vector<TextRange> wrap_text_ranges(const Font& font, std::string_view text, TextWrapOptions options) {
+    std::vector<TextRange> lines;
+    if (options.max_lines == 0) {
+        return lines;
+    }
+    const Font actual = font ? font : bitmap_font();
+    const auto reached_limit = [&] {
+        return options.max_lines >= 0 && static_cast<i32>(lines.size()) >= options.max_lines;
+    };
+
+    // Character widths, measured once per distinct character.
+    std::unordered_map<u32, f32> widths;
+    const auto width_of = [&](std::size_t begin, std::size_t end) {
+        u32 key = 0;
+        for (std::size_t i = begin; i < end; ++i) {
+            key = (key << 8) | static_cast<unsigned char>(text[i]);
+        }
+        const auto [it, inserted] = widths.try_emplace(key, 0.0f);
+        if (inserted) {
+            it->second = measure_text(actual, text.substr(begin, end - begin), options.scale).x;
+        }
+        return it->second;
+    };
+    const auto is_space = [&](std::size_t i) {
+        return text[i] == ' ' || text[i] == '\t' || text[i] == '\r';
+    };
+
+    std::size_t hard_begin = 0;
+    while (!reached_limit()) {
+        const std::size_t newline = text.find('\n', hard_begin);
+        const std::size_t hard_end = newline == std::string_view::npos ? text.size() : newline;
+        std::size_t pos = hard_begin;
+        if (options.max_width <= 0.0f) {
+            lines.push_back({hard_begin, hard_end});
+        } else {
+            while (!reached_limit()) {
+                f32 width = 0.0f;
+                std::size_t after_space = std::string_view::npos;
+                std::size_t i = pos;
+                while (i < hard_end) {
+                    const std::size_t next = utf8_next(text, i);
+                    const f32 w = width_of(i, next);
+                    const bool space = is_space(i);
+                    // Whitespace may hang past the edge; the first character always fits.
+                    if (!space && i > pos && width + w > options.max_width) {
+                        break;
+                    }
+                    width += w;
+                    if (space) {
+                        after_space = next;
+                    }
+                    i = next;
+                }
+                if (i >= hard_end) {
+                    lines.push_back({pos, hard_end});
+                    break;
+                }
+                std::size_t cut = i;
+                if (after_space != std::string_view::npos && after_space > pos) {
+                    cut = after_space;
+                } else if (!options.break_long_words) {
+                    // Keep the word whole: the line runs to its end and the spaces after it.
+                    while (cut < hard_end && !is_space(cut)) {
+                        cut = utf8_next(text, cut);
+                    }
+                    while (cut < hard_end && is_space(cut)) {
+                        cut = utf8_next(text, cut);
+                    }
+                }
+                lines.push_back({pos, cut});
+                pos = cut;
+                if (pos >= hard_end) {
+                    break;
+                }
+            }
+        }
+        if (newline == std::string_view::npos) {
+            break;
+        }
+        hard_begin = newline + 1;
+    }
     return lines;
 }
 

@@ -152,6 +152,8 @@ std::string readable_key(Key key, bool compact) {
     case Key::F10: return "F10";
     case Key::F11: return "F11";
     case Key::F12: return "F12";
+    case Key::PageUp: return compact ? "PgUp" : "Page Up";
+    case Key::PageDown: return compact ? "PgDn" : "Page Down";
     case Key::Unknown: break;
     }
     return compact ? "?" : "Unknown";
@@ -826,6 +828,10 @@ bool Context::key_pressed(Key key) const {
     return _input && _input->frame_pressed(key);
 }
 
+bool Context::key_typed(Key key) const {
+    return _input && (_input->frame_pressed(key) || _input->frame_repeated(key));
+}
+
 bool Context::action_pressed(std::string_view action) const {
     return _input && _input->frame_pressed(action);
 }
@@ -846,6 +852,16 @@ void Context::set_clipboard_text(std::string_view text) {
     if (_input) {
         _input->set_clipboard_text(text);
     }
+}
+
+UiTextEditState& Context::text_edit_state(Id id, std::string_view initial) {
+    const auto [it, inserted] = _text_edits.try_emplace(id.value);
+    if (inserted) {
+        it->second.text = std::string{initial};
+        it->second.caret = it->second.text.size();
+        it->second.clear_selection();
+    }
+    return it->second;
 }
 
 UiTextInputState& Context::text_input_state(Id id, std::string_view value) {

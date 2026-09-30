@@ -14,6 +14,7 @@
 #include <kin/ecs/system.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
+#include <cctype>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -734,6 +735,62 @@ ServerResponse handle_input_mouse(ServerContext& ctx, const JsonValue& params) {
     return ok_result(out.str());
 }
 
+std::optional<Key> parse_key_name(std::string_view name) {
+    const auto lower = [](std::string_view value) {
+        std::string out{value};
+        for (char& c : out) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        return out;
+    };
+    const std::string target = lower(name);
+    for (i32 code = static_cast<i32>(Key::Unknown) + 1; code <= static_cast<i32>(LastKey); ++code) {
+        const Key key = static_cast<Key>(code);
+        if (lower(key_name(key)) == target) {
+            return key;
+        }
+    }
+    return std::nullopt;
+}
+
+ServerResponse handle_input_key(ServerContext& ctx, const JsonValue& params) {
+    const std::string name = params.string_at("name");
+    const std::optional<Key> key = parse_key_name(name);
+    if (!key) {
+        return error_result("input.key requires a key 'name', e.g. \"Enter\", \"Left\" or \"A\"");
+    }
+    const std::string mode = params.string_at("mode", "press");
+    if (mode != "press" && mode != "hold" && mode != "release") {
+        return error_result("mode must be 'press', 'hold', or 'release'");
+    }
+    KeyModifiers modifiers = KeyModifiers::None;
+    if (const JsonValue* list = params.find("modifiers")) {
+        if (!list->is_array()) {
+            return error_result("modifiers must be an array of \"shift\", \"ctrl\" or \"alt\"");
+        }
+        for (const JsonValue& item : list->items()) {
+            const std::string value = item.is_string() ? item.as_string() : std::string{};
+            if (value == "shift") {
+                modifiers = modifiers | KeyModifiers::Shift;
+            } else if (value == "ctrl") {
+                modifiers = modifiers | KeyModifiers::Ctrl;
+            } else if (value == "alt") {
+                modifiers = modifiers | KeyModifiers::Alt;
+            } else {
+                return error_result("modifiers must be an array of \"shift\", \"ctrl\" or \"alt\"");
+            }
+        }
+    }
+    ctx.queue_key(*key, mode, modifiers);
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", key_name(*key));
+    json.field("mode", std::string_view{mode});
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_input_text(ServerContext& ctx, const JsonValue& params) {
     const JsonValue* text = params.find("text");
     if (!text || !text->is_string()) {
@@ -798,6 +855,10 @@ void ServerContext::queue_text(std::string text) {
     _pending.push_back({PendingInput::Kind::Text, std::move(text), {}, {}, 0.0f});
 }
 
+void ServerContext::queue_key(Key key, std::string mode, KeyModifiers modifiers) {
+    _pending.push_back({PendingInput::Kind::Key, {}, std::move(mode), {}, 0.0f, key, modifiers});
+}
+
 void ServerContext::step() {
     Input& input = _app.input();
     input.begin_frame();
@@ -810,8 +871,13 @@ void ServerContext::step() {
     for (const MouseButton button : _tapped_buttons) {
         input.set_mouse_held(button, false);
     }
+    for (const auto& [key, modifiers] : _tapped_keys) {
+        input.set_key_released(key);
+        input.set_modifier_held(modifiers, false);
+    }
     _tapped_actions.clear();
     _tapped_buttons.clear();
+    _tapped_keys.clear();
 
     for (const PendingInput& in : _pending) {
         switch (in.kind) {
@@ -845,6 +911,18 @@ void ServerContext::step() {
             break;
         case PendingInput::Kind::Text:
             input.set_text_input(in.text);
+            break;
+        case PendingInput::Kind::Key:
+            if (in.mode == "release") {
+                input.set_key_released(in.key);
+                input.set_modifier_held(in.modifiers, false);
+            } else {
+                input.set_modifier_held(in.modifiers, true);
+                input.set_key_pressed(in.key);
+                if (in.mode == "press") {
+                    _tapped_keys.emplace_back(in.key, in.modifiers);
+                }
+            }
             break;
         }
     }
@@ -896,6 +974,9 @@ void ServerContext::shutdown_scenes() {
 }
 
 void ServerContext::render_frame() {
+    // An extra render outside a step (a screenshot): the step already handled this
+    // frame's input, so a scene that reads input in render() must not see it again.
+    _app.input().consume_frame_edges();
     SceneContext scene_ctx = make_context();
     _scenes.render(scene_ctx);
 }
@@ -951,6 +1032,9 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     }
     if (method == "input.text") {
         return handle_input_text(ctx, params);
+    }
+    if (method == "input.key") {
+        return handle_input_key(ctx, params);
     }
     if (method == "ui.snapshot") {
         return handle_ui_snapshot(ctx, params);

@@ -23,6 +23,7 @@ add_library(kin_engine STATIC
     src/core/json.cpp
     src/core/json_value.cpp
     src/core/profile.cpp
+    src/core/utf8.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
     src/ecs/audio.cpp
@@ -101,6 +102,7 @@ add_library(kin_engine STATIC
     src/ui2/widgets_menus.cpp
     src/ui2/widgets_collections.cpp
     src/ui2/widgets_editor.cpp
+    src/ui2/widgets_text_edit.cpp
 )
 add_library(kin::engine ALIAS kin_engine)
 

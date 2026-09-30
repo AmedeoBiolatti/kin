@@ -1109,6 +1109,100 @@ struct TextInput {
     UiTextInputResult result{};
 };
 
+// Editing state of a TextEdit. Keep one per editor across frames: in the TextEdit
+// itself, or in the Context via Context::text_edit_state(). Callers may read and
+// change `text` (e.g. clear a chat box after sending); the rest is kept by the widget.
+struct UiTextEditState {
+    std::string text;              // UTF-8
+    std::size_t caret = 0;         // byte offset, always at the start of a character
+    std::size_t selection_anchor = UiTextInputState::unset_selection;
+    f32 preferred_x = -1.0f;       // column kept by Up/Down; -1 = the caret's own
+    Vec2f scroll{};                // px
+    bool active = false;
+
+    bool has_selection() const { return selection_anchor != UiTextInputState::unset_selection && selection_anchor != caret; }
+    std::size_t selection_start() const { return !has_selection() ? caret : (selection_anchor < caret ? selection_anchor : caret); }
+    std::size_t selection_end() const { return !has_selection() ? caret : (selection_anchor < caret ? caret : selection_anchor); }
+    void clear_selection() { selection_anchor = caret; }
+
+    // Kept by the widget between frames.
+    struct Snapshot {
+        std::string text;
+        std::size_t caret = 0;
+        std::size_t selection_anchor = 0;
+    };
+    std::vector<Snapshot> undo_steps; // oldest first, at most TextEdit::undo_limit
+    std::vector<Snapshot> redo_steps;
+    u8 last_edit = 0;                 // kind of the last edit, for grouping undo steps
+    std::size_t last_edit_caret = 0;
+    u64 last_click_frame = 0;
+    Vec2f last_click_position{};
+    i32 click_count = 0;
+    u64 caret_frame = 0;              // the caret last moved: its blink restarts
+    bool scrollbar = false;
+    f32 scrollbar_grab = 0.0f;
+    struct Layout {
+        std::vector<TextRange> lines;  // displayed lines
+        std::size_t text_hash = 0;
+        std::size_t text_size = 0;
+        f32 width = -1.0f;
+        const void* font = nullptr;
+        f32 scale = 0.0f;
+        bool wrap = true;
+        f32 widest = 0.0f;             // widest line, for sideways scrolling without wrap
+    } layout;
+};
+
+// Which key sends a TextEdit's text (sets result.submitted, inserts nothing).
+enum class UiSubmitKey : u8 {
+    None,      // Enter starts a new line; nothing submits
+    Enter,     // Enter submits; Shift+Enter starts a new line
+    CtrlEnter, // Ctrl+Enter submits; Enter starts a new line
+};
+
+enum class UiTabKey : u8 {
+    LeaveField,   // stop editing and report result.tab_direction (+1, or -1 with Shift)
+    InsertSpaces, // insert TextEdit::tab_spaces spaces
+};
+
+struct UiTextEditResult {
+    UiButtonState state = UiButtonState::Normal;
+    bool changed = false;      // the text changed this frame
+    bool submitted = false;    // the submit key was pressed
+    bool cancelled = false;    // Escape: editing stopped
+    i32 tab_direction = 0;     // UiTabKey::LeaveField: +1 Tab, -1 Shift+Tab
+    f32 wanted_height = 0.0f;  // the height that fits the text, padding included
+};
+
+// A multi-line text editor: wraps, scrolls, selects with keyboard and mouse,
+// copies and pastes, and undoes. With read_only it is selectable, copyable text.
+// Sized for chat messages and notes (a few KB), not for code.
+struct TextEdit {
+    static constexpr std::size_t undo_limit = 200;
+
+    Id id{};
+    Rectf bounds{};
+    UiTextEditState state{};
+    TextStyle text_style{};
+    WidgetStyle style{};
+    std::string_view placeholder{};
+    bool read_only = false;       // select and copy only
+    bool wrap = true;             // soft-wrap at the width; otherwise scroll sideways
+    f32 line_spacing = 2.0f;
+    std::size_t max_bytes = 0;    // 0: no limit
+    UiSubmitKey submit = UiSubmitKey::None;
+    UiTabKey tab = UiTabKey::LeaveField;
+    i32 tab_spaces = 4;
+    bool auto_grow = false;       // bounds.h follows the text (at least one line)...
+    f32 max_height = 0.0f;        // ...up to this (0: no cap), then it scrolls
+    f32 wheel_step = 48.0f;
+    f32 scrollbar_thickness = 8.0f;
+    bool enabled = true;
+    i32 z = 0;
+    Interaction interaction{};
+    UiTextEditResult result{};
+};
+
 struct NumberInput {
     Id id{};
     Rectf bounds{};
@@ -1436,6 +1530,9 @@ void run(Context& ctx, ToastStack& widget);
 void run(Context& ctx, FloatingText& widget);
 void run(Context& ctx, AnimatedValue& widget);
 void run(Context& ctx, TextInput& widget);
+void run(Context& ctx, TextEdit& widget);
+// Edits `state` instead of widget.state, e.g. one kept by Context::text_edit_state().
+void run(Context& ctx, TextEdit& widget, UiTextEditState& state);
 void run(Context& ctx, NumberInput& widget);
 void run(Context& ctx, ComboBox& widget);
 void run(Context& ctx, ColorPicker& widget);

@@ -102,6 +102,8 @@ SDL_Scancode to_sdl_scancode(Key key) {
     case Key::F10: return SDL_SCANCODE_F10;
     case Key::F11: return SDL_SCANCODE_F11;
     case Key::F12: return SDL_SCANCODE_F12;
+    case Key::PageUp: return SDL_SCANCODE_PAGEUP;
+    case Key::PageDown: return SDL_SCANCODE_PAGEDOWN;
     case Key::Unknown: return SDL_SCANCODE_UNKNOWN;
     }
     return SDL_SCANCODE_UNKNOWN;
@@ -247,6 +249,8 @@ std::string_view key_name(Key key) {
     case Key::F10: return "F10";
     case Key::F11: return "F11";
     case Key::F12: return "F12";
+    case Key::PageUp: return "PageUp";
+    case Key::PageDown: return "PageDown";
     }
     return "Unknown";
 }
@@ -462,9 +466,12 @@ void Input::advance_keyboard_edges() {
 
 void Input::consume_frame_edges() {
     _key_frame_pressed.fill(false);
+    _key_frame_repeated.fill(false);
     _key_frame_released.fill(false);
     _mouse_frame_pressed.fill(false);
     _mouse_frame_released.fill(false);
+    _mouse_wheel_y = 0.0f;
+    _text_input.clear();
 }
 
 void Input::begin_frame(bool advance_transients) {
@@ -506,6 +513,7 @@ void Input::begin_frame(bool advance_transients) {
     // Keyboard read from update() must use the sticky pressed() API, which already
     // survives 0-step frames.)
     _key_frame_pressed.fill(false);
+    _key_frame_repeated.fill(false);
     _key_frame_released.fill(false);
     _mouse_pos_prev = _mouse_pos;
     _mouse_wheel_y = 0.0f;
@@ -521,6 +529,8 @@ void Input::process_native_event(const void* native_event) {
             _key_frame_pressed[event.key.scancode] = true;
             _last_key_press_event_time_ns = event.key.timestamp;
             _last_key_press_detected_time_ns = SDL_GetTicksNS();
+        } else if (event.key.repeat) {
+            _key_frame_repeated[event.key.scancode] = true;
         }
         _key_cur[event.key.scancode] = true;
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
@@ -581,6 +591,11 @@ bool Input::released(Key key) const {
 bool Input::frame_pressed(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
     return valid_scancode(scancode) && _key_frame_pressed[scancode];
+}
+
+bool Input::frame_repeated(Key key) const {
+    const SDL_Scancode scancode = to_sdl_scancode(key);
+    return valid_scancode(scancode) && _key_frame_repeated[scancode];
 }
 
 bool Input::frame_released(Key key) const {
@@ -711,6 +726,35 @@ void Input::set_mouse_pressed(MouseButton button) {
 
 void Input::set_text_input(std::string_view text) {
     _text_input = text;
+}
+
+void Input::set_key_pressed(Key key) {
+    const SDL_Scancode scancode = to_sdl_scancode(key);
+    if (!valid_scancode(scancode)) {
+        return;
+    }
+    _key_prev[scancode] = false;
+    _key_cur[scancode] = true;
+    _key_pressed[scancode] = true;
+    _key_frame_pressed[scancode] = true;
+}
+
+void Input::set_key_released(Key key) {
+    const SDL_Scancode scancode = to_sdl_scancode(key);
+    if (!valid_scancode(scancode) || !_key_cur[scancode]) {
+        return;
+    }
+    _key_cur[scancode] = false;
+    _key_released[scancode] = true;
+    _key_frame_released[scancode] = true;
+}
+
+void Input::set_key_repeated(Key key) {
+    const SDL_Scancode scancode = to_sdl_scancode(key);
+    if (!valid_scancode(scancode) || !_key_cur[scancode]) {
+        return;
+    }
+    _key_frame_repeated[scancode] = true;
 }
 
 void Input::set_modifier_held(KeyModifiers modifiers, bool held) {
