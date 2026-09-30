@@ -88,10 +88,12 @@ enum class Key {
     F10,
     F11,
     F12,
+    PageUp,
+    PageDown,
 };
 
 // The last Key: codes run from Key::Unknown to this.
-inline constexpr Key LastKey = Key::F12;
+inline constexpr Key LastKey = Key::PageDown;
 
 enum class KeyModifiers : u8 {
     None = 0,
@@ -213,7 +215,8 @@ public:
     // via frame_pressed().
     void advance_keyboard_edges();
 
-    // Consume this frame's per-frame edges (keyboard + mouse frame_pressed/released).
+    // Consume this frame's per-frame edges (keyboard + mouse frame_pressed/released,
+    // key repeats, typed text and the wheel).
     // A scene that fully handles its input in update() calls this so its own render()
     // redraw does not re-read the same edges (double nav / double click). Only the
     // calling scene is affected — edges already read are simply cleared early; the
@@ -225,6 +228,10 @@ public:
     bool released(Key key) const;
     bool frame_pressed(Key key) const;
     bool frame_released(Key key) const;
+    // The OS's auto-repeat while `key` is held (not the first press): text editing
+    // reads frame_pressed() || frame_repeated() so held keys repeat; menus that read
+    // frame_pressed() alone move once per press. Lives one rendered frame.
+    bool frame_repeated(Key key) const;
     bool modifier_held(KeyModifiers modifiers) const;
     u64 last_key_press_event_time_ns() const { return _last_key_press_event_time_ns; }
     u64 last_key_press_detected_time_ns() const { return _last_key_press_detected_time_ns; }
@@ -263,6 +270,11 @@ public:
     void set_mouse_held(MouseButton button, bool held);
     void set_mouse_pressed(MouseButton button);
     void set_text_input(std::string_view text);
+    // Test/scripting hooks: a press edge of `key` this frame (and it held), or an
+    // auto-repeat of a key already held.
+    void set_key_pressed(Key key);
+    void set_key_released(Key key);
+    void set_key_repeated(Key key);
     void set_modifier_held(KeyModifiers modifiers, bool held);
     void set_clipboard_text(std::string_view text);
 
@@ -305,6 +317,7 @@ private:
     std::array<bool, KEY_COUNT> _key_pressed = {};
     std::array<bool, KEY_COUNT> _key_released = {};
     std::array<bool, KEY_COUNT> _key_frame_pressed = {};
+    std::array<bool, KEY_COUNT> _key_frame_repeated = {};
     std::array<bool, KEY_COUNT> _key_frame_released = {};
 
     std::array<bool, MOUSE_BUTTON_COUNT> _mouse_cur = {};

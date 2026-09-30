@@ -43,6 +43,54 @@ auto size = kin::ui2::measure_text(*font, "START", 2.0f);
 kin::ui2::draw_text_centered(renderer, *font, "START", center, 2.0f, color);
 ```
 
+## Text Editing
+
+`TextInput` is one line; `TextEdit` is a multi-line editor for chat boxes and notes
+(a few KB of text; it is not a code editor). Like `TextInput` it is a struct you run
+each frame: keep it (or its `UiTextEditState`) across frames and read `result`
+afterwards.
+
+```cpp
+kin::ui2::TextEdit chat{
+    .id = kin::ui2::make_id("chat"),
+    .placeholder = "Message",
+    .submit = kin::ui2::UiSubmitKey::Enter, // Enter sends, Shift+Enter is a new line
+    .auto_grow = true,                      // bounds.h follows the text...
+    .max_height = 120.0f,                   // ...up to here, then it scrolls
+};
+
+chat.bounds = {x, bottom - chat.bounds.h, width, chat.bounds.h};
+kin::ui2::run(ui, chat);
+if (chat.result.submitted) {
+    send(chat.state.text);
+    chat.state.text.clear();
+}
+```
+
+To keep the state in the `Context` instead, pass
+`ui.text_edit_state(id, initial_text)` as the third argument of `run`.
+
+- **Editing:** typed text (including composed characters), Backspace and Delete
+  (with Ctrl, a word), Enter, and Tab (`UiTabKey::LeaveField` stops editing and
+  reports `result.tab_direction`; `InsertSpaces` indents). Held keys repeat.
+- **Moving:** arrows (Ctrl+Left/Right by word), Up/Down by displayed line keeping
+  the column, Home/End (with Ctrl, the whole text), Page Up/Down. Shift selects.
+- **Mouse:** click places the caret, drag selects and scrolls past an edge,
+  double-click selects a word, triple-click a line, Shift+click extends; the wheel
+  and the scrollbar scroll.
+- **Clipboard and undo:** Ctrl+C/X/V (pasted line endings become `\n`), Ctrl+Z,
+  and Ctrl+Y or Ctrl+Shift+Z. Consecutive typing or deleting is one undo step; the
+  history keeps `TextEdit::undo_limit` steps.
+- **Read-only:** `read_only = true` keeps selecting and copying but refuses edits,
+  for selectable chat history or logs.
+- **Layout:** `wrap` soft-wraps at the width (otherwise lines scroll sideways);
+  `max_bytes` caps the text, cutting only between characters. Lines are cached
+  and re-wrapped only when the text, width or font changes.
+
+Carets in both text widgets move by character, never into the middle of a
+multi-byte UTF-8 character; `kin/core/utf8.hpp` has the stepping and word helpers,
+and `wrap_text_ranges` in `kin/ui2/text.hpp` wraps text into byte ranges.
+
 ## Menu Scenes
 
 Games that need a simple navigable menu should use `kin::ui2::MenuScene`. It keeps

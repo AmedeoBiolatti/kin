@@ -278,6 +278,9 @@ public:
     bool pointer_released(MouseButton button = MouseButton::Left) const;
     f32 mouse_wheel_y() const;
     bool key_pressed(Key key) const;
+    // Pressed this frame, or auto-repeated while held: for keys that act again
+    // while held, such as a text caret's arrows and Backspace.
+    bool key_typed(Key key) const;
     bool action_pressed(std::string_view action) const;
     bool modifier_held(KeyModifiers modifiers) const;
     std::string_view text_input() const;
@@ -286,6 +289,8 @@ public:
     std::string clipboard_text() const;
     void set_clipboard_text(std::string_view text);
     UiTextInputState& text_input_state(Id id, std::string_view value = {});
+    // A TextEdit's state kept per id; `initial` is its text the first time only.
+    UiTextEditState& text_edit_state(Id id, std::string_view initial = {});
     UiComboState& combo_state(Id id, i32 selected = 0);
     ColorPickerMode& color_picker_mode(Id id, ColorPickerMode mode = ColorPickerMode::Hsv);
 
@@ -381,6 +386,7 @@ private:
     Renderer2D* _renderer = nullptr;
     State _state;
     std::unordered_map<u64, UiTextInputState> _text_inputs;
+    std::unordered_map<u64, UiTextEditState> _text_edits;
     std::unordered_map<u64, UiComboState> _combos;
     std::unordered_map<u64, ColorPickerMode> _color_picker_modes;
     // State-transition animation (B6): the eased surface chasing each widget's target,

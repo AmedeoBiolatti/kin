@@ -1,3 +1,4 @@
+#include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/widgets.hpp>
@@ -140,14 +141,18 @@ std::size_t caret_from_text_pos(const UiTextInputState& state, f32 x, f32 text_x
         return 0;
     }
 
-    for (std::size_t i = 0; i < state.text.size(); ++i) {
-        const f32 before = measure_text(font, std::string_view{state.text}.substr(0, i), scale).x;
-        const f32 after = measure_text(font, std::string_view{state.text}.substr(0, i + 1), scale).x;
+    const std::string_view text{state.text};
+    f32 before = 0.0f;
+    for (std::size_t i = 0; i < text.size();) {
+        const std::size_t next = utf8_next(text, i);
+        const f32 after = measure_text(font, text.substr(0, next), scale).x;
         if (x < text_x + (before + after) * 0.5f) {
             return i;
         }
+        before = after;
+        i = next;
     }
-    return state.text.size();
+    return text.size();
 }
 
 bool same_padding(UiPadding a, UiPadding b) {
@@ -192,11 +197,11 @@ Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled)
 }
 
 void normalize_text_state(UiTextInputState& state) {
-    state.caret = std::min(state.caret, state.text.size());
+    state.caret = utf8_floor(state.text, state.caret);
     if (state.selection_anchor == UiTextInputState::unset_selection) {
         state.selection_anchor = state.caret;
     } else {
-        state.selection_anchor = std::min(state.selection_anchor, state.text.size());
+        state.selection_anchor = utf8_floor(state.text, state.selection_anchor);
     }
     if (!state.active) {
         state.clear_selection();
@@ -260,7 +265,9 @@ UiTextInputResult edit_text_input(Context& ctx,
             }
         }
         if (ctrl && ctx.key_pressed(Key::V)) {
-            const std::string paste = ctx.clipboard_text();
+            // One line: pasted line breaks become spaces.
+            std::string paste = normalize_newlines(ctx.clipboard_text());
+            std::ranges::replace(paste, '\n', ' ');
             if (!paste.empty()) {
                 erase_selection(state);
                 state.text.insert(state.caret, paste);
@@ -270,11 +277,11 @@ UiTextInputResult edit_text_input(Context& ctx,
             }
         }
 
-        if (ctx.key_pressed(Key::Left) || ctx.action_pressed("text_left")) {
-            move_text_caret(state, state.caret > 0 ? state.caret - 1 : 0, select_left);
+        if (ctx.key_typed(Key::Left) || ctx.action_pressed("text_left")) {
+            move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret), select_left);
         }
-        if (ctx.key_pressed(Key::Right) || ctx.action_pressed("text_right")) {
-            move_text_caret(state, state.caret + 1, select_right);
+        if (ctx.key_typed(Key::Right) || ctx.action_pressed("text_right")) {
+            move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret), select_right);
         }
         if (ctx.key_pressed(Key::Home) || ctx.action_pressed("text_home")) {
             move_text_caret(state, 0, select_home);
@@ -291,21 +298,23 @@ UiTextInputResult edit_text_input(Context& ctx,
             state.clear_selection();
             result.changed = true;
         }
-        if (ctx.key_pressed(Key::Backspace) || ctx.action_pressed("text_backspace")) {
+        if (ctx.key_typed(Key::Backspace) || ctx.action_pressed("text_backspace")) {
             if (erase_selection(state)) {
                 result.changed = true;
             } else if (state.caret > 0) {
-                state.text.erase(state.caret - 1, 1);
-                --state.caret;
+                const std::size_t from = ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret);
+                state.text.erase(from, state.caret - from);
+                state.caret = from;
                 state.clear_selection();
                 result.changed = true;
             }
         }
-        if (ctx.key_pressed(Key::Delete) || ctx.action_pressed("text_delete")) {
+        if (ctx.key_typed(Key::Delete) || ctx.action_pressed("text_delete")) {
             if (erase_selection(state)) {
                 result.changed = true;
             } else if (state.caret < state.text.size()) {
-                state.text.erase(state.caret, 1);
+                const std::size_t to = ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret);
+                state.text.erase(state.caret, to - state.caret);
                 state.clear_selection();
                 result.changed = true;
             }

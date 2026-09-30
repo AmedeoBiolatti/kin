@@ -9,6 +9,7 @@
 #include <kin/runtime/scene_server.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <kin/ui2/context.hpp>
+#include <kin/ui2/widgets.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -116,6 +117,37 @@ private:
     kin::ui2::Context _ui;
     kin::i32 _clicks = 0;
     kin::i32 _jump_releases = 0;
+};
+
+// A TextEdit that submits on Enter, driven through input.key and input.text. It
+// runs its UI in render(), as games do, so an extra render (a screenshot) must
+// not replay the step's input.
+class TextEditProbeScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "TextEditProbe"; }
+
+    void render(kin::SceneContext& ctx) override {
+        _ui.begin(ctx.input, ctx.renderer);
+        kin::ui2::run(_ui, _edit);
+        if (_edit.result.submitted) {
+            ++_submits;
+        }
+        _ui.end();
+    }
+
+    void write_report(kin::JsonWriter& json) const override {
+        json.field("text", std::string_view{_edit.state.text});
+        json.field("submits", _submits);
+    }
+
+private:
+    kin::ui2::Context _ui;
+    kin::ui2::TextEdit _edit{
+        .id = kin::ui2::make_id("edit"),
+        .bounds = {0.0f, 0.0f, 200.0f, 60.0f},
+        .submit = kin::ui2::UiSubmitKey::Enter,
+    };
+    kin::i32 _submits = 0;
 };
 
 kin::Animation make_server_animation(std::string name) {
@@ -571,6 +603,71 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
     assert(after_reset != nullptr && after_reset->int_at("frames") == 0);
 }
 
+void test_input_key_drives_a_text_edit() {
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<TextEditProbeScene>());
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"input.mouse","params":{"x":20,"y":20}})" "\n"
+        R"({"id":2,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":3,"method":"input.mouse","params":{"x":20,"y":20,"button":"left","mode":"press"}})" "\n"
+        R"({"id":4,"method":"sim.tick","params":{"count":2}})" "\n"
+        R"({"id":5,"method":"input.text","params":{"text":"hi"}})" "\n"
+        R"({"id":6,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":22,"method":"view.screenshot","params":{"path":"kin-server-text-edit.png"}})" "\n"
+        R"({"id":7,"method":"input.key","params":{"name":"Enter","modifiers":["shift"]}})" "\n"
+        R"({"id":8,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":9,"method":"input.text","params":{"text":"yo"}})" "\n"
+        R"({"id":10,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":11,"method":"input.key","params":{"name":"enter"}})" "\n"
+        R"({"id":12,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":13,"method":"scene.current"})" "\n"
+        R"({"id":14,"method":"input.key","params":{"name":"A","modifiers":["ctrl"]}})" "\n"
+        R"({"id":15,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":16,"method":"input.key","params":{"name":"Backspace"}})" "\n"
+        R"({"id":17,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":18,"method":"scene.current"})" "\n"
+        R"({"id":19,"method":"input.key","params":{"name":"NoSuchKey"}})" "\n"
+        R"({"id":20,"method":"input.key","params":{"name":"A","modifiers":["hyper"]}})" "\n"
+        R"({"id":21,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "keys", .width = 240, .height = 80},
+        .mode = kin::ServerMode::Driven,
+        .render = true,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    const std::string text = out.str();
+    std::filesystem::remove(std::filesystem::current_path() / "kin-server-text-edit.png");
+
+    // Shift+Enter started a new line; Enter alone submitted. The screenshot after
+    // "hi" did not type it again.
+    const kin::JsonValue* typed = response_result(text, 13);
+    assert(typed != nullptr);
+    assert(typed->find("state")->string_at("text") == "hi\nyo");
+    assert(typed->find("state")->int_at("submits") == 1);
+    // Ctrl+A then Backspace cleared it: the tapped Ctrl was released in between.
+    const kin::JsonValue* cleared = response_result(text, 18);
+    assert(cleared != nullptr);
+    assert(cleared->find("state")->string_at("text").empty());
+    // Unknown key names and modifiers are errors.
+    const auto is_error = [&](kin::i64 id) {
+        std::istringstream lines{text};
+        std::string line;
+        while (std::getline(lines, line)) {
+            const kin::JsonParseResult parsed = kin::parse_json(line);
+            if (parsed.ok() && parsed.value->int_at("id", -1) == id) {
+                return parsed.value->find("error") != nullptr;
+            }
+        }
+        return false;
+    };
+    assert(is_error(19));
+    assert(is_error(20));
+    assert(!is_error(14));
+}
+
 void test_sim_reset() {
     std::vector<kin::LogEvent> log_events;
     kin::set_logger_config({
@@ -749,6 +846,7 @@ int main() {
     test_animation_diagnostics_endpoint_missing_provider_errors();
     test_ui_snapshot_and_pointer_input();
     test_press_completes_a_ui2_click_and_frame_timing();
+    test_input_key_drives_a_text_edit();
     test_sim_reset();
     test_sim_reset_unsupported_without_factory();
     test_view_screenshot();

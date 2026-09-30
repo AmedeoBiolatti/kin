@@ -139,6 +139,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
 | `input.mouse` | `{x, y, button?, mode?, wheel?, space?}` | Move the pointer; optionally click or scroll. |
 | `input.text` | `{text}` | Deliver text input for the next tick. |
+| `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
 | `frame.timing` | `{reset?}` | Update and render wall time over the last 600 ticks: `last`, `mean` and `max`, in ms. `reset` clears the history after reporting. |
 | `ping` | none | `{"pong": true}`. |
@@ -152,7 +153,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 
 ## Input
 
-Injected input (`input.action`, `input.mouse`, `input.text`) is queued and applied
+Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`) is queued and applied
 on the next `sim.tick`, after `begin_frame`, so the scene observes it that frame.
 A `press` is a tap: held for that tick and released at the start of the next
 one, which sees the release, as with a real button. A ui2 click completes on that

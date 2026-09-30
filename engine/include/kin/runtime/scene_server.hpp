@@ -2,6 +2,7 @@
 
 #include <kin/core/json_value.hpp>
 #include <kin/core/rng.hpp>
+#include <kin/platform/input.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/windowed_app.hpp>
@@ -13,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace kin {
@@ -112,6 +114,9 @@ public:
     void queue_mouse_wheel(f32 delta);
     // Queue text input for the next step.
     void queue_text(std::string text);
+    // Queue a key for the next step, with modifiers held alongside it. mode is
+    // "press" (a tap), "hold" or "release", as for actions.
+    void queue_key(Key key, std::string mode, KeyModifiers modifiers);
 
     // Wall time of the scene update and render in recent steps, oldest first.
     struct FrameTiming {
@@ -124,12 +129,14 @@ public:
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key };
         Kind kind;
         std::string text;  // action name / button name / text input
         std::string mode;  // press / hold / release
         Vec2f pos{};       // window-space pointer position
         f32 value = 0.0f;  // wheel delta
+        Key key = Key::Unknown;
+        KeyModifiers modifiers = KeyModifiers::None;
     };
 
     SceneContext make_context();
@@ -149,6 +156,7 @@ private:
     // Taps pressed in the last step, released at the start of the next.
     std::vector<std::string> _tapped_actions;
     std::vector<MouseButton> _tapped_buttons;
+    std::vector<std::pair<Key, KeyModifiers>> _tapped_keys;
     std::deque<FrameTiming> _timings;
     std::function<void(SceneManager&)> _reset_scenes;
 };

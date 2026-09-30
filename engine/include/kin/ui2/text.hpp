@@ -67,8 +67,24 @@ struct TextWrapOptions {
     bool break_long_words = true;
 };
 
+// A byte range [begin, end) of a text.
+struct TextRange {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+
+    friend constexpr bool operator==(TextRange, TextRange) = default;
+};
+
 Vec2f measure_text(const Font& font, std::string_view text, f32 scale = 1.0f);
 std::vector<std::string> wrap_text(const Font& font, std::string_view text, TextWrapOptions options);
+// wrap_text for editors: each displayed line as a byte range of `text` rather than
+// a copy, and nothing dropped. Lines break at '\n' (which no range includes), then
+// a line wider than max_width breaks after the last whitespace that fits; that
+// whitespace stays at the end of its line. A word too wide for a line of its own
+// breaks between characters when break_long_words, else overflows. max_width <= 0
+// breaks at '\n' only. An empty text is one empty line, and text ending in '\n'
+// ends with an empty line. Widths are summed per character, ignoring kerning.
+std::vector<TextRange> wrap_text_ranges(const Font& font, std::string_view text, TextWrapOptions options);
 std::vector<std::string> wrap_text(const Font& font, std::string_view text, f32 max_width, f32 scale = 1.0f);
 std::vector<std::string> wrap_text(std::string_view text, f32 max_width, f32 scale = 1.0f);
 Vec2f measure_wrapped_text(const Font& font, std::string_view text, TextWrapOptions options);

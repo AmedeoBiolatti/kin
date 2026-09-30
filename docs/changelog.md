@@ -14,12 +14,29 @@ releases may change APIs.
   flush, the everyday path.
 - `RenderQueue::submit(std::span<const RenderCommand>)` appends a batch of
   commands, such as a cached one, in order.
+- `ui2::TextEdit`: a multi-line text editor with wrapping, scrolling, mouse and
+  keyboard selection, clipboard, grouped undo, a submit key and auto-grow; with
+  `read_only` it is selectable, copyable text. Its state can live in the widget
+  or in the `Context` (`Context::text_edit_state`). See docs/ui.md.
+- `kin/core/utf8.hpp`: character-safe stepping (`utf8_next`, `utf8_prev`,
+  `utf8_floor`), word stepping and `normalize_newlines`.
+- `ui2::wrap_text_ranges`: wraps text into byte ranges, keeping every byte.
+- `Key::PageUp` and `Key::PageDown`; `Input::frame_repeated` and
+  `Context::key_typed` for the OS's key repeat; `Input::set_key_pressed`,
+  `set_key_released` and `set_key_repeated` for tests and scripting.
+- Scene server `input.key {name, mode?, modifiers?}` presses keys by name with
+  modifiers held, e.g. `{"name":"Enter","modifiers":["shift"]}`.
+- `games/text_edit_demo`: a chat box, a read-only history and a notes pane.
 
 ### Changed
 
 - `RenderQueue::flush` draws in sorted order without moving the commands, so
   `commands()` keeps submission order after a flush. Call `sort_commands()`
   first if you need the commands themselves sorted.
+- Text drawn from a TTF glyph atlas (printable ASCII) uses the font's advances
+  and kerning. Glyphs narrower than a space no longer take a space's width, so
+  such text is a little narrower and now as wide as `measure_text` reports.
+- `Input::consume_frame_edges` also clears typed text and the wheel delta.
 - `RenderCommand` is 152 bytes instead of 216. Code that builds or reads
   commands directly needs updating:
   - Sprite commands keep their texture in `texture` and their region in
@@ -38,9 +55,6 @@ releases may change APIs.
   queue space for the visible cells and hand their cached chunks over in one
   bulk submit: a partial-view submit takes 0.56 ms instead of 1.7, a full
   uncached one 6.3 ms instead of 10.2, and both allocate half as much.
-
-### Performance
-
 - The software renderer, used for headless runs and screenshots, draws
   line-heavy scenes about twice as fast: while the logical size equals the
   window it leaves SDL's logical presentation off (with it on, SDL draws every
@@ -52,15 +66,17 @@ releases may change APIs.
 - ECS inspection is 5× faster: `query_entities` and `EcsWorld::snapshot()`
   read each entity's parent and name once instead of on every comparison while
   sorting. A query matching 4.5k of 10k entities takes 1.7 ms instead of 9 ms.
-
-### Performance
-
 - `TileMap::collision_rects` finds the rect to merge each run into with a
   lookup instead of scanning every rect found so far: 56× faster on a dense
   layer (101 ms to 1.8 ms), with identical output.
 
 ### Fixed
 
+- `TextInput` moves and deletes by character, so multi-byte characters such as
+  "é" or "°" no longer break. Ctrl+Left/Right move by word, Ctrl+Backspace and
+  Ctrl+Delete delete one, held keys repeat, and pasted line breaks become spaces.
+- The scene server's `view.screenshot` no longer replays the last step's input
+  into a scene that reads input in `render()`: typed text was entered twice.
 - GPU games no longer crash or hang on exit. Textures that outlive their
   renderer, such as the glyph atlases in the static system-font cache, skip
   their release once the GPU device is destroyed instead of calling into it.
