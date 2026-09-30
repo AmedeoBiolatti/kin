@@ -32,6 +32,12 @@ releases may change APIs.
   read each entity's parent and name once instead of on every comparison while
   sorting. A query matching 4.5k of 10k entities takes 1.7 ms instead of 9 ms.
 
+### Performance
+
+- `TileMap::collision_rects` finds the rect to merge each run into with a
+  lookup instead of scanning every rect found so far: 56× faster on a dense
+  layer (101 ms to 1.8 ms), with identical output.
+
 ### Fixed
 
 - GPU games no longer crash or hang on exit. Textures that outlive their
