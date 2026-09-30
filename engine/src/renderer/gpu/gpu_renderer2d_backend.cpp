@@ -1,3 +1,4 @@
+#include <kin/core/jobs.hpp>
 #include "gpu_renderer2d_backend.hpp"
 
 #include <kin/platform/log.hpp>
@@ -688,38 +689,69 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
     const f32 tex_w = static_cast<f32>(size.x);
     const f32 tex_h = static_cast<f32>(size.y);
     constexpr f32 pi = 3.14159265358979323846f;
-    _instance_scratch.clear();
-    _instance_scratch.reserve(sprites.size());
-    for (const SpriteInstance& sprite : sprites) {
-        const Rectf dest = sprite.dest;
-        if (dest.w <= 0.0f || dest.h <= 0.0f) {
-            continue;
+    // Each instance depends only on its sprite, so large batches are filled in
+    // parallel chunks; a zero-sized sprite leaves a zero-width instance, removed
+    // afterwards in order.
+    const Vec2f offset = _view_offset;
+    const auto fill = [&](std::size_t begin, std::size_t end) {
+        bool dropped = false;
+        for (std::size_t i = begin; i < end; ++i) {
+            const SpriteInstance& sprite = sprites[i];
+            gpu::GpuSpriteInstance& out = _instance_scratch[i];
+            const Rectf dest = sprite.dest;
+            if (dest.w <= 0.0f || dest.h <= 0.0f) {
+                out = {};
+                out.w = 0.0f;
+                dropped = true;
+                continue;
+            }
+            const Rectf source =
+                sprite.source.w > 0.0f && sprite.source.h > 0.0f ? sprite.source : Rectf{0.0f, 0.0f, tex_w, tex_h};
+            out.x = dest.x + offset.x;
+            out.y = dest.y + offset.y;
+            out.w = dest.w;
+            out.h = dest.h;
+            out.r = sprite.tint.r;
+            out.g = sprite.tint.g;
+            out.b = sprite.tint.b;
+            out.a = sprite.tint.a;
+            out.u0 = source.x / tex_w;
+            out.v0 = source.y / tex_h;
+            if (sprite.rotation == 0.0f) {
+                out.u1 = out.u0 + source.w / tex_w;
+                out.v1 = out.v0 + source.h / tex_h;
+                out.pivot_x = 0.0f;
+                out.pivot_y = 0.0f;
+                out.cos = 1.0f;
+                out.sin = 0.0f;
+            } else {
+                out.u1 = (source.x + source.w) / tex_w;
+                out.v1 = (source.y + source.h) / tex_h;
+                const f32 radians = sprite.rotation * pi / 180.0f;
+                out.cos = std::cos(radians);
+                out.sin = std::sin(radians);
+                out.pivot_x = dest.x + dest.w * sprite.pivot.x + offset.x;
+                out.pivot_y = dest.y + dest.h * sprite.pivot.y + offset.y;
+            }
         }
-        const Rectf source =
-            sprite.source.w > 0.0f && sprite.source.h > 0.0f ? sprite.source : Rectf{0.0f, 0.0f, tex_w, tex_h};
-        gpu::GpuSpriteInstance& out = _instance_scratch.emplace_back();
-        out.x = dest.x + _view_offset.x;
-        out.y = dest.y + _view_offset.y;
-        out.w = dest.w;
-        out.h = dest.h;
-        out.r = sprite.tint.r;
-        out.g = sprite.tint.g;
-        out.b = sprite.tint.b;
-        out.a = sprite.tint.a;
-        out.u0 = source.x / tex_w;
-        out.v0 = source.y / tex_h;
-        if (sprite.rotation == 0.0f) {
-            out.u1 = out.u0 + source.w / tex_w;
-            out.v1 = out.v0 + source.h / tex_h;
-        } else {
-            out.u1 = (source.x + source.w) / tex_w;
-            out.v1 = (source.y + source.h) / tex_h;
-            const f32 radians = sprite.rotation * pi / 180.0f;
-            out.cos = std::cos(radians);
-            out.sin = std::sin(radians);
-            out.pivot_x = dest.x + dest.w * sprite.pivot.x + _view_offset.x;
-            out.pivot_y = dest.y + dest.h * sprite.pivot.y + _view_offset.y;
-        }
+        return dropped;
+    };
+    _instance_scratch.resize(sprites.size());
+    bool dropped = false;
+    constexpr std::size_t parallel_min = 16384, chunk = 8192;
+    if (_jobs && sprites.size() >= parallel_min) {
+        const i32 chunks = static_cast<i32>((sprites.size() + chunk - 1) / chunk);
+        std::vector<char> chunk_dropped(static_cast<std::size_t>(chunks), 0);
+        _jobs->parallel_for(chunks, [&](i32 c) {
+            const std::size_t begin = static_cast<std::size_t>(c) * chunk;
+            chunk_dropped[static_cast<std::size_t>(c)] = fill(begin, std::min(sprites.size(), begin + chunk)) ? 1 : 0;
+        });
+        dropped = std::find(chunk_dropped.begin(), chunk_dropped.end(), 1) != chunk_dropped.end();
+    } else {
+        dropped = fill(0, sprites.size());
+    }
+    if (dropped) {
+        std::erase_if(_instance_scratch, [](const gpu::GpuSpriteInstance& instance) { return instance.w <= 0.0f; });
     }
     if (_instance_scratch.empty()) {
         return;

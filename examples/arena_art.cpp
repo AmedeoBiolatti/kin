@@ -1,5 +1,6 @@
 #include "arena_art.hpp"
 
+#include <kin/core/jobs.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/renderer/shader.hpp>
 
@@ -697,7 +698,7 @@ void ArenaPainter::collect_lights(const Arena& arena, const Camera2D& camera) {
             _lights.push_back({.position = s, .radius = 90, .color = Color::rgb(255, 164, 84), .intensity = 1.1f * impact.life / .3f});
         }
     }
-    for (const VisibleEnemy& enemy : _visible) {
+    for (const VisibleEnemy& enemy : _marked) {
         if (enemy.kind == 2 && enemy.cooldown < .45f) {
             const Vec2f s = camera.world_to_screen(enemy.pos);
             if (on_screen(s, 70)) {
@@ -710,7 +711,12 @@ void ArenaPainter::collect_lights(const Arena& arena, const Camera2D& camera) {
 void ArenaPainter::collect_effects(const Arena& arena, const RenderView& view) {
     _emissive.clear();
     _glow.clear();
-    const auto visible = [&](Vec2f p, float r) { return render_view_visible(view, {p.x - r, p.y - r, r * 2, r * 2}); };
+    const Rectf area = render_view_visible_rect(view); // worked out once, not per test
+    const auto visible = [&](Vec2f p, float r) {
+        const Rectf b{p.x - r, p.y - r, r * 2, r * 2};
+        return !view.culling_enabled || area.w <= 0 || area.h <= 0 ||
+               (b.x + b.w >= area.x && b.y + b.h >= area.y && b.x <= area.x + area.w && b.y <= area.y + area.h);
+    };
     const auto halo = [&](Vec2f p, float size, Color color) {
         _glow.draw_texture({}, _halo, {p.x - size / 2, p.y - size / 2, size, size}, color);
     };
@@ -719,7 +725,7 @@ void ArenaPainter::collect_effects(const Arena& arena, const RenderView& view) {
         queue.draw_texture({}, texture, {p.x - size / 2, p.y - size / 2, size, size}, tint, {}, rotation);
     };
 
-    for (const VisibleEnemy& enemy : _visible) {
+    for (const VisibleEnemy& enemy : _marked) {
         const Vec2f p = enemy.pos;
         if (!visible(p, 32)) {
             continue;
@@ -785,22 +791,85 @@ void ArenaPainter::collect_effects(const Arena& arena, const RenderView& view) {
     submit_particles(_glow, _particles.particles(), {.sprites = &_sprites, .sort = false});
 }
 
-// The enemies near the view, gathered in one pass over the arena's storage;
-// shadows, lights and effects then only visit these, however large the arena.
+// One pass over the arena's storage for everything the art draws per enemy:
+// each enemy near the view casts a shadow, and the few that show something (a
+// damaged plate's pips, an orbiter's charge ring and light) are kept in _marked
+// for the lights and effects, however large the arena.
 void ArenaPainter::gather_visible(const Arena& arena, const Camera2D& camera) {
     KIN_PROFILE_SCOPE("example.art.gather");
-    constexpr float margin = 80; // covers the widest per-enemy effect (a 70px light)
-    const Vec2f view = camera.viewport;
-    _visible.clear();
-    arena.each_enemy([&](Vec2f pos, const Enemy& enemy) {
-        const Vec2f s = camera.world_to_screen(pos);
-        if (s.x > -margin && s.y > -margin && s.x < view.x + margin && s.y < view.y + margin) {
-            _visible.push_back({pos, enemy.kind, enemy.hp, enemy.cooldown});
+    _visible_count = 0;
+    _marked.clear();
+    _shadows.clear();
+    // Large tables are split into chunks gathered on the arena's workers, then
+    // joined in order: the same lists a single pass builds.
+    constexpr std::size_t parallel_min = 16384, chunk = 4096;
+    JobSystem* jobs = arena.jobs();
+    arena.each_enemy_table([&](std::span<const Transform2D> transforms, std::span<const Enemy> enemies) {
+        if (!jobs || transforms.size() < parallel_min) {
+            _visible_count += gather_rows(transforms, enemies, camera, _shadows, _marked);
+            return;
+        }
+        const std::size_t chunks = (transforms.size() + chunk - 1) / chunk;
+        if (_chunks.size() < chunks) {
+            _chunks.resize(chunks);
+        }
+        jobs->parallel_for(static_cast<i32>(chunks), [&](i32 c) {
+            GatherChunk& out = _chunks[static_cast<std::size_t>(c)];
+            out.shadows.clear();
+            out.marked.clear();
+            const std::size_t begin = static_cast<std::size_t>(c) * chunk;
+            const std::size_t count = std::min(chunk, transforms.size() - begin);
+            out.visible = gather_rows(transforms.subspan(begin, count), enemies.subspan(begin, count), camera, out.shadows,
+                                      out.marked);
+        });
+        for (std::size_t c = 0; c < chunks; ++c) {
+            const GatherChunk& part = _chunks[c];
+            _visible_count += part.visible;
+            _shadows.insert(_shadows.end(), part.shadows.begin(), part.shadows.end());
+            _marked.insert(_marked.end(), part.marked.begin(), part.marked.end());
         }
     });
 }
 
+// Each enemy near the view casts a shadow; the few that show something (a
+// damaged plate's pips, an orbiter's charge ring and light) are kept for the
+// lights and effects. Returns how many were near the view.
+std::size_t ArenaPainter::gather_rows(std::span<const Transform2D> transforms, std::span<const Enemy> enemies,
+                                      const Camera2D& camera, std::vector<SpriteInstance>& shadows,
+                                      std::vector<VisibleEnemy>& marked) const {
+    constexpr float margin = 80; // covers the widest per-enemy effect (a 70px light)
+    constexpr std::array<float, 3> shadow_size{34, 46, 40};
+    const Vec2f view = camera.viewport;
+    std::size_t visible = 0;
+    for (std::size_t i = 0; i < transforms.size(); ++i) {
+        const Vec2f pos = transforms[i].pos;
+        const Enemy& enemy = enemies[i];
+        const Vec2f s = camera.world_to_screen(pos);
+        if (s.x <= -margin || s.y <= -margin || s.x >= view.x + margin || s.y >= view.y + margin) {
+            continue;
+        }
+        ++visible;
+        cast_shadow(s, shadow_size[static_cast<std::size_t>(std::clamp(enemy.kind, 0, 2))], view, shadows);
+        if ((enemy.kind == 1 && enemy.hp < 3) || (enemy.kind == 2 && enemy.cooldown < .45f)) {
+            marked.push_back({pos, enemy.kind, enemy.hp, enemy.cooldown});
+        }
+    }
+    return visible;
+}
+
+// A soft contact shadow for something at screen point `s`, cast down and to the
+// right (away from the sprites' top-left key light).
+void ArenaPainter::cast_shadow(Vec2f s, float size, Vec2f view, std::vector<SpriteInstance>& shadows) {
+    const Vec2f p = add(s, {5, 7});
+    if (p.x < -size || p.y < -size || p.x > view.x + size || p.y > view.y + size) {
+        return;
+    }
+    shadows.push_back({.dest = {p.x - size / 2, p.y - size / 2, size, size}, .source = {0, 0, 64, 64}});
+}
+
 void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& camera) {
+    // Large sprite batches may use the arena's workers while the art draws.
+    JobSystem* const previous_jobs = renderer.set_job_system(arena.jobs());
     {
         KIN_PROFILE_SCOPE("example.art.floor");
         draw_floor(renderer, arena, camera);
@@ -831,25 +900,13 @@ void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& came
     const Color body = arena.hurt() ? Color::rgb(255, 150, 140) : arena.dashing() ? Color::rgb(220, 255, 255) : colors::white;
     const Vec2f ship = camera.world_to_screen(arena.player);
     renderer.draw_texture(_player, {0, 0, 128, 128}, {ship.x - 24, ship.y - 24, 48, 48}, body, degrees(arena.facing()), {.5f, .5f});
+    renderer.set_job_system(previous_jobs);
 }
 
-// Soft contact shadows, cast down and to the right (away from the sprites'
-// top-left key light), so ships sit above the deck. Drawn before lighting, so
-// the floor's darkness and the shadows are lit together.
+// The shadows gathered for the enemies, then the player's, in one batch. Drawn
+// before lighting, so the floor's darkness and the shadows are lit together.
 void ArenaPainter::draw_shadows(Renderer2D& renderer, const Arena& arena, const Camera2D& camera) {
-    constexpr std::array<float, 3> size{34, 46, 40};
-    _shadows.clear();
-    const auto cast = [&](Vec2f world, float s) {
-        const Vec2f p = add(camera.world_to_screen(world), {5, 7});
-        if (p.x < -s || p.y < -s || p.x > camera.viewport.x + s || p.y > camera.viewport.y + s) {
-            return;
-        }
-        _shadows.push_back({.dest = {p.x - s / 2, p.y - s / 2, s, s}, .source = {0, 0, 64, 64}});
-    };
-    for (const VisibleEnemy& enemy : _visible) {
-        cast(enemy.pos, size[static_cast<std::size_t>(std::clamp(enemy.kind, 0, 2))]);
-    }
-    cast(arena.player, 44);
+    cast_shadow(camera.world_to_screen(arena.player), 44, camera.viewport, _shadows);
     renderer.draw_sprites(_shadow, _shadows); // one instanced batch on the GPU
 }
 

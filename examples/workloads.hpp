@@ -119,6 +119,20 @@ public:
     void each_enemy(F&& f) const {
         _movement.each([&](const Transform2D& t, const Enemy& e) { f(t.pos, e); });
     }
+    // Calls f(transforms, enemies) once per storage table, in each_enemy() order:
+    // whole columns, for work split across threads.
+    template <class F>
+    void each_enemy_table(F&& f) const {
+        _movement.run([&](flecs::iter& it) {
+            while (it.next()) {
+                const auto t = it.field<Transform2D>(0);
+                const auto e = it.field<Enemy>(1);
+                f(std::span<const Transform2D>{&t[0], it.count()}, std::span<const Enemy>{&e[0], it.count()});
+            }
+        });
+    }
+    // Worker threads, started once the arena is large enough to use them; null before.
+    JobSystem* jobs() const { return _jobs.get(); }
     // Draws enemies with a texture instead of flat rects: each kind uses its
     // `sources` region of `atlas`, drawn at `sizes`.
     void use_enemy_textures(const Texture& atlas, const std::array<Rectf, 3>& sources, const std::array<Vec2f, 3>& sizes);

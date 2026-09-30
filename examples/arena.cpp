@@ -331,7 +331,7 @@ void Arena::collect_entities(RenderQueue& queue, const RenderView& view) {
         _render.propagate_transforms();
     }
     KIN_PROFILE_SCOPE("example.arena.collect_sprites");
-    _render.collect_dynamic(queue, {.view = &view});
+    _render.collect_dynamic(queue, {.view = &view, .jobs = _jobs.get()});
 }
 
 u64 Arena::checksum() const {

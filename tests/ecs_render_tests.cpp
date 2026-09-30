@@ -1,3 +1,4 @@
+#include <kin/core/jobs.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/platform/log.hpp>
@@ -463,6 +464,47 @@ void test_collect_culls_rotated_sprites() {
     assert(queue.size() == 2);
 }
 
+// With a job system, large texture tables are prepared on workers; the queue
+// must come out exactly as a single-threaded collect makes it.
+void test_parallel_collect_matches_serial() {
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::TextureRenderer>("TextureRenderer");
+    const kin::Texture a{std::make_shared<FakeTextureBackend>(kin::Vec2i{64, 32})};
+    const kin::Texture b{std::make_shared<FakeTextureBackend>(kin::Vec2i{16, 16})};
+    for (int i = 0; i < 20000; ++i) {
+        const auto h = static_cast<unsigned>(i) * 2654435761u;
+        world.entity()
+            .set(kin::Transform2D{{static_cast<float>(h % 700u) - 50.0f, static_cast<float>((h >> 12) % 500u) - 50.0f}})
+            .set(kin::TextureRenderer{.texture = i % 7 == 0 ? b : a, .source = {static_cast<float>(i % 2) * 32.0f, 0.0f, 32.0f, 32.0f},
+                                      .size = {8.0f, 8.0f}, .tint = kin::Color::rgb(255, static_cast<kin::u8>(i % 256), 0),
+                                      .y_sort = true, .static_renderable = i % 11 == 0});
+    }
+    kin::WorldRenderState state{world};
+    state.propagate_transforms();
+    const kin::RenderView view{.cull_rect = {0.0f, 0.0f, 600.0f, 400.0f}, .culling_enabled = true};
+    kin::JobSystem jobs{{.workers = 3}};
+    for (const bool statics : {false, true}) {
+        kin::RenderQueue serial;
+        kin::RenderQueue parallel;
+        if (statics) {
+            state.collect_static(serial, {.view = &view});
+            state.collect_static(parallel, {.view = &view, .jobs = &jobs});
+        } else {
+            state.collect_dynamic(serial, {.view = &view});
+            state.collect_dynamic(parallel, {.view = &view, .jobs = &jobs});
+        }
+        const auto expected = serial.commands();
+        const auto actual = parallel.commands();
+        assert(expected.size() == actual.size() && expected.size() > 1000);
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            assert(expected[i].sequence == actual[i].sequence && expected[i].texture == actual[i].texture);
+            assert(expected[i].rect == actual[i].rect && expected[i].source == actual[i].source);
+            assert(expected[i].key.y == actual[i].key.y && expected[i].color == actual[i].color);
+        }
+    }
+}
+
 void test_top_down_render_applies_camera_and_culling() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -648,6 +690,7 @@ int main() {
     test_rotated_render_command_bounds_expand();
     test_top_down_render_applies_camera_and_culling();
     test_collect_culls_rotated_sprites();
+    test_parallel_collect_matches_serial();
     test_static_render_cache_merges_with_dynamic_queue();
     test_world_render_state_collect_dynamic_excludes_static_renderables();
     test_one_shot_submit_reuses_scratch_queue_output();

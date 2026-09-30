@@ -15,6 +15,8 @@
 
 namespace kin {
 
+class JobSystem;
+
 struct ParticleSystemComponent;
 struct ParticleFieldComponent;
 
@@ -91,6 +93,9 @@ struct SpriteRenderOptions {
     bool sort = true;
     RenderSortMode sort_mode = RenderSortMode::LayerThenY;
     const RenderView* view = nullptr;
+    // Workers for large tables: collect_static/collect_dynamic prepare texture
+    // sprites in parallel chunks and queue them in order, so the result is the same.
+    JobSystem* jobs = nullptr;
 };
 
 struct TopDownRenderOptions {
@@ -120,8 +125,12 @@ public:
     void collect_dynamic(RenderQueue& queue, SpriteRenderOptions options = {});
 
 private:
+    // TextureRenderer entities (static or dynamic ones), in parallel when options.jobs is set.
+    void collect_textures(RenderQueue& queue, const SpriteRenderOptions& options, bool statics);
+
     flecs::world* _world = nullptr;
     flecs::observer _transform_observer;
+    std::vector<std::vector<PreparedSprite>> _prepared; // per chunk, reused
     // Own transform, local transform, and the parent's world transform (optional,
     // cascaded so parents are visited before their children).
     flecs::query<WorldTransform, const Transform2D, const WorldTransform> _transforms;

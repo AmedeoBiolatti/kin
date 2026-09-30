@@ -353,6 +353,13 @@ void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, 
     }
 }
 
+JobSystem* Renderer2D::set_job_system(JobSystem* jobs) {
+    JobSystem* previous = _jobs;
+    _jobs = jobs;
+    _backend->set_job_system(jobs);
+    return previous;
+}
+
 void Renderer2D::draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
     if (!sprites.empty() && drawable(texture)) {
         _backend->draw_sprites(texture, sprites);

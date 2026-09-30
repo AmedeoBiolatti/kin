@@ -1,5 +1,6 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/core/jobs.hpp>
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -1205,6 +1206,31 @@ void test_sprite_batches_on_gpu_backend() {
         const int mismatches = sprite_batch_mismatches(*renderer);
         if (mismatches > 4) {
             throw std::runtime_error(std::string(test_name) + ": " + std::to_string(mismatches) + " pixels differ");
+        }
+        // A batch big enough to be filled on workers draws the same pixels.
+        std::vector<kin::SpriteInstance> many;
+        for (int i = 0; i < 40000; ++i) {
+            const float x = static_cast<float>((i * 37) % 60), y = static_cast<float>((i * 91) % 60);
+            many.push_back({.dest = {x, y, i % 97 == 0 ? 0.0f : 4.0f, 4.0f}, .tint = kin::Color::rgba(255, 255, 255, 40),
+                            .rotation = static_cast<float>(i % 5) * 20.0f});
+        }
+        std::array<kin::u8, 4> white{255, 255, 255, 255};
+        const kin::Texture dot = renderer->create_texture_from_rgba(white.data(), {1, 1});
+        const auto draw_many = [&](kin::JobSystem* jobs) {
+            renderer->set_job_system(jobs);
+            kin::RenderTarget target = renderer->create_render_target({64, 64}, kin::ScaleMode::Nearest);
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_sprites(dot, many);
+            std::vector<kin::u8> pixels;
+            kin::Vec2i size{};
+            assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
+            renderer->set_job_system(nullptr);
+            return pixels;
+        };
+        kin::JobSystem jobs{{.workers = 3}};
+        if (draw_many(nullptr) != draw_many(&jobs)) {
+            throw std::runtime_error(std::string(test_name) + ": a batch filled on workers drew different pixels");
         }
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
