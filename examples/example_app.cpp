@@ -1,5 +1,5 @@
 #include "example_app.hpp"
-#include "arena_art.hpp"
+#include "example_common.hpp"
 #include "workloads.hpp"
 #include <kin/core/json.hpp>
 #include <kin/runtime/run_report.hpp>
@@ -13,13 +13,6 @@
 
 namespace examples {
 namespace {
-struct Options {
-    int enemies = 300, runs = 1000, capture_frame = 120;
-    int width = 1280, height = 800;
-    float ui_scale = 0; // zero follows the window's current display
-    bool benchmark = false, help = false, vsync = false, power_grid = false;
-    std::string scenario = "live", screenshot;
-};
 
 Options parse(int argc, char** argv) {
     Options o;
@@ -53,6 +46,7 @@ Options parse(int argc, char** argv) {
         else if (arg == "--scenario") o.scenario = value(arg);
         else if (arg == "--screenshot") o.screenshot = value(arg);
         else if (arg == "--vsync") o.vsync = true;
+        else if (arg == "--mute") o.mute = true;
         else if (arg == "--help") o.help = true;
     }
     if (o.scenario != "idle" && o.scenario != "live" && o.scenario != "scroll" && o.scenario != "churn")
@@ -60,6 +54,8 @@ Options parse(int argc, char** argv) {
     if (o.width < 640 || o.height < 480) throw std::invalid_argument("minimum example size is 640x480");
     return o;
 }
+
+} // namespace
 
 void capture(SceneContext& ctx, const Options& options, int ticks, bool& captured) {
     if (captured || options.screenshot.empty() || ticks < options.capture_frame) return;
@@ -88,91 +84,7 @@ float update_ui_scale(Window& window, const Options& options, Vec2i& last_minimu
     return scale;
 }
 
-class ArenaScene final : public Scene {
-public:
-    explicit ArenaScene(Options o) : _options(std::move(o)), _arena(_options.enemies) {}
-    std::string_view name() const override { return "Signal Siege"; }
-    EcsWorld* world() override { return &_arena.world; }
-    void on_enter(SceneContext& ctx) override {
-        _seed = rng_detail::to_u64(ctx.rng); _arena.reset(_seed);
-        _autoplay = _options.benchmark || ctx.app.headless();
-        _power_grid = _options.power_grid;
-    }
-    void update(SceneContext& ctx) override {
-        if (ctx.input.pressed("quit")) {
-            if (_power_grid) { _power_grid = false; return; }
-            ctx.app.quit();
-        }
-        if (ctx.input.pressed("power_grid")) { _power_grid = !_power_grid; return; }
-        if (ctx.input.pressed("pause")) _paused = !_paused;
-        if (ctx.input.pressed("autoplay")) _autoplay = !_autoplay;
-        if (ctx.input.pressed("reset")) { _arena.reset(_seed); _power_grid = false; _paused = false; _power_state = {}; }
-        if (_paused || _power_grid) return;
-        const Vec2f mouse = ctx.renderer.window_to_logical(ctx.input.mouse_pos());
-        const Vec2f aim = _camera.screen_to_world(mouse);
-        ArenaInput input{.move = {
-            float(ctx.input.held("right")) - float(ctx.input.held("left")),
-            float(ctx.input.held("down")) - float(ctx.input.held("up"))},
-            .aim = {aim.x - _arena.player.x, aim.y - _arena.player.y},
-            .fire = ctx.input.held("fire"), .dash = ctx.input.pressed("dash")};
-        _arena.step(ctx.dt, _autoplay ? _arena.autopilot() : input, _autoplay);
-        _painter.update(_arena, ctx.dt);
-    }
-    void render(SceneContext& ctx) override {
-        _display_scale = update_ui_scale(ctx.window, _options, _minimum_size);
-        auto& renderer = ctx.renderer;
-        if (_grid_coordinates != _power_grid) {
-            renderer.set_logical_size(_power_grid ? 0 : 1280, _power_grid ? 0 : 800);
-            _grid_coordinates = _power_grid;
-        }
-        renderer.clear(Color::rgb(12, 20, 28));
-        if (_power_grid) {
-            _painter.disable_post_process(renderer); // keep the upgrade screen's text crisp
-            if (render_power_grid(_arena,ctx.input,renderer,_power_state,_display_scale)) _power_grid=false;
-            capture(ctx, _options, ++_frames, _captured);
-            return;
-        }
-        if (!_painter.ready()) _painter.init(renderer, _arena);
-        _painter.enable_post_process(renderer);
-        _camera.viewport = {1280, 800};
-        _camera.offset = {std::clamp(_arena.player.x - 640, 0.0f, 1792.0f), std::clamp(_arena.player.y - 400, 0.0f, 1248.0f)};
-        _painter.draw(renderer, _arena, _camera);
-        const auto p = _camera.world_to_screen(_arena.player);
-        const auto mouse = renderer.window_to_logical(ctx.input.mouse_pos());
-        if (!_autoplay) {
-            renderer.draw_line(p, mouse, Color::rgba(88,171,169,35));
-            constexpr auto reticle=Color::rgb(183,239,228);
-            renderer.draw_line({mouse.x-11,mouse.y},{mouse.x-5,mouse.y},reticle);
-            renderer.draw_line({mouse.x+5,mouse.y},{mouse.x+11,mouse.y},reticle);
-            renderer.draw_line({mouse.x,mouse.y-11},{mouse.x,mouse.y-5},reticle);
-            renderer.draw_line({mouse.x,mouse.y+5},{mouse.x,mouse.y+11},reticle);
-            renderer.fill_rect({mouse.x-1,mouse.y-1,2,2},reticle);
-        }
-        render_arena_hud(_arena, renderer, _paused, _autoplay, int(_painter.commands()), _display_scale);
-        capture(ctx, _options, ++_frames, _captured);
-    }
-    void write_report(JsonWriter& json) const override {
-        json.field("ticks", _arena.ticks).field("enemies", _arena.enemy_count()).field("kills", _arena.kills)
-            .field("cores", _arena.collected).field("health", _arena.health).field("shots", u64(_arena.shots.size()))
-            .field("commands", u64(_painter.commands())).field("checksum", _arena.checksum()).field("autoplay", _autoplay);
-        json.field("lights", u64(_painter.lights())).field("particles", u64(_painter.particles())).field("lit", _painter.lit());
-        json.field("ui_scale", _display_scale);
-        json.field("power_grid", _power_grid).field("available_cores", _arena.available_cores());
-    }
-private:
-    Options _options;
-    Arena _arena;
-    Camera2D _camera;
-    ArenaPainter _painter;
-    Vec2i _minimum_size{};
-    float _display_scale = 1;
-    u64 _seed = 7;
-    int _frames = 0;
-    PowerGridState _power_state;
-    bool _power_grid = false;
-    bool _grid_coordinates = false;
-    bool _paused = false, _autoplay = false, _captured = false;
-};
+namespace {
 
 class TrackerScene final : public Scene {
 public:
@@ -219,7 +131,7 @@ int run_example(int argc, char** argv, bool tracker) {
             std::cout << "--benchmark (autoplay/scripted UI) --stress --enemies 1..5000 --runs 1..100000\n"
                 "--scenario idle|live|scroll|churn --vsync --screenshot PATH --capture-frame N\n"
                 "--width 640..4096 --height 480..4096 --ui-scale 0.5..4 (default: automatic)\n"
-                "--power-grid (Signal Siege: start on the paused upgrade screen)\n"
+                "--power-grid (Signal Siege: start on the paused upgrade screen) --mute (Signal Siege: no sound)\n"
                 "Standard Kin flags: --headless --frames N --seed N --report PATH --profile --profile-json PATH\n";
             return 0;
         }
@@ -231,6 +143,8 @@ int run_example(int argc, char** argv, bool tracker) {
         input.bind("grid_up",Key::Up); input.bind("grid_down",Key::Down);
         input.bind("up", Key::W); input.bind("down", Key::S); input.bind("left", Key::A); input.bind("right", Key::D);
         input.bind("fire", MouseButton::Left);
+        input.bind("menu_up", {Key::Up, Key::W}); input.bind("menu_down", {Key::Down, Key::S});
+        input.bind("accept", {Key::Enter, Key::KeypadEnter, Key::Space});
         GameInfo game{.id = tracker ? "run_observatory" : "signal_siege", .title = tracker ? "Run Observatory" : "Signal Siege",
             .version = "0.1", .description = tracker ? "Simulated LLM training tracker and UI benchmark" : "Arena survival and ECS performance example",
             .window = {.width = options.width, .height = options.height, .logical_width = tracker ? 0 : 1280, .logical_height = tracker ? 0 : 800, .resizable = true},
@@ -243,13 +157,16 @@ int run_example(int argc, char** argv, bool tracker) {
         if (!options.screenshot.empty() && headless.enabled && headless.frames > 0 && headless.frames < options.capture_frame)
             throw std::invalid_argument("--frames must reach --capture-frame for screenshot capture");
         SceneManager scenes;
-        const auto build = [options, tracker](SceneManager& manager) {
+        const bool start_in_arena = headless.enabled || options.benchmark || options.power_grid || !options.screenshot.empty();
+        const bool tool_run = start_in_arena || headless.server;
+        const auto build = [options, tracker, start_in_arena, tool_run](SceneManager& manager) {
             if (tracker) manager.push(std::make_unique<TrackerScene>(options));
-            else manager.push(std::make_unique<ArenaScene>(options));
+            else manager.push(make_signal_siege(options, start_in_arena, tool_run));
         };
         build(scenes);
         return run_scene_app({.window = window, .headless = headless, .game = &game,
-            .render_headless = !options.screenshot.empty(), .reset_scenes = build}, scenes);
+            // The server renders every step: menus and HUD run in render().
+            .render_headless = !options.screenshot.empty() || headless.server, .reset_scenes = build}, scenes);
     } catch (const std::exception& e) {
         std::cerr << "Example error: " << e.what() << '\n'; return 1;
     }

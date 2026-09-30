@@ -19,7 +19,7 @@ struct Pickup { Vec2f pos{}; float life = 15; };
 struct Impact { Vec2f pos{}; float life = .3f; };
 // Something a renderer may want to show: an effect cue, never read by the simulation.
 struct ArenaEvent {
-    enum class Kind : u8 { Hit, Kill, Pickup, Dash, Hurt };
+    enum class Kind : u8 { Hit, Kill, Pickup, Dash, Hurt, Fire, EnemyFire };
     Kind kind = Kind::Hit;
     Vec2f pos{};
     int enemy_kind = 0;
@@ -135,8 +135,40 @@ private:
     int _spent = 0;
 };
 
-// Draw over the fixed 1280x800 playfield at native pixel density. Restores the
-// game's logical coordinates before returning (including mouse mapping).
+struct HudState {
+    bool paused = false, autoplay = false;
+    int commands = 0;
+    float display_scale = 1;
+    bool reticle = false;   // draw the aim reticle at `aim` (logical coordinates)
+    Vec2f aim{};
+};
+
+// Signal Siege's HUD, drawn with ui2 widgets over the fixed 1280x800 playfield at
+// native pixel density. Restores the game's logical coordinates before returning
+// (including mouse mapping). Keeps rolling counters and the wave banner, so keep
+// one per run.
+class ArenaHud {
+public:
+    void render(const Arena& arena, Renderer2D& renderer, Input& input, const HudState& state, float dt);
+    // A wave banner started this frame (for its sound).
+    bool wave_started() const { return _wave_started; }
+    // Back to the start of a run: counters from zero, the first wave's banner again.
+    void reset() {
+        _kills = {.speed = 40}; _cores = {.speed = 30};
+        _wave = 0; _banner = -1; _hurt = 0; _health = -1; _wave_started = false;
+    }
+
+private:
+    ui2::Context _ui;
+    ui2::AnimatedValue _kills{.speed = 40}, _cores{.speed = 30};
+    int _wave = 0;
+    float _banner = -1;  // seconds since the current wave's banner appeared
+    float _hurt = 0;     // hull bar flash after damage
+    int _health = -1;
+    bool _wave_started = false;
+};
+
+// One-shot HUD for checks: a fresh ArenaHud with no input.
 void render_arena_hud(const Arena& arena, Renderer2D& renderer, bool paused,
                       bool autoplay, int commands, float display_scale);
 // Separate, native-resolution screen. Returns true when Return is clicked.

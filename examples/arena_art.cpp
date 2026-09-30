@@ -346,6 +346,9 @@ void ArenaPainter::update(Arena& arena, float dt) {
         case ArenaEvent::Kind::Hurt:
             _particles.burst(burst(e.pos, 16, {60, 240}, {.2f, .4f}, 10, Color::rgb(255, 150, 130), Color::rgba(255, 40, 40, 0)));
             break;
+        case ArenaEvent::Kind::Fire:
+        case ArenaEvent::Kind::EnemyFire:
+            break; // shots draw themselves; these cue sound
         }
     }
     arena.events.clear();

@@ -28,9 +28,17 @@ over six wave phases. Killed enemies respawn to sustain the configured load.
 Collect green cores to repair the player and improve weapon fire rate; ten
 cores unlock a second projectile. Dash grants brief immunity.
 
+It opens on a title screen over an autoplaying arena: **Play**, **Watch
+autoplay** or **Quit** (arrows or W/S and Enter, or the mouse). A run that ends
+fades to a results screen (time survived, kills, cores, upgrades) whose counters
+roll up; Enter retries, Escape returns to the title. The best run is kept between
+sessions with kin's `SaveStore`. Screens change with kin's scene transitions
+(iris, dissolve, wipe, crossfade; a plain fade on the software backend).
+
 - WASD: move; mouse: aim; hold left mouse: fire.
 - Space: dash (1.5-second cooldown); P: pause; R: restart with the same seed.
-- B: toggle invincible autoplay; Escape: quit; F1: engine timing overlay.
+- B: toggle invincible autoplay; Escape: back to the title (quits when the run was
+  started from the command line); F1: engine timing overlay.
 - U: open/close the Power Grid (simulation pauses); Escape returns from the grid.
 - On the grid, click a square or use Left/Right to select, then click Install or
   press Enter. Connected prerequisites must be installed first. Three starting
@@ -46,6 +54,11 @@ cores unlock a second projectile. Dash grants brief immunity.
   and keypad Enter install, with immediate success or failure feedback.
   No exclusive branches or permanent purchases.
 - `--power-grid`: start on the upgrade screen, also usable for screenshot runs.
+- `--mute`: no sound.
+
+Headless, `--benchmark`, `--screenshot` and `--power-grid` runs skip the title and
+start an autoplaying arena, as before. They and scene-server runs are silent and
+never read or write the saved best run.
 - Default: 300 enemies. `--stress`: 1,200. `--enemies N`: up to 5,000.
 
 Uses ECS transforms/renderers, a cached movement query, a spatial grid for
@@ -75,6 +88,17 @@ measure the plain render path. Effects advance with simulation time, so pausing
 freezes them, and there is no camera shake or full-screen flash to disturb aim.
 On the GPU the look costs well under a millisecond a frame; SDL's software
 renderer, used headless, takes about 25 ms a frame at the default load.
+
+Sound is synthesized at startup (no audio files) and played with kin's
+`AudioEngine`: shots, hits, kills, pickups, dashes and damage, positioned around
+the player so distant fights are quieter, plus wave, win, lose and menu cues and
+a looping ambient drone. The clips are registered with `AudioEngine::add_clip`.
+
+The HUD is built from ui2 widgets: glass panels, hull and dash bars (the hull bar
+shifts colour and flashes when hit), a countdown with wave progress, rolling kill
+and core counters, an "upgrades ready" notice, a `TargetReticle`, and a wave
+banner animated with kin animation property tracks. The controls fade out after
+the opening seconds and return while paused.
 
 The arena keeps a fixed 1,280 x 800 logical view, letterboxed to fit the window.
 Its HUD uses native-resolution system text and automatic display scaling;

@@ -1,8 +1,11 @@
 #include "arena_art.hpp"
+#include "example_common.hpp"
+#include "siege_audio.hpp"
 #include "workloads.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <kin/platform/app.hpp>
 #include <iostream>
 #include <SDL3/SDL.h>
@@ -56,6 +59,61 @@ static void check_native_display(const char* screenshot, bool game = false) {
     renderer.present();
     std::cout << "Native display: backend=" << renderer.backend_name() << " scale=" << scale
               << " pixels=" << output.x << 'x' << output.y << " rows=" << dashboard.drawn_rows() << '\n';
+}
+
+// The pieces of Signal Siege's flow: the best run survives a restart (and only a
+// better run replaces it), muted sound still plays and finishes its effects, and
+// the HUD announces the first wave once, again after a reset.
+static void check_siege_flow() {
+    using namespace examples;
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-siege-best-run";
+    std::filesystem::remove_all(dir);
+    {
+        BestRunStore store(dir);
+        assert(store.best().time == 0);
+        assert(store.record({.won = false, .time = 30, .kills = 12}));
+        assert(!store.record({.won = false, .time = 20, .kills = 99}));
+        assert(store.record({.won = false, .time = 30, .kills = 13}));
+    }
+    {
+        BestRunStore reopened(dir);
+        assert(reopened.best().time == 30 && reopened.best().kills == 13 && !reopened.best().won);
+        assert(reopened.record({.won = true, .time = 90, .kills = 1}));
+    }
+    assert(BestRunStore(dir).best().won);
+    std::filesystem::remove_all(dir);
+
+    SiegeAudio audio(true);
+    Arena arena(120, 5);
+    for (int i = 0; i < 240; ++i) {
+        arena.step(1.0f / 120, arena.autopilot(), true);
+        audio.play_events(arena.events, arena.player);
+        arena.events.clear();
+        audio.update(1.0f / 120);
+    }
+    const int played = audio.stats().played_requests;
+    assert(played > 20); // shots at least; kills and hits too
+    audio.play("wave");
+    for (int i = 0; i < 240; ++i) audio.update(1.0f / 120);
+    assert(audio.stats().played_requests == played + 1);
+    assert(audio.stats().active_voices == 0); // silent one-shots still end
+
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    auto& window = app.create_window({.width = 1280, .height = 800, .hidden = true});
+    Renderer2D renderer{window};
+    renderer.set_logical_size(1280, 800);
+    Input input;
+    ArenaHud hud;
+    hud.render(arena, renderer, input, {}, 1.0f / 60);
+    assert(hud.wave_started());
+    hud.render(arena, renderer, input, {}, 1.0f / 60);
+    assert(!hud.wave_started());
+    hud.reset();
+    hud.render(arena, renderer, input, {.reticle = true, .aim = {640, 400}}, 1.0f / 60);
+    assert(hud.wave_started());
+    const auto mapped = renderer.window_to_logical(renderer.logical_to_window({960, 320}));
+    assert(std::abs(mapped.x - 960) < .01f && std::abs(mapped.y - 320) < .01f);
+    renderer.present();
 }
 
 // The painter only reads the simulation: attaching art and effects to an arena
@@ -125,6 +183,7 @@ int main(int argc, char** argv) {
     first.step(1.0f / 120, {.move = {1, 0}, .fire = true, .dash = true});
     assert(first.player.x > start.x && first.dash_cooldown > 0 && !first.shots.empty());
     check_painter();
+    check_siege_flow();
 
     Tracker tracker(10000, 7), replay(10000, 7);
     // Purchases are atomic, dependency-gated, and reset with the run.

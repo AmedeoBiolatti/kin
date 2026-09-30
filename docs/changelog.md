@@ -7,14 +7,32 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- `AudioEngine::add_clip` registers an in-memory clip (synthesized, or from
+  `make_memory_audio_clip`) under a clip id that cues name like a file-backed one.
+
 ### Changed
 
+- Signal Siege has a title screen over an autoplaying arena, a results screen
+  whose counters roll up, and scene transitions between them; sound effects and an
+  ambient drone synthesized at startup and played with `AudioEngine`; a HUD built
+  from ui2 widgets with a wave banner animated by property tracks; and the best
+  run kept with `SaveStore`. Headless, benchmark and screenshot runs still start
+  straight in the arena. `--mute` silences it.
 - The Signal Siege example has a new look that shows off more of kin, still
   without asset files: procedurally rasterized sprites (enemies drawn by the ECS
   through `TextureRenderer`), a lit arena with `LightLayer` (a flashlight cone,
   reactor lamps, lights on shots and impacts), `ParticleSystem` effects driven by
   the arena's events, and a bloom, vignette and grade chain on the GPU backend.
   The simulation and the `kin_bench` arena cases are unchanged.
+
+### Fixed
+
+- An `AudioEngine` on the silent (null) backend advances its voices by elapsed
+  time. It used to mix only until its queue target was reached, so one-shot sounds
+  never finished and, once every voice and instance limit was taken, new ones were
+  refused.
 
 ## [0.2.1] — 2026-09-30
 

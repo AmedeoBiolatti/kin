@@ -2,6 +2,8 @@ add_library(kin_example_workloads STATIC
     arena.cpp
     arena_art.cpp
     arena_hud.cpp
+    siege_audio.cpp
+    siege_scenes.cpp
     power_grid.cpp
     tracker.cpp
     example_app.cpp
