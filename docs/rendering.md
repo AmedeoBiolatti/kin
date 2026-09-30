@@ -290,6 +290,15 @@ of several kinds interleave, so put them in one atlas (a `SpriteCatalog` sheet,
 or `TextureRenderer::source` regions of one texture): a texture change ends the
 run and starts a new draw.
 
+`RenderQueue` stores plain sprites (a valid texture, no material, not in output
+pixels) compactly: the quad, its key and a texture index, about half a
+`RenderCommand`, with one texture reference per distinct texture instead of one
+per sprite. `flush()` sorts and draws them without ever building commands;
+`commands()`, `sort_commands()` and the presorted flushes convert them, in
+submission order, the first time they are asked for, so readers of the queue see
+ordinary Texture and Sprite commands. `cull(view, first, last)` counts
+submissions (`submitted()`), not positions.
+
 ## Fixed-Timestep Render Interpolation
 
 `SceneContext::alpha` carries the fixed-timestep interpolation factor into

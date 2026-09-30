@@ -1,6 +1,7 @@
 #include <kin/renderer/render_queue.hpp>
 
 #include <algorithm>
+#include <cstdint>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -182,6 +183,23 @@ bool sprite_of(Renderer2D& renderer, const RenderCommand& command, const RenderV
     return true;
 }
 
+// render_view_visible() with the view's rectangle worked out once, for loops.
+class Culler {
+public:
+    explicit Culler(const RenderView& view)
+        : _rect(render_view_visible_rect(view)),
+          _enabled(view.culling_enabled && _rect.w > 0.0f && _rect.h > 0.0f) {}
+
+    bool visible(Rectf bounds) const {
+        return !_enabled || (bounds.x + bounds.w >= _rect.x && bounds.y + bounds.h >= _rect.y &&
+                             bounds.x <= _rect.x + _rect.w && bounds.y <= _rect.y + _rect.h);
+    }
+
+private:
+    Rectf _rect;
+    bool _enabled;
+};
+
 // Gathers consecutive sprites that share a texture and draws them with one
 // draw_sprites() call (instanced on the GPU backend); a lone sprite still goes
 // through draw_texture(). Anything else drawn in between ends the run first, so
@@ -201,15 +219,18 @@ public:
             return false;
         }
         SpriteInstance sprite;
-        if (!sprite_of(_renderer, command, view, sprite)) {
-            return true; // draws nothing
+        if (sprite_of(_renderer, command, view, sprite)) {
+            add(command.texture, sprite);
         }
-        if (!_sprites.empty() && !(command.texture == *_texture)) {
+        return true; // a sprite, drawn or (if it draws nothing) dropped
+    }
+
+    void add(const Texture& texture, const SpriteInstance& sprite) {
+        if (!_sprites.empty() && !(texture == *_texture)) {
             flush();
         }
-        _texture = &command.texture;
+        _texture = &texture;
         _sprites.push_back(sprite);
-        return true;
     }
 
     void flush() {
@@ -309,6 +330,9 @@ RenderQueue::RenderQueue(RenderSortMode sort)
 
 void RenderQueue::clear() {
     _commands.clear();
+    _sprites.clear();
+    _textures.clear();
+    _sprites_after = 0;
     _next_sequence = 0;
     _sorted = true;
     _in_sequence = true;
@@ -316,9 +340,20 @@ void RenderQueue::clear() {
 
 void RenderQueue::reserve(std::size_t capacity) {
     _commands.reserve(capacity);
+    _sprites.reserve(capacity);
 }
 
 void RenderQueue::submit(RenderCommand command) {
+    // Plain sprites (e.g. particles) join the compact lane like draw_texture's.
+    const bool sprite = command.texture && !command.material && !command.output_pixel_rect && !command.detail &&
+                        command.a == Vec2f{} && command.b == Vec2f{} &&
+                        (command.type == RenderCommandType::Texture ||
+                         (command.type == RenderCommandType::Sprite && command.source.w > 0.0f && command.source.h > 0.0f));
+    if (sprite) {
+        queue_sprite(command.type, command.key, command.texture, command.source, command.rect, command.color,
+                     command.rotation, command.pivot);
+        return;
+    }
     command.sequence = _next_sequence++;
     _commands.push_back(std::move(command));
     _sorted = false;
@@ -352,11 +387,124 @@ void RenderQueue::draw_line(RenderKey key, Vec2f a, Vec2f b, Color color) {
 }
 
 void RenderQueue::draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot) {
+    if (texture && !material.material) {
+        queue_sprite(RenderCommandType::Texture, key, texture, {}, dest, tint, rotation, pivot);
+        return;
+    }
     submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
 void RenderQueue::draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot) {
+    if (sprite.texture && !material.material && sprite.source.w > 0.0f && sprite.source.h > 0.0f) {
+        queue_sprite(RenderCommandType::Sprite, key, sprite.texture, sprite.source, dest, tint, rotation, pivot);
+        return;
+    }
     submit({.type = RenderCommandType::Sprite, .key = key, .rect = dest, .source = sprite.source, .color = tint, .texture = sprite.texture, .rotation = rotation, .pivot = pivot, .material = material.material});
+}
+
+void RenderQueue::draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) {
+    if (texture) {
+        queue_sprite(RenderCommandType::Texture, key, texture, source, dest, tint, rotation, pivot);
+        return;
+    }
+    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .source = source, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot});
+}
+
+void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
+                               Color tint, f32 rotation, Vec2f pivot) {
+    if (_sprites.empty()) {
+        _sprites_after = _commands.size();
+    }
+    _sprites.push_back({
+        .dest = dest,
+        .source = source,
+        .tint = tint,
+        .rotation = rotation,
+        .pivot = pivot,
+        .layer = key.layer,
+        .order = key.order,
+        .y = key.y,
+        .texture = texture_slot(texture),
+        .pass_mask = key.pass_mask,
+        .sequence = _next_sequence++,
+        .use_y = key.use_y,
+        .type = type,
+    });
+    _sorted = false;
+}
+
+u32 RenderQueue::texture_slot(const Texture& texture) {
+    // A small cache by texture address makes the lookup constant time however
+    // many textures alternate; entries are verified, so a stale one only misses.
+    const ITextureBackend* id = texture.backend().get();
+    u32& cached = _texture_cache[(reinterpret_cast<std::uintptr_t>(id) >> 4) & (_texture_cache.size() - 1)];
+    if (cached != 0 && cached <= _textures.size() && _textures[cached - 1].backend().get() == id) {
+        return cached - 1;
+    }
+    u32 slot = static_cast<u32>(_textures.size());
+    for (u32 i = 0; i < _textures.size(); ++i) {
+        if (_textures[i].backend().get() == id) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == _textures.size()) {
+        _textures.push_back(texture);
+    }
+    cached = slot + 1;
+    return slot;
+}
+
+RenderCommand RenderQueue::to_command(const QueuedSprite& sprite) const {
+    return {
+        .type = sprite.type,
+        .key = {.layer = sprite.layer, .order = sprite.order, .y = sprite.y, .use_y = sprite.use_y, .pass_mask = sprite.pass_mask},
+        .sequence = sprite.sequence,
+        .rect = sprite.dest,
+        .source = sprite.source,
+        .color = sprite.tint,
+        .texture = _textures[sprite.texture],
+        .rotation = sprite.rotation,
+        .pivot = sprite.pivot,
+    };
+}
+
+template<typename Visit>
+void RenderQueue::for_each_in_submission_order(Visit&& visit) const {
+    // _commands before _sprites_after predate every queued sprite; after it, both
+    // lists are in submission order, so they merge by sequence.
+    std::size_t c = 0;
+    for (; c < _sprites_after && c < _commands.size(); ++c) {
+        visit(static_cast<u32>(c));
+    }
+    std::size_t q = 0;
+    while (c < _commands.size() || q < _sprites.size()) {
+        if (q == _sprites.size() || (c < _commands.size() && _commands[c].sequence < _sprites[q].sequence)) {
+            visit(static_cast<u32>(c++));
+        } else {
+            visit(static_cast<u32>(q++) | sprite_bit);
+        }
+    }
+}
+
+void RenderQueue::materialize() const {
+    if (_sprites.empty()) {
+        return;
+    }
+    _sort_scratch.clear();
+    _sort_scratch.reserve(_commands.size() + _sprites.size());
+    for_each_in_submission_order([&](u32 index) {
+        if (index & sprite_bit) {
+            _sort_scratch.push_back(to_command(_sprites[index & ~sprite_bit]));
+        } else {
+            _sort_scratch.push_back(std::move(_commands[index]));
+        }
+    });
+    _commands.swap(_sort_scratch);
+    _sort_scratch.clear();
+    _sprites.clear();
+    _textures.clear();
+    _sprites_after = 0;
 }
 
 void RenderQueue::draw_text(RenderKey key,
@@ -441,57 +589,87 @@ constexpr std::size_t radix_sort_min = 256;
 } // namespace
 
 bool RenderQueue::compute_draw_order() {
-    const std::size_t count = _commands.size();
+    const std::size_t count = size();
     if (count < 2) {
         return false;
     }
 
     // Sort compact keys, not the heavy commands, which are moved at most once.
+    // Entries start in submission order when _commands is, so a stable sort keeps
+    // ties in sequence order exactly as `before` does.
     const bool layer_then_y = _sort == RenderSortMode::LayerThenY;
-    _sort_keys.resize(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const RenderKey& key = _commands[i].key;
-        _sort_keys[i] = {sortable_i32(key.order),
-                         layer_then_y ? sortable_f32(key.use_y ? key.y : 0.0f) : 0u,
-                         sortable_i32(key.layer),
-                         static_cast<u32>(i)};
+    _sort_keys.clear();
+    _sort_keys.reserve(count);
+    const auto key_entry = [&](i32 layer, i32 order, f32 y, bool use_y, u32 index) {
+        _sort_keys.push_back({sortable_i32(order), layer_then_y ? sortable_f32(use_y ? y : 0.0f) : 0u,
+                              sortable_i32(layer), index});
+    };
+    if (_sprites.empty()) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const RenderKey& key = _commands[i].key;
+            key_entry(key.layer, key.order, key.y, key.use_y, static_cast<u32>(i));
+        }
+    } else {
+        for_each_in_submission_order([&](u32 index) {
+            if (index & sprite_bit) {
+                const QueuedSprite& sprite = _sprites[index & ~sprite_bit];
+                key_entry(sprite.layer, sprite.order, sprite.y, sprite.use_y, index);
+            } else {
+                const RenderKey& key = _commands[index].key;
+                key_entry(key.layer, key.order, key.y, key.use_y, index);
+            }
+        });
     }
 
     if (_in_sequence && count >= radix_sort_min) {
-        // LSD radix sort over the 12 key bytes, least significant first. It is
-        // stable and the keys start in submission order, so ties keep sequence
-        // order exactly as `before` does. Bytes that are equal on every key
-        // (typically most of layer and order) are skipped.
-        constexpr std::size_t digits = 12;
-        std::array<std::array<u32, 256>, digits> counts{};
-        const auto byte_of = [](const SortEntry& entry, std::size_t digit) -> u32 {
-            const u32 word = digit < 4 ? entry.order : digit < 8 ? entry.y : entry.layer;
-            return (word >> ((digit % 4) * 8)) & 0xffu;
-        };
+        // LSD radix sort over the key bytes, least significant first; stable, so
+        // ties keep submission order. Words equal on every key (typically layer
+        // and order) are skipped outright, and so is any byte equal on every key.
+        const SortEntry& first = _sort_keys[0];
+        bool varies[3] = {false, false, false}; // order, y, layer
         for (const SortEntry& entry : _sort_keys) {
-            for (std::size_t digit = 0; digit < digits; ++digit) {
-                ++counts[digit][byte_of(entry, digit)];
-            }
+            varies[0] = varies[0] || entry.order != first.order;
+            varies[1] = varies[1] || entry.y != first.y;
+            varies[2] = varies[2] || entry.layer != first.layer;
         }
+        const auto word_of = [](const SortEntry& entry, std::size_t word) -> u32 {
+            return word == 0 ? entry.order : word == 1 ? entry.y : entry.layer;
+        };
         _radix_scratch.resize(count);
-        for (std::size_t digit = 0; digit < digits; ++digit) {
-            std::array<u32, 256>& bucket = counts[digit];
-            if (bucket[byte_of(_sort_keys[0], digit)] == count) {
+        for (std::size_t word = 0; word < 3; ++word) {
+            if (!varies[word]) {
                 continue;
             }
-            u32 offset = 0;
-            for (u32& slot : bucket) {
-                const u32 n = slot;
-                slot = offset;
-                offset += n;
-            }
+            std::array<std::array<u32, 256>, 4> counts{};
             for (const SortEntry& entry : _sort_keys) {
-                _radix_scratch[bucket[byte_of(entry, digit)]++] = entry;
+                const u32 value = word_of(entry, word);
+                ++counts[0][value & 0xffu];
+                ++counts[1][(value >> 8) & 0xffu];
+                ++counts[2][(value >> 16) & 0xffu];
+                ++counts[3][value >> 24];
             }
-            _sort_keys.swap(_radix_scratch);
+            for (std::size_t digit = 0; digit < 4; ++digit) {
+                std::array<u32, 256>& bucket = counts[digit];
+                const u32 shift = static_cast<u32>(digit * 8);
+                if (bucket[(word_of(_sort_keys[0], word) >> shift) & 0xffu] == count) {
+                    continue;
+                }
+                u32 offset = 0;
+                for (u32& slot : bucket) {
+                    const u32 n = slot;
+                    slot = offset;
+                    offset += n;
+                }
+                for (const SortEntry& entry : _sort_keys) {
+                    _radix_scratch[bucket[(word_of(entry, word) >> shift) & 0xffu]++] = entry;
+                }
+                _sort_keys.swap(_radix_scratch);
+            }
         }
     } else {
-        const bool in_sequence = _in_sequence;
+        const auto sequence_of = [&](u32 index) {
+            return (index & sprite_bit) ? _sprites[index & ~sprite_bit].sequence : _commands[index].sequence;
+        };
         std::sort(_sort_keys.begin(), _sort_keys.end(), [&](const SortEntry& a, const SortEntry& b) {
             if (a.layer != b.layer) {
                 return a.layer < b.layer;
@@ -502,11 +680,13 @@ bool RenderQueue::compute_draw_order() {
             if (a.order != b.order) {
                 return a.order < b.order;
             }
-            return in_sequence ? a.index < b.index
-                               : _commands[a.index].sequence < _commands[b.index].sequence;
+            return sequence_of(a.index) < sequence_of(b.index);
         });
     }
 
+    if (!_sprites.empty()) {
+        return true;
+    }
     for (std::size_t i = 0; i < count; ++i) {
         if (_sort_keys[i].index != i) {
             return true;
@@ -517,52 +697,91 @@ bool RenderQueue::compute_draw_order() {
 }
 
 void RenderQueue::sort_commands() {
-    if (_sort == RenderSortMode::Submission || _sorted) {
-        return;
-    }
-    if (!compute_draw_order()) {
+    if (_sort == RenderSortMode::Submission || (_sorted && _sprites.empty()) || !compute_draw_order()) {
+        materialize();
         return;
     }
 
-    // Materialize the permutation once into a reused scratch buffer, then swap.
+    // Build the draw order once into a reused scratch buffer, converting queued
+    // sprites on the way, then swap.
     _sort_scratch.clear();
-    _sort_scratch.reserve(_commands.size());
+    _sort_scratch.reserve(size());
     for (const SortEntry& entry : _sort_keys) {
-        _sort_scratch.push_back(std::move(_commands[entry.index]));
+        if (entry.index & sprite_bit) {
+            _sort_scratch.push_back(to_command(_sprites[entry.index & ~sprite_bit]));
+        } else {
+            _sort_scratch.push_back(std::move(_commands[entry.index]));
+        }
     }
     _commands.swap(_sort_scratch);
     _sort_scratch.clear();
+    _sprites.clear();
+    _textures.clear();
+    _sprites_after = 0;
     _sorted = true;
     _in_sequence = false;
 }
 
 template<typename Draw>
 void RenderQueue::for_each_in_draw_order(Draw&& draw) {
-    if (_sort == RenderSortMode::Submission || _sorted || !compute_draw_order()) {
-        for (const RenderCommand& command : _commands) {
-            draw(command);
+    const auto visit = [&](u32 index) {
+        if (index & sprite_bit) {
+            draw(static_cast<const RenderCommand*>(nullptr), &_sprites[index & ~sprite_bit]);
+        } else {
+            draw(&_commands[index], static_cast<const QueuedSprite*>(nullptr));
         }
+    };
+    if (_sort == RenderSortMode::Submission || (_sorted && _sprites.empty()) || !compute_draw_order()) {
+        for_each_in_submission_order(visit);
         return;
     }
     for (const SortEntry& entry : _sort_keys) {
-        draw(_commands[entry.index]);
+        visit(entry.index);
     }
 }
+
+namespace {
+
+// The quad a queued sprite draws, with the view's transform when given.
+SpriteInstance sprite_instance(Rectf dest, Rectf source, const Texture& texture, Color tint, f32 rotation, Vec2f pivot,
+                               const RenderView* view) {
+    if (source.w <= 0.0f || source.h <= 0.0f) {
+        const Vec2i size = texture.size();
+        source = {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+    }
+    return {.dest = view ? to_view_rect(dest, *view) : dest, .source = source, .tint = tint, .rotation = rotation, .pivot = pivot};
+}
+
+} // namespace
 
 void RenderQueue::cull(const RenderView& view) {
     cull(view, 0);
 }
 
-void RenderQueue::cull(const RenderView& view, std::size_t first, std::size_t last) {
-    last = std::min(last, _commands.size());
+void RenderQueue::cull(const RenderView& view, u64 first, u64 last) {
     if (!view.culling_enabled || first >= last) {
         return;
     }
-    const auto begin = _commands.begin() + static_cast<std::ptrdiff_t>(first);
-    const auto end = _commands.begin() + static_cast<std::ptrdiff_t>(last);
-    _commands.erase(std::remove_if(begin, end, [&](const RenderCommand& command) {
-        return !render_command_visible(command, view);
-    }), end);
+    const auto in_range = [&](u64 sequence) { return sequence >= first && sequence < last; };
+    // Compact _commands in place, keeping _sprites_after on the same command.
+    std::size_t kept = 0;
+    std::size_t kept_before_sprites = 0;
+    for (std::size_t i = 0; i < _commands.size(); ++i) {
+        if (in_range(_commands[i].sequence) && !render_command_visible(_commands[i], view)) {
+            continue;
+        }
+        if (kept != i) {
+            _commands[kept] = std::move(_commands[i]);
+        }
+        kept_before_sprites += i < _sprites_after ? 1 : 0;
+        ++kept;
+    }
+    _commands.erase(_commands.begin() + static_cast<std::ptrdiff_t>(kept), _commands.end());
+    _sprites_after = kept_before_sprites;
+    const Culler culler{view};
+    std::erase_if(_sprites, [&](const QueuedSprite& sprite) {
+        return in_range(sprite.sequence) && !culler.visible(rotated_bounds(sprite.dest, sprite.rotation, sprite.pivot));
+    });
 }
 
 void RenderQueue::flush(Renderer2D& renderer) {
@@ -571,9 +790,17 @@ void RenderQueue::flush(Renderer2D& renderer) {
 
 void RenderQueue::flush(Renderer2D& renderer, u64 pass_mask) {
     SpriteRun run{renderer, _sprite_run};
-    for_each_in_draw_order([&](const RenderCommand& command) {
-        if ((command.key.pass_mask & pass_mask) != 0 && !run.take(command, nullptr)) {
-            execute_render_command(renderer, command);
+    for_each_in_draw_order([&](const RenderCommand* command, const QueuedSprite* sprite) {
+        if (sprite) {
+            if ((sprite->pass_mask & pass_mask) != 0) {
+                const Texture& texture = _textures[sprite->texture];
+                run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
+                                                 sprite->pivot, nullptr));
+            }
+            return;
+        }
+        if ((command->key.pass_mask & pass_mask) != 0 && !run.take(*command, nullptr)) {
+            execute_render_command(renderer, *command);
         }
     });
     run.flush();
@@ -585,21 +812,33 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
     SpriteRun run{renderer, _sprite_run};
-    for_each_in_draw_order([&](const RenderCommand& command) {
-        if ((command.key.pass_mask & pass_mask) == 0) {
+    const Culler culler{view};
+    for_each_in_draw_order([&](const RenderCommand* command, const QueuedSprite* sprite) {
+        if (sprite) {
+            if ((sprite->pass_mask & pass_mask) == 0 ||
+                !culler.visible(rotated_bounds(sprite->dest, sprite->rotation, sprite->pivot))) {
+                return;
+            }
+            const Texture& texture = _textures[sprite->texture];
+            run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
+                                             sprite->pivot, &view));
             return;
         }
-        if (view.culling_enabled && !render_command_visible(command, view)) {
+        if ((command->key.pass_mask & pass_mask) == 0) {
             return;
         }
-        if (!run.take(command, &view)) {
-            execute_render_command(renderer, command, view);
+        if (view.culling_enabled && !render_command_visible(*command, view)) {
+            return;
+        }
+        if (!run.take(*command, &view)) {
+            execute_render_command(renderer, *command, view);
         }
     });
     run.flush();
 }
 
 void RenderQueue::flush_presorted(Renderer2D& renderer, const RenderView& view, u64 pass_mask) const {
+    materialize();
     SpriteRun run{renderer, _sprite_run};
     for (const RenderCommand& command : _commands) {
         if ((command.key.pass_mask & pass_mask) == 0) {
@@ -619,6 +858,7 @@ void RenderQueue::flush_merged_presorted(Renderer2D& renderer,
                                          std::span<const RenderCommand> other,
                                          const RenderView& view,
                                          u64 pass_mask) const {
+    materialize();
     std::size_t lhs = 0;
     std::size_t rhs = 0;
     SpriteRun run{renderer, _sprite_run};

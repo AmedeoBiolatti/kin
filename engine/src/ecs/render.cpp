@@ -141,7 +141,7 @@ void WorldRenderState::propagate_transforms() {
 void WorldRenderState::collect_all(RenderQueue& queue,
                                    const EcsRenderFilter& include,
                                    SpriteRenderOptions options) {
-    const std::size_t existing = queue.size(); // the caller's commands, not culled yet
+    const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
         if (!include || include(entity)) {
@@ -164,7 +164,7 @@ void WorldRenderState::collect_all(RenderQueue& queue,
         }
     });
     // Everything above was culled as it was submitted; only particles still need it.
-    const std::size_t unculled = queue.size();
+    const u64 unculled = queue.submitted();
     _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
         if (!include || include(entity)) {
             submit_particles(queue, particles);
@@ -182,7 +182,7 @@ void WorldRenderState::collect_all(RenderQueue& queue,
 }
 
 void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions options) {
-    const std::size_t existing = queue.size(); // the caller's commands, not culled yet
+    const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
         if (sprite.static_renderable) {
@@ -210,7 +210,7 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
 }
 
 void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions options) {
-    const std::size_t existing = queue.size(); // the caller's commands, not culled yet
+    const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
         if (!sprite.static_renderable) {
@@ -233,7 +233,7 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
         }
     });
     // Everything above was culled as it was submitted; only particles still need it.
-    const std::size_t unculled = queue.size();
+    const u64 unculled = queue.submitted();
     _particle_systems.each([&](flecs::entity, const ParticleSystemComponent& particles) {
         submit_particles(queue, particles);
     });
@@ -340,14 +340,7 @@ bool submit_texture(RenderQueue& queue,
                                   texture.order,
                                   texture.y_sort,
                                   pos.y + texture.offset.y + texture.sort_y_offset);
-    queue.submit({
-        .type = RenderCommandType::Texture,
-        .key = key,
-        .rect = dest,
-        .source = texture_source_rect(texture),
-        .color = texture.tint,
-        .texture = texture.texture,
-    });
+    queue.draw_texture_region(key, texture.texture, texture_source_rect(texture), dest, texture.tint);
     return true;
 }
 

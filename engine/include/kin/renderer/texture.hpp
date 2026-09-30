@@ -55,6 +55,7 @@ public:
 
 private:
     friend class Renderer2D;
+    friend class RenderQueue;
     friend class SdlRenderer2DBackend;
     friend class GpuRenderer2DBackend;
 

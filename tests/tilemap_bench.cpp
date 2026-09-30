@@ -257,6 +257,7 @@ public:
     }
     void draw_texture(const kin::Texture&, kin::Rectf) override { ++_draws; }
     void draw_texture(const kin::Texture&, kin::Rectf, kin::Rectf) override { ++_draws; }
+    void draw_sprites(const kin::Texture&, std::span<const kin::SpriteInstance> sprites) override { _draws += sprites.size(); }
     void fill_rect(kin::Rectf, kin::Color) override { ++_draws; }
     void draw_rect(kin::Rectf, kin::Color) override { ++_draws; }
     void draw_line(kin::Vec2f, kin::Vec2f, kin::Color) override { ++_draws; }
@@ -599,6 +600,49 @@ kin::u64 render_collect_culled_10k(int) {
     return fixture.queue.size();
 }
 
+// 100,000 y-sorted texture sprites, all in view (the Signal Siege stress case):
+// what the ECS render path costs per visible sprite, backend work excluded.
+struct EcsSpriteFixture {
+    kin::EcsWorld world;
+    kin::WorldRenderState render{world};
+    kin::RenderQueue queue{kin::RenderSortMode::LayerThenY};
+    kin::Renderer2D renderer{std::make_unique<NullBackend>()};
+    kin::Texture atlas{std::make_shared<NullTextureBackend>(kin::Vec2i{384, 128})};
+    kin::RenderView view{.cull_rect = {0.0f, 0.0f, 1280.0f, 800.0f}, .culling_enabled = true};
+
+    EcsSpriteFixture() {
+        for (int i = 0; i < 100000; ++i) {
+            const kin::u32 h = static_cast<kin::u32>(i) * 2654435761u;
+            world.entity()
+                .set(kin::Transform2D{.pos = {static_cast<kin::f32>(h % 1240u) + 20.0f, static_cast<kin::f32>((h >> 12) % 760u) + 20.0f}})
+                .set(kin::TextureRenderer{.texture = atlas, .source = {static_cast<kin::f32>((i % 3) * 128), 0.0f, 128.0f, 128.0f},
+                                          .offset = {-16.0f, -16.0f}, .size = {32.0f, 32.0f}, .layer = 1, .y_sort = true});
+        }
+        render.propagate_transforms();
+        queue.reserve(100000);
+    }
+};
+
+EcsSpriteFixture& ecs_sprite_fixture() {
+    static EcsSpriteFixture fixture;
+    return fixture;
+}
+
+kin::u64 ecs_sprites_collect_100k(int) {
+    EcsSpriteFixture& fixture = ecs_sprite_fixture();
+    fixture.queue.clear();
+    fixture.render.collect_dynamic(fixture.queue, {.view = &fixture.view});
+    return fixture.queue.size();
+}
+
+kin::u64 ecs_sprites_collect_flush_100k(int) {
+    EcsSpriteFixture& fixture = ecs_sprite_fixture();
+    fixture.queue.clear();
+    fixture.render.collect_dynamic(fixture.queue, {.view = &fixture.view});
+    fixture.queue.flush(fixture.renderer, fixture.view);
+    return fixture.queue.size();
+}
+
 #if defined(KIN_BENCH_HAS_EXAMPLES)
 template<int Enemies>
 kin::u64 arena_workload(int) {
@@ -666,6 +710,8 @@ const std::vector<BenchCase>& bench_cases() {
         {"prefab", "spawn_destroy", prefab_spawn_destroy},
         {"prefab", "spawn_destroy_uncached", prefab_spawn_destroy_uncached},
         {"render", "collect_culled_10k", render_collect_culled_10k},
+        {"render", "ecs_sprites_collect_100k", ecs_sprites_collect_100k},
+        {"render", "ecs_sprites_collect_flush_100k", ecs_sprites_collect_flush_100k},
         {"input", "latency_60_60", nullptr, 60, 60},
         {"input", "latency_60_144", nullptr, 60, 144},
         {"input", "latency_120_144", nullptr, 120, 144},

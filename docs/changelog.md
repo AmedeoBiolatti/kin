@@ -19,6 +19,14 @@ releases may change APIs.
 
 ### Changed
 
+- `RenderQueue` keeps plain sprites compactly (no per-sprite `RenderCommand` or
+  texture reference) and flushes them straight into sprite batches; its radix
+  sort skips key words that never vary. Collecting and flushing 100,000 ECS
+  sprites takes about 9.5 ms on the CPU, down from 16.6, and Signal Siege at
+  100,000 enemies about 15.9 ms a frame on the GPU, down from 20.2. `commands()`
+  and `sort_commands()` still show every command (converting queued sprites on
+  first use); `cull(view, first, last)` now counts submissions (`submitted()`),
+  not positions. New `draw_texture_region()` queues part of a texture.
 - Signal Siege draws its drop shadows with one `draw_sprites()` call. With the
   enemy atlas, a frame at 100,000 enemies takes about 19.7 ms on the GPU, down
   from 24.7, and 2.4 ms at 10,000, down from 2.9.
