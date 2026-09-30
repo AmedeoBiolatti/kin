@@ -1,3 +1,4 @@
+#include "arena_art.hpp"
 #include "workloads.hpp"
 #include <algorithm>
 #include <cassert>
@@ -57,6 +58,37 @@ static void check_native_display(const char* screenshot, bool game = false) {
               << " pixels=" << output.x << 'x' << output.y << " rows=" << dashboard.drawn_rows() << '\n';
 }
 
+// The painter only reads the simulation: attaching art and effects to an arena
+// leaves its checksum identical to a plain one, it consumes the arena's events,
+// and on a real backend it lights the scene.
+static void check_painter() {
+    using namespace examples;
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    auto& window = app.create_window({.width = 1280, .height = 800, .hidden = true});
+    Renderer2D renderer{window};
+    renderer.set_logical_size(1280, 800);
+    Arena painted(180, 11), plain(180, 11);
+    ArenaPainter painter;
+    painter.init(renderer, painted);
+    for (int i = 0; i < 600; ++i) {
+        painted.step(1.0f / 120, painted.autopilot(), true);
+        plain.step(1.0f / 120, plain.autopilot(), true);
+        painter.update(painted, 1.0f / 120);
+        assert(painted.events.empty());
+    }
+    assert(painted.checksum() == plain.checksum());
+    assert(painted.kills > 0 && painter.particles() > 0);
+    assert(!plain.events.empty() && plain.events.size() <= 1024);
+    Camera2D camera;
+    camera.viewport = {1280, 800};
+    camera.offset = {painted.player.x - 640, painted.player.y - 400};
+    renderer.clear();
+    painter.draw(renderer, painted, camera);
+    assert(painter.lit() && painter.lights() >= 2 && painter.commands() > 0);
+    assert(painted.checksum() == plain.checksum());
+    renderer.present();
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--native-game") {
         check_native_display(argc > 2 ? argv[2] : nullptr, true);
@@ -92,6 +124,7 @@ int main(int argc, char** argv) {
     const auto start = first.player;
     first.step(1.0f / 120, {.move = {1, 0}, .fire = true, .dash = true});
     assert(first.player.x > start.x && first.dash_cooldown > 0 && !first.shots.empty());
+    check_painter();
 
     Tracker tracker(10000, 7), replay(10000, 7);
     // Purchases are atomic, dependency-gated, and reset with the run.

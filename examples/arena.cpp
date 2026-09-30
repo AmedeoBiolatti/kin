@@ -45,7 +45,7 @@ void Arena::reset(u64 seed) {
     _powers = 1; _spent = 0;
     _stats = {}; _regen = 0;
     _facing = {1, 0}; _travel = {};
-    _impacts.clear(); _muzzle = 0;
+    _impacts.clear(); _muzzle = 0; events.clear();
     _rng = make_key(seed); player = {1536, 1024}; health = 100;
     kills = collected = ticks = 0; elapsed = dash_cooldown = _fire = _hurt = _dash = 0;
     shots.clear(); sparks.clear(); pickups.clear();
@@ -111,7 +111,9 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
     ++ticks; elapsed += dt; _fire -= dt; _hurt -= dt; _dash -= dt; dash_cooldown -= dt;
     _regen += dt*_stats.regen;
     if (_regen>=1) {const int repair=int(_regen); health=std::min(max_health(),health+repair); _regen-=repair;}
-    if (input.dash && dash_cooldown <= 0) { _dash = _stats.dash_duration; dash_cooldown = _stats.dash_cooldown; }
+    if (input.dash && dash_cooldown <= 0) {
+        _dash = _stats.dash_duration; dash_cooldown = _stats.dash_cooldown; event(ArenaEvent::Kind::Dash, player);
+    }
     if (length(input.move) > 0) player = add(player, mul(unit(input.move), dt * (_dash > 0 ? _stats.dash_speed : _stats.move)));
     player.x = std::clamp(player.x, 20.0f, 3052.0f); player.y = std::clamp(player.y, 20.0f, 2028.0f);
     if (input.fire && _fire <= 0 && shots.size() < 8190) {
@@ -137,7 +139,9 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
         if (e.kind == 2 && distance < 650 && e.cooldown <= 0 && shots.size() < 8192) {
             shots.push_back({t.pos, mul(unit(toward), 180), 4, true}); e.cooldown = 3;
         }
-        if (distance < 22 && _hurt <= 0 && _dash <= 0 && !invincible) { health -= std::max(1,8-_stats.armor); _hurt = .35f; }
+        if (distance < 22 && _hurt <= 0 && _dash <= 0 && !invincible) {
+            health -= std::max(1,8-_stats.armor); _hurt = .35f; event(ArenaEvent::Kind::Hurt, player);
+        }
         const int bucket = cell(t.pos); _next[e.slot] = _grid[bucket]; _grid[bucket] = e.slot;
     });
     // Spatial buckets limit projectile collision candidates; no world-wide pair scan.
@@ -145,7 +149,9 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
         shot.pos = add(shot.pos, mul(shot.velocity, dt)); shot.life -= dt;
         if (shot.hostile) {
             if (length(sub(shot.pos, player)) < 13 && _dash <= 0) {
-                if (_hurt <= 0 && !invincible) { health -= std::max(1,5-_stats.armor); _hurt = .2f; }
+                if (_hurt <= 0 && !invincible) {
+                    health -= std::max(1,5-_stats.armor); _hurt = .2f; event(ArenaEvent::Kind::Hurt, player);
+                }
                 shot.life = 0;
             }
             continue;
@@ -157,6 +163,7 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
                     auto entity = _enemies[slot]; auto* enemy = entity.get_mut<Enemy>();
                     if (enemy->hp <= 0 || length(sub(entity.get<Transform2D>()->pos, shot.pos)) > 15) continue;
                     shot.life = 0; enemy->hp -= _stats.damage; burst(shot.pos);
+                    event(enemy->hp <= 0 ? ArenaEvent::Kind::Kill : ArenaEvent::Kind::Hit, shot.pos, enemy->kind);
                     if (enemy->hp <= 0) {
                         ++kills;
                         if (pickups.size() < 512) pickups.push_back({shot.pos});
@@ -169,7 +176,10 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
     for (auto& pickup : pickups) {
         pickup.life -= dt; const auto delta = sub(player, pickup.pos);
         if (length(delta) < _stats.magnet) pickup.pos = add(pickup.pos, mul(unit(delta), std::min(length(delta),_stats.pull*dt)));
-        if (length(delta) < 20) { ++collected; health = std::min(max_health(), health + _stats.repair); pickup.life = 0; }
+        if (length(delta) < 20) {
+            ++collected; health = std::min(max_health(), health + _stats.repair); pickup.life = 0;
+            event(ArenaEvent::Kind::Pickup, pickup.pos);
+        }
     }
     std::erase_if(shots, [](const Shot& s) { return s.life <= 0; });
     std::erase_if(sparks, [](const Spark& s) { return s.life <= 0; });
@@ -259,6 +269,20 @@ void Arena::collect(RenderQueue& queue, const RenderView& view) {
         queue.draw_line({.layer=4},sub(tip,mul(side,5)),add(tip,mul(side,5)),Color::rgb(255,218,137));
     }
     if (_hurt>0) ring(player,23,Color::rgba(255,136,119,170),4);
+}
+
+void Arena::use_enemy_textures(const std::array<Texture, 3>& textures, const std::array<Vec2f, 3>& sizes) {
+    for (auto entity : _enemies) {
+        const int kind = entity.get<Enemy>()->kind;
+        const Vec2f size = sizes[kind];
+        entity.remove<RectRenderer>();
+        entity.set(TextureRenderer{.texture = textures[kind], .offset = {-size.x / 2, -size.y / 2}, .size = size,
+            .layer = 1, .y_sort = true});
+    }
+}
+
+void Arena::collect_entities(RenderQueue& queue, const RenderView& view) {
+    queue.clear(); _render.propagate_transforms(); _render.collect_dynamic(queue, {.view = &view});
 }
 
 u64 Arena::checksum() const {

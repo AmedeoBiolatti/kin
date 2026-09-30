@@ -1,4 +1,5 @@
 #include "example_app.hpp"
+#include "arena_art.hpp"
 #include "workloads.hpp"
 #include <kin/core/json.hpp>
 #include <kin/runtime/run_report.hpp>
@@ -115,6 +116,7 @@ public:
             .aim = {aim.x - _arena.player.x, aim.y - _arena.player.y},
             .fire = ctx.input.held("fire"), .dash = ctx.input.pressed("dash")};
         _arena.step(ctx.dt, _autoplay ? _arena.autopilot() : input, _autoplay);
+        _painter.update(_arena, ctx.dt);
     }
     void render(SceneContext& ctx) override {
         _display_scale = update_ui_scale(ctx.window, _options, _minimum_size);
@@ -125,65 +127,16 @@ public:
         }
         renderer.clear(Color::rgb(12, 20, 28));
         if (_power_grid) {
+            _painter.disable_post_process(renderer); // keep the upgrade screen's text crisp
             if (render_power_grid(_arena,ctx.input,renderer,_power_state,_display_scale)) _power_grid=false;
             capture(ctx, _options, ++_frames, _captured);
             return;
         }
+        if (!_painter.ready()) _painter.init(renderer, _arena);
+        _painter.enable_post_process(renderer);
         _camera.viewport = {1280, 800};
         _camera.offset = {std::clamp(_arena.player.x - 640, 0.0f, 1792.0f), std::clamp(_arena.player.y - 400, 0.0f, 1248.0f)};
-        // Camera-local floor panels: decoration never participates in physics.
-        const int tile_x=int(_camera.offset.x)/256, tile_y=int(_camera.offset.y)/256;
-        for (int y=tile_y;y<=tile_y+4;++y) for (int x=tile_x;x<=tile_x+5;++x) {
-            const auto p=_camera.world_to_screen({float(x*256),float(y*256)});
-            renderer.fill_rect({p.x+2,p.y+2,252,252},(x+y)%2 ? Color::rgb(15,25,35) : Color::rgb(17,28,38));
-            renderer.draw_line({p.x+12,p.y+12},{p.x+34,p.y+12},Color::rgb(34,53,65));
-            renderer.draw_line({p.x+12,p.y+12},{p.x+12,p.y+34},Color::rgb(34,53,65));
-            // Recessed cable channels and travelling power indicators.
-            renderer.fill_rect({p.x+120,p.y+2,16,252},Color::rgb(9,19,28));
-            renderer.draw_line({p.x+122,p.y+2},{p.x+122,p.y+254},Color::rgb(28,60,71));
-            const float pulse=std::fmod(_arena.elapsed*45+float((x+y)*37),224.0f);
-            renderer.fill_rect({p.x+126,p.y+12+pulse,3,14},Color::rgb(44,114,128));
-            if ((x+y)%3==0) {
-                renderer.fill_rect({p.x+178,p.y+180,48,36},Color::rgb(9,18,26));
-                for (int i=0;i<5;++i) renderer.fill_rect({p.x+183,p.y+185+i*6.0f,38,2},Color::rgb(35,49,60));
-            }
-        }
-        for (int x = 0; x <= 3072; x += 64) {
-            const float sx = x - _camera.offset.x;
-            if (sx >= 0 && sx <= 1280) renderer.draw_line({sx, 0}, {sx, 800}, Color::rgb(21,33,43));
-        }
-        for (int y = 0; y <= 2048; y += 64) {
-            const float sy = y - _camera.offset.y;
-            if (sy >= 0 && sy <= 800) renderer.draw_line({0, sy}, {1280, sy}, Color::rgb(21,33,43));
-        }
-        // Sector landmarks make camera movement and aim direction legible.
-        for (int y = 256; y < 2048; y += 512) for (int x = 256; x < 3072; x += 512) {
-            auto p = _camera.world_to_screen({float(x), float(y)});
-            if (p.x < -60 || p.x > 1340 || p.y < -60 || p.y > 860) continue;
-            renderer.fill_rect({p.x-38,p.y-38,76,76},Color::rgb(12,22,31));
-            renderer.draw_rect({p.x-38,p.y-38,76,76},Color::rgb(36,58,70));
-            renderer.draw_rect({p.x-28,p.y-28,56,56},Color::rgb(27,45,58));
-            renderer.fill_rect({p.x-10,p.y-2,20,4},Color::rgb(38,78,83));
-            renderer.fill_rect({p.x-2,p.y-10,4,20},Color::rgb(38,78,83));
-            renderer.fill_rect({p.x-27,p.y+32,12,2},Color::rgb(89,109,90));
-            renderer.fill_rect({p.x+15,p.y-34,12,2},Color::rgb(89,109,90));
-            // Rotating reactor geometry is driven by simulation time, so it
-            // freezes with pause and the upgrade screen.
-            for (int i=0;i<8;++i) {
-                const float angle=i*.785398f+_arena.elapsed*.3f;
-                const Vec2f a{p.x+std::cos(angle)*15,p.y+std::sin(angle)*15};
-                const Vec2f b{p.x+std::cos(angle+.45f)*24,p.y+std::sin(angle+.45f)*24};
-                renderer.draw_line(a,b,Color::rgb(48,119,127));
-            }
-            renderer.fill_rect({p.x-5,p.y-5,10,10},Color::rgb(61,145,143));
-            for (int i=0;i<4;++i) {
-                const float sx=p.x-36+i*20.0f;
-                renderer.draw_line({sx,p.y+43},{sx+7,p.y+50},Color::rgb(129,104,60));
-                renderer.draw_line({sx,p.y-50},{sx+7,p.y-43},Color::rgb(129,104,60));
-            }
-        }
-        const RenderView view{.camera = &_camera, .culling_enabled = true};
-        _arena.collect(_queue, view); _queue.flush(renderer, view);
+        _painter.draw(renderer, _arena, _camera);
         const auto p = _camera.world_to_screen(_arena.player);
         const auto mouse = renderer.window_to_logical(ctx.input.mouse_pos());
         if (!_autoplay) {
@@ -195,13 +148,14 @@ public:
             renderer.draw_line({mouse.x,mouse.y+5},{mouse.x,mouse.y+11},reticle);
             renderer.fill_rect({mouse.x-1,mouse.y-1,2,2},reticle);
         }
-        render_arena_hud(_arena, renderer, _paused, _autoplay, int(_queue.size()), _display_scale);
+        render_arena_hud(_arena, renderer, _paused, _autoplay, int(_painter.commands()), _display_scale);
         capture(ctx, _options, ++_frames, _captured);
     }
     void write_report(JsonWriter& json) const override {
         json.field("ticks", _arena.ticks).field("enemies", _arena.enemy_count()).field("kills", _arena.kills)
             .field("cores", _arena.collected).field("health", _arena.health).field("shots", u64(_arena.shots.size()))
-            .field("commands", u64(_queue.size())).field("checksum", _arena.checksum()).field("autoplay", _autoplay);
+            .field("commands", u64(_painter.commands())).field("checksum", _arena.checksum()).field("autoplay", _autoplay);
+        json.field("lights", u64(_painter.lights())).field("particles", u64(_painter.particles())).field("lit", _painter.lit());
         json.field("ui_scale", _display_scale);
         json.field("power_grid", _power_grid).field("available_cores", _arena.available_cores());
     }
@@ -209,7 +163,7 @@ private:
     Options _options;
     Arena _arena;
     Camera2D _camera;
-    RenderQueue _queue;
+    ArenaPainter _painter;
     Vec2i _minimum_size{};
     float _display_scale = 1;
     u64 _seed = 7;

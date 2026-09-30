@@ -7,6 +7,15 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Changed
+
+- The Signal Siege example has a new look that shows off more of kin, still
+  without asset files: procedurally rasterized sprites (enemies drawn by the ECS
+  through `TextureRenderer`), a lit arena with `LightLayer` (a flashlight cone,
+  reactor lamps, lights on shots and impacts), `ParticleSystem` effects driven by
+  the arena's events, and a bloom, vignette and grade chain on the GPU backend.
+  The simulation and the `kin_bench` arena cases are unchanged.
+
 ## [0.2.1] — 2026-09-30
 
 A multi-line text editor for ui2, faster render queues, tilemaps, ECS inspection

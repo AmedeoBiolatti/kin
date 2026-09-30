@@ -17,6 +17,13 @@ struct Shot { Vec2f pos{}, velocity{}; float life = 0; bool hostile = false; };
 struct Spark { Vec2f pos{}, velocity{}; float life = 0; };
 struct Pickup { Vec2f pos{}; float life = 15; };
 struct Impact { Vec2f pos{}; float life = .3f; };
+// Something a renderer may want to show: an effect cue, never read by the simulation.
+struct ArenaEvent {
+    enum class Kind : u8 { Hit, Kill, Pickup, Dash, Hurt };
+    Kind kind = Kind::Hit;
+    Vec2f pos{};
+    int enemy_kind = 0;
+};
 enum class PowerEffect { None, Move, DashCooldown, DashDuration, DashSpeed, Damage, Fire,
     Magnet, Hull, Pull, Repair, ShotSpeed, ShotLife, Pellets, Armor, Regen };
 struct PowerUp { std::string_view name, description; int parent, cost; PowerEffect effect=PowerEffect::None; float value=0; };
@@ -91,7 +98,24 @@ public:
     bool buy_power(int id);
     int max_health() const { return _stats.hull; }
     const PowerStats& power_stats() const { return _stats; }
+
+    // Visual state for renderers; the simulation never reads it.
+    std::vector<ArenaEvent> events;  // appended by step(), at most 1024; the renderer clears it
+    Vec2f facing() const { return _facing; }
+    Vec2f travel() const { return _travel; }
+    bool dashing() const { return _dash > 0; }
+    bool hurt() const { return _hurt > 0; }
+    bool muzzle_flash() const { return _muzzle > 0; }
+    const std::vector<Impact>& impacts() const { return _impacts; }
+    const std::vector<EcsEntity>& enemies() const { return _enemies; }
+    // Draws enemies with textures (one per kind, at `sizes`) instead of flat rects.
+    void use_enemy_textures(const std::array<Texture, 3>& textures, const std::array<Vec2f, 3>& sizes);
+    // The ECS-rendered entities alone (enemies), into `queue`.
+    void collect_entities(RenderQueue& queue, const RenderView& view);
 private:
+    void event(ArenaEvent::Kind kind, Vec2f pos, int enemy_kind = 0) {
+        if (events.size() < 1024) events.push_back({kind, pos, enemy_kind});
+    }
     float random(float lo, float hi);
     void respawn(EcsEntity entity);
     void burst(Vec2f pos);
