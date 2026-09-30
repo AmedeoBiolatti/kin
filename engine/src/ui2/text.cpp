@@ -114,7 +114,7 @@ public:
 
 private:
     struct GlyphAtlas {
-        const Renderer2D* renderer = nullptr;
+        u64 renderer_id = 0; // Renderer2D::id(), never a reused address
         Texture texture;
         u64 last_used = 0;
     };
@@ -130,7 +130,7 @@ private:
     GlyphAtlas* find_glyph_atlas(Renderer2D& renderer) const {
         ++_atlas_tick;
         auto found = std::ranges::find_if(_glyph_atlases, [&](const GlyphAtlas& atlas) {
-            return atlas.renderer == &renderer;
+            return atlas.renderer_id == renderer.id();
         });
         if (found != _glyph_atlases.end()) {
             found->last_used = _atlas_tick;
@@ -148,7 +148,7 @@ private:
 
     GlyphAtlas build_glyph_atlas(Renderer2D& renderer) const {
         GlyphAtlas atlas;
-        atlas.renderer = &renderer;
+        atlas.renderer_id = renderer.id();
 
         constexpr i32 cell_w = glyph_w + atlas_padding * 2;
         constexpr i32 cell_h = glyph_h + atlas_padding * 2;
@@ -313,7 +313,7 @@ private:
     };
 
     struct CachedTextTexture {
-        const Renderer2D* renderer = nullptr;
+        u64 renderer_id = 0;
         std::string text;
         Color color{};
         f32 scale = 1.0f;
@@ -330,7 +330,7 @@ private:
     };
 
     struct GlyphAtlas {
-        const Renderer2D* renderer = nullptr;
+        u64 renderer_id = 0;
         f32 scale = 1.0f;
         Texture texture;
         std::array<CachedGlyph, 128> glyphs{};
@@ -392,7 +392,7 @@ private:
     GlyphAtlas* find_glyph_atlas(Renderer2D& renderer, TTF_Font* font, f32 scale) const {
         ++_cache_tick;
         auto found = std::ranges::find_if(_glyph_atlases, [&](const GlyphAtlas& atlas) {
-            return atlas.renderer == &renderer && same_scale(atlas.scale, scale);
+            return atlas.renderer_id == renderer.id() && same_scale(atlas.scale, scale);
         });
         if (found != _glyph_atlases.end()) {
             found->last_used = _cache_tick;
@@ -409,7 +409,7 @@ private:
 
     GlyphAtlas build_glyph_atlas(Renderer2D& renderer, TTF_Font* font, f32 scale) const {
         GlyphAtlas atlas;
-        atlas.renderer = &renderer;
+        atlas.renderer_id = renderer.id();
         atlas.scale = scale;
 
         std::vector<GlyphSurface> surfaces;
@@ -550,7 +550,7 @@ private:
     const CachedTextTexture* find_cached_texture(Renderer2D& renderer, std::string_view text, Color color, f32 scale) const {
         ++_cache_tick;
         auto found = std::ranges::find_if(_cache, [&](const CachedTextTexture& entry) {
-            return entry.renderer == &renderer && entry.text == text && entry.color == color && same_scale(entry.scale, scale);
+            return entry.renderer_id == renderer.id() && entry.text == text && entry.color == color && same_scale(entry.scale, scale);
         });
         if (found == _cache.end()) {
             return nullptr;
@@ -590,7 +590,7 @@ private:
         }
 
         _cache.push_back(CachedTextTexture{
-            .renderer = &renderer,
+            .renderer_id = renderer.id(),
             .text = copy,
             .color = color,
             .scale = scale,

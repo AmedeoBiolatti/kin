@@ -112,6 +112,10 @@ public:
     Renderer2D(Renderer2D&&) noexcept;
     Renderer2D& operator=(Renderer2D&&) noexcept;
 
+    // Unique for the life of the process and never reused, unlike the renderer's
+    // address. Caches of renderer-owned resources (such as font glyph atlases) key
+    // on it so a new renderer never picks up a dead one's textures.
+    u64 id() const { return _id; }
     std::string_view backend_name() const;
     RendererBackendCapabilities capabilities() const;
     RendererBackendStats backend_stats() const;
@@ -249,6 +253,7 @@ private:
     // identity). Called by PooledTarget's destructor.
     void release_render_target_(const RenderTarget& target);
 
+    u64 _id = 0;
     std::unique_ptr<IRenderer2DBackend> _backend;
     std::vector<RenderTargetPoolEntry> _rt_pool;
     std::unordered_map<int, ShaderHandle> _builtin_shaders; // BuiltinShader -> cached handle

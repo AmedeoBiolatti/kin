@@ -8,6 +8,7 @@
 #include "sdl_renderer2d_backend.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -71,6 +72,11 @@ bool valid_params(const ShaderParams& params) {
                     (LogFields{{.name = "floats", .value = std::to_string(params.uniforms.size())},
                                {.name = "max", .value = std::to_string(MaxShaderUniformFloats)}}));
     return false;
+}
+
+u64 next_renderer_id() {
+    static std::atomic<u64> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -156,7 +162,7 @@ Renderer2D::Renderer2D(Window& window, bool vsync)
 }
 
 Renderer2D::Renderer2D(std::unique_ptr<IRenderer2DBackend> backend)
-    : _backend(std::move(backend)) {
+    : _id(next_renderer_id()), _backend(std::move(backend)) {
     if (!_backend) {
         KIN_LOG_ERROR("render", "renderer backend missing");
         throw std::runtime_error("Renderer2D requires a backend");

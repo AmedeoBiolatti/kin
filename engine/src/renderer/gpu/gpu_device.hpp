@@ -83,6 +83,7 @@ private:
     void release_upload_ring();
 
     SDL_GPUDevice* _device = nullptr;
+    SharedDevice _shared; // handed to textures; nulled on destruction
     SDL_Window* _window = nullptr;
     SDL_GPUTextureFormat _swapchain_format = SDL_GPU_TEXTUREFORMAT_INVALID;
     SDL_GPUPresentMode _present_mode = SDL_GPU_PRESENTMODE_VSYNC;

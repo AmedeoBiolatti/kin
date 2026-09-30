@@ -5,6 +5,7 @@
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
+#include <kin/ui2/text.hpp>
 
 #include <SDL3_image/SDL_image.h>
 
@@ -20,6 +21,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -876,6 +878,61 @@ void test_gpu_logical_transforms_are_immediate() {
     }
 }
 
+// Fonts and textures can outlive the renderer that made them: the static
+// system-font cache holds glyph atlases until exit. Releasing them must not touch
+// the dead GPU device, and a new renderer at the same address must build its own
+// atlases instead of drawing with the dead renderer's.
+void test_gpu_resources_outlive_renderer() {
+    constexpr std::string_view test_name = "test_gpu_resources_outlive_renderer";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-lifetime-test", .width = 64, .height = 32, .hidden = true});
+        std::vector<kin::ui2::Font> fonts{kin::ui2::bitmap_font()};
+        if (kin::ui2::system_ui_font_available()) {
+            fonts.push_back(kin::ui2::system_ui_font(14.0f));
+        }
+        kin::Texture survivor;
+        std::optional<kin::Renderer2D> renderer; // one slot, so both renderers share an address
+        for (int round = 0; round < 2; ++round) {
+            std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+            if (!backend || backend->name() != "SDL_GPU") {
+                skip_or_require_gpu_test(test_name, "SDL_GPU backend was not selected");
+                return;
+            }
+            gpu_ready = true;
+            renderer.emplace(std::move(backend));
+            if (round == 0) {
+                const std::array<kin::u8, 4> px{255, 0, 0, 255};
+                survivor = renderer->create_texture_from_rgba(px.data(), {1, 1});
+            }
+            kin::RenderTarget target = renderer->create_render_target({48, 24}, kin::ScaleMode::Nearest);
+            for (const kin::ui2::Font& font : fonts) {
+                std::vector<kin::u8> pixels;
+                kin::Vec2i size{};
+                {
+                    const auto bind = renderer->scoped_render_target(target);
+                    renderer->clear(kin::Color::rgb(0, 0, 0));
+                    kin::ui2::draw_text(*renderer, font, "HI", {4.0f, 4.0f}, 1.0f, kin::Color::rgb(255, 255, 255));
+                    assert(renderer->read_rgba({0.0f, 0.0f, 48.0f, 24.0f}, pixels, size));
+                }
+                std::size_t lit = 0;
+                for (std::size_t i = 0; i + 3 < pixels.size(); i += 4) {
+                    lit += pixels[i] > 128 ? 1 : 0;
+                }
+                assert(lit > 0);
+            }
+            renderer.reset();
+        }
+        survivor = {}; // released after its device is gone
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_native_pixel_size_and_pointer_mapping() {
     constexpr std::string_view test_name = "test_gpu_native_pixel_size_and_pointer_mapping";
     bool gpu_ready = false;
@@ -1266,6 +1323,7 @@ int main() {
     test_gpu_shader_surface_binds_every_source();
     test_shader_params_and_formats_on_software_backends();
     test_gpu_data_textures_and_large_uniforms();
+    test_gpu_resources_outlive_renderer();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();
