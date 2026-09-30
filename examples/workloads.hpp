@@ -119,8 +119,9 @@ public:
     void each_enemy(F&& f) const {
         _movement.each([&](const Transform2D& t, const Enemy& e) { f(t.pos, e); });
     }
-    // Draws enemies with textures (one per kind, at `sizes`) instead of flat rects.
-    void use_enemy_textures(const std::array<Texture, 3>& textures, const std::array<Vec2f, 3>& sizes);
+    // Draws enemies with a texture instead of flat rects: each kind uses its
+    // `sources` region of `atlas`, drawn at `sizes`.
+    void use_enemy_textures(const Texture& atlas, const std::array<Rectf, 3>& sources, const std::array<Vec2f, 3>& sizes);
     // The ECS-rendered entities alone (enemies), into `queue`.
     void collect_entities(RenderQueue& queue, const RenderView& view);
 private:

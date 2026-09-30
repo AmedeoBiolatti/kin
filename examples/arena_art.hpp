@@ -59,7 +59,7 @@ private:
     bool _lit = false;
     Texture _player, _core, _shot, _bullet, _ring, _cone, _halo, _shadow, _reactor, _fan, _edge;
     std::array<Texture, 4> _floors;
-    std::array<Texture, 3> _enemies;
+    Texture _enemies; // all three classes, see make_enemy_atlas()
     SpriteCatalog _sprites;
     LightLayer _lighting;
     ParticleSystem _particles{make_key(0x5167'5ee9)};

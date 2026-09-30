@@ -59,23 +59,30 @@ public:
     // A `width` x `height` design-unit canvas stored at `scale` pixels per unit.
     Canvas(float width, float height, float scale)
         : _w(static_cast<int>(width * scale)), _h(static_cast<int>(height * scale)), _scale(scale),
-          _px(static_cast<std::size_t>(_w * _h)) {}
+          _cell{0, 0, width, height}, _px(static_cast<std::size_t>(_w * _h)) {}
+
+    // Draw into `cell` (design units) from now on: shapes use the cell's own
+    // coordinates and are clipped to it, so several sprites can share a texture.
+    void set_cell(Rectf cell) { _cell = cell; }
 
     template <class Sdf, class Paint>
     void fill(Sdf&& sdf, Paint&& paint) {
-        fill({0, 0, _w / _scale, _h / _scale}, sdf, paint);
+        fill({0, 0, _cell.w, _cell.h}, sdf, paint);
     }
 
     // Only the pixels inside `area` (design units): small details on big canvases.
     template <class Sdf, class Paint>
     void fill(Rectf area, Sdf&& sdf, Paint&& paint) {
         const float e = .5f / _scale;
-        const int x0 = std::max(0, int(std::floor(area.x * _scale)) - 1), y0 = std::max(0, int(std::floor(area.y * _scale)) - 1);
-        const int x1 = std::min(_w, int(std::ceil((area.x + area.w) * _scale)) + 1);
-        const int y1 = std::min(_h, int(std::ceil((area.y + area.h) * _scale)) + 1);
+        const float left = _cell.x + std::max(area.x, 0.0f), top = _cell.y + std::max(area.y, 0.0f);
+        const float right = _cell.x + std::min(area.x + area.w, _cell.w), bottom = _cell.y + std::min(area.y + area.h, _cell.h);
+        const int x0 = std::max(int(std::floor(_cell.x * _scale)), int(std::floor(left * _scale)) - 1);
+        const int y0 = std::max(int(std::floor(_cell.y * _scale)), int(std::floor(top * _scale)) - 1);
+        const int x1 = std::min({_w, int(std::ceil((_cell.x + _cell.w) * _scale)), int(std::ceil(right * _scale)) + 1});
+        const int y1 = std::min({_h, int(std::ceil((_cell.y + _cell.h) * _scale)), int(std::ceil(bottom * _scale)) + 1});
         for (int y = y0; y < y1; ++y) {
             for (int x = x0; x < x1; ++x) {
-                const Vec2f p{(x + .5f) / _scale, (y + .5f) / _scale};
+                const Vec2f p{(x + .5f) / _scale - _cell.x, (y + .5f) / _scale - _cell.y};
                 const float d = sdf(p);
                 const float coverage = std::clamp(.5f - d * _scale, 0.0f, 1.0f);
                 if (coverage <= 0) {
@@ -131,6 +138,7 @@ private:
 
     int _w, _h;
     float _scale;
+    Rectf _cell;
     std::vector<Rgba> _px;
 };
 
@@ -258,8 +266,7 @@ Texture make_player(Renderer2D& renderer) {
     return canvas.upload(renderer);
 }
 
-Texture make_chaser(Renderer2D& renderer) {
-    Canvas canvas(64, 64, sprite_scale);
+void paint_chaser(Canvas& canvas) {
     const std::vector<Vec2f> body = star({32, 32}, 5, 30, 12.5f, -pi / 2);
     canvas.fill([&](Vec2f p) { return polygon(p, body); }, metal({.base = rgb(255, 98, 112), .outline = rgb(58, 10, 22)}, {32, 32}, 28));
     for (int i = 0; i < 5; ++i) {
@@ -270,11 +277,9 @@ Texture make_chaser(Renderer2D& renderer) {
     const std::vector<Vec2f> plate = regular({32, 32}, 5, 12, -pi / 2);
     canvas.fill([&](Vec2f p) { return polygon(p, plate); }, metal({.base = rgb(150, 36, 52), .outline = rgb(50, 8, 18), .bevel = 1.8f}, {32, 32}, 12));
     canvas.fill([](Vec2f p) { return circle(p, {32, 32.5f}, 5.2f); }, emissive(rgb(255, 244, 230), rgb(255, 120, 110), rgb(60, 8, 16), 5.2f));
-    return canvas.upload(renderer);
 }
 
-Texture make_brute(Renderer2D& renderer) {
-    Canvas canvas(64, 64, sprite_scale);
+void paint_brute(Canvas& canvas) {
     const std::vector<Vec2f> plate = regular({32, 32}, 6, 30, pi / 6);
     canvas.fill([&](Vec2f p) { return polygon(p, plate); }, metal({.base = rgb(240, 162, 62), .outline = rgb(58, 30, 8), .bevel = 3}, {32, 32}, 30));
     const std::vector<Vec2f> seam_ring = regular({32, 32}, 6, 23, pi / 6);
@@ -286,11 +291,9 @@ Texture make_brute(Renderer2D& renderer) {
         canvas.fill([&](Vec2f p) { return circle(p, rivet, 2.1f); }, metal({.base = rgb(255, 214, 150), .outline = rgb(70, 36, 10), .outline_width = .6f, .bevel = 1.2f, .gloss = .7f}, rivet, 2));
     }
     canvas.fill([](Vec2f p) { return capsule(p, {23, 32}, {41, 32}, 3.2f); }, emissive(rgb(255, 248, 210), rgb(255, 176, 70), rgb(44, 20, 4), 3.2f));
-    return canvas.upload(renderer);
 }
 
-Texture make_orbiter(Renderer2D& renderer) {
-    Canvas canvas(64, 64, sprite_scale);
+void paint_orbiter(Canvas& canvas) {
     for (int i = 0; i < 4; ++i) {
         const float angle = pi / 4 + i * pi / 2;
         const std::vector<Vec2f> fin = regular({32 + std::cos(angle) * 25, 32 + std::sin(angle) * 25}, 4, 6, angle);
@@ -305,6 +308,21 @@ Texture make_orbiter(Renderer2D& renderer) {
     }
     canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 9.5f); }, metal({.base = rgb(70, 46, 136), .outline = rgb(24, 12, 50), .bevel = 1.6f}, {32, 32}, 9));
     canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 4.2f); }, emissive(rgb(236, 220, 255), rgb(170, 120, 255), rgb(30, 14, 60), 4.2f));
+}
+
+// The three enemy classes side by side in one texture. Enemies are drawn in y
+// order, so their classes interleave; with one texture per class every change
+// started a new GPU draw (about 28,000 a frame at 100,000 enemies), while a
+// shared texture lets the whole run batch together.
+constexpr std::array<Rectf, 3> enemy_cells{{{0, 0, 64, 64}, {64, 0, 64, 64}, {128, 0, 64, 64}}};
+
+Texture make_enemy_atlas(Renderer2D& renderer) {
+    Canvas canvas(192, 64, sprite_scale);
+    const std::array<void (*)(Canvas&), 3> painters{paint_chaser, paint_brute, paint_orbiter};
+    for (std::size_t i = 0; i < painters.size(); ++i) {
+        canvas.set_cell(enemy_cells[i]);
+        painters[i](canvas);
+    }
     return canvas.upload(renderer);
 }
 
@@ -514,7 +532,7 @@ ParticleBurst burst(Vec2f at, int count, ParticleRange speed, ParticleRange life
 
 void ArenaPainter::init(Renderer2D& renderer, Arena& arena) {
     _player = make_player(renderer);
-    _enemies = {make_chaser(renderer), make_brute(renderer), make_orbiter(renderer)};
+    _enemies = make_enemy_atlas(renderer);
     _core = make_core(renderer);
     _bullet = make_bullet(renderer);
     _ring = make_ring(renderer);
@@ -532,7 +550,12 @@ void ArenaPainter::init(Renderer2D& renderer, Arena& arena) {
     _sprites.set_texture("halo", _halo);
     _sprites.add({.id = "halo", .texture_id = "halo", .source = {0, 0, float(halo_size.x), float(halo_size.y)}});
     _particles.reserve(4096);
-    arena.use_enemy_textures(_enemies, {{{28, 28}, {38, 38}, {32, 32}}});
+    std::array<Rectf, 3> sources{};
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const Rectf cell = enemy_cells[i];
+        sources[i] = {cell.x * sprite_scale, cell.y * sprite_scale, cell.w * sprite_scale, cell.h * sprite_scale};
+    }
+    arena.use_enemy_textures(_enemies, sources, {{{28, 28}, {38, 38}, {32, 32}}});
     _ready = true;
 }
 

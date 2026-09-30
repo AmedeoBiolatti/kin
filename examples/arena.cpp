@@ -312,13 +312,13 @@ void Arena::collect(RenderQueue& queue, const RenderView& view) {
     if (_hurt>0) ring(player,23,Color::rgba(255,136,119,170),4);
 }
 
-void Arena::use_enemy_textures(const std::array<Texture, 3>& textures, const std::array<Vec2f, 3>& sizes) {
+void Arena::use_enemy_textures(const Texture& atlas, const std::array<Rectf, 3>& sources, const std::array<Vec2f, 3>& sizes) {
     world.raw().defer([&] {
         for (auto entity : _enemies) {
             const int kind = entity.get<Enemy>()->kind;
             const Vec2f size = sizes[kind];
             entity.remove<RectRenderer>();
-            entity.set(TextureRenderer{.texture = textures[kind], .offset = {-size.x / 2, -size.y / 2}, .size = size,
+            entity.set(TextureRenderer{.texture = atlas, .source = sources[kind], .offset = {-size.x / 2, -size.y / 2}, .size = size,
                 .layer = 1, .y_sort = true});
         }
     });
