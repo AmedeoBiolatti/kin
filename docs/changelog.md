@@ -7,6 +7,24 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-09-30
+
+A multi-line text editor for ui2, faster render queues, tilemaps, ECS inspection
+and headless rendering, and a fix for GPU games crashing on exit.
+
+### Upgrading from 0.2.0
+
+- `RenderCommand` fields changed: a Sprite command keeps its texture in
+  `texture` and its region in `source` (the `sprite` member is gone), and
+  `material` is a `const Material2D*`. Only code that builds or reads commands
+  directly is affected; `RenderQueue`'s methods are unchanged.
+- After `RenderQueue::flush`, `commands()` keeps submission order; call
+  `sort_commands()` first if you need the commands themselves sorted.
+- `Input::consume_frame_edges` also clears typed text and the wheel delta.
+- TTF text drawn from the glyph atlas is a little narrower (true advances and
+  kerning), matching `measure_text`; layouts placed by eye may shift a pixel or
+  two.
+
 ### Added
 
 - `Renderer2D::id()`: unique for the life of the process, never reused.
