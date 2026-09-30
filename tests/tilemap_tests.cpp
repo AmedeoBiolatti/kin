@@ -532,6 +532,75 @@ void test_collision_queries_and_extraction() {
     assert(map.collision_rects("decor").empty());
 }
 
+// collision_rects merges each run into the first earlier rect with the same
+// columns ending where the run starts. Check it against that rule written as a
+// plain scan, on random maps with several layers (merging across layers when all
+// are visited) and a layer that does not collide.
+void test_collision_rects_match_reference_merge() {
+    kin::u32 seed = 99;
+    const auto next = [&](kin::u32 range) {
+        seed = seed * 1664525u + 1013904223u;
+        return (seed >> 8) % range;
+    };
+    for (int trial = 0; trial < 20; ++trial) {
+        kin::TileMap map;
+        map.resize(3 + static_cast<kin::i32>(next(30)), 2 + static_cast<kin::i32>(next(30)));
+        map.tile_w = 8;
+        map.tile_h = 6;
+        map.tileset.resize(3);
+        map.tileset.tiles[1] = {.id = "floor"};
+        map.tileset.tiles[2] = {.id = "wall", .solid = true};
+        map.add_layer("upper", 1);
+        map.add_layer("ghost", 2).participates_in_collision = false;
+        const kin::u32 density = 2 + next(4);
+        for (const std::string_view layer : {"ground", "upper", "ghost"}) {
+            for (kin::i32 row = 0; row < map.rows; ++row) {
+                for (kin::i32 col = 0; col < map.cols; ++col) {
+                    // Column bands make runs line up across rows and layers.
+                    const bool wall = (col / 3) % 2 == 0 ? next(density) != 0 : next(density) == 0;
+                    map.set(layer, col, row, wall ? 2 : 1);
+                }
+            }
+        }
+
+        for (const std::string_view layer_id : {"", "ground", "upper", "ghost"}) {
+            std::vector<kin::Rectf> expected;
+            for (const kin::TileLayer& layer : map.layers) {
+                if ((!layer_id.empty() && layer.id != layer_id) || !layer.participates_in_collision) {
+                    continue;
+                }
+                for (kin::i32 row = 0; row < map.rows; ++row) {
+                    kin::i32 run_start = -1;
+                    for (kin::i32 col = 0; col <= map.cols; ++col) {
+                        const kin::TileDefinition* tile = col < map.cols
+                            ? map.tile(layer.cells[static_cast<std::size_t>(row * map.cols + col)].tile_id)
+                            : nullptr;
+                        const bool blocked = tile && tile->solid;
+                        if (blocked && run_start < 0) {
+                            run_start = col;
+                        } else if (!blocked && run_start >= 0) {
+                            const kin::Rectf rect{static_cast<float>(run_start * map.tile_w),
+                                                  static_cast<float>(row * map.tile_h),
+                                                  static_cast<float>((col - run_start) * map.tile_w),
+                                                  static_cast<float>(map.tile_h)};
+                            const auto merge = std::ranges::find_if(expected, [&](const kin::Rectf& existing) {
+                                return existing.x == rect.x && existing.w == rect.w && existing.y + existing.h == rect.y;
+                            });
+                            if (merge != expected.end()) {
+                                merge->h += rect.h;
+                            } else {
+                                expected.push_back(rect);
+                            }
+                            run_start = -1;
+                        }
+                    }
+                }
+            }
+            assert(map.collision_rects(layer_id) == expected);
+        }
+    }
+}
+
 void test_query_layer_participation_filters() {
     kin::TileMap map;
     map.resize(2, 1);
@@ -995,6 +1064,7 @@ int main() {
     test_flood_fill();
     test_pattern_extract_stamp_and_roundtrip();
     test_collision_queries_and_extraction();
+    test_collision_rects_match_reference_merge();
     test_query_layer_participation_filters();
     test_collision_rect_order_and_named_layer_blocking();
     test_collision_polygon_roundtrip();

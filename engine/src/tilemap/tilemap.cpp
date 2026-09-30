@@ -14,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 namespace kin {
@@ -1560,7 +1561,18 @@ bool TileMap::blocks_rect(std::string_view layer_id, Rectf world_rect) const {
 }
 
 std::vector<Rectf> TileMap::collision_rects(std::string_view layer_id) const {
+    // Each horizontal run of solid cells merges into the first earlier rect with
+    // the same columns whose bottom edge is the run's top edge (across layers too,
+    // when every layer is visited). Rects are indexed by (first column, width,
+    // bottom row), in ascending order, so a merge is a lookup rather than a scan
+    // of every rect found so far.
     std::vector<Rectf> runs;
+    std::unordered_map<u64, std::vector<u32>> by_edge;
+    const auto edge_key = [](i32 col, i32 width, i32 bottom_row) {
+        return (static_cast<u64>(static_cast<u32>(col)) << 42) |
+               (static_cast<u64>(static_cast<u32>(width)) << 21) |
+               static_cast<u64>(static_cast<u32>(bottom_row));
+    };
     visit_layers(*this, layer_id, [&](const TileLayer& tile_layer) {
         if (!tile_layer.participates_in_collision) {
             return;
@@ -1572,23 +1584,26 @@ std::vector<Rectf> TileMap::collision_rects(std::string_view layer_id) const {
                 if (blocked && run_start < 0) {
                     run_start = col;
                 } else if (!blocked && run_start >= 0) {
-                    Rectf rect{
-                        static_cast<f32>(run_start * tile_w),
-                        static_cast<f32>(row * tile_h),
-                        static_cast<f32>((col - run_start) * tile_w),
-                        static_cast<f32>(tile_h),
-                    };
-                    bool merged = false;
-                    for (Rectf& existing : runs) {
-                        if (same_rect_span(existing, rect)) {
-                            existing.h += rect.h;
-                            merged = true;
-                            break;
+                    const i32 width = col - run_start;
+                    u32 index = 0;
+                    if (const auto found = by_edge.find(edge_key(run_start, width, row)); found != by_edge.end()) {
+                        index = found->second.front();
+                        found->second.erase(found->second.begin());
+                        if (found->second.empty()) {
+                            by_edge.erase(found);
                         }
+                        runs[index].h += static_cast<f32>(tile_h);
+                    } else {
+                        index = static_cast<u32>(runs.size());
+                        runs.push_back({
+                            static_cast<f32>(run_start * tile_w),
+                            static_cast<f32>(row * tile_h),
+                            static_cast<f32>(width * tile_w),
+                            static_cast<f32>(tile_h),
+                        });
                     }
-                    if (!merged) {
-                        runs.push_back(rect);
-                    }
+                    std::vector<u32>& below = by_edge[edge_key(run_start, width, row + 1)];
+                    below.insert(std::ranges::lower_bound(below, index), index);
                     run_start = -1;
                 }
             }
