@@ -1,5 +1,6 @@
 #include "arena_art.hpp"
 
+#include <kin/core/profile.hpp>
 #include <kin/renderer/shader.hpp>
 
 #include <algorithm>
@@ -673,9 +674,9 @@ void ArenaPainter::collect_lights(const Arena& arena, const Camera2D& camera) {
             _lights.push_back({.position = s, .radius = 90, .color = Color::rgb(255, 164, 84), .intensity = 1.1f * impact.life / .3f});
         }
     }
-    for (const EcsEntity entity : arena.enemies()) {
-        if (entity.get<Enemy>()->kind == 2 && entity.get<Enemy>()->cooldown < .45f) {
-            const Vec2f s = camera.world_to_screen(entity.get<Transform2D>()->pos);
+    for (const VisibleEnemy& enemy : _visible) {
+        if (enemy.kind == 2 && enemy.cooldown < .45f) {
+            const Vec2f s = camera.world_to_screen(enemy.pos);
             if (on_screen(s, 70)) {
                 _lights.push_back({.position = s, .radius = 70, .color = Color::rgb(210, 160, 255), .intensity = .6f});
             }
@@ -695,12 +696,11 @@ void ArenaPainter::collect_effects(const Arena& arena, const RenderView& view) {
         queue.draw_texture({}, texture, {p.x - size / 2, p.y - size / 2, size, size}, tint, {}, rotation);
     };
 
-    for (const EcsEntity entity : arena.enemies()) {
-        const Vec2f p = entity.get<Transform2D>()->pos;
+    for (const VisibleEnemy& enemy : _visible) {
+        const Vec2f p = enemy.pos;
         if (!visible(p, 32)) {
             continue;
         }
-        const Enemy& enemy = *entity.get<Enemy>();
         if (enemy.kind == 1) {
             // Armor left, once damaged: three pips over the plate.
             for (int i = 0; i < 3 && enemy.hp < 3; ++i) {
@@ -762,21 +762,46 @@ void ArenaPainter::collect_effects(const Arena& arena, const RenderView& view) {
     submit_particles(_glow, _particles.particles(), {.sprites = &_sprites, .sort = false});
 }
 
+// The enemies near the view, gathered in one pass over the arena's storage;
+// shadows, lights and effects then only visit these, however large the arena.
+void ArenaPainter::gather_visible(const Arena& arena, const Camera2D& camera) {
+    KIN_PROFILE_SCOPE("example.art.gather");
+    constexpr float margin = 80; // covers the widest per-enemy effect (a 70px light)
+    const Vec2f view = camera.viewport;
+    _visible.clear();
+    arena.each_enemy([&](Vec2f pos, const Enemy& enemy) {
+        const Vec2f s = camera.world_to_screen(pos);
+        if (s.x > -margin && s.y > -margin && s.x < view.x + margin && s.y < view.y + margin) {
+            _visible.push_back({pos, enemy.kind, enemy.hp, enemy.cooldown});
+        }
+    });
+}
+
 void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& camera) {
-    draw_floor(renderer, arena, camera);
+    {
+        KIN_PROFILE_SCOPE("example.art.floor");
+        draw_floor(renderer, arena, camera);
+    }
+    gather_visible(arena, camera);
 
     const RenderView view{.camera = &camera, .culling_enabled = true};
     // Light the environment only: enemies, shots and the player are drawn after,
     // at full colour, so threats read the same in any light.
-    collect_lights(arena, camera);
-    draw_shadows(renderer, arena, camera);
-    _lit = _lighting.apply(renderer, {0, 0, camera.viewport.x, camera.viewport.y}, ambient, _lights);
-    arena.collect_entities(_world, view); // enemies: the ECS TextureRenderer path
-    _world.flush(renderer, view);
-
-    collect_effects(arena, view);
-    _emissive.flush(renderer, view);
     {
+        KIN_PROFILE_SCOPE("example.art.lighting");
+        collect_lights(arena, camera);
+        draw_shadows(renderer, arena, camera);
+        _lit = _lighting.apply(renderer, {0, 0, camera.viewport.x, camera.viewport.y}, ambient, _lights);
+    }
+    {
+        arena.collect_entities(_world, view); // enemies: the ECS TextureRenderer path
+        KIN_PROFILE_SCOPE("example.art.enemies_flush");
+        _world.flush(renderer, view);
+    }
+    {
+        KIN_PROFILE_SCOPE("example.art.effects");
+        collect_effects(arena, view);
+        _emissive.flush(renderer, view);
         const auto additive = renderer.scoped_blend_mode(BlendMode::Additive);
         _glow.flush(renderer, view);
     }
@@ -798,8 +823,8 @@ void ArenaPainter::draw_shadows(Renderer2D& renderer, const Arena& arena, const 
         }
         renderer.draw_texture(_shadow, {0, 0, 64, 64}, {p.x - s / 2, p.y - s / 2, s, s}, shade);
     };
-    for (const EcsEntity entity : arena.enemies()) {
-        cast(entity.get<Transform2D>()->pos, size[static_cast<std::size_t>(std::clamp(entity.get<Enemy>()->kind, 0, 2))]);
+    for (const VisibleEnemy& enemy : _visible) {
+        cast(enemy.pos, size[static_cast<std::size_t>(std::clamp(enemy.kind, 0, 2))]);
     }
     cast(arena.player, 44);
 }

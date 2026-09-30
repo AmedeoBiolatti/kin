@@ -5,6 +5,9 @@
 #include <kin/ui2/context.hpp>
 #include <array>
 #include <deque>
+#include <memory>
+
+namespace kin { class JobSystem; }
 
 namespace examples {
 using namespace kin;
@@ -77,7 +80,9 @@ struct PowerStats {
 
 class Arena {
 public:
+    static constexpr int max_enemies = 100000;
     explicit Arena(int enemies = 300, u64 seed = 7);
+    ~Arena();
     void reset(u64 seed);
     void step(float dt, ArenaInput input, bool invincible = false);
     ArenaInput autopilot() const;
@@ -108,6 +113,12 @@ public:
     bool muzzle_flash() const { return _muzzle > 0; }
     const std::vector<Impact>& impacts() const { return _impacts; }
     const std::vector<EcsEntity>& enemies() const { return _enemies; }
+    // Calls f(position, enemy) for every enemy, in storage order: much faster than
+    // looking each one up through enemies() when there are many.
+    template <class F>
+    void each_enemy(F&& f) const {
+        _movement.each([&](const Transform2D& t, const Enemy& e) { f(t.pos, e); });
+    }
     // Draws enemies with textures (one per kind, at `sizes`) instead of flat rects.
     void use_enemy_textures(const std::array<Texture, 3>& textures, const std::array<Vec2f, 3>& sizes);
     // The ECS-rendered entities alone (enemies), into `queue`.
@@ -123,6 +134,15 @@ private:
     flecs::query<Transform2D, Enemy> _movement;
     std::vector<EcsEntity> _enemies;
     std::vector<int> _next;
+    // Per slot: positions, kept by the movement pass and respawns (autopilot and
+    // collisions read these, not the ECS), and the enemies' components, refreshed
+    // by each movement pass for that step's collisions only.
+    std::vector<Vec2f> _pos;
+    std::vector<Enemy*> _enemy_at;
+    std::vector<int> _killed; // slots killed this step
+    std::vector<float> _distance; // per storage row, this step: distance to the player
+    std::vector<Vec2f> _aim;      // and the unit vector toward it
+    std::unique_ptr<JobSystem> _jobs; // started on the first step big enough to use it
     std::array<int, 48 * 32> _grid{};
     RngKey _rng{};
     float _fire = 0, _hurt = 0, _dash = 0;

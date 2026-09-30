@@ -41,6 +41,9 @@ public:
     // flushes see them sorted. Does nothing when nothing changed since the last sort.
     void sort_commands();
     void cull(const RenderView& view);
+    // Culls only the commands in [first, last), e.g. ones appended after
+    // submissions that were already culled one by one.
+    void cull(const RenderView& view, std::size_t first, std::size_t last = static_cast<std::size_t>(-1));
     // flush draws in sorted order without moving the commands: unless
     // sort_commands() was called, commands() keeps submission order afterwards.
     void flush(Renderer2D& renderer);

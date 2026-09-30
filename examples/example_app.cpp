@@ -31,7 +31,7 @@ Options parse(int argc, char** argv) {
         if (arg == "--benchmark") o.benchmark = true;
         else if (arg == "--power-grid") o.power_grid = true;
         else if (arg == "--stress") { o.enemies = 1200; o.runs = 10000; }
-        else if (arg == "--enemies") integer(o.enemies, 5000);
+        else if (arg == "--enemies") integer(o.enemies, Arena::max_enemies);
         else if (arg == "--runs") integer(o.runs, 100000);
         else if (arg == "--capture-frame") integer(o.capture_frame, 1000000);
         else if (arg == "--width") integer(o.width, 4096);
@@ -128,7 +128,7 @@ int run_example(int argc, char** argv, bool tracker) {
     try {
         const Options options = parse(argc, argv);
         if (options.help) {
-            std::cout << "--benchmark (autoplay/scripted UI) --stress --enemies 1..5000 --runs 1..100000\n"
+            std::cout << "--benchmark (autoplay/scripted UI) --stress --enemies 1..100000 --runs 1..100000\n"
                 "--scenario idle|live|scroll|churn --vsync --screenshot PATH --capture-frame N\n"
                 "--width 640..4096 --height 480..4096 --ui-scale 0.5..4 (default: automatic)\n"
                 "--power-grid (Signal Siege: start on the paused upgrade screen) --mute (Signal Siege: no sound)\n"

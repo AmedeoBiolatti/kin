@@ -5,6 +5,7 @@
 #include <kin/renderer/render_profile.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 namespace kin {
@@ -106,7 +107,8 @@ WorldRenderState::WorldRenderState(flecs::world& world)
                               .each([](flecs::entity entity, Transform2D&) {
                                   entity.ensure<WorldTransform>();
                               })),
-      _transforms(world.query_builder<WorldTransform, const Transform2D>()
+      _transforms(world.query_builder<WorldTransform, const Transform2D, const WorldTransform>()
+                      .term_at(2).parent().cascade().optional()
                       .cached()
                       .build()),
       _sprites(world.query_builder<const Transform2D, const WorldTransform, const SpriteRenderer>().cached().build()),
@@ -118,22 +120,19 @@ WorldRenderState::WorldRenderState(flecs::world& world)
 }
 
 void WorldRenderState::propagate_transforms() {
+    // Tables come in hierarchy depth order (cascade), and every entity in a table
+    // shares its parent, so each table is one tight loop with no per-entity lookups.
     _transforms.run([](flecs::iter& it) {
         while (it.next()) {
-            for (auto i : it) {
-                auto& self = it.field_at<WorldTransform>(0, i);
-                const auto& local = it.field_at<const Transform2D>(1, i);
-                self.pos = local.pos;
-                self.rotation = local.rotation;
-                const flecs::entity entity = it.entity(i);
-                const flecs::entity parent_entity = entity.parent();
-                if (parent_entity) {
-                    const auto* parent = parent_entity.get<WorldTransform>();
-                    if (parent != nullptr) {
-                        self.pos = add(self.pos, parent->pos);
-                        self.rotation += parent->rotation;
-                    }
-                }
+            const auto self = it.field<WorldTransform>(0);
+            const auto local = it.field<const Transform2D>(1);
+            WorldTransform parent{};
+            if (it.is_set(2)) {
+                parent = it.field<const WorldTransform>(2)[0];
+            }
+            for (const auto i : it) {
+                self[i].pos = add(local[i].pos, parent.pos);
+                self[i].rotation = local[i].rotation + parent.rotation;
             }
         }
     });
@@ -142,6 +141,7 @@ void WorldRenderState::propagate_transforms() {
 void WorldRenderState::collect_all(RenderQueue& queue,
                                    const EcsRenderFilter& include,
                                    SpriteRenderOptions options) {
+    const std::size_t existing = queue.size(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
         if (!include || include(entity)) {
@@ -163,6 +163,8 @@ void WorldRenderState::collect_all(RenderQueue& queue,
             submit_line(queue, entity, transform, line, options.view);
         }
     });
+    // Everything above was culled as it was submitted; only particles still need it.
+    const std::size_t unculled = queue.size();
     _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
         if (!include || include(entity)) {
             submit_particles(queue, particles);
@@ -174,11 +176,13 @@ void WorldRenderState::collect_all(RenderQueue& queue,
         }
     });
     if (options.view) {
-        queue.cull(*options.view);
+        queue.cull(*options.view, unculled);
+        queue.cull(*options.view, 0, existing);
     }
 }
 
 void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions options) {
+    const std::size_t existing = queue.size(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
         if (sprite.static_renderable) {
@@ -201,11 +205,12 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
         }
     });
     if (options.view) {
-        queue.cull(*options.view);
+        queue.cull(*options.view, 0, existing); // the rest was culled as it was submitted
     }
 }
 
 void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions options) {
+    const std::size_t existing = queue.size(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
         if (!sprite.static_renderable) {
@@ -227,6 +232,8 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
             submit_line(queue, entity, transform, line, options.view);
         }
     });
+    // Everything above was culled as it was submitted; only particles still need it.
+    const std::size_t unculled = queue.size();
     _particle_systems.each([&](flecs::entity, const ParticleSystemComponent& particles) {
         submit_particles(queue, particles);
     });
@@ -234,7 +241,8 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
         submit_particles(queue, field);
     });
     if (options.view) {
-        queue.cull(*options.view);
+        queue.cull(*options.view, unculled);
+        queue.cull(*options.view, 0, existing);
     }
 }
 
@@ -280,8 +288,21 @@ bool submit_sprite(RenderQueue& queue,
     const Vec2f pos = transform.pos;
     const Rectf dest = sprite_draw_rect(pos, sprite, resolved);
     const f32 rotation = transform.rotation + sprite.rotation;
-    if (view && rotation == 0.0f && !render_view_visible(*view, dest)) {
-        return false;
+    if (view) {
+        Rectf bounds = dest;
+        if (rotation != 0.0f) {
+            // Turned about its pivot, the sprite stays inside the circle through its
+            // farthest corner.
+            const Vec2f pivot = resolved_pivot(sprite, resolved);
+            const Vec2f p{dest.x + dest.w * pivot.x, dest.y + dest.h * pivot.y};
+            const f32 dx = std::max(std::abs(p.x - dest.x), std::abs(dest.x + dest.w - p.x));
+            const f32 dy = std::max(std::abs(p.y - dest.y), std::abs(dest.y + dest.h - p.y));
+            const f32 r = std::sqrt(dx * dx + dy * dy);
+            bounds = {p.x - r, p.y - r, 2 * r, 2 * r};
+        }
+        if (!render_view_visible(*view, bounds)) {
+            return false;
+        }
     }
     const RenderKey key = key_for(sprite.layer,
                                   sprite.order,

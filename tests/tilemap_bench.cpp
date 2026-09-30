@@ -674,6 +674,7 @@ const std::vector<BenchCase>& bench_cases() {
 #if defined(KIN_BENCH_HAS_EXAMPLES)
         {"examples", "arena_1200_encounter", arena_workload<1200>},
         {"examples", "arena_5000_encounter", arena_workload<5000>},
+        {"examples", "arena_100000_encounter", arena_workload<100000>},
         {"examples", "tracker_idle_10k", tracker_workload<0>},
         {"examples", "tracker_scroll_10k", tracker_workload<1>},
         {"examples", "tracker_churn_10k", tracker_workload<2>},

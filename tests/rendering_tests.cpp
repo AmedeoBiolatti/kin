@@ -96,6 +96,23 @@ void test_render_queue_sorts_and_culls() {
     assert((raw->rects[1] == kin::Rectf{20.0f, 20.0f, 4.0f, 4.0f}));
 }
 
+// A ranged cull leaves the commands outside [first, last) alone.
+void test_render_queue_culls_a_range() {
+    kin::RenderQueue queue;
+    for (const float x : {-100.0f, 10.0f, -100.0f, 10.0f, -100.0f}) {
+        queue.fill_rect({}, {x, 10.0f, 4.0f, 4.0f}, kin::colors::white);
+    }
+    kin::RenderView view{.cull_rect = {0.0f, 0.0f, 40.0f, 40.0f}, .culling_enabled = true};
+    queue.cull(view, 1, 3);
+    assert(queue.size() == 4);
+    assert(queue.commands()[0].rect.x == -100.0f && queue.commands()[1].rect.x == 10.0f);
+    assert(queue.commands()[2].rect.x == 10.0f && queue.commands()[3].rect.x == -100.0f);
+    queue.cull(view, 3);
+    assert(queue.size() == 3);
+    queue.cull(view);
+    assert(queue.size() == 2);
+}
+
 // The queue sorts packed keys with a radix sort above a size threshold and a
 // comparison sort below it or once commands are out of submission order. Every
 // path must match a stable sort by (layer, y, order), i.e. ties keep submission
@@ -423,6 +440,7 @@ void test_rgba_canvas_blits_sprite_from_catalog_pixels() {
 
 int main() {
     test_render_queue_sorts_and_culls();
+    test_render_queue_culls_a_range();
     test_render_queue_sort_matches_reference();
     test_render_queue_sprite_fields_and_bulk_submit();
     test_render_queue_pass_masks_and_text_command();
