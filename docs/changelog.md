@@ -41,6 +41,14 @@ releases may change APIs.
 
 ### Performance
 
+- The software renderer, used for headless runs and screenshots, draws
+  line-heavy scenes about twice as fast: while the logical size equals the
+  window it leaves SDL's logical presentation off (with it on, SDL draws every
+  line as triangles and blends each through a scratch surface), turning it back
+  on when a resize makes them differ. Untextured draws whose colors are all
+  opaque also skip blending. The hex demo renders a frame in 5.3 ms instead of
+  12.6, `signal_siege` in 5.7 instead of 7.6. Thin translucent lines may
+  rasterize a pixel differently.
 - ECS inspection is 5× faster: `query_entities` and `EcsWorld::snapshot()`
   read each entity's parent and name once instead of on every comparison while
   sorting. A query matching 4.5k of 10k entities takes 1.7 ms instead of 9 ms.

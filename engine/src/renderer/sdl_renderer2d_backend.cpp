@@ -225,6 +225,30 @@ private:
     SDL_BlendMode _previous = SDL_BLENDMODE_BLEND;
 };
 
+// SDL's software renderer blends each untextured triangle through a scratch
+// surface. Under Alpha blending an opaque color gives the same pixels unblended,
+// which it fills directly, so untextured draws whose colors are all opaque turn
+// blending off for the call.
+class OpaqueDrawScope {
+public:
+    OpaqueDrawScope(SDL_Renderer* renderer, BlendMode mode, bool opaque) {
+        if (mode == BlendMode::Alpha && opaque) {
+            _renderer = renderer;
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        }
+    }
+    ~OpaqueDrawScope() {
+        if (_renderer) {
+            SDL_SetRenderDrawBlendMode(_renderer, SDL_BLENDMODE_BLEND);
+        }
+    }
+    OpaqueDrawScope(const OpaqueDrawScope&) = delete;
+    OpaqueDrawScope& operator=(const OpaqueDrawScope&) = delete;
+
+private:
+    SDL_Renderer* _renderer = nullptr;
+};
+
 } // namespace
 
 SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
@@ -350,6 +374,7 @@ bool SdlRenderer2DBackend::texture_batching_enabled() const {
 
 void SdlRenderer2DBackend::clear(Color color) {
     flush_batch();
+    apply_logical_presentation();
     const SDL_FColor sdl_color = to_sdl_color(color);
     SDL_SetRenderDrawColorFloat(_handle, sdl_color.r, sdl_color.g, sdl_color.b, sdl_color.a);
     SDL_RenderClear(_handle);
@@ -363,11 +388,13 @@ void SdlRenderer2DBackend::present() {
     if (const char* skip_present = std::getenv("KIN_SKIP_PRESENT");
         skip_present && skip_present[0] == '1') {
         _stats.last_present_backend_ms = 0.0;
+        apply_logical_presentation();
         return;
     }
 
     const auto present_start = std::chrono::steady_clock::now();
     SDL_RenderPresent(_handle);
+    apply_logical_presentation();
     _stats.last_present_backend_ms = ms_since(present_start);
 }
 
@@ -434,41 +461,60 @@ bool SdlRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
 
 void SdlRenderer2DBackend::set_logical_size(Vec2i size) {
     flush_batch();
-    SDL_SetRenderLogicalPresentation(
-        _handle,
-        size.x,
-        size.y,
-        SDL_LOGICAL_PRESENTATION_LETTERBOX
-    );
+    _logical = {.width = size.x, .height = size.y, .mode = SDL_LOGICAL_PRESENTATION_LETTERBOX};
+    apply_logical_presentation();
 }
 
 void SdlRenderer2DBackend::set_integer_logical_size(Vec2i size) {
     flush_batch();
-    SDL_SetRenderLogicalPresentation(
-        _handle,
-        size.x,
-        size.y,
-        SDL_LOGICAL_PRESENTATION_INTEGER_SCALE
-    );
+    _logical = {.width = size.x, .height = size.y, .mode = SDL_LOGICAL_PRESENTATION_INTEGER_SCALE};
+    apply_logical_presentation();
 }
 
 void SdlRenderer2DBackend::push_native_coordinates() {
     flush_batch();
-    LogicalPresentationState state{};
-    SDL_GetRenderLogicalPresentation(_handle, &state.width, &state.height, &state.mode);
-    _logical_presentation_stack.push_back(state);
-    SDL_SetRenderLogicalPresentation(_handle, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    _logical_presentation_stack.push_back(_logical);
+    _logical = {};
+    apply_logical_presentation();
 }
 
 void SdlRenderer2DBackend::pop_native_coordinates() {
     flush_batch();
-    if (_logical_presentation_stack.empty()) {
-        SDL_SetRenderLogicalPresentation(_handle, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    _logical = {};
+    if (!_logical_presentation_stack.empty()) {
+        _logical = _logical_presentation_stack.back();
+        _logical_presentation_stack.pop_back();
+    }
+    apply_logical_presentation();
+}
+
+// A logical size equal to the window's output maps every coordinate to itself,
+// but with logical presentation on SDL draws every line as triangles, which the
+// software renderer blends one by one through a scratch surface, instead of its
+// direct line path: about twice the frame time in line-heavy scenes. So SDL gets
+// logical presentation only while the sizes differ; clear() and present()
+// re-check, which picks up window resizes.
+void SdlRenderer2DBackend::apply_logical_presentation() {
+    // SDL keeps logical presentation per view and sets the current one: only
+    // touch it while the window, not a render target, is bound.
+    if (SDL_GetRenderTarget(_handle) != nullptr) {
         return;
     }
-    const LogicalPresentationState state = _logical_presentation_stack.back();
-    _logical_presentation_stack.pop_back();
-    SDL_SetRenderLogicalPresentation(_handle, state.width, state.height, state.mode);
+    LogicalPresentationState wanted = _logical;
+    if (wanted.mode != SDL_LOGICAL_PRESENTATION_DISABLED) {
+        Vec2i window{};
+        SDL_GetRenderOutputSize(_handle, &window.x, &window.y);
+        if (window == Vec2i{wanted.width, wanted.height}) {
+            wanted = {};
+        }
+    }
+    if (wanted.width == _applied_logical.width && wanted.height == _applied_logical.height &&
+        wanted.mode == _applied_logical.mode) {
+        return;
+    }
+    flush_batch();
+    SDL_SetRenderLogicalPresentation(_handle, wanted.width, wanted.height, wanted.mode);
+    _applied_logical = wanted;
 }
 
 Vec2i SdlRenderer2DBackend::output_size() const {
@@ -508,6 +554,7 @@ void SdlRenderer2DBackend::fill_rect(Rectf rect, Color color) {
     const SDL_FColor sdl_color = to_sdl_color(color);
     const SDL_FRect sdl_rect = to_sdl_frect(rect);
     SDL_SetRenderDrawColorFloat(_handle, sdl_color.r, sdl_color.g, sdl_color.b, sdl_color.a);
+    const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
     SDL_RenderFillRect(_handle, &sdl_rect);
 }
 
@@ -602,6 +649,7 @@ void SdlRenderer2DBackend::draw_rect(Rectf rect, Color color) {
     const SDL_FColor sdl_color = to_sdl_color(color);
     const SDL_FRect sdl_rect = to_sdl_frect(rect);
     SDL_SetRenderDrawColorFloat(_handle, sdl_color.r, sdl_color.g, sdl_color.b, sdl_color.a);
+    const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
     SDL_RenderRect(_handle, &sdl_rect);
 }
 
@@ -620,11 +668,15 @@ void SdlRenderer2DBackend::fill_rounded_rect(Rectf rect, f32 radius, Color color
     constexpr f32 fringe = 1.0f;
     const Rectf solid_rect = inset_rect(rect, fringe);
     if (solid_rect.w <= 0.0f || solid_rect.h <= 0.0f) {
+        const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
         render_filled_loop(_handle, rounded_rect_loop(rect, r), color);
         return;
     }
     const std::vector<Vec2f> solid = rounded_rect_loop(solid_rect, std::max(0.0f, r - fringe));
-    render_filled_loop(_handle, solid, color);
+    {
+        const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
+        render_filled_loop(_handle, solid, color);
+    }
     render_loop_ring(_handle, rounded_rect_loop(rect, r), alpha_scaled(color, 0.0f), solid, color);
 }
 
@@ -657,6 +709,7 @@ void SdlRenderer2DBackend::draw_rounded_rect(Rectf rect, f32 radius, Color color
     const std::vector<Vec2f> outer_solid = rounded_rect_loop(outer_solid_rect, std::max(0.0f, base_radius - fringe));
     render_loop_ring(_handle, outer_fringe, alpha_scaled(color, 0.0f), outer_solid, color);
     if (inner_rect.w <= 0.0f || inner_rect.h <= 0.0f) {
+        const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
         render_filled_loop(_handle, outer_solid, color);
         return;
     }
@@ -698,6 +751,7 @@ void SdlRenderer2DBackend::fill_gradient_rect(Rectf rect, const Gradient& gradie
         {.position = {x0, y1}, .color = bottom_left, .tex_coord = {0.0f, 0.0f}},
     }};
     const std::array<int, 6> indices{{0, 1, 2, 0, 2, 3}};
+    const OpaqueDrawScope opaque(_handle, _blend, gradient.start.a == 255 && gradient.end.a == 255);
     SDL_RenderGeometry(_handle, nullptr, vertices.data(), 4, indices.data(), 6);
 }
 
@@ -799,6 +853,7 @@ void SdlRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     ++_stats.direct_lines;
     const SDL_FColor sdl_color = to_sdl_color(color);
     SDL_SetRenderDrawColorFloat(_handle, sdl_color.r, sdl_color.g, sdl_color.b, sdl_color.a);
+    const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
     SDL_RenderLine(_handle, a.x, a.y, b.x, b.y);
 }
 
@@ -941,6 +996,7 @@ void SdlRenderer2DBackend::set_blend_mode(BlendMode mode) {
 void SdlRenderer2DBackend::flush_batch() {
     if (_batch.kind == BatchKind::None || _batch.vertices.empty() || _batch.indices.empty()) {
         _batch.kind = BatchKind::None;
+        _batch.opaque = true;
         _batch.retained_texture = {};
         _batch.texture = nullptr;
         _batch.vertices.clear();
@@ -949,6 +1005,7 @@ void SdlRenderer2DBackend::flush_batch() {
     }
 
     const TextureBlendScope blend(_batch.texture, _blend);
+    const OpaqueDrawScope opaque(_handle, _blend, _batch.kind == BatchKind::Color && _batch.opaque);
     if (!SDL_RenderGeometry(_handle,
                             _batch.texture,
                             _batch.vertices.data(),
@@ -964,6 +1021,7 @@ void SdlRenderer2DBackend::flush_batch() {
     }
 
     _batch.kind = BatchKind::None;
+    _batch.opaque = true;
     _batch.retained_texture = {};
     _batch.texture = nullptr;
     _batch.vertices.clear();
@@ -997,6 +1055,7 @@ void SdlRenderer2DBackend::append_quad(Rectf dest, Rectf source, Vec2i texture_s
         begin_batch(kind, texture, std::move(retained_texture));
     }
 
+    _batch.opaque = _batch.opaque && color.a == 255;
     const SDL_FColor sdl_color = to_sdl_color(color);
     const f32 u0 = texture_size.x > 0 ? source.x / static_cast<f32>(texture_size.x) : 0.0f;
     const f32 v0 = texture_size.y > 0 ? source.y / static_cast<f32>(texture_size.y) : 0.0f;

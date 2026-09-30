@@ -494,6 +494,41 @@ void test_sprite_catalog_resolves_refs_and_sheets() {
     assert((resolved.size == kin::Vec2f{16.0f, 16.0f}));
 }
 
+// The SDL backend skips SDL's logical presentation while the logical size equals
+// the window (SDL would otherwise draw every line as triangles), and turns it
+// back on when a resize makes the sizes differ: clear() re-checks.
+void test_sdl_logical_size_follows_window_size() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "logical-follow", .width = 160, .height = 100, .hidden = true});
+    kin::Renderer2D renderer{window};
+    renderer.set_logical_size(160, 100);
+    const auto near = [](kin::Vec2f a, kin::Vec2f b) {
+        return std::abs(a.x - b.x) < 0.01f && std::abs(a.y - b.y) < 0.01f;
+    };
+    const auto resize = [&](kin::Vec2i size) {
+        window.set_size(size);
+        SDL_SyncWindow(SDL_GetWindowFromID(window.id()));
+        renderer.present();
+        renderer.clear();
+        return renderer.output_size() == size;
+    };
+
+    renderer.clear();
+    assert(near(renderer.window_to_logical({40.0f, 30.0f}), {40.0f, 30.0f}));
+    renderer.draw_line({0.0f, 0.0f}, {159.0f, 99.0f}, kin::Color::rgba(255, 0, 0, 128));
+    renderer.present();
+
+    if (!resize({320, 200})) {
+        std::cerr << "[SKIP] test_sdl_logical_size_follows_window_size: window resize not supported here\n";
+        return;
+    }
+    assert(near(renderer.window_to_logical({160.0f, 100.0f}), {80.0f, 50.0f}));
+    assert(near(renderer.logical_to_window({80.0f, 50.0f}), {160.0f, 100.0f}));
+
+    assert(resize({160, 100}));
+    assert(near(renderer.window_to_logical({40.0f, 30.0f}), {40.0f, 30.0f}));
+}
+
 void test_sdl_backend_smoke() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({
@@ -1310,6 +1345,7 @@ int main() {
     test_sprite_sheet();
     test_sprite_catalog_resolves_refs_and_sheets();
     test_sdl_backend_smoke();
+    test_sdl_logical_size_follows_window_size();
     test_sdl_render_targets_and_gradients();
     test_render_target_pool_reuse();
     test_render_target_move_assign_releases();

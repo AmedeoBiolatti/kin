@@ -75,6 +75,7 @@ private:
 
     struct GeometryBatch {
         BatchKind kind = BatchKind::None;
+        bool opaque = true; // every color appended so far has alpha 255
         Texture retained_texture;
         SDL_Texture* texture = nullptr;
         std::vector<SDL_Vertex> vertices;
@@ -96,6 +97,7 @@ private:
 
     ViewportState capture_viewport() const;
     void restore_viewport(const ViewportState& state);
+    void apply_logical_presentation();
     void flush_batch();
     void begin_batch(BatchKind kind, SDL_Texture* texture, Texture retained_texture = {});
     void append_quad(Rectf dest, Rectf source, Vec2i texture_size, Color color, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
@@ -113,6 +115,8 @@ private:
     std::vector<ViewportState> _viewport_stack;
     std::vector<ViewportState> _clip_stack;
     std::vector<LogicalPresentationState> _logical_presentation_stack;
+    LogicalPresentationState _logical;         // what the game asked for
+    LogicalPresentationState _applied_logical; // what SDL has; may differ at 1:1
     std::vector<SDL_Texture*> _render_target_stack;
     GeometryBatch _batch;
     BlendMode _blend = BlendMode::Alpha;
