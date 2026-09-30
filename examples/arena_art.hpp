@@ -47,7 +47,7 @@ private:
 
     bool _ready = false;
     bool _lit = false;
-    Texture _player, _core, _shot, _floor, _cone, _halo;
+    Texture _player, _core, _shot, _bullet, _ring, _floor, _cone, _halo;
     std::array<Texture, 3> _enemies;
     SpriteCatalog _sprites;
     LightLayer _lighting;
