@@ -69,9 +69,15 @@ Both apps run simulation at 120 Hz; UI interactions run during rendering.
 Its look is built at startup with no asset files (`arena_art.cpp`), and shows off
 several kin systems:
 
-- **Sprites** rasterized from signed-distance shapes: the player ship, a star, an
-  armored plate and a ring for the three enemy classes, cores, shots and steel deck
-  plates. Enemies are drawn by the ECS render system through `TextureRenderer`.
+- **Sprites** rasterized from signed-distance shapes at twice their on-screen
+  size and shaded as hard-surface metal: an outline, a bevelled rim lit from the
+  top left, panel seams, rivets and glowing parts (the player's canopy and
+  nozzles, the enemies' eyes and visors). A star, an armored plate and a gyro ring
+  stand for the three enemy classes; cores are faceted gems. Enemies are drawn by
+  the ECS render system through `TextureRenderer`, each over a soft drop shadow.
+- **A steel deck** of four tile variants (plain, grate, hazard paint, patched),
+  chosen per tile by a hash, with hazard strips along the arena's edge and reactor
+  housings whose fans turn with simulation time.
 - **2D lighting** (`LightLayer`) of the environment: a dim ambient, the player's
   light and a flashlight cone that follows the aim, amber reactor lamps, impacts,
   and orbiters about to fire.
@@ -95,7 +101,7 @@ same with or without it, and the `kin_bench` arena cases, which never attach it,
 measure the plain render path. Effects advance with simulation time, so pausing
 freezes them, and there is no camera shake or full-screen flash to disturb aim.
 On the GPU the look costs well under a millisecond a frame; SDL's software
-renderer, used headless, takes about 25 ms a frame at the default load.
+renderer, used headless, takes about 28 ms a frame at the default load.
 
 Sound is synthesized at startup (no audio files) and played with kin's
 `AudioEngine`: shots, hits, kills, pickups, dashes and damage, positioned around
