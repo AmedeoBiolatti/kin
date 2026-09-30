@@ -1,3 +1,4 @@
+#include <kin/renderer/material.hpp>
 #include <kin/renderer/render_graph.hpp>
 #include <kin/renderer/render_profile.hpp>
 #include <kin/renderer/static_texture_layer.hpp>
@@ -197,6 +198,46 @@ void test_render_queue_sort_matches_reference() {
     }
 }
 
+// Sprites keep their texture and region in the command's texture/source fields;
+// a material is kept by pointer; bulk submits continue the sequence so sorting
+// keeps them after earlier commands with equal keys, in their given order.
+void test_render_queue_sprite_fields_and_bulk_submit() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    const kin::Sprite sprite{.texture = kin::Texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{32, 16})},
+                             .source = {8.0f, 0.0f, 8.0f, 8.0f}};
+    const kin::Material2D material{.id = "tinted", .tint = kin::Color::rgb(128, 255, 255)};
+
+    kin::RenderQueue queue{kin::RenderSortMode::LayerThenOrder};
+    queue.draw_sprite({}, sprite, {0.0f, 0.0f, 8.0f, 8.0f}, kin::colors::white, {.material = &material});
+    queue.draw_sprite({}, kin::Sprite{.texture = sprite.texture}, {1.0f, 0.0f, 8.0f, 8.0f}); // empty region: skipped
+    const kin::RenderCommand& command = queue.commands()[0];
+    assert(command.type == kin::RenderCommandType::Sprite);
+    assert(command.source == sprite.source);
+    assert(command.texture.size() == (kin::Vec2i{32, 16}));
+    assert(command.material == &material);
+
+    std::vector<kin::RenderCommand> batch;
+    for (int i = 0; i < 3; ++i) {
+        batch.push_back({.type = kin::RenderCommandType::FillRect, .rect = {10.0f + static_cast<float>(i), 0.0f, 1.0f, 1.0f}});
+    }
+    queue.submit(batch);
+    queue.fill_rect({.layer = -1}, {20.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);
+    assert(queue.size() == 6);
+    for (std::size_t i = 0; i < queue.size(); ++i) {
+        assert(queue.commands()[i].sequence == i);
+    }
+
+    queue.flush(renderer);
+    // Layer -1 first, then submission order: the sprite (the empty one draws
+    // nothing), then the batch.
+    assert((raw->commands == std::vector<std::string>{"fill", "sprite", "fill", "fill", "fill"}));
+    assert(raw->rects[0].x == 20.0f);
+    assert(raw->rects[1].x == 0.0f);
+    assert(raw->rects[2].x == 10.0f && raw->rects[3].x == 11.0f && raw->rects[4].x == 12.0f);
+}
+
 void test_render_queue_pass_masks_and_text_command() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -383,6 +424,7 @@ void test_rgba_canvas_blits_sprite_from_catalog_pixels() {
 int main() {
     test_render_queue_sorts_and_culls();
     test_render_queue_sort_matches_reference();
+    test_render_queue_sprite_fields_and_bulk_submit();
     test_render_queue_pass_masks_and_text_command();
     test_render_graph_pass_toggles_and_stats();
     test_default_render_graph_flushes_pass_masks();

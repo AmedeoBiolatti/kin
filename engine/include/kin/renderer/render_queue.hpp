@@ -24,6 +24,8 @@ public:
     std::span<const RenderCommand> commands() const { return _commands; }
 
     void submit(RenderCommand command);
+    // Appends copies of `commands` in order, e.g. a cached batch.
+    void submit(std::span<const RenderCommand> commands);
     void clear_color(Color color);
     void fill_rect(RenderKey key, Rectf rect, Color color, MaterialRef material = {});
     void draw_rect(RenderKey key, Rectf rect, Color color);

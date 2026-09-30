@@ -68,8 +68,9 @@ void submit_particle(RenderQueue& queue,
             .key = key,
             .rect = rect,
             .output_pixel_rect = output_pixel_rect,
+            .source = resolved.sprite.source,
             .color = color,
-            .sprite = resolved.sprite,
+            .texture = resolved.sprite.texture,
         });
     } else {
         queue.submit({
