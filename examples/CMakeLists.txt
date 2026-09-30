@@ -1,5 +1,6 @@
 add_library(kin_example_workloads STATIC
     arena.cpp
+    arena_art.cpp
     arena_hud.cpp
     power_grid.cpp
     tracker.cpp

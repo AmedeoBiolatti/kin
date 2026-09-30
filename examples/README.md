@@ -53,14 +53,28 @@ projectile collision, bounded projectile/effect/pickup storage, camera culling,
 render-queue sorting, and a HUD. The playfield is 3,072 x 2,048 world units.
 Both apps run simulation at 120 Hz; UI interactions run during rendering.
 
-The arena uses asset-free industrial floor panels, enemy armor/charge indicators,
-projectile streaks, core outlines, a directional player chassis and dash echoes.
-Decorations are camera-culled, use batched primitives, and do not change collision
-sizes or simulation randomness. The HUD shows dash readiness and survival progress.
-Reactor fans and cable-channel lights animate with simulation time. The player
-has directional wing pods, twin thrusters and muzzle flashes; impacts expand into
-fading octagonal shock rings (capped at 96 live effects). Pausing freezes these
-animations, and no camera shake or full-screen flashes interfere with aiming.
+Its look is built at startup with no asset files (`arena_art.cpp`), and shows off
+several kin systems:
+
+- **Sprites** rasterized from signed-distance shapes: the player ship, a star, an
+  armored plate and a ring for the three enemy classes, cores, shots and steel deck
+  plates. Enemies are drawn by the ECS render system through `TextureRenderer`.
+- **2D lighting** (`LightLayer`): a dim ambient, the player's light and a
+  flashlight cone that follows the aim, reactor lamps, and lights on shots,
+  impacts and cores.
+- **Particles** (`ParticleSystem`) from the arena's events: hit sparks, kill
+  bursts in each enemy's colour, core pickups, dashes, damage, and twin thruster
+  plumes. They are drawn additively after lighting, with shots, cores and halos.
+- **Post-processing** on the GPU backend: bloom, a vignette and a light grade.
+  The Power Grid screen turns it off to keep its text crisp; the software backend
+  presents without it.
+
+The art only reads the simulation: collisions, randomness and checksums are the
+same with or without it, and the `kin_bench` arena cases, which never attach it,
+measure the plain render path. Effects advance with simulation time, so pausing
+freezes them, and there is no camera shake or full-screen flash to disturb aim.
+On the GPU the look costs well under a millisecond a frame; SDL's software
+renderer, used headless, takes about 25 ms a frame at the default load.
 
 The arena keeps a fixed 1,280 x 800 logical view, letterboxed to fit the window.
 Its HUD uses native-resolution system text and automatic display scaling;
