@@ -72,15 +72,23 @@ several kin systems:
 - **Sprites** rasterized from signed-distance shapes: the player ship, a star, an
   armored plate and a ring for the three enemy classes, cores, shots and steel deck
   plates. Enemies are drawn by the ECS render system through `TextureRenderer`.
-- **2D lighting** (`LightLayer`): a dim ambient, the player's light and a
-  flashlight cone that follows the aim, reactor lamps, and lights on shots,
-  impacts and cores.
+- **2D lighting** (`LightLayer`) of the environment: a dim ambient, the player's
+  light and a flashlight cone that follows the aim, amber reactor lamps, impacts,
+  and orbiters about to fire.
 - **Particles** (`ParticleSystem`) from the arena's events: hit sparks, kill
   bursts in each enemy's colour, core pickups, dashes, damage, and twin thruster
-  plumes. They are drawn additively after lighting, with shots, cores and halos.
+  plumes, drawn additively.
 - **Post-processing** on the GPU backend: bloom, a vignette and a light grade.
   The Power Grid screen turns it off to keep its text crisp; the software backend
   presents without it.
+
+Colour keeps the screen readable at 300 enemies: cyan and white are only the
+player (the ship, drawn over everything with a ground ring, and its streaking
+shots); enemies are warm, solid shapes drawn at full colour after the lighting
+(red stars, orange plates, purple rings) with no glow; enemy bullets are the one
+round, white-cored hot pink-red thing; cores are small green gems that blink
+before they expire; an orbiter about to fire shows a closing ring. The floor stays
+neutral steel, and only shots, cores and effects glow.
 
 The art only reads the simulation: collisions, randomness and checksums are the
 same with or without it, and the `kin_bench` arena cases, which never attach it,

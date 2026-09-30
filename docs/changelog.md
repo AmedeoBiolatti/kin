@@ -14,6 +14,12 @@ releases may change APIs.
 
 ### Changed
 
+- Signal Siege reads more clearly: cyan is only the player (drawn over every
+  effect, with a ground ring), enemies are solid warm shapes drawn after the
+  lighting and without glow, enemy bullets are round white-cored pink orbs, an
+  orbiter about to fire shows a closing ring, cores are small and blink before
+  expiring, and the floor, lights, particles and bloom are toned down. The HUD's
+  countdown gets a panel.
 - Signal Siege has a title screen over an autoplaying arena, a results screen
   whose counters roll up, and scene transitions between them; sound effects and an
   ambient drone synthesized at startup and played with `AudioEngine`; a HUD built

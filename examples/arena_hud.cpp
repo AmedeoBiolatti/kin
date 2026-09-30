@@ -106,13 +106,14 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
     if (ready >= 1) text("READY", 276, 66, 10, Color::rgb(120, 220, 255));
 
     // Countdown and wave progress, top centre.
+    panel({w * .5f - 130, 12, 260, 74});
     const int remaining = std::max(0, 90 - int(arena.elapsed));
     char timer[16];
     std::snprintf(timer, sizeof timer, "%02d:%02d", remaining / 60, remaining % 60);
-    centered(timer, 12, 30, remaining <= 10 ? Color::rgb(255, 214, 140) : ink);
+    centered(timer, 16, 30, remaining <= 10 ? Color::rgb(255, 214, 140) : ink);
     const int wave = std::min(6, 1 + int(arena.elapsed / 15));
-    centered("WAVE " + std::to_string(wave) + " / 6", 54, 12, muted);
-    bar({w * .5f - 110, 75, 220, 3}, arena.elapsed / 90, teal);
+    centered("WAVE " + std::to_string(wave) + " / 6", 56, 12, muted);
+    bar({w * .5f - 110, 76, 220, 3}, arena.elapsed / 90, teal);
 
     // Kills and cores, top right: rolling counters.
     panel({w - 236, 16, 220, 86});

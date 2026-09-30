@@ -179,7 +179,7 @@ Texture make_player(Renderer2D& renderer) {
 Texture make_chaser(Renderer2D& renderer) {
     Canvas canvas(64, 64);
     const std::vector<Vec2f> body = star({32, 32}, 5, 30, 13, -pi / 2);
-    canvas.fill([&](Vec2f p) { return polygon(p, body); }, shaded(rgb(236, 82, 96), rgb(58, 12, 22), {32, 32}, 30));
+    canvas.fill([&](Vec2f p) { return polygon(p, body); }, shaded(rgb(255, 100, 112), rgb(64, 12, 24), {32, 32}, 30));
     canvas.fill([](Vec2f p) { return circle(p, {32, 33}, 8); },
                 [](Vec2f p, float d) { return d > -1.4f ? rgb(90, 20, 30) : p.y < 31 ? rgb(255, 236, 226) : rgb(255, 170, 160); });
     return canvas.upload(renderer);
@@ -189,7 +189,7 @@ Texture make_brute(Renderer2D& renderer) {
     Canvas canvas(64, 64);
     const std::vector<Vec2f> plate = regular({32, 32}, 6, 30, pi / 6);
     const std::vector<Vec2f> inner = regular({32, 32}, 6, 18, pi / 6);
-    canvas.fill([&](Vec2f p) { return polygon(p, plate); }, shaded(rgb(224, 150, 58), rgb(56, 30, 10), {32, 32}, 30));
+    canvas.fill([&](Vec2f p) { return polygon(p, plate); }, shaded(rgb(246, 168, 66), rgb(60, 32, 10), {32, 32}, 30));
     canvas.fill([&](Vec2f p) { return polygon(p, inner); }, shaded(rgb(96, 62, 38), rgb(40, 22, 10), {32, 32}, 18));
     for (int i = 0; i < 6; ++i) {
         const Vec2f rivet{32 + std::cos(i * pi / 3) * 24, 32 + std::sin(i * pi / 3) * 24};
@@ -209,7 +209,24 @@ Texture make_orbiter(Renderer2D& renderer) {
     canvas.fill([](Vec2f p) { return std::abs(length(sub(p, {32, 32})) - 20) - 4.5f; },
                 shaded(rgb(158, 118, 236), rgb(36, 22, 70), {32, 32}, 26));
     canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 10); },
-                [](Vec2f p, float d) { return d > -1.4f ? rgb(50, 30, 90) : p.x + p.y < 60 ? rgb(244, 234, 255) : rgb(196, 170, 255); });
+                [](Vec2f p, float d) { return d > -1.4f ? rgb(40, 24, 76) : p.x + p.y < 58 ? rgb(170, 140, 240) : rgb(112, 80, 196); });
+    return canvas.upload(renderer);
+}
+
+// Enemy bullets: round (the player's shots are streaks), a white core in a hot
+// pink-red rim with a dark edge, so they read against any enemy or light.
+Texture make_bullet(Renderer2D& renderer) {
+    Canvas canvas(24, 24);
+    canvas.fill([](Vec2f p) { return circle(p, {12, 12}, 11); }, [](Vec2f, float d) {
+        return d > -1.6f ? rgb(52, 0, 22) : d > -5.5f ? rgb(255, 58, 110) : rgb(255, 238, 244);
+    });
+    return canvas.upload(renderer);
+}
+
+// A thin ring: the player's ground marker and the orbiters' charge warning.
+Texture make_ring(Renderer2D& renderer) {
+    Canvas canvas(64, 64);
+    canvas.fill([](Vec2f p) { return std::abs(length(sub(p, {32, 32})) - 28) - 1.6f; }, [](Vec2f, float) { return rgb(255, 255, 255); });
     return canvas.upload(renderer);
 }
 
@@ -300,7 +317,7 @@ Color with_alpha(Color c, float alpha) {
 }
 
 constexpr std::array<Color, 3> kind_glow{Color::rgb(255, 92, 100), Color::rgb(255, 172, 64), Color::rgb(176, 136, 255)};
-constexpr Color ambient = Color::rgb(92, 102, 132);
+constexpr Color ambient = Color::rgb(118, 126, 150);
 
 ParticleBurst burst(Vec2f at, int count, ParticleRange speed, ParticleRange life, float size, Color from, Color to) {
     return {.position = at, .count = count, .speed = speed, .lifetime = life, .start_size = size, .end_size = 0,
@@ -313,6 +330,8 @@ void ArenaPainter::init(Renderer2D& renderer, Arena& arena) {
     _player = make_player(renderer);
     _enemies = {make_chaser(renderer), make_brute(renderer), make_orbiter(renderer)};
     _core = make_core(renderer);
+    _bullet = make_bullet(renderer);
+    _ring = make_ring(renderer);
     _shot = make_shot(renderer);
     _cone = make_cone(renderer);
     _floor = make_floor(renderer);
@@ -321,7 +340,7 @@ void ArenaPainter::init(Renderer2D& renderer, Arena& arena) {
     _sprites.set_texture("halo", _halo);
     _sprites.add({.id = "halo", .texture_id = "halo", .source = {0, 0, float(halo_size.x), float(halo_size.y)}});
     _particles.reserve(4096);
-    arena.use_enemy_textures(_enemies, {{{24, 24}, {38, 38}, {32, 32}}});
+    arena.use_enemy_textures(_enemies, {{{28, 28}, {38, 38}, {32, 32}}});
     _ready = true;
 }
 
@@ -329,22 +348,21 @@ void ArenaPainter::update(Arena& arena, float dt) {
     for (const ArenaEvent& e : arena.events) {
         switch (e.kind) {
         case ArenaEvent::Kind::Hit:
-            _particles.burst(burst(e.pos, 10, {80, 260}, {.12f, .3f}, 8, Color::rgb(255, 224, 170), Color::rgba(255, 110, 40, 0)));
+            _particles.burst(burst(e.pos, 6, {60, 200}, {.1f, .22f}, 5, Color::rgb(255, 220, 180), Color::rgba(255, 120, 60, 0)));
             break;
         case ArenaEvent::Kind::Kill: {
             const Color c = kind_glow[static_cast<std::size_t>(std::clamp(e.enemy_kind, 0, 2))];
-            _particles.burst(burst(e.pos, 24, {60, 320}, {.25f, .6f}, 12, c, with_alpha(c, 0)));
-            _particles.burst(burst(e.pos, 4, {5, 50}, {.3f, .5f}, 30, with_alpha(c, .35f), with_alpha(c, 0)));
+            _particles.burst(burst(e.pos, 14, {50, 240}, {.2f, .45f}, 8, c, with_alpha(c, 0)));
             break;
         }
         case ArenaEvent::Kind::Pickup:
-            _particles.burst(burst(e.pos, 14, {40, 160}, {.25f, .5f}, 9, Color::rgb(150, 255, 190), Color::rgba(40, 255, 130, 0)));
+            _particles.burst(burst(e.pos, 8, {40, 140}, {.2f, .4f}, 6, Color::rgb(150, 255, 190), Color::rgba(40, 255, 130, 0)));
             break;
         case ArenaEvent::Kind::Dash:
-            _particles.burst(burst(e.pos, 12, {120, 260}, {.15f, .35f}, 7, Color::rgba(120, 220, 255, 170), Color::rgba(40, 150, 255, 0)));
+            _particles.burst(burst(e.pos, 10, {120, 240}, {.12f, .3f}, 6, Color::rgba(120, 220, 255, 150), Color::rgba(40, 150, 255, 0)));
             break;
         case ArenaEvent::Kind::Hurt:
-            _particles.burst(burst(e.pos, 16, {60, 240}, {.2f, .4f}, 10, Color::rgb(255, 150, 130), Color::rgba(255, 40, 40, 0)));
+            _particles.burst(burst(e.pos, 12, {60, 220}, {.18f, .35f}, 8, Color::rgb(255, 150, 130), Color::rgba(255, 40, 40, 0)));
             break;
         case ArenaEvent::Kind::Fire:
         case ArenaEvent::Kind::EnemyFire:
@@ -367,9 +385,9 @@ void ArenaPainter::update(Arena& arena, float dt) {
                 .position = add(rear, mul(side, sign * 8)),
                 .velocity = add(mul(facing, -speed), mul(side, jitter)),
                 .lifetime = arena.dashing() ? .26f : .16f,
-                .start_size = arena.dashing() ? 13.0f : 9.0f,
+                .start_size = arena.dashing() ? 10.0f : 7.0f,
                 .end_size = 0,
-                .start_color = Color::rgb(150, 225, 255),
+                .start_color = Color::rgba(130, 215, 255, 200),
                 .end_color = Color::rgba(40, 90, 255, 0),
                 .render = {.sprite_id = "halo"},
             });
@@ -388,7 +406,7 @@ void ArenaPainter::draw_floor(Renderer2D& renderer, const Arena& arena, const Ca
             renderer.fill_rect({p.x + 120, p.y + 2, 16, 252}, Color::rgb(12, 18, 25));
             renderer.draw_line({p.x + 122, p.y + 2}, {p.x + 122, p.y + 254}, Color::rgb(34, 70, 82));
             const float pulse = std::fmod(arena.elapsed * 45 + float((x + y) * 37), 224.0f);
-            renderer.fill_rect({p.x + 126, p.y + 12 + pulse, 3, 14}, Color::rgb(70, 190, 210));
+            renderer.fill_rect({p.x + 126, p.y + 12 + pulse, 3, 14}, Color::rgb(92, 104, 118));
             if ((x + y) % 3 == 0) {
                 renderer.fill_rect({p.x + 178, p.y + 180, 48, 36}, Color::rgb(14, 20, 27));
                 for (int i = 0; i < 5; ++i) {
@@ -412,9 +430,9 @@ void ArenaPainter::draw_floor(Renderer2D& renderer, const Arena& arena, const Ca
                 const float angle = i * .785398f + arena.elapsed * .3f;
                 const Vec2f a{p.x + std::cos(angle) * 15, p.y + std::sin(angle) * 15};
                 const Vec2f b{p.x + std::cos(angle + .45f) * 24, p.y + std::sin(angle + .45f) * 24};
-                renderer.draw_line(a, b, Color::rgb(80, 180, 186));
+                renderer.draw_line(a, b, Color::rgb(104, 116, 130));
             }
-            renderer.fill_rect({p.x - 6, p.y - 6, 12, 12}, Color::rgb(120, 230, 220));
+            renderer.fill_rect({p.x - 6, p.y - 6, 12, 12}, Color::rgb(224, 156, 78));
             for (int i = 0; i < 4; ++i) {
                 const float sx = p.x - 36 + i * 20.0f;
                 renderer.draw_line({sx, p.y + 43}, {sx + 7, p.y + 50}, Color::rgb(190, 150, 70));
@@ -430,8 +448,8 @@ void ArenaPainter::collect_lights(const Arena& arena, const Camera2D& camera) {
     const auto on_screen = [&](Vec2f s, float r) { return s.x > -r && s.y > -r && s.x < view.x + r && s.y < view.y + r; };
     const Vec2f player = camera.world_to_screen(arena.player);
     const Vec2f facing = arena.facing();
-    _lights.push_back({.position = player, .radius = 250, .color = Color::rgb(140, 205, 255), .intensity = 1.0f});
-    _lights.push_back({.position = player, .radius = 460, .color = Color::rgb(215, 238, 255), .intensity = .95f,
+    _lights.push_back({.position = player, .radius = 250, .color = Color::rgb(140, 205, 255), .intensity = .9f});
+    _lights.push_back({.position = player, .radius = 460, .color = Color::rgb(215, 238, 255), .intensity = .85f,
                        .shape = _cone, .rotation = degrees(facing)});
     if (arena.muzzle_flash()) {
         _lights.push_back({.position = camera.world_to_screen(add(arena.player, mul(facing, 22))), .radius = 150,
@@ -440,39 +458,23 @@ void ArenaPainter::collect_lights(const Arena& arena, const Camera2D& camera) {
     for (int y = 256; y < 2048; y += 512) {
         for (int x = 256; x < 3072; x += 512) {
             const Vec2f s = camera.world_to_screen({float(x), float(y)});
-            if (on_screen(s, 180)) {
-                _lights.push_back({.position = s, .radius = 180, .color = Color::rgb(70, 214, 200),
-                                   .intensity = .8f + .25f * std::sin(arena.elapsed * 2.1f + float(x + y) * .01f)});
+            if (on_screen(s, 170)) {
+                _lights.push_back({.position = s, .radius = 160, .color = Color::rgb(255, 176, 96),
+                                   .intensity = .45f + .15f * std::sin(arena.elapsed * 2.1f + float(x + y) * .01f)});
             }
         }
     }
     for (const Impact& impact : arena.impacts()) {
         const Vec2f s = camera.world_to_screen(impact.pos);
-        if (on_screen(s, 120)) {
-            _lights.push_back({.position = s, .radius = 120, .color = Color::rgb(255, 164, 84), .intensity = 1.8f * impact.life / .3f});
-        }
-    }
-    int shot_lights = 0;
-    for (const Shot& shot : arena.shots) {
-        const Vec2f s = camera.world_to_screen(shot.pos);
-        if (shot_lights < 96 && on_screen(s, 80)) {
-            ++shot_lights;
-            _lights.push_back(shot.hostile
-                ? Light2D{.position = s, .radius = 84, .color = Color::rgb(255, 120, 60), .intensity = 1.0f}
-                : Light2D{.position = s, .radius = 64, .color = Color::rgb(90, 196, 255), .intensity = .75f});
-        }
-    }
-    for (const Pickup& pickup : arena.pickups) {
-        const Vec2f s = camera.world_to_screen(pickup.pos);
-        if (on_screen(s, 64)) {
-            _lights.push_back({.position = s, .radius = 64, .color = Color::rgb(70, 255, 150), .intensity = .6f});
+        if (on_screen(s, 90)) {
+            _lights.push_back({.position = s, .radius = 90, .color = Color::rgb(255, 164, 84), .intensity = 1.1f * impact.life / .3f});
         }
     }
     for (const EcsEntity entity : arena.enemies()) {
         if (entity.get<Enemy>()->kind == 2 && entity.get<Enemy>()->cooldown < .45f) {
             const Vec2f s = camera.world_to_screen(entity.get<Transform2D>()->pos);
             if (on_screen(s, 70)) {
-                _lights.push_back({.position = s, .radius = 70, .color = Color::rgb(210, 160, 255), .intensity = .9f});
+                _lights.push_back({.position = s, .radius = 70, .color = Color::rgb(210, 160, 255), .intensity = .6f});
             }
         }
     }
@@ -486,62 +488,73 @@ void ArenaPainter::collect_effects(const Arena& arena, const RenderView& view) {
         _glow.draw_texture({}, _halo, {p.x - size / 2, p.y - size / 2, size, size}, color);
     };
 
+    const auto sprite = [&](RenderQueue& queue, const Texture& texture, Vec2f p, float size, Color tint, float rotation = 0) {
+        queue.draw_texture({}, texture, {p.x - size / 2, p.y - size / 2, size, size}, tint, {}, rotation);
+    };
+
     for (const EcsEntity entity : arena.enemies()) {
         const Vec2f p = entity.get<Transform2D>()->pos;
-        if (!visible(p, 24)) {
+        if (!visible(p, 32)) {
             continue;
         }
         const Enemy& enemy = *entity.get<Enemy>();
-        if (enemy.kind == 0) {
-            halo(p, 26, Color::rgba(255, 90, 96, 150));
-        } else if (enemy.kind == 1) {
-            halo(p, 30, Color::rgba(255, 170, 60, 110));
+        if (enemy.kind == 1) {
             // Armor left, once damaged: three pips over the plate.
             for (int i = 0; i < 3 && enemy.hp < 3; ++i) {
                 const bool left = float(i) < enemy.hp;
                 _emissive.fill_rect({}, {p.x - 9 + i * 7.0f, p.y - 26, 5, 3}, left ? Color::rgb(255, 214, 120) : Color::rgba(60, 40, 24, 200));
             }
-        } else {
-            const bool charging = enemy.cooldown < .45f;
-            halo(p, charging ? 40.0f : 26.0f, charging ? Color::rgba(200, 150, 255, 170) : Color::rgba(170, 130, 255, 120));
+        } else if (enemy.kind == 2 && enemy.cooldown < .45f) {
+            // About to fire: a ring closes in on the orbiter.
+            const float t = enemy.cooldown / .45f;
+            sprite(_emissive, _ring, p, 30 + 34 * t, Color::rgba(226, 180, 255, u8(255 - 150 * t)));
+            halo(p, 30, Color::rgba(190, 140, 255, 90));
         }
-    }
-    for (const Shot& shot : arena.shots) {
-        if (!visible(shot.pos, 24)) {
-            continue;
-        }
-        const float angle = degrees(shot.velocity);
-        const Color tint = shot.hostile ? Color::rgb(255, 186, 120) : Color::rgb(190, 250, 255);
-        halo(shot.pos, shot.hostile ? 34.0f : 26.0f, shot.hostile ? Color::rgba(255, 110, 50, 190) : Color::rgba(70, 180, 255, 160));
-        const Vec2f size = shot.hostile ? Vec2f{24, 12} : Vec2f{22, 10};
-        _emissive.draw_texture({}, _shot, {shot.pos.x - size.x / 2, shot.pos.y - size.y / 2, size.x, size.y}, tint, {}, angle);
     }
     for (const Pickup& pickup : arena.pickups) {
-        if (!visible(pickup.pos, 24)) {
+        if (!visible(pickup.pos, 16)) {
+            continue;
+        }
+        // Blinks in its last three seconds.
+        if (pickup.life < 3 && std::fmod(pickup.life * 5, 1.0f) < .4f) {
             continue;
         }
         const float bob = std::sin(arena.elapsed * 3 + pickup.pos.x * .02f) * 2;
-        const float pulse = .75f + .25f * std::sin(arena.elapsed * 5 + pickup.pos.y * .03f);
-        halo(pickup.pos, 44, with_alpha(Color::rgb(60, 255, 140), .45f * pulse));
-        _emissive.draw_texture({}, _core, {pickup.pos.x - 9, pickup.pos.y - 9 + bob, 18, 18}, colors::white, {},
-                               arena.elapsed * 40 + pickup.pos.x);
+        halo(pickup.pos, 22, Color::rgba(60, 255, 140, 60));
+        sprite(_emissive, _core, {pickup.pos.x, pickup.pos.y + bob}, 14, colors::white, arena.elapsed * 40 + pickup.pos.x);
     }
     for (const Impact& impact : arena.impacts()) {
         const float t = impact.life / .3f;
-        halo(impact.pos, 24 + (1 - t) * 60, with_alpha(Color::rgb(255, 180, 100), t * .8f));
+        halo(impact.pos, 18 + (1 - t) * 30, with_alpha(Color::rgb(255, 180, 100), t * .45f));
+    }
+    for (const Shot& shot : arena.shots) {
+        if (!visible(shot.pos, 16)) {
+            continue;
+        }
+        if (shot.hostile) {
+            const float pulse = 1 + .08f * std::sin(arena.elapsed * 18 + shot.pos.x * .05f);
+            halo(shot.pos, 28, Color::rgba(255, 50, 110, 90));
+            sprite(_emissive, _bullet, shot.pos, 14 * pulse, colors::white);
+        } else {
+            halo(shot.pos, 16, Color::rgba(60, 170, 255, 70));
+            _emissive.draw_texture({}, _shot, {shot.pos.x - 10, shot.pos.y - 4, 20, 8}, Color::rgb(150, 236, 255), {}, degrees(shot.velocity));
+        }
     }
 
     const Vec2f facing = arena.facing();
     if (arena.dashing()) {
         for (int i = 3; i > 0; --i) {
             const Vec2f p = sub(arena.player, mul(arena.travel(), float(i) * 16));
-            _glow.draw_texture({}, _player, {p.x - 24, p.y - 24, 48, 48}, Color::rgba(60, 180, 240, u8(110 - i * 30)), {}, degrees(facing));
+            _glow.draw_texture({}, _player, {p.x - 24, p.y - 24, 48, 48}, Color::rgba(60, 180, 240, u8(90 - i * 25)), {}, degrees(facing));
         }
     }
-    halo(arena.player, 84, Color::rgba(40, 140, 230, 55)); // the player stands out from the crowd
-    halo(sub(arena.player, mul(facing, 18)), 26, Color::rgba(90, 190, 255, 110));
+    // The player's marker: a ground ring and a soft glow; the ship itself is drawn
+    // last, over every effect.
+    sprite(_emissive, _ring, arena.player, 58, Color::rgba(120, 230, 255, 120));
+    halo(arena.player, 70, Color::rgba(40, 140, 230, 40));
+    halo(sub(arena.player, mul(facing, 18)), 24, Color::rgba(90, 190, 255, 90));
     if (arena.muzzle_flash()) {
-        halo(add(arena.player, mul(facing, 24)), 40, Color::rgba(255, 234, 170, 230));
+        halo(add(arena.player, mul(facing, 24)), 30, Color::rgba(255, 234, 170, 170));
     }
     submit_particles(_glow, _particles.particles(), {.sprites = &_sprites, .sort = false});
 }
@@ -550,13 +563,12 @@ void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& came
     draw_floor(renderer, arena, camera);
 
     const RenderView view{.camera = &camera, .culling_enabled = true};
-    arena.collect_entities(_world, view); // enemies: the ECS TextureRenderer path
-    const Color body = arena.hurt() ? Color::rgb(255, 150, 140) : arena.dashing() ? Color::rgb(220, 255, 255) : colors::white;
-    _world.draw_texture({.layer = 4}, _player, {arena.player.x - 24, arena.player.y - 24, 48, 48}, body, {}, degrees(arena.facing()));
-    _world.flush(renderer, view);
-
+    // Light the environment only: enemies, shots and the player are drawn after,
+    // at full colour, so threats read the same in any light.
     collect_lights(arena, camera);
     _lit = _lighting.apply(renderer, {0, 0, camera.viewport.x, camera.viewport.y}, ambient, _lights);
+    arena.collect_entities(_world, view); // enemies: the ECS TextureRenderer path
+    _world.flush(renderer, view);
 
     collect_effects(arena, view);
     _emissive.flush(renderer, view);
@@ -564,6 +576,9 @@ void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& came
         const auto additive = renderer.scoped_blend_mode(BlendMode::Additive);
         _glow.flush(renderer, view);
     }
+    const Color body = arena.hurt() ? Color::rgb(255, 150, 140) : arena.dashing() ? Color::rgb(220, 255, 255) : colors::white;
+    const Vec2f ship = camera.world_to_screen(arena.player);
+    renderer.draw_texture(_player, {0, 0, 64, 64}, {ship.x - 24, ship.y - 24, 48, 48}, body, degrees(arena.facing()), {.5f, .5f});
 }
 
 void ArenaPainter::enable_post_process(Renderer2D& renderer) {
@@ -588,14 +603,14 @@ void ArenaPainter::enable_post_process(Renderer2D& renderer) {
     };
     const float tx = 1.0f / float(size.x), ty = 1.0f / float(size.y);
     _post = {
-        {.shader = bright, .params = params({.62f, 1.1f})},
+        {.shader = bright, .params = params({.8f, 1.0f})},
         {.shader = blur, .params = params({tx * 2, 0})},
         {.shader = blur, .params = params({0, ty * 2})},
         {.shader = blur, .params = params({tx * 5, 0})},
         {.shader = blur, .params = params({0, ty * 5})},
-        {.shader = combine, .params = params({.85f}), .sample_original = true},
-        {.shader = vignette, .params = params({.55f, .85f, .6f})},
-        {.shader = grade, .params = params({1.03f, 1.07f, 1.12f, 0, .78f, .9f, 1.0f, .1f})},
+        {.shader = combine, .params = params({.6f}), .sample_original = true},
+        {.shader = vignette, .params = params({.45f, .85f, .6f})},
+        {.shader = grade, .params = params({1.02f, 1.06f, 1.05f, 0, .8f, .9f, 1.0f, .06f})},
     };
     renderer.set_post_process(_post);
 }
