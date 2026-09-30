@@ -349,6 +349,17 @@ kin::u64 render_submit_sort_flush(int) {
     return fixture.queue.size();
 }
 
+// Build + flush, the everyday path: flush sorts and draws in one call. Compare
+// to render_submit_sort_flush, which sorts the commands physically first.
+template <int N>
+kin::u64 render_submit_flush(int) {
+    RenderFixture& fixture = render_fixture();
+    fixture.queue.set_sort(kin::RenderSortMode::LayerThenY);
+    build_sprite_queue(fixture.queue, N);
+    fixture.queue.flush(fixture.renderer);
+    return fixture.queue.size();
+}
+
 // Rect-only build (no Texture/shared_ptr) — compare to render_submit at the same
 // N to quantify the per-command shared_ptr refcount cost the Texture-handle
 // proposal would remove.
@@ -633,12 +644,15 @@ const std::vector<BenchCase>& bench_cases() {
         {"render", "submit_sprites_2k", render_submit<2000>},
         {"render", "submit_sort_sprites_2k", render_submit_sort<2000>},
         {"render", "submit_sort_flush_sprites_2k", render_submit_sort_flush<2000>},
+        {"render", "submit_flush_sprites_2k", render_submit_flush<2000>},
         {"render", "submit_sprites_8k", render_submit<8000>},
         {"render", "submit_sort_sprites_8k", render_submit_sort<8000>},
         {"render", "submit_sort_flush_sprites_8k", render_submit_sort_flush<8000>},
+        {"render", "submit_flush_sprites_8k", render_submit_flush<8000>},
         {"render", "submit_sprites_32k", render_submit<32000>},
         {"render", "submit_sort_sprites_32k", render_submit_sort<32000>},
         {"render", "submit_sort_flush_sprites_32k", render_submit_sort_flush<32000>},
+        {"render", "submit_flush_sprites_32k", render_submit_flush<32000>},
         {"render", "submit_rect_8k", render_submit_rect<8000>},
         {"render", "submit_rect_32k", render_submit_rect<32000>},
 

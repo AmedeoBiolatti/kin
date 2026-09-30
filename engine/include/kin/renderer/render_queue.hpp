@@ -11,7 +11,10 @@ class RenderQueue {
 public:
     explicit RenderQueue(RenderSortMode sort = RenderSortMode::LayerThenOrder);
 
-    void set_sort(RenderSortMode sort) { _sort = sort; }
+    void set_sort(RenderSortMode sort) {
+        _sorted = _sorted && sort == _sort;
+        _sort = sort;
+    }
     RenderSortMode sort() const { return _sort; }
     void clear();
     void reserve(std::size_t capacity);
@@ -32,8 +35,12 @@ public:
     void pop_viewport();
     void custom(RenderKey key, std::function<void(Renderer2D&)> callback, std::string debug_name = {});
 
+    // Reorders the commands into draw order, so commands() and the presorted
+    // flushes see them sorted. Does nothing when nothing changed since the last sort.
     void sort_commands();
     void cull(const RenderView& view);
+    // flush draws in sorted order without moving the commands: unless
+    // sort_commands() was called, commands() keeps submission order afterwards.
     void flush(Renderer2D& renderer);
     void flush(Renderer2D& renderer, u64 pass_mask);
     void flush(Renderer2D& renderer, const RenderView& view);
@@ -46,25 +53,28 @@ public:
 
 private:
     bool before(const RenderCommand& a, const RenderCommand& b) const;
+    // Leaves _sort_keys holding the draw order (entry i is the i-th command to
+    // draw). Returns false when that is already the physical order.
+    bool compute_draw_order();
+    template<typename Draw>
+    void for_each_in_draw_order(Draw&& draw);
 
-    // Compact sort entry. sort_commands sorts these (cache-resident, ~32B) rather
-    // than moving the heavy ~300B RenderCommand objects O(n log n) times, then
-    // applies the resulting permutation to _commands once (O(n)). _commands stays
-    // the physically-sorted source of truth, so commands()/flush_presorted are
-    // unchanged. Holds exactly the fields `before` compares.
+    // Sort key with each field encoded as an unsigned integer that orders like the
+    // original, so keys can be radix sorted. Ties break by submission sequence.
     struct SortEntry {
-        i32 layer;
-        i32 order;
-        f32 y;
-        bool use_y;
-        u64 sequence;
-        u32 index;
+        u32 order;
+        u32 y;
+        u32 layer;
+        u32 index; // position in _commands
     };
 
     RenderSortMode _sort = RenderSortMode::LayerThenOrder;
     u64 _next_sequence = 0;
     std::vector<RenderCommand> _commands;
+    bool _sorted = true;      // _commands is in draw order for _sort
+    bool _in_sequence = true; // _commands is in submission order
     std::vector<SortEntry> _sort_keys;        // reused across frames (capacity retained)
+    std::vector<SortEntry> _radix_scratch;    // radix sort ping-pong buffer
     std::vector<RenderCommand> _sort_scratch; // permutation target, reused across frames
 };
 

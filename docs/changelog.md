@@ -10,6 +10,21 @@ releases may change APIs.
 ### Added
 
 - `Renderer2D::id()`: unique for the life of the process, never reused.
+- `kin_bench` cases `render.submit_flush_sprites_{2k,8k,32k}`: submit and
+  flush, the everyday path.
+
+### Changed
+
+- `RenderQueue::flush` draws in sorted order without moving the commands, so
+  `commands()` keeps submission order after a flush. Call `sort_commands()`
+  first if you need the commands themselves sorted.
+
+### Performance
+
+- Render queue sorting is 2–2.5× faster: keys are radix sorted, a queue that
+  has not changed since its last sort is not sorted again, and `flush` skips
+  reordering the commands. Submitting and flushing 32k sprites takes 4.2 ms
+  instead of 9.7 ms.
 
 ### Fixed
 
