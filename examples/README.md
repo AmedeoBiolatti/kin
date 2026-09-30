@@ -59,7 +59,8 @@ sessions with kin's `SaveStore`. Screens change with kin's scene transitions
 Headless, `--benchmark`, `--screenshot` and `--power-grid` runs skip the title and
 start an autoplaying arena, as before. They and scene-server runs are silent and
 never read or write the saved best run.
-- Default: 300 enemies. `--stress`: 1,200. `--enemies N`: up to 5,000.
+- Default: 300 enemies. `--stress`: 1,200. `--enemies N`: up to 100,000 (a stress
+  test; see below).
 
 Uses ECS transforms/renderers, a cached movement query, a spatial grid for
 projectile collision, bounded projectile/effect/pickup storage, camera culling,
@@ -172,6 +173,7 @@ key-to-screen latency; use the separate `input` suite for software input timing.
 | --- | --- |
 | `arena_1200_encounter` | Reset seed 7, 120 autoplay steps, collect and sort one view |
 | `arena_5000_encounter` | Same encounter with 5,000 enemies |
+| `arena_100000_encounter` | Same encounter with 100,000 enemies |
 | `tracker_idle_10k` | Draw an idle 10,000-run dashboard through the null backend |
 | `tracker_scroll_10k` | Advance telemetry and scrolling, then draw the dashboard |
 | `tracker_churn_10k` | Change search/sort/selection, advance telemetry, then draw |
@@ -184,6 +186,25 @@ updates. Churn deliberately changes filters every benchmark sample, more often
 than the interactive scripted scenario. Seeded run reports include checksums
 for repeatability on the same build/platform. Floating-point simulation is not
 promised to be bit-identical across architectures.
+
+### Stress test
+
+`--enemies 100000` packs the arena; the enemies converge on the player, so most
+of them end up on screen. Run it on the GPU backend with the example's own
+profiler zones (`--profile-lines`):
+
+```sh
+KIN_RENDER_BACKEND=gpu build/bin/signal_siege --benchmark --mute --enemies 100000 --frames 1200 --seed 7 --profile --profile-lines --profile-text=-
+```
+
+The zones split a frame: `example.arena.step` (with `.move`, the movement pass,
+spread across worker threads from 16,384 enemies, and `.shots`),
+`example.art.floor`, `.gather` (finding the enemies near the view, once),
+`.lighting` (lights, drop shadows, the light map), `example.arena.propagate` and
+`.collect_sprites` (the ECS sprite path), `example.art.enemies_flush`,
+`.effects`, and `example.hud`, where the frame's sprite batch is first flushed.
+The run report's `visible_enemies` counts the enemies drawn. Results match a
+single-threaded run exactly.
 
 ## Capture and verify
 

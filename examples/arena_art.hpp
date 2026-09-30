@@ -38,6 +38,7 @@ public:
     std::size_t commands() const { return _world.size() + _glow.size() + _emissive.size(); }
     std::size_t particles() const { return _particles.active_count(); }
     std::size_t lights() const { return _lights.size(); }
+    std::size_t visible_enemies() const { return _visible.size(); }
     bool lit() const { return _lit; }
 
 private:
@@ -45,6 +46,14 @@ private:
     void collect_effects(const Arena& arena, const RenderView& view);
     void collect_lights(const Arena& arena, const Camera2D& camera);
     void draw_shadows(Renderer2D& renderer, const Arena& arena, const Camera2D& camera);
+    void gather_visible(const Arena& arena, const Camera2D& camera);
+
+    struct VisibleEnemy {
+        Vec2f pos;
+        int kind = 0;
+        float hp = 0, cooldown = 0;
+    };
+    std::vector<VisibleEnemy> _visible; // this frame's enemies near the view
 
     bool _ready = false;
     bool _lit = false;

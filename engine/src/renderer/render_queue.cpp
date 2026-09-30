@@ -474,12 +474,19 @@ void RenderQueue::for_each_in_draw_order(Draw&& draw) {
 }
 
 void RenderQueue::cull(const RenderView& view) {
-    if (!view.culling_enabled) {
+    cull(view, 0);
+}
+
+void RenderQueue::cull(const RenderView& view, std::size_t first, std::size_t last) {
+    last = std::min(last, _commands.size());
+    if (!view.culling_enabled || first >= last) {
         return;
     }
-    std::erase_if(_commands, [&](const RenderCommand& command) {
+    const auto begin = _commands.begin() + static_cast<std::ptrdiff_t>(first);
+    const auto end = _commands.begin() + static_cast<std::ptrdiff_t>(last);
+    _commands.erase(std::remove_if(begin, end, [&](const RenderCommand& command) {
         return !render_command_visible(command, view);
-    });
+    }), end);
 }
 
 void RenderQueue::flush(Renderer2D& renderer) {

@@ -14,6 +14,23 @@ releases may change APIs.
 
 ### Changed
 
+- `WorldRenderState::propagate_transforms` visits parents before their children
+  (a cascaded query) and does no per-entity parent lookup, so a flat world of
+  100,000 sprites propagates in about 0.13 ms; nested hierarchies are now updated
+  correctly whatever order their entities were created in.
+- `WorldRenderState::collect_*` cull each sprite as it is submitted, rotated ones
+  by a bounding circle, and cull only the particles (and commands already in the
+  queue) afterwards, instead of re-checking the whole queue. `RenderQueue::cull`
+  takes an optional command range.
+- Signal Siege scales to 100,000 enemies (`--enemies` up to 100,000, and a
+  `kin_bench` case `arena_100000_encounter`): the art gathers the enemies near the
+  view once per frame for shadows, lights and effects; collisions, respawns and
+  the autopilot read slot-indexed positions instead of looking each enemy up; the
+  movement pass runs on worker threads for large arenas, with identical results;
+  enemies are created and retextured in deferred batches. Simulation checksums are
+  unchanged. At 100,000 enemies on the GPU a frame takes about 29 ms, down from
+  48; at 10,000, about 3.4 ms, down from 5.3. New profiler zones
+  (`--profile-lines`) split the frame.
 - Signal Siege's sprites and floor are more detailed: sprites are rasterized at
   twice their drawn size and shaded as bevelled metal with seams, rivets and
   glowing eyes; ships cast soft drop shadows; the deck mixes four tile variants

@@ -1,4 +1,5 @@
 #include "workloads.hpp"
+#include <kin/core/jobs.hpp>
 #include <kin/core/profile.hpp>
 #include <algorithm>
 #include <cmath>
@@ -15,17 +16,22 @@ constexpr std::array<Color, 3> colors{Color::rgb(241, 99, 103), Color::rgb(241, 
 }
 
 Arena::Arena(int enemies, u64 seed) : _render(world), _movement(world.raw().query<Transform2D, Enemy>()) {
-    enemies = std::clamp(enemies, 1, 5000);
-    for (int i = 0; i < enemies; ++i) {
-        const float size = i % 3 == 1 ? 22.0f : i % 3 == 0 ? 10.0f : 16.0f;
-        _enemies.push_back(world.entity().set(Transform2D{}).set(Enemy{.slot = i, .kind = i % 3})
-            .set(RectRenderer{.offset = {-size / 2, -size / 2}, .size = {size, size}, .color = colors[i % 3], .y_sort = true, .outline = i % 3 == 2}));
-    }
-    _next.resize(enemies);
+    enemies = std::clamp(enemies, 1, max_enemies);
+    // Deferred, so each entity moves into its final table once, not per component.
+    world.raw().defer([&] {
+        for (int i = 0; i < enemies; ++i) {
+            const float size = i % 3 == 1 ? 22.0f : i % 3 == 0 ? 10.0f : 16.0f;
+            _enemies.push_back(world.entity().set(Transform2D{}).set(Enemy{.slot = i, .kind = i % 3})
+                .set(RectRenderer{.offset = {-size / 2, -size / 2}, .size = {size, size}, .color = colors[i % 3], .y_sort = true, .outline = i % 3 == 2}));
+        }
+    });
+    _next.resize(enemies); _pos.resize(enemies); _enemy_at.resize(enemies);
     shots.reserve(8192); sparks.reserve(8192); pickups.reserve(512);
     _impacts.reserve(96);
     reset(seed);
 }
+
+Arena::~Arena() = default;
 
 float Arena::random(float lo, float hi) {
     const auto [next, value] = split(_rng); _rng = next; return rng_f32(value, lo, hi);
@@ -36,9 +42,11 @@ void Arena::respawn(EcsEntity entity) {
     enemy->hp = enemy->kind == 1 ? 3.0f : 1.0f;
     enemy->cooldown = random(1, 4);
     const float angle = random(0, 6.283185f), radius = random(420, 1200);
-    entity.get_mut<Transform2D>()->pos = {
+    const Vec2f pos{
         std::clamp(player.x + std::cos(angle) * radius, 24.0f, 3048.0f),
         std::clamp(player.y + std::sin(angle) * radius, 24.0f, 2024.0f)};
+    entity.get_mut<Transform2D>()->pos = pos;
+    _pos[enemy->slot] = pos;
 }
 
 void Arena::reset(u64 seed) {
@@ -86,8 +94,8 @@ bool Arena::buy_power(int id) {
 
 ArenaInput Arena::autopilot() const {
     Vec2f aim{1, 0}; float nearest = 1e9f;
-    for (auto entity : _enemies) {
-        const Vec2f delta = sub(entity.get<Transform2D>()->pos, player);
+    for (const Vec2f pos : _pos) {
+        const Vec2f delta = sub(pos, player);
         const float distance = length(delta);
         if (distance < nearest) { nearest = distance; aim = unit(delta); }
     }
@@ -130,21 +138,52 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
         }
     }
     _grid.fill(-1);
-    _movement.each([&](flecs::entity, Transform2D& t, Enemy& e) {
-        Vec2f toward = sub(player, t.pos); const float distance = length(toward);
-        Vec2f direction = unit(toward);
-        if (e.kind == 2 && distance < 330) direction = {-direction.y, direction.x};
-        t.pos = add(t.pos, mul(direction, dt * (e.kind == 1 ? 48.0f : 80.0f) * (1 + elapsed / 180)));
-        e.cooldown -= dt;
-        if (e.kind == 2 && distance < 650 && e.cooldown <= 0 && shots.size() < 8192) {
-            shots.push_back({t.pos, mul(unit(toward), 180), 4, true}); e.cooldown = 3;
-            event(ArenaEvent::Kind::EnemyFire, t.pos, e.kind);
-        }
-        if (distance < 22 && _hurt <= 0 && _dash <= 0 && !invincible) {
-            health -= std::max(1,8-_stats.armor); _hurt = .35f; event(ArenaEvent::Kind::Hurt, player);
-        }
-        const int bucket = cell(t.pos); _next[e.slot] = _grid[bucket]; _grid[bucket] = e.slot;
-    });
+    {
+        KIN_PROFILE_SCOPE("example.arena.move");
+        _movement.run([&](flecs::iter& it) {
+            while (it.next()) {
+                const auto t = it.field<Transform2D>(0);
+                const auto e = it.field<Enemy>(1);
+                const auto rows = static_cast<i32>(it.count());
+                _distance.resize(static_cast<std::size_t>(rows)); _aim.resize(static_cast<std::size_t>(rows));
+                // Movement is independent per enemy, so large arenas split it across
+                // threads; the arithmetic is the same either way.
+                const auto advance = [&](i32 begin, i32 end) {
+                    for (i32 i = begin; i < end; ++i) {
+                        Transform2D& transform = t[i]; Enemy& enemy = e[i];
+                        const Vec2f toward = sub(player, transform.pos); const float distance = length(toward);
+                        Vec2f direction = unit(toward);
+                        _aim[i] = direction; _distance[i] = distance;
+                        if (enemy.kind == 2 && distance < 330) direction = {-direction.y, direction.x};
+                        transform.pos = add(transform.pos, mul(direction, dt * (enemy.kind == 1 ? 48.0f : 80.0f) * (1 + elapsed / 180)));
+                        enemy.cooldown -= dt;
+                        _pos[enemy.slot] = transform.pos; _enemy_at[enemy.slot] = &enemy;
+                    }
+                };
+                constexpr i32 parallel_min = 16384, chunk = 4096;
+                if (rows >= parallel_min) {
+                    if (!_jobs) _jobs = std::make_unique<JobSystem>();
+                    _jobs->parallel_for((rows + chunk - 1) / chunk, [&](i32 c) { advance(c * chunk, std::min(rows, (c + 1) * chunk)); });
+                } else {
+                    advance(0, rows);
+                }
+                // Firing, damage and bucket order depend on the order enemies are
+                // visited, so these stay serial, in storage order.
+                for (i32 i = 0; i < rows; ++i) {
+                    const Transform2D& transform = t[i]; Enemy& enemy = e[i];
+                    if (enemy.kind == 2 && _distance[i] < 650 && enemy.cooldown <= 0 && shots.size() < 8192) {
+                        shots.push_back({transform.pos, mul(_aim[i], 180), 4, true}); enemy.cooldown = 3;
+                        event(ArenaEvent::Kind::EnemyFire, transform.pos, enemy.kind);
+                    }
+                    if (_distance[i] < 22 && _hurt <= 0 && _dash <= 0 && !invincible) {
+                        health -= std::max(1,8-_stats.armor); _hurt = .35f; event(ArenaEvent::Kind::Hurt, player);
+                    }
+                    const int bucket = cell(transform.pos); _next[enemy.slot] = _grid[bucket]; _grid[bucket] = enemy.slot;
+                }
+            }
+        });
+    }
+    KIN_PROFILE_SCOPE("example.arena.shots");
     // Spatial buckets limit projectile collision candidates; no world-wide pair scan.
     for (auto& shot : shots) {
         shot.pos = add(shot.pos, mul(shot.velocity, dt)); shot.life -= dt;
@@ -161,18 +200,21 @@ void Arena::step(float dt, ArenaInput input, bool invincible) {
         for (int y = std::max(0, cy - 1); y <= std::min(31, cy + 1) && shot.life > 0; ++y)
             for (int x = std::max(0, cx - 1); x <= std::min(47, cx + 1) && shot.life > 0; ++x)
                 for (int slot = _grid[y * 48 + x]; slot >= 0; slot = _next[slot]) {
-                    auto entity = _enemies[slot]; auto* enemy = entity.get_mut<Enemy>();
-                    if (enemy->hp <= 0 || length(sub(entity.get<Transform2D>()->pos, shot.pos)) > 15) continue;
+                    Enemy* enemy = _enemy_at[slot];
+                    if (enemy->hp <= 0 || length(sub(_pos[slot], shot.pos)) > 15) continue;
                     shot.life = 0; enemy->hp -= _stats.damage; burst(shot.pos);
                     event(enemy->hp <= 0 ? ArenaEvent::Kind::Kill : ArenaEvent::Kind::Hit, shot.pos, enemy->kind);
                     if (enemy->hp <= 0) {
-                        ++kills;
+                        ++kills; _killed.push_back(slot);
                         if (pickups.size() < 512) pickups.push_back({shot.pos});
                     }
                     break;
                 }
     }
-    for (auto entity : _enemies) if (entity.get<Enemy>()->hp <= 0) respawn(entity);
+    // In slot order, as respawns draw from the random stream.
+    std::sort(_killed.begin(), _killed.end());
+    for (const int slot : _killed) respawn(_enemies[slot]);
+    _killed.clear();
     for (auto& spark : sparks) { spark.pos = add(spark.pos, mul(spark.velocity, dt)); spark.life -= dt; }
     for (auto& pickup : pickups) {
         pickup.life -= dt; const auto delta = sub(player, pickup.pos);
@@ -202,10 +244,8 @@ void Arena::collect(RenderQueue& queue, const RenderView& view) {
     }
     // Small, culled details distinguish silhouettes without textures or extra
     // entities. Enemy base bodies still come from the ECS render system.
-    for (auto entity : _enemies) {
-        const auto p = entity.get<Transform2D>()->pos;
-        if (!render_view_visible(view, {p.x-16,p.y-16,32,32})) continue;
-        const auto& e = *entity.get<Enemy>();
+    each_enemy([&](Vec2f p, const Enemy& e) {
+        if (!render_view_visible(view, {p.x-16,p.y-16,32,32})) return;
         const float s = e.kind == 1 ? 22 : e.kind == 0 ? 10 : 16;
         queue.fill_rect({.layer=-1},{p.x-s*.5f+3,p.y-s*.5f+5,s,s},Color::rgba(0,0,0,100));
         if (e.kind == 0) {
@@ -217,7 +257,7 @@ void Arena::collect(RenderQueue& queue, const RenderView& view) {
             queue.fill_rect({.layer=1},{p.x-4,p.y-4,8,8},e.cooldown < .45f ? Color::rgb(250,218,255) : Color::rgb(164,134,233));
             queue.draw_line({.layer=1},{p.x-12,p.y},{p.x+12,p.y},Color::rgb(164,134,233));
         }
-    }
+    });
     for (auto& shot : shots) {
         if (!render_view_visible(view,{shot.pos.x-18,shot.pos.y-18,36,36})) continue;
         const auto tail = sub(shot.pos,mul(shot.velocity,shot.hostile ? .045f : .018f));
@@ -273,17 +313,25 @@ void Arena::collect(RenderQueue& queue, const RenderView& view) {
 }
 
 void Arena::use_enemy_textures(const std::array<Texture, 3>& textures, const std::array<Vec2f, 3>& sizes) {
-    for (auto entity : _enemies) {
-        const int kind = entity.get<Enemy>()->kind;
-        const Vec2f size = sizes[kind];
-        entity.remove<RectRenderer>();
-        entity.set(TextureRenderer{.texture = textures[kind], .offset = {-size.x / 2, -size.y / 2}, .size = size,
-            .layer = 1, .y_sort = true});
-    }
+    world.raw().defer([&] {
+        for (auto entity : _enemies) {
+            const int kind = entity.get<Enemy>()->kind;
+            const Vec2f size = sizes[kind];
+            entity.remove<RectRenderer>();
+            entity.set(TextureRenderer{.texture = textures[kind], .offset = {-size.x / 2, -size.y / 2}, .size = size,
+                .layer = 1, .y_sort = true});
+        }
+    });
 }
 
 void Arena::collect_entities(RenderQueue& queue, const RenderView& view) {
-    queue.clear(); _render.propagate_transforms(); _render.collect_dynamic(queue, {.view = &view});
+    queue.clear();
+    {
+        KIN_PROFILE_SCOPE("example.arena.propagate");
+        _render.propagate_transforms();
+    }
+    KIN_PROFILE_SCOPE("example.arena.collect_sprites");
+    _render.collect_dynamic(queue, {.view = &view});
 }
 
 u64 Arena::checksum() const {

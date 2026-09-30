@@ -1,3 +1,4 @@
+#include <kin/core/profile.hpp>
 #include "arena_art.hpp"
 #include "example_common.hpp"
 #include "siege_audio.hpp"
@@ -153,14 +154,17 @@ public:
             const auto p = _camera.world_to_screen(_arena.player);
             renderer.draw_line(p, mouse, Color::rgba(88, 171, 169, 35));
         }
-        _hud.render(_arena, renderer, ctx.input, {.paused = _paused, .autoplay = _autoplay, .commands = int(_painter.commands()),
-            .display_scale = _display_scale, .reticle = !_autoplay, .aim = mouse}, ctx.dt);
+        {
+            KIN_PROFILE_SCOPE("example.hud"); // also where the frame's sprite batch is first flushed
+            _hud.render(_arena, renderer, ctx.input, {.paused = _paused, .autoplay = _autoplay, .commands = int(_painter.commands()),
+                .display_scale = _display_scale, .reticle = !_autoplay, .aim = mouse}, ctx.dt);
+        }
         capture(ctx, _siege->options, ++_frames, _captured);
     }
     void write_report(JsonWriter& json) const override {
         json.field("ticks", _arena.ticks).field("enemies", _arena.enemy_count()).field("kills", _arena.kills)
             .field("cores", _arena.collected).field("health", _arena.health).field("shots", u64(_arena.shots.size()))
-            .field("commands", u64(_painter.commands())).field("checksum", _arena.checksum()).field("autoplay", _autoplay);
+            .field("commands", u64(_painter.commands())).field("visible_enemies", u64(_painter.visible_enemies())).field("checksum", _arena.checksum()).field("autoplay", _autoplay);
         json.field("lights", u64(_painter.lights())).field("particles", u64(_painter.particles())).field("lit", _painter.lit());
         json.field("sounds", _siege->audio.stats().played_requests);
         json.field("ui_scale", _display_scale);

@@ -167,6 +167,30 @@ void test_render_world_sorts_and_draws_sprites() {
     assert(raw->draws[1] == last_draw);
 }
 
+// Parents are updated before their children however the entities were created:
+// here the deepest one first, so storage order is the reverse of the hierarchy.
+void test_world_render_state_propagates_hierarchy_created_bottom_up() {
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::WorldTransform>("WorldTransform");
+
+    kin::EcsEntity leaf = world.entity("leaf").set(kin::Transform2D{{1.0f, 1.0f}, 0.25f});
+    kin::EcsEntity middle = world.entity("middle").set(kin::Transform2D{{10.0f, 10.0f}, 0.5f});
+    kin::EcsEntity root = world.entity("root").set(kin::Transform2D{{100.0f, 100.0f}, 1.0f});
+    leaf.raw().child_of(middle.raw());
+    middle.raw().child_of(root.raw());
+
+    kin::WorldRenderState state{world};
+    state.propagate_transforms();
+    assert((leaf.get<kin::WorldTransform>()->pos == kin::Vec2f{111.0f, 111.0f}));
+    assert(leaf.get<kin::WorldTransform>()->rotation == 1.75f);
+
+    root.set(kin::Transform2D{{200.0f, 0.0f}, 0.0f});
+    state.propagate_transforms();
+    assert((middle.get<kin::WorldTransform>()->pos == kin::Vec2f{210.0f, 10.0f}));
+    assert((leaf.get<kin::WorldTransform>()->pos == kin::Vec2f{211.0f, 11.0f}));
+}
+
 void test_world_render_state_propagates_hierarchy() {
     kin::EcsWorld world;
     world.component<kin::Transform2D>("Transform2D");
@@ -412,6 +436,33 @@ void test_rotated_render_command_bounds_expand() {
     assert(bounds.h < command.rect.h);
 }
 
+// Rotated sprites are culled as they are submitted too, by the circle they can
+// turn within, so a queue built from a view holds only what may be seen.
+void test_collect_culls_rotated_sprites() {
+    kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{32, 32})};
+    kin::SpriteCatalog catalog;
+    catalog.set_texture("main", texture);
+    catalog.add({.id = "bar", .texture_id = "main", .source = {0.0f, 0.0f, 32.0f, 4.0f}, .size = {32.0f, 4.0f}});
+
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::SpriteRenderer>("SpriteRenderer");
+    const auto bar = [&](kin::Vec2f pos) {
+        world.entity().set(kin::Transform2D{pos, 0.8f}).set(kin::SpriteRenderer{.sprite = catalog.ref("bar")});
+    };
+    bar({20.0f, 20.0f});   // inside the view
+    bar({-12.0f, 20.0f});  // centre outside, but its turned ends reach in
+    bar({500.0f, 500.0f}); // far away
+
+    kin::WorldRenderState state{world};
+    state.propagate_transforms();
+    kin::RenderQueue queue;
+    queue.fill_rect({}, {-100.0f, -100.0f, 4.0f, 4.0f}, kin::colors::white); // queued before: culled too
+    const kin::RenderView view{.cull_rect = {0.0f, 0.0f, 40.0f, 40.0f}, .culling_enabled = true};
+    state.collect_dynamic(queue, {.view = &view});
+    assert(queue.size() == 2);
+}
+
 void test_top_down_render_applies_camera_and_culling() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -589,12 +640,14 @@ int main() {
 #endif
     test_render_world_sorts_and_draws_sprites();
     test_world_render_state_propagates_hierarchy();
+    test_world_render_state_propagates_hierarchy_created_bottom_up();
     test_render_world_draws_primitives();
     test_render_world_draws_texture_renderer();
     test_sprite_pivot_offsets_and_y_sort();
     test_sprite_renderer_tint_rotation_and_pivot_reach_commands();
     test_rotated_render_command_bounds_expand();
     test_top_down_render_applies_camera_and_culling();
+    test_collect_culls_rotated_sprites();
     test_static_render_cache_merges_with_dynamic_queue();
     test_world_render_state_collect_dynamic_excludes_static_renderables();
     test_one_shot_submit_reuses_scratch_queue_output();

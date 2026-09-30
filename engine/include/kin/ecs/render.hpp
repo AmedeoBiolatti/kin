@@ -122,7 +122,9 @@ public:
 private:
     flecs::world* _world = nullptr;
     flecs::observer _transform_observer;
-    flecs::query<WorldTransform, const Transform2D> _transforms;
+    // Own transform, local transform, and the parent's world transform (optional,
+    // cascaded so parents are visited before their children).
+    flecs::query<WorldTransform, const Transform2D, const WorldTransform> _transforms;
     flecs::query<const Transform2D, const WorldTransform, const SpriteRenderer> _sprites;
     flecs::query<const Transform2D, const WorldTransform, const TextureRenderer> _textures;
     flecs::query<const Transform2D, const WorldTransform, const RectRenderer> _rects;
