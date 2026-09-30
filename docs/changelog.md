@@ -7,6 +7,31 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-09-30
+
+Large sprite counts get far cheaper: sprites that share a texture are drawn as
+instanced batches on the GPU, the render queue stores plain sprites compactly,
+and ECS sprite collection and batch building can use worker threads, with the
+same results as one thread. Signal Siege, reworked with a title screen, sound,
+new art and a 100,000-enemy stress mode, goes from 48 ms to about 12 ms a frame
+at 100,000 enemies on the GPU.
+
+### Upgrading from 0.2.1
+
+- `RenderQueue` flushes hand runs of consecutive same-texture sprites to the new
+  `IRenderer2DBackend::draw_sprites()`. Its default draws them one by one through
+  `draw_texture()`, so custom backends keep working unchanged.
+- `RenderQueue` stores plain Texture and Sprite commands compactly;
+  `commands()`, `sort_commands()` and the presorted flushes convert them back on
+  first use, so readers see the same commands, in submission order. As before,
+  a span from `commands()` is invalidated by further submissions.
+- `WorldRenderState::propagate_transforms()` updates parents before children in
+  one pass, so a child no longer sees its parent's previous-frame transform when
+  the child was created first.
+- `WorldRenderState::collect_*` cull rotated sprites as they are submitted, by
+  the circle they can turn within; a queue collected with a view may keep a few
+  more rotated sprites near its edges than before (flushes still cull exactly).
+
 ### Added
 
 - `Renderer2D::draw_sprites(texture, sprites)` draws many quads from one texture
@@ -16,6 +41,12 @@ releases may change APIs.
   ECS sprites batch automatically. `Texture` handles compare with `==`.
 - `AudioEngine::add_clip` registers an in-memory clip (synthesized, or from
   `make_memory_audio_clip`) under a clip id that cues name like a file-backed one.
+- Render queue and threading APIs: `RenderQueue::draw_texture_region()`,
+  `append_sprites()` (with `PreparedSprite`), `reserve_sprites()` /
+  `texture_index()` / `write_sprite()` for producers on several threads,
+  `submitted()` and a ranged `cull(view, first, last)`;
+  `SpriteRenderOptions::jobs`; `Renderer2D::set_job_system()` and
+  `IRenderer2DBackend::set_job_system()`.
 
 ### Changed
 
@@ -283,6 +314,8 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AmedeoBiolatti/kin/releases/tag/v0.1.0
