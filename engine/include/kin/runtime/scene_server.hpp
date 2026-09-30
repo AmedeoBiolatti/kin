@@ -7,6 +7,7 @@
 #include <kin/runtime/windowed_app.hpp>
 #include <kin/scene/scene_manager.hpp>
 
+#include <deque>
 #include <functional>
 #include <iosfwd>
 #include <optional>
@@ -97,18 +98,29 @@ public:
     // report, and queued input. Optionally reseed the root RNG key.
     void reset(std::optional<u64> seed);
 
-    // Queue an action for the next step. mode is "press" (one-frame tap),
+    // Queue an action for the next step. mode is "press" (a tap: held for that
+    // step and released at the start of the one after, which sees the release),
     // "hold", or "release".
     void queue_action(std::string name, std::string mode);
 
     // Queue a pointer move to window-space pos for the next step.
     void queue_mouse_move(Vec2f window_pos);
-    // Queue a mouse button for the next step. mode is "press", "hold", "release".
+    // Queue a mouse button for the next step. mode is "press" (a tap, as for
+    // actions: a ui2 click completes on the step after it), "hold", "release".
     void queue_mouse_button(std::string button, std::string mode);
     // Queue a mouse wheel delta for the next step.
     void queue_mouse_wheel(f32 delta);
     // Queue text input for the next step.
     void queue_text(std::string text);
+
+    // Wall time of the scene update and render in recent steps, oldest first.
+    struct FrameTiming {
+        f64 update_ms = 0.0;
+        f64 render_ms = 0.0;
+    };
+    static constexpr std::size_t frame_timing_window = 600;
+    const std::deque<FrameTiming>& frame_timings() const { return _timings; }
+    void clear_frame_timings() { _timings.clear(); }
 
 private:
     struct PendingInput {
@@ -134,6 +146,10 @@ private:
     i64 _frame = 0;
     RunReport _report;
     std::vector<PendingInput> _pending;
+    // Taps pressed in the last step, released at the start of the next.
+    std::vector<std::string> _tapped_actions;
+    std::vector<MouseButton> _tapped_buttons;
+    std::deque<FrameTiming> _timings;
     std::function<void(SceneManager&)> _reset_scenes;
 };
 

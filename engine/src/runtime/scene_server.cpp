@@ -653,6 +653,43 @@ ServerResponse handle_server_status(ServerContext& ctx) {
     return ok_result(out.str());
 }
 
+ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) {
+    const std::deque<ServerContext::FrameTiming>& timings = ctx.frame_timings();
+    ServerContext::FrameTiming sum{};
+    ServerContext::FrameTiming max{};
+    f64 max_total = 0.0;
+    for (const ServerContext::FrameTiming& t : timings) {
+        sum.update_ms += t.update_ms;
+        sum.render_ms += t.render_ms;
+        max.update_ms = std::max(max.update_ms, t.update_ms);
+        max.render_ms = std::max(max.render_ms, t.render_ms);
+        max_total = std::max(max_total, t.update_ms + t.render_ms);
+    }
+    const f64 n = timings.empty() ? 1.0 : static_cast<f64>(timings.size());
+    const ServerContext::FrameTiming last = timings.empty() ? ServerContext::FrameTiming{} : timings.back();
+    const auto write = [](JsonWriter& json, std::string_view name, f64 update, f64 render, f64 total) {
+        json.key(name).begin_object();
+        json.field("update_ms", update);
+        json.field("render_ms", render);
+        json.field("total_ms", total);
+        json.end_object();
+    };
+
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("frames", static_cast<u64>(timings.size()));
+    json.field("window", static_cast<u64>(ServerContext::frame_timing_window));
+    write(json, "last", last.update_ms, last.render_ms, last.update_ms + last.render_ms);
+    write(json, "mean", sum.update_ms / n, sum.render_ms / n, (sum.update_ms + sum.render_ms) / n);
+    write(json, "max", max.update_ms, max.render_ms, max_total);
+    json.end_object();
+    if (const JsonValue* reset = params.find("reset"); reset && reset->as_bool()) {
+        ctx.clear_frame_timings();
+    }
+    return ok_result(out.str());
+}
+
 ServerResponse handle_ui_snapshot(ServerContext& ctx, const JsonValue& params) {
     (void)ctx;
     (void)params;
@@ -765,9 +802,17 @@ void ServerContext::step() {
     Input& input = _app.input();
     input.begin_frame();
 
-    // One-frame taps to release after the update so they do not linger as held.
-    std::vector<std::string> action_taps;
-    std::vector<MouseButton> mouse_taps;
+    // Release last step's taps now, after begin_frame, so this step sees the
+    // release edge: ui2 completes a click on it, as with a real mouse.
+    for (const std::string& name : _tapped_actions) {
+        input.set_action_held(name, false);
+    }
+    for (const MouseButton button : _tapped_buttons) {
+        input.set_mouse_held(button, false);
+    }
+    _tapped_actions.clear();
+    _tapped_buttons.clear();
+
     for (const PendingInput& in : _pending) {
         switch (in.kind) {
         case PendingInput::Kind::Action:
@@ -777,7 +822,7 @@ void ServerContext::step() {
                 input.set_action_held(in.text, false);
             } else {
                 input.set_action_pressed(in.text);
-                action_taps.push_back(in.text);
+                _tapped_actions.push_back(in.text);
             }
             break;
         case PendingInput::Kind::MouseMove:
@@ -791,7 +836,7 @@ void ServerContext::step() {
                     input.set_mouse_held(*button, false);
                 } else {
                     input.set_mouse_pressed(*button);
-                    mouse_taps.push_back(*button);
+                    _tapped_buttons.push_back(*button);
                 }
             }
             break;
@@ -807,18 +852,21 @@ void ServerContext::step() {
 
     SceneContext scene_ctx = make_context();
     runtime_detail::pump_scene_assets(_asset_server, _render);
+    using clock = std::chrono::steady_clock;
+    const auto update_start = clock::now();
     _scenes.update(scene_ctx);
+    const auto render_start = clock::now();
     if (_render) {
         _scenes.render(scene_ctx);
         _renderer.present();
     }
-
-    // Release one-frame taps so they do not linger as held input next step.
-    for (const std::string& name : action_taps) {
-        input.set_action_held(name, false);
-    }
-    for (const MouseButton button : mouse_taps) {
-        input.set_mouse_held(button, false);
+    const auto end = clock::now();
+    _timings.push_back({
+        .update_ms = std::chrono::duration<f64, std::milli>(render_start - update_start).count(),
+        .render_ms = std::chrono::duration<f64, std::milli>(end - render_start).count(),
+    });
+    if (_timings.size() > frame_timing_window) {
+        _timings.pop_front();
     }
     ++_frame;
 }
@@ -859,6 +907,7 @@ void ServerContext::reset(std::optional<u64> seed) {
     }
     _report = {};
     _pending.clear();
+    _timings.clear();
 
     SceneContext scene_ctx = make_context();
     _scenes.clear();
@@ -914,6 +963,9 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     }
     if (method == "server.status") {
         return handle_server_status(ctx);
+    }
+    if (method == "frame.timing") {
+        return handle_frame_timing(ctx, params);
     }
     if (method == "ping") {
         return ok_result("{\"pong\":true}");

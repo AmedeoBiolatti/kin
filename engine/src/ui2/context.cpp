@@ -655,11 +655,15 @@ Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view va
     if (_tooltip_candidate != id) {
         _tooltip_candidate = id;
         _tooltip_first_frame = _state.frame();
+        _tooltip_warm = _tooltip_shown_frame && _state.frame() <= *_tooltip_shown_frame + options.warm_frames;
+        if (!_tooltip_warm) {
+            return result;
+        }
+    }
+    if (!_tooltip_warm && _state.frame() < _tooltip_first_frame + options.delay_frames) {
         return result;
     }
-    if (_state.frame() < _tooltip_first_frame + options.delay_frames) {
-        return result;
-    }
+    _tooltip_shown_frame = _state.frame();
 
     const Vec2f text_size = measure_text(options.text_style.font, value, options.text_style.scale);
     const Vec2f size{
