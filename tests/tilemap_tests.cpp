@@ -128,8 +128,8 @@ bool render_command_eq(const kin::RenderCommand& a, const kin::RenderCommand& b)
            render_key_eq(a.key, b.key) &&
            a.rect == b.rect &&
            a.color == b.color &&
-           a.sprite.source == b.sprite.source &&
-           a.sprite.valid() == b.sprite.valid();
+           a.source == b.source &&
+           a.texture.valid() == b.texture.valid();
 }
 
 std::vector<kin::RenderCommand> sorted_render_commands(std::span<const kin::RenderCommand> commands) {

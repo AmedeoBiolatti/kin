@@ -12,12 +12,21 @@ releases may change APIs.
 - `Renderer2D::id()`: unique for the life of the process, never reused.
 - `kin_bench` cases `render.submit_flush_sprites_{2k,8k,32k}`: submit and
   flush, the everyday path.
+- `RenderQueue::submit(std::span<const RenderCommand>)` appends a batch of
+  commands, such as a cached one, in order.
 
 ### Changed
 
 - `RenderQueue::flush` draws in sorted order without moving the commands, so
   `commands()` keeps submission order after a flush. Call `sort_commands()`
   first if you need the commands themselves sorted.
+- `RenderCommand` is 152 bytes instead of 216. Code that builds or reads
+  commands directly needs updating:
+  - Sprite commands keep their texture in `texture` and their region in
+    `source`; the `sprite` member is gone.
+  - `material` is a `const Material2D*`. `RenderQueue`'s `MaterialRef`
+    parameters are unchanged; only their `material` pointer is kept.
+  - `RenderCommandType` is a `u8` enum.
 
 ### Performance
 
@@ -25,6 +34,10 @@ releases may change APIs.
   has not changed since its last sort is not sorted again, and `flush` skips
   reordering the commands. Submitting and flushing 32k sprites takes 4.2 ms
   instead of 9.7 ms.
+- Smaller render commands make submitting 10–28% faster. Tilemaps also reserve
+  queue space for the visible cells and hand their cached chunks over in one
+  bulk submit: a partial-view submit takes 0.56 ms instead of 1.7, a full
+  uncached one 6.3 ms instead of 10.2, and both allocate half as much.
 
 ### Performance
 

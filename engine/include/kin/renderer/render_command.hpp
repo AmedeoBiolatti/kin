@@ -41,7 +41,7 @@ struct RenderKey {
     u64 pass_mask = render_pass_mask::world;
 };
 
-enum class RenderCommandType {
+enum class RenderCommandType : u8 {
     Clear,
     FillRect,
     DrawRect,
@@ -65,24 +65,29 @@ struct RenderCommandDetail {
     std::function<void(Renderer2D&)> callback;
 };
 
+// One queued draw. Kept small (checked below) because queues hold thousands and
+// sorting, culling and flushing walk them every frame: fields are shared between
+// command types rather than each type getting its own.
 struct RenderCommand {
     RenderCommandType type = RenderCommandType::FillRect;
     RenderKey key{};
     u64 sequence = 0;
-    Rectf rect{};
-    bool output_pixel_rect = false;
-    Rectf source{};
-    Vec2f a{};
+    Rectf rect{};                   // destination; unused by Line, Clear, PopViewport, Custom
+    bool output_pixel_rect = false; // rect is in output pixels, not world/logical units
+    Rectf source{};                 // Texture/Sprite: region of `texture`; empty means all of it (Texture only)
+    Vec2f a{};                      // Line endpoints
     Vec2f b{};
     Color color = colors::white;
-    Texture texture;
-    Sprite sprite;
+    Texture texture;                // Texture and Sprite commands
     f32 rotation = 0.0f;
     Vec2f pivot{0.5f, 0.5f};
-    MaterialRef material;
+    const Material2D* material = nullptr;
     // Text/debug/callback for Text & Custom commands; null on every other command.
     std::shared_ptr<RenderCommandDetail> detail;
 };
+
+// Was 216 bytes with a Sprite (a second Texture) and a MaterialRef (a string).
+static_assert(sizeof(RenderCommand) <= 152, "RenderCommand grew; keep queued commands small");
 
 Rectf render_command_bounds(const RenderCommand& command);
 bool render_command_visible(const RenderCommand& command, const RenderView& view);

@@ -246,8 +246,9 @@ void append_tile_render_commands(const TileMap& map,
             .type = RenderCommandType::Sprite,
             .key = key,
             .rect = sprite_rect,
+            .source = resolved.sprite.source,
             .color = colors::white,
-            .sprite = resolved.sprite,
+            .texture = resolved.sprite.texture,
         });
         return;
     }
@@ -265,6 +266,15 @@ void append_tile_render_commands(const TileMap& map,
             .rect = {rect.x, rect.y, rect.w, std::min(2.0f, rect.h)},
             .color = definition->top_edge_color,
         });
+    }
+}
+
+// Makes room for `count` more commands, growing geometrically so that several
+// layers reserving in turn do not each reallocate the whole queue.
+void reserve_more(RenderQueue& queue, std::size_t count) {
+    const std::size_t needed = queue.size() + count;
+    if (needed > queue.capacity()) {
+        queue.reserve(std::max(needed, queue.capacity() * 2));
     }
 }
 
@@ -1835,6 +1845,7 @@ void TileMap::reset_render_cache_chunks(LayerRenderCache& cache,
 
 void TileMap::rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& layer, const RenderCacheKey& key) const {
     chunk.commands.clear();
+    chunk.commands.reserve(static_cast<std::size_t>(std::max(0, chunk.bounds.w) * std::max(0, chunk.bounds.h)));
     for (i32 row = chunk.bounds.y; row < chunk.bounds.y + chunk.bounds.h; ++row) {
         for (i32 col = chunk.bounds.x; col < chunk.bounds.x + chunk.bounds.w; ++col) {
             append_tile_render_commands(*this,
@@ -1854,6 +1865,8 @@ void TileMap::rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& lay
 
 void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key) const {
     std::vector<RenderCommand> commands;
+    // About one command per visible cell; reserving skips the queue's regrowth.
+    reserve_more(queue, static_cast<std::size_t>(std::max(0, visible_tiles.w) * std::max(0, visible_tiles.h)));
     for (i32 row = visible_tiles.y; row < visible_tiles.y + visible_tiles.h; ++row) {
         for (i32 col = visible_tiles.x; col < visible_tiles.x + visible_tiles.w; ++col) {
             append_tile_render_commands(*this,
@@ -1866,8 +1879,8 @@ void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, 
                                         key.pass_mask,
                                         key.sprites,
                                         commands);
-            for (const RenderCommand& command : commands) {
-                queue.submit(command);
+            for (RenderCommand& command : commands) {
+                queue.submit(std::move(command));
             }
             commands.clear();
         }
@@ -1901,15 +1914,20 @@ void TileMap::submit_cached_layer(RenderQueue& queue,
     const i32 visible_chunk_row0 = std::clamp(row0 / chunk_size.y, 0, chunk_rows - 1);
     const i32 visible_chunk_col1 = std::clamp(col1 / chunk_size.x, 0, chunk_cols - 1);
     const i32 visible_chunk_row1 = std::clamp(row1 / chunk_size.y, 0, chunk_rows - 1);
+    std::size_t visible_commands = 0;
     for (i32 chunk_row = visible_chunk_row0; chunk_row <= visible_chunk_row1; ++chunk_row) {
         for (i32 chunk_col = visible_chunk_col0; chunk_col <= visible_chunk_col1; ++chunk_col) {
             RenderChunkCache& chunk = cache.chunks[chunk_index(chunk_col, chunk_row, chunk_cols)];
             if (chunk.dirty) {
                 rebuild_render_chunk(chunk, layer, key);
             }
-            for (const RenderCommand& command : chunk.commands) {
-                queue.submit(command);
-            }
+            visible_commands += chunk.commands.size();
+        }
+    }
+    reserve_more(queue, visible_commands);
+    for (i32 chunk_row = visible_chunk_row0; chunk_row <= visible_chunk_row1; ++chunk_row) {
+        for (i32 chunk_col = visible_chunk_col0; chunk_col <= visible_chunk_col1; ++chunk_col) {
+            queue.submit(cache.chunks[chunk_index(chunk_col, chunk_row, chunk_cols)].commands);
         }
     }
 }

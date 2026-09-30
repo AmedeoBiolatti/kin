@@ -10,11 +10,11 @@ namespace kin {
 
 namespace {
 
-bool has_material_tint(const MaterialRef& material, Color& out) {
-    if (!material.material) {
+bool has_material_tint(const Material2D* material, Color& out) {
+    if (!material) {
         return false;
     }
-    out = material.material->tint;
+    out = material->tint;
     return true;
 }
 
@@ -124,9 +124,9 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
         }
         break;
     case RenderCommandType::Sprite:
-        if (command.sprite.valid()) {
-            renderer.draw_texture(command.sprite.texture,
-                                  command.sprite.source,
+        if (command.texture && command.source.w > 0.0f && command.source.h > 0.0f) {
+            renderer.draw_texture(command.texture,
+                                  command.source,
                                   rect,
                                   color,
                                   command.rotation,
@@ -247,13 +247,24 @@ void RenderQueue::submit(RenderCommand command) {
     _commands.push_back(std::move(command));
     _sorted = false;
 }
+void RenderQueue::submit(std::span<const RenderCommand> commands) {
+    if (commands.empty()) {
+        return;
+    }
+    const std::size_t first = _commands.size();
+    _commands.insert(_commands.end(), commands.begin(), commands.end());
+    for (std::size_t i = first; i < _commands.size(); ++i) {
+        _commands[i].sequence = _next_sequence++;
+    }
+    _sorted = false;
+}
 
 void RenderQueue::clear_color(Color color) {
     submit({.type = RenderCommandType::Clear, .color = color});
 }
 
 void RenderQueue::fill_rect(RenderKey key, Rectf rect, Color color, MaterialRef material) {
-    submit({.type = RenderCommandType::FillRect, .key = key, .rect = rect, .color = color, .material = std::move(material)});
+    submit({.type = RenderCommandType::FillRect, .key = key, .rect = rect, .color = color, .material = material.material});
 }
 
 void RenderQueue::draw_rect(RenderKey key, Rectf rect, Color color) {
@@ -265,11 +276,11 @@ void RenderQueue::draw_line(RenderKey key, Vec2f a, Vec2f b, Color color) {
 }
 
 void RenderQueue::draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot) {
-    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot, .material = std::move(material)});
+    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
 void RenderQueue::draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot) {
-    submit({.type = RenderCommandType::Sprite, .key = key, .rect = dest, .color = tint, .sprite = sprite, .rotation = rotation, .pivot = pivot, .material = std::move(material)});
+    submit({.type = RenderCommandType::Sprite, .key = key, .rect = dest, .source = sprite.source, .color = tint, .texture = sprite.texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
 void RenderQueue::draw_text(RenderKey key,
