@@ -97,12 +97,16 @@ GpuDevice::GpuDevice(Window& window, GpuDeviceOptions options)
         _window = nullptr;
         throw sdl_error("SDL_GPU swapchain unavailable for window");
     }
+    _shared = std::make_shared<SDL_GPUDevice*>(_device);
 }
 
 GpuDevice::~GpuDevice() {
     if (!_device) {
         return;
     }
+    // Textures still alive (held past the renderer) must not release into the
+    // destroyed device; they see a null handle from here on.
+    *_shared = nullptr;
     SDL_WaitForGPUIdle(_device);
     release_upload_ring();
     if (_window) {
@@ -113,6 +117,7 @@ GpuDevice::~GpuDevice() {
 
 GpuDevice::GpuDevice(GpuDevice&& other) noexcept
     : _device(std::exchange(other._device, nullptr)),
+      _shared(std::move(other._shared)),
       _window(std::exchange(other._window, nullptr)),
       _swapchain_format(std::exchange(other._swapchain_format, SDL_GPU_TEXTUREFORMAT_INVALID)),
       _present_mode(std::exchange(other._present_mode, SDL_GPU_PRESENTMODE_VSYNC)),
@@ -143,7 +148,7 @@ GpuTexture GpuDevice::create_render_texture(u32 width, u32 height, SDL_GPUTextur
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
-    return GpuTexture{_device, texture, width, height, format};
+    return GpuTexture{_shared, texture, width, height, format};
 }
 
 GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 height) {
@@ -230,7 +235,7 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     }
 
     SDL_ReleaseGPUTransferBuffer(_device, transfer);
-    return GpuTexture{_device, raw_texture, width, height, format};
+    return GpuTexture{_shared, raw_texture, width, height, format};
 }
 
 void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,

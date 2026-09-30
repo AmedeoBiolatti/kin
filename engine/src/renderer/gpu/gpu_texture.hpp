@@ -4,14 +4,21 @@
 
 #include <SDL3/SDL.h>
 
+#include <memory>
 #include <utility>
 
 namespace kin::gpu {
 
+// A device handle shared by the device and every texture it creates. The device
+// nulls it when destroyed, so a texture that outlives its device (for example
+// one held by a static cache until exit) skips the release instead of calling
+// into a destroyed device.
+using SharedDevice = std::shared_ptr<SDL_GPUDevice*>;
+
 class GpuTexture {
 public:
     GpuTexture() = default;
-    GpuTexture(SDL_GPUDevice* device, SDL_GPUTexture* texture,
+    GpuTexture(SharedDevice device, SDL_GPUTexture* texture,
                u32 width, u32 height, SDL_GPUTextureFormat format);
     ~GpuTexture();
 
@@ -30,7 +37,7 @@ public:
 private:
     void release();
 
-    SDL_GPUDevice* _device = nullptr;
+    SharedDevice _device;
     SDL_GPUTexture* _texture = nullptr;
     u32 _width = 0;
     u32 _height = 0;

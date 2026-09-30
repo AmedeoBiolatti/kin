@@ -7,6 +7,19 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- `Renderer2D::id()`: unique for the life of the process, never reused.
+
+### Fixed
+
+- GPU games no longer crash or hang on exit. Textures that outlive their
+  renderer, such as the glyph atlases in the static system-font cache, skip
+  their release once the GPU device is destroyed instead of calling into it.
+- Font caches key on `Renderer2D::id()` rather than the renderer's address, so
+  a new renderer created where an old one lived no longer draws text with the
+  old renderer's textures.
+
 ## [0.2.0] — 2026-09-30
 
 Features the first game built on kin needed: hex grids, 2D lighting, a job
