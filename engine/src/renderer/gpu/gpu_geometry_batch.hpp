@@ -39,6 +39,18 @@ struct GpuVertex {
     u8 a = 255;
 };
 
+// One draw_sprites() quad for sprite_instanced.vert, in target-pixel space.
+struct GpuSpriteInstance {
+    f32 x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+    f32 u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+    f32 pivot_x = 0.0f, pivot_y = 0.0f, cos = 1.0f, sin = 0.0f; // rotation about the pivot
+    u8 r = 255, g = 255, b = 255, a = 255;
+};
+
+// Which vertex input a pipeline reads: GpuVertex triangles, or GpuSpriteInstance
+// quads (one per instance).
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances };
+
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {
     f32 scale[2]{1.0f, 1.0f};
@@ -72,11 +84,20 @@ public:
               SDL_GPUSampler* sampler = nullptr, // nullptr -> FlushContext default sampler
               std::span<const SDL_GPUTextureSamplerBinding> extra = {});
 
-    bool empty() const { return _vertices.empty(); }
+    // Append quads drawn by instancing (see GpuSpriteInstance) with the default
+    // fragment shader. Consecutive pushes with identical state coalesce.
+    void push_instances(std::span<const GpuSpriteInstance> instances,
+                        SDL_GPUTexture* texture,
+                        SDL_Rect scissor,
+                        GpuBlendMode blend,
+                        SDL_GPUSampler* sampler = nullptr);
+
+    bool empty() const { return _vertices.empty() && _instances.empty(); }
 
     // Context shared by every range in a flush.
     struct FlushContext {
         SDL_GPUShader* vertex_shader = nullptr;   // shared 2D vertex shader
+        SDL_GPUShader* instance_shader = nullptr; // sprite_instanced.vert, for instance ranges
         SDL_GPUShader* default_fragment = nullptr; // used when a range's fragment is null
         SDL_GPUTexture* white_texture = nullptr;   // used when a range's texture is null
         SDL_GPUSampler* sampler = nullptr;
@@ -100,18 +121,21 @@ private:
         GpuBlendMode blend = GpuBlendMode::Alpha;
         u32 uniform_offset = 0; // into _uniform_bytes; size 0 == none
         u32 uniform_size = 0;
-        u32 first_vertex = 0;
-        u32 vertex_count = 0;
+        u32 first_vertex = 0;   // or first instance, for an instanced range
+        u32 vertex_count = 0;   // or instance count
+        bool instanced = false;
     };
 
     const GpuTexture* _target = nullptr;
     SDL_FColor _clear{0.0f, 0.0f, 0.0f, 1.0f};
     bool _do_clear = true;
     std::vector<GpuVertex> _vertices;
+    std::vector<GpuSpriteInstance> _instances;
     std::vector<Range> _ranges;
     std::vector<u8> _uniform_bytes;
     std::vector<SDL_GPUTextureSamplerBinding> _extra_bindings;
     GpuBuffer _vertex_buffer;
+    GpuBuffer _instance_buffer;
 };
 
 } // namespace kin::gpu

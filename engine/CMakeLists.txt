@@ -150,6 +150,7 @@ if(KIN_GLSLC)
     file(MAKE_DIRECTORY "${_kin_gpu_shader_dir}")
     set(_kin_gpu_spv)
     foreach(_pair "textured_quad.vert.glsl:vertex" "textured_quad.frag.glsl:fragment"
+                  "sprite_instanced.vert.glsl:vertex"
                   "pp_vignette.frag.glsl:fragment" "pp_color_grade.frag.glsl:fragment"
                   "pp_scanline.frag.glsl:fragment" "pp_chroma.frag.glsl:fragment"
                   "pp_bloom_bright.frag.glsl:fragment" "pp_bloom_blur.frag.glsl:fragment"

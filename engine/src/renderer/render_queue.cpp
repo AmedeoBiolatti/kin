@@ -84,7 +84,7 @@ Rectf output_to_logical(Renderer2D& renderer, Rectf rect) {
 // without copying the whole RenderCommand — RenderCommand owns strings, a
 // std::function, and shared_ptr-backed textures, so a by-value copy per
 // command per flush was the single hottest allocation/refcount path.
-void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf rect, Vec2f a, Vec2f b) {
+Color command_color(const RenderCommand& command) {
     Color color = command.color;
     Color material_tint{};
     if (has_material_tint(command.material, material_tint)) {
@@ -95,6 +95,11 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
             static_cast<u8>((static_cast<u32>(color.a) * material_tint.a) / 255),
         };
     }
+    return color;
+}
+
+void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf rect, Vec2f a, Vec2f b) {
+    const Color color = command_color(command);
 
     switch (command.type) {
     case RenderCommandType::Clear:
@@ -151,6 +156,77 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
         break;
     }
 }
+
+// A Texture or Sprite command as the quad execute_render_command() would draw;
+// false for other commands and for ones that draw nothing.
+bool sprite_of(Renderer2D& renderer, const RenderCommand& command, const RenderView* view, SpriteInstance& out) {
+    if (!command.texture) {
+        return false;
+    }
+    if (command.type == RenderCommandType::Texture) {
+        const Vec2i size = command.texture.size();
+        out.source = command.source.w > 0.0f && command.source.h > 0.0f
+            ? command.source
+            : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+    } else if (command.type == RenderCommandType::Sprite && command.source.w > 0.0f && command.source.h > 0.0f) {
+        out.source = command.source;
+    } else {
+        return false;
+    }
+    out.dest = command.output_pixel_rect ? output_to_logical(renderer, command.rect)
+             : view                      ? to_view_rect(command.rect, *view)
+                                         : command.rect;
+    out.tint = command_color(command);
+    out.rotation = command.rotation;
+    out.pivot = command.pivot;
+    return true;
+}
+
+// Gathers consecutive sprites that share a texture and draws them with one
+// draw_sprites() call (instanced on the GPU backend); a lone sprite still goes
+// through draw_texture(). Anything else drawn in between ends the run first, so
+// the draw order never changes.
+class SpriteRun {
+public:
+    SpriteRun(Renderer2D& renderer, std::vector<SpriteInstance>& sprites)
+        : _renderer(renderer), _sprites(sprites) {
+        _sprites.clear();
+    }
+
+    // Takes the command if it is a sprite (drawing any run it cannot join), or
+    // draws the pending run and returns false so the caller executes it.
+    bool take(const RenderCommand& command, const RenderView* view) {
+        if (command.type != RenderCommandType::Texture && command.type != RenderCommandType::Sprite) {
+            flush();
+            return false;
+        }
+        SpriteInstance sprite;
+        if (!sprite_of(_renderer, command, view, sprite)) {
+            return true; // draws nothing
+        }
+        if (!_sprites.empty() && !(command.texture == *_texture)) {
+            flush();
+        }
+        _texture = &command.texture;
+        _sprites.push_back(sprite);
+        return true;
+    }
+
+    void flush() {
+        if (_sprites.size() == 1) {
+            const SpriteInstance& s = _sprites.front();
+            _renderer.draw_texture(*_texture, s.source, s.dest, s.tint, s.rotation, s.pivot);
+        } else if (!_sprites.empty()) {
+            _renderer.draw_sprites(*_texture, _sprites);
+        }
+        _sprites.clear();
+    }
+
+private:
+    Renderer2D& _renderer;
+    std::vector<SpriteInstance>& _sprites;
+    const Texture* _texture = nullptr;
+};
 
 } // namespace
 
@@ -494,11 +570,13 @@ void RenderQueue::flush(Renderer2D& renderer) {
 }
 
 void RenderQueue::flush(Renderer2D& renderer, u64 pass_mask) {
+    SpriteRun run{renderer, _sprite_run};
     for_each_in_draw_order([&](const RenderCommand& command) {
-        if ((command.key.pass_mask & pass_mask) != 0) {
+        if ((command.key.pass_mask & pass_mask) != 0 && !run.take(command, nullptr)) {
             execute_render_command(renderer, command);
         }
     });
+    run.flush();
 }
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
@@ -506,6 +584,7 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
 }
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
+    SpriteRun run{renderer, _sprite_run};
     for_each_in_draw_order([&](const RenderCommand& command) {
         if ((command.key.pass_mask & pass_mask) == 0) {
             return;
@@ -513,11 +592,15 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_m
         if (view.culling_enabled && !render_command_visible(command, view)) {
             return;
         }
-        execute_render_command(renderer, command, view);
+        if (!run.take(command, &view)) {
+            execute_render_command(renderer, command, view);
+        }
     });
+    run.flush();
 }
 
 void RenderQueue::flush_presorted(Renderer2D& renderer, const RenderView& view, u64 pass_mask) const {
+    SpriteRun run{renderer, _sprite_run};
     for (const RenderCommand& command : _commands) {
         if ((command.key.pass_mask & pass_mask) == 0) {
             continue;
@@ -525,8 +608,11 @@ void RenderQueue::flush_presorted(Renderer2D& renderer, const RenderView& view, 
         if (view.culling_enabled && !render_command_visible(command, view)) {
             continue;
         }
-        execute_render_command(renderer, command, view);
+        if (!run.take(command, &view)) {
+            execute_render_command(renderer, command, view);
+        }
     }
+    run.flush();
 }
 
 void RenderQueue::flush_merged_presorted(Renderer2D& renderer,
@@ -535,6 +621,7 @@ void RenderQueue::flush_merged_presorted(Renderer2D& renderer,
                                          u64 pass_mask) const {
     std::size_t lhs = 0;
     std::size_t rhs = 0;
+    SpriteRun run{renderer, _sprite_run};
     const auto draw = [&](const RenderCommand& command) {
         if ((command.key.pass_mask & pass_mask) == 0) {
             return;
@@ -542,7 +629,9 @@ void RenderQueue::flush_merged_presorted(Renderer2D& renderer,
         if (view.culling_enabled && !render_command_visible(command, view)) {
             return;
         }
-        execute_render_command(renderer, command, view);
+        if (!run.take(command, &view)) {
+            execute_render_command(renderer, command, view);
+        }
     };
 
     while (lhs < _commands.size() && rhs < other.size()) {
@@ -558,6 +647,7 @@ void RenderQueue::flush_merged_presorted(Renderer2D& renderer,
     while (rhs < other.size()) {
         draw(other[rhs++]);
     }
+    run.flush();
 }
 
 } // namespace kin

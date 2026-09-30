@@ -277,6 +277,19 @@ Prefer `SpriteRef` ids over concrete `Sprite`/`Texture` data on entity
 components. Keep catalogs, animation registries, and loaded asset handles in
 scene-owned resources.
 
+### Sprite batches
+
+`Renderer2D::draw_sprites(texture, sprites)` draws many quads from one texture
+in order: each `SpriteInstance` (dest, source, tint, rotation, pivot) draws
+what `draw_texture()` would. The SDL_GPU backend submits them as one instanced
+draw (a 52-byte instance per quad, expanded by `sprite_instanced.vert`); other
+backends draw them one by one. `RenderQueue` flushes hand every run of
+consecutive same-texture sprite commands to it, so ECS sprites batch without
+changes, as long as neighbours in draw order share a texture. Y-sorted sprites
+of several kinds interleave, so put them in one atlas (a `SpriteCatalog` sheet,
+or `TextureRenderer::source` regions of one texture): a texture change ends the
+run and starts a new draw.
+
 ## Fixed-Timestep Render Interpolation
 
 `SceneContext::alpha` carries the fixed-timestep interpolation factor into

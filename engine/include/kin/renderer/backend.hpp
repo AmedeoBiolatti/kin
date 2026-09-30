@@ -16,6 +16,16 @@
 
 namespace kin {
 
+// One quad of a draw_sprites() call: what draw_texture(texture, source, dest,
+// tint, rotation, pivot) would draw.
+struct SpriteInstance {
+    Rectf dest{};
+    Rectf source{};             // texture pixels; empty means the whole texture
+    Color tint = colors::white;
+    f32 rotation = 0.0f;        // degrees, clockwise, about the pivot
+    Vec2f pivot{0.5f, 0.5f};    // normalized within dest
+};
+
 struct RendererBackendCapabilities {
     bool immediate_2d = true;
     bool queued_2d = false;
@@ -129,6 +139,17 @@ public:
     }
     virtual void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32, Vec2f) {
         draw_texture(texture, source, dest, tint);
+    }
+    // Many quads from one texture, in order. Backends that can draw them as one
+    // instanced batch override this; the default draws them one by one.
+    virtual void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
+        const Vec2i size = texture.size();
+        for (const SpriteInstance& sprite : sprites) {
+            const Rectf source = sprite.source.w > 0.0f && sprite.source.h > 0.0f
+                ? sprite.source
+                : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+            draw_texture(texture, source, sprite.dest, sprite.tint, sprite.rotation, sprite.pivot);
+        }
     }
 
     virtual void fill_rect(Rectf rect, Color color) = 0;

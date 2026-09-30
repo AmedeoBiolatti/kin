@@ -1120,6 +1120,100 @@ std::vector<kin::u8> lit_scene(kin::Renderer2D& renderer, kin::LightLayer& layer
     return pixels;
 }
 
+// A scene of sprites drawn one draw_texture() at a time, or as one draw_sprites().
+std::vector<kin::u8> sprite_scene(kin::Renderer2D& renderer, const kin::Texture& texture,
+                                  std::span<const kin::SpriteInstance> sprites, bool batched) {
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    assert(target.valid());
+    const auto bind = renderer.scoped_render_target(target);
+    renderer.clear(kin::Color::rgb(10, 20, 30));
+    renderer.push_viewport({8.0f, 4.0f, 48.0f, 56.0f});
+    if (batched) {
+        renderer.draw_sprites(texture, sprites);
+    } else {
+        for (const kin::SpriteInstance& s : sprites) {
+            const kin::Rectf source = s.source.w > 0.0f ? s.source : kin::Rectf{0.0f, 0.0f, 4.0f, 4.0f};
+            renderer.draw_texture(texture, source, s.dest, s.tint, s.rotation, s.pivot);
+        }
+    }
+    renderer.pop_viewport();
+    std::vector<kin::u8> pixels;
+    kin::Vec2i size{};
+    assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
+    assert((size == kin::Vec2i{64, 64}));
+    return pixels;
+}
+
+// draw_sprites() must draw what a draw_texture() per sprite draws: plain, tinted,
+// from part of the texture, turned about a pivot, overlapping in order, inside a
+// viewport. Returns how many pixels differ by more than 2 in any channel.
+int sprite_batch_mismatches(kin::Renderer2D& renderer) {
+    std::array<kin::u8, 64> texels{};
+    for (std::size_t i = 0; i < 16; ++i) {
+        texels[i * 4 + 0] = static_cast<kin::u8>(40 + i * 13);
+        texels[i * 4 + 1] = static_cast<kin::u8>(250 - i * 11);
+        texels[i * 4 + 2] = static_cast<kin::u8>((i % 4) * 60);
+        texels[i * 4 + 3] = 255;
+    }
+    const kin::Texture texture = renderer.create_texture_from_rgba(texels.data(), {4, 4});
+    renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
+    const std::array<kin::SpriteInstance, 5> sprites{{
+        {.dest = {2.0f, 2.0f, 12.0f, 12.0f}},
+        {.dest = {18.0f, 2.0f, 12.0f, 8.0f}, .source = {1.0f, 1.0f, 2.0f, 2.0f}, .tint = kin::Color::rgba(255, 128, 64, 200)},
+        {.dest = {4.0f, 20.0f, 16.0f, 16.0f}, .rotation = 30.0f},
+        {.dest = {24.0f, 24.0f, 10.0f, 14.0f}, .rotation = -45.0f, .pivot = {0.0f, 0.0f}},
+        {.dest = {10.0f, 10.0f, 20.0f, 20.0f}, .tint = kin::Color::rgba(255, 255, 255, 128)},
+    }};
+    const std::vector<kin::u8> one_by_one = sprite_scene(renderer, texture, sprites, false);
+    const std::vector<kin::u8> batched = sprite_scene(renderer, texture, sprites, true);
+    int mismatches = 0;
+    for (std::size_t i = 0; i < one_by_one.size(); i += 4) {
+        for (std::size_t c = 0; c < 4; ++c) {
+            if (std::abs(int(one_by_one[i + c]) - int(batched[i + c])) > 2) {
+                ++mismatches;
+                break;
+            }
+        }
+    }
+    // Something was drawn at all: the first sprite's top-left texel.
+    assert(pixel_near(batched, {64, 64}, 12, 8, kin::Color::rgb(40, 250, 0), 3));
+    return mismatches;
+}
+
+void test_sprite_batches_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "sprite-batch-test", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    assert(sprite_batch_mismatches(renderer) == 0); // the default: one draw_texture each
+}
+
+void test_sprite_batches_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_sprite_batches_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-sprite-batch-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        // Instanced: the corners are computed on the GPU, so allow a few edge pixels
+        // of a turned sprite to round the other way.
+        const int mismatches = sprite_batch_mismatches(*renderer);
+        if (mismatches > 4) {
+            throw std::runtime_error(std::string(test_name) + ": " + std::to_string(mismatches) + " pixels differ");
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Shared by the software (SDL) and GPU backend tests: both must light the same way.
 void check_lighting(kin::Renderer2D& renderer) {
     constexpr kin::Vec2i size{64, 64};
@@ -1363,5 +1457,7 @@ int main() {
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();
+    test_sprite_batches_on_software_backend();
+    test_sprite_batches_on_gpu_backend();
     return 0;
 }

@@ -353,6 +353,12 @@ void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, 
     }
 }
 
+void Renderer2D::draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
+    if (!sprites.empty() && drawable(texture)) {
+        _backend->draw_sprites(texture, sprites);
+    }
+}
+
 void Renderer2D::draw_texture(const Texture& texture, Vec2f pos, Vec2f size) {
     draw_texture(texture, Rectf{pos.x, pos.y, size.x, size.y});
 }

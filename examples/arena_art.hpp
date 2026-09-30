@@ -54,6 +54,7 @@ private:
         float hp = 0, cooldown = 0;
     };
     std::vector<VisibleEnemy> _visible; // this frame's enemies near the view
+    std::vector<SpriteInstance> _shadows;
 
     bool _ready = false;
     bool _lit = false;

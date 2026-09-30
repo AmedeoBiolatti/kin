@@ -1,6 +1,7 @@
 #pragma once
 // Caches SDL_GPU graphics pipelines keyed by (vertex shader, fragment shader,
-// blend mode, color-target format). One vertex layout (GpuVertex). Reusable by
+// blend mode, color-target format, vertex layout): GpuVertex triangles or
+// GpuSpriteInstance quads. Reusable by
 // the default 2D path and by custom material/effect shaders (Phase G3+).
 #include "gpu_geometry_batch.hpp" // GpuBlendMode
 
@@ -22,7 +23,8 @@ public:
 
     // Returns a cached pipeline or creates one. Returns nullptr on failure.
     SDL_GPUGraphicsPipeline* get(SDL_GPUShader* vertex, SDL_GPUShader* fragment,
-                                 GpuBlendMode blend, SDL_GPUTextureFormat target_format);
+                                 GpuBlendMode blend, SDL_GPUTextureFormat target_format,
+                                 GpuVertexLayout layout = GpuVertexLayout::Triangles);
 
     void destroy();
 
@@ -32,6 +34,7 @@ private:
         SDL_GPUShader* fragment = nullptr;
         GpuBlendMode blend = GpuBlendMode::Alpha;
         SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        GpuVertexLayout layout = GpuVertexLayout::Triangles;
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
     };
 
