@@ -59,7 +59,7 @@ private:
     std::size_t gather_rows(std::span<const Transform2D> transforms, std::span<const Enemy> enemies,
                             const Camera2D& camera, std::vector<SpriteInstance>& shadows,
                             std::vector<VisibleEnemy>& marked) const;
-    struct GatherChunk {
+    struct alignas(64) GatherChunk { // one per worker; aligned so neighbours share no cache line
         std::size_t visible = 0;
         std::vector<SpriteInstance> shadows;
         std::vector<VisibleEnemy> marked;

@@ -302,7 +302,9 @@ submissions (`submitted()`), not positions.
 Both ends can use worker threads for large workloads, with the same result as
 a single thread: `SpriteRenderOptions::jobs` has `collect_static()` and
 `collect_dynamic()` prepare `TextureRenderer` tables of 8,192 or more entities in
-chunks, queued in row order with `RenderQueue::append_sprites()`; and after
+chunks: workers count each chunk's sprites, the queue reserves room for all of
+them (`RenderQueue::reserve_sprites()`), and workers write each into its slot
+(`write_sprite()`), in row order; and after
 `Renderer2D::set_job_system(jobs)` the SDL_GPU backend fills `draw_sprites()`
 batches of 16,384 or more in parallel.
 

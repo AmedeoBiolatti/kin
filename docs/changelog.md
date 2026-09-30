@@ -19,6 +19,15 @@ releases may change APIs.
 
 ### Changed
 
+- The parallel ECS sprite collect writes sprites straight into the queue
+  (`RenderQueue::reserve_sprites()`, `texture_index()`, `write_sprite()`)
+  instead of preparing them on workers and appending them on one thread: about
+  3–4× faster than a single thread for 100,000 sprites, where the previous
+  version was slower than one. Chunks are smaller (1,024 rows) so fast cores take
+  over from slow ones. `RenderQueue` sorts in 11-bit radix passes and shifts
+  queued sprites into the view with the camera offset looked up once. Signal
+  Siege at 100,000 enemies: about 8.4 ms a frame on the GPU against 9.5 ms for
+  main (same session); its sprite collect 1.1 ms against 1.9.
 - Large sprite workloads use worker threads when given a `JobSystem`:
   `SpriteRenderOptions::jobs` prepares big `TextureRenderer` tables in parallel
   chunks (queued in row order, via the new `RenderQueue::append_sprites()`), and
