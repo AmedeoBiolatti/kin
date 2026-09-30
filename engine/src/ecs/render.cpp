@@ -209,31 +209,50 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
 
 namespace {
 
+// render_view_visible() with the view's rectangle worked out once, for loops.
+class ViewCuller {
+public:
+    explicit ViewCuller(const RenderView* view)
+        : _rect(view ? render_view_visible_rect(*view) : Rectf{}),
+          _enabled(view && view->culling_enabled && _rect.w > 0.0f && _rect.h > 0.0f) {}
+
+    bool visible(Rectf b) const {
+        return !_enabled || (b.x + b.w >= _rect.x && b.y + b.h >= _rect.y && b.x <= _rect.x + _rect.w &&
+                             b.y <= _rect.y + _rect.h);
+    }
+
+private:
+    Rectf _rect;
+    bool _enabled;
+};
+
 // submit_texture()'s work, into `out` instead of a queue: safe on a worker.
-void prepare_texture(const WorldTransform& transform, const TextureRenderer& texture, const RenderView* view,
-                     std::vector<PreparedSprite>& out) {
+bool prepare_texture(const WorldTransform& transform, const TextureRenderer& texture, const ViewCuller& culler,
+                     PreparedSprite& out) {
     if (!texture.visible || !texture.texture) {
-        return;
+        return false;
     }
     const Vec2f pos = transform.pos;
     const Rectf dest = texture_draw_rect(pos, texture);
-    if (view && !render_view_visible(*view, dest)) {
-        return;
+    if (!culler.visible(dest)) {
+        return false;
     }
-    out.push_back({
+    out = {
         .key = key_for(texture.layer, texture.order, texture.y_sort, pos.y + texture.offset.y + texture.sort_y_offset),
         .texture = &texture.texture,
         .source = texture_source_rect(texture),
         .dest = dest,
         .tint = texture.tint,
-    });
+    };
+    return true;
 }
 
 } // namespace
 
 void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOptions& options, bool statics) {
     constexpr i32 parallel_min = 8192;
-    constexpr i32 chunk = 4096;
+    constexpr i32 chunk = 1024; // small, so fast threads take over from slow ones
+    const ViewCuller culler{options.view};
     _textures.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto world = it.field<const WorldTransform>(1);
@@ -247,25 +266,67 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 }
                 continue;
             }
-            // Chunks are prepared on the workers and queued in row order, exactly as
-            // the loop above would queue them.
+            // In parallel, with the same result as the loop above: the workers count
+            // each chunk's sprites and note its textures; the queue then makes room for
+            // all of them at once; and the workers write each sprite into its slot.
             const i32 chunks = (rows + chunk - 1) / chunk;
-            if (_prepared.size() < static_cast<std::size_t>(chunks)) {
-                _prepared.resize(static_cast<std::size_t>(chunks));
+            if (_chunks.size() < static_cast<std::size_t>(chunks)) {
+                _chunks.resize(static_cast<std::size_t>(chunks));
             }
+            const auto rows_of = [&](i32 c) { return std::pair{c * chunk, std::min(rows, (c + 1) * chunk)}; };
             options.jobs->parallel_for(chunks, [&](i32 c) {
-                std::vector<PreparedSprite>& out = _prepared[static_cast<std::size_t>(c)];
-                out.clear();
-                for (i32 i = c * chunk; i < std::min(rows, (c + 1) * chunk); ++i) {
+                TextureChunk& out = _chunks[static_cast<std::size_t>(c)];
+                out.textures.clear();
+                std::size_t count = 0; // a local: a shared counter would bounce between cores
+                const Texture* last = nullptr;
+                PreparedSprite sprite;
+                const auto [begin, end] = rows_of(c);
+                for (i32 i = begin; i < end; ++i) {
                     const auto row = static_cast<std::size_t>(i);
-                    if (textures[row].static_renderable == statics) {
-                        prepare_texture(world[row], textures[row], options.view, out);
+                    if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+                        ++count;
+                        // Each entity holds its own handle: compare textures, not handle addresses.
+                        if ((!last || !(*sprite.texture == *last)) &&
+                            std::find_if(out.textures.begin(), out.textures.end(),
+                                         [&](const Texture* t) { return *t == *sprite.texture; }) == out.textures.end()) {
+                            out.textures.push_back(sprite.texture);
+                        }
+                        last = sprite.texture;
+                    }
+                }
+                out.count = count;
+            });
+            std::size_t total = 0;
+            for (i32 c = 0; c < chunks; ++c) {
+                TextureChunk& part = _chunks[static_cast<std::size_t>(c)];
+                part.first = total;
+                total += part.count;
+                part.slots.clear();
+                for (const Texture* texture : part.textures) {
+                    part.slots.push_back(queue.texture_index(*texture));
+                }
+            }
+            const RenderQueue::SpriteBlock block = queue.reserve_sprites(total);
+            options.jobs->parallel_for(chunks, [&](i32 c) {
+                const TextureChunk& part = _chunks[static_cast<std::size_t>(c)];
+                std::size_t slot = part.first;
+                const Texture* last = nullptr;
+                u32 last_slot = 0;
+                PreparedSprite sprite;
+                const auto [begin, end] = rows_of(c);
+                for (i32 i = begin; i < end; ++i) {
+                    const auto row = static_cast<std::size_t>(i);
+                    if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+                        if (!last || !(*sprite.texture == *last)) {
+                            const auto found = std::find_if(part.textures.begin(), part.textures.end(),
+                                                            [&](const Texture* t) { return *t == *sprite.texture; });
+                            last_slot = part.slots[static_cast<std::size_t>(found - part.textures.begin())];
+                            last = sprite.texture;
+                        }
+                        queue.write_sprite(block, slot++, last_slot, sprite);
                     }
                 }
             });
-            for (i32 c = 0; c < chunks; ++c) {
-                queue.append_sprites(_prepared[static_cast<std::size_t>(c)]);
-            }
         }
     });
 }

@@ -1,5 +1,6 @@
 #include <kin/core/json.hpp>
 #include <kin/core/instrumentation.hpp>
+#include <kin/core/jobs.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/ecs/component.hpp>
 #include <kin/ecs/render.hpp>
@@ -635,6 +636,26 @@ kin::u64 ecs_sprites_collect_100k(int) {
     return fixture.queue.size();
 }
 
+// The fixed cost of a parallel_for over idle workers: what a frame pays per call.
+kin::u64 jobs_parallel_for_empty(int) {
+    static kin::JobSystem jobs;
+    static std::array<kin::u64, 64 * 8> sink{};
+    kin::u64 total = 0;
+    for (int round = 0; round < 10; ++round) {
+        jobs.parallel_for(64, [&](kin::i32 i) { sink[static_cast<std::size_t>(i) * 8] += static_cast<kin::u64>(round); });
+        total += sink[0];
+    }
+    return total;
+}
+
+kin::u64 ecs_sprites_collect_100k_jobs(int) {
+    static kin::JobSystem jobs{{.workers = std::getenv("KIN_BENCH_WORKERS") ? std::atoi(std::getenv("KIN_BENCH_WORKERS")) : 0}};
+    EcsSpriteFixture& fixture = ecs_sprite_fixture();
+    fixture.queue.clear();
+    fixture.render.collect_dynamic(fixture.queue, {.view = &fixture.view, .jobs = &jobs});
+    return fixture.queue.size();
+}
+
 kin::u64 ecs_sprites_collect_flush_100k(int) {
     EcsSpriteFixture& fixture = ecs_sprite_fixture();
     fixture.queue.clear();
@@ -712,6 +733,8 @@ const std::vector<BenchCase>& bench_cases() {
         {"render", "collect_culled_10k", render_collect_culled_10k},
         {"render", "ecs_sprites_collect_100k", ecs_sprites_collect_100k},
         {"render", "ecs_sprites_collect_flush_100k", ecs_sprites_collect_flush_100k},
+        {"render", "ecs_sprites_collect_100k_jobs", ecs_sprites_collect_100k_jobs},
+        {"jobs", "parallel_for_empty_x10", jobs_parallel_for_empty},
         {"input", "latency_60_60", nullptr, 60, 60},
         {"input", "latency_60_144", nullptr, 60, 144},
         {"input", "latency_120_144", nullptr, 120, 144},

@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace kin {
@@ -59,6 +61,22 @@ public:
     // Queues each sprite in order, as draw_texture_region() (Texture) or
     // draw_sprite() (Sprite) would.
     void append_sprites(std::span<const PreparedSprite> sprites);
+
+    // For sprites produced on several threads, without copying them twice: room
+    // for `count` sprites, queued in order as if submitted one by one now. Register
+    // their textures with texture_index() (one thread), then fill every slot
+    // exactly once with write_sprite() (any threads, distinct slots) before the
+    // queue is used again.
+    struct SpriteBlock {
+        std::size_t first = 0;
+        u64 sequence = 0;
+        std::size_t count = 0;
+    };
+    SpriteBlock reserve_sprites(std::size_t count);
+    u32 texture_index(const Texture& texture) { return texture_slot(texture); }
+    // `sprite` must be drawable: its texture valid (and registered as `texture`),
+    // and a source given for a Sprite.
+    void write_sprite(const SpriteBlock& block, std::size_t index, u32 texture, const PreparedSprite& sprite);
     // A Texture command drawing `source` (texture pixels) of `texture`.
     void draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint = colors::white, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
     void draw_text(RenderKey key, std::string text, Vec2f pos, Rectf bounds, f32 scale, Color color, std::function<void(Renderer2D&)> callback);
@@ -89,20 +107,39 @@ private:
     // A plain Texture or Sprite command (a valid texture, no material, not in
     // output pixels), kept compactly: the texture is an index into _textures, so
     // queueing a sprite copies no texture handle.
+    // Trivial (every field is set where one is made), so reserve_sprites() can
+    // grow the list without initializing slots the writers fill anyway.
     struct QueuedSprite {
-        Rectf dest{};
-        Rectf source{};
-        Color tint = colors::white;
-        f32 rotation = 0.0f;
-        Vec2f pivot{0.5f, 0.5f};
-        i32 layer = 0;
-        i32 order = 0;
-        f32 y = 0.0f;
-        u32 texture = 0;
-        u64 pass_mask = 0;
-        u64 sequence = 0;
-        bool use_y = false;
-        RenderCommandType type = RenderCommandType::Texture;
+        Rectf dest;
+        Rectf source;
+        Color tint;
+        f32 rotation;
+        Vec2f pivot;
+        i32 layer;
+        i32 order;
+        f32 y;
+        u32 texture;
+        u64 pass_mask;
+        u64 sequence;
+        bool use_y;
+        RenderCommandType type;
+    };
+    // Default-initializes on resize(): for trivial types, leaves memory as is.
+    template<typename T>
+    struct UninitializedAllocator : std::allocator<T> {
+        template<typename U>
+        struct rebind {
+            using other = UninitializedAllocator<U>;
+        };
+        using std::allocator<T>::allocator;
+        template<typename U>
+        void construct(U* p) noexcept {
+            ::new (static_cast<void*>(p)) U;
+        }
+        template<typename U, typename... Args>
+        void construct(U* p, Args&&... args) {
+            ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+        }
     };
 
     bool before(const RenderCommand& a, const RenderCommand& b) const;
@@ -137,7 +174,7 @@ private:
     u64 _next_sequence = 0;
     // Mutable: commands() and the presorted flushes materialize queued sprites.
     mutable std::vector<RenderCommand> _commands;
-    mutable std::vector<QueuedSprite> _sprites;
+    mutable std::vector<QueuedSprite, UninitializedAllocator<QueuedSprite>> _sprites;
     mutable std::vector<Texture> _textures; // referenced by _sprites
     mutable std::size_t _sprites_after = 0; // _commands before this index predate every queued sprite
     std::array<u32, 64> _texture_cache{};   // slot + 1 by texture address; checked, so never stale

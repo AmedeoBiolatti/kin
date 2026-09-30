@@ -130,7 +130,15 @@ private:
 
     flecs::world* _world = nullptr;
     flecs::observer _transform_observer;
-    std::vector<std::vector<PreparedSprite>> _prepared; // per chunk, reused
+    // Cache-line aligned: each is written by one worker, and neighbours must not
+    // share a line (false sharing made the parallel path slower than one thread).
+    struct alignas(64) TextureChunk {
+        std::size_t count = 0;                // sprites this chunk queues
+        std::size_t first = 0;                // its first slot in the reserved block
+        std::vector<const Texture*> textures; // distinct, in first-use order
+        std::vector<u32> slots;               // their queue texture indices
+    };
+    std::vector<TextureChunk> _chunks; // per parallel chunk, reused
     // Own transform, local transform, and the parent's world transform (optional,
     // cascaded so parents are visited before their children).
     flecs::query<WorldTransform, const Transform2D, const WorldTransform> _transforms;

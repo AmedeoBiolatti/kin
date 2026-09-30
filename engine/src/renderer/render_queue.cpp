@@ -31,6 +31,20 @@ Rectf to_view_rect(Rectf rect, const RenderView& view) {
     return {pos.x, pos.y, rect.w, rect.h};
 }
 
+// to_view_rect() with the camera's offset looked up once, for loops.
+struct ViewShift {
+    explicit ViewShift(const RenderView* view)
+        : active(view && !view->output_space && view->camera),
+          offset(active ? view->camera->effective_offset() : Vec2f{}) {}
+
+    Rectf apply(Rectf rect) const {
+        return active ? Rectf{rect.x - offset.x, rect.y - offset.y, rect.w, rect.h} : rect;
+    }
+
+    bool active;
+    Vec2f offset;
+};
+
 Rectf rotated_bounds(Rectf rect, f32 rotation, Vec2f pivot) {
     if (rotation == 0.0f || rect.w <= 0.0f || rect.h <= 0.0f) {
         return rect;
@@ -425,6 +439,35 @@ void RenderQueue::append_sprites(std::span<const PreparedSprite> sprites) {
     }
 }
 
+RenderQueue::SpriteBlock RenderQueue::reserve_sprites(std::size_t count) {
+    if (_sprites.empty()) {
+        _sprites_after = _commands.size();
+    }
+    const SpriteBlock block{.first = _sprites.size(), .sequence = _next_sequence, .count = count};
+    _sprites.resize(_sprites.size() + count);
+    _next_sequence += count;
+    _sorted = false;
+    return block;
+}
+
+void RenderQueue::write_sprite(const SpriteBlock& block, std::size_t index, u32 texture, const PreparedSprite& sprite) {
+    _sprites[block.first + index] = {
+        .dest = sprite.dest,
+        .source = sprite.source,
+        .tint = sprite.tint,
+        .rotation = sprite.rotation,
+        .pivot = sprite.pivot,
+        .layer = sprite.key.layer,
+        .order = sprite.key.order,
+        .y = sprite.key.y,
+        .texture = texture,
+        .pass_mask = sprite.key.pass_mask,
+        .sequence = block.sequence + index,
+        .use_y = sprite.key.use_y,
+        .type = sprite.type,
+    };
+}
+
 void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
                                Color tint, f32 rotation, Vec2f pivot) {
     if (_sprites.empty()) {
@@ -650,23 +693,25 @@ bool RenderQueue::compute_draw_order() {
         const auto word_of = [](const SortEntry& entry, std::size_t word) -> u32 {
             return word == 0 ? entry.order : word == 1 ? entry.y : entry.layer;
         };
+        // Three passes per word, of 11, 11 and 10 bits.
+        constexpr std::array<u32, 3> shifts{0, 11, 22};
+        constexpr u32 digit_mask = 0x7ffu;
         _radix_scratch.resize(count);
         for (std::size_t word = 0; word < 3; ++word) {
             if (!varies[word]) {
                 continue;
             }
-            std::array<std::array<u32, 256>, 4> counts{};
+            std::array<std::array<u32, 2048>, 3> counts{};
             for (const SortEntry& entry : _sort_keys) {
                 const u32 value = word_of(entry, word);
-                ++counts[0][value & 0xffu];
-                ++counts[1][(value >> 8) & 0xffu];
-                ++counts[2][(value >> 16) & 0xffu];
-                ++counts[3][value >> 24];
+                ++counts[0][value & digit_mask];
+                ++counts[1][(value >> 11) & digit_mask];
+                ++counts[2][value >> 22];
             }
-            for (std::size_t digit = 0; digit < 4; ++digit) {
-                std::array<u32, 256>& bucket = counts[digit];
-                const u32 shift = static_cast<u32>(digit * 8);
-                if (bucket[(word_of(_sort_keys[0], word) >> shift) & 0xffu] == count) {
+            for (std::size_t digit = 0; digit < 3; ++digit) {
+                std::array<u32, 2048>& bucket = counts[digit];
+                const u32 shift = shifts[digit];
+                if (bucket[(word_of(_sort_keys[0], word) >> shift) & digit_mask] == count) {
                     continue;
                 }
                 u32 offset = 0;
@@ -676,7 +721,7 @@ bool RenderQueue::compute_draw_order() {
                     offset += n;
                 }
                 for (const SortEntry& entry : _sort_keys) {
-                    _radix_scratch[bucket[(word_of(entry, word) >> shift) & 0xffu]++] = entry;
+                    _radix_scratch[bucket[(word_of(entry, word) >> shift) & digit_mask]++] = entry;
                 }
                 _sort_keys.swap(_radix_scratch);
             }
@@ -757,14 +802,14 @@ void RenderQueue::for_each_in_draw_order(Draw&& draw) {
 
 namespace {
 
-// The quad a queued sprite draws, with the view's transform when given.
+// The quad a queued sprite draws, shifted into the view.
 SpriteInstance sprite_instance(Rectf dest, Rectf source, const Texture& texture, Color tint, f32 rotation, Vec2f pivot,
-                               const RenderView* view) {
+                               const ViewShift& shift) {
     if (source.w <= 0.0f || source.h <= 0.0f) {
         const Vec2i size = texture.size();
         source = {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
     }
-    return {.dest = view ? to_view_rect(dest, *view) : dest, .source = source, .tint = tint, .rotation = rotation, .pivot = pivot};
+    return {.dest = shift.apply(dest), .source = source, .tint = tint, .rotation = rotation, .pivot = pivot};
 }
 
 } // namespace
@@ -805,12 +850,13 @@ void RenderQueue::flush(Renderer2D& renderer) {
 
 void RenderQueue::flush(Renderer2D& renderer, u64 pass_mask) {
     SpriteRun run{renderer, _sprite_run};
+    const ViewShift no_shift{nullptr};
     for_each_in_draw_order([&](const RenderCommand* command, const QueuedSprite* sprite) {
         if (sprite) {
             if ((sprite->pass_mask & pass_mask) != 0) {
                 const Texture& texture = _textures[sprite->texture];
                 run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
-                                                 sprite->pivot, nullptr));
+                                                 sprite->pivot, no_shift));
             }
             return;
         }
@@ -828,6 +874,7 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
     SpriteRun run{renderer, _sprite_run};
     const Culler culler{view};
+    const ViewShift shift{&view};
     for_each_in_draw_order([&](const RenderCommand* command, const QueuedSprite* sprite) {
         if (sprite) {
             if ((sprite->pass_mask & pass_mask) == 0 ||
@@ -836,7 +883,7 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_m
             }
             const Texture& texture = _textures[sprite->texture];
             run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
-                                             sprite->pivot, &view));
+                                             sprite->pivot, shift));
             return;
         }
         if ((command->key.pass_mask & pass_mask) == 0) {
