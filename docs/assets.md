@@ -107,6 +107,40 @@ config.asset_server = &server;
 return kin::run_scene_app(config, scenes);
 ```
 
+## Hot-reloading game data
+
+`kin::FileWatcher` (`kin/assets/file_watcher.hpp`) reloads a game's own data
+files (text, balance tables, themes, levels) while it runs: edit a file, save,
+and the change is in the game a moment later, without a restart.
+
+```cpp
+kin::FileWatcher files;
+files.load_and_watch(root / "data/balance.kinbalance",
+                     [&](std::string_view text, std::vector<std::string>& errors) {
+                         return balance.load(text, errors); // apply only on success
+                     });
+config.file_watcher = &files; // run_scene_app polls it once per frame
+```
+
+- `load_and_watch(path, load)` loads the file now and again whenever it changes.
+  `load` gets the whole text and returns false, with messages in `errors`, to
+  reject it. A rejected or unreadable file is logged and the loader should keep
+  what it had, so a typo in an edit leaves the game running on the last good
+  version; fix the file and it reloads.
+- `watch(path, on_change)` just calls back, for files a game reads itself or
+  whose change means more than one reload (for example data files that refer to
+  each other, reloaded together).
+- Changes are found by polling modification time and size, at most every
+  `Options::interval` (250 ms), and reported only once a file has stayed the
+  same for two polls, so editors that write in steps or save through a temporary
+  file are seen once, after they finish. A deleted file is not reported until it
+  comes back.
+- Callbacks run inside `poll()`, on the thread that calls it: with
+  `SceneAppConfig::file_watcher`, the main thread between frames, so they may
+  change game state directly. Headless and server runs never poll, so their data
+  stays what it was when the run began and they stay deterministic. A game that
+  runs its own loop calls `poll()` itself.
+
 ## Scope (V1)
 
 Implemented: async loading, handles, `LoadState`, events, dependency loading,

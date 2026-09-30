@@ -13,6 +13,7 @@
 namespace kin {
 
 class AssetServer;
+class FileWatcher;
 
 struct HeadlessOptions {
     bool enabled = false;
@@ -62,6 +63,11 @@ struct SceneAppConfig {
     // frame before scenes.update — draining to quiescence in headless mode (for
     // deterministic runs) and applying budgeted completions when windowed.
     AssetServer* asset_server = nullptr;
+    // Optional watcher of the game's own data files (see FileWatcher). When set,
+    // run_scene_app polls it once per frame before scenes.update, so changed files
+    // reload between frames; never in headless or server runs, which stay
+    // deterministic.
+    FileWatcher* file_watcher = nullptr;
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);

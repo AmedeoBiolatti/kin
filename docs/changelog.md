@@ -7,6 +7,15 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- `kin::FileWatcher` hot-reloads a game's own data files: `load_and_watch(path,
+  load)` loads a file and reloads it when it changes, keeping the last good data
+  when an edit is rejected; `watch(path, callback)` reports changes. Changes are
+  found by polling (at most every 250 ms) and reported once a file has settled,
+  so partial writes and save-by-rename are seen once. `SceneAppConfig::file_watcher`
+  has `run_scene_app` poll it between frames, except in headless and server runs.
+
 ## [0.2.2] — 2026-09-30
 
 Large sprite counts get far cheaper: sprites that share a texture are drawn as

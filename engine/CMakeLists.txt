@@ -16,6 +16,7 @@ add_library(kin_engine STATIC
     src/audio/spatial_audio.cpp
     src/assets/asset_manager.cpp
     src/assets/asset_server.cpp
+    src/assets/file_watcher.cpp
     src/assets/image.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
