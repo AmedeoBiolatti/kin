@@ -9,11 +9,19 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::draw_sprites(texture, sprites)` draws many quads from one texture
+  in one call; the SDL_GPU backend draws them as one instanced batch
+  (`SpriteInstance`, `sprite_instanced.vert`), other backends quad by quad.
+  `RenderQueue` flushes hand it every run of consecutive same-texture sprites, so
+  ECS sprites batch automatically. `Texture` handles compare with `==`.
 - `AudioEngine::add_clip` registers an in-memory clip (synthesized, or from
   `make_memory_audio_clip`) under a clip id that cues name like a file-backed one.
 
 ### Changed
 
+- Signal Siege draws its drop shadows with one `draw_sprites()` call. With the
+  enemy atlas, a frame at 100,000 enemies takes about 19.7 ms on the GPU, down
+  from 24.7, and 2.4 ms at 10,000, down from 2.9.
 - `WorldRenderState::propagate_transforms` visits parents before their children
   (a cascaded query) and does no per-entity parent lookup, so a flat world of
   100,000 sprites propagates in about 0.13 ms; nested hierarchies are now updated

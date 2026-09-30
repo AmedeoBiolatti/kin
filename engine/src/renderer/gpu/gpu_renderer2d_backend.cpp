@@ -175,6 +175,15 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
                                                  SDL_GPU_SHADERFORMAT_SPIRV,
                                                  dir / "textured_quad.frag.spv",
                                                  /*uniform_buffers=*/0, /*samplers=*/1);
+    try {
+        _instance_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                     SDL_GPU_SHADERFORMAT_SPIRV,
+                                                     dir / "sprite_instanced.vert.spv",
+                                                     /*uniform_buffers=*/1, /*samplers=*/0);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "instanced sprites unavailable; drawing them quad by quad",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
 
     SDL_GPUSamplerCreateInfo sampler_info{};
     sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
@@ -297,6 +306,7 @@ void GpuRenderer2DBackend::flush_to_frame() {
     const Vec2i coord = scene_logical ? _logical_size : current_size();
     gpu::GpuGeometryBatch::FlushContext ctx{};
     ctx.vertex_shader = _vertex_shader.handle();
+    ctx.instance_shader = _instance_shader.handle();
     ctx.default_fragment = _fragment_shader.handle();
     ctx.white_texture = _white.handle();
     ctx.sampler = _sampler_linear; // default for solids/white & null-sampler ranges
@@ -661,6 +671,66 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
         backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
     _batch.push(verts, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr, 0,
                 sampler);
+}
+
+void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend || !_instance_shader.handle()) {
+        IRenderer2DBackend::draw_sprites(texture, sprites);
+        return;
+    }
+    const Vec2i size = backend->size();
+    if (size.x <= 0 || size.y <= 0) {
+        return;
+    }
+    // The same corners, texture coordinates and colours draw_texture() computes per
+    // quad; the vertex shader expands each instance.
+    const f32 tex_w = static_cast<f32>(size.x);
+    const f32 tex_h = static_cast<f32>(size.y);
+    constexpr f32 pi = 3.14159265358979323846f;
+    _instance_scratch.clear();
+    _instance_scratch.reserve(sprites.size());
+    for (const SpriteInstance& sprite : sprites) {
+        const Rectf dest = sprite.dest;
+        if (dest.w <= 0.0f || dest.h <= 0.0f) {
+            continue;
+        }
+        const Rectf source =
+            sprite.source.w > 0.0f && sprite.source.h > 0.0f ? sprite.source : Rectf{0.0f, 0.0f, tex_w, tex_h};
+        gpu::GpuSpriteInstance& out = _instance_scratch.emplace_back();
+        out.x = dest.x + _view_offset.x;
+        out.y = dest.y + _view_offset.y;
+        out.w = dest.w;
+        out.h = dest.h;
+        out.r = sprite.tint.r;
+        out.g = sprite.tint.g;
+        out.b = sprite.tint.b;
+        out.a = sprite.tint.a;
+        out.u0 = source.x / tex_w;
+        out.v0 = source.y / tex_h;
+        if (sprite.rotation == 0.0f) {
+            out.u1 = out.u0 + source.w / tex_w;
+            out.v1 = out.v0 + source.h / tex_h;
+        } else {
+            out.u1 = (source.x + source.w) / tex_w;
+            out.v1 = (source.y + source.h) / tex_h;
+            const f32 radians = sprite.rotation * pi / 180.0f;
+            out.cos = std::cos(radians);
+            out.sin = std::sin(radians);
+            out.pivot_x = dest.x + dest.w * sprite.pivot.x + _view_offset.x;
+            out.pivot_y = dest.y + dest.h * sprite.pivot.y + _view_offset.y;
+        }
+    }
+    if (_instance_scratch.empty()) {
+        return;
+    }
+    ensure_frame();
+    const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
+                                                             : gpu::GpuBlendMode::Alpha;
+    SDL_GPUSampler* sampler =
+        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+    _batch.push_instances(_instance_scratch, backend->texture().handle(), current_scissor(), resolve_blend(blend),
+                          sampler);
 }
 
 bool GpuRenderer2DBackend::save_png(const char* path) {
@@ -1169,6 +1239,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
 
         gpu::GpuGeometryBatch::FlushContext ctx{};
         ctx.vertex_shader = _vertex_shader.handle();
+        ctx.instance_shader = _instance_shader.handle();
         ctx.default_fragment = _fragment_shader.handle();
         ctx.white_texture = _white.handle();
         ctx.sampler = _sampler_linear;

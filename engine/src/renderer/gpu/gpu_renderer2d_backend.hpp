@@ -88,6 +88,7 @@ public:
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) override;
+    void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) override;
 
     void fill_rect(Rectf rect, Color color) override;
     void draw_rect(Rectf rect, Color color) override;
@@ -151,6 +152,8 @@ private:
     gpu::GpuDevice _device;
     gpu::GpuShader _vertex_shader;
     gpu::GpuShader _fragment_shader;
+    gpu::GpuShader _instance_shader; // sprite_instanced.vert; without it draw_sprites draws quad by quad
+    std::vector<gpu::GpuSpriteInstance> _instance_scratch;
     SDL_GPUSampler* _sampler_linear = nullptr;  // render targets / blur
     SDL_GPUSampler* _sampler_nearest = nullptr; // default for uploaded textures (crisp text/pixel art)
     bool _data_textures = false; // the device can sample R16_UINT, R16G16_UINT and R32_FLOAT

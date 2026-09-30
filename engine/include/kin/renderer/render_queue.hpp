@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/renderer/backend.hpp>
 #include <kin/renderer/render_command.hpp>
 
 #include <span>
@@ -81,6 +82,9 @@ private:
     std::vector<SortEntry> _sort_keys;        // reused across frames (capacity retained)
     std::vector<SortEntry> _radix_scratch;    // radix sort ping-pong buffer
     std::vector<RenderCommand> _sort_scratch; // permutation target, reused across frames
+    // Consecutive same-texture sprites gathered during a flush, drawn with one
+    // draw_sprites() call; reused across flushes.
+    mutable std::vector<SpriteInstance> _sprite_run;
 };
 
 } // namespace kin

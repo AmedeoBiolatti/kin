@@ -50,6 +50,8 @@ public:
     explicit operator bool() const { return valid(); }
     Vec2i size() const;
     TextureFormat format() const;
+    // True for handles to the same texture.
+    bool operator==(const Texture&) const = default;
 
 private:
     friend class Renderer2D;

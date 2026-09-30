@@ -71,9 +71,11 @@ void GpuPipelineCache::destroy() {
 }
 
 SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUShader* fragment,
-                                               GpuBlendMode blend, SDL_GPUTextureFormat target_format) {
+                                               GpuBlendMode blend, SDL_GPUTextureFormat target_format,
+                                               GpuVertexLayout layout) {
     for (const Entry& e : _entries) {
-        if (e.vertex == vertex && e.fragment == fragment && e.blend == blend && e.format == target_format) {
+        if (e.vertex == vertex && e.fragment == fragment && e.blend == blend && e.format == target_format &&
+            e.layout == layout) {
             return e.pipeline;
         }
     }
@@ -83,27 +85,34 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
 
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
-    vb.pitch = sizeof(GpuVertex);
-    vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-
-    SDL_GPUVertexAttribute attrs[3]{};
-    attrs[0].location = 0;
-    attrs[0].buffer_slot = 0;
-    attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-    attrs[0].offset = offsetof(GpuVertex, x);
-    attrs[1].location = 1;
-    attrs[1].buffer_slot = 0;
-    attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
-    attrs[1].offset = offsetof(GpuVertex, u);
-    attrs[2].location = 2;
-    attrs[2].buffer_slot = 0;
-    attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM;
-    attrs[2].offset = offsetof(GpuVertex, r);
+    SDL_GPUVertexAttribute attrs[4]{};
+    u32 attr_count = 0;
+    const auto attribute = [&](SDL_GPUVertexElementFormat format, u32 offset) {
+        attrs[attr_count].location = attr_count;
+        attrs[attr_count].buffer_slot = 0;
+        attrs[attr_count].format = format;
+        attrs[attr_count].offset = offset;
+        ++attr_count;
+    };
+    if (layout == GpuVertexLayout::SpriteInstances) {
+        vb.pitch = sizeof(GpuSpriteInstance);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_INSTANCE;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, u0));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, pivot_x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSpriteInstance, r));
+    } else {
+        vb.pitch = sizeof(GpuVertex);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuVertex, x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuVertex, u));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuVertex, r));
+    }
 
     SDL_GPUVertexInputState vertex_input{};
     vertex_input.num_vertex_buffers = 1;
     vertex_input.vertex_buffer_descriptions = &vb;
-    vertex_input.num_vertex_attributes = 3;
+    vertex_input.num_vertex_attributes = attr_count;
     vertex_input.vertex_attributes = attrs;
 
     SDL_GPUColorTargetBlendState blend_state{};
@@ -131,7 +140,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
     if (!pipeline) {
         return nullptr;
     }
-    _entries.push_back(Entry{vertex, fragment, blend, target_format, pipeline});
+    _entries.push_back(Entry{vertex, fragment, blend, target_format, layout, pipeline});
     return pipeline;
 }
 

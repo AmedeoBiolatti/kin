@@ -71,7 +71,12 @@ public:
         commands.push_back("push");
     }
     void pop_viewport() override { commands.push_back("pop"); }
+    void draw_sprites(const kin::Texture& texture, std::span<const kin::SpriteInstance> sprites) override {
+        sprite_batches.push_back(sprites.size());
+        IRenderer2DBackend::draw_sprites(texture, sprites); // one draw_texture each, recorded as usual
+    }
 
+    std::vector<std::size_t> sprite_batches;
     std::vector<std::string> commands;
     std::vector<kin::Rectf> rects;
     std::vector<kin::Color> colors;
@@ -111,6 +116,39 @@ void test_render_queue_culls_a_range() {
     assert(queue.size() == 3);
     queue.cull(view);
     assert(queue.size() == 2);
+}
+
+// A flush hands runs of same-texture sprites to draw_sprites() in one call; any
+// other draw, or another texture, ends a run, and a lone sprite is drawn alone.
+void test_render_queue_batches_sprites_by_texture() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    const std::array<kin::u8, 4> pixel{255, 255, 255, 255};
+    const kin::Texture a = renderer.create_texture_from_rgba(pixel.data(), {1, 1});
+    const kin::Texture b = renderer.create_texture_from_rgba(pixel.data(), {1, 1});
+    assert(a == a && !(a == b));
+
+    kin::RenderQueue queue{kin::RenderSortMode::Submission};
+    const auto sprite = [&](const kin::Texture& texture, float x) {
+        queue.draw_texture({}, texture, {x, 0.0f, 4.0f, 4.0f});
+    };
+    sprite(a, 0.0f);
+    sprite(a, 4.0f);
+    sprite(a, 8.0f);
+    queue.fill_rect({}, {0.0f, 8.0f, 4.0f, 4.0f}, kin::colors::white);
+    sprite(a, 12.0f);
+    sprite(b, 16.0f);
+    sprite(b, 20.0f);
+    sprite(a, 24.0f);
+    queue.flush(renderer);
+
+    assert((raw->sprite_batches == std::vector<std::size_t>{3, 2}));
+    const std::vector<std::string> expected{"sprite", "sprite", "sprite", "fill", "sprite", "sprite", "sprite", "sprite"};
+    assert(raw->commands == expected);
+    for (std::size_t i = 0; i < 3; ++i) {
+        assert(raw->rects[i].x == 4.0f * static_cast<float>(i));
+    }
 }
 
 // The queue sorts packed keys with a radix sort above a size threshold and a
@@ -441,6 +479,7 @@ void test_rgba_canvas_blits_sprite_from_catalog_pixels() {
 int main() {
     test_render_queue_sorts_and_culls();
     test_render_queue_culls_a_range();
+    test_render_queue_batches_sprites_by_texture();
     test_render_queue_sort_matches_reference();
     test_render_queue_sprite_fields_and_bulk_submit();
     test_render_queue_pass_masks_and_text_command();

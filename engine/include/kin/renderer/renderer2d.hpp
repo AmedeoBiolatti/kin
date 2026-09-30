@@ -158,6 +158,9 @@ public:
     void draw_texture(const Texture& texture, Rectf source, Rectf dest);
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint);
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot);
+    // Many quads from one texture, in order: the same pixels as a draw_texture()
+    // per sprite, but backends with instancing (SDL_GPU) submit them as one batch.
+    void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites);
     void draw_texture(const Texture& texture, Vec2f pos, Vec2f size);
     void draw_texture(const Texture& texture, Vec2f pos);
     void draw_sprite(const Sprite& sprite, Rectf dest);

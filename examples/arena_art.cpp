@@ -838,18 +838,19 @@ void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& came
 // the floor's darkness and the shadows are lit together.
 void ArenaPainter::draw_shadows(Renderer2D& renderer, const Arena& arena, const Camera2D& camera) {
     constexpr std::array<float, 3> size{34, 46, 40};
-    const Color shade = colors::white;
+    _shadows.clear();
     const auto cast = [&](Vec2f world, float s) {
         const Vec2f p = add(camera.world_to_screen(world), {5, 7});
         if (p.x < -s || p.y < -s || p.x > camera.viewport.x + s || p.y > camera.viewport.y + s) {
             return;
         }
-        renderer.draw_texture(_shadow, {0, 0, 64, 64}, {p.x - s / 2, p.y - s / 2, s, s}, shade);
+        _shadows.push_back({.dest = {p.x - s / 2, p.y - s / 2, s, s}, .source = {0, 0, 64, 64}});
     };
     for (const VisibleEnemy& enemy : _visible) {
         cast(enemy.pos, size[static_cast<std::size_t>(std::clamp(enemy.kind, 0, 2))]);
     }
     cast(arena.player, 44);
+    renderer.draw_sprites(_shadow, _shadows); // one instanced batch on the GPU
 }
 
 void ArenaPainter::enable_post_process(Renderer2D& renderer) {
