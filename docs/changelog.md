@@ -22,6 +22,10 @@ releases may change APIs.
   by a bounding circle, and cull only the particles (and commands already in the
   queue) afterwards, instead of re-checking the whole queue. `RenderQueue::cull`
   takes an optional command range.
+- Signal Siege's three enemy sprites share one texture (an atlas), so the
+  y-sorted enemies batch into a few GPU draws instead of one per texture change
+  (about 28,000 a frame at 100,000 enemies, now 21): a frame there takes about
+  25 ms, down from 29, and 2.9 ms at 10,000 enemies, down from 3.3.
 - Signal Siege scales to 100,000 enemies (`--enemies` up to 100,000, and a
   `kin_bench` case `arena_100000_encounter`): the art gathers the enemies near the
   view once per frame for shadows, lights and effects; collisions, respawns and
