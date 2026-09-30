@@ -3,6 +3,8 @@
 #include <kin/renderer/static_texture_layer.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cassert>
 #include <memory>
 #include <string>
@@ -91,6 +93,108 @@ void test_render_queue_sorts_and_culls() {
     assert(raw->rects.size() == 2);
     assert((raw->rects[0] == kin::Rectf{10.0f, 10.0f, 4.0f, 4.0f}));
     assert((raw->rects[1] == kin::Rectf{20.0f, 20.0f, 4.0f, 4.0f}));
+}
+
+// The queue sorts packed keys with a radix sort above a size threshold and a
+// comparison sort below it or once commands are out of submission order. Every
+// path must match a stable sort by (layer, y, order), i.e. ties keep submission
+// order, with -0 and +0 equal.
+void test_render_queue_sort_matches_reference() {
+    struct Submitted {
+        kin::RenderKey key;
+        int id = 0;
+    };
+    kin::u32 seed = 12345;
+    const auto next = [&](int range) {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<int>((seed >> 8) % static_cast<kin::u32>(range));
+    };
+    const std::array<float, 7> ys{-0.0f, 0.0f, -12.5f, 3.0f, 3.0f, 1.0e6f, -1.0e-3f};
+
+    for (const kin::RenderSortMode mode : {kin::RenderSortMode::LayerThenOrder, kin::RenderSortMode::LayerThenY}) {
+        for (const int count : {5, 300, 5000}) {
+            auto backend = std::make_unique<FakeBackend>();
+            FakeBackend* raw = backend.get();
+            kin::Renderer2D renderer{std::move(backend)};
+            kin::RenderSortMode current = mode;
+            kin::RenderQueue queue{mode};
+            std::vector<Submitted> submitted;
+            const auto submit = [&](int n) {
+                for (int i = 0; i < n; ++i) {
+                    const kin::RenderKey key{.layer = next(7) - 3,
+                                             .order = next(5) - 2 + (next(50) == 0 ? 1 << 20 : 0),
+                                             .y = ys[static_cast<std::size_t>(next(7))],
+                                             .use_y = next(4) != 0};
+                    const int id = static_cast<int>(submitted.size());
+                    submitted.push_back({key, id});
+                    queue.fill_rect(key, {static_cast<float>(id), 0.0f, 1.0f, 1.0f}, kin::colors::white);
+                }
+            };
+            const auto expected = [&] {
+                std::vector<Submitted> sorted = submitted;
+                std::ranges::stable_sort(sorted, [&](const Submitted& a, const Submitted& b) {
+                    if (a.key.layer != b.key.layer) {
+                        return a.key.layer < b.key.layer;
+                    }
+                    if (current == kin::RenderSortMode::LayerThenY) {
+                        const float ay = a.key.use_y ? a.key.y : 0.0f;
+                        const float by = b.key.use_y ? b.key.y : 0.0f;
+                        if (ay != by) {
+                            return ay < by;
+                        }
+                    }
+                    return a.key.order < b.key.order;
+                });
+                std::vector<int> ids;
+                for (const Submitted& entry : sorted) {
+                    ids.push_back(entry.id);
+                }
+                return ids;
+            };
+            const auto flushed_ids = [&] {
+                raw->rects.clear();
+                queue.flush(renderer);
+                std::vector<int> ids;
+                for (const kin::Rectf& rect : raw->rects) {
+                    ids.push_back(static_cast<int>(rect.x));
+                }
+                return ids;
+            };
+            const auto queued_ids = [&] {
+                std::vector<int> ids;
+                for (const kin::RenderCommand& command : queue.commands()) {
+                    ids.push_back(static_cast<int>(command.rect.x));
+                }
+                return ids;
+            };
+
+            submit(count);
+            assert(flushed_ids() == expected());
+            // flush draws through the order without moving the commands.
+            for (int i = 0; i < count; ++i) {
+                assert(queue.commands()[static_cast<std::size_t>(i)].rect.x == static_cast<float>(i));
+            }
+
+            queue.sort_commands();
+            assert(queued_ids() == expected());
+            assert(flushed_ids() == expected());
+
+            // Commands added after a sort are out of submission order as a whole.
+            submit(count / 2 + 3);
+            queue.sort_commands();
+            assert(queued_ids() == expected());
+            assert(flushed_ids() == expected());
+
+            // A new mode must put back in submission order ties that the old mode
+            // had separated, e.g. by y.
+            current = mode == kin::RenderSortMode::LayerThenY ? kin::RenderSortMode::LayerThenOrder
+                                                              : kin::RenderSortMode::LayerThenY;
+            queue.set_sort(current);
+            queue.sort_commands();
+            assert(queued_ids() == expected());
+            assert(flushed_ids() == expected());
+        }
+    }
 }
 
 void test_render_queue_pass_masks_and_text_command() {
@@ -278,6 +382,7 @@ void test_rgba_canvas_blits_sprite_from_catalog_pixels() {
 
 int main() {
     test_render_queue_sorts_and_culls();
+    test_render_queue_sort_matches_reference();
     test_render_queue_pass_masks_and_text_command();
     test_render_graph_pass_toggles_and_stats();
     test_default_render_graph_flushes_pass_masks();

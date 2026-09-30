@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <utility>
 
@@ -233,6 +234,8 @@ RenderQueue::RenderQueue(RenderSortMode sort)
 void RenderQueue::clear() {
     _commands.clear();
     _next_sequence = 0;
+    _sorted = true;
+    _in_sequence = true;
 }
 
 void RenderQueue::reserve(std::size_t capacity) {
@@ -242,6 +245,7 @@ void RenderQueue::reserve(std::size_t capacity) {
 void RenderQueue::submit(RenderCommand command) {
     command.sequence = _next_sequence++;
     _commands.push_back(std::move(command));
+    _sorted = false;
 }
 
 void RenderQueue::clear_color(Color color) {
@@ -330,49 +334,132 @@ bool RenderQueue::before(const RenderCommand& a, const RenderCommand& b) const {
     return a.sequence < b.sequence;
 }
 
-void RenderQueue::sort_commands() {
-    if (_sort == RenderSortMode::Submission || _commands.size() < 2) {
-        return;
+namespace {
+
+u32 sortable_i32(i32 value) {
+    return static_cast<u32>(value) ^ 0x8000'0000u;
+}
+
+u32 sortable_f32(f32 value) {
+    if (value == 0.0f) {
+        value = 0.0f; // -0 and +0 compare equal, so they must encode equal
     }
+    const u32 bits = std::bit_cast<u32>(value);
+    return (bits & 0x8000'0000u) != 0 ? ~bits : bits | 0x8000'0000u;
+}
+
+// Below this many commands a comparison sort beats the radix sort's fixed cost.
+constexpr std::size_t radix_sort_min = 256;
+
+} // namespace
+
+bool RenderQueue::compute_draw_order() {
     const std::size_t count = _commands.size();
-
-    // Sort compact keys, not the heavy commands. `before` is a total order (sequence
-    // is a unique tiebreaker), so a non-stable sort produces the identical ordering
-    // the previous stable_sort did — without the O(n log n) temp buffer and 300-byte
-    // element moves.
-    _sort_keys.clear();
-    _sort_keys.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        const RenderCommand& command = _commands[i];
-        _sort_keys.push_back({command.key.layer, command.key.order, command.key.y,
-                              command.key.use_y, command.sequence, static_cast<u32>(i)});
+    if (count < 2) {
+        return false;
     }
 
+    // Sort compact keys, not the heavy commands, which are moved at most once.
     const bool layer_then_y = _sort == RenderSortMode::LayerThenY;
-    std::sort(_sort_keys.begin(), _sort_keys.end(), [layer_then_y](const SortEntry& a, const SortEntry& b) {
-        if (a.layer != b.layer) {
-            return a.layer < b.layer;
-        }
-        if (layer_then_y) {
-            const f32 ay = a.use_y ? a.y : 0.0f;
-            const f32 by = b.use_y ? b.y : 0.0f;
-            if (ay != by) {
-                return ay < by;
+    _sort_keys.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const RenderKey& key = _commands[i].key;
+        _sort_keys[i] = {sortable_i32(key.order),
+                         layer_then_y ? sortable_f32(key.use_y ? key.y : 0.0f) : 0u,
+                         sortable_i32(key.layer),
+                         static_cast<u32>(i)};
+    }
+
+    if (_in_sequence && count >= radix_sort_min) {
+        // LSD radix sort over the 12 key bytes, least significant first. It is
+        // stable and the keys start in submission order, so ties keep sequence
+        // order exactly as `before` does. Bytes that are equal on every key
+        // (typically most of layer and order) are skipped.
+        constexpr std::size_t digits = 12;
+        std::array<std::array<u32, 256>, digits> counts{};
+        const auto byte_of = [](const SortEntry& entry, std::size_t digit) -> u32 {
+            const u32 word = digit < 4 ? entry.order : digit < 8 ? entry.y : entry.layer;
+            return (word >> ((digit % 4) * 8)) & 0xffu;
+        };
+        for (const SortEntry& entry : _sort_keys) {
+            for (std::size_t digit = 0; digit < digits; ++digit) {
+                ++counts[digit][byte_of(entry, digit)];
             }
         }
-        if (a.order != b.order) {
-            return a.order < b.order;
+        _radix_scratch.resize(count);
+        for (std::size_t digit = 0; digit < digits; ++digit) {
+            std::array<u32, 256>& bucket = counts[digit];
+            if (bucket[byte_of(_sort_keys[0], digit)] == count) {
+                continue;
+            }
+            u32 offset = 0;
+            for (u32& slot : bucket) {
+                const u32 n = slot;
+                slot = offset;
+                offset += n;
+            }
+            for (const SortEntry& entry : _sort_keys) {
+                _radix_scratch[bucket[byte_of(entry, digit)]++] = entry;
+            }
+            _sort_keys.swap(_radix_scratch);
         }
-        return a.sequence < b.sequence;
-    });
+    } else {
+        const bool in_sequence = _in_sequence;
+        std::sort(_sort_keys.begin(), _sort_keys.end(), [&](const SortEntry& a, const SortEntry& b) {
+            if (a.layer != b.layer) {
+                return a.layer < b.layer;
+            }
+            if (a.y != b.y) {
+                return a.y < b.y;
+            }
+            if (a.order != b.order) {
+                return a.order < b.order;
+            }
+            return in_sequence ? a.index < b.index
+                               : _commands[a.index].sequence < _commands[b.index].sequence;
+        });
+    }
+
+    for (std::size_t i = 0; i < count; ++i) {
+        if (_sort_keys[i].index != i) {
+            return true;
+        }
+    }
+    _sorted = true; // already physically in draw order
+    return false;
+}
+
+void RenderQueue::sort_commands() {
+    if (_sort == RenderSortMode::Submission || _sorted) {
+        return;
+    }
+    if (!compute_draw_order()) {
+        return;
+    }
 
     // Materialize the permutation once into a reused scratch buffer, then swap.
     _sort_scratch.clear();
-    _sort_scratch.reserve(count);
+    _sort_scratch.reserve(_commands.size());
     for (const SortEntry& entry : _sort_keys) {
         _sort_scratch.push_back(std::move(_commands[entry.index]));
     }
     _commands.swap(_sort_scratch);
+    _sort_scratch.clear();
+    _sorted = true;
+    _in_sequence = false;
+}
+
+template<typename Draw>
+void RenderQueue::for_each_in_draw_order(Draw&& draw) {
+    if (_sort == RenderSortMode::Submission || _sorted || !compute_draw_order()) {
+        for (const RenderCommand& command : _commands) {
+            draw(command);
+        }
+        return;
+    }
+    for (const SortEntry& entry : _sort_keys) {
+        draw(_commands[entry.index]);
+    }
 }
 
 void RenderQueue::cull(const RenderView& view) {
@@ -389,13 +476,11 @@ void RenderQueue::flush(Renderer2D& renderer) {
 }
 
 void RenderQueue::flush(Renderer2D& renderer, u64 pass_mask) {
-    sort_commands();
-    for (const RenderCommand& command : _commands) {
-        if ((command.key.pass_mask & pass_mask) == 0) {
-            continue;
+    for_each_in_draw_order([&](const RenderCommand& command) {
+        if ((command.key.pass_mask & pass_mask) != 0) {
+            execute_render_command(renderer, command);
         }
-        execute_render_command(renderer, command);
-    }
+    });
 }
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
@@ -403,16 +488,15 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
 }
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
-    sort_commands();
-    for (const RenderCommand& command : _commands) {
+    for_each_in_draw_order([&](const RenderCommand& command) {
         if ((command.key.pass_mask & pass_mask) == 0) {
-            continue;
+            return;
         }
         if (view.culling_enabled && !render_command_visible(command, view)) {
-            continue;
+            return;
         }
         execute_render_command(renderer, command, view);
-    }
+    });
 }
 
 void RenderQueue::flush_presorted(Renderer2D& renderer, const RenderView& view, u64 pass_mask) const {
