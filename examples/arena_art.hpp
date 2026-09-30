@@ -44,10 +44,12 @@ private:
     void draw_floor(Renderer2D& renderer, const Arena& arena, const Camera2D& camera);
     void collect_effects(const Arena& arena, const RenderView& view);
     void collect_lights(const Arena& arena, const Camera2D& camera);
+    void draw_shadows(Renderer2D& renderer, const Arena& arena, const Camera2D& camera);
 
     bool _ready = false;
     bool _lit = false;
-    Texture _player, _core, _shot, _bullet, _ring, _floor, _cone, _halo;
+    Texture _player, _core, _shot, _bullet, _ring, _cone, _halo, _shadow, _reactor, _fan, _edge;
+    std::array<Texture, 4> _floors;
     std::array<Texture, 3> _enemies;
     SpriteCatalog _sprites;
     LightLayer _lighting;

@@ -14,6 +14,12 @@ releases may change APIs.
 
 ### Changed
 
+- Signal Siege's sprites and floor are more detailed: sprites are rasterized at
+  twice their drawn size and shaded as bevelled metal with seams, rivets and
+  glowing eyes; ships cast soft drop shadows; the deck mixes four tile variants
+  (plain, grate, hazard paint, patched) and has hazard strips along the arena's
+  edge; reactors are bolted housings with turning fans. The colour roles are
+  unchanged.
 - Signal Siege reads more clearly: cyan is only the player (drawn over every
   effect, with a ground ring), enemies are solid warm shapes drawn after the
   lighting and without glow, enemy bullets are round white-cored pink orbs, an

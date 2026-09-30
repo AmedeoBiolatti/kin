@@ -20,8 +20,10 @@ float length(Vec2f a) { return std::sqrt(dot(a, a)); }
 float degrees(Vec2f direction) { return std::atan2(direction.y, direction.x) * 180.0f / pi; }
 
 // ---------------------------------------------------------------------------
-// Procedural textures: shapes are signed distance functions (px, negative
-// inside), filled with 1px antialiasing and composited back to front.
+// Procedural textures. Shapes are signed distance functions in design units
+// (negative inside); a canvas renders them at `scale` pixels per unit with 1px
+// antialiasing, back to front. Paint functions get the point, the distance and
+// the outward surface normal, which the material shading uses for bevels.
 
 struct Rgba {
     float r = 0, g = 0, b = 0, a = 0;
@@ -35,28 +37,61 @@ Rgba brighter(Rgba c, float k) {
     return {std::min(1.0f, c.r * k), std::min(1.0f, c.g * k), std::min(1.0f, c.b * k), c.a};
 }
 
+float hash(int x, int y) {
+    u32 h = static_cast<u32>(x) * 374761393u + static_cast<u32>(y) * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return static_cast<float>((h ^ (h >> 16)) & 0xffff) / 65535.0f;
+}
+
+// Smooth value noise, 0..1, with features about `cell` units apart.
+float value_noise(Vec2f p, float cell) {
+    const float fx = p.x / cell, fy = p.y / cell;
+    const int x = static_cast<int>(std::floor(fx)), y = static_cast<int>(std::floor(fy));
+    const float tx = fx - x, ty = fy - y;
+    const float sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
+    const float a = hash(x, y), b = hash(x + 1, y), c = hash(x, y + 1), d = hash(x + 1, y + 1);
+    return (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy;
+}
+
 class Canvas {
 public:
-    Canvas(int w, int h) : _w(w), _h(h), _px(static_cast<std::size_t>(w * h)) {}
+    // A `width` x `height` design-unit canvas stored at `scale` pixels per unit.
+    Canvas(float width, float height, float scale)
+        : _w(static_cast<int>(width * scale)), _h(static_cast<int>(height * scale)), _scale(scale),
+          _px(static_cast<std::size_t>(_w * _h)) {}
 
     template <class Sdf, class Paint>
     void fill(Sdf&& sdf, Paint&& paint) {
-        for (int y = 0; y < _h; ++y) {
-            for (int x = 0; x < _w; ++x) {
-                const Vec2f p{x + .5f, y + .5f};
+        fill({0, 0, _w / _scale, _h / _scale}, sdf, paint);
+    }
+
+    // Only the pixels inside `area` (design units): small details on big canvases.
+    template <class Sdf, class Paint>
+    void fill(Rectf area, Sdf&& sdf, Paint&& paint) {
+        const float e = .5f / _scale;
+        const int x0 = std::max(0, int(std::floor(area.x * _scale)) - 1), y0 = std::max(0, int(std::floor(area.y * _scale)) - 1);
+        const int x1 = std::min(_w, int(std::ceil((area.x + area.w) * _scale)) + 1);
+        const int y1 = std::min(_h, int(std::ceil((area.y + area.h) * _scale)) + 1);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const Vec2f p{(x + .5f) / _scale, (y + .5f) / _scale};
                 const float d = sdf(p);
-                const float coverage = std::clamp(.5f - d, 0.0f, 1.0f);
-                if (coverage > 0) {
-                    over(x, y, paint(p, d), coverage);
+                const float coverage = std::clamp(.5f - d * _scale, 0.0f, 1.0f);
+                if (coverage <= 0) {
+                    continue;
                 }
+                Vec2f n{sdf(Vec2f{p.x + e, p.y}) - sdf(Vec2f{p.x - e, p.y}), sdf(Vec2f{p.x, p.y + e}) - sdf(Vec2f{p.x, p.y - e})};
+                const float len = length(n);
+                n = len > 1e-6f ? mul(n, 1 / len) : Vec2f{0, 0};
+                over(x, y, paint(p, d, n), coverage);
             }
         }
     }
 
-    // One colour whose opacity is `alpha(p)`: glows and light shapes.
+    // One colour whose opacity is `alpha(p)`: glows, shadows and light shapes.
     template <class Alpha>
     void glow(Rgba color, Alpha&& alpha) {
-        fill([](Vec2f) { return -1.0f; }, [&](Vec2f p, float) {
+        fill([](Vec2f) { return -1.0f; }, [&](Vec2f p, float, Vec2f) {
             Rgba c = color;
             c.a *= std::clamp(alpha(p), 0.0f, 1.0f);
             return c;
@@ -94,10 +129,17 @@ private:
     }
 
     int _w, _h;
+    float _scale;
     std::vector<Rgba> _px;
 };
 
 float circle(Vec2f p, Vec2f center, float radius) { return length(sub(p, center)) - radius; }
+
+float box(Vec2f p, Rectf r, float round = 0) {
+    const Vec2f c{r.x + r.w / 2, r.y + r.h / 2};
+    const Vec2f q{std::abs(p.x - c.x) - r.w / 2 + round, std::abs(p.y - c.y) - r.h / 2 + round};
+    return length({std::max(q.x, 0.0f), std::max(q.y, 0.0f)}) + std::min(std::max(q.x, q.y), 0.0f) - round;
+}
 
 float capsule(Vec2f p, Vec2f a, Vec2f b, float radius) {
     const Vec2f pa = sub(p, a), ba = sub(b, a);
@@ -135,89 +177,141 @@ std::vector<Vec2f> regular(Vec2f c, int sides, float radius, float turn) {
     return star(c, sides, radius, radius, turn);
 }
 
-// Hull paint: a dark outline, a bevelled rim, light from the top left.
-auto shaded(Rgba base, Rgba outline, Vec2f center, float size) {
-    return [=](Vec2f p, float d) {
-        if (d > -1.6f) {
-            return outline;
+// A hard-surface material: a dark outline, a body lit broadly from the top left,
+// and a bevelled rim whose brightness follows the edge's normal, so every plate
+// reads as raised metal.
+struct Material {
+    Rgba base;
+    Rgba outline;
+    float outline_width = .9f;
+    float bevel = 2.4f;
+    float gloss = .45f;
+    float grain = .03f;
+};
+
+constexpr Vec2f to_light{-.6f, -.8f}; // toward the light, top left
+
+auto metal(Material m, Vec2f center, float radius) {
+    return [=](Vec2f p, float d, Vec2f n) {
+        if (d > -m.outline_width) {
+            return m.outline;
         }
-        const float light = std::clamp(1.0f - ((p.x - center.x) + (p.y - center.y)) / (size * 1.8f), .72f, 1.22f);
-        Rgba c = brighter(base, light);
-        if (d > -4.0f) {
-            c = mix(c, rgb(255, 255, 255), .2f);
+        const float broad = std::clamp(1.05f - dot(sub(p, center), {.6f, .8f}) / (radius * 2.4f), .72f, 1.2f);
+        Rgba c = brighter(m.base, broad * (1 + (hash(int(p.x * 8), int(p.y * 8)) - .5f) * m.grain));
+        const float depth = -d - m.outline_width;
+        if (depth < m.bevel) {
+            const float rim = 1 - depth / m.bevel;
+            const float facing = dot(n, to_light);
+            c = facing > 0 ? mix(c, rgb(255, 255, 255), facing * rim * m.gloss) : mix(c, rgb(0, 0, 0), -facing * rim * .4f);
         }
         return c;
     };
 }
 
-float hash(int x, int y) {
-    u32 h = static_cast<u32>(x) * 374761393u + static_cast<u32>(y) * 668265263u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    return static_cast<float>((h ^ (h >> 16)) & 0xffff) / 65535.0f;
+// A glowing part (eye, visor, nozzle): hot centre, dark rim.
+auto emissive(Rgba core, Rgba edge, Rgba rim, float radius) {
+    return [=](Vec2f, float d, Vec2f) {
+        if (d > -.7f) {
+            return rim;
+        }
+        return mix(core, edge, std::clamp(1 + d / radius, 0.0f, 1.0f));
+    };
 }
 
-// Smooth value noise, 0..1, with features about `cell` px apart.
-float value_noise(Vec2f p, float cell) {
-    const float fx = p.x / cell, fy = p.y / cell;
-    const int x = static_cast<int>(std::floor(fx)), y = static_cast<int>(std::floor(fy));
-    const float tx = fx - x, ty = fy - y;
-    const float sx = tx * tx * (3 - 2 * tx), sy = ty * ty * (3 - 2 * ty);
-    const float a = hash(x, y), b = hash(x + 1, y), c = hash(x, y + 1), d = hash(x + 1, y + 1);
-    return (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy;
+// Recessed line (panel seam): dark groove with a highlight on its lower-right lip.
+template <class Sdf>
+void seam(Canvas& canvas, Sdf&& sdf, float width = .5f) {
+    canvas.fill([&](Vec2f p) { return std::abs(sdf(p)) - width; }, [](Vec2f, float, Vec2f) { return rgb(0, 0, 0, .55f); });
+    canvas.fill([&](Vec2f p) { return std::abs(sdf(Vec2f{p.x - .6f, p.y - .6f})) - width * .6f; },
+                [](Vec2f, float, Vec2f) { return rgb(255, 255, 255, .12f); });
 }
+
+constexpr float sprite_scale = 2; // sprites are drawn at about half their pixel size
 
 Texture make_player(Renderer2D& renderer) {
-    Canvas canvas(64, 64);
-    const std::array<Vec2f, 8> hull{{{60, 32}, {30, 51}, {26, 42}, {7, 50}, {14, 32}, {7, 14}, {26, 22}, {30, 13}}};
-    canvas.fill([&](Vec2f p) { return polygon(p, hull); }, shaded(rgb(72, 204, 206), rgb(12, 38, 46), {32, 32}, 28));
-    canvas.fill([](Vec2f p) { return capsule(p, {16, 32}, {34, 32}, 1.4f); }, [](Vec2f, float) { return rgb(22, 84, 94); });
-    canvas.fill([](Vec2f p) { return (length({(p.x - 41) / 9, (p.y - 32) / 5}) - 1) * 5; },
-                [](Vec2f p, float d) { return d > -1.2f ? rgb(20, 60, 70) : p.y < 31 ? rgb(236, 255, 252) : rgb(150, 226, 232); });
+    Canvas canvas(64, 64, sprite_scale);
+    const std::array<Vec2f, 12> hull{{{61, 32}, {41, 25}, {31, 12}, {24, 13}, {23, 25}, {8, 21},
+                                      {13, 32}, {8, 43}, {23, 39}, {24, 51}, {31, 52}, {41, 39}}};
+    const auto hull_sdf = [&](Vec2f p) { return polygon(p, hull); };
+    canvas.fill(hull_sdf, metal({.base = rgb(64, 198, 206), .outline = rgb(6, 30, 38)}, {34, 32}, 26));
+    // Wing panels and the spine.
+    seam(canvas, [](Vec2f p) { return capsule(p, {16, 32}, {50, 32}, 0); }, .45f);
+    seam(canvas, [](Vec2f p) { return capsule(p, {26, 22}, {36, 27}, 0); }, .35f);
+    seam(canvas, [](Vec2f p) { return capsule(p, {26, 42}, {36, 37}, 0); }, .35f);
+    for (const float y : {17.0f, 47.0f}) {
+        canvas.fill([&](Vec2f p) { return capsule(p, {26, y}, {30, y}, .9f); }, [](Vec2f, float, Vec2f) { return rgb(214, 252, 255); });
+    }
+    // Glass canopy with a highlight.
+    const auto canopy = [](Vec2f p) { return (length({(p.x - 42) / 9.5f, (p.y - 32) / 5}) - 1) * 5; };
+    canvas.fill(canopy, [](Vec2f p, float d, Vec2f) {
+        if (d > -.8f) return rgb(8, 34, 44);
+        const float t = std::clamp((p.x - 33) / 18, 0.0f, 1.0f);
+        return mix(rgb(24, 70, 96), rgb(8, 26, 44), t);
+    });
+    canvas.fill([](Vec2f p) { return capsule(p, {37, 29.5f}, {43, 28.8f}, .9f); }, [](Vec2f, float, Vec2f) { return rgb(210, 250, 255, .9f); });
+    // Engine nozzles.
+    for (const float y : {27.0f, 37.0f}) {
+        canvas.fill([&](Vec2f p) { return circle(p, {11.5f, y}, 2.6f); },
+                    emissive(rgb(240, 255, 255), rgb(90, 200, 255), rgb(8, 30, 40), 2.6f));
+    }
     return canvas.upload(renderer);
 }
 
 Texture make_chaser(Renderer2D& renderer) {
-    Canvas canvas(64, 64);
-    const std::vector<Vec2f> body = star({32, 32}, 5, 30, 13, -pi / 2);
-    canvas.fill([&](Vec2f p) { return polygon(p, body); }, shaded(rgb(255, 100, 112), rgb(64, 12, 24), {32, 32}, 30));
-    canvas.fill([](Vec2f p) { return circle(p, {32, 33}, 8); },
-                [](Vec2f p, float d) { return d > -1.4f ? rgb(90, 20, 30) : p.y < 31 ? rgb(255, 236, 226) : rgb(255, 170, 160); });
+    Canvas canvas(64, 64, sprite_scale);
+    const std::vector<Vec2f> body = star({32, 32}, 5, 30, 12.5f, -pi / 2);
+    canvas.fill([&](Vec2f p) { return polygon(p, body); }, metal({.base = rgb(255, 98, 112), .outline = rgb(58, 10, 22)}, {32, 32}, 28));
+    for (int i = 0; i < 5; ++i) {
+        const float angle = -pi / 2 + i * 2 * pi / 5;
+        const Vec2f tip{32 + std::cos(angle) * 25, 32 + std::sin(angle) * 25};
+        seam(canvas, [&](Vec2f p) { return capsule(p, {32, 32}, tip, 0); }, .4f);
+    }
+    const std::vector<Vec2f> plate = regular({32, 32}, 5, 12, -pi / 2);
+    canvas.fill([&](Vec2f p) { return polygon(p, plate); }, metal({.base = rgb(150, 36, 52), .outline = rgb(50, 8, 18), .bevel = 1.8f}, {32, 32}, 12));
+    canvas.fill([](Vec2f p) { return circle(p, {32, 32.5f}, 5.2f); }, emissive(rgb(255, 244, 230), rgb(255, 120, 110), rgb(60, 8, 16), 5.2f));
     return canvas.upload(renderer);
 }
 
 Texture make_brute(Renderer2D& renderer) {
-    Canvas canvas(64, 64);
+    Canvas canvas(64, 64, sprite_scale);
     const std::vector<Vec2f> plate = regular({32, 32}, 6, 30, pi / 6);
-    const std::vector<Vec2f> inner = regular({32, 32}, 6, 18, pi / 6);
-    canvas.fill([&](Vec2f p) { return polygon(p, plate); }, shaded(rgb(246, 168, 66), rgb(60, 32, 10), {32, 32}, 30));
-    canvas.fill([&](Vec2f p) { return polygon(p, inner); }, shaded(rgb(96, 62, 38), rgb(40, 22, 10), {32, 32}, 18));
+    canvas.fill([&](Vec2f p) { return polygon(p, plate); }, metal({.base = rgb(240, 162, 62), .outline = rgb(58, 30, 8), .bevel = 3}, {32, 32}, 30));
+    const std::vector<Vec2f> seam_ring = regular({32, 32}, 6, 23, pi / 6);
+    seam(canvas, [&](Vec2f p) { return polygon(p, seam_ring); }, .45f);
+    const std::vector<Vec2f> inner = regular({32, 32}, 6, 17, pi / 6);
+    canvas.fill([&](Vec2f p) { return polygon(p, inner); }, metal({.base = rgb(118, 76, 40), .outline = rgb(40, 20, 6), .bevel = 2}, {32, 32}, 17));
     for (int i = 0; i < 6; ++i) {
-        const Vec2f rivet{32 + std::cos(i * pi / 3) * 24, 32 + std::sin(i * pi / 3) * 24};
-        canvas.fill([&](Vec2f p) { return circle(p, rivet, 2.4f); }, [](Vec2f, float d) { return d > -.8f ? rgb(80, 44, 16) : rgb(255, 222, 160); });
+        const Vec2f rivet{32 + std::cos(i * pi / 3) * 26.5f, 32 + std::sin(i * pi / 3) * 26.5f};
+        canvas.fill([&](Vec2f p) { return circle(p, rivet, 2.1f); }, metal({.base = rgb(255, 214, 150), .outline = rgb(70, 36, 10), .outline_width = .6f, .bevel = 1.2f, .gloss = .7f}, rivet, 2));
     }
-    canvas.fill([](Vec2f p) { return capsule(p, {24, 32}, {40, 32}, 3); }, [](Vec2f, float) { return rgb(255, 238, 170); });
+    canvas.fill([](Vec2f p) { return capsule(p, {23, 32}, {41, 32}, 3.2f); }, emissive(rgb(255, 248, 210), rgb(255, 176, 70), rgb(44, 20, 4), 3.2f));
     return canvas.upload(renderer);
 }
 
 Texture make_orbiter(Renderer2D& renderer) {
-    Canvas canvas(64, 64);
+    Canvas canvas(64, 64, sprite_scale);
     for (int i = 0; i < 4; ++i) {
         const float angle = pi / 4 + i * pi / 2;
         const std::vector<Vec2f> fin = regular({32 + std::cos(angle) * 25, 32 + std::sin(angle) * 25}, 4, 6, angle);
-        canvas.fill([&](Vec2f p) { return polygon(p, fin); }, shaded(rgb(120, 86, 200), rgb(34, 20, 64), {32, 32}, 30));
+        canvas.fill([&](Vec2f p) { return polygon(p, fin); }, metal({.base = rgb(120, 86, 204), .outline = rgb(30, 16, 60), .bevel = 1.6f}, {32, 32}, 30));
     }
-    canvas.fill([](Vec2f p) { return std::abs(length(sub(p, {32, 32})) - 20) - 4.5f; },
-                shaded(rgb(158, 118, 236), rgb(36, 22, 70), {32, 32}, 26));
-    canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 10); },
-                [](Vec2f p, float d) { return d > -1.4f ? rgb(40, 24, 76) : p.x + p.y < 58 ? rgb(170, 140, 240) : rgb(112, 80, 196); });
+    const auto ring = [](Vec2f p) { return std::abs(length(sub(p, {32, 32})) - 20) - 4.8f; };
+    canvas.fill(ring, metal({.base = rgb(160, 120, 238), .outline = rgb(34, 20, 70), .bevel = 1.8f}, {32, 32}, 24));
+    for (int i = 0; i < 8; ++i) {
+        const float angle = i * pi / 4 + pi / 8;
+        const Vec2f dir{std::cos(angle), std::sin(angle)};
+        seam(canvas, [&](Vec2f p) { return capsule(p, add({32, 32}, mul(dir, 16)), add({32, 32}, mul(dir, 24)), 0); }, .4f);
+    }
+    canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 9.5f); }, metal({.base = rgb(70, 46, 136), .outline = rgb(24, 12, 50), .bevel = 1.6f}, {32, 32}, 9));
+    canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 4.2f); }, emissive(rgb(236, 220, 255), rgb(170, 120, 255), rgb(30, 14, 60), 4.2f));
     return canvas.upload(renderer);
 }
 
 // Enemy bullets: round (the player's shots are streaks), a white core in a hot
 // pink-red rim with a dark edge, so they read against any enemy or light.
 Texture make_bullet(Renderer2D& renderer) {
-    Canvas canvas(24, 24);
-    canvas.fill([](Vec2f p) { return circle(p, {12, 12}, 11); }, [](Vec2f, float d) {
+    Canvas canvas(24, 24, 1);
+    canvas.fill([](Vec2f p) { return circle(p, {12, 12}, 11); }, [](Vec2f, float d, Vec2f) {
         return d > -1.6f ? rgb(52, 0, 22) : d > -5.5f ? rgb(255, 58, 110) : rgb(255, 238, 244);
     });
     return canvas.upload(renderer);
@@ -225,38 +319,54 @@ Texture make_bullet(Renderer2D& renderer) {
 
 // A thin ring: the player's ground marker and the orbiters' charge warning.
 Texture make_ring(Renderer2D& renderer) {
-    Canvas canvas(64, 64);
-    canvas.fill([](Vec2f p) { return std::abs(length(sub(p, {32, 32})) - 28) - 1.6f; }, [](Vec2f, float) { return rgb(255, 255, 255); });
+    Canvas canvas(64, 64, 1);
+    canvas.fill([](Vec2f p) { return std::abs(length(sub(p, {32, 32})) - 28) - 1.6f; }, [](Vec2f, float, Vec2f) { return rgb(255, 255, 255); });
     return canvas.upload(renderer);
 }
 
-Texture make_core(Renderer2D& renderer) {
-    Canvas canvas(32, 32);
-    const std::vector<Vec2f> gem = regular({16, 16}, 6, 14, 0);
-    canvas.fill([&](Vec2f p) { return polygon(p, gem); }, [](Vec2f p, float d) {
-        if (d > -1.4f) {
-            return rgb(16, 64, 40);
-        }
-        return p.x < 16 && p.y < 16 ? rgb(200, 255, 222) : p.x + p.y < 32 ? rgb(96, 236, 160) : rgb(46, 176, 110);
+// A soft ground shadow, drawn under ships.
+Texture make_shadow(Renderer2D& renderer) {
+    Canvas canvas(64, 64, 1);
+    canvas.glow(rgb(0, 0, 0), [](Vec2f p) {
+        const float r = length({(p.x - 32) / 30, (p.y - 32) / 30});
+        const float t = std::clamp((1 - r) / .55f, 0.0f, 1.0f);
+        return .8f * t * t * (3 - 2 * t);
     });
     return canvas.upload(renderer);
 }
 
+// Cores: a faceted green gem; each facet catches the light differently.
+Texture make_core(Renderer2D& renderer) {
+    Canvas canvas(32, 32, sprite_scale);
+    const std::vector<Vec2f> gem = regular({16, 16}, 6, 14, 0);
+    canvas.fill([&](Vec2f p) { return polygon(p, gem); }, [](Vec2f p, float d, Vec2f) {
+        if (d > -1.1f) return rgb(12, 60, 36);
+        const float angle = std::atan2(p.y - 16, p.x - 16);
+        const float facet = std::floor((angle + pi) / (pi / 3));
+        const float light = .72f + .28f * std::cos(facet * pi / 3 - 3.7f);
+        Rgba c = brighter(rgb(70, 224, 150), light);
+        if (length(sub(p, {16, 16})) < 6) c = mix(c, rgb(200, 255, 225), .55f);
+        return c;
+    });
+    canvas.fill([](Vec2f p) { return capsule(p, {10, 11}, {13, 9}, .8f); }, [](Vec2f, float, Vec2f) { return rgb(255, 255, 255, .85f); });
+    return canvas.upload(renderer);
+}
+
 Texture make_shot(Renderer2D& renderer) {
-    Canvas canvas(32, 16);
+    Canvas canvas(32, 16, 1);
     canvas.glow(rgb(255, 255, 255), [](Vec2f p) {
         const float d = std::max(0.0f, capsule(p, {8, 8}, {24, 8}, 0));
         const float t = std::clamp(1 - d / 7, 0.0f, 1.0f);
         return t * t;
     });
-    canvas.fill([](Vec2f p) { return capsule(p, {9, 8}, {25, 8}, 2.2f); }, [](Vec2f, float) { return rgb(255, 255, 255); });
+    canvas.fill([](Vec2f p) { return capsule(p, {9, 8}, {25, 8}, 2.2f); }, [](Vec2f, float, Vec2f) { return rgb(255, 255, 255); });
     return canvas.upload(renderer);
 }
 
 // A flashlight beam for Light2D::shape: bright near the ship, fading out and
 // toward the edges of a 32-degree half-angle cone pointing right.
 Texture make_cone(Renderer2D& renderer) {
-    Canvas canvas(128, 128);
+    Canvas canvas(128, 128, 1);
     canvas.glow(rgb(255, 255, 255), [](Vec2f p) {
         const Vec2f d{(p.x - 64) / 64, (p.y - 64) / 64};
         const float r = length(d);
@@ -271,41 +381,116 @@ Texture make_cone(Renderer2D& renderer) {
     return canvas.upload(renderer);
 }
 
-// Steel deck plates: four panels per tile, seams, bolts and wear.
-Texture make_floor(Renderer2D& renderer) {
-    constexpr int size = 256;
-    Canvas canvas(size, size);
-    canvas.fill([](Vec2f) { return -1.0f; }, [](Vec2f p, float) {
-        const float wear = value_noise(p, 48) * .06f + value_noise(p, 9) * .03f + hash(int(p.x), int(p.y)) * .02f;
-        Rgba c = brighter(rgb(38, 46, 57), .92f + wear);
-        const int lx = int(p.x) % 128, ly = int(p.y) % 128;
-        if (lx == 0 || ly == 0) {
-            c = rgb(16, 21, 28);
-        } else if (lx == 1 || ly == 1) {
-            c = rgb(56, 67, 80);
-        } else if (lx == 127 || ly == 127) {
-            c = brighter(c, .8f);
-        }
-        return c;
-    });
+// Deck tiles: one 256-unit world tile of four bevelled steel panels with
+// rivets, brushed grain and wear. Variants break up the repetition: 1 swaps a
+// panel for a floor grate, 2 paints hazard chevrons, 3 adds scuffs and a patch.
+Texture make_floor(Renderer2D& renderer, int variant) {
+    Canvas canvas(256, 256, 1);
+    const float tint = .94f + hash(variant, 7) * .08f;
+    canvas.fill([](Vec2f) { return -1.0f; }, [](Vec2f, float, Vec2f) { return rgb(14, 18, 24); }); // gaps
     for (int py = 0; py < 2; ++py) {
         for (int px = 0; px < 2; ++px) {
-            for (const Vec2f corner : {Vec2f{9, 9}, Vec2f{119, 9}, Vec2f{9, 119}, Vec2f{119, 119}}) {
-                const Vec2f at{px * 128 + corner.x, py * 128 + corner.y};
-                canvas.fill([&](Vec2f p) { return circle(p, at, 3); },
-                            [&](Vec2f p, float d) { return d > -1 ? rgb(20, 26, 33) : p.x + p.y < at.x + at.y ? rgb(96, 108, 122) : rgb(62, 72, 84); });
+            const Rectf panel{px * 128.0f + 2, py * 128.0f + 2, 124, 124};
+            const int id = py * 2 + px;
+            const bool grate = variant == 1 && id == 3;
+            canvas.fill(panel, [&](Vec2f p) { return box(p, panel, 3); }, [&](Vec2f p, float d, Vec2f n) {
+                const float wear = value_noise(add(p, {float(variant * 91), float(id * 57)}), 40) * .08f +
+                                   value_noise(p, 7) * .03f;
+                const float brushed = (hash(int(p.y * 2), id) - .5f) * .025f;
+                Rgba c = brighter(grate ? rgb(22, 27, 34) : rgb(44, 52, 63), tint * (.94f + wear + brushed));
+                if (-d < 2.5f && !grate) {
+                    const float facing = dot(n, to_light);
+                    c = facing > 0 ? mix(c, rgb(120, 134, 150), facing * .35f) : mix(c, rgb(6, 8, 12), -facing * .5f);
+                }
+                return c;
+            });
+            if (grate) {
+                for (float x = panel.x + 10; x < panel.x + panel.w - 6; x += 8) {
+                    const Rectf bar{x, panel.y + 8, 3.2f, panel.h - 16};
+                    canvas.fill(bar, [&](Vec2f p) { return box(p, bar, 1); },
+                                metal({.base = rgb(58, 66, 78), .outline = rgb(10, 12, 16), .outline_width = .5f, .bevel = 1, .gloss = .3f}, {x, panel.y + 62}, 4));
+                }
+                continue;
+            }
+            // Rivets along each panel's rim.
+            for (float t = 10; t < 120; t += 27) {
+                for (const Vec2f at : {Vec2f{panel.x + t, panel.y + 6}, Vec2f{panel.x + t, panel.y + panel.h - 6},
+                                       Vec2f{panel.x + 6, panel.y + t}, Vec2f{panel.x + panel.w - 6, panel.y + t}}) {
+                    canvas.fill({at.x - 3, at.y - 3, 6, 6}, [&](Vec2f p) { return circle(p, at, 1.5f); },
+                                metal({.base = rgb(88, 98, 112), .outline = rgb(16, 20, 26), .outline_width = .4f, .bevel = .9f, .gloss = .6f}, at, 1.5f));
+                }
+            }
+            if (variant == 2 && id == 0) {
+                // Worn hazard chevrons painted across the panel.
+                const Rectf band{panel.x + 18, panel.y + 50, 88, 24};
+                canvas.fill(band, [&](Vec2f p) { return box(p, band); }, [&](Vec2f p, float, Vec2f) {
+                    const bool stripe = std::fmod(p.x - p.y + 400, 16.0f) < 8;
+                    const float worn = value_noise(p, 5) > .38f ? .5f : .18f;
+                    return stripe ? rgb(214, 160, 52, worn) : rgb(20, 20, 20, worn * .8f);
+                });
+            }
+            if (variant == 3 && id == 1) {
+                const Rectf patch{panel.x + 30, panel.y + 34, 52, 40};
+                canvas.fill(patch, [&](Vec2f p) { return box(p, patch, 2); },
+                            metal({.base = rgb(52, 60, 70), .outline = rgb(14, 18, 24), .outline_width = .6f, .bevel = 1.6f, .gloss = .3f}, {panel.x + 56, panel.y + 54}, 26));
             }
         }
     }
-    // A worn walkway stripe and a few scuffs.
-    canvas.fill([](Vec2f p) { return std::abs(p.y - 192) - 10; }, [](Vec2f p, float) {
-        return rgb(50, 60, 72, value_noise(p, 14) > .45f ? .55f : .3f);
-    });
-    for (int i = 0; i < 6; ++i) {
-        const Vec2f a{hash(i, 1) * 240 + 8, hash(i, 2) * 240 + 8};
-        const Vec2f b = add(a, {hash(i, 3) * 40 - 20, hash(i, 4) * 12 - 6});
-        canvas.fill([&](Vec2f p) { return capsule(p, a, b, .6f); }, [](Vec2f, float) { return rgb(70, 82, 96, .6f); });
+    // Scuffs.
+    for (int i = 0; i < (variant == 3 ? 10 : 4); ++i) {
+        const Vec2f a{hash(i, variant * 3 + 1) * 230 + 12, hash(i, variant * 3 + 2) * 230 + 12};
+        const Vec2f b = add(a, {hash(i, variant * 3 + 5) * 36 - 18, hash(i, variant * 3 + 6) * 12 - 6});
+        canvas.fill({std::min(a.x, b.x) - 2, std::min(a.y, b.y) - 2, std::abs(b.x - a.x) + 4, std::abs(b.y - a.y) + 4},
+                    [&](Vec2f p) { return capsule(p, a, b, .35f); }, [](Vec2f, float, Vec2f) { return rgb(120, 132, 146, .35f); });
     }
+    return canvas.upload(renderer);
+}
+
+// A reactor housing (a bolted octagon around a dark well) and its fan, drawn
+// rotating over it.
+Texture make_reactor(Renderer2D& renderer) {
+    Canvas canvas(64, 64, sprite_scale);
+    const std::vector<Vec2f> housing = regular({32, 32}, 8, 31, pi / 8);
+    canvas.fill([&](Vec2f p) { return polygon(p, housing); }, metal({.base = rgb(62, 70, 82), .outline = rgb(10, 12, 16), .bevel = 2.6f, .gloss = .35f}, {32, 32}, 30));
+    for (int i = 0; i < 8; ++i) {
+        const Vec2f bolt{32 + std::cos(i * pi / 4) * 26, 32 + std::sin(i * pi / 4) * 26};
+        canvas.fill([&](Vec2f p) { return circle(p, bolt, 1.6f); },
+                    metal({.base = rgb(120, 130, 144), .outline = rgb(18, 22, 28), .outline_width = .5f, .bevel = 1, .gloss = .6f}, bolt, 1.6f));
+    }
+    canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 21); }, [](Vec2f p, float d, Vec2f n) {
+        if (d > -1.2f) return rgb(8, 10, 14);
+        const float shade = std::clamp(-dot(n, to_light), 0.0f, 1.0f) * std::clamp(1 + d / 6, 0.0f, 1.0f);
+        return mix(rgb(20, 24, 30), rgb(46, 52, 62), shade);
+    });
+    for (const Vec2f lamp : {Vec2f{10, 10}, Vec2f{54, 10}, Vec2f{10, 54}, Vec2f{54, 54}}) {
+        canvas.fill([&](Vec2f p) { return circle(p, lamp, 2.2f); }, emissive(rgb(255, 230, 170), rgb(240, 150, 60), rgb(40, 22, 6), 2.2f));
+    }
+    return canvas.upload(renderer);
+}
+
+Texture make_fan(Renderer2D& renderer) {
+    Canvas canvas(64, 64, sprite_scale);
+    for (int i = 0; i < 6; ++i) {
+        const float angle = i * pi / 3;
+        const Vec2f a{32 + std::cos(angle) * 6, 32 + std::sin(angle) * 6};
+        const Vec2f b{32 + std::cos(angle + .5f) * 18, 32 + std::sin(angle + .5f) * 18};
+        canvas.fill([&](Vec2f p) { return capsule(p, a, b, 3.2f); },
+                    metal({.base = rgb(96, 106, 120), .outline = rgb(14, 16, 22), .outline_width = .6f, .bevel = 1.4f, .gloss = .5f}, {32, 32}, 18));
+    }
+    canvas.fill([](Vec2f p) { return circle(p, {32, 32}, 6); }, emissive(rgb(255, 214, 150), rgb(214, 130, 50), rgb(30, 16, 4), 6));
+    return canvas.upload(renderer);
+}
+
+// Hazard stripes for the arena's boundary walls.
+Texture make_edge(Renderer2D& renderer) {
+    Canvas canvas(64, 16, 2);
+    canvas.fill([](Vec2f) { return -1.0f; }, [](Vec2f p, float, Vec2f) {
+        const bool stripe = std::fmod(p.x + p.y, 16.0f) < 8;
+        Rgba c = stripe ? rgb(206, 150, 46) : rgb(24, 24, 26);
+        c = brighter(c, .9f + value_noise(p, 6) * .15f);
+        if (p.y < 1.2f || p.y > 14.8f) c = rgb(10, 10, 12);
+        return c;
+    });
     return canvas.upload(renderer);
 }
 
@@ -334,7 +519,13 @@ void ArenaPainter::init(Renderer2D& renderer, Arena& arena) {
     _ring = make_ring(renderer);
     _shot = make_shot(renderer);
     _cone = make_cone(renderer);
-    _floor = make_floor(renderer);
+    for (int i = 0; i < 4; ++i) {
+        _floors[static_cast<std::size_t>(i)] = make_floor(renderer, i);
+    }
+    _shadow = make_shadow(renderer);
+    _reactor = make_reactor(renderer);
+    _fan = make_fan(renderer);
+    _edge = make_edge(renderer);
     _halo = _lighting.falloff(renderer);
     const Vec2i halo_size = _halo.size();
     _sprites.set_texture("halo", _halo);
@@ -397,47 +588,59 @@ void ArenaPainter::update(Arena& arena, float dt) {
 }
 
 void ArenaPainter::draw_floor(Renderer2D& renderer, const Arena& arena, const Camera2D& camera) {
-    const int tile_x = int(camera.offset.x) / 256, tile_y = int(camera.offset.y) / 256;
-    for (int y = tile_y; y <= tile_y + 4; ++y) {
-        for (int x = tile_x; x <= tile_x + 5; ++x) {
+    // Deck tiles: a variant per tile from a hash of its coordinates, so the
+    // details never line up into a visible grid. (Drawn 1:1 and unrotated: the
+    // software backend pays heavily for scaled or rotated copies.)
+    const int tile_x = int(std::floor(camera.offset.x / 256)), tile_y = int(std::floor(camera.offset.y / 256));
+    for (int y = tile_y; y <= tile_y + int(camera.viewport.y / 256) + 1; ++y) {
+        for (int x = tile_x; x <= tile_x + int(camera.viewport.x / 256) + 1; ++x) {
+            const u32 h = static_cast<u32>(x * 73856093) ^ static_cast<u32>(y * 19349663);
+            const u32 mixed = (h ^ (h >> 13)) * 0x5bd1e995u;
+            const int variant = (mixed >> 8) % 7 < 4 ? 0 : 1 + int((mixed >> 12) % 3);
             const auto p = camera.world_to_screen({float(x * 256), float(y * 256)});
-            renderer.draw_texture(_floor, {0, 0, 256, 256}, {p.x, p.y, 256, 256});
-            // Recessed cable channels with travelling power indicators.
-            renderer.fill_rect({p.x + 120, p.y + 2, 16, 252}, Color::rgb(12, 18, 25));
-            renderer.draw_line({p.x + 122, p.y + 2}, {p.x + 122, p.y + 254}, Color::rgb(34, 70, 82));
-            const float pulse = std::fmod(arena.elapsed * 45 + float((x + y) * 37), 224.0f);
-            renderer.fill_rect({p.x + 126, p.y + 12 + pulse, 3, 14}, Color::rgb(92, 104, 118));
-            if ((x + y) % 3 == 0) {
-                renderer.fill_rect({p.x + 178, p.y + 180, 48, 36}, Color::rgb(14, 20, 27));
-                for (int i = 0; i < 5; ++i) {
-                    renderer.fill_rect({p.x + 183, p.y + 185 + i * 6.0f, 38, 2}, Color::rgb(44, 56, 68));
-                }
-            }
+            renderer.draw_texture(_floors[static_cast<std::size_t>(variant)], {0, 0, 256, 256}, {p.x, p.y, 256, 256});
         }
     }
+    // The arena's boundary: hazard strips along the inside of its edge (the
+    // camera never shows past it; ships are kept 20 units clear).
+    const auto wall = [&](Vec2f a, Vec2f b) {
+        const Vec2f s = camera.world_to_screen(a), e = camera.world_to_screen(b);
+        const Rectf r{std::min(s.x, e.x), std::min(s.y, e.y), std::abs(e.x - s.x), std::abs(e.y - s.y)};
+        if (r.x > camera.viewport.x || r.y > camera.viewport.y || r.x + r.w < 0 || r.y + r.h < 0) {
+            return;
+        }
+        const bool across = r.w >= r.h;
+        const float run = across ? r.w : r.h, depth = across ? r.h : r.w;
+        for (float t = 0; t < run; t += 64) {
+            const float len = std::min(64.0f, run - t);
+            const Rectf src{0, 0, len * 2, 32};
+            if (across) {
+                renderer.draw_texture(_edge, src, {r.x + t, r.y, len, depth});
+            } else {
+                // Rotate the strip a quarter turn about its centre.
+                const Vec2f c{r.x + r.w / 2, r.y + t + len / 2};
+                renderer.draw_texture(_edge, src, {c.x - len / 2, c.y - depth / 2, len, depth}, colors::white, 90, {.5f, .5f});
+            }
+        }
+    };
+    constexpr float w = 3072, h = 2048, t = 16;
+    wall({0, 0}, {w, t});
+    wall({0, h - t}, {w, h});
+    wall({0, t}, {t, h - t});
+    wall({w - t, t}, {w, h - t});
+
     // Reactor landmarks make camera movement and aim direction legible. Their
-    // rotors turn with simulation time, so they freeze with pause.
+    // fans turn with simulation time, so they freeze with pause.
     for (int y = 256; y < 2048; y += 512) {
         for (int x = 256; x < 3072; x += 512) {
             const auto p = camera.world_to_screen({float(x), float(y)});
             if (p.x < -60 || p.x > camera.viewport.x + 60 || p.y < -60 || p.y > camera.viewport.y + 60) {
                 continue;
             }
-            renderer.fill_rect({p.x - 38, p.y - 38, 76, 76}, Color::rgb(16, 24, 32));
-            renderer.draw_rect({p.x - 38, p.y - 38, 76, 76}, Color::rgb(58, 82, 96));
-            renderer.draw_rect({p.x - 28, p.y - 28, 56, 56}, Color::rgb(40, 62, 76));
-            for (int i = 0; i < 8; ++i) {
-                const float angle = i * .785398f + arena.elapsed * .3f;
-                const Vec2f a{p.x + std::cos(angle) * 15, p.y + std::sin(angle) * 15};
-                const Vec2f b{p.x + std::cos(angle + .45f) * 24, p.y + std::sin(angle + .45f) * 24};
-                renderer.draw_line(a, b, Color::rgb(104, 116, 130));
-            }
-            renderer.fill_rect({p.x - 6, p.y - 6, 12, 12}, Color::rgb(224, 156, 78));
-            for (int i = 0; i < 4; ++i) {
-                const float sx = p.x - 36 + i * 20.0f;
-                renderer.draw_line({sx, p.y + 43}, {sx + 7, p.y + 50}, Color::rgb(190, 150, 70));
-                renderer.draw_line({sx, p.y - 50}, {sx + 7, p.y - 43}, Color::rgb(190, 150, 70));
-            }
+            renderer.draw_texture(_shadow, {0, 0, 64, 64}, {p.x - 44, p.y - 40, 96, 96}, Color::rgba(255, 255, 255, 150));
+            renderer.draw_texture(_reactor, {0, 0, 128, 128}, {p.x - 40, p.y - 40, 80, 80});
+            renderer.draw_texture(_fan, {0, 0, 128, 128}, {p.x - 26, p.y - 26, 52, 52}, colors::white,
+                                  arena.elapsed * 17 + float(x + y), {.5f, .5f});
         }
     }
 }
@@ -566,6 +769,7 @@ void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& came
     // Light the environment only: enemies, shots and the player are drawn after,
     // at full colour, so threats read the same in any light.
     collect_lights(arena, camera);
+    draw_shadows(renderer, arena, camera);
     _lit = _lighting.apply(renderer, {0, 0, camera.viewport.x, camera.viewport.y}, ambient, _lights);
     arena.collect_entities(_world, view); // enemies: the ECS TextureRenderer path
     _world.flush(renderer, view);
@@ -578,7 +782,26 @@ void ArenaPainter::draw(Renderer2D& renderer, Arena& arena, const Camera2D& came
     }
     const Color body = arena.hurt() ? Color::rgb(255, 150, 140) : arena.dashing() ? Color::rgb(220, 255, 255) : colors::white;
     const Vec2f ship = camera.world_to_screen(arena.player);
-    renderer.draw_texture(_player, {0, 0, 64, 64}, {ship.x - 24, ship.y - 24, 48, 48}, body, degrees(arena.facing()), {.5f, .5f});
+    renderer.draw_texture(_player, {0, 0, 128, 128}, {ship.x - 24, ship.y - 24, 48, 48}, body, degrees(arena.facing()), {.5f, .5f});
+}
+
+// Soft contact shadows, cast down and to the right (away from the sprites'
+// top-left key light), so ships sit above the deck. Drawn before lighting, so
+// the floor's darkness and the shadows are lit together.
+void ArenaPainter::draw_shadows(Renderer2D& renderer, const Arena& arena, const Camera2D& camera) {
+    constexpr std::array<float, 3> size{34, 46, 40};
+    const Color shade = colors::white;
+    const auto cast = [&](Vec2f world, float s) {
+        const Vec2f p = add(camera.world_to_screen(world), {5, 7});
+        if (p.x < -s || p.y < -s || p.x > camera.viewport.x + s || p.y > camera.viewport.y + s) {
+            return;
+        }
+        renderer.draw_texture(_shadow, {0, 0, 64, 64}, {p.x - s / 2, p.y - s / 2, s, s}, shade);
+    };
+    for (const EcsEntity entity : arena.enemies()) {
+        cast(entity.get<Transform2D>()->pos, size[static_cast<std::size_t>(std::clamp(entity.get<Enemy>()->kind, 0, 2))]);
+    }
+    cast(arena.player, 44);
 }
 
 void ArenaPainter::enable_post_process(Renderer2D& renderer) {
