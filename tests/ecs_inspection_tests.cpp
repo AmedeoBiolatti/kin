@@ -100,6 +100,66 @@ void test_query_plan_matches_all_and_none_deterministically() {
     assert(!invalid.diagnostics.empty());
 }
 
+// Queries and snapshots list entities roots first, then children grouped by
+// parent id (not parent name), each group by name, with unnamed entities and
+// equal names ordered by id.
+void test_inspection_order_groups_by_parent_then_name() {
+    kin::EcsWorld world;
+    register_components(world);
+    std::vector<kin::EcsEntity> made;
+    const auto make = [&](std::string_view name) {
+        kin::EcsEntity entity = world.entity(name);
+        entity.set(Transform{});
+        made.push_back(entity);
+        return entity;
+    };
+    kin::EcsEntity zeta = make("zeta"); // created first, so its id is lower than alpha's
+    kin::EcsEntity alpha = make("alpha");
+    make("");
+    make("mid");
+    for (kin::EcsEntity parent : {alpha, zeta}) {
+        for (std::string_view name : {"b", "", "a", "", "c"}) {
+            make(name).child_of(parent);
+        }
+    }
+
+    std::vector<kin::EcsEntity> expected = made;
+    std::ranges::sort(expected, [](const kin::EcsEntity& a, const kin::EcsEntity& b) {
+        const bool a_child = static_cast<bool>(a.parent());
+        const bool b_child = static_cast<bool>(b.parent());
+        if (a_child != b_child) {
+            return !a_child;
+        }
+        if (a_child && a.parent().id() != b.parent().id()) {
+            return a.parent().id() < b.parent().id();
+        }
+        if (a.name() != b.name()) {
+            return a.name() < b.name();
+        }
+        return a.id() < b.id();
+    });
+    std::vector<kin::EcsId> expected_ids;
+    for (const kin::EcsEntity& entity : expected) {
+        expected_ids.push_back(entity.id());
+    }
+    // Spot-check the rule itself, not only the reference: zeta's children come
+    // before alpha's because zeta's id is lower.
+    assert(expected[4].parent().id() == zeta.id());
+
+    const kin::EcsQueryPlan plan = world.build_query_plan({.all = {"Transform"}});
+    std::vector<kin::EcsId> queried;
+    for (const kin::EcsEntity& entity : world.query_entities(plan)) {
+        queried.push_back(entity.id());
+    }
+    assert(queried == expected_ids);
+
+    std::vector<kin::EcsId> snapshotted;
+    for (const kin::EntitySnapshot& entity : world.snapshot({.include_components = false}).entities) {
+        snapshotted.push_back(entity.descriptor.id);
+    }
+    assert(snapshotted == expected_ids);
+}
+
 void test_component_field_json_conversion() {
     std::string error;
     const kin::JsonParseResult vec_json = kin::parse_json(R"({"x":3.5,"y":4.5})");
@@ -194,6 +254,7 @@ void test_scene_instantiation_validates_before_mutating() {
 int main() {
     test_world_snapshot_contains_hierarchy_and_components();
     test_query_plan_matches_all_and_none_deterministically();
+    test_inspection_order_groups_by_parent_then_name();
     test_component_field_json_conversion();
     test_scene_document_round_trip();
     test_scene_instantiation_validates_before_mutating();
