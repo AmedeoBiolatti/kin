@@ -21,25 +21,41 @@ std::string entity_name(flecs::entity entity) {
     return {value.c_str(), value.length()};
 }
 
-bool world_entity_less(flecs::entity a, flecs::entity b) {
-    const flecs::string_view a_raw_name = a.name();
-    const flecs::string_view b_raw_name = b.name();
-    const std::string_view a_name{a_raw_name.c_str(), a_raw_name.length()};
-    const std::string_view b_name{b_raw_name.c_str(), b_raw_name.length()};
-    const EcsEntity wrapped_a{a};
-    const EcsEntity wrapped_b{b};
-    const bool a_has_parent = static_cast<bool>(wrapped_a.parent());
-    const bool b_has_parent = static_cast<bool>(wrapped_b.parent());
-    if (a_has_parent != b_has_parent) {
-        return !a_has_parent;
+// Inspection order: root entities first, then children grouped by parent id,
+// each group by name, then id. Reading parent and name is a flecs lookup, so
+// they are read once per entity into a key rather than once per comparison.
+struct WorldEntityKey {
+    u64 parent = 0; // 0 for roots, which sort first (entity ids are never 0)
+    std::string_view name;
+    u64 id = 0;
+    flecs::entity entity;
+
+    bool operator<(const WorldEntityKey& other) const {
+        if (parent != other.parent) {
+            return parent < other.parent;
+        }
+        if (name != other.name) {
+            return name < other.name;
+        }
+        return id < other.id;
     }
-    if (a_has_parent && wrapped_a.parent().id() != wrapped_b.parent().id()) {
-        return wrapped_a.parent().id() < wrapped_b.parent().id();
+};
+
+void sort_world_entities(std::vector<flecs::entity>& entities) {
+    std::vector<WorldEntityKey> keys;
+    keys.reserve(entities.size());
+    for (const flecs::entity entity : entities) {
+        const flecs::entity parent = entity.parent();
+        const flecs::string_view name = entity.name();
+        keys.push_back({.parent = parent ? parent.id() : 0,
+                        .name = {name.c_str(), name.length()},
+                        .id = entity.id(),
+                        .entity = entity});
     }
-    if (a_name != b_name) {
-        return a_name < b_name;
+    std::sort(keys.begin(), keys.end());
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+        entities[i] = keys[i].entity;
     }
-    return a.id() < b.id();
 }
 
 bool is_editor_internal_entity(flecs::entity entity) {
@@ -98,7 +114,7 @@ std::vector<flecs::entity> sorted_world_entities(const EcsWorld& world) {
     const_cast<flecs::world&>(world.raw()).each([&](flecs::entity entity) {
         add_entity(EcsEntity{entity});
     });
-    std::ranges::sort(entities, world_entity_less);
+    sort_world_entities(entities);
     entities.erase(std::ranges::unique(entities, [](flecs::entity a, flecs::entity b) {
         return a.id() == b.id();
     }).begin(), entities.end());
@@ -1017,14 +1033,17 @@ std::vector<EcsEntity> EcsWorld::query_entities(const EcsQueryPlan& plan) const 
         return result;
     }
     if (const std::shared_ptr<flecs::query<>> compiled = plan.compiled.lock()) {
+        std::vector<flecs::entity> matched;
         compiled->each([&](flecs::entity entity) {
             if (!is_editor_internal_entity(entity)) {
-                result.push_back(EcsEntity{entity});
+                matched.push_back(entity);
             }
         });
-        std::ranges::sort(result, [](EcsEntity a, EcsEntity b) {
-            return world_entity_less(a.raw(), b.raw());
-        });
+        sort_world_entities(matched);
+        result.reserve(matched.size());
+        for (const flecs::entity entity : matched) {
+            result.push_back(EcsEntity{entity});
+        }
         return result;
     }
     for (flecs::entity entity : sorted_world_entities(*this)) {

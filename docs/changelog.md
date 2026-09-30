@@ -26,6 +26,12 @@ releases may change APIs.
   reordering the commands. Submitting and flushing 32k sprites takes 4.2 ms
   instead of 9.7 ms.
 
+### Performance
+
+- ECS inspection is 5× faster: `query_entities` and `EcsWorld::snapshot()`
+  read each entity's parent and name once instead of on every comparison while
+  sorting. A query matching 4.5k of 10k entities takes 1.7 ms instead of 9 ms.
+
 ### Fixed
 
 - GPU games no longer crash or hang on exit. Textures that outlive their
