@@ -10,6 +10,19 @@
 
 namespace kin {
 
+// A sprite made ready outside the queue (e.g. on worker threads) for
+// RenderQueue::append_sprites().
+struct PreparedSprite {
+    RenderKey key{};
+    const Texture* texture = nullptr; // must stay valid until appended
+    Rectf source{};                   // texture pixels; empty: all of it (Texture only)
+    Rectf dest{};
+    Color tint = colors::white;
+    f32 rotation = 0.0f;
+    Vec2f pivot{0.5f, 0.5f};
+    RenderCommandType type = RenderCommandType::Texture; // or Sprite
+};
+
 class RenderQueue {
 public:
     explicit RenderQueue(RenderSortMode sort = RenderSortMode::LayerThenOrder);
@@ -43,6 +56,9 @@ public:
     void draw_line(RenderKey key, Vec2f a, Vec2f b, Color color);
     void draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
     void draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
+    // Queues each sprite in order, as draw_texture_region() (Texture) or
+    // draw_sprite() (Sprite) would.
+    void append_sprites(std::span<const PreparedSprite> sprites);
     // A Texture command drawing `source` (texture pixels) of `texture`.
     void draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint = colors::white, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
     void draw_text(RenderKey key, std::string text, Vec2f pos, Rectf bounds, f32 scale, Color color, std::function<void(Renderer2D&)> callback);

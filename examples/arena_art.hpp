@@ -38,7 +38,7 @@ public:
     std::size_t commands() const { return _world.size() + _glow.size() + _emissive.size(); }
     std::size_t particles() const { return _particles.active_count(); }
     std::size_t lights() const { return _lights.size(); }
-    std::size_t visible_enemies() const { return _visible.size(); }
+    std::size_t visible_enemies() const { return _visible_count; }
     bool lit() const { return _lit; }
 
 private:
@@ -47,13 +47,24 @@ private:
     void collect_lights(const Arena& arena, const Camera2D& camera);
     void draw_shadows(Renderer2D& renderer, const Arena& arena, const Camera2D& camera);
     void gather_visible(const Arena& arena, const Camera2D& camera);
+    static void cast_shadow(Vec2f screen, float size, Vec2f view, std::vector<SpriteInstance>& shadows);
 
     struct VisibleEnemy {
         Vec2f pos;
         int kind = 0;
         float hp = 0, cooldown = 0;
     };
-    std::vector<VisibleEnemy> _visible; // this frame's enemies near the view
+    std::size_t _visible_count = 0;     // this frame's enemies near the view
+    std::vector<VisibleEnemy> _marked;  // those with pips or a charge ring
+    std::size_t gather_rows(std::span<const Transform2D> transforms, std::span<const Enemy> enemies,
+                            const Camera2D& camera, std::vector<SpriteInstance>& shadows,
+                            std::vector<VisibleEnemy>& marked) const;
+    struct GatherChunk {
+        std::size_t visible = 0;
+        std::vector<SpriteInstance> shadows;
+        std::vector<VisibleEnemy> marked;
+    };
+    std::vector<GatherChunk> _chunks; // per worker chunk, reused
     std::vector<SpriteInstance> _shadows;
 
     bool _ready = false;

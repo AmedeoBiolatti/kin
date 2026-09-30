@@ -161,6 +161,10 @@ public:
     // Many quads from one texture, in order: the same pixels as a draw_texture()
     // per sprite, but backends with instancing (SDL_GPU) submit them as one batch.
     void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites);
+    // Lets the backend spread large batches over these workers (null: none);
+    // returns the job system it replaces. The caller keeps it alive while set.
+    JobSystem* set_job_system(JobSystem* jobs);
+    JobSystem* job_system() const { return _jobs; }
     void draw_texture(const Texture& texture, Vec2f pos, Vec2f size);
     void draw_texture(const Texture& texture, Vec2f pos);
     void draw_sprite(const Sprite& sprite, Rectf dest);
@@ -242,6 +246,7 @@ public:
     ShaderHandle builtin_shader(BuiltinShader id);
 
 private:
+    JobSystem* _jobs = nullptr;
     friend class ViewportGuard;
     friend class PooledTarget;
 

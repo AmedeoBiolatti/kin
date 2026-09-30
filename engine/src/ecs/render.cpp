@@ -1,5 +1,7 @@
 #include <kin/ecs/render.hpp>
 
+#include <kin/core/jobs.hpp>
+
 #include <kin/ecs/particles.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/render_profile.hpp>
@@ -189,11 +191,7 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
             submit_sprite(queue, entity, transform, sprite, options.view);
         }
     });
-    _textures.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const TextureRenderer& texture) {
-        if (texture.static_renderable) {
-            submit_texture(queue, entity, transform, texture, options.view);
-        }
-    });
+    collect_textures(queue, options, true);
     _rects.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const RectRenderer& rect) {
         if (rect.static_renderable) {
             submit_rect(queue, entity, transform, rect, options.view);
@@ -209,6 +207,69 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
     }
 }
 
+namespace {
+
+// submit_texture()'s work, into `out` instead of a queue: safe on a worker.
+void prepare_texture(const WorldTransform& transform, const TextureRenderer& texture, const RenderView* view,
+                     std::vector<PreparedSprite>& out) {
+    if (!texture.visible || !texture.texture) {
+        return;
+    }
+    const Vec2f pos = transform.pos;
+    const Rectf dest = texture_draw_rect(pos, texture);
+    if (view && !render_view_visible(*view, dest)) {
+        return;
+    }
+    out.push_back({
+        .key = key_for(texture.layer, texture.order, texture.y_sort, pos.y + texture.offset.y + texture.sort_y_offset),
+        .texture = &texture.texture,
+        .source = texture_source_rect(texture),
+        .dest = dest,
+        .tint = texture.tint,
+    });
+}
+
+} // namespace
+
+void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOptions& options, bool statics) {
+    constexpr i32 parallel_min = 8192;
+    constexpr i32 chunk = 4096;
+    _textures.run([&](flecs::iter& it) {
+        while (it.next()) {
+            const auto world = it.field<const WorldTransform>(1);
+            const auto textures = it.field<const TextureRenderer>(2);
+            const i32 rows = static_cast<i32>(it.count());
+            if (!options.jobs || rows < parallel_min) {
+                for (const auto i : it) {
+                    if (textures[i].static_renderable == statics) {
+                        submit_texture(queue, it.entity(i), world[i], textures[i], options.view);
+                    }
+                }
+                continue;
+            }
+            // Chunks are prepared on the workers and queued in row order, exactly as
+            // the loop above would queue them.
+            const i32 chunks = (rows + chunk - 1) / chunk;
+            if (_prepared.size() < static_cast<std::size_t>(chunks)) {
+                _prepared.resize(static_cast<std::size_t>(chunks));
+            }
+            options.jobs->parallel_for(chunks, [&](i32 c) {
+                std::vector<PreparedSprite>& out = _prepared[static_cast<std::size_t>(c)];
+                out.clear();
+                for (i32 i = c * chunk; i < std::min(rows, (c + 1) * chunk); ++i) {
+                    const auto row = static_cast<std::size_t>(i);
+                    if (textures[row].static_renderable == statics) {
+                        prepare_texture(world[row], textures[row], options.view, out);
+                    }
+                }
+            });
+            for (i32 c = 0; c < chunks; ++c) {
+                queue.append_sprites(_prepared[static_cast<std::size_t>(c)]);
+            }
+        }
+    });
+}
+
 void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions options) {
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
@@ -217,11 +278,7 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
             submit_sprite(queue, entity, transform, sprite, options.view);
         }
     });
-    _textures.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const TextureRenderer& texture) {
-        if (!texture.static_renderable) {
-            submit_texture(queue, entity, transform, texture, options.view);
-        }
-    });
+    collect_textures(queue, options, false);
     _rects.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const RectRenderer& rect) {
         if (!rect.static_renderable) {
             submit_rect(queue, entity, transform, rect, options.view);

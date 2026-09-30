@@ -16,6 +16,8 @@
 
 namespace kin {
 
+class JobSystem;
+
 // One quad of a draw_sprites() call: what draw_texture(texture, source, dest,
 // tint, rotation, pivot) would draw.
 struct SpriteInstance {
@@ -215,6 +217,8 @@ public:
 
     // See Renderer2D::set_blend_mode. The default backend ignores it.
     virtual void set_blend_mode(BlendMode) {}
+    // Worker threads the backend may use for large batches (null: none).
+    virtual void set_job_system(JobSystem*) {}
 
     virtual void set_viewport(Rectf rect) = 0;
     virtual void reset_viewport() = 0;

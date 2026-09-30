@@ -19,6 +19,15 @@ releases may change APIs.
 
 ### Changed
 
+- Large sprite workloads use worker threads when given a `JobSystem`:
+  `SpriteRenderOptions::jobs` prepares big `TextureRenderer` tables in parallel
+  chunks (queued in row order, via the new `RenderQueue::append_sprites()`), and
+  `Renderer2D::set_job_system()` lets the SDL_GPU backend fill large
+  `draw_sprites()` batches in parallel. Results are identical to a
+  single-threaded run. Signal Siege passes its arena's workers, and its art finds
+  the enemies near the view, their shadows and the few showing effects in one
+  (parallel) pass. At 100,000 enemies a GPU frame took about 13.6 ms against
+  19.7 ms for main in the same session; at 10,000, 1.85 ms against 2.39.
 - `RenderQueue` keeps plain sprites compactly (no per-sprite `RenderCommand` or
   texture reference) and flushes them straight into sprite batches; its radix
   sort skips key words that never vary. Collecting and flushing 100,000 ECS

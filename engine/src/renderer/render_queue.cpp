@@ -410,6 +410,21 @@ void RenderQueue::draw_texture_region(RenderKey key, const Texture& texture, Rec
     submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .source = source, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot});
 }
 
+void RenderQueue::append_sprites(std::span<const PreparedSprite> sprites) {
+    _sprites.reserve(_sprites.size() + sprites.size());
+    for (const PreparedSprite& sprite : sprites) {
+        const bool drawable = sprite.texture && *sprite.texture &&
+                              (sprite.type == RenderCommandType::Texture || (sprite.source.w > 0.0f && sprite.source.h > 0.0f));
+        if (drawable) {
+            queue_sprite(sprite.type, sprite.key, *sprite.texture, sprite.source, sprite.dest, sprite.tint, sprite.rotation,
+                         sprite.pivot);
+        } else {
+            submit({.type = sprite.type, .key = sprite.key, .rect = sprite.dest, .source = sprite.source, .color = sprite.tint,
+                    .texture = sprite.texture ? *sprite.texture : Texture{}, .rotation = sprite.rotation, .pivot = sprite.pivot});
+        }
+    }
+}
+
 void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
                                Color tint, f32 rotation, Vec2f pivot) {
     if (_sprites.empty()) {
