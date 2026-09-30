@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
@@ -499,6 +500,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         }
         kin::SceneContext scene_ctx = make_scene_context(ctx);
         runtime_detail::pump_scene_assets(config.asset_server, window.mode != AppMode::Headless);
+        if (config.file_watcher && window.mode != AppMode::Headless) {
+            config.file_watcher->poll();
+        }
         const auto update_start = std::chrono::steady_clock::now();
         scenes.update(scene_ctx);
         const f64 update_ms = ms_since(update_start);

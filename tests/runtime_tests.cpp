@@ -1,3 +1,4 @@
+#include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/runtime/debug_overlay.hpp>
@@ -8,6 +9,7 @@
 #include <cassert>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -235,6 +237,29 @@ int main() {
 
     const std::string report = actions.str();
     assert(report.find("start: Start [Enter]") != std::string::npos);
+
+    // A headless run never polls the game's file watcher, so its data stays as
+    // it was when the run began: deterministic, whatever changes on disk.
+    {
+        const std::filesystem::path watched = std::filesystem::temp_directory_path() / "kin-runtime-watched.txt";
+        std::ofstream{watched} << "a";
+        kin::FileWatcher files;
+        int reloads = 0;
+        files.watch(watched, [&](const std::filesystem::path&) { ++reloads; });
+        std::ofstream{watched} << "changed";
+        kin::SceneManager watched_scenes;
+        watched_scenes.push(std::make_unique<RuntimeActionScene>());
+        kin::run_scene_app({
+            .window = {.title = "runtime-watch-test", .width = 64, .height = 64},
+            .headless = {.enabled = true, .frames = 5},
+            .file_watcher = &files,
+        }, watched_scenes);
+        assert(reloads == 0);
+        files.poll_now();
+        files.poll_now();
+        assert(reloads == 1); // the change was there to see
+        std::filesystem::remove(watched);
+    }
 
     std::ostringstream metadata;
     kin::run_scene_app({
