@@ -118,6 +118,92 @@ void test_render_queue_culls_a_range() {
     assert(queue.size() == 2);
 }
 
+// Plain sprites are queued compactly beside the other commands; every view of
+// the queue (flush order, commands(), culls by submission number, sorting) must
+// be as if they were ordinary commands.
+void test_render_queue_sprite_lane_keeps_order() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    const std::array<kin::u8, 4> pixel{255, 255, 255, 255};
+    const kin::Texture texture = renderer.create_texture_from_rgba(pixel.data(), {1, 1});
+    const kin::Sprite sprite{.texture = texture, .source = {0.0f, 0.0f, 1.0f, 1.0f}};
+    const kin::Material2D tinted{.tint = kin::Color::rgb(255, 0, 0)};
+
+    kin::RenderQueue queue{kin::RenderSortMode::Submission};
+    queue.fill_rect({}, {0.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);                   // 0
+    queue.draw_texture({}, texture, {1.0f, 0.0f, 1.0f, 1.0f});                            // 1: queued sprite
+    queue.draw_sprite({}, sprite, {2.0f, 0.0f, 1.0f, 1.0f});                              // 2: queued sprite
+    queue.fill_rect({}, {3.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);                   // 3
+    queue.draw_texture({}, texture, {4.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white, {&tinted}); // 4: a material, so a command
+    queue.submit({.type = kin::RenderCommandType::Sprite, .rect = {5.0f, 0.0f, 1.0f, 1.0f},
+                  .source = sprite.source, .texture = texture});                           // 5: queued sprite
+    assert(queue.size() == 6 && queue.submitted() == 6);
+
+    queue.flush(renderer);
+    const std::vector<std::string> expected{"fill", "sprite", "sprite", "fill", "sprite", "sprite"};
+    assert(raw->commands == expected);
+    // Runs: sprites 1-2, then 4 (a command, with its material's tint) and 5.
+    assert((raw->sprite_batches == std::vector<std::size_t>{2, 2}));
+    for (std::size_t i = 0; i < raw->rects.size(); ++i) {
+        assert(raw->rects[i].x == static_cast<float>(i));
+    }
+
+    // commands() converts the queued sprites, in submission order.
+    const auto commands = queue.commands();
+    const std::array<kin::RenderCommandType, 6> types{
+        kin::RenderCommandType::FillRect, kin::RenderCommandType::Texture, kin::RenderCommandType::Sprite,
+        kin::RenderCommandType::FillRect, kin::RenderCommandType::Texture, kin::RenderCommandType::Sprite};
+    assert(commands.size() == 6);
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        assert(commands[i].type == types[i] && commands[i].sequence == i && commands[i].rect.x == static_cast<float>(i));
+    }
+    assert(commands[1].texture == texture && commands[1].source.w == 0.0f && commands[2].source.w == 1.0f);
+    raw->commands.clear();
+    raw->rects.clear();
+    queue.flush(renderer);
+    assert(raw->commands == expected);
+
+    // Y order across both kinds; ties keep submission order.
+    queue.clear();
+    queue.set_sort(kin::RenderSortMode::LayerThenY);
+    queue.draw_texture({.y = 30.0f, .use_y = true}, texture, {0.0f, 30.0f, 1.0f, 1.0f});
+    queue.fill_rect({.y = 10.0f, .use_y = true}, {1.0f, 10.0f, 1.0f, 1.0f}, kin::colors::white);
+    queue.draw_texture({.y = 20.0f, .use_y = true}, texture, {2.0f, 20.0f, 1.0f, 1.0f});
+    queue.fill_rect({.y = 20.0f, .use_y = true}, {3.0f, 20.0f, 1.0f, 1.0f}, kin::colors::white);
+    queue.draw_texture({.y = 20.0f, .use_y = true}, texture, {4.0f, 20.0f, 1.0f, 1.0f});
+    raw->commands.clear();
+    raw->rects.clear();
+    queue.flush(renderer);
+    const std::array<float, 5> by_y{1.0f, 2.0f, 3.0f, 4.0f, 0.0f};
+    for (std::size_t i = 0; i < by_y.size(); ++i) {
+        assert(raw->rects[i].x == by_y[i]);
+    }
+    queue.sort_commands();
+    for (std::size_t i = 0; i < by_y.size(); ++i) {
+        assert(queue.commands()[i].rect.x == by_y[i]);
+    }
+
+    // Ranged culls count submissions, whichever kind each command is.
+    queue.clear();
+    queue.set_sort(kin::RenderSortMode::Submission);
+    for (int i = 0; i < 6; ++i) {
+        const float x = i % 2 == 0 ? -100.0f : 10.0f;
+        if (i < 3) {
+            queue.draw_texture({}, texture, {x, 10.0f, 4.0f, 4.0f});
+        } else {
+            queue.fill_rect({}, {x, 10.0f, 4.0f, 4.0f}, kin::colors::white);
+        }
+    }
+    const kin::RenderView view{.cull_rect = {0.0f, 0.0f, 40.0f, 40.0f}, .culling_enabled = true};
+    queue.cull(view, 2, 5); // drops submissions 2 and 4
+    assert(queue.size() == 4);
+    const std::array<float, 4> kept{-100.0f, 10.0f, 10.0f, 10.0f};
+    for (std::size_t i = 0; i < kept.size(); ++i) {
+        assert(queue.commands()[i].rect.x == kept[i]);
+    }
+}
+
 // A flush hands runs of same-texture sprites to draw_sprites() in one call; any
 // other draw, or another texture, ends a run, and a lone sprite is drawn alone.
 void test_render_queue_batches_sprites_by_texture() {
@@ -480,6 +566,7 @@ int main() {
     test_render_queue_sorts_and_culls();
     test_render_queue_culls_a_range();
     test_render_queue_batches_sprites_by_texture();
+    test_render_queue_sprite_lane_keeps_order();
     test_render_queue_sort_matches_reference();
     test_render_queue_sprite_fields_and_bulk_submit();
     test_render_queue_pass_masks_and_text_command();
