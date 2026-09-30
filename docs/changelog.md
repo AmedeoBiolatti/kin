@@ -7,6 +7,23 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-30
+
+Features the first game built on kin needed: hex grids, 2D lighting, a job
+system shared by the whole engine, and shaders with more textures, larger
+uniform blocks and data textures. CI now also runs the GPU backend's tests.
+
+### Upgrading from 0.1
+
+- `ShaderParams::uniforms` is a `std::vector<f32>`: code that indexes it is
+  unchanged; code that relied on it being a `std::array` needs updating.
+- The ECS scheduler, `AssetServer` and `PathServer` share
+  `default_job_system()`. `worker_count` in `AssetServerConfig` and
+  `PathServerConfig` now limits concurrent work rather than starting threads.
+- Destroying an `AssetServer` or `PathServer` drops work that has not started.
+- A scripted `press` is released at the start of the next tick, so games see
+  its release edge one tick later than before.
+
 ### Added
 
 - `draw_shader_surface()` takes a list of source textures, bound at fragment
@@ -77,5 +94,6 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AmedeoBiolatti/kin/releases/tag/v0.1.0

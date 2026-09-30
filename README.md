@@ -9,9 +9,10 @@ built to be driven from code, the command line, and automated agents. It starts
 small, stays honest about its scope, and grows alongside the games built with it.
 [The manifest](docs/manifest.md) explains the design philosophy.
 
-> **Status — v0.1.0 (library-first release).** The engine, its test suite, a
-> few small demos (`games/`) and two performance examples (`examples/`). APIs
-> are young and may change between minor versions.
+> **Status — v0.2.0.** The engine, its test suite, demos (`games/`) and two
+> performance examples (`examples/`). 0.2 adds hex grids, 2D lighting, a shared
+> job system and richer shaders; see the [changelog](docs/changelog.md). APIs are
+> young and may change between minor versions.
 
 ![Signal Siege: the player ship, centered, fires at three kinds of enemies closing in across an industrial arena](docs/images/signal_siege.png)
 
@@ -117,7 +118,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(kin
     GIT_REPOSITORY https://github.com/AmedeoBiolatti/kin.git
-    GIT_TAG v0.1.0
+    GIT_TAG v0.2.0
 )
 FetchContent_MakeAvailable(kin)
 
