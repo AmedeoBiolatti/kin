@@ -9,6 +9,14 @@ releases may change APIs.
 
 ### Added
 
+- An optional frame rate cap: `AppConfig::max_fps` / `WindowedAppConfig::max_fps`
+  (0, the default, is uncapped), `App::set_max_fps()` to change it while running
+  (e.g. from a settings menu), and `--max-fps N` on any kin game. Frames are
+  paced to deadlines with `SDL_DelayPrecise`, so the rate holds without drift,
+  and a frame that runs late resets the pace instead of rushing the next ones.
+  Headless runs are never paced. `AppFrameStats::pacing_wait` and the profile's
+  `app.pacing_wait` show the time slept.
+
 - Desktop integration without calling SDL (`docs/platform.md`): files dropped
   on a window (`Input::take_dropped_files()`, `drop_position()` while a drag
   hovers, `add_dropped_file()` for tests); the system's file dialogs
@@ -33,6 +41,12 @@ releases may change APIs.
   found by polling (at most every 250 ms) and reported once a file has settled,
   so partial writes and save-by-rename are seen once. `SceneAppConfig::file_watcher`
   has `run_scene_app` poll it between frames, except in headless and server runs.
+
+### Changed
+
+- `KIN_LOG_FRAME_STATS` reports fps from the time between frames, which counts
+  waiting on the GPU and the frame rate cap, instead of from the frame's work
+  alone (which overstated it); `frame_ms` is still the work.
 
 ## [0.2.2] — 2026-09-30
 

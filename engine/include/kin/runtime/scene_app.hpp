@@ -41,6 +41,9 @@ struct HeadlessOptions {
     std::optional<LogLevel> log_level;
     std::optional<LogFormat> log_format;
     bool invalid_log_option = false;
+    // --max-fps N: caps a windowed run's frame rate, over the game's own setting
+    // (0: uncapped).
+    std::optional<f32> max_fps;
 };
 
 struct SceneAppConfig {

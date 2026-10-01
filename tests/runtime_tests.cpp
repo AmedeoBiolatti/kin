@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -75,7 +76,44 @@ private:
 
 } // namespace
 
+// A frame rate cap paces a windowed loop to deadlines; headless runs ignore it.
+void test_frame_rate_cap() {
+    const auto seconds_for = [](kin::WindowedAppConfig config, int frames, float* waited) {
+        int drawn = 0;
+        const auto start = std::chrono::steady_clock::now();
+        kin::run_windowed_app(config, [](kin::FrameContext&) {}, [&](kin::FrameContext& ctx) {
+            if (waited) {
+                *waited += ctx.app.frame_stats().pacing_wait;
+            }
+            ctx.renderer.clear(0, 0, 0);
+            ctx.renderer.present();
+            if (++drawn == frames) {
+                ctx.app.quit();
+            }
+        });
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+
+    float waited = 0.0f;
+    const double capped = seconds_for({.title = "cap-test", .width = 32, .height = 32, .max_fps = 50.0f, .hidden = true},
+                                      11, &waited);
+    assert(capped >= 10 * 0.020 * 0.9); // ten 20 ms periods between eleven frames
+    assert(waited > 0.0f);              // and the loop says it slept for them
+
+    // Headless runs are never paced: six frames at a 5 fps cap would take a second.
+    const double headless = seconds_for({.title = "cap-headless", .width = 32, .height = 32, .mode = kin::AppMode::Headless,
+                                         .max_fps = 5.0f, .max_frames = 6, .hidden = true},
+                                        6, nullptr);
+    assert(headless < 0.5);
+
+    kin::App app{{.mode = kin::AppMode::Headless, .max_fps = 30.0f}};
+    assert(app.max_fps() == 30.0f);
+    app.set_max_fps(-1.0f);
+    assert(app.max_fps() == 0.0f); // no cap
+}
+
 int main() {
+    test_frame_rate_cap();
     char arg0[] = "game";
     char arg1[] = "--headless";
     char arg2[] = "--list-actions";
