@@ -123,7 +123,8 @@ GpuDevice::GpuDevice(GpuDevice&& other) noexcept
       _present_mode(std::exchange(other._present_mode, SDL_GPU_PRESENTMODE_VSYNC)),
       _upload_ring(std::exchange(other._upload_ring, nullptr)),
       _upload_ring_size(std::exchange(other._upload_ring_size, 0)),
-      _upload_ring_offset(std::exchange(other._upload_ring_offset, 0)) {}
+      _upload_ring_offset(std::exchange(other._upload_ring_offset, 0)),
+      _first_submit_ns(std::exchange(other._first_submit_ns, 0)) {}
 
 GpuFrame GpuDevice::begin_frame(bool acquire_swapchain) {
     return GpuFrame{*this, acquire_swapchain};
@@ -500,11 +501,30 @@ void GpuFrame::submit() {
     if (!_command_buffer || _submitted) {
         return;
     }
+    if (_device->_first_submit_ns == 0) {
+        _device->_first_submit_ns = SDL_GetTicksNS();
+    }
     if (!SDL_SubmitGPUCommandBuffer(_command_buffer)) {
         throw sdl_error("SDL_SubmitGPUCommandBuffer failed");
     }
     _submitted = true;
     _command_buffer = nullptr;
+}
+
+SDL_GPUFence* GpuFrame::submit_with_fence() {
+    if (!_command_buffer || _submitted) {
+        return nullptr;
+    }
+    if (_device->_first_submit_ns == 0) {
+        _device->_first_submit_ns = SDL_GetTicksNS();
+    }
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(_command_buffer);
+    if (!fence) {
+        throw sdl_error("SDL_SubmitGPUCommandBufferAndAcquireFence failed");
+    }
+    _submitted = true;
+    _command_buffer = nullptr;
+    return fence;
 }
 
 void GpuFrame::upload_buffer(GpuBuffer& buffer, const void* data, u32 size) {

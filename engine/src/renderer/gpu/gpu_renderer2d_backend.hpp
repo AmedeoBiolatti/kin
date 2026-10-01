@@ -10,6 +10,7 @@
 #include <kin/renderer/texture.hpp>
 
 #include "gpu_device.hpp"
+#include "gpu_frame_timer.hpp"
 #include "gpu_geometry_batch.hpp"
 #include "gpu_pipeline_cache.hpp"
 #include "gpu_shader.hpp"
@@ -65,6 +66,8 @@ public:
 
     std::string_view name() const override { return "SDL_GPU"; }
     RendererBackendCapabilities capabilities() const override;
+    RendererBackendStats stats() const override { return _stats; }
+    void set_gpu_timing_enabled(bool enabled) override;
 
     void clear(Color color) override;
     void present() override;
@@ -169,6 +172,8 @@ private:
     gpu::GpuPipelineCache _pipelines;
     gpu::GpuGeometryBatch _batch;
     std::optional<gpu::GpuFrame> _frame;
+    std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
+    RendererBackendStats _stats;                    // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec2i _logical_size{0, 0}; // 0 = render at window size (no logical presentation)
     bool _integer_scale = false;

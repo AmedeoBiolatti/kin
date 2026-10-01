@@ -221,6 +221,7 @@ GpuRenderer2DBackend::~GpuRenderer2DBackend() {
         _frame.reset();
     }
     _device.wait_idle();
+    _gpu_timer.reset();
     _pipelines.destroy();
     if (_sampler_linear) {
         SDL_ReleaseGPUSampler(_device.handle(), _sampler_linear);
@@ -331,13 +332,31 @@ void GpuRenderer2DBackend::clear(Color color) {
     _clip_stack.clear();
 }
 
+void GpuRenderer2DBackend::set_gpu_timing_enabled(bool enabled) {
+    if (enabled && !_gpu_timer) {
+        _gpu_timer = std::make_unique<gpu::GpuFrameTimer>(_device.handle());
+    } else if (!enabled && _gpu_timer) {
+        _gpu_timer.reset();
+        _stats.last_gpu_frame_ms = 0.0;
+    }
+}
+
 void GpuRenderer2DBackend::present() {
+    const auto ms_between = [](u64 start_ns, u64 end_ns) {
+        return static_cast<f64>(end_ns - start_ns) / 1'000'000.0;
+    };
+    const u64 flush_start = SDL_GetTicksNS();
     ensure_frame();
     flush_to_frame();
     // Full-scene post-processing: run the chain over the scene texture (ping-pong
     // scratch RTs); the result (scene-sized) is what gets blitted to the swapchain.
     const gpu::GpuTexture* presented = run_post_chain();
-    if (_frame->acquire_swapchain() && _frame->swapchain_texture()) {
+    const u64 acquire_start = SDL_GetTicksNS();
+    const bool acquired = _frame->acquire_swapchain();
+    const u64 acquire_end = SDL_GetTicksNS();
+    _stats.last_present_flush_ms = ms_between(flush_start, acquire_start);
+    _stats.last_gpu_wait_ms = ms_between(acquire_start, acquire_end);
+    if (acquired && _frame->swapchain_texture()) {
         const Vec2i target{static_cast<i32>(_frame->swapchain_width()),
                            static_cast<i32>(_frame->swapchain_height())};
         const Rectf d = letterbox_rect(_scene_size, target, _integer_scale);
@@ -355,8 +374,20 @@ void GpuRenderer2DBackend::present() {
         blit.filter = _integer_scale ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
         SDL_BlitGPUTexture(_frame->command_buffer(), &blit);
     }
-    _frame->submit();
+    if (_gpu_timer) {
+        SDL_GPUFence* fence = _frame->submit_with_fence();
+        if (!_gpu_timer->track(fence, _device.take_first_submit_ns())) {
+            SDL_ReleaseGPUFence(_device.handle(), fence);
+        }
+        if (const std::optional<f64> gpu_ms = _gpu_timer->collect()) {
+            _stats.last_gpu_frame_ms = *gpu_ms;
+        }
+    } else {
+        _frame->submit();
+        _device.take_first_submit_ns();
+    }
     _frame.reset();
+    _stats.last_present_backend_ms = ms_between(acquire_start, SDL_GetTicksNS());
 }
 
 SDL_Rect GpuRenderer2DBackend::current_scissor() const {

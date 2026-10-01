@@ -144,7 +144,7 @@ of headless flags parsed by `parse_headless_options`:
 | Flag | Effect |
 |---|---|
 | `--headless` | Run headless (dummy video driver, hidden window). Defaults to 1 frame. |
-| `--frames=N` / `--frames N` | Run exactly N fixed-timestep frames. |
+| `--frames=N` / `--frames N` | Run exactly N fixed-timestep frames; a windowed run instead runs in real time (frame rate cap included) and quits after N rendered frames. |
 | `--seed=N` / `--seed N` | Seed the run's root RNG key (`SceneContext::rng`, default 0). |
 | `--max-fps=N` / `--max-fps N` | Cap a windowed run at N frames a second (0: uncapped), over the game's own setting. Headless runs are never paced. |
 | `--report[=PATH]` | Emit a JSON run report to PATH (`-` for stdout). Forces headless. |

@@ -153,8 +153,10 @@ AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayReques
 
     i32 index = -1;
     if (!allocate_voice(*cue, request, index)) {
+        // Culling is the voice limits doing their job, and a busy game does it
+        // every frame: count it (stats().culled_requests), log only at debug.
         ++_stats.culled_requests;
-        KIN_LOG_WARN_F("audio",
+        KIN_LOG_DEBUG_F("audio",
                        "audio play rejected",
                        (LogFields{
                            {.name = "cue", .value = std::string{request.cue}},

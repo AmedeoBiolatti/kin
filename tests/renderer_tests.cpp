@@ -11,6 +11,7 @@
 #include <SDL3_image/SDL_image.h>
 
 #include <cassert>
+#include <chrono>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -27,6 +28,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -879,6 +881,60 @@ void test_gpu_native_coordinates_disable_logical_presentation() {
     }
 }
 
+void test_gpu_frame_timing() {
+    constexpr std::string_view test_name = "test_gpu_frame_timing";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-timing-test", .width = 160, .height = 120, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const auto draw_frame = [&] {
+            renderer->clear(kin::colors::black);
+            renderer->fill_rect({0.0f, 0.0f, 40.0f, 40.0f}, kin::Color::rgb(210, 20, 20));
+            renderer->present();
+        };
+        // Off by default: no GPU time, but the present timings are there.
+        draw_frame();
+        assert(renderer->backend_stats().last_gpu_frame_ms == 0.0);
+        assert(renderer->backend_stats().last_gpu_wait_ms >= 0.0);
+
+        // On: a finished frame reports its GPU time a frame or two later.
+        renderer->set_gpu_timing_enabled(true);
+        renderer->set_gpu_timing_enabled(true); // idempotent
+        bool timed = false;
+        for (int frame = 0; frame < 500 && !timed; ++frame) {
+            draw_frame();
+            timed = renderer->backend_stats().last_gpu_frame_ms > 0.0;
+            if (!timed) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        assert(timed);
+        assert(renderer->backend_stats().last_gpu_frame_ms < 10'000.0);
+
+        // Off again: the timer stops (waiting for its frames) and frames still present.
+        renderer->set_gpu_timing_enabled(false);
+        assert(renderer->backend_stats().last_gpu_frame_ms == 0.0);
+        draw_frame();
+        // Left on at destruction, the timer goes before the device.
+        renderer->set_gpu_timing_enabled(true);
+        draw_frame();
+        draw_frame();
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_logical_transforms_are_immediate() {
     constexpr std::string_view test_name = "test_gpu_logical_transforms_are_immediate";
     bool gpu_ready = false;
@@ -1474,6 +1530,7 @@ int main() {
     test_capture_backdrop_round_trips();
     test_gpu_save_png_captures_bound_render_target();
     test_gpu_native_coordinates_disable_logical_presentation();
+    test_gpu_frame_timing();
     test_gpu_logical_transforms_are_immediate();
     test_gpu_native_pixel_size_and_pointer_mapping();
     test_gpu_shader_surface_binds_every_source();

@@ -10,6 +10,7 @@
 #include <SDL3/SDL.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace kin::gpu {
@@ -65,6 +66,9 @@ public:
     void present_texture(GpuFrame& frame, const GpuTexture& texture,
                          SDL_GPUFilter filter = SDL_GPU_FILTER_NEAREST);
     void wait_idle();
+    // When the first command buffer since the last call was submitted
+    // (SDL_GetTicksNS), or 0 if none was; GPU frame timing starts frames there.
+    u64 take_first_submit_ns() { return std::exchange(_first_submit_ns, 0); }
 
     SDL_GPUDevice* handle() const { return _device; }
     SDL_GPUTextureFormat swapchain_format() const { return _swapchain_format; }
@@ -90,6 +94,7 @@ private:
     SDL_GPUTransferBuffer* _upload_ring = nullptr;
     u32 _upload_ring_size = 0;
     u32 _upload_ring_offset = 0;
+    u64 _first_submit_ns = 0;
 };
 
 class GpuFrame {
@@ -105,6 +110,9 @@ public:
 
     bool acquire_swapchain();
     void submit();
+    // Submits and returns a fence that signals when the GPU has finished this
+    // frame; release it with SDL_ReleaseGPUFence.
+    SDL_GPUFence* submit_with_fence();
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
 
     SDL_GPUCommandBuffer* command_buffer() const { return _command_buffer; }

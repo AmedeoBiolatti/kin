@@ -20,8 +20,9 @@ small, stays honest about its scope, and grows alongside the games built with it
 
 ![Signal Siege: the cyan player ship, marked by a ground ring, fires at red star, orange plate and purple ring enemies while pink enemy bullets stream across a dark steel deck](docs/images/signal_siege.png)
 
-<sub>Signal Siege, an arena survival example. Rendered headless by the engine itself, then cropped around the player:
-<code>signal_siege --headless --enemies 300 --seed 7 --width 2560 --height 1600 --frames 1200 --capture-frame 1200 --screenshot out.png</code></sub>
+<sub>Signal Siege, an arena survival example: a 1280x800 frame from kin's GPU backend, captured through the scene server
+while its autoplay benchmark runs: <code>KIN_RENDER_BACKEND=gpu signal_siege --server --benchmark --seed=7 --mute</code>,
+then <code>sim.tick</code> and <code>view.screenshot</code> requests.</sub>
 
 ## Features
 
