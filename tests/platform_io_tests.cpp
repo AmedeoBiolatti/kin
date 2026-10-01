@@ -171,7 +171,8 @@ void test_dropped_files() {
     assert(input.has_dropped_files());
     const std::vector<kin::DroppedFile> dropped = input.take_dropped_files();
     assert(dropped.size() == 2 && !input.has_dropped_files());
-    assert(dropped[0].path == std::filesystem::path(u8"/tmp/café.png"));
+    // ASCII source only: MSVC reads it in the system code page without /utf-8.
+    assert(dropped[0].path.u8string() == std::u8string(u8"/tmp/caf\u00e9.png"));
     assert((dropped[0].window == 4 && dropped[0].pos == kin::Vec2f{31.0f, 21.0f}));
     assert(dropped[1].path == "notes.txt");
 }
