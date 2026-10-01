@@ -439,7 +439,7 @@ StylePreset make_preset_from_radix(StylePresetKind kind, RadixConfig cfg) {
     return preset;
 }
 
-Theme make_theme_from_tokens(const StylePreset& style, ThemeColorScales scales, ThemeColorTokens tokens, Font font, Font emphasis_font = {}) {
+Theme make_theme_from_tokens(const StylePreset& style, ThemeColorScales scales, ThemeColorTokens tokens, Font font, Font emphasis_font) {
     Theme theme;
     theme.scales = scales;
     theme.colors = tokens;
