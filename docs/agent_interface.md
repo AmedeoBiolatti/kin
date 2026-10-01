@@ -29,6 +29,7 @@ an explicit `--seed`.
 | `--headless` | Run headless. Defaults to 1 frame. |
 | `--frames=N` / `--frames N` | Run exactly N fixed-timestep frames. |
 | `--seed=N` / `--seed N` | Seed the run's root RNG key (`SceneContext::rng`, default 0). |
+| `--max-fps=N` / `--max-fps N` | Cap a windowed run at N frames a second (0: uncapped), over the game's own setting. Headless runs are never paced. |
 | `--report[=PATH]` | Write the JSON run report to PATH (`-` for stdout). Implies headless. |
 | `--list-actions` | Print available input actions and bindings, then quit. |
 | `--game-info` / `--list-info` | Print game metadata, then quit. |

@@ -22,6 +22,7 @@ std::string_view app_mode_name(AppMode mode) {
 
 App::App(AppConfig config)
     : _config(config) {
+    set_max_fps(config.max_fps);
     // KIN_RENDER_BACKEND=gpu keeps the real video driver even headless, so a
     // --server --render capture can go through the GPU backend the game
     // actually ships on (its window is created hidden either way).
@@ -48,6 +49,7 @@ App::App(AppConfig config)
                        {.name = "max_frame_time", .value = std::to_string(_config.max_frame_time)},
                        {.name = "max_steps", .value = std::to_string(_config.max_steps)},
                        {.name = "vsync", .value = _config.vsync ? "true" : "false"},
+                       {.name = "max_fps", .value = std::to_string(_config.max_fps)},
                    }));
 }
 
@@ -134,6 +136,7 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
     const i32 max_steps = std::max(1, _config.max_steps);
     f32 accumulator = 0.0f;
     u64 last = SDL_GetTicksNS();
+    u64 next_frame_ns = 0; // when the next frame may start, under max_fps
     bool advance_input = true;
     i32 frames = 0;
 
@@ -152,6 +155,7 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
         const f32 raw_frame_time = static_cast<f32>(now - last) / 1'000'000'000.0f;
         last = now;
         const f32 frame_time = std::min(raw_frame_time, max_frame_time);
+        const f32 pacing_wait = _frame_stats.pacing_wait;
         // time_scale paces real time into the accumulator (game-speed control);
         // it never changes fixed_dt or step contents, so determinism holds.
         accumulator += frame_time * _time_scale;
@@ -163,6 +167,7 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
             .alpha = 0.0f,
             .update_steps = 0,
             .hit_max_steps = false,
+            .pacing_wait = pacing_wait,
         };
 
         _input.begin_frame(advance_input);
@@ -202,14 +207,38 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
             render(_frame_stats.alpha);
         }
 
-        if (!headless() && !_config.vsync && _config.yield_when_unpaced) {
-            SDL_Delay(1);
+        if (!headless()) {
+            pace_frame(next_frame_ns);
         }
         advance_input = steps > 0;
     }
     KIN_LOG_INFO_F("runtime",
                    "app loop stopped",
                    (LogFields{{.name = "frames", .value = std::to_string(frames)}}));
+}
+
+void App::pace_frame(u64& next_frame_ns) {
+    _frame_stats.pacing_wait = 0.0f;
+    if (_max_fps <= 0.0f) {
+        next_frame_ns = 0;
+        if (!_config.vsync && _config.yield_when_unpaced) {
+            SDL_Delay(1);
+        }
+        return;
+    }
+    // Deadlines a period apart, not "a period after this frame ended", so the
+    // rate holds without drifting; a frame more than a period late starts over
+    // from now instead of rushing the next ones to catch up.
+    const u64 period = static_cast<u64>(1'000'000'000.0 / static_cast<f64>(_max_fps));
+    const u64 now = SDL_GetTicksNS();
+    if (next_frame_ns == 0 || now > next_frame_ns + period) {
+        next_frame_ns = now;
+    }
+    next_frame_ns += period;
+    if (next_frame_ns > now) {
+        SDL_DelayPrecise(next_frame_ns - now);
+        _frame_stats.pacing_wait = static_cast<f32>(next_frame_ns - now) / 1'000'000'000.0f;
+    }
 }
 
 void App::run_for(i32 frames, std::function<void(f32 dt, i32 frame)> update) {

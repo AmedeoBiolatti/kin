@@ -27,6 +27,8 @@ struct WindowedAppConfig {
     i32 max_steps = 8;
     bool vsync = false;
     bool yield_when_unpaced = true;
+    // Most frames a second (0: no cap; see AppConfig::max_fps).
+    f32 max_fps = 0.0f;
     i32 max_frames = 0;
     bool resizable = false;
     bool maximized = false;

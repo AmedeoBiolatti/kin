@@ -26,6 +26,9 @@ struct AppConfig {
     i32 max_steps = 8;
     bool vsync = false;
     bool yield_when_unpaced = true;
+    // Most frames a second a windowed run draws (0: no cap). Frames are paced
+    // to deadlines, so the rate holds without drift; headless runs ignore it.
+    f32 max_fps = 0.0f;
 };
 
 struct AppFrameStats {
@@ -36,6 +39,7 @@ struct AppFrameStats {
     f32 alpha = 0.0f;
     i32 update_steps = 0;
     bool hit_max_steps = false;
+    f32 pacing_wait = 0.0f; // seconds slept after the previous frame to hold max_fps
 };
 
 class App {
@@ -72,6 +76,10 @@ public:
     // WITHOUT changing fixed_dt or the per-step contents. Determinism is
     // unaffected (the headless run_for path ignores this entirely). Effective
     // fast-forward is bounded by max_steps. Clamped to >= 0.
+    // The frame rate cap (0: none); a game's settings may change it at any time.
+    f32 max_fps() const { return _max_fps; }
+    void set_max_fps(f32 fps) { _max_fps = fps > 0.0f ? fps : 0.0f; }
+
     f32 time_scale() const { return _time_scale; }
     void set_time_scale(f32 scale) { _time_scale = scale > 0.0f ? scale : 0.0f; }
 
@@ -84,6 +92,9 @@ private:
     Input _input;
     AppFrameStats _frame_stats{};
     f32 _time_scale = 1.0f;
+    f32 _max_fps = 0.0f;
+
+    void pace_frame(u64& next_frame_ns);
     bool _running = false;
 };
 

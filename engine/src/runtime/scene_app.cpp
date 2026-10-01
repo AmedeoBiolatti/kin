@@ -203,6 +203,13 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             } else {
                 invalid_log_option = true;
             }
+        } else if (arg.starts_with("--max-fps=") || (arg == "--max-fps" && i + 1 < argc)) {
+            const std::string text = arg == "--max-fps" ? std::string(argv[++i]) : std::string(arg.substr(10));
+            char* end = nullptr;
+            const f32 fps = std::strtof(text.c_str(), &end);
+            if (end != text.c_str() && *end == '\0' && fps >= 0.0f) {
+                options.max_fps = fps;
+            }
         } else if (arg == "--log-level" && i + 1 < argc) {
             LogLevel level{};
             if (parse_log_level(argv[i + 1], level)) {
@@ -278,6 +285,7 @@ void write_render_profile_report(std::ostream& out, const RuntimeDebugOverlay& o
         std::string_view{"app.accumulator_before"},
         std::string_view{"app.accumulator_after"},
         std::string_view{"app.hit_max_steps"},
+        std::string_view{"app.pacing_wait"},
         std::string_view{"render.scene"},
         std::string_view{"render.scene.camera"},
         std::string_view{"render.scene.view"},
@@ -352,6 +360,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     }
 
     WindowedAppConfig window = config.window;
+    if (config.headless.max_fps) {
+        window.max_fps = *config.headless.max_fps;
+    }
     if (config.headless.enabled || config.headless.list_actions || config.headless.profile_render || config.headless.profile) {
         window.mode = AppMode::Headless;
         window.hidden = true;
@@ -575,6 +586,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         debug_overlay.record("frame.update_total", frame_update_total_ms);
         debug_overlay.record("frame.update_steps", static_cast<f64>(frame_update_steps));
         debug_overlay.record("app.raw_frame", static_cast<f64>(app_frame.raw_frame_time) * 1000.0);
+        debug_overlay.record("app.pacing_wait", static_cast<f64>(app_frame.pacing_wait) * 1000.0);
         debug_overlay.record("app.clamped_frame", static_cast<f64>(app_frame.clamped_frame_time) * 1000.0);
         debug_overlay.record("app.accumulator_before", static_cast<f64>(app_frame.accumulator_before_update) * 1000.0);
         debug_overlay.record("app.accumulator_after", static_cast<f64>(app_frame.accumulator_after_update) * 1000.0);
@@ -589,18 +601,25 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         record_profile_value("app.accumulator_before", "runtime", static_cast<f64>(app_frame.accumulator_before_update) * 1000.0);
         record_profile_value("app.accumulator_after", "runtime", static_cast<f64>(app_frame.accumulator_after_update) * 1000.0);
         record_profile_value("app.hit_max_steps", "runtime", app_frame.hit_max_steps ? 1.0 : 0.0);
+        record_profile_value("app.pacing_wait", "runtime", static_cast<f64>(app_frame.pacing_wait) * 1000.0);
         record_profile_value("frame.render_total", "runtime", render_total_ms);
         record_profile_value("frame.unaccounted", "runtime", unaccounted_ms);
         record_profile("frame", "runtime", frame_start);
         if (log_frame_stats && ++logged_frames % 120 == 0) {
+            // fps from the time between frames, which includes waiting on the GPU
+            // and the frame rate cap; frame_ms is the work alone.
+            const DebugTimingStats interval = debug_overlay.stats("app.raw_frame");
             const DebugTimingStats frame = debug_overlay.stats("frame");
             const DebugTimingStats present = debug_overlay.stats("present.backend");
-            const f64 fps = frame.median_ms > 0.0001 ? 1000.0 / frame.median_ms : 0.0;
+            const DebugTimingStats pacing = debug_overlay.stats("app.pacing_wait");
+            const f64 fps = interval.median_ms > 0.0001 ? 1000.0 / interval.median_ms : 0.0;
             KIN_LOG_INFO_F("runtime",
                            "frame stats",
                            (LogFields{
                                {.name = "fps", .value = std::to_string(fps)},
+                               {.name = "frame_interval_ms", .value = std::to_string(interval.median_ms)},
                                {.name = "frame_ms", .value = std::to_string(frame.median_ms)},
+                               {.name = "pacing_wait_ms", .value = std::to_string(pacing.median_ms)},
                                {.name = "present_backend_ms", .value = std::to_string(present.median_ms)},
                            }));
         }
