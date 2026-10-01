@@ -9,6 +9,15 @@ releases may change APIs.
 
 ### Added
 
+- Desktop integration without calling SDL (`docs/platform.md`): files dropped
+  on a window (`Input::take_dropped_files()`, `drop_position()` while a drag
+  hovers, `add_dropped_file()` for tests); the system's file dialogs
+  (`kin::FileDialogs`: open, save, folder; answers taken on the game's thread,
+  never shown in headless runs, `answer_next()` for tests and agents); and child
+  processes with non-blocking pipes (`kin::Process`: `write`, `read_line`,
+  `close_input`, `running`/`exit_code`, `wait`, `kill`; a child still running
+  when its `Process` goes away is ended).
+
 - `kin::LuaScript` (`kin/scripting/lua_script.hpp`) runs Lua for code outside
   the ECS (rules, AI, formulas): the host binds an API in `setup`, then
   `call(name, args...)` / `call_for<R>(...)` run the script's functions. A

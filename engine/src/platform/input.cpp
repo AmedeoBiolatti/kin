@@ -570,7 +570,25 @@ void Input::process_native_event(const void* native_event) {
     } else if (event.type == SDL_EVENT_TEXT_INPUT && event.text.text) {
         _text_input += event.text.text;
         _keyboard_window = static_cast<WindowId>(event.text.windowID);
+    } else if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION) {
+        _drop_position = Vec2f{event.drop.x, event.drop.y};
+    } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) {
+        _dropped_files.push_back({
+            .path = std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(event.drop.data))),
+            .pos = {event.drop.x, event.drop.y},
+            .window = static_cast<WindowId>(event.drop.windowID),
+        });
+    } else if (event.type == SDL_EVENT_DROP_COMPLETE) {
+        _drop_position.reset();
     }
+}
+
+std::vector<DroppedFile> Input::take_dropped_files() {
+    return std::exchange(_dropped_files, {});
+}
+
+void Input::add_dropped_file(DroppedFile file) {
+    _dropped_files.push_back(std::move(file));
 }
 
 bool Input::pressed(Key key) const {

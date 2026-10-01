@@ -7,12 +7,20 @@
 #include <filesystem>
 #include <initializer_list>
 #include <iosfwd>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace kin {
+
+// A file dropped from the desktop onto one of the app's windows.
+struct DroppedFile {
+    std::filesystem::path path;
+    Vec2f pos{};          // window pixels, like Input::mouse_pos()
+    WindowId window = 0;
+};
 
 class App;
 class InputMap;
@@ -281,6 +289,16 @@ public:
     std::string_view text_input() const { return _text_input; }
     std::string clipboard_text() const;
 
+    // Files dropped since they were last taken, oldest first. Taking clears
+    // them, so each drop is handled once however frames and updates interleave.
+    std::vector<DroppedFile> take_dropped_files();
+    bool has_dropped_files() const { return !_dropped_files.empty(); }
+    // Where a drag from the desktop is over a window while it is in progress, to
+    // highlight a drop target; nullopt otherwise. Window pixels.
+    std::optional<Vec2f> drop_position() const { return _drop_position; }
+    // A drop as if the desktop made it: for tests and agents.
+    void add_dropped_file(DroppedFile file);
+
     void bind(std::string_view action, Key key);
     void bind(std::string_view action, Key key, KeyModifiers modifiers);
     void bind(std::string_view action, std::initializer_list<Key> keys);
@@ -339,6 +357,8 @@ private:
     u64 _last_key_press_event_time_ns = 0;
     u64 _last_key_press_detected_time_ns = 0;
     std::string _text_input;
+    std::vector<DroppedFile> _dropped_files;
+    std::optional<Vec2f> _drop_position;
     std::string _clipboard_text;
 
     std::unordered_map<WindowId, Vec2f> _window_mouse_pos;

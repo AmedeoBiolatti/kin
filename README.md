@@ -146,7 +146,7 @@ Kin has no install rules yet, so `find_package(kin)` is not supported.
 |---|---|
 | Agents and automation | [agent_interface](docs/agent_interface.md), [testing](docs/testing.md), [profiling](docs/profiling.md) |
 | ECS | [entities](docs/ecs_entities.md), [components](docs/ecs_components.md), [data components](docs/ecs_data_components.md), [systems](docs/ecs_systems.md), [events](docs/ecs_events.md), [prefabs](docs/ecs_prefabs.md), [inspection](docs/ecs_inspection.md), [editor workflow](docs/ecs_editor_workflow.md) |
-| Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [scripting](docs/scripting.md), [background jobs](docs/jobs.md), [hex grids](docs/hex_grids.md) |
+| Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [scripting](docs/scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [hex grids](docs/hex_grids.md) |
 | Project | [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing

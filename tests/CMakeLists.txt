@@ -61,6 +61,7 @@ kin_add_test(kin_file_watcher_tests kin-file-watcher SOURCES file_watcher_tests.
 kin_add_test(kin_lua_script_tests kin-lua-script SOURCES lua_script_tests.cpp)
 kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp)
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
+kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
 # Test-only material shaders for the GPU renderer tests. Without glslc (found by the
