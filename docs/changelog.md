@@ -7,40 +7,34 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-10-01
+
+Tools for building a game around its data: a game's own files hot-reload as
+they are edited, Lua runs rules and formulas outside the ECS in a deterministic
+sandbox, and ui2 themes load from `.kintheme` files. Games also get files
+dropped on the window, the system's file dialogs and child processes without
+calling SDL, an optional frame rate cap, and GPU frame timing in the profiler.
+
+### Upgrading from 0.2.2
+
+- A windowed run given `--frames N` now quits after N rendered frames. Scripts
+  that passed `--frames` to a windowed run and expected it to keep going should
+  drop the flag.
+- `KIN_LOG_FRAME_STATS` reports fps from the time between frames, so it reads
+  lower than before when the GPU or a frame rate cap holds frames back.
+- Voice-limit culling no longer logs a warning per request; read
+  `AudioEngine::stats().culled_requests`, or log at debug level, to see it.
+- `IRenderer2DBackend` gains `set_gpu_timing_enabled()`, with a default that
+  does nothing, so custom backends keep working unchanged.
+
 ### Added
 
-- GPU frame timing on the SDL_GPU backend: `gpu.wait` (time `present()` blocked
-  on a swapchain image, i.e. waiting for the GPU) and `gpu.frame` (each frame's
-  GPU time, measured with fences since SDL_GPU has no timestamp queries) in
-  profiles, the debug overlay and `KIN_LOG_FRAME_STATS`, and as
-  `RendererBackendStats::last_gpu_wait_ms` / `last_gpu_frame_ms`. Timing is on
-  while something reads it, or via `Renderer2D::set_gpu_timing_enabled()`. The
-  backend now also reports `present.flush` and `present.backend`.
-- ui2 themes from data files (`kin/ui2/theme_file.hpp`, `.kintheme`): start
-  from a built-in theme, name the game's own colours (usable anywhere a colour
-  goes, with `@aa` alpha), set kin's colour tokens and sizes (the rest of the
-  theme follows the tokens), style any surface (fill, gradient, border, radius,
-  shadow, `like` another), and ask for procedural nine-slice skin frames.
-  Unknown sections, keys and names are errors with their line, and a file with
-  errors changes nothing; `parse_theme_file` fits `FileWatcher::load_and_watch`.
-  `make_theme_from_tokens` is now public.
-- An optional frame rate cap: `AppConfig::max_fps` / `WindowedAppConfig::max_fps`
-  (0, the default, is uncapped), `App::set_max_fps()` to change it while running
-  (e.g. from a settings menu), and `--max-fps N` on any kin game. Frames are
-  paced to deadlines with `SDL_DelayPrecise`, so the rate holds without drift,
-  and a frame that runs late resets the pace instead of rushing the next ones.
-  Headless runs are never paced. `AppFrameStats::pacing_wait` and the profile's
-  `app.pacing_wait` show the time slept.
-
-- Desktop integration without calling SDL (`docs/platform.md`): files dropped
-  on a window (`Input::take_dropped_files()`, `drop_position()` while a drag
-  hovers, `add_dropped_file()` for tests); the system's file dialogs
-  (`kin::FileDialogs`: open, save, folder; answers taken on the game's thread,
-  never shown in headless runs, `answer_next()` for tests and agents); and child
-  processes with non-blocking pipes (`kin::Process`: `write`, `read_line`,
-  `close_input`, `running`/`exit_code`, `wait`, `kill`; a child still running
-  when its `Process` goes away is ended).
-
+- `kin::FileWatcher` hot-reloads a game's own data files: `load_and_watch(path,
+  load)` loads a file and reloads it when it changes, keeping the last good data
+  when an edit is rejected; `watch(path, callback)` reports changes. Changes are
+  found by polling (at most every 250 ms) and reported once a file has settled,
+  so partial writes and save-by-rename are seen once. `SceneAppConfig::file_watcher`
+  has `run_scene_app` poll it between frames, except in headless and server runs.
 - `kin::LuaScript` (`kin/scripting/lua_script.hpp`) runs Lua for code outside
   the ECS (rules, AI, formulas): the host binds an API in `setup`, then
   `call(name, args...)` / `call_for<R>(...)` run the script's functions. A
@@ -49,13 +43,36 @@ releases may change APIs.
   per load and call, loads that keep the last good script when a new one fails,
   errors with script:line, and hot reload of the script and its modules through
   `FileWatcher`. New `docs/scripting.md`.
-
-- `kin::FileWatcher` hot-reloads a game's own data files: `load_and_watch(path,
-  load)` loads a file and reloads it when it changes, keeping the last good data
-  when an edit is rejected; `watch(path, callback)` reports changes. Changes are
-  found by polling (at most every 250 ms) and reported once a file has settled,
-  so partial writes and save-by-rename are seen once. `SceneAppConfig::file_watcher`
-  has `run_scene_app` poll it between frames, except in headless and server runs.
+- Desktop integration without calling SDL (`docs/platform.md`): files dropped
+  on a window (`Input::take_dropped_files()`, `drop_position()` while a drag
+  hovers, `add_dropped_file()` for tests); the system's file dialogs
+  (`kin::FileDialogs`: open, save, folder; answers taken on the game's thread,
+  never shown in headless runs, `answer_next()` for tests and agents); and child
+  processes with non-blocking pipes (`kin::Process`: `write`, `read_line`,
+  `close_input`, `running`/`exit_code`, `wait`, `kill`; a child still running
+  when its `Process` goes away is ended).
+- An optional frame rate cap: `AppConfig::max_fps` / `WindowedAppConfig::max_fps`
+  (0, the default, is uncapped), `App::set_max_fps()` to change it while running
+  (e.g. from a settings menu), and `--max-fps N` on any kin game. Frames are
+  paced to deadlines with `SDL_DelayPrecise`, so the rate holds without drift,
+  and a frame that runs late resets the pace instead of rushing the next ones.
+  Headless runs are never paced. `AppFrameStats::pacing_wait` and the profile's
+  `app.pacing_wait` show the time slept.
+- ui2 themes from data files (`kin/ui2/theme_file.hpp`, `.kintheme`): start
+  from a built-in theme, name the game's own colours (usable anywhere a colour
+  goes, with `@aa` alpha), set kin's colour tokens and sizes (the rest of the
+  theme follows the tokens), style any surface (fill, gradient, border, radius,
+  shadow, `like` another), and ask for procedural nine-slice skin frames.
+  Unknown sections, keys and names are errors with their line, and a file with
+  errors changes nothing; `parse_theme_file` fits `FileWatcher::load_and_watch`.
+  `make_theme_from_tokens` is now public.
+- GPU frame timing on the SDL_GPU backend: `gpu.wait` (time `present()` blocked
+  on a swapchain image, i.e. waiting for the GPU) and `gpu.frame` (each frame's
+  GPU time, measured with fences since SDL_GPU has no timestamp queries) in
+  profiles, the debug overlay and `KIN_LOG_FRAME_STATS`, and as
+  `RendererBackendStats::last_gpu_wait_ms` / `last_gpu_frame_ms`. Timing is on
+  while something reads it, or via `Renderer2D::set_gpu_timing_enabled()`. The
+  backend now also reports `present.flush` and `present.backend`.
 
 ### Changed
 
@@ -376,7 +393,8 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...v0.2.0

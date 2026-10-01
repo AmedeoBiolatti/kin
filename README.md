@@ -9,12 +9,15 @@ built to be driven from code, the command line, and automated agents. It starts
 small, stays honest about its scope, and grows alongside the games built with it.
 [The manifest](docs/manifest.md) explains the design philosophy.
 
-> **Status — v0.2.2.** The engine, its test suite, demos (`games/`) and two
+> **Status — v0.2.3.** The engine, its test suite, demos (`games/`) and two
 > performance examples (`examples/`). 0.2 adds hex grids, 2D lighting, a shared
 > job system and richer shaders; 0.2.1 adds a multi-line text editor, faster
 > rendering and tilemaps, and fixes a GPU crash on exit; 0.2.2 draws large
 > numbers of sprites far faster (instanced batches, a compact render queue,
-> worker threads) and reworks the Signal Siege example; see the
+> worker threads) and reworks the Signal Siege example; 0.2.3 adds hot reload of
+> a game's data files, Lua for code outside the ECS, ui2 themes from data files,
+> file drops, dialogs and child processes, a frame rate cap and GPU frame
+> timing; see the
 > [changelog](docs/changelog.md). APIs are young and may change between minor
 > versions.
 
@@ -123,7 +126,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(kin
     GIT_REPOSITORY https://github.com/AmedeoBiolatti/kin.git
-    GIT_TAG v0.2.2
+    GIT_TAG v0.2.3
 )
 FetchContent_MakeAvailable(kin)
 
