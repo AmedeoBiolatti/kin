@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -60,6 +61,10 @@ public:
     std::size_t size() const { return _watches.size(); }
     bool empty() const { return _watches.empty(); }
 
+    // Expires when this watcher is destroyed, so an object holding watch ids can
+    // tell whether there is still a watcher to unwatch from.
+    std::weak_ptr<const void> lifetime() const { return _lifetime; }
+
 private:
     struct Stamp {
         bool exists = false;
@@ -82,6 +87,7 @@ private:
     u32 _next_id = 1;
     std::chrono::steady_clock::time_point _last_poll{};
     bool _polled = false;
+    std::shared_ptr<const void> _lifetime = std::make_shared<char>(0);
 };
 
 // Reads a whole file as text; nullopt if it cannot be read.
