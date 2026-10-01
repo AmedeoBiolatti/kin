@@ -79,6 +79,7 @@ public:
 private:
     friend class SdlRenderer2DBackend;
     friend class gpu::GpuDevice;
+    friend class FileDialogs;
 
     void* native_handle() const { return _handle; }
 
