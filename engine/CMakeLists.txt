@@ -86,6 +86,8 @@ add_library(kin_engine STATIC
     src/scene/transitions.cpp
     src/save/save_store.cpp
     src/scripting/script_engine.cpp
+    src/scripting/lua_paths.cpp
+    src/scripting/lua_script.cpp
     src/scripting/script_scene.cpp
     src/tilemap/tilemap.cpp
     src/ui2/geometry.cpp

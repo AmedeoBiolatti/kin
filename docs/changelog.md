@@ -9,6 +9,15 @@ releases may change APIs.
 
 ### Added
 
+- `kin::LuaScript` (`kin/scripting/lua_script.hpp`) runs Lua for code outside
+  the ECS (rules, AI, formulas): the host binds an API in `setup`, then
+  `call(name, args...)` / `call_for<R>(...)` run the script's functions. A
+  deterministic sandbox (no files, time, random numbers or loading code;
+  `require` only from `module_root`; `print` to the log), an instruction budget
+  per load and call, loads that keep the last good script when a new one fails,
+  errors with script:line, and hot reload of the script and its modules through
+  `FileWatcher`. New `docs/scripting.md`.
+
 - `kin::FileWatcher` hot-reloads a game's own data files: `load_and_watch(path,
   load)` loads a file and reloads it when it changes, keeping the last good data
   when an edit is rejected; `watch(path, callback)` reports changes. Changes are
