@@ -101,6 +101,7 @@ add_library(kin_engine STATIC
     src/ui2/style_internal.cpp
     src/ui2/text.cpp
     src/ui2/theme.cpp
+    src/ui2/theme_file.cpp
     src/ui2/widget_internal.cpp
     src/ui2/widgets_core.cpp
     src/ui2/widgets_inputs.cpp

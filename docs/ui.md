@@ -10,7 +10,8 @@ snapshot path have been removed, so new and existing UI code should include
   and interaction state.
 - `kin/ui2/widgets.hpp` for controls, lists, tables, editor widgets, text inputs,
   scroll views, overlays, and game HUD widgets.
-- `kin/ui2/theme.hpp` for themes and palette presets.
+- `kin/ui2/theme.hpp` for themes and palette presets; `kin/ui2/theme_file.hpp` for
+  themes in `.kintheme` data files.
 - `kin/ui2/geometry.hpp` for layout geometry helpers.
 - `kin/ui2/text.hpp` for `kin::ui2::Font`, text measuring, wrapping, and drawing.
 - `kin/ui2/menu_scene.hpp` for reusable menu scenes.
@@ -90,6 +91,71 @@ To keep the state in the `Context` instead, pass
 Carets in both text widgets move by character, never into the middle of a
 multi-byte UTF-8 character; `kin/core/utf8.hpp` has the stepping and word helpers,
 and `wrap_text_ranges` in `kin/ui2/text.hpp` wraps text into byte ranges.
+
+## Themes From Data
+
+A game's look can live in a `.kintheme` file instead of code
+(`kin/ui2/theme_file.hpp`), so it can be tuned, and reloaded, without a rebuild.
+
+```ini
+# The game's look.
+[theme]                 # all optional
+base = game             # game | editor | compact
+palette = slate         # default | slate | ember | verdant | parchment | high_contrast
+system_font = 15        # the system UI font at this size (pt)
+transition = 0.08       # seconds widgets take to change state
+
+[colors]                # the game's own colours: for its UI and for whatever else it draws
+accent = 5cdebe         # rrggbb or rrggbbaa: no '#', which starts a comment
+glow = accent@40        # a colour by name, with alpha 40 (hex); names may come in any order
+panel_dark = 0a1015
+
+[tokens]                # kin's colour tokens; text, widgets and surfaces all follow them
+surface_panel = panel_dark
+solid_accent = accent
+text = dcf0e8
+
+[style]                 # sizes: padding_x, padding_y, spacing, row_height, radius, text_scale, ...
+radius = 6
+
+[surface.panel]         # one surface: panel, card, header, tooltip, popup, input, button, ...
+gradient = 121d22 090e12 vertical
+border = 2c464a
+radius = 8
+shadow = 000000aa 0 8 24   # colour, offset x, offset y, spread [, radius]; or none
+
+[surface.tooltip]
+like = panel            # start from another surface
+shadow = none
+
+[skin]                  # nine-slice frames for kin's widgets: border fill radius border_width [size]
+button = 213135 0f161b 5 1
+input = 1b272c 0f161b 4 1
+```
+
+```cpp
+kin::ui2::ThemeFile look;
+std::vector<std::string> errors;
+if (!kin::ui2::load_theme_file(root / "data/look.kintheme", look, errors)) {
+    report(errors); // "line 12: no token 'txt' (app_background, ...)"
+}
+look.build_skin(renderer);                    // the [skin] frames, once a renderer exists
+ui.set_theme(look.theme);
+const kin::Color water = look.color("water"); // the game's own colours
+```
+
+- The theme starts from a built-in one (`[theme]`), takes `[style]` and
+  `[tokens]`, and is then rebuilt from the tokens (`make_theme_from_tokens`), so a
+  token reaches every text style, widget and surface derived from it. Surface
+  sections come last and set one surface exactly.
+- `[colors]` is for the game as much as for the theme: `ThemeFile::color(name)`
+  reads any of them back, so one file can hold a game's whole palette.
+- Anything unknown (a section, a key, a colour name) is an error naming its line,
+  and a file with errors changes nothing. `parse_theme_file` fits
+  `FileWatcher::load_and_watch`, so a theme can reload as it is edited; rebuild
+  the skin and set the theme on the contexts after each reload.
+- `[skin]` frames are GPU textures: let the `ThemeFile` (and themes copied from
+  it) go before the renderer does.
 
 ## Menu Scenes
 

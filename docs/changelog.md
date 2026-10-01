@@ -9,6 +9,14 @@ releases may change APIs.
 
 ### Added
 
+- ui2 themes from data files (`kin/ui2/theme_file.hpp`, `.kintheme`): start
+  from a built-in theme, name the game's own colours (usable anywhere a colour
+  goes, with `@aa` alpha), set kin's colour tokens and sizes (the rest of the
+  theme follows the tokens), style any surface (fill, gradient, border, radius,
+  shadow, `like` another), and ask for procedural nine-slice skin frames.
+  Unknown sections, keys and names are errors with their line, and a file with
+  errors changes nothing; `parse_theme_file` fits `FileWatcher::load_and_watch`.
+  `make_theme_from_tokens` is now public.
 - An optional frame rate cap: `AppConfig::max_fps` / `WindowedAppConfig::max_fps`
   (0, the default, is uncapped), `App::set_max_fps()` to change it while running
   (e.g. from a settings menu), and `--max-fps N` on any kin game. Frames are

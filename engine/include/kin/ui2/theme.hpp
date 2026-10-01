@@ -341,6 +341,11 @@ StylePreset make_preset_from_radix(StylePresetKind kind, RadixConfig cfg = {});
 // weight contrast, not just scale — pass system_ui_font_bold(...); invalid
 // falls back to `font`.
 Theme make_theme(const StylePreset& style, const Palette& palette, Font font = {}, Font emphasis_font = {});
+// A theme from explicit colour tokens: every text style, widget and surface is
+// derived from `tokens` (and indicators from `scales`), as make_theme() does
+// from a palette. ThemeFile builds themes this way.
+Theme make_theme_from_tokens(const StylePreset& style, ThemeColorScales scales, ThemeColorTokens tokens,
+                             Font font = {}, Font emphasis_font = {});
 
 // Replace the theme's text styles with system-UI fonts loaded at per-tier point
 // sizes (body/muted at `base_pt`, small at 0.8x floored to 10pt, title/emphasis

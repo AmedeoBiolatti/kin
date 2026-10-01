@@ -55,6 +55,7 @@ kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_te
 kin_add_test(kin_ecs_lifecycle_tests kin-ecs-lifecycle SOURCES ecs_lifecycle_tests.cpp)
 kin_add_test(kin_ui2_tests kin-ui2 SOURCES ui2_tests.cpp)
 kin_add_test(kin_ui2_text_edit_tests kin-ui2-text-edit SOURCES ui2_text_edit_tests.cpp)
+kin_add_test(kin_ui2_theme_file_tests kin-ui2-theme-file SOURCES ui2_theme_file_tests.cpp)
 kin_add_test(kin_dialogue_tests kin-dialogue SOURCES dialogue_tests.cpp)
 kin_add_test(kin_assets_tests kin-assets SOURCES assets_tests.cpp anim_asset_loader_tests.cpp)
 kin_add_test(kin_file_watcher_tests kin-file-watcher SOURCES file_watcher_tests.cpp)
