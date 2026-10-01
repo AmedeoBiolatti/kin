@@ -195,6 +195,10 @@ void Renderer2D::reset_backend_stats() {
     _backend->reset_stats();
 }
 
+void Renderer2D::set_gpu_timing_enabled(bool enabled) {
+    _backend->set_gpu_timing_enabled(enabled);
+}
+
 void Renderer2D::set_texture_batching_enabled(bool enabled) {
     _backend->set_texture_batching_enabled(enabled);
 }

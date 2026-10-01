@@ -120,6 +120,9 @@ public:
     RendererBackendCapabilities capabilities() const;
     RendererBackendStats backend_stats() const;
     void reset_backend_stats();
+    // GPU time per frame in backend_stats().last_gpu_frame_ms (SDL_GPU only; off
+    // by default, as it costs a fence per frame and a waiting thread).
+    void set_gpu_timing_enabled(bool enabled);
     void set_texture_batching_enabled(bool enabled);
     bool texture_batching_enabled() const;
 

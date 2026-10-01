@@ -301,6 +301,8 @@ void write_render_profile_report(std::ostream& out, const RuntimeDebugOverlay& o
         std::string_view{"present"},
         std::string_view{"present.flush"},
         std::string_view{"present.backend"},
+        std::string_view{"gpu.wait"},
+        std::string_view{"gpu.frame"},
         std::string_view{"frame.render_total"},
         std::string_view{"frame.unaccounted"},
         std::string_view{"frame"},
@@ -393,6 +395,8 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         return value && value[0] == '1';
     }();
     i32 logged_frames = 0;
+    const i32 windowed_frame_limit = window.mode == AppMode::Headless ? 0 : config.headless.frames;
+    i32 frames_rendered = 0;
     const auto ms_since = [](std::chrono::steady_clock::time_point start) {
         const auto end = std::chrono::steady_clock::now();
         return std::chrono::duration<f64, std::milli>(end - start).count();
@@ -564,6 +568,10 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             debug_overlay.record("render.debug_overlay", overlay_ms);
             record_profile("render.debug_overlay", "runtime", overlay_start);
 
+            // GPU frame timing costs a fence and a waiting thread, so only when
+            // someone reads it.
+            ctx.renderer.set_gpu_timing_enabled(profile_enabled || log_frame_stats ||
+                                                config.headless.profile_render || debug_overlay.visible());
             const auto present_start = std::chrono::steady_clock::now();
             ctx.renderer.present();
             present_ms = ms_since(present_start);
@@ -575,6 +583,14 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             if (profile_enabled) {
                 profile_session.record("present.flush", "runtime", static_cast<u64>(present_stats.last_present_flush_ms * 1'000'000.0));
                 profile_session.record("present.backend", "runtime", static_cast<u64>(present_stats.last_present_backend_ms * 1'000'000.0));
+            }
+            if (ctx.renderer.backend_name() == "SDL_GPU") {
+                debug_overlay.record("gpu.wait", present_stats.last_gpu_wait_ms);
+                record_profile_value("gpu.wait", "runtime", present_stats.last_gpu_wait_ms);
+                if (present_stats.last_gpu_frame_ms > 0.0) {
+                    debug_overlay.record("gpu.frame", present_stats.last_gpu_frame_ms);
+                    record_profile_value("gpu.frame", "runtime", present_stats.last_gpu_frame_ms);
+                }
             }
         }
 
@@ -612,6 +628,8 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             const DebugTimingStats frame = debug_overlay.stats("frame");
             const DebugTimingStats present = debug_overlay.stats("present.backend");
             const DebugTimingStats pacing = debug_overlay.stats("app.pacing_wait");
+            const DebugTimingStats gpu_wait = debug_overlay.stats("gpu.wait");
+            const DebugTimingStats gpu_frame = debug_overlay.stats("gpu.frame");
             const f64 fps = interval.median_ms > 0.0001 ? 1000.0 / interval.median_ms : 0.0;
             KIN_LOG_INFO_F("runtime",
                            "frame stats",
@@ -621,7 +639,14 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                                {.name = "frame_ms", .value = std::to_string(frame.median_ms)},
                                {.name = "pacing_wait_ms", .value = std::to_string(pacing.median_ms)},
                                {.name = "present_backend_ms", .value = std::to_string(present.median_ms)},
+                               {.name = "gpu_wait_ms", .value = std::to_string(gpu_wait.median_ms)},
+                               {.name = "gpu_frame_ms", .value = std::to_string(gpu_frame.median_ms)},
                            }));
+        }
+        // A windowed run with --frames runs the real loop (real time, frame rate
+        // cap) and stops after that many rendered frames.
+        if (windowed_frame_limit > 0 && ++frames_rendered >= windowed_frame_limit) {
+            ctx.app.quit();
         }
         frame_prepared = false;
     });

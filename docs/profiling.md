@@ -62,6 +62,20 @@ Runtime profiles include these phase timings by default:
 If `present.backend` dominates in a headless run, remember that this is the
 software/SDL backend path, not necessarily final GPU performance.
 
+On the SDL_GPU backend two more rows show the GPU's side of the frame:
+
+- `gpu.wait`: how long `present()` blocked acquiring a swapchain image, that is
+  the CPU waiting for the GPU (or the display, under vsync) to catch up. Near
+  zero means the CPU is the bottleneck; a large share of `frame` means the GPU is.
+- `gpu.frame`: the GPU time of each frame, from when its first command buffer
+  was submitted (or the previous frame finished, if later) to when its fence
+  signalled. SDL_GPU has no timestamp queries, so this is measured with fences
+  and a thread that waits on them; it trails the CPU by a frame or two.
+
+GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
+or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`
+turns it on. `KIN_LOG_FRAME_STATS` logs `gpu_wait_ms` and `gpu_frame_ms` too.
+
 ## Benchmark Profiles
 
 List benchmark cases:

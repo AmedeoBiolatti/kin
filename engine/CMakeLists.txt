@@ -72,6 +72,7 @@ add_library(kin_engine STATIC
     src/renderer/sdl_renderer2d_backend.cpp
     src/renderer/gpu/gpu_buffer.cpp
     src/renderer/gpu/gpu_device.cpp
+    src/renderer/gpu/gpu_frame_timer.cpp
     src/renderer/gpu/gpu_geometry_batch.cpp
     src/renderer/gpu/gpu_pipeline_cache.cpp
     src/renderer/gpu/gpu_renderer2d_backend.cpp

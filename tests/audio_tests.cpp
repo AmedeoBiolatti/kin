@@ -175,6 +175,11 @@ void test_voice_priority_caps_and_instances() {
     assert(!rejected);
     assert(audio.active_voice_count() == 1);
     assert(has_log_event(log_events, "audio", "audio play rejected"));
+    // Culling is routine, so it stays out of the default (info) log.
+    assert(std::ranges::all_of(log_events, [](const kin::LogEvent& event) {
+        return event.message != "audio play rejected" || event.level == kin::LogLevel::Debug;
+    }));
+    assert(audio.stats().culled_requests == 1);
 
     const kin::AudioHandle high = audio.play(catalog, {.cue = "impact"});
     assert(high);

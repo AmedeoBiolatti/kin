@@ -52,6 +52,12 @@ struct RendererBackendStats {
     u64 direct_lines = 0;
     f64 last_present_flush_ms = 0.0;
     f64 last_present_backend_ms = 0.0;
+    // SDL_GPU only. The time present() blocked acquiring a swapchain image: the
+    // CPU waiting for the GPU (or the display) to catch up.
+    f64 last_gpu_wait_ms = 0.0;
+    // SDL_GPU with GPU timing on: the GPU time of the latest frame that finished,
+    // usually one or two frames behind. Measured with fences, not timestamps.
+    f64 last_gpu_frame_ms = 0.0;
     u64 saved_texture_draws() const {
         return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
     }
@@ -72,6 +78,8 @@ public:
         return {};
     }
     virtual void reset_stats() {}
+    // Measures each frame's GPU time (stats().last_gpu_frame_ms) where supported.
+    virtual void set_gpu_timing_enabled(bool) {}
     virtual void set_texture_batching_enabled(bool) {}
     virtual bool texture_batching_enabled() const {
         return false;

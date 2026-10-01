@@ -9,6 +9,13 @@ releases may change APIs.
 
 ### Added
 
+- GPU frame timing on the SDL_GPU backend: `gpu.wait` (time `present()` blocked
+  on a swapchain image, i.e. waiting for the GPU) and `gpu.frame` (each frame's
+  GPU time, measured with fences since SDL_GPU has no timestamp queries) in
+  profiles, the debug overlay and `KIN_LOG_FRAME_STATS`, and as
+  `RendererBackendStats::last_gpu_wait_ms` / `last_gpu_frame_ms`. Timing is on
+  while something reads it, or via `Renderer2D::set_gpu_timing_enabled()`. The
+  backend now also reports `present.flush` and `present.backend`.
 - ui2 themes from data files (`kin/ui2/theme_file.hpp`, `.kintheme`): start
   from a built-in theme, name the game's own colours (usable anywhere a colour
   goes, with `@aa` alpha), set kin's colour tokens and sizes (the rest of the
@@ -55,6 +62,12 @@ releases may change APIs.
 - `KIN_LOG_FRAME_STATS` reports fps from the time between frames, which counts
   waiting on the GPU and the frame rate cap, instead of from the frame's work
   alone (which overstated it); `frame_ms` is still the work.
+- A windowed run given `--frames N` now quits after N rendered frames, running
+  in real time with the frame rate cap; it used to ignore `--frames` unless the
+  run was also made headless (`--report`, `--profile`).
+- Audio requests culled by the voice limits are logged at debug level (still
+  counted in `stats().culled_requests`) instead of a warning per request, which
+  flooded the log of busy games.
 
 ## [0.2.2] — 2026-09-30
 
