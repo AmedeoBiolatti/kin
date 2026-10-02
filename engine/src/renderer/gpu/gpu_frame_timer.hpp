@@ -1,10 +1,15 @@
 #pragma once
 // GPU time per frame without timestamp queries, which SDL_GPU does not have. Each
-// presented frame's command buffer carries a fence; a helper thread waits on the
+// presented frame's command buffer carries a fence; a helper thread polls the
 // fences in submission order and notes when each signals. A frame's GPU time is
 // then signal time - max(its first submit, the previous frame's signal): the span
 // the GPU spent on that frame's command buffers, plus any gaps between them
 // while the CPU was still recording.
+//
+// The thread only ever calls SDL_QueryGPUFence, a plain status read. Waiting with
+// SDL_WaitForGPUFences there would also run SDL's cleanup (finished command
+// buffers, pending resource destroys) on this thread, at moments the render
+// thread does not expect: on Vulkan that lost the device under load.
 #include <kin/core/types.hpp>
 
 #include <SDL3/SDL.h>
@@ -20,7 +25,7 @@ namespace kin::gpu {
 class GpuFrameTimer {
 public:
     explicit GpuFrameTimer(SDL_GPUDevice* device);
-    ~GpuFrameTimer(); // waits for the frames still on the GPU
+    ~GpuFrameTimer(); // waits (on the calling thread) for the frames still on the GPU
 
     GpuFrameTimer(const GpuFrameTimer&) = delete;
     GpuFrameTimer& operator=(const GpuFrameTimer&) = delete;

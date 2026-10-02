@@ -218,7 +218,7 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
 GpuRenderer2DBackend::~GpuRenderer2DBackend() {
     if (_frame) {
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     _device.wait_idle();
     _gpu_timer.reset();
@@ -297,6 +297,20 @@ void GpuRenderer2DBackend::ensure_frame() {
     ensure_scene();
     _frame.emplace(_device.begin_frame());
     _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
+}
+
+void GpuRenderer2DBackend::end_frame() {
+    _frame.reset();
+    _retained.clear();
+    _last_retained = nullptr;
+}
+
+void GpuRenderer2DBackend::retain(const Texture& texture) {
+    const ITextureBackend* backend = texture.backend().get();
+    if (backend != _last_retained) {
+        _retained.push_back(texture.backend());
+        _last_retained = backend;
+    }
 }
 
 void GpuRenderer2DBackend::flush_to_frame() {
@@ -386,7 +400,7 @@ void GpuRenderer2DBackend::present() {
         _frame->submit();
         _device.take_first_submit_ns();
     }
-    _frame.reset();
+    end_frame();
     _stats.last_present_backend_ms = ms_between(acquire_start, SDL_GetTicksNS());
 }
 
@@ -649,6 +663,7 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
         backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+    retain(texture);
     push_quad(dest, uv, tint, backend->texture().handle(), blend, sampler);
 }
 
@@ -701,6 +716,7 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
         backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+    retain(texture);
     _batch.push(verts, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr, 0,
                 sampler);
 }
@@ -792,6 +808,7 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
         backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+    retain(texture);
     _batch.push_instances(_instance_scratch, backend->texture().handle(), current_scissor(), resolve_blend(blend),
                           sampler);
 }
@@ -812,13 +829,13 @@ bool GpuRenderer2DBackend::save_png(const char* path) {
             src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
         }
         _frame->submit();
-        _frame.reset();
+        end_frame();
     } else if (scene_target && _scene && !_post_passes.empty()) {
         _frame.emplace(_device.begin_frame());
         src = run_post_chain();
         src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     std::vector<u8> rgba;
     if (!_device.read_texture_rgba(*src, rgba)) {
@@ -846,7 +863,7 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
     const Vec2i target_size = current_size();
     flush_to_frame();
     _frame->submit();
-    _frame.reset();
+    end_frame();
 
     std::vector<u8> full;
     if (!_device.read_texture_rgba(target, full)) {
@@ -922,7 +939,7 @@ void GpuRenderer2DBackend::set_logical_size(Vec2i size) {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     _logical_size = size; // scene renders at this size; present letterboxes to the window
     _integer_scale = false;
@@ -933,7 +950,7 @@ void GpuRenderer2DBackend::set_integer_logical_size(Vec2i size) {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     _logical_size = size;
     _integer_scale = true;
@@ -944,7 +961,7 @@ void GpuRenderer2DBackend::push_native_coordinates() {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
 
     _native_stack.push_back(NativeState{
@@ -965,7 +982,7 @@ void GpuRenderer2DBackend::pop_native_coordinates() {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
 
     if (_native_stack.empty()) {
@@ -1047,6 +1064,7 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     if (!backend || !backend->texture()) {
         return;
     }
+    retain(target.texture());
     if (_frame) {
         flush_to_frame();
     }
@@ -1211,6 +1229,7 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         SDL_GPUTextureSamplerBinding binding{};
         if (const auto* backend = as_gpu(src.backend().get());
             backend && backend->texture()) {
+            retain(src);
             binding.texture = backend->texture().handle();
             // Integer textures cannot be filtered, and 32-bit floats may not be.
             const bool linear = backend->scale_mode() == ScaleMode::Linear && backend->format() == TextureFormat::Rgba8;

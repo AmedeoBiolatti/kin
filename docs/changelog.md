@@ -7,36 +7,17 @@ releases may change APIs.
 
 ## [Unreleased]
 
-### Added
-
-- Render probe: `--probe-render[=PATH]` on any `run_scene_app` game renders each
-  headless frame, compares it with the frames before it tile by tile, and
-  writes a `kin.render_probe/1` report of flicker (jitter, frame popping, single
-  wrong frames) and spikes, with when and where each happened. `--probe-fail`
-  fails the run when it finds anything; `--probe-tile=N` sets the tile size.
-  `kin::RenderProbe` runs the same analysis on frames from anywhere. The
-  `KIN_ENABLE_RENDER_PROBE` CMake option (on by default) compiles it out.
-- Render probe events name their culprits: the entities and render components
-  (or named scopes, or scenes) whose draws changed where the event happened,
-  and how (`moved`, `frame`, `color`, `appeared`, ...). `KIN_DRAW_SCOPE(label)`
-  and `KIN_DRAW_ENTITY(entity, component)` name draws made outside the ECS
-  render components.
-- Determinism check: `--check-determinism[=PATH]` on any `run_scene_app` game
-  runs it three times in lockstep (twice alike, once with one job worker),
-  hashing each frame's state, and reports the first frame where a run differs
-  with the entities, components and report fields that differ
-  (`kin.determinism/1`). `kin::hash_state` / `kin::describe_state` hash and list
-  a scene stack's state. The `KIN_ENABLE_DETERMINISM_CHECK` CMake option (on by
-  default) compiles it out.
-- `KIN_JOB_WORKERS` sets the default job system's worker count.
-- `ProcessOptions::environment` sets variables for a child process.
-
 ### Fixed
 
-- ui2 text moves the pen by each glyph's advance, not the width of its bitmap:
-  italic text is no longer letter-spaced, glyphs that overhang (an f or a j in
-  many faces) no longer push the next one away, and drawn text matches
-  `measure_text` more closely.
+- SDL_GPU: a texture released right after it was drawn, before the frame was
+  flushed, left the queued draw a dangling handle: a crash, or on Vulkan a lost
+  device once SDL destroyed the image. The backend now keeps the textures the
+  frame's draws use alive until the frame is submitted.
+- SDL_GPU: GPU frame timing (`--profile`, `KIN_LOG_FRAME_STATS`, the debug
+  overlay) waited on frame fences with `SDL_WaitForGPUFences` on its own thread,
+  which also ran SDL's resource cleanup there; under load on Vulkan that lost the
+  device or stalled frames for seconds. It now polls `SDL_QueryGPUFence`, a plain
+  status read (resolution about 0.1 ms).
 
 ## [0.2.3] — 2026-10-01
 

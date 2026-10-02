@@ -844,6 +844,60 @@ void test_gpu_save_png_captures_bound_render_target() {
     }
 }
 
+// A texture released right after it is drawn, before the frame is flushed, still
+// draws: the backend keeps it alive until the frame is submitted. And frames that
+// drop textures that way keep working with GPU frame timing on, whose fence
+// thread once ran SDL's resource cleanup behind the render thread's back.
+void test_gpu_texture_released_before_flush() {
+    constexpr std::string_view test_name = "test_gpu_texture_released_before_flush";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-release-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const std::vector<kin::u8> white(8u * 8u * 4u, 255);
+        std::vector<kin::u8> blue(8u * 8u * 4u, 0);
+        for (std::size_t i = 2; i < blue.size(); i += 4) {
+            blue[i] = 255;
+            blue[i + 1] = 255;
+        }
+        renderer->clear(kin::Color::rgb(0, 0, 0));
+        {
+            kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
+            renderer->draw_texture(texture, kin::Rectf{8.0f, 8.0f, 16.0f, 16.0f});
+        } // released while the draw is still queued
+        std::vector<kin::u8> pixels;
+        kin::Vec2i size;
+        assert(renderer->read_rgba(kin::Rectf{0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
+        assert(pixel_near(pixels, size, 16, 16, kin::Color::rgb(255, 255, 255)));
+        assert(pixel_near(pixels, size, 40, 40, kin::Color::rgb(0, 0, 0)));
+        renderer->present();
+
+        renderer->set_gpu_timing_enabled(true);
+        for (int frame = 0; frame < 120; ++frame) {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            for (int i = 0; i < 8; ++i) {
+                kin::Texture texture = renderer->create_texture_from_rgba((i % 2 ? blue : white).data(), 8, 8);
+                renderer->draw_texture(texture, kin::Rectf{static_cast<kin::f32>(i * 8), 0.0f, 8.0f, 8.0f});
+            }
+            renderer->present();
+        }
+        renderer->set_gpu_timing_enabled(false);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_native_coordinates_disable_logical_presentation() {
     constexpr std::string_view test_name = "test_gpu_native_coordinates_disable_logical_presentation";
     bool gpu_ready = false;
@@ -1529,6 +1583,7 @@ int main() {
     test_blur_degrades_on_fake_backend();
     test_capture_backdrop_round_trips();
     test_gpu_save_png_captures_bound_render_target();
+    test_gpu_texture_released_before_flush();
     test_gpu_native_coordinates_disable_logical_presentation();
     test_gpu_frame_timing();
     test_gpu_logical_transforms_are_immediate();
