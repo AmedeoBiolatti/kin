@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- Render probe: `--probe-render[=PATH]` on any `run_scene_app` game renders each
+  headless frame, compares it with the frames before it tile by tile, and
+  writes a `kin.render_probe/1` report of flicker (jitter, frame popping, single
+  wrong frames) and spikes, with when and where each happened. `--probe-fail`
+  fails the run when it finds anything; `--probe-tile=N` sets the tile size.
+  `kin::RenderProbe` runs the same analysis on frames from anywhere. The
+  `KIN_ENABLE_RENDER_PROBE` CMake option (on by default) compiles it out.
+
 ## [0.2.3] — 2026-10-01
 
 Tools for building a game around its data: a game's own files hot-reload as

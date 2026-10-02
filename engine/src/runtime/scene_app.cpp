@@ -9,6 +9,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
@@ -16,6 +17,9 @@
 #include <kin/core/rng.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/runtime/debug_overlay.hpp>
+#ifdef KIN_ENABLE_RENDER_PROBE
+#include <kin/runtime/render_probe.hpp>
+#endif
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_server.hpp>
 
@@ -178,6 +182,21 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.enabled = true;
             options.report_path = argv[i + 1];
             ++i;
+        } else if (arg == "--probe-render") {
+            options.enabled = true;
+            options.probe_render_path = "-";
+        } else if (arg.starts_with("--probe-render=")) {
+            options.enabled = true;
+            options.probe_render_path = arg.substr(15);
+        } else if (arg == "--probe-fail") {
+            options.enabled = true;
+            options.probe_fail = true;
+        } else if (arg.starts_with("--probe-tile=")) {
+            i32 tile = 0;
+            if (parse_i32(arg.substr(13), tile) && tile > 0) {
+                options.enabled = true;
+                options.probe_tile_size = tile;
+            }
         } else if (arg == "--server") {
             options.server = true;
         } else if (arg.starts_with("--server-mode=")) {
@@ -386,6 +405,25 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         }
     }
     RunReport run_report;
+    const bool probe_requested = config.probe_output != nullptr ||
+        !config.headless.probe_render_path.empty() ||
+        config.headless.probe_fail ||
+        config.headless.probe_tile_size > 0;
+#ifdef KIN_ENABLE_RENDER_PROBE
+    std::optional<RenderProbe> probe;
+    std::vector<u8> probe_pixels;
+    if (probe_requested) {
+        RenderProbeConfig probe_config;
+        if (config.headless.probe_tile_size > 0) {
+            probe_config.tile_size = config.headless.probe_tile_size;
+        }
+        probe.emplace(probe_config);
+    }
+#else
+    if (probe_requested) {
+        KIN_LOG_WARN("runtime", "render probe requested, but this build has KIN_ENABLE_RENDER_PROBE off");
+    }
+#endif
     const RngKey root_key = make_key(config.headless.seed);
     const bool want_report = config.report_output != nullptr || !config.headless.report_path.empty();
     std::string report_snapshot;
@@ -411,6 +449,16 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     // stack before run_windowed_app destroys its backend.
     const auto user_shutdown = window.shutdown;
     window.shutdown = [&, user_shutdown](FrameContext& frame) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+        if (probe && config.headless.probe_fail && !probe->events().empty()) {
+            const RenderProbeEvent& first = probe->events().front();
+            std::ostringstream reason;
+            reason << "render probe found " << probe->events().size() << " event(s); first: "
+                   << render_probe_event_kind_name(first.kind) << " at frame " << first.first_frame
+                   << " in " << first.rect.w << "x" << first.rect.h << "+" << first.rect.x << "+" << first.rect.y;
+            run_report.fail(reason.str());
+        }
+#endif
         if (want_report) {
             std::ostringstream report;
             write_run_report(report, run_report, config.headless.seed, frames_run, scenes);
@@ -555,12 +603,25 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         f64 render_scene_ms = 0.0;
         f64 overlay_ms = 0.0;
         f64 present_ms = 0.0;
-        if (!ctx.app.headless() || config.render_headless || config.headless.profile_render || config.headless.profile) {
+        if (!ctx.app.headless() || config.render_headless || config.headless.profile_render || config.headless.profile ||
+            probe_requested) {
             const auto render_start = std::chrono::steady_clock::now();
             scenes.render(scene_ctx);
             render_scene_ms = ms_since(render_start);
             debug_overlay.record("render.scene", render_scene_ms);
             record_profile("render.scene", "runtime", render_start);
+#ifdef KIN_ENABLE_RENDER_PROBE
+            // The scene alone: before the debug overlay, which is not the game's.
+            if (probe) {
+                const Vec2i output = ctx.renderer.output_size();
+                const Vec2f a = ctx.renderer.window_to_logical({0.0f, 0.0f});
+                const Vec2f b = ctx.renderer.window_to_logical({static_cast<f32>(output.x), static_cast<f32>(output.y)});
+                Vec2i size;
+                if (ctx.renderer.read_rgba({a.x, a.y, b.x - a.x, b.y - a.y}, probe_pixels, size)) {
+                    probe->add_frame(probe_pixels, size);
+                }
+            }
+#endif
 
             const auto overlay_start = std::chrono::steady_clock::now();
             debug_overlay.render(ctx.input, ctx.renderer);
@@ -709,6 +770,42 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             write_json(file);
         }
     }
+
+#ifdef KIN_ENABLE_RENDER_PROBE
+    if (probe) {
+        const auto write_probe = [&](std::ostream& out) {
+            JsonWriter json(out);
+            probe->write_json(json);
+            out << '\n';
+        };
+        KIN_LOG_INFO_F("runtime",
+                       "render probe done",
+                       (LogFields{
+                           {.name = "frames", .value = std::to_string(probe->frame_count())},
+                           {.name = "spikes", .value = std::to_string(probe->event_count(RenderProbeEventKind::Spike))},
+                           {.name = "flickers", .value = std::to_string(probe->event_count(RenderProbeEventKind::Flicker))},
+                       }));
+        const std::string& path = config.headless.probe_render_path;
+        if (config.probe_output) {
+            write_probe(*config.probe_output);
+        } else if (path == "-") {
+            write_probe(std::cout);
+        } else if (!path.empty()) {
+            const std::filesystem::path parent = std::filesystem::path{path}.parent_path();
+            if (!parent.empty()) {
+                std::filesystem::create_directories(parent);
+            }
+            std::ofstream file(path);
+            if (!file) {
+                KIN_LOG_ERROR_F("runtime",
+                                "failed to open render probe path",
+                                (LogFields{{.name = "path", .value = path}}));
+                return 1;
+            }
+            write_probe(file);
+        }
+    }
+#endif
 
     if (want_report) {
         const auto emit_report = [&](std::ostream& out) {

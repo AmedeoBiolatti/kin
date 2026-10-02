@@ -86,6 +86,7 @@ tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 | `KIN_BUILD_BENCHMARKS` | top-level only | `kin_bench` and other benchmark runners |
 | `KIN_BUILD_TESTS` | top-level only | Engine tests (with `BUILD_TESTING`) |
 | `KIN_ENABLE_PROFILING` | `OFF` | Manual profiling macros ([docs/profiling.md](docs/profiling.md)) |
+| `KIN_ENABLE_RENDER_PROBE` | `ON` | Headless render probe, `--probe-render` ([docs/testing.md](docs/testing.md#render-probe)); turn off for shipping builds |
 
 ## Demos and examples
 

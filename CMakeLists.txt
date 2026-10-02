@@ -45,6 +45,9 @@ option(KIN_BUILD_BENCHMARKS "Build benchmark executables" ${PROJECT_IS_TOP_LEVEL
 option(KIN_BUILD_TESTS "Build kin's tests (with BUILD_TESTING)" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_ENABLE_PROFILING "Enable Kin manual profiling macros" OFF)
 option(KIN_ENABLE_RELEASE_PROFILING "Enable Kin manual profiling macros in Release builds" ON)
+# The headless render probe (--probe-render). Turn it off in shipping builds to
+# compile it out entirely.
+option(KIN_ENABLE_RENDER_PROBE "Build the headless render probe (--probe-render)" ON)
 
 add_subdirectory(engine)
 

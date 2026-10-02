@@ -44,6 +44,14 @@ struct HeadlessOptions {
     // --max-fps N: caps a windowed run's frame rate, over the game's own setting
     // (0: uncapped).
     std::optional<f32> max_fps;
+    // Render probe (--probe-render[=PATH]): look for spikes and flicker in every
+    // rendered frame and write a kin.render_probe/1 report to PATH ("-" or no
+    // PATH: stdout). --probe-fail fails the run when the probe finds anything;
+    // --probe-tile=N sets the tile size. Each forces a headless run that renders.
+    // Needs a build with KIN_ENABLE_RENDER_PROBE.
+    std::string probe_render_path;
+    bool probe_fail = false;
+    i32 probe_tile_size = 0;
 };
 
 struct SceneAppConfig {
@@ -57,6 +65,9 @@ struct SceneAppConfig {
     std::ostream* report_output = nullptr;
     std::ostream* profile_json_output = nullptr;
     std::ostream* profile_text_output = nullptr;
+    // When set, the render probe runs and its report is written here instead of
+    // to headless.probe_render_path. Mainly for tests.
+    std::ostream* probe_output = nullptr;
     bool render_headless = false;
     // Optional factory enabling sim.reset in server mode: repopulates the scene
     // stack for a fresh episode. The same factory should produce the initial

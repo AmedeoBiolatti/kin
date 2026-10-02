@@ -148,6 +148,9 @@ of headless flags parsed by `parse_headless_options`:
 | `--seed=N` / `--seed N` | Seed the run's root RNG key (`SceneContext::rng`, default 0). |
 | `--max-fps=N` / `--max-fps N` | Cap a windowed run at N frames a second (0: uncapped), over the game's own setting. Headless runs are never paced. |
 | `--report[=PATH]` | Emit a JSON run report to PATH (`-` for stdout). Forces headless. |
+| `--probe-render[=PATH]` | Check every rendered frame for spikes and flicker; write a JSON report to PATH (`-` or no PATH for stdout). Forces headless. See [Render probe](#render-probe). |
+| `--probe-fail` | Fail the run (exit code `1`) when the render probe finds anything. Forces headless. |
+| `--probe-tile=N` | Render probe tile size in pixels (default 16). |
 | `--list-actions` | Print available input actions and bindings, then quit. |
 | `--game-info` / `--list-info` | Print game metadata, then quit. |
 | `--profile-render` | Run 600 frames and print a render timing table. |
@@ -192,6 +195,73 @@ void write_report(kin::JsonWriter& json) const override {
 
 This is the headless test surface: drive the game for N frames with a fixed seed,
 then assert on the exit code and the JSON state.
+
+## Render probe
+
+`--probe-render` checks a run's rendering for animation and rendering faults
+without any game-specific setup or reference images. It renders every headless
+frame, reads it back, and compares it with the two frames before it, tile by tile
+(16×16 pixels by default):
+
+```sh
+./build/bin/ecs_systems_demo --frames=600 --seed=7 --probe-render=out/probe.json
+./build/bin/ecs_systems_demo --frames=600 --seed=7 --probe-render --probe-fail   # CI gate
+```
+
+It reports two kinds of event:
+
+- **flicker** — a frame that differs from both neighbours while they agree with
+  each other: the A-B-A of a sprite jittering in place, a sprite flipping between
+  two frames every tick, or a single wrong frame. Something moving through a tile
+  is not flicker: the ratio has to hold over the tiles around it too
+  (`flicker_radius`), so the change can't simply have moved next door.
+- **spike** — a tile changes far more than the run's recent frames did (robust
+  deviations over a rolling median of each frame's most-changed tile), after an
+  8-frame warm-up. A sudden flash, a texture turning to garbage, a teleport.
+
+Consecutive frames with the same kind of event in overlapping places are one
+event, so a sprite that jitters for 200 frames is one event with `frames: 200`.
+
+```json
+{
+  "schema": "kin.render_probe/1",
+  "width": 960, "height": 540, "frames": 600,
+  "config": { "tile_size": 16, "pixel_threshold": 0, "baseline_frames": 60, "warmup_frames": 8,
+              "spike_sigmas": 8, "spike_sigma_floor": 0.01, "spike_min_delta": 0.05,
+              "flicker_min_delta": 0.01, "flicker_ratio": 4, "flicker_radius": 2 },
+  "summary": { "events": 1, "spikes": 0, "flickers": 1, "peak_delta": 0.0172, "mean_delta": 0.0093 },
+  "events": [
+    { "kind": "flicker", "first_frame": 12, "last_frame": 211, "frames": 200,
+      "rect": { "x": 480, "y": 256, "w": 32, "h": 16 },
+      "peak_frame": 40, "peak_delta": 0.086, "peak_score": 86.4 }
+  ],
+  "timeline": { "delta": [], "max_tile_delta": [], "changed": [] }
+}
+```
+
+Frames are numbered like the run's frames (the first rendered frame is 1); `rect`
+is in the captured frame's pixels. Deltas are mean channel change, 0 to 1.
+`peak_score` is the number of deviations over the baseline for a spike, and the
+ratio of the frame's change to its neighbours' for flicker. `timeline` holds one
+value per frame, for plotting. The report is deterministic: the same seed and
+frame count give the same file.
+
+Things to know:
+
+- The probe sees what the headless renderer draws. That is the SDL_Renderer
+  software backend, so custom materials, post-processing and transition shaders
+  are not drawn and their faults can't be seen.
+- Under full-screen motion such as a scrolling camera every tile changes every
+  frame, which hides flicker. Large one-frame glitches still show up there, as a
+  spike in and out.
+- Legitimate fast change (screen shake, hit flashes, scene cuts) shows up as
+  spikes or flicker too. Read the events before gating CI on `--probe-fail`.
+- The cost is a framebuffer readback and two frame comparisons a frame, a few
+  milliseconds at 960×540. Builds configured with `-DKIN_ENABLE_RENDER_PROBE=OFF`
+  leave the probe out entirely; the flags then only log a warning.
+
+`kin::RenderProbe` (`kin/runtime/render_probe.hpp`) is the analysis on its own:
+feed it RGBA frames with `add_frame` and read `events()`, or `write_json`.
 
 ## Benchmarking And Profiling
 
