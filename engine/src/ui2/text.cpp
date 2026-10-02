@@ -328,6 +328,7 @@ private:
         Rectf source{};
         Vec2i size{};
         f32 advance = 0.0f;
+        f32 left = 0.0f;  // where the bitmap starts, from the pen: below 0 for a glyph that overhangs it
         bool drawable = false;
     };
 
@@ -344,6 +345,7 @@ private:
         char ch = 0;
         Vec2i size{};
         f32 advance = 0.0f;
+        f32 left = 0.0f;
         std::vector<u8> pixels;
     };
 
@@ -420,13 +422,28 @@ private:
         i32 max_h = 1;
         for (char ch = 32; ch < 127; ++ch) {
             const std::string text{ch};
-            int advance_w = 0;
-            int advance_h = 0;
-            if (!TTF_GetStringSize(font, text.c_str(), text.size(), &advance_w, &advance_h)) {
+            int extent_w = 0;
+            int extent_h = 0;
+            if (!TTF_GetStringSize(font, text.c_str(), text.size(), &extent_w, &extent_h)) {
                 continue;
             }
+            // The pen moves by the glyph's advance, not by the width of its
+            // bitmap: a glyph that overhangs its advance (italics, an f or a
+            // j) would otherwise push the next one away. Its bitmap starts at
+            // its left bearing when that is left of the pen (SDL_ttf renders a
+            // string from min(0, the first glyph's left)).
+            int min_x = 0;
+            int max_x = 0;
+            int min_y = 0;
+            int max_y = 0;
+            int advance_w = extent_w;
+            if (!TTF_GetGlyphMetrics(font, static_cast<Uint32>(ch), &min_x, &max_x, &min_y, &max_y, &advance_w)) {
+                advance_w = extent_w;
+                min_x = 0;
+            }
+            const f32 left = static_cast<f32>(std::min(0, min_x));
             atlas.glyphs[static_cast<std::size_t>(ch)].advance = static_cast<f32>(std::max(1, advance_w));
-            atlas.line_height = std::max(atlas.line_height, static_cast<f32>(std::max(1, advance_h)));
+            atlas.line_height = std::max(atlas.line_height, static_cast<f32>(std::max(1, extent_h)));
 
             if (ch == ' ') {
                 continue;
@@ -446,6 +463,7 @@ private:
             glyph.ch = ch;
             glyph.size = {converted->w, converted->h};
             glyph.advance = static_cast<f32>(std::max(1, advance_w));
+            glyph.left = left;
             glyph.pixels.resize(static_cast<std::size_t>(converted->w * converted->h * 4));
             const auto* src = static_cast<const u8*>(converted->pixels);
             for (int y = 0; y < converted->h; ++y) {
@@ -482,6 +500,7 @@ private:
                 .source = {static_cast<f32>(dst_x), static_cast<f32>(dst_y), static_cast<f32>(glyph.size.x), static_cast<f32>(glyph.size.y)},
                 .size = glyph.size,
                 .advance = glyph.advance,
+                .left = glyph.left,
                 .drawable = true,
             };
             for (i32 y = 0; y < glyph.size.y; ++y) {
@@ -548,7 +567,7 @@ private:
                 // correct average advance; only the draw position rounds.
                 renderer.draw_texture(atlas->texture,
                                       glyph.source,
-                                      {snap(cursor.x),
+                                      {snap(cursor.x + glyph.left * inv),
                                        snap(cursor.y),
                                        static_cast<f32>(glyph.size.x) * inv,
                                        static_cast<f32>(glyph.size.y) * inv},
