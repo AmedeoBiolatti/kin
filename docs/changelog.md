@@ -7,6 +7,18 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Fixed
+
+- SDL_GPU: a texture released right after it was drawn, before the frame was
+  flushed, left the queued draw a dangling handle: a crash, or on Vulkan a lost
+  device once SDL destroyed the image. The backend now keeps the textures the
+  frame's draws use alive until the frame is submitted.
+- SDL_GPU: GPU frame timing (`--profile`, `KIN_LOG_FRAME_STATS`, the debug
+  overlay) waited on frame fences with `SDL_WaitForGPUFences` on its own thread,
+  which also ran SDL's resource cleanup there; under load on Vulkan that lost the
+  device or stalled frames for seconds. It now polls `SDL_QueryGPUFence`, a plain
+  status read (resolution about 0.1 ms).
+
 ## [0.2.3] — 2026-10-01
 
 Tools for building a game around its data: a game's own files hot-reload as

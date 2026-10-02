@@ -134,6 +134,12 @@ private:
     void ensure_scene();          // (re)create the scene texture to the window size
     void ensure_frame();          // lazily begin a frame + batch on the active target
     void flush_to_frame();        // emit the current batch's pass into the frame
+    void end_frame();             // after the frame is submitted: drop it and what it retained
+    // Keeps `texture` alive until the frame is submitted. Queued draws hold only
+    // its SDL handle, which SDL frees as soon as the texture is released, so a
+    // texture dropped right after a draw would leave the batch a dangling handle
+    // (and, once SDL destroys the image, a lost device).
+    void retain(const Texture& texture);
     const gpu::GpuTexture& current_target() const; // pushed render target, else the scene
     Vec2i current_size() const;
     bool scene_uses_logical_coordinates() const;
@@ -172,6 +178,8 @@ private:
     gpu::GpuPipelineCache _pipelines;
     gpu::GpuGeometryBatch _batch;
     std::optional<gpu::GpuFrame> _frame;
+    std::vector<std::shared_ptr<ITextureBackend>> _retained; // textures the frame's draws use
+    const ITextureBackend* _last_retained = nullptr;         // skips repeats of the same texture
     std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
     RendererBackendStats _stats;                    // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};

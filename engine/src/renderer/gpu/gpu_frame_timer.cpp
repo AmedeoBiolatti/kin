@@ -1,6 +1,7 @@
 #include "gpu_frame_timer.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 
 namespace kin::gpu {
@@ -8,6 +9,8 @@ namespace kin::gpu {
 namespace {
 // Frames allowed to wait for timing; past this (a stalled GPU) frames go untimed.
 constexpr std::size_t MaxFramesInFlight = 8;
+// How often the thread checks the oldest fence: the timing's resolution.
+constexpr std::chrono::microseconds PollInterval{100};
 } // namespace
 
 GpuFrameTimer::GpuFrameTimer(SDL_GPUDevice* device) : _device(device) {
@@ -21,7 +24,11 @@ GpuFrameTimer::~GpuFrameTimer() {
     }
     _wake.notify_one();
     _thread.join();
+    // A fence still in flight must not go back to SDL's pool, where it could be
+    // reset for another submission: wait here, on the render thread.
     for (const Pending& frame : _waiting) {
+        SDL_GPUFence* fence = frame.fence;
+        SDL_WaitForGPUFences(_device, true, &fence, 1);
         SDL_ReleaseGPUFence(_device, frame.fence);
     }
     for (const Pending& frame : _finished) {
@@ -60,25 +67,25 @@ std::optional<f64> GpuFrameTimer::collect() {
 void GpuFrameTimer::run() {
     std::unique_lock lock{_mutex};
     for (;;) {
-        // Drain what is queued before stopping: the destructor releases fences
-        // only once nothing waits on them.
         _wake.wait(lock, [this] { return _stop || !_waiting.empty(); });
-        if (_waiting.empty()) {
-            return;
+        if (_stop) {
+            return; // the destructor waits for what is left
         }
         SDL_GPUFence* fence = _waiting.front().fence;
         lock.unlock();
-        const bool signalled = SDL_WaitForGPUFences(_device, true, &fence, 1);
+        const bool signalled = SDL_QueryGPUFence(_device, fence);
         const u64 now_ns = SDL_GetTicksNS();
         lock.lock();
+        if (!signalled) {
+            _wake.wait_for(lock, PollInterval, [this] { return _stop; });
+            continue;
+        }
 
         Pending frame = _waiting.front();
         _waiting.pop_front();
-        if (signalled) {
-            const u64 start_ns = std::max(frame.first_submit_ns, _last_signal_ns);
-            frame.gpu_ms = now_ns > start_ns ? static_cast<f64>(now_ns - start_ns) / 1'000'000.0 : 0.0;
-            _last_signal_ns = now_ns;
-        }
+        const u64 start_ns = std::max(frame.first_submit_ns, _last_signal_ns);
+        frame.gpu_ms = now_ns > start_ns ? static_cast<f64>(now_ns - start_ns) / 1'000'000.0 : 0.0;
+        _last_signal_ns = now_ns;
         _finished.push_back(frame);
     }
 }
