@@ -5,6 +5,7 @@
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/draw_trace.hpp>
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
@@ -12,6 +13,7 @@
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -263,6 +265,17 @@ private:
     // Returns a checked-out pooled target to the free list (matched by texture
     // identity). Called by PooledTarget's destructor.
     void release_render_target_(const RenderTarget& target);
+
+#ifdef KIN_ENABLE_RENDER_PROBE
+    // Draw tracing (see draw_trace.hpp): records a draw in the active trace, in
+    // window pixels, unless it goes to a render target.
+    void trace_draw(DrawKind kind, Rectf dest, Color color, const Texture* texture = nullptr, Rectf region = {},
+                    f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, u32 source = 0);
+    std::optional<Rectf> _trace_viewport;              // drawing is relative to its origin
+    std::vector<std::optional<Rectf>> _trace_viewports; // pushed ones
+    i32 _trace_targets = 0;                             // render targets pushed
+    i32 _trace_native = 0;                              // native coordinate scopes
+#endif
 
     u64 _id = 0;
     std::unique_ptr<IRenderer2DBackend> _backend;

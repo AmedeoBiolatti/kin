@@ -1,4 +1,7 @@
 #include <kin/core/json.hpp>
+#include <kin/ecs/render.hpp>
+#include <kin/ecs/world.hpp>
+#include <kin/renderer/draw_trace.hpp>
 #include <kin/runtime/render_probe.hpp>
 #include <kin/runtime/scene_app.hpp>
 
@@ -55,6 +58,26 @@ bool contains(kin::RenderProbeRect outer, kin::i32 x, kin::i32 y, kin::i32 w, ki
 
 bool overlaps_box(kin::RenderProbeRect rect, kin::i32 x, kin::i32 y, kin::i32 w, kin::i32 h) {
     return rect.x < x + w && x < rect.x + rect.w && rect.y < y + h && y < rect.y + rect.h;
+}
+
+// The draws that would make make_frame()'s boxes, each claimed by `sources[i]`.
+std::vector<kin::DrawRecord> draws_of(std::initializer_list<Box> boxes, std::initializer_list<kin::u32> sources) {
+    std::vector<kin::DrawRecord> draws;
+    auto source = sources.begin();
+    for (const Box& box : boxes) {
+        draws.push_back({
+            .bounds = {static_cast<kin::f32>(box.x), static_cast<kin::f32>(box.y), static_cast<kin::f32>(box.w),
+                       static_cast<kin::f32>(box.h)},
+            .color = kin::Color{box.r, box.g, box.b, 255},
+            .source = source != sources.end() ? *source++ : 0,
+        });
+    }
+    return draws;
+}
+
+// Adds a frame of `boxes` and the draws that made them.
+void add(kin::RenderProbe& probe, std::initializer_list<Box> boxes, std::initializer_list<kin::u32> sources) {
+    probe.add_frame(make_frame(boxes), frame_size, draws_of(boxes, sources));
 }
 
 std::string probe_json(const kin::RenderProbe& probe) {
@@ -205,6 +228,195 @@ void test_report_is_deterministic() {
     assert(first.find("\"timeline\"") != std::string::npos);
 }
 
+struct TraceFixture {
+    kin::DrawTrace trace;
+    kin::u32 hero = trace.entity_source(1, 10, "SpriteRenderer", [] { return "hero"; });
+    kin::u32 wall = trace.entity_source(1, 11, "RectRenderer", [] { return "wall"; });
+    kin::u32 birds = trace.scope_source("birds");
+    kin::RenderProbe probe;
+
+    TraceFixture() { probe.set_draw_trace(&trace); }
+};
+
+void test_draw_sources() {
+    kin::DrawTrace trace;
+    int named = 0;
+    const kin::u32 a = trace.entity_source(1, 10, "SpriteRenderer", [&] { ++named; return "hero"; });
+    assert(trace.entity_source(1, 10, "SpriteRenderer", [&] { ++named; return "hero"; }) == a);
+    assert(named == 1); // named once
+    const kin::u32 b = trace.entity_source(1, 10, "RectRenderer", [] { return "hero"; });
+    const kin::u32 c = trace.entity_source(2, 10, "SpriteRenderer", [] { return "other world"; });
+    const kin::u32 d = trace.scope_source("hud");
+    assert(a != b && a != c && b != c && d != a && trace.scope_source("hud") == d);
+    assert(trace.source_info(a).name == "hero" && trace.source_info(a).component == "SpriteRenderer");
+    assert(trace.source_info(a).entity == 10);
+    assert(trace.source_info(d).entity == 0 && trace.source_info(d).name == "hud");
+    assert(trace.source_info(0).name.empty() && trace.source_info(99).name.empty());
+
+    // Scopes nest and restore; 0 leaves the current one.
+    assert(kin::current_draw_source() == 0);
+    {
+        const kin::DrawSourceScope outer{a};
+        {
+            const kin::DrawSourceScope none{0};
+            assert(kin::current_draw_source() == a);
+            const kin::DrawSourceScope inner{b};
+            assert(kin::current_draw_source() == b);
+        }
+        assert(kin::current_draw_source() == a);
+    }
+    assert(kin::current_draw_source() == 0);
+}
+
+// The jittering sprite is named, with how it changed; the still wall next to it
+// and the bird flying past are not.
+void test_culprit_of_jitter() {
+    TraceFixture f;
+    for (int i = 0; i < 30; ++i) {
+        add(f.probe,
+            {{50 + (i % 2), 40, 20, 20, 220, 120, 60}, {72, 40, 8, 20, 90, 90, 90}, {20 + i, 70, 8, 8, 200, 200, 255}},
+            {f.hero, f.wall, f.birds});
+    }
+    assert(f.probe.events().size() == 1);
+    const kin::RenderProbeEvent& event = f.probe.events().front();
+    assert(event.kind == kin::RenderProbeEventKind::Flicker);
+    assert(event.culprits.size() == 1);
+    const kin::RenderProbeCulprit& culprit = event.culprits.front();
+    assert(culprit.source == f.hero);
+    assert(culprit.changes == kin::render_probe_change::moved);
+    assert(culprit.max_move == 1.0f);
+    assert(culprit.frames == event.frames);
+
+    const std::string json = probe_json(f.probe);
+    assert(json.find("\"name\": \"hero\"") != std::string::npos);
+    assert(json.find("\"component\": \"SpriteRenderer\"") != std::string::npos);
+    assert(json.find("\"moved\"") != std::string::npos);
+    assert(json.find("\"wall\"") == std::string::npos);
+    assert(json.find("\"birds\"") == std::string::npos);
+}
+
+// A one-frame wrong color, a draw shown for one frame, and one hidden for one
+// frame are each put on the draw that did it.
+void test_culprits_of_glitches() {
+    namespace change = kin::render_probe_change;
+    {
+        TraceFixture f;
+        for (int i = 1; i <= 30; ++i) {
+            add(f.probe, {{90, 10, 24, 24, static_cast<kin::u8>(i == 15 ? 30 : 220), 200, 60}}, {f.hero});
+        }
+        assert(f.probe.events().size() == 1 && f.probe.events().front().culprits.size() == 1);
+        assert(f.probe.events().front().culprits.front().source == f.hero);
+        assert(f.probe.events().front().culprits.front().changes == change::color);
+    }
+    {
+        TraceFixture f;
+        for (int i = 1; i <= 30; ++i) {
+            if (i == 15) {
+                add(f.probe, {{10, 10, 20, 20, 90, 90, 90}, {60, 50, 12, 12, 255, 255, 0}}, {f.wall, f.birds});
+            } else {
+                add(f.probe, {{10, 10, 20, 20, 90, 90, 90}}, {f.wall});
+            }
+        }
+        assert(f.probe.events().size() == 1);
+        const kin::RenderProbeEvent& event = f.probe.events().front();
+        assert(event.first_frame == 15 && event.culprits.size() == 1);
+        assert(event.culprits.front().source == f.birds);
+        assert(event.culprits.front().changes == (change::appeared | change::disappeared));
+    }
+    {
+        TraceFixture f;
+        for (int i = 1; i <= 30; ++i) {
+            if (i == 15) {
+                add(f.probe, {}, {});
+            } else {
+                add(f.probe, {{60, 50, 12, 12, 255, 255, 0}}, {f.hero});
+            }
+        }
+        assert(f.probe.events().size() == 1);
+        const kin::RenderProbeEvent& event = f.probe.events().front();
+        assert(event.first_frame == 15 && event.culprits.size() == 1);
+        assert(event.culprits.front().source == f.hero);
+        assert(event.culprits.front().changes == (change::appeared | change::disappeared));
+    }
+}
+
+// A spike is put on what changed there, not on what kept still.
+void test_culprit_of_spike() {
+    TraceFixture f;
+    for (int i = 1; i <= 40; ++i) {
+        if (i < 25) {
+            add(f.probe, {{10 + i, 50, 16, 16, 120, 140, 200}, {100, 4, 20, 20, 60, 60, 60}}, {f.birds, f.wall});
+        } else {
+            add(f.probe, {{10 + i, 50, 16, 16, 120, 140, 200}, {100, 4, 20, 20, 60, 60, 60}, {96, 0, 32, 32, 255, 0, 255}},
+                {f.birds, f.wall, f.hero});
+        }
+    }
+    assert(f.probe.event_count(kin::RenderProbeEventKind::Spike) == 1);
+    const kin::RenderProbeEvent& event = f.probe.events().front();
+    assert(event.first_frame == 25);
+    assert(event.culprits.size() == 1);
+    assert(event.culprits.front().source == f.hero);
+    assert(event.culprits.front().changes == kin::render_probe_change::appeared);
+}
+
+// Pixels that change while every draw stays the same (a shader, say) have no
+// culprit, and the report says so with an empty list.
+void test_unexplained_change() {
+    TraceFixture f;
+    for (int i = 0; i < 20; ++i) {
+        f.probe.add_frame(make_frame({{50 + (i % 2), 40, 20, 20, 220, 120, 60}}), frame_size,
+                          draws_of({{50, 40, 20, 20, 220, 120, 60}}, {f.hero}));
+    }
+    assert(f.probe.events().size() == 1);
+    assert(f.probe.events().front().culprits.empty());
+    assert(probe_json(f.probe).find("\"culprits\": []") != std::string::npos);
+
+    // Without draws there is nothing to name, and no culprits field.
+    kin::RenderProbe untraced;
+    for (int i = 0; i < 20; ++i) {
+        untraced.add_frame(make_frame({{50 + (i % 2), 40, 20, 20, 220, 120, 60}}), frame_size);
+    }
+    assert(probe_json(untraced).find("culprits") == std::string::npos);
+}
+
+// An ECS entity drawn by render_world, an immediate draw in a named scope, and
+// an immediate draw with no scope (put on its scene), all jittering.
+class CulpritScene final : public kin::Scene {
+public:
+    CulpritScene() {
+        _world.component<kin::Transform2D>("Transform2D");
+        _world.component<kin::RectRenderer>("RectRenderer");
+        _world.entity("jitterer")
+            .set(kin::Transform2D{{8.0f, 8.0f}})
+            .set(kin::RectRenderer{.size = {16.0f, 16.0f}, .color = kin::Color::rgb(230, 200, 90)});
+        _world.entity("post")
+            .set(kin::Transform2D{{8.0f, 28.0f}})
+            .set(kin::RectRenderer{.size = {16.0f, 8.0f}, .color = kin::Color::rgb(90, 90, 90)});
+    }
+
+    std::string_view name() const override { return "Culprits"; }
+
+    void update(kin::SceneContext&) override {
+        ++_frame;
+        _world.lookup("jitterer").set(kin::Transform2D{{8.0f + static_cast<kin::f32>(_frame % 2), 8.0f}});
+    }
+
+    void render(kin::SceneContext& ctx) override {
+        ctx.renderer.clear(kin::Color::rgb(16, 18, 24));
+        kin::render_world(_world, ctx.renderer);
+        const kin::u8 blink = _frame % 2 ? 250 : 120;
+        {
+            KIN_DRAW_SCOPE("hud.blink");
+            ctx.renderer.fill_rect(kin::Rectf{60.0f, 8.0f, 12.0f, 12.0f}, kin::Color::rgb(blink, 60, 60));
+        }
+        ctx.renderer.fill_rect(kin::Rectf{108.0f, 40.0f, 12.0f, 12.0f}, kin::Color::rgb(60, blink, 60));
+    }
+
+private:
+    kin::EcsWorld _world;
+    kin::i32 _frame = 0;
+};
+
 // Draws a box that either moves steadily or jitters one pixel in place.
 class BoxScene final : public kin::Scene {
 public:
@@ -261,6 +473,26 @@ void test_scene_app_probe() {
         assert(text.find("render probe found 1 event(s); first: flicker") != std::string::npos);
     }
 
+    {
+        kin::SceneManager scenes;
+        scenes.push(std::make_unique<CulpritScene>());
+        std::ostringstream probe;
+        const int code = kin::run_scene_app({
+            .window = {.title = "probe-culprits", .width = 128, .height = 64},
+            .headless = {.enabled = true, .frames = 12},
+            .probe_output = &probe,
+        }, scenes);
+        assert(code == 0);
+        assert(kin::active_draw_trace() == nullptr);
+        const std::string text = probe.str();
+        assert(text.find("\"flickers\": 3") != std::string::npos);
+        assert(text.find("\"name\": \"jitterer\"") != std::string::npos);
+        assert(text.find("\"component\": \"RectRenderer\"") != std::string::npos);
+        assert(text.find("\"scope\": \"hud.blink\"") != std::string::npos);
+        assert(text.find("\"scope\": \"Culprits\"") != std::string::npos);
+        assert(text.find("\"post\"") == std::string::npos);
+    }
+
     const char* argv[] = {"game", "--probe-render=out/probe.json", "--probe-fail", "--probe-tile=8"};
     const kin::HeadlessOptions options = kin::parse_headless_options(4, const_cast<char**>(argv));
     assert(options.enabled);
@@ -283,6 +515,11 @@ int main() {
     test_spikes_wait_for_warmup();
     test_resize_restarts();
     test_report_is_deterministic();
+    test_draw_sources();
+    test_culprit_of_jitter();
+    test_culprits_of_glitches();
+    test_culprit_of_spike();
+    test_unexplained_change();
     test_scene_app_probe();
     return 0;
 }

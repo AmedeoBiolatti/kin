@@ -23,6 +23,9 @@ struct PreparedSprite {
     f32 rotation = 0.0f;
     Vec2f pivot{0.5f, 0.5f};
     RenderCommandType type = RenderCommandType::Texture; // or Sprite
+#ifdef KIN_ENABLE_RENDER_PROBE
+    u32 draw_source = 0; // draw_trace.hpp; 0: the thread's current source
+#endif
 };
 
 class RenderQueue {
@@ -123,6 +126,9 @@ private:
         u64 sequence;
         bool use_y;
         RenderCommandType type;
+#ifdef KIN_ENABLE_RENDER_PROBE
+        u32 draw_source; // fits in padding
+#endif
     };
     // Default-initializes on resize(): for trivial types, leaves memory as is.
     template<typename T>
@@ -153,8 +159,9 @@ private:
     void for_each_in_draw_order(Draw&& draw);
     template<typename Visit>
     void for_each_in_submission_order(Visit&& visit) const;
+    // `draw_source` 0: the thread's current one (only kept with the render probe).
     void queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
-                      Color tint, f32 rotation, Vec2f pivot);
+                      Color tint, f32 rotation, Vec2f pivot, u32 draw_source = 0);
     u32 texture_slot(const Texture& texture);
     RenderCommand to_command(const QueuedSprite& sprite) const;
     // Moves the queued sprites into _commands, in submission order.

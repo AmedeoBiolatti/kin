@@ -3,6 +3,7 @@
 #include <kin/core/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +30,129 @@ RenderProbeRect merged(RenderProbeRect a, RenderProbeRect b) {
     const i32 x1 = std::max(a.x + a.w, b.x + b.w);
     const i32 y1 = std::max(a.y + a.h, b.y + b.h);
     return {x0, y0, x1 - x0, y1 - y0};
+}
+
+// Attribution weights, in "pixels moved" so the kinds of change compare.
+constexpr f32 pop_weight = 64.0f;     // a draw shown or hidden
+constexpr f32 swap_weight = 32.0f;    // a different texture or texture region
+constexpr f32 color_divisor = 4.0f;   // a full channel swing counts as 64 px
+constexpr f32 match_distance = 64.0f; // farther apart, two draws are not the same thing
+constexpr f32 near_margin = 32.0f;    // draws this close to an event are looked at
+constexpr std::size_t match_pairs_limit = 65536;
+
+struct DrawChange {
+    u8 bits = 0;
+    f32 magnitude = 0.0f;
+    f32 move = 0.0f;
+};
+
+Vec2f center(Rectf r) {
+    return {r.x + r.w * 0.5f, r.y + r.h * 0.5f};
+}
+
+bool intersects(Rectf a, f32 x, f32 y, f32 w, f32 h) {
+    return a.x < x + w && x < a.x + a.w && a.y < y + h && y < a.y + a.h;
+}
+
+bool same_rect(Rectf a, Rectf b) {
+    return std::abs(a.x - b.x) < 0.01f && std::abs(a.y - b.y) < 0.01f && std::abs(a.w - b.w) < 0.01f &&
+        std::abs(a.h - b.h) < 0.01f;
+}
+
+DrawChange compare(const DrawRecord* a, const DrawRecord* b) {
+    namespace change = render_probe_change;
+    if (!a && !b) {
+        return {};
+    }
+    if (!a) {
+        return {change::appeared, pop_weight, 0.0f};
+    }
+    if (!b) {
+        return {change::disappeared, pop_weight, 0.0f};
+    }
+    DrawChange result;
+    const Vec2f ca = center(a->bounds);
+    const Vec2f cb = center(b->bounds);
+    result.move = std::abs(ca.x - cb.x) + std::abs(ca.y - cb.y);
+    if (result.move > 0.01f) {
+        result.bits |= change::moved;
+        result.magnitude += result.move;
+    }
+    const f32 resize = std::abs(a->bounds.w - b->bounds.w) + std::abs(a->bounds.h - b->bounds.h);
+    if (resize > 0.01f) {
+        result.bits |= change::resized;
+        result.magnitude += resize;
+    }
+    if (a->texture != b->texture) {
+        result.bits |= change::texture;
+        result.magnitude += swap_weight;
+    } else if (!same_rect(a->region, b->region)) {
+        result.bits |= change::frame;
+        result.magnitude += swap_weight;
+    }
+    const i32 color = std::max({std::abs(a->color.r - b->color.r), std::abs(a->color.g - b->color.g),
+                                std::abs(a->color.b - b->color.b), std::abs(a->color.a - b->color.a)});
+    if (color > 0) {
+        result.bits |= change::color;
+        result.magnitude += static_cast<f32>(color) / color_divisor;
+    }
+    const f32 turn = std::abs(a->rotation - b->rotation);
+    if (turn > 0.01f) {
+        result.bits |= change::rotated;
+        result.magnitude += std::min(turn, pop_weight);
+    }
+    return result;
+}
+
+// Pairs up the draws of `a` and `b` that are most likely the same thing drawn
+// twice: nearest first, the same kind only. Returns, for each draw of `b`, the
+// index of its partner in `a` (or -1).
+std::vector<i32> match(const std::vector<const DrawRecord*>& a, const std::vector<const DrawRecord*>& b) {
+    std::vector<i32> partner(b.size(), -1);
+    if (a.empty() || b.empty()) {
+        return partner;
+    }
+    if (a.size() * b.size() > match_pairs_limit) {
+        // Too many to compare pairwise: the same position in drawing order.
+        for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+            partner[i] = static_cast<i32>(i);
+        }
+        return partner;
+    }
+    struct Pair {
+        f32 cost;
+        u32 ia;
+        u32 ib;
+    };
+    std::vector<Pair> pairs;
+    for (u32 ib = 0; ib < b.size(); ++ib) {
+        for (u32 ia = 0; ia < a.size(); ++ia) {
+            if (a[ia]->kind != b[ib]->kind) {
+                continue;
+            }
+            const Vec2f ca = center(a[ia]->bounds);
+            const Vec2f cb = center(b[ib]->bounds);
+            f32 cost = std::abs(ca.x - cb.x) + std::abs(ca.y - cb.y) + std::abs(a[ia]->bounds.w - b[ib]->bounds.w) +
+                std::abs(a[ia]->bounds.h - b[ib]->bounds.h);
+            if (cost > match_distance) {
+                continue;
+            }
+            // Prefer the same texture and look, so a still draw pairs with itself.
+            cost += a[ia]->texture != b[ib]->texture ? 0.5f : 0.0f;
+            cost += !same_rect(a[ia]->region, b[ib]->region) ? 0.25f : 0.0f;
+            cost += !(a[ia]->color == b[ib]->color) ? 0.125f : 0.0f;
+            pairs.push_back({cost, ia, ib});
+        }
+    }
+    std::stable_sort(pairs.begin(), pairs.end(), [](const Pair& x, const Pair& y) { return x.cost < y.cost; });
+    std::vector<u8> used(a.size(), 0);
+    for (const Pair& pair : pairs) {
+        if (partner[pair.ib] < 0 && !used[pair.ia]) {
+            partner[pair.ib] = static_cast<i32>(pair.ia);
+            used[pair.ia] = 1;
+        }
+    }
+    return partner;
 }
 
 // Median of `values`, reordering them.
@@ -64,11 +188,14 @@ void RenderProbe::reset(Vec2i size) {
     for (std::vector<u8>& frame : _frame) {
         frame.clear();
     }
+    for (std::vector<DrawRecord>& draws : _draws) {
+        draws.clear();
+    }
     _max_history.clear();
     _open.clear();
 }
 
-void RenderProbe::add_frame(std::span<const u8> rgba, Vec2i size) {
+void RenderProbe::add_frame(std::span<const u8> rgba, Vec2i size, std::span<const DrawRecord> draws) {
     const std::size_t pixels = size.x > 0 && size.y > 0
         ? static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y)
         : 0;
@@ -81,6 +208,10 @@ void RenderProbe::add_frame(std::span<const u8> rgba, Vec2i size) {
 
     std::swap(_frame[2], _frame[1]);
     std::swap(_frame[1], _frame[0]);
+    std::swap(_draws[2], _draws[1]);
+    std::swap(_draws[1], _draws[0]);
+    _draws[0].assign(draws.begin(), draws.end());
+    _traced = _traced || !draws.empty();
     // Alpha is not compared: making it opaque lets the diff sum all four bytes.
     _frame[0].resize(pixels * 4u);
     std::memcpy(_frame[0].data(), rgba.data(), pixels * 4u);
@@ -288,11 +419,122 @@ void RenderProbe::report_regions(RenderProbeEventKind kind,
                 }
             }
         }
-        record(kind, frame, rect, peak_delta, peak_score);
+        record(kind, frame, rect, peak_delta, peak_score, attribute(kind, rect));
     }
 }
 
-void RenderProbe::record(RenderProbeEventKind kind, i32 frame, RenderProbeRect rect, f32 delta, f32 score) {
+std::vector<RenderProbeCulprit> RenderProbe::attribute(RenderProbeEventKind kind, RenderProbeRect rect) const {
+    std::vector<RenderProbeCulprit> culprits;
+    if (!_traced) {
+        return culprits;
+    }
+    // The frames compared, oldest first: a spike is the newest frame against the
+    // one before; a flicker is the frame before the newest, against both sides.
+    const bool flicker = kind == RenderProbeEventKind::Flicker;
+    const std::size_t count = flicker ? 3 : 2;
+    std::array<const std::vector<DrawRecord>*, 3> frames{};
+    for (std::size_t i = 0; i < count; ++i) {
+        frames[i] = &_draws[count - 1 - i];
+    }
+
+    const f32 x = static_cast<f32>(rect.x);
+    const f32 y = static_cast<f32>(rect.y);
+    const f32 w = static_cast<f32>(rect.w);
+    const f32 h = static_cast<f32>(rect.h);
+    std::vector<u32> sources;
+    for (std::size_t f = 0; f < count; ++f) {
+        for (const DrawRecord& draw : *frames[f]) {
+            if (intersects(draw.bounds, x, y, w, h)) {
+                sources.push_back(draw.source);
+            }
+        }
+    }
+    std::sort(sources.begin(), sources.end());
+    sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+
+    std::array<std::vector<const DrawRecord*>, 3> near;
+    for (const u32 source : sources) {
+        for (std::size_t f = 0; f < count; ++f) {
+            near[f].clear();
+            for (const DrawRecord& draw : *frames[f]) {
+                if (draw.source == source &&
+                    intersects(draw.bounds, x - near_margin, y - near_margin, w + 2 * near_margin, h + 2 * near_margin)) {
+                    near[f].push_back(&draw);
+                }
+            }
+        }
+        RenderProbeCulprit culprit{.source = source, .frames = 1};
+        const auto note = [&](const DrawChange& change, f32 evidence) {
+            if (evidence > 0.0f) {
+                culprit.score += evidence;
+                culprit.changes |= change.bits;
+                culprit.max_move = std::max(culprit.max_move, change.move);
+            }
+        };
+        if (!flicker) {
+            const std::vector<i32> partner = match(near[0], near[1]);
+            std::vector<u8> matched(near[0].size(), 0);
+            for (std::size_t ib = 0; ib < near[1].size(); ++ib) {
+                const DrawRecord* a = partner[ib] >= 0 ? near[0][static_cast<std::size_t>(partner[ib])] : nullptr;
+                if (partner[ib] >= 0) {
+                    matched[static_cast<std::size_t>(partner[ib])] = 1;
+                }
+                const DrawChange change = compare(a, near[1][ib]);
+                note(change, change.magnitude);
+            }
+            for (std::size_t ia = 0; ia < near[0].size(); ++ia) {
+                if (!matched[ia]) {
+                    const DrawChange change = compare(near[0][ia], nullptr);
+                    note(change, change.magnitude);
+                }
+            }
+        } else {
+            // Evidence of A-B-A: B differs from both sides by more than the sides
+            // differ from each other.
+            const std::vector<i32> ab = match(near[0], near[1]);
+            const std::vector<i32> cb = match(near[2], near[1]);
+            const std::vector<i32> ac = match(near[2], near[0]);
+            std::vector<u8> a_used(near[0].size(), 0);
+            for (std::size_t ib = 0; ib < near[1].size(); ++ib) {
+                const DrawRecord* b = near[1][ib];
+                const DrawRecord* a = ab[ib] >= 0 ? near[0][static_cast<std::size_t>(ab[ib])] : nullptr;
+                const DrawRecord* c = cb[ib] >= 0 ? near[2][static_cast<std::size_t>(cb[ib])] : nullptr;
+                if (ab[ib] >= 0) {
+                    a_used[static_cast<std::size_t>(ab[ib])] = 1;
+                }
+                const DrawChange to_b = compare(a, b);
+                const DrawChange from_b = compare(b, c);
+                const DrawChange across = compare(a, c);
+                DrawChange both = to_b;
+                both.bits |= from_b.bits;
+                both.move = std::max(to_b.move, from_b.move);
+                note(both, std::min(to_b.magnitude, from_b.magnitude) - across.magnitude);
+            }
+            // Missing for one frame: drawn before and after, not in between.
+            for (std::size_t ia = 0; ia < near[0].size(); ++ia) {
+                if (a_used[ia] || ac[ia] < 0) {
+                    continue;
+                }
+                const DrawChange across = compare(near[0][ia], near[2][static_cast<std::size_t>(ac[ia])]);
+                note({render_probe_change::disappeared | render_probe_change::appeared, pop_weight, 0.0f},
+                     pop_weight - across.magnitude);
+            }
+        }
+        if (culprit.score > 0.0f) {
+            culprits.push_back(culprit);
+        }
+    }
+    std::stable_sort(culprits.begin(), culprits.end(), [](const RenderProbeCulprit& a, const RenderProbeCulprit& b) {
+        return a.score > b.score;
+    });
+    if (culprits.size() > max_culprits) {
+        culprits.resize(max_culprits);
+    }
+    return culprits;
+}
+
+void RenderProbe::record(RenderProbeEventKind kind, i32 frame, RenderProbeRect rect, f32 delta, f32 score,
+                         std::vector<RenderProbeCulprit> culprits) {
     // A frame that jumps and comes back is also a spike into it and one out of
     // it; the flicker explains both, so it replaces them.
     if (kind == RenderProbeEventKind::Flicker) {
@@ -308,7 +550,10 @@ void RenderProbe::record(RenderProbeEventKind kind, i32 frame, RenderProbeRect r
             if (std::ranges::find(_open, index) != _open.end()) {
                 open.push_back(kept);
             }
-            _events[kept++] = event;
+            if (kept != index) {
+                _events[kept] = std::move(_events[index]);
+            }
+            ++kept;
         }
         _events.resize(kept);
         _open = std::move(open);
@@ -318,11 +563,28 @@ void RenderProbe::record(RenderProbeEventKind kind, i32 frame, RenderProbeRect r
         if (event.kind != kind || event.last_frame < frame - 1 || !overlaps(event.rect, rect, _config.tile_size)) {
             continue;
         }
-        if (event.last_frame != frame) {
+        const bool new_frame = event.last_frame != frame;
+        if (new_frame) {
             event.last_frame = frame;
             ++event.frames;
         }
         event.rect = merged(event.rect, rect);
+        for (const RenderProbeCulprit& culprit : culprits) {
+            const auto known = std::ranges::find(event.culprits, culprit.source, &RenderProbeCulprit::source);
+            if (known == event.culprits.end()) {
+                event.culprits.push_back(culprit);
+                continue;
+            }
+            known->frames += new_frame ? 1 : 0;
+            known->changes |= culprit.changes;
+            known->score = std::max(known->score, culprit.score);
+            known->max_move = std::max(known->max_move, culprit.max_move);
+        }
+        // Most often implicated first, then by evidence.
+        std::stable_sort(event.culprits.begin(), event.culprits.end(),
+                         [](const RenderProbeCulprit& a, const RenderProbeCulprit& b) {
+                             return a.frames != b.frames ? a.frames > b.frames : a.score > b.score;
+                         });
         if (delta > event.peak_delta) {
             event.peak_delta = delta;
             event.peak_frame = frame;
@@ -339,8 +601,39 @@ void RenderProbe::record(RenderProbeEventKind kind, i32 frame, RenderProbeRect r
         .peak_frame = frame,
         .peak_delta = delta,
         .peak_score = score,
+        .culprits = std::move(culprits),
     });
     _open.push_back(_events.size() - 1);
+}
+
+void RenderProbe::write_culprit(JsonWriter& json, const RenderProbeCulprit& culprit) const {
+    static constexpr std::array<std::string_view, 8> change_names{
+        "moved", "resized", "frame", "color", "texture", "rotated", "appeared", "disappeared",
+    };
+    json.begin_object();
+    const DrawSourceInfo info = _trace ? _trace->source_info(culprit.source) : DrawSourceInfo{};
+    if (culprit.source == 0) {
+        json.field("unclaimed", true);
+    } else if (info.entity != 0) {
+        json.field("entity", info.entity);
+        json.field("name", info.name);
+        json.field("component", info.component);
+    } else if (!info.name.empty()) {
+        json.field("scope", info.name);
+    } else {
+        json.field("source", culprit.source);
+    }
+    json.field("frames", culprit.frames);
+    json.key("changes").begin_array();
+    for (std::size_t bit = 0; bit < change_names.size(); ++bit) {
+        if (culprit.changes & (1u << bit)) {
+            json.value(change_names[bit]);
+        }
+    }
+    json.end_array();
+    json.field("max_move", rounded(culprit.max_move));
+    json.field("score", rounded(culprit.score));
+    json.end_object();
 }
 
 i32 RenderProbe::event_count(RenderProbeEventKind kind) const {
@@ -399,6 +692,13 @@ void RenderProbe::write_json(JsonWriter& json) const {
         json.field("peak_frame", event.peak_frame);
         json.field("peak_delta", rounded(event.peak_delta));
         json.field("peak_score", rounded(event.peak_score));
+        if (_traced) {
+            json.key("culprits").begin_array();
+            for (std::size_t i = 0; i < std::min(event.culprits.size(), max_culprits); ++i) {
+                write_culprit(json, event.culprits[i]);
+            }
+            json.end_array();
+        }
         json.end_object();
     }
     json.end_array();

@@ -233,7 +233,11 @@ event, so a sprite that jitters for 200 frames is one event with `frames: 200`.
   "events": [
     { "kind": "flicker", "first_frame": 12, "last_frame": 211, "frames": 200,
       "rect": { "x": 480, "y": 256, "w": 32, "h": 16 },
-      "peak_frame": 40, "peak_delta": 0.086, "peak_score": 86.4 }
+      "peak_frame": 40, "peak_delta": 0.086, "peak_score": 86.4,
+      "culprits": [
+        { "entity": 557, "name": "hero", "component": "SpriteRenderer", "frames": 200,
+          "changes": ["moved"], "max_move": 1, "score": 1 }
+      ] }
   ],
   "timeline": { "delta": [], "max_tile_delta": [], "changed": [] }
 }
@@ -246,6 +250,47 @@ ratio of the frame's change to its neighbours' for flicker. `timeline` holds one
 value per frame, for plotting. The report is deterministic: the same seed and
 frame count give the same file.
 
+### Culprits
+
+While the probe runs, every draw that reaches the screen is traced with its
+bounds and with who drew it. Each event lists up to five `culprits`: the draw
+sources near it whose own draws changed in the way the event implies. For
+flicker that means a change that came back (moved and moved back, a color or
+animation frame that flipped and flipped back), or a draw shown or hidden for a
+single frame. For a spike it means any change. `changes` says how: `moved`,
+`resized`, `frame` (another region of the same texture, i.e. an animation
+frame), `color`, `texture`, `rotated`, `appeared`, `disappeared`. Draws that
+stayed the same are never culprits, so a still wall next to a jittering sprite
+isn't blamed.
+
+A source is one of:
+
+- an ECS entity and render component (`entity`, `name`, `component`): what the
+  `SpriteRenderer`, `TextureRenderer`, `RectRenderer` and `LineRenderer` and particle
+  components draw, through `render_world`, `collect_*` or `submit_*`;
+- a named scope (`scope`) for code that draws directly:
+
+  ```cpp
+  #include <kin/renderer/draw_trace.hpp>   // KIN_DRAW_SCOPE
+  #include <kin/ecs/render.hpp>            // KIN_DRAW_ENTITY
+
+  {
+      KIN_DRAW_SCOPE("hud.minimap");
+      draw_minimap(renderer);              // its draws are the minimap's
+  }
+  world.each([&](flecs::entity entity, const Box& box) {
+      KIN_DRAW_ENTITY(entity, "Box");      // these draws are entity's Box
+      renderer.fill_rect(box.rect, box.color);
+  });
+  ```
+
+- otherwise, the scene whose `render` drew it (`scope` is the scene's `name()`).
+
+An empty `culprits` list means no traced draw explains the change. That usually
+points at something the trace can't see, such as a shader or a render target
+whose contents changed while its draw stayed put. Both macros compile to
+nothing when the probe is compiled out.
+
 Things to know:
 
 - The probe sees what the headless renderer draws. That is the SDL_Renderer
@@ -257,11 +302,15 @@ Things to know:
 - Legitimate fast change (screen shake, hit flashes, scene cuts) shows up as
   spikes or flicker too. Read the events before gating CI on `--probe-fail`.
 - The cost is a framebuffer readback and two frame comparisons a frame, a few
-  milliseconds at 960×540. Builds configured with `-DKIN_ENABLE_RENDER_PROBE=OFF`
-  leave the probe out entirely; the flags then only log a warning.
+  milliseconds at 960×540. Compiled in but not running, the probe costs a
+  load and a branch per queued draw (about 3% of collecting and flushing 125k
+  sprites into a backend that draws nothing). Builds configured with
+  `-DKIN_ENABLE_RENDER_PROBE=OFF` leave it out entirely; the flags then only
+  log a warning.
 
 `kin::RenderProbe` (`kin/runtime/render_probe.hpp`) is the analysis on its own:
-feed it RGBA frames with `add_frame` and read `events()`, or `write_json`.
+feed it RGBA frames (and optionally their `DrawRecord`s from a `kin::DrawTrace`)
+with `add_frame`, and read `events()` or `write_json`.
 
 ## Benchmarking And Profiling
 

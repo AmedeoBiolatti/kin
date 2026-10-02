@@ -8,7 +8,10 @@
 #include "sdl_renderer2d_backend.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -17,6 +20,19 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#ifdef KIN_ENABLE_RENDER_PROBE
+#define KIN_TRACE_DRAW(...)                \
+    do {                                   \
+        if (active_draw_trace()) {         \
+            trace_draw(__VA_ARGS__);       \
+        }                                  \
+    } while (false)
+#else
+#define KIN_TRACE_DRAW(...) \
+    do {                    \
+    } while (false)
+#endif
 
 namespace kin {
 
@@ -99,11 +115,17 @@ Renderer2D::ViewportGuard::ViewportGuard(ViewportGuard&& other) noexcept
 
 Renderer2D::NativeCoordinateGuard::NativeCoordinateGuard(Renderer2D& renderer)
     : _renderer(&renderer) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    ++_renderer->_trace_native;
+#endif
     _renderer->_backend->push_native_coordinates();
 }
 
 Renderer2D::NativeCoordinateGuard::~NativeCoordinateGuard() {
     if (_renderer) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+        --_renderer->_trace_native;
+#endif
         _renderer->_backend->pop_native_coordinates();
     }
 }
@@ -335,24 +357,28 @@ Texture Renderer2D::create_texture_from_rgba(const u8* pixels, Vec2i size) {
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf dest) {
     if (drawable(texture)) {
+        KIN_TRACE_DRAW(DrawKind::Texture, dest, colors::white, &texture);
         _backend->draw_texture(texture, dest);
     }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest) {
     if (drawable(texture)) {
+        KIN_TRACE_DRAW(DrawKind::Texture, dest, colors::white, &texture, source);
         _backend->draw_texture(texture, source, dest);
     }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) {
     if (drawable(texture)) {
+        KIN_TRACE_DRAW(DrawKind::Texture, dest, tint, &texture, source);
         _backend->draw_texture(texture, source, dest, tint);
     }
 }
 
 void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) {
     if (drawable(texture)) {
+        KIN_TRACE_DRAW(DrawKind::Texture, dest, tint, &texture, source, rotation, pivot);
         _backend->draw_texture(texture, source, dest, tint, rotation, pivot);
     }
 }
@@ -366,6 +392,17 @@ JobSystem* Renderer2D::set_job_system(JobSystem* jobs) {
 
 void Renderer2D::draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
     if (!sprites.empty() && drawable(texture)) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+        if (DrawTrace* trace = active_draw_trace()) {
+            const std::span<const u32> sources = trace->instance_sources();
+            for (std::size_t i = 0; i < sprites.size(); ++i) {
+                const SpriteInstance& sprite = sprites[i];
+                trace_draw(DrawKind::Texture, sprite.dest, sprite.tint, &texture, sprite.source, sprite.rotation,
+                           sprite.pivot, i < sources.size() ? sources[i] : 0);
+            }
+            trace->clear_instance_sources();
+        }
+#endif
         _backend->draw_sprites(texture, sprites);
     }
 }
@@ -402,6 +439,7 @@ void Renderer2D::draw_sprite(const Sprite& sprite, Vec2f pos) {
 }
 
 void Renderer2D::fill_rect(Rectf rect, Color color) {
+    KIN_TRACE_DRAW(DrawKind::Fill, rect, color);
     _backend->fill_rect(rect, color);
 }
 
@@ -414,6 +452,7 @@ void Renderer2D::fill_rect(Vec2f pos, Vec2f size, u8 r, u8 g, u8 b, u8 a) {
 }
 
 void Renderer2D::draw_rect(Rectf rect, Color color) {
+    KIN_TRACE_DRAW(DrawKind::Outline, rect, color);
     _backend->draw_rect(rect, color);
 }
 
@@ -426,14 +465,17 @@ void Renderer2D::draw_rect(Vec2f pos, Vec2f size, u8 r, u8 g, u8 b, u8 a) {
 }
 
 void Renderer2D::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
+    KIN_TRACE_DRAW(DrawKind::Fill, rect, color);
     _backend->fill_rounded_rect(rect, radius, color);
 }
 
 void Renderer2D::draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width) {
+    KIN_TRACE_DRAW(DrawKind::Outline, rect, color);
     _backend->draw_rounded_rect(rect, radius, color, width);
 }
 
 void Renderer2D::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
+    KIN_TRACE_DRAW(DrawKind::Gradient, rect, mix(gradient.start, gradient.end, 0.5f));
     _backend->fill_gradient_rect(rect, gradient);
 }
 
@@ -443,6 +485,7 @@ ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params) {
     if (valid_params(params)) {
+        KIN_TRACE_DRAW(DrawKind::Shader, rect, colors::white);
         _backend->draw_shader_surface(rect, shader, params);
     }
 }
@@ -450,6 +493,7 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                                      const Texture& source) {
     if (valid_params(params)) {
+        KIN_TRACE_DRAW(DrawKind::Shader, rect, colors::white, &source);
         _backend->draw_shader_surface(rect, shader, params, source);
     }
 }
@@ -457,6 +501,7 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                                      const Texture& source0, const Texture& source1) {
     if (valid_params(params)) {
+        KIN_TRACE_DRAW(DrawKind::Shader, rect, colors::white, &source0);
         _backend->draw_shader_surface(rect, shader, params, source0, source1);
     }
 }
@@ -472,6 +517,7 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
                                    {.name = "max", .value = std::to_string(MaxShaderSamplers)}}));
         return;
     }
+    KIN_TRACE_DRAW(DrawKind::Shader, rect, colors::white, sources.empty() ? nullptr : &sources.front());
     _backend->draw_shader_surface(rect, shader, params, sources);
 }
 
@@ -539,6 +585,9 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
 }
 
 void Renderer2D::draw_line(Vec2f a, Vec2f b, Color color) {
+    KIN_TRACE_DRAW(DrawKind::Line,
+                   Rectf{std::min(a.x, b.x), std::min(a.y, b.y), std::abs(a.x - b.x) + 1.0f, std::abs(a.y - b.y) + 1.0f},
+                   color);
     _backend->draw_line(a, b, color);
 }
 
@@ -547,10 +596,16 @@ void Renderer2D::draw_line(Vec2f a, Vec2f b, u8 r, u8 g, u8 b_color, u8 a_color)
 }
 
 void Renderer2D::set_viewport(Rectf rect) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    _trace_viewport = rect;
+#endif
     _backend->set_viewport(rect);
 }
 
 void Renderer2D::reset_viewport() {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    _trace_viewport.reset();
+#endif
     _backend->reset_viewport();
 }
 
@@ -563,10 +618,20 @@ Renderer2D::NativeCoordinateGuard Renderer2D::scoped_native_coordinates() {
 }
 
 void Renderer2D::push_viewport(Rectf rect) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    _trace_viewports.push_back(_trace_viewport);
+    _trace_viewport = rect;
+#endif
     _backend->push_viewport(rect);
 }
 
 void Renderer2D::pop_viewport() {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    if (!_trace_viewports.empty()) {
+        _trace_viewport = _trace_viewports.back();
+        _trace_viewports.pop_back();
+    }
+#endif
     _backend->pop_viewport();
 }
 
@@ -583,10 +648,16 @@ RenderTarget Renderer2D::create_render_target(Vec2i size, ScaleMode mode) {
 }
 
 void Renderer2D::push_render_target(const RenderTarget& target) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    ++_trace_targets;
+#endif
     _backend->push_render_target(target);
 }
 
 void Renderer2D::pop_render_target() {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    _trace_targets = std::max(_trace_targets - 1, 0);
+#endif
     _backend->pop_render_target();
 }
 
@@ -702,5 +773,64 @@ PooledTarget& PooledTarget::operator=(PooledTarget&& other) noexcept {
     }
     return *this;
 }
+
+#ifdef KIN_ENABLE_RENDER_PROBE
+void Renderer2D::trace_draw(DrawKind kind, Rectf dest, Color color, const Texture* texture, Rectf region, f32 rotation,
+                            Vec2f pivot, u32 source) {
+    DrawTrace* trace = active_draw_trace();
+    if (!trace || _trace_targets > 0) {
+        return;
+    }
+    // The axis-aligned bounds of the quad turned about its pivot.
+    f32 x0 = dest.x;
+    f32 y0 = dest.y;
+    f32 x1 = dest.x + dest.w;
+    f32 y1 = dest.y + dest.h;
+    if (rotation != 0.0f) {
+        constexpr f32 pi = 3.14159265358979323846f;
+        const f32 c = std::cos(rotation * pi / 180.0f);
+        const f32 s = std::sin(rotation * pi / 180.0f);
+        const Vec2f center{dest.x + dest.w * pivot.x, dest.y + dest.h * pivot.y};
+        x0 = y0 = std::numeric_limits<f32>::max();
+        x1 = y1 = std::numeric_limits<f32>::lowest();
+        for (const Vec2f corner : {Vec2f{dest.x, dest.y}, Vec2f{dest.x + dest.w, dest.y}, Vec2f{dest.x, dest.y + dest.h},
+                                   Vec2f{dest.x + dest.w, dest.y + dest.h}}) {
+            const Vec2f d{corner.x - center.x, corner.y - center.y};
+            const Vec2f p{center.x + d.x * c - d.y * s, center.y + d.x * s + d.y * c};
+            x0 = std::min(x0, p.x);
+            y0 = std::min(y0, p.y);
+            x1 = std::max(x1, p.x);
+            y1 = std::max(y1, p.y);
+        }
+    }
+    if (_trace_native == 0) {
+        if (_trace_viewport) {
+            x0 += _trace_viewport->x;
+            x1 += _trace_viewport->x;
+            y0 += _trace_viewport->y;
+            y1 += _trace_viewport->y;
+        }
+        const Vec2f a = _backend->logical_to_window({x0, y0});
+        const Vec2f b = _backend->logical_to_window({x1, y1});
+        x0 = std::min(a.x, b.x);
+        y0 = std::min(a.y, b.y);
+        x1 = std::max(a.x, b.x);
+        y1 = std::max(a.y, b.y);
+    }
+    if (texture && region.w <= 0.0f && region.h <= 0.0f) {
+        const Vec2i size = texture->size();
+        region = {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+    }
+    trace->record({
+        .bounds = {x0, y0, x1 - x0, y1 - y0},
+        .region = region,
+        .texture = texture ? static_cast<u64>(reinterpret_cast<std::uintptr_t>(texture->backend().get())) : 0,
+        .color = color,
+        .rotation = rotation,
+        .source = source != 0 ? source : current_draw_source(),
+        .kind = kind,
+    });
+}
+#endif
 
 } // namespace kin

@@ -412,12 +412,25 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
 #ifdef KIN_ENABLE_RENDER_PROBE
     std::optional<RenderProbe> probe;
     std::vector<u8> probe_pixels;
+    // Records who draws what, so probe events can name their culprits.
+    DrawTrace draw_trace;
+    struct ActiveTraceReset {
+        bool armed = false;
+        ~ActiveTraceReset() {
+            if (armed) {
+                set_active_draw_trace(nullptr);
+            }
+        }
+    } active_trace_reset;
     if (probe_requested) {
         RenderProbeConfig probe_config;
         if (config.headless.probe_tile_size > 0) {
             probe_config.tile_size = config.headless.probe_tile_size;
         }
         probe.emplace(probe_config);
+        probe->set_draw_trace(&draw_trace);
+        set_active_draw_trace(&draw_trace);
+        active_trace_reset.armed = true;
     }
 #else
     if (probe_requested) {
@@ -605,6 +618,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         f64 present_ms = 0.0;
         if (!ctx.app.headless() || config.render_headless || config.headless.profile_render || config.headless.profile ||
             probe_requested) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+            draw_trace.begin_frame();
+#endif
             const auto render_start = std::chrono::steady_clock::now();
             scenes.render(scene_ctx);
             render_scene_ms = ms_since(render_start);
@@ -618,7 +634,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                 const Vec2f b = ctx.renderer.window_to_logical({static_cast<f32>(output.x), static_cast<f32>(output.y)});
                 Vec2i size;
                 if (ctx.renderer.read_rgba({a.x, a.y, b.x - a.x, b.y - a.y}, probe_pixels, size)) {
-                    probe->add_frame(probe_pixels, size);
+                    probe->add_frame(probe_pixels, size, draw_trace.draws());
                 }
             }
 #endif

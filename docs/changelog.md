@@ -16,6 +16,11 @@ releases may change APIs.
   fails the run when it finds anything; `--probe-tile=N` sets the tile size.
   `kin::RenderProbe` runs the same analysis on frames from anywhere. The
   `KIN_ENABLE_RENDER_PROBE` CMake option (on by default) compiles it out.
+- Render probe events name their culprits: the entities and render components
+  (or named scopes, or scenes) whose draws changed where the event happened,
+  and how (`moved`, `frame`, `color`, `appeared`, ...). `KIN_DRAW_SCOPE(label)`
+  and `KIN_DRAW_ENTITY(entity, component)` name draws made outside the ECS
+  render components.
 
 ## [0.2.3] — 2026-10-01
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/renderer/draw_trace.hpp>
 
 #include <span>
 #include <string_view>
@@ -54,6 +55,30 @@ struct RenderProbeRect {
     friend constexpr bool operator==(RenderProbeRect, RenderProbeRect) = default;
 };
 
+// How a draw changed between frames (bits of RenderProbeCulprit::changes).
+namespace render_probe_change {
+constexpr u8 moved = 1u << 0;
+constexpr u8 resized = 1u << 1;
+constexpr u8 frame = 1u << 2;   // a different region of its texture (an animation frame)
+constexpr u8 color = 1u << 3;
+constexpr u8 texture = 1u << 4;
+constexpr u8 rotated = 1u << 5;
+constexpr u8 appeared = 1u << 6;
+constexpr u8 disappeared = 1u << 7;
+} // namespace render_probe_change
+
+// A draw source (an entity's render component, or a named scope; see
+// draw_trace.hpp) whose own draws changed where an event happened, the way the
+// event needs: for flicker, a change that came back (A-B-A), or a draw shown or
+// hidden for a single frame; for a spike, any change.
+struct RenderProbeCulprit {
+    u32 source = 0;      // DrawTrace source id; 0: draws nothing claimed
+    i32 frames = 0;      // frames of the event it was found in
+    u8 changes = 0;      // render_probe_change bits
+    f32 score = 0.0f;    // highest per-frame evidence (pixels moved, roughly)
+    f32 max_move = 0.0f; // largest move of one of its draws, in pixels
+};
+
 // A run of consecutive frames with the same kind of anomaly in overlapping
 // places: one jittering sprite is one event, not one per frame.
 struct RenderProbeEvent {
@@ -65,6 +90,9 @@ struct RenderProbeEvent {
     i32 peak_frame = 0;
     f32 peak_delta = 0.0f;   // largest mean tile change seen, 0-1
     f32 peak_score = 0.0f;   // spike: deviations over baseline; flicker: ratio
+    // Who drew it, most likely first (at most RenderProbe::max_culprits). Empty
+    // when frames came without draws, or when no traced draw explains the change.
+    std::vector<RenderProbeCulprit> culprits;
 };
 
 // Per-frame change statistics, relative to the previous frame. Frame 1 has none.
@@ -84,9 +112,16 @@ public:
 
     const RenderProbeConfig& config() const { return _config; }
 
+    static constexpr std::size_t max_culprits = 5;
+
     // Adds the next frame: tightly packed RGBA8, `size.x * size.y` pixels. Alpha
     // is ignored. A frame of a different size starts the comparison over.
-    void add_frame(std::span<const u8> rgba, Vec2i size);
+    // `draws` are the frame's traced draws (DrawTrace::draws()), in the same
+    // pixels; with them, events name the culprits.
+    void add_frame(std::span<const u8> rgba, Vec2i size, std::span<const DrawRecord> draws = {});
+    // Where culprits' names come from when writing the report (optional; must
+    // outlive write_json).
+    void set_draw_trace(const DrawTrace* trace) { _trace = trace; }
 
     i32 frame_count() const { return static_cast<i32>(_timeline.size()); }
     Vec2i frame_size() const { return _size; }
@@ -116,14 +151,22 @@ private:
                         const std::vector<u8>& flagged,
                         const std::vector<f32>& delta,
                         const std::vector<f32>& score);
-    void record(RenderProbeEventKind kind, i32 frame, RenderProbeRect rect, f32 delta, f32 score);
+    void record(RenderProbeEventKind kind, i32 frame, RenderProbeRect rect, f32 delta, f32 score,
+                std::vector<RenderProbeCulprit> culprits);
+    // The sources whose draws near `rect` changed the way `kind` needs, between
+    // the frames the event was found in.
+    std::vector<RenderProbeCulprit> attribute(RenderProbeEventKind kind, RenderProbeRect rect) const;
+    void write_culprit(JsonWriter& json, const RenderProbeCulprit& culprit) const;
 
     RenderProbeConfig _config;
     Vec2i _size{};
     Vec2i _tiles{};
     i32 _frames_since_reset = 0;
-    // The last three frames, newest first.
+    // The last three frames and their draws, newest first.
     std::vector<u8> _frame[3];
+    std::vector<DrawRecord> _draws[3];
+    bool _traced = false; // some frame came with draws
+    const DrawTrace* _trace = nullptr;
     std::vector<TileDelta> _d1;      // newest vs previous
     std::vector<TileDelta> _d2;      // newest vs the one before the previous
     std::vector<TileDelta> _prev_d1; // previous vs the one before it

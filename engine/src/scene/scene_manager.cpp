@@ -1,5 +1,7 @@
 #include <kin/scene/scene_manager.hpp>
 
+#include <kin/renderer/draw_trace.hpp>
+
 namespace kin {
 namespace {
 
@@ -66,6 +68,8 @@ void SceneManager::render(SceneContext& ctx) {
     const i32 top_index = static_cast<i32>(_stack.size()) - 1;
     for (i32 i = start; i <= top_index; ++i) {
         ctx.is_top = (i == top_index);
+        // Draws nothing more specific claims belong to the scene (render probe).
+        KIN_DRAW_SCOPE(_stack[static_cast<std::size_t>(i)]->name());
         _stack[static_cast<std::size_t>(i)]->render(ctx);
     }
 }

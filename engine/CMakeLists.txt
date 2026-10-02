@@ -127,7 +127,7 @@ target_include_directories(kin_engine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 if(KIN_ENABLE_RENDER_PROBE)
-    target_sources(kin_engine PRIVATE src/runtime/render_probe.cpp)
+    target_sources(kin_engine PRIVATE src/renderer/draw_trace.cpp src/runtime/render_probe.cpp)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_RENDER_PROBE)
 endif()
 
