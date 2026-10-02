@@ -94,8 +94,19 @@ bool Process::start(const ProcessOptions& options) {
     } else {
         SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_INHERITED);
     }
+    SDL_Environment* environment = nullptr;
+    if (!options.environment.empty()) {
+        environment = SDL_CreateEnvironment(true);
+        for (const auto& [name, value] : options.environment) {
+            SDL_SetEnvironmentVariable(environment, name.c_str(), value.c_str(), true);
+        }
+        SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ENVIRONMENT_POINTER, environment);
+    }
     _process = SDL_CreateProcessWithProperties(props);
     SDL_DestroyProperties(props);
+    if (environment) {
+        SDL_DestroyEnvironment(environment);
+    }
     if (!_process) {
         _error = std::string("could not start ") + options.args.front() + ": " + SDL_GetError();
         return false;

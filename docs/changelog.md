@@ -21,6 +21,15 @@ releases may change APIs.
   and how (`moved`, `frame`, `color`, `appeared`, ...). `KIN_DRAW_SCOPE(label)`
   and `KIN_DRAW_ENTITY(entity, component)` name draws made outside the ECS
   render components.
+- Determinism check: `--check-determinism[=PATH]` on any `run_scene_app` game
+  runs it three times in lockstep (twice alike, once with one job worker),
+  hashing each frame's state, and reports the first frame where a run differs
+  with the entities, components and report fields that differ
+  (`kin.determinism/1`). `kin::hash_state` / `kin::describe_state` hash and list
+  a scene stack's state. The `KIN_ENABLE_DETERMINISM_CHECK` CMake option (on by
+  default) compiles it out.
+- `KIN_JOB_WORKERS` sets the default job system's worker count.
+- `ProcessOptions::environment` sets variables for a child process.
 
 ## [0.2.3] — 2026-10-01
 

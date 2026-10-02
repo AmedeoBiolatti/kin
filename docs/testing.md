@@ -151,6 +151,7 @@ of headless flags parsed by `parse_headless_options`:
 | `--probe-render[=PATH]` | Check every rendered frame for spikes and flicker; write a JSON report to PATH (`-` or no PATH for stdout). Forces headless. See [Render probe](#render-probe). |
 | `--probe-fail` | Fail the run (exit code `1`) when the render probe finds anything. Forces headless. |
 | `--probe-tile=N` | Render probe tile size in pixels (default 16). |
+| `--check-determinism[=PATH]` | Run the game three times in lockstep and report where their states differ, as JSON to PATH (`-` or no PATH for stdout). See [Determinism check](#determinism-check). |
 | `--list-actions` | Print available input actions and bindings, then quit. |
 | `--game-info` / `--list-info` | Print game metadata, then quit. |
 | `--profile-render` | Run 600 frames and print a render timing table. |
@@ -195,6 +196,90 @@ void write_report(kin::JsonWriter& json) const override {
 
 This is the headless test surface: drive the game for N frames with a fixed seed,
 then assert on the exit code and the JSON state.
+
+## Determinism check
+
+`--check-determinism` checks the promise above: that the same seed and frame
+count always play out the same way. Instead of playing, the game runs itself
+three times as headless child processes, in lockstep:
+
+- **baseline**;
+- **repeat**, the same again: catches anything that differs between two runs of
+  one build, such as uninitialized memory, clocks, or behavior that depends on
+  addresses (pointer-keyed maps, sorting by pointer);
+- **one worker**, with `KIN_JOB_WORKERS=1`: catches anything that depends on
+  how work is split between threads, such as races and order-dependent
+  parallel systems.
+
+```sh
+./build/bin/ecs_graph_demo --check-determinism --frames=300 --seed=7
+./build/bin/ecs_graph_demo --check-determinism=out/determinism.json --frames=600
+```
+
+After every update each run hashes its state, and the runs are compared frame
+by frame. At the first frame where a run differs from the baseline, both are
+asked for their state item by item, and the report names what differs. The
+exit code is `1` if any run differs.
+
+```json
+{
+  "schema": "kin.determinism/1",
+  "status": "diverged",
+  "frames": 300, "seed": 7,
+  "coverage": { "scenes": 1, "entities": 45, "values": 113, "not_compared": ["(Identifier,Name)", "Label"] },
+  "runs": [
+    { "name": "repeat", "environment": {}, "status": "ok", "frames": 300 },
+    { "name": "one worker", "environment": { "KIN_JOB_WORKERS": "1" }, "status": "diverged",
+      "frames": 37, "first_frame": 37, "total_differences": 2,
+      "differences": [
+        { "scene": "Play", "entity": 571, "name": "box_3", "component": "Velocity", "change": "value",
+          "baseline": { "hex": "0000a0c20000f042", "as_f32": [-80, 120] },
+          "run":      { "hex": "0000a0420000f042", "as_f32": [80, 120] } },
+        { "scene": "Play", "component": "(report)", "change": "value",
+          "fields": [ { "path": ".bounces", "baseline": 12, "run": 11 } ] }
+      ] }
+  ]
+}
+```
+
+What is compared, per scene on the stack:
+
+- the scene's `write_report` state (differences are listed by field path);
+- if the scene exposes an ECS world (`Scene::world()`), every entity: its set of
+  components, tags and pairs (`"(type)"`), and the bytes of each plain-data
+  component (trivially copyable). `as_f32` shows the same bytes read as floats,
+  since most game data is.
+
+What is not:
+
+- components that own resources (strings, containers, texture handles): their
+  bytes hold addresses that differ between processes. They're listed in
+  `coverage.not_compared`. Move state that matters out of them, or into
+  `write_report`;
+- the ECS's own bookkeeping (component and type definitions, systems, queries,
+  observers, the flecs namespace);
+- state a scene keeps in its own members, unless its `write_report` includes it.
+  A game without an ECS world is checked through its reports alone; `coverage`
+  says how much was seen.
+
+Things to know:
+
+- Reports must be deterministic too: a report that includes timings (such as
+  a system's `last_duration_ms`) differs on every run and fails the check.
+- A plain-data component whose padding bytes are left uninitialized, or that
+  holds a raw pointer, can show up as a difference that isn't one. Fields
+  initialized in the struct, or `T{}`, keep padding stable.
+- Frames are numbered like the run's: on frame 1 the first scene is pushed, so
+  its first update happens on frame 2.
+- The cost is three headless runs plus hashing each frame's state, which is
+  linear in entities. The children inherit the game's other options (seed,
+  logging); options that make it do something else (`--report`, `--profile*`,
+  `--probe-*`, `--server`) are dropped.
+- `KIN_JOB_WORKERS=N` sets the default job system's worker count in any run.
+- Builds configured with `-DKIN_ENABLE_DETERMINISM_CHECK=OFF` leave the check out.
+
+`kin::hash_state` and `kin::describe_state` (`kin/runtime/state_hash.hpp`) are
+the state hashing on its own, for tests that compare states directly.
 
 ## Render probe
 

@@ -48,6 +48,8 @@ option(KIN_ENABLE_RELEASE_PROFILING "Enable Kin manual profiling macros in Relea
 # The headless render probe (--probe-render). Turn it off in shipping builds to
 # compile it out entirely.
 option(KIN_ENABLE_RENDER_PROBE "Build the headless render probe (--probe-render)" ON)
+# The determinism check (--check-determinism). Off in shipping builds.
+option(KIN_ENABLE_DETERMINISM_CHECK "Build the determinism check (--check-determinism)" ON)
 
 add_subdirectory(engine)
 

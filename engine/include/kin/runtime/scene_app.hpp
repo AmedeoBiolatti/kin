@@ -52,6 +52,18 @@ struct HeadlessOptions {
     std::string probe_render_path;
     bool probe_fail = false;
     i32 probe_tile_size = 0;
+    // Determinism check (--check-determinism[=PATH]): instead of playing, run the
+    // game three times in lockstep (twice alike, once with one job worker) and
+    // report the first frame and the entities and components where their states
+    // differ, as kin.determinism/1 JSON to PATH ("-" or no PATH: stdout). Needs a
+    // build with KIN_ENABLE_DETERMINISM_CHECK.
+    bool check_determinism = false;
+    std::string determinism_path;
+    // --state-lockstep: the runs the check starts. After each update, print the
+    // state's hash and wait for a command on standard input.
+    bool state_lockstep = false;
+    // The command line as given, program first (the check runs it again).
+    std::vector<std::string> args;
 };
 
 struct SceneAppConfig {
@@ -68,6 +80,9 @@ struct SceneAppConfig {
     // When set, the render probe runs and its report is written here instead of
     // to headless.probe_render_path. Mainly for tests.
     std::ostream* probe_output = nullptr;
+    // When set, the determinism check's report is written here instead of to
+    // headless.determinism_path. Mainly for tests.
+    std::ostream* determinism_output = nullptr;
     bool render_headless = false;
     // Optional factory enabling sim.reset in server mode: repopulates the scene
     // stack for a fresh episode. The same factory should produce the initial

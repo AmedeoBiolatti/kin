@@ -22,6 +22,9 @@
 #endif
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_server.hpp>
+#ifdef KIN_ENABLE_DETERMINISM_CHECK
+#include <kin/runtime/state_hash.hpp>
+#endif
 
 #include "runtime_internal.hpp"
 #include <string_view>
@@ -114,6 +117,7 @@ void configure_runtime_logging(const HeadlessOptions& options) {
 HeadlessOptions parse_headless_options(int argc, char** argv) {
     HeadlessOptions options;
     bool invalid_log_option = false;
+    options.args.assign(argv, argv + argc);
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -197,6 +201,14 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
                 options.enabled = true;
                 options.probe_tile_size = tile;
             }
+        } else if (arg == "--check-determinism") {
+            options.check_determinism = true;
+        } else if (arg.starts_with("--check-determinism=")) {
+            options.check_determinism = true;
+            options.determinism_path = arg.substr(20);
+        } else if (arg == "--state-lockstep") {
+            options.enabled = true;
+            options.state_lockstep = true;
         } else if (arg == "--server") {
             options.server = true;
         } else if (arg.starts_with("--server-mode=")) {
@@ -343,6 +355,15 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                        {.name = "seed", .value = std::to_string(config.headless.seed)},
                    }));
 
+    if (config.headless.check_determinism && !config.headless.state_lockstep) {
+#ifdef KIN_ENABLE_DETERMINISM_CHECK
+        return runtime_detail::run_determinism_check(config);
+#else
+        KIN_LOG_ERROR("runtime", "determinism check requested, but this build has KIN_ENABLE_DETERMINISM_CHECK off");
+        return 1;
+#endif
+    }
+
     if (config.headless.server) {
         ServerConfig server{
             .window = config.window,
@@ -437,6 +458,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         KIN_LOG_WARN("runtime", "render probe requested, but this build has KIN_ENABLE_RENDER_PROBE off");
     }
 #endif
+#ifdef KIN_ENABLE_DETERMINISM_CHECK
+    StateCoverage lockstep_coverage;
+#endif
     const RngKey root_key = make_key(config.headless.seed);
     const bool want_report = config.report_output != nullptr || !config.headless.report_path.empty();
     std::string report_snapshot;
@@ -462,6 +486,11 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     // stack before run_windowed_app destroys its backend.
     const auto user_shutdown = window.shutdown;
     window.shutdown = [&, user_shutdown](FrameContext& frame) {
+#ifdef KIN_ENABLE_DETERMINISM_CHECK
+        if (config.headless.state_lockstep) {
+            runtime_detail::state_lockstep_finish(lockstep_coverage);
+        }
+#endif
 #ifdef KIN_ENABLE_RENDER_PROBE
         if (probe && config.headless.probe_fail && !probe->events().empty()) {
             const RenderProbeEvent& first = probe->events().front();
@@ -586,6 +615,11 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         ++frame_update_steps;
         debug_overlay.record("update", update_ms);
         record_profile("update", "runtime", update_start);
+#ifdef KIN_ENABLE_DETERMINISM_CHECK
+        if (config.headless.state_lockstep && !runtime_detail::state_lockstep_step(scenes, frames_run, lockstep_coverage)) {
+            ctx.app.quit();
+        }
+#endif
 
         if (run_report.failed) {
             KIN_LOG_ERROR_F("runtime",
