@@ -1401,6 +1401,82 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// write_texture: the fill writes the texels where they go (the upload memory
+// on SDL_GPU), and may not use the renderer meanwhile.
+void check_write_texture(kin::Renderer2D& renderer) {
+    kin::Texture texture = renderer.create_texture_from_rgba(std::vector<kin::u8>(16u * 16u * 4u, 0).data(), {16, 16});
+    const bool written = renderer.write_texture(texture, {4, 0}, {12, 16}, [](std::span<kin::u8> texels) {
+        assert(texels.size() == 12u * 16u * 4u);
+        for (std::size_t i = 0; i < texels.size(); i += 4) {
+            texels[i] = 255;
+            texels[i + 1] = static_cast<kin::u8>(i / 4 % 12 * 20);
+            texels[i + 2] = 0;
+            texels[i + 3] = 255;
+        }
+    });
+    if (!written) {
+        return; // a backend that cannot update textures
+    }
+    kin::RenderTarget target = renderer.create_render_target({16, 16}, kin::ScaleMode::Nearest);
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(0, 0, 255));
+        renderer.draw_texture(texture, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+        assert(renderer.read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+    }
+    assert(pixel_near(px, size, 2, 8, kin::Color::rgba(0, 0, 0, 0), 2) ||
+           pixel_near(px, size, 2, 8, kin::Color::rgb(0, 0, 255), 2)); // left untouched: transparent
+    assert(pixel_near(px, size, 4, 8, kin::Color::rgb(255, 0, 0), 2));
+    assert(pixel_near(px, size, 9, 8, kin::Color::rgb(255, 100, 0), 2));
+    // Outside the texture: refused.
+    assert(!renderer.write_texture(texture, {8, 8}, {9, 1}, [](std::span<kin::u8>) {}));
+}
+
+void test_write_texture_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "write-texture-test", .width = 16, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    check_write_texture(renderer);
+}
+
+void test_gpu_write_texture() {
+    constexpr std::string_view test_name = "test_gpu_write_texture";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-write-texture-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        check_write_texture(*renderer);
+        // A fill that uploads would deadlock: it is refused.
+        kin::Texture texture = renderer->create_texture_from_rgba(std::vector<kin::u8>(4u * 4u * 4u, 0).data(), {4, 4});
+        bool refused = false;
+        try {
+            renderer->write_texture(texture, {0, 0}, {4, 4}, [&](std::span<kin::u8> texels) {
+                std::fill(texels.begin(), texels.end(), kin::u8{0});
+                const std::array<kin::u8, 4> red{255, 0, 0, 255};
+                renderer->create_texture_from_rgba(red.data(), {1, 1});
+            });
+        } catch (const std::logic_error&) {
+            refused = true;
+        }
+        assert(refused);
+        renderer->present(); // and the renderer still works
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Uploads past the shared staging buffer's size (it grows), copied on workers
 // when a job system is set, land where they should.
 void test_gpu_big_uploads() {
@@ -2024,6 +2100,8 @@ int main() {
     test_gpu_uploads_batch_in_order();
     test_gpu_scopes();
     test_gpu_big_uploads();
+    test_write_texture_on_software_backend();
+    test_gpu_write_texture();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

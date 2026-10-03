@@ -699,15 +699,30 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
     if (!backend || !backend->texture()) {
         return false;
     }
+    _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
+                           static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
+                           texture_format_bytes(backend->format()), may_cycle(*backend, at, size));
+    return true;
+}
+
+bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t /*bytes*/,
+                                         const std::function<void(std::span<u8>)>& fill) {
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend || !backend->texture()) {
+        return false;
+    }
+    _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
+                          static_cast<u32>(size.x), static_cast<u32>(size.y), texture_format_bytes(backend->format()),
+                          may_cycle(*backend, at, size), fill);
+    return true;
+}
+
+bool GpuRenderer2DBackend::may_cycle(const gpu::GpuTextureBackend& texture, Vec2i at, Vec2i size) const {
     // Replacing the whole texture lets its storage be cycled, so the upload does
     // not wait for earlier frames still reading it. Not when this frame already
     // draws it: its queued draws bind the texture only when flushed, and must see
     // the update as they would without cycling.
-    const bool whole = at == Vec2i{0, 0} && size == backend->size() && backend->used_in_frame() != _frame_serial;
-    _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
-                           static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
-                           texture_format_bytes(backend->format()), whole);
-    return true;
+    return at == Vec2i{0, 0} && size == texture.size() && texture.used_in_frame() != _frame_serial;
 }
 
 void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf dest) {

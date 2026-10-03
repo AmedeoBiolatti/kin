@@ -254,7 +254,24 @@ to the whole frame. Replacing a whole texture that the frame hasn't drawn yet
 cycles its storage, so the upload doesn't wait for earlier frames still reading
 it. Texels are copied with streaming stores (the staging memory is uncached),
 and with `Renderer2D::set_job_system()` uploads of 1 MB or more are copied on
-the workers too. `backend_stats().texture_uploads` and `texture_upload_submits`
+the workers too. Released textures are kept a few seconds (up to 256 MB) and
+reused by `create_texture()` for one of the same size and format, skipping the
+driver's create and destroy.
+
+Texels made each frame can skip the copy altogether: `write_texture()` hands
+its callback the upload memory itself to write them into.
+
+```cpp
+renderer.write_texture(shadow_data, {0, 0}, {1024, rows}, [&](std::span<kin::u8> texels) {
+    auto* out = reinterpret_cast<float*>(texels.data());
+    for (const Caster& c : casters) {   // in order, once: the memory is uncached
+        *out++ = c.height;
+    }
+});
+```
+
+The callback must not use the renderer. On other backends it writes a buffer
+that is then uploaded as by `update_texture()`. `backend_stats().texture_uploads` and `texture_upload_submits`
 count them; `kin_upload_bench [frames] [workers] [big]` measures them.
 
 CPU time per frame on an RTX 4080 Laptop GPU (kin 0.2.3, which submitted each
@@ -263,8 +280,8 @@ present):
 
 | Uploads a frame | No job system | 3 workers |
 | --- | --- | --- |
-| 150 of 256 KB | 3.1 ms | 3.1 ms |
-| 12 of 8-16 MB | 11.4 ms | 4.9 ms |
+| 50 created and 50 replaced (256 KB each), 50 half updated | 2.1 ms | 2.1 ms |
+| 4 created and 4 replaced (16 MB each), 4 half updated | 11.4 ms | 4.6 ms |
 They need `capabilities().data_textures` (the SDL_GPU backend), are only for
 shaders (`draw_texture()` refuses them), and every slot that expects one must be
 given one, since an empty slot is bound to the white `Rgba8` texture.

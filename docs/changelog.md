@@ -9,6 +9,9 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::write_texture(texture, at, size, fill)`: `fill` writes the
+  texels straight into the upload memory on SDL_GPU, skipping the copy
+  `update_texture` makes, for texels made each frame.
 - `Renderer2D::gpu_scope("name")`: the GPU time of a part of a frame, reported
   as `gpu.<name>` by `--profile` and the debug overlay (and by
   `take_gpu_scope_timings()`). Measured with fences on each side, splitting the
@@ -37,8 +40,10 @@ releases may change APIs.
   the frame, from a shared staging buffer that grows to fit big uploads and
   shrinks back. Texels are copied with streaming stores, and on the renderer's
   job system for uploads of 1 MB or more. Replacing a whole texture the frame
-  hasn't drawn yet cycles its storage. 150 uploads of 256 KB in a frame went
-  from about 25 ms of calls plus a 70 ms stall at present to 3.1 ms.
+  hasn't drawn yet cycles its storage. Released textures are pooled (a few
+  seconds, up to 256 MB) for `create_texture` to reuse. 150 uploads of 256 KB
+  in a frame went from about 25 ms of calls plus a 70 ms stall at present to
+  2.1 ms.
   `RendererBackendStats::texture_uploads` and `texture_upload_submits` count
   them; `kin_upload_bench` measures them.
 - `--profile` (and `--profile-json`, `--profile-text`, `--profile-lines`) no

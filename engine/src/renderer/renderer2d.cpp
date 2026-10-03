@@ -319,6 +319,25 @@ bool Renderer2D::update_texture(const Texture& texture, Vec2i at, Vec2i size, co
     }
 }
 
+bool Renderer2D::write_texture(const Texture& texture, Vec2i at, Vec2i size,
+                               const std::function<void(std::span<u8>)>& fill) {
+    const Vec2i whole = texture.size();
+    if (!texture.valid() || !fill || size.x <= 0 || size.y <= 0 || at.x < 0 || at.y < 0 || at.x + size.x > whole.x ||
+        at.y + size.y > whole.y) {
+        return false;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) *
+                              texture_format_bytes(texture.format());
+    try {
+        return _backend->write_texture(texture, at, size, bytes, fill);
+    } catch (const std::logic_error&) {
+        throw; // a misused fill
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "texture write failed", (LogFields{{.name = "error", .value = std::string{error.what()}}}));
+        return false;
+    }
+}
+
 Texture Renderer2D::create_texture(Vec2i size, TextureFormat format, const void* pixels) {
     if (size.x <= 0 || size.y <= 0) {
         return {};

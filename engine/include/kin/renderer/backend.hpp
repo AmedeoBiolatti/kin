@@ -10,6 +10,8 @@
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
+#include <functional>
+#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
@@ -164,6 +166,15 @@ public:
     // texture in place: the caller then makes a new one. Default: false.
     virtual bool update_texture(const Texture& /*texture*/, Vec2i /*at*/, Vec2i /*size*/, const u8* /*pixels*/) {
         return false;
+    }
+    // As update_texture, with `fill` writing the texels (`bytes` of them). The
+    // default fills a buffer and calls update_texture; SDL_GPU lets it write
+    // straight into the upload memory.
+    virtual bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,
+                               const std::function<void(std::span<u8>)>& fill) {
+        std::vector<u8> texels(bytes);
+        fill(texels);
+        return update_texture(texture, at, size, texels.data());
     }
     virtual void draw_texture(const Texture& texture, Rectf dest) = 0;
     virtual void draw_texture(const Texture& texture, Rectf source, Rectf dest) = 0;
