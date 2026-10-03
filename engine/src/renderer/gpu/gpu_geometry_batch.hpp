@@ -13,6 +13,8 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
+#include <array>
 #include <span>
 #include <vector>
 
@@ -106,6 +108,29 @@ public:
                     u32 uniform_size = 0,
                     SDL_GPUSampler* sampler = nullptr,
                     std::span<const SDL_GPUTextureSamplerBinding> extra = {});
+
+    // One quad with the default fragment shader and no uniforms: the common
+    // case, appended straight to the last range when its state matches.
+    void push_quad(const std::array<GpuVertex, 4>& corners, SDL_GPUTexture* texture, SDL_Rect scissor,
+                   GpuBlendMode blend, SDL_GPUSampler* sampler) {
+        if (!_ranges.empty()) {
+            const Range& last = _ranges.back();
+            if (last.quads && last.texture == texture && last.sampler == sampler && last.blend == blend &&
+                last.fragment == nullptr && last.uniform_size == 0 && last.extra_count == 0 &&
+                last.layout == GpuVertexLayout::Triangles && last.scissor.x == scissor.x &&
+                last.scissor.y == scissor.y && last.scissor.w == scissor.w && last.scissor.h == scissor.h) {
+                if (_vertices.capacity() - _vertices.size() < 4) {
+                    _vertices.reserve(std::max<std::size_t>(_vertices.capacity() * 2, 4096));
+                }
+                for (const GpuVertex& v : corners) {
+                    _vertices.push_back(v); // in reserved room: plain stores
+                }
+                _ranges.back().vertex_count += 4;
+                return;
+            }
+        }
+        push_quads(corners, nullptr, texture, scissor, blend, nullptr, 0, sampler);
+    }
 
     // As push(), with GpuShaderVertex triangles (draw_shader_geometry), drawn by
     // shader_geometry.vert.

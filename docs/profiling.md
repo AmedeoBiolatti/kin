@@ -92,6 +92,18 @@ GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
 or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`
 turns it on. `KIN_LOG_FRAME_STATS` logs `gpu_wait_ms` and `gpu_frame_ms` too.
 
+## Renderer Benchmarks
+
+With `KIN_BUILD_BENCHMARKS`, two programs time the SDL_GPU backend directly:
+
+- `kin_draw_bench [frames] [quads]`: a frame of `draw_texture` calls, of
+  `fill_rect` calls and one `draw_sprites` batch (min and median CPU time to
+  record them, present, GPU time), and a shader's first use. On an RTX 4080
+  Laptop GPU, 20,000 quads cost about 1.0 ms as `draw_texture` calls, 0.65 ms
+  as `fill_rect` calls and 0.19 ms as one `draw_sprites` batch: many sprites of
+  one texture are much cheaper batched (`RenderQueue` does so by itself).
+- `kin_upload_bench [frames] [workers] [big]`: texture creation and updates.
+
 ## Benchmark Profiles
 
 List benchmark cases:
