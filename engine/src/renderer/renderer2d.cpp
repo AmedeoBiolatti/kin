@@ -611,6 +611,35 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     _backend->draw_shader_surface(rect, shader, params, sources, buffers);
 }
 
+void Renderer2D::draw_shader_surface_scaled(f32 resolution, Rectf rect, ShaderHandle shader,
+                                            const ShaderParams& params, std::span<const Texture> sources,
+                                            std::span<const DataBuffer> buffers) {
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return;
+    }
+    if (!(resolution > 0.0f && resolution < 1.0f) || !capabilities().render_targets) {
+        draw_shader_surface(rect, shader, params, sources, buffers);
+        return;
+    }
+    const Vec2i size{std::max(1, static_cast<i32>(std::ceil(rect.w * resolution))),
+                     std::max(1, static_cast<i32>(std::ceil(rect.h * resolution)))};
+    PooledTarget small = acquire_render_target(size, ScaleMode::Linear);
+    if (!small) {
+        draw_shader_surface(rect, shader, params, sources, buffers);
+        return;
+    }
+    {
+        // Straight alpha over transparent leaves premultiplied colour, which is
+        // what a render target holds and how it is drawn back.
+        const auto bind = scoped_render_target(small.target());
+        const auto blend = scoped_blend_mode(BlendMode::Alpha);
+        clear(Color::rgba(0, 0, 0, 0));
+        draw_shader_surface(Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)}, shader, params,
+                            sources, buffers);
+    }
+    draw_texture(small.texture(), rect);
+}
+
 namespace {
 // A range of a data buffer that lies inside it.
 bool within(const DataBuffer& buffer, std::size_t offset, std::size_t bytes) {

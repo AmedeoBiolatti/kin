@@ -1808,6 +1808,59 @@ void test_gpu_data_buffers() {
     }
 }
 
+// A smooth effect drawn at half resolution and stretched back looks the same
+// as drawn at full resolution; at 1 it is the plain draw.
+void test_gpu_shader_surface_scaled() {
+    constexpr std::string_view test_name = "test_gpu_shader_surface_scaled";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "bench_heavy.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-scaled-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const std::vector<kin::u8> code = read_spirv(spv);
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        const kin::ShaderHandle shader = renderer->create_shader(desc);
+        kin::RenderTarget target = renderer->create_render_target({64, 64}, kin::ScaleMode::Nearest);
+        const auto draw = [&](float resolution) {
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface_scaled(resolution, {0.0f, 0.0f, 64.0f, 64.0f}, shader, {});
+            assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+            return px;
+        };
+        const std::vector<kin::u8> full = draw(1.0f);
+        const std::vector<kin::u8> half = draw(0.5f);
+        double error = 0.0;
+        for (std::size_t i = 0; i < full.size(); ++i) {
+            error += std::abs(static_cast<int>(full[i]) - static_cast<int>(half[i]));
+        }
+        error /= static_cast<double>(full.size());
+        if (error > 3.0) {
+            throw std::runtime_error(std::string(test_name) + ": half resolution strays " + std::to_string(error));
+        }
+        assert(full != std::vector<kin::u8>(full.size(), 0)); // something was drawn
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2350,6 +2403,7 @@ int main() {
     test_gpu_uploads_batch_in_order();
     test_gpu_pipeline_record();
     test_gpu_data_buffers();
+    test_gpu_shader_surface_scaled();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

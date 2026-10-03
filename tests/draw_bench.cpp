@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -116,6 +117,66 @@ int data_reads(kin::Window& window, int frames) {
     return 0;
 }
 
+// A costly full-screen effect at 1, 0.5 and 0.25 resolution: GPU time, and how
+// far the picture strays from the full-resolution one (mean per channel, 0-255).
+int scaled_effect(kin::Window& window, int frames) {
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    std::ifstream file(std::filesystem::path{KIN_TEST_SHADER_DIR} / "bench_heavy.frag.spv", std::ios::binary);
+    const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    kin::ShaderDesc desc{};
+    desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+    const kin::ShaderHandle shader = renderer->create_shader(desc);
+    const kin::Rectf screen{0.0f, 0.0f, 1280.0f, 720.0f};
+    std::vector<kin::u8> reference;
+    for (const float resolution : {1.0f, 0.5f, 0.25f}) {
+        std::vector<double> gpu, frame_gpu;
+        for (int f = 0; f < frames; ++f) {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            {
+                const auto scope = renderer->gpu_scope("effect");
+                renderer->draw_shader_surface_scaled(resolution, screen, shader, {});
+            }
+            renderer->present();
+            // Wait for the GPU each frame: ahead of it, the timer fills and
+            // frames go untimed, and leftovers of the last mode would count.
+            std::vector<kin::u8> one;
+            kin::Vec2i one_size{};
+            renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+            const std::vector<kin::GpuScopeTiming> timings = renderer->take_gpu_scope_timings();
+            if (f >= 5) {
+                for (const kin::GpuScopeTiming& t : timings) {
+                    gpu.push_back(t.ms);
+                }
+                frame_gpu.push_back(renderer->backend_stats().last_gpu_frame_ms);
+            }
+        }
+        kin::RenderTarget target = renderer->create_render_target({1280, 720}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> pixels;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface_scaled(resolution, screen, shader, {});
+            renderer->read_rgba(screen, pixels, size);
+        }
+        if (reference.empty()) {
+            reference = pixels;
+        }
+        double error = 0.0;
+        for (std::size_t i = 0; i < pixels.size(); ++i) {
+            error += std::abs(static_cast<int>(pixels[i]) - static_cast<int>(reference[i]));
+        }
+        std::sort(gpu.begin(), gpu.end());
+        std::sort(frame_gpu.begin(), frame_gpu.end());
+        std::printf("effect at %.2f resolution: GPU scope median %.3f ms, GPU frame median %.3f ms, mean error %.2f / 255\n",
+                    resolution, gpu.empty() ? 0.0 : gpu[gpu.size() / 2], frame_gpu[frame_gpu.size() / 2],
+                    error / static_cast<double>(pixels.size()));
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
@@ -129,6 +190,10 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "pipelines") {
         backend.reset();
         return pipeline_runs(window);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "scaled") {
+        backend.reset();
+        return scaled_effect(window, frames);
     }
     if (argc > 3 && std::string_view{argv[3]} == "data") {
         backend.reset();

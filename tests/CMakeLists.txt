@@ -74,7 +74,7 @@ target_compile_definitions(kin_renderer_tests PRIVATE
 if(KIN_GLSLC)
     file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
     set(_kin_test_spv)
-    foreach(_name four_sources data_formats custom_vertex storage_read bench_read_texture bench_read_buffer)
+    foreach(_name four_sources data_formats custom_vertex storage_read bench_read_texture bench_read_buffer bench_heavy)
         add_custom_command(
             OUTPUT "${_kin_test_shader_dir}/${_name}.frag.spv"
             COMMAND "${KIN_GLSLC}" -fshader-stage=fragment
