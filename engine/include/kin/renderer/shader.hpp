@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/renderer/color.hpp>
 
 #include <array>
 #include <vector>
@@ -38,6 +39,8 @@ struct ShaderBlob {
 // the fragment input is `float4 v_color : COLOR0; float2 v_uv : TEXCOORD0`, the
 // output is `SV_Target`, and an optional uniform block is `cbuffer : register(b0, space3)`
 // (fed from ShaderParams via slot 0). Provide whichever precompiled formats you have.
+// draw_shader_geometry() feeds each vertex's ShaderVertex::custom to the fragment
+// stage at `layout(location = 2) in vec4` (TEXCOORD1 in HLSL).
 // The textures passed to draw_shader_surface() bind in order at sampler slots 0, 1,
 // 2, ... (`register(tN, space2)`, or `layout(set = 2, binding = N)` in GLSL). Slots the
 // shader declares but the draw leaves out are bound to a 1x1 white texture.
@@ -62,6 +65,17 @@ inline constexpr u32 MaxShaderUniformFloats = 4096;
 // float array to 16 bytes.
 struct ShaderParams {
     std::vector<f32> uniforms = std::vector<f32>(16, 0.0f);
+};
+
+// A vertex of draw_shader_geometry(). The fragment shader gets `color` and `uv`
+// as for a shader surface, and `custom` as `layout(location = 2) in vec4`: per
+// vertex data, so one draw can carry many shapes with their own parameters (an
+// index into a data texture, a height, a strength).
+struct ShaderVertex {
+    Vec2f position{}; // in the same coordinates as other draws
+    Vec2f uv{};
+    Color color = Color::rgb(255, 255, 255);
+    std::array<f32, 4> custom{};
 };
 
 // Engine-shipped fragment shaders, compiled to SPIR-V in KIN_GPU_SHADER_DIR and loaded

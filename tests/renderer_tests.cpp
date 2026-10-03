@@ -1401,6 +1401,95 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// Triangles with a material shader: only what they cover is drawn, each vertex
+// carries its own `custom`, indices and plain lists both work, and with Max
+// overlapping shapes combine by the larger.
+void test_gpu_shader_geometry() {
+    constexpr std::string_view test_name = "test_gpu_shader_geometry";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "custom_vertex.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-shader-geometry-test", .width = 32, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().shader_geometry);
+
+        std::ifstream file(spv, std::ios::binary);
+        const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        desc.num_samplers = 1;
+        const kin::ShaderHandle shader = renderer->create_shader(desc);
+        assert(shader);
+
+        const auto vertex = [](float x, float y, std::array<float, 4> custom) {
+            return kin::ShaderVertex{.position = {x, y}, .custom = custom};
+        };
+        constexpr std::array<float, 4> red{1.0f, 0.0f, 0.0f, 1.0f};
+        constexpr std::array<float, 4> green{0.0f, 0.5f, 0.0f, 1.0f};
+        // A quad from four vertices and six indices (left half), and one triangle
+        // as a plain list (right half, below its diagonal).
+        const std::array<kin::ShaderVertex, 4> quad{vertex(0, 0, red), vertex(16, 0, red), vertex(16, 16, red),
+                                                    vertex(0, 16, red)};
+        const std::array<kin::u32, 6> quad_indices{0, 1, 2, 0, 2, 3};
+        const std::array<kin::ShaderVertex, 3> triangle{vertex(16, 0, green), vertex(32, 16, green),
+                                                        vertex(16, 16, green)};
+        kin::RenderTarget target = renderer->create_render_target({32, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        const auto draw = [&](auto&& body) {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgba(0, 0, 0, 0));
+            body();
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        };
+        draw([&] {
+            renderer->draw_shader_geometry(quad, quad_indices, shader, {});
+            renderer->draw_shader_geometry(triangle, {}, shader, {});
+        });
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(255, 0, 0), 2));
+        assert(pixel_near(px, size, 20, 13, kin::Color::rgb(0, 128, 0), 3));  // below the diagonal
+        assert(pixel_near(px, size, 28, 3, kin::Color::rgba(0, 0, 0, 0), 0)); // above it: not covered
+
+        // Bad geometry is refused whole.
+        const std::array<kin::u32, 3> past_the_end{0, 1, 9};
+        draw([&] { renderer->draw_shader_geometry(quad, past_the_end, shader, {}); });
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgba(0, 0, 0, 0), 0));
+
+        // Two overlapping shapes with Max: the overlap takes the larger.
+        constexpr std::array<float, 4> dim{0.4f, 0.4f, 0.4f, 1.0f};
+        constexpr std::array<float, 4> bright{0.8f, 0.2f, 0.8f, 1.0f};
+        const std::array<kin::ShaderVertex, 6> left{vertex(0, 0, dim), vertex(20, 0, dim), vertex(20, 16, dim),
+                                                    vertex(0, 0, dim), vertex(20, 16, dim), vertex(0, 16, dim)};
+        const std::array<kin::ShaderVertex, 6> right{vertex(12, 0, bright), vertex(32, 0, bright),
+                                                     vertex(32, 16, bright), vertex(12, 0, bright),
+                                                     vertex(32, 16, bright), vertex(12, 16, bright)};
+        draw([&] {
+            const auto blend = renderer->scoped_blend_mode(kin::BlendMode::Max);
+            renderer->draw_shader_geometry(left, {}, shader, {});
+            renderer->draw_shader_geometry(right, {}, shader, {});
+        });
+        assert(pixel_near(px, size, 4, 8, kin::Color::rgb(102, 102, 102), 2));
+        assert(pixel_near(px, size, 16, 8, kin::Color::rgb(204, 102, 204), 2)); // the overlap
+        assert(pixel_near(px, size, 28, 8, kin::Color::rgb(204, 51, 204), 2));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Max and Min blending: a fill and a texture over a cleared target. Returns
 // the pixels at (8, 8) (the fill) and (24, 8) (the texture) for each mode.
 std::array<kin::Color, 4> min_max_blended(kin::Renderer2D& renderer) {
@@ -1728,6 +1817,7 @@ int main() {
     test_gpu_resources_outlive_renderer();
     test_min_max_blend_on_software_backend();
     test_min_max_blend_on_gpu_backend();
+    test_gpu_shader_geometry();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

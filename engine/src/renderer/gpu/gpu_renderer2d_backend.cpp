@@ -185,6 +185,15 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         KIN_LOG_WARN_F("render", "instanced sprites unavailable; drawing them quad by quad",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    try {
+        _shader_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                          SDL_GPU_SHADERFORMAT_SPIRV,
+                                                          dir / "shader_geometry.vert.spv",
+                                                          /*uniform_buffers=*/1, /*samplers=*/0);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "shader geometry unavailable",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
 
     SDL_GPUSamplerCreateInfo sampler_info{};
     sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
@@ -238,6 +247,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .render_targets = true,
         .blend_modes = true,
         .min_max_blend = true,
+        .shader_geometry = static_cast<bool>(_shader_vertex_shader.handle()),
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -324,6 +334,7 @@ void GpuRenderer2DBackend::flush_to_frame() {
     gpu::GpuGeometryBatch::FlushContext ctx{};
     ctx.vertex_shader = _vertex_shader.handle();
     ctx.instance_shader = _instance_shader.handle();
+    ctx.shader_vertex_shader = _shader_vertex_shader.handle();
     ctx.default_fragment = _fragment_shader.handle();
     ctx.white_texture = _white.handle();
     ctx.sampler = _sampler_linear; // default for solids/white & null-sampler ranges
@@ -1233,6 +1244,27 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         return;
     }
     ensure_frame();
+    const SourceBindings bindings = bind_sources(shader, sources);
+    // Quad over `rect` (uv 0..1, white vertex color) tagged with the material fragment
+    // shader + the ShaderParams uniform (fragment slot 0).
+    const f32 x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.w, y1 = rect.y + rect.h;
+    std::array<gpu::GpuVertex, 6> verts{{
+        {x0, y0, 0.0f, 0.0f, 255, 255, 255, 255},
+        {x1, y0, 1.0f, 0.0f, 255, 255, 255, 255},
+        {x1, y1, 1.0f, 1.0f, 255, 255, 255, 255},
+        {x0, y0, 0.0f, 0.0f, 255, 255, 255, 255},
+        {x1, y1, 1.0f, 1.0f, 255, 255, 255, 255},
+        {x0, y1, 0.0f, 1.0f, 255, 255, 255, 255},
+    }};
+    apply_view_offset(verts);
+    _batch.push(verts, shader.handle(), bindings.slot0.texture, current_scissor(),
+                resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
+                static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
+                std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(), bindings.extra_count});
+}
+
+GpuRenderer2DBackend::SourceBindings GpuRenderer2DBackend::bind_sources(const gpu::GpuShader& shader,
+                                                                        std::span<const Texture> sources) {
     // `sources[i]` -> fragment sampler i. An invalid source leaves the binding null,
     // which the batch replaces with the white texture and default sampler. Slots the
     // shader declares beyond the sources are bound the same way, so it never samples
@@ -1251,26 +1283,58 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
     };
     const std::size_t slots = std::min<std::size_t>(
         std::max<std::size_t>({sources.size(), shader.samplers(), 1}), MaxShaderSamplers);
-    const SDL_GPUTextureSamplerBinding slot0 = sources.empty() ? SDL_GPUTextureSamplerBinding{} : resolve(sources[0]);
-    std::array<SDL_GPUTextureSamplerBinding, MaxShaderSamplers - 1> extra{};
+    SourceBindings out;
+    out.slot0 = sources.empty() ? SDL_GPUTextureSamplerBinding{} : resolve(sources[0]);
     for (std::size_t i = 1; i < slots && i < sources.size(); ++i) {
-        extra[i - 1] = resolve(sources[i]);
+        out.extra[i - 1] = resolve(sources[i]);
     }
-    // Quad over `rect` (uv 0..1, white vertex color) tagged with the material fragment
-    // shader + the ShaderParams uniform (fragment slot 0).
-    const f32 x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.w, y1 = rect.y + rect.h;
-    std::array<gpu::GpuVertex, 6> verts{{
-        {x0, y0, 0.0f, 0.0f, 255, 255, 255, 255},
-        {x1, y0, 1.0f, 0.0f, 255, 255, 255, 255},
-        {x1, y1, 1.0f, 1.0f, 255, 255, 255, 255},
-        {x0, y0, 0.0f, 0.0f, 255, 255, 255, 255},
-        {x1, y1, 1.0f, 1.0f, 255, 255, 255, 255},
-        {x0, y1, 0.0f, 1.0f, 255, 255, 255, 255},
-    }};
-    apply_view_offset(verts);
-    _batch.push(verts, shader.handle(), slot0.texture, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha),
-                params.uniforms.data(), static_cast<u32>(params.uniforms.size() * sizeof(f32)),
-                slot0.sampler, std::span<const SDL_GPUTextureSamplerBinding>{extra.data(), slots - 1});
+    out.extra_count = slots - 1;
+    return out;
+}
+
+void GpuRenderer2DBackend::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                                                ShaderHandle handle, const ShaderParams& params,
+                                                std::span<const Texture> sources) {
+    if (handle.value == 0 || handle.value > _shaders.size() || !_shader_vertex_shader.handle()) {
+        return;
+    }
+    const gpu::GpuShader& shader = _shaders[static_cast<std::size_t>(handle.value) - 1];
+    if (!shader) {
+        return;
+    }
+    ensure_frame();
+    const SourceBindings bindings = bind_sources(shader, sources);
+    // The batch draws triangle lists: indices are expanded here.
+    const auto convert = [this](const ShaderVertex& v) {
+        gpu::GpuShaderVertex out{};
+        out.x = v.position.x + _view_offset.x;
+        out.y = v.position.y + _view_offset.y;
+        out.u = v.uv.x;
+        out.v = v.uv.y;
+        out.r = v.color.r;
+        out.g = v.color.g;
+        out.b = v.color.b;
+        out.a = v.color.a;
+        std::copy(v.custom.begin(), v.custom.end(), out.custom);
+        return out;
+    };
+    _shader_vertex_scratch.clear();
+    if (indices.empty()) {
+        _shader_vertex_scratch.reserve(vertices.size());
+        for (const ShaderVertex& v : vertices) {
+            _shader_vertex_scratch.push_back(convert(v));
+        }
+    } else {
+        _shader_vertex_scratch.reserve(indices.size());
+        for (const u32 i : indices) {
+            _shader_vertex_scratch.push_back(convert(vertices[i]));
+        }
+    }
+    _batch.push_shader_vertices(_shader_vertex_scratch, shader.handle(), bindings.slot0.texture, current_scissor(),
+                                resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
+                                static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
+                                std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(),
+                                                                               bindings.extra_count});
 }
 
 void GpuRenderer2DBackend::set_post_process(std::span<const PostProcessPass> passes) {
@@ -1334,6 +1398,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
         gpu::GpuGeometryBatch::FlushContext ctx{};
         ctx.vertex_shader = _vertex_shader.handle();
         ctx.instance_shader = _instance_shader.handle();
+        ctx.shader_vertex_shader = _shader_vertex_shader.handle();
         ctx.default_fragment = _fragment_shader.handle();
         ctx.white_texture = _white.handle();
         ctx.sampler = _sampler_linear;

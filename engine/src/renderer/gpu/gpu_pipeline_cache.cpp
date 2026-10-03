@@ -98,7 +98,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
 
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
-    SDL_GPUVertexAttribute attrs[4]{};
+    SDL_GPUVertexAttribute attrs[4]{}; // at most four, whichever layout
     u32 attr_count = 0;
     const auto attribute = [&](SDL_GPUVertexElementFormat format, u32 offset) {
         attrs[attr_count].location = attr_count;
@@ -114,6 +114,13 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, u0));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, pivot_x));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSpriteInstance, r));
+    } else if (layout == GpuVertexLayout::ShaderVertices) {
+        vb.pitch = sizeof(GpuShaderVertex);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuShaderVertex, x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuShaderVertex, u));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuShaderVertex, r));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuShaderVertex, custom));
     } else {
         vb.pitch = sizeof(GpuVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;

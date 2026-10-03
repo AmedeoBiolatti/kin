@@ -196,6 +196,14 @@ public:
     // is an error: it is logged and nothing is drawn.
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                              std::span<const Texture> sources);
+    // Triangles drawn with a material shader: only the pixels they cover run it.
+    // `indices` index `vertices` three at a time; empty, the vertices themselves
+    // are the triangles. Sources and params as for draw_shader_surface; the
+    // current blend mode applies. Needs capabilities().shader_geometry (SDL_GPU);
+    // elsewhere nothing is drawn.
+    void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                              ShaderHandle shader, const ShaderParams& params,
+                              std::span<const Texture> sources = {});
     void draw_line(Vec2f a, Vec2f b, Color color);
     void draw_line(Vec2f a, Vec2f b, u8 r, u8 g, u8 b_color, u8 a_color = 255);
 

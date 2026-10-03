@@ -49,9 +49,17 @@ struct GpuSpriteInstance {
     u8 r = 255, g = 255, b = 255, a = 255;
 };
 
-// Which vertex input a pipeline reads: GpuVertex triangles, or GpuSpriteInstance
-// quads (one per instance).
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances };
+// One draw_shader_geometry() vertex for shader_geometry.vert: a GpuVertex plus
+// four free floats for the material fragment shader.
+struct GpuShaderVertex {
+    f32 x = 0.0f, y = 0.0f, u = 0.0f, v = 0.0f;
+    u8 r = 255, g = 255, b = 255, a = 255;
+    f32 custom[4]{};
+};
+
+// Which vertex input a pipeline reads: GpuVertex triangles, GpuSpriteInstance
+// quads (one per instance), or GpuShaderVertex triangles.
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices };
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {
@@ -86,6 +94,18 @@ public:
               SDL_GPUSampler* sampler = nullptr, // nullptr -> FlushContext default sampler
               std::span<const SDL_GPUTextureSamplerBinding> extra = {});
 
+    // As push(), with GpuShaderVertex triangles (draw_shader_geometry), drawn by
+    // shader_geometry.vert.
+    void push_shader_vertices(std::span<const GpuShaderVertex> tris,
+                              SDL_GPUShader* fragment,
+                              SDL_GPUTexture* texture,
+                              SDL_Rect scissor,
+                              GpuBlendMode blend,
+                              const void* uniform,
+                              u32 uniform_size,
+                              SDL_GPUSampler* sampler,
+                              std::span<const SDL_GPUTextureSamplerBinding> extra);
+
     // Append quads drawn by instancing (see GpuSpriteInstance) with the default
     // fragment shader. Consecutive pushes with identical state coalesce.
     void push_instances(std::span<const GpuSpriteInstance> instances,
@@ -94,12 +114,13 @@ public:
                         GpuBlendMode blend,
                         SDL_GPUSampler* sampler = nullptr);
 
-    bool empty() const { return _vertices.empty() && _instances.empty(); }
+    bool empty() const { return _vertices.empty() && _instances.empty() && _shader_vertices.empty(); }
 
     // Context shared by every range in a flush.
     struct FlushContext {
         SDL_GPUShader* vertex_shader = nullptr;   // shared 2D vertex shader
         SDL_GPUShader* instance_shader = nullptr; // sprite_instanced.vert, for instance ranges
+        SDL_GPUShader* shader_vertex_shader = nullptr; // shader_geometry.vert, for GpuShaderVertex ranges
         SDL_GPUShader* default_fragment = nullptr; // used when a range's fragment is null
         SDL_GPUTexture* white_texture = nullptr;   // used when a range's texture is null
         SDL_GPUSampler* sampler = nullptr;
@@ -125,19 +146,27 @@ private:
         u32 uniform_size = 0;
         u32 first_vertex = 0;   // or first instance, for an instanced range
         u32 vertex_count = 0;   // or instance count
-        bool instanced = false;
+        GpuVertexLayout layout = GpuVertexLayout::Triangles; // which array it indexes
     };
+
+    // Adds `count` vertices of `layout` at `first` to the last range when its
+    // state matches, else as a new range.
+    void add_range(GpuVertexLayout layout, u32 first, u32 count, SDL_GPUShader* fragment, SDL_GPUTexture* texture,
+                   SDL_Rect scissor, GpuBlendMode blend, const void* uniform, u32 uniform_size,
+                   SDL_GPUSampler* sampler, std::span<const SDL_GPUTextureSamplerBinding> extra);
 
     const GpuTexture* _target = nullptr;
     SDL_FColor _clear{0.0f, 0.0f, 0.0f, 1.0f};
     bool _do_clear = true;
     std::vector<GpuVertex> _vertices;
     std::vector<GpuSpriteInstance> _instances;
+    std::vector<GpuShaderVertex> _shader_vertices;
     std::vector<Range> _ranges;
     std::vector<u8> _uniform_bytes;
     std::vector<SDL_GPUTextureSamplerBinding> _extra_bindings;
     GpuBuffer _vertex_buffer;
     GpuBuffer _instance_buffer;
+    GpuBuffer _shader_vertex_buffer;
 };
 
 } // namespace kin::gpu
