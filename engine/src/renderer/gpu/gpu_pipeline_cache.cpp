@@ -1,6 +1,9 @@
 #include "gpu_pipeline_cache.hpp"
 
+#include <kin/platform/log.hpp>
+
 #include <cstddef>
+#include <string>
 
 namespace kin::gpu {
 
@@ -156,10 +159,16 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.target_info = target_info;
 
+    const u64 start_ns = SDL_GetTicksNS();
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(_device, &info);
     if (!pipeline) {
         return nullptr;
     }
+    // Made on first use: worth seeing when it lands mid-game (tens of ms on a
+    // cold driver cache).
+    KIN_LOG_DEBUG_F("render", "pipeline created",
+                    (LogFields{{.name = "ms", .value = std::to_string(static_cast<f64>(SDL_GetTicksNS() - start_ns) / 1e6)},
+                               {.name = "pipelines", .value = std::to_string(_entries.size() + 1)}}));
     _entries.push_back(Entry{vertex, fragment, blend, target_format, layout, pipeline});
     return pipeline;
 }

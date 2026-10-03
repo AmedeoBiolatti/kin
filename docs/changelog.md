@@ -35,6 +35,14 @@ releases may change APIs.
 
 ### Changed
 
+- SDL_GPU `create_shader` builds the shader's usual pipeline (alpha blend, an
+  RGBA8 target) at once instead of at its first draw: on a cold driver cache
+  that moves a ~19 ms hitch from the first frame drawing it to load time.
+  Pipelines made later are logged at debug level with their cost.
+- SDL_GPU quads with the default shader append straight to the last draw when
+  its state matches, and the clip rectangle is computed once per change, not
+  per draw: `fill_rect` about 12% less CPU, `draw_texture` 4%. `kin_draw_bench`
+  measures `draw_texture`, `fill_rect` and `draw_sprites`.
 - SDL_GPU sends a third less geometry: quads (textures, rects, lines) go as
   four corners drawn through a static index buffer, not six vertices (hex_demo
   189 to 126 KB a frame, same draw calls). An empty texture

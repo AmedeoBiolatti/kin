@@ -474,9 +474,15 @@ SDL_Rect GpuRenderer2DBackend::current_scissor() const {
     // Clips are stored in coordinate space (logical for the scene under logical
     // presentation, target pixels otherwise). The GPU scissor needs native texture
     // pixels, so scale by the coord->texture factor (_view_scale for the scene, 1 for RTs).
+    // Asked once a draw, it is kept until what it is made from changes.
     const bool scene_logical = scene_uses_logical_coordinates();
     const f32 sc = scene_logical ? _view_scale : 1.0f;
     const Vec2i tex = current_size();
+    const SDL_Rect top = _clip_stack.empty() ? SDL_Rect{0, 0, -1, -1} : _clip_stack.back();
+    ScissorKey key{top, sc, tex};
+    if (_scissor_cache && _scissor_cache->first == key) {
+        return _scissor_cache->second;
+    }
     SDL_Rect c;
     if (!_clip_stack.empty()) {
         const SDL_Rect& r = _clip_stack.back();
@@ -485,7 +491,9 @@ SDL_Rect GpuRenderer2DBackend::current_scissor() const {
     } else {
         c = {0, 0, tex.x, tex.y};
     }
-    return intersect(c, SDL_Rect{0, 0, tex.x, tex.y});
+    const SDL_Rect scissor = intersect(c, SDL_Rect{0, 0, tex.x, tex.y});
+    _scissor_cache.emplace(key, scissor);
+    return scissor;
 }
 
 void GpuRenderer2DBackend::apply_view_offset(std::span<gpu::GpuVertex> verts) const {
@@ -529,10 +537,10 @@ void GpuRenderer2DBackend::push_quad(
     SDL_GPUSampler* sampler
 ) {
     ensure_frame();
-    const f32 x0 = dest.x;
-    const f32 y0 = dest.y;
-    const f32 x1 = dest.x + dest.w;
-    const f32 y1 = dest.y + dest.h;
+    const f32 x0 = dest.x + _view_offset.x;
+    const f32 y0 = dest.y + _view_offset.y;
+    const f32 x1 = x0 + dest.w;
+    const f32 y1 = y0 + dest.h;
     const f32 u0 = uv.x;
     const f32 v0 = uv.y;
     const f32 u1 = uv.x + uv.w;
@@ -544,8 +552,7 @@ void GpuRenderer2DBackend::push_quad(
         {x1, y1, u1, v1, r, g, b, a},
         {x0, y1, u0, v1, r, g, b, a},
     }};
-    apply_view_offset(corners);
-    _batch.push_quads(corners, nullptr, texture, current_scissor(), resolve_blend(blend), nullptr, 0, sampler);
+    _batch.push_quad(corners, texture, current_scissor(), resolve_blend(blend), sampler);
 }
 
 void GpuRenderer2DBackend::fill_rect(Rectf rect, Color color) {
@@ -1272,6 +1279,11 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
                         (LogFields{{.name = "error", .value = SDL_GetError()}}));
         return {};
     }
+    // Its usual pipeline now, while the game loads, rather than at its first
+    // draw: on a cold driver cache that is a ~20 ms hitch. Every 2D target is
+    // RGBA8, and shader surfaces blend as alpha unless a blend mode is set.
+    _pipelines.get(_vertex_shader.handle(), shader.handle(), gpu::GpuBlendMode::Alpha,
+                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
     _shaders.push_back(std::move(shader));
     KIN_LOG_INFO_F("render", "shader created",
                    (LogFields{{.name = "handle", .value = std::to_string(_shaders.size())}}));

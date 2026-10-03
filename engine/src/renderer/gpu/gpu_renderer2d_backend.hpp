@@ -174,6 +174,17 @@ private:
     Vec2i current_size() const;
     bool scene_uses_logical_coordinates() const;
     SDL_Rect current_scissor() const;
+    // What current_scissor() was last made from, and what it made.
+    struct ScissorKey {
+        SDL_Rect clip{};
+        f32 scale = 1.0f;
+        Vec2i target{};
+        bool operator==(const ScissorKey& o) const {
+            return clip.x == o.clip.x && clip.y == o.clip.y && clip.w == o.clip.w && clip.h == o.clip.h &&
+                   scale == o.scale && target == o.target;
+        }
+    };
+    mutable std::optional<std::pair<ScissorKey, SDL_Rect>> _scissor_cache;
     void push_quad(Rectf dest, Rectf uv, Color color, SDL_GPUTexture* texture,
                    gpu::GpuBlendMode blend = gpu::GpuBlendMode::Alpha,
                    SDL_GPUSampler* sampler = nullptr);
