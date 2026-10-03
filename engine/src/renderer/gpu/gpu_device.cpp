@@ -247,7 +247,14 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     texture_info.type = SDL_GPU_TEXTURETYPE_2D;
     texture_info.format = format;
     texture_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
-    if (format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM) {
+    // An empty texture is cleared on the GPU rather than sent zeros, which takes
+    // being a render target: RGBA8 textures are anyway, data formats where the
+    // device allows (it is one more kind, so pooled apart).
+    const bool clear_on_gpu =
+        format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ||
+        (!pixels && SDL_GPUTextureSupportsFormat(_device, format, SDL_GPU_TEXTURETYPE_2D,
+                                                 SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET));
+    if (clear_on_gpu) {
         texture_info.usage |= SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
     }
     texture_info.width = width;
@@ -258,7 +265,7 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
 
     // A released texture of the same kind, if the pool has one: its first upload
     // replaces it whole, cycled in case a frame on the GPU still reads it.
-    SDL_GPUTexture* raw_texture = _texture_pool->take(width, height, format);
+    SDL_GPUTexture* raw_texture = _texture_pool->take(width, height, format, texture_info.usage);
     const bool reused = raw_texture != nullptr;
     if (!reused) {
         raw_texture = SDL_CreateGPUTexture(_device, &texture_info);
@@ -268,13 +275,17 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     }
 
     try {
-        stage_texture_upload(raw_texture, 0, 0, width, height, pixels, texel_bytes, /*cycle=*/reused);
+        if (!pixels && clear_on_gpu) {
+            clear_texture(raw_texture, /*cycle=*/reused);
+        } else {
+            stage_texture_upload(raw_texture, 0, 0, width, height, pixels, texel_bytes, /*cycle=*/reused);
+        }
     } catch (...) {
         SDL_ReleaseGPUTexture(_device, raw_texture);
         throw;
     }
     const u64 bytes = static_cast<u64>(width) * height * texel_bytes;
-    return GpuTexture{_shared, raw_texture, width, height, format, _texture_pool, bytes};
+    return GpuTexture{_shared, raw_texture, width, height, format, _texture_pool, bytes, texture_info.usage};
 }
 
 void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
@@ -366,11 +377,8 @@ void GpuDevice::stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 
     fill(_staging, offset, _staging_used == 0);
     _staging_used = offset + bytes;
     SDL_GPUTransferBuffer* transfer = _staging;
-    if (!_upload_commands) {
-        _upload_commands = SDL_AcquireGPUCommandBuffer(_device);
-        if (!_upload_commands) {
-            throw sdl_error("SDL_AcquireGPUCommandBuffer failed");
-        }
+    begin_upload_commands();
+    if (!_upload_pass) {
         _upload_pass = SDL_BeginGPUCopyPass(_upload_commands);
     }
     SDL_GPUTextureTransferInfo source{};
@@ -389,6 +397,33 @@ void GpuDevice::stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 
     ++_uploads_staged;
 }
 
+void GpuDevice::begin_upload_commands() {
+    if (!_upload_commands) {
+        _upload_commands = SDL_AcquireGPUCommandBuffer(_device);
+        if (!_upload_commands) {
+            throw sdl_error("SDL_AcquireGPUCommandBuffer failed");
+        }
+    }
+}
+
+void GpuDevice::clear_texture(SDL_GPUTexture* texture, bool cycle) {
+    refuse_upload_inside_fill();
+    const std::lock_guard lock{_uploads_mutex};
+    begin_upload_commands();
+    if (_upload_pass) {
+        SDL_EndGPUCopyPass(_upload_pass); // reopened by the next upload, in order
+        _upload_pass = nullptr;
+    }
+    SDL_GPUColorTargetInfo target{};
+    target.texture = texture;
+    target.load_op = SDL_GPU_LOADOP_CLEAR;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    target.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f};
+    target.cycle = cycle;
+    SDL_EndGPURenderPass(SDL_BeginGPURenderPass(_upload_commands, &target, 1, nullptr));
+    ++_textures_cleared;
+}
+
 void GpuDevice::refuse_upload_inside_fill() const {
     if (_filling.load() == std::this_thread::get_id()) {
         throw std::logic_error("write_texture: the fill used the renderer (upload or submit)");
@@ -404,8 +439,10 @@ void GpuDevice::flush_uploads() {
     if (!_upload_commands) {
         return;
     }
-    SDL_EndGPUCopyPass(_upload_pass);
-    _upload_pass = nullptr;
+    if (_upload_pass) {
+        SDL_EndGPUCopyPass(_upload_pass);
+        _upload_pass = nullptr;
+    }
     SDL_GPUCommandBuffer* commands = std::exchange(_upload_commands, nullptr);
     _staging_used = 0;
     if (_first_submit_ns == 0) {

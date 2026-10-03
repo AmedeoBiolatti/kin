@@ -35,6 +35,11 @@ releases may change APIs.
 
 ### Changed
 
+- SDL_GPU sends a third less geometry: quads (textures, rects, lines) go as
+  four corners drawn through a static index buffer, not six vertices (hex_demo
+  189 to 126 KB a frame, same draw calls). An empty texture
+  (`create_texture` with no pixels) is cleared on the GPU instead of being sent
+  zeros, where its format can be a render target.
 - SDL_GPU texture uploads (`create_texture`, `update_texture`) no longer submit
   a command buffer each: a frame's uploads are recorded into one, sent ahead of
   the frame, from a shared staging buffer that grows to fit big uploads and

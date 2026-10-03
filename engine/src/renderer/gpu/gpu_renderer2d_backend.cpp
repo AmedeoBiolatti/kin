@@ -538,16 +538,14 @@ void GpuRenderer2DBackend::push_quad(
     const f32 u1 = uv.x + uv.w;
     const f32 v1 = uv.y + uv.h;
     const u8 r = color.r, g = color.g, b = color.b, a = color.a;
-    std::array<gpu::GpuVertex, 6> verts{{
+    std::array<gpu::GpuVertex, 4> corners{{
         {x0, y0, u0, v0, r, g, b, a},
         {x1, y0, u1, v0, r, g, b, a},
         {x1, y1, u1, v1, r, g, b, a},
-        {x0, y0, u0, v0, r, g, b, a},
-        {x1, y1, u1, v1, r, g, b, a},
         {x0, y1, u0, v1, r, g, b, a},
     }};
-    apply_view_offset(verts);
-    _batch.push(verts, nullptr, texture, current_scissor(), resolve_blend(blend), nullptr, 0, sampler);
+    apply_view_offset(corners);
+    _batch.push_quads(corners, nullptr, texture, current_scissor(), resolve_blend(blend), nullptr, 0, sampler);
 }
 
 void GpuRenderer2DBackend::fill_rect(Rectf rect, Color color) {
@@ -588,17 +586,15 @@ void GpuRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     const f32 nx = -dy / len * 0.5f;
     const f32 ny = dx / len * 0.5f;
     const u8 r = color.r, g = color.g, bl = color.b, al = color.a;
-    std::array<gpu::GpuVertex, 6> verts{{
+    std::array<gpu::GpuVertex, 4> corners{{
         {a.x + nx, a.y + ny, 0.0f, 0.0f, r, g, bl, al},
         {b.x + nx, b.y + ny, 1.0f, 0.0f, r, g, bl, al},
-        {b.x - nx, b.y - ny, 1.0f, 1.0f, r, g, bl, al},
-        {a.x + nx, a.y + ny, 0.0f, 0.0f, r, g, bl, al},
         {b.x - nx, b.y - ny, 1.0f, 1.0f, r, g, bl, al},
         {a.x - nx, a.y - ny, 0.0f, 1.0f, r, g, bl, al},
     }};
     ensure_frame();
-    apply_view_offset(verts);
-    _batch.push(verts, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
+    apply_view_offset(corners);
+    _batch.push_quads(corners, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
 }
 
 void GpuRenderer2DBackend::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
@@ -790,23 +786,21 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     const Vec2f p2 = rot(dest.x + dest.w, dest.y + dest.h);
     const Vec2f p3 = rot(dest.x, dest.y + dest.h);
     const u8 r = tint.r, g = tint.g, b = tint.b, a = tint.a;
-    std::array<gpu::GpuVertex, 6> verts{{
+    std::array<gpu::GpuVertex, 4> corners{{
         {p0.x, p0.y, u0, v0, r, g, b, a},
         {p1.x, p1.y, u1, v0, r, g, b, a},
         {p2.x, p2.y, u1, v1, r, g, b, a},
-        {p0.x, p0.y, u0, v0, r, g, b, a},
-        {p2.x, p2.y, u1, v1, r, g, b, a},
         {p3.x, p3.y, u0, v1, r, g, b, a},
     }};
-    apply_view_offset(verts);
+    apply_view_offset(corners);
     ensure_frame();
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
         backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
     retain(texture);
-    _batch.push(verts, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr, 0,
-                sampler);
+    _batch.push_quads(corners, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr,
+                      0, sampler);
 }
 
 void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {

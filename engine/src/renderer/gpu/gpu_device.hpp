@@ -80,6 +80,8 @@ public:
     std::pair<u64, u64> upload_counts() const { return {_uploads_staged, _upload_batches}; }
     // Textures create_texture took from the pool instead of creating, so far.
     u64 textures_reused() const { return _texture_pool ? _texture_pool->reused() : 0; }
+    // Empty textures cleared on the GPU instead of sent zeros, so far.
+    u64 textures_cleared() const { return _textures_cleared; }
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
     void upload_buffer(GpuFrame& frame, GpuBuffer& buffer, const void* data, u32 size);
@@ -135,6 +137,10 @@ private:
     // from it would deadlock, so it is refused instead.
     std::atomic<std::thread::id> _filling{};
     void refuse_upload_inside_fill() const;
+    void begin_upload_commands(); // the upload command buffer, acquired if needed
+    // Clears `texture` (a render target) to zeros in the upload command buffer.
+    void clear_texture(SDL_GPUTexture* texture, bool cycle);
+    u64 _textures_cleared = 0;
     SDL_GPUCommandBuffer* _upload_commands = nullptr;
     SDL_GPUCopyPass* _upload_pass = nullptr;
     SDL_GPUTransferBuffer* _staging = nullptr;

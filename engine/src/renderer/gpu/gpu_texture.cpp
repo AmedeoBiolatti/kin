@@ -9,12 +9,13 @@ constexpr u64 PoolTicks = 300;
 constexpr u64 PoolBytes = 256ull * 1024 * 1024;
 } // namespace
 
-SDL_GPUTexture* GpuTexturePool::take(u32 width, u32 height, SDL_GPUTextureFormat format) {
+SDL_GPUTexture* GpuTexturePool::take(u32 width, u32 height, SDL_GPUTextureFormat format,
+                                     SDL_GPUTextureUsageFlags usage) {
     const std::lock_guard lock{_mutex};
     // The newest first: the most likely to be the one released just now.
     for (std::size_t i = _entries.size(); i-- > 0;) {
         const Entry& e = _entries[i];
-        if (e.width == width && e.height == height && e.format == format) {
+        if (e.width == width && e.height == height && e.format == format && e.usage == usage) {
             SDL_GPUTexture* texture = e.texture;
             _bytes -= e.bytes;
             _entries.erase(_entries.begin() + static_cast<std::ptrdiff_t>(i));
@@ -26,7 +27,7 @@ SDL_GPUTexture* GpuTexturePool::take(u32 width, u32 height, SDL_GPUTextureFormat
 }
 
 void GpuTexturePool::give_back(SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
-                               u64 bytes) {
+                               SDL_GPUTextureUsageFlags usage, u64 bytes) {
     const std::lock_guard lock{_mutex};
     if (_closed || !*_device || bytes > PoolBytes) {
         if (*_device) {
@@ -35,7 +36,7 @@ void GpuTexturePool::give_back(SDL_GPUTexture* texture, u32 width, u32 height, S
         return;
     }
     _entries.push_back(Entry{.texture = texture, .width = width, .height = height, .format = format,
-                             .bytes = bytes, .since = _ticks});
+                             .usage = usage, .bytes = bytes, .since = _ticks});
     _bytes += bytes;
     while (_bytes > PoolBytes) {
         release_locked(0);
@@ -71,8 +72,10 @@ GpuTexture::GpuTexture(SharedDevice device, SDL_GPUTexture* texture,
     : _device(std::move(device)), _texture(texture), _width(width), _height(height), _format(format) {}
 
 GpuTexture::GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height,
-                       SDL_GPUTextureFormat format, std::shared_ptr<GpuTexturePool> pool, u64 bytes)
-    : _device(std::move(device)), _pool(std::move(pool)), _bytes(bytes), _texture(texture), _width(width),
+                       SDL_GPUTextureFormat format, std::shared_ptr<GpuTexturePool> pool, u64 bytes,
+                       SDL_GPUTextureUsageFlags usage)
+    : _device(std::move(device)), _pool(std::move(pool)), _bytes(bytes), _usage(usage), _texture(texture),
+      _width(width),
       _height(height), _format(format) {}
 
 GpuTexture::~GpuTexture() {
@@ -83,6 +86,7 @@ GpuTexture::GpuTexture(GpuTexture&& other) noexcept
     : _device(std::move(other._device)),
       _pool(std::move(other._pool)),
       _bytes(std::exchange(other._bytes, 0)),
+      _usage(std::exchange(other._usage, 0)),
       _texture(std::exchange(other._texture, nullptr)),
       _width(std::exchange(other._width, 0)),
       _height(std::exchange(other._height, 0)),
@@ -96,6 +100,7 @@ GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept {
     _device = std::move(other._device);
     _pool = std::move(other._pool);
     _bytes = std::exchange(other._bytes, 0);
+    _usage = std::exchange(other._usage, 0);
     _texture = std::exchange(other._texture, nullptr);
     _width = std::exchange(other._width, 0);
     _height = std::exchange(other._height, 0);
@@ -106,7 +111,7 @@ GpuTexture& GpuTexture::operator=(GpuTexture&& other) noexcept {
 void GpuTexture::release() {
     if (_device && *_device && _texture) {
         if (_pool) {
-            _pool->give_back(_texture, _width, _height, _format, _bytes);
+            _pool->give_back(_texture, _width, _height, _format, _usage, _bytes);
         } else {
             SDL_ReleaseGPUTexture(*_device, _texture);
         }
@@ -114,6 +119,7 @@ void GpuTexture::release() {
     _device.reset();
     _pool.reset();
     _bytes = 0;
+    _usage = 0;
     _texture = nullptr;
     _width = 0;
     _height = 0;

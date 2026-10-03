@@ -27,10 +27,11 @@ public:
     explicit GpuTexturePool(SharedDevice device) : _device(std::move(device)) {}
 
     // A pooled texture of this size and format, or null.
-    SDL_GPUTexture* take(u32 width, u32 height, SDL_GPUTextureFormat format);
+    SDL_GPUTexture* take(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage);
     // Keeps `texture` (of `bytes`) for take(), or releases it when the pool is
     // over its size or closed.
-    void give_back(SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format, u64 bytes);
+    void give_back(SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
+                   SDL_GPUTextureUsageFlags usage, u64 bytes);
     // Once a frame: releases what has waited too long.
     void tick();
     // Releases everything, and later give_backs too (the device is going).
@@ -43,6 +44,7 @@ private:
         SDL_GPUTexture* texture = nullptr;
         u32 width = 0, height = 0;
         SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        SDL_GPUTextureUsageFlags usage = 0;
         u64 bytes = 0;
         u64 since = 0; // tick() count when given back
     };
@@ -64,7 +66,7 @@ public:
                u32 width, u32 height, SDL_GPUTextureFormat format);
     // A texture that goes back to `pool` (as `bytes`) when released.
     GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
-               std::shared_ptr<GpuTexturePool> pool, u64 bytes);
+               std::shared_ptr<GpuTexturePool> pool, u64 bytes, SDL_GPUTextureUsageFlags usage);
     ~GpuTexture();
 
     GpuTexture(const GpuTexture&) = delete;
@@ -85,6 +87,7 @@ private:
     SharedDevice _device;
     std::shared_ptr<GpuTexturePool> _pool;
     u64 _bytes = 0; // for the pool
+    SDL_GPUTextureUsageFlags _usage = 0;
     SDL_GPUTexture* _texture = nullptr;
     u32 _width = 0;
     u32 _height = 0;
