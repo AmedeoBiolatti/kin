@@ -219,7 +219,15 @@ public:
     void fill_rounded_rect(Rectf rect, f32 radius, Color color);
     void draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width = 1.0f);
     void fill_gradient_rect(Rectf rect, const Gradient& gradient);
+    // Reads the SPIR-V's layout (kin/renderer/shader_reflect.hpp): the sampler,
+    // storage buffer and uniform block counts come from it, so a ShaderDesc's
+    // counts may be left as they are (a mismatch is logged and the shader's
+    // own used).
     ShaderHandle create_shader(const ShaderDesc& desc);
+    // The layout read from a shader's SPIR-V (null when there was none).
+    std::shared_ptr<const ShaderLayout> shader_layout(ShaderHandle shader) const;
+    // Params sized for the shader's uniform block, settable by member name.
+    ShaderParams shader_params(ShaderHandle shader) const;
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params);
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                              const Texture& source);
@@ -327,6 +335,7 @@ private:
     std::unique_ptr<IRenderer2DBackend> _backend;
     std::vector<RenderTargetPoolEntry> _rt_pool;
     std::unordered_map<int, ShaderHandle> _builtin_shaders; // BuiltinShader -> cached handle
+    std::unordered_map<u64, std::shared_ptr<const ShaderLayout>> _shader_layouts; // read from each shader's SPIR-V
     BlendMode _blend_mode = BlendMode::Alpha;
 };
 

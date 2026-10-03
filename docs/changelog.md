@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- Shader reflection: `create_shader` reads the SPIR-V's sampler, storage buffer
+  and uniform block counts (a `ShaderDesc` that disagrees is logged, the
+  shader's used), and `Renderer2D::shader_params(shader)` gives params that
+  `set("name", ...)` by uniform block member. `kin::reflect_spirv` is public.
 - `Renderer2D::write_texture(texture, at, size, fill)`: `fill` writes the
   texels straight into the upload memory on SDL_GPU, skipping the copy
   `update_texture` makes, for texels made each frame.
