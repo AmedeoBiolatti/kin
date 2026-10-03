@@ -70,6 +70,7 @@ add_library(kin_engine STATIC
     src/renderer/sprite_catalog.cpp
     src/renderer/sprite_sheet.cpp
     src/renderer/sdl_renderer2d_backend.cpp
+    src/renderer/shader_compiler.cpp
     src/renderer/shader_reflect.cpp
     src/renderer/gpu/gpu_buffer.cpp
     src/renderer/gpu/gpu_device.cpp
@@ -163,6 +164,8 @@ find_program(KIN_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK
 set(_kin_gpu_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_compile_definitions(kin_engine PRIVATE KIN_GPU_SHADER_DIR="${_kin_gpu_shader_dir}")
 if(KIN_GLSLC)
+    # For runtime compiles (kin/renderer/shader_compiler.hpp) on this machine.
+    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
     file(MAKE_DIRECTORY "${_kin_gpu_shader_dir}")
     set(_kin_gpu_spv)
     foreach(_pair "textured_quad.vert.glsl:vertex" "textured_quad.frag.glsl:fragment"

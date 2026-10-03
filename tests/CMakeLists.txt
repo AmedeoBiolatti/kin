@@ -124,7 +124,8 @@ if(KIN_BUILD_BENCHMARKS)
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)
     target_link_libraries(kin_draw_bench PRIVATE kin::engine)
-    target_compile_definitions(kin_draw_bench PRIVATE KIN_TEST_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
+    target_compile_definitions(kin_draw_bench PRIVATE KIN_TEST_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        KIN_ENGINE_SHADER_SOURCE_DIR="${PROJECT_SOURCE_DIR}/engine/shaders")
     if(TARGET kin_test_shaders)
         add_dependencies(kin_draw_bench kin_test_shaders)
     endif()

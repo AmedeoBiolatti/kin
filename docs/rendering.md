@@ -205,6 +205,25 @@ params.set("tint", std::array{1.0f, 0.8f, 0.6f, 1.0f});
 `kin::MaxShaderUniformFloats` (4096, 16 KiB). Declare arrays in the shader as
 `vec4`s: std140 pads each element of a `float` array to 16 bytes.
 
+### Editing shaders while the game runs
+
+During development a shader can be loaded from its GLSL source and reloaded
+whenever the file is saved, keeping its handle:
+
+```cpp
+kin::ShaderFile lava{renderer, "shaders/lava.frag.glsl"};
+// each frame:
+lava.poll();                                  // recompiled and reloaded when saved
+renderer.draw_shader_surface(rect, lava.handle(), params);
+```
+
+It compiles with `glslc` (the Vulkan SDK's: the one kin was built with, or
+`KIN_GLSLC`), about 0.1 s a save; the reload itself takes ~0.02 ms. An edit
+that does not compile is logged (`ShaderFile::error()`) and the last good
+shader kept. `kin::compile_glsl()` compiles a file directly, and
+`Renderer2D::reload_shader()` replaces any shader in place. Shipped games load
+precompiled SPIR-V.
+
 ### Pipelines
 
 The GPU needs a pipeline for each combination of shader, blend mode, target

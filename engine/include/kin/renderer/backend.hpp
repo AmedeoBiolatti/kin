@@ -237,6 +237,8 @@ public:
     // returns a null handle (no shader support) so callers degrade to a fill; a
     // backend reporting capabilities().materials_2d builds a real shader/state.
     virtual ShaderHandle create_shader(const ShaderDesc&) { return {}; }
+    // Replaces a shader in place (its handle stays): false when it cannot.
+    virtual bool reload_shader(ShaderHandle, const ShaderDesc&) { return false; }
 
     // Draw `rect` with a custom-shader material. Default is a no-op; the UI layer
     // reads capabilities().materials_2d (false here) and supplies a fallback fill.

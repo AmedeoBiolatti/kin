@@ -231,6 +231,9 @@ public:
     // it in the game's user data (windowed runs).
     std::string pipeline_record() const { return _backend->pipeline_record(); }
     void prewarm_pipelines(std::string_view record) { _backend->prewarm_pipelines(record); }
+    // Replaces a shader with a new version, keeping its handle (hot reload: see
+    // kin/renderer/shader_compiler.hpp). Draws already queued use the old one.
+    bool reload_shader(ShaderHandle shader, const ShaderDesc& desc);
     // The layout read from a shader's SPIR-V (null when there was none).
     std::shared_ptr<const ShaderLayout> shader_layout(ShaderHandle shader) const;
     // Params sized for the shader's uniform block, settable by member name.

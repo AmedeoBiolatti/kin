@@ -2,6 +2,7 @@
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
 #include <kin/platform/app.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 
 #include <algorithm>
 #include <array>
@@ -244,6 +245,43 @@ int light_field(kin::Window& window, int frames) {
     return 0;
 }
 
+// Hot reload: compiling engine and bench shaders with glslc at runtime, and
+// reloading one in place (KIN_SHADER_SOURCE_DIR: the source shaders).
+int hot_reload(kin::Window& window) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    const std::filesystem::path engine{KIN_ENGINE_SHADER_SOURCE_DIR};
+    for (const char* name : {"pp_vignette.frag.glsl", "pp_bloom_combine.frag.glsl", "transition_iris.frag.glsl"}) {
+        std::vector<double> times;
+        for (int i = 0; i < 5; ++i) {
+            const auto t0 = clock::now();
+            const auto spirv = kin::compile_glsl(engine / name, kin::ShaderStage::Fragment);
+            times.push_back(ms(t0, clock::now()));
+            if (!spirv) {
+                std::printf("%s did not compile\n", name);
+                return 1;
+            }
+        }
+        std::sort(times.begin(), times.end());
+        std::printf("compile %-28s median %.1f ms\n", name, times[times.size() / 2]);
+    }
+    kin::ShaderFile file{*renderer, engine / "pp_vignette.frag.glsl"};
+    const auto spirv = kin::compile_glsl(engine / "pp_bloom_combine.frag.glsl", kin::ShaderStage::Fragment);
+    kin::ShaderDesc desc;
+    desc.spirv = {spirv->data(), static_cast<kin::u32>(spirv->size())};
+    std::vector<double> times;
+    for (int i = 0; i < 10; ++i) {
+        const auto t0 = clock::now();
+        renderer->reload_shader(file.handle(), desc);
+        times.push_back(ms(t0, clock::now()));
+    }
+    std::sort(times.begin(), times.end());
+    std::printf("reload_shader (new shader + its pipeline) median %.2f ms\n", times[times.size() / 2]);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
@@ -265,6 +303,10 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "compute") {
         backend.reset();
         return light_field(window, frames);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "hotreload") {
+        backend.reset();
+        return hot_reload(window);
     }
     if (argc > 3 && std::string_view{argv[3]} == "data") {
         backend.reset();
