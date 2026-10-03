@@ -282,6 +282,53 @@ int hot_reload(kin::Window& window) {
     return 0;
 }
 
+// 2000 small shader surfaces a frame, with the same params (merged into one
+// draw) and with params differing each draw (one draw each): CPU time to
+// record a frame, and frame time back to back (the GPU kept busy, so its
+// clocks are up; the slower of CPU and GPU). Fence timing is no use here: the
+// GPU work is below its floor.
+int many_surfaces(kin::Window& window, int frames) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    const kin::ShaderHandle shader = renderer->builtin_shader(kin::BuiltinShader::Vignette);
+    std::vector<kin::u8> texels(16u * 16u * 4u, 200);
+    const kin::Texture texture = renderer->create_texture_from_rgba(texels.data(), {16, 16});
+    kin::ShaderParams params;
+    const auto draw = [&](bool differing) {
+        renderer->clear(kin::Color::rgb(0, 0, 0));
+        for (int i = 0; i < 2000; ++i) {
+            params.uniforms[0] = differing ? static_cast<float>(i) * 0.001f : 0.5f;
+            const kin::Rectf rect{static_cast<float>((i * 37) % 1260), static_cast<float>((i * 91) % 700), 16.0f,
+                                  16.0f};
+            renderer->draw_shader_surface(rect, shader, params, texture);
+        }
+    };
+    for (const bool differing : {false, true}) {
+        std::vector<double> record;
+        for (int f = 0; f < frames; ++f) {
+            const auto t0 = clock::now();
+            draw(differing);
+            record.push_back(ms(t0, clock::now()));
+            renderer->present();
+        }
+        const auto b0 = clock::now();
+        for (int f = 0; f < 300; ++f) {
+            draw(differing);
+            renderer->present();
+        }
+        std::vector<kin::u8> one;
+        kin::Vec2i one_size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+        std::sort(record.begin(), record.end());
+        std::printf("2000 shader surfaces, %-16s record median %.3f ms, back-to-back frame %.3f ms\n",
+                    differing ? "params differing:" : "same params:", record[record.size() / 2],
+                    ms(b0, clock::now()) / 300.0);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
@@ -307,6 +354,10 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "hotreload") {
         backend.reset();
         return hot_reload(window);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "surfaces") {
+        backend.reset();
+        return many_surfaces(window, frames);
     }
     if (argc > 3 && std::string_view{argv[3]} == "data") {
         backend.reset();

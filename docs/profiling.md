@@ -102,6 +102,8 @@ With `KIN_BUILD_BENCHMARKS`, two programs time the SDL_GPU backend directly:
   Laptop GPU, 20,000 quads cost about 1.0 ms as `draw_texture` calls, 0.65 ms
   as `fill_rect` calls and 0.19 ms as one `draw_sprites` batch: many sprites of
   one texture are much cheaper batched (`RenderQueue` does so by itself).
+  Its third argument picks other runs: `pipelines`, `data`, `scaled`,
+  `compute`, `hotreload` and `surfaces` (see `docs/rendering.md`).
 - `kin_upload_bench [frames] [workers] [big]`: texture creation and updates.
 
 ## Benchmark Profiles
