@@ -3,18 +3,21 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/platform/user_data.hpp>
 #include <kin/runtime/debug_overlay.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_server.hpp>
@@ -125,27 +128,21 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.enabled = true;
             options.profile_render = true;
         } else if (arg == "--profile") {
-            options.enabled = true;
             options.profile = true;
         } else if (arg == "--profile-lines") {
-            options.enabled = true;
             options.profile = true;
             options.profile_lines = true;
         } else if (arg.starts_with("--profile-json=")) {
-            options.enabled = true;
             options.profile = true;
             options.profile_json_path = arg.substr(15);
         } else if (arg == "--profile-json" && i + 1 < argc) {
-            options.enabled = true;
             options.profile = true;
             options.profile_json_path = argv[i + 1];
             ++i;
         } else if (arg.starts_with("--profile-text=")) {
-            options.enabled = true;
             options.profile = true;
             options.profile_text_path = arg.substr(15);
         } else if (arg == "--profile-text" && i + 1 < argc) {
-            options.enabled = true;
             options.profile = true;
             options.profile_text_path = argv[i + 1];
             ++i;
@@ -365,7 +362,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     if (config.headless.max_fps) {
         window.max_fps = *config.headless.max_fps;
     }
-    if (config.headless.enabled || config.headless.list_actions || config.headless.profile_render || config.headless.profile) {
+    // --profile measures the run as it is: windowed unless --headless (which
+    // then defaults to a 600-frame pass). --profile-render is always a pass.
+    if (config.headless.enabled || config.headless.list_actions || config.headless.profile_render) {
         window.mode = AppMode::Headless;
         window.hidden = true;
         window.max_frames = config.headless.frames > 0 ? config.headless.frames :
@@ -409,8 +408,29 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     // Scene-owned textures must be destroyed while the renderer/device is still
     // alive. Capture the report first because the shutdown tears down the scene
     // stack before run_windowed_app destroys its backend.
+    // The pipelines an earlier windowed run made, made again while this one
+    // loads; this run's, kept for the next.
+    std::filesystem::path pipeline_file;
+    if (window.mode != AppMode::Headless) {
+        if (config.pipeline_record_path) {
+            pipeline_file = *config.pipeline_record_path;
+        } else {
+            std::string folder;
+            for (const char c : std::string_view{config.window.title}) {
+                folder += std::isalnum(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(static_cast<unsigned char>(c))) : '-';
+            }
+            pipeline_file = user_data_dir("kin") / (folder.empty() ? std::string{"game"} : folder) / "pipelines.txt";
+        }
+    }
+    bool pipelines_prewarmed = false;
     const auto user_shutdown = window.shutdown;
     window.shutdown = [&, user_shutdown](FrameContext& frame) {
+        if (!pipeline_file.empty()) {
+            std::error_code error;
+            std::filesystem::create_directories(pipeline_file.parent_path(), error);
+            std::ofstream out{pipeline_file};
+            out << frame.renderer.pipeline_record();
+        }
         if (want_report) {
             std::ostringstream report;
             write_run_report(report, run_report, config.headless.seed, frames_run, scenes);
@@ -452,6 +472,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     };
 
     auto frame_start = std::chrono::steady_clock::now();
+    u64 gpu_frames_sampled = 0; // the backend's count at the last gpu.frame recorded
     bool frame_prepared = false;
     f64 frame_update_total_ms = 0.0;
     i32 frame_update_steps = 0;
@@ -508,6 +529,14 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     };
 
     run_windowed_app(window, [&](FrameContext& ctx) {
+        if (!pipelines_prewarmed) {
+            pipelines_prewarmed = true;
+            if (!pipeline_file.empty()) {
+                std::ifstream in{pipeline_file};
+                const std::string record{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+                ctx.renderer.prewarm_pipelines(record);
+            }
+        }
         prepare_frame(ctx);
         ++frames_run;
         if (profile_enabled) {
@@ -587,9 +616,16 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             if (ctx.renderer.backend_name() == "SDL_GPU") {
                 debug_overlay.record("gpu.wait", present_stats.last_gpu_wait_ms);
                 record_profile_value("gpu.wait", "runtime", present_stats.last_gpu_wait_ms);
-                if (present_stats.last_gpu_frame_ms > 0.0) {
+                // Only new samples: a frame without one would repeat the last.
+                if (present_stats.gpu_frames_sampled != gpu_frames_sampled) {
+                    gpu_frames_sampled = present_stats.gpu_frames_sampled;
                     debug_overlay.record("gpu.frame", present_stats.last_gpu_frame_ms);
                     record_profile_value("gpu.frame", "runtime", present_stats.last_gpu_frame_ms);
+                }
+                for (const GpuScopeTiming& scope : ctx.renderer.take_gpu_scope_timings()) {
+                    const std::string name = "gpu." + scope.name;
+                    debug_overlay.record(name, scope.ms);
+                    record_profile_value(name, "runtime", scope.ms);
                 }
             }
         }

@@ -4,6 +4,8 @@
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
 #include <kin/ui2/text.hpp>
@@ -26,6 +28,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -53,6 +56,16 @@ void skip_or_require_gpu_test(std::string_view test_name, const std::string& rea
     }
     std::cerr << "[SKIP] " << test_name << ": " << reason
               << " (set KIN_REQUIRE_GPU_TESTS=1 to require GPU coverage)\n";
+}
+
+bool color_near(kin::Color a, kin::Color b, int tolerance = 2) {
+    const auto near = [tolerance](kin::u8 x, kin::u8 y) { return std::abs(static_cast<int>(x) - static_cast<int>(y)) <= tolerance; };
+    return near(a.r, b.r) && near(a.g, b.g) && near(a.b, b.b) && near(a.a, b.a);
+}
+
+std::vector<kin::u8> read_spirv(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
 std::unique_ptr<kin::Renderer2D> try_create_gpu_renderer(kin::Window& window, std::string& unavailable_reason) {
@@ -844,6 +857,113 @@ void test_gpu_save_png_captures_bound_render_target() {
     }
 }
 
+// A texture released right after it is drawn, before the frame is flushed, still
+// draws: the backend keeps it alive until the frame is submitted. And frames that
+// drop textures that way keep working with GPU frame timing on, whose fence
+// thread once ran SDL's resource cleanup behind the render thread's back.
+void test_gpu_texture_released_before_flush() {
+    constexpr std::string_view test_name = "test_gpu_texture_released_before_flush";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-release-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const std::vector<kin::u8> white(8u * 8u * 4u, 255);
+        std::vector<kin::u8> blue(8u * 8u * 4u, 0);
+        for (std::size_t i = 2; i < blue.size(); i += 4) {
+            blue[i] = 255;
+            blue[i + 1] = 255;
+        }
+        renderer->clear(kin::Color::rgb(0, 0, 0));
+        {
+            kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
+            renderer->draw_texture(texture, kin::Rectf{8.0f, 8.0f, 16.0f, 16.0f});
+        } // released while the draw is still queued
+        std::vector<kin::u8> pixels;
+        kin::Vec2i size;
+        assert(renderer->read_rgba(kin::Rectf{0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
+        assert(pixel_near(pixels, size, 16, 16, kin::Color::rgb(255, 255, 255)));
+        assert(pixel_near(pixels, size, 40, 40, kin::Color::rgb(0, 0, 0)));
+        renderer->present();
+
+        renderer->set_gpu_timing_enabled(true);
+        for (int frame = 0; frame < 120; ++frame) {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            for (int i = 0; i < 8; ++i) {
+                kin::Texture texture = renderer->create_texture_from_rgba((i % 2 ? blue : white).data(), 8, 8);
+                renderer->draw_texture(texture, kin::Rectf{static_cast<kin::f32>(i * 8), 0.0f, 8.0f, 8.0f});
+            }
+            renderer->present();
+        }
+        renderer->set_gpu_timing_enabled(false);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// With GPU timing on, a CPU that runs frames ahead of a busy GPU fills the
+// timer, and the frames past it go untimed. Their fences once went back to
+// SDL's pool still in flight, to be reset for the next submission (an upload,
+// say), which the old frame's end then reported finished: SDL freed its staging
+// buffer under the copy, and Vulkan lost the device. Whether that crashes is up
+// to the driver's timing; this runs the untimed frames, uploads between them.
+void test_gpu_timing_survives_a_gpu_behind() {
+    constexpr std::string_view test_name = "test_gpu_timing_survives_a_gpu_behind";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-behind-test", .width = 512, .height = 512, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const std::vector<kin::u8> white(8u * 8u * 4u, 255);
+        const std::vector<kin::u8> big(1024u * 1024u * 4u, 128);
+        const kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
+        renderer->set_gpu_timing_enabled(true);
+        // Blended full-window quads: far more GPU work than CPU, on a real GPU
+        // (about 0.5 ms a frame) and on a software one alike, without taking
+        // long on the latter.
+        for (int frame = 0; frame < 40; ++frame) {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            for (int i = 0; i < 300; ++i) {
+                renderer->draw_texture(texture, kin::Rectf{0.0f, 0.0f, 8.0f, 8.0f}, kin::Rectf{0.0f, 0.0f, 512.0f, 512.0f},
+                                       kin::Color::rgba(255, 255, 255, 4));
+            }
+            renderer->present();
+            // An upload after each frame: a submission that a recycled fence
+            // would report finished too early, freeing its staging buffer.
+            const kin::Texture streamed = renderer->create_texture_from_rgba(big.data(), 1024, 1024);
+            renderer->draw_texture(streamed, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+        }
+        renderer->present();
+        // Samples still come, each spread over the untimed frames it covers.
+        const kin::RendererBackendStats stats = renderer->backend_stats();
+        assert(stats.gpu_frames_sampled > 0);
+        assert(stats.last_gpu_frame_span >= 1 && stats.last_gpu_frame_ms > 0.0);
+        renderer->set_gpu_timing_enabled(false);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_native_coordinates_disable_logical_presentation() {
     constexpr std::string_view test_name = "test_gpu_native_coordinates_disable_logical_presentation";
     bool gpu_ready = false;
@@ -1296,6 +1416,858 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// write_texture: the fill writes the texels where they go (the upload memory
+// on SDL_GPU), and may not use the renderer meanwhile.
+void check_write_texture(kin::Renderer2D& renderer) {
+    kin::Texture texture = renderer.create_texture_from_rgba(std::vector<kin::u8>(16u * 16u * 4u, 0).data(), {16, 16});
+    const bool written = renderer.write_texture(texture, {4, 0}, {12, 16}, [](std::span<kin::u8> texels) {
+        assert(texels.size() == 12u * 16u * 4u);
+        for (std::size_t i = 0; i < texels.size(); i += 4) {
+            texels[i] = 255;
+            texels[i + 1] = static_cast<kin::u8>(i / 4 % 12 * 20);
+            texels[i + 2] = 0;
+            texels[i + 3] = 255;
+        }
+    });
+    if (!written) {
+        return; // a backend that cannot update textures
+    }
+    kin::RenderTarget target = renderer.create_render_target({16, 16}, kin::ScaleMode::Nearest);
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(0, 0, 255));
+        renderer.draw_texture(texture, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+        assert(renderer.read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+    }
+    assert(pixel_near(px, size, 2, 8, kin::Color::rgba(0, 0, 0, 0), 2) ||
+           pixel_near(px, size, 2, 8, kin::Color::rgb(0, 0, 255), 2)); // left untouched: transparent
+    assert(pixel_near(px, size, 4, 8, kin::Color::rgb(255, 0, 0), 2));
+    assert(pixel_near(px, size, 9, 8, kin::Color::rgb(255, 100, 0), 2));
+    // Outside the texture: refused.
+    assert(!renderer.write_texture(texture, {8, 8}, {9, 1}, [](std::span<kin::u8>) {}));
+}
+
+void test_write_texture_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "write-texture-test", .width = 16, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    check_write_texture(renderer);
+}
+
+void test_gpu_write_texture() {
+    constexpr std::string_view test_name = "test_gpu_write_texture";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-write-texture-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        check_write_texture(*renderer);
+        // A fill that uploads would deadlock: it is refused.
+        kin::Texture texture = renderer->create_texture_from_rgba(std::vector<kin::u8>(4u * 4u * 4u, 0).data(), {4, 4});
+        bool refused = false;
+        try {
+            renderer->write_texture(texture, {0, 0}, {4, 4}, [&](std::span<kin::u8> texels) {
+                std::fill(texels.begin(), texels.end(), kin::u8{0});
+                const std::array<kin::u8, 4> red{255, 0, 0, 255};
+                renderer->create_texture_from_rgba(red.data(), {1, 1});
+            });
+        } catch (const std::logic_error&) {
+            refused = true;
+        }
+        assert(refused);
+        renderer->present(); // and the renderer still works
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// An empty texture is cleared on the GPU, not sent zeros: even one the pool
+// hands back that held other texels comes out transparent.
+void test_gpu_empty_textures_are_clear() {
+    constexpr std::string_view test_name = "test_gpu_empty_textures_are_clear";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-empty-texture-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        {
+            const std::vector<kin::u8> red(16u * 16u * 4u, 255);
+            const kin::Texture used = renderer->create_texture({16, 16}, kin::TextureFormat::Rgba8, red.data());
+        } // to the pool
+        renderer->present();
+        const auto before = renderer->backend_stats().texture_uploads;
+        const kin::Texture empty = renderer->create_texture({16, 16}, kin::TextureFormat::Rgba8, nullptr);
+        assert(renderer->backend_stats().texture_uploads == before); // nothing sent
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 255));
+            renderer->draw_texture(empty, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 0, 255), 2));
+        // A data texture made empty reads zeros too (the data_formats shader
+        // shows 0 as black where it would show the value).
+        const kin::Texture data = renderer->create_texture({4, 4}, kin::TextureFormat::R32Float, nullptr);
+        assert(data.valid());
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Uploads past the shared staging buffer's size (it grows), copied on workers
+// when a job system is set, land where they should.
+void test_gpu_big_uploads() {
+    constexpr std::string_view test_name = "test_gpu_big_uploads";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-big-upload-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        constexpr int n = 2560; // 25 MB of RGBA: more than the 16 MB staging buffer
+        std::vector<kin::u8> texels(static_cast<std::size_t>(n) * n * 4);
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                kin::u8* t = &texels[(static_cast<std::size_t>(y) * n + x) * 4];
+                t[0] = static_cast<kin::u8>(x * 255 / n);
+                t[1] = static_cast<kin::u8>(y * 255 / n);
+                t[2] = 0;
+                t[3] = 255;
+            }
+        }
+        kin::JobSystem jobs{{.workers = 3}};
+        for (kin::JobSystem* with : {static_cast<kin::JobSystem*>(nullptr), &jobs}) {
+            renderer->set_job_system(with);
+            const kin::Texture big = renderer->create_texture_from_rgba(texels.data(), {n, n});
+            kin::RenderTarget target = renderer->create_render_target({64, 64}, kin::ScaleMode::Nearest);
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            {
+                const auto bind = renderer->scoped_render_target(target);
+                renderer->clear(kin::Color::rgb(0, 0, 255));
+                // Three texels far apart, each drawn over a 16 x 16 square.
+                const auto sample = [&](int tx, int ty, float at) {
+                    renderer->draw_texture(big, kin::Rectf{static_cast<float>(tx), static_cast<float>(ty), 1.0f, 1.0f},
+                                           kin::Rectf{at, 0.0f, 16.0f, 16.0f});
+                };
+                sample(0, 0, 0.0f);
+                sample(n / 2, n - 1, 16.0f);
+                sample(n - 1, n / 4, 32.0f);
+                assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+            }
+            assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 0, 0), 2));
+            assert(pixel_near(px, size, 24, 8, kin::Color::rgb(127, 254, 0), 2));
+            assert(pixel_near(px, size, 40, 8, kin::Color::rgb(254, 63, 0), 2));
+        }
+        renderer->set_job_system(nullptr);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// gpu_scope() times named parts of a frame on the GPU, while timing is on.
+void test_gpu_scopes() {
+    constexpr std::string_view test_name = "test_gpu_scopes";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-scope-test", .width = 256, .height = 256, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const std::array<kin::u8, 4> white{255, 255, 255, 255};
+        const kin::Texture dot = renderer->create_texture_from_rgba(white.data(), {1, 1});
+        const auto frame = [&] {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            {
+                const auto heavy = renderer->gpu_scope("heavy");
+                const auto ignored = renderer->gpu_scope("nested"); // inside another: ignored
+                for (int i = 0; i < 600; ++i) {
+                    renderer->draw_texture(dot, kin::Rectf{0.0f, 0.0f, 1.0f, 1.0f}, kin::Rectf{0.0f, 0.0f, 256.0f, 256.0f},
+                                           kin::Color::rgba(255, 255, 255, 3));
+                }
+            }
+            {
+                const auto light = renderer->gpu_scope("light");
+                renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 4.0f, 4.0f}, kin::Color::rgb(255, 0, 0));
+            }
+            renderer->present();
+        };
+
+        // Off: nothing is timed.
+        frame();
+        frame();
+        assert(renderer->take_gpu_scope_timings().empty());
+
+        renderer->set_gpu_timing_enabled(true);
+        std::vector<kin::GpuScopeTiming> timings;
+        for (int i = 0; i < 30; ++i) {
+            frame();
+            for (kin::GpuScopeTiming& t : renderer->take_gpu_scope_timings()) {
+                timings.push_back(std::move(t));
+            }
+        }
+        // Let the GPU finish, then one more present collects the last of them.
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        assert(renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, px, size));
+        renderer->present();
+        for (kin::GpuScopeTiming& t : renderer->take_gpu_scope_timings()) {
+            timings.push_back(std::move(t));
+        }
+        renderer->set_gpu_timing_enabled(false);
+        std::vector<double> heavy, light;
+        for (const kin::GpuScopeTiming& t : timings) {
+            assert(t.name == "heavy" || t.name == "light");
+            (t.name == "heavy" ? heavy : light).push_back(t.ms);
+        }
+        if (heavy.size() < 10 || light.size() < 10) { // with the GPU behind, some go untimed
+            throw std::runtime_error(std::string(test_name) + ": " + std::to_string(heavy.size()) + " heavy and " +
+                                     std::to_string(light.size()) + " light timings of 30 frames");
+        }
+        std::sort(heavy.begin(), heavy.end());
+        std::sort(light.begin(), light.end());
+        const double heavy_median = heavy[heavy.size() / 2], light_median = light[light.size() / 2];
+        if (!(heavy_median > 0.1 && heavy_median > 5.0 * light_median)) {
+            throw std::runtime_error(std::string(test_name) + ": heavy " + std::to_string(heavy_median) +
+                                     " ms, light " + std::to_string(light_median) + " ms");
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// A run's pipeline record makes the next run's pipelines while it loads: a
+// second renderer handed the first's record has the same pipelines as soon as
+// its shader exists, before drawing anything.
+void test_gpu_pipeline_record() {
+    constexpr std::string_view test_name = "test_gpu_pipeline_record";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "custom_vertex.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-pipeline-record-test", .width = 32, .height = 32, .hidden = true});
+        const std::vector<kin::u8> code = read_spirv(spv);
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        const auto lines = [](const std::string& record) {
+            std::vector<std::string> out;
+            std::istringstream in{record};
+            for (std::string line; std::getline(in, line);) {
+                out.push_back(line);
+            }
+            std::sort(out.begin(), out.end());
+            return out;
+        };
+        std::string record;
+        {
+            std::string unavailable_reason;
+            std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+            if (!renderer) {
+                skip_or_require_gpu_test(test_name, unavailable_reason);
+                return;
+            }
+            gpu_ready = true;
+            const kin::ShaderHandle shader = renderer->create_shader(desc);
+            const std::array<kin::ShaderVertex, 3> triangle{{{.position = {0, 0}}, {.position = {32, 0}}, {.position = {0, 32}}}};
+            renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 4.0f, 4.0f}, kin::Color::rgb(255, 0, 0));
+            {
+                const auto blend = renderer->scoped_blend_mode(kin::BlendMode::Max);
+                renderer->draw_shader_geometry(triangle, {}, shader, {});
+            }
+            renderer->present();
+            record = renderer->pipeline_record();
+            assert(record.starts_with("kin.pipelines/1\n") && lines(record).size() >= 4);
+        }
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        renderer->prewarm_pipelines("not a record"); // ignored
+        renderer->prewarm_pipelines(record);
+        renderer->create_shader(desc); // nothing drawn yet
+        if (lines(renderer->pipeline_record()) != lines(record)) {
+            throw std::runtime_error(std::string(test_name) + ": the second run did not make the first run's pipelines");
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Storage buffers: a shader reads entries a draw's vertices pick, updates and
+// writes land, and a draw missing its buffer is skipped rather than drawn.
+void test_gpu_data_buffers() {
+    constexpr std::string_view test_name = "test_gpu_data_buffers";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "storage_read.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-data-buffer-test", .width = 32, .height = 8, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().data_buffers);
+        const std::vector<kin::u8> code = read_spirv(spv);
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        const kin::ShaderHandle shader = renderer->create_shader(desc); // counts from the SPIR-V
+        assert(shader && renderer->shader_layout(shader)->storage_buffers == 1);
+
+        std::array<float, 16> colors{1, 0, 0, 1,  0, 1, 0, 1,  0, 0, 1, 1,  1, 1, 1, 1};
+        const kin::DataBuffer items = renderer->create_data_buffer(sizeof(colors), colors.data());
+        assert(items.valid() && items.size() == sizeof(colors));
+        // Four 8 x 8 squares, square i reading entry i.
+        std::vector<kin::ShaderVertex> vertices;
+        for (int i = 0; i < 4; ++i) {
+            const float x = static_cast<float>(i * 8);
+            const std::array<float, 4> custom{static_cast<float>(i), 0.0f, 0.0f, 0.0f};
+            for (const kin::Vec2f p : {kin::Vec2f{x, 0}, kin::Vec2f{x + 8, 0}, kin::Vec2f{x + 8, 8},
+                                       kin::Vec2f{x, 0}, kin::Vec2f{x + 8, 8}, kin::Vec2f{x, 8}}) {
+                vertices.push_back({.position = p, .custom = custom});
+            }
+        }
+        kin::RenderTarget target = renderer->create_render_target({32, 8}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        const auto draw = [&](std::span<const kin::DataBuffer> buffers) {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgba(0, 0, 0, 0));
+            renderer->draw_shader_geometry(vertices, {}, shader, {}, {}, buffers);
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 8.0f}, px, size));
+        };
+        draw(std::span<const kin::DataBuffer>{&items, 1});
+        assert(pixel_near(px, size, 4, 4, kin::Color::rgb(255, 0, 0), 2));
+        assert(pixel_near(px, size, 12, 4, kin::Color::rgb(0, 255, 0), 2));
+        assert(pixel_near(px, size, 20, 4, kin::Color::rgb(0, 0, 255), 2));
+        assert(pixel_near(px, size, 28, 4, kin::Color::rgb(255, 255, 255), 2));
+
+        // One entry updated, another written in place.
+        const std::array<float, 4> yellow{1, 1, 0, 1};
+        assert(renderer->update_data_buffer(items, 16, 16, yellow.data()));
+        assert(renderer->write_data_buffer(items, 32, 16, [](std::span<kin::u8> bytes) {
+            const std::array<float, 4> magenta{1, 0, 1, 1};
+            std::memcpy(bytes.data(), magenta.data(), bytes.size());
+        }));
+        assert(!renderer->update_data_buffer(items, 60, 16, yellow.data())); // past the end
+        draw(std::span<const kin::DataBuffer>{&items, 1});
+        assert(pixel_near(px, size, 12, 4, kin::Color::rgb(255, 255, 0), 2));
+        assert(pixel_near(px, size, 20, 4, kin::Color::rgb(255, 0, 255), 2));
+        assert(pixel_near(px, size, 4, 4, kin::Color::rgb(255, 0, 0), 2)); // untouched
+
+        // Without its buffer the draw is skipped (an unbound one is a GPU error).
+        draw({});
+        assert(pixel_near(px, size, 4, 4, kin::Color::rgba(0, 0, 0, 0), 0));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// A smooth effect drawn at half resolution and stretched back looks the same
+// as drawn at full resolution; at 1 it is the plain draw.
+void test_gpu_shader_surface_scaled() {
+    constexpr std::string_view test_name = "test_gpu_shader_surface_scaled";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "bench_heavy.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-scaled-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const std::vector<kin::u8> code = read_spirv(spv);
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        const kin::ShaderHandle shader = renderer->create_shader(desc);
+        kin::RenderTarget target = renderer->create_render_target({64, 64}, kin::ScaleMode::Nearest);
+        const auto draw = [&](float resolution) {
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface_scaled(resolution, {0.0f, 0.0f, 64.0f, 64.0f}, shader, {});
+            assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+            return px;
+        };
+        const std::vector<kin::u8> full = draw(1.0f);
+        const std::vector<kin::u8> half = draw(0.5f);
+        double error = 0.0;
+        for (std::size_t i = 0; i < full.size(); ++i) {
+            error += std::abs(static_cast<int>(full[i]) - static_cast<int>(half[i]));
+        }
+        error /= static_cast<double>(full.size());
+        if (error > 3.0) {
+            throw std::runtime_error(std::string(test_name) + ": half resolution strays " + std::to_string(error));
+        }
+        assert(full != std::vector<kin::u8>(full.size(), 0)); // something was drawn
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Compute: a shader writes a storage texture (reading a uniform and a buffer),
+// ordered with the draws around it; layouts and workgroup size from the SPIR-V.
+void test_gpu_compute() {
+    constexpr std::string_view test_name = "test_gpu_compute";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "compute_gradient.comp.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-compute-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().compute);
+        const std::vector<kin::u8> code = read_spirv(spv);
+        const kin::ShaderBlob blob{code.data(), static_cast<kin::u32>(code.size())};
+        const kin::ShaderLayout layout = *kin::reflect_spirv(blob);
+        assert(layout.local_size[0] == 8 && layout.local_size[1] == 8);
+        assert(layout.readwrite_storage_textures == 1 && layout.storage_buffers == 1 && layout.uniform_buffers == 1);
+        const kin::ComputeShaderHandle shader = renderer->create_compute_shader(blob);
+        assert(shader);
+
+        // 60 x 36: not a multiple of the workgroup, so the edges are covered too.
+        const kin::Texture image = renderer->create_storage_texture({60, 36});
+        assert(image.valid());
+        const std::array<float, 4> extra{0, 0, 0, 1};
+        const kin::DataBuffer buffer = renderer->create_data_buffer(sizeof(extra), extra.data());
+        kin::ShaderParams params;
+        params.uniforms[0] = 0.5f;
+        kin::RenderTarget target = renderer->create_render_target({60, 36}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            const kin::ComputeBindings bindings{.buffers = std::span<const kin::DataBuffer>{&buffer, 1},
+                                                .outputs = std::span<const kin::Texture>{&image, 1},
+                                                .params = &params};
+            assert(renderer->dispatch_compute(shader, {60, 36}, bindings));
+            renderer->draw_texture(image, kin::Rectf{0.0f, 0.0f, 60.0f, 36.0f}); // after the dispatch
+            assert(renderer->read_rgba({0.0f, 0.0f, 60.0f, 36.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 30, 18, kin::Color::rgb(128, 128, 128), 3));
+        assert(pixel_near(px, size, 59, 35, kin::Color::rgb(251, 249, 128), 3)); // the far corner
+        // Missing the output: refused, nothing run.
+        assert(!renderer->dispatch_compute(shader, {60, 36}, kin::ComputeBindings{.params = &params}));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Hot reload: a GLSL file compiled at runtime, edited, recompiled and reloaded
+// under the same handle; a broken edit keeps the last good shader.
+void test_gpu_shader_hot_reload() {
+    constexpr std::string_view test_name = "test_gpu_shader_hot_reload";
+    if (!kin::shader_compiler_available()) {
+        skip_or_require_gpu_test(test_name, "glslc not found");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-hot-reload-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const std::filesystem::path source = std::filesystem::temp_directory_path() / "kin-hot-reload-test.frag.glsl";
+        const auto write = [&](std::string_view colour, int seconds) {
+            std::ofstream{source} << "#version 450 core\n"
+                                     "layout(location = 0) out vec4 fColor;\n"
+                                     "layout(location = 0) in struct { vec4 Color; vec2 UV; } In;\n"
+                                     "void main() { fColor = "
+                                  << colour << "; }\n";
+            // Edits land in the same second in a test: make the change visible.
+            std::filesystem::last_write_time(source, std::filesystem::file_time_type::clock::now() +
+                                                         std::chrono::seconds{seconds});
+        };
+        write("vec4(1.0, 0.0, 0.0, 1.0)", 0);
+        kin::ShaderFile shader{*renderer, source};
+        assert(shader.handle() && shader.error().empty());
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        const auto draw = [&] {
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 16.0f, 16.0f}, shader.handle(), {});
+            assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+            return kin::Color::rgba(px[0], px[1], px[2], px[3]);
+        };
+        assert(color_near(draw(), kin::Color::rgb(255, 0, 0)));
+        assert(!shader.poll()); // unchanged
+        const kin::ShaderHandle handle = shader.handle();
+        write("vec4(0.0, 1.0, 0.0, 1.0)", 2);
+        assert(shader.poll() && shader.handle() == handle);
+        assert(color_near(draw(), kin::Color::rgb(0, 255, 0)));
+        write("vec4(0.0, 0.0, 1.0 1.0)", 4); // a typo
+        assert(!shader.poll() && !shader.error().empty());
+        assert(color_near(draw(), kin::Color::rgb(0, 255, 0))); // the last good one
+        std::filesystem::remove(source);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Texture uploads are batched: many in a frame go in one command buffer ahead
+// of it, so an update applies to the whole frame it is made in. A whole-texture
+// update of a texture the frame hasn't drawn yet cycles its storage (no wait on
+// earlier frames still reading it) and must still show.
+void test_gpu_uploads_batch_in_order() {
+    constexpr std::string_view test_name = "test_gpu_uploads_batch_in_order";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-upload-test", .width = 32, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        renderer->present(); // whatever setup uploaded is out of the way
+
+        const auto before = renderer->backend_stats();
+        std::vector<kin::Texture> textures;
+        std::vector<kin::u8> texels(64u * 64u * 4u, 77);
+        for (int i = 0; i < 50; ++i) {
+            textures.push_back(renderer->create_texture_from_rgba(texels.data(), {64, 64}));
+            assert(renderer->update_texture(textures.back(), {8, 8}, {4, 4}, texels.data()));
+        }
+        const std::array<kin::u8, 4> red{255, 0, 0, 255};
+        const std::array<kin::u8, 4> green{0, 255, 0, 255};
+        kin::Texture swatch = renderer->create_texture_from_rgba(red.data(), {1, 1});
+        kin::RenderTarget target = renderer->create_render_target({32, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_texture(swatch, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer->update_texture(swatch, {0, 0}, {1, 1}, green.data())); // the whole texture
+            renderer->draw_texture(swatch, kin::Rectf{16.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        }
+        const auto after = renderer->backend_stats();
+        assert(after.texture_uploads - before.texture_uploads == 102);
+        assert(after.texture_upload_submits - before.texture_upload_submits == 1);
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 255, 0), 2)); // drawn before the update, in its frame
+        assert(pixel_near(px, size, 24, 8, kin::Color::rgb(0, 255, 0), 2));
+
+        // Next frame: replaced whole before it is drawn (cycled), then drawn.
+        renderer->present();
+        assert(renderer->update_texture(swatch, {0, 0}, {1, 1}, red.data()));
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_texture(swatch, kin::Rectf{0.0f, 0.0f, 32.0f, 16.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 16, 8, kin::Color::rgb(255, 0, 0), 2));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Triangles with a material shader: only what they cover is drawn, each vertex
+// carries its own `custom`, indices and plain lists both work, and with Max
+// overlapping shapes combine by the larger.
+void test_gpu_shader_geometry() {
+    constexpr std::string_view test_name = "test_gpu_shader_geometry";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "custom_vertex.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-shader-geometry-test", .width = 32, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().shader_geometry);
+
+        std::ifstream file(spv, std::ios::binary);
+        const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        desc.num_samplers = 1;
+        const kin::ShaderHandle shader = renderer->create_shader(desc);
+        assert(shader);
+
+        const auto vertex = [](float x, float y, std::array<float, 4> custom) {
+            return kin::ShaderVertex{.position = {x, y}, .custom = custom};
+        };
+        constexpr std::array<float, 4> red{1.0f, 0.0f, 0.0f, 1.0f};
+        constexpr std::array<float, 4> green{0.0f, 0.5f, 0.0f, 1.0f};
+        // A quad from four vertices and six indices (left half), and one triangle
+        // as a plain list (right half, below its diagonal).
+        const std::array<kin::ShaderVertex, 4> quad{vertex(0, 0, red), vertex(16, 0, red), vertex(16, 16, red),
+                                                    vertex(0, 16, red)};
+        const std::array<kin::u32, 6> quad_indices{0, 1, 2, 0, 2, 3};
+        const std::array<kin::ShaderVertex, 3> triangle{vertex(16, 0, green), vertex(32, 16, green),
+                                                        vertex(16, 16, green)};
+        kin::RenderTarget target = renderer->create_render_target({32, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        const auto draw = [&](auto&& body) {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgba(0, 0, 0, 0));
+            body();
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        };
+        draw([&] {
+            renderer->draw_shader_geometry(quad, quad_indices, shader, {});
+            renderer->draw_shader_geometry(triangle, {}, shader, {});
+        });
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(255, 0, 0), 2));
+        assert(pixel_near(px, size, 20, 13, kin::Color::rgb(0, 128, 0), 3));  // below the diagonal
+        assert(pixel_near(px, size, 28, 3, kin::Color::rgba(0, 0, 0, 0), 0)); // above it: not covered
+
+        // Bad geometry is refused whole.
+        const std::array<kin::u32, 3> past_the_end{0, 1, 9};
+        draw([&] { renderer->draw_shader_geometry(quad, past_the_end, shader, {}); });
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgba(0, 0, 0, 0), 0));
+
+        // Two overlapping shapes with Max: the overlap takes the larger.
+        constexpr std::array<float, 4> dim{0.4f, 0.4f, 0.4f, 1.0f};
+        constexpr std::array<float, 4> bright{0.8f, 0.2f, 0.8f, 1.0f};
+        const std::array<kin::ShaderVertex, 6> left{vertex(0, 0, dim), vertex(20, 0, dim), vertex(20, 16, dim),
+                                                    vertex(0, 0, dim), vertex(20, 16, dim), vertex(0, 16, dim)};
+        const std::array<kin::ShaderVertex, 6> right{vertex(12, 0, bright), vertex(32, 0, bright),
+                                                     vertex(32, 16, bright), vertex(12, 0, bright),
+                                                     vertex(32, 16, bright), vertex(12, 16, bright)};
+        draw([&] {
+            const auto blend = renderer->scoped_blend_mode(kin::BlendMode::Max);
+            renderer->draw_shader_geometry(left, {}, shader, {});
+            renderer->draw_shader_geometry(right, {}, shader, {});
+        });
+        assert(pixel_near(px, size, 4, 8, kin::Color::rgb(102, 102, 102), 2));
+        assert(pixel_near(px, size, 16, 8, kin::Color::rgb(204, 102, 204), 2)); // the overlap
+        assert(pixel_near(px, size, 28, 8, kin::Color::rgb(204, 51, 204), 2));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// Shader layouts read from SPIR-V: the test shaders' and the engine's.
+void test_shader_reflection() {
+    const std::filesystem::path tests{KIN_TEST_SHADER_DIR};
+    if (!std::filesystem::exists(tests / "four_sources.frag.spv")) {
+        return; // glslc not found: nothing compiled to read
+    }
+    const auto reflect = [](const std::filesystem::path& path) {
+        const std::vector<kin::u8> code = read_spirv(path);
+        std::string error;
+        const std::optional<kin::ShaderLayout> layout =
+            kin::reflect_spirv({code.data(), static_cast<kin::u32>(code.size())}, &error);
+        if (!layout) {
+            throw std::runtime_error(path.string() + ": " + error);
+        }
+        return *layout;
+    };
+    const kin::ShaderLayout four = reflect(tests / "four_sources.frag.spv");
+    assert(four.samplers == 4 && four.uniform_buffers == 0 && four.storage_buffers == 0);
+    const kin::ShaderLayout formats = reflect(tests / "data_formats.frag.spv");
+    assert(formats.samplers == 3 && formats.uniform_buffers == 1);
+    assert(formats.uniform_bytes == 128);
+    const kin::ShaderParamInfo* u = formats.find("u");
+    assert(u && u->offset == 0 && u->size == 128);
+    assert(reflect(tests / "custom_vertex.frag.spv").samplers == 1);
+    // Every engine shader reads.
+    for (const auto& entry : std::filesystem::directory_iterator{KIN_GPU_SHADER_DIR_FOR_TESTS}) {
+        if (entry.path().extension() == ".spv") {
+            reflect(entry.path());
+        }
+    }
+    // Not SPIR-V: refused, with a reason.
+    const std::array<kin::u8, 8> junk{1, 2, 3, 4, 5, 6, 7, 8};
+    std::string error;
+    assert(!kin::reflect_spirv({junk.data(), 8}, &error) && !error.empty());
+
+    // Params by name write where the shader reads.
+    kin::ShaderParams params;
+    params.layout = std::make_shared<const kin::ShaderLayout>(formats);
+    const std::array<float, 4> fifth{0.0f, 0.25f, 0.0f, 0.0f};
+    std::vector<float> u_values(24, 0.0f);
+    std::copy(fifth.begin(), fifth.end(), u_values.begin() + 20);
+    assert(params.set("u", u_values));
+    assert(params.uniforms[21] == 0.25f);
+    assert(!params.set("nope", 1.0f));
+    assert(!params.set("u", std::vector<float>(33, 0.0f))); // past the member
+}
+
+// Max and Min blending: a fill and a texture over a cleared target. Returns
+// the pixels at (8, 8) (the fill) and (24, 8) (the texture) for each mode.
+std::array<kin::Color, 4> min_max_blended(kin::Renderer2D& renderer) {
+    const std::array<kin::u8, 4> texel{50, 220, 120, 255};
+    const kin::Texture texture = renderer.create_texture_from_rgba(texel.data(), {1, 1});
+    std::array<kin::Color, 4> out{};
+    std::size_t i = 0;
+    for (const kin::BlendMode mode : {kin::BlendMode::Max, kin::BlendMode::Min}) {
+        kin::RenderTarget target = renderer.create_render_target({32, 16}, kin::ScaleMode::Nearest);
+        assert(target.valid());
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(100, 50, 200));
+        {
+            const auto blend = renderer.scoped_blend_mode(mode);
+            renderer.fill_rect(kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}, kin::Color::rgb(200, 20, 100));
+            renderer.draw_texture(texture, kin::Rectf{16.0f, 0.0f, 16.0f, 16.0f});
+        }
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        assert(renderer.read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        const auto at = [&](int x, int y) {
+            const std::size_t idx = (static_cast<std::size_t>(y) * static_cast<std::size_t>(size.x) + static_cast<std::size_t>(x)) * 4u;
+            return kin::Color::rgba(px[idx], px[idx + 1], px[idx + 2], px[idx + 3]);
+        };
+        out[i++] = at(8, 8);
+        out[i++] = at(24, 8);
+    }
+    return out;
+}
+
+void test_min_max_blend_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "min-max-test", .width = 32, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    const std::array<kin::Color, 4> px = min_max_blended(renderer);
+    if (renderer.capabilities().min_max_blend) {
+        assert(color_near(px[0], kin::Color::rgb(200, 50, 200)));
+        assert(color_near(px[3], kin::Color::rgb(50, 50, 120)));
+    } else {
+        // Drawn as Alpha (and a warning logged): plain opaque draws.
+        assert(color_near(px[0], kin::Color::rgb(200, 20, 100)));
+        assert(color_near(px[1], kin::Color::rgb(50, 220, 120)));
+    }
+}
+
+void test_min_max_blend_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_min_max_blend_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-min-max-test", .width = 32, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().min_max_blend);
+        const std::array<kin::Color, 4> px = min_max_blended(*renderer);
+        const std::array<kin::Color, 4> want{kin::Color::rgb(200, 50, 200), kin::Color::rgb(100, 220, 200),
+                                             kin::Color::rgb(100, 20, 100), kin::Color::rgb(50, 50, 120)};
+        for (std::size_t i = 0; i < px.size(); ++i) {
+            if (!color_near(px[i], want[i])) {
+                throw std::runtime_error(std::string(test_name) + ": pixel " + std::to_string(i) + " is " +
+                                         std::to_string(px[i].r) + "," + std::to_string(px[i].g) + "," +
+                                         std::to_string(px[i].b) + "," + std::to_string(px[i].a));
+            }
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Shared by the software (SDL) and GPU backend tests: both must light the same way.
 void check_lighting(kin::Renderer2D& renderer) {
     constexpr kin::Vec2i size{64, 64};
@@ -1445,7 +2417,7 @@ void test_gpu_data_textures_and_large_uniforms() {
         const std::array<std::uint16_t, 1> r16{32768};
         const std::array<std::uint16_t, 4> rg16{65535, 0, 0, 65535}; // texel (1, 0) has green 65535
         const std::array<float, 1> r32f{0.25f};
-        const std::array<kin::Texture, 3> sources{
+        std::array<kin::Texture, 3> sources{
             renderer->create_texture({1, 1}, kin::TextureFormat::R16Uint, r16.data()),
             renderer->create_texture({2, 1}, kin::TextureFormat::Rg16Uint, rg16.data()),
             renderer->create_texture({1, 1}, kin::TextureFormat::R32Float, r32f.data()),
@@ -1476,6 +2448,33 @@ void test_gpu_data_textures_and_large_uniforms() {
         const std::array<float, 1> half{0.5f};
         assert(renderer->update_texture(sources[2], {0, 0}, {1, 1}, reinterpret_cast<const kin::u8*>(half.data())));
         assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(128, 255, 191), 2));
+
+        // Made empty (cleared on the GPU where the format can be a render
+        // target, else sent zeros), every format reads 0: only the uniform shows.
+        sources = {
+            renderer->create_texture({1, 1}, kin::TextureFormat::R16Uint, nullptr),
+            renderer->create_texture({2, 1}, kin::TextureFormat::Rg16Uint, nullptr),
+            renderer->create_texture({1, 1}, kin::TextureFormat::R32Float, nullptr),
+        };
+        assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(0, 0, 64), 2));
+
+        // Shader draws with the same params share one draw; different params
+        // each keep theirs (the blue channel shows u[5].y).
+        {
+            std::vector<kin::u8> pixels;
+            kin::Vec2i size{};
+            kin::ShaderParams second = params;
+            second.uniforms[21] = 0.75f;
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 2.0f, 8.0f}, shader, params, std::span<const kin::Texture>{sources});
+            renderer->draw_shader_surface({2.0f, 0.0f, 2.0f, 8.0f}, shader, params, std::span<const kin::Texture>{sources});
+            renderer->draw_shader_surface({4.0f, 0.0f, 4.0f, 8.0f}, shader, second, std::span<const kin::Texture>{sources});
+            assert(renderer->read_rgba({0.0f, 0.0f, 8.0f, 8.0f}, pixels, size));
+            assert(pixel_near(pixels, {8, 8}, 1, 4, kin::Color::rgb(0, 0, 64), 2));
+            assert(pixel_near(pixels, {8, 8}, 3, 4, kin::Color::rgb(0, 0, 64), 2));
+            assert(pixel_near(pixels, {8, 8}, 6, 4, kin::Color::rgb(0, 0, 191), 2));
+        }
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;
@@ -1514,6 +2513,7 @@ void test_post_process_degrades_on_fake_backend() {
 
 } // namespace
 
+
 int main() {
     test_facade_with_fake_backend();
     test_post_process_degrades_on_fake_backend();
@@ -1529,6 +2529,8 @@ int main() {
     test_blur_degrades_on_fake_backend();
     test_capture_backdrop_round_trips();
     test_gpu_save_png_captures_bound_render_target();
+    test_gpu_texture_released_before_flush();
+    test_gpu_timing_survives_a_gpu_behind();
     test_gpu_native_coordinates_disable_logical_presentation();
     test_gpu_frame_timing();
     test_gpu_logical_transforms_are_immediate();
@@ -1537,6 +2539,21 @@ int main() {
     test_shader_params_and_formats_on_software_backends();
     test_gpu_data_textures_and_large_uniforms();
     test_gpu_resources_outlive_renderer();
+    test_shader_reflection();
+    test_min_max_blend_on_software_backend();
+    test_min_max_blend_on_gpu_backend();
+    test_gpu_shader_geometry();
+    test_gpu_uploads_batch_in_order();
+    test_gpu_pipeline_record();
+    test_gpu_data_buffers();
+    test_gpu_shader_surface_scaled();
+    test_gpu_compute();
+    test_gpu_shader_hot_reload();
+    test_gpu_scopes();
+    test_gpu_big_uploads();
+    test_gpu_empty_textures_are_clear();
+    test_write_texture_on_software_backend();
+    test_gpu_write_texture();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

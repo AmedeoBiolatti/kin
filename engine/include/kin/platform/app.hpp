@@ -29,6 +29,28 @@ struct AppConfig {
     // Most frames a second a windowed run draws (0: no cap). Frames are paced
     // to deadlines, so the rate holds without drift; headless runs ignore it.
     f32 max_fps = 0.0f;
+    // A frame time within this many seconds of a whole number of fixed steps
+    // counts as exactly that many (0: off): see FrameTimeSnapper.
+    f32 snap_tolerance = 0.001f;
+};
+
+// Snaps measured frame times to whole fixed steps, so ordinary jitter (a frame
+// of 16.5 or 16.9 ms at 60 steps a second) runs one step every frame instead
+// of sometimes 0 and then 2, which shows as judder in what update() moves.
+// The time snapped away is kept as a debt and paid back a whole step at a
+// time once it adds up to one (a display at 59.94 Hz still drops a step every
+// 17 s), so game time keeps up with real time. Frames not near a whole number
+// of steps (hitches, unpaced frames shorter than a step) pass unchanged.
+class FrameTimeSnapper {
+public:
+    // How much time to add to the step accumulator for a frame of `frame_time`.
+    f32 advance(f32 frame_time, f32 fixed_dt, f32 tolerance);
+    // Forgets the debt (after the accumulator itself was dropped).
+    void reset() { _debt = 0.0; }
+    f64 debt() const { return _debt; }
+
+private:
+    f64 _debt = 0.0; // seconds of real time not yet counted (negative: counted ahead)
 };
 
 struct AppFrameStats {
@@ -40,6 +62,7 @@ struct AppFrameStats {
     i32 update_steps = 0;
     bool hit_max_steps = false;
     f32 pacing_wait = 0.0f; // seconds slept after the previous frame to hold max_fps
+    f32 snapped_frame_time = 0.0f; // what the accumulator was given (FrameTimeSnapper)
 };
 
 class App {

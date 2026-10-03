@@ -9,9 +9,18 @@
 
 #include <SDL3/SDL.h>
 
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
+
+namespace kin {
+class JobSystem;
+}
 
 namespace kin::gpu {
 
@@ -39,7 +48,7 @@ public:
 
     GpuDevice(const GpuDevice&) = delete;
     GpuDevice& operator=(const GpuDevice&) = delete;
-    GpuDevice(GpuDevice&& other) noexcept;
+    GpuDevice(GpuDevice&& other) noexcept; // the upload state is moved, not the mutex
     GpuDevice& operator=(GpuDevice&& other) noexcept = delete;
 
     GpuTexture create_render_texture(u32 width, u32 height,
@@ -48,11 +57,33 @@ public:
     // A sampled texture of `format` (`texel_bytes` per texel) filled from `pixels`,
     // or with zeros when null. RGBA8 textures can also be render targets.
     GpuTexture create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
-                              u32 texel_bytes);
+                              u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage = 0);
     // Uploads `pixels` (tightly packed, `texel_bytes` per texel) over the w x h
-    // region at (x, y), ordered after the frames submitted before it.
+    // region at (x, y), ordered after the frames submitted before it. `whole`:
+    // the region is the whole texture, so its storage may be cycled (a frame
+    // still reading the old texels doesn't hold the upload up).
     void update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
-                        u32 texel_bytes = 4);
+                        u32 texel_bytes = 4, bool whole = false);
+    // Uploads `bytes` (from `data`, zeros when null, or written by `fill`) to a
+    // buffer at `offset`, with the texture uploads. `cycle`: the whole buffer is
+    // replaced and may get fresh storage.
+    void upload_storage_buffer(SDL_GPUBuffer* buffer, u32 offset, u32 bytes, const void* data, bool cycle,
+                               const std::function<void(std::span<u8>)>* fill = nullptr);
+    // As update_texture, but `fill` writes the texels straight into the upload
+    // memory (no copy). It must not call back into the device.
+    void write_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, bool whole,
+                       const std::function<void(std::span<u8>)>& fill);
+    // Texture uploads (create_texture, update_texture) are not submitted one by
+    // one: each is recorded at once into a shared upload command buffer, which
+    // goes to the GPU before the next submission (a frame, a read-back), so the
+    // frame sees them. Recording at once keeps the order of uploads and draws:
+    // a draw recorded before a cycled upload reads the old texels.
+    void flush_uploads();
+    // Big uploads copy their texels on these workers too (null: none).
+    void set_job_system(JobSystem* jobs) { _jobs = jobs; }
+    // Texture uploads recorded and command buffers submitted for them so far.
+    std::pair<u64, u64> upload_counts() const { return {_uploads_staged, _upload_batches}; }
+
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
     void upload_buffer(GpuFrame& frame, GpuBuffer& buffer, const void* data, u32 size);
@@ -86,6 +117,21 @@ private:
     UploadSlice stage_upload_data(const void* data, u32 size, u32 alignment);
     void release_upload_ring();
 
+    // Copies `pixels` (or zeros, when null) to a transfer buffer and records the
+    // upload to `texture`; or, with `fill`, lets it write the texels there.
+    void stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const void* pixels,
+                              u32 texel_bytes, bool cycle,
+                              const std::function<void(std::span<u8>)>* fill = nullptr);
+    // Where an upload goes: a texture's region, or a range of a buffer.
+    struct UploadDestination {
+        SDL_GPUTexture* texture = nullptr;
+        u32 x = 0, y = 0, w = 0, h = 0;
+        SDL_GPUBuffer* buffer = nullptr;
+        u32 buffer_offset = 0;
+    };
+    void stage_upload(const UploadDestination& to, u32 bytes, const void* pixels, bool cycle,
+                      const std::function<void(std::span<u8>)>* fill);
+
     SDL_GPUDevice* _device = nullptr;
     SharedDevice _shared; // handed to textures; nulled on destruction
     SDL_Window* _window = nullptr;
@@ -95,6 +141,26 @@ private:
     u32 _upload_ring_size = 0;
     u32 _upload_ring_offset = 0;
     u64 _first_submit_ns = 0;
+    // Texture uploads: the command buffer and copy pass they are recorded into
+    // (open until flush_uploads), and the staging buffer they share.
+    std::mutex _uploads_mutex;
+    // The thread inside a write_texture fill, which holds the mutex: an upload
+    // from it would deadlock, so it is refused instead.
+    std::atomic<std::thread::id> _filling{};
+    void refuse_upload_inside_fill() const;
+    void begin_upload_commands(); // the upload command buffer, acquired if needed
+    // Clears `texture` (a render target) to zeros in the upload command buffer.
+    void clear_texture(SDL_GPUTexture* texture, bool cycle);
+    SDL_GPUCommandBuffer* _upload_commands = nullptr;
+    SDL_GPUCopyPass* _upload_pass = nullptr;
+    SDL_GPUTransferBuffer* _staging = nullptr;
+    u32 _staging_used = 0;
+    u32 _staging_size = 0;     // grows to fit the biggest upload, shrinks after
+    u64 _big_upload_batch = 0; // the batch of the last upload over half the usual size
+    JobSystem* _jobs = nullptr;
+    std::shared_ptr<GpuTexturePool> _texture_pool; // released sampled textures, for create_texture
+    u64 _uploads_staged = 0;
+    u64 _upload_batches = 0;
 };
 
 class GpuFrame {

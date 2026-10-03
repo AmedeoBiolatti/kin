@@ -1,8 +1,12 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/renderer/color.hpp>
 
 #include <array>
+#include <memory>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace kin {
@@ -11,6 +15,14 @@ namespace kin {
 // "gpu" render driver (SDL 3.4 render-GPU-state); capabilities().materials_2d is
 // true only there. On any other backend draw_shader_surface() is a no-op and the
 // UI layer supplies a fallback fill, so callers degrade gracefully.
+
+// A compute shader (Renderer2D::create_compute_shader).
+struct ComputeShaderHandle {
+    u64 value = 0;
+
+    explicit operator bool() const { return value != 0; }
+    friend constexpr bool operator==(ComputeShaderHandle, ComputeShaderHandle) = default;
+};
 
 struct ShaderHandle {
     u64 value = 0;
@@ -22,6 +34,9 @@ struct ShaderHandle {
 // Most textures one material shader can sample (fragment sampler slots 0..15),
 // the per-stage limit SDL_GPU guarantees on every backend.
 inline constexpr u32 MaxShaderSamplers = 16;
+// Most storage buffers one material shader can read (fragment slots), SDL_GPU's
+// guaranteed per-stage minimum.
+inline constexpr u32 MaxShaderStorageBuffers = 8;
 
 // A single precompiled fragment-shader binary in one GPU format. The backend
 // picks the blob matching the device's supported format (SDL_GetGPUShaderFormats).
@@ -38,6 +53,8 @@ struct ShaderBlob {
 // the fragment input is `float4 v_color : COLOR0; float2 v_uv : TEXCOORD0`, the
 // output is `SV_Target`, and an optional uniform block is `cbuffer : register(b0, space3)`
 // (fed from ShaderParams via slot 0). Provide whichever precompiled formats you have.
+// draw_shader_geometry() feeds each vertex's ShaderVertex::custom to the fragment
+// stage at `layout(location = 2) in vec4` (TEXCOORD1 in HLSL).
 // The textures passed to draw_shader_surface() bind in order at sampler slots 0, 1,
 // 2, ... (`register(tN, space2)`, or `layout(set = 2, binding = N)` in GLSL). Slots the
 // shader declares but the draw leaves out are bound to a 1x1 white texture.
@@ -48,6 +65,7 @@ struct ShaderDesc {
     ShaderBlob msl;              // Metal
     u32 num_samplers = 1;        // sampler slots the shader declares, 1..MaxShaderSamplers
     u32 num_uniform_buffers = 0; // fragment uniform buffers (ShaderParams -> slot 0)
+    u32 num_storage_buffers = 0; // fragment storage buffers (DataBuffer), after the samplers in set 2
     const char* entrypoint = "main";
 };
 
@@ -60,8 +78,28 @@ inline constexpr u32 MaxShaderUniformFloats = 4096;
 // 16 floats (four vec4s) by default; resize for more, up to
 // MaxShaderUniformFloats. Declare arrays as vec4s: std140 pads each element of a
 // float array to 16 bytes.
+struct ShaderLayout;
+
 struct ShaderParams {
     std::vector<f32> uniforms = std::vector<f32>(16, 0.0f);
+    // The shader's layout (Renderer2D::shader_params sets it), for set() by name.
+    std::shared_ptr<const ShaderLayout> layout{};
+
+    // Writes `values` at the uniform block member `name` (as declared in the
+    // shader). False without a layout, for an unknown name, or past the member.
+    bool set(std::string_view name, std::span<const f32> values);
+    bool set(std::string_view name, f32 value) { return set(name, std::span<const f32>{&value, 1}); }
+};
+
+// A vertex of draw_shader_geometry(). The fragment shader gets `color` and `uv`
+// as for a shader surface, and `custom` as `layout(location = 2) in vec4`: per
+// vertex data, so one draw can carry many shapes with their own parameters (an
+// index into a data texture, a height, a strength).
+struct ShaderVertex {
+    Vec2f position{}; // in the same coordinates as other draws
+    Vec2f uv{};
+    Color color = Color::rgb(255, 255, 255);
+    std::array<f32, 4> custom{};
 };
 
 // Engine-shipped fragment shaders, compiled to SPIR-V in KIN_GPU_SHADER_DIR and loaded

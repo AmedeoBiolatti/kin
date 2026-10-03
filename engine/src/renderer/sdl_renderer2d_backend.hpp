@@ -120,6 +120,8 @@ private:
     std::vector<SDL_Texture*> _render_target_stack;
     GeometryBatch _batch;
     BlendMode _blend = BlendMode::Alpha;
+    bool _min_max_blend = false;  // the driver takes BlendMode::Max and Min
+    bool _warned_min_max = false;
     RendererBackendStats _stats;
     bool _texture_batching_enabled = true;
 };

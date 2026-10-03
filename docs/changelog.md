@@ -7,6 +7,111 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- Shader hot reload for development: `kin::ShaderFile` keeps a GLSL file
+  compiled (with `glslc`, about 0.1 s) and reloaded in place when it is saved,
+  keeping the last good version when an edit does not compile;
+  `kin::compile_glsl()` and `Renderer2D::reload_shader()` underneath.
+- Compute shaders: `Renderer2D::create_compute_shader` (layout and workgroup
+  size read from the SPIR-V), `create_storage_texture` and `dispatch_compute`
+  (`ComputeBindings`: sampled sources, read-only buffers, written textures and
+  buffers, params), recorded in order with the frame's draws. SDL_GPU only
+  (`capabilities().compute`).
+- `Renderer2D::draw_shader_surface_scaled(resolution, ...)`: a costly, smooth
+  effect computed at lower resolution into a pooled render target and
+  stretched back (half resolution: about a third of the GPU time).
+- Storage buffers for shaders: `Renderer2D::create_data_buffer`,
+  `update_data_buffer`, `write_data_buffer`, and `draw_shader_surface` /
+  `draw_shader_geometry` taking `DataBuffer`s, bound after the textures
+  (`kin/renderer/data_buffer.hpp`). SDL_GPU only (`capabilities().data_buffers`).
+- `Renderer2D::pipeline_record()` and `prewarm_pipelines(record)`: the GPU
+  pipelines a run made, made again while the next run loads instead of at
+  their first draw (up to ~20 ms each on a cold driver cache). `run_scene_app`
+  keeps the record for windowed runs in the user data folder
+  (`SceneAppConfig::pipeline_record_path`).
+- Shader reflection: `create_shader` reads the SPIR-V's sampler, storage buffer
+  and uniform block counts (a `ShaderDesc` that disagrees is logged, the
+  shader's used), and `Renderer2D::shader_params(shader)` gives params that
+  `set("name", ...)` by uniform block member. `kin::reflect_spirv` is public.
+- `Renderer2D::write_texture(texture, at, size, fill)`: `fill` writes the
+  texels straight into the upload memory on SDL_GPU, skipping the copy
+  `update_texture` makes, for texels made each frame.
+- `Renderer2D::gpu_scope("name")`: the GPU time of a part of a frame, reported
+  as `gpu.<name>` by `--profile` and the debug overlay (and by
+  `take_gpu_scope_timings()`). Measured with fences on each side, splitting the
+  frame's submission there, while GPU timing is on; otherwise it does nothing.
+- `Renderer2D::draw_shader_geometry()`: triangles drawn with a material shader,
+  so only the pixels a shape covers run it, instead of a rectangle over its
+  bounds. Each `kin::ShaderVertex` carries four free floats the fragment shader
+  reads at `location = 2`, so one draw can hold many shapes with their own
+  parameters. SDL_GPU only (`capabilities().shader_geometry`).
+- `BlendMode::Max` and `BlendMode::Min`: per channel (alpha too), the larger or
+  smaller of what is drawn and what is there. Overlapping shadows, fog of war,
+  coverage and heat maps can be drawn shape by shape. The SDL_GPU backend has
+  them; SDL's software renderer draws them as `Alpha` with a warning
+  (`RendererBackendCapabilities::min_max_blend`).
+- Frame times within `AppConfig::snap_tolerance` (1 ms) of a whole number of
+  fixed steps count as exactly that many (`kin::FrameTimeSnapper`), so ordinary
+  display jitter no longer runs some frames 0 updates and the next 2. The time
+  snapped away is paid back a whole step at a time, so game time keeps up.
+- `RendererBackendStats::gpu_frames_sampled` and `last_gpu_frame_span`: when
+  new GPU timing arrived, and how many frames it covers.
+
+### Changed
+
+- SDL_GPU shader draws with the same params (and shader, sources, state) in a
+  row are one draw call, not one each: 2000 small shader surfaces a frame went
+  from 0.47 to 0.24 ms back to back (`kin_draw_bench 60 1 surfaces`).
+- SDL_GPU `create_shader` builds the shader's usual pipeline (alpha blend, an
+  RGBA8 target) at once instead of at its first draw: on a cold driver cache
+  that moves a ~19 ms hitch from the first frame drawing it to load time.
+  Pipelines made later are logged at debug level with their cost.
+- SDL_GPU quads with the default shader append straight to the last draw when
+  its state matches, and the clip rectangle is computed once per change, not
+  per draw: `fill_rect` about 12% less CPU, `draw_texture` 4%. `kin_draw_bench`
+  measures `draw_texture`, `fill_rect` and `draw_sprites`.
+- SDL_GPU sends a third less geometry: quads (textures, rects, lines) go as
+  four corners drawn through a static index buffer, not six vertices (hex_demo
+  189 to 126 KB a frame, same draw calls). An empty texture
+  (`create_texture` with no pixels) is cleared on the GPU instead of being sent
+  zeros, where its format can be a render target.
+- SDL_GPU texture uploads (`create_texture`, `update_texture`) no longer submit
+  a command buffer each: a frame's uploads are recorded into one, sent ahead of
+  the frame, from a shared staging buffer that grows to fit big uploads and
+  shrinks back. Texels are copied with streaming stores, and on the renderer's
+  job system for uploads of 1 MB or more. Replacing a whole texture the frame
+  hasn't drawn yet cycles its storage. Released textures are pooled (a few
+  seconds, up to 256 MB) for `create_texture` to reuse. 150 uploads of 256 KB
+  in a frame went from about 25 ms of calls plus a 70 ms stall at present to
+  2.1 ms. `RendererBackendStats::texture_uploads` and `texture_upload_submits`
+  count them; `kin_upload_bench` measures them.
+- `--profile` (and `--profile-json`, `--profile-text`, `--profile-lines`) no
+  longer makes a run headless: it profiles the window, until the game quits or
+  `--frames` N. For the old 600-frame headless pass add `--headless`.
+  (`--profile-render` is still a headless pass.)
+- `gpu.frame` is recorded only on frames with a new GPU sample, instead of
+  repeating the last one; a sample taken after untimed frames (the GPU far
+  behind the CPU) is their average rather than their sum.
+
+### Fixed
+
+- SDL_GPU: a texture released right after it was drawn, before the frame was
+  flushed, left the queued draw a dangling handle: a crash, or on Vulkan a lost
+  device once SDL destroyed the image. The backend now keeps the textures the
+  frame's draws use alive until the frame is submitted.
+- SDL_GPU: GPU frame timing (`--profile`, `KIN_LOG_FRAME_STATS`, the debug
+  overlay) waited on frame fences with `SDL_WaitForGPUFences` on its own thread,
+  which also ran SDL's resource cleanup there; under load on Vulkan that lost the
+  device or stalled frames for seconds. It now polls `SDL_QueryGPUFence`, a plain
+  status read (resolution about 0.1 ms).
+- SDL_GPU: with GPU frame timing on and the GPU more than 8 frames behind (a
+  heavy scene, no vsync), each further frame's fence was released while the
+  frame still ran. SDL put it back in its pool and reset it for the next
+  submission, whose resources it then freed when the old frame finished: on
+  Vulkan, a lost device a few seconds into `--profile`. Those frames are now
+  submitted without a fence (and go untimed).
+
 ## [0.2.3] — 2026-10-01
 
 Tools for building a game around its data: a game's own files hot-reload as

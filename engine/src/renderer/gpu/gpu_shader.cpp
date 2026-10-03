@@ -21,8 +21,8 @@ std::runtime_error sdl_error(std::string_view prefix) {
 
 } // namespace
 
-GpuShader::GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader, u32 samplers)
-    : _device(device), _shader(shader), _samplers(samplers) {}
+GpuShader::GpuShader(SDL_GPUDevice* device, SDL_GPUShader* shader, u32 samplers, u32 storage_buffers)
+    : _device(device), _shader(shader), _samplers(samplers), _storage_buffers(storage_buffers) {}
 
 GpuShader::~GpuShader() {
     release();
@@ -31,7 +31,8 @@ GpuShader::~GpuShader() {
 GpuShader::GpuShader(GpuShader&& other) noexcept
     : _device(std::exchange(other._device, nullptr)),
       _shader(std::exchange(other._shader, nullptr)),
-      _samplers(std::exchange(other._samplers, 0u)) {}
+      _samplers(std::exchange(other._samplers, 0u)),
+      _storage_buffers(std::exchange(other._storage_buffers, 0u)) {}
 
 GpuShader& GpuShader::operator=(GpuShader&& other) noexcept {
     if (this == &other) {
@@ -41,6 +42,7 @@ GpuShader& GpuShader::operator=(GpuShader&& other) noexcept {
     _device = std::exchange(other._device, nullptr);
     _shader = std::exchange(other._shader, nullptr);
     _samplers = std::exchange(other._samplers, 0u);
+    _storage_buffers = std::exchange(other._storage_buffers, 0u);
     return *this;
 }
 
@@ -48,7 +50,8 @@ GpuShader GpuShader::from_bytes(GpuDevice& device, SDL_GPUShaderStage stage,
                                 SDL_GPUShaderFormat format,
                                 std::span<const u8> bytes,
                                 u32 uniform_buffers,
-                                u32 samplers) {
+                                u32 samplers,
+                                u32 storage_buffers) {
     if (bytes.empty()) {
         throw std::runtime_error("GpuShader::from_bytes failed: bytecode is empty");
     }
@@ -61,12 +64,13 @@ GpuShader GpuShader::from_bytes(GpuDevice& device, SDL_GPUShaderStage stage,
     info.stage = stage;
     info.num_uniform_buffers = uniform_buffers;
     info.num_samplers = samplers;
+    info.num_storage_buffers = storage_buffers;
 
     SDL_GPUShader* shader = SDL_CreateGPUShader(device.handle(), &info);
     if (!shader) {
         throw sdl_error("SDL_CreateGPUShader failed");
     }
-    return GpuShader{device.handle(), shader, samplers};
+    return GpuShader{device.handle(), shader, samplers, storage_buffers};
 }
 
 GpuShader GpuShader::from_file(GpuDevice& device, SDL_GPUShaderStage stage,
