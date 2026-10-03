@@ -1,10 +1,14 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <numeric>
 #include <sstream>
+#include <vector>
 
 namespace {
 
@@ -99,8 +103,59 @@ void test_logging() {
 
 } // namespace
 
+// Steps per frame for `frames` frame times, as App::run's accumulator takes them.
+std::vector<int> steps_per_frame(const std::vector<float>& frame_times, float tolerance, double* debt = nullptr) {
+    constexpr float dt = 1.0f / 60.0f;
+    kin::FrameTimeSnapper snapper;
+    float accumulator = 0.0001f; // a remainder right at the edge: the worst case
+    std::vector<int> steps;
+    for (const float t : frame_times) {
+        accumulator += snapper.advance(t, dt, tolerance);
+        int n = 0;
+        while (accumulator >= dt) {
+            accumulator -= dt;
+            ++n;
+        }
+        steps.push_back(n);
+    }
+    if (debt) {
+        *debt = snapper.debt();
+    }
+    return steps;
+}
+
+void test_frame_time_snapper() {
+    // 60 Hz with +-0.4 ms of jitter: unsnapped, frames run 0 or 2 steps.
+    std::vector<float> jittery;
+    for (int i = 0; i < 600; ++i) {
+        jittery.push_back(1.0f / 60.0f + (i % 2 ? 0.0004f : -0.0004f) * static_cast<float>((i * 7) % 5) / 4.0f);
+    }
+    const auto uneven = [](const std::vector<int>& steps) {
+        return std::count_if(steps.begin(), steps.end(), [](int n) { return n != 1; });
+    };
+    assert(uneven(steps_per_frame(jittery, 0.0f)) > 100);
+    assert(uneven(steps_per_frame(jittery, 0.001f)) == 0);
+
+    // A 59.94 Hz display: snapped every frame, and game time keeps up by
+    // skipping one step once the lag adds up to a whole one.
+    std::vector<float> ntsc(3000, 1.0f / 59.94f);
+    double debt = 0.0;
+    const std::vector<int> steps = steps_per_frame(ntsc, 0.001f, &debt);
+    const long total = std::accumulate(steps.begin(), steps.end(), 0L);
+    assert(uneven(steps) >= 2 && uneven(steps) <= 4); // about one every 1000 frames
+    assert(std::abs(static_cast<double>(total) / 60.0 + debt - 3000.0 / 59.94) < 1.0 / 60.0);
+    assert(std::abs(debt) < 1.0 / 60.0);
+
+    // A hitch near three steps counts as three; one off the grid is untouched.
+    kin::FrameTimeSnapper snapper;
+    assert(std::abs(snapper.advance(0.0502f, 1.0f / 60.0f, 0.001f) - 0.05f) < 1e-6f);
+    assert(snapper.advance(0.0420f, 1.0f / 60.0f, 0.001f) == 0.0420f);
+    assert(snapper.advance(0.0069f, 1.0f / 60.0f, 0.001f) == 0.0069f); // 144 Hz, unpaced
+}
+
 int main() {
     test_logging();
+    test_frame_time_snapper();
 
     kin::App app{{.mode = kin::AppMode::Headless}};
 

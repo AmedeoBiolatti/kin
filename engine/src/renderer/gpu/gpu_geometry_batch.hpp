@@ -26,6 +26,8 @@ enum class GpuBlendMode {
     Additive,
     Replace,
     Multiply,      // dst * src; the destination's alpha is kept
+    Max,           // max(dst, src) per channel
+    Min,           // min(dst, src) per channel
 };
 
 struct GpuVertex {

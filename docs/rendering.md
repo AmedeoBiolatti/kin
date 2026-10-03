@@ -222,6 +222,26 @@ the above. The SDL renderer's `gpu` driver draws shader surfaces without source
 textures, and other backends draw nothing, so check the capability and provide a
 fallback. `engine/shaders/` has working examples.
 
+## Blend Modes
+
+`Renderer2D::set_blend_mode()` (or `scoped_blend_mode()`) sets how later draws
+combine with what is under them:
+
+| Mode | Result | For |
+|---|---|---|
+| `Alpha` | straight alpha over (the default) | most drawing |
+| `Additive` | dst + src * src alpha | lights, glows |
+| `Multiply` | dst * src | light maps, tinting |
+| `Replace` | src | copying |
+| `Max` | max(dst, src), each channel and alpha | overlapping shadows, fog of war, coverage, heat maps |
+| `Min` | min(dst, src), each channel and alpha | the reverse |
+
+`Max` and `Min` let overlapping shapes each be drawn on their own, in any order,
+into one target: two shadows that overlap darken it once, not twice. The source
+is not weighted by its alpha. The SDL_GPU backend has them; SDL's software
+renderer does not (`capabilities().min_max_blend` is false) and draws them as
+`Alpha`, logging a warning once.
+
 ## Lighting
 
 `kin::LightLayer` lights a scene after it is drawn: everything in an area is
@@ -330,3 +350,19 @@ native captures `prev_pos` each step, `begin_interpolated_view(ctx.alpha)`
 lerps the camera, and all `world_to_screen` consumers pick the interpolated
 view up automatically. Death/teleport visuals must force one final sync so the
 last pose is not interpolated from a stale previous position.
+
+### Frame pacing
+
+A display's frame times jitter around the step: at 60 steps a second, 16.5 ms
+then 16.9 ms. Counted as measured, the accumulator crosses a step boundary early
+or late, and some frames run 0 updates and the next 2, which shows as judder in
+whatever `update()` moves. `App::run` therefore counts a frame time within
+`AppConfig::snap_tolerance` (1 ms by default; `WindowedAppConfig` has it too) of
+a whole number of steps as exactly that many (`kin::FrameTimeSnapper`).
+
+- The time snapped away is kept and paid back a whole step at a time, so game
+  time keeps up with real time: a 59.94 Hz display drops one step every 17 s.
+- Frame times not near a whole number of steps (hitches, unpaced frames shorter
+  than a step) are counted as measured.
+- `AppFrameStats::snapped_frame_time` is what the accumulator was given.
+- Set `snap_tolerance` to 0 to count every frame as measured.

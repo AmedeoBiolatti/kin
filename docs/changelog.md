@@ -7,6 +7,30 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- `BlendMode::Max` and `BlendMode::Min`: per channel (alpha too), the larger or
+  smaller of what is drawn and what is there. Overlapping shadows, fog of war,
+  coverage and heat maps can be drawn shape by shape. The SDL_GPU backend has
+  them; SDL's software renderer draws them as `Alpha` with a warning
+  (`RendererBackendCapabilities::min_max_blend`).
+- Frame times within `AppConfig::snap_tolerance` (1 ms) of a whole number of
+  fixed steps count as exactly that many (`kin::FrameTimeSnapper`), so ordinary
+  display jitter no longer runs some frames 0 updates and the next 2. The time
+  snapped away is paid back a whole step at a time, so game time keeps up.
+- `RendererBackendStats::gpu_frames_sampled` and `last_gpu_frame_span`: when
+  new GPU timing arrived, and how many frames it covers.
+
+### Changed
+
+- `--profile` (and `--profile-json`, `--profile-text`, `--profile-lines`) no
+  longer makes a run headless: it profiles the window, until the game quits or
+  `--frames` N. For the old 600-frame headless pass add `--headless`.
+  (`--profile-render` is still a headless pass.)
+- `gpu.frame` is recorded only on frames with a new GPU sample, instead of
+  repeating the last one; a sample taken after untimed frames (the GPU more than
+  8 frames behind) is their average rather than their sum.
+
 ### Fixed
 
 - SDL_GPU: a texture released right after it was drawn, before the frame was

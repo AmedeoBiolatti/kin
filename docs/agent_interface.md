@@ -34,7 +34,7 @@ an explicit `--seed`.
 | `--list-actions` | Print available input actions and bindings, then quit. |
 | `--game-info` / `--list-info` | Print game metadata, then quit. |
 | `--profile-render` | Run 600 frames and print a render timing table. |
-| `--profile` | Run a profiling pass. Defaults to 600 frames unless `--frames` is set. |
+| `--profile` | Profile the run: windowed, until it quits or `--frames` N; with `--headless`, a 600-frame pass unless `--frames` is set. |
 | `--profile-lines` | Enable compiled-in Kin profile line/block capture. |
 | `--profile-json=PATH` | Write `kin.profile/1` JSON to PATH (`-` for stdout). |
 | `--profile-text=PATH` | Write a text profile summary to PATH (`-` for stdout). |

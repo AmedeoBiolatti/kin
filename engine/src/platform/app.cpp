@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <string_view>
 #include <stdexcept>
@@ -129,12 +130,35 @@ void App::pump_events() {
     }
 }
 
+f32 FrameTimeSnapper::advance(f32 frame_time, f32 fixed_dt, f32 tolerance) {
+    if (tolerance <= 0.0f || fixed_dt <= 0.0f) {
+        return frame_time;
+    }
+    const f64 steps = std::round(static_cast<f64>(frame_time) / fixed_dt);
+    const f64 snapped = steps * fixed_dt;
+    if (steps < 1.0 || std::abs(frame_time - snapped) > tolerance) {
+        return frame_time;
+    }
+    _debt += frame_time - snapped;
+    // Paid back in whole steps, so the accumulator's remainder (and with it
+    // the steps per frame and the render alpha) stays where it was.
+    f64 paid = 0.0;
+    if (_debt >= fixed_dt) {
+        paid = fixed_dt;
+    } else if (_debt <= -fixed_dt) {
+        paid = -static_cast<f64>(fixed_dt);
+    }
+    _debt -= paid;
+    return static_cast<f32>(snapped + paid);
+}
+
 void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)> render) {
     _running = true;
     const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
     const f32 max_frame_time = std::max(0.0f, _config.max_frame_time);
     const i32 max_steps = std::max(1, _config.max_steps);
     f32 accumulator = 0.0f;
+    FrameTimeSnapper snapper;
     u64 last = SDL_GetTicksNS();
     u64 next_frame_ns = 0; // when the next frame may start, under max_fps
     bool advance_input = true;
@@ -158,7 +182,8 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
         const f32 pacing_wait = _frame_stats.pacing_wait;
         // time_scale paces real time into the accumulator (game-speed control);
         // it never changes fixed_dt or step contents, so determinism holds.
-        accumulator += frame_time * _time_scale;
+        const f32 snapped = snapper.advance(frame_time, fixed_dt, _config.snap_tolerance);
+        accumulator += snapped * _time_scale;
         _frame_stats = {
             .raw_frame_time = raw_frame_time,
             .clamped_frame_time = frame_time,
@@ -168,6 +193,7 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
             .update_steps = 0,
             .hit_max_steps = false,
             .pacing_wait = pacing_wait,
+            .snapped_frame_time = snapped,
         };
 
         _input.begin_frame(advance_input);
@@ -198,6 +224,7 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
             // its last allowed step (accumulator < fixed_dt), there is no backlog
             // to discard and the leftover feeds the render interpolation alpha.
             accumulator = 0.0f;
+            snapper.reset();
             _frame_stats.hit_max_steps = true;
             _frame_stats.accumulator_after_update = accumulator;
         }

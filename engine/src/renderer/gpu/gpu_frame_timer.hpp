@@ -22,6 +22,13 @@
 
 namespace kin::gpu {
 
+// A finished frame's GPU time. When frames went untimed before it (the timer
+// was full), its span covers them too: `frames` of them in `ms` together.
+struct GpuFrameSample {
+    f64 ms = 0.0;
+    u32 frames = 1;
+};
+
 class GpuFrameTimer {
 public:
     explicit GpuFrameTimer(SDL_GPUDevice* device);
@@ -38,17 +45,19 @@ public:
     bool full() const;
 
     // Takes `fence`, from a frame whose first command buffer was submitted at
-    // `first_submit_ns` (SDL_GetTicksNS). Call only when not full().
-    void track(SDL_GPUFence* fence, u64 first_submit_ns);
+    // `first_submit_ns` (SDL_GetTicksNS), after `untimed` frames submitted
+    // without one. Call only when not full().
+    void track(SDL_GPUFence* fence, u64 first_submit_ns, u32 untimed = 0);
 
-    // The GPU time (ms) of the latest frame that finished since the last call, if
-    // any. Releases the finished frames' fences.
-    std::optional<f64> collect();
+    // The latest frame that finished since the last call, if any. Releases the
+    // finished frames' fences.
+    std::optional<GpuFrameSample> collect();
 
 private:
     struct Pending {
         SDL_GPUFence* fence = nullptr;
         u64 first_submit_ns = 0;
+        u32 frames = 1;    // this one and the untimed ones before it
         f64 gpu_ms = -1.0; // set once the fence signals
     };
 

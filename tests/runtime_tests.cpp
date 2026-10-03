@@ -146,7 +146,7 @@ int main() {
         arg3,
     };
     const kin::HeadlessOptions runtime_profile_options = kin::parse_headless_options(7, runtime_profile_argv);
-    assert(runtime_profile_options.enabled);
+    assert(!runtime_profile_options.enabled); // profiles the window; --headless for a pass
     assert(runtime_profile_options.profile);
     assert(runtime_profile_options.profile_lines);
     assert(runtime_profile_options.profile_json_path == "profile.json");
@@ -414,7 +414,7 @@ int main() {
         std::ostringstream profile_text;
         const int code = kin::run_scene_app({
             .window = {.title = "profiled", .width = 64, .height = 64},
-            .headless = {.profile = true, .frames = 3, .seed = 1},
+            .headless = {.enabled = true, .profile = true, .frames = 3, .seed = 1},
             .profile_json_output = &profile_json,
             .profile_text_output = &profile_text,
         }, profiled);

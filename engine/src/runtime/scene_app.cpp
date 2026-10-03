@@ -133,27 +133,21 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.enabled = true;
             options.profile_render = true;
         } else if (arg == "--profile") {
-            options.enabled = true;
             options.profile = true;
         } else if (arg == "--profile-lines") {
-            options.enabled = true;
             options.profile = true;
             options.profile_lines = true;
         } else if (arg.starts_with("--profile-json=")) {
-            options.enabled = true;
             options.profile = true;
             options.profile_json_path = arg.substr(15);
         } else if (arg == "--profile-json" && i + 1 < argc) {
-            options.enabled = true;
             options.profile = true;
             options.profile_json_path = argv[i + 1];
             ++i;
         } else if (arg.starts_with("--profile-text=")) {
-            options.enabled = true;
             options.profile = true;
             options.profile_text_path = arg.substr(15);
         } else if (arg == "--profile-text" && i + 1 < argc) {
-            options.enabled = true;
             options.profile = true;
             options.profile_text_path = argv[i + 1];
             ++i;
@@ -405,7 +399,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     if (config.headless.max_fps) {
         window.max_fps = *config.headless.max_fps;
     }
-    if (config.headless.enabled || config.headless.list_actions || config.headless.profile_render || config.headless.profile) {
+    // --profile measures the run as it is: windowed unless --headless (which
+    // then defaults to a 600-frame pass). --profile-render is always a pass.
+    if (config.headless.enabled || config.headless.list_actions || config.headless.profile_render) {
         window.mode = AppMode::Headless;
         window.hidden = true;
         window.max_frames = config.headless.frames > 0 ? config.headless.frames :
@@ -542,6 +538,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     };
 
     auto frame_start = std::chrono::steady_clock::now();
+    u64 gpu_frames_sampled = 0; // the backend's count at the last gpu.frame recorded
     bool frame_prepared = false;
     f64 frame_update_total_ms = 0.0;
     i32 frame_update_steps = 0;
@@ -698,7 +695,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             if (ctx.renderer.backend_name() == "SDL_GPU") {
                 debug_overlay.record("gpu.wait", present_stats.last_gpu_wait_ms);
                 record_profile_value("gpu.wait", "runtime", present_stats.last_gpu_wait_ms);
-                if (present_stats.last_gpu_frame_ms > 0.0) {
+                // Only new samples: a frame without one would repeat the last.
+                if (present_stats.gpu_frames_sampled != gpu_frames_sampled) {
+                    gpu_frames_sampled = present_stats.gpu_frames_sampled;
                     debug_overlay.record("gpu.frame", present_stats.last_gpu_frame_ms);
                     record_profile_value("gpu.frame", "runtime", present_stats.last_gpu_frame_ms);
                 }

@@ -204,8 +204,13 @@ public:
     //   Additive  dst + src * src_alpha: lights, glows
     //   Multiply  dst * src (alpha ignored): light maps, tinting the scene
     //   Replace   src, no blending
+    //   Max       max(dst, src) per channel, alpha too (src not weighted by its
+    //             alpha): overlapping shadows, fog of war, coverage, heat maps
+    //   Min       min(dst, src) per channel, alpha too
     // A render target's premultiplied texture keeps its own blend under Alpha.
-    // Backends without blend modes (capabilities().blend_modes false) ignore it.
+    // Backends without blend modes (capabilities().blend_modes false) ignore it;
+    // those without Max and Min (capabilities().min_max_blend false: SDL's
+    // software renderer) draw them as Alpha and log a warning once.
     void set_blend_mode(BlendMode mode);
     BlendMode blend_mode() const { return _blend_mode; }
     BlendModeGuard scoped_blend_mode(BlendMode mode);
