@@ -1401,6 +1401,70 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// Texture uploads are batched: many in a frame go in one command buffer ahead
+// of it, so an update applies to the whole frame it is made in. A whole-texture
+// update of a texture the frame hasn't drawn yet cycles its storage (no wait on
+// earlier frames still reading it) and must still show.
+void test_gpu_uploads_batch_in_order() {
+    constexpr std::string_view test_name = "test_gpu_uploads_batch_in_order";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-upload-test", .width = 32, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        renderer->present(); // whatever setup uploaded is out of the way
+
+        const auto before = renderer->backend_stats();
+        std::vector<kin::Texture> textures;
+        std::vector<kin::u8> texels(64u * 64u * 4u, 77);
+        for (int i = 0; i < 50; ++i) {
+            textures.push_back(renderer->create_texture_from_rgba(texels.data(), {64, 64}));
+            assert(renderer->update_texture(textures.back(), {8, 8}, {4, 4}, texels.data()));
+        }
+        const std::array<kin::u8, 4> red{255, 0, 0, 255};
+        const std::array<kin::u8, 4> green{0, 255, 0, 255};
+        kin::Texture swatch = renderer->create_texture_from_rgba(red.data(), {1, 1});
+        kin::RenderTarget target = renderer->create_render_target({32, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_texture(swatch, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer->update_texture(swatch, {0, 0}, {1, 1}, green.data())); // the whole texture
+            renderer->draw_texture(swatch, kin::Rectf{16.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        }
+        const auto after = renderer->backend_stats();
+        assert(after.texture_uploads - before.texture_uploads == 102);
+        assert(after.texture_upload_submits - before.texture_upload_submits == 1);
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 255, 0), 2)); // drawn before the update, in its frame
+        assert(pixel_near(px, size, 24, 8, kin::Color::rgb(0, 255, 0), 2));
+
+        // Next frame: replaced whole before it is drawn (cycled), then drawn.
+        renderer->present();
+        assert(renderer->update_texture(swatch, {0, 0}, {1, 1}, red.data()));
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_texture(swatch, kin::Rectf{0.0f, 0.0f, 32.0f, 16.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 16, 8, kin::Color::rgb(255, 0, 0), 2));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Triangles with a material shader: only what they cover is drawn, each vertex
 // carries its own `custom`, indices and plain lists both work, and with Max
 // overlapping shapes combine by the larger.
@@ -1790,6 +1854,7 @@ void test_post_process_degrades_on_fake_backend() {
 
 } // namespace
 
+
 int main() {
     test_facade_with_fake_backend();
     test_post_process_degrades_on_fake_backend();
@@ -1818,6 +1883,7 @@ int main() {
     test_min_max_blend_on_software_backend();
     test_min_max_blend_on_gpu_backend();
     test_gpu_shader_geometry();
+    test_gpu_uploads_batch_in_order();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

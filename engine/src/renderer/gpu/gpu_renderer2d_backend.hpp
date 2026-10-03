@@ -19,6 +19,7 @@
 #include <SDL3/SDL.h>
 
 #include <memory>
+#include <tuple>
 #include <optional>
 #include <span>
 #include <vector>
@@ -47,12 +48,16 @@ public:
     // Linear (blur). Mutable so set_scale_mode works through a const Texture&.
     ScaleMode scale_mode() const { return _scale; }
     void set_scale_mode(ScaleMode mode) const { _scale = mode; }
+    // The backend's frame serial when a draw last used it (see retain()).
+    u64 used_in_frame() const { return _used_in_frame; }
+    void mark_used(u64 frame) const { _used_in_frame = frame; }
 
 private:
     GpuTexture _texture;
     bool _premultiplied = false;
     mutable ScaleMode _scale = ScaleMode::Nearest;
     TextureFormat _format = TextureFormat::Rgba8;
+    mutable u64 _used_in_frame = 0;
 };
 } // namespace gpu
 
@@ -66,7 +71,11 @@ public:
 
     std::string_view name() const override { return "SDL_GPU"; }
     RendererBackendCapabilities capabilities() const override;
-    RendererBackendStats stats() const override { return _stats; }
+    RendererBackendStats stats() const override {
+        RendererBackendStats stats = _stats;
+        std::tie(stats.texture_uploads, stats.texture_upload_submits) = _device.upload_counts();
+        return stats;
+    }
     void set_gpu_timing_enabled(bool enabled) override;
 
     void clear(Color color) override;
@@ -193,6 +202,7 @@ private:
     std::optional<gpu::GpuFrame> _frame;
     std::vector<std::shared_ptr<ITextureBackend>> _retained; // textures the frame's draws use
     const ITextureBackend* _last_retained = nullptr;         // skips repeats of the same texture
+    u64 _frame_serial = 1; // counts end_frame(): which frame a texture was last drawn in
     std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
     u32 _untimed_frames = 0; // submitted without a fence since the last timed one (timer full)
     RendererBackendStats _stats;                    // present timings only
