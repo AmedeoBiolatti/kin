@@ -16,6 +16,14 @@ namespace kin {
 // true only there. On any other backend draw_shader_surface() is a no-op and the
 // UI layer supplies a fallback fill, so callers degrade gracefully.
 
+// A compute shader (Renderer2D::create_compute_shader).
+struct ComputeShaderHandle {
+    u64 value = 0;
+
+    explicit operator bool() const { return value != 0; }
+    friend constexpr bool operator==(ComputeShaderHandle, ComputeShaderHandle) = default;
+};
+
 struct ShaderHandle {
     u64 value = 0;
 

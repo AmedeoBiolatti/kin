@@ -263,6 +263,16 @@ public:
     void draw_shader_surface_scaled(f32 resolution, Rectf rect, ShaderHandle shader, const ShaderParams& params,
                                     std::span<const Texture> sources = {}, std::span<const DataBuffer> buffers = {});
 
+    // Compute shaders (capabilities().compute; elsewhere a null handle): made
+    // from SPIR-V, whose layout and workgroup size are read from it. A storage
+    // texture is one they can write (and other shaders sample, or draws draw).
+    // dispatch_compute runs enough workgroups to cover `size` threads (x, y),
+    // recorded in the frame in order with the draws around it; false when the
+    // bindings fall short of what the shader declares (logged).
+    ComputeShaderHandle create_compute_shader(ShaderBlob spirv);
+    Texture create_storage_texture(Vec2i size, TextureFormat format = TextureFormat::Rgba8);
+    bool dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings);
+
     // Storage buffers for shaders (capabilities().data_buffers; elsewhere an
     // invalid buffer). Filled from `data`, or zeros. Updates go to the GPU with
     // the frame's texture uploads; write_data_buffer's `fill` writes straight
@@ -351,6 +361,7 @@ private:
     std::vector<RenderTargetPoolEntry> _rt_pool;
     std::unordered_map<int, ShaderHandle> _builtin_shaders; // BuiltinShader -> cached handle
     std::unordered_map<u64, std::shared_ptr<const ShaderLayout>> _shader_layouts; // read from each shader's SPIR-V
+    std::unordered_map<u64, ShaderLayout> _compute_layouts;
     BlendMode _blend_mode = BlendMode::Alpha;
 };
 

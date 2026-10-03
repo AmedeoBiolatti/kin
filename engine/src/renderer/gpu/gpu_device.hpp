@@ -57,7 +57,7 @@ public:
     // A sampled texture of `format` (`texel_bytes` per texel) filled from `pixels`,
     // or with zeros when null. RGBA8 textures can also be render targets.
     GpuTexture create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
-                              u32 texel_bytes);
+                              u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage = 0);
     // Uploads `pixels` (tightly packed, `texel_bytes` per texel) over the w x h
     // region at (x, y), ordered after the frames submitted before it. `whole`:
     // the region is the whole texture, so its storage may be cycled (a frame
