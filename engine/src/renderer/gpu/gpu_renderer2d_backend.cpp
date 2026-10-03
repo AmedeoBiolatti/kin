@@ -739,6 +739,16 @@ Texture GpuRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
 
 namespace {
 
+// A shader known across runs (pipeline records): FNV-1a of its SPIR-V, never 0
+// (the default shader's).
+u64 spirv_id(ShaderBlob spirv) {
+    u64 id = 1469598103934665603ull;
+    for (u32 i = 0; i < spirv.size; ++i) {
+        id = (id ^ spirv.code[i]) * 1099511628211ull;
+    }
+    return id | 1;
+}
+
 SDL_GPUTextureFormat sdl_format(TextureFormat format) {
     switch (format) {
     case TextureFormat::Rgba8: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -1348,11 +1358,7 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
     _pipelines.get(_vertex_shader.handle(), shader.handle(), gpu::GpuBlendMode::Alpha,
                     SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
     // And whatever else an earlier run drew it with.
-    u64 id = 1469598103934665603ull; // FNV-1a of the SPIR-V
-    for (u32 i = 0; i < desc.spirv.size; ++i) {
-        id = (id ^ desc.spirv.code[i]) * 1099511628211ull;
-    }
-    id |= 1; // never 0, the default shader's
+    const u64 id = spirv_id(desc.spirv);
     _fragment_ids[shader.handle()] = id;
     make_hinted_pipelines(id, shader.handle());
     _shaders.push_back(std::move(shader));
@@ -1462,6 +1468,9 @@ bool GpuRenderer2DBackend::reload_shader(ShaderHandle handle, const ShaderDesc& 
     slot = std::move(shader);
     _pipelines.get(_vertex_shader.handle(), slot.handle(), gpu::GpuBlendMode::Alpha,
                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    const u64 id = spirv_id(desc.spirv);
+    _fragment_ids[slot.handle()] = id;
+    make_hinted_pipelines(id, slot.handle());
     return true;
 }
 

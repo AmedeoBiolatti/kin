@@ -52,7 +52,7 @@ struct RendererBackendCapabilities {
 
 // A named part of a frame's GPU work (Renderer2D::gpu_scope) and its GPU time.
 struct GpuScopeTiming {
-    std::string name;
+    std::string name{};
     f64 ms = 0.0;
 };
 
@@ -61,10 +61,10 @@ struct GpuScopeTiming {
 // set 1 the `outputs` (storage textures, from create_storage_texture) then the
 // `output_buffers`, and set 2 the uniform block (`params`).
 struct ComputeBindings {
-    std::span<const Texture> sources;
-    std::span<const DataBuffer> buffers;
-    std::span<const Texture> outputs;
-    std::span<const DataBuffer> output_buffers;
+    std::span<const Texture> sources{};
+    std::span<const DataBuffer> buffers{};
+    std::span<const Texture> outputs{};
+    std::span<const DataBuffer> output_buffers{};
     const ShaderParams* params = nullptr;
 };
 

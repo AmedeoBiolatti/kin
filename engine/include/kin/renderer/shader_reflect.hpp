@@ -17,7 +17,7 @@ namespace kin {
 
 // A member of the shader's uniform block: where it sits, in bytes.
 struct ShaderParamInfo {
-    std::string name;
+    std::string name{};
     u32 offset = 0;
     u32 size = 0; // a whole array's, for an array
 };
@@ -32,7 +32,7 @@ struct ShaderLayout {
     u32 readwrite_storage_textures = 0;
     u32 readwrite_storage_buffers = 0;
     u32 local_size[3]{1, 1, 1};
-    std::vector<ShaderParamInfo> params;
+    std::vector<ShaderParamInfo> params{};
 
     const ShaderParamInfo* find(std::string_view name) const;
 };

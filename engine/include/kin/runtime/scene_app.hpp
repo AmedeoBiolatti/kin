@@ -101,7 +101,7 @@ struct SceneAppConfig {
     // Where a windowed run keeps the GPU pipelines it made, to make them while
     // the next run loads (Renderer2D::pipeline_record). Unset: the user data
     // folder, kin/<the window title>/pipelines.txt. Empty: not kept.
-    std::optional<std::filesystem::path> pipeline_record_path;
+    std::optional<std::filesystem::path> pipeline_record_path{};
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);

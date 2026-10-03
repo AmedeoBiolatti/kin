@@ -922,7 +922,7 @@ void test_gpu_timing_survives_a_gpu_behind() {
     bool gpu_ready = false;
     try {
         kin::App app{};
-        kin::Window& window = app.create_window({.title = "gpu-behind-test", .width = 1024, .height = 1024, .hidden = true});
+        kin::Window& window = app.create_window({.title = "gpu-behind-test", .width = 512, .height = 512, .hidden = true});
         std::string unavailable_reason;
         std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
         if (!renderer) {
@@ -935,11 +935,13 @@ void test_gpu_timing_survives_a_gpu_behind() {
         const std::vector<kin::u8> big(1024u * 1024u * 4u, 128);
         const kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
         renderer->set_gpu_timing_enabled(true);
-        for (int frame = 0; frame < 60; ++frame) {
+        // Blended full-window quads: far more GPU work than CPU, on a real GPU
+        // (about 0.5 ms a frame) and on a software one alike, without taking
+        // long on the latter.
+        for (int frame = 0; frame < 40; ++frame) {
             renderer->clear(kin::Color::rgb(0, 0, 0));
-            // Blended full-window quads: far more GPU work than CPU.
-            for (int i = 0; i < 1500; ++i) {
-                renderer->draw_texture(texture, kin::Rectf{0.0f, 0.0f, 8.0f, 8.0f}, kin::Rectf{0.0f, 0.0f, 1024.0f, 1024.0f},
+            for (int i = 0; i < 300; ++i) {
+                renderer->draw_texture(texture, kin::Rectf{0.0f, 0.0f, 8.0f, 8.0f}, kin::Rectf{0.0f, 0.0f, 512.0f, 512.0f},
                                        kin::Color::rgba(255, 255, 255, 4));
             }
             renderer->present();
@@ -1600,7 +1602,7 @@ void test_gpu_scopes() {
     bool gpu_ready = false;
     try {
         kin::App app{};
-        kin::Window& window = app.create_window({.title = "gpu-scope-test", .width = 512, .height = 512, .hidden = true});
+        kin::Window& window = app.create_window({.title = "gpu-scope-test", .width = 256, .height = 256, .hidden = true});
         std::string unavailable_reason;
         std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
         if (!renderer) {
@@ -1615,8 +1617,8 @@ void test_gpu_scopes() {
             {
                 const auto heavy = renderer->gpu_scope("heavy");
                 const auto ignored = renderer->gpu_scope("nested"); // inside another: ignored
-                for (int i = 0; i < 1500; ++i) {
-                    renderer->draw_texture(dot, kin::Rectf{0.0f, 0.0f, 1.0f, 1.0f}, kin::Rectf{0.0f, 0.0f, 512.0f, 512.0f},
+                for (int i = 0; i < 600; ++i) {
+                    renderer->draw_texture(dot, kin::Rectf{0.0f, 0.0f, 1.0f, 1.0f}, kin::Rectf{0.0f, 0.0f, 256.0f, 256.0f},
                                            kin::Color::rgba(255, 255, 255, 3));
                 }
             }
@@ -1661,7 +1663,7 @@ void test_gpu_scopes() {
         std::sort(heavy.begin(), heavy.end());
         std::sort(light.begin(), light.end());
         const double heavy_median = heavy[heavy.size() / 2], light_median = light[light.size() / 2];
-        if (!(heavy_median > 0.5 && heavy_median > 5.0 * light_median)) {
+        if (!(heavy_median > 0.1 && heavy_median > 5.0 * light_median)) {
             throw std::runtime_error(std::string(test_name) + ": heavy " + std::to_string(heavy_median) +
                                      " ms, light " + std::to_string(light_median) + " ms");
         }

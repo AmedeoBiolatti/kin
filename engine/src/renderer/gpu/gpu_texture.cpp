@@ -3,7 +3,7 @@
 namespace kin::gpu {
 
 namespace {
-// Pooled textures waiting longer than this many frames are released.
+// Pooled textures waiting longer than this many ticks (about frames) are released.
 constexpr u64 PoolTicks = 300;
 // And the pool holds at most this much, releasing its oldest past it.
 constexpr u64 PoolBytes = 256ull * 1024 * 1024;
@@ -19,7 +19,6 @@ SDL_GPUTexture* GpuTexturePool::take(u32 width, u32 height, SDL_GPUTextureFormat
             SDL_GPUTexture* texture = e.texture;
             _bytes -= e.bytes;
             _entries.erase(_entries.begin() + static_cast<std::ptrdiff_t>(i));
-            ++_reused;
             return texture;
         }
     }
