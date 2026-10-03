@@ -28,6 +28,14 @@ public:
 
     void destroy();
 
+    // Calls fn(vertex, fragment, blend, format, layout) for each pipeline made.
+    template<typename Fn>
+    void for_each(Fn&& fn) const {
+        for (const Entry& e : _entries) {
+            fn(e.vertex, e.fragment, e.blend, e.format, e.layout);
+        }
+    }
+
 private:
     struct Entry {
         SDL_GPUShader* vertex = nullptr;

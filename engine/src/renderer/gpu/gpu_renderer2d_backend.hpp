@@ -21,6 +21,7 @@
 #include <memory>
 #include <tuple>
 #include <optional>
+#include <unordered_map>
 #include <span>
 #include <vector>
 
@@ -77,6 +78,8 @@ public:
         return stats;
     }
     void set_gpu_timing_enabled(bool enabled) override;
+    std::string pipeline_record() const override;
+    void prewarm_pipelines(std::string_view record) override;
     void begin_gpu_scope(std::string_view name) override;
     void end_gpu_scope() override;
     std::vector<GpuScopeTiming> take_gpu_scope_timings() override { return std::exchange(_scope_timings, {}); }
@@ -225,6 +228,17 @@ private:
     const ITextureBackend* _last_retained = nullptr;         // skips repeats of the same texture
     u64 _frame_serial = 1; // counts end_frame(): which frame a texture was last drawn in
     std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
+    // Pipelines to make ahead: a shader is known across runs by its SPIR-V's
+    // hash (0: the engine's default fragment shader).
+    struct PipelineHint {
+        u64 fragment = 0;
+        gpu::GpuBlendMode blend = gpu::GpuBlendMode::Alpha;
+        SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        gpu::GpuVertexLayout layout = gpu::GpuVertexLayout::Triangles;
+    };
+    std::vector<PipelineHint> _pipeline_hints;
+    std::unordered_map<SDL_GPUShader*, u64> _fragment_ids; // created shaders' hashes
+    void make_hinted_pipelines(u64 fragment_id, SDL_GPUShader* fragment);
     u32 _untimed_frames = 0; // submitted without a fence since the last timed one (timer full)
     // The open gpu_scope(): its name, and whether it is timed (the timer had room).
     std::optional<std::string> _scope;

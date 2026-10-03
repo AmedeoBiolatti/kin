@@ -100,6 +100,10 @@ public:
     virtual void reset_stats() {}
     // Measures each frame's GPU time (stats().last_gpu_frame_ms) where supported.
     virtual void set_gpu_timing_enabled(bool) {}
+    // The pipelines this run made, as text a later run passes to
+    // prewarm_pipelines to make them while it loads (before their first draw).
+    virtual std::string pipeline_record() const { return {}; }
+    virtual void prewarm_pipelines(std::string_view /*record*/) {}
     // A named scope of GPU work, timed while GPU timing is on (else nothing).
     virtual void begin_gpu_scope(std::string_view) {}
     virtual void end_gpu_scope() {}

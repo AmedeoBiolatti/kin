@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::pipeline_record()` and `prewarm_pipelines(record)`: the GPU
+  pipelines a run made, made again while the next run loads instead of at
+  their first draw (up to ~20 ms each on a cold driver cache). `run_scene_app`
+  keeps the record for windowed runs in the user data folder
+  (`SceneAppConfig::pipeline_record_path`).
 - Shader reflection: `create_shader` reads the SPIR-V's sampler, storage buffer
   and uniform block counts (a `ShaderDesc` that disagrees is logged, the
   shader's used), and `Renderer2D::shader_params(shader)` gives params that

@@ -27,6 +27,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -54,6 +55,11 @@ void skip_or_require_gpu_test(std::string_view test_name, const std::string& rea
     }
     std::cerr << "[SKIP] " << test_name << ": " << reason
               << " (set KIN_REQUIRE_GPU_TESTS=1 to require GPU coverage)\n";
+}
+
+std::vector<kin::u8> read_spirv(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
 std::unique_ptr<kin::Renderer2D> try_create_gpu_renderer(kin::Window& window, std::string& unavailable_reason) {
@@ -1661,6 +1667,68 @@ void test_gpu_scopes() {
     }
 }
 
+// A run's pipeline record makes the next run's pipelines while it loads: a
+// second renderer handed the first's record has the same pipelines as soon as
+// its shader exists, before drawing anything.
+void test_gpu_pipeline_record() {
+    constexpr std::string_view test_name = "test_gpu_pipeline_record";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "custom_vertex.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-pipeline-record-test", .width = 32, .height = 32, .hidden = true});
+        const std::vector<kin::u8> code = read_spirv(spv);
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        const auto lines = [](const std::string& record) {
+            std::vector<std::string> out;
+            std::istringstream in{record};
+            for (std::string line; std::getline(in, line);) {
+                out.push_back(line);
+            }
+            std::sort(out.begin(), out.end());
+            return out;
+        };
+        std::string record;
+        {
+            std::string unavailable_reason;
+            std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+            if (!renderer) {
+                skip_or_require_gpu_test(test_name, unavailable_reason);
+                return;
+            }
+            gpu_ready = true;
+            const kin::ShaderHandle shader = renderer->create_shader(desc);
+            const std::array<kin::ShaderVertex, 3> triangle{{{.position = {0, 0}}, {.position = {32, 0}}, {.position = {0, 32}}}};
+            renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 4.0f, 4.0f}, kin::Color::rgb(255, 0, 0));
+            {
+                const auto blend = renderer->scoped_blend_mode(kin::BlendMode::Max);
+                renderer->draw_shader_geometry(triangle, {}, shader, {});
+            }
+            renderer->present();
+            record = renderer->pipeline_record();
+            assert(record.starts_with("kin.pipelines/1\n") && lines(record).size() >= 4);
+        }
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        renderer->prewarm_pipelines("not a record"); // ignored
+        renderer->prewarm_pipelines(record);
+        renderer->create_shader(desc); // nothing drawn yet
+        if (lines(renderer->pipeline_record()) != lines(record)) {
+            throw std::runtime_error(std::string(test_name) + ": the second run did not make the first run's pipelines");
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -1812,11 +1880,6 @@ void test_gpu_shader_geometry() {
         }
         skip_or_require_gpu_test(test_name, e.what());
     }
-}
-
-std::vector<kin::u8> read_spirv(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
 // Shader layouts read from SPIR-V: the test shaders' and the engine's.
@@ -2206,6 +2269,7 @@ int main() {
     test_min_max_blend_on_gpu_backend();
     test_gpu_shader_geometry();
     test_gpu_uploads_batch_in_order();
+    test_gpu_pipeline_record();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

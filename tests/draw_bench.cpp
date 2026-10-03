@@ -9,7 +9,42 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
+
+// Two "runs" of a shader drawn as triangles with Max blending (not the
+// pipeline create_shader makes by itself): the first keeps its pipeline
+// record, the second hands it to prewarm_pipelines before making the shader.
+// Run with __GL_SHADER_DISK_CACHE=0 for a cold driver cache.
+int pipeline_runs(kin::Window& window) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::string record;
+    for (int run = 0; run < 2; ++run) {
+        std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+        auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+        const auto t0 = clock::now();
+        renderer->prewarm_pipelines(record);
+        const kin::ShaderHandle shader = renderer->builtin_shader(kin::BuiltinShader::Vignette);
+        const auto t1 = clock::now();
+        const std::array<kin::ShaderVertex, 3> triangle{{{.position = {0, 0}}, {.position = {64, 0}}, {.position = {0, 64}}}};
+        const auto frame = [&] {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            const auto blend = renderer->scoped_blend_mode(kin::BlendMode::Max);
+            renderer->draw_shader_geometry(triangle, {}, shader, {});
+            renderer->present();
+        };
+        frame();
+        const auto t2 = clock::now();
+        frame();
+        const auto t3 = clock::now();
+        std::printf("run %d (%s): prewarm + shader %.2f ms, first frame %.2f ms, second %.2f ms\n", run + 1,
+                    run == 0 ? "no record" : "with the first run's record", ms(t0, t1), ms(t1, t2), ms(t2, t3));
+        record = renderer->pipeline_record();
+    }
+    return 0;
+}
 
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
@@ -20,6 +55,10 @@ int main(int argc, char** argv) {
     if (!backend || backend->name() != "SDL_GPU") {
         std::fprintf(stderr, "SDL_GPU backend unavailable\n");
         return 1;
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "pipelines") {
+        backend.reset();
+        return pipeline_runs(window);
     }
     auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
     renderer->set_gpu_timing_enabled(true);

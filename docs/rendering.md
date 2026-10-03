@@ -205,6 +205,26 @@ params.set("tint", std::array{1.0f, 0.8f, 0.6f, 1.0f});
 `kin::MaxShaderUniformFloats` (4096, 16 KiB). Declare arrays in the shader as
 `vec4`s: std140 pads each element of a `float` array to 16 bytes.
 
+### Pipelines
+
+The GPU needs a pipeline for each combination of shader, blend mode, target
+and vertex layout, and making one costs about 0.5 ms, or up to ~20 ms on a cold
+driver cache (first launch, new driver): a hitch on the frame that first draws
+it. So:
+
+- `create_shader()` makes the shader's usual pipeline (alpha blend, an RGBA8
+  target) at once.
+- `Renderer2D::pipeline_record()` lists the pipelines a run made, and
+  `prewarm_pipelines(record)` makes them while the next run loads: the engine's
+  own at once, a game's as its shader is created (shaders are known across runs
+  by their SPIR-V's hash). `run_scene_app` does this for windowed runs, keeping
+  the record in the user data folder (`kin/<window title>/pipelines.txt`, or
+  `SceneAppConfig::pipeline_record_path`; an empty path keeps none).
+
+On an RTX 4080 Laptop GPU with a cold driver cache, the first frame drawing a
+shader as triangles with `BlendMode::Max` took 10 ms without a record and
+0.8 ms with one (the pipeline was made during loading instead).
+
 ### Shader geometry
 
 `draw_shader_surface()` covers a rectangle. For a shape that is really a
