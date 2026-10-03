@@ -1477,6 +1477,51 @@ void test_gpu_write_texture() {
     }
 }
 
+// An empty texture is cleared on the GPU, not sent zeros: even one the pool
+// hands back that held other texels comes out transparent.
+void test_gpu_empty_textures_are_clear() {
+    constexpr std::string_view test_name = "test_gpu_empty_textures_are_clear";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-empty-texture-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        {
+            const std::vector<kin::u8> red(16u * 16u * 4u, 255);
+            const kin::Texture used = renderer->create_texture({16, 16}, kin::TextureFormat::Rgba8, red.data());
+        } // to the pool
+        renderer->present();
+        const auto before = renderer->backend_stats().texture_uploads;
+        const kin::Texture empty = renderer->create_texture({16, 16}, kin::TextureFormat::Rgba8, nullptr);
+        assert(renderer->backend_stats().texture_uploads == before); // nothing sent
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 255));
+            renderer->draw_texture(empty, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 0, 255), 2));
+        // A data texture made empty reads zeros too (the data_formats shader
+        // shows 0 as black where it would show the value).
+        const kin::Texture data = renderer->create_texture({4, 4}, kin::TextureFormat::R32Float, nullptr);
+        assert(data.valid());
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Uploads past the shared staging buffer's size (it grows), copied on workers
 // when a job system is set, land where they should.
 void test_gpu_big_uploads() {
@@ -1999,7 +2044,7 @@ void test_gpu_data_textures_and_large_uniforms() {
         const std::array<std::uint16_t, 1> r16{32768};
         const std::array<std::uint16_t, 4> rg16{65535, 0, 0, 65535}; // texel (1, 0) has green 65535
         const std::array<float, 1> r32f{0.25f};
-        const std::array<kin::Texture, 3> sources{
+        std::array<kin::Texture, 3> sources{
             renderer->create_texture({1, 1}, kin::TextureFormat::R16Uint, r16.data()),
             renderer->create_texture({2, 1}, kin::TextureFormat::Rg16Uint, rg16.data()),
             renderer->create_texture({1, 1}, kin::TextureFormat::R32Float, r32f.data()),
@@ -2030,6 +2075,15 @@ void test_gpu_data_textures_and_large_uniforms() {
         const std::array<float, 1> half{0.5f};
         assert(renderer->update_texture(sources[2], {0, 0}, {1, 1}, reinterpret_cast<const kin::u8*>(half.data())));
         assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(128, 255, 191), 2));
+
+        // Made empty (cleared on the GPU where the format can be a render
+        // target, else sent zeros), every format reads 0: only the uniform shows.
+        sources = {
+            renderer->create_texture({1, 1}, kin::TextureFormat::R16Uint, nullptr),
+            renderer->create_texture({2, 1}, kin::TextureFormat::Rg16Uint, nullptr),
+            renderer->create_texture({1, 1}, kin::TextureFormat::R32Float, nullptr),
+        };
+        assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(0, 0, 64), 2));
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;
@@ -2100,6 +2154,7 @@ int main() {
     test_gpu_uploads_batch_in_order();
     test_gpu_scopes();
     test_gpu_big_uploads();
+    test_gpu_empty_textures_are_clear();
     test_write_texture_on_software_backend();
     test_gpu_write_texture();
     test_lighting_on_software_backend();

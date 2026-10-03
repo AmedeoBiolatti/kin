@@ -3,9 +3,11 @@
 #include "gpu_pipeline_cache.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <optional>
+#include <vector>
 
 namespace kin::gpu {
 
@@ -14,6 +16,9 @@ namespace {
 bool same_scissor(const SDL_Rect& a, const SDL_Rect& b) {
     return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
 }
+
+// Quads one indexed draw covers: their corners must fit 16-bit indices.
+constexpr u32 QuadsPerDraw = 16384;
 
 bool same_binding(const SDL_GPUTextureSamplerBinding& a, const SDL_GPUTextureSamplerBinding& b) {
     return a.texture == b.texture && a.sampler == b.sampler;
@@ -68,8 +73,22 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
     }
     const u32 first = static_cast<u32>(_vertices.size());
     _vertices.insert(_vertices.end(), tris.begin(), tris.end());
-    add_range(GpuVertexLayout::Triangles, first, static_cast<u32>(tris.size()), fragment, texture, scissor, blend,
-              uniform, uniform_size, sampler, extra);
+    add_range(GpuVertexLayout::Triangles, false, first, static_cast<u32>(tris.size()), fragment, texture, scissor,
+              blend, uniform, uniform_size, sampler, extra);
+}
+
+void GpuGeometryBatch::push_quads(std::span<const GpuVertex> corners, SDL_GPUShader* fragment,
+                                  SDL_GPUTexture* texture, SDL_Rect scissor, GpuBlendMode blend,
+                                  const void* uniform, u32 uniform_size, SDL_GPUSampler* sampler,
+                                  std::span<const SDL_GPUTextureSamplerBinding> extra) {
+    if (corners.empty()) {
+        return;
+    }
+    assert(corners.size() % 4 == 0);
+    const u32 first = static_cast<u32>(_vertices.size());
+    _vertices.insert(_vertices.end(), corners.begin(), corners.end());
+    add_range(GpuVertexLayout::Triangles, true, first, static_cast<u32>(corners.size()), fragment, texture, scissor,
+              blend, uniform, uniform_size, sampler, extra);
 }
 
 void GpuGeometryBatch::push_shader_vertices(std::span<const GpuShaderVertex> tris, SDL_GPUShader* fragment,
@@ -81,16 +100,17 @@ void GpuGeometryBatch::push_shader_vertices(std::span<const GpuShaderVertex> tri
     }
     const u32 first = static_cast<u32>(_shader_vertices.size());
     _shader_vertices.insert(_shader_vertices.end(), tris.begin(), tris.end());
-    add_range(GpuVertexLayout::ShaderVertices, first, static_cast<u32>(tris.size()), fragment, texture, scissor,
-              blend, uniform, uniform_size, sampler, extra);
+    add_range(GpuVertexLayout::ShaderVertices, false, first, static_cast<u32>(tris.size()), fragment, texture,
+              scissor, blend, uniform, uniform_size, sampler, extra);
 }
 
-void GpuGeometryBatch::add_range(GpuVertexLayout layout, u32 first, u32 count, SDL_GPUShader* fragment,
+void GpuGeometryBatch::add_range(GpuVertexLayout layout, bool quads, u32 first, u32 count, SDL_GPUShader* fragment,
                                  SDL_GPUTexture* texture, SDL_Rect scissor, GpuBlendMode blend, const void* uniform,
                                  u32 uniform_size, SDL_GPUSampler* sampler,
                                  std::span<const SDL_GPUTextureSamplerBinding> extra) {
     assert(extra.size() < MaxShaderSamplers);
     const bool can_coalesce = uniform_size == 0 && !_ranges.empty() && _ranges.back().layout == layout &&
+                              _ranges.back().quads == quads &&
                               _ranges.back().fragment == fragment &&
                               _ranges.back().texture == texture &&
                               _ranges.back().sampler == sampler &&
@@ -118,6 +138,7 @@ void GpuGeometryBatch::add_range(GpuVertexLayout layout, u32 first, u32 count, S
     range.first_vertex = first;
     range.vertex_count = count;
     range.layout = layout;
+    range.quads = quads;
     if (uniform && uniform_size > 0) {
         range.uniform_offset = static_cast<u32>(_uniform_bytes.size());
         range.uniform_size = uniform_size;
@@ -162,7 +183,24 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     upload(_shader_vertex_buffer, _shader_vertices.data(),
            static_cast<u32>(_shader_vertices.size() * sizeof(GpuShaderVertex)));
 
+    const bool any_quads = std::any_of(_ranges.begin(), _ranges.end(), [](const Range& r) { return r.quads; });
+    if (any_quads && !_quad_indices) {
+        std::vector<u16> indices(static_cast<std::size_t>(QuadsPerDraw) * 6);
+        for (u32 q = 0; q < QuadsPerDraw; ++q) {
+            const auto v = static_cast<u16>(q * 4);
+            const std::array<u16, 6> quad{v, static_cast<u16>(v + 1), static_cast<u16>(v + 2),
+                                          v, static_cast<u16>(v + 2), static_cast<u16>(v + 3)};
+            std::copy(quad.begin(), quad.end(), indices.begin() + static_cast<std::ptrdiff_t>(q) * 6);
+        }
+        _quad_indices = device.create_buffer(SDL_GPU_BUFFERUSAGE_INDEX, indices.data(),
+                                             static_cast<u32>(indices.size() * sizeof(u16)));
+    }
+
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &color_target, 1, nullptr);
+    if (any_quads) {
+        const SDL_GPUBufferBinding indices{.buffer = _quad_indices.handle(), .offset = 0};
+        SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_16BIT);
+    }
 
     SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(_target->width()),
                              static_cast<f32>(_target->height()), 0.0f, 1.0f};
@@ -259,7 +297,16 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
                 SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
                 bound_vertices = range.layout;
             }
-            SDL_DrawGPUPrimitives(pass, range.vertex_count, 1, range.first_vertex, 0);
+            if (range.quads) {
+                // In draws of at most QuadsPerDraw, each from its own first corner.
+                for (u32 done = 0; done < range.vertex_count / 4; done += QuadsPerDraw) {
+                    const u32 quads = std::min(QuadsPerDraw, range.vertex_count / 4 - done);
+                    SDL_DrawGPUIndexedPrimitives(pass, quads * 6, 1, 0,
+                                                 static_cast<Sint32>(range.first_vertex + done * 4), 0);
+                }
+            } else {
+                SDL_DrawGPUPrimitives(pass, range.vertex_count, 1, range.first_vertex, 0);
+            }
         }
     }
 

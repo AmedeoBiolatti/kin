@@ -94,6 +94,19 @@ public:
               SDL_GPUSampler* sampler = nullptr, // nullptr -> FlushContext default sampler
               std::span<const SDL_GPUTextureSamplerBinding> extra = {});
 
+    // As push(), for quads: four corners each (top-left, top-right,
+    // bottom-right, bottom-left, as the quad is meant to be split), drawn
+    // through a static index buffer instead of as six vertices.
+    void push_quads(std::span<const GpuVertex> corners,
+                    SDL_GPUShader* fragment,
+                    SDL_GPUTexture* texture,
+                    SDL_Rect scissor,
+                    GpuBlendMode blend,
+                    const void* uniform = nullptr,
+                    u32 uniform_size = 0,
+                    SDL_GPUSampler* sampler = nullptr,
+                    std::span<const SDL_GPUTextureSamplerBinding> extra = {});
+
     // As push(), with GpuShaderVertex triangles (draw_shader_geometry), drawn by
     // shader_geometry.vert.
     void push_shader_vertices(std::span<const GpuShaderVertex> tris,
@@ -147,11 +160,13 @@ private:
         u32 first_vertex = 0;   // or first instance, for an instanced range
         u32 vertex_count = 0;   // or instance count
         GpuVertexLayout layout = GpuVertexLayout::Triangles; // which array it indexes
+        bool quads = false; // its vertices are quads' corners, drawn indexed
     };
 
     // Adds `count` vertices of `layout` at `first` to the last range when its
     // state matches, else as a new range.
-    void add_range(GpuVertexLayout layout, u32 first, u32 count, SDL_GPUShader* fragment, SDL_GPUTexture* texture,
+    void add_range(GpuVertexLayout layout, bool quads, u32 first, u32 count, SDL_GPUShader* fragment,
+                   SDL_GPUTexture* texture,
                    SDL_Rect scissor, GpuBlendMode blend, const void* uniform, u32 uniform_size,
                    SDL_GPUSampler* sampler, std::span<const SDL_GPUTextureSamplerBinding> extra);
 
@@ -167,6 +182,7 @@ private:
     GpuBuffer _vertex_buffer;
     GpuBuffer _instance_buffer;
     GpuBuffer _shader_vertex_buffer;
+    GpuBuffer _quad_indices; // 0 1 2 0 2 3, 4 5 6 4 6 7, ...: made once
 };
 
 } // namespace kin::gpu

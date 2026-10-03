@@ -258,6 +258,11 @@ the workers too. Released textures are kept a few seconds (up to 256 MB) and
 reused by `create_texture()` for one of the same size and format, skipping the
 driver's create and destroy.
 
+An empty texture (`create_texture()` with no pixels) is cleared on the GPU
+rather than sent zeros. Draws send little: a quad is four corners (20 bytes
+each) drawn through an index buffer made once, and shaders and textures stay
+on the GPU, so a frame's traffic is its geometry and whatever textures change.
+
 Texels made each frame can skip the copy altogether: `write_texture()` hands
 its callback the upload memory itself to write them into.
 
