@@ -331,7 +331,7 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
                              const std::function<void(std::span<u8>)>* write) {
     refuse_upload_inside_fill();
     std::unique_lock lock{_uploads_mutex};
-    const auto fill = [&](SDL_GPUTransferBuffer* transfer, u32 offset, bool cycle_transfer) {
+    const auto copy_in = [&](SDL_GPUTransferBuffer* transfer, u32 offset, bool cycle_transfer) {
         auto* mapped = static_cast<u8*>(SDL_MapGPUTransferBuffer(_device, transfer, cycle_transfer));
         if (!mapped) {
             throw sdl_error("SDL_MapGPUTransferBuffer failed");
@@ -388,7 +388,7 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
     // The first upload of a batch cycles the staging buffer: if the GPU still
     // copies from the last batch, SDL hands out other memory instead of waiting.
     const u32 offset = align_up(_staging_used, TextureStagingAlignment);
-    fill(_staging, offset, _staging_used == 0);
+    copy_in(_staging, offset, _staging_used == 0);
     _staging_used = offset + bytes;
     SDL_GPUTransferBuffer* transfer = _staging;
     begin_upload_commands();
@@ -441,7 +441,6 @@ void GpuDevice::clear_texture(SDL_GPUTexture* texture, bool cycle) {
     target.clear_color = SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f};
     target.cycle = cycle;
     SDL_EndGPURenderPass(SDL_BeginGPURenderPass(_upload_commands, &target, 1, nullptr));
-    ++_textures_cleared;
 }
 
 void GpuDevice::refuse_upload_inside_fill() const {
@@ -454,7 +453,7 @@ void GpuDevice::flush_uploads() {
     refuse_upload_inside_fill();
     const std::lock_guard lock{_uploads_mutex};
     if (_texture_pool) {
-        _texture_pool->tick(); // once a frame: flushed before each frame's submit
+        _texture_pool->tick(); // before each submission: about once a frame
     }
     if (!_upload_commands) {
         return;

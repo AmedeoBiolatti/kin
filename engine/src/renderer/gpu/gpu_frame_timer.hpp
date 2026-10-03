@@ -36,14 +36,14 @@ struct GpuFrameSample {
 };
 
 struct GpuScopeSample {
-    std::string name;
+    std::string name{};
     f64 ms = 0.0;
 };
 
 // What finished since the last collect(): the latest frame, and every scope.
 struct GpuTimerSamples {
-    std::optional<GpuFrameSample> frame;
-    std::vector<GpuScopeSample> scopes;
+    std::optional<GpuFrameSample> frame{};
+    std::vector<GpuScopeSample> scopes{};
 };
 
 class GpuFrameTimer {
@@ -83,7 +83,7 @@ private:
         Kind kind = Kind::Frame;
         u64 submit_ns = 0;  // the frame's first submit, or the scope's own
         u32 frames = 1;     // a frame: this one and the untimed ones before it
-        std::string name;   // a scope's
+        std::string name{}; // a scope's
         u64 signal_ns = 0;  // set once the fence signals
     };
 

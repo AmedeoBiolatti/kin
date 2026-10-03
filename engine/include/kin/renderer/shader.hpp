@@ -83,7 +83,7 @@ struct ShaderLayout;
 struct ShaderParams {
     std::vector<f32> uniforms = std::vector<f32>(16, 0.0f);
     // The shader's layout (Renderer2D::shader_params sets it), for set() by name.
-    std::shared_ptr<const ShaderLayout> layout;
+    std::shared_ptr<const ShaderLayout> layout{};
 
     // Writes `values` at the uniform block member `name` (as declared in the
     // shader). False without a layout, for an unknown name, or past the member.

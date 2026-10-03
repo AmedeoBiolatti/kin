@@ -81,16 +81,15 @@ releases may change APIs.
   hasn't drawn yet cycles its storage. Released textures are pooled (a few
   seconds, up to 256 MB) for `create_texture` to reuse. 150 uploads of 256 KB
   in a frame went from about 25 ms of calls plus a 70 ms stall at present to
-  2.1 ms.
-  `RendererBackendStats::texture_uploads` and `texture_upload_submits` count
-  them; `kin_upload_bench` measures them.
+  2.1 ms. `RendererBackendStats::texture_uploads` and `texture_upload_submits`
+  count them; `kin_upload_bench` measures them.
 - `--profile` (and `--profile-json`, `--profile-text`, `--profile-lines`) no
   longer makes a run headless: it profiles the window, until the game quits or
   `--frames` N. For the old 600-frame headless pass add `--headless`.
   (`--profile-render` is still a headless pass.)
 - `gpu.frame` is recorded only on frames with a new GPU sample, instead of
-  repeating the last one; a sample taken after untimed frames (the GPU more than
-  8 frames behind) is their average rather than their sum.
+  repeating the last one; a sample taken after untimed frames (the GPU far
+  behind the CPU) is their average rather than their sum.
 
 ### Fixed
 

@@ -32,12 +32,11 @@ public:
     // over its size or closed.
     void give_back(SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
                    SDL_GPUTextureUsageFlags usage, u64 bytes);
-    // Once a frame: releases what has waited too long.
+    // Before each submission (about once a frame): releases what has waited
+    // too long.
     void tick();
     // Releases everything, and later give_backs too (the device is going).
     void close();
-
-    u64 reused() const { return _reused; }
 
 private:
     struct Entry {
@@ -55,7 +54,6 @@ private:
     std::vector<Entry> _entries; // oldest first
     u64 _bytes = 0;
     u64 _ticks = 0;
-    u64 _reused = 0;
     bool _closed = false;
 };
 
