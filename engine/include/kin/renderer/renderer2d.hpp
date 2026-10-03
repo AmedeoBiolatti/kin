@@ -255,6 +255,14 @@ public:
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                              std::span<const Texture> sources, std::span<const DataBuffer> buffers);
 
+    // A shader surface computed at `resolution` (0.5: half as many pixels each
+    // way, a quarter of the work) into a pooled render target, then stretched
+    // over `rect` with linear filtering: for smooth, costly effects (fog, glow,
+    // soft light). The shader must work from its UV, not gl_FragCoord. At 1 or
+    // more, or without render targets, it is a plain draw_shader_surface.
+    void draw_shader_surface_scaled(f32 resolution, Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                    std::span<const Texture> sources = {}, std::span<const DataBuffer> buffers = {});
+
     // Storage buffers for shaders (capabilities().data_buffers; elsewhere an
     // invalid buffer). Filled from `data`, or zeros. Updates go to the GPU with
     // the frame's texture uploads; write_data_buffer's `fill` writes straight

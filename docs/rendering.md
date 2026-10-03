@@ -258,6 +258,17 @@ renderer.draw_shader_geometry(vertices, indices, shadow_shader, params, sources)
 - It needs `capabilities().shader_geometry`: the SDL_GPU backend has it, others
   draw nothing.
 
+### Costly effects at lower resolution
+
+`draw_shader_surface_scaled(resolution, rect, shader, params, ...)` runs the
+shader into a pooled render target `resolution` times the size each way, then
+stretches it over `rect` with linear filtering. For smooth effects (fog, glow,
+soft light) the picture is the same and the cost a fraction: a full-screen
+effect at 1280 x 720 took 1.04 ms at full resolution, 0.32 ms at half and
+0.16 ms at a quarter, differing by under 0.1/255 a channel on average
+(`kin_draw_bench 60 1 scaled`). The shader must work from its UV, not
+`gl_FragCoord`.
+
 ### Data buffers
 
 Per-object data a shader reads by index can be a storage buffer instead of a

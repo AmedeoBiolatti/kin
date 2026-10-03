@@ -9,6 +9,9 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::draw_shader_surface_scaled(resolution, ...)`: a costly, smooth
+  effect computed at lower resolution into a pooled render target and
+  stretched back (half resolution: about a third of the GPU time).
 - Storage buffers for shaders: `Renderer2D::create_data_buffer`,
   `update_data_buffer`, `write_data_buffer`, and `draw_shader_surface` /
   `draw_shader_geometry` taking `DataBuffer`s, bound after the textures
