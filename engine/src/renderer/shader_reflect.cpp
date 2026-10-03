@@ -12,6 +12,7 @@ namespace {
 // The few SPIR-V opcodes, decorations and storage classes this reads.
 enum Op : u32 {
     OpName = 5,
+    OpExecutionMode = 16,
     OpMemberName = 6,
     OpTypeInt = 21,
     OpTypeFloat = 22,
@@ -112,6 +113,7 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
         u32 storage = 0;
     };
     std::unordered_map<u32, Variable> variables;
+    u32 layout_local_size[3]{1, 1, 1};
 
     for (std::size_t at = 5; at < words.size();) {
         const u32 count = words[at] >> 16;
@@ -121,6 +123,13 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
         }
         const u32* w = &words[at];
         switch (op) {
+        case OpExecutionMode:
+            if (count >= 6 && w[2] == 17) { // LocalSize x y z
+                layout_local_size[0] = w[3];
+                layout_local_size[1] = w[4];
+                layout_local_size[2] = w[5];
+            }
+            break;
         case OpMemberName:
             member_names[w[1]][w[2]] = read_string(w + 3, count - 3);
             break;
@@ -198,6 +207,7 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
 
     ShaderLayout layout;
     std::unordered_set<u32> sampler_bindings, storage_texture_bindings, storage_buffer_bindings, uniform_bindings;
+    std::unordered_set<u32> rw_texture_bindings, rw_buffer_bindings;
     for (const auto& [id, variable] : variables) {
         const Type* pointer = type_of(variable.type);
         if (!pointer || pointer->op != OpTypePointer || pointer->operands.size() < 2) {
@@ -216,15 +226,19 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
             continue;
         }
         const u32 binding = decoration(id, Binding).value_or(0);
+        // Set 1 holds what a compute shader writes (SDL_GPU's layout).
+        const bool writes = decoration(id, DescriptorSet).value_or(0) == 1;
         if (variable.storage == UniformConstant) {
             if (t->op == OpTypeSampledImage) {
                 for (u32 e = 0; e < elements; ++e) sampler_bindings.insert(binding + e);
             } else if (t->op == OpTypeImage && t->operands.size() > 5 && t->operands[5] == 2) {
-                for (u32 e = 0; e < elements; ++e) storage_texture_bindings.insert(binding + e);
+                for (u32 e = 0; e < elements; ++e) {
+                    (writes ? rw_texture_bindings : storage_texture_bindings).insert(binding + e);
+                }
             }
         } else if (variable.storage == StorageBuffer ||
                    (variable.storage == Uniform && decoration(pointee, BufferBlock))) {
-            storage_buffer_bindings.insert(binding);
+            (writes ? rw_buffer_bindings : storage_buffer_bindings).insert(binding);
         } else if (variable.storage == Uniform && t->op == OpTypeStruct) {
             uniform_bindings.insert(binding);
             if (binding == 0) {
@@ -243,6 +257,9 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
     layout.storage_textures = static_cast<u32>(storage_texture_bindings.size());
     layout.storage_buffers = static_cast<u32>(storage_buffer_bindings.size());
     layout.uniform_buffers = static_cast<u32>(uniform_bindings.size());
+    layout.readwrite_storage_textures = static_cast<u32>(rw_texture_bindings.size());
+    layout.readwrite_storage_buffers = static_cast<u32>(rw_buffer_bindings.size());
+    std::copy(std::begin(layout_local_size), std::end(layout_local_size), layout.local_size);
     return layout;
 }
 

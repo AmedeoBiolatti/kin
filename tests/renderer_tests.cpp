@@ -1861,6 +1861,67 @@ void test_gpu_shader_surface_scaled() {
     }
 }
 
+// Compute: a shader writes a storage texture (reading a uniform and a buffer),
+// ordered with the draws around it; layouts and workgroup size from the SPIR-V.
+void test_gpu_compute() {
+    constexpr std::string_view test_name = "test_gpu_compute";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "compute_gradient.comp.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-compute-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().compute);
+        const std::vector<kin::u8> code = read_spirv(spv);
+        const kin::ShaderBlob blob{code.data(), static_cast<kin::u32>(code.size())};
+        const kin::ShaderLayout layout = *kin::reflect_spirv(blob);
+        assert(layout.local_size[0] == 8 && layout.local_size[1] == 8);
+        assert(layout.readwrite_storage_textures == 1 && layout.storage_buffers == 1 && layout.uniform_buffers == 1);
+        const kin::ComputeShaderHandle shader = renderer->create_compute_shader(blob);
+        assert(shader);
+
+        // 60 x 36: not a multiple of the workgroup, so the edges are covered too.
+        const kin::Texture image = renderer->create_storage_texture({60, 36});
+        assert(image.valid());
+        const std::array<float, 4> extra{0, 0, 0, 1};
+        const kin::DataBuffer buffer = renderer->create_data_buffer(sizeof(extra), extra.data());
+        kin::ShaderParams params;
+        params.uniforms[0] = 0.5f;
+        kin::RenderTarget target = renderer->create_render_target({60, 36}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            const kin::ComputeBindings bindings{.buffers = std::span<const kin::DataBuffer>{&buffer, 1},
+                                                .outputs = std::span<const kin::Texture>{&image, 1},
+                                                .params = &params};
+            assert(renderer->dispatch_compute(shader, {60, 36}, bindings));
+            renderer->draw_texture(image, kin::Rectf{0.0f, 0.0f, 60.0f, 36.0f}); // after the dispatch
+            assert(renderer->read_rgba({0.0f, 0.0f, 60.0f, 36.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 30, 18, kin::Color::rgb(128, 128, 128), 3));
+        assert(pixel_near(px, size, 59, 35, kin::Color::rgb(251, 249, 128), 3)); // the far corner
+        // Missing the output: refused, nothing run.
+        assert(!renderer->dispatch_compute(shader, {60, 36}, kin::ComputeBindings{.params = &params}));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2404,6 +2465,7 @@ int main() {
     test_gpu_pipeline_record();
     test_gpu_data_buffers();
     test_gpu_shader_surface_scaled();
+    test_gpu_compute();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

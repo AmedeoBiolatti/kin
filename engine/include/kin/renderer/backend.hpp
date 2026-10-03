@@ -3,6 +3,7 @@
 #include <kin/core/types.hpp>
 #include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/material.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/post_process.hpp>
@@ -40,6 +41,7 @@ struct RendererBackendCapabilities {
     bool min_max_blend = false; // BlendMode::Max and Min honoured
     bool shader_geometry = false; // draw_shader_geometry() draws
     bool data_buffers = false;    // create_data_buffer() and shaders reading them
+    bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -52,6 +54,18 @@ struct RendererBackendCapabilities {
 struct GpuScopeTiming {
     std::string name;
     f64 ms = 0.0;
+};
+
+// What a compute dispatch reads and writes (Renderer2D::dispatch_compute). In
+// the shader, set 0 holds the sampled `sources` then the read-only `buffers`,
+// set 1 the `outputs` (storage textures, from create_storage_texture) then the
+// `output_buffers`, and set 2 the uniform block (`params`).
+struct ComputeBindings {
+    std::span<const Texture> sources;
+    std::span<const DataBuffer> buffers;
+    std::span<const Texture> outputs;
+    std::span<const DataBuffer> output_buffers;
+    const ShaderParams* params = nullptr;
 };
 
 struct RendererBackendStats {
@@ -269,6 +283,15 @@ public:
     // indices are already checked. Backends without it draw nothing.
     virtual void draw_shader_geometry(std::span<const ShaderVertex>, std::span<const u32>, ShaderHandle,
                                       const ShaderParams&, std::span<const Texture>, std::span<const DataBuffer>) {}
+
+    // Compute (capabilities().compute): a pipeline from SPIR-V and its layout, a
+    // texture compute shaders can write, and a dispatch of `groups` workgroups
+    // recorded in the frame between the draws around it.
+    virtual ComputeShaderHandle create_compute_shader(ShaderBlob /*spirv*/, const ShaderLayout& /*layout*/) {
+        return {};
+    }
+    virtual Texture create_storage_texture(Vec2i /*size*/, TextureFormat /*format*/) { return {}; }
+    virtual bool dispatch_compute(ComputeShaderHandle, Vec2i /*groups*/, const ComputeBindings&) { return false; }
 
     // Storage buffers for shaders (capabilities().data_buffers). `data` (or
     // zeros) fills a new one; update/write replace `bytes` at `offset`.

@@ -177,6 +177,73 @@ int scaled_effect(kin::Window& window, int frames) {
     return 0;
 }
 
+// A 512 x 512 light field (64 lights, a smooth falloff each) made each frame:
+// on the CPU and uploaded, or by a compute shader. CPU time to make it, and GPU
+// time of the dispatch.
+int light_field(kin::Window& window, int frames) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    std::ifstream file(std::filesystem::path{KIN_TEST_SHADER_DIR} / "bench_light_field.comp.spv", std::ios::binary);
+    const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    const kin::ComputeShaderHandle shader = renderer->create_compute_shader({code.data(), static_cast<kin::u32>(code.size())});
+    constexpr int n = 512, count = 64;
+    std::vector<float> lights;
+    for (int i = 0; i < count; ++i) {
+        lights.insert(lights.end(), {static_cast<float>((i * 97) % n), static_cast<float>((i * 61) % n), 40.0f + static_cast<float>(i % 7) * 10.0f, 1.0f});
+    }
+    const kin::DataBuffer light_buffer = renderer->create_data_buffer(lights.size() * sizeof(float), lights.data());
+    const kin::Texture uploaded = renderer->create_texture({n, n}, kin::TextureFormat::R32Float, nullptr);
+    const kin::Texture computed = renderer->create_storage_texture({n, n}, kin::TextureFormat::R32Float);
+    kin::ShaderParams params;
+    params.uniforms[0] = static_cast<float>(count);
+    std::vector<float> field(static_cast<std::size_t>(n) * n);
+    for (int mode = 0; mode < 2; ++mode) {
+        std::vector<double> cpu, gpu;
+        for (int f = 0; f < frames; ++f) {
+            const auto t0 = clock::now();
+            if (mode == 0) {
+                for (int y = 0; y < n; ++y) {
+                    for (int x = 0; x < n; ++x) {
+                        float sum = 0.0f;
+                        for (int i = 0; i < count; ++i) {
+                            const float* l = &lights[static_cast<std::size_t>(i) * 4];
+                            const float dx = (static_cast<float>(x) - l[0]) / l[2], dy = (static_cast<float>(y) - l[1]) / l[2];
+                            const float g = std::max(0.0f, 1.0f - (dx * dx + dy * dy));
+                            sum += g * g * l[3];
+                        }
+                        field[static_cast<std::size_t>(y) * n + static_cast<std::size_t>(x)] = sum;
+                    }
+                }
+                renderer->update_texture(uploaded, {0, 0}, {n, n}, reinterpret_cast<const kin::u8*>(field.data()));
+            } else {
+                const auto scope = renderer->gpu_scope("field");
+                renderer->dispatch_compute(shader, {n, n},
+                                           {.buffers = std::span<const kin::DataBuffer>{&light_buffer, 1},
+                                            .outputs = std::span<const kin::Texture>{&computed, 1},
+                                            .params = &params});
+            }
+            const auto t1 = clock::now();
+            renderer->present();
+            std::vector<kin::u8> one;
+            kin::Vec2i one_size{};
+            renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+            for (const kin::GpuScopeTiming& t : renderer->take_gpu_scope_timings()) {
+                gpu.push_back(t.ms);
+            }
+            cpu.push_back(ms(t0, t1));
+        }
+        std::sort(cpu.begin(), cpu.end());
+        std::sort(gpu.begin(), gpu.end());
+        std::printf("light field 512x512, 64 lights, %-26s CPU median %.3f ms, GPU median %.3f ms\n",
+                    mode == 0 ? "on the CPU and uploaded:" : "by a compute shader:", cpu[cpu.size() / 2],
+                    gpu.empty() ? 0.0 : gpu[gpu.size() / 2]);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
@@ -194,6 +261,10 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "scaled") {
         backend.reset();
         return scaled_effect(window, frames);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "compute") {
+        backend.reset();
+        return light_field(window, frames);
     }
     if (argc > 3 && std::string_view{argv[3]} == "data") {
         backend.reset();

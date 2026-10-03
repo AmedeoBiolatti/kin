@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Added
 
+- Compute shaders: `Renderer2D::create_compute_shader` (layout and workgroup
+  size read from the SPIR-V), `create_storage_texture` and `dispatch_compute`
+  (`ComputeBindings`: sampled sources, read-only buffers, written textures and
+  buffers, params), recorded in order with the frame's draws. SDL_GPU only
+  (`capabilities().compute`).
 - `Renderer2D::draw_shader_surface_scaled(resolution, ...)`: a costly, smooth
   effect computed at lower resolution into a pooled render target and
   stretched back (half resolution: about a third of the GPU time).

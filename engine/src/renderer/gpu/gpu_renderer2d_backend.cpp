@@ -233,6 +233,9 @@ GpuRenderer2DBackend::~GpuRenderer2DBackend() {
     _device.wait_idle();
     _gpu_timer.reset();
     _pipelines.destroy();
+    for (const ComputePipeline& compute : _compute_pipelines) {
+        SDL_ReleaseGPUComputePipeline(_device.handle(), compute.pipeline);
+    }
     if (_sampler_linear) {
         SDL_ReleaseGPUSampler(_device.handle(), _sampler_linear);
     }
@@ -250,6 +253,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .min_max_blend = true,
         .shader_geometry = static_cast<bool>(_shader_vertex_shader.handle()),
         .data_buffers = true,
+        .compute = true,
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -1434,9 +1438,109 @@ std::optional<std::span<SDL_GPUBuffer* const>> GpuRenderer2DBackend::bind_buffer
     return std::span<SDL_GPUBuffer* const>{_storage_scratch};
 }
 
+ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) {
+    SDL_GPUComputePipelineCreateInfo info{};
+    info.code = spirv.code;
+    info.code_size = spirv.size;
+    info.entrypoint = "main";
+    info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    info.num_samplers = layout.samplers;
+    info.num_readonly_storage_textures = layout.storage_textures;
+    info.num_readonly_storage_buffers = layout.storage_buffers;
+    info.num_readwrite_storage_textures = layout.readwrite_storage_textures;
+    info.num_readwrite_storage_buffers = layout.readwrite_storage_buffers;
+    info.num_uniform_buffers = layout.uniform_buffers;
+    info.threadcount_x = layout.local_size[0];
+    info.threadcount_y = layout.local_size[1];
+    info.threadcount_z = layout.local_size[2];
+    SDL_GPUComputePipeline* pipeline = SDL_CreateGPUComputePipeline(_device.handle(), &info);
+    if (!pipeline) {
+        KIN_LOG_ERROR_F("render", "create_compute_shader: SDL_CreateGPUComputePipeline failed",
+                        (LogFields{{.name = "error", .value = SDL_GetError()}}));
+        return {};
+    }
+    _compute_pipelines.push_back(ComputePipeline{.pipeline = pipeline, .samplers = layout.samplers});
+    return ComputeShaderHandle{static_cast<u64>(_compute_pipelines.size())};
+}
+
+Texture GpuRenderer2DBackend::create_storage_texture(Vec2i size, TextureFormat format) {
+    gpu::GpuTexture tex = _device.create_texture(nullptr, static_cast<u32>(size.x), static_cast<u32>(size.y),
+                                                 sdl_format(format), texture_format_bytes(format),
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Nearest, format)};
+}
+
+bool GpuRenderer2DBackend::dispatch_compute(ComputeShaderHandle handle, Vec2i groups, const ComputeBindings& bindings) {
+    if (handle.value == 0 || handle.value > _compute_pipelines.size()) {
+        return false;
+    }
+    const ComputePipeline& compute = _compute_pipelines[static_cast<std::size_t>(handle.value) - 1];
+    std::vector<SDL_GPUStorageTextureReadWriteBinding> outputs;
+    for (const Texture& output : bindings.outputs) {
+        const auto* backend = as_gpu(output.backend().get());
+        if (!backend || !backend->texture()) {
+            KIN_LOG_ERROR("render", "dispatch_compute: an output is not a storage texture of this renderer");
+            return false;
+        }
+        retain(output);
+        outputs.push_back(SDL_GPUStorageTextureReadWriteBinding{.texture = backend->texture().handle()});
+    }
+    std::vector<SDL_GPUStorageBufferReadWriteBinding> output_buffers;
+    std::vector<SDL_GPUBuffer*> buffers;
+    for (const auto* list : {&bindings.output_buffers, &bindings.buffers}) {
+        for (const DataBuffer& buffer : *list) {
+            const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+            if (!gpu || !gpu->buffer()) {
+                KIN_LOG_ERROR("render", "dispatch_compute: a data buffer is not of this renderer");
+                return false;
+            }
+            gpu->mark_used(_frame_serial);
+            _retained_buffers.push_back(buffer.backend());
+            if (list == &bindings.output_buffers) {
+                output_buffers.push_back(SDL_GPUStorageBufferReadWriteBinding{.buffer = gpu->buffer().handle()});
+            } else {
+                buffers.push_back(gpu->buffer().handle());
+            }
+        }
+    }
+    // Draws so far go first; the dispatch records between them and the next.
+    ensure_frame();
+    flush_to_frame();
+    SDL_GPUCommandBuffer* commands = _frame->command_buffer();
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, outputs.data(), static_cast<u32>(outputs.size()),
+                                                       output_buffers.data(), static_cast<u32>(output_buffers.size()));
+    SDL_BindGPUComputePipeline(pass, compute.pipeline);
+    if (compute.samplers > 0) {
+        std::vector<SDL_GPUTextureSamplerBinding> samplers(compute.samplers);
+        for (std::size_t i = 0; i < samplers.size(); ++i) {
+            const auto* backend = i < bindings.sources.size() ? as_gpu(bindings.sources[i].backend().get()) : nullptr;
+            if (backend && backend->texture()) {
+                retain(bindings.sources[i]);
+                samplers[i] = {.texture = backend->texture().handle(), .sampler = _sampler_nearest};
+            } else {
+                samplers[i] = {.texture = _white.handle(), .sampler = _sampler_nearest};
+            }
+        }
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+    }
+    if (!buffers.empty()) {
+        SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), static_cast<u32>(buffers.size()));
+    }
+    if (bindings.params && !bindings.params->uniforms.empty()) {
+        SDL_PushGPUComputeUniformData(commands, 0, bindings.params->uniforms.data(),
+                                      static_cast<u32>(bindings.params->uniforms.size() * sizeof(f32)));
+    }
+    SDL_DispatchGPUCompute(pass, static_cast<u32>(groups.x), static_cast<u32>(groups.y), 1);
+    SDL_EndGPUComputePass(pass);
+    _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
+    return true;
+}
+
 DataBuffer GpuRenderer2DBackend::create_data_buffer(std::size_t bytes, const void* data) {
-    gpu::GpuBuffer buffer = _device.create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr,
-                                                  static_cast<u32>(bytes));
+    gpu::GpuBuffer buffer = _device.create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+                                                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                                                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
+                                                  nullptr, static_cast<u32>(bytes));
     _device.upload_storage_buffer(buffer.handle(), 0, static_cast<u32>(bytes), data, /*cycle=*/false);
     return DataBuffer{std::make_shared<gpu::GpuDataBuffer>(std::move(buffer))};
 }

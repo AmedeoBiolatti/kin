@@ -85,6 +85,17 @@ if(KIN_GLSLC)
             VERBATIM)
         list(APPEND _kin_test_spv "${_kin_test_shader_dir}/${_name}.frag.spv")
     endforeach()
+    foreach(_name compute_gradient bench_light_field)
+        add_custom_command(
+            OUTPUT "${_kin_test_shader_dir}/${_name}.comp.spv"
+            COMMAND "${KIN_GLSLC}" -fshader-stage=compute
+                    -o "${_kin_test_shader_dir}/${_name}.comp.spv"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.comp.glsl"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.comp.glsl"
+            COMMENT "glslc: ${_name}.comp.glsl -> ${_name}.comp.spv"
+            VERBATIM)
+        list(APPEND _kin_test_spv "${_kin_test_shader_dir}/${_name}.comp.spv")
+    endforeach()
     add_custom_target(kin_test_shaders DEPENDS ${_kin_test_spv})
     add_dependencies(kin_renderer_tests kin_test_shaders)
 endif()

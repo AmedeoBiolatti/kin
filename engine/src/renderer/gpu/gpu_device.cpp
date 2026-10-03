@@ -238,7 +238,7 @@ GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 
 }
 
 GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
-                                     u32 texel_bytes) {
+                                     u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage) {
     if (width == 0 || height == 0 || texel_bytes == 0) {
         throw std::runtime_error("create_texture failed: invalid arguments");
     }
@@ -257,6 +257,7 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     if (clear_on_gpu) {
         texture_info.usage |= SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
     }
+    texture_info.usage |= extra_usage;
     texture_info.width = width;
     texture_info.height = height;
     texture_info.layer_count_or_depth = 1;

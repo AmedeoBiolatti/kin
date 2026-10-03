@@ -292,6 +292,33 @@ go up with the frame's texture uploads, and need `capabilities().data_buffers`
 logged. Read speed matches a data texture (`kin_draw_bench 80 1 data`: 1000
 objects of 64 floats, 64 reads a pixel, about 0.15 ms either way).
 
+### Compute shaders
+
+Work that is the same small sum at every texel (light or fog fields, flow
+fields, coverage) can run on the GPU straight into a texture that later draws
+sample, instead of being computed on the CPU and uploaded:
+
+```glsl
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, set = 0, binding = 0) readonly buffer Lights { vec4 lights[]; };
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D field;
+layout(set = 2, binding = 0) uniform Params { vec4 count; };
+```
+
+```cpp
+kin::ComputeShaderHandle shader = renderer.create_compute_shader(spirv);  // layout read from it
+kin::Texture field = renderer.create_storage_texture({512, 512}, kin::TextureFormat::R32Float);
+renderer.dispatch_compute(shader, {512, 512}, {.buffers = {&lights, 1}, .outputs = {&field, 1}, .params = &params});
+renderer.draw_shader_surface(rect, lighting, {}, std::span<const kin::Texture>{&field, 1});
+```
+
+Set 0 holds what the shader reads (sampled `sources`, then read-only
+`buffers`), set 1 what it writes (`outputs`, then `output_buffers`), set 2 the
+uniform block. The dispatch records in the frame between the draws around it.
+`capabilities().compute` (SDL_GPU). A 512 x 512 field of 64 lights took
+48.5 ms on the CPU (one core) and under 0.1 ms on the GPU, with 0.08 ms of CPU
+to record (`kin_draw_bench 30 1 compute`).
+
 ### Data textures
 
 Besides `Rgba8`, textures can hold numbers for shaders to read:

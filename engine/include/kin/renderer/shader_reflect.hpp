@@ -28,6 +28,10 @@ struct ShaderLayout {
     u32 storage_buffers = 0;  // set 2, after those
     u32 uniform_buffers = 0;  // set 3
     u32 uniform_bytes = 0;    // the uniform block's size
+    // Compute shaders: what they write (set 1), and their workgroup size.
+    u32 readwrite_storage_textures = 0;
+    u32 readwrite_storage_buffers = 0;
+    u32 local_size[3]{1, 1, 1};
     std::vector<ShaderParamInfo> params;
 
     const ShaderParamInfo* find(std::string_view name) const;

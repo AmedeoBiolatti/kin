@@ -611,6 +611,57 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     _backend->draw_shader_surface(rect, shader, params, sources, buffers);
 }
 
+ComputeShaderHandle Renderer2D::create_compute_shader(ShaderBlob spirv) {
+    if (!capabilities().compute) {
+        return {};
+    }
+    std::string error;
+    const std::optional<ShaderLayout> layout = reflect_spirv(spirv, &error);
+    if (!layout) {
+        KIN_LOG_ERROR_F("render", "create_compute_shader: SPIR-V not readable", (LogFields{{.name = "error", .value = error}}));
+        return {};
+    }
+    try {
+        const ComputeShaderHandle handle = _backend->create_compute_shader(spirv, *layout);
+        if (handle) {
+            _compute_layouts[handle.value] = *layout;
+        }
+        return handle;
+    } catch (const std::exception& e) {
+        KIN_LOG_ERROR_F("render", "create_compute_shader failed", (LogFields{{.name = "error", .value = e.what()}}));
+        return {};
+    }
+}
+
+Texture Renderer2D::create_storage_texture(Vec2i size, TextureFormat format) {
+    if (size.x <= 0 || size.y <= 0 || !capabilities().compute) {
+        return {};
+    }
+    try {
+        return _backend->create_storage_texture(size, format);
+    } catch (const std::exception& e) {
+        KIN_LOG_ERROR_F("render", "create_storage_texture failed", (LogFields{{.name = "error", .value = e.what()}}));
+        return {};
+    }
+}
+
+bool Renderer2D::dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings) {
+    const auto it = _compute_layouts.find(shader.value);
+    if (it == _compute_layouts.end() || size.x <= 0 || size.y <= 0) {
+        return false;
+    }
+    const ShaderLayout& layout = it->second;
+    if (bindings.buffers.size() < layout.storage_buffers || bindings.outputs.size() < layout.readwrite_storage_textures ||
+        bindings.output_buffers.size() < layout.readwrite_storage_buffers ||
+        bindings.sources.size() > MaxShaderSamplers || (bindings.params && !valid_params(*bindings.params))) {
+        KIN_LOG_ERROR("render", "dispatch_compute: the bindings fall short of what the shader declares");
+        return false;
+    }
+    const Vec2i groups{(size.x + static_cast<i32>(layout.local_size[0]) - 1) / static_cast<i32>(layout.local_size[0]),
+                       (size.y + static_cast<i32>(layout.local_size[1]) - 1) / static_cast<i32>(layout.local_size[1])};
+    return _backend->dispatch_compute(shader, groups, bindings);
+}
+
 void Renderer2D::draw_shader_surface_scaled(f32 resolution, Rectf rect, ShaderHandle shader,
                                             const ShaderParams& params, std::span<const Texture> sources,
                                             std::span<const DataBuffer> buffers) {
