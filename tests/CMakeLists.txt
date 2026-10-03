@@ -74,7 +74,7 @@ target_compile_definitions(kin_renderer_tests PRIVATE
 if(KIN_GLSLC)
     file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
     set(_kin_test_spv)
-    foreach(_name four_sources data_formats custom_vertex)
+    foreach(_name four_sources data_formats custom_vertex storage_read bench_read_texture bench_read_buffer)
         add_custom_command(
             OUTPUT "${_kin_test_shader_dir}/${_name}.frag.spv"
             COMMAND "${KIN_GLSLC}" -fshader-stage=fragment
@@ -113,6 +113,10 @@ if(KIN_BUILD_BENCHMARKS)
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)
     target_link_libraries(kin_draw_bench PRIVATE kin::engine)
+    target_compile_definitions(kin_draw_bench PRIVATE KIN_TEST_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
+    if(TARGET kin_test_shaders)
+        add_dependencies(kin_draw_bench kin_test_shaders)
+    endif()
 
     if(TARGET kin_example_workloads)
         target_link_libraries(kin_bench PRIVATE kin_example_workloads)

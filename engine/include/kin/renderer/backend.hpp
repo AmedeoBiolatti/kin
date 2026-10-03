@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/gradient.hpp>
@@ -38,6 +39,7 @@ struct RendererBackendCapabilities {
     bool blend_modes = false;
     bool min_max_blend = false; // BlendMode::Max and Min honoured
     bool shader_geometry = false; // draw_shader_geometry() draws
+    bool data_buffers = false;    // create_data_buffer() and shaders reading them
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -256,10 +258,31 @@ public:
         }
     }
 
+    // As above, with storage buffers bound after the textures. The default
+    // draws without them.
+    virtual void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                     std::span<const Texture> sources, std::span<const DataBuffer> /*buffers*/) {
+        draw_shader_surface(rect, shader, params, sources);
+    }
+
     // Triangles with a material shader (Renderer2D::draw_shader_geometry); the
     // indices are already checked. Backends without it draw nothing.
     virtual void draw_shader_geometry(std::span<const ShaderVertex>, std::span<const u32>, ShaderHandle,
-                                      const ShaderParams&, std::span<const Texture>) {}
+                                      const ShaderParams&, std::span<const Texture>, std::span<const DataBuffer>) {}
+
+    // Storage buffers for shaders (capabilities().data_buffers). `data` (or
+    // zeros) fills a new one; update/write replace `bytes` at `offset`.
+    virtual DataBuffer create_data_buffer(std::size_t /*bytes*/, const void* /*data*/) { return {}; }
+    virtual bool update_data_buffer(const DataBuffer&, std::size_t /*offset*/, std::size_t /*bytes*/,
+                                    const void* /*data*/) {
+        return false;
+    }
+    virtual bool write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                   const std::function<void(std::span<u8>)>& fill) {
+        std::vector<u8> data(bytes);
+        fill(data);
+        return update_data_buffer(buffer, offset, bytes, data.data());
+    }
 
     // Set the full-scene post-processing chain applied at present() time. Default is a
     // no-op (no shader/RT support) so the backend presents the scene unprocessed.

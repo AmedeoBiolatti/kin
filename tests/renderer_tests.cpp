@@ -1729,6 +1729,85 @@ void test_gpu_pipeline_record() {
     }
 }
 
+// Storage buffers: a shader reads entries a draw's vertices pick, updates and
+// writes land, and a draw missing its buffer is skipped rather than drawn.
+void test_gpu_data_buffers() {
+    constexpr std::string_view test_name = "test_gpu_data_buffers";
+    const std::filesystem::path spv = std::filesystem::path{KIN_TEST_SHADER_DIR} / "storage_read.frag.spv";
+    if (!std::filesystem::exists(spv)) {
+        skip_or_require_gpu_test(test_name, "test shader not compiled (glslc not found)");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-data-buffer-test", .width = 32, .height = 8, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().data_buffers);
+        const std::vector<kin::u8> code = read_spirv(spv);
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        const kin::ShaderHandle shader = renderer->create_shader(desc); // counts from the SPIR-V
+        assert(shader && renderer->shader_layout(shader)->storage_buffers == 1);
+
+        std::array<float, 16> colors{1, 0, 0, 1,  0, 1, 0, 1,  0, 0, 1, 1,  1, 1, 1, 1};
+        const kin::DataBuffer items = renderer->create_data_buffer(sizeof(colors), colors.data());
+        assert(items.valid() && items.size() == sizeof(colors));
+        // Four 8 x 8 squares, square i reading entry i.
+        std::vector<kin::ShaderVertex> vertices;
+        for (int i = 0; i < 4; ++i) {
+            const float x = static_cast<float>(i * 8);
+            const std::array<float, 4> custom{static_cast<float>(i), 0.0f, 0.0f, 0.0f};
+            for (const kin::Vec2f p : {kin::Vec2f{x, 0}, kin::Vec2f{x + 8, 0}, kin::Vec2f{x + 8, 8},
+                                       kin::Vec2f{x, 0}, kin::Vec2f{x + 8, 8}, kin::Vec2f{x, 8}}) {
+                vertices.push_back({.position = p, .custom = custom});
+            }
+        }
+        kin::RenderTarget target = renderer->create_render_target({32, 8}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        const auto draw = [&](std::span<const kin::DataBuffer> buffers) {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgba(0, 0, 0, 0));
+            renderer->draw_shader_geometry(vertices, {}, shader, {}, {}, buffers);
+            assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 8.0f}, px, size));
+        };
+        draw(std::span<const kin::DataBuffer>{&items, 1});
+        assert(pixel_near(px, size, 4, 4, kin::Color::rgb(255, 0, 0), 2));
+        assert(pixel_near(px, size, 12, 4, kin::Color::rgb(0, 255, 0), 2));
+        assert(pixel_near(px, size, 20, 4, kin::Color::rgb(0, 0, 255), 2));
+        assert(pixel_near(px, size, 28, 4, kin::Color::rgb(255, 255, 255), 2));
+
+        // One entry updated, another written in place.
+        const std::array<float, 4> yellow{1, 1, 0, 1};
+        assert(renderer->update_data_buffer(items, 16, 16, yellow.data()));
+        assert(renderer->write_data_buffer(items, 32, 16, [](std::span<kin::u8> bytes) {
+            const std::array<float, 4> magenta{1, 0, 1, 1};
+            std::memcpy(bytes.data(), magenta.data(), bytes.size());
+        }));
+        assert(!renderer->update_data_buffer(items, 60, 16, yellow.data())); // past the end
+        draw(std::span<const kin::DataBuffer>{&items, 1});
+        assert(pixel_near(px, size, 12, 4, kin::Color::rgb(255, 255, 0), 2));
+        assert(pixel_near(px, size, 20, 4, kin::Color::rgb(255, 0, 255), 2));
+        assert(pixel_near(px, size, 4, 4, kin::Color::rgb(255, 0, 0), 2)); // untouched
+
+        // Without its buffer the draw is skipped (an unbound one is a GPU error).
+        draw({});
+        assert(pixel_near(px, size, 4, 4, kin::Color::rgba(0, 0, 0, 0), 0));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2270,6 +2349,7 @@ int main() {
     test_gpu_shader_geometry();
     test_gpu_uploads_batch_in_order();
     test_gpu_pipeline_record();
+    test_gpu_data_buffers();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

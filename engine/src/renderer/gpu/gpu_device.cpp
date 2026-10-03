@@ -314,7 +314,20 @@ void GpuDevice::stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 
     if (bytes64 > 0xFFFFFFFFull) {
         throw std::runtime_error("texture upload too large");
     }
-    const u32 bytes = static_cast<u32>(bytes64);
+    stage_upload(UploadDestination{.texture = texture, .x = x, .y = y, .w = w, .h = h}, static_cast<u32>(bytes64),
+                 pixels, cycle, write);
+}
+
+void GpuDevice::upload_storage_buffer(SDL_GPUBuffer* buffer, u32 offset, u32 bytes, const void* data, bool cycle,
+                                      const std::function<void(std::span<u8>)>* write) {
+    if (!buffer || bytes == 0) {
+        throw std::runtime_error("upload_storage_buffer failed: invalid arguments");
+    }
+    stage_upload(UploadDestination{.buffer = buffer, .buffer_offset = offset}, bytes, data, cycle, write);
+}
+
+void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void* pixels, bool cycle,
+                             const std::function<void(std::span<u8>)>* write) {
     refuse_upload_inside_fill();
     std::unique_lock lock{_uploads_mutex};
     const auto fill = [&](SDL_GPUTransferBuffer* transfer, u32 offset, bool cycle_transfer) {
@@ -381,19 +394,25 @@ void GpuDevice::stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 
     if (!_upload_pass) {
         _upload_pass = SDL_BeginGPUCopyPass(_upload_commands);
     }
-    SDL_GPUTextureTransferInfo source{};
-    source.transfer_buffer = transfer;
-    source.offset = offset;
-    source.pixels_per_row = w;
-    source.rows_per_layer = h;
-    SDL_GPUTextureRegion destination{};
-    destination.texture = texture;
-    destination.x = x;
-    destination.y = y;
-    destination.w = w;
-    destination.h = h;
-    destination.d = 1;
-    SDL_UploadToGPUTexture(_upload_pass, &source, &destination, cycle);
+    if (to.buffer) {
+        const SDL_GPUTransferBufferLocation source{.transfer_buffer = transfer, .offset = offset};
+        const SDL_GPUBufferRegion destination{.buffer = to.buffer, .offset = to.buffer_offset, .size = bytes};
+        SDL_UploadToGPUBuffer(_upload_pass, &source, &destination, cycle);
+    } else {
+        SDL_GPUTextureTransferInfo source{};
+        source.transfer_buffer = transfer;
+        source.offset = offset;
+        source.pixels_per_row = to.w;
+        source.rows_per_layer = to.h;
+        SDL_GPUTextureRegion destination{};
+        destination.texture = to.texture;
+        destination.x = to.x;
+        destination.y = to.y;
+        destination.w = to.w;
+        destination.h = to.h;
+        destination.d = 1;
+        SDL_UploadToGPUTexture(_upload_pass, &source, &destination, cycle);
+    }
     ++_uploads_staged;
 }
 

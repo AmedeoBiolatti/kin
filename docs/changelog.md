@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- Storage buffers for shaders: `Renderer2D::create_data_buffer`,
+  `update_data_buffer`, `write_data_buffer`, and `draw_shader_surface` /
+  `draw_shader_geometry` taking `DataBuffer`s, bound after the textures
+  (`kin/renderer/data_buffer.hpp`). SDL_GPU only (`capabilities().data_buffers`).
 - `Renderer2D::pipeline_record()` and `prewarm_pipelines(record)`: the GPU
   pipelines a run made, made again while the next run loads instead of at
   their first draw (up to ~20 ms each on a cold driver cache). `run_scene_app`
