@@ -898,6 +898,53 @@ void test_gpu_texture_released_before_flush() {
     }
 }
 
+// With GPU timing on, a CPU that runs frames ahead of a busy GPU fills the
+// timer, and the frames past it go untimed. Their fences once went back to
+// SDL's pool still in flight, to be reset for the next submission (an upload,
+// say), which the old frame's end then reported finished: SDL freed its staging
+// buffer under the copy, and Vulkan lost the device. Whether that crashes is up
+// to the driver's timing; this runs the untimed frames, uploads between them.
+void test_gpu_timing_survives_a_gpu_behind() {
+    constexpr std::string_view test_name = "test_gpu_timing_survives_a_gpu_behind";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-behind-test", .width = 1024, .height = 1024, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const std::vector<kin::u8> white(8u * 8u * 4u, 255);
+        const std::vector<kin::u8> big(1024u * 1024u * 4u, 128);
+        const kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
+        renderer->set_gpu_timing_enabled(true);
+        for (int frame = 0; frame < 60; ++frame) {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            // Blended full-window quads: far more GPU work than CPU.
+            for (int i = 0; i < 1500; ++i) {
+                renderer->draw_texture(texture, kin::Rectf{0.0f, 0.0f, 8.0f, 8.0f}, kin::Rectf{0.0f, 0.0f, 1024.0f, 1024.0f},
+                                       kin::Color::rgba(255, 255, 255, 4));
+            }
+            renderer->present();
+            // An upload after each frame: a submission that a recycled fence
+            // would report finished too early, freeing its staging buffer.
+            const kin::Texture streamed = renderer->create_texture_from_rgba(big.data(), 1024, 1024);
+            renderer->draw_texture(streamed, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+        }
+        renderer->present();
+        renderer->set_gpu_timing_enabled(false);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_native_coordinates_disable_logical_presentation() {
     constexpr std::string_view test_name = "test_gpu_native_coordinates_disable_logical_presentation";
     bool gpu_ready = false;
@@ -1584,6 +1631,7 @@ int main() {
     test_capture_backdrop_round_trips();
     test_gpu_save_png_captures_bound_render_target();
     test_gpu_texture_released_before_flush();
+    test_gpu_timing_survives_a_gpu_behind();
     test_gpu_native_coordinates_disable_logical_presentation();
     test_gpu_frame_timing();
     test_gpu_logical_transforms_are_immediate();

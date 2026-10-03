@@ -30,10 +30,16 @@ public:
     GpuFrameTimer(const GpuFrameTimer&) = delete;
     GpuFrameTimer& operator=(const GpuFrameTimer&) = delete;
 
+    // Whether enough frames already wait for timing (a GPU behind the CPU): the
+    // next frame should then be submitted without a fence, and go untimed. Asked
+    // before submitting, since a fence must not be released before it signals:
+    // SDL would put it back in its pool and reset it for another submission
+    // while the GPU still runs this one (on Vulkan, a lost device).
+    bool full() const;
+
     // Takes `fence`, from a frame whose first command buffer was submitted at
-    // `first_submit_ns` (SDL_GetTicksNS). Returns false, leaving the fence to the
-    // caller, when too many frames are already waiting.
-    bool track(SDL_GPUFence* fence, u64 first_submit_ns);
+    // `first_submit_ns` (SDL_GetTicksNS). Call only when not full().
+    void track(SDL_GPUFence* fence, u64 first_submit_ns);
 
     // The GPU time (ms) of the latest frame that finished since the last call, if
     // any. Releases the finished frames' fences.
@@ -49,7 +55,7 @@ private:
     void run();
 
     SDL_GPUDevice* _device = nullptr;
-    std::mutex _mutex;
+    mutable std::mutex _mutex;
     std::condition_variable _wake;
     std::deque<Pending> _waiting;  // oldest first; the thread waits on the front
     std::deque<Pending> _finished; // signalled, fence not yet released
