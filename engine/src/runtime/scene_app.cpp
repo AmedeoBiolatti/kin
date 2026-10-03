@@ -3,18 +3,21 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/platform/user_data.hpp>
 #include <kin/runtime/debug_overlay.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_server.hpp>
@@ -405,8 +408,29 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     // Scene-owned textures must be destroyed while the renderer/device is still
     // alive. Capture the report first because the shutdown tears down the scene
     // stack before run_windowed_app destroys its backend.
+    // The pipelines an earlier windowed run made, made again while this one
+    // loads; this run's, kept for the next.
+    std::filesystem::path pipeline_file;
+    if (window.mode != AppMode::Headless) {
+        if (config.pipeline_record_path) {
+            pipeline_file = *config.pipeline_record_path;
+        } else {
+            std::string folder;
+            for (const char c : std::string_view{config.window.title}) {
+                folder += std::isalnum(static_cast<unsigned char>(c)) ? static_cast<char>(std::tolower(static_cast<unsigned char>(c))) : '-';
+            }
+            pipeline_file = user_data_dir("kin") / (folder.empty() ? std::string{"game"} : folder) / "pipelines.txt";
+        }
+    }
+    bool pipelines_prewarmed = false;
     const auto user_shutdown = window.shutdown;
     window.shutdown = [&, user_shutdown](FrameContext& frame) {
+        if (!pipeline_file.empty()) {
+            std::error_code error;
+            std::filesystem::create_directories(pipeline_file.parent_path(), error);
+            std::ofstream out{pipeline_file};
+            out << frame.renderer.pipeline_record();
+        }
         if (want_report) {
             std::ostringstream report;
             write_run_report(report, run_report, config.headless.seed, frames_run, scenes);
@@ -505,6 +529,14 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     };
 
     run_windowed_app(window, [&](FrameContext& ctx) {
+        if (!pipelines_prewarmed) {
+            pipelines_prewarmed = true;
+            if (!pipeline_file.empty()) {
+                std::ifstream in{pipeline_file};
+                const std::string record{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+                ctx.renderer.prewarm_pipelines(record);
+            }
+        }
         prepare_frame(ctx);
         ++frames_run;
         if (profile_enabled) {

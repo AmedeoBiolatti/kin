@@ -405,6 +405,26 @@ int main() {
         assert(text.find("\"observed\": " + std::to_string(expected)) != std::string::npos);
     }
 
+    // A windowed run keeps its pipeline record where it is told (and reads it
+    // back the next time); a headless one keeps none.
+    {
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-pipeline-record-test";
+        std::filesystem::remove_all(dir);
+        const std::filesystem::path file = dir / "pipelines.txt";
+        for (int run = 0; run < 2; ++run) {
+            kin::SceneManager windowed;
+            windowed.push(std::make_unique<SeededReportScene>());
+            const int code = kin::run_scene_app({
+                .window = {.title = "pipelines", .width = 64, .height = 64, .hidden = true},
+                .headless = {.frames = 2},
+                .pipeline_record_path = file,
+            }, windowed);
+            assert(code == 0);
+            assert(std::filesystem::exists(file));
+        }
+        std::filesystem::remove_all(dir);
+    }
+
     // Runtime profile output is available for every game that uses
     // run_scene_app; no game-specific wiring is required.
     {

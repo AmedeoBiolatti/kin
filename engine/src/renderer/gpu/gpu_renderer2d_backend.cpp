@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <span>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 #include <utility>
@@ -368,6 +369,62 @@ SDL_GPUFence* GpuRenderer2DBackend::submit_for_scope() {
     SDL_GPUFence* fence = _frame->submit_with_fence();
     end_frame();
     return fence;
+}
+
+std::string GpuRenderer2DBackend::pipeline_record() const {
+    // One line a pipeline: fragment id, blend, target format, vertex layout.
+    std::string out = "kin.pipelines/1\n";
+    _pipelines.for_each([&](SDL_GPUShader*, SDL_GPUShader* fragment, gpu::GpuBlendMode blend,
+                            SDL_GPUTextureFormat format, gpu::GpuVertexLayout layout) {
+        u64 id = 0;
+        if (fragment != _fragment_shader.handle()) {
+            const auto it = _fragment_ids.find(fragment);
+            if (it == _fragment_ids.end()) {
+                return; // a shader made some other way: not known next run
+            }
+            id = it->second;
+        }
+        out += std::to_string(id) + ' ' + std::to_string(static_cast<int>(blend)) + ' ' +
+               std::to_string(static_cast<int>(format)) + ' ' + std::to_string(static_cast<int>(layout)) + '\n';
+    });
+    return out;
+}
+
+void GpuRenderer2DBackend::prewarm_pipelines(std::string_view record) {
+    if (!record.starts_with("kin.pipelines/1\n")) {
+        return; // none, or from another version
+    }
+    std::istringstream in{std::string{record.substr(16)}};
+    u64 id = 0;
+    int blend = 0, format = 0, layout = 0;
+    while (in >> id >> blend >> format >> layout) {
+        if (blend < 0 || blend > static_cast<int>(gpu::GpuBlendMode::Min) || layout < 0 ||
+            layout > static_cast<int>(gpu::GpuVertexLayout::ShaderVertices)) {
+            continue;
+        }
+        _pipeline_hints.push_back(PipelineHint{.fragment = id,
+                                               .blend = static_cast<gpu::GpuBlendMode>(blend),
+                                               .format = static_cast<SDL_GPUTextureFormat>(format),
+                                               .layout = static_cast<gpu::GpuVertexLayout>(layout)});
+    }
+    make_hinted_pipelines(0, _fragment_shader.handle()); // the engine's own, now
+    for (const auto& [fragment, fragment_id] : _fragment_ids) {
+        make_hinted_pipelines(fragment_id, fragment); // shaders already made
+    }
+}
+
+void GpuRenderer2DBackend::make_hinted_pipelines(u64 fragment_id, SDL_GPUShader* fragment) {
+    for (const PipelineHint& hint : _pipeline_hints) {
+        if (hint.fragment != fragment_id) {
+            continue;
+        }
+        SDL_GPUShader* vertex = hint.layout == gpu::GpuVertexLayout::SpriteInstances ? _instance_shader.handle()
+                              : hint.layout == gpu::GpuVertexLayout::ShaderVertices  ? _shader_vertex_shader.handle()
+                                                                                     : _vertex_shader.handle();
+        if (vertex) {
+            _pipelines.get(vertex, fragment, hint.blend, hint.format, hint.layout);
+        }
+    }
 }
 
 void GpuRenderer2DBackend::begin_gpu_scope(std::string_view name) {
@@ -1284,6 +1341,14 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
     // RGBA8, and shader surfaces blend as alpha unless a blend mode is set.
     _pipelines.get(_vertex_shader.handle(), shader.handle(), gpu::GpuBlendMode::Alpha,
                     SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    // And whatever else an earlier run drew it with.
+    u64 id = 1469598103934665603ull; // FNV-1a of the SPIR-V
+    for (u32 i = 0; i < desc.spirv.size; ++i) {
+        id = (id ^ desc.spirv.code[i]) * 1099511628211ull;
+    }
+    id |= 1; // never 0, the default shader's
+    _fragment_ids[shader.handle()] = id;
+    make_hinted_pipelines(id, shader.handle());
     _shaders.push_back(std::move(shader));
     KIN_LOG_INFO_F("render", "shader created",
                    (LogFields{{.name = "handle", .value = std::to_string(_shaders.size())}}));

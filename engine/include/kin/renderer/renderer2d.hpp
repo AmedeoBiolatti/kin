@@ -222,6 +222,13 @@ public:
     // counts may be left as they are (a mismatch is logged and the shader's
     // own used).
     ShaderHandle create_shader(const ShaderDesc& desc);
+    // The pipelines (shader, blend mode, target, vertex layout) this run made, as
+    // text; a later run hands it to prewarm_pipelines, which makes them at once
+    // (the engine's own) or as their shader is created, instead of at their
+    // first draw: up to ~20 ms each on a cold driver cache. run_scene_app keeps
+    // it in the game's user data (windowed runs).
+    std::string pipeline_record() const { return _backend->pipeline_record(); }
+    void prewarm_pipelines(std::string_view record) { _backend->prewarm_pipelines(record); }
     // The layout read from a shader's SPIR-V (null when there was none).
     std::shared_ptr<const ShaderLayout> shader_layout(ShaderHandle shader) const;
     // Params sized for the shader's uniform block, settable by member name.
