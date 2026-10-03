@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -36,8 +37,10 @@ int main(int argc, char** argv) {
     std::vector<float> data(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y), 0.5f);
     using clock = std::chrono::steady_clock;
     const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    renderer->set_gpu_timing_enabled(true); // the GPU's own time, from fences
     std::vector<kin::Texture> keep;
-    double t_create = 0, t_whole = 0, t_part = 0, t_present = 0, t_gpu = 0;
+    double t_create = 0, t_whole = 0, t_part = 0, t_present = 0, t_gpu = 0, gpu_frame = 0;
+    double t_make_update = 0, t_make_write = 0;
     int counted = 0;
     for (int f = 0; f < frames; ++f) {
         const auto t0 = clock::now();
@@ -48,6 +51,25 @@ int main(int argc, char** argv) {
         const auto t2 = clock::now();
         for (int i = 0; i < count; ++i) renderer->update_texture(keep[i], {0, 0}, {size.x, size.y / 2}, reinterpret_cast<const kin::u8*>(data.data()));
         const auto t3 = clock::now();
+        // Texels made this frame: into a buffer then uploaded, or written straight
+        // into the upload memory.
+        const auto make = [&](float* out, std::size_t n, int salt) {
+            for (std::size_t k = 0; k < n; ++k) {
+                out[k] = static_cast<float>((k + static_cast<std::size_t>(salt)) & 1023) * 0.001f;
+            }
+        };
+        const auto g0 = clock::now();
+        for (int i = 0; i < count; ++i) {
+            make(data.data(), data.size(), i);
+            renderer->update_texture(keep[i], {0, 0}, size, reinterpret_cast<const kin::u8*>(data.data()));
+        }
+        const auto g1 = clock::now();
+        for (int i = 0; i < count; ++i) {
+            renderer->write_texture(keep[i], {0, 0}, size, [&](std::span<kin::u8> texels) {
+                make(reinterpret_cast<float*>(texels.data()), texels.size() / sizeof(float), i);
+            });
+        }
+        const auto g2 = clock::now();
         renderer->present();
         const auto t4 = clock::now();
         std::vector<kin::u8> px; kin::Vec2i sz;
@@ -55,10 +77,15 @@ int main(int argc, char** argv) {
         const auto t5 = clock::now();
         if (f >= 5) {
             t_create += ms(t0, t1); t_whole += ms(t1, t2); t_part += ms(t2, t3); t_present += ms(t3, t4); t_gpu += ms(t4, t5);
+            gpu_frame += renderer->backend_stats().last_gpu_frame_ms;
+            t_make_update += ms(g0, g1);
+            t_make_write += ms(g1, g2);
             ++counted;
         }
     }
     renderer->set_job_system(nullptr);
-    std::printf("%d x %dx%d floats, workers %d, per frame (mean of %d): create %.2f ms, whole update %.2f ms, half update %.2f ms, present %.2f ms, until GPU done %.2f ms\n",
-                count, size.x, size.y, workers, counted, t_create / counted, t_whole / counted, t_part / counted, t_present / counted, t_gpu / counted);
+    std::printf("made each frame: into a buffer then update_texture %.2f ms, write_texture %.2f ms\n",
+                t_make_update / counted, t_make_write / counted);
+    std::printf("%d x %dx%d floats, workers %d, per frame (mean of %d): create %.2f ms, whole update %.2f ms, half update %.2f ms, present %.2f ms, until GPU done %.2f ms, GPU frame %.2f ms\n",
+                count, size.x, size.y, workers, counted, t_create / counted, t_whole / counted, t_part / counted, t_present / counted, t_gpu / counted, gpu_frame / counted);
 }

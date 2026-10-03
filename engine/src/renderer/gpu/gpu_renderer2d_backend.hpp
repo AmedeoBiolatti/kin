@@ -99,6 +99,8 @@ public:
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
     Texture create_texture(Vec2i size, TextureFormat format, const void* pixels) override;
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
+    bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,
+                       const std::function<void(std::span<u8>)>& fill) override;
     void draw_texture(const Texture& texture, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
@@ -158,6 +160,8 @@ private:
     // texture dropped right after a draw would leave the batch a dangling handle
     // (and, once SDL destroys the image, a lost device).
     void retain(const Texture& texture);
+    // Whether an upload of `size` at `at` may cycle the texture's storage.
+    bool may_cycle(const gpu::GpuTextureBackend& texture, Vec2i at, Vec2i size) const;
     // A material draw's sampler bindings: `sources[i]` at slot i, the slots the
     // shader declares past them left null (the batch binds the white texture).
     struct SourceBindings {

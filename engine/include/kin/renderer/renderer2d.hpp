@@ -12,6 +12,7 @@
 #include <kin/renderer/sprite.hpp>
 #include <kin/renderer/texture.hpp>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -185,6 +186,12 @@ public:
     // backend cannot (the software backend) or the region is outside the texture;
     // the texture is then unchanged, and the caller makes a new one.
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels);
+    // As update_texture, but `fill` writes the region's texels (row by row, in
+    // the texture's format) into the span it is given, which on SDL_GPU is the
+    // upload memory itself: no copy, for texels made each frame. That memory is
+    // uncached, so write it in order, once, and never read it. `fill` must not
+    // use the renderer. Elsewhere the span is a plain buffer.
+    bool write_texture(const Texture& texture, Vec2i at, Vec2i size, const std::function<void(std::span<u8>)>& fill);
     void draw_texture(const Texture& texture, Rectf dest);
     void draw_texture(const Texture& texture, Rectf source, Rectf dest);
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint);
