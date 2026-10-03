@@ -3,14 +3,20 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <utility>
 
 namespace kin::gpu {
 
 namespace {
-// Frames allowed to wait for timing; past this (a stalled GPU) frames go untimed.
-constexpr std::size_t MaxFramesInFlight = 8;
+// Fences allowed to wait at once; past this (a stalled GPU) frames go untimed.
+// Room for 8 frames of a few scopes each.
+constexpr std::size_t MaxFencesInFlight = 64;
 // How often the thread checks the oldest fence: the timing's resolution.
 constexpr std::chrono::microseconds PollInterval{100};
+
+f64 ms_from(u64 start_ns, u64 end_ns) {
+    return end_ns > start_ns ? static_cast<f64>(end_ns - start_ns) / 1'000'000.0 : 0.0;
+}
 } // namespace
 
 GpuFrameTimer::GpuFrameTimer(SDL_GPUDevice* device) : _device(device) {
@@ -26,43 +32,69 @@ GpuFrameTimer::~GpuFrameTimer() {
     _thread.join();
     // A fence still in flight must not go back to SDL's pool, where it could be
     // reset for another submission: wait here, on the render thread.
-    for (const Pending& frame : _waiting) {
-        SDL_GPUFence* fence = frame.fence;
+    for (const Pending& pending : _waiting) {
+        SDL_GPUFence* fence = pending.fence;
         SDL_WaitForGPUFences(_device, true, &fence, 1);
-        SDL_ReleaseGPUFence(_device, frame.fence);
+        SDL_ReleaseGPUFence(_device, pending.fence);
     }
-    for (const Pending& frame : _finished) {
-        SDL_ReleaseGPUFence(_device, frame.fence);
+    for (const Pending& pending : _finished) {
+        SDL_ReleaseGPUFence(_device, pending.fence);
     }
 }
 
-bool GpuFrameTimer::full() const {
+bool GpuFrameTimer::full(std::size_t fences) const {
     std::lock_guard lock{_mutex};
-    return _waiting.size() + _finished.size() >= MaxFramesInFlight;
+    return _waiting.size() + _finished.size() + fences > MaxFencesInFlight;
 }
 
-void GpuFrameTimer::track(SDL_GPUFence* fence, u64 first_submit_ns, u32 untimed) {
+void GpuFrameTimer::push(Pending pending) {
     {
         std::lock_guard lock{_mutex};
-        _waiting.push_back(Pending{.fence = fence, .first_submit_ns = first_submit_ns, .frames = 1 + untimed});
+        _waiting.push_back(std::move(pending));
     }
     _wake.notify_one();
 }
 
-std::optional<GpuFrameSample> GpuFrameTimer::collect() {
+void GpuFrameTimer::track(SDL_GPUFence* fence, u64 first_submit_ns, u32 untimed) {
+    push(Pending{.fence = fence, .kind = Kind::Frame, .submit_ns = first_submit_ns, .frames = 1 + untimed});
+}
+
+void GpuFrameTimer::track_scope_start(SDL_GPUFence* fence) {
+    push(Pending{.fence = fence, .kind = Kind::ScopeStart});
+}
+
+void GpuFrameTimer::track_scope_end(std::string name, SDL_GPUFence* fence, u64 end_submit_ns) {
+    push(Pending{.fence = fence, .kind = Kind::ScopeEnd, .submit_ns = end_submit_ns, .name = std::move(name)});
+}
+
+GpuTimerSamples GpuFrameTimer::collect() {
     std::deque<Pending> finished;
     {
         std::lock_guard lock{_mutex};
         finished.swap(_finished);
     }
-    std::optional<GpuFrameSample> latest;
-    for (const Pending& frame : finished) {
-        SDL_ReleaseGPUFence(_device, frame.fence);
-        if (frame.gpu_ms >= 0.0) {
-            latest = GpuFrameSample{.ms = frame.gpu_ms, .frames = frame.frames};
+    // In submission order, as they signalled.
+    GpuTimerSamples samples;
+    for (Pending& pending : finished) {
+        SDL_ReleaseGPUFence(_device, pending.fence);
+        switch (pending.kind) {
+        case Kind::Frame:
+            samples.frame = GpuFrameSample{
+                .ms = ms_from(std::max(pending.submit_ns, _last_frame_signal_ns), pending.signal_ns),
+                .frames = pending.frames};
+            _last_frame_signal_ns = pending.signal_ns;
+            break;
+        case Kind::ScopeStart:
+            _scope_start_signal_ns = pending.signal_ns;
+            break;
+        case Kind::ScopeEnd:
+            samples.scopes.push_back(GpuScopeSample{
+                .name = std::move(pending.name),
+                .ms = ms_from(std::max(pending.submit_ns, _scope_start_signal_ns), pending.signal_ns)});
+            break;
         }
     }
-    return latest;
+    return samples;
 }
 
 void GpuFrameTimer::run() {
@@ -81,13 +113,10 @@ void GpuFrameTimer::run() {
             _wake.wait_for(lock, PollInterval, [this] { return _stop; });
             continue;
         }
-
-        Pending frame = _waiting.front();
+        Pending pending = std::move(_waiting.front());
         _waiting.pop_front();
-        const u64 start_ns = std::max(frame.first_submit_ns, _last_signal_ns);
-        frame.gpu_ms = now_ns > start_ns ? static_cast<f64>(now_ns - start_ns) / 1'000'000.0 : 0.0;
-        _last_signal_ns = now_ns;
-        _finished.push_back(frame);
+        pending.signal_ns = now_ns;
+        _finished.push_back(std::move(pending));
     }
 }
 

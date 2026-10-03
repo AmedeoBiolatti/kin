@@ -362,10 +362,46 @@ void GpuRenderer2DBackend::clear(Color color) {
     _clip_stack.clear();
 }
 
+SDL_GPUFence* GpuRenderer2DBackend::submit_for_scope() {
+    ensure_frame();
+    flush_to_frame();
+    SDL_GPUFence* fence = _frame->submit_with_fence();
+    end_frame();
+    return fence;
+}
+
+void GpuRenderer2DBackend::begin_gpu_scope(std::string_view name) {
+    if (!_gpu_timer || _scope) {
+        return; // timing off, or inside a scope already
+    }
+    _scope = std::string{name};
+    // Room for both its fences, or it goes untimed (a fence must never be
+    // dropped unsignalled). Only the render thread adds fences, and present
+    // ends the scope before adding the frame's.
+    _scope_timed = !_gpu_timer->full(2);
+    if (_scope_timed) {
+        _gpu_timer->track_scope_start(submit_for_scope());
+    }
+}
+
+void GpuRenderer2DBackend::end_gpu_scope() {
+    if (!_scope) {
+        return;
+    }
+    std::string name = std::move(*_scope);
+    _scope.reset();
+    if (!_scope_timed || !_gpu_timer) {
+        return;
+    }
+    const u64 submit_ns = SDL_GetTicksNS();
+    _gpu_timer->track_scope_end(std::move(name), submit_for_scope(), submit_ns);
+}
+
 void GpuRenderer2DBackend::set_gpu_timing_enabled(bool enabled) {
     if (enabled && !_gpu_timer) {
         _gpu_timer = std::make_unique<gpu::GpuFrameTimer>(_device.handle());
     } else if (!enabled && _gpu_timer) {
+        _scope.reset(); // its start fence goes with the timer
         _gpu_timer.reset();
         _stats.last_gpu_frame_ms = 0.0;
         _untimed_frames = 0;
@@ -376,6 +412,7 @@ void GpuRenderer2DBackend::present() {
     const auto ms_between = [](u64 start_ns, u64 end_ns) {
         return static_cast<f64>(end_ns - start_ns) / 1'000'000.0;
     };
+    end_gpu_scope(); // a scope ends with its frame, before the frame's fence
     const u64 flush_start = SDL_GetTicksNS();
     ensure_frame();
     flush_to_frame();
@@ -418,11 +455,15 @@ void GpuRenderer2DBackend::present() {
         }
     }
     if (_gpu_timer) {
-        if (const std::optional<gpu::GpuFrameSample> sample = _gpu_timer->collect()) {
+        gpu::GpuTimerSamples samples = _gpu_timer->collect();
+        if (const std::optional<gpu::GpuFrameSample>& sample = samples.frame) {
             // A span over untimed frames is shared out evenly.
             _stats.last_gpu_frame_ms = sample->ms / static_cast<f64>(sample->frames);
             _stats.last_gpu_frame_span = sample->frames;
             ++_stats.gpu_frames_sampled;
+        }
+        for (gpu::GpuScopeSample& scope : samples.scopes) {
+            _scope_timings.push_back(GpuScopeTiming{.name = std::move(scope.name), .ms = scope.ms});
         }
     }
     end_frame();

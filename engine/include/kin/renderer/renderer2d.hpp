@@ -16,6 +16,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +69,21 @@ public:
     };
 
     // Sets the blend mode for the guard's scope and restores the previous one.
+    // Ends a gpu_scope() when it goes.
+    class GpuScope {
+    public:
+        GpuScope() = default;
+        explicit GpuScope(Renderer2D* renderer) : _renderer(renderer) {}
+        ~GpuScope();
+        GpuScope(const GpuScope&) = delete;
+        GpuScope& operator=(const GpuScope&) = delete;
+        GpuScope(GpuScope&& other) noexcept : _renderer(std::exchange(other._renderer, nullptr)) {}
+        GpuScope& operator=(GpuScope&&) noexcept = delete;
+
+    private:
+        Renderer2D* _renderer = nullptr;
+    };
+
     class BlendModeGuard {
     public:
         BlendModeGuard() = default;
@@ -125,6 +141,16 @@ public:
     // GPU time per frame in backend_stats().last_gpu_frame_ms (SDL_GPU only; off
     // by default, as it costs a fence per frame and a waiting thread).
     void set_gpu_timing_enabled(bool enabled);
+    // Times the GPU work drawn until the returned guard goes, as `name`, while
+    // GPU timing is on (run_scene_app reports it as gpu.<name> under --profile
+    // and in the debug overlay); otherwise does nothing. SDL_GPU has no GPU
+    // timestamps, so the scope's edges split the frame's submission and are
+    // timed with fences: about 0.1 ms resolution, and a little overhead from
+    // the split. Scopes do not nest (an inner one is ignored) and end at present.
+    [[nodiscard]] GpuScope gpu_scope(std::string_view name);
+    // The scopes that finished on the GPU since the last call (a frame or two
+    // after they were drawn).
+    std::vector<GpuScopeTiming> take_gpu_scope_timings();
     void set_texture_batching_enabled(bool enabled);
     bool texture_batching_enabled() const;
 
