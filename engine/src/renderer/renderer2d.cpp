@@ -197,6 +197,21 @@ void Renderer2D::reset_backend_stats() {
     _backend->reset_stats();
 }
 
+Renderer2D::GpuScope::~GpuScope() {
+    if (_renderer) {
+        _renderer->_backend->end_gpu_scope();
+    }
+}
+
+Renderer2D::GpuScope Renderer2D::gpu_scope(std::string_view name) {
+    _backend->begin_gpu_scope(name);
+    return GpuScope{this};
+}
+
+std::vector<GpuScopeTiming> Renderer2D::take_gpu_scope_timings() {
+    return _backend->take_gpu_scope_timings();
+}
+
 void Renderer2D::set_gpu_timing_enabled(bool enabled) {
     _backend->set_gpu_timing_enabled(enabled);
 }

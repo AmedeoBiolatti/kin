@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::gpu_scope("name")`: the GPU time of a part of a frame, reported
+  as `gpu.<name>` by `--profile` and the debug overlay (and by
+  `take_gpu_scope_timings()`). Measured with fences on each side, splitting the
+  frame's submission there, while GPU timing is on; otherwise it does nothing.
 - `Renderer2D::draw_shader_geometry()`: triangles drawn with a material shader,
   so only the pixels a shape covers run it, instead of a rectangle over its
   bounds. Each `kin::ShaderVertex` carries four free floats the fragment shader

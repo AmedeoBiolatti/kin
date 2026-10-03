@@ -77,6 +77,9 @@ public:
         return stats;
     }
     void set_gpu_timing_enabled(bool enabled) override;
+    void begin_gpu_scope(std::string_view name) override;
+    void end_gpu_scope() override;
+    std::vector<GpuScopeTiming> take_gpu_scope_timings() override { return std::exchange(_scope_timings, {}); }
 
     void clear(Color color) override;
     void present() override;
@@ -205,6 +208,13 @@ private:
     u64 _frame_serial = 1; // counts end_frame(): which frame a texture was last drawn in
     std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
     u32 _untimed_frames = 0; // submitted without a fence since the last timed one (timer full)
+    // The open gpu_scope(): its name, and whether it is timed (the timer had room).
+    std::optional<std::string> _scope;
+    bool _scope_timed = false;
+    std::vector<GpuScopeTiming> _scope_timings; // finished, not yet taken
+    // Submits what is recorded so far (the frame's batch included) with a fence
+    // for the timer; the next draw starts a new command buffer.
+    SDL_GPUFence* submit_for_scope();
     RendererBackendStats _stats;                    // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec2i _logical_size{0, 0}; // 0 = render at window size (no logical presentation)

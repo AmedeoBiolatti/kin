@@ -1401,6 +1401,85 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// gpu_scope() times named parts of a frame on the GPU, while timing is on.
+void test_gpu_scopes() {
+    constexpr std::string_view test_name = "test_gpu_scopes";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-scope-test", .width = 512, .height = 512, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const std::array<kin::u8, 4> white{255, 255, 255, 255};
+        const kin::Texture dot = renderer->create_texture_from_rgba(white.data(), {1, 1});
+        const auto frame = [&] {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            {
+                const auto heavy = renderer->gpu_scope("heavy");
+                const auto ignored = renderer->gpu_scope("nested"); // inside another: ignored
+                for (int i = 0; i < 1500; ++i) {
+                    renderer->draw_texture(dot, kin::Rectf{0.0f, 0.0f, 1.0f, 1.0f}, kin::Rectf{0.0f, 0.0f, 512.0f, 512.0f},
+                                           kin::Color::rgba(255, 255, 255, 3));
+                }
+            }
+            {
+                const auto light = renderer->gpu_scope("light");
+                renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 4.0f, 4.0f}, kin::Color::rgb(255, 0, 0));
+            }
+            renderer->present();
+        };
+
+        // Off: nothing is timed.
+        frame();
+        frame();
+        assert(renderer->take_gpu_scope_timings().empty());
+
+        renderer->set_gpu_timing_enabled(true);
+        std::vector<kin::GpuScopeTiming> timings;
+        for (int i = 0; i < 30; ++i) {
+            frame();
+            for (kin::GpuScopeTiming& t : renderer->take_gpu_scope_timings()) {
+                timings.push_back(std::move(t));
+            }
+        }
+        // Let the GPU finish, then one more present collects the last of them.
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        assert(renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, px, size));
+        renderer->present();
+        for (kin::GpuScopeTiming& t : renderer->take_gpu_scope_timings()) {
+            timings.push_back(std::move(t));
+        }
+        renderer->set_gpu_timing_enabled(false);
+        std::vector<double> heavy, light;
+        for (const kin::GpuScopeTiming& t : timings) {
+            assert(t.name == "heavy" || t.name == "light");
+            (t.name == "heavy" ? heavy : light).push_back(t.ms);
+        }
+        if (heavy.size() < 10 || light.size() < 10) { // with the GPU behind, some go untimed
+            throw std::runtime_error(std::string(test_name) + ": " + std::to_string(heavy.size()) + " heavy and " +
+                                     std::to_string(light.size()) + " light timings of 30 frames");
+        }
+        std::sort(heavy.begin(), heavy.end());
+        std::sort(light.begin(), light.end());
+        const double heavy_median = heavy[heavy.size() / 2], light_median = light[light.size() / 2];
+        if (!(heavy_median > 0.5 && heavy_median > 5.0 * light_median)) {
+            throw std::runtime_error(std::string(test_name) + ": heavy " + std::to_string(heavy_median) +
+                                     " ms, light " + std::to_string(light_median) + " ms");
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -1884,6 +1963,7 @@ int main() {
     test_min_max_blend_on_gpu_backend();
     test_gpu_shader_geometry();
     test_gpu_uploads_batch_in_order();
+    test_gpu_scopes();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

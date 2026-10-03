@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -41,6 +42,12 @@ struct RendererBackendCapabilities {
     bool rendering_3d = false;
     // create_texture() accepts the data formats (R16Uint, Rg16Uint, R32Float).
     bool data_textures = false;
+};
+
+// A named part of a frame's GPU work (Renderer2D::gpu_scope) and its GPU time.
+struct GpuScopeTiming {
+    std::string name;
+    f64 ms = 0.0;
 };
 
 struct RendererBackendStats {
@@ -91,6 +98,11 @@ public:
     virtual void reset_stats() {}
     // Measures each frame's GPU time (stats().last_gpu_frame_ms) where supported.
     virtual void set_gpu_timing_enabled(bool) {}
+    // A named scope of GPU work, timed while GPU timing is on (else nothing).
+    virtual void begin_gpu_scope(std::string_view) {}
+    virtual void end_gpu_scope() {}
+    // The scopes that finished on the GPU since the last call.
+    virtual std::vector<GpuScopeTiming> take_gpu_scope_timings() { return {}; }
     virtual void set_texture_batching_enabled(bool) {}
     virtual bool texture_batching_enabled() const {
         return false;

@@ -590,6 +590,11 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                     debug_overlay.record("gpu.frame", present_stats.last_gpu_frame_ms);
                     record_profile_value("gpu.frame", "runtime", present_stats.last_gpu_frame_ms);
                 }
+                for (const GpuScopeTiming& scope : ctx.renderer.take_gpu_scope_timings()) {
+                    const std::string name = "gpu." + scope.name;
+                    debug_overlay.record(name, scope.ms);
+                    record_profile_value(name, "runtime", scope.ms);
+                }
             }
         }
 

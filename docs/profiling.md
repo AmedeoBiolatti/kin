@@ -70,7 +70,23 @@ On the SDL_GPU backend two more rows show the GPU's side of the frame:
 - `gpu.frame`: the GPU time of each frame, from when its first command buffer
   was submitted (or the previous frame finished, if later) to when its fence
   signalled. SDL_GPU has no timestamp queries, so this is measured with fences
-  and a thread that waits on them; it trails the CPU by a frame or two.
+  and a thread that polls them; it trails the CPU by a frame or two. With the
+  GPU more than a few frames behind, some frames go untimed, and the next
+  sample is the average over them.
+- `gpu.<name>`: the GPU time of a part of the frame the game marked with
+  `Renderer2D::gpu_scope()`:
+
+  ```cpp
+  {
+      const auto scope = renderer.gpu_scope("shadows");
+      draw_shadows(renderer);
+  } // the scope ends here
+  ```
+
+  The scope's edges split the frame's submission so each side can carry a
+  fence: resolution is about 0.1 ms, and each scope adds two submissions.
+  Scopes do not nest (an inner one is ignored) and end at `present()`. While
+  GPU timing is off, `gpu_scope()` does nothing.
 
 GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
 or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`
