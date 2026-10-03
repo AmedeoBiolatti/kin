@@ -190,6 +190,17 @@ the uniform block is `layout(set = 3, binding = 0)`. Slots the shader declares
 but the draw does not fill are bound to a 1x1 white texture. Overloads taking no
 texture, one texture, or two textures are shorthands for the same call.
 
+`create_shader()` reads the SPIR-V itself (`kin::reflect_spirv`, about 10 µs):
+the texture, storage buffer and uniform block counts come from the shader, so a
+`ShaderDesc`'s may be left alone (one that disagrees is logged, and the
+shader's used). Its uniform block can then be set by member name:
+
+```cpp
+kin::ShaderParams params = renderer.shader_params(shader); // sized, with the layout
+params.set("strength", 0.5f);
+params.set("tint", std::array{1.0f, 0.8f, 0.6f, 1.0f});
+```
+
 `ShaderParams::uniforms` holds 16 floats by default. Resize it for more, up to
 `kin::MaxShaderUniformFloats` (4096, 16 KiB). Declare arrays in the shader as
 `vec4`s: std140 pads each element of a `float` array to 16 bytes.

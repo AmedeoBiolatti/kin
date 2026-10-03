@@ -4,6 +4,7 @@
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
 #include <kin/ui2/text.hpp>
@@ -1813,6 +1814,58 @@ void test_gpu_shader_geometry() {
     }
 }
 
+std::vector<kin::u8> read_spirv(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+}
+
+// Shader layouts read from SPIR-V: the test shaders' and the engine's.
+void test_shader_reflection() {
+    const std::filesystem::path tests{KIN_TEST_SHADER_DIR};
+    if (!std::filesystem::exists(tests / "four_sources.frag.spv")) {
+        return; // glslc not found: nothing compiled to read
+    }
+    const auto reflect = [](const std::filesystem::path& path) {
+        const std::vector<kin::u8> code = read_spirv(path);
+        std::string error;
+        const std::optional<kin::ShaderLayout> layout =
+            kin::reflect_spirv({code.data(), static_cast<kin::u32>(code.size())}, &error);
+        if (!layout) {
+            throw std::runtime_error(path.string() + ": " + error);
+        }
+        return *layout;
+    };
+    const kin::ShaderLayout four = reflect(tests / "four_sources.frag.spv");
+    assert(four.samplers == 4 && four.uniform_buffers == 0 && four.storage_buffers == 0);
+    const kin::ShaderLayout formats = reflect(tests / "data_formats.frag.spv");
+    assert(formats.samplers == 3 && formats.uniform_buffers == 1);
+    assert(formats.uniform_bytes == 128);
+    const kin::ShaderParamInfo* u = formats.find("u");
+    assert(u && u->offset == 0 && u->size == 128);
+    assert(reflect(tests / "custom_vertex.frag.spv").samplers == 1);
+    // Every engine shader reads.
+    for (const auto& entry : std::filesystem::directory_iterator{KIN_GPU_SHADER_DIR_FOR_TESTS}) {
+        if (entry.path().extension() == ".spv") {
+            reflect(entry.path());
+        }
+    }
+    // Not SPIR-V: refused, with a reason.
+    const std::array<kin::u8, 8> junk{1, 2, 3, 4, 5, 6, 7, 8};
+    std::string error;
+    assert(!kin::reflect_spirv({junk.data(), 8}, &error) && !error.empty());
+
+    // Params by name write where the shader reads.
+    kin::ShaderParams params;
+    params.layout = std::make_shared<const kin::ShaderLayout>(formats);
+    const std::array<float, 4> fifth{0.0f, 0.25f, 0.0f, 0.0f};
+    std::vector<float> u_values(24, 0.0f);
+    std::copy(fifth.begin(), fifth.end(), u_values.begin() + 20);
+    assert(params.set("u", u_values));
+    assert(params.uniforms[21] == 0.25f);
+    assert(!params.set("nope", 1.0f));
+    assert(!params.set("u", std::vector<float>(33, 0.0f))); // past the member
+}
+
 // Max and Min blending: a fill and a texture over a cleared target. Returns
 // the pixels at (8, 8) (the fill) and (24, 8) (the texture) for each mode.
 std::array<kin::Color, 4> min_max_blended(kin::Renderer2D& renderer) {
@@ -2148,6 +2201,7 @@ int main() {
     test_shader_params_and_formats_on_software_backends();
     test_gpu_data_textures_and_large_uniforms();
     test_gpu_resources_outlive_renderer();
+    test_shader_reflection();
     test_min_max_blend_on_software_backend();
     test_min_max_blend_on_gpu_backend();
     test_gpu_shader_geometry();

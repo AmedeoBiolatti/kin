@@ -2,6 +2,7 @@
 
 #include <kin/platform/log.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 
 #include <cmath>
 
@@ -474,7 +475,49 @@ void Renderer2D::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
 }
 
 ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
-    return _backend->create_shader(desc);
+    ShaderDesc used = desc;
+    std::shared_ptr<const ShaderLayout> layout;
+    if (desc.spirv.valid()) {
+        std::string error;
+        if (std::optional<ShaderLayout> read = reflect_spirv(desc.spirv, &error)) {
+            const auto agree = [&](const char* what, u32 given, u32 declared, u32& into) {
+                // The default of one sampler stands for a shader that samples none.
+                if (given != declared && !(given == 1 && declared == 0 && std::string_view{what} == "samplers")) {
+                    KIN_LOG_WARN_F("render", "create_shader: ShaderDesc disagrees with the shader; using the shader's",
+                                   (LogFields{{.name = "what", .value = what},
+                                              {.name = "desc", .value = std::to_string(given)},
+                                              {.name = "shader", .value = std::to_string(declared)}}));
+                    into = declared;
+                }
+            };
+            agree("samplers", desc.num_samplers, read->samplers, used.num_samplers);
+            agree("uniform_buffers", desc.num_uniform_buffers, read->uniform_buffers, used.num_uniform_buffers);
+            agree("storage_buffers", desc.num_storage_buffers, read->storage_buffers, used.num_storage_buffers);
+            layout = std::make_shared<const ShaderLayout>(std::move(*read));
+        } else {
+            KIN_LOG_WARN_F("render", "create_shader: SPIR-V not readable; trusting the ShaderDesc",
+                           (LogFields{{.name = "error", .value = error}}));
+        }
+    }
+    const ShaderHandle handle = _backend->create_shader(used);
+    if (handle && layout) {
+        _shader_layouts[handle.value] = std::move(layout);
+    }
+    return handle;
+}
+
+std::shared_ptr<const ShaderLayout> Renderer2D::shader_layout(ShaderHandle shader) const {
+    const auto it = _shader_layouts.find(shader.value);
+    return it == _shader_layouts.end() ? nullptr : it->second;
+}
+
+ShaderParams Renderer2D::shader_params(ShaderHandle shader) const {
+    ShaderParams params;
+    params.layout = shader_layout(shader);
+    if (params.layout) {
+        params.uniforms.assign(std::max<std::size_t>(16, (params.layout->uniform_bytes + 3) / 4), 0.0f);
+    }
+    return params;
 }
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params) {

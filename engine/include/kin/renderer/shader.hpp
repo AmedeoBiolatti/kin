@@ -4,6 +4,9 @@
 #include <kin/renderer/color.hpp>
 
 #include <array>
+#include <memory>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace kin {
@@ -51,6 +54,7 @@ struct ShaderDesc {
     ShaderBlob msl;              // Metal
     u32 num_samplers = 1;        // sampler slots the shader declares, 1..MaxShaderSamplers
     u32 num_uniform_buffers = 0; // fragment uniform buffers (ShaderParams -> slot 0)
+    u32 num_storage_buffers = 0; // fragment storage buffers (DataBuffer), after the samplers in set 2
     const char* entrypoint = "main";
 };
 
@@ -63,8 +67,17 @@ inline constexpr u32 MaxShaderUniformFloats = 4096;
 // 16 floats (four vec4s) by default; resize for more, up to
 // MaxShaderUniformFloats. Declare arrays as vec4s: std140 pads each element of a
 // float array to 16 bytes.
+struct ShaderLayout;
+
 struct ShaderParams {
     std::vector<f32> uniforms = std::vector<f32>(16, 0.0f);
+    // The shader's layout (Renderer2D::shader_params sets it), for set() by name.
+    std::shared_ptr<const ShaderLayout> layout;
+
+    // Writes `values` at the uniform block member `name` (as declared in the
+    // shader). False without a layout, for an unknown name, or past the member.
+    bool set(std::string_view name, std::span<const f32> values);
+    bool set(std::string_view name, f32 value) { return set(name, std::span<const f32>{&value, 1}); }
 };
 
 // A vertex of draw_shader_geometry(). The fragment shader gets `color` and `uv`

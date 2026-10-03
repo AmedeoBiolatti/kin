@@ -70,6 +70,7 @@ add_library(kin_engine STATIC
     src/renderer/sprite_catalog.cpp
     src/renderer/sprite_sheet.cpp
     src/renderer/sdl_renderer2d_backend.cpp
+    src/renderer/shader_reflect.cpp
     src/renderer/gpu/gpu_buffer.cpp
     src/renderer/gpu/gpu_device.cpp
     src/renderer/gpu/gpu_frame_timer.cpp
