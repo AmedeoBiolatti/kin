@@ -114,7 +114,14 @@ void GpuGeometryBatch::add_range(GpuVertexLayout layout, bool quads, u32 first, 
                                  std::span<const SDL_GPUTextureSamplerBinding> extra,
                                  std::span<SDL_GPUBuffer* const> storage) {
     assert(extra.size() < MaxShaderSamplers);
-    const bool can_coalesce = uniform_size == 0 && !_ranges.empty() && _ranges.back().layout == layout &&
+    // Draws with uniforms join the last range only when the bytes are the same:
+    // the range pushes one block for all of them.
+    const auto same_uniforms = [&](const Range& last) {
+        return last.uniform_size == uniform_size &&
+               (uniform_size == 0 ||
+                std::memcmp(_uniform_bytes.data() + last.uniform_offset, uniform, uniform_size) == 0);
+    };
+    const bool can_coalesce = !_ranges.empty() && same_uniforms(_ranges.back()) && _ranges.back().layout == layout &&
                               _ranges.back().quads == quads &&
                               _ranges.back().fragment == fragment &&
                               _ranges.back().texture == texture &&
@@ -124,7 +131,6 @@ void GpuGeometryBatch::add_range(GpuVertexLayout layout, bool quads, u32 first, 
                                          _extra_bindings.begin() + _ranges.back().extra_offset,
                                          same_binding) &&
                               _ranges.back().blend == blend &&
-                              _ranges.back().uniform_size == 0 &&
                               _ranges.back().storage_count == storage.size() &&
                               std::equal(storage.begin(), storage.end(),
                                          _storage_buffers.begin() + _ranges.back().storage_offset) &&

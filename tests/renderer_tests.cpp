@@ -2457,6 +2457,24 @@ void test_gpu_data_textures_and_large_uniforms() {
             renderer->create_texture({1, 1}, kin::TextureFormat::R32Float, nullptr),
         };
         assert(pixel_near(draw(), {8, 8}, 4, 4, kin::Color::rgb(0, 0, 64), 2));
+
+        // Shader draws with the same params share one draw; different params
+        // each keep theirs (the blue channel shows u[5].y).
+        {
+            std::vector<kin::u8> pixels;
+            kin::Vec2i size{};
+            kin::ShaderParams second = params;
+            second.uniforms[21] = 0.75f;
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 2.0f, 8.0f}, shader, params, std::span<const kin::Texture>{sources});
+            renderer->draw_shader_surface({2.0f, 0.0f, 2.0f, 8.0f}, shader, params, std::span<const kin::Texture>{sources});
+            renderer->draw_shader_surface({4.0f, 0.0f, 4.0f, 8.0f}, shader, second, std::span<const kin::Texture>{sources});
+            assert(renderer->read_rgba({0.0f, 0.0f, 8.0f, 8.0f}, pixels, size));
+            assert(pixel_near(pixels, {8, 8}, 1, 4, kin::Color::rgb(0, 0, 64), 2));
+            assert(pixel_near(pixels, {8, 8}, 3, 4, kin::Color::rgb(0, 0, 64), 2));
+            assert(pixel_near(pixels, {8, 8}, 6, 4, kin::Color::rgb(0, 0, 191), 2));
+        }
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;

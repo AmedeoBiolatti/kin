@@ -60,6 +60,9 @@ releases may change APIs.
 
 ### Changed
 
+- SDL_GPU shader draws with the same params (and shader, sources, state) in a
+  row are one draw call, not one each: 2000 small shader surfaces a frame went
+  from 0.47 to 0.24 ms back to back (`kin_draw_bench 60 1 surfaces`).
 - SDL_GPU `create_shader` builds the shader's usual pipeline (alpha blend, an
   RGBA8 target) at once instead of at its first draw: on a cold driver cache
   that moves a ~19 ms hitch from the first frame drawing it to load time.
