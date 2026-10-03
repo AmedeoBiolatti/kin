@@ -104,7 +104,10 @@ public:
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) override;
     void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) override;
-    void set_job_system(JobSystem* jobs) override { _jobs = jobs; }
+    void set_job_system(JobSystem* jobs) override {
+        _jobs = jobs;
+        _device.set_job_system(jobs);
+    }
 
     void fill_rect(Rectf rect, Color color) override;
     void draw_rect(Rectf rect, Color color) override;

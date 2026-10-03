@@ -252,9 +252,19 @@ own command buffer: a frame's uploads are recorded into one, sent to the GPU
 just before the frame (or a read-back), so updates made during a frame apply
 to the whole frame. Replacing a whole texture that the frame hasn't drawn yet
 cycles its storage, so the upload doesn't wait for earlier frames still reading
-it. `backend_stats().texture_uploads` and `texture_upload_submits` count them.
-On this laptop's RTX 4080, 150 uploads of 256 KB in one frame went from about
-25 ms of calls plus a 70 ms stall at present to about 4.5 ms with none.
+it. Texels are copied with streaming stores (the staging memory is uncached),
+and with `Renderer2D::set_job_system()` uploads of 1 MB or more are copied on
+the workers too. `backend_stats().texture_uploads` and `texture_upload_submits`
+count them; `kin_upload_bench [frames] [workers] [big]` measures them.
+
+CPU time per frame on an RTX 4080 Laptop GPU (kin 0.2.3, which submitted each
+upload on its own, took about 25 ms for the first row and then stalled 70 ms at
+present):
+
+| Uploads a frame | No job system | 3 workers |
+| --- | --- | --- |
+| 150 of 256 KB | 3.1 ms | 3.1 ms |
+| 12 of 8-16 MB | 11.4 ms | 4.9 ms |
 They need `capabilities().data_textures` (the SDL_GPU backend), are only for
 shaders (`draw_texture()` refuses them), and every slot that expects one must be
 given one, since an empty slot is bound to the white `Rgba8` texture.

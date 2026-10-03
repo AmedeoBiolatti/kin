@@ -1401,6 +1401,65 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// Uploads past the shared staging buffer's size (it grows), copied on workers
+// when a job system is set, land where they should.
+void test_gpu_big_uploads() {
+    constexpr std::string_view test_name = "test_gpu_big_uploads";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-big-upload-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        constexpr int n = 2560; // 25 MB of RGBA: more than the 16 MB staging buffer
+        std::vector<kin::u8> texels(static_cast<std::size_t>(n) * n * 4);
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                kin::u8* t = &texels[(static_cast<std::size_t>(y) * n + x) * 4];
+                t[0] = static_cast<kin::u8>(x * 255 / n);
+                t[1] = static_cast<kin::u8>(y * 255 / n);
+                t[2] = 0;
+                t[3] = 255;
+            }
+        }
+        kin::JobSystem jobs{{.workers = 3}};
+        for (kin::JobSystem* with : {static_cast<kin::JobSystem*>(nullptr), &jobs}) {
+            renderer->set_job_system(with);
+            const kin::Texture big = renderer->create_texture_from_rgba(texels.data(), {n, n});
+            kin::RenderTarget target = renderer->create_render_target({64, 64}, kin::ScaleMode::Nearest);
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            {
+                const auto bind = renderer->scoped_render_target(target);
+                renderer->clear(kin::Color::rgb(0, 0, 255));
+                // Three texels far apart, each drawn over a 16 x 16 square.
+                const auto sample = [&](int tx, int ty, float at) {
+                    renderer->draw_texture(big, kin::Rectf{static_cast<float>(tx), static_cast<float>(ty), 1.0f, 1.0f},
+                                           kin::Rectf{at, 0.0f, 16.0f, 16.0f});
+                };
+                sample(0, 0, 0.0f);
+                sample(n / 2, n - 1, 16.0f);
+                sample(n - 1, n / 4, 32.0f);
+                assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+            }
+            assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 0, 0), 2));
+            assert(pixel_near(px, size, 24, 8, kin::Color::rgb(127, 254, 0), 2));
+            assert(pixel_near(px, size, 40, 8, kin::Color::rgb(254, 63, 0), 2));
+        }
+        renderer->set_job_system(nullptr);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // gpu_scope() times named parts of a frame on the GPU, while timing is on.
 void test_gpu_scopes() {
     constexpr std::string_view test_name = "test_gpu_scopes";
@@ -1964,6 +2023,7 @@ int main() {
     test_gpu_shader_geometry();
     test_gpu_uploads_batch_in_order();
     test_gpu_scopes();
+    test_gpu_big_uploads();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

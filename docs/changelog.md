@@ -34,11 +34,13 @@ releases may change APIs.
 
 - SDL_GPU texture uploads (`create_texture`, `update_texture`) no longer submit
   a command buffer each: a frame's uploads are recorded into one, sent ahead of
-  the frame, from a shared 16 MB staging buffer (big uploads get their own).
-  Replacing a whole texture the frame hasn't drawn yet cycles its storage. 150
-  uploads of 256 KB in a frame went from about 25 ms of calls plus a 70 ms stall
-  at present to about 4.5 ms. `RendererBackendStats::texture_uploads` and
-  `texture_upload_submits` count them.
+  the frame, from a shared staging buffer that grows to fit big uploads and
+  shrinks back. Texels are copied with streaming stores, and on the renderer's
+  job system for uploads of 1 MB or more. Replacing a whole texture the frame
+  hasn't drawn yet cycles its storage. 150 uploads of 256 KB in a frame went
+  from about 25 ms of calls plus a 70 ms stall at present to 3.1 ms.
+  `RendererBackendStats::texture_uploads` and `texture_upload_submits` count
+  them; `kin_upload_bench` measures them.
 - `--profile` (and `--profile-json`, `--profile-text`, `--profile-lines`) no
   longer makes a run headless: it profiles the window, until the game quits or
   `--frames` N. For the old 600-frame headless pass add `--headless`.

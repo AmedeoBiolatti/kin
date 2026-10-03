@@ -105,6 +105,10 @@ if(KIN_BUILD_BENCHMARKS)
         KIN_ENABLE_INSTRUMENTATION
     )
 
+    # SDL_GPU texture uploads: many data textures created and updated a frame.
+    add_executable(kin_upload_bench upload_bench.cpp)
+    target_link_libraries(kin_upload_bench PRIVATE kin::engine)
+
     if(TARGET kin_example_workloads)
         target_link_libraries(kin_bench PRIVATE kin_example_workloads)
         target_compile_definitions(kin_bench PRIVATE KIN_BENCH_HAS_EXAMPLES)

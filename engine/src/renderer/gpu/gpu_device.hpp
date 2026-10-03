@@ -14,6 +14,10 @@
 #include <utility>
 #include <vector>
 
+namespace kin {
+class JobSystem;
+}
+
 namespace kin::gpu {
 
 struct ClearColor {
@@ -62,6 +66,8 @@ public:
     // frame sees them. Recording at once keeps the order of uploads and draws:
     // a draw recorded before a cycled upload reads the old texels.
     void flush_uploads();
+    // Big uploads copy their texels on these workers too (null: none).
+    void set_job_system(JobSystem* jobs) { _jobs = jobs; }
     // Texture uploads recorded and command buffers submitted for them so far.
     std::pair<u64, u64> upload_counts() const { return {_uploads_staged, _upload_batches}; }
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
@@ -112,14 +118,15 @@ private:
     u32 _upload_ring_offset = 0;
     u64 _first_submit_ns = 0;
     // Texture uploads: the command buffer and copy pass they are recorded into
-    // (open until flush_uploads), the staging buffer most of them share, and the
-    // transfer buffers of big ones, released once submitted.
+    // (open until flush_uploads), and the staging buffer they share.
     std::mutex _uploads_mutex;
     SDL_GPUCommandBuffer* _upload_commands = nullptr;
     SDL_GPUCopyPass* _upload_pass = nullptr;
     SDL_GPUTransferBuffer* _staging = nullptr;
     u32 _staging_used = 0;
-    std::vector<SDL_GPUTransferBuffer*> _own_transfers;
+    u32 _staging_size = 0;     // grows to fit the biggest upload, shrinks after
+    u64 _big_upload_batch = 0; // the batch of the last upload over half the usual size
+    JobSystem* _jobs = nullptr;
     u64 _uploads_staged = 0;
     u64 _upload_batches = 0;
 };
