@@ -75,6 +75,18 @@ GpuPipelineCache::~GpuPipelineCache() {
     destroy();
 }
 
+void GpuPipelineCache::forget(SDL_GPUShader* fragment) {
+    std::erase_if(_entries, [&](const Entry& e) {
+        if (e.fragment != fragment) {
+            return false;
+        }
+        if (_device && e.pipeline) {
+            SDL_ReleaseGPUGraphicsPipeline(_device, e.pipeline);
+        }
+        return true;
+    });
+}
+
 void GpuPipelineCache::destroy() {
     if (_device) {
         for (Entry& e : _entries) {

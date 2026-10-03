@@ -506,6 +506,27 @@ ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
     return handle;
 }
 
+bool Renderer2D::reload_shader(ShaderHandle shader, const ShaderDesc& desc) {
+    if (!shader || !desc.spirv.valid()) {
+        return false;
+    }
+    std::string error;
+    std::optional<ShaderLayout> layout = reflect_spirv(desc.spirv, &error);
+    if (!layout) {
+        KIN_LOG_ERROR_F("render", "reload_shader: SPIR-V not readable", (LogFields{{.name = "error", .value = error}}));
+        return false;
+    }
+    ShaderDesc used = desc;
+    used.num_samplers = std::max<u32>(layout->samplers, 1);
+    used.num_uniform_buffers = layout->uniform_buffers;
+    used.num_storage_buffers = layout->storage_buffers;
+    if (!_backend->reload_shader(shader, used)) {
+        return false;
+    }
+    _shader_layouts[shader.value] = std::make_shared<const ShaderLayout>(std::move(*layout));
+    return true;
+}
+
 std::shared_ptr<const ShaderLayout> Renderer2D::shader_layout(ShaderHandle shader) const {
     const auto it = _shader_layouts.find(shader.value);
     return it == _shader_layouts.end() ? nullptr : it->second;

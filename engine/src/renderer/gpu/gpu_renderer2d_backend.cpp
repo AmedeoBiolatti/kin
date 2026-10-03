@@ -1438,6 +1438,33 @@ std::optional<std::span<SDL_GPUBuffer* const>> GpuRenderer2DBackend::bind_buffer
     return std::span<SDL_GPUBuffer* const>{_storage_scratch};
 }
 
+bool GpuRenderer2DBackend::reload_shader(ShaderHandle handle, const ShaderDesc& desc) {
+    if (handle.value == 0 || handle.value > _shaders.size() || !desc.spirv.valid()) {
+        return false;
+    }
+    gpu::GpuShader shader;
+    try {
+        shader = gpu::GpuShader::from_bytes(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                            std::span<const u8>{desc.spirv.code, desc.spirv.size},
+                                            desc.num_uniform_buffers, desc.num_samplers, desc.num_storage_buffers);
+    } catch (const std::exception& e) {
+        KIN_LOG_ERROR_F("render", "reload_shader failed", (LogFields{{.name = "error", .value = e.what()}}));
+        return false;
+    }
+    // Queued draws name the old shader: record them before it goes.
+    if (_frame) {
+        flush_to_frame();
+        _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
+    }
+    gpu::GpuShader& slot = _shaders[static_cast<std::size_t>(handle.value) - 1];
+    _pipelines.forget(slot.handle());
+    _fragment_ids.erase(slot.handle());
+    slot = std::move(shader);
+    _pipelines.get(_vertex_shader.handle(), slot.handle(), gpu::GpuBlendMode::Alpha,
+                   SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    return true;
+}
+
 ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) {
     SDL_GPUComputePipelineCreateInfo info{};
     info.code = spirv.code;

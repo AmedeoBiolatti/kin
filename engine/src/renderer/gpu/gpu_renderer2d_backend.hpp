@@ -160,6 +160,7 @@ public:
     void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                               ShaderHandle handle, const ShaderParams& params,
                               std::span<const Texture> sources, std::span<const DataBuffer> buffers) override;
+    bool reload_shader(ShaderHandle handle, const ShaderDesc& desc) override;
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) override;
     Texture create_storage_texture(Vec2i size, TextureFormat format) override;
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i groups, const ComputeBindings& bindings) override;

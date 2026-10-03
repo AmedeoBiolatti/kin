@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- Shader hot reload for development: `kin::ShaderFile` keeps a GLSL file
+  compiled (with `glslc`, about 0.1 s) and reloaded in place when it is saved,
+  keeping the last good version when an edit does not compile;
+  `kin::compile_glsl()` and `Renderer2D::reload_shader()` underneath.
 - Compute shaders: `Renderer2D::create_compute_shader` (layout and workgroup
   size read from the SPIR-V), `create_storage_texture` and `dispatch_compute`
   (`ComputeBindings`: sampled sources, read-only buffers, written textures and

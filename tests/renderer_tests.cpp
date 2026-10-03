@@ -4,6 +4,7 @@
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
@@ -55,6 +56,11 @@ void skip_or_require_gpu_test(std::string_view test_name, const std::string& rea
     }
     std::cerr << "[SKIP] " << test_name << ": " << reason
               << " (set KIN_REQUIRE_GPU_TESTS=1 to require GPU coverage)\n";
+}
+
+bool color_near(kin::Color a, kin::Color b, int tolerance = 2) {
+    const auto near = [tolerance](kin::u8 x, kin::u8 y) { return std::abs(static_cast<int>(x) - static_cast<int>(y)) <= tolerance; };
+    return near(a.r, b.r) && near(a.g, b.g) && near(a.b, b.b) && near(a.a, b.a);
 }
 
 std::vector<kin::u8> read_spirv(const std::filesystem::path& path) {
@@ -1922,6 +1928,67 @@ void test_gpu_compute() {
     }
 }
 
+// Hot reload: a GLSL file compiled at runtime, edited, recompiled and reloaded
+// under the same handle; a broken edit keeps the last good shader.
+void test_gpu_shader_hot_reload() {
+    constexpr std::string_view test_name = "test_gpu_shader_hot_reload";
+    if (!kin::shader_compiler_available()) {
+        skip_or_require_gpu_test(test_name, "glslc not found");
+        return;
+    }
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-hot-reload-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const std::filesystem::path source = std::filesystem::temp_directory_path() / "kin-hot-reload-test.frag.glsl";
+        const auto write = [&](std::string_view colour, int seconds) {
+            std::ofstream{source} << "#version 450 core\n"
+                                     "layout(location = 0) out vec4 fColor;\n"
+                                     "layout(location = 0) in struct { vec4 Color; vec2 UV; } In;\n"
+                                     "void main() { fColor = "
+                                  << colour << "; }\n";
+            // Edits land in the same second in a test: make the change visible.
+            std::filesystem::last_write_time(source, std::filesystem::file_time_type::clock::now() +
+                                                         std::chrono::seconds{seconds});
+        };
+        write("vec4(1.0, 0.0, 0.0, 1.0)", 0);
+        kin::ShaderFile shader{*renderer, source};
+        assert(shader.handle() && shader.error().empty());
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        const auto draw = [&] {
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_shader_surface({0.0f, 0.0f, 16.0f, 16.0f}, shader.handle(), {});
+            assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+            return kin::Color::rgba(px[0], px[1], px[2], px[3]);
+        };
+        assert(color_near(draw(), kin::Color::rgb(255, 0, 0)));
+        assert(!shader.poll()); // unchanged
+        const kin::ShaderHandle handle = shader.handle();
+        write("vec4(0.0, 1.0, 0.0, 1.0)", 2);
+        assert(shader.poll() && shader.handle() == handle);
+        assert(color_near(draw(), kin::Color::rgb(0, 255, 0)));
+        write("vec4(0.0, 0.0, 1.0 1.0)", 4); // a typo
+        assert(!shader.poll() && !shader.error().empty());
+        assert(color_near(draw(), kin::Color::rgb(0, 255, 0))); // the last good one
+        std::filesystem::remove(source);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2150,11 +2217,6 @@ std::array<kin::Color, 4> min_max_blended(kin::Renderer2D& renderer) {
         out[i++] = at(24, 8);
     }
     return out;
-}
-
-bool color_near(kin::Color a, kin::Color b, int tolerance = 2) {
-    const auto near = [tolerance](kin::u8 x, kin::u8 y) { return std::abs(static_cast<int>(x) - static_cast<int>(y)) <= tolerance; };
-    return near(a.r, b.r) && near(a.g, b.g) && near(a.b, b.b) && near(a.a, b.a);
 }
 
 void test_min_max_blend_on_software_backend() {
@@ -2466,6 +2528,7 @@ int main() {
     test_gpu_data_buffers();
     test_gpu_shader_surface_scaled();
     test_gpu_compute();
+    test_gpu_shader_hot_reload();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();
