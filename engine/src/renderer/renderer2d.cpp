@@ -554,17 +554,75 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     _backend->draw_shader_surface(rect, shader, params, sources);
 }
 
+void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                     std::span<const Texture> sources, std::span<const DataBuffer> buffers) {
+    if (!valid_params(params)) {
+        return;
+    }
+    if (sources.size() > MaxShaderSamplers || buffers.size() > MaxShaderStorageBuffers) {
+        KIN_LOG_ERROR("render", "draw_shader_surface: too many sources or buffers");
+        return;
+    }
+    _backend->draw_shader_surface(rect, shader, params, sources, buffers);
+}
+
+namespace {
+// A range of a data buffer that lies inside it.
+bool within(const DataBuffer& buffer, std::size_t offset, std::size_t bytes) {
+    return buffer.valid() && bytes > 0 && offset <= buffer.size() && bytes <= buffer.size() - offset;
+}
+} // namespace
+
+DataBuffer Renderer2D::create_data_buffer(std::size_t bytes, const void* data) {
+    if (bytes == 0 || bytes > 0xFFFFFFFFu || !capabilities().data_buffers) {
+        return {};
+    }
+    try {
+        return _backend->create_data_buffer(bytes, data);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "data buffer creation failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+}
+
+bool Renderer2D::update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data) {
+    if (!data || !within(buffer, offset, bytes)) {
+        return false;
+    }
+    try {
+        return _backend->update_data_buffer(buffer, offset, bytes, data);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "data buffer update failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
+}
+
+bool Renderer2D::write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                   const std::function<void(std::span<u8>)>& fill) {
+    if (!fill || !within(buffer, offset, bytes)) {
+        return false;
+    }
+    try {
+        return _backend->write_data_buffer(buffer, offset, bytes, fill);
+    } catch (const std::logic_error&) {
+        throw; // a misused fill
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "data buffer write failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
+}
+
 void Renderer2D::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                                       ShaderHandle shader, const ShaderParams& params,
-                                      std::span<const Texture> sources) {
+                                      std::span<const Texture> sources, std::span<const DataBuffer> buffers) {
     if (!valid_params(params) || vertices.empty()) {
         return;
     }
     const auto refuse = [](std::string_view why) {
         KIN_LOG_ERROR_F("render", "draw_shader_geometry: nothing drawn", (LogFields{{.name = "reason", .value = std::string{why}}}));
     };
-    if (sources.size() > MaxShaderSamplers) {
-        refuse("more sources than MaxShaderSamplers");
+    if (sources.size() > MaxShaderSamplers || buffers.size() > MaxShaderStorageBuffers) {
+        refuse("more sources or buffers than a shader can take");
         return;
     }
     if (indices.empty() ? vertices.size() % 3 != 0 : indices.size() % 3 != 0) {
@@ -575,7 +633,7 @@ void Renderer2D::draw_shader_geometry(std::span<const ShaderVertex> vertices, st
         refuse("an index past the vertices");
         return;
     }
-    _backend->draw_shader_geometry(vertices, indices, shader, params, sources);
+    _backend->draw_shader_geometry(vertices, indices, shader, params, sources, buffers);
 }
 
 void Renderer2D::set_post_process(std::span<const PostProcessPass> passes) {

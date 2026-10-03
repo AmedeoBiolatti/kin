@@ -258,6 +258,29 @@ renderer.draw_shader_geometry(vertices, indices, shadow_shader, params, sources)
 - It needs `capabilities().shader_geometry`: the SDL_GPU backend has it, others
   draw nothing.
 
+### Data buffers
+
+Per-object data a shader reads by index can be a storage buffer instead of a
+data texture: an array of structs, with no texel format to pack into and no
+16,384-row limit.
+
+```glsl
+layout(std430, set = 2, binding = 1) readonly buffer Casters { vec4 casters[]; }; // after 1 sampler
+```
+
+```cpp
+kin::DataBuffer casters = renderer.create_data_buffer(count * sizeof(Caster), data);
+renderer.update_data_buffer(casters, 0, count * sizeof(Caster), data);   // or write_data_buffer
+renderer.draw_shader_geometry(vertices, indices, shader, params, sources,
+                              std::span<const kin::DataBuffer>{&casters, 1});
+```
+
+Buffers bind after the shader's textures in set 2 (`kin/renderer/data_buffer.hpp`),
+go up with the frame's texture uploads, and need `capabilities().data_buffers`
+(SDL_GPU). A draw given fewer buffers than its shader reads is skipped and
+logged. Read speed matches a data texture (`kin_draw_bench 80 1 data`: 1000
+objects of 64 floats, 64 reads a pixel, about 0.15 ms either way).
+
 ### Data textures
 
 Besides `Rgba8`, textures can hold numbers for shaders to read:

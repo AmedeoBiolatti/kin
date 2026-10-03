@@ -26,6 +26,9 @@ struct ShaderHandle {
 // Most textures one material shader can sample (fragment sampler slots 0..15),
 // the per-stage limit SDL_GPU guarantees on every backend.
 inline constexpr u32 MaxShaderSamplers = 16;
+// Most storage buffers one material shader can read (fragment slots), SDL_GPU's
+// guaranteed per-stage minimum.
+inline constexpr u32 MaxShaderStorageBuffers = 8;
 
 // A single precompiled fragment-shader binary in one GPU format. The backend
 // picks the blob matching the device's supported format (SDL_GetGPUShaderFormats).

@@ -249,7 +249,20 @@ public:
     // elsewhere nothing is drawn.
     void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                               ShaderHandle shader, const ShaderParams& params,
-                              std::span<const Texture> sources = {});
+                              std::span<const Texture> sources = {}, std::span<const DataBuffer> buffers = {});
+    // A shader surface that also reads storage buffers (`buffers[i]` after the
+    // shader's textures in set 2; kin/renderer/data_buffer.hpp).
+    void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                             std::span<const Texture> sources, std::span<const DataBuffer> buffers);
+
+    // Storage buffers for shaders (capabilities().data_buffers; elsewhere an
+    // invalid buffer). Filled from `data`, or zeros. Updates go to the GPU with
+    // the frame's texture uploads; write_data_buffer's `fill` writes straight
+    // into the upload memory (in order, once; it must not use the renderer).
+    DataBuffer create_data_buffer(std::size_t bytes, const void* data = nullptr);
+    bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data);
+    bool write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                           const std::function<void(std::span<u8>)>& fill);
     void draw_line(Vec2f a, Vec2f b, Color color);
     void draw_line(Vec2f a, Vec2f b, u8 r, u8 g, u8 b_color, u8 a_color = 255);
 

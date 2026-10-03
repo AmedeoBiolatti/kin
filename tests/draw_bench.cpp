@@ -8,6 +8,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -46,6 +49,73 @@ int pipeline_runs(kin::Window& window) {
     return 0;
 }
 
+// Per-object data read by a shader: 1000 objects of 64 floats, from an R32F
+// data texture or from a storage buffer; the data uploaded each frame, then
+// every object drawn (32 x 32 each), 64 reads a pixel.
+int data_reads(kin::Window& window, int frames) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    const auto load = [&](const char* name) {
+        std::ifstream file(std::filesystem::path{KIN_TEST_SHADER_DIR} / name, std::ios::binary);
+        const std::vector<kin::u8> code{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+        kin::ShaderDesc desc{};
+        desc.spirv = {code.data(), static_cast<kin::u32>(code.size())};
+        return renderer->create_shader(desc);
+    };
+    const kin::ShaderHandle from_texture = load("bench_read_texture.frag.spv");
+    const kin::ShaderHandle from_buffer = load("bench_read_buffer.frag.spv");
+    constexpr int objects = 1000;
+    std::vector<float> data(objects * 64, 0.5f);
+    const kin::Texture texture = renderer->create_texture({64, objects}, kin::TextureFormat::R32Float, data.data());
+    const kin::DataBuffer buffer = renderer->create_data_buffer(data.size() * sizeof(float), data.data());
+    std::vector<kin::ShaderVertex> vertices;
+    for (int i = 0; i < objects; ++i) {
+        const float x = static_cast<float>((i % 40) * 32), y = static_cast<float>((i / 40) * 28);
+        const std::array<float, 4> custom{static_cast<float>(i), 0, 0, 0};
+        for (const kin::Vec2f p : {kin::Vec2f{x, y}, kin::Vec2f{x + 32, y}, kin::Vec2f{x + 32, y + 32},
+                                   kin::Vec2f{x, y}, kin::Vec2f{x + 32, y + 32}, kin::Vec2f{x, y + 32}}) {
+            vertices.push_back({.position = p, .custom = custom});
+        }
+    }
+    for (int mode = 0; mode < 2; ++mode) {
+        std::vector<double> upload, gpu;
+        for (int f = 0; f < frames; ++f) {
+            const auto t0 = clock::now();
+            if (mode == 0) {
+                renderer->update_texture(texture, {0, 0}, {64, objects}, reinterpret_cast<const kin::u8*>(data.data()));
+            } else {
+                renderer->update_data_buffer(buffer, 0, data.size() * sizeof(float), data.data());
+            }
+            const auto t1 = clock::now();
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            {
+                const auto scope = renderer->gpu_scope("reads");
+                if (mode == 0) {
+                    renderer->draw_shader_geometry(vertices, {}, from_texture, {}, std::span<const kin::Texture>{&texture, 1});
+                } else {
+                    renderer->draw_shader_geometry(vertices, {}, from_buffer, {}, {}, std::span<const kin::DataBuffer>{&buffer, 1});
+                }
+            }
+            renderer->present();
+            for (const kin::GpuScopeTiming& t : renderer->take_gpu_scope_timings()) {
+                gpu.push_back(t.ms);
+            }
+            if (f >= 5) {
+                upload.push_back(ms(t0, t1));
+            }
+        }
+        std::sort(upload.begin(), upload.end());
+        std::sort(gpu.begin(), gpu.end());
+        std::printf("per-object data from a %-12s: upload median %.3f ms, GPU reads median %.3f ms (%zu samples)\n",
+                    mode == 0 ? "data texture" : "data buffer", upload[upload.size() / 2],
+                    gpu.empty() ? 0.0 : gpu[gpu.size() / 2], gpu.size());
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
@@ -59,6 +129,10 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "pipelines") {
         backend.reset();
         return pipeline_runs(window);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "data") {
+        backend.reset();
+        return data_reads(window, frames);
     }
     auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
     renderer->set_gpu_timing_enabled(true);

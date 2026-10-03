@@ -94,7 +94,8 @@ public:
               const void* uniform = nullptr,
               u32 uniform_size = 0,
               SDL_GPUSampler* sampler = nullptr, // nullptr -> FlushContext default sampler
-              std::span<const SDL_GPUTextureSamplerBinding> extra = {});
+              std::span<const SDL_GPUTextureSamplerBinding> extra = {},
+              std::span<SDL_GPUBuffer* const> storage = {});
 
     // As push(), for quads: four corners each (top-left, top-right,
     // bottom-right, bottom-left, as the quad is meant to be split), drawn
@@ -107,7 +108,8 @@ public:
                     const void* uniform = nullptr,
                     u32 uniform_size = 0,
                     SDL_GPUSampler* sampler = nullptr,
-                    std::span<const SDL_GPUTextureSamplerBinding> extra = {});
+                    std::span<const SDL_GPUTextureSamplerBinding> extra = {},
+                    std::span<SDL_GPUBuffer* const> storage = {});
 
     // One quad with the default fragment shader and no uniforms: the common
     // case, appended straight to the last range when its state matches.
@@ -116,7 +118,7 @@ public:
         if (!_ranges.empty()) {
             const Range& last = _ranges.back();
             if (last.quads && last.texture == texture && last.sampler == sampler && last.blend == blend &&
-                last.fragment == nullptr && last.uniform_size == 0 && last.extra_count == 0 &&
+                last.fragment == nullptr && last.uniform_size == 0 && last.extra_count == 0 && last.storage_count == 0 &&
                 last.layout == GpuVertexLayout::Triangles && last.scissor.x == scissor.x &&
                 last.scissor.y == scissor.y && last.scissor.w == scissor.w && last.scissor.h == scissor.h) {
                 if (_vertices.capacity() - _vertices.size() < 4) {
@@ -142,7 +144,8 @@ public:
                               const void* uniform,
                               u32 uniform_size,
                               SDL_GPUSampler* sampler,
-                              std::span<const SDL_GPUTextureSamplerBinding> extra);
+                              std::span<const SDL_GPUTextureSamplerBinding> extra,
+                              std::span<SDL_GPUBuffer* const> storage = {});
 
     // Append quads drawn by instancing (see GpuSpriteInstance) with the default
     // fragment shader. Consecutive pushes with identical state coalesce.
@@ -178,6 +181,8 @@ private:
         SDL_GPUSampler* sampler = nullptr; // nullptr -> FlushContext default
         u32 extra_offset = 0; // into _extra_bindings: sampler slots 1..extra_count
         u32 extra_count = 0;
+        u32 storage_offset = 0; // into _storage_buffers: fragment storage buffer slots 0..
+        u32 storage_count = 0;
         SDL_Rect scissor{};
         GpuBlendMode blend = GpuBlendMode::Alpha;
         u32 uniform_offset = 0; // into _uniform_bytes; size 0 == none
@@ -193,7 +198,8 @@ private:
     void add_range(GpuVertexLayout layout, bool quads, u32 first, u32 count, SDL_GPUShader* fragment,
                    SDL_GPUTexture* texture,
                    SDL_Rect scissor, GpuBlendMode blend, const void* uniform, u32 uniform_size,
-                   SDL_GPUSampler* sampler, std::span<const SDL_GPUTextureSamplerBinding> extra);
+                   SDL_GPUSampler* sampler, std::span<const SDL_GPUTextureSamplerBinding> extra,
+                   std::span<SDL_GPUBuffer* const> storage);
 
     const GpuTexture* _target = nullptr;
     SDL_FColor _clear{0.0f, 0.0f, 0.0f, 1.0f};
@@ -204,6 +210,7 @@ private:
     std::vector<Range> _ranges;
     std::vector<u8> _uniform_bytes;
     std::vector<SDL_GPUTextureSamplerBinding> _extra_bindings;
+    std::vector<SDL_GPUBuffer*> _storage_buffers;
     GpuBuffer _vertex_buffer;
     GpuBuffer _instance_buffer;
     GpuBuffer _shader_vertex_buffer;

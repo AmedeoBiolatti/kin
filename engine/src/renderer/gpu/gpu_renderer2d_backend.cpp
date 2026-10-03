@@ -249,6 +249,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .blend_modes = true,
         .min_max_blend = true,
         .shader_geometry = static_cast<bool>(_shader_vertex_shader.handle()),
+        .data_buffers = true,
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -314,6 +315,7 @@ void GpuRenderer2DBackend::ensure_frame() {
 void GpuRenderer2DBackend::end_frame() {
     _frame.reset();
     _retained.clear();
+    _retained_buffers.clear();
     _last_retained = nullptr;
     ++_frame_serial;
 }
@@ -1330,7 +1332,7 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
     gpu::GpuShader shader = gpu::GpuShader::from_bytes(
         _device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
         std::span<const u8>{desc.spirv.code, desc.spirv.size},
-        desc.num_uniform_buffers, desc.num_samplers);
+        desc.num_uniform_buffers, desc.num_samplers, desc.num_storage_buffers);
     if (!shader) {
         KIN_LOG_ERROR_F("render", "create_shader: GpuShader::from_bytes failed",
                         (LogFields{{.name = "error", .value = SDL_GetError()}}));
@@ -1372,11 +1374,21 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
 
 void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                                                std::span<const Texture> sources) {
+    draw_shader_surface(rect, handle, params, sources, std::span<const DataBuffer>{});
+}
+
+void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
+                                               std::span<const Texture> sources,
+                                               std::span<const DataBuffer> buffers) {
     if (handle.value == 0 || handle.value > _shaders.size() || rect.w <= 0.0f || rect.h <= 0.0f) {
         return;
     }
     const gpu::GpuShader& shader = _shaders[static_cast<std::size_t>(handle.value) - 1];
     if (!shader) {
+        return;
+    }
+    const std::optional<std::span<SDL_GPUBuffer* const>> storage = bind_buffers(shader, buffers);
+    if (!storage) {
         return;
     }
     ensure_frame();
@@ -1396,7 +1408,62 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
     _batch.push(verts, shader.handle(), bindings.slot0.texture, current_scissor(),
                 resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
                 static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
-                std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(), bindings.extra_count});
+                std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(), bindings.extra_count}, *storage);
+}
+
+std::optional<std::span<SDL_GPUBuffer* const>> GpuRenderer2DBackend::bind_buffers(const gpu::GpuShader& shader,
+                                                                                std::span<const DataBuffer> buffers) {
+    if (buffers.size() < shader.storage_buffers()) {
+        // An unbound storage buffer is an error on the GPU: skip the draw.
+        KIN_LOG_ERROR_F("render", "shader draw skipped: fewer data buffers than the shader reads",
+                        (LogFields{{.name = "given", .value = std::to_string(buffers.size())},
+                                   {.name = "shader", .value = std::to_string(shader.storage_buffers())}}));
+        return std::nullopt;
+    }
+    _storage_scratch.clear();
+    for (const DataBuffer& buffer : buffers.first(shader.storage_buffers())) {
+        const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+        if (!gpu || !gpu->buffer()) {
+            KIN_LOG_ERROR("render", "shader draw skipped: a data buffer from another backend or invalid");
+            return std::nullopt;
+        }
+        gpu->mark_used(_frame_serial);
+        _retained_buffers.push_back(buffer.backend());
+        _storage_scratch.push_back(gpu->buffer().handle());
+    }
+    return std::span<SDL_GPUBuffer* const>{_storage_scratch};
+}
+
+DataBuffer GpuRenderer2DBackend::create_data_buffer(std::size_t bytes, const void* data) {
+    gpu::GpuBuffer buffer = _device.create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr,
+                                                  static_cast<u32>(bytes));
+    _device.upload_storage_buffer(buffer.handle(), 0, static_cast<u32>(bytes), data, /*cycle=*/false);
+    return DataBuffer{std::make_shared<gpu::GpuDataBuffer>(std::move(buffer))};
+}
+
+bool GpuRenderer2DBackend::update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                              const void* data) {
+    const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+    if (!gpu || !gpu->buffer()) {
+        return false;
+    }
+    // Replacing all of one this frame hasn't drawn with lets it cycle, as textures do.
+    const bool whole = offset == 0 && bytes == gpu->size() && gpu->used_in_frame() != _frame_serial;
+    _device.upload_storage_buffer(gpu->buffer().handle(), static_cast<u32>(offset), static_cast<u32>(bytes), data,
+                                  whole);
+    return true;
+}
+
+bool GpuRenderer2DBackend::write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                             const std::function<void(std::span<u8>)>& fill) {
+    const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+    if (!gpu || !gpu->buffer()) {
+        return false;
+    }
+    const bool whole = offset == 0 && bytes == gpu->size() && gpu->used_in_frame() != _frame_serial;
+    _device.upload_storage_buffer(gpu->buffer().handle(), static_cast<u32>(offset), static_cast<u32>(bytes), nullptr,
+                                  whole, &fill);
+    return true;
 }
 
 GpuRenderer2DBackend::SourceBindings GpuRenderer2DBackend::bind_sources(const gpu::GpuShader& shader,
@@ -1430,12 +1497,17 @@ GpuRenderer2DBackend::SourceBindings GpuRenderer2DBackend::bind_sources(const gp
 
 void GpuRenderer2DBackend::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                                                 ShaderHandle handle, const ShaderParams& params,
-                                                std::span<const Texture> sources) {
+                                                std::span<const Texture> sources,
+                                                std::span<const DataBuffer> buffers) {
     if (handle.value == 0 || handle.value > _shaders.size() || !_shader_vertex_shader.handle()) {
         return;
     }
     const gpu::GpuShader& shader = _shaders[static_cast<std::size_t>(handle.value) - 1];
     if (!shader) {
+        return;
+    }
+    const std::optional<std::span<SDL_GPUBuffer* const>> storage = bind_buffers(shader, buffers);
+    if (!storage) {
         return;
     }
     ensure_frame();
@@ -1470,7 +1542,8 @@ void GpuRenderer2DBackend::draw_shader_geometry(std::span<const ShaderVertex> ve
                                 resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
                                 static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
                                 std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(),
-                                                                               bindings.extra_count});
+                                                                               bindings.extra_count},
+                                *storage);
 }
 
 void GpuRenderer2DBackend::set_post_process(std::span<const PostProcessPass> passes) {

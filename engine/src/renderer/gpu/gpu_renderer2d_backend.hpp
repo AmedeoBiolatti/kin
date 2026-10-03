@@ -60,6 +60,19 @@ private:
     TextureFormat _format = TextureFormat::Rgba8;
     mutable u64 _used_in_frame = 0;
 };
+// A storage buffer (kin/renderer/data_buffer.hpp).
+class GpuDataBuffer : public IDataBufferBackend {
+public:
+    explicit GpuDataBuffer(GpuBuffer buffer) : _buffer(std::move(buffer)) {}
+    std::size_t size() const override { return _buffer.size(); }
+    const GpuBuffer& buffer() const { return _buffer; }
+    u64 used_in_frame() const { return _used_in_frame; }
+    void mark_used(u64 frame) const { _used_in_frame = frame; }
+
+private:
+    GpuBuffer _buffer;
+    mutable u64 _used_in_frame = 0;
+};
 } // namespace gpu
 
 class GpuRenderer2DBackend final : public IRenderer2DBackend {
@@ -142,9 +155,16 @@ public:
                              const Texture& source0, const Texture& source1) override;
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                              std::span<const Texture> sources) override;
+    void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
+                             std::span<const Texture> sources, std::span<const DataBuffer> buffers) override;
     void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                               ShaderHandle handle, const ShaderParams& params,
-                              std::span<const Texture> sources) override;
+                              std::span<const Texture> sources, std::span<const DataBuffer> buffers) override;
+    DataBuffer create_data_buffer(std::size_t bytes, const void* data) override;
+    bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                            const void* data) override;
+    bool write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                           const std::function<void(std::span<u8>)>& fill) override;
 
     void set_post_process(std::span<const PostProcessPass> passes) override;
 
@@ -225,6 +245,12 @@ private:
     gpu::GpuGeometryBatch _batch;
     std::optional<gpu::GpuFrame> _frame;
     std::vector<std::shared_ptr<ITextureBackend>> _retained; // textures the frame's draws use
+    std::vector<std::shared_ptr<IDataBufferBackend>> _retained_buffers; // and data buffers
+    std::vector<SDL_GPUBuffer*> _storage_scratch;
+    // The storage buffers a draw binds (retained till submit), or nullopt when
+    // the shader wants more than it was given (the draw is skipped).
+    std::optional<std::span<SDL_GPUBuffer* const>> bind_buffers(const gpu::GpuShader& shader,
+                                                                std::span<const DataBuffer> buffers);
     const ITextureBackend* _last_retained = nullptr;         // skips repeats of the same texture
     u64 _frame_serial = 1; // counts end_frame(): which frame a texture was last drawn in
     std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on

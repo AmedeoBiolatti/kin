@@ -64,6 +64,11 @@ public:
     // still reading the old texels doesn't hold the upload up).
     void update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
                         u32 texel_bytes = 4, bool whole = false);
+    // Uploads `bytes` (from `data`, zeros when null, or written by `fill`) to a
+    // buffer at `offset`, with the texture uploads. `cycle`: the whole buffer is
+    // replaced and may get fresh storage.
+    void upload_storage_buffer(SDL_GPUBuffer* buffer, u32 offset, u32 bytes, const void* data, bool cycle,
+                               const std::function<void(std::span<u8>)>* fill = nullptr);
     // As update_texture, but `fill` writes the texels straight into the upload
     // memory (no copy). It must not call back into the device.
     void write_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, bool whole,
@@ -120,6 +125,15 @@ private:
     void stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const void* pixels,
                               u32 texel_bytes, bool cycle,
                               const std::function<void(std::span<u8>)>* fill = nullptr);
+    // Where an upload goes: a texture's region, or a range of a buffer.
+    struct UploadDestination {
+        SDL_GPUTexture* texture = nullptr;
+        u32 x = 0, y = 0, w = 0, h = 0;
+        SDL_GPUBuffer* buffer = nullptr;
+        u32 buffer_offset = 0;
+    };
+    void stage_upload(const UploadDestination& to, u32 bytes, const void* pixels, bool cycle,
+                      const std::function<void(std::span<u8>)>* fill);
 
     SDL_GPUDevice* _device = nullptr;
     SharedDevice _shared; // handed to textures; nulled on destruction
