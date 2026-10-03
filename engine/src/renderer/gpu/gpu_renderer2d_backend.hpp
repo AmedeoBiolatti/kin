@@ -181,6 +181,7 @@ private:
     std::vector<std::shared_ptr<ITextureBackend>> _retained; // textures the frame's draws use
     const ITextureBackend* _last_retained = nullptr;         // skips repeats of the same texture
     std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
+    u32 _untimed_frames = 0; // submitted without a fence since the last timed one (timer full)
     RendererBackendStats _stats;                    // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec2i _logical_size{0, 0}; // 0 = render at window size (no logical presentation)

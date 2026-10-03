@@ -197,6 +197,12 @@ SDL_BlendMode to_sdl_blend(BlendMode mode) {
     case BlendMode::Additive: return SDL_BLENDMODE_ADD;
     case BlendMode::Multiply: return SDL_BLENDMODE_MOD;
     case BlendMode::Replace: return SDL_BLENDMODE_NONE;
+    case BlendMode::Max:
+    case BlendMode::Min: {
+        const SDL_BlendOperation op = mode == BlendMode::Max ? SDL_BLENDOPERATION_MAXIMUM : SDL_BLENDOPERATION_MINIMUM;
+        return SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, op, SDL_BLENDFACTOR_ONE,
+                                          SDL_BLENDFACTOR_ONE, op);
+    }
     case BlendMode::Alpha: break;
     }
     return SDL_BLENDMODE_BLEND;
@@ -291,6 +297,10 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
     if (vsync) {
         SDL_SetRenderVSync(_handle, 1);
     }
+    // Max and Min are custom blend modes, which only some drivers take (not
+    // the software one): ask once.
+    _min_max_blend = SDL_SetRenderDrawBlendMode(_handle, to_sdl_blend(BlendMode::Max)) &&
+                     SDL_SetRenderDrawBlendMode(_handle, to_sdl_blend(BlendMode::Min));
     SDL_SetRenderDrawBlendMode(_handle, SDL_BLENDMODE_BLEND);
     KIN_LOG_INFO_F("render",
                    "renderer backend created",
@@ -345,6 +355,7 @@ RendererBackendCapabilities SdlRenderer2DBackend::capabilities() const {
         .queued_2d = true,
         .render_targets = true,
         .blend_modes = true,
+        .min_max_blend = _min_max_blend,
         .materials_2d = _gpu_device != nullptr,
         .gradients = true,
         .text = false,
@@ -989,6 +1000,15 @@ void SdlRenderer2DBackend::set_blend_mode(BlendMode mode) {
         return;
     }
     flush_batch();
+    if ((mode == BlendMode::Max || mode == BlendMode::Min) && !_min_max_blend) {
+        if (!_warned_min_max) {
+            _warned_min_max = true;
+            KIN_LOG_WARN_F("render", "blend mode not supported, drawing as alpha",
+                           (LogFields{{.name = "mode", .value = mode == BlendMode::Max ? "max" : "min"},
+                                      {.name = "backend", .value = std::string{name()}}}));
+        }
+        mode = BlendMode::Alpha;
+    }
     _blend = mode;
     SDL_SetRenderDrawBlendMode(_handle, to_sdl_blend(mode));
 }

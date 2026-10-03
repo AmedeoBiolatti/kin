@@ -237,6 +237,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .queued_2d = false,
         .render_targets = true,
         .blend_modes = true,
+        .min_max_blend = true,
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -352,6 +353,7 @@ void GpuRenderer2DBackend::set_gpu_timing_enabled(bool enabled) {
     } else if (!enabled && _gpu_timer) {
         _gpu_timer.reset();
         _stats.last_gpu_frame_ms = 0.0;
+        _untimed_frames = 0;
     }
 }
 
@@ -392,14 +394,20 @@ void GpuRenderer2DBackend::present() {
     // between the check and track().
     if (_gpu_timer && !_gpu_timer->full()) {
         SDL_GPUFence* fence = _frame->submit_with_fence();
-        _gpu_timer->track(fence, _device.take_first_submit_ns());
+        _gpu_timer->track(fence, _device.take_first_submit_ns(), std::exchange(_untimed_frames, 0));
     } else {
         _frame->submit();
         _device.take_first_submit_ns();
+        if (_gpu_timer) {
+            ++_untimed_frames;
+        }
     }
     if (_gpu_timer) {
-        if (const std::optional<f64> gpu_ms = _gpu_timer->collect()) {
-            _stats.last_gpu_frame_ms = *gpu_ms;
+        if (const std::optional<gpu::GpuFrameSample> sample = _gpu_timer->collect()) {
+            // A span over untimed frames is shared out evenly.
+            _stats.last_gpu_frame_ms = sample->ms / static_cast<f64>(sample->frames);
+            _stats.last_gpu_frame_span = sample->frames;
+            ++_stats.gpu_frames_sampled;
         }
     }
     end_frame();
@@ -439,6 +447,8 @@ gpu::GpuBlendMode GpuRenderer2DBackend::resolve_blend(gpu::GpuBlendMode natural)
     case BlendMode::Additive: return gpu::GpuBlendMode::Additive;
     case BlendMode::Multiply: return gpu::GpuBlendMode::Multiply;
     case BlendMode::Replace: return gpu::GpuBlendMode::Replace;
+    case BlendMode::Max: return gpu::GpuBlendMode::Max;
+    case BlendMode::Min: return gpu::GpuBlendMode::Min;
     case BlendMode::Alpha: break;
     }
     return natural;

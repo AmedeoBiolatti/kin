@@ -33,6 +33,7 @@ struct RendererBackendCapabilities {
     bool queued_2d = false;
     bool render_targets = false;
     bool blend_modes = false;
+    bool min_max_blend = false; // BlendMode::Max and Min honoured
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -57,7 +58,12 @@ struct RendererBackendStats {
     f64 last_gpu_wait_ms = 0.0;
     // SDL_GPU with GPU timing on: the GPU time of the latest frame that finished,
     // usually one or two frames behind. Measured with fences, not timestamps.
+    // With the GPU far behind, some frames go untimed and the next sample spans
+    // them (last_gpu_frame_span frames): this is then their average.
     f64 last_gpu_frame_ms = 0.0;
+    u32 last_gpu_frame_span = 1;
+    // Samples taken so far: last_gpu_frame_ms is new when this has grown.
+    u64 gpu_frames_sampled = 0;
     u64 saved_texture_draws() const {
         return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
     }

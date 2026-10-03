@@ -36,7 +36,7 @@ Any game using `run_scene_app` accepts:
 
 | Flag | Effect |
 |---|---|
-| `--profile` | Run headless profiling. Defaults to 600 frames unless `--frames` is set. |
+| `--profile` | Profile the run: windowed, until it quits or `--frames` N; with `--headless`, a 600-frame pass unless `--frames` is set. |
 | `--profile-lines` | Enables manual macro capture for this run. |
 | `--profile-json=PATH` | Writes `kin.profile/1` JSON. Use `-` for stdout. |
 | `--profile-text=PATH` | Writes a human-readable summary. Use `-` for stdout. |
@@ -46,7 +46,7 @@ Any game using `run_scene_app` accepts:
 Example:
 
 ```powershell
-.\build\bin\ecs_systems_demo.exe --profile --frames=600 --seed=7 --profile-json=out\profile\ecs_systems_demo.json --profile-text=out\profile\ecs_systems_demo.txt
+.\build\bin\ecs_systems_demo.exe --headless --profile --frames=600 --seed=7 --profile-json=out\profile\ecs_systems_demo.json --profile-text=out\profile\ecs_systems_demo.txt
 ```
 
 Runtime profiles include these phase timings by default:
@@ -161,7 +161,7 @@ no hard latency threshold: timings depend on the host scheduler and load.
 The [interactive performance examples](../examples/README.md) provide arena
 combat and a virtualized training dashboard. Build with `KIN_BUILD_EXAMPLES=ON`
 and run `kin_bench --suite examples` for their shared CPU workloads, or launch
-either app with `--profile` to measure full headless rendering.
+either app with `--headless --profile` to measure full headless rendering.
 
 Include:
 

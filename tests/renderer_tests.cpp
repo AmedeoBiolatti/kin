@@ -936,6 +936,10 @@ void test_gpu_timing_survives_a_gpu_behind() {
             renderer->draw_texture(streamed, kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
         }
         renderer->present();
+        // Samples still come, each spread over the untimed frames it covers.
+        const kin::RendererBackendStats stats = renderer->backend_stats();
+        assert(stats.gpu_frames_sampled > 0);
+        assert(stats.last_gpu_frame_span >= 1 && stats.last_gpu_frame_ms > 0.0);
         renderer->set_gpu_timing_enabled(false);
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
@@ -1397,6 +1401,88 @@ void test_sprite_batches_on_gpu_backend() {
     }
 }
 
+// Max and Min blending: a fill and a texture over a cleared target. Returns
+// the pixels at (8, 8) (the fill) and (24, 8) (the texture) for each mode.
+std::array<kin::Color, 4> min_max_blended(kin::Renderer2D& renderer) {
+    const std::array<kin::u8, 4> texel{50, 220, 120, 255};
+    const kin::Texture texture = renderer.create_texture_from_rgba(texel.data(), {1, 1});
+    std::array<kin::Color, 4> out{};
+    std::size_t i = 0;
+    for (const kin::BlendMode mode : {kin::BlendMode::Max, kin::BlendMode::Min}) {
+        kin::RenderTarget target = renderer.create_render_target({32, 16}, kin::ScaleMode::Nearest);
+        assert(target.valid());
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(100, 50, 200));
+        {
+            const auto blend = renderer.scoped_blend_mode(mode);
+            renderer.fill_rect(kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}, kin::Color::rgb(200, 20, 100));
+            renderer.draw_texture(texture, kin::Rectf{16.0f, 0.0f, 16.0f, 16.0f});
+        }
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        assert(renderer.read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+        const auto at = [&](int x, int y) {
+            const std::size_t idx = (static_cast<std::size_t>(y) * static_cast<std::size_t>(size.x) + static_cast<std::size_t>(x)) * 4u;
+            return kin::Color::rgba(px[idx], px[idx + 1], px[idx + 2], px[idx + 3]);
+        };
+        out[i++] = at(8, 8);
+        out[i++] = at(24, 8);
+    }
+    return out;
+}
+
+bool color_near(kin::Color a, kin::Color b, int tolerance = 2) {
+    const auto near = [tolerance](kin::u8 x, kin::u8 y) { return std::abs(static_cast<int>(x) - static_cast<int>(y)) <= tolerance; };
+    return near(a.r, b.r) && near(a.g, b.g) && near(a.b, b.b) && near(a.a, b.a);
+}
+
+void test_min_max_blend_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "min-max-test", .width = 32, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    const std::array<kin::Color, 4> px = min_max_blended(renderer);
+    if (renderer.capabilities().min_max_blend) {
+        assert(color_near(px[0], kin::Color::rgb(200, 50, 200)));
+        assert(color_near(px[3], kin::Color::rgb(50, 50, 120)));
+    } else {
+        // Drawn as Alpha (and a warning logged): plain opaque draws.
+        assert(color_near(px[0], kin::Color::rgb(200, 20, 100)));
+        assert(color_near(px[1], kin::Color::rgb(50, 220, 120)));
+    }
+}
+
+void test_min_max_blend_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_min_max_blend_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-min-max-test", .width = 32, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().min_max_blend);
+        const std::array<kin::Color, 4> px = min_max_blended(*renderer);
+        const std::array<kin::Color, 4> want{kin::Color::rgb(200, 50, 200), kin::Color::rgb(100, 220, 200),
+                                             kin::Color::rgb(100, 20, 100), kin::Color::rgb(50, 50, 120)};
+        for (std::size_t i = 0; i < px.size(); ++i) {
+            if (!color_near(px[i], want[i])) {
+                throw std::runtime_error(std::string(test_name) + ": pixel " + std::to_string(i) + " is " +
+                                         std::to_string(px[i].r) + "," + std::to_string(px[i].g) + "," +
+                                         std::to_string(px[i].b) + "," + std::to_string(px[i].a));
+            }
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Shared by the software (SDL) and GPU backend tests: both must light the same way.
 void check_lighting(kin::Renderer2D& renderer) {
     constexpr kin::Vec2i size{64, 64};
@@ -1640,6 +1726,8 @@ int main() {
     test_shader_params_and_formats_on_software_backends();
     test_gpu_data_textures_and_large_uniforms();
     test_gpu_resources_outlive_renderer();
+    test_min_max_blend_on_software_backend();
+    test_min_max_blend_on_gpu_backend();
     test_lighting_on_software_backend();
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();

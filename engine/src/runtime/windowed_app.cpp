@@ -13,6 +13,7 @@ void run_windowed_app(const WindowedAppConfig& config, FrameUpdate update, Frame
             .vsync = config.vsync,
             .yield_when_unpaced = config.yield_when_unpaced,
             .max_fps = config.max_fps,
+            .snap_tolerance = config.snap_tolerance,
         }};
 
         // Create hidden, then show after the renderer is built: the SDL_GPU backend can

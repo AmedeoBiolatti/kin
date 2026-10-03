@@ -31,6 +31,19 @@ void set_blend(SDL_GPUColorTargetBlendState& blend, GpuBlendMode mode) {
         blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
         break;
+    case GpuBlendMode::Max:
+    case GpuBlendMode::Min: {
+        // The factors are ignored by MIN and MAX (Vulkan, D3D12, Metal alike).
+        const SDL_GPUBlendOp op = mode == GpuBlendMode::Max ? SDL_GPU_BLENDOP_MAX : SDL_GPU_BLENDOP_MIN;
+        blend.enable_blend = true;
+        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.color_blend_op = op;
+        blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.alpha_blend_op = op;
+        break;
+    }
     case GpuBlendMode::Premultiplied:
         blend.enable_blend = true;
         blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;

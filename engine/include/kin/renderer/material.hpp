@@ -12,6 +12,8 @@ enum class BlendMode {
     Additive,
     Multiply,
     Replace,
+    Max, // per channel, the larger of src and dst (alpha too): coverage, shadows
+    Min, // per channel, the smaller
 };
 
 struct Material2D {

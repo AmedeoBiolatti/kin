@@ -41,25 +41,25 @@ bool GpuFrameTimer::full() const {
     return _waiting.size() + _finished.size() >= MaxFramesInFlight;
 }
 
-void GpuFrameTimer::track(SDL_GPUFence* fence, u64 first_submit_ns) {
+void GpuFrameTimer::track(SDL_GPUFence* fence, u64 first_submit_ns, u32 untimed) {
     {
         std::lock_guard lock{_mutex};
-        _waiting.push_back(Pending{.fence = fence, .first_submit_ns = first_submit_ns});
+        _waiting.push_back(Pending{.fence = fence, .first_submit_ns = first_submit_ns, .frames = 1 + untimed});
     }
     _wake.notify_one();
 }
 
-std::optional<f64> GpuFrameTimer::collect() {
+std::optional<GpuFrameSample> GpuFrameTimer::collect() {
     std::deque<Pending> finished;
     {
         std::lock_guard lock{_mutex};
         finished.swap(_finished);
     }
-    std::optional<f64> latest;
+    std::optional<GpuFrameSample> latest;
     for (const Pending& frame : finished) {
         SDL_ReleaseGPUFence(_device, frame.fence);
         if (frame.gpu_ms >= 0.0) {
-            latest = frame.gpu_ms;
+            latest = GpuFrameSample{.ms = frame.gpu_ms, .frames = frame.frames};
         }
     }
     return latest;
