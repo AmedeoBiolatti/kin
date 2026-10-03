@@ -8,6 +8,7 @@
 #include "sdl_renderer2d_backend.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -473,6 +475,30 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
         return;
     }
     _backend->draw_shader_surface(rect, shader, params, sources);
+}
+
+void Renderer2D::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                                      ShaderHandle shader, const ShaderParams& params,
+                                      std::span<const Texture> sources) {
+    if (!valid_params(params) || vertices.empty()) {
+        return;
+    }
+    const auto refuse = [](std::string_view why) {
+        KIN_LOG_ERROR_F("render", "draw_shader_geometry: nothing drawn", (LogFields{{.name = "reason", .value = std::string{why}}}));
+    };
+    if (sources.size() > MaxShaderSamplers) {
+        refuse("more sources than MaxShaderSamplers");
+        return;
+    }
+    if (indices.empty() ? vertices.size() % 3 != 0 : indices.size() % 3 != 0) {
+        refuse("not a whole number of triangles");
+        return;
+    }
+    if (std::any_of(indices.begin(), indices.end(), [&](u32 i) { return i >= vertices.size(); })) {
+        refuse("an index past the vertices");
+        return;
+    }
+    _backend->draw_shader_geometry(vertices, indices, shader, params, sources);
 }
 
 void Renderer2D::set_post_process(std::span<const PostProcessPass> passes) {

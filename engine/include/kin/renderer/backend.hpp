@@ -34,6 +34,7 @@ struct RendererBackendCapabilities {
     bool render_targets = false;
     bool blend_modes = false;
     bool min_max_blend = false; // BlendMode::Max and Min honoured
+    bool shader_geometry = false; // draw_shader_geometry() draws
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -223,6 +224,11 @@ public:
             draw_shader_surface(rect, shader, params, sources[0], sources[1]);
         }
     }
+
+    // Triangles with a material shader (Renderer2D::draw_shader_geometry); the
+    // indices are already checked. Backends without it draw nothing.
+    virtual void draw_shader_geometry(std::span<const ShaderVertex>, std::span<const u32>, ShaderHandle,
+                                      const ShaderParams&, std::span<const Texture>) {}
 
     // Set the full-scene post-processing chain applied at present() time. Default is a
     // no-op (no shader/RT support) so the backend presents the scene unprocessed.

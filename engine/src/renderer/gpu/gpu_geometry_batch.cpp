@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <optional>
 
 namespace kin::gpu {
 
@@ -26,6 +27,7 @@ void GpuGeometryBatch::begin(const GpuTexture& target, SDL_FColor clear, bool do
     _do_clear = do_clear;
     _vertices.clear();
     _instances.clear();
+    _shader_vertices.clear();
     _ranges.clear();
     _uniform_bytes.clear();
     _extra_bindings.clear();
@@ -40,7 +42,7 @@ void GpuGeometryBatch::push_instances(std::span<const GpuSpriteInstance> instanc
     _instances.insert(_instances.end(), instances.begin(), instances.end());
     if (!_ranges.empty()) {
         Range& last = _ranges.back();
-        if (last.instanced && last.texture == texture && last.sampler == sampler && last.blend == blend &&
+        if (last.layout == GpuVertexLayout::SpriteInstances && last.texture == texture && last.sampler == sampler && last.blend == blend &&
             same_scissor(last.scissor, scissor)) {
             last.vertex_count += static_cast<u32>(instances.size());
             return;
@@ -53,7 +55,7 @@ void GpuGeometryBatch::push_instances(std::span<const GpuSpriteInstance> instanc
     range.blend = blend;
     range.first_vertex = first;
     range.vertex_count = static_cast<u32>(instances.size());
-    range.instanced = true;
+    range.layout = GpuVertexLayout::SpriteInstances;
     _ranges.push_back(range);
 }
 
@@ -64,11 +66,31 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
     if (tris.empty()) {
         return;
     }
-    assert(extra.size() < MaxShaderSamplers);
     const u32 first = static_cast<u32>(_vertices.size());
     _vertices.insert(_vertices.end(), tris.begin(), tris.end());
+    add_range(GpuVertexLayout::Triangles, first, static_cast<u32>(tris.size()), fragment, texture, scissor, blend,
+              uniform, uniform_size, sampler, extra);
+}
 
-    const bool can_coalesce = uniform_size == 0 && !_ranges.empty() && !_ranges.back().instanced &&
+void GpuGeometryBatch::push_shader_vertices(std::span<const GpuShaderVertex> tris, SDL_GPUShader* fragment,
+                                            SDL_GPUTexture* texture, SDL_Rect scissor, GpuBlendMode blend,
+                                            const void* uniform, u32 uniform_size, SDL_GPUSampler* sampler,
+                                            std::span<const SDL_GPUTextureSamplerBinding> extra) {
+    if (tris.empty()) {
+        return;
+    }
+    const u32 first = static_cast<u32>(_shader_vertices.size());
+    _shader_vertices.insert(_shader_vertices.end(), tris.begin(), tris.end());
+    add_range(GpuVertexLayout::ShaderVertices, first, static_cast<u32>(tris.size()), fragment, texture, scissor,
+              blend, uniform, uniform_size, sampler, extra);
+}
+
+void GpuGeometryBatch::add_range(GpuVertexLayout layout, u32 first, u32 count, SDL_GPUShader* fragment,
+                                 SDL_GPUTexture* texture, SDL_Rect scissor, GpuBlendMode blend, const void* uniform,
+                                 u32 uniform_size, SDL_GPUSampler* sampler,
+                                 std::span<const SDL_GPUTextureSamplerBinding> extra) {
+    assert(extra.size() < MaxShaderSamplers);
+    const bool can_coalesce = uniform_size == 0 && !_ranges.empty() && _ranges.back().layout == layout &&
                               _ranges.back().fragment == fragment &&
                               _ranges.back().texture == texture &&
                               _ranges.back().sampler == sampler &&
@@ -80,7 +102,7 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
                               _ranges.back().uniform_size == 0 &&
                               same_scissor(_ranges.back().scissor, scissor);
     if (can_coalesce) {
-        _ranges.back().vertex_count += static_cast<u32>(tris.size());
+        _ranges.back().vertex_count += count;
         return;
     }
 
@@ -94,7 +116,8 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
     range.scissor = scissor;
     range.blend = blend;
     range.first_vertex = first;
-    range.vertex_count = static_cast<u32>(tris.size());
+    range.vertex_count = count;
+    range.layout = layout;
     if (uniform && uniform_size > 0) {
         range.uniform_offset = static_cast<u32>(_uniform_bytes.size());
         range.uniform_size = uniform_size;
@@ -136,6 +159,8 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     };
     upload(_vertex_buffer, _vertices.data(), static_cast<u32>(_vertices.size() * sizeof(GpuVertex)));
     upload(_instance_buffer, _instances.data(), static_cast<u32>(_instances.size() * sizeof(GpuSpriteInstance)));
+    upload(_shader_vertex_buffer, _shader_vertices.data(),
+           static_cast<u32>(_shader_vertices.size() * sizeof(GpuShaderVertex)));
 
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &color_target, 1, nullptr);
 
@@ -149,9 +174,10 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     } uniforms{{ctx.view.scale[0], ctx.view.scale[1]}, {ctx.view.translate[0], ctx.view.translate[1]}};
     SDL_PushGPUVertexUniformData(frame.command_buffer(), 0, &uniforms, sizeof(uniforms));
 
-    // Slot 0 holds the triangle vertices or, for an instanced range, its instances
-    // (bound at the range's offset, so every draw starts at instance 0).
-    bool vertices_bound = false;
+    // Slot 0 holds the triangle vertices, the shader vertices or, for an
+    // instanced range, its instances (bound at the range's offset, so every draw
+    // starts at instance 0). Which array is bound now:
+    std::optional<GpuVertexLayout> bound_vertices;
 
     const int target_w = static_cast<int>(_target->width());
     const int target_h = static_cast<int>(_target->height());
@@ -168,10 +194,10 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
 
     for (const Range& range : _ranges) {
         SDL_GPUShader* fragment = range.fragment ? range.fragment : ctx.default_fragment;
-        SDL_GPUGraphicsPipeline* pipeline =
-            range.instanced ? cache.get(ctx.instance_shader, fragment, range.blend, ctx.target_format,
-                                        GpuVertexLayout::SpriteInstances)
-                            : cache.get(ctx.vertex_shader, fragment, range.blend, ctx.target_format);
+        SDL_GPUShader* vertex = range.layout == GpuVertexLayout::SpriteInstances ? ctx.instance_shader
+                              : range.layout == GpuVertexLayout::ShaderVertices  ? ctx.shader_vertex_shader
+                                                                                 : ctx.vertex_shader;
+        SDL_GPUGraphicsPipeline* pipeline = cache.get(vertex, fragment, range.blend, ctx.target_format, range.layout);
         if (!pipeline) {
             continue;
         }
@@ -218,19 +244,20 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
             bound_binding_count = binding_count;
         }
 
-        if (range.instanced) {
+        if (range.layout == GpuVertexLayout::SpriteInstances) {
             SDL_GPUBufferBinding binding{};
             binding.buffer = _instance_buffer.handle();
             binding.offset = range.first_vertex * static_cast<u32>(sizeof(GpuSpriteInstance));
             SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
-            vertices_bound = false;
+            bound_vertices.reset();
             SDL_DrawGPUPrimitives(pass, 6, range.vertex_count, 0, 0);
         } else {
-            if (!vertices_bound || pipeline_changed) {
+            if (bound_vertices != range.layout || pipeline_changed) {
                 SDL_GPUBufferBinding binding{};
-                binding.buffer = _vertex_buffer.handle();
+                binding.buffer = range.layout == GpuVertexLayout::ShaderVertices ? _shader_vertex_buffer.handle()
+                                                                                 : _vertex_buffer.handle();
                 SDL_BindGPUVertexBuffers(pass, 0, &binding, 1);
-                vertices_bound = true;
+                bound_vertices = range.layout;
             }
             SDL_DrawGPUPrimitives(pass, range.vertex_count, 1, range.first_vertex, 0);
         }
@@ -244,6 +271,7 @@ void GpuGeometryBatch::reset() {
     _target = nullptr;
     _vertices.clear();
     _instances.clear();
+    _shader_vertices.clear();
     _ranges.clear();
     _uniform_bytes.clear();
     _extra_bindings.clear();

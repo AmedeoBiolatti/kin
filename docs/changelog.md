@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::draw_shader_geometry()`: triangles drawn with a material shader,
+  so only the pixels a shape covers run it, instead of a rectangle over its
+  bounds. Each `kin::ShaderVertex` carries four free floats the fragment shader
+  reads at `location = 2`, so one draw can hold many shapes with their own
+  parameters. SDL_GPU only (`capabilities().shader_geometry`).
 - `BlendMode::Max` and `BlendMode::Min`: per channel (alpha too), the larger or
   smaller of what is drawn and what is there. Overlapping shadows, fog of war,
   coverage and heat maps can be drawn shape by shape. The SDL_GPU backend has

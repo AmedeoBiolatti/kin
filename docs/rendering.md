@@ -194,6 +194,39 @@ texture, one texture, or two textures are shorthands for the same call.
 `kin::MaxShaderUniformFloats` (4096, 16 KiB). Declare arrays in the shader as
 `vec4`s: std140 pads each element of a `float` array to 16 bytes.
 
+### Shader geometry
+
+`draw_shader_surface()` covers a rectangle. For a shape that is really a
+polygon (a shadow, a hull, a beam), `draw_shader_geometry()` draws triangles
+with the same material shader, so the rasterizer decides what is inside and
+only the covered pixels run the shader:
+
+```cpp
+std::vector<kin::ShaderVertex> vertices;
+std::vector<kin::u32> indices;            // three per triangle; empty: vertices are triangles
+for (const Shadow& s : shadows) {
+    const auto first = static_cast<kin::u32>(vertices.size());
+    for (const kin::Vec2f p : s.hull) {
+        vertices.push_back({.position = p, .uv = s.uv_of(p), .custom = {s.index, s.height, 0, 0}});
+    }
+    for (kin::u32 i = 1; i + 1 < s.hull.size(); ++i) {   // a fan over the convex hull
+        indices.insert(indices.end(), {first, first + i, first + i + 1});
+    }
+}
+const auto max = renderer.scoped_blend_mode(kin::BlendMode::Max);
+renderer.draw_shader_geometry(vertices, indices, shadow_shader, params, sources);
+```
+
+- The fragment shader gets `color` and `uv` as for a surface, and each vertex's
+  `custom` as `layout(location = 2) in vec4`. One draw can then carry many
+  shapes, each with its own parameters, such as an index into a data texture.
+- Sources, params and the blend mode work as for `draw_shader_surface()`. With
+  `BlendMode::Max`, overlapping shapes combine by the larger, in any order.
+- Geometry that isn't whole triangles, or indexes past the vertices, is refused
+  and logged; nothing is drawn.
+- It needs `capabilities().shader_geometry`: the SDL_GPU backend has it, others
+  draw nothing.
+
 ### Data textures
 
 Besides `Rgba8`, textures can hold numbers for shaders to read:

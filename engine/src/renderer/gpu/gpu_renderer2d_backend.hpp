@@ -122,6 +122,9 @@ public:
                              const Texture& source0, const Texture& source1) override;
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                              std::span<const Texture> sources) override;
+    void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                              ShaderHandle handle, const ShaderParams& params,
+                              std::span<const Texture> sources) override;
 
     void set_post_process(std::span<const PostProcessPass> passes) override;
 
@@ -140,6 +143,14 @@ private:
     // texture dropped right after a draw would leave the batch a dangling handle
     // (and, once SDL destroys the image, a lost device).
     void retain(const Texture& texture);
+    // A material draw's sampler bindings: `sources[i]` at slot i, the slots the
+    // shader declares past them left null (the batch binds the white texture).
+    struct SourceBindings {
+        SDL_GPUTextureSamplerBinding slot0{};
+        std::array<SDL_GPUTextureSamplerBinding, MaxShaderSamplers - 1> extra{};
+        std::size_t extra_count = 0;
+    };
+    SourceBindings bind_sources(const gpu::GpuShader& shader, std::span<const Texture> sources);
     const gpu::GpuTexture& current_target() const; // pushed render target, else the scene
     Vec2i current_size() const;
     bool scene_uses_logical_coordinates() const;
@@ -163,6 +174,8 @@ private:
     gpu::GpuShader _vertex_shader;
     gpu::GpuShader _fragment_shader;
     gpu::GpuShader _instance_shader; // sprite_instanced.vert; without it draw_sprites draws quad by quad
+    gpu::GpuShader _shader_vertex_shader; // shader_geometry.vert; without it draw_shader_geometry draws nothing
+    std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;
     std::vector<gpu::GpuSpriteInstance> _instance_scratch;
     JobSystem* _jobs = nullptr; // splits large draw_sprites() batches when set
     SDL_GPUSampler* _sampler_linear = nullptr;  // render targets / blur
