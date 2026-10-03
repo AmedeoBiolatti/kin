@@ -14,6 +14,11 @@ namespace {
 // Force SPIR-V so SDL_GPU selects the Vulkan backend.
 constexpr SDL_GPUShaderFormat SupportedShaderFormats = SDL_GPU_SHADERFORMAT_SPIRV;
 constexpr u32 DefaultUploadRingSize = 1024u * 1024u;
+// Texture uploads share a staging buffer of this size; a larger one gets its own.
+constexpr u32 TextureStagingSize = 16u * 1024u * 1024u;
+// Where each staged upload starts in it (Vulkan wants a multiple of the texel
+// size and of 4; this covers every format, and D3D12's 512 would be next).
+constexpr u32 TextureStagingAlignment = 256u;
 
 u32 align_up(u32 value, u32 alignment) {
     if (alignment == 0) {
@@ -104,6 +109,14 @@ GpuDevice::~GpuDevice() {
     if (!_device) {
         return;
     }
+    try {
+        flush_uploads();
+    } catch (const std::exception&) {
+        // The device is going away: its uploads with it.
+    }
+    if (_staging) {
+        SDL_ReleaseGPUTransferBuffer(_device, _staging);
+    }
     // Textures still alive (held past the renderer) must not release into the
     // destroyed device; they see a null handle from here on.
     *_shared = nullptr;
@@ -124,7 +137,14 @@ GpuDevice::GpuDevice(GpuDevice&& other) noexcept
       _upload_ring(std::exchange(other._upload_ring, nullptr)),
       _upload_ring_size(std::exchange(other._upload_ring_size, 0)),
       _upload_ring_offset(std::exchange(other._upload_ring_offset, 0)),
-      _first_submit_ns(std::exchange(other._first_submit_ns, 0)) {}
+      _first_submit_ns(std::exchange(other._first_submit_ns, 0)),
+      _upload_commands(std::exchange(other._upload_commands, nullptr)),
+      _upload_pass(std::exchange(other._upload_pass, nullptr)),
+      _staging(std::exchange(other._staging, nullptr)),
+      _staging_used(std::exchange(other._staging_used, 0)),
+      _own_transfers(std::move(other._own_transfers)),
+      _uploads_staged(std::exchange(other._uploads_staged, 0)),
+      _upload_batches(std::exchange(other._upload_batches, 0)) {}
 
 GpuFrame GpuDevice::begin_frame(bool acquire_swapchain) {
     return GpuFrame{*this, acquire_swapchain};
@@ -183,89 +203,93 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
 
-    const u32 byte_count = width * height * texel_bytes;
-    SDL_GPUTransferBufferCreateInfo transfer_info{};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = byte_count;
-
-    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(_device, &transfer_info);
-    if (!transfer) {
+    try {
+        stage_texture_upload(raw_texture, 0, 0, width, height, pixels, texel_bytes, /*cycle=*/false);
+    } catch (...) {
         SDL_ReleaseGPUTexture(_device, raw_texture);
-        throw sdl_error("SDL_CreateGPUTransferBuffer failed");
+        throw;
     }
-
-    void* mapped = SDL_MapGPUTransferBuffer(_device, transfer, false);
-    if (!mapped) {
-        SDL_ReleaseGPUTransferBuffer(_device, transfer);
-        SDL_ReleaseGPUTexture(_device, raw_texture);
-        throw sdl_error("SDL_MapGPUTransferBuffer failed");
-    }
-    if (pixels) {
-        std::memcpy(mapped, pixels, byte_count);
-    } else {
-        std::memset(mapped, 0, byte_count);
-    }
-    SDL_UnmapGPUTransferBuffer(_device, transfer);
-
-    SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(_device);
-    if (!command_buffer) {
-        SDL_ReleaseGPUTransferBuffer(_device, transfer);
-        SDL_ReleaseGPUTexture(_device, raw_texture);
-        throw sdl_error("SDL_AcquireGPUCommandBuffer failed");
-    }
-
-    SDL_GPUTextureTransferInfo source{};
-    source.transfer_buffer = transfer;
-    source.pixels_per_row = width;
-    source.rows_per_layer = height;
-
-    SDL_GPUTextureRegion destination{};
-    destination.texture = raw_texture;
-    destination.w = width;
-    destination.h = height;
-    destination.d = 1;
-
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
-    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
-    SDL_EndGPUCopyPass(copy_pass);
-
-    if (!SDL_SubmitGPUCommandBuffer(command_buffer)) {
-        SDL_ReleaseGPUTransferBuffer(_device, transfer);
-        SDL_ReleaseGPUTexture(_device, raw_texture);
-        throw sdl_error("SDL_SubmitGPUCommandBuffer failed");
-    }
-
-    SDL_ReleaseGPUTransferBuffer(_device, transfer);
     return GpuTexture{_shared, raw_texture, width, height, format};
 }
 
 void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
-                               u32 texel_bytes) {
+                               u32 texel_bytes, bool whole) {
     if (!texture || !pixels || w == 0 || h == 0 || texel_bytes == 0) {
         throw std::runtime_error("update_texture failed: invalid arguments");
     }
-    const u32 byte_count = w * h * texel_bytes;
-    SDL_GPUTransferBufferCreateInfo transfer_info{};
-    transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transfer_info.size = byte_count;
-    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(_device, &transfer_info);
-    if (!transfer) {
-        throw sdl_error("SDL_CreateGPUTransferBuffer failed");
+    // Not cycled unless the whole texture is replaced: a cycled texture gets fresh
+    // storage, and the texels outside the region would be lost. Uploads run in
+    // order with the frames submitted around them, so frames submitted before read
+    // the old texels and frames after the new.
+    stage_texture_upload(texture, x, y, w, h, pixels, texel_bytes, whole);
+}
+
+void GpuDevice::stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const void* pixels,
+                                     u32 texel_bytes, bool cycle) {
+    const u64 bytes64 = static_cast<u64>(w) * h * texel_bytes;
+    if (bytes64 > 0xFFFFFFFFull) {
+        throw std::runtime_error("texture upload too large");
     }
-    void* mapped = SDL_MapGPUTransferBuffer(_device, transfer, false);
-    if (!mapped) {
-        SDL_ReleaseGPUTransferBuffer(_device, transfer);
-        throw sdl_error("SDL_MapGPUTransferBuffer failed");
+    const u32 bytes = static_cast<u32>(bytes64);
+    std::unique_lock lock{_uploads_mutex};
+    const auto fill = [&](SDL_GPUTransferBuffer* transfer, u32 offset, bool cycle_transfer) {
+        auto* mapped = static_cast<u8*>(SDL_MapGPUTransferBuffer(_device, transfer, cycle_transfer));
+        if (!mapped) {
+            throw sdl_error("SDL_MapGPUTransferBuffer failed");
+        }
+        if (pixels) {
+            std::memcpy(mapped + offset, pixels, bytes);
+        } else {
+            std::memset(mapped + offset, 0, bytes);
+        }
+        SDL_UnmapGPUTransferBuffer(_device, transfer);
+    };
+    SDL_GPUTransferBuffer* transfer = nullptr;
+    u32 offset = 0;
+    if (bytes > TextureStagingSize / 2) {
+        // A big upload (a whole sprite sheet) gets a transfer buffer of its own,
+        // so the shared one stays small.
+        SDL_GPUTransferBufferCreateInfo info{};
+        info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        info.size = bytes;
+        transfer = SDL_CreateGPUTransferBuffer(_device, &info);
+        if (!transfer) {
+            throw sdl_error("SDL_CreateGPUTransferBuffer failed");
+        }
+        _own_transfers.push_back(transfer); // released after the flush
+        fill(transfer, 0, false);
+    } else {
+        if (_upload_commands && align_up(_staging_used, TextureStagingAlignment) + bytes > TextureStagingSize) {
+            lock.unlock();
+            flush_uploads(); // full: send what is there
+            lock.lock();
+        }
+        if (!_staging) {
+            SDL_GPUTransferBufferCreateInfo info{};
+            info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+            info.size = TextureStagingSize;
+            _staging = SDL_CreateGPUTransferBuffer(_device, &info);
+            if (!_staging) {
+                throw sdl_error("SDL_CreateGPUTransferBuffer failed");
+            }
+        }
+        // The first upload of a batch cycles the staging buffer: if the GPU still
+        // copies from the last batch, SDL hands out other memory instead of waiting.
+        offset = align_up(_staging_used, TextureStagingAlignment);
+        fill(_staging, offset, _staging_used == 0);
+        _staging_used = offset + bytes;
+        transfer = _staging;
     }
-    std::memcpy(mapped, pixels, byte_count);
-    SDL_UnmapGPUTransferBuffer(_device, transfer);
-    SDL_GPUCommandBuffer* command_buffer = SDL_AcquireGPUCommandBuffer(_device);
-    if (!command_buffer) {
-        SDL_ReleaseGPUTransferBuffer(_device, transfer);
-        throw sdl_error("SDL_AcquireGPUCommandBuffer failed");
+    if (!_upload_commands) {
+        _upload_commands = SDL_AcquireGPUCommandBuffer(_device);
+        if (!_upload_commands) {
+            throw sdl_error("SDL_AcquireGPUCommandBuffer failed");
+        }
+        _upload_pass = SDL_BeginGPUCopyPass(_upload_commands);
     }
     SDL_GPUTextureTransferInfo source{};
     source.transfer_buffer = transfer;
+    source.offset = offset;
     source.pixels_per_row = w;
     source.rows_per_layer = h;
     SDL_GPUTextureRegion destination{};
@@ -275,17 +299,31 @@ void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32
     destination.w = w;
     destination.h = h;
     destination.d = 1;
-    SDL_GPUCopyPass* copy_pass = SDL_BeginGPUCopyPass(command_buffer);
-    // Not cycled: a cycled texture gets fresh storage, and the texels outside the
-    // region would be lost. Command buffers run in the order they are submitted, so
-    // frames submitted before read the old texels and frames after the new.
-    SDL_UploadToGPUTexture(copy_pass, &source, &destination, false);
-    SDL_EndGPUCopyPass(copy_pass);
-    if (!SDL_SubmitGPUCommandBuffer(command_buffer)) {
-        SDL_ReleaseGPUTransferBuffer(_device, transfer);
+    SDL_UploadToGPUTexture(_upload_pass, &source, &destination, cycle);
+    ++_uploads_staged;
+}
+
+void GpuDevice::flush_uploads() {
+    const std::lock_guard lock{_uploads_mutex};
+    if (!_upload_commands) {
+        return;
+    }
+    SDL_EndGPUCopyPass(_upload_pass);
+    _upload_pass = nullptr;
+    SDL_GPUCommandBuffer* commands = std::exchange(_upload_commands, nullptr);
+    _staging_used = 0;
+    if (_first_submit_ns == 0) {
+        _first_submit_ns = SDL_GetTicksNS();
+    }
+    const bool submitted = SDL_SubmitGPUCommandBuffer(commands);
+    for (SDL_GPUTransferBuffer* transfer : _own_transfers) {
+        SDL_ReleaseGPUTransferBuffer(_device, transfer); // freed once the copies are done
+    }
+    _own_transfers.clear();
+    ++_upload_batches;
+    if (!submitted) {
         throw sdl_error("SDL_SubmitGPUCommandBuffer failed");
     }
-    SDL_ReleaseGPUTransferBuffer(_device, transfer);
 }
 
 GpuBuffer GpuDevice::create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size) {
@@ -323,6 +361,7 @@ bool GpuDevice::read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rg
     if (!_device || !src.handle() || src.width() == 0 || src.height() == 0) {
         return false;
     }
+    flush_uploads();
     const u32 w = src.width();
     const u32 h = src.height();
     const u32 bytes = w * h * 4;
@@ -448,6 +487,9 @@ void GpuDevice::present_texture(GpuFrame& frame, const GpuTexture& texture, SDL_
 }
 
 void GpuDevice::wait_idle() {
+    if (_device) {
+        flush_uploads();
+    }
     if (_device && !SDL_WaitForGPUIdle(_device)) {
         throw sdl_error("SDL_WaitForGPUIdle failed");
     }
@@ -501,6 +543,7 @@ void GpuFrame::submit() {
     if (!_command_buffer || _submitted) {
         return;
     }
+    _device->flush_uploads(); // ahead of this frame, which may draw what they fill
     if (_device->_first_submit_ns == 0) {
         _device->_first_submit_ns = SDL_GetTicksNS();
     }
@@ -515,6 +558,7 @@ SDL_GPUFence* GpuFrame::submit_with_fence() {
     if (!_command_buffer || _submitted) {
         return nullptr;
     }
+    _device->flush_uploads();
     if (_device->_first_submit_ns == 0) {
         _device->_first_submit_ns = SDL_GetTicksNS();
     }

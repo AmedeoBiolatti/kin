@@ -65,6 +65,10 @@ struct RendererBackendStats {
     u32 last_gpu_frame_span = 1;
     // Samples taken so far: last_gpu_frame_ms is new when this has grown.
     u64 gpu_frames_sampled = 0;
+    // SDL_GPU: texture uploads (create_texture, update_texture) so far, and the
+    // command buffers that carried them (batched: many uploads, one submit).
+    u64 texture_uploads = 0;
+    u64 texture_upload_submits = 0;
     u64 saved_texture_draws() const {
         return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
     }

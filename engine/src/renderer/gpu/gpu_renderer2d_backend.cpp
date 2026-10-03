@@ -314,6 +314,7 @@ void GpuRenderer2DBackend::end_frame() {
     _frame.reset();
     _retained.clear();
     _last_retained = nullptr;
+    ++_frame_serial;
 }
 
 void GpuRenderer2DBackend::retain(const Texture& texture) {
@@ -321,6 +322,9 @@ void GpuRenderer2DBackend::retain(const Texture& texture) {
     if (backend != _last_retained) {
         _retained.push_back(texture.backend());
         _last_retained = backend;
+        if (const auto* gpu = as_gpu(backend)) {
+            gpu->mark_used(_frame_serial);
+        }
     }
 }
 
@@ -654,9 +658,14 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
     if (!backend || !backend->texture()) {
         return false;
     }
+    // Replacing the whole texture lets its storage be cycled, so the upload does
+    // not wait for earlier frames still reading it. Not when this frame already
+    // draws it: its queued draws bind the texture only when flushed, and must see
+    // the update as they would without cycling.
+    const bool whole = at == Vec2i{0, 0} && size == backend->size() && backend->used_in_frame() != _frame_serial;
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                            static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
-                           texture_format_bytes(backend->format()));
+                           texture_format_bytes(backend->format()), whole);
     return true;
 }
 
