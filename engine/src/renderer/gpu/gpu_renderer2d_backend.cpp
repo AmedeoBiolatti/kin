@@ -388,17 +388,19 @@ void GpuRenderer2DBackend::present() {
         blit.filter = _integer_scale ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
         SDL_BlitGPUTexture(_frame->command_buffer(), &blit);
     }
-    if (_gpu_timer) {
+    // Only the render thread adds frames to the timer, so it cannot fill up
+    // between the check and track().
+    if (_gpu_timer && !_gpu_timer->full()) {
         SDL_GPUFence* fence = _frame->submit_with_fence();
-        if (!_gpu_timer->track(fence, _device.take_first_submit_ns())) {
-            SDL_ReleaseGPUFence(_device.handle(), fence);
-        }
-        if (const std::optional<f64> gpu_ms = _gpu_timer->collect()) {
-            _stats.last_gpu_frame_ms = *gpu_ms;
-        }
+        _gpu_timer->track(fence, _device.take_first_submit_ns());
     } else {
         _frame->submit();
         _device.take_first_submit_ns();
+    }
+    if (_gpu_timer) {
+        if (const std::optional<f64> gpu_ms = _gpu_timer->collect()) {
+            _stats.last_gpu_frame_ms = *gpu_ms;
+        }
     }
     end_frame();
     _stats.last_present_backend_ms = ms_between(acquire_start, SDL_GetTicksNS());

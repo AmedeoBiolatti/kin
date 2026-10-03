@@ -36,16 +36,17 @@ GpuFrameTimer::~GpuFrameTimer() {
     }
 }
 
-bool GpuFrameTimer::track(SDL_GPUFence* fence, u64 first_submit_ns) {
+bool GpuFrameTimer::full() const {
+    std::lock_guard lock{_mutex};
+    return _waiting.size() + _finished.size() >= MaxFramesInFlight;
+}
+
+void GpuFrameTimer::track(SDL_GPUFence* fence, u64 first_submit_ns) {
     {
         std::lock_guard lock{_mutex};
-        if (_waiting.size() + _finished.size() >= MaxFramesInFlight) {
-            return false;
-        }
         _waiting.push_back(Pending{.fence = fence, .first_submit_ns = first_submit_ns});
     }
     _wake.notify_one();
-    return true;
 }
 
 std::optional<f64> GpuFrameTimer::collect() {

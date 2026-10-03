@@ -18,6 +18,12 @@ releases may change APIs.
   which also ran SDL's resource cleanup there; under load on Vulkan that lost the
   device or stalled frames for seconds. It now polls `SDL_QueryGPUFence`, a plain
   status read (resolution about 0.1 ms).
+- SDL_GPU: with GPU frame timing on and the GPU more than 8 frames behind (a
+  heavy scene, no vsync), each further frame's fence was released while the
+  frame still ran. SDL put it back in its pool and reset it for the next
+  submission, whose resources it then freed when the old frame finished: on
+  Vulkan, a lost device a few seconds into `--profile`. Those frames are now
+  submitted without a fence (and go untimed).
 
 ## [0.2.3] — 2026-10-01
 
