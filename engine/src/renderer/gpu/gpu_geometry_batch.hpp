@@ -132,11 +132,7 @@ public:
                 }
                 _ranges.back().vertex_count += 4;
                 _area += quad_area(corners.data());
-                if (!_bounds.empty()) {
-                    for (const GpuVertex& v : corners) {
-                        _bounds.back().add(v.x, v.y);
-                    }
-                }
+                bound(std::span<const GpuVertex>{corners});
                 return;
             }
         }
