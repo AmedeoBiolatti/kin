@@ -727,6 +727,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             if (ctx.renderer.backend_name() == "SDL_GPU") {
                 debug_overlay.record("gpu.wait", present_stats.last_gpu_wait_ms);
                 record_profile_value("gpu.wait", "runtime", present_stats.last_gpu_wait_ms);
+                // Not a time: how many times each screen pixel was shaded.
+                debug_overlay.record("render.overdraw", present_stats.last_overdraw);
+                record_profile_value("render.overdraw", "runtime", present_stats.last_overdraw);
                 // Only new samples: a frame without one would repeat the last.
                 if (present_stats.gpu_frames_sampled != gpu_frames_sampled) {
                     gpu_frames_sampled = present_stats.gpu_frames_sampled;

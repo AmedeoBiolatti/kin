@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <array>
+#include <utility>
+#include <cmath>
 #include <span>
 #include <vector>
 
@@ -128,6 +130,7 @@ public:
                     _vertices.push_back(v); // in reserved room: plain stores
                 }
                 _ranges.back().vertex_count += 4;
+                _area += quad_area(corners.data());
                 return;
             }
         }
@@ -156,6 +159,11 @@ public:
                         SDL_GPUSampler* sampler = nullptr);
 
     bool empty() const { return _vertices.empty() && _instances.empty() && _shader_vertices.empty(); }
+
+    // The area everything pushed covers (target units; overlaps count each
+    // time, clipping is not taken off) since the last call: what the GPU
+    // shades, for an overdraw figure.
+    f64 take_area() { return std::exchange(_area, 0.0); }
 
     // Context shared by every range in a flush.
     struct FlushContext {
@@ -215,6 +223,13 @@ private:
     GpuBuffer _instance_buffer;
     GpuBuffer _shader_vertex_buffer;
     GpuBuffer _quad_indices; // 0 1 2 0 2 3, 4 5 6 4 6 7, ...: made once
+    f64 _area = 0.0;         // covered since take_area()
+
+    template<typename V>
+    static f64 triangle_area(const V& a, const V& b, const V& c) {
+        return 0.5 * std::abs(static_cast<f64>(b.x - a.x) * (c.y - a.y) - static_cast<f64>(c.x - a.x) * (b.y - a.y));
+    }
+    static f64 quad_area(const GpuVertex* q) { return triangle_area(q[0], q[1], q[2]) + triangle_area(q[0], q[2], q[3]); }
 };
 
 } // namespace kin::gpu

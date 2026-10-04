@@ -88,6 +88,11 @@ On the SDL_GPU backend two more rows show the GPU's side of the frame:
   Scopes do not nest (an inner one is ignored) and end at `present()`. While
   GPU timing is off, `gpu_scope()` does nothing.
 
+- `render.overdraw` (not a time): how many times each screen pixel was shaded
+  that frame, on average: the area all draws covered (render targets
+  included, overlaps counted each time, clipping not taken off) over the
+  screen's. In 2D this is usually where GPU time goes. The demos run 0.2 to 3.2.
+
 GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
 or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`
 turns it on. `KIN_LOG_FRAME_STATS` logs `gpu_wait_ms` and `gpu_frame_ms` too.

@@ -2061,6 +2061,41 @@ void test_gpu_mipmaps() {
     }
 }
 
+// Overdraw: the area a frame's draws cover over the screen's.
+void test_gpu_overdraw() {
+    constexpr std::string_view test_name = "test_gpu_overdraw";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-overdraw-test", .width = 64, .height = 32, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        renderer->present();
+        renderer->clear(kin::Color::rgb(0, 0, 0)); // a clear covers nothing
+        renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 64.0f, 32.0f}, kin::Color::rgb(255, 0, 0));
+        renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 64.0f, 32.0f}, kin::Color::rgba(0, 255, 0, 128));
+        const std::array<kin::u8, 4> white{255, 255, 255, 255};
+        const kin::Texture dot = renderer->create_texture_from_rgba(white.data(), {1, 1});
+        const std::array<kin::SpriteInstance, 1> sprite{{{.dest = {0.0f, 0.0f, 32.0f, 32.0f}}}};
+        renderer->draw_sprites(dot, sprite); // half the screen
+        renderer->present();
+        const kin::RendererBackendStats stats = renderer->backend_stats();
+        if (std::abs(stats.last_overdraw - 2.5) > 0.01 || std::abs(stats.last_pixels_drawn - 2.5 * 64 * 32) > 1.0) {
+            throw std::runtime_error(std::string(test_name) + ": overdraw " + std::to_string(stats.last_overdraw));
+        }
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2620,6 +2655,7 @@ int main() {
     test_gpu_compute();
     test_gpu_shader_hot_reload();
     test_gpu_mipmaps();
+    test_gpu_overdraw();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

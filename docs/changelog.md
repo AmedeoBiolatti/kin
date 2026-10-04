@@ -9,6 +9,9 @@ releases may change APIs.
 
 ### Added
 
+- Overdraw: `RendererBackendStats::last_pixels_drawn` and `last_overdraw`
+  (SDL_GPU), reported as `render.overdraw` by `--profile` and the debug
+  overlay: how many times each screen pixel was shaded in the frame.
 - `ScaleMode::Mipmapped`: textures drawn smaller than they are get mipmaps,
   made on the GPU (and remade on update), sampled trilinearly: no shimmer, and
   faster to read (4000 sprites of a 2048 x 2048 texture at 24 x 24: about 30%
