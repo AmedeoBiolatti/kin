@@ -16,7 +16,7 @@ components with it. Each license is in the fetched source tree, under
 | [SDL](https://github.com/libsdl-org/SDL) | 3.4.10 | zlib | Sam Lantinga |
 | [SDL_image](https://github.com/libsdl-org/SDL_image) | 3.4.4 | zlib | Sam Lantinga |
 | [SDL_ttf](https://github.com/libsdl-org/SDL_ttf) | 3.2.2 | zlib | Sam Lantinga |
-| [flecs](https://github.com/SanderMertens/flecs) | 4.0.3 | MIT | Sander Mertens |
+| [flecs](https://github.com/SanderMertens/flecs) | 4.0.5 | MIT | Sander Mertens |
 | [Box2D](https://github.com/erincatto/box2d) | 2.4.1 | MIT | Erin Catto |
 | [Lua](https://www.lua.org) | 5.4.6 | MIT | Lua.org, PUC-Rio |
 | [sol2](https://github.com/ThePhD/sol2) | 3.3.1 | MIT | Rapptz, ThePhD, and contributors |

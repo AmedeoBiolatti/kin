@@ -159,6 +159,15 @@ releases may change APIs.
 
 ### Fixed
 
+- Worlds in one process can register components in any order: flecs 4.0.5
+  (from 4.0.3) keeps C++ component ids per world. Before, a component first
+  registered in a second world could take the id another type had in the
+  first, and setting that type wrote past the component's storage (the
+  prefab tests crashed once `Transform2D` grew). The animation preview and the
+  tests run several worlds.
+- The ECS physics sync converts angles: `Transform2D::rotation` is degrees, as
+  everywhere in kin, and `PhysicsWorld` radians, as Box2D. Before, radians were
+  written into `rotation`, so physics bodies' sprites barely turned.
 - SDL_GPU: a texture released right after it was drawn, before the frame was
   flushed, left the queued draw a dangling handle: a crash, or on Vulkan a lost
   device once SDL destroyed the image. The backend now keeps the textures the

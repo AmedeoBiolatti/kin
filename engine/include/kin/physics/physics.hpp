@@ -54,7 +54,7 @@ struct PhysicsWorldDef {
 struct PhysicsBodyDef {
     PhysicsBodyType type = PhysicsBodyType::Static;
     Vec2f position{};
-    f32 rotation = 0.0f;
+    f32 rotation = 0.0f; // radians, as Box2D (Transform2D is degrees; the ECS sync converts)
     Vec2f linear_velocity{};
     f32 angular_velocity = 0.0f;
     f32 linear_damping = 0.0f;
@@ -153,6 +153,7 @@ public:
     u64 user_id(PhysicsBody body) const;
     u64 fixture_tag(PhysicsFixture fixture) const;
 
+    // Angles in radians.
     void set_transform(PhysicsBody body, Vec2f position, f32 rotation);
     Vec2f position(PhysicsBody body) const;
     f32 rotation(PhysicsBody body) const;

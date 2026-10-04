@@ -26,7 +26,7 @@ void test_body_creation_multiple_colliders_and_transform_sync() {
 
     kin::PhysicsWorld physics;
     kin::EcsEntity entity = world.entity("actor")
-                                .set(kin::Transform2D{.pos = {10.0f, 20.0f}, .rotation = 0.25f})
+                                .set(kin::Transform2D{.pos = {10.0f, 20.0f}, .rotation = 90.0f})
                                 .set(kin::PhysicsBodyComponent{
                                     .def = {
                                         .type = kin::PhysicsBodyType::Dynamic,
@@ -52,7 +52,8 @@ void test_body_creation_multiple_colliders_and_transform_sync() {
     assert(physics.is_alive(colliders->colliders[1].fixture));
     assert(physics.fixture_tag(colliders->colliders[1].fixture) == 2);
     assert((physics.position(body->body) == kin::Vec2f{10.0f, 20.0f}));
-    assert(near(physics.rotation(body->body), 0.25f));
+    // Transform2D turns in degrees, the physics world in radians.
+    assert(near(physics.rotation(body->body), 1.5707964f));
 }
 
 void test_velocity_step_and_transform_sync_from_physics() {
@@ -79,6 +80,11 @@ void test_velocity_step_and_transform_sync_from_physics() {
     assert(transform != nullptr);
     assert(near(transform->pos.x, 1.0f, 0.01f));
     assert(near(transform->pos.y, 0.0f, 0.01f));
+
+    // A quarter turn in the physics world (radians) is 90 degrees on the entity.
+    physics.set_transform(entity.get<kin::PhysicsBodyComponent>()->body, {1.0f, 0.0f}, 1.5707964f);
+    kin::sync_transforms_from_physics(world, physics);
+    assert(near(entity.get<kin::Transform2D>()->rotation, 90.0f, 0.001f));
 }
 
 void test_removed_collider_destroys_fixture() {

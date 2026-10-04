@@ -56,6 +56,18 @@ void push_contact_for_body(const BodyEntityMap& map, PhysicsBody body, const Phy
     }
 }
 
+// Transform2D turns in degrees, like the rest of kin; the physics world in
+// radians, like Box2D. The same sense on screen (y down): only the unit differs.
+constexpr f32 radians_per_degree = 3.14159265358979323846f / 180.0f;
+
+f32 to_physics_angle(f32 degrees) {
+    return degrees * radians_per_degree;
+}
+
+f32 from_physics_angle(f32 radians) {
+    return radians / radians_per_degree;
+}
+
 // Internal flecs-typed implementations. The public API (further down) takes
 // EcsWorld& and forwards via world.raw(), keeping flecs out of the
 // kin/ecs/physics.hpp surface.
@@ -66,7 +78,7 @@ void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
             PhysicsBodyDef def = body.def;
             if (const Transform2D* transform = entity.get<Transform2D>()) {
                 def.position = transform->pos;
-                def.rotation = transform->rotation;
+                def.rotation = to_physics_angle(transform->rotation);
             }
             if (def.user_id == 0) {
                 def.user_id = static_cast<u64>(entity.id());
@@ -100,7 +112,7 @@ void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
 void sync_transforms_to_physics_raw(flecs::world& world, PhysicsWorld& physics) {
     world.query<PhysicsBodyComponent, const Transform2D>().each([&](PhysicsBodyComponent& body, const Transform2D& transform) {
         if (body.sync_to_physics && physics.is_alive(body.body)) {
-            physics.set_transform(body.body, transform.pos, transform.rotation);
+            physics.set_transform(body.body, transform.pos, to_physics_angle(transform.rotation));
         }
     });
 }
@@ -118,7 +130,7 @@ void sync_transforms_from_physics_raw(flecs::world& world, PhysicsWorld& physics
     world.query<PhysicsBodyComponent, Transform2D>().each([&](const PhysicsBodyComponent& body, Transform2D& transform) {
         if (body.sync_from_physics && physics.is_alive(body.body)) {
             transform.pos = physics.position(body.body);
-            transform.rotation = physics.rotation(body.body);
+            transform.rotation = from_physics_angle(physics.rotation(body.body));
         }
     });
 }

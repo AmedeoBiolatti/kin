@@ -33,6 +33,34 @@ void register_components(kin::EcsWorld& world) {
         .field("name", &Stats::name);
 }
 
+struct WideComponent {
+    kin::f32 values[5]{1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+};
+
+struct NarrowComponent {
+    kin::i32 value = 0;
+};
+
+// Worlds in one process may register components in any order: a component
+// never takes the id another type has in an earlier world (flecs before 4.0.5
+// kept one id per C++ type for the whole process, and overflowed into
+// whichever type took it).
+void test_worlds_register_components_in_any_order() {
+    {
+        kin::EcsWorld first;
+        first.entity().set(WideComponent{});
+    }
+    kin::EcsWorld second;
+    kin::EcsEntity entity = second.entity();
+    entity.set(NarrowComponent{7});
+    entity.set(WideComponent{});
+    flecs::world& raw = second.raw();
+    assert(raw.id<WideComponent>() != raw.id<NarrowComponent>());
+    assert(ecs_get_type_info(raw, raw.id<WideComponent>())->size == sizeof(WideComponent));
+    assert(entity.get<NarrowComponent>()->value == 7);
+    assert(entity.get<WideComponent>()->values[4] == 1.0f);
+}
+
 void test_create_lookup_handle_and_enabled_state() {
     kin::EcsWorld world;
     kin::EcsEntity root = world.entities().create({
@@ -157,6 +185,7 @@ void test_scene_documents_use_authored_ids() {
 } // namespace
 
 int main() {
+    test_worlds_register_components_in_any_order();
     test_create_lookup_handle_and_enabled_state();
     test_rename_reparent_detach_and_cycle_rejection();
     test_snapshot_reports_identity_metadata_and_raw_fallbacks();
