@@ -12,24 +12,53 @@ Vec2f Camera2D::effective_offset() const {
     return {offset.x + shake_offset.x, offset.y + shake_offset.y};
 }
 
-Vec2f Camera2D::world_to_screen(Vec2f world) const {
+Vec2f Camera2D::center() const {
+    return {offset.x + viewport.x * 0.5f, offset.y + viewport.y * 0.5f};
+}
+
+void Camera2D::look_at(Vec2f world) {
+    offset = {world.x - viewport.x * 0.5f, world.y - viewport.y * 0.5f};
+}
+
+Affine2 Camera2D::view_transform() const {
     const Vec2f camera = effective_offset();
-    return {world.x - camera.x, world.y - camera.y};
+    if (translation_only()) {
+        return Affine2::translation({-camera.x, -camera.y});
+    }
+    // About the viewport's centre: to it, turn the other way, zoom, and back.
+    const Vec2f half{viewport.x * 0.5f, viewport.y * 0.5f};
+    return Affine2::translation(half) * Affine2::scaling({zoom, zoom}) * Affine2::rotation(-rotation) *
+           Affine2::translation({-camera.x - half.x, -camera.y - half.y});
+}
+
+Vec2f Camera2D::world_to_screen(Vec2f world) const {
+    if (translation_only()) {
+        const Vec2f camera = effective_offset();
+        return {world.x - camera.x, world.y - camera.y};
+    }
+    return view_transform().apply(world);
 }
 
 Vec2f Camera2D::screen_to_world(Vec2f screen) const {
-    const Vec2f camera = effective_offset();
-    return {screen.x + camera.x, screen.y + camera.y};
+    if (translation_only()) {
+        const Vec2f camera = effective_offset();
+        return {screen.x + camera.x, screen.y + camera.y};
+    }
+    return view_transform().inverse().apply(screen);
 }
 
 Rectf Camera2D::visible_rect(f32 padding) const {
-    const Vec2f camera = effective_offset();
-    return {
-        camera.x - padding,
-        camera.y - padding,
-        viewport.x + padding * 2.0f,
-        viewport.y + padding * 2.0f,
-    };
+    if (translation_only()) {
+        const Vec2f camera = effective_offset();
+        return {
+            camera.x - padding,
+            camera.y - padding,
+            viewport.x + padding * 2.0f,
+            viewport.y + padding * 2.0f,
+        };
+    }
+    const Rectf world = transformed_bounds(view_transform().inverse(), {0.0f, 0.0f, viewport.x, viewport.y});
+    return {world.x - padding, world.y - padding, world.w + padding * 2.0f, world.h + padding * 2.0f};
 }
 
 bool Camera2D::visible(Rectf rect, f32 padding) const {

@@ -291,7 +291,8 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("Transform2D")) {
         world.components().native<Transform2D>("Transform2D")
             .field("pos", &Transform2D::pos)
-            .field("rotation", &Transform2D::rotation);
+            .field("rotation", &Transform2D::rotation)
+            .field("scale", &Transform2D::scale);
     }
     if (!world.components().find("RectRenderer")) {
         world.components().native<RectRenderer>("RectRenderer")

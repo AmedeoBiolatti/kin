@@ -19,8 +19,14 @@ bool has_material_tint(const Material2D* material, Color& out) {
     return true;
 }
 
+// A camera that zooms or turns is the renderer's transform while the queue
+// draws (CameraTransform); one that only moves shifts each command instead.
+bool camera_transforms(const RenderView& view) {
+    return view.camera && !view.output_space && !view.camera->translation_only();
+}
+
 Vec2f to_view_pos(Vec2f value, const RenderView& view) {
-    if (view.output_space || !view.camera) {
+    if (view.output_space || !view.camera || camera_transforms(view)) {
         return value;
     }
     return view.camera->world_to_screen(value);
@@ -34,7 +40,7 @@ Rectf to_view_rect(Rectf rect, const RenderView& view) {
 // to_view_rect() with the camera's offset looked up once, for loops.
 struct ViewShift {
     explicit ViewShift(const RenderView* view)
-        : active(view && !view->output_space && view->camera),
+        : active(view && !view->output_space && view->camera && view->camera->translation_only()),
           offset(active ? view->camera->effective_offset() : Vec2f{}) {}
 
     Rectf apply(Rectf rect) const {
@@ -94,6 +100,51 @@ Rectf output_to_logical(Renderer2D& renderer, Rectf rect) {
     return Rectf{min.x, min.y, max.x - min.x, max.y - min.y};
 }
 
+// Pushes the view's camera onto the renderer for a flush, when it zooms or turns.
+class CameraTransform {
+public:
+    CameraTransform(Renderer2D& renderer, const RenderView& view) {
+        if (camera_transforms(view)) {
+            _renderer = &renderer;
+            renderer.push_transform(view.camera->view_transform());
+        }
+    }
+    ~CameraTransform() {
+        if (_renderer) {
+            _renderer->pop_transform();
+        }
+    }
+    CameraTransform(const CameraTransform&) = delete;
+    CameraTransform& operator=(const CameraTransform&) = delete;
+
+private:
+    Renderer2D* _renderer = nullptr;
+};
+
+// Takes the camera's transform off for one command: output-pixel commands and
+// callbacks draw where they would under a camera that only moves.
+class WithoutCamera {
+public:
+    WithoutCamera(Renderer2D& renderer, const RenderView& view) {
+        if (camera_transforms(view)) {
+            _renderer = &renderer;
+            _transform = renderer.transform();
+            renderer.set_transform(_transform * view.camera->view_transform().inverse());
+        }
+    }
+    ~WithoutCamera() {
+        if (_renderer) {
+            _renderer->set_transform(_transform);
+        }
+    }
+    WithoutCamera(const WithoutCamera&) = delete;
+    WithoutCamera& operator=(const WithoutCamera&) = delete;
+
+private:
+    Renderer2D* _renderer = nullptr;
+    Affine2 _transform{};
+};
+
 // Shared execution core. Takes the already-resolved geometry (rect for
 // quad-like commands, a/b for lines) so callers can apply a view transform
 // without copying the whole RenderCommand — RenderCommand owns strings, a
@@ -121,11 +172,24 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
         renderer.clear(command.color);
         break;
     case RenderCommandType::FillRect:
-        renderer.fill_rect(rect, color);
+    case RenderCommandType::DrawRect: {
+        // Turned about its pivot, through the renderer's transform.
+        const bool turned = command.rotation != 0.0f;
+        if (turned) {
+            const Vec2f p{rect.x + rect.w * command.pivot.x, rect.y + rect.h * command.pivot.y};
+            renderer.push_transform(Affine2::translation(p) * Affine2::rotation(command.rotation) *
+                                    Affine2::translation({-p.x, -p.y}));
+        }
+        if (command.type == RenderCommandType::FillRect) {
+            renderer.fill_rect(rect, color);
+        } else {
+            renderer.draw_rect(rect, color);
+        }
+        if (turned) {
+            renderer.pop_transform();
+        }
         break;
-    case RenderCommandType::DrawRect:
-        renderer.draw_rect(rect, color);
-        break;
+    }
     case RenderCommandType::Line:
         renderer.draw_line(a, b, color);
         break;
@@ -241,7 +305,8 @@ public:
     // Takes the command if it is a sprite (drawing any run it cannot join), or
     // draws the pending run and returns false so the caller executes it.
     bool take(const RenderCommand& command, const RenderView* view) {
-        if (command.type != RenderCommandType::Texture && command.type != RenderCommandType::Sprite) {
+        if ((command.type != RenderCommandType::Texture && command.type != RenderCommandType::Sprite) ||
+            (command.output_pixel_rect && view && camera_transforms(*view))) {
             flush();
             return false;
         }
@@ -311,11 +376,11 @@ Rectf render_command_bounds(const RenderCommand& command) {
             std::abs(command.a.x - command.b.x),
             std::abs(command.a.y - command.b.y),
         };
-    case RenderCommandType::FillRect:
-    case RenderCommandType::DrawRect:
     case RenderCommandType::Text:
     case RenderCommandType::PushViewport:
         return command.rect;
+    case RenderCommandType::FillRect:
+    case RenderCommandType::DrawRect:
     case RenderCommandType::Texture:
     case RenderCommandType::Sprite:
         return rotated_bounds(command.rect, command.rotation, command.pivot);
@@ -348,7 +413,13 @@ void execute_render_command(Renderer2D& renderer, const RenderCommand& command, 
 #endif
     // output_pixel_rect commands bypass the view/camera transform entirely.
     if (command.output_pixel_rect) {
+        const WithoutCamera outside{renderer, view};
         execute_resolved(renderer, command, output_to_logical(renderer, command.rect), command.a, command.b);
+        return;
+    }
+    if (command.type == RenderCommandType::Text || command.type == RenderCommandType::Custom) {
+        const WithoutCamera outside{renderer, view};
+        execute_resolved(renderer, command, command.rect, command.a, command.b);
         return;
     }
 
@@ -357,10 +428,15 @@ void execute_render_command(Renderer2D& renderer, const RenderCommand& command, 
     Vec2f a = command.a;
     Vec2f b = command.b;
     switch (command.type) {
+    case RenderCommandType::PushViewport:
+        // Viewports are not transformed: one under a zooming or turning camera
+        // covers where its rectangle lands on screen.
+        rect = camera_transforms(view) ? transformed_bounds(view.camera->view_transform(), command.rect)
+                                       : to_view_rect(command.rect, view);
+        break;
     case RenderCommandType::FillRect:
     case RenderCommandType::DrawRect:
     case RenderCommandType::Text:
-    case RenderCommandType::PushViewport:
     case RenderCommandType::Texture:
     case RenderCommandType::Sprite:
         rect = to_view_rect(command.rect, view);
@@ -932,6 +1008,7 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
 }
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
+    const CameraTransform camera{renderer, view};
     SpriteRun run{renderer, _sprite_run};
     const Culler culler{view};
     const ViewShift shift{&view};
@@ -962,6 +1039,7 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_m
 
 void RenderQueue::flush_presorted(Renderer2D& renderer, const RenderView& view, u64 pass_mask) const {
     materialize();
+    const CameraTransform camera{renderer, view};
     SpriteRun run{renderer, _sprite_run};
     for (const RenderCommand& command : _commands) {
         if ((command.key.pass_mask & pass_mask) == 0) {
@@ -984,6 +1062,7 @@ void RenderQueue::flush_merged_presorted(Renderer2D& renderer,
     materialize();
     std::size_t lhs = 0;
     std::size_t rhs = 0;
+    const CameraTransform camera{renderer, view};
     SpriteRun run{renderer, _sprite_run};
     const auto draw = [&](const RenderCommand& command) {
         if ((command.key.pass_mask & pass_mask) == 0) {

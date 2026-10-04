@@ -269,6 +269,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .shader_geometry = static_cast<bool>(_shader_vertex_shader.handle()),
         .data_buffers = true,
         .compute = true,
+        .transforms = true,
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -610,7 +611,15 @@ SDL_Rect GpuRenderer2DBackend::current_scissor() const {
     return scissor;
 }
 
-void GpuRenderer2DBackend::apply_view_offset(std::span<gpu::GpuVertex> verts) const {
+void GpuRenderer2DBackend::place(std::span<gpu::GpuVertex> verts) const {
+    if (_transformed) {
+        for (gpu::GpuVertex& v : verts) {
+            const Vec2f p = place(Vec2f{v.x, v.y});
+            v.x = p.x;
+            v.y = p.y;
+        }
+        return;
+    }
     if (_view_offset.x == 0.0f && _view_offset.y == 0.0f) {
         return;
     }
@@ -638,7 +647,7 @@ void GpuRenderer2DBackend::push_triangles(std::span<gpu::GpuVertex> tris,
         return;
     }
     ensure_frame();
-    apply_view_offset(tris); // no-op when no viewport offset is active
+    place(tris); // no-op without a transform or viewport offset
     _batch.push(tris, nullptr, texture, current_scissor(), resolve_blend(blend));
 }
 
@@ -651,15 +660,29 @@ void GpuRenderer2DBackend::push_quad(
     SDL_GPUSampler* sampler
 ) {
     ensure_frame();
-    const f32 x0 = dest.x + _view_offset.x;
-    const f32 y0 = dest.y + _view_offset.y;
-    const f32 x1 = x0 + dest.w;
-    const f32 y1 = y0 + dest.h;
     const f32 u0 = uv.x;
     const f32 v0 = uv.y;
     const f32 u1 = uv.x + uv.w;
     const f32 v1 = uv.y + uv.h;
     const u8 r = color.r, g = color.g, b = color.b, a = color.a;
+    if (_transformed) {
+        // One corner mapped, the others along the mapped edges.
+        const Vec2f p = place(Vec2f{dest.x, dest.y});
+        const Vec2f ex = _transform.apply_vector({dest.w, 0.0f});
+        const Vec2f ey = _transform.apply_vector({0.0f, dest.h});
+        std::array<gpu::GpuVertex, 4> corners{{
+            {p.x, p.y, u0, v0, r, g, b, a},
+            {p.x + ex.x, p.y + ex.y, u1, v0, r, g, b, a},
+            {p.x + ex.x + ey.x, p.y + ex.y + ey.y, u1, v1, r, g, b, a},
+            {p.x + ey.x, p.y + ey.y, u0, v1, r, g, b, a},
+        }};
+        _batch.push_quad(corners, texture, current_scissor(), resolve_blend(blend), sampler);
+        return;
+    }
+    const f32 x0 = dest.x + _view_offset.x;
+    const f32 y0 = dest.y + _view_offset.y;
+    const f32 x1 = x0 + dest.w;
+    const f32 y1 = y0 + dest.h;
     std::array<gpu::GpuVertex, 4> corners{{
         {x0, y0, u0, v0, r, g, b, a},
         {x1, y0, u1, v0, r, g, b, a},
@@ -714,7 +737,7 @@ void GpuRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
         {a.x - nx, a.y - ny, 0.0f, 1.0f, r, g, bl, al},
     }};
     ensure_frame();
-    apply_view_offset(corners);
+    place(corners);
     _batch.push_quads(corners, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
 }
 
@@ -929,7 +952,7 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
         {p2.x, p2.y, u1, v1, r, g, b, a},
         {p3.x, p3.y, u0, v1, r, g, b, a},
     }};
-    apply_view_offset(corners);
+    place(corners);
     ensure_frame();
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
@@ -950,6 +973,17 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
     if (size.x <= 0 || size.y <= 0) {
         return;
     }
+    // Under a transform that turns and scales evenly a sprite is still a sprite:
+    // its pivot moves, its size scales and its angle adds up. Anything else
+    // (mirrored, sheared, squashed when turned) is drawn quad by quad.
+    if (_transformed && !_transform.is_similarity()) {
+        IRenderer2DBackend::draw_sprites(texture, sprites);
+        return;
+    }
+    const bool transformed = _transformed;
+    const Affine2 transform = _transform;
+    const f32 scale = transformed ? transform.uniform_scale() : 1.0f;
+    const f32 angle = transformed ? transform.rotation_degrees() : 0.0f;
     // The same corners, texture coordinates and colours draw_texture() computes per
     // quad; the vertex shader expands each instance.
     const f32 tex_w = static_cast<f32>(size.x);
@@ -961,15 +995,24 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
     const Vec2f offset = _view_offset;
     const auto fill = [&](std::size_t begin, std::size_t end) {
         bool dropped = false;
+        // Sprites in a batch often share an angle (all of them, under a camera).
+        f32 last_rotation = 0.0f, last_cos = 1.0f, last_sin = 0.0f;
         for (std::size_t i = begin; i < end; ++i) {
             const SpriteInstance& sprite = sprites[i];
             gpu::GpuSpriteInstance& out = _instance_scratch[i];
-            const Rectf dest = sprite.dest;
+            Rectf dest = sprite.dest;
             if (dest.w <= 0.0f || dest.h <= 0.0f) {
                 out = {};
                 out.w = 0.0f;
                 dropped = true;
                 continue;
+            }
+            f32 rotation = sprite.rotation;
+            if (transformed) {
+                const Vec2f p = transform.apply({dest.x + dest.w * sprite.pivot.x, dest.y + dest.h * sprite.pivot.y});
+                dest = {p.x - dest.w * scale * sprite.pivot.x, p.y - dest.h * scale * sprite.pivot.y, dest.w * scale,
+                        dest.h * scale};
+                rotation += angle;
             }
             const Rectf source =
                 sprite.source.w > 0.0f && sprite.source.h > 0.0f ? sprite.source : Rectf{0.0f, 0.0f, tex_w, tex_h};
@@ -983,7 +1026,7 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
             out.a = sprite.tint.a;
             out.u0 = source.x / tex_w;
             out.v0 = source.y / tex_h;
-            if (sprite.rotation == 0.0f) {
+            if (rotation == 0.0f) {
                 out.u1 = out.u0 + source.w / tex_w;
                 out.v1 = out.v0 + source.h / tex_h;
                 out.pivot_x = 0.0f;
@@ -993,9 +1036,14 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
             } else {
                 out.u1 = (source.x + source.w) / tex_w;
                 out.v1 = (source.y + source.h) / tex_h;
-                const f32 radians = sprite.rotation * pi / 180.0f;
-                out.cos = std::cos(radians);
-                out.sin = std::sin(radians);
+                if (rotation != last_rotation) {
+                    const f32 radians = rotation * pi / 180.0f;
+                    last_rotation = rotation;
+                    last_cos = std::cos(radians);
+                    last_sin = std::sin(radians);
+                }
+                out.cos = last_cos;
+                out.sin = last_sin;
                 out.pivot_x = dest.x + dest.w * sprite.pivot.x + offset.x;
                 out.pivot_y = dest.y + dest.h * sprite.pivot.y + offset.y;
             }
@@ -1187,11 +1235,13 @@ void GpuRenderer2DBackend::push_native_coordinates() {
         .clip_stack = _clip_stack,
         .view_offset = _view_offset,
         .view_offset_stack = _view_offset_stack,
+        .transform = _transform,
     });
 
     _clip_stack.clear();
     _view_offset = {0.0f, 0.0f};
     _view_offset_stack.clear();
+    set_transform({});
 }
 
 void GpuRenderer2DBackend::pop_native_coordinates() {
@@ -1217,6 +1267,7 @@ void GpuRenderer2DBackend::pop_native_coordinates() {
         _clip_stack = std::move(state.clip_stack);
         _view_offset = state.view_offset;
         _view_offset_stack = std::move(state.view_offset_stack);
+        set_transform(state.transform);
     }
     ensure_scene();
 }
@@ -1288,6 +1339,8 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     _clip_stack.clear();
     _saved_view_offsets.push_back(_view_offset);
     _view_offset = {0.0f, 0.0f}; // RT-internal draws use the target's native origin
+    _saved_transforms.push_back(_transform);
+    set_transform({});
     _rt_stack.push_back(TargetEntry{.texture = &backend->texture()});
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
@@ -1303,10 +1356,11 @@ bool GpuRenderer2DBackend::push_layer_target(const RenderTarget& target) {
     const Vec2f coords = coordinate_size(); // the layer keeps these, at its own resolution
     ensure_frame();
     flush_to_frame();
-    // Clips and the viewport offset stay as they are: draws in the layer land
-    // where they would have outside it.
+    // Clips, the viewport offset and the transform stay as they are: draws in
+    // the layer land where they would have outside it.
     _saved_clip_stacks.push_back(_clip_stack);
     _saved_view_offsets.push_back(_view_offset);
+    _saved_transforms.push_back(_transform);
     _rt_stack.push_back(TargetEntry{.texture = &backend->texture(), .coords = coords});
     _batch.begin(current_target(), SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}, /*do_clear=*/true);
     _batch.begin_bounds();
@@ -1354,6 +1408,12 @@ void GpuRenderer2DBackend::pop_render_target() {
         _saved_view_offsets.pop_back();
     } else {
         _view_offset = {0.0f, 0.0f};
+    }
+    if (!_saved_transforms.empty()) {
+        set_transform(_saved_transforms.back());
+        _saved_transforms.pop_back();
+    } else {
+        set_transform({});
     }
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
@@ -1523,7 +1583,7 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         {x1, y1, 1.0f, 1.0f, 255, 255, 255, 255},
         {x0, y1, 0.0f, 1.0f, 255, 255, 255, 255},
     }};
-    apply_view_offset(verts);
+    place(verts);
     _batch.push(verts, shader.handle(), bindings.slot0.texture, current_scissor(),
                 resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
                 static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
@@ -1763,8 +1823,9 @@ void GpuRenderer2DBackend::draw_shader_geometry(std::span<const ShaderVertex> ve
     // The batch draws triangle lists: indices are expanded here.
     const auto convert = [this](const ShaderVertex& v) {
         gpu::GpuShaderVertex out{};
-        out.x = v.position.x + _view_offset.x;
-        out.y = v.position.y + _view_offset.y;
+        const Vec2f p = place(v.position);
+        out.x = p.x;
+        out.y = p.y;
         out.u = v.uv.x;
         out.v = v.uv.y;
         out.r = v.color.r;

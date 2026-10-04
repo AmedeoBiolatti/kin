@@ -4,6 +4,7 @@
 #include <kin/renderer/cached_target.hpp>
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
+#include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 #include <kin/renderer/shader_reflect.hpp>
@@ -2539,6 +2540,160 @@ void test_layers_on_software_backend() {
     assert(pixel_near(px, size, 24, 8, kin::Color::rgb(255, 0, 0), 2));
 }
 
+// Shared by the software (SDL) and GPU backend tests: transforms map shapes,
+// textures, sprite batches and lines the same way on both.
+void check_transforms(kin::Renderer2D& renderer) {
+    using kin::Affine2;
+    const kin::Color white = kin::Color::rgb(255, 255, 255);
+    const kin::Color red = kin::Color::rgb(255, 0, 0);
+    const kin::Color green = kin::Color::rgb(0, 255, 0);
+    const kin::Color blue = kin::Color::rgb(0, 0, 255);
+    const kin::Color black = kin::Color::rgb(0, 0, 0);
+    std::vector<kin::u8> pixels(4 * 4 * 4);
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        pixels[i + 2] = 255;
+        pixels[i + 3] = 255;
+    }
+    const kin::Texture texture = renderer.create_texture_from_rgba(pixels.data(), {4, 4});
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+
+    // Outside the target a transform is set; inside it starts untransformed.
+    const auto outside = renderer.scoped_transform(Affine2::translation({5.0f, 5.0f}));
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        assert(renderer.transform().is_identity());
+        renderer.clear(white);
+        {
+            // Moved and scaled: a 4 x 4 square at (8, 8), 8 x 8.
+            const auto t = renderer.scoped_transform(Affine2::translation({8.0f, 8.0f}));
+            const auto s = renderer.scoped_transform(Affine2::scaling({2.0f, 2.0f}));
+            renderer.fill_rect({0.0f, 0.0f, 4.0f, 4.0f}, red);
+        }
+        {
+            // Turned a quarter about (40, 16): the 12 x 4 bar stands up, x 36..40, y 16..28.
+            const auto t = renderer.scoped_transform(Affine2::translation({40.0f, 16.0f}) * Affine2::rotation(90.0f) *
+                                                     Affine2::translation({-40.0f, -16.0f}));
+            renderer.fill_rect({40.0f, 16.0f, 12.0f, 4.0f}, green);
+        }
+        {
+            // Sprites turned and scaled evenly (still sprites): x 12..16, y 40..48.
+            const auto t = renderer.scoped_transform(Affine2::translation({16.0f, 40.0f}) * Affine2::rotation(90.0f) *
+                                                     Affine2::scaling({2.0f, 2.0f}));
+            const std::array<kin::SpriteInstance, 2> sprites{{
+                {.dest = {0.0f, 0.0f, 4.0f, 2.0f}},
+                {.dest = {0.0f, 0.0f, 4.0f, 2.0f}},
+            }};
+            renderer.draw_sprites(texture, sprites);
+        }
+        {
+            // Squashed, then turned (drawn quad by quad): x 44..48, y 40..48.
+            const auto t = renderer.scoped_transform(Affine2::translation({48.0f, 40.0f}) * Affine2::rotation(90.0f) *
+                                                     Affine2::scaling({2.0f, 1.0f}));
+            const std::array<kin::SpriteInstance, 2> sprites{{
+                {.dest = {0.0f, 0.0f, 4.0f, 4.0f}},
+                {.dest = {0.0f, 0.0f, 4.0f, 4.0f}},
+            }};
+            renderer.draw_sprites(texture, sprites);
+        }
+        {
+            // A line widens with the scale: x 2..18, y 56..60.
+            const auto t = renderer.scoped_transform(Affine2::translation({0.0f, 56.0f}) * Affine2::scaling({4.0f, 4.0f}));
+            renderer.draw_line({0.0f, 0.0f}, {4.0f, 0.0f}, black);
+            // Nested targets start untransformed too, and give it back.
+            const kin::Affine2 before = renderer.transform();
+            {
+                kin::RenderTarget inner = renderer.create_render_target({4, 4}, kin::ScaleMode::Nearest);
+                const auto bind_inner = renderer.scoped_render_target(inner);
+                assert(renderer.transform().is_identity());
+            }
+            assert(renderer.transform() == before);
+        }
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+    }
+    assert((renderer.transform() == Affine2::translation({5.0f, 5.0f})));
+    const auto expect = [&](int x, int y, kin::Color color, const char* what) {
+        if (!pixel_near(px, size, x, y, color, 2)) {
+            const std::size_t i = (static_cast<std::size_t>(y) * size.x + x) * 4;
+            throw std::runtime_error(std::string("check_transforms (") + std::string(renderer.backend_name()) + "): " +
+                                     what + " at " + std::to_string(x) + "," + std::to_string(y) + " is " +
+                                     std::to_string(px[i]) + "," + std::to_string(px[i + 1]) + "," + std::to_string(px[i + 2]));
+        }
+    };
+    expect(12, 12, red, "scaled square");
+    expect(20, 12, white, "past the scaled square");
+    expect(6, 6, white, "before the scaled square");
+    expect(38, 24, green, "turned bar");
+    expect(46, 18, white, "where the bar was");
+    expect(14, 44, blue, "turned sprites");
+    expect(18, 44, white, "past the turned sprites");
+    expect(46, 46, blue, "squashed sprites");
+    expect(50, 46, white, "past the squashed sprites");
+    expect(10, 58, black, "scaled line");
+    expect(10, 62, white, "under the scaled line");
+}
+
+void test_transforms_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "transform-test", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    assert(renderer.capabilities().transforms);
+    check_transforms(renderer);
+}
+
+void test_transforms_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_transforms_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-transform-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().transforms);
+        check_transforms(*renderer);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+void test_camera_zoom_and_rotation() {
+    const auto near = [](kin::Vec2f a, kin::Vec2f b) { return std::abs(a.x - b.x) < 1e-3f && std::abs(a.y - b.y) < 1e-3f; };
+    kin::Camera2D camera;
+    camera.viewport = {100.0f, 50.0f};
+    camera.offset = {10.0f, 20.0f};
+    // Unzoomed and unturned, as before: the offset is the top-left corner.
+    assert(camera.translation_only());
+    assert((camera.world_to_screen({10.0f, 20.0f}) == kin::Vec2f{0.0f, 0.0f}));
+    assert((camera.view_transform() == kin::Affine2::translation({-10.0f, -20.0f})));
+    assert((camera.visible_rect(1.0f) == kin::Rectf{9.0f, 19.0f, 102.0f, 52.0f}));
+    // Zoom works about the viewport's centre, which stays put.
+    camera.zoom = 2.0f;
+    assert(near(camera.center(), {60.0f, 45.0f}) && near(camera.world_to_screen({60.0f, 45.0f}), {50.0f, 25.0f}));
+    assert(near(camera.world_to_screen({70.0f, 45.0f}), {70.0f, 25.0f}));
+    assert(near(camera.screen_to_world({70.0f, 25.0f}), {70.0f, 45.0f}));
+    const kin::Rectf zoomed = camera.visible_rect();
+    assert(near({zoomed.x, zoomed.y}, {35.0f, 32.5f}) && near({zoomed.w, zoomed.h}, {50.0f, 25.0f}));
+    // Turned clockwise, the world turns the other way: what lies right of the
+    // centre shows above it.
+    camera.zoom = 1.0f;
+    camera.rotation = 90.0f;
+    assert(near(camera.world_to_screen({70.0f, 45.0f}), {50.0f, 15.0f}));
+    assert(near(camera.screen_to_world(camera.world_to_screen({3.0f, -7.0f})), {3.0f, -7.0f}));
+    const kin::Rectf turned = camera.visible_rect();
+    assert(near({turned.w, turned.h}, {50.0f, 100.0f}));
+    camera.look_at({0.0f, 0.0f});
+    assert(near(camera.world_to_screen({0.0f, 0.0f}), {50.0f, 25.0f}));
+}
+
 void test_cached_target_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "cached-target-test", .width = 16, .height = 16, .hidden = true});
@@ -2855,6 +3010,9 @@ int main() {
     test_layers_on_software_backend();
     test_cached_target_on_software_backend();
     test_cached_target_on_gpu_backend();
+    test_transforms_on_software_backend();
+    test_transforms_on_gpu_backend();
+    test_camera_zoom_and_rotation();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

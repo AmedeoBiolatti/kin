@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
 #include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/material.hpp>
@@ -43,6 +44,7 @@ struct RendererBackendCapabilities {
     bool shader_geometry = false; // draw_shader_geometry() draws
     bool data_buffers = false;    // create_data_buffer() and shaders reading them
     bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
+    bool transforms = false;      // set_transform() honoured (Renderer2D::push_transform)
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -340,6 +342,10 @@ public:
 
     // See Renderer2D::set_blend_mode. The default backend ignores it.
     virtual void set_blend_mode(BlendMode) {}
+    // See Renderer2D::push_transform: maps every later draw's coordinates
+    // (before viewports and clips, which it leaves alone). A backend that
+    // reports capabilities().transforms honours it.
+    virtual void set_transform(const Affine2&) {}
     // Worker threads the backend may use for large batches (null: none).
     virtual void set_job_system(JobSystem*) {}
 

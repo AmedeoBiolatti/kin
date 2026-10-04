@@ -9,6 +9,18 @@ releases may change APIs.
 
 ### Added
 
+- Transforms: `Renderer2D::push_transform` / `pop_transform` / `scoped_transform`
+  draw through a `kin::Affine2` (`kin/core/affine.hpp`), on both backends.
+  Mapped on the CPU, so draws still batch across transform changes, and sprite
+  batches stay instanced under rotation and even scale. Through a zoomed,
+  turned camera 20,000 quads take about 5% more CPU to record
+  (`kin_draw_bench 300 20000 camera`); untransformed drawing costs what it did.
+- `Camera2D::zoom` and `rotation`, about the viewport's centre, with
+  `view_transform()`, `center()` and `look_at()`; `world_to_screen`,
+  `screen_to_world` and `visible_rect` follow them, and a `RenderQueue` flushed
+  with such a camera draws through it.
+- `Transform2D::scale` and `WorldTransform::scale`; `kin::world_transform(entity)`
+  and `kin::compose(parent, child)`.
 - `kin::CachedTarget` and `kin::cache_key(...)`: a render target drawn again
   only when its key or size changes (`kin/renderer/cached_target.hpp`). A
   288 x 288 target of 44 layers: 4.3 Mpixels and 0.5 ms of CPU a frame redrawn,
@@ -103,6 +115,14 @@ releases may change APIs.
 
 ### Changed
 
+- Children follow their parents' rotation and scale: `propagate_transforms()`
+  (and `world_position()`) turn and scale a child's position by its parents'.
+  Before, only positions and angles were added, so a child of a turned parent
+  stayed put while the parent turned.
+- Renderer offsets, sizes and line ends go through the entity's world
+  transform; `TextureRenderer` and `RectRenderer` now turn with their entity
+  (they ignored `rotation`), and queued `FillRect` / `DrawRect` commands honour
+  `rotation` and `pivot`.
 - SDL_GPU shader draws with the same params (and shader, sources, state) in a
   row are one draw call, not one each: 2000 small shader surfaces a frame went
   from 0.47 to 0.24 ms back to back (`kin_draw_bench 60 1 surfaces`).

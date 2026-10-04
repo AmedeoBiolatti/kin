@@ -38,13 +38,15 @@ helpers, but ECS/editor-facing rendering should prefer ids.
 ECS sprite rendering composes placement in this order:
 
 ```text
-anchor = world_position + catalog_sprite.offset + SpriteRenderer.offset
-top_left = anchor - pivot * final_size
+anchor = world_transform(catalog_sprite.offset + SpriteRenderer.offset)
+top_left = anchor - pivot * final_size * |world scale|
+rotation = world rotation + SpriteRenderer.rotation, about the anchor
 ```
 
 `final_size` uses `SpriteRenderer.size` when set, otherwise the catalog sprite
 size. `pivot` uses `SpriteRenderer.pivot` when it is non-negative, otherwise the
-catalog sprite pivot.
+catalog sprite pivot. With an unturned, unscaled entity the anchor is its
+position plus the offsets.
 
 Named layer helpers keep ordering stable:
 
@@ -69,6 +71,67 @@ The renderer-backed load overload can create textures from image assets:
 ```cpp
 kin::SpriteCatalog catalog = kin::load_sprite_catalog(assets, renderer, "hero.kinsprites");
 ```
+
+## Transforms And Cameras
+
+### Entities and the flecs hierarchy
+
+`Transform2D` places an entity relative to its parent (flecs `ChildOf`), or to
+the world without one: scaled (`scale`, per axis), then turned (`rotation`, in
+degrees, clockwise), then moved to `pos`. `WorldRenderState::propagate_transforms()`
+composes them into `WorldTransform` through a cached flecs `cascade` query, so
+parents are done before their children and each table (one parent) is a tight
+loop:
+
+```cpp
+kin::EcsEntity ship = world.entity("ship").set(kin::Transform2D{.pos = {100, 100}, .rotation = 30});
+kin::EcsEntity turret = world.entity("turret").set(kin::Transform2D{.pos = {12, 0}});
+turret.child_of(ship);   // turret sits 12 units along the ship's nose, turned with it
+```
+
+Renderer offsets and sizes, line ends and rectangles go through the entity's
+world transform. A turned parent's scale stays along the child's own axes (no
+shear), and a negative scale draws a sprite at its size, unmirrored.
+`kin::world_transform(entity)` composes the chain on demand when no
+`WorldRenderState` has run; `kin::compose(parent, child)` is one step.
+
+### Drawing through a transform
+
+`Renderer2D::push_transform(m)` / `pop_transform()` / `scoped_transform(m)`
+map everything drawn until the pop by `m` (a `kin::Affine2`), then by any
+transform pushed before it. Shapes are transformed as if drawn and then moved,
+turned and scaled: a line or an outline one unit wide grows with the scale.
+The vertices are mapped on the CPU, so draws keep batching across transform
+changes; sprite batches stay instanced under rotation and even scale.
+Viewports, clips, `capture_backdrop` and `read_rgba` stay in untransformed
+coordinates. A render target starts untransformed and the transform returns
+when it is popped; layers keep it. Both backends support it
+(`capabilities().transforms`).
+
+```cpp
+{
+    const auto spin = renderer.scoped_transform(kin::Affine2::translation(center) *
+                                                kin::Affine2::rotation(angle) *
+                                                kin::Affine2::translation({-center.x, -center.y}));
+    draw_dial(renderer);
+}
+```
+
+### Cameras
+
+`Camera2D` has `zoom` (screen units per world unit) and `rotation` (degrees,
+clockwise: the camera turns, so the world turns the other way), both about the
+viewport's centre. `center()` and `look_at(world)` move it by that point;
+`offset` is still the world point at the top-left corner of an unzoomed,
+unturned camera. `view_transform()` is world to screen as an `Affine2`;
+`world_to_screen`, `screen_to_world` and `visible_rect` (the box around what is
+shown, for culling) follow zoom and rotation.
+
+A `RenderQueue` flushed with a `RenderView` whose camera zooms or turns draws
+through `view_transform()`; one that only moves shifts each command as before.
+Output-pixel commands and `Text` / `Custom` callbacks draw without the camera
+either way: draw world coordinates in a callback with
+`renderer.scoped_transform(camera.view_transform())`.
 
 ## Animation
 

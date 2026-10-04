@@ -13,8 +13,19 @@ struct Health {
     int hp = 0;
 };
 
-void test_spawns_registered_factory_prefab() {
+// flecs 4.0 keeps one id per C++ component type for the whole process: worlds
+// that register the same types in different orders hand one type's id to
+// another. Each test's world registers them in this order first.
+kin::EcsWorld make_world() {
     kin::EcsWorld world;
+    world.raw().component<Marker>();
+    world.raw().component<Health>();
+    world.raw().component<kin::Transform2D>();
+    return world;
+}
+
+void test_spawns_registered_factory_prefab() {
+    kin::EcsWorld world = make_world();
     kin::PrefabRegistry prefabs;
 
     assert(prefabs.add("marker", [](kin::EcsWorld& w, const kin::PrefabSpawn& spawn) {
@@ -32,7 +43,7 @@ void test_spawns_registered_factory_prefab() {
 }
 
 void test_recipe_prefab_uses_spawn_name_and_parent() {
-    kin::EcsWorld world;
+    kin::EcsWorld world = make_world();
     kin::PrefabRegistry prefabs;
     kin::EcsEntity parent = world.entity("parent");
 
@@ -58,7 +69,7 @@ void test_recipe_prefab_uses_spawn_name_and_parent() {
 }
 
 void test_missing_remove_and_names() {
-    kin::EcsWorld world;
+    kin::EcsWorld world = make_world();
     kin::PrefabRegistry prefabs;
     assert(!prefabs.spawn(world, "missing"));
     assert(prefabs.names().empty());
