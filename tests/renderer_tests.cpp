@@ -2515,6 +2515,30 @@ void check_cached_target(kin::Renderer2D& renderer) {
     assert(cache.reuses() == 4 && cache.redraws() == 4);
 }
 
+// Without layer targets (SDL's software renderer) a layer draws straight
+// through: what is drawn in it still lands, and the guard ends cleanly.
+void test_layers_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "layer-fallback-test", .width = 32, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::RenderTarget target = renderer.create_render_target({32, 16}, kin::ScaleMode::Nearest);
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(255, 255, 255));
+        {
+            const auto outer = renderer.begin_layer({.opacity = 0.5f});
+            const auto inner = renderer.begin_layer();
+            renderer.fill_rect(kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}, kin::Color::rgb(0, 0, 0));
+        }
+        renderer.fill_rect(kin::Rectf{16.0f, 0.0f, 16.0f, 16.0f}, kin::Color::rgb(255, 0, 0)); // after: not in a layer
+        assert(renderer.read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
+    }
+    assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 0, 0), 2));
+    assert(pixel_near(px, size, 24, 8, kin::Color::rgb(255, 0, 0), 2));
+}
+
 void test_cached_target_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "cached-target-test", .width = 16, .height = 16, .hidden = true});
@@ -2828,6 +2852,7 @@ int main() {
     test_gpu_mipmaps();
     test_gpu_overdraw();
     test_gpu_layers();
+    test_layers_on_software_backend();
     test_cached_target_on_software_backend();
     test_cached_target_on_gpu_backend();
     test_gpu_scopes();

@@ -38,6 +38,14 @@
 
 namespace kin {
 
+// An open layer (begin_layer). Defined before anything that needs its size
+// (the unique_ptrs holding it).
+struct Renderer2D::OpenLayer {
+    PooledTarget target;
+    LayerOptions options;
+};
+
+
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     // The SDL_GPU/Vulkan backend is now the default when a real GPU is available
     // (`allow_gpu` — false for headless/dummy-video). Opt out with KIN_RENDER_BACKEND=sdl
@@ -631,11 +639,6 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     }
     _backend->draw_shader_surface(rect, shader, params, sources, buffers);
 }
-
-struct Renderer2D::OpenLayer {
-    PooledTarget target;
-    LayerOptions options;
-};
 
 Renderer2D::LayerGuard::~LayerGuard() {
     if (_renderer) {
