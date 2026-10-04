@@ -59,6 +59,7 @@ add_library(kin_engine STATIC
     src/physics/physics.cpp
     src/prefab/prefab_asset.cpp
     src/renderer/animation_import.cpp
+    src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
     src/renderer/render_profile.cpp
     src/renderer/render_queue.cpp

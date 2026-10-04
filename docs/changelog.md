@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- `kin::CachedTarget` and `kin::cache_key(...)`: a render target drawn again
+  only when its key or size changes (`kin/renderer/cached_target.hpp`). A
+  288 x 288 target of 44 layers: 4.3 Mpixels and 0.5 ms of CPU a frame redrawn,
+  0.08 Mpixels and 0.002 ms cached.
 - `Renderer2D::begin_layer({.opacity, .resolution, .blend})`: draws land in a
   pooled render target in the same coordinates and are laid over once, at one
   opacity, over only the box they covered; `resolution` below 1 for soft

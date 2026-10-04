@@ -122,7 +122,8 @@ With `KIN_BUILD_BENCHMARKS`, two programs time the SDL_GPU backend directly:
   as `fill_rect` calls and 0.19 ms as one `draw_sprites` batch: many sprites of
   one texture are much cheaper batched (`RenderQueue` does so by itself).
   Its third argument picks other runs: `pipelines`, `data`, `scaled`,
-  `compute`, `hotreload` and `surfaces` (see `docs/rendering.md`).
+  `compute`, `hotreload`, `surfaces`, `mipmaps`, `layers` and `cached` (see
+  `docs/rendering.md`).
 - `kin_upload_bench [frames] [workers] [big]`: texture creation and updates.
 
 ## Benchmark Profiles

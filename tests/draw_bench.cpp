@@ -1,6 +1,7 @@
 // Times drawing many quads a frame on the SDL_GPU backend, three ways:
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
 #include <kin/platform/app.hpp>
+#include <kin/renderer/cached_target.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 
@@ -450,8 +451,69 @@ int layers(int frames) {
     return 0;
 }
 
+// XC-121's other pattern: a 288 x 288 target drawn over 44 times a frame (layers
+// of 200 small quads covering it), then shown: every frame, or cached and drawn
+// only when its key changes (never, here).
+int cached(int frames) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "cached-bench", .width = 1280, .height = 720, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    kin::CachedTarget cache;
+    const auto draw_content = [&] {
+        renderer->clear(kin::Color::rgba(0, 0, 0, 0));
+        for (int layer = 0; layer < 44; ++layer) {
+            for (int i = 0; i < 200; ++i) {
+                const float x = static_cast<float>((i % 14) * 20), y = static_cast<float>((i / 14) * 20);
+                renderer->fill_rect(kin::Rectf{x, y, 22.0f, 22.0f}, kin::Color::rgba(40, 80, 120, 30));
+            }
+        }
+    };
+    for (const bool use_cache : {false, true}) {
+        double pixels = 0.0;
+        std::vector<double> record;
+        const auto frame = [&] {
+            const auto t0 = clock::now();
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            if (!use_cache || cache.stale(*renderer, {288, 288}, kin::cache_key(7))) {
+                const auto bind = renderer->scoped_render_target(cache.target());
+                draw_content();
+            }
+            renderer->draw_texture(cache.texture(), kin::Rectf{0.0f, 0.0f, 288.0f, 288.0f});
+            record.push_back(ms(t0, clock::now()));
+            renderer->present();
+            pixels = renderer->backend_stats().last_pixels_drawn;
+        };
+        if (!use_cache) {
+            cache.stale(*renderer, {288, 288}, kin::cache_key(0)); // just to have its target
+        }
+        for (int f = 0; f < 10; ++f) {
+            frame();
+        }
+        std::vector<kin::u8> one;
+        kin::Vec2i one_size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+        record.clear();
+        const auto t0 = clock::now();
+        for (int f = 0; f < frames; ++f) {
+            frame();
+        }
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+        std::sort(record.begin(), record.end());
+        std::printf("288x288 target of 44 layers, %-14s %5.2f Mpixels shaded, record median %.3f ms, back-to-back frame %.3f ms\n",
+                    use_cache ? "cached:" : "every frame:", pixels / 1e6, record[record.size() / 2],
+                    ms(t0, clock::now()) / frames);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
+    if (argc > 3 && std::string_view{argv[3]} == "cached") {
+        return cached(frames);
+    }
     if (argc > 3 && std::string_view{argv[3]} == "layers") {
         return layers(frames);
     }

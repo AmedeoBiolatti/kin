@@ -434,6 +434,28 @@ screen), whole-screen targets shaded 15.9 Mpixels a frame, `begin_layer` 2.3,
 and at half resolution 1.4. SDL_GPU; elsewhere the draws go straight to the
 current target and the opacity is not applied.
 
+## Cached Targets
+
+A render target whose content changes rarely (a minimap, an icon, a panel, a
+static part of the world) can be drawn again only when it does:
+
+```cpp
+kin::CachedTarget minimap;
+// each frame:
+if (minimap.stale(renderer, size, kin::cache_key(camera.x, camera.y, map.version()))) {
+    const auto bind = renderer.scoped_render_target(minimap.target());
+    renderer.clear(kin::Color::rgba(0, 0, 0, 0));
+    draw_minimap(renderer);
+}
+renderer.draw_texture(minimap.texture(), rect);
+```
+
+`stale()` is true the first time, when the size or the key changes, or after
+`invalidate()`; `kin::cache_key(...)` hashes plain values into a key.
+`reuses()` and `redraws()` count how it went. In `kin_draw_bench 200 1
+cached`, a 288 x 288 target of 44 layers cost 4.3 Mpixels and 0.5 ms of CPU a
+frame drawn every frame, and 0.08 Mpixels and 0.002 ms cached.
+
 ## Mipmaps
 
 A texture drawn much smaller than it is (a big sprite sheet zoomed out, a

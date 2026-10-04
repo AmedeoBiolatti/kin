@@ -1,6 +1,7 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/core/jobs.hpp>
+#include <kin/renderer/cached_target.hpp>
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/post_blur.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -2479,6 +2480,70 @@ void test_min_max_blend_on_gpu_backend() {
     }
 }
 
+// A cached target is drawn again only when its key or size changes (or it
+// is invalidated), and keeps what it was drawn with in between.
+void check_cached_target(kin::Renderer2D& renderer) {
+    kin::CachedTarget cache{kin::ScaleMode::Nearest};
+    const auto draw_in = [&](kin::Color color) {
+        const auto bind = renderer.scoped_render_target(cache.target());
+        renderer.clear(kin::Color::rgba(0, 0, 0, 0));
+        renderer.fill_rect(kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}, color);
+    };
+    const kin::u64 key = kin::cache_key(1, 2.5f);
+    assert(key == kin::cache_key(1, 2.5f) && key != kin::cache_key(1, 2.6f));
+    assert(cache.stale(renderer, {16, 16}, key));
+    draw_in(kin::Color::rgb(255, 0, 0));
+    for (int frame = 0; frame < 3; ++frame) {
+        assert(!cache.stale(renderer, {16, 16}, key)); // reused
+        kin::RenderTarget screen = renderer.create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        {
+            const auto bind = renderer.scoped_render_target(screen);
+            renderer.clear(kin::Color::rgb(0, 0, 0));
+            renderer.draw_texture(cache.texture(), kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f});
+            assert(renderer.read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+        }
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgb(255, 0, 0), 2)); // what it was drawn with
+        renderer.present();
+    }
+    assert(cache.stale(renderer, {16, 16}, kin::cache_key(2)));   // a new key
+    assert(!cache.stale(renderer, {16, 16}, kin::cache_key(2)));
+    assert(cache.stale(renderer, {32, 16}, kin::cache_key(2)));   // a new size
+    cache.invalidate();
+    assert(cache.stale(renderer, {32, 16}, kin::cache_key(2)));   // invalidated
+    assert(cache.reuses() == 4 && cache.redraws() == 4);
+}
+
+void test_cached_target_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "cached-target-test", .width = 16, .height = 16, .hidden = true});
+    kin::Renderer2D renderer{window};
+    check_cached_target(renderer);
+}
+
+void test_cached_target_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_cached_target_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-cached-target-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        check_cached_target(*renderer);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Shared by the software (SDL) and GPU backend tests: both must light the same way.
 void check_lighting(kin::Renderer2D& renderer) {
     constexpr kin::Vec2i size{64, 64};
@@ -2763,6 +2828,8 @@ int main() {
     test_gpu_mipmaps();
     test_gpu_overdraw();
     test_gpu_layers();
+    test_cached_target_on_software_backend();
+    test_cached_target_on_gpu_backend();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();
