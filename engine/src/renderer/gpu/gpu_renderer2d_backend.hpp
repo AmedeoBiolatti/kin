@@ -101,6 +101,7 @@ public:
     void set_gpu_timing_enabled(bool enabled) override;
     std::string pipeline_record() const override;
     void prewarm_pipelines(std::string_view record) override;
+    void set_overdraw_view(bool enabled) override { _overdraw_view = enabled; }
     void begin_gpu_scope(std::string_view name) override;
     void end_gpu_scope() override;
     std::vector<GpuScopeTiming> take_gpu_scope_timings() override { return std::exchange(_scope_timings, {}); }
@@ -240,6 +241,9 @@ private:
     gpu::GpuShader _fragment_shader;
     gpu::GpuShader _instance_shader; // sprite_instanced.vert; without it draw_sprites draws quad by quad
     gpu::GpuShader _shader_vertex_shader; // shader_geometry.vert; without it draw_shader_geometry draws nothing
+    gpu::GpuShader _overdraw_count_shader; // the overdraw view's: one layer a draw
+    ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
+    bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;
     std::vector<gpu::GpuSpriteInstance> _instance_scratch;
     JobSystem* _jobs = nullptr; // splits large draw_sprites() batches when set
@@ -289,6 +293,7 @@ private:
     // The open gpu_scope(): its name, and whether it is timed (the timer had room).
     std::optional<std::string> _scope;
     bool _scope_timed = false;
+    f64 _scope_pixels = 0.0; // the batch's pixel count when the scope began
     std::vector<GpuScopeTiming> _scope_timings; // finished, not yet taken
     // Submits what is recorded so far (the frame's batch included) with a fence
     // for the timer; the next draw starts a new command buffer.

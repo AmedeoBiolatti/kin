@@ -37,6 +37,8 @@ Any game using `run_scene_app` accepts:
 | Flag | Effect |
 |---|---|
 | `--profile` | Profile the run: windowed, until it quits or `--frames` N; with `--headless`, a 600-frame pass unless `--frames` is set. |
+| `--overdraw-view` | Start with the overdraw view on (SDL_GPU): the screen shows how many times each pixel is shaded, as colours. Also a debug overlay toggle. |
+| `--screenshot=PATH` | Save the last frame as a PNG when the run ends. |
 | `--profile-lines` | Enables manual macro capture for this run. |
 | `--profile-json=PATH` | Writes `kin.profile/1` JSON. Use `-` for stdout. |
 | `--profile-text=PATH` | Writes a human-readable summary. Use `-` for stdout. |
@@ -94,6 +96,16 @@ On the SDL_GPU backend two more rows show the GPU's side of the frame:
   overlaps counted each time, clipping not taken off), over the screen's. In
   2D this is usually where GPU time goes. The demos run 0.2 to 3.2; XC-121
   runs 5 to 8.5, about half of it render targets composited over the scene.
+
+- `overdraw.<name>`: a `gpu_scope`'s share of `render.overdraw`, so a frame's
+  overdraw can be told apart by part.
+
+To see where the overdraw is, the debug overlay's *Overdraw view* toggle (or
+`--overdraw-view`) draws every draw as one layer where it covers and shows the
+counts as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or
+more. With `--screenshot=PATH` a run saves its last frame as a PNG. Only the
+screen's own draws show: a render target's composite counts once, whatever
+was drawn into it.
 
 GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
 or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`

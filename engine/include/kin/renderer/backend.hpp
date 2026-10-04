@@ -54,6 +54,10 @@ struct RendererBackendCapabilities {
 struct GpuScopeTiming {
     std::string name{};
     f64 ms = 0.0;
+    // The pixels its draws shaded (as RendererBackendStats::last_pixels_drawn),
+    // and that over the screen's: its share of the frame's overdraw.
+    f64 pixels = 0.0;
+    f64 overdraw = 0.0;
 };
 
 // What a compute dispatch reads and writes (Renderer2D::dispatch_compute). In
@@ -126,6 +130,8 @@ public:
     // prewarm_pipelines to make them while it loads (before their first draw).
     virtual std::string pipeline_record() const { return {}; }
     virtual void prewarm_pipelines(std::string_view /*record*/) {}
+    // Draws show how many times each pixel is shaded instead of themselves.
+    virtual void set_overdraw_view(bool) {}
     // A named scope of GPU work, timed while GPU timing is on (else nothing).
     virtual void begin_gpu_scope(std::string_view) {}
     virtual void end_gpu_scope() {}

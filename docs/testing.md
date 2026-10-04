@@ -156,6 +156,8 @@ of headless flags parsed by `parse_headless_options`:
 | `--game-info` / `--list-info` | Print game metadata, then quit. |
 | `--profile-render` | Run 600 frames and print a render timing table. |
 | `--profile` | Profile the run: windowed, until it quits or `--frames` N; with `--headless`, a 600-frame pass unless `--frames` is set. |
+| `--overdraw-view` | Start with the overdraw view on (SDL_GPU): the screen shows how many times each pixel is shaded, as colours. Also a debug overlay toggle. |
+| `--screenshot=PATH` | Save the last frame as a PNG when the run ends. |
 | `--profile-lines` | Enable line/block profile capture for compiled-in Kin profile macros. |
 | `--profile-json=PATH` | Write `kin.profile/1` JSON to PATH (`-` for stdout). Implies `--profile`. |
 | `--profile-text=PATH` | Write a text profile summary to PATH (`-` for stdout). Implies `--profile`. |

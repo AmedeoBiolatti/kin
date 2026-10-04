@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Added
 
+- Overdraw by part and by eye: a `gpu_scope`'s pixels and overdraw
+  (`GpuScopeTiming::pixels` / `overdraw`, `overdraw.<name>` in `--profile`), and
+  the overdraw view (`Renderer2D::set_overdraw_view`, the debug overlay's toggle,
+  `--overdraw-view`), which shows how many times each pixel is shaded as
+  colours. `--screenshot=PATH` saves a run's last frame.
 - Overdraw: `RendererBackendStats::last_pixels_drawn` and `last_overdraw`
   (SDL_GPU), reported as `render.overdraw` by `--profile` and the debug
   overlay: how many times each screen pixel was shaded in the frame.

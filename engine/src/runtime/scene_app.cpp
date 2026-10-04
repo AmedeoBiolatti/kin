@@ -132,6 +132,10 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
         } else if (arg == "--game-info" || arg == "--list-info") {
             options.enabled = true;
             options.print_game_info = true;
+        } else if (arg == "--overdraw-view") {
+            options.overdraw_view = true;
+        } else if (arg.starts_with("--screenshot=")) {
+            options.screenshot_path = arg.substr(13);
         } else if (arg == "--profile-render") {
             options.enabled = true;
             options.profile_render = true;
@@ -498,6 +502,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         }
     }
     bool pipelines_prewarmed = false;
+    debug_overlay.options().overdraw_view = config.headless.overdraw_view;
     const auto user_shutdown = window.shutdown;
     window.shutdown = [&, user_shutdown](FrameContext& frame) {
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
@@ -515,6 +520,10 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             run_report.fail(reason.str());
         }
 #endif
+        if (!config.headless.screenshot_path.empty() && !frame.renderer.save_png(config.headless.screenshot_path)) {
+            KIN_LOG_ERROR_F("runtime", "screenshot not saved",
+                            (LogFields{{.name = "path", .value = config.headless.screenshot_path}}));
+        }
         if (!pipeline_file.empty()) {
             std::error_code error;
             std::filesystem::create_directories(pipeline_file.parent_path(), error);
@@ -601,6 +610,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             debug_overlay.options().detailed_render_timings_enabled = true;
         }
         ctx.renderer.set_texture_batching_enabled(debug_overlay.options().texture_batching_enabled);
+        ctx.renderer.set_overdraw_view(debug_overlay.options().overdraw_view);
     };
     const auto make_scene_context = [&](FrameContext& ctx) {
         return kin::SceneContext{
@@ -740,6 +750,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                     const std::string name = "gpu." + scope.name;
                     debug_overlay.record(name, scope.ms);
                     record_profile_value(name, "runtime", scope.ms);
+                    // Not a time: the scope's share of render.overdraw.
+                    debug_overlay.record("overdraw." + scope.name, scope.overdraw);
+                    record_profile_value("overdraw." + scope.name, "runtime", scope.overdraw);
                 }
             }
         }

@@ -264,11 +264,14 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     u32 bound_binding_count = 0;
 
     for (const Range& range : _ranges) {
-        SDL_GPUShader* fragment = range.fragment ? range.fragment : ctx.default_fragment;
+        SDL_GPUShader* fragment = ctx.override_fragment ? ctx.override_fragment
+                                : range.fragment         ? range.fragment
+                                                         : ctx.default_fragment;
+        const GpuBlendMode blend = ctx.override_fragment ? GpuBlendMode::Additive : range.blend;
         SDL_GPUShader* vertex = range.layout == GpuVertexLayout::SpriteInstances ? ctx.instance_shader
                               : range.layout == GpuVertexLayout::ShaderVertices  ? ctx.shader_vertex_shader
                                                                                  : ctx.vertex_shader;
-        SDL_GPUGraphicsPipeline* pipeline = cache.get(vertex, fragment, range.blend, ctx.target_format, range.layout);
+        SDL_GPUGraphicsPipeline* pipeline = cache.get(vertex, fragment, blend, ctx.target_format, range.layout);
         if (!pipeline) {
             continue;
         }
@@ -290,7 +293,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
             have_scissor = true;
         }
 
-        if (range.uniform_size > 0) {
+        if (range.uniform_size > 0 && !ctx.override_fragment) {
             SDL_PushGPUFragmentUniformData(frame.command_buffer(), 0,
                                            _uniform_bytes.data() + range.uniform_offset,
                                            range.uniform_size);
@@ -299,7 +302,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
         SDL_GPUTextureSamplerBinding tex_bindings[MaxShaderSamplers]{};
         tex_bindings[0].texture = range.texture ? range.texture : ctx.white_texture;
         tex_bindings[0].sampler = range.sampler ? range.sampler : ctx.sampler;
-        const u32 binding_count = 1 + range.extra_count;
+        const u32 binding_count = ctx.override_fragment ? 1 : 1 + range.extra_count;
         for (u32 i = 0; i < range.extra_count; ++i) {
             const SDL_GPUTextureSamplerBinding& extra = _extra_bindings[range.extra_offset + i];
             tex_bindings[1 + i].texture = extra.texture ? extra.texture : ctx.white_texture;
@@ -314,7 +317,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
             std::copy(tex_bindings, tex_bindings + binding_count, bound_bindings);
             bound_binding_count = binding_count;
         }
-        if (range.storage_count > 0) {
+        if (range.storage_count > 0 && !ctx.override_fragment) {
             SDL_BindGPUFragmentStorageBuffers(pass, 0, _storage_buffers.data() + range.storage_offset,
                                               range.storage_count);
         }

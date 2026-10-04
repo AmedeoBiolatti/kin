@@ -38,6 +38,7 @@ struct GpuFrameSample {
 struct GpuScopeSample {
     std::string name{};
     f64 ms = 0.0;
+    f64 pixels = 0.0; // what its draws covered
 };
 
 // What finished since the last collect(): the latest frame, and every scope.
@@ -71,7 +72,7 @@ public:
     // own, whose command buffer was submitted at `end_submit_ns`. Scopes do not
     // nest, and a frame's fence comes after its scopes'.
     void track_scope_start(SDL_GPUFence* fence);
-    void track_scope_end(std::string name, SDL_GPUFence* fence, u64 end_submit_ns);
+    void track_scope_end(std::string name, SDL_GPUFence* fence, u64 end_submit_ns, f64 pixels = 0.0);
 
     // What finished since the last call. Releases the finished fences.
     GpuTimerSamples collect();
@@ -84,6 +85,7 @@ private:
         u64 submit_ns = 0;  // the frame's first submit, or the scope's own
         u32 frames = 1;     // a frame: this one and the untimed ones before it
         std::string name{}; // a scope's
+        f64 pixels = 0.0;   // a scope's draws' covered pixels
         u64 signal_ns = 0;  // set once the fence signals
     };
 

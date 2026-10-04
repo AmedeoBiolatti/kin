@@ -164,6 +164,7 @@ public:
     // targets' own pixels (overlaps count each time, clipping is not taken
     // off): what the GPU shaded, for an overdraw figure.
     f64 take_pixels() { return std::exchange(_pixels, 0.0); }
+    f64 pixels() const { return _pixels; } // so far, without taking them
 
     // Context shared by every range in a flush.
     struct FlushContext {
@@ -175,6 +176,9 @@ public:
         SDL_GPUSampler* sampler = nullptr;
         SDL_GPUTextureFormat target_format = SDL_GPU_TEXTUREFORMAT_INVALID;
         GpuView view{};
+        // Set: every range draws with this shader, additively, its own inputs
+        // left unbound (the overdraw view).
+        SDL_GPUShader* override_fragment = nullptr;
     };
 
     // Emit one render pass into the active target and reset the accumulator.

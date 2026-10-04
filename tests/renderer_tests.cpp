@@ -1655,6 +1655,9 @@ void test_gpu_scopes() {
         for (const kin::GpuScopeTiming& t : timings) {
             assert(t.name == "heavy" || t.name == "light");
             (t.name == "heavy" ? heavy : light).push_back(t.ms);
+            // Each scope's pixels: 600 window-sized quads, or one 4 x 4 rect.
+            const double pixels = t.name == "heavy" ? 600.0 * 256 * 256 : 16.0;
+            assert(std::abs(t.pixels - pixels) < 1.0 && std::abs(t.overdraw - pixels / (256.0 * 256.0)) < 1e-6);
         }
         if (heavy.size() < 10 || light.size() < 10) { // with the GPU behind, some go untimed
             throw std::runtime_error(std::string(test_name) + ": " + std::to_string(heavy.size()) + " heavy and " +
@@ -2097,6 +2100,21 @@ void test_gpu_overdraw() {
             throw std::runtime_error(std::string(test_name) + ": logical overdraw " +
                                      std::to_string(renderer->backend_stats().last_overdraw));
         }
+
+        // The overdraw view: each draw adds one layer (8 in red) where it covers,
+        // whatever it draws; the presented frame shows them as colours.
+        renderer->set_overdraw_view(true);
+        renderer->clear(kin::Color::rgb(200, 200, 200)); // counted from black regardless
+        renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}, kin::Color::rgb(0, 0, 255));
+        renderer->draw_texture(dot, kin::Rectf{0.0f, 0.0f, 1.0f, 1.0f}, kin::Rectf{8.0f, 0.0f, 16.0f, 16.0f},
+                               kin::Color::rgba(0, 255, 0, 10));
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        assert(renderer->read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size)); // the counts
+        const auto layers = [&](int x) { return (px[(static_cast<std::size_t>(8) * size.x + x * size.x / 32) * 4] + 4) / 8; };
+        assert(layers(4) == 1 && layers(12) == 2 && layers(20) == 1 && layers(28) == 0);
+        renderer->present();
+        renderer->set_overdraw_view(false);
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;

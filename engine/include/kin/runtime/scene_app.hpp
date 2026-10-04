@@ -31,6 +31,10 @@ struct HeadlessOptions {
     std::string report_path;
     std::string profile_json_path;
     std::string profile_text_path;
+    // --overdraw-view: start with the overdraw view on (Renderer2D::set_overdraw_view).
+    bool overdraw_view = false;
+    // --screenshot=PATH: the last frame saved as a PNG when the run ends.
+    std::string screenshot_path;
     // Run the game as a long-lived command server (--server) instead of a fixed
     // headless run. server_mode is "driven" (default) or "realtime";
     // server_transport is "stdio" (default) or "http".

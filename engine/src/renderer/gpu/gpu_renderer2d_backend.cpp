@@ -195,6 +195,13 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         KIN_LOG_WARN_F("render", "shader geometry unavailable",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    try {
+        _overdraw_count_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                           SDL_GPU_SHADERFORMAT_SPIRV, dir / "overdraw_count.frag.spv",
+                                                           /*uniform_buffers=*/0, /*samplers=*/1);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "overdraw view unavailable", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
 
     SDL_GPUSamplerCreateInfo sampler_info{};
     sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
@@ -359,6 +366,9 @@ void GpuRenderer2DBackend::flush_to_frame() {
     ctx.white_texture = _white.handle();
     ctx.sampler = _sampler_linear; // default for solids/white & null-sampler ranges
     ctx.target_format = current_target().format();
+    if (_overdraw_view) {
+        ctx.override_fragment = _overdraw_count_shader.handle();
+    }
     ctx.view.scale[0] = 2.0f / static_cast<f32>(std::max(1, coord.x));
     ctx.view.scale[1] = 2.0f / static_cast<f32>(std::max(1, coord.y));
     ctx.view.translate[0] = -1.0f;
@@ -368,7 +378,8 @@ void GpuRenderer2DBackend::flush_to_frame() {
 
 void GpuRenderer2DBackend::clear(Color color) {
     ensure_scene();
-    _clear_color = to_fcolor(color);
+    // The overdraw view counts from nothing.
+    _clear_color = _overdraw_view && _overdraw_count_shader ? SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f} : to_fcolor(color);
     if (!_frame) {
         _frame.emplace(_device.begin_frame());
     } else {
@@ -453,6 +464,7 @@ void GpuRenderer2DBackend::begin_gpu_scope(std::string_view name) {
     _scope_timed = !_gpu_timer->full(2);
     if (_scope_timed) {
         _gpu_timer->track_scope_start(submit_for_scope());
+        _scope_pixels = _batch.pixels(); // flushed: everything before is counted
     }
 }
 
@@ -466,7 +478,8 @@ void GpuRenderer2DBackend::end_gpu_scope() {
         return;
     }
     const u64 submit_ns = SDL_GetTicksNS();
-    _gpu_timer->track_scope_end(std::move(name), submit_for_scope(), submit_ns);
+    SDL_GPUFence* fence = submit_for_scope(); // flushes the scope's draws, counting their pixels
+    _gpu_timer->track_scope_end(std::move(name), fence, submit_ns, _batch.pixels() - _scope_pixels);
 }
 
 void GpuRenderer2DBackend::set_gpu_timing_enabled(bool enabled) {
@@ -535,8 +548,11 @@ void GpuRenderer2DBackend::present() {
             _stats.last_gpu_frame_span = sample->frames;
             ++_stats.gpu_frames_sampled;
         }
+        const f64 screen = static_cast<f64>(_scene_size.x) * _scene_size.y;
         for (gpu::GpuScopeSample& scope : samples.scopes) {
-            _scope_timings.push_back(GpuScopeTiming{.name = std::move(scope.name), .ms = scope.ms});
+            _scope_timings.push_back(GpuScopeTiming{.name = std::move(scope.name), .ms = scope.ms,
+                                                    .pixels = scope.pixels,
+                                                    .overdraw = screen > 0.0 ? scope.pixels / screen : 0.0});
         }
     }
     end_frame();
@@ -1014,7 +1030,7 @@ bool GpuRenderer2DBackend::save_png(const char* path) {
         }
         _frame->submit();
         end_frame();
-    } else if (scene_target && _scene && !_post_passes.empty()) {
+    } else if (scene_target && _scene && (!_post_passes.empty() || (_overdraw_view && _overdraw_count_shader))) {
         _frame.emplace(_device.begin_frame());
         src = run_post_chain();
         src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
@@ -1729,7 +1745,19 @@ void GpuRenderer2DBackend::set_post_process(std::span<const PostProcessPass> pas
 }
 
 const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
-    if (_post_passes.empty() || !_frame || !_scene) {
+    // The overdraw view's own last pass instead of the game's: counts to colours.
+    std::vector<PostProcessPass> heat;
+    if (_overdraw_view && _overdraw_count_shader) {
+        if (!_overdraw_heat) {
+            const std::vector<u8> code = gpu::read_shader_file(std::filesystem::path{KIN_GPU_SHADER_DIR} / "overdraw_heat.frag.spv");
+            ShaderDesc desc;
+            desc.spirv = {code.data(), static_cast<u32>(code.size())};
+            _overdraw_heat = create_shader(desc);
+        }
+        heat.push_back(PostProcessPass{.shader = _overdraw_heat});
+    }
+    const std::vector<PostProcessPass>& passes = heat.empty() ? _post_passes : heat;
+    if (passes.empty() || !_frame || !_scene) {
         return &_scene;
     }
     // Scratch ping-pong targets sized to the scene (native resolution).
@@ -1760,7 +1788,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
 
     const gpu::GpuTexture* read = &_scene;
     gpu::GpuTexture* write = &_post_a;
-    for (const PostProcessPass& pass : _post_passes) {
+    for (const PostProcessPass& pass : passes) {
         if (pass.shader.value == 0 || pass.shader.value > _shaders.size()) {
             continue; // skip invalid pass (leaves `read` unchanged)
         }

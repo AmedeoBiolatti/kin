@@ -153,6 +153,11 @@ public:
     // after they were drawn).
     std::vector<GpuScopeTiming> take_gpu_scope_timings();
     void set_texture_batching_enabled(bool enabled);
+    // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
+    // every draw adds one layer where it covers, and the screen shows the counts
+    // as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or more.
+    // Only the screen's own draws show (a render target's composite counts once).
+    void set_overdraw_view(bool enabled) { _backend->set_overdraw_view(enabled); }
     bool texture_batching_enabled() const;
 
     void clear(Color color = colors::black);

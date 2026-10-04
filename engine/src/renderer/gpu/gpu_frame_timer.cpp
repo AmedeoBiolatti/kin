@@ -63,8 +63,9 @@ void GpuFrameTimer::track_scope_start(SDL_GPUFence* fence) {
     push(Pending{.fence = fence, .kind = Kind::ScopeStart});
 }
 
-void GpuFrameTimer::track_scope_end(std::string name, SDL_GPUFence* fence, u64 end_submit_ns) {
-    push(Pending{.fence = fence, .kind = Kind::ScopeEnd, .submit_ns = end_submit_ns, .name = std::move(name)});
+void GpuFrameTimer::track_scope_end(std::string name, SDL_GPUFence* fence, u64 end_submit_ns, f64 pixels) {
+    push(Pending{.fence = fence, .kind = Kind::ScopeEnd, .submit_ns = end_submit_ns, .name = std::move(name),
+                 .pixels = pixels});
 }
 
 GpuTimerSamples GpuFrameTimer::collect() {
@@ -90,7 +91,8 @@ GpuTimerSamples GpuFrameTimer::collect() {
         case Kind::ScopeEnd:
             samples.scopes.push_back(GpuScopeSample{
                 .name = std::move(pending.name),
-                .ms = ms_from(std::max(pending.submit_ns, _scope_start_signal_ns), pending.signal_ns)});
+                .ms = ms_from(std::max(pending.submit_ns, _scope_start_signal_ns), pending.signal_ns),
+                .pixels = pending.pixels});
             break;
         }
     }
