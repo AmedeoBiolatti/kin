@@ -89,9 +89,11 @@ On the SDL_GPU backend two more rows show the GPU's side of the frame:
   GPU timing is off, `gpu_scope()` does nothing.
 
 - `render.overdraw` (not a time): how many times each screen pixel was shaded
-  that frame, on average: the area all draws covered (render targets
-  included, overlaps counted each time, clipping not taken off) over the
-  screen's. In 2D this is usually where GPU time goes. The demos run 0.2 to 3.2.
+  that frame, on average: the pixels all draws covered, in each target's own
+  pixels (a logical scene at its native size; render targets included,
+  overlaps counted each time, clipping not taken off), over the screen's. In
+  2D this is usually where GPU time goes. The demos run 0.2 to 3.2; XC-121
+  runs 5 to 8.5, about half of it render targets composited over the scene.
 
 GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
 or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`

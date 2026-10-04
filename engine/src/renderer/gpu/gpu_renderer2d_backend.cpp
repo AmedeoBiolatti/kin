@@ -485,13 +485,7 @@ void GpuRenderer2DBackend::present() {
         return static_cast<f64>(end_ns - start_ns) / 1'000'000.0;
     };
     end_gpu_scope(); // a scope ends with its frame, before the frame's fence
-    {
-        const Vec2i screen = scene_uses_logical_coordinates() ? _logical_size : _scene_size;
-        _stats.last_pixels_drawn = _batch.take_area();
-        _stats.last_overdraw = screen.x > 0 && screen.y > 0
-                                   ? _stats.last_pixels_drawn / (static_cast<f64>(screen.x) * screen.y)
-                                   : 0.0;
-    }
+
     const u64 flush_start = SDL_GetTicksNS();
     ensure_frame();
     flush_to_frame();
@@ -546,6 +540,12 @@ void GpuRenderer2DBackend::present() {
         }
     }
     end_frame();
+    // In the targets' own pixels, over the screen's: a scene drawn in logical
+    // coordinates is shaded at its native size.
+    _stats.last_pixels_drawn = _batch.take_pixels();
+    _stats.last_overdraw = _scene_size.x > 0 && _scene_size.y > 0
+                               ? _stats.last_pixels_drawn / (static_cast<f64>(_scene_size.x) * _scene_size.y)
+                               : 0.0;
     _stats.last_present_backend_ms = ms_between(acquire_start, SDL_GetTicksNS());
 }
 

@@ -160,10 +160,10 @@ public:
 
     bool empty() const { return _vertices.empty() && _instances.empty() && _shader_vertices.empty(); }
 
-    // The area everything pushed covers (target units; overlaps count each
-    // time, clipping is not taken off) since the last call: what the GPU
-    // shades, for an overdraw figure.
-    f64 take_area() { return std::exchange(_area, 0.0); }
+    // The pixels everything flushed since the last call covered, in the
+    // targets' own pixels (overlaps count each time, clipping is not taken
+    // off): what the GPU shaded, for an overdraw figure.
+    f64 take_pixels() { return std::exchange(_pixels, 0.0); }
 
     // Context shared by every range in a flush.
     struct FlushContext {
@@ -223,7 +223,8 @@ private:
     GpuBuffer _instance_buffer;
     GpuBuffer _shader_vertex_buffer;
     GpuBuffer _quad_indices; // 0 1 2 0 2 3, 4 5 6 4 6 7, ...: made once
-    f64 _area = 0.0;         // covered since take_area()
+    f64 _area = 0.0;         // covered by what is pushed, in draw coordinates
+    f64 _pixels = 0.0;       // covered by what was flushed, in target pixels
 
     template<typename V>
     static f64 triangle_area(const V& a, const V& b, const V& c) {

@@ -90,9 +90,10 @@ struct RendererBackendStats {
     u32 last_gpu_frame_span = 1;
     // Samples taken so far: last_gpu_frame_ms is new when this has grown.
     u64 gpu_frames_sampled = 0;
-    // SDL_GPU: the area the last frame's draws covered, overlaps counted each
-    // time (clipping not taken off), and that over the screen's area: how many
-    // times each pixel was shaded on average. Render targets count too.
+    // SDL_GPU: the pixels the last frame's draws covered, in each target's own
+    // pixels (a logical scene at its native size; overlaps counted each time,
+    // clipping not taken off), and that over the screen's: how many times each
+    // pixel was shaded on average. Render targets count too.
     f64 last_pixels_drawn = 0.0;
     f64 last_overdraw = 0.0;
     // SDL_GPU: texture uploads (create_texture, update_texture) so far, and the

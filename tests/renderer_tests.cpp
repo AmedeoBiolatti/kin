@@ -2088,6 +2088,15 @@ void test_gpu_overdraw() {
         if (std::abs(stats.last_overdraw - 2.5) > 0.01 || std::abs(stats.last_pixels_drawn - 2.5 * 64 * 32) > 1.0) {
             throw std::runtime_error(std::string(test_name) + ": overdraw " + std::to_string(stats.last_overdraw));
         }
+        // At a logical size the scene is shaded at its native size: one fill
+        // of the logical screen is still once over every pixel.
+        renderer->set_logical_size({32, 16});
+        renderer->fill_rect(kin::Rectf{0.0f, 0.0f, 32.0f, 16.0f}, kin::Color::rgb(255, 0, 0));
+        renderer->present();
+        if (std::abs(renderer->backend_stats().last_overdraw - 1.0) > 0.01) {
+            throw std::runtime_error(std::string(test_name) + ": logical overdraw " +
+                                     std::to_string(renderer->backend_stats().last_overdraw));
+        }
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;

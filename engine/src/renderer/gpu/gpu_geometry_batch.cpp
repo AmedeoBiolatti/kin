@@ -182,6 +182,10 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     if (!_target) {
         return;
     }
+    // Draw coordinates to the target's pixels (the view maps coordinates to
+    // -1..1 over the target).
+    _pixels += _area * (_target->width() * ctx.view.scale[0] * 0.5) * (_target->height() * ctx.view.scale[1] * 0.5);
+    _area = 0.0;
 
     SDL_GPUColorTargetInfo color_target{};
     color_target.texture = _target->handle();
