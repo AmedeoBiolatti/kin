@@ -431,10 +431,25 @@ WorldTransform compose(const WorldTransform& parent, const Transform2D& child) {
     return {to_world(parent, child.pos), parent.rotation + child.rotation, mul(parent.scale, child.scale)};
 }
 
+Transform2D to_local(const WorldTransform& parent, const WorldTransform& world) {
+    const auto divide = [](f32 a, f32 b) { return b == 0.0f ? 0.0f : a / b; };
+    Vec2f offset = sub(world.pos, parent.pos);
+    if (parent.rotation != 0.0f) {
+        offset = Affine2::rotation(-parent.rotation).apply_vector(offset);
+    }
+    return {{divide(offset.x, parent.scale.x), divide(offset.y, parent.scale.y)},
+            world.rotation - parent.rotation,
+            {divide(world.scale.x, parent.scale.x), divide(world.scale.y, parent.scale.y)}};
+}
+
 WorldTransform world_transform(flecs::entity entity) {
     if (const auto* transform = entity.get<WorldTransform>()) {
         return *transform;
     }
+    return current_world_transform(entity);
+}
+
+WorldTransform current_world_transform(flecs::entity entity) {
     // Up to the root, then composed back down.
     std::vector<const Transform2D*> chain;
     for (flecs::entity current = entity; current; current = current.parent()) {
@@ -447,6 +462,10 @@ WorldTransform world_transform(flecs::entity entity) {
         world = compose(world, **it);
     }
     return world;
+}
+
+WorldTransform current_world_transform(const EcsEntity& entity) {
+    return current_world_transform(entity.raw());
 }
 
 WorldTransform world_transform(const EcsEntity& entity) {

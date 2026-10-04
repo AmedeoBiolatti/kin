@@ -41,6 +41,10 @@ struct WorldTransform {
 
 // `child` (a Transform2D) under `parent` (a WorldTransform).
 WorldTransform compose(const WorldTransform& parent, const Transform2D& child);
+// The reverse: the Transform2D that puts a child at `world` under `parent`
+// (compose(parent, to_local(parent, world)) == world). An axis the parent
+// scales to zero keeps the child at the parent's origin along it.
+Transform2D to_local(const WorldTransform& parent, const WorldTransform& world);
 
 struct SpriteRenderer {
     SpriteRef sprite;
@@ -209,6 +213,10 @@ Vec2f world_position(const EcsEntity& entity);
 // up the hierarchy.
 WorldTransform world_transform(flecs::entity entity);
 WorldTransform world_transform(const EcsEntity& entity);
+// Its Transform2Ds composed up the hierarchy now, whatever WorldTransform says
+// (that is only as fresh as the last propagate_transforms()).
+WorldTransform current_world_transform(flecs::entity entity);
+WorldTransform current_world_transform(const EcsEntity& entity);
 
 bool submit_sprite(Renderer2D& renderer, flecs::entity entity);
 bool submit_texture(Renderer2D& renderer, flecs::entity entity);

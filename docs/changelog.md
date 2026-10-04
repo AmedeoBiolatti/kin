@@ -165,6 +165,13 @@ releases may change APIs.
   first, and setting that type wrote past the component's storage (the
   prefab tests crashed once `Transform2D` grew). The animation preview and the
   tests run several worlds.
+- Physics bodies under a parent: the ECS sync works in the world and converts
+  to and from the parent's space. A simulated body (`sync_from_physics`) stays
+  put in the world when its parent moves; one the entity leads
+  (`sync_to_physics`) follows its parent. Bodies under bodies are written
+  parents first. Before, world positions were written into the
+  parent-relative `Transform2D`. `kin::to_local(parent, world)` (the reverse of
+  `compose`) and `kin::current_world_transform(entity)` support it.
 - The ECS physics sync converts angles: `Transform2D::rotation` is degrees, as
   everywhere in kin, and `PhysicsWorld` radians, as Box2D. Before, radians were
   written into `rotation`, so physics bodies' sprites barely turned.

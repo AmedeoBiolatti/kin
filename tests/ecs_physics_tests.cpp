@@ -87,6 +87,71 @@ void test_velocity_step_and_transform_sync_from_physics() {
     assert(near(entity.get<kin::Transform2D>()->rotation, 90.0f, 0.001f));
 }
 
+bool near(kin::Vec2f a, kin::Vec2f b, kin::f32 epsilon = 0.01f) {
+    return near(a.x, b.x, epsilon) && near(a.y, b.y, epsilon);
+}
+
+kin::EcsEntity body_entity(kin::EcsWorld& world, const char* name, kin::Transform2D transform, kin::PhysicsBodyType type,
+                           bool to_physics = false, bool from_physics = true) {
+    return world.entity(name)
+        .set(transform)
+        .set(kin::PhysicsBodyComponent{.def = {.type = type}, .sync_to_physics = to_physics, .sync_from_physics = from_physics})
+        .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(1.0f))}});
+}
+
+// Physics works in the world, Transform2D from the parent. A simulated body
+// stays put when its parent moves; one the entity leads follows it.
+void test_bodies_under_a_parent() {
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics;
+
+    kin::EcsEntity parent = world.entity("parent").set(kin::Transform2D{.pos = {100.0f, 0.0f}, .rotation = 90.0f});
+    kin::EcsEntity simulated = body_entity(world, "simulated", {.pos = {10.0f, 0.0f}}, kin::PhysicsBodyType::Dynamic);
+    kin::EcsEntity led = body_entity(world, "led", {.pos = {0.0f, 20.0f}}, kin::PhysicsBodyType::Kinematic, true, false);
+    simulated.child_of(parent);
+    led.child_of(parent);
+
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    const kin::PhysicsBody simulated_body = simulated.get<kin::PhysicsBodyComponent>()->body;
+    const kin::PhysicsBody led_body = led.get<kin::PhysicsBodyComponent>()->body;
+    // Made where the entity is in the world, turned with its parent.
+    assert(near(physics.position(simulated_body), {100.0f, 10.0f}));
+    assert(near(physics.rotation(simulated_body), 1.5707964f, 0.001f));
+    assert(near(physics.position(led_body), {80.0f, 0.0f}));
+
+    parent.set(kin::Transform2D{.pos = {200.0f, 0.0f}, .rotation = 90.0f});
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    assert(near(physics.position(simulated_body), {100.0f, 10.0f}));
+    assert(near(kin::current_world_transform(simulated).pos, {100.0f, 10.0f}));
+    assert(near(simulated.get<kin::Transform2D>()->pos, {10.0f, 100.0f}));
+    assert(near(simulated.get<kin::Transform2D>()->rotation, 0.0f, 0.001f));
+    assert(near(physics.position(led_body), {180.0f, 0.0f}));
+    assert(near(led.get<kin::Transform2D>()->pos, {0.0f, 20.0f})); // the entity leads: untouched
+}
+
+// A body under another body is placed against where its parent has just been
+// put, whichever order the query visits them in.
+void test_nested_bodies_place_parents_first() {
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics;
+
+    kin::EcsEntity child = body_entity(world, "child", {.pos = {0.0f, 10.0f}}, kin::PhysicsBodyType::Dynamic);
+    kin::EcsEntity mover = body_entity(world, "mover", {.pos = {0.0f, 0.0f}}, kin::PhysicsBodyType::Kinematic);
+    mover.set(kin::PhysicsVelocity{.linear = {60.0f, 0.0f}});
+    child.child_of(mover);
+
+    for (int i = 0; i < 3; ++i) {
+        kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    }
+    assert(near(mover.get<kin::Transform2D>()->pos, {3.0f, 0.0f}));
+    assert(near(kin::current_world_transform(child).pos, {0.0f, 10.0f}));
+    assert(near(child.get<kin::Transform2D>()->pos, {-3.0f, 10.0f}));
+}
+
 void test_removed_collider_destroys_fixture() {
     kin::EcsWorld world;
     kin::register_physics_components(world);
@@ -255,6 +320,8 @@ void test_component_removal_cleans_up_physics_objects() {
 int main() {
     test_body_creation_multiple_colliders_and_transform_sync();
     test_velocity_step_and_transform_sync_from_physics();
+    test_bodies_under_a_parent();
+    test_nested_bodies_place_parents_first();
     test_removed_collider_destroys_fixture();
     test_contact_and_overlap_collection();
     test_entity_removal_destroys_physics_body();

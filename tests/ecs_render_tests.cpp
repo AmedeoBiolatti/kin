@@ -227,6 +227,18 @@ void test_world_transform_composes_without_propagation() {
     assert(near(same.pos, t.pos) && same.rotation == t.rotation);
 }
 
+// to_local() undoes compose().
+void test_to_local_inverts_compose() {
+    const kin::WorldTransform parent{{50.0f, -20.0f}, 30.0f, {2.0f, 0.5f}};
+    const kin::Transform2D child{{3.0f, 4.0f}, -10.0f, {1.5f, 1.5f}};
+    const kin::WorldTransform world = kin::compose(parent, child);
+    const kin::Transform2D back = kin::to_local(parent, world);
+    assert(near(back.pos, child.pos) && near(back.rotation, child.rotation) && near(back.scale, child.scale));
+    // A parent squashed flat along an axis keeps the child at its origin along it.
+    const kin::Transform2D flat = kin::to_local({{0.0f, 0.0f}, 0.0f, {0.0f, 1.0f}}, {{5.0f, 5.0f}});
+    assert(flat.pos == (kin::Vec2f{0.0f, 5.0f}));
+}
+
 // Renderers under a turned, scaled parent: offsets, sizes and line ends go
 // through it, and the drawing turns with it.
 void test_renderers_follow_parent_rotation_and_scale() {
@@ -779,6 +791,7 @@ int main() {
     test_world_render_state_propagates_hierarchy();
     test_world_render_state_propagates_hierarchy_created_bottom_up();
     test_world_transform_composes_without_propagation();
+    test_to_local_inverts_compose();
     test_renderers_follow_parent_rotation_and_scale();
     test_queue_flush_applies_zooming_camera();
     test_render_world_draws_primitives();
