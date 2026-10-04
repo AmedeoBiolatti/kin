@@ -1991,6 +1991,76 @@ void test_gpu_shader_hot_reload() {
     }
 }
 
+// Mipmaps: a 1-pixel checkerboard drawn 16 times smaller is an even grey with
+// them, and aliases (pixels far from grey) without; an update remakes them.
+void test_gpu_mipmaps() {
+    constexpr std::string_view test_name = "test_gpu_mipmaps";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-mipmap-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        constexpr int n = 256;
+        std::vector<kin::u8> checker(static_cast<std::size_t>(n) * n * 4);
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                const kin::u8 v = (x + y) % 2 ? 255 : 0;
+                kin::u8* t = &checker[(static_cast<std::size_t>(y) * n + x) * 4];
+                t[0] = t[1] = t[2] = v;
+                t[3] = 255;
+            }
+        }
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        const auto drawn_small = [&](const kin::Texture& texture) {
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            // Offset a little, so plain filtering lands between texels unevenly.
+            renderer->draw_texture(texture, kin::Rectf{0.3f, 0.3f, 15.7f, 15.7f});
+            assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, size));
+            double off_grey = 0.0;
+            int counted = 0;
+            for (int y = 2; y < 14; ++y) {
+                for (int x = 2; x < 14; ++x) {
+                    off_grey += std::abs(static_cast<int>(px[(static_cast<std::size_t>(y) * 16 + x) * 4]) - 128);
+                    ++counted;
+                }
+            }
+            return std::pair{off_grey / counted, kin::Color::rgba(px[8 * 64 + 32], px[8 * 64 + 33], px[8 * 64 + 34], 255)};
+        };
+        const kin::Texture plain = renderer->create_texture_from_rgba(checker.data(), {n, n});
+        renderer->set_scale_mode(plain, kin::ScaleMode::Linear);
+        const kin::Texture smooth = renderer->create_texture_from_rgba(checker.data(), {n, n});
+        renderer->set_scale_mode(smooth, kin::ScaleMode::Mipmapped);
+        const double aliased = drawn_small(plain).first;
+        const double mipmapped = drawn_small(smooth).first;
+        if (!(mipmapped < 8.0 && aliased > 3.0 * mipmapped)) {
+            throw std::runtime_error(std::string(test_name) + ": off grey " + std::to_string(mipmapped) +
+                                     " with mipmaps, " + std::to_string(aliased) + " without");
+        }
+        // Updating it remakes the smaller levels.
+        std::vector<kin::u8> red(static_cast<std::size_t>(n) * n * 4);
+        for (std::size_t i = 0; i < red.size(); i += 4) {
+            red[i] = 255;
+            red[i + 3] = 255;
+        }
+        assert(renderer->update_texture(smooth, {0, 0}, {n, n}, red.data()));
+        assert(color_near(drawn_small(smooth).second, kin::Color::rgb(255, 0, 0), 2));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2549,6 +2619,7 @@ int main() {
     test_gpu_shader_surface_scaled();
     test_gpu_compute();
     test_gpu_shader_hot_reload();
+    test_gpu_mipmaps();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

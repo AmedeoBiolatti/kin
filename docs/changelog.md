@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- `ScaleMode::Mipmapped`: textures drawn smaller than they are get mipmaps,
+  made on the GPU (and remade on update), sampled trilinearly: no shimmer, and
+  faster to read (4000 sprites of a 2048 x 2048 texture at 24 x 24: about 30%
+  less frame time). SDL_GPU, RGBA8 textures.
 - Shader hot reload for development: `kin::ShaderFile` keeps a GLSL file
   compiled (with `glslc`, about 0.1 s) and reloaded in place when it is saved,
   keeping the last good version when an edit does not compile;

@@ -41,6 +41,13 @@ public:
     }
     TextureFormat format() const override { return _format; }
     const GpuTexture& texture() const { return _texture; }
+    // Puts `texture` in place of the current one (made mipmapped), returning
+    // the old for the caller to keep until the frame's draws are submitted.
+    GpuTexture replace_texture(GpuTexture texture) const {
+        _mipmapped = true;
+        return std::exchange(_texture, std::move(texture));
+    }
+    bool mipmapped() const { return _mipmapped; }
     // Render targets store premultiplied alpha; sampling them out uses the
     // premultiplied blend (matches the SDL backend's BLEND_PREMULTIPLIED).
     bool premultiplied() const { return _premultiplied; }
@@ -54,7 +61,8 @@ public:
     void mark_used(u64 frame) const { _used_in_frame = frame; }
 
 private:
-    GpuTexture _texture;
+    mutable GpuTexture _texture;
+    mutable bool _mipmapped = false;
     bool _premultiplied = false;
     mutable ScaleMode _scale = ScaleMode::Nearest;
     TextureFormat _format = TextureFormat::Rgba8;
@@ -250,6 +258,9 @@ private:
     std::optional<gpu::GpuFrame> _frame;
     std::vector<std::shared_ptr<ITextureBackend>> _retained; // textures the frame's draws use
     std::vector<std::shared_ptr<IDataBufferBackend>> _retained_buffers; // and data buffers
+    std::vector<gpu::GpuTexture> _retired_textures; // replaced this frame (made mipmapped), kept till submit
+    SDL_GPUSampler* _sampler_mipmapped = nullptr;   // trilinear, for ScaleMode::Mipmapped
+    SDL_GPUSampler* sampler_for(const gpu::GpuTextureBackend& texture) const;
     std::vector<SDL_GPUBuffer*> _storage_scratch;
     struct ComputePipeline {
         SDL_GPUComputePipeline* pipeline = nullptr;

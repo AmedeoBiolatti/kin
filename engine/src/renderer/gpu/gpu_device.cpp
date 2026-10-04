@@ -426,14 +426,58 @@ void GpuDevice::begin_upload_commands() {
     }
 }
 
-void GpuDevice::clear_texture(SDL_GPUTexture* texture, bool cycle) {
-    refuse_upload_inside_fill();
-    const std::lock_guard lock{_uploads_mutex};
-    begin_upload_commands();
+void GpuDevice::end_upload_pass() {
     if (_upload_pass) {
         SDL_EndGPUCopyPass(_upload_pass); // reopened by the next upload, in order
         _upload_pass = nullptr;
     }
+}
+
+GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
+    const u32 w = source.width(), h = source.height();
+    u32 levels = 1;
+    while ((std::max(w, h) >> levels) > 0) {
+        ++levels;
+    }
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = source.format();
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET; // generating needs both
+    info.width = w;
+    info.height = h;
+    info.layer_count_or_depth = 1;
+    info.num_levels = levels;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture failed");
+    }
+    refuse_upload_inside_fill();
+    const std::lock_guard lock{_uploads_mutex};
+    begin_upload_commands();
+    end_upload_pass();
+    SDL_GPUCopyPass* pass = SDL_BeginGPUCopyPass(_upload_commands);
+    const SDL_GPUTextureLocation from{.texture = source.handle()};
+    const SDL_GPUTextureLocation to{.texture = texture};
+    SDL_CopyGPUTextureToTexture(pass, &from, &to, w, h, 1, false);
+    SDL_EndGPUCopyPass(pass);
+    SDL_GenerateMipmapsForGPUTexture(_upload_commands, texture);
+    return GpuTexture{_shared, texture, w, h, source.format()}; // not pooled: a kind of its own
+}
+
+void GpuDevice::generate_mipmaps(SDL_GPUTexture* texture) {
+    refuse_upload_inside_fill();
+    const std::lock_guard lock{_uploads_mutex};
+    begin_upload_commands();
+    end_upload_pass();
+    SDL_GenerateMipmapsForGPUTexture(_upload_commands, texture);
+}
+
+void GpuDevice::clear_texture(SDL_GPUTexture* texture, bool cycle) {
+    refuse_upload_inside_fill();
+    const std::lock_guard lock{_uploads_mutex};
+    begin_upload_commands();
+    end_upload_pass();
     SDL_GPUColorTargetInfo target{};
     target.texture = texture;
     target.load_op = SDL_GPU_LOADOP_CLEAR;

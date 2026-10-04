@@ -204,6 +204,11 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
     sampler_info.mag_filter = SDL_GPU_FILTER_LINEAR;
     _sampler_linear = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
+    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    sampler_info.max_lod = 1000.0f; // every level
+    _sampler_mipmapped = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
+    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    sampler_info.max_lod = 0.0f;
     sampler_info.min_filter = SDL_GPU_FILTER_NEAREST;
     sampler_info.mag_filter = SDL_GPU_FILTER_NEAREST;
     _sampler_nearest = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
@@ -238,6 +243,9 @@ GpuRenderer2DBackend::~GpuRenderer2DBackend() {
     }
     if (_sampler_linear) {
         SDL_ReleaseGPUSampler(_device.handle(), _sampler_linear);
+    }
+    if (_sampler_mipmapped) {
+        SDL_ReleaseGPUSampler(_device.handle(), _sampler_mipmapped);
     }
     if (_sampler_nearest) {
         SDL_ReleaseGPUSampler(_device.handle(), _sampler_nearest);
@@ -320,6 +328,7 @@ void GpuRenderer2DBackend::end_frame() {
     _frame.reset();
     _retained.clear();
     _retained_buffers.clear();
+    _retired_textures.clear();
     _last_retained = nullptr;
     ++_frame_serial;
 }
@@ -778,6 +787,9 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                            static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
                            texture_format_bytes(backend->format()), may_cycle(*backend, at, size));
+    if (backend->mipmapped()) {
+        _device.generate_mipmaps(backend->texture().handle());
+    }
     return true;
 }
 
@@ -790,6 +802,9 @@ bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i
     _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                           static_cast<u32>(size.x), static_cast<u32>(size.y), texture_format_bytes(backend->format()),
                           may_cycle(*backend, at, size), fill);
+    if (backend->mipmapped()) {
+        _device.generate_mipmaps(backend->texture().handle());
+    }
     return true;
 }
 
@@ -826,7 +841,7 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
-        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+        sampler_for(*backend);
     retain(texture);
     push_quad(dest, uv, tint, backend->texture().handle(), blend, sampler);
 }
@@ -877,7 +892,7 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
-        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+        sampler_for(*backend);
     retain(texture);
     _batch.push_quads(corners, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr,
                       0, sampler);
@@ -969,7 +984,7 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
-        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+        sampler_for(*backend);
     retain(texture);
     _batch.push_instances(_instance_scratch, backend->texture().handle(), current_scissor(), resolve_blend(blend),
                           sampler);
@@ -1266,10 +1281,27 @@ void GpuRenderer2DBackend::pop_render_target() {
 }
 
 void GpuRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode) {
-    // Per-texture sampling: draw_texture picks the nearest/linear sampler from this.
-    if (const auto* backend = as_gpu(texture.backend().get())) {
-        backend->set_scale_mode(mode);
+    // Per-texture sampling: draws pick their sampler from this (sampler_for).
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend) {
+        return;
     }
+    backend->set_scale_mode(mode);
+    if (mode == ScaleMode::Mipmapped && !backend->mipmapped() && !backend->premultiplied() &&
+        backend->format() == TextureFormat::Rgba8 && backend->texture()) {
+        // Remade with room for its mips; the old one stays alive until the
+        // frame's draws (which may name it) are submitted.
+        _retired_textures.push_back(backend->replace_texture(_device.make_mipmapped(backend->texture())));
+    }
+}
+
+SDL_GPUSampler* GpuRenderer2DBackend::sampler_for(const gpu::GpuTextureBackend& texture) const {
+    switch (texture.scale_mode()) {
+    case ScaleMode::Nearest: return _sampler_nearest;
+    case ScaleMode::Linear: return _sampler_linear;
+    case ScaleMode::Mipmapped: return texture.mipmapped() ? _sampler_mipmapped : _sampler_linear;
+    }
+    return _sampler_linear;
 }
 
 void GpuRenderer2DBackend::set_viewport(Rectf rect) {
@@ -1619,8 +1651,7 @@ GpuRenderer2DBackend::SourceBindings GpuRenderer2DBackend::bind_sources(const gp
             retain(src);
             binding.texture = backend->texture().handle();
             // Integer textures cannot be filtered, and 32-bit floats may not be.
-            const bool linear = backend->scale_mode() == ScaleMode::Linear && backend->format() == TextureFormat::Rgba8;
-            binding.sampler = linear ? _sampler_linear : _sampler_nearest;
+            binding.sampler = backend->format() == TextureFormat::Rgba8 ? sampler_for(*backend) : _sampler_nearest;
         }
         return binding;
     };

@@ -11,6 +11,11 @@ namespace kin {
 enum class ScaleMode {
     Nearest,
     Linear,
+    // Linear, plus mipmaps (smaller copies made on the GPU): textures drawn
+    // smaller than they are stay smooth instead of shimmering, and read
+    // faster. Costs a third more memory; updates remake the copies. SDL_GPU,
+    // RGBA8 textures (not render targets); elsewhere Linear.
+    Mipmapped,
 };
 
 // A drawable + sampleable offscreen surface: a Texture whose backing SDL texture

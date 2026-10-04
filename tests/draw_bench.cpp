@@ -329,6 +329,69 @@ int many_surfaces(kin::Window& window, int frames) {
     return 0;
 }
 
+// Mipmaps: 4000 sprites of a 2048 x 2048 texture drawn at 24 x 24, back to back
+// (reading a big texture small skips through memory without its smaller
+// copies), and how far a 1-pixel checkerboard drawn small strays from grey.
+int mipmaps(kin::Window& window) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    constexpr int n = 2048;
+    std::vector<kin::u8> texels(static_cast<std::size_t>(n) * n * 4);
+    for (int y = 0; y < n; ++y) {
+        for (int x = 0; x < n; ++x) {
+            kin::u8* t = &texels[(static_cast<std::size_t>(y) * n + x) * 4];
+            const kin::u8 v = (x + y) % 2 ? 255 : 0; // the worst case: detail at every texel
+            t[0] = v;
+            t[1] = static_cast<kin::u8>(x);
+            t[2] = static_cast<kin::u8>(y);
+            t[3] = 255;
+        }
+    }
+    std::vector<kin::SpriteInstance> sprites;
+    for (int i = 0; i < 4000; ++i) {
+        sprites.push_back({.dest = {static_cast<float>((i * 37) % 1256) + 0.3f, static_cast<float>((i * 91) % 696) + 0.3f, 24.0f, 24.0f}});
+    }
+    for (const kin::ScaleMode mode : {kin::ScaleMode::Linear, kin::ScaleMode::Mipmapped}) {
+        const kin::Texture texture = renderer->create_texture_from_rgba(texels.data(), {n, n});
+        renderer->set_scale_mode(texture, mode);
+        const auto frame = [&] {
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_sprites(texture, sprites);
+            renderer->present();
+        };
+        for (int f = 0; f < 10; ++f) {
+            frame();
+        }
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, px, size);
+        const auto t0 = clock::now();
+        for (int f = 0; f < 200; ++f) {
+            frame();
+        }
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, px, size); // wait for the GPU
+        const double per_frame = ms(t0, clock::now()) / 200.0;
+        // Shimmer: the red channel (the checkerboard) of one sprite, off grey.
+        kin::RenderTarget target = renderer->create_render_target({24, 24}, kin::ScaleMode::Nearest);
+        {
+            const auto bind = renderer->scoped_render_target(target);
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            renderer->draw_texture(texture, kin::Rectf{0.3f, 0.3f, 23.7f, 23.7f});
+            renderer->read_rgba({0.0f, 0.0f, 24.0f, 24.0f}, px, size);
+        }
+        double off = 0.0;
+        for (std::size_t i = 0; i < px.size(); i += 4) {
+            off += std::abs(static_cast<int>(px[i]) - 128);
+        }
+        std::printf("4000 sprites of 2048x2048 at 24x24, %-9s back-to-back frame %.3f ms, checkerboard off grey %.1f / 128\n",
+                    mode == kin::ScaleMode::Linear ? "linear:" : "mipmaps:", per_frame,
+                    off / static_cast<double>(px.size() / 4));
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
@@ -358,6 +421,10 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "surfaces") {
         backend.reset();
         return many_surfaces(window, frames);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "mipmaps") {
+        backend.reset();
+        return mipmaps(window);
     }
     if (argc > 3 && std::string_view{argv[3]} == "data") {
         backend.reset();

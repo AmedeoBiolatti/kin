@@ -948,7 +948,7 @@ RenderTarget SdlRenderer2DBackend::create_render_target(Vec2i size, ScaleMode mo
     // when sampled/drawn out, and drawing straight-alpha sources onto a
     // transparent-cleared target accumulates as premultiplied automatically.
     SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
-    SDL_SetTextureScaleMode(texture, mode == ScaleMode::Linear ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+    SDL_SetTextureScaleMode(texture, mode == ScaleMode::Nearest ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
 
     return RenderTarget{Texture{std::make_shared<SdlTextureBackend>(texture, size)}};
 }
@@ -977,7 +977,7 @@ void SdlRenderer2DBackend::pop_render_target() {
 void SdlRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode) {
     if (const auto* sdl = as_sdl(texture.backend().get());
         sdl && sdl->handle()) {
-        SDL_SetTextureScaleMode(sdl->handle(), mode == ScaleMode::Linear ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
+        SDL_SetTextureScaleMode(sdl->handle(), mode == ScaleMode::Nearest ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
     }
 }
 

@@ -79,6 +79,11 @@ public:
     // frame sees them. Recording at once keeps the order of uploads and draws:
     // a draw recorded before a cycled upload reads the old texels.
     void flush_uploads();
+    // A copy of `source` (RGBA8) with a full mip chain, made on the GPU with the
+    // uploads (the copies before the frame that draws it).
+    GpuTexture make_mipmapped(const GpuTexture& source);
+    // Remakes a mipmapped texture's smaller levels from level 0, with the uploads.
+    void generate_mipmaps(SDL_GPUTexture* texture);
     // Big uploads copy their texels on these workers too (null: none).
     void set_job_system(JobSystem* jobs) { _jobs = jobs; }
     // Texture uploads recorded and command buffers submitted for them so far.
@@ -149,6 +154,7 @@ private:
     std::atomic<std::thread::id> _filling{};
     void refuse_upload_inside_fill() const;
     void begin_upload_commands(); // the upload command buffer, acquired if needed
+    void end_upload_pass();       // ends its copy pass (reopened by the next upload)
     // Clears `texture` (a render target) to zeros in the upload command buffer.
     void clear_texture(SDL_GPUTexture* texture, bool cycle);
     SDL_GPUCommandBuffer* _upload_commands = nullptr;
