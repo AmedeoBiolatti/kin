@@ -310,7 +310,27 @@ void GpuRenderer2DBackend::ensure_scene() {
 }
 
 const gpu::GpuTexture& GpuRenderer2DBackend::current_target() const {
-    return _rt_stack.empty() ? _scene : *_rt_stack.back();
+    return _rt_stack.empty() ? _scene : *_rt_stack.back().texture;
+}
+
+f32 GpuRenderer2DBackend::coordinates_to_pixels() const {
+    return static_cast<f32>(current_size().x) / std::max(1.0f, coordinate_size().x);
+}
+
+Vec2i GpuRenderer2DBackend::coordinate_extent() const {
+    const Vec2f size = coordinate_size();
+    return {static_cast<i32>(std::ceil(size.x)), static_cast<i32>(std::ceil(size.y))};
+}
+
+Vec2f GpuRenderer2DBackend::coordinate_size() const {
+    if (!_rt_stack.empty() && _rt_stack.back().coords.x > 0.0f) {
+        return _rt_stack.back().coords;
+    }
+    if (scene_uses_logical_coordinates()) {
+        return {static_cast<f32>(_logical_size.x), static_cast<f32>(_logical_size.y)};
+    }
+    const Vec2i size = current_size();
+    return {static_cast<f32>(size.x), static_cast<f32>(size.y)};
 }
 
 Vec2i GpuRenderer2DBackend::current_size() const {
@@ -356,8 +376,7 @@ void GpuRenderer2DBackend::flush_to_frame() {
     // presentation, else the target's texture size. The uniform maps coord -> NDC so
     // logical coords fill the (native-res) scene texture; the rasterizer then renders
     // at native res. The batch sets the GPU viewport to the target's texture size.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2f coord = coordinate_size();
     gpu::GpuGeometryBatch::FlushContext ctx{};
     ctx.vertex_shader = _vertex_shader.handle();
     ctx.instance_shader = _instance_shader.handle();
@@ -369,8 +388,8 @@ void GpuRenderer2DBackend::flush_to_frame() {
     if (_overdraw_view) {
         ctx.override_fragment = _overdraw_count_shader.handle();
     }
-    ctx.view.scale[0] = 2.0f / static_cast<f32>(std::max(1, coord.x));
-    ctx.view.scale[1] = 2.0f / static_cast<f32>(std::max(1, coord.y));
+    ctx.view.scale[0] = 2.0f / std::max(1.0f, coord.x);
+    ctx.view.scale[1] = 2.0f / std::max(1.0f, coord.y);
     ctx.view.translate[0] = -1.0f;
     ctx.view.translate[1] = -1.0f;
     _batch.flush(*_frame, _device, _pipelines, ctx);
@@ -568,11 +587,11 @@ void GpuRenderer2DBackend::present() {
 SDL_Rect GpuRenderer2DBackend::current_scissor() const {
     // Clips are stored in coordinate space (logical for the scene under logical
     // presentation, target pixels otherwise). The GPU scissor needs native texture
-    // pixels, so scale by the coord->texture factor (_view_scale for the scene, 1 for RTs).
-    // Asked once a draw, it is kept until what it is made from changes.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    // pixels, so scale by the coord->texture factor (a logical scene's or a layer's;
+    // 1 for plain render targets). Asked once a draw, it is kept until what it is
+    // made from changes.
     const Vec2i tex = current_size();
+    const f32 sc = coordinates_to_pixels();
     const SDL_Rect top = _clip_stack.empty() ? SDL_Rect{0, 0, -1, -1} : _clip_stack.back();
     ScissorKey key{top, sc, tex};
     if (_scissor_cache && _scissor_cache->first == key) {
@@ -1073,8 +1092,7 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
     const int sh = target_size.y;
     // Under logical presentation the scene texture is native-res; scale the
     // logical-space region up to native pixels before reading.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    const f32 sc = coordinates_to_pixels();
     const Rectf native_region{logical_region.x * sc, logical_region.y * sc,
                               logical_region.w * sc, logical_region.h * sc};
     SDL_Rect r = intersect(to_sdl_rect(native_region), SDL_Rect{0, 0, sw, sh});
@@ -1107,8 +1125,7 @@ bool GpuRenderer2DBackend::blit_region_to_target(Rectf region, const RenderTarge
 
     // Map the logical region to native target pixels (scene is native-res under logical
     // presentation; render targets are 1:1).
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    const f32 sc = coordinates_to_pixels();
     const gpu::GpuTexture& src = current_target();
 
     SDL_GPUBlitInfo blit{};
@@ -1130,8 +1147,7 @@ bool GpuRenderer2DBackend::blit_region_to_target(Rectf region, const RenderTarge
 
 Vec2i GpuRenderer2DBackend::region_pixel_size(Rectf region) const {
     // The scene is native-res under logical presentation; render targets are 1:1.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    const f32 sc = coordinates_to_pixels();
     return {static_cast<i32>(region.w * sc + 0.5f), static_cast<i32>(region.h * sc + 0.5f)};
 }
 
@@ -1272,10 +1288,51 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     _clip_stack.clear();
     _saved_view_offsets.push_back(_view_offset);
     _view_offset = {0.0f, 0.0f}; // RT-internal draws use the target's native origin
-    _rt_stack.push_back(&backend->texture());
+    _rt_stack.push_back(TargetEntry{.texture = &backend->texture()});
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
     }
+}
+
+bool GpuRenderer2DBackend::push_layer_target(const RenderTarget& target) {
+    const auto* backend = as_gpu(target.texture().backend().get());
+    if (!backend || !backend->texture()) {
+        return false;
+    }
+    retain(target.texture());
+    const Vec2f coords = coordinate_size(); // the layer keeps these, at its own resolution
+    ensure_frame();
+    flush_to_frame();
+    // Clips and the viewport offset stay as they are: draws in the layer land
+    // where they would have outside it.
+    _saved_clip_stacks.push_back(_clip_stack);
+    _saved_view_offsets.push_back(_view_offset);
+    _rt_stack.push_back(TargetEntry{.texture = &backend->texture(), .coords = coords});
+    _batch.begin(current_target(), SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}, /*do_clear=*/true);
+    _batch.begin_bounds();
+    return true;
+}
+
+std::optional<IRenderer2DBackend::LayerBounds> GpuRenderer2DBackend::pop_layer_target() {
+    if (_rt_stack.empty() || _rt_stack.back().coords.x <= 0.0f) {
+        return std::nullopt;
+    }
+    const Vec2f coords = _rt_stack.back().coords;
+    const Vec2f pixels{static_cast<f32>(current_size().x) / coords.x, static_cast<f32>(current_size().y) / coords.y};
+    const std::optional<Rectf> drawn = _batch.end_bounds(); // in absolute draw coordinates
+    pop_render_target();
+    if (!drawn) {
+        return LayerBounds{}; // nothing drawn
+    }
+    // Within the layer, and back to the coordinates draws are given in.
+    const f32 x0 = std::max(0.0f, std::floor(drawn->x)), y0 = std::max(0.0f, std::floor(drawn->y));
+    const f32 x1 = std::min(coords.x, std::ceil(drawn->x + drawn->w));
+    const f32 y1 = std::min(coords.y, std::ceil(drawn->y + drawn->h));
+    if (x1 <= x0 || y1 <= y0) {
+        return LayerBounds{};
+    }
+    return LayerBounds{.dest = {x0 - _view_offset.x, y0 - _view_offset.y, x1 - x0, y1 - y0},
+                       .source = {x0 * pixels.x, y0 * pixels.y, (x1 - x0) * pixels.x, (y1 - y0) * pixels.y}};
 }
 
 void GpuRenderer2DBackend::pop_render_target() {
@@ -1332,8 +1389,7 @@ void GpuRenderer2DBackend::set_viewport(Rectf rect) {
     // rect, AND subsequent draw coords become viewport-relative (origin at rect.x/y).
     // Clips are kept in coordinate space (logical for the scene under logical
     // presentation, target pixels otherwise); current_scissor() scales them.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2i coord = coordinate_extent();
     _clip_stack.clear();
     _clip_stack.push_back(intersect(to_sdl_rect(rect), SDL_Rect{0, 0, coord.x, coord.y}));
     _view_offset = {rect.x, rect.y};
@@ -1347,8 +1403,7 @@ void GpuRenderer2DBackend::reset_viewport() {
 void GpuRenderer2DBackend::push_viewport(Rectf rect) {
     // Save + set both the clip (absolute viewport rect, intersected with parent) and
     // the origin offset, mirroring SdlRenderer2DBackend::push_viewport.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2i coord = coordinate_extent();
     const SDL_Rect parent = _clip_stack.empty() ? SDL_Rect{0, 0, coord.x, coord.y} : _clip_stack.back();
     _view_offset_stack.push_back(_view_offset);
     _clip_stack.push_back(intersect(to_sdl_rect(rect), parent));
@@ -1371,8 +1426,7 @@ void GpuRenderer2DBackend::push_clip(Rectf rect) {
     // SDL clip rects are viewport-relative, so shift by the active viewport origin to
     // absolute coordinate space, then intersect with the parent clip (current_scissor()
     // scales the result to native texture pixels at draw time).
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2i coord = coordinate_extent();
     const SDL_Rect parent = _clip_stack.empty() ? SDL_Rect{0, 0, coord.x, coord.y} : _clip_stack.back();
     const Rectf shifted{rect.x + _view_offset.x, rect.y + _view_offset.y, rect.w, rect.h};
     _clip_stack.push_back(intersect(to_sdl_rect(shifted), parent));

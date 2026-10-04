@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <utility>
 #include <cmath>
 #include <span>
@@ -131,6 +132,11 @@ public:
                 }
                 _ranges.back().vertex_count += 4;
                 _area += quad_area(corners.data());
+                if (!_bounds.empty()) {
+                    for (const GpuVertex& v : corners) {
+                        _bounds.back().add(v.x, v.y);
+                    }
+                }
                 return;
             }
         }
@@ -165,6 +171,17 @@ public:
     // off): what the GPU shaded, for an overdraw figure.
     f64 take_pixels() { return std::exchange(_pixels, 0.0); }
     f64 pixels() const { return _pixels; } // so far, without taking them
+
+    // The box (in draw coordinates) of what is pushed between these, nested.
+    void begin_bounds() { _bounds.push_back(Box{}); }
+    std::optional<Rectf> end_bounds() {
+        const Box box = _bounds.back();
+        _bounds.pop_back();
+        if (box.x0 > box.x1) {
+            return std::nullopt;
+        }
+        return Rectf{box.x0, box.y0, box.x1 - box.x0, box.y1 - box.y0};
+    }
 
     // Context shared by every range in a flush.
     struct FlushContext {
@@ -228,6 +245,24 @@ private:
     GpuBuffer _shader_vertex_buffer;
     GpuBuffer _quad_indices; // 0 1 2 0 2 3, 4 5 6 4 6 7, ...: made once
     f64 _area = 0.0;         // covered by what is pushed, in draw coordinates
+    struct Box {
+        f32 x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+        void add(f32 x, f32 y) {
+            x0 = std::min(x0, x);
+            y0 = std::min(y0, y);
+            x1 = std::max(x1, x);
+            y1 = std::max(y1, y);
+        }
+    };
+    std::vector<Box> _bounds; // open begin_bounds(), innermost last
+    template<typename V>
+    void bound(std::span<const V> vertices) {
+        if (!_bounds.empty()) {
+            for (const V& v : vertices) {
+                _bounds.back().add(v.x, v.y);
+            }
+        }
+    }
     f64 _pixels = 0.0;       // covered by what was flushed, in target pixels
 
     template<typename V>

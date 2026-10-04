@@ -105,6 +105,21 @@ public:
     // Binds a render target for the guard's scope (push in ctor, pop in dtor).
     // Distinct from the pool below: this manages which target is *bound*, not
     // target lifetime. Mirrors ViewportGuard.
+    // A layer (begin_layer): drawn into a pooled target, laid over when it goes.
+    class LayerGuard {
+    public:
+        LayerGuard() = default;
+        explicit LayerGuard(Renderer2D* renderer) : _renderer(renderer) {}
+        ~LayerGuard();
+        LayerGuard(const LayerGuard&) = delete;
+        LayerGuard& operator=(const LayerGuard&) = delete;
+        LayerGuard(LayerGuard&& other) noexcept : _renderer(std::exchange(other._renderer, nullptr)) {}
+        LayerGuard& operator=(LayerGuard&&) noexcept = delete;
+
+    private:
+        Renderer2D* _renderer = nullptr;
+    };
+
     class RenderTargetGuard {
     public:
         RenderTargetGuard() = default;
@@ -153,6 +168,25 @@ public:
     // after they were drawn).
     std::vector<GpuScopeTiming> take_gpu_scope_timings();
     void set_texture_batching_enabled(bool enabled);
+    // A layer: what is drawn until the guard goes lands in a pooled render
+    // target, in the same coordinates (clips and viewport too), and is then laid
+    // over the current target once, at `opacity`, with `blend`:
+    //
+    //     { auto shadows = renderer.begin_layer({.opacity = 0.6f, .resolution = 0.5f});
+    //       draw_shadows(renderer); }   // overlapping shadows darken once
+    //
+    // Only what the draws covered is laid over (and counted as overdraw), not
+    // the whole target; `resolution` below 1 draws soft content (shadows, glow,
+    // light) at a fraction of the pixels. Layers nest. SDL_GPU; elsewhere the
+    // draws go straight to the current target (opacity not applied).
+    struct LayerOptions {
+        f32 opacity = 1.0f;
+        f32 resolution = 1.0f; // of the current target's pixels, each way
+        BlendMode blend = BlendMode::Alpha;
+    };
+    [[nodiscard]] LayerGuard begin_layer(LayerOptions options);
+    [[nodiscard]] LayerGuard begin_layer() { return begin_layer(LayerOptions{}); }
+
     // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
     // every draw adds one layer where it covers, and the screen shows the counts
     // as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or more.
@@ -383,6 +417,10 @@ private:
     std::unordered_map<int, ShaderHandle> _builtin_shaders; // BuiltinShader -> cached handle
     std::unordered_map<u64, std::shared_ptr<const ShaderLayout>> _shader_layouts; // read from each shader's SPIR-V
     std::unordered_map<u64, ShaderLayout> _compute_layouts;
+    // Open layers, innermost last (an invalid target: drawn straight through).
+    struct OpenLayer;
+    std::vector<std::unique_ptr<OpenLayer>> _layers;
+    void end_layer();
     BlendMode _blend_mode = BlendMode::Alpha;
 };
 

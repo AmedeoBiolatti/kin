@@ -392,8 +392,69 @@ int mipmaps(kin::Window& window) {
     return 0;
 }
 
+// XC-121's pattern: 4 layers a frame (30 shadows of 96 x 96 each, in one part
+// of a 2560 x 1440 screen), laid over at one opacity: by hand into a whole-
+// screen target, or with begin_layer at full and at half resolution. Pixels
+// shaded a frame and frame time back to back.
+int layers(int frames) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "layer-bench", .width = 2560, .height = 1440, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    const auto shadows = [&](int layer) {
+        for (int i = 0; i < 30; ++i) {
+            const float x = 200.0f + static_cast<float>(layer * 500 + (i * 53) % 400);
+            const float y = 300.0f + static_cast<float>((i * 97) % 500);
+            renderer->fill_rect(kin::Rectf{x, y, 96.0f, 96.0f}, kin::Color::rgb(0, 0, 0));
+        }
+    };
+    const char* names[3] = {"whole-screen target", "begin_layer", "begin_layer at 0.5"};
+    for (int mode = 0; mode < 3; ++mode) {
+        double pixels = 0.0;
+        const auto frame = [&] {
+            renderer->clear(kin::Color::rgb(90, 140, 60));
+            for (int layer = 0; layer < 4; ++layer) {
+                if (mode == 0) {
+                    const kin::PooledTarget target = renderer->acquire_render_target({2560, 1440});
+                    {
+                        const auto bind = renderer->scoped_render_target(target.target());
+                        renderer->clear(kin::Color::rgba(0, 0, 0, 0));
+                        shadows(layer);
+                    }
+                    const kin::Rectf screen{0.0f, 0.0f, 2560.0f, 1440.0f};
+                    renderer->draw_texture(target.texture(), screen, screen, kin::Color::rgba(150, 150, 150, 150));
+                } else {
+                    const auto shade = renderer->begin_layer({.opacity = 0.6f, .resolution = mode == 2 ? 0.5f : 1.0f});
+                    shadows(layer);
+                }
+            }
+            renderer->present();
+            pixels = renderer->backend_stats().last_pixels_drawn;
+        };
+        for (int f = 0; f < 10; ++f) {
+            frame();
+        }
+        std::vector<kin::u8> one;
+        kin::Vec2i one_size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+        const auto t0 = clock::now();
+        for (int f = 0; f < frames; ++f) {
+            frame();
+        }
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+        std::printf("4 layers of 30 shadows, %-20s %5.2f Mpixels shaded (overdraw %.2f), back-to-back frame %.3f ms\n",
+                    names[mode], pixels / 1e6, renderer->backend_stats().last_overdraw, ms(t0, clock::now()) / frames);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
+    if (argc > 3 && std::string_view{argv[3]} == "layers") {
+        return layers(frames);
+    }
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
     kin::App app{};
     kin::Window& window = app.create_window({.title = "draw-bench", .width = 1280, .height = 720, .hidden = true});

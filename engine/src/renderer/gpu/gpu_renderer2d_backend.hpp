@@ -145,6 +145,9 @@ public:
 
     RenderTarget create_render_target(Vec2i size, ScaleMode mode) override;
     void push_render_target(const RenderTarget& target) override;
+    bool push_layer_target(const RenderTarget& target) override;
+    std::optional<LayerBounds> pop_layer_target() override;
+    Vec2i current_target_pixels() const override { return current_size(); }
     void pop_render_target() override;
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
 
@@ -313,7 +316,18 @@ private:
     };
     std::vector<NativeState> _native_stack;
     std::vector<SDL_Rect> _clip_stack;
-    std::vector<const gpu::GpuTexture*> _rt_stack;       // pushed render targets
+    // Pushed render targets; a layer's (push_layer_target) keeps the
+    // coordinates it was pushed in, drawn at its own resolution.
+    struct TargetEntry {
+        const gpu::GpuTexture* texture = nullptr;
+        Vec2f coords{}; // a layer's coordinate size; 0: the target's own pixels
+    };
+    std::vector<TargetEntry> _rt_stack;
+    // The draw coordinates' extent on the current target: a layer's, the
+    // logical size for a logical scene, else the target's pixels.
+    Vec2f coordinate_size() const;
+    Vec2i coordinate_extent() const; // the same, in whole units
+    f32 coordinates_to_pixels() const; // the current target's pixels per draw unit
     std::vector<std::vector<SDL_Rect>> _saved_clip_stacks; // clip per pushed target
     std::vector<gpu::GpuShader> _shaders;                // custom material fragment shaders (handle = index+1)
     Vec2f _view_offset{0.0f, 0.0f};                      // active viewport origin (coord space); added to all verts

@@ -14,6 +14,7 @@
 #include <memory>
 #include <functional>
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -130,6 +131,17 @@ public:
     // prewarm_pipelines to make them while it loads (before their first draw).
     virtual std::string pipeline_record() const { return {}; }
     virtual void prewarm_pipelines(std::string_view /*record*/) {}
+    // Layers (Renderer2D::begin_layer): a target drawn into in the current
+    // coordinates, at its own resolution; pop returns the box of what was drawn
+    // (in draw coordinates), empty when nothing was. False / nullopt: not had.
+    struct LayerBounds {
+        Rectf dest;   // what was drawn, in draw coordinates (empty: nothing)
+        Rectf source; // the same in the layer target's pixels
+    };
+    virtual bool push_layer_target(const RenderTarget&) { return false; }
+    virtual std::optional<LayerBounds> pop_layer_target() { return std::nullopt; }
+    // The current target's size in pixels (a layer's resolution is a share of it).
+    virtual Vec2i current_target_pixels() const { return {}; }
     // Draws show how many times each pixel is shaded instead of themselves.
     virtual void set_overdraw_view(bool) {}
     // A named scope of GPU work, timed while GPU timing is on (else nothing).

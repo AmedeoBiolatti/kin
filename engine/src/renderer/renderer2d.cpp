@@ -632,6 +632,59 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     _backend->draw_shader_surface(rect, shader, params, sources, buffers);
 }
 
+struct Renderer2D::OpenLayer {
+    PooledTarget target;
+    LayerOptions options;
+};
+
+Renderer2D::LayerGuard::~LayerGuard() {
+    if (_renderer) {
+        _renderer->end_layer();
+    }
+}
+
+Renderer2D::LayerGuard Renderer2D::begin_layer(LayerOptions options) {
+    auto layer = std::make_unique<OpenLayer>();
+    layer->options = options;
+    const Vec2i pixels = _backend->current_target_pixels();
+    if (pixels.x > 0 && pixels.y > 0) {
+        const f32 resolution = std::clamp(options.resolution, 0.05f, 1.0f);
+        const Vec2i size{std::max(1, static_cast<i32>(std::ceil(static_cast<f32>(pixels.x) * resolution))),
+                         std::max(1, static_cast<i32>(std::ceil(static_cast<f32>(pixels.y) * resolution)))};
+        layer->target = acquire_render_target(size, ScaleMode::Linear);
+        if (layer->target && !_backend->push_layer_target(layer->target.target())) {
+            layer->target = PooledTarget{};
+        }
+    }
+    if (!layer->target) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            KIN_LOG_WARN("render", "begin_layer: no layers on this backend; drawing straight through");
+        }
+    }
+    _layers.push_back(std::move(layer));
+    return LayerGuard{this};
+}
+
+void Renderer2D::end_layer() {
+    if (_layers.empty()) {
+        return;
+    }
+    std::unique_ptr<OpenLayer> layer = std::move(_layers.back());
+    _layers.pop_back();
+    if (!layer->target) {
+        return;
+    }
+    const std::optional<IRenderer2DBackend::LayerBounds> bounds = _backend->pop_layer_target();
+    if (!bounds || bounds->dest.w <= 0.0f || bounds->dest.h <= 0.0f) {
+        return; // nothing drawn: nothing to lay over
+    }
+    // The target holds premultiplied colour: opacity scales all of it.
+    const auto o = static_cast<u8>(std::clamp(layer->options.opacity, 0.0f, 1.0f) * 255.0f + 0.5f);
+    const auto blend = scoped_blend_mode(layer->options.blend);
+    draw_texture(layer->target.texture(), bounds->source, bounds->dest, Color::rgba(o, o, o, o));
+}
+
 ComputeShaderHandle Renderer2D::create_compute_shader(ShaderBlob spirv) {
     if (!capabilities().compute) {
         return {};

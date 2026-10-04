@@ -2123,6 +2123,85 @@ void test_gpu_overdraw() {
     }
 }
 
+// Layers: drawn into a target in the same coordinates and laid over once, at
+// one opacity (so overlaps inside darken once), over only what was drawn.
+void test_gpu_layers() {
+    constexpr std::string_view test_name = "test_gpu_layers";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-layer-test", .width = 64, .height = 32, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        const kin::Color black = kin::Color::rgb(0, 0, 0);
+        const auto frame = [&](float resolution, bool layered) {
+            renderer->clear(kin::Color::rgb(255, 255, 255));
+            {
+                std::optional<kin::Renderer2D::LayerGuard> layer;
+                if (layered) {
+                    layer.emplace(renderer->begin_layer({.opacity = 0.5f, .resolution = resolution}));
+                }
+                const kin::Color c = layered ? black : kin::Color::rgba(0, 0, 0, 128);
+                renderer->fill_rect(kin::Rectf{8.0f, 8.0f, 16.0f, 16.0f}, c);
+                renderer->fill_rect(kin::Rectf{16.0f, 8.0f, 16.0f, 16.0f}, c); // overlaps x 16..24
+            }
+            std::vector<kin::u8> px;
+            kin::Vec2i size{};
+            assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 32.0f}, px, size));
+            renderer->present();
+            const auto at = [&](int x, int y) {
+                const std::size_t i = (static_cast<std::size_t>(y * size.y / 32) * size.x + x * size.x / 64) * 4;
+                return kin::Color::rgb(px[i], px[i + 1], px[i + 2]);
+            };
+            return std::array{at(12, 16), at(20, 16), at(40, 16)};
+        };
+        // Without a layer the overlap darkens twice; with one, once.
+        const auto plain = frame(1.0f, false);
+        assert(color_near(plain[0], kin::Color::rgb(127, 127, 127), 3) && color_near(plain[1], kin::Color::rgb(63, 63, 63), 4));
+        const auto layered = frame(1.0f, true);
+        assert(color_near(layered[0], kin::Color::rgb(127, 127, 127), 3));
+        assert(color_near(layered[1], kin::Color::rgb(127, 127, 127), 3));
+        assert(color_near(layered[2], kin::Color::rgb(255, 255, 255), 0));
+        // Only what was drawn is laid over: 24 x 16 drawn into it twice-ish
+        // (two 16 x 16 squares), and that box once over the screen.
+        const double pixels = renderer->backend_stats().last_pixels_drawn;
+        if (std::abs(pixels - (2 * 16 * 16 + 24 * 16)) > 1.0) {
+            throw std::runtime_error(std::string(test_name) + ": " + std::to_string(pixels) + " pixels drawn");
+        }
+        // At half resolution, under a logical size, things stay where they are.
+        renderer->set_logical_size({64, 32});
+        const auto half = frame(0.5f, true);
+        assert(color_near(half[0], kin::Color::rgb(127, 127, 127), 4) && color_near(half[1], kin::Color::rgb(127, 127, 127), 4));
+        assert(color_near(half[2], kin::Color::rgb(255, 255, 255), 0));
+        // A clip set outside holds inside; layers nest.
+        renderer->clear(kin::Color::rgb(255, 255, 255));
+        renderer->push_clip({0.0f, 0.0f, 16.0f, 32.0f});
+        {
+            const auto outer = renderer->begin_layer({.opacity = 1.0f});
+            const auto inner = renderer->begin_layer({.opacity = 0.5f});
+            renderer->fill_rect(kin::Rectf{8.0f, 8.0f, 16.0f, 16.0f}, black);
+        }
+        renderer->pop_clip();
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        assert(renderer->read_rgba({0.0f, 0.0f, 64.0f, 32.0f}, px, size));
+        const auto red_at = [&](int x) { return px[(static_cast<std::size_t>(16 * size.y / 32) * size.x + x * size.x / 64) * 4]; };
+        assert(std::abs(red_at(12) - 127) <= 4); // inside the clip
+        assert(red_at(20) == 255);               // outside it
+        renderer->present();
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Texture uploads are batched: many in a frame go in one command buffer ahead
 // of it, so an update applies to the whole frame it is made in. A whole-texture
 // update of a texture the frame hasn't drawn yet cycles its storage (no wait on
@@ -2683,6 +2762,7 @@ int main() {
     test_gpu_shader_hot_reload();
     test_gpu_mipmaps();
     test_gpu_overdraw();
+    test_gpu_layers();
     test_gpu_scopes();
     test_gpu_big_uploads();
     test_gpu_empty_textures_are_clear();

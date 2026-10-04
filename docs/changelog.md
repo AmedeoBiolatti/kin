@@ -9,6 +9,12 @@ releases may change APIs.
 
 ### Added
 
+- `Renderer2D::begin_layer({.opacity, .resolution, .blend})`: draws land in a
+  pooled render target in the same coordinates and are laid over once, at one
+  opacity, over only the box they covered; `resolution` below 1 for soft
+  content. Four sparse shadow layers on a 2560 x 1440 screen: 15.9 Mpixels a
+  frame by hand with whole-screen targets, 2.3 with layers, 1.4 at half
+  resolution. SDL_GPU.
 - Overdraw by part and by eye: a `gpu_scope`'s pixels and overdraw
   (`GpuScopeTiming::pixels` / `overdraw`, `overdraw.<name>` in `--profile`), and
   the overdraw view (`Renderer2D::set_overdraw_view`, the debug overlay's toggle,

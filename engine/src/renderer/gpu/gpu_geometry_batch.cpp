@@ -48,6 +48,17 @@ void GpuGeometryBatch::push_instances(std::span<const GpuSpriteInstance> instanc
     _instances.insert(_instances.end(), instances.begin(), instances.end());
     for (const GpuSpriteInstance& s : instances) {
         _area += std::abs(static_cast<f64>(s.w) * s.h);
+        if (!_bounds.empty()) {
+            if (s.cos == 1.0f && s.sin == 0.0f) {
+                _bounds.back().add(s.x, s.y);
+                _bounds.back().add(s.x + s.w, s.y + s.h);
+            } else { // turned about its pivot: within the circle through its corners
+                const f32 r = std::hypot(std::max(std::abs(s.pivot_x - s.x), std::abs(s.x + s.w - s.pivot_x)),
+                                         std::max(std::abs(s.pivot_y - s.y), std::abs(s.y + s.h - s.pivot_y)));
+                _bounds.back().add(s.pivot_x - r, s.pivot_y - r);
+                _bounds.back().add(s.pivot_x + r, s.pivot_y + r);
+            }
+        }
     }
     if (!_ranges.empty()) {
         Range& last = _ranges.back();
@@ -81,6 +92,7 @@ void GpuGeometryBatch::push(std::span<const GpuVertex> tris, SDL_GPUShader* frag
     for (std::size_t i = 0; i + 2 < tris.size(); i += 3) {
         _area += triangle_area(tris[i], tris[i + 1], tris[i + 2]);
     }
+    bound(tris);
     add_range(GpuVertexLayout::Triangles, false, first, static_cast<u32>(tris.size()), fragment, texture, scissor,
               blend, uniform, uniform_size, sampler, extra, storage);
 }
@@ -99,6 +111,7 @@ void GpuGeometryBatch::push_quads(std::span<const GpuVertex> corners, SDL_GPUSha
     for (std::size_t i = 0; i + 3 < corners.size(); i += 4) {
         _area += quad_area(&corners[i]);
     }
+    bound(corners);
     add_range(GpuVertexLayout::Triangles, true, first, static_cast<u32>(corners.size()), fragment, texture, scissor,
               blend, uniform, uniform_size, sampler, extra, storage);
 }
@@ -116,6 +129,7 @@ void GpuGeometryBatch::push_shader_vertices(std::span<const GpuShaderVertex> tri
     for (std::size_t i = 0; i + 2 < tris.size(); i += 3) {
         _area += triangle_area(tris[i], tris[i + 1], tris[i + 2]);
     }
+    bound(tris);
     add_range(GpuVertexLayout::ShaderVertices, false, first, static_cast<u32>(tris.size()), fragment, texture,
               scissor, blend, uniform, uniform_size, sampler, extra, storage);
 }

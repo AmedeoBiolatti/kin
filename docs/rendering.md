@@ -407,6 +407,33 @@ the above. The SDL renderer's `gpu` driver draws shader surfaces without source
 textures, and other backends draw nothing, so check the capability and provide a
 fallback. `engine/shaders/` has working examples.
 
+## Layers
+
+Shapes that must combine before they are laid over the scene (shadows that
+darken once where they cross, parts of one piece of art that must not show
+through each other) go in a layer:
+
+```cpp
+{
+    const auto shadows = renderer.begin_layer({.opacity = 0.6f, .resolution = 0.5f});
+    for (const Building& b : buildings) {
+        draw_shadow(renderer, b);   // same coordinates, clips and viewport as outside
+    }
+}   // laid over the scene here, once
+```
+
+- The layer is a pooled render target. Draws inside use the coordinates they
+  would outside, so code moves into a layer unchanged.
+- Only the box around what was drawn is laid over (and counted as overdraw),
+  not the whole target: sparse layers cost what they cover.
+- `resolution` below 1 draws soft content at a fraction of the pixels.
+- `blend` sets how the layer is laid over (`Alpha` by default). Layers nest.
+
+In `kin_draw_bench 200 1 layers` (four layers of 30 shadows on a 2560 x 1440
+screen), whole-screen targets shaded 15.9 Mpixels a frame, `begin_layer` 2.3,
+and at half resolution 1.4. SDL_GPU; elsewhere the draws go straight to the
+current target and the opacity is not applied.
+
 ## Mipmaps
 
 A texture drawn much smaller than it is (a big sprite sheet zoomed out, a
