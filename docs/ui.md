@@ -44,6 +44,42 @@ auto size = kin::ui2::measure_text(*font, "START", 2.0f);
 kin::ui2::draw_text_centered(renderer, *font, "START", center, 2.0f, color);
 ```
 
+## Text That Scales
+
+TTF fonts are made one of two ways (`kin::ui2::TextRendering`):
+
+- `Bitmap` (the default): glyphs rasterised and hinted at each size drawn. The
+  crispest small UI text, but blurred when a transform or camera scales it,
+  and an atlas per size (the most recent few are kept, so a scale that
+  changes every frame no longer piles them up).
+- `Sdf`: one atlas of signed distance fields (48-pixel glyphs, 8 pixels of
+  spread), made once per renderer (about 15 ms, on the job system). Sharp at any
+  size, scale, zoom or turn, and outlines come nearly free. Metrics scale
+  linearly (unhinted), so measuring at twice the scale gives exactly twice the
+  size; below about 12 pixels it is softer than `Bitmap`.
+
+```cpp
+auto title = kin::ui2::load_ttf_font("fonts/Title.ttf", 24, 1.0f, kin::ui2::TextRendering::Sdf);
+auto label = kin::ui2::system_ui_font(16, kin::ui2::TextRendering::Sdf);
+
+// In the world, under the camera: zooms and turns with it, still sharp.
+const auto view = renderer.scoped_transform(camera.view_transform());
+kin::ui2::draw_text(renderer, label, "Aqua", planet_pos, 1.0f, white);
+
+// An outline 2 units wide, in one pass from the distance field.
+kin::ui2::draw_text_outlined(renderer, title, "GAME OVER", pos, 2.0f, gold, 2.0f, ink);
+```
+
+`Sdf` text needs `capabilities().distance_fields` (SDL_GPU). Elsewhere it is
+drawn as `Bitmap`, and `draw_text_outlined` stamps the text four times under
+itself, as widgets' `TextStyle::outline_width` always did. `games/shapes_demo`
+names its planets in the world with an `Sdf` font (`--zoom=3 --turn=20` to
+see them zoomed and turned).
+
+`Renderer2D::draw_distance_field(texture, quads, style)` draws any
+distance-field texture this way: alpha 0.5 on the outline, rising inside and
+falling outside over `DistanceFieldStyle::spread` texels.
+
 ## Text Editing
 
 `TextInput` is one line; `TextEdit` is a multi-line editor for chat boxes and notes

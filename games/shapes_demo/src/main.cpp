@@ -1,10 +1,12 @@
 // Shapes demo: an orrery of vector shapes. Planets and moons are entities
 // whose ShapeRenderers turn with their parents (flecs ChildOf); the planets
 // and the sun are composed in code, the rocket read from SVG-lite; the HUD is
-// drawn with the immediate shape calls.
+// drawn with the immediate shape calls. The planets' names are Sdf text drawn
+// in the world, so they stay sharp as the camera zooms and turns.
 //
 //   Q / E    turn the camera      - / =  or the wheel   zoom
 //   Space    pause                Esc   quit
+//   --zoom=Z --turn=DEGREES   start the camera zoomed and turned
 
 #include <kin/core/json.hpp>
 #include <kin/ecs/render.hpp>
@@ -20,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,6 +31,8 @@ namespace demo {
 namespace {
 
 constexpr kin::Vec2f logical_size{960.0f, 600.0f};
+float start_zoom = 1.0f;
+float start_turn = 0.0f;
 
 // The rocket, as a vector editor would save it: a body, a window, and one fin
 // used twice (the second mirrored).
@@ -140,6 +145,7 @@ public:
             arm.child_of(_sun);
             _arms.push_back(arm);
             kin::EcsEntity p = body("planet", {.pos = {distance[i], 0}}, mesh_of(looks[i]), &arm, 3);
+            _planets.push_back(p);
             if (i != 1) {
                 kin::EcsEntity moon_arm = _world.entity().set(kin::Transform2D{});
                 moon_arm.child_of(p);
@@ -156,6 +162,8 @@ public:
         }
         _camera.viewport = logical_size;
         _camera.look_at({0.0f, 0.0f});
+        _camera.zoom = std::clamp(start_zoom, 0.3f, 6.0f);
+        _camera.rotation = start_turn;
     }
 
     std::string_view name() const override { return "Shapes Demo"; }
@@ -191,6 +199,7 @@ public:
         _queue.clear();
         kin::collect_world(*_state, _queue, {}, {.sort_mode = kin::RenderSortMode::LayerThenOrder, .view = &view});
         _queue.flush(r, view);
+        draw_names(r);
         draw_hud(r);
     }
 
@@ -211,10 +220,26 @@ public:
     }
 
 private:
+    // In the world, under the camera: the names zoom and turn with it.
+    void draw_names(kin::Renderer2D& r) const {
+        if (!_names) {
+            return;
+        }
+        const auto camera = r.scoped_transform(_camera.view_transform());
+        static constexpr std::array<std::string_view, 3> names{"Aqua", "Rust", "Moss"};
+        for (std::size_t i = 0; i < _planets.size() && i < names.size(); ++i) {
+            const kin::Vec2f at = kin::current_world_transform(_planets[i]).pos;
+            const kin::Vec2f size = kin::ui2::measure_text(_names, names[i], 0.8f);
+            kin::ui2::draw_text_outlined(r, _names, names[i], {at.x - size.x * 0.5f, at.y + 30.0f}, 0.8f,
+                                         kin::Color::rgb(226, 232, 240), 1.5f, kin::Color::rgb(14, 18, 32));
+        }
+    }
+
     void draw_hud(kin::Renderer2D& r) const {
         r.fill_rounded_rect({12, 12, 380, 64}, 8, kin::Color::rgba(10, 12, 20, 200));
         const kin::ui2::Font font = kin::ui2::system_ui_font(15);
-        kin::ui2::draw_text(r, font, "SHAPES  orrery", {24, 20}, 18.0f / 15.0f, kin::Color::rgb(226, 232, 240));
+        kin::ui2::draw_text_outlined(r, _names ? _names : font, "SHAPES  orrery", {24, 18}, 18.0f / 16.0f,
+                                     kin::Color::rgb(255, 214, 120), 1.0f, kin::Color::rgb(60, 30, 10));
         kin::ui2::draw_text(r, font, "Q/E turn   -/= or wheel zoom   Space pause", {24, 48}, 13.0f / 15.0f,
                             kin::Color::rgb(150, 162, 178));
         // A dial: the zoom as an arc, the camera's turn as a needle.
@@ -233,6 +258,10 @@ private:
     kin::Camera2D _camera;
     kin::EcsEntity _sun;
     std::vector<kin::EcsEntity> _arms;
+    std::vector<kin::EcsEntity> _planets;
+    kin::ui2::Font _names = kin::ui2::system_ui_font_available()
+                                ? kin::ui2::system_ui_font_bold(16, kin::ui2::TextRendering::Sdf)
+                                : kin::ui2::Font{};
     float _time = 0.0f;
     bool _paused = false;
     int _svg_elements = 0;
@@ -244,6 +273,14 @@ private:
 } // namespace demo
 
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if (arg.starts_with("--zoom=")) {
+            demo::start_zoom = std::strtof(argv[i] + 7, nullptr);
+        } else if (arg.starts_with("--turn=")) {
+            demo::start_turn = std::strtof(argv[i] + 7, nullptr);
+        }
+    }
     kin::GameInfo game = demo::make_game_info();
     kin::SceneManager scenes;
     const auto build_scenes = [](kin::SceneManager& target) { target.push(std::make_unique<demo::ShapesDemoScene>()); };

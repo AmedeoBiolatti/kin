@@ -36,6 +36,15 @@ struct SpriteInstance {
     Vec2f pivot{0.5f, 0.5f};    // normalized within dest
 };
 
+// How Renderer2D::draw_distance_field reads a distance-field texture: its
+// alpha is 0.5 on the outline, rising inside and falling outside by 0.5 over
+// `spread` texels.
+struct DistanceFieldStyle {
+    f32 spread = 8.0f;
+    f32 outline = 0.0f; // its width outside the outline, in texels
+    Color outline_color = colors::black;
+};
+
 struct RendererBackendCapabilities {
     bool immediate_2d = true;
     bool queued_2d = false;
@@ -48,6 +57,7 @@ struct RendererBackendCapabilities {
     bool transforms = false;      // set_transform() honoured (Renderer2D::push_transform)
     bool shapes = false;          // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
     bool shape_primitives = false; // draw_shape_primitives() draws primitives whole
+    bool distance_fields = false;  // draw_distance_field() draws
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -360,6 +370,12 @@ public:
     // rounded rectangles); false where the backend cannot, and Renderer2D
     // tessellates them instead.
     virtual bool draw_shape_primitives(std::span<const ShapePrimitive> /*primitives*/, Color /*tint*/) { return false; }
+    // Quads of a distance-field texture, sharp at any scale (scalable text);
+    // false where the backend cannot.
+    virtual bool draw_distance_field(const Texture& /*texture*/, std::span<const SpriteInstance> /*quads*/,
+                                     const DistanceFieldStyle& /*style*/) {
+        return false;
+    }
     // Worker threads the backend may use for large batches (null: none).
     virtual void set_job_system(JobSystem*) {}
 

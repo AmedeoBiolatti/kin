@@ -155,6 +155,8 @@ public:
     void draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices, u32 index_base,
                          Color tint) override;
     bool draw_shape_primitives(std::span<const ShapePrimitive> primitives, Color tint) override;
+    bool draw_distance_field(const Texture& texture, std::span<const SpriteInstance> quads,
+                             const DistanceFieldStyle& style) override;
     void set_transform(const Affine2& transform) override {
         _transform = transform;
         _transformed = !transform.is_identity();
@@ -265,6 +267,7 @@ private:
     gpu::GpuShader _sdf_shader;            // sdf_shape.frag: primitives drawn whole
     gpu::GpuShader _sdf_vertex_shader;     // sdf_shape.vert: one instance each
     std::vector<gpu::GpuSdfInstance> _sdf_scratch;
+    gpu::GpuShader _distance_field_shader; // distance_field.frag: scalable text and icons
     ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
     bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;

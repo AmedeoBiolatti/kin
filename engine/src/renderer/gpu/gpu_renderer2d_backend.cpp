@@ -211,6 +211,9 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
                                                 dir / "sdf_shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
         _sdf_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
                                                        dir / "sdf_shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
+        _distance_field_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                                           dir / "distance_field.frag.spv", /*uniform_buffers=*/1,
+                                                           /*samplers=*/1);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "shapes drawn with soft edges only", (LogFields{{.name = "reason", .value = e.what()}}));
     }
@@ -246,6 +249,10 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         // Shapes' pipeline now rather than at the first one drawn.
         _pipelines.get(_shape_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha,
                        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::ShapeVertices);
+    }
+    if (_distance_field_shader.handle()) {
+        _pipelines.get(_vertex_shader.handle(), _distance_field_shader.handle(), gpu::GpuBlendMode::Alpha,
+                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
     }
     if (_sdf_shader.handle() && _sdf_vertex_shader.handle()) {
         _pipelines.get(_sdf_vertex_shader.handle(), _sdf_shader.handle(), gpu::GpuBlendMode::Alpha,
@@ -293,6 +300,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .transforms = true,
         .shapes = true,
         .shape_primitives = _sdf_shader.handle() && _sdf_vertex_shader.handle(),
+        .distance_fields = static_cast<bool>(_distance_field_shader.handle()),
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -811,6 +819,60 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
     }
     _batch.push_shapes(_shape_scratch, indices, index_base, _shape_shader.handle(), current_scissor(),
                        resolve_blend(gpu::GpuBlendMode::Alpha));
+}
+
+bool GpuRenderer2DBackend::draw_distance_field(const Texture& texture, std::span<const SpriteInstance> quads,
+                                               const DistanceFieldStyle& style) {
+    if (!_distance_field_shader.handle()) {
+        return false;
+    }
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend || !backend->texture() || quads.empty()) {
+        return true;
+    }
+    const Vec2i size = backend->size();
+    if (size.x <= 0 || size.y <= 0) {
+        return true;
+    }
+    ensure_frame();
+    retain(texture);
+    struct Uniforms {
+        f32 outline_color[4];
+        f32 params[4];
+    } uniforms{{style.outline_color.r / 255.0f, style.outline_color.g / 255.0f, style.outline_color.b / 255.0f,
+                style.outline_color.a / 255.0f},
+               {style.spread, style.outline, 0.0f, 0.0f}};
+    const f32 tex_w = static_cast<f32>(size.x), tex_h = static_cast<f32>(size.y);
+    constexpr f32 pi = 3.14159265358979323846f;
+    _scratch_verts.clear();
+    for (const SpriteInstance& q : quads) {
+        if (q.dest.w <= 0.0f || q.dest.h <= 0.0f) {
+            continue;
+        }
+        const Rectf src = q.source.w > 0.0f && q.source.h > 0.0f ? q.source : Rectf{0.0f, 0.0f, tex_w, tex_h};
+        const f32 u0 = src.x / tex_w, v0 = src.y / tex_h, u1 = (src.x + src.w) / tex_w, v1 = (src.y + src.h) / tex_h;
+        std::array<Vec2f, 4> p{{{q.dest.x, q.dest.y},
+                                {q.dest.x + q.dest.w, q.dest.y},
+                                {q.dest.x + q.dest.w, q.dest.y + q.dest.h},
+                                {q.dest.x, q.dest.y + q.dest.h}}};
+        if (q.rotation != 0.0f) {
+            const f32 c = std::cos(q.rotation * pi / 180.0f), s = std::sin(q.rotation * pi / 180.0f);
+            const Vec2f o{q.dest.x + q.dest.w * q.pivot.x, q.dest.y + q.dest.h * q.pivot.y};
+            for (Vec2f& v : p) {
+                const Vec2f d{v.x - o.x, v.y - o.y};
+                v = {o.x + d.x * c - d.y * s, o.y + d.x * s + d.y * c};
+            }
+        }
+        const Color t = q.tint;
+        const std::array<Vec2f, 4> uv{{{u0, v0}, {u1, v0}, {u1, v1}, {u0, v1}}};
+        for (std::size_t k = 0; k < 4; ++k) {
+            const Vec2f at = place(p[k]);
+            _scratch_verts.push_back({at.x, at.y, uv[k].x, uv[k].y, t.r, t.g, t.b, t.a});
+        }
+    }
+    _batch.push_quads(_scratch_verts, _distance_field_shader.handle(), backend->texture().handle(), current_scissor(),
+                      resolve_blend(gpu::GpuBlendMode::Alpha), &uniforms, sizeof(uniforms), _sampler_linear);
+    return true;
 }
 
 bool GpuRenderer2DBackend::draw_shape_primitives(std::span<const ShapePrimitive> primitives, Color tint) {

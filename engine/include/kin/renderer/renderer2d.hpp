@@ -296,6 +296,12 @@ public:
     void draw_arc(Vec2f center, f32 radius, f32 start, f32 end, Color color, StrokeStyle style = {});
     void fill_pie(Vec2f center, f32 radius, f32 start, f32 end, Color color);
     void fill_path(const Path& path, Color color, FillRule rule = FillRule::NonZero);
+    // Quads of a distance-field texture (alpha 0.5 on the outline, see
+    // DistanceFieldStyle), tinted, their edges one pixel soft at any size,
+    // turn or zoom, with an optional outline: scalable text and icons. False
+    // (nothing drawn) where the backend cannot (capabilities().distance_fields).
+    bool draw_distance_field(const Texture& texture, std::span<const SpriteInstance> quads,
+                             const DistanceFieldStyle& style = {});
     void stroke_path(const Path& path, Color color, StrokeStyle style = {});
     // Reads the SPIR-V's layout (kin/renderer/shader_reflect.hpp): the sampler,
     // storage buffer and uniform block counts come from it, so a ShaderDesc's
