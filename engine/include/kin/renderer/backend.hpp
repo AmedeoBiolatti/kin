@@ -10,6 +10,7 @@
 #include <kin/renderer/post_process.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
+#include <kin/renderer/shape.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
@@ -45,6 +46,7 @@ struct RendererBackendCapabilities {
     bool data_buffers = false;    // create_data_buffer() and shaders reading them
     bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
     bool transforms = false;      // set_transform() honoured (Renderer2D::push_transform)
+    bool shapes = false;          // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -346,6 +348,12 @@ public:
     // (before viewports and clips, which it leaves alone). A backend that
     // reports capabilities().transforms honours it.
     virtual void set_transform(const Affine2&) {}
+    // Anti-aliased triangles (Renderer2D::draw_shape): each vertex's colour
+    // times `tint`, faded out over the pixel past the outline by its `edge`
+    // (measured on the GPU, or from the transform's scale where shaders cannot
+    // measure pixels). Mapped like any draw.
+    virtual void draw_shape_mesh(std::span<const ShapeVertex> /*vertices*/, std::span<const u32> /*indices*/,
+                                 Color /*tint*/) {}
     // Worker threads the backend may use for large batches (null: none).
     virtual void set_job_system(JobSystem*) {}
 

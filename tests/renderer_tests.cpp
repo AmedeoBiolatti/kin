@@ -2634,6 +2634,95 @@ void check_transforms(kin::Renderer2D& renderer) {
     expect(10, 62, white, "under the scaled line");
 }
 
+// Shared by the software (SDL) and GPU backend tests: shapes land where they
+// should on both, with soft edges.
+void check_shapes(kin::Renderer2D& renderer) {
+    const kin::Color white = kin::Color::rgb(255, 255, 255);
+    const kin::Color red = kin::Color::rgb(255, 0, 0);
+    const kin::Color green = kin::Color::rgb(0, 255, 0);
+    const kin::Color blue = kin::Color::rgb(0, 0, 255);
+    const kin::Color black = kin::Color::rgb(0, 0, 0);
+    assert(renderer.capabilities().shapes);
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    kin::Shape square;
+    square.fill(kin::Path::rect({0, 0, 1, 1}), kin::colors::white);
+    const kin::ShapeMesh unit = square.mesh();
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(white);
+        renderer.fill_circle({16.0f, 16.0f}, 10.0f, red);
+        renderer.draw_line({32.0f, 8.0f}, {60.0f, 8.0f}, blue, 4.0f);
+        renderer.draw_circle({48.0f, 40.0f}, 8.0f, green, 2.0f);
+        // A unit square made once, drawn 6 x 6 at (10, 44) and 10 x 10 at (30, 50).
+        renderer.draw_shape(unit, kin::Affine2::translation({10.0f, 44.0f}) * kin::Affine2::scaling({6.0f, 6.0f}), black);
+        renderer.draw_shape(unit, kin::Affine2::translation({30.0f, 50.0f}) * kin::Affine2::scaling({10.0f, 10.0f}),
+                            black);
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+    }
+    const auto at = [&](int x, int y) {
+        const std::size_t i = (static_cast<std::size_t>(y) * size.x + x) * 4;
+        return kin::Color::rgb(px[i], px[i + 1], px[i + 2]);
+    };
+    const auto expect = [&](int x, int y, kin::Color color, const char* what) {
+        if (!pixel_near(px, size, x, y, color, 3)) {
+            const kin::Color c = at(x, y);
+            throw std::runtime_error(std::string("check_shapes (") + std::string(renderer.backend_name()) + "): " + what +
+                                     " at " + std::to_string(x) + "," + std::to_string(y) + " is " + std::to_string(c.r) +
+                                     "," + std::to_string(c.g) + "," + std::to_string(c.b));
+        }
+    };
+    expect(16, 16, red, "circle");
+    expect(16, 29, white, "past the circle");
+    expect(46, 7, blue, "thick line");
+    expect(46, 12, white, "past the thick line");
+    expect(48, 32, green, "ring");
+    expect(48, 40, white, "inside the ring");
+    expect(12, 46, black, "scaled mesh");
+    expect(15, 49, black, "scaled mesh's far corner");
+    expect(18, 46, white, "past the scaled mesh");
+    expect(35, 55, black, "the bigger mesh");
+    // The circle's edge is soft: half way between red and white where the
+    // outline crosses the pixel (below the centre, 10.5 out at y = 26).
+    const kin::Color edge = at(16, 26);
+    if (!(edge.r > 240 && edge.g > 40 && edge.g < 215)) {
+        throw std::runtime_error(std::string("check_shapes (") + std::string(renderer.backend_name()) +
+                                 "): the circle's edge pixel is " + std::to_string(edge.g) + " green, not soft");
+    }
+    // Ten times bigger, the edge is still one pixel soft: 1.5 pixels out is clear.
+    expect(41, 55, white, "1.5 px past the bigger mesh");
+}
+
+void test_shapes_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "shape-test", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    check_shapes(renderer);
+}
+
+void test_shapes_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_shapes_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-shape-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        check_shapes(*renderer);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_transforms_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "transform-test", .width = 64, .height = 64, .hidden = true});
@@ -3011,6 +3100,8 @@ int main() {
     test_cached_target_on_software_backend();
     test_cached_target_on_gpu_backend();
     test_transforms_on_software_backend();
+    test_shapes_on_software_backend();
+    test_shapes_on_gpu_backend();
     test_transforms_on_gpu_backend();
     test_camera_zoom_and_rotation();
     test_gpu_scopes();

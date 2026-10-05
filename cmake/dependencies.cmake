@@ -113,6 +113,21 @@ FetchContent_Declare(sol2
 
 FetchContent_MakeAvailable(sol2)
 
+# Polygon triangulation for filled shapes (kin/renderer/shape.hpp). Header-only.
+set(EARCUT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(EARCUT_BUILD_BENCH OFF CACHE BOOL "" FORCE)
+set(EARCUT_BUILD_VIZ OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(earcut
+    GIT_REPOSITORY https://github.com/mapbox/earcut.hpp.git
+    GIT_TAG v3.2.4
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(earcut)
+if(TARGET earcut_hpp)
+    get_target_property(_earcut_include_dirs earcut_hpp INTERFACE_INCLUDE_DIRECTORIES)
+    set_property(TARGET earcut_hpp PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_earcut_include_dirs}")
+endif()
+
 set(SDLIMAGE_VENDORED ON CACHE BOOL "" FORCE)
 set(SDLIMAGE_DEPS_SHARED OFF CACHE BOOL "" FORCE)
 set(SDLIMAGE_INSTALL OFF CACHE BOOL "" FORCE)

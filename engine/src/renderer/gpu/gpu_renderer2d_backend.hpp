@@ -152,6 +152,7 @@ public:
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
 
     void set_blend_mode(BlendMode mode) override { _blend = mode; }
+    void draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices, Color tint) override;
     void set_transform(const Affine2& transform) override {
         _transform = transform;
         _transformed = !transform.is_identity();
@@ -256,6 +257,7 @@ private:
     gpu::GpuShader _instance_shader; // sprite_instanced.vert; without it draw_sprites draws quad by quad
     gpu::GpuShader _shader_vertex_shader; // shader_geometry.vert; without it draw_shader_geometry draws nothing
     gpu::GpuShader _overdraw_count_shader; // the overdraw view's: one layer a draw
+    gpu::GpuShader _shape_shader;          // shape.frag: anti-aliased shapes (draw_shape_mesh)
     ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
     bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;

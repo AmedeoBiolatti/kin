@@ -10,6 +10,7 @@
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
+#include <kin/renderer/shape.hpp>
 #include <kin/renderer/sprite.hpp>
 #include <kin/renderer/texture.hpp>
 
@@ -274,6 +275,28 @@ public:
     void fill_rounded_rect(Rectf rect, f32 radius, Color color);
     void draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width = 1.0f);
     void fill_gradient_rect(Rectf rect, const Gradient& gradient);
+
+    // Shapes (kin/renderer/shape.hpp), anti-aliased: one pixel soft at any
+    // scale on SDL_GPU, a soft edge as wide as the mesh's fringe elsewhere.
+    // draw_shape draws a mesh made once, placed by `transform` and coloured by
+    // `tint`; the rest tessellate as they are called (for the odd circle or
+    // line; a mesh is cheaper for anything drawn often). Widths are in drawing
+    // units, so they grow with the transform; arcs' angles are degrees, 0 at +x,
+    // clockwise.
+    void draw_shape(const ShapeMesh& mesh, const Affine2& transform = {}, Color tint = colors::white);
+    void fill_circle(Vec2f center, f32 radius, Color color);
+    void draw_circle(Vec2f center, f32 radius, Color color, f32 width = 1.0f);
+    void fill_ellipse(Vec2f center, Vec2f radii, Color color);
+    void draw_ellipse(Vec2f center, Vec2f radii, Color color, f32 width = 1.0f);
+    void fill_polygon(std::span<const Vec2f> points, Color color);
+    void draw_polygon(std::span<const Vec2f> points, Color color, StrokeStyle style = {});
+    void draw_polyline(std::span<const Vec2f> points, Color color, StrokeStyle style = {});
+    // A line `width` wide (the other draw_line is one unit wide and pixel-aligned).
+    void draw_line(Vec2f a, Vec2f b, Color color, f32 width, LineCap cap = LineCap::Butt);
+    void draw_arc(Vec2f center, f32 radius, f32 start, f32 end, Color color, StrokeStyle style = {});
+    void fill_pie(Vec2f center, f32 radius, f32 start, f32 end, Color color);
+    void fill_path(const Path& path, Color color, FillRule rule = FillRule::NonZero);
+    void stroke_path(const Path& path, Color color, StrokeStyle style = {});
     // Reads the SPIR-V's layout (kin/renderer/shader_reflect.hpp): the sampler,
     // storage buffer and uniform block counts come from it, so a ShaderDesc's
     // counts may be left as they are (a mismatch is logged and the shader's
@@ -455,6 +478,17 @@ private:
     std::vector<std::unique_ptr<OpenLayer>> _layers;
     void end_layer();
     BlendMode _blend_mode = BlendMode::Alpha;
+    // The shapes drawn as they are called: reused buffers, and how finely to
+    // tessellate under the current transform.
+    ShapeMesh _shape_scratch;
+    std::vector<PathContour> _contour_scratch;
+    struct ShapeDetail {
+        f32 tolerance = 0.25f;
+        f32 fringe = 1.0f;
+    };
+    ShapeDetail shape_detail() const;
+    void fill_contours(FillRule rule, Color color);
+    void stroke_contours(const StrokeStyle& style, Color color);
     Affine2 _transform{};                 // what draws are mapped by now
     std::vector<Affine2> _transform_stack; // push_transform's saved transforms
     std::vector<Affine2> _target_transforms; // the transform outside each pushed render target

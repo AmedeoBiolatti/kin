@@ -20,6 +20,7 @@ components with it. Each license is in the fetched source tree, under
 | [Box2D](https://github.com/erincatto/box2d) | 2.4.1 | MIT | Erin Catto |
 | [Lua](https://www.lua.org) | 5.4.6 | MIT | Lua.org, PUC-Rio |
 | [sol2](https://github.com/ThePhD/sol2) | 3.3.1 | MIT | Rapptz, ThePhD, and contributors |
+| [earcut.hpp](https://github.com/mapbox/earcut.hpp) | 3.2.4 | ISC | Mapbox |
 
 ## Libraries bundled by SDL_image and SDL_ttf
 

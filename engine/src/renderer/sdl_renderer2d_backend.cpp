@@ -357,6 +357,7 @@ RendererBackendCapabilities SdlRenderer2DBackend::capabilities() const {
         .blend_modes = true,
         .min_max_blend = _min_max_blend,
         .transforms = true,
+        .shapes = true,
         .materials_2d = _gpu_device != nullptr,
         .gradients = true,
         .text = false,
@@ -659,6 +660,48 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
         SDL_SetTextureColorMod(sdl_texture->handle(), 255, 255, 255);
         SDL_SetTextureAlphaMod(sdl_texture->handle(), 255);
     }
+}
+
+void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
+                                           Color tint) {
+    if (indices.empty() || tint.a == 0) {
+        return;
+    }
+    flush_batch();
+    // No shader to measure pixels: `edge` (mesh units) in pixels from the
+    // transform's scale, and the logical presentation's when drawing to the window.
+    f32 pixels_per_unit = std::sqrt(std::abs(_transform.determinant()));
+    int out_w = 0, out_h = 0;
+    if (_render_target_stack.empty() && _applied_logical.mode != SDL_LOGICAL_PRESENTATION_DISABLED &&
+        _applied_logical.width > 0 && _applied_logical.height > 0 && SDL_GetCurrentRenderOutputSize(_handle, &out_w, &out_h)) {
+        pixels_per_unit *= std::min(static_cast<f32>(out_w) / static_cast<f32>(_applied_logical.width),
+                                    static_cast<f32>(out_h) / static_cast<f32>(_applied_logical.height));
+    }
+    _shape_vertices.clear();
+    _shape_vertices.reserve(vertices.size());
+    // A soft edge wider than a pixel is pulled in to one, along `outward`.
+    const f32 rim = -1.0f / std::max(pixels_per_unit, 1e-6f);
+    for (const ShapeVertex& v : vertices) {
+        Vec2f p = v.position;
+        f32 edge = v.edge;
+        if (edge < rim) {
+            p = {p.x + v.outward.x * (edge - rim), p.y + v.outward.y * (edge - rim)};
+            edge = rim;
+        }
+        p = _transformed ? _transform.apply(p) : p;
+        const f32 cover = std::clamp(1.0f + edge * pixels_per_unit, 0.0f, 1.0f);
+        _shape_vertices.push_back(SDL_Vertex{
+            .position = {p.x, p.y},
+            .color = {static_cast<f32>(v.color.r) * static_cast<f32>(tint.r) / 65025.0f,
+                      static_cast<f32>(v.color.g) * static_cast<f32>(tint.g) / 65025.0f,
+                      static_cast<f32>(v.color.b) * static_cast<f32>(tint.b) / 65025.0f,
+                      static_cast<f32>(v.color.a) * static_cast<f32>(tint.a) / 65025.0f * cover},
+            .tex_coord = {0.0f, 0.0f}});
+    }
+    _shape_indices.assign(indices.begin(), indices.end());
+    ++_stats.direct_rect_fills;
+    SDL_RenderGeometry(_handle, nullptr, _shape_vertices.data(), static_cast<int>(_shape_vertices.size()),
+                       _shape_indices.data(), static_cast<int>(_shape_indices.size()));
 }
 
 void SdlRenderer2DBackend::draw_rect(Rectf rect, Color color) {
