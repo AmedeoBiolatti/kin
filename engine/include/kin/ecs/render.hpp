@@ -106,6 +106,24 @@ struct TopDownRenderOptions {
     Rectf viewport{};
 };
 
+#ifdef KIN_ENABLE_RENDER_PROBE
+// The render probe's source id for draws of `component` of `entity` (0 when no
+// probe is running). The submit_* functions below claim their draws this way;
+// KIN_DRAW_ENTITY does it for code that draws an entity itself.
+u32 draw_source_of_entity(DrawTrace& trace, flecs::entity entity, std::string_view component);
+inline u32 draw_source_for(flecs::entity entity, std::string_view component) {
+    DrawTrace* trace = active_draw_trace();
+    return trace ? draw_source_of_entity(*trace, entity, component) : 0;
+}
+
+#define KIN_DRAW_ENTITY(entity, component)                                                             \
+    const ::kin::DrawSourceScope KIN_DRAW_TRACE_CONCAT(kin_draw_entity_, __LINE__) {                   \
+        ::kin::draw_source_for(entity, component)                                                      \
+    }
+#else
+#define KIN_DRAW_ENTITY(entity, component) static_cast<void>(0)
+#endif
+
 using EcsRenderFilter = std::function<bool(flecs::entity)>;
 using EcsRenderCollector = std::function<void(EcsWorld&, RenderQueue&)>;
 

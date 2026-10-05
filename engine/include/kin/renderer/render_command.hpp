@@ -70,6 +70,9 @@ struct RenderCommandDetail {
 // command types rather than each type getting its own.
 struct RenderCommand {
     RenderCommandType type = RenderCommandType::FillRect;
+#ifdef KIN_ENABLE_RENDER_PROBE
+    u32 draw_source = 0; // draw_trace.hpp: who queued it (fits in padding)
+#endif
     RenderKey key{};
     u64 sequence = 0;
     Rectf rect{};                   // destination; unused by Line, Clear, PopViewport, Custom

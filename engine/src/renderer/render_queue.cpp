@@ -172,6 +172,16 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
     }
 }
 
+// Who queued a command or sprite (draw_trace.hpp); 0 without the render probe.
+template<typename T>
+u32 draw_source_of([[maybe_unused]] const T& item) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    return item.draw_source;
+#else
+    return 0;
+#endif
+}
+
 // A Texture or Sprite command as the quad execute_render_command() would draw;
 // false for other commands and for ones that draw nothing.
 bool sprite_of(Renderer2D& renderer, const RenderCommand& command, const RenderView* view, SpriteInstance& out) {
@@ -223,6 +233,9 @@ public:
     SpriteRun(Renderer2D& renderer, std::vector<SpriteInstance>& sprites)
         : _renderer(renderer), _sprites(sprites) {
         _sprites.clear();
+#ifdef KIN_ENABLE_RENDER_PROBE
+        _trace = active_draw_trace();
+#endif
     }
 
     // Takes the command if it is a sprite (drawing any run it cannot join), or
@@ -234,33 +247,53 @@ public:
         }
         SpriteInstance sprite;
         if (sprite_of(_renderer, command, view, sprite)) {
-            add(command.texture, sprite);
+            add(command.texture, sprite, draw_source_of(command));
         }
         return true; // a sprite, drawn or (if it draws nothing) dropped
     }
 
-    void add(const Texture& texture, const SpriteInstance& sprite) {
+    void add(const Texture& texture, const SpriteInstance& sprite, [[maybe_unused]] u32 draw_source) {
         if (!_sprites.empty() && !(texture == *_texture)) {
             flush();
         }
         _texture = &texture;
         _sprites.push_back(sprite);
+#ifdef KIN_ENABLE_RENDER_PROBE
+        if (_trace) {
+            _sources.push_back(draw_source);
+        }
+#endif
     }
 
     void flush() {
         if (_sprites.size() == 1) {
             const SpriteInstance& s = _sprites.front();
+#ifdef KIN_ENABLE_RENDER_PROBE
+            const DrawSourceScope scope{_trace ? _sources.front() : 0};
+#endif
             _renderer.draw_texture(*_texture, s.source, s.dest, s.tint, s.rotation, s.pivot);
         } else if (!_sprites.empty()) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+            if (_trace) {
+                _trace->set_instance_sources(_sources);
+            }
+#endif
             _renderer.draw_sprites(*_texture, _sprites);
         }
         _sprites.clear();
+#ifdef KIN_ENABLE_RENDER_PROBE
+        _sources.clear();
+#endif
     }
 
 private:
     Renderer2D& _renderer;
     std::vector<SpriteInstance>& _sprites;
     const Texture* _texture = nullptr;
+#ifdef KIN_ENABLE_RENDER_PROBE
+    DrawTrace* _trace = nullptr;
+    std::vector<u32> _sources; // per sprite, while tracing
+#endif
 };
 
 } // namespace
@@ -302,11 +335,17 @@ bool render_command_visible(const RenderCommand& command, const RenderView& view
 }
 
 void execute_render_command(Renderer2D& renderer, const RenderCommand& command) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    const DrawSourceScope scope{command.draw_source};
+#endif
     const Rectf rect = command.output_pixel_rect ? output_to_logical(renderer, command.rect) : command.rect;
     execute_resolved(renderer, command, rect, command.a, command.b);
 }
 
 void execute_render_command(Renderer2D& renderer, const RenderCommand& command, const RenderView& view) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+    const DrawSourceScope scope{command.draw_source};
+#endif
     // output_pixel_rect commands bypass the view/camera transform entirely.
     if (command.output_pixel_rect) {
         execute_resolved(renderer, command, output_to_logical(renderer, command.rect), command.a, command.b);
@@ -363,9 +402,17 @@ void RenderQueue::submit(RenderCommand command) {
                         command.a == Vec2f{} && command.b == Vec2f{} &&
                         (command.type == RenderCommandType::Texture ||
                          (command.type == RenderCommandType::Sprite && command.source.w > 0.0f && command.source.h > 0.0f));
+#ifdef KIN_ENABLE_RENDER_PROBE
+    if (command.draw_source == 0) {
+        command.draw_source = current_draw_source();
+    }
+    const u32 draw_source = command.draw_source;
+#else
+    const u32 draw_source = 0;
+#endif
     if (sprite) {
         queue_sprite(command.type, command.key, command.texture, command.source, command.rect, command.color,
-                     command.rotation, command.pivot);
+                     command.rotation, command.pivot, draw_source);
         return;
     }
     command.sequence = _next_sequence++;
@@ -429,6 +476,9 @@ void RenderQueue::append_sprites(std::span<const PreparedSprite> sprites) {
     for (const PreparedSprite& sprite : sprites) {
         const bool drawable = sprite.texture && *sprite.texture &&
                               (sprite.type == RenderCommandType::Texture || (sprite.source.w > 0.0f && sprite.source.h > 0.0f));
+#ifdef KIN_ENABLE_RENDER_PROBE
+        const DrawSourceScope scope{sprite.draw_source};
+#endif
         if (drawable) {
             queue_sprite(sprite.type, sprite.key, *sprite.texture, sprite.source, sprite.dest, sprite.tint, sprite.rotation,
                          sprite.pivot);
@@ -465,11 +515,14 @@ void RenderQueue::write_sprite(const SpriteBlock& block, std::size_t index, u32 
         .sequence = block.sequence + index,
         .use_y = sprite.key.use_y,
         .type = sprite.type,
+#ifdef KIN_ENABLE_RENDER_PROBE
+        .draw_source = sprite.draw_source != 0 ? sprite.draw_source : current_draw_source(),
+#endif
     };
 }
 
 void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
-                               Color tint, f32 rotation, Vec2f pivot) {
+                               Color tint, f32 rotation, Vec2f pivot, [[maybe_unused]] u32 draw_source) {
     if (_sprites.empty()) {
         _sprites_after = _commands.size();
     }
@@ -487,6 +540,9 @@ void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Text
         .sequence = _next_sequence++,
         .use_y = key.use_y,
         .type = type,
+#ifdef KIN_ENABLE_RENDER_PROBE
+        .draw_source = draw_source != 0 ? draw_source : current_draw_source(),
+#endif
     });
     _sorted = false;
 }
@@ -516,6 +572,9 @@ u32 RenderQueue::texture_slot(const Texture& texture) {
 RenderCommand RenderQueue::to_command(const QueuedSprite& sprite) const {
     return {
         .type = sprite.type,
+#ifdef KIN_ENABLE_RENDER_PROBE
+        .draw_source = sprite.draw_source,
+#endif
         .key = {.layer = sprite.layer, .order = sprite.order, .y = sprite.y, .use_y = sprite.use_y, .pass_mask = sprite.pass_mask},
         .sequence = sprite.sequence,
         .rect = sprite.dest,
@@ -856,7 +915,8 @@ void RenderQueue::flush(Renderer2D& renderer, u64 pass_mask) {
             if ((sprite->pass_mask & pass_mask) != 0) {
                 const Texture& texture = _textures[sprite->texture];
                 run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
-                                                 sprite->pivot, no_shift));
+                                                 sprite->pivot, no_shift),
+                        draw_source_of(*sprite));
             }
             return;
         }
@@ -883,7 +943,8 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_m
             }
             const Texture& texture = _textures[sprite->texture];
             run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
-                                             sprite->pivot, shift));
+                                             sprite->pivot, shift),
+                    draw_source_of(*sprite));
             return;
         }
         if ((command->key.pass_mask & pass_mask) == 0) {

@@ -1,6 +1,7 @@
 #include <kin/core/jobs.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace kin {
 namespace {
@@ -25,7 +26,15 @@ JobSystem& default_job_system() {
     }
     // Deliberately never deleted: systems that use it may be destroyed during
     // static destruction, after a function-local object would already be gone.
-    static JobSystem* built_in = new JobSystem{};
+    // KIN_JOB_WORKERS sets its worker count (e.g. to test that results do not
+    // depend on it).
+    static JobSystem* built_in = [] {
+        JobSystemConfig config;
+        if (const char* workers = std::getenv("KIN_JOB_WORKERS")) {
+            config.workers = std::max(0, std::atoi(workers));
+        }
+        return new JobSystem{config};
+    }();
     return *built_in;
 }
 

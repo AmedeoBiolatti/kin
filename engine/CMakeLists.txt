@@ -126,6 +126,14 @@ target_compile_definitions(kin_engine PUBLIC
 target_include_directories(kin_engine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
+if(KIN_ENABLE_RENDER_PROBE)
+    target_sources(kin_engine PRIVATE src/renderer/draw_trace.cpp src/runtime/render_probe.cpp)
+    target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_RENDER_PROBE)
+endif()
+if(KIN_ENABLE_DETERMINISM_CHECK)
+    target_sources(kin_engine PRIVATE src/runtime/determinism_check.cpp src/runtime/state_hash.cpp)
+    target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_DETERMINISM_CHECK)
+endif()
 
 add_library(kin_core_allocation_instrumentation OBJECT
     src/core/allocation_instrumentation.cpp

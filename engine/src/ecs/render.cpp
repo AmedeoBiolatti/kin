@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 namespace kin {
@@ -169,11 +170,13 @@ void WorldRenderState::collect_all(RenderQueue& queue,
     const u64 unculled = queue.submitted();
     _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
         if (!include || include(entity)) {
+            KIN_DRAW_ENTITY(entity, "ParticleSystemComponent");
             submit_particles(queue, particles);
         }
     });
     _particle_fields.each([&](flecs::entity entity, const ParticleFieldComponent& field) {
         if (!include || include(entity)) {
+            KIN_DRAW_ENTITY(entity, "ParticleFieldComponent");
             submit_particles(queue, field);
         }
     });
@@ -317,6 +320,9 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 for (i32 i = begin; i < end; ++i) {
                     const auto row = static_cast<std::size_t>(i);
                     if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+#ifdef KIN_ENABLE_RENDER_PROBE
+                        sprite.draw_source = draw_source_for(it.entity(row), "TextureRenderer");
+#endif
                         if (!last || !(*sprite.texture == *last)) {
                             const auto found = std::find_if(part.textures.begin(), part.textures.end(),
                                                             [&](const Texture* t) { return *t == *sprite.texture; });
@@ -352,10 +358,12 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
     });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
-    _particle_systems.each([&](flecs::entity, const ParticleSystemComponent& particles) {
+    _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
+        KIN_DRAW_ENTITY(entity, "ParticleSystemComponent");
         submit_particles(queue, particles);
     });
-    _particle_fields.each([&](flecs::entity, const ParticleFieldComponent& field) {
+    _particle_fields.each([&](flecs::entity entity, const ParticleFieldComponent& field) {
+        KIN_DRAW_ENTITY(entity, "ParticleFieldComponent");
         submit_particles(queue, field);
     });
     if (options.view) {
@@ -363,6 +371,19 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
         queue.cull(*options.view, 0, existing);
     }
 }
+
+#ifdef KIN_ENABLE_RENDER_PROBE
+u32 draw_source_of_entity(DrawTrace& trace, flecs::entity entity, std::string_view component) {
+    if (!entity) {
+        return 0;
+    }
+    return trace.entity_source(static_cast<u64>(reinterpret_cast<std::uintptr_t>(entity.world().c_ptr())), entity.id(),
+                                component, [&] {
+                                    const flecs::string_view name = entity.name();
+                                    return name.size() > 0 ? std::string{name.c_str()} : "#" + std::to_string(entity.id());
+                                });
+}
+#endif
 
 Vec2f world_position(flecs::entity entity) {
     if (const auto* transform = entity.get<WorldTransform>()) {
@@ -394,10 +415,11 @@ bool submit_sprite(RenderQueue& queue, flecs::entity entity) {
 }
 
 bool submit_sprite(RenderQueue& queue,
-                   flecs::entity,
+                   [[maybe_unused]] flecs::entity entity,
                    const WorldTransform& transform,
                    const SpriteRenderer& sprite,
                    const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "SpriteRenderer");
     ResolvedSprite resolved;
     if (!resolve_sprite_renderer(sprite, resolved)) {
         return false;
@@ -441,10 +463,11 @@ bool submit_texture(RenderQueue& queue, flecs::entity entity) {
 }
 
 bool submit_texture(RenderQueue& queue,
-                    flecs::entity,
+                    [[maybe_unused]] flecs::entity entity,
                     const WorldTransform& transform,
                     const TextureRenderer& texture,
                     const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "TextureRenderer");
     if (!texture.visible || !texture.texture) {
         return false;
     }
@@ -473,10 +496,11 @@ bool submit_rect(RenderQueue& queue, flecs::entity entity) {
 }
 
 bool submit_rect(RenderQueue& queue,
-                 flecs::entity,
+                 [[maybe_unused]] flecs::entity entity,
                  const WorldTransform& transform,
                  const RectRenderer& rect,
                  const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "RectRenderer");
     if (!rect.visible || rect.size.x <= 0.0f || rect.size.y <= 0.0f) {
         return false;
     }
@@ -509,10 +533,11 @@ bool submit_line(RenderQueue& queue, flecs::entity entity) {
 }
 
 bool submit_line(RenderQueue& queue,
-                 flecs::entity,
+                 [[maybe_unused]] flecs::entity entity,
                  const WorldTransform& transform,
                  const LineRenderer& line,
                  const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "LineRenderer");
     if (!line.visible) {
         return false;
     }
@@ -538,9 +563,11 @@ bool submit_line(RenderQueue& queue,
 bool submit_particles(RenderQueue& queue, flecs::entity entity) {
     bool submitted = false;
     if (const auto* particles = entity.get<ParticleSystemComponent>()) {
+        KIN_DRAW_ENTITY(entity, "ParticleSystemComponent");
         submitted = submit_particles(queue, *particles) || submitted;
     }
     if (const auto* field = entity.get<ParticleFieldComponent>()) {
+        KIN_DRAW_ENTITY(entity, "ParticleFieldComponent");
         submitted = submit_particles(queue, *field) || submitted;
     }
     return submitted;

@@ -123,6 +123,13 @@ target_link_libraries(kin_runtime_tests PRIVATE
 
 add_test(NAME kin-runtime COMMAND kin_runtime_tests)
 
+if(KIN_ENABLE_RENDER_PROBE)
+    kin_add_test(kin_render_probe_tests kin-render-probe SOURCES render_probe_tests.cpp)
+endif()
+if(KIN_ENABLE_DETERMINISM_CHECK)
+    kin_add_test(kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)
+endif()
+
 add_executable(kin_server_tests
     server_tests.cpp
 )

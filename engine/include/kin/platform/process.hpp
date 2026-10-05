@@ -7,6 +7,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace kin {
@@ -22,6 +23,8 @@ struct ProcessOptions {
     bool capture_output = true;
     // Its standard error joins the captured output. Off: it shares the app's.
     bool errors_to_output = false;
+    // Variables set for it (name, value), over the app's own environment.
+    std::vector<std::pair<std::string, std::string>> environment;
 };
 
 // A child process the app talks to through its standard input and output,
