@@ -85,6 +85,12 @@ releases may change APIs.
     `stroke_path`;
   - `kin::ShapeRenderer` and `RenderQueue::draw_shape`; `games/shapes_demo`.
   - New dependency: mapbox earcut.hpp 3.2.4 (ISC), header-only, for fills.
+- Mirrored sprites: `SpriteRenderer::flip_x` / `flip_y` and
+  `TextureRenderer::flip_x` / `flip_y`, mirrored about the pivot; a negative
+  world scale mirrors too (and cancels a flag). `kin::Flip` on
+  `Renderer2D::draw_texture` / `draw_sprite`, the `RenderQueue` texture and
+  sprite calls, and `SpriteInstance`; flipped sprites still batch, on both
+  backends. Animatable as `SpriteRenderer.flip_x` / `flip_y`.
 - Transforms: `Renderer2D::push_transform` / `pop_transform` / `scoped_transform`
   draw through a `kin::Affine2` (`kin/core/affine.hpp`), on both backends.
   Mapped on the CPU, so draws still batch across transform changes, and sprite

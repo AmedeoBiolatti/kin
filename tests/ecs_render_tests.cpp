@@ -646,6 +646,65 @@ void test_clip_groups_cut_and_keep_children_together() {
     assert(raw->events == expected);
 }
 
+// Flipped sprites mirror about their pivot, which stays put; a negative scale
+// flips too, and cancels a flag on the same axis.
+void test_sprite_and_texture_renderers_flip() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{32, 32})};
+
+    kin::SpriteCatalog catalog;
+    catalog.set_texture("main", texture);
+    catalog.add({
+        .id = "hero",
+        .texture_id = "main",
+        .source = {0.0f, 0.0f, 16.0f, 16.0f},
+        .size = {20.0f, 10.0f},
+        .pivot = {0.25f, 0.75f},
+    });
+
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::SpriteRenderer>("SpriteRenderer");
+    world.component<kin::TextureRenderer>("TextureRenderer");
+
+    world.entity("plain").set(kin::Transform2D{{10.0f, 20.0f}}).set(kin::SpriteRenderer{.sprite = catalog.ref("hero"), .order = 0});
+    world.entity("flag")
+        .set(kin::Transform2D{{10.0f, 20.0f}})
+        .set(kin::SpriteRenderer{.sprite = catalog.ref("hero"), .order = 1, .flip_x = true});
+    world.entity("scale")
+        .set(kin::Transform2D{{10.0f, 20.0f}, 0.0f, {-1.0f, 1.0f}})
+        .set(kin::SpriteRenderer{.sprite = catalog.ref("hero"), .order = 2});
+    world.entity("both")
+        .set(kin::Transform2D{{10.0f, 20.0f}, 0.0f, {-2.0f, 1.0f}})
+        .set(kin::SpriteRenderer{.sprite = catalog.ref("hero"), .order = 3, .flip_x = true});
+    world.entity("texture")
+        .set(kin::Transform2D{{0.0f, 0.0f}})
+        .set(kin::TextureRenderer{.texture = texture, .source = {0.0f, 0.0f, 8.0f, 4.0f}, .order = 4, .flip_y = true});
+
+    kin::render_world(world, renderer);
+
+    assert(raw->sources.size() == 5);
+    // Unflipped: the pivot (a quarter in, three quarters down) on (10, 20).
+    assert((raw->draws[0] == kin::Rectf{5.0f, 12.5f, 20.0f, 10.0f}));
+    assert((raw->sources[0] == kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}));
+    assert((raw->pivots[0] == kin::Vec2f{0.25f, 0.75f}));
+    // Flipped: the pivot is a quarter in from the right, still on (10, 20).
+    for (std::size_t i : {std::size_t{1}, std::size_t{2}}) {
+        assert((raw->draws[i] == kin::Rectf{-5.0f, 12.5f, 20.0f, 10.0f}));
+        assert((raw->sources[i] == kin::Rectf{16.0f, 0.0f, -16.0f, 16.0f}));
+        assert((raw->pivots[i] == kin::Vec2f{0.75f, 0.75f}));
+    }
+    // Flag and negative scale cancel out; the scale still stretches.
+    assert((raw->draws[3] == kin::Rectf{0.0f, 12.5f, 40.0f, 10.0f}));
+    assert((raw->sources[3] == kin::Rectf{0.0f, 0.0f, 16.0f, 16.0f}));
+    // Upside down about its top-left pivot, which becomes the bottom-left.
+    assert((raw->draws[4] == kin::Rectf{0.0f, -4.0f, 8.0f, 4.0f}));
+    assert((raw->sources[4] == kin::Rectf{0.0f, 4.0f, 8.0f, -4.0f}));
+    assert((raw->pivots[4] == kin::Vec2f{0.0f, 1.0f}));
+}
+
 void test_rotated_render_command_bounds_expand() {
     kin::RenderCommand command{
         .type = kin::RenderCommandType::Sprite,
@@ -917,6 +976,7 @@ int main() {
     test_sprite_pivot_offsets_and_y_sort();
     test_sprite_renderer_tint_rotation_and_pivot_reach_commands();
     test_clip_groups_cut_and_keep_children_together();
+    test_sprite_and_texture_renderers_flip();
     test_rotated_render_command_bounds_expand();
     test_top_down_render_applies_camera_and_culling();
     test_collect_culls_rotated_sprites();

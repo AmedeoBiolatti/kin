@@ -23,6 +23,7 @@ struct PreparedSprite {
     f32 rotation = 0.0f;
     Vec2f pivot{0.5f, 0.5f};
     RenderCommandType type = RenderCommandType::Texture; // or Sprite
+    Flip flip = Flip::None;
 #ifdef KIN_ENABLE_RENDER_PROBE
     u32 draw_source = 0; // draw_trace.hpp; 0: the thread's current source
 #endif
@@ -59,8 +60,9 @@ public:
     void fill_rect(RenderKey key, Rectf rect, Color color, MaterialRef material = {});
     void draw_rect(RenderKey key, Rectf rect, Color color);
     void draw_line(RenderKey key, Vec2f a, Vec2f b, Color color);
-    void draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
-    void draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
+    // `flip` mirrors the image within `dest` before it turns.
+    void draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, Flip flip = Flip::None);
+    void draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, Flip flip = Flip::None);
     // Queues each sprite in order, as draw_texture_region() (Texture) or
     // draw_sprite() (Sprite) would.
     void append_sprites(std::span<const PreparedSprite> sprites);
@@ -81,7 +83,7 @@ public:
     // and a source given for a Sprite.
     void write_sprite(const SpriteBlock& block, std::size_t index, u32 texture, const PreparedSprite& sprite);
     // A Texture command drawing `source` (texture pixels) of `texture`.
-    void draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint = colors::white, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
+    void draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint = colors::white, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, Flip flip = Flip::None);
     void draw_text(RenderKey key, std::string text, Vec2f pos, Rectf bounds, f32 scale, Color color, std::function<void(Renderer2D&)> callback);
     void push_viewport(Rectf rect);
     void pop_viewport();
@@ -140,6 +142,7 @@ private:
         u64 sequence;
         bool use_y;
         RenderCommandType type;
+        Flip flip; // fits in padding
 #ifdef KIN_ENABLE_RENDER_PROBE
         u32 draw_source; // fits in padding
 #endif
@@ -175,7 +178,7 @@ private:
     void for_each_in_submission_order(Visit&& visit) const;
     // `draw_source` 0: the thread's current one (only kept with the render probe).
     void queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
-                      Color tint, f32 rotation, Vec2f pivot, u32 draw_source = 0);
+                      Color tint, f32 rotation, Vec2f pivot, Flip flip, u32 draw_source = 0);
     u32 texture_slot(const Texture& texture);
     RenderCommand to_command(const QueuedSprite& sprite) const;
     // Moves the queued sprites into _commands, in submission order.

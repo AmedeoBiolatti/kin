@@ -448,6 +448,15 @@ void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, 
     }
 }
 
+void Renderer2D::draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot,
+                              Flip flip) {
+    if (source.w <= 0.0f || source.h <= 0.0f) { // the whole texture, as for draw_sprites()
+        const Vec2i size = texture.size();
+        source = {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+    }
+    draw_texture(texture, mirrored(source, flip), dest, tint, rotation, pivot);
+}
+
 JobSystem* Renderer2D::set_job_system(JobSystem* jobs) {
     JobSystem* previous = _jobs;
     _jobs = jobs;
@@ -462,7 +471,7 @@ void Renderer2D::draw_sprites(const Texture& texture, std::span<const SpriteInst
             const std::span<const u32> sources = trace->instance_sources();
             for (std::size_t i = 0; i < sprites.size(); ++i) {
                 const SpriteInstance& sprite = sprites[i];
-                trace_draw(DrawKind::Texture, sprite.dest, sprite.tint, &texture, sprite.source, sprite.rotation,
+                trace_draw(DrawKind::Texture, sprite.dest, sprite.tint, &texture, mirrored(sprite.source, sprite.flip), sprite.rotation,
                            sprite.pivot, i < sources.size() ? sources[i] : 0);
             }
             trace->clear_instance_sources();
@@ -493,6 +502,13 @@ void Renderer2D::draw_sprite(const Sprite& sprite, Rectf dest, Color tint, f32 r
         return;
     }
     draw_texture(sprite.texture, sprite.source, dest, tint, rotation, pivot);
+}
+
+void Renderer2D::draw_sprite(const Sprite& sprite, Rectf dest, Color tint, f32 rotation, Vec2f pivot, Flip flip) {
+    if (!sprite.valid()) {
+        return;
+    }
+    draw_texture(sprite.texture, mirrored(sprite.source, flip), dest, tint, rotation, pivot);
 }
 
 void Renderer2D::draw_sprite(const Sprite& sprite, Vec2f pos, Vec2f size) {

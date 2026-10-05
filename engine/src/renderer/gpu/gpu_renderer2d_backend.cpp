@@ -1476,8 +1476,9 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
                         dest.h * scale};
                 rotation += angle;
             }
-            const Rectf source =
-                sprite.source.w > 0.0f && sprite.source.h > 0.0f ? sprite.source : Rectf{0.0f, 0.0f, tex_w, tex_h};
+            const Rectf source = mirrored(
+                sprite.source.w > 0.0f && sprite.source.h > 0.0f ? sprite.source : Rectf{0.0f, 0.0f, tex_w, tex_h},
+                sprite.flip);
             out.x = dest.x + offset.x;
             out.y = dest.y + offset.y;
             out.w = dest.w;

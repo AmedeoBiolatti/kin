@@ -204,7 +204,8 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
                                   rect,
                                   color,
                                   command.rotation,
-                                  command.pivot);
+                                  command.pivot,
+                                  command.flip);
         }
         break;
     case RenderCommandType::Sprite:
@@ -214,7 +215,8 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
                                   rect,
                                   color,
                                   command.rotation,
-                                  command.pivot);
+                                  command.pivot,
+                                  command.flip);
         }
         break;
     case RenderCommandType::Text:
@@ -278,6 +280,7 @@ bool sprite_of(Renderer2D& renderer, const RenderCommand& command, const RenderV
     out.tint = command_color(command);
     out.rotation = command.rotation;
     out.pivot = command.pivot;
+    out.flip = command.flip;
     return true;
 }
 
@@ -346,7 +349,7 @@ public:
 #ifdef KIN_ENABLE_RENDER_PROBE
             const DrawSourceScope scope{_trace ? _sources.front() : 0};
 #endif
-            _renderer.draw_texture(*_texture, s.source, s.dest, s.tint, s.rotation, s.pivot);
+            _renderer.draw_texture(*_texture, s.source, s.dest, s.tint, s.rotation, s.pivot, s.flip);
         } else if (!_sprites.empty()) {
 #ifdef KIN_ENABLE_RENDER_PROBE
             if (_trace) {
@@ -539,7 +542,7 @@ void RenderQueue::submit(RenderCommand command) {
 #endif
     if (sprite) {
         queue_sprite(command.type, command.key, command.texture, command.source, command.rect, command.color,
-                     command.rotation, command.pivot, draw_source);
+                     command.rotation, command.pivot, command.flip, draw_source);
         return;
     }
     command.sequence = _next_sequence++;
@@ -574,28 +577,28 @@ void RenderQueue::draw_line(RenderKey key, Vec2f a, Vec2f b, Color color) {
     submit({.type = RenderCommandType::Line, .key = key, .a = a, .b = b, .color = color});
 }
 
-void RenderQueue::draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot) {
+void RenderQueue::draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot, Flip flip) {
     if (texture && !material.material) {
-        queue_sprite(RenderCommandType::Texture, key, texture, {}, dest, tint, rotation, pivot);
+        queue_sprite(RenderCommandType::Texture, key, texture, {}, dest, tint, rotation, pivot, flip);
         return;
     }
-    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot, .material = material.material});
+    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .flip = flip, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
-void RenderQueue::draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot) {
+void RenderQueue::draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, Color tint, MaterialRef material, f32 rotation, Vec2f pivot, Flip flip) {
     if (sprite.texture && !material.material && sprite.source.w > 0.0f && sprite.source.h > 0.0f) {
-        queue_sprite(RenderCommandType::Sprite, key, sprite.texture, sprite.source, dest, tint, rotation, pivot);
+        queue_sprite(RenderCommandType::Sprite, key, sprite.texture, sprite.source, dest, tint, rotation, pivot, flip);
         return;
     }
-    submit({.type = RenderCommandType::Sprite, .key = key, .rect = dest, .source = sprite.source, .color = tint, .texture = sprite.texture, .rotation = rotation, .pivot = pivot, .material = material.material});
+    submit({.type = RenderCommandType::Sprite, .key = key, .rect = dest, .flip = flip, .source = sprite.source, .color = tint, .texture = sprite.texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
-void RenderQueue::draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) {
+void RenderQueue::draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot, Flip flip) {
     if (texture) {
-        queue_sprite(RenderCommandType::Texture, key, texture, source, dest, tint, rotation, pivot);
+        queue_sprite(RenderCommandType::Texture, key, texture, source, dest, tint, rotation, pivot, flip);
         return;
     }
-    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .source = source, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot});
+    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .flip = flip, .source = source, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot});
 }
 
 void RenderQueue::append_sprites(std::span<const PreparedSprite> sprites) {
@@ -608,10 +611,11 @@ void RenderQueue::append_sprites(std::span<const PreparedSprite> sprites) {
 #endif
         if (drawable) {
             queue_sprite(sprite.type, sprite.key, *sprite.texture, sprite.source, sprite.dest, sprite.tint, sprite.rotation,
-                         sprite.pivot);
+                         sprite.pivot, sprite.flip);
         } else {
-            submit({.type = sprite.type, .key = sprite.key, .rect = sprite.dest, .source = sprite.source, .color = sprite.tint,
-                    .texture = sprite.texture ? *sprite.texture : Texture{}, .rotation = sprite.rotation, .pivot = sprite.pivot});
+            submit({.type = sprite.type, .key = sprite.key, .rect = sprite.dest, .flip = sprite.flip, .source = sprite.source,
+                    .color = sprite.tint, .texture = sprite.texture ? *sprite.texture : Texture{},
+                    .rotation = sprite.rotation, .pivot = sprite.pivot});
         }
     }
 }
@@ -642,6 +646,7 @@ void RenderQueue::write_sprite(const SpriteBlock& block, std::size_t index, u32 
         .sequence = block.sequence + index,
         .use_y = sprite.key.use_y,
         .type = sprite.type,
+        .flip = sprite.flip,
 #ifdef KIN_ENABLE_RENDER_PROBE
         .draw_source = sprite.draw_source != 0 ? sprite.draw_source : current_draw_source(),
 #endif
@@ -649,7 +654,7 @@ void RenderQueue::write_sprite(const SpriteBlock& block, std::size_t index, u32 
 }
 
 void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Texture& texture, Rectf source, Rectf dest,
-                               Color tint, f32 rotation, Vec2f pivot, [[maybe_unused]] u32 draw_source) {
+                               Color tint, f32 rotation, Vec2f pivot, Flip flip, [[maybe_unused]] u32 draw_source) {
     if (_sprites.empty()) {
         _sprites_after = _commands.size();
     }
@@ -667,6 +672,7 @@ void RenderQueue::queue_sprite(RenderCommandType type, RenderKey key, const Text
         .sequence = _next_sequence++,
         .use_y = key.use_y,
         .type = type,
+        .flip = flip,
 #ifdef KIN_ENABLE_RENDER_PROBE
         .draw_source = draw_source != 0 ? draw_source : current_draw_source(),
 #endif
@@ -705,6 +711,7 @@ RenderCommand RenderQueue::to_command(const QueuedSprite& sprite) const {
         .key = {.layer = sprite.layer, .order = sprite.order, .y = sprite.y, .use_y = sprite.use_y, .pass_mask = sprite.pass_mask},
         .sequence = sprite.sequence,
         .rect = sprite.dest,
+        .flip = sprite.flip,
         .source = sprite.source,
         .color = sprite.tint,
         .texture = _textures[sprite.texture],
@@ -1018,12 +1025,12 @@ namespace {
 
 // The quad a queued sprite draws, shifted into the view.
 SpriteInstance sprite_instance(Rectf dest, Rectf source, const Texture& texture, Color tint, f32 rotation, Vec2f pivot,
-                               const ViewShift& shift) {
+                               Flip flip, const ViewShift& shift) {
     if (source.w <= 0.0f || source.h <= 0.0f) {
         const Vec2i size = texture.size();
         source = {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
     }
-    return {.dest = shift.apply(dest), .source = source, .tint = tint, .rotation = rotation, .pivot = pivot};
+    return {.dest = shift.apply(dest), .source = source, .tint = tint, .rotation = rotation, .pivot = pivot, .flip = flip};
 }
 
 } // namespace
@@ -1070,7 +1077,7 @@ void RenderQueue::flush(Renderer2D& renderer, u64 pass_mask) {
             if ((sprite->pass_mask & pass_mask) != 0) {
                 const Texture& texture = _textures[sprite->texture];
                 run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
-                                                 sprite->pivot, no_shift),
+                                                 sprite->pivot, sprite->flip, no_shift),
                         draw_source_of(*sprite));
             }
             return;
@@ -1103,7 +1110,7 @@ void RenderQueue::flush_within_view(Renderer2D& renderer, const RenderView& view
             }
             const Texture& texture = _textures[sprite->texture];
             run.add(texture, sprite_instance(sprite->dest, sprite->source, texture, sprite->tint, sprite->rotation,
-                                             sprite->pivot, shift),
+                                             sprite->pivot, sprite->flip, shift),
                     draw_source_of(*sprite));
             return;
         }

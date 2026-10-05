@@ -655,13 +655,24 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
         append_quad(dest, source, texture.size(), tint, rotation, pivot);
     } else {
         flush_batch();
+        // A source read from the far side (a flipped sprite) as SDL's flip.
+        int flip = SDL_FLIP_NONE;
+        if (source.w < 0.0f) {
+            source = {source.x + source.w, source.y, -source.w, source.h};
+            flip |= SDL_FLIP_HORIZONTAL;
+        }
+        if (source.h < 0.0f) {
+            source = {source.x, source.y + source.h, source.w, -source.h};
+            flip |= SDL_FLIP_VERTICAL;
+        }
         const SDL_FRect src_rect = to_sdl_frect(source);
         const SDL_FRect dst_rect = to_sdl_frect(dest);
         const SDL_FPoint center{dest.w * pivot.x, dest.h * pivot.y};
         SDL_SetTextureColorMod(sdl_texture->handle(), tint.r, tint.g, tint.b);
         SDL_SetTextureAlphaMod(sdl_texture->handle(), tint.a);
         const TextureBlendScope blend(sdl_texture->handle(), _blend);
-        SDL_RenderTextureRotated(_handle, sdl_texture->handle(), &src_rect, &dst_rect, rotation, &center, SDL_FLIP_NONE);
+        SDL_RenderTextureRotated(_handle, sdl_texture->handle(), &src_rect, &dst_rect, rotation, &center,
+                                 static_cast<SDL_FlipMode>(flip));
         SDL_SetTextureColorMod(sdl_texture->handle(), 255, 255, 255);
         SDL_SetTextureAlphaMod(sdl_texture->handle(), 255);
     }

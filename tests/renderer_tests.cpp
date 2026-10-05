@@ -1318,7 +1318,7 @@ std::vector<kin::u8> sprite_scene(kin::Renderer2D& renderer, const kin::Texture&
     } else {
         for (const kin::SpriteInstance& s : sprites) {
             const kin::Rectf source = s.source.w > 0.0f ? s.source : kin::Rectf{0.0f, 0.0f, 4.0f, 4.0f};
-            renderer.draw_texture(texture, source, s.dest, s.tint, s.rotation, s.pivot);
+            renderer.draw_texture(texture, source, s.dest, s.tint, s.rotation, s.pivot, s.flip);
         }
     }
     renderer.pop_viewport();
@@ -1330,8 +1330,8 @@ std::vector<kin::u8> sprite_scene(kin::Renderer2D& renderer, const kin::Texture&
 }
 
 // draw_sprites() must draw what a draw_texture() per sprite draws: plain, tinted,
-// from part of the texture, turned about a pivot, overlapping in order, inside a
-// viewport. Returns how many pixels differ by more than 2 in any channel.
+// from part of the texture, turned about a pivot, mirrored, overlapping in order,
+// inside a viewport. Returns how many pixels differ by more than 2 in any channel.
 int sprite_batch_mismatches(kin::Renderer2D& renderer) {
     std::array<kin::u8, 64> texels{};
     for (std::size_t i = 0; i < 16; ++i) {
@@ -1342,12 +1342,14 @@ int sprite_batch_mismatches(kin::Renderer2D& renderer) {
     }
     const kin::Texture texture = renderer.create_texture_from_rgba(texels.data(), {4, 4});
     renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
-    const std::array<kin::SpriteInstance, 5> sprites{{
+    const std::array<kin::SpriteInstance, 7> sprites{{
         {.dest = {2.0f, 2.0f, 12.0f, 12.0f}},
         {.dest = {18.0f, 2.0f, 12.0f, 8.0f}, .source = {1.0f, 1.0f, 2.0f, 2.0f}, .tint = kin::Color::rgba(255, 128, 64, 200)},
         {.dest = {4.0f, 20.0f, 16.0f, 16.0f}, .rotation = 30.0f},
         {.dest = {24.0f, 24.0f, 10.0f, 14.0f}, .rotation = -45.0f, .pivot = {0.0f, 0.0f}},
         {.dest = {10.0f, 10.0f, 20.0f, 20.0f}, .tint = kin::Color::rgba(255, 255, 255, 128)},
+        {.dest = {36.0f, 2.0f, 12.0f, 8.0f}, .source = {0.0f, 1.0f, 3.0f, 2.0f}, .flip = kin::Flip::X},
+        {.dest = {34.0f, 36.0f, 12.0f, 14.0f}, .rotation = 20.0f, .pivot = {0.25f, 0.75f}, .flip = kin::Flip::XY},
     }};
     const std::vector<kin::u8> one_by_one = sprite_scene(renderer, texture, sprites, false);
     const std::vector<kin::u8> batched = sprite_scene(renderer, texture, sprites, true);
@@ -1397,6 +1399,68 @@ void test_textures_outliving_their_renderer() {
     }
 }
 
+// A 2 x 2 texture (red, green over blue, white) drawn mirrored every way, by
+// each entry point, at 16 x 16: how many quadrants are the wrong colour.
+int flipped_quadrant_errors(kin::Renderer2D& renderer) {
+    const kin::Color red = kin::Color::rgb(255, 0, 0), green = kin::Color::rgb(0, 255, 0);
+    const kin::Color blue = kin::Color::rgb(0, 0, 255), white = kin::Color::rgb(255, 255, 255);
+    const std::array<kin::u8, 16> texels{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255};
+    const kin::Texture texture = renderer.create_texture_from_rgba(texels.data(), {2, 2});
+    renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
+    const kin::Sprite sprite{.texture = texture, .source = {0.0f, 0.0f, 2.0f, 2.0f}};
+    struct Case {
+        kin::Flip flip;
+        float rotation;
+        std::array<kin::Color, 4> quadrants; // top-left, top-right, bottom-left, bottom-right
+    };
+    const std::array<Case, 5> cases{{
+        {kin::Flip::None, 0.0f, {red, green, blue, white}},
+        {kin::Flip::X, 0.0f, {green, red, white, blue}},
+        {kin::Flip::Y, 0.0f, {blue, white, red, green}},
+        {kin::Flip::XY, 0.0f, {white, blue, green, red}},
+        // Mirrored first, then turned a quarter clockwise about the centre.
+        {kin::Flip::X, 90.0f, {white, green, blue, red}},
+    }};
+    int errors = 0;
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    for (const Case& c : cases) {
+        for (int way = 0; way < 4; ++way) {
+            const kin::Rectf dest{24.0f, 24.0f, 16.0f, 16.0f};
+            std::vector<kin::u8> pixels;
+            kin::Vec2i size{};
+            {
+                const auto bind = renderer.scoped_render_target(target);
+                renderer.clear(kin::Color::rgb(0, 0, 0));
+                const kin::SpriteInstance instance{.dest = dest, .rotation = c.rotation, .flip = c.flip};
+                switch (way) {
+                case 0: renderer.draw_texture(texture, sprite.source, dest, kin::colors::white, c.rotation, {0.5f, 0.5f}, c.flip); break;
+                case 1: renderer.draw_texture(texture, {}, dest, kin::colors::white, c.rotation, {0.5f, 0.5f}, c.flip); break;
+                case 2: renderer.draw_sprite(sprite, dest, kin::colors::white, c.rotation, {0.5f, 0.5f}, c.flip); break;
+                default: renderer.draw_sprites(texture, std::span{&instance, 1}); break;
+                }
+                assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
+            }
+            const std::array<kin::Vec2i, 4> probes{{{28, 28}, {36, 28}, {28, 36}, {36, 36}}};
+            for (std::size_t q = 0; q < 4; ++q) {
+                if (!pixel_near(pixels, size, probes[q].x, probes[q].y, c.quadrants[q])) {
+                    std::fprintf(stderr, "flip %d rotation %.0f way %d quadrant %zu wrong\n", int(c.flip), c.rotation, way, q);
+                    ++errors;
+                }
+            }
+        }
+    }
+    return errors;
+}
+
+void test_flipped_sprites_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "flip-test", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    assert(flipped_quadrant_errors(renderer) == 0); // batched into geometry
+    renderer.set_texture_batching_enabled(false);
+    assert(flipped_quadrant_errors(renderer) == 0); // one SDL_RenderTextureRotated each
+}
+
 void test_sprite_batches_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "sprite-batch-test", .width = 64, .height = 64, .hidden = true});
@@ -1422,6 +1486,9 @@ void test_sprite_batches_on_gpu_backend() {
         const int mismatches = sprite_batch_mismatches(*renderer);
         if (mismatches > 4) {
             throw std::runtime_error(std::string(test_name) + ": " + std::to_string(mismatches) + " pixels differ");
+        }
+        if (const int errors = flipped_quadrant_errors(*renderer); errors != 0) {
+            throw std::runtime_error(std::string(test_name) + ": " + std::to_string(errors) + " flipped quadrants wrong");
         }
         // A batch big enough to be filled on workers draws the same pixels.
         std::vector<kin::SpriteInstance> many;
@@ -3839,6 +3906,7 @@ int main() {
     test_lighting_declines_without_render_targets();
     test_sprite_batches_on_software_backend();
     test_textures_outliving_their_renderer();
+    test_flipped_sprites_on_software_backend();
     test_sprite_batches_on_gpu_backend();
     return 0;
 }
