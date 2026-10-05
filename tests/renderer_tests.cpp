@@ -2784,7 +2784,9 @@ void check_sdf_text(kin::Renderer2D& renderer) {
         dark += c.g < 40 ? 1 : 0;
         ramp += c.g >= 40 && c.g <= 215 ? 1 : 0;
     }
-    if (dark < 6 || (fields && ramp > 6)) {
+    // Bitmap text magnified 8x is as soft as its texels: a thin stem (Segoe UI's)
+    // may have no texel fully inked, so only ask that it was drawn.
+    if (fields ? dark < 6 || ramp > 6 : dark + ramp < 6) {
         throw std::runtime_error(std::string("check_sdf_text (") + std::string(renderer.backend_name()) + "): " +
                                  std::to_string(dark) + " dark and " + std::to_string(ramp) + " soft pixels in the stem");
     }
