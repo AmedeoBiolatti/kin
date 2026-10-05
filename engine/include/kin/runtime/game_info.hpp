@@ -25,6 +25,8 @@ struct GameWindowInfo {
     bool integer_scale = false;
     bool resizable = false;
     bool borderless = false;
+    ColorSpace color_space = ColorSpace::Gamma; // see Renderer2D::set_color_space
+    bool hdr = false;
 };
 
 // Every member has a default, so a designated initializer can leave any out

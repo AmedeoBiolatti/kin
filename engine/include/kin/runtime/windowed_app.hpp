@@ -21,6 +21,10 @@ struct WindowedAppConfig {
     i32 logical_width = 0;
     i32 logical_height = 0;
     bool integer_scale = false;
+    // The renderer's colour space (Renderer2D::set_color_space), set before
+    // any scene loads a texture.
+    ColorSpace color_space = ColorSpace::Gamma;
+    bool hdr = false;
     AppMode mode = AppMode::Windowed;
     f32 fixed_dt = default_fixed_dt;
     f32 max_frame_time = 0.25f;

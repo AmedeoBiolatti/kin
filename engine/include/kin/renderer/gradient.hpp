@@ -2,6 +2,8 @@
 
 #include <kin/renderer/color.hpp>
 
+#include <optional>
+
 namespace kin {
 
 enum class GradientDirection {
@@ -15,6 +17,10 @@ struct Gradient {
     Color start;
     Color end;
     GradientDirection direction = GradientDirection::Vertical;
+    // Where the colours mix (ColorMix): unset, as the pipeline blends (sRGB
+    // values in a Gamma one, linear light in a Linear one). OKLab keeps the
+    // middle as bright and saturated as the ends look.
+    std::optional<ColorMix> mix;
 };
 
 } // namespace kin

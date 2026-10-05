@@ -1,12 +1,16 @@
 // 2D lighting demo: a courtyard at night lit by lamps, a campfire, a crystal and
-// the player's flashlight, using kin::LightLayer.
+// the player's flashlight, using kin::LightLayer. Drawn in linear light with an
+// HDR scene: light adds up past white and is tonemapped (ACES), then graded
+// through a LUT for the time of day, cross-faded as it changes, and dithered.
 //
 //   WASD     move          1-4  dawn / day / dusk / night
 //   Mouse    aim the flashlight   F  flashlight on / off
+//   C        linear HDR / the old gamma pipeline     G  grading on / off
 //   Esc      quit
 
 #include <kin/core/json.hpp>
 #include <kin/platform/input.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/lighting.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/runtime/game_info.hpp>
@@ -54,6 +58,8 @@ kin::GameInfo make_game_info() {
     input.bind("day", kin::Key::Num2);
     input.bind("dusk", kin::Key::Num3);
     input.bind("night", kin::Key::Num4);
+    input.bind("color_space", kin::Key::C);
+    input.bind("grading", kin::Key::G);
 
     return {
         .id = "lighting_demo",
@@ -67,6 +73,8 @@ kin::GameInfo make_game_info() {
             .logical_width = static_cast<kin::i32>(logical_size.x),
             .logical_height = static_cast<kin::i32>(logical_size.y),
             .resizable = true,
+            .color_space = kin::ColorSpace::Linear,
+            .hdr = true,
         },
         .tags = {"sample", "lighting"},
         .fields = {},
@@ -79,6 +87,46 @@ kin::Color lerp(kin::Color a, kin::Color b, float t) {
         return static_cast<kin::u8>(std::lround(static_cast<float>(x) + (static_cast<float>(y) - x) * t));
     };
     return kin::Color::rgb(ch(a.r, b.r), ch(a.g, b.g), ch(a.b, b.b));
+}
+
+// A look for a time of day: a LUT made from the neutral one by `grade`, which
+// takes and gives sRGB values from 0 to 1.
+template <typename Grade>
+std::shared_ptr<const kin::ColorLut> make_look(Grade grade) {
+    const kin::ColorLut neutral = kin::ColorLut::neutral(32);
+    std::vector<kin::u8> strip{neutral.strip().begin(), neutral.strip().end()};
+    for (std::size_t i = 0; i < strip.size(); i += 4) {
+        std::array<float, 3> c{strip[i] / 255.0f, strip[i + 1] / 255.0f, strip[i + 2] / 255.0f};
+        grade(c);
+        for (std::size_t k = 0; k < 3; ++k) {
+            strip[i + k] = static_cast<kin::u8>(std::clamp(c[k], 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    }
+    return std::make_shared<const kin::ColorLut>(*kin::ColorLut::from_image(strip, {32 * 32, 32}));
+}
+
+// Dawn pink, day as it is, dusk warm and contrasty, night blue and muted.
+std::array<std::shared_ptr<const kin::ColorLut>, 4> make_looks() {
+    const auto luma = [](const std::array<float, 3>& c) { return 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]; };
+    return {
+        make_look([](std::array<float, 3>& c) {
+            c = {c[0] * 1.06f + 0.02f, c[1] * 0.97f, c[2] * 1.02f + 0.01f};
+        }),
+        make_look([](std::array<float, 3>&) {}),
+        make_look([](std::array<float, 3>& c) {
+            for (float& v : c) {
+                v = v + (v - 0.5f) * 0.12f; // a little more contrast
+            }
+            c = {c[0] * 1.10f, c[1] * 0.96f, c[2] * 0.86f};
+        }),
+        make_look([&](std::array<float, 3>& c) {
+            const float l = luma(c);
+            for (float& v : c) {
+                v = l + (v - l) * 0.7f; // muted
+            }
+            c = {c[0] * 0.86f + 0.01f, c[1] * 0.95f + 0.015f, c[2] * 1.12f + 0.03f};
+        }),
+    };
 }
 
 // A deterministic flicker around 1: a few sines of time, no randomness.
@@ -100,6 +148,7 @@ public:
         for (std::size_t i = 0; i < times.size(); ++i) {
             if (ctx.input.pressed(times[i].name)) {
                 _from = current_ambient();
+                _from_look = _blend < 0.5f ? _from_look : _target;
                 _target = i;
                 _blend = 0.0f;
             }
@@ -107,6 +156,13 @@ public:
         _blend = std::min(1.0f, _blend + ctx.dt * 1.5f);
         if (ctx.input.pressed("flashlight")) {
             _flashlight = !_flashlight;
+        }
+        if (ctx.input.pressed("color_space")) {
+            _linear = !_linear;
+            ctx.renderer.set_color_space(_linear ? kin::ColorSpace::Linear : kin::ColorSpace::Gamma, _linear);
+        }
+        if (ctx.input.pressed("grading")) {
+            _grading = !_grading;
         }
 
         const float speed = 180.0f * ctx.dt;
@@ -127,10 +183,21 @@ public:
         const std::vector<kin::Light2D> lights = scene_lights(r);
         _lit = _lighting.apply(r, world_area, current_ambient(), lights);
         draw_hud(r); // after lighting: never darkened
+        // Tonemapped and graded on the way to the screen: the time of day's
+        // look, cross-faded from the last one.
+        r.set_color_output({.exposure = 1.6f,
+                            .tonemap = kin::Tonemap::Aces,
+                            .lut = _grading ? _looks[_from_look] : nullptr,
+                            .lut_to = _grading ? _looks[_target] : nullptr,
+                            .lut_mix = _blend,
+                            .dither = true});
+        _linear = r.color_space() == kin::ColorSpace::Linear;
     }
 
     void collect_actions(kin::InputActionContext& actions) const override {
         actions.add("flashlight", "Toggle the flashlight");
+        actions.add("color_space", "Switch between linear HDR and gamma");
+        actions.add("grading", "Toggle colour grading");
         for (const TimeOfDay& t : times) {
             actions.add(t.name, "Set the time of day");
         }
@@ -144,6 +211,7 @@ public:
             .value(static_cast<kin::i64>(a.b)).end_array();
         json.field("flashlight", _flashlight);
         json.field("lit", _lit);
+        json.field("linear", _linear);
     }
 
 private:
@@ -248,8 +316,10 @@ private:
         if (!_lit) {
             title += "  (unlit: this backend has no render targets)";
         }
+        title += _linear ? "   linear HDR" : "   gamma";
+        title += _grading ? ", graded" : "";
         text(title, 20.0f, 12.0f, 20.0f, kin::Color::rgb(226, 232, 240));
-        text("WASD: move    Mouse: aim flashlight    F: flashlight    1-4: dawn / day / dusk / night",
+        text("WASD: move    Mouse: aim    F: flashlight    1-4: dawn / day / dusk / night    C: linear / gamma    G: grading",
              20.0f, 42.0f, 13.0f, kin::Color::rgb(150, 162, 178));
     }
 
@@ -263,6 +333,10 @@ private:
     std::size_t _target = 3; // night
     kin::Color _from = times[3].ambient;
     float _blend = 1.0f;
+    std::size_t _from_look = 3;
+    std::array<std::shared_ptr<const kin::ColorLut>, 4> _looks = make_looks();
+    bool _linear = true;
+    bool _grading = true;
     bool _flashlight = true;
     bool _lit = false;
     kin::Vec2f _player{380.0f, 360.0f};

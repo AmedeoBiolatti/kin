@@ -36,6 +36,9 @@ void run_windowed_app(const WindowedAppConfig& config, FrameUpdate update, Frame
         });
 
         Renderer2D renderer{make_render_backend(window, config.vsync && !app.headless(), !app.headless())};
+        if (config.color_space != ColorSpace::Gamma || config.hdr) {
+            renderer.set_color_space(config.color_space, config.hdr);
+        }
         if (want_visible) {
             window.show();
         }

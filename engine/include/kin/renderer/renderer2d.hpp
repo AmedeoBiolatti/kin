@@ -222,6 +222,23 @@ public:
     [[nodiscard]] LayerGuard begin_layer(LayerOptions options);
     [[nodiscard]] LayerGuard begin_layer() { return begin_layer(LayerOptions{}); }
 
+    // Colour (kin/renderer/color_grading.hpp). The colour space colours blend
+    // in: Linear decodes colour textures and colours from sRGB to linear light,
+    // blends there, and encodes for the display; `hdr` keeps light above white
+    // in a float scene until set_color_output() tonemaps it. Set it at
+    // start-up, before making textures: those made before keep the encoding
+    // they were made with (create_texture()'s data textures are never
+    // decoded). Clears the render target pool. SDL_GPU
+    // (capabilities().linear_color); elsewhere false, and nothing changes.
+    bool set_color_space(ColorSpace space, bool hdr = false);
+    ColorSpace color_space() const { return _color_space; }
+    bool hdr() const { return _hdr; }
+    // The image on its way to the display, from the next present: exposure and
+    // tonemapping (Linear), grading through LUTs, dithering. SDL_GPU
+    // (capabilities().color_output); elsewhere kept but not applied.
+    void set_color_output(ColorOutput output);
+    const ColorOutput& color_output() const { return _color_output; }
+
     // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
     // every draw adds one layer where it covers, and the screen shows the counts
     // as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or more.
@@ -540,6 +557,11 @@ private:
     std::vector<std::unique_ptr<OpenClip>> _clips;
     void end_mask(OpenClip& clip);
     BlendMode _blend_mode = BlendMode::Alpha;
+    ColorSpace _color_space = ColorSpace::Gamma;
+    bool _hdr = false;
+    ColorOutput _color_output;
+    Texture _lut_texture;    // _color_output.lut's, uploaded
+    Texture _lut_to_texture; // and lut_to's
     // The shapes drawn as they are called: reused buffers, and how finely to
     // tessellate under the current transform.
     ShapeMesh _shape_scratch;

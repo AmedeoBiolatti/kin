@@ -245,6 +245,8 @@ public:
         SDL_GPUTexture* depth_stencil = nullptr;
         SDL_GPUTextureFormat depth_stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID;
         bool clear_stencil = true;
+        // Colours are sRGB, decoded to linear light in the vertex shaders.
+        bool linear_colors = false;
         GpuView view{};
         // Set: every range draws with this shader, additively, its own inputs
         // left unbound (the overdraw view).

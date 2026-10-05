@@ -2,6 +2,7 @@
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
 #include <kin/platform/app.hpp>
 #include <kin/renderer/cached_target.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
@@ -582,6 +583,54 @@ int masks(int frames, int cards) {
     return 0;
 }
 
+// The colour pipelines on a 1920 x 1080 screen of translucent quads: gamma,
+// linear (sRGB targets), linear HDR (float targets), and HDR tonemapped, graded
+// through two LUTs and dithered.
+int color(int frames, int quads) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "color-bench", .width = 1920, .height = 1080, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    auto lut = std::make_shared<const kin::ColorLut>(kin::ColorLut::neutral(32));
+    const char* names[4] = {"gamma", "linear", "linear HDR", "HDR graded"};
+    for (int mode = 0; mode < 4; ++mode) {
+        renderer->set_color_space(mode == 0 ? kin::ColorSpace::Gamma : kin::ColorSpace::Linear, mode >= 2);
+        renderer->set_color_output(mode == 3 ? kin::ColorOutput{.tonemap = kin::Tonemap::Aces, .lut = lut, .lut_to = lut,
+                                                                 .lut_mix = 0.5f, .dither = true}
+                                             : kin::ColorOutput{});
+        std::vector<double> gpu;
+        const auto frame = [&] {
+            renderer->clear(kin::Color::rgb(20, 24, 32));
+            for (int i = 0; i < quads; ++i) {
+                const float x = static_cast<float>((i * 37) % 1880), y = static_cast<float>((i * 91) % 1040);
+                renderer->fill_rect(kin::Rectf{x, y, 40.0f, 40.0f}, kin::Color::rgba(200, 120 + i % 100, 60, 160));
+            }
+            renderer->present();
+            gpu.push_back(renderer->backend_stats().last_gpu_frame_ms);
+        };
+        for (int f = 0; f < 10; ++f) {
+            frame();
+        }
+        gpu.clear();
+        std::vector<kin::u8> one;
+        kin::Vec2i one_size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+        const auto t0 = clock::now();
+        for (int f = 0; f < frames; ++f) {
+            frame();
+        }
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+        std::erase_if(gpu, [](double v) { return v <= 0.0; });
+        std::ranges::sort(gpu);
+        std::printf("%-12s %d quads: back-to-back frame %6.3f ms, GPU frame %6.3f ms\n", names[mode], quads,
+                    ms(t0, clock::now()) / frames, gpu.empty() ? 0.0 : gpu[gpu.size() / 2]);
+    }
+    return 0;
+}
+
 // XC-121's other pattern: a 288 x 288 target drawn over 44 times a frame (layers
 // of 200 small quads covering it), then shown: every frame, or cached and drawn
 // only when its key changes (never, here).
@@ -649,6 +698,9 @@ int main(int argc, char** argv) {
         return layers(frames);
     }
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
+    if (argc > 3 && std::string_view{argv[3]} == "color") {
+        return color(frames, quads);
+    }
     if (argc > 3 && std::string_view{argv[3]} == "masks") {
         return masks(frames, quads);
     }

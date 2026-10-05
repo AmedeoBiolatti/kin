@@ -799,12 +799,116 @@ is not weighted by its alpha. The SDL_GPU backend has them; SDL's software
 renderer does not (`capabilities().min_max_blend` is false) and draws them as
 `Alpha`, logging a warning once.
 
+## Colour
+
+Colours (`kin::Color`) and images hold sRGB values, as image editors and colour
+pickers give them. By default kin blends those values as they are (the gamma
+pipeline, as most 2D engines do). In a linear pipeline it decodes them to linear
+light, blends there, and encodes the result for the display: translucent
+overlaps, soft edges, glows, gradients and lights then add up as light does.
+
+```cpp
+renderer.set_color_space(kin::ColorSpace::Linear, /*hdr=*/true); // at start-up
+renderer.set_color_output({
+    .exposure = 1.2f,
+    .tonemap = kin::Tonemap::Aces,          // light above white, brought into range
+    .lut = night_look,                      // a std::shared_ptr<const kin::ColorLut>
+    .dither = true,
+});
+```
+
+Or in a game's `GameInfo`: `.window = {..., .color_space = kin::ColorSpace::Linear, .hdr = true}`,
+set before any scene loads a texture.
+
+![The lighting demo at night, gamma (left) and linear HDR, tonemapped and graded (right)](images/lighting_color.png)
+
+### The linear pipeline
+
+`set_color_space(ColorSpace::Linear, hdr)` (SDL_GPU, `capabilities().linear_color`):
+
+- Colour textures (`create_texture_from_rgba`, loaded images, glyph atlases) are
+  made sRGB: the GPU decodes them as it samples, filtering in linear light.
+  Data textures (`create_texture`) are never decoded.
+- `Color`s given to draws are decoded in the vertex shaders; clear colours on
+  the CPU.
+- The scene, render targets, layers and post-process passes store linear light:
+  8-bit sRGB (`hdr` false), or 16-bit float (`hdr` true), which keeps light
+  above white, as from additive glows and bright lights, until the output.
+- On the way to the display an output pass applies the exposure and the
+  tonemapper and encodes to sRGB.
+
+Set it at start-up. Textures and render targets made before keep the encoding
+they were made with (the render target pool is cleared). Post-process shaders
+see linear light, so a pass written for sRGB values may need to encode first.
+
+Things that change in linear light:
+
+- A tint that carries a premultiplied opacity (`Color::rgba(o, o, o, o)` over a
+  render target) has its colour decoded but not its alpha: give the colour
+  channels the opacity encoded, `linear_to_srgb(o)`. Layers do.
+- Luminance masks read linear luminance (as SVG's do).
+- Light colours and `LightLayer`'s ambient are decoded like any colour: an
+  ambient of `(28, 32, 56)` is a darker night than in the gamma pipeline.
+  The lighting demo keeps its ambients and adds exposure.
+- `read_rgba` returns what the target holds encoded to sRGB (a float one
+  clipped at white), before tonemapping and grading; `save_png` of the screen
+  returns what is displayed.
+
+SDL's renderer keeps its gamma pipeline: `set_color_space(Linear)` returns
+false and changes nothing.
+
+### Output: exposure, tonemapping, grading, dithering
+
+`set_color_output(ColorOutput)` can change every frame (SDL_GPU,
+`capabilities().color_output`):
+
+| Field | Does |
+| --- | --- |
+| `exposure` | scales the light first (linear) |
+| `tonemap` | `None` clips at white; `Reinhard` (x / (1 + x)) is gentle; `Aces` is filmic and contrasty |
+| `lut`, `lut_to`, `lut_mix`, `lut_strength` | grade the encoded colour through a 3D LUT, cross-faded to a second (day to night) |
+| `dither` | adds half an 8-bit step of noise, so dark gradients, fog and vignettes do not band |
+
+Grading works in the gamma pipeline too (exposure and tonemapping do not).
+
+`kin::ColorLut` is a 3D lookup table, 2 to 64 points along each axis, read
+trilinearly:
+
+- `ColorLut::load(path)`: a `.cube` file (from Resolve, Photoshop, most
+  grading tools), or a PNG strip (size² x size: blue slices left to right) or
+  square grid (e.g. 512 x 512 of 8 x 8 tiles).
+- `ColorLut::neutral(size).save_png(path)`: a LUT that changes nothing. To make
+  a look in any image editor, paste it into a screenshot, grade the whole
+  image, and cut the strip out again.
+- `ColorLut::apply(color)` grades a colour on the CPU, as the GPU does.
+
+The lighting demo makes a look per time of day from the neutral LUT and
+cross-fades between them as the time changes.
+
+### Colour maths
+
+`kin/renderer/color.hpp`: `srgb_to_linear`, `linear_to_srgb`, `LinearColor`
+(`to_linear`, `to_srgb`), and OKLab (`to_oklab`, `from_oklab`), a space where
+equal steps look equal. `mix(a, b, t, ColorMix)` mixes in sRGB values, linear
+light, or OKLab: halfway from black to white is 128, 188 or 99, and from red to
+green the sRGB middle is a dark olive (128, 128, 0), the OKLab one a bright amber
+(208, 168, 0).
+`Gradient::mix` picks it for `fill_gradient_rect`; unset, a gradient blends as
+the pipeline does.
+
+### Cost
+
+In `kin_draw_bench 200 20000 color` (20,000 translucent quads at 1920 x 1080),
+the GPU took 0.67 ms a frame in the gamma pipeline, 0.80 ms linear (the
+output pass included), 0.80 ms with an HDR scene, and 0.79 ms HDR tonemapped,
+graded through two LUTs and dithered.
+
 ## Lighting
 
 `kin::LightLayer` lights a scene after it is drawn: everything in an area is
 multiplied by an ambient colour plus the light of each `kin::Light2D`.
 
-![The lighting demo at night: lamps, a campfire, a cyan crystal and a flashlight beam](images/lighting_demo.png)
+![The lighting demo at night: lamps, a campfire, a cyan crystal and a flashlight beam, in linear HDR](images/lighting_demo.png)
 
 ```cpp
 kin::LightLayer lighting;                         // keep it; it caches a texture

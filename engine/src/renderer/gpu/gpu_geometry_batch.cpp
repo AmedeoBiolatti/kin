@@ -351,7 +351,10 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     struct VertexUniforms {
         f32 scale[2];
         f32 translate[2];
-    } uniforms{{ctx.view.scale[0], ctx.view.scale[1]}, {ctx.view.translate[0], ctx.view.translate[1]}};
+        f32 flags[4];
+    } uniforms{{ctx.view.scale[0], ctx.view.scale[1]},
+               {ctx.view.translate[0], ctx.view.translate[1]},
+               {ctx.linear_colors ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f}};
     SDL_PushGPUVertexUniformData(frame.command_buffer(), 0, &uniforms, sizeof(uniforms));
 
     // Slot 0 holds the triangle vertices, the shader vertices or, for an

@@ -1,4 +1,6 @@
+#include <kin/assets/image.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/renderer/cached_target.hpp>
@@ -3095,6 +3097,260 @@ void check_masks_on_window(kin::Renderer2D& renderer) {
     }
 }
 
+// sRGB and linear light, OKLab, and mixing in each.
+void test_color_math() {
+    for (int v = 0; v < 256; ++v) {
+        const kin::Color c = kin::Color::rgba(static_cast<kin::u8>(v), 0, static_cast<kin::u8>(255 - v), 77);
+        assert(kin::to_srgb(kin::to_linear(c)) == c);
+    }
+    assert(std::abs(kin::srgb_to_linear(0.5f) - 0.2140f) < 1e-3f);
+    assert(std::abs(kin::linear_to_srgb(0.5f) - 0.7354f) < 1e-3f);
+    const kin::Oklab red = kin::to_oklab(kin::to_linear(kin::Color::rgb(255, 0, 0)));
+    assert(std::abs(red.l - 0.62796f) < 1e-3f && std::abs(red.a - 0.22486f) < 1e-3f && std::abs(red.b - 0.12585f) < 1e-3f);
+    const kin::Oklab white = kin::to_oklab({1.0f, 1.0f, 1.0f, 1.0f});
+    assert(std::abs(white.l - 1.0f) < 1e-3f && std::abs(white.a) < 1e-3f && std::abs(white.b) < 1e-3f);
+    const kin::LinearColor back = kin::from_oklab(red);
+    assert(std::abs(back.r - 1.0f) < 1e-3f && std::abs(back.g) < 1e-3f && std::abs(back.b) < 1e-3f);
+    // Halfway from black to white: the sRGB value, half the light, half the lightness.
+    const kin::Color black = kin::colors::black, full = kin::colors::white;
+    assert(kin::mix(black, full, 0.5f, kin::ColorMix::Srgb).r == 128);
+    assert(kin::mix(black, full, 0.5f, kin::ColorMix::Linear).r == 188);
+    assert(std::abs(int(kin::mix(black, full, 0.5f, kin::ColorMix::Oklab).r) - 99) <= 1);
+    // Red to green: the sRGB middle is dark, the others are not.
+    const kin::Color r = kin::Color::rgb(255, 0, 0), g = kin::Color::rgb(0, 255, 0);
+    const auto light = [](kin::Color c) { return kin::to_oklab(kin::to_linear(c)).l; };
+    assert(light(kin::mix(r, g, 0.5f, kin::ColorMix::Srgb)) < light(kin::mix(r, g, 0.5f, kin::ColorMix::Oklab)) - 0.05f);
+}
+
+// LUTs: neutral, from a strip or a grid image, from .cube text, through PNG.
+void test_color_luts() {
+    const kin::ColorLut neutral = kin::ColorLut::neutral(17);
+    assert(neutral.size() == 17 && neutral.strip().size() == 17u * 17u * 17u * 4u);
+    for (const kin::Color c : {kin::Color::rgb(0, 0, 0), kin::Color::rgb(255, 255, 255), kin::Color::rgb(12, 200, 99),
+                               kin::Color::rgba(128, 64, 250, 9)}) {
+        const kin::Color out = neutral.apply(c);
+        assert(std::abs(int(out.r) - c.r) <= 1 && std::abs(int(out.g) - c.g) <= 1 && std::abs(int(out.b) - c.b) <= 1 &&
+               out.a == c.a);
+    }
+    // A strip image; and the same table as a square grid of 4 x 4 tiles.
+    const kin::ColorLut n16 = kin::ColorLut::neutral(16);
+    const std::optional<kin::ColorLut> strip = kin::ColorLut::from_image(n16.strip(), {256, 16});
+    assert(strip && strip->size() == 16 && std::ranges::equal(strip->strip(), n16.strip()));
+    std::vector<kin::u8> grid(64u * 64u * 4u);
+    for (int b = 0; b < 16; ++b) {
+        for (int g = 0; g < 16; ++g) {
+            for (int r = 0; r < 16; ++r) {
+                const std::size_t from = (static_cast<std::size_t>(g) * 256u + static_cast<std::size_t>(b * 16 + r)) * 4u;
+                const std::size_t to = (static_cast<std::size_t>((b / 4) * 16 + g) * 64u + static_cast<std::size_t>((b % 4) * 16 + r)) * 4u;
+                std::copy_n(n16.strip().begin() + static_cast<std::ptrdiff_t>(from), 4, grid.begin() + static_cast<std::ptrdiff_t>(to));
+            }
+        }
+    }
+    const std::optional<kin::ColorLut> tiled = kin::ColorLut::from_image(grid, {64, 64});
+    assert(tiled && std::ranges::equal(tiled->strip(), n16.strip()));
+    std::string error;
+    assert(!kin::ColorLut::from_image(grid, {64, 32}, &error) && !error.empty());
+
+    // .cube: an inverting table, red fastest, over a domain of 0 to 2.
+    const std::string cube = "TITLE \"invert\"\n# a comment\nLUT_3D_SIZE 2\nDOMAIN_MIN 0 0 0\nDOMAIN_MAX 2 2 2\n"
+                             "2 2 2\n0 2 2\n2 0 2\n0 0 2\n2 2 0\n0 2 0\n2 0 0\n0 0 0\n";
+    const std::optional<kin::ColorLut> invert = kin::ColorLut::parse_cube(cube, &error);
+    assert(invert && invert->size() == 2);
+    assert((invert->apply(kin::Color::rgb(0, 0, 0)) == kin::Color::rgb(255, 255, 255)));
+    assert((invert->apply(kin::Color::rgb(255, 0, 255)) == kin::Color::rgb(0, 255, 0)));
+    assert(!kin::ColorLut::parse_cube("LUT_3D_SIZE 2\n0 0 0\n", &error) && error.find("entries") != std::string::npos);
+    assert(!kin::ColorLut::parse_cube("LUT_1D_SIZE 4\n", &error));
+
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "kin_lut_test.png";
+    assert(invert->save_png(path));
+    const std::optional<kin::ColorLut> loaded = kin::ColorLut::load(path, &error);
+    assert(loaded && std::ranges::equal(loaded->strip(), invert->strip()));
+    std::filesystem::remove(path);
+}
+
+// Linear light on SDL_GPU: blending, textures, gradients, HDR and tonemapping,
+// LUTs and dithering, pixel by pixel.
+void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
+    const auto fail = [&](const std::string& what) {
+        throw std::runtime_error("check_linear_color: " + what);
+    };
+    kin::RenderTarget target; // made after each change of colour space: targets keep their format
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    const auto grey_at = [&](int x, int y) { return int(px[(static_cast<std::size_t>(y) * size.x + x) * 4]); };
+    const auto in_target = [&](const std::function<void()>& draw) {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(0, 0, 0));
+        draw();
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+    };
+    // What the screen shows (through the output pass): a screenshot's pixel.
+    kin::Image shot;
+    const auto on_screen = [&](const std::function<void()>& draw) {
+        renderer.clear(kin::Color::rgb(0, 0, 0));
+        draw();
+        renderer.present();
+        const std::filesystem::path path = std::filesystem::temp_directory_path() / "kin_color_test.png";
+        assert(renderer.save_png(path.string().c_str()));
+        shot = kin::load_image(path);
+        std::filesystem::remove(path);
+    };
+    const auto shot_at = [&](int x, int y) {
+        const std::size_t i = (static_cast<std::size_t>(y) * shot.size.x + x) * 4;
+        return kin::Color::rgb(shot.rgba[i], shot.rgba[i + 1], shot.rgba[i + 2]);
+    };
+    (void)window;
+    const std::array<kin::u8, 4> texel{128, 64, 200, 255};
+    const kin::Gradient ramp{.start = kin::colors::black, .end = kin::colors::white, .direction = kin::GradientDirection::Horizontal};
+
+    for (const bool hdr : {false, true}) {
+        const std::string mode = hdr ? "hdr: " : "srgb: ";
+        if (!renderer.set_color_space(kin::ColorSpace::Linear, hdr)) {
+            fail(mode + "not set");
+        }
+        target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+        // Half white over black: half the light, not half the value.
+        in_target([&] { renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 255, 255, 128)); });
+        if (std::abs(grey_at(8, 8) - 188) > 2) {
+            fail(mode + "half white over black is " + std::to_string(grey_at(8, 8)));
+        }
+        // A colour texture drawn as it is comes back as it was.
+        const kin::Texture texture = renderer.create_texture_from_rgba(texel.data(), {1, 1});
+        in_target([&] { renderer.draw_texture(texture, {0.0f, 0.0f, 64.0f, 64.0f}); });
+        const std::size_t i = (8u * static_cast<std::size_t>(size.x) + 8u) * 4u;
+        if (std::abs(int(px[i]) - 128) > 1 || std::abs(int(px[i + 1]) - 64) > 1 || std::abs(int(px[i + 2]) - 200) > 1) {
+            fail(mode + "a texture's colour changed");
+        }
+        // Gradients: as the pipeline blends, or as asked.
+        in_target([&] { renderer.fill_gradient_rect({0.0f, 0.0f, 64.0f, 64.0f}, ramp); });
+        if (std::abs(grey_at(32, 8) - 188) > 6) {
+            fail(mode + "a linear gradient's middle is " + std::to_string(grey_at(32, 8)));
+        }
+        kin::Gradient srgb = ramp;
+        srgb.mix = kin::ColorMix::Srgb;
+        in_target([&] { renderer.fill_gradient_rect({0.0f, 0.0f, 64.0f, 64.0f}, srgb); });
+        if (std::abs(grey_at(32, 8) - 128) > 6) {
+            fail(mode + "an sRGB gradient's middle is " + std::to_string(grey_at(32, 8)));
+        }
+        // Layers and masks lay over in linear light too.
+        in_target([&] {
+            auto layer = renderer.begin_layer({.opacity = 0.5f});
+            renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::colors::white);
+        });
+        if (std::abs(grey_at(8, 8) - 188) > 2) {
+            fail(mode + "a half-opaque layer is " + std::to_string(grey_at(8, 8)));
+        }
+        in_target([&] {
+            auto clip = renderer.scoped_clip(kin::Path::circle({32.0f, 32.0f}, 16.0f));
+            renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 255, 255, 128));
+        });
+        if (std::abs(grey_at(32, 32) - 188) > 2 || grey_at(4, 4) != 0) {
+            fail(mode + "a clipped half white is " + std::to_string(grey_at(32, 32)));
+        }
+        // The screen: encoded on the way out.
+        on_screen([&] { renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 255, 255, 128)); });
+        if (std::abs(int(shot_at(8, 8).r) - 188) > 2) {
+            fail(mode + "the screen shows " + std::to_string(shot_at(8, 8).r));
+        }
+    }
+
+    // HDR: twice white, added, brought down by each tonemapper and by exposure.
+    assert(renderer.set_color_space(kin::ColorSpace::Linear, true));
+    const auto twice_white = [&] {
+        const auto add = renderer.scoped_blend_mode(kin::BlendMode::Additive);
+        renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::colors::white);
+        renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::colors::white);
+    };
+    const auto expect_shot = [&](kin::ColorOutput output, int grey, const char* what) {
+        renderer.set_color_output(std::move(output));
+        on_screen(twice_white);
+        if (std::abs(int(shot_at(8, 8).r) - grey) > 3) {
+            fail(std::string(what) + " shows " + std::to_string(shot_at(8, 8).r) + ", not " + std::to_string(grey));
+        }
+    };
+    expect_shot({}, 255, "clipped at white");
+    expect_shot({.tonemap = kin::Tonemap::Reinhard}, 214, "Reinhard");  // 2/3 light
+    expect_shot({.tonemap = kin::Tonemap::Aces}, 245, "ACES");          // 0.915 light
+    expect_shot({.exposure = 0.25f}, 188, "a quarter exposure");         // half the light
+
+    // Grading: an inverting LUT, applied, cross-faded away, half strength.
+    auto invert = std::make_shared<const kin::ColorLut>(*kin::ColorLut::parse_cube(
+        "LUT_3D_SIZE 2\n1 1 1\n0 1 1\n1 0 1\n0 0 1\n1 1 0\n0 1 0\n1 0 0\n0 0 0\n"));
+    auto neutral = std::make_shared<const kin::ColorLut>(kin::ColorLut::neutral(16));
+    const auto expect_graded = [&](kin::ColorOutput output, int grey, const char* what) {
+        renderer.set_color_output(std::move(output));
+        on_screen([&] { renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgb(40, 40, 40)); });
+        if (std::abs(int(shot_at(8, 8).r) - grey) > 3) {
+            fail(std::string(what) + " shows " + std::to_string(shot_at(8, 8).r) + ", not " + std::to_string(grey));
+        }
+    };
+    expect_graded({.lut = invert}, 215, "an inverting LUT");
+    expect_graded({.lut = invert, .lut_to = neutral, .lut_mix = 1.0f}, 40, "cross-faded to neutral");
+    expect_graded({.lut = invert, .lut_strength = 0.5f}, 128, "half an inverting LUT");
+    // In a gamma pipeline too.
+    assert(renderer.set_color_space(kin::ColorSpace::Gamma));
+    expect_graded({.lut = invert}, 215, "an inverting LUT, gamma");
+
+    // Dithering: a dark grey between two 8-bit steps comes out as both.
+    assert(renderer.set_color_space(kin::ColorSpace::Linear));
+    const auto faint = [&] { renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 255, 255, 1)); };
+    const auto values = [&] {
+        std::array<int, 256> seen{};
+        for (int y = 0; y < 32; ++y) {
+            for (int x = 0; x < 32; ++x) {
+                ++seen[shot_at(x, y).r];
+            }
+        }
+        return static_cast<int>(std::ranges::count_if(seen, [](int n) { return n > 0; }));
+    };
+    renderer.set_color_output({});
+    on_screen(faint);
+    if (values() != 1) {
+        fail("undithered, a flat colour has " + std::to_string(values()) + " values");
+    }
+    renderer.set_color_output({.dither = true});
+    on_screen(faint);
+    if (values() < 2) {
+        fail("dithered, a colour between steps stays one value");
+    }
+    renderer.set_color_output({});
+    assert(renderer.set_color_space(kin::ColorSpace::Gamma));
+}
+
+void test_linear_color_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_linear_color_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-color-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        assert(renderer->capabilities().linear_color && renderer->capabilities().color_output);
+        check_linear_color(*renderer, window);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// SDL's renderer keeps its gamma pipeline: a linear one is refused.
+void test_linear_color_refused_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "color-test", .width = 32, .height = 32, .hidden = true});
+    kin::Renderer2D renderer{window};
+    assert(!renderer.capabilities().linear_color);
+    assert(!renderer.set_color_space(kin::ColorSpace::Linear));
+    assert(renderer.color_space() == kin::ColorSpace::Gamma);
+    assert(renderer.set_color_space(kin::ColorSpace::Gamma));
+}
+
 void test_masks_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "mask-test", .width = 64, .height = 64, .hidden = true});
@@ -3567,6 +3823,10 @@ int main() {
     test_masks_on_software_backend();
     test_masks_on_gpu_backend();
     test_masks_on_accelerated_sdl_renderer();
+    test_color_math();
+    test_color_luts();
+    test_linear_color_refused_on_software_backend();
+    test_linear_color_on_gpu_backend();
     test_transforms_on_gpu_backend();
     test_camera_zoom_and_rotation();
     test_gpu_scopes();

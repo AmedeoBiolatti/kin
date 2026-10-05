@@ -13,7 +13,16 @@ layout(location = 4) in vec4 aStroke;
 layout(set = 1, binding = 0) uniform UBO {
     vec2 uScale;
     vec2 uTranslate;
+    vec4 uFlags;
 } ubo;
+
+// Linear pipeline (uFlags.x): colours are given in sRGB, blended in linear light.
+vec4 decode_color(vec4 c) {
+    if (ubo.uFlags.x < 0.5) {
+        return c;
+    }
+    return vec4(mix(c.rgb / 12.92, pow((c.rgb + 0.055) / 1.055, vec3(2.4)), step(0.04045, c.rgb)), c.a);
+}
 
 layout(location = 0) out struct {
     vec4 Color; // the fill
@@ -30,10 +39,10 @@ void main() {
     const vec2 local = corners[gl_VertexIndex] * (aPlace.zw + vec2(aShape.y + aShape.z));
     const vec2 pos = vec2(aLinear.x * local.x + aLinear.z * local.y + aPlace.x,
                           aLinear.y * local.x + aLinear.w * local.y + aPlace.y);
-    Out.Color = aFill;
+    Out.Color = decode_color(aFill);
     Out.UV = local;
     Size = vec4(aPlace.zw, aShape.x, aShape.y);
-    Stroke = aStroke;
+    Stroke = decode_color(aStroke);
     Kind = aShape.w;
     gl_Position = vec4(pos * ubo.uScale + ubo.uTranslate, 0.0, 1.0);
     gl_Position.y *= -1.0;

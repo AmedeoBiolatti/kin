@@ -217,6 +217,9 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         _mask_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
                                                  dir / "mask_composite.frag.spv", /*uniform_buffers=*/1,
                                                  /*samplers=*/2);
+        _color_output_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                         SDL_GPU_SHADERFORMAT_SPIRV, dir / "color_output.frag.spv",
+                                                         /*uniform_buffers=*/1, /*samplers=*/3);
         _mask_stencil_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                          SDL_GPU_SHADERFORMAT_SPIRV, dir / "mask_stencil.frag.spv",
                                                          /*uniform_buffers=*/1, /*samplers=*/1);
@@ -252,28 +255,174 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
 
     _pipelines.init(_device.handle());
     _stencil_format = _device.depth_stencil_format();
-    if (_shape_shader.handle() && _shape_vertex_shader.handle()) {
-        // Shapes' pipeline now rather than at the first one drawn.
-        _pipelines.get(_shape_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha,
-                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::ShapeVertices);
-    }
-    if (_distance_field_shader.handle()) {
-        _pipelines.get(_vertex_shader.handle(), _distance_field_shader.handle(), gpu::GpuBlendMode::Alpha,
-                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
-    }
-    if (_sdf_shader.handle() && _sdf_vertex_shader.handle()) {
-        _pipelines.get(_sdf_vertex_shader.handle(), _sdf_shader.handle(), gpu::GpuBlendMode::Alpha,
-                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::SdfInstances);
-    }
-    if (_mask_shader.handle()) {
-        _pipelines.get(_vertex_shader.handle(), _mask_shader.handle(), gpu::GpuBlendMode::Premultiplied,
-                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
-    }
+    warm_pipelines();
     ensure_scene();
 
     KIN_LOG_INFO_F("render", "gpu backend created",
                    (LogFields{{.name = "driver", .value = std::string{_device.driver_name()}},
                               {.name = "vsync", .value = vsync ? "true" : "false"}}));
+}
+
+SDL_FColor GpuRenderer2DBackend::stored_color(Color color) const {
+    if (_color_space == ColorSpace::Linear) {
+        const LinearColor c = to_linear(color);
+        return {c.r, c.g, c.b, c.a};
+    }
+    return to_fcolor(color);
+}
+
+bool GpuRenderer2DBackend::set_color_space(ColorSpace space, bool hdr) {
+    const bool linear = space == ColorSpace::Linear;
+    if (hdr && !linear) {
+        return false; // a gamma pipeline stores display values: nothing above white
+    }
+    const SDL_GPUTextureFormat target = !linear ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM
+                                        : hdr   ? SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT
+                                                : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+    const SDL_GPUTextureFormat textures = linear ? SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    const SDL_GPUTextureUsageFlags drawn = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    if (!SDL_GPUTextureSupportsFormat(_device.handle(), target, SDL_GPU_TEXTURETYPE_2D, drawn) ||
+        !SDL_GPUTextureSupportsFormat(_device.handle(), textures, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
+        return false;
+    }
+    if (target == _target_format && textures == _color_texture_format) {
+        return true;
+    }
+    // Everything drawn so far goes; the scene and the post targets come back
+    // in the new format.
+    if (_frame) {
+        flush_to_frame();
+        _frame->submit();
+        end_frame();
+    }
+    _device.wait_idle();
+    _color_space = space;
+    _hdr = hdr;
+    _target_format = target;
+    _color_texture_format = textures;
+    _scene = {};
+    _scene_size = {};
+    _post_a = {};
+    _post_b = {};
+    _post_size = {};
+    warm_pipelines();
+    ensure_scene();
+    KIN_LOG_INFO_F("render", "color space set",
+                   (LogFields{{.name = "space", .value = linear ? "linear" : "gamma"},
+                              {.name = "hdr", .value = hdr ? "true" : "false"}}));
+    return true;
+}
+
+const gpu::GpuTexture* GpuRenderer2DBackend::readable(const gpu::GpuTexture* source, gpu::GpuTexture& scratch) {
+    if (!source || source->format() != SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT) {
+        return source;
+    }
+    scratch = _device.create_render_texture(source->width(), source->height(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB);
+    const bool own_frame = !_frame;
+    if (own_frame) {
+        _frame.emplace(_device.begin_frame());
+    }
+    SDL_GPUBlitInfo blit{};
+    blit.source.texture = source->handle();
+    blit.source.w = source->width();
+    blit.source.h = source->height();
+    blit.destination.texture = scratch.handle();
+    blit.destination.w = scratch.width();
+    blit.destination.h = scratch.height();
+    blit.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    blit.filter = SDL_GPU_FILTER_NEAREST;
+    SDL_BlitGPUTexture(_frame->command_buffer(), &blit);
+    if (own_frame) {
+        _frame->submit();
+        end_frame();
+    }
+    return &scratch;
+}
+
+bool GpuRenderer2DBackend::set_color_output(const ColorOutputState& output) {
+    if (!_color_output_shader.handle()) {
+        return false;
+    }
+    _color_output = output;
+    return true;
+}
+
+const gpu::GpuTexture* GpuRenderer2DBackend::run_output_pass(const gpu::GpuTexture* source) {
+    const bool linear = _color_space == ColorSpace::Linear;
+    const bool lut = static_cast<bool>(_color_output.lut) || static_cast<bool>(_color_output.lut_to);
+    if (!_color_output_shader.handle() || !_frame || !source || (!linear && !lut && !_color_output.dither) ||
+        (_overdraw_view && _overdraw_count_shader)) {
+        return source;
+    }
+    if (!_output || _output.width() != source->width() || _output.height() != source->height()) {
+        _output = _device.create_render_texture(source->width(), source->height(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    }
+    // The LUTs: a missing first one takes the second's place.
+    const auto* lut_a = as_gpu((_color_output.lut ? _color_output.lut : _color_output.lut_to).backend().get());
+    const auto* lut_b = _color_output.lut ? as_gpu(_color_output.lut_to.backend().get()) : nullptr;
+    const f32 size_a = static_cast<f32>(_color_output.lut ? _color_output.lut_size : _color_output.lut_to_size);
+    const f32 size_b = static_cast<f32>(_color_output.lut_to_size);
+    struct Uniforms {
+        f32 a[4];
+        f32 b[4];
+        f32 c[4];
+    } uniforms{{_color_output.exposure, static_cast<f32>(_color_output.tonemap), _color_output.dither ? 1.0f : 0.0f,
+                linear ? 1.0f : 0.0f},
+               {_color_output.lut_strength, _color_output.lut_mix, size_a, size_b},
+               {lut_a && lut_a->texture() ? 1.0f : 0.0f, lut_b && lut_b->texture() ? 1.0f : 0.0f, 0.0f, 0.0f}};
+    const f32 w = static_cast<f32>(source->width()), h = static_cast<f32>(source->height());
+    const std::array<gpu::GpuVertex, 6> verts{{
+        {0.0f, 0.0f, 0.0f, 0.0f, 255, 255, 255, 255},
+        {w, 0.0f, 1.0f, 0.0f, 255, 255, 255, 255},
+        {w, h, 1.0f, 1.0f, 255, 255, 255, 255},
+        {0.0f, 0.0f, 0.0f, 0.0f, 255, 255, 255, 255},
+        {w, h, 1.0f, 1.0f, 255, 255, 255, 255},
+        {0.0f, h, 0.0f, 1.0f, 255, 255, 255, 255},
+    }};
+    const std::array<SDL_GPUTextureSamplerBinding, 2> extra{{
+        {.texture = lut_a && lut_a->texture() ? lut_a->texture().handle() : _white.handle(), .sampler = _sampler_linear},
+        {.texture = lut_b && lut_b->texture() ? lut_b->texture().handle() : _white.handle(), .sampler = _sampler_linear},
+    }};
+    _batch.begin(_output, SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f}, /*do_clear=*/false);
+    _batch.set_stencil(gpu::GpuStencilOp::None, 0);
+    _batch.push(verts, _color_output_shader.handle(), source->handle(), SDL_Rect{0, 0, static_cast<int>(w), static_cast<int>(h)},
+                gpu::GpuBlendMode::Replace, &uniforms, sizeof(uniforms), _sampler_linear, extra);
+    gpu::GpuGeometryBatch::FlushContext ctx{};
+    ctx.vertex_shader = _vertex_shader.handle();
+    ctx.instance_shader = _instance_shader.handle();
+    ctx.shader_vertex_shader = _shader_vertex_shader.handle();
+    ctx.shape_vertex_shader = _shape_vertex_shader.handle();
+    ctx.sdf_vertex_shader = _sdf_vertex_shader.handle();
+    ctx.default_fragment = _fragment_shader.handle();
+    ctx.white_texture = _white.handle();
+    ctx.sampler = _sampler_linear;
+    ctx.target_format = _output.format();
+    ctx.view.scale[0] = 2.0f / std::max(1.0f, w);
+    ctx.view.scale[1] = 2.0f / std::max(1.0f, h);
+    ctx.view.translate[0] = -1.0f;
+    ctx.view.translate[1] = -1.0f;
+    _batch.flush(*_frame, _device, _pipelines, ctx);
+    return &_output;
+}
+
+void GpuRenderer2DBackend::warm_pipelines() {
+    if (_shape_shader.handle() && _shape_vertex_shader.handle()) {
+        // Shapes' pipeline now rather than at the first one drawn.
+        _pipelines.get(_shape_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha, _target_format,
+                       gpu::GpuVertexLayout::ShapeVertices);
+    }
+    if (_distance_field_shader.handle()) {
+        _pipelines.get(_vertex_shader.handle(), _distance_field_shader.handle(), gpu::GpuBlendMode::Alpha, _target_format,
+                       gpu::GpuVertexLayout::Triangles);
+    }
+    if (_sdf_shader.handle() && _sdf_vertex_shader.handle()) {
+        _pipelines.get(_sdf_vertex_shader.handle(), _sdf_shader.handle(), gpu::GpuBlendMode::Alpha, _target_format,
+                       gpu::GpuVertexLayout::SdfInstances);
+    }
+    if (_mask_shader.handle()) {
+        _pipelines.get(_vertex_shader.handle(), _mask_shader.handle(), gpu::GpuBlendMode::Premultiplied, _target_format,
+                       gpu::GpuVertexLayout::Triangles);
+    }
 }
 
 GpuRenderer2DBackend::~GpuRenderer2DBackend() {
@@ -314,6 +463,10 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .distance_fields = static_cast<bool>(_distance_field_shader.handle()),
         .masks = static_cast<bool>(_mask_shader.handle()),
         .stencil_clips = _stencil_format != SDL_GPU_TEXTUREFORMAT_INVALID,
+        .linear_color = SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB,
+                                                     SDL_GPU_TEXTURETYPE_2D,
+                                                     SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET),
+        .color_output = static_cast<bool>(_color_output_shader.handle()),
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -349,8 +502,7 @@ void GpuRenderer2DBackend::ensure_scene() {
         return;
     }
     _device.wait_idle();
-    _scene = _device.create_render_texture(static_cast<u32>(wanted.x), static_cast<u32>(wanted.y),
-                                           SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    _scene = _device.create_render_texture(static_cast<u32>(wanted.x), static_cast<u32>(wanted.y), _target_format);
     _scene_size = wanted;
 }
 
@@ -439,6 +591,7 @@ void GpuRenderer2DBackend::flush_to_frame() {
     ctx.view.scale[1] = 2.0f / std::max(1.0f, coord.y);
     ctx.view.translate[0] = -1.0f;
     ctx.view.translate[1] = -1.0f;
+    ctx.linear_colors = _color_space == ColorSpace::Linear;
     // The stencil goes with the passes that use it, kept from one to the next.
     StencilState& stencil = current_stencil();
     if (stencil.texture && _batch.uses_stencil()) {
@@ -563,7 +716,7 @@ void GpuRenderer2DBackend::pop_stencil_clip() {
 void GpuRenderer2DBackend::clear(Color color) {
     ensure_scene();
     // The overdraw view counts from nothing.
-    _clear_color = _overdraw_view && _overdraw_count_shader ? SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f} : to_fcolor(color);
+    _clear_color = _overdraw_view && _overdraw_count_shader ? SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f} : stored_color(color);
     if (!_frame) {
         _frame.emplace(_device.begin_frame());
     } else {
@@ -692,7 +845,7 @@ void GpuRenderer2DBackend::present() {
     _batch.set_stencil(gpu::GpuStencilOp::None, 0);
     // Full-scene post-processing: run the chain over the scene texture (ping-pong
     // scratch RTs); the result (scene-sized) is what gets blitted to the swapchain.
-    const gpu::GpuTexture* presented = run_post_chain();
+    const gpu::GpuTexture* presented = run_output_pass(run_post_chain());
     const u64 acquire_start = SDL_GetTicksNS();
     const bool acquired = _frame->acquire_swapchain();
     const u64 acquire_end = SDL_GetTicksNS();
@@ -969,12 +1122,11 @@ bool GpuRenderer2DBackend::draw_distance_field(const Texture& texture, std::span
     }
     ensure_frame();
     retain(texture);
+    const SDL_FColor outline = stored_color(style.outline_color);
     struct Uniforms {
         f32 outline_color[4];
         f32 params[4];
-    } uniforms{{style.outline_color.r / 255.0f, style.outline_color.g / 255.0f, style.outline_color.b / 255.0f,
-                style.outline_color.a / 255.0f},
-               {style.spread, style.outline, 0.0f, 0.0f}};
+    } uniforms{{outline.r, outline.g, outline.b, outline.a}, {style.spread, style.outline, 0.0f, 0.0f}};
     const f32 tex_w = static_cast<f32>(size.x), tex_h = static_cast<f32>(size.y);
     constexpr f32 pi = 3.14159265358979323846f;
     _scratch_verts.clear();
@@ -1115,8 +1267,9 @@ Texture GpuRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
     if (!pixels || size.x <= 0 || size.y <= 0) {
         return {};
     }
-    gpu::GpuTexture tex = _device.create_texture_from_rgba(pixels, static_cast<u32>(size.x),
-                                                           static_cast<u32>(size.y));
+    // Colour: sRGB in a linear pipeline, decoded to linear light as sampled.
+    gpu::GpuTexture tex = _device.create_texture(pixels, static_cast<u32>(size.x), static_cast<u32>(size.y),
+                                                 _color_texture_format, 4);
     return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex))};
 }
 
@@ -1401,18 +1554,22 @@ bool GpuRenderer2DBackend::save_png(const char* path) {
     if (_frame) {
         flush_to_frame();
         if (scene_target) {
-            src = run_post_chain();
+            src = run_output_pass(run_post_chain());
             src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
         }
         _frame->submit();
         end_frame();
-    } else if (scene_target && _scene && (!_post_passes.empty() || (_overdraw_view && _overdraw_count_shader))) {
+    } else if (scene_target && _scene &&
+               (!_post_passes.empty() || (_overdraw_view && _overdraw_count_shader) ||
+                _color_space == ColorSpace::Linear || _color_output.lut || _color_output.lut_to || _color_output.dither)) {
         _frame.emplace(_device.begin_frame());
-        src = run_post_chain();
+        src = run_output_pass(run_post_chain());
         src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
         _frame->submit();
         end_frame();
     }
+    gpu::GpuTexture encoded;
+    src = readable(src, encoded);
     std::vector<u8> rgba;
     if (!_device.read_texture_rgba(*src, rgba)) {
         return false;
@@ -1438,11 +1595,13 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
     const gpu::GpuTexture& target = current_target();
     const Vec2i target_size = current_size();
     flush_to_frame();
+    gpu::GpuTexture encoded;
+    const gpu::GpuTexture* read = readable(&target, encoded);
     _frame->submit();
     end_frame();
 
     std::vector<u8> full;
-    if (!_device.read_texture_rgba(target, full)) {
+    if (!_device.read_texture_rgba(*read, full)) {
         return false;
     }
     const int sw = target_size.x;
@@ -1627,11 +1786,7 @@ RenderTarget GpuRenderer2DBackend::create_render_target(Vec2i size, ScaleMode mo
     if (size.x <= 0 || size.y <= 0) {
         throw std::runtime_error("create_render_target requires a positive size");
     }
-    gpu::GpuTexture tex = _device.create_render_texture(
-        static_cast<u32>(size.x),
-        static_cast<u32>(size.y),
-        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM
-    );
+    gpu::GpuTexture tex = _device.create_render_texture(static_cast<u32>(size.x), static_cast<u32>(size.y), _target_format);
     return RenderTarget{Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), true, mode)}};
 }
 
@@ -1871,9 +2026,9 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
     }
     // Its usual pipeline now, while the game loads, rather than at its first
     // draw: on a cold driver cache that is a ~20 ms hitch. Every 2D target is
-    // RGBA8, and shader surfaces blend as alpha unless a blend mode is set.
-    _pipelines.get(_vertex_shader.handle(), shader.handle(), gpu::GpuBlendMode::Alpha,
-                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    // of one format, and shader surfaces blend as alpha unless a blend mode is set.
+    _pipelines.get(_vertex_shader.handle(), shader.handle(), gpu::GpuBlendMode::Alpha, _target_format,
+                   gpu::GpuVertexLayout::Triangles);
     // And whatever else an earlier run drew it with.
     const u64 id = spirv_id(desc.spirv);
     _fragment_ids[shader.handle()] = id;
@@ -1983,8 +2138,8 @@ bool GpuRenderer2DBackend::reload_shader(ShaderHandle handle, const ShaderDesc& 
     _pipelines.forget(slot.handle());
     _fragment_ids.erase(slot.handle());
     slot = std::move(shader);
-    _pipelines.get(_vertex_shader.handle(), slot.handle(), gpu::GpuBlendMode::Alpha,
-                   SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    _pipelines.get(_vertex_shader.handle(), slot.handle(), gpu::GpuBlendMode::Alpha, _target_format,
+                   gpu::GpuVertexLayout::Triangles);
     const u64 id = spirv_id(desc.spirv);
     _fragment_ids[slot.handle()] = id;
     make_hinted_pipelines(id, slot.handle());
@@ -2226,12 +2381,10 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
     // Scratch ping-pong targets sized to the scene (native resolution).
     if (!_post_a || _post_size != _scene_size) {
         _device.wait_idle();
-        _post_a = _device.create_render_texture(static_cast<u32>(_scene_size.x),
-                                                static_cast<u32>(_scene_size.y),
-                                                SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
-        _post_b = _device.create_render_texture(static_cast<u32>(_scene_size.x),
-                                                static_cast<u32>(_scene_size.y),
-                                                SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+        _post_a = _device.create_render_texture(static_cast<u32>(_scene_size.x), static_cast<u32>(_scene_size.y),
+                                                _target_format);
+        _post_b = _device.create_render_texture(static_cast<u32>(_scene_size.x), static_cast<u32>(_scene_size.y),
+                                                _target_format);
         _post_size = _scene_size;
     }
 
