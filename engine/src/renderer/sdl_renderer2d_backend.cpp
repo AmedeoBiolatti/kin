@@ -339,6 +339,7 @@ SdlRenderer2DBackend::~SdlRenderer2DBackend() {
     }
     _shaders.clear();
     _white_texture = {}; // free the SDL texture while the renderer is still alive
+    *_alive = false;
     if (_handle) {
         SDL_DestroyRenderer(_handle);
     }
@@ -618,7 +619,7 @@ Texture SdlRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
         throw std::runtime_error(error);
     }
 
-    return Texture{std::make_shared<SdlTextureBackend>(texture, size)};
+    return Texture{std::make_shared<SdlTextureBackend>(texture, size, _alive)};
 }
 
 void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf dest) {
@@ -1041,7 +1042,7 @@ RenderTarget SdlRenderer2DBackend::create_render_target(Vec2i size, ScaleMode mo
     SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
     SDL_SetTextureScaleMode(texture, mode == ScaleMode::Nearest ? SDL_SCALEMODE_NEAREST : SDL_SCALEMODE_LINEAR);
 
-    return RenderTarget{Texture{std::make_shared<SdlTextureBackend>(texture, size)}};
+    return RenderTarget{Texture{std::make_shared<SdlTextureBackend>(texture, size, _alive)}};
 }
 
 void SdlRenderer2DBackend::push_render_target(const RenderTarget& target) {
@@ -1233,14 +1234,15 @@ void SdlRenderer2DBackend::append_corners(const std::array<Vec2f, 4>& positions,
     _batch.indices.push_back(base + 3);
 }
 
-SdlTextureBackend::SdlTextureBackend(SDL_Texture* texture, Vec2i size)
+SdlTextureBackend::SdlTextureBackend(SDL_Texture* texture, Vec2i size, std::shared_ptr<const bool> renderer_alive)
     : ITextureBackend(ITextureBackend::Kind::Sdl),
       _texture(texture),
-      _size(size) {
+      _size(size),
+      _renderer_alive(std::move(renderer_alive)) {
 }
 
 SdlTextureBackend::~SdlTextureBackend() {
-    if (_texture) {
+    if (_texture && *_renderer_alive) {
         SDL_DestroyTexture(_texture);
     }
 }

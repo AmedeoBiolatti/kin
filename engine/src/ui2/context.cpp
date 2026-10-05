@@ -1733,26 +1733,24 @@ void Context::text(std::string_view value, Vec2f pos, const TextStyle& style) {
         color = hsv_color(std::fmod(_debug_last_hue + 0.5f, 1.0f), 1.0f, 1.0f, 255);
     }
     const Vec2f base{std::round(pos.x), std::round(pos.y)};
-    // Outline (4-way) and drop shadow draw underneath the main glyphs. Skipped in the
-    // debug wireframe theme (already recoloured) for clarity.
-    if (!_theme.debug_component_tint) {
-        if (style.outline_color.a > 0 && style.outline_width > 0.0f) {
-            const f32 w = style.outline_width;
-            const std::array<Vec2f, 4> offsets{{{-w, 0.0f}, {w, 0.0f}, {0.0f, -w}, {0.0f, w}}};
-            for (const Vec2f off : offsets) {
-                draw_text(*_renderer, style.font, value, {base.x + off.x, base.y + off.y}, style.scale, style.outline_color);
-            }
-        }
-        if (style.shadow_color.a > 0) {
-            draw_text(*_renderer, style.font, value,
-                      {base.x + style.shadow_offset.x, base.y + style.shadow_offset.y}, style.scale, style.shadow_color);
-        }
+    // The drop shadow under the text, the outline round it (from the distance
+    // field with an Sdf font, else four offset copies). Skipped in the debug
+    // wireframe theme (already recoloured) for clarity.
+    const bool outlined = !_theme.debug_component_tint && style.outline_color.a > 0 && style.outline_width > 0.0f;
+    if (!_theme.debug_component_tint && style.shadow_color.a > 0) {
+        draw_text(*_renderer, style.font, value,
+                  {base.x + style.shadow_offset.x, base.y + style.shadow_offset.y}, style.scale, style.shadow_color);
     }
     if (_debug.record_draws && !value.empty()) {
         const Vec2f size = measure_text(style.font, value, style.scale);
         record_draw(DrawOp::Kind::Text, {base.x, base.y, size.x, size.y}, 0.0f, 0.0f, color);
     }
-    draw_text(*_renderer, style.font, value, base, style.scale, color);
+    if (outlined) {
+        draw_text_outlined(*_renderer, style.font, value, base, style.scale, color, style.outline_width,
+                           style.outline_color);
+    } else {
+        draw_text(*_renderer, style.font, value, base, style.scale, color);
+    }
 }
 
 i32 Context::add_node(LayoutStyle style, Vec2f intrinsic) {

@@ -115,6 +115,14 @@ void Renderer2D::draw_shape(const ShapeMesh& mesh, const Affine2& transform, Col
     }
 }
 
+bool Renderer2D::draw_distance_field(const Texture& texture, std::span<const SpriteInstance> quads,
+                                     const DistanceFieldStyle& style) {
+    for (const SpriteInstance& q : quads) {
+        KIN_TRACE_DRAW(DrawKind::Texture, q.dest, q.tint, &texture, q.source, q.rotation, q.pivot);
+    }
+    return _backend->draw_distance_field(texture, quads, style);
+}
+
 void Renderer2D::fill_contours(FillRule rule, Color color) {
     _shape_scratch.clear();
     tessellate_fill(_shape_scratch, _contour_scratch, rule, color, shape_detail().fringe);

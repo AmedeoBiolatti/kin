@@ -9,6 +9,16 @@ releases may change APIs.
 
 ### Added
 
+- Text that scales: TTF fonts made with `ui2::TextRendering::Sdf`
+  (`load_ttf_font`, `system_ui_font`, `system_ui_font_bold`) draw from one
+  atlas of signed distance fields, sharp at any size, zoom or turn, under any
+  transform or camera; their metrics scale linearly. The atlas is made once per
+  renderer from glyphs drawn at twice the size, distance-transformed on the job
+  system (about 15 ms). `ui2::draw_text_outlined` draws an outline from the
+  field in one pass (four stamped copies on other fonts); widgets'
+  `TextStyle::outline_width` uses it. `Renderer2D::draw_distance_field` draws
+  any distance-field texture. SDL_GPU (`capabilities().distance_fields`);
+  drawn as Bitmap elsewhere.
 - Vector shapes (`kin/renderer/path.hpp`, `shape.hpp`, `svg.hpp`):
   - `kin::Path` (lines, curves, SVG arcs; rectangles, circles, polygons, arcs,
     pies, stars; SVG path data read and written), filled under non-zero or
@@ -194,6 +204,9 @@ releases may change APIs.
   parents first. Before, world positions were written into the
   parent-relative `Transform2D`. `kin::to_local(parent, world)` (the reverse of
   `compose`) and `kin::current_world_transform(entity)` support it.
+- Bitmap TTF fonts drawn at a scale that changes every frame opened a font face
+  and built a glyph atlas for every value, kept for good: now the most recent 12
+  faces and 8 atlases are kept.
 - `fill_rounded_rect` and `draw_rounded_rect` on SDL_Renderer: a border drew
   as a faint one-pixel line instead of its width. Both now draw as shape
   primitives on every backend.

@@ -5781,9 +5781,44 @@ void test_ui2_theme_variant_registry() {
     assert(!theme.variant("gold_button")->surface.normal.use_skin);
 }
 
+// Sdf fonts measure linearly: twice the scale, exactly twice the size. Bitmap
+// fonts keep only a few sizes however many are asked for. Outlines: one draw
+// from an Sdf font's field, four stamped copies under the text otherwise.
+void test_text_rendering_modes() {
+    if (ui2::system_ui_font_available()) {
+        const ui2::Font sdf = ui2::system_ui_font(16, ui2::TextRendering::Sdf);
+        const Vec2f one = ui2::measure_text(sdf, "Scalable text", 1.0f);
+        const Vec2f two = ui2::measure_text(sdf, "Scalable text", 2.0f);
+        assert(one.x > 0.0f && std::abs(two.x - 2.0f * one.x) < 1e-3f && std::abs(two.y - 2.0f * one.y) < 1e-3f);
+        // Close to the hinted Bitmap measure at the same size.
+        const Vec2f bitmap = ui2::measure_text(ui2::system_ui_font(16), "Scalable text", 1.0f);
+        assert(std::abs(one.x - bitmap.x) < bitmap.x * 0.05f);
+
+        // A scale changing every frame: measured and drawn, no atlas or face per value kept.
+        const ui2::Font animated = ui2::system_ui_font(15);
+        std::vector<Rectf> fills;
+        Renderer2D renderer = make_recording_renderer(fills);
+        for (int i = 0; i < 40; ++i) {
+            const f32 scale = 1.0f + static_cast<f32>(i) * 0.037f;
+            assert(ui2::measure_text(animated, "Pulse", scale).x > 0.0f);
+            ui2::draw_text(renderer, animated, "Pulse", {0, 0}, scale, colors::white);
+        }
+    }
+    // On a backend without distance fields, an outline is the text stamped
+    // four times under it: five draws of each glyph.
+    std::vector<Rectf> fills;
+    Renderer2D renderer = make_recording_renderer(fills);
+    ui2::draw_text(renderer, ui2::bitmap_font(), "A", {0, 0}, 1.0f, colors::white);
+    const std::size_t once = fills.size();
+    fills.clear();
+    ui2::draw_text_outlined(renderer, ui2::bitmap_font(), "A", {0, 0}, 1.0f, colors::white, 1.0f, colors::black);
+    assert(once > 0 && fills.size() == once * 5);
+}
+
 } // namespace
 
 int main() {
+    test_text_rendering_modes();
 #if defined(_MSC_VER)
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);

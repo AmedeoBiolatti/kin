@@ -7,6 +7,7 @@
 #include <SDL3/SDL.h>
 
 #include <array>
+#include <memory>
 #include <vector>
 
 namespace kin {
@@ -120,6 +121,9 @@ private:
     };
 
     SDL_Renderer* _handle = nullptr;
+    // Cleared as the renderer goes: SDL frees its textures with it, so a
+    // Texture that outlives it (in a static cache, say) must not free its own.
+    std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
     SDL_GPUDevice* _gpu_device = nullptr; // non-null when the renderer is on the "gpu" driver
     std::vector<ShaderEntry> _shaders;    // ShaderHandle.value == index + 1
     Texture _white_texture;               // 1x1 white, for shader-surface quads (lazy)
@@ -144,18 +148,20 @@ private:
 
 class SdlTextureBackend final : public ITextureBackend {
 public:
-    SdlTextureBackend(SDL_Texture* texture, Vec2i size);
+    SdlTextureBackend(SDL_Texture* texture, Vec2i size, std::shared_ptr<const bool> renderer_alive);
     ~SdlTextureBackend() override;
 
     SdlTextureBackend(const SdlTextureBackend&) = delete;
     SdlTextureBackend& operator=(const SdlTextureBackend&) = delete;
 
     Vec2i size() const override { return _size; }
-    SDL_Texture* handle() const { return _texture; }
+    // Null once the renderer that made it is gone.
+    SDL_Texture* handle() const { return *_renderer_alive ? _texture : nullptr; }
 
 private:
     SDL_Texture* _texture = nullptr;
     Vec2i _size{};
+    std::shared_ptr<const bool> _renderer_alive;
 };
 
 } // namespace kin

@@ -1359,6 +1359,38 @@ int sprite_batch_mismatches(kin::Renderer2D& renderer) {
     return mismatches;
 }
 
+// A texture kept past its renderer (in a static cache, say) and dropped while
+// a newer renderer runs must not touch the newer renderer's textures: SDL frees
+// a renderer's textures with it, and may hand their addresses to new ones.
+void test_textures_outliving_their_renderer() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "stale-texture-test", .width = 16, .height = 16, .hidden = true});
+    std::vector<kin::Texture> stale;
+    const std::array<kin::u8, 4> red{255, 0, 0, 255};
+    {
+        kin::Renderer2D old_renderer{window};
+        for (int i = 0; i < 32; ++i) {
+            stale.push_back(old_renderer.create_texture_from_rgba(red.data(), {1, 1}));
+        }
+    }
+    kin::Renderer2D renderer{window};
+    std::vector<kin::Texture> live;
+    for (int i = 0; i < 32; ++i) {
+        live.push_back(renderer.create_texture_from_rgba(red.data(), {1, 1}));
+    }
+    stale.clear();
+    kin::RenderTarget target = renderer.create_render_target({16, 16}, kin::ScaleMode::Nearest);
+    for (const kin::Texture& texture : live) {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(0, 0, 0));
+        renderer.draw_texture(texture, {0.0f, 0.0f, 16.0f, 16.0f});
+        std::vector<kin::u8> pixels;
+        kin::Vec2i size{};
+        assert(renderer.read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, pixels, size));
+        assert(pixel_near(pixels, size, 8, 8, kin::Color::rgb(255, 0, 0)));
+    }
+}
+
 void test_sprite_batches_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "sprite-batch-test", .width = 64, .height = 64, .hidden = true});
@@ -2746,12 +2778,70 @@ void check_primitives(kin::Renderer2D& renderer) {
     expect(25, 54, white, "1.5 px past the dot drawn 8x");
 }
 
+// Sdf text: one atlas, sharp at any zoom (SDL_GPU). Zoomed 8x, an "I"'s stem
+// has edges a pixel or two soft, not a texel's blur, and an outline rings it.
+// Backends without distance fields draw it as Bitmap text.
+void check_sdf_text(kin::Renderer2D& renderer) {
+    if (!kin::ui2::system_ui_font_available()) {
+        return;
+    }
+    const kin::ui2::Font font = kin::ui2::system_ui_font(16, kin::ui2::TextRendering::Sdf);
+    const bool fields = renderer.capabilities().distance_fields;
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    const auto row = [&](bool outline) {
+        std::vector<kin::u8> px;
+        kin::Vec2i size{};
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(255, 255, 255));
+        {
+            const auto zoom = renderer.scoped_transform(kin::Affine2::scaling({8.0f, 8.0f}));
+            if (outline) {
+                kin::ui2::draw_text_outlined(renderer, font, "I", {1.0f, -4.0f}, 1.0f, kin::Color::rgb(0, 0, 0), 1.0f,
+                                             kin::Color::rgb(255, 0, 0));
+            } else {
+                kin::ui2::draw_text(renderer, font, "I", {1.0f, -4.0f}, 1.0f, kin::Color::rgb(0, 0, 0));
+            }
+        }
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+        std::vector<kin::Color> out;
+        for (int x = 0; x < size.x; ++x) {
+            const std::size_t i = (static_cast<std::size_t>(32) * size.x + x) * 4;
+            out.push_back(kin::Color::rgb(px[i], px[i + 1], px[i + 2]));
+        }
+        return out;
+    };
+    const std::vector<kin::Color> plain = row(false);
+    int dark = 0, ramp = 0;
+    for (const kin::Color c : plain) {
+        dark += c.g < 40 ? 1 : 0;
+        ramp += c.g >= 40 && c.g <= 215 ? 1 : 0;
+    }
+    // Bitmap text magnified 8x is as soft as its texels: a thin stem (Segoe UI's)
+    // may have no texel fully inked, so only ask that it was drawn.
+    if (fields ? dark < 6 || ramp > 6 : dark + ramp < 6) {
+        throw std::runtime_error(std::string("check_sdf_text (") + std::string(renderer.backend_name()) + "): " +
+                                 std::to_string(dark) + " dark and " + std::to_string(ramp) + " soft pixels in the stem");
+    }
+    if (fields) {
+        // The outline: red beside the stem, on both sides.
+        const std::vector<kin::Color> ringed = row(true);
+        int red = 0;
+        for (const kin::Color c : ringed) {
+            red += c.r > 200 && c.g < 60 ? 1 : 0;
+        }
+        if (red < 6) {
+            throw std::runtime_error("check_sdf_text: " + std::to_string(red) + " outline pixels");
+        }
+    }
+}
+
 void test_shapes_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "shape-test", .width = 64, .height = 64, .hidden = true});
     kin::Renderer2D renderer{window};
     check_shapes(renderer);
     check_primitives(renderer);
+    check_sdf_text(renderer);
 }
 
 void test_shapes_on_gpu_backend() {
@@ -2770,6 +2860,8 @@ void test_shapes_on_gpu_backend() {
         assert(renderer->capabilities().shape_primitives);
         check_shapes(*renderer);
         check_primitives(*renderer);
+        assert(renderer->capabilities().distance_fields);
+        check_sdf_text(*renderer);
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;
@@ -3168,6 +3260,7 @@ int main() {
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();
     test_sprite_batches_on_software_backend();
+    test_textures_outliving_their_renderer();
     test_sprite_batches_on_gpu_backend();
     return 0;
 }

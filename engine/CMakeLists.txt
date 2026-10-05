@@ -179,6 +179,7 @@ if(KIN_GLSLC)
                   "overdraw_count.frag.glsl:fragment" "overdraw_heat.frag.glsl:fragment"
                   "shape.frag.glsl:fragment" "shape.vert.glsl:vertex"
                   "sdf_shape.frag.glsl:fragment" "sdf_shape.vert.glsl:vertex"
+                  "distance_field.frag.glsl:fragment"
                   "pp_vignette.frag.glsl:fragment" "pp_color_grade.frag.glsl:fragment"
                   "pp_scanline.frag.glsl:fragment" "pp_chroma.frag.glsl:fragment"
                   "pp_bloom_bright.frag.glsl:fragment" "pp_bloom_blur.frag.glsl:fragment"

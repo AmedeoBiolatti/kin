@@ -17,11 +17,27 @@ namespace kin::ui2 {
 
 using ::kin::Renderer2D;
 
+// How a TTF font's glyphs are made.
+//   Bitmap  rasterised, hinted, at each size drawn: the crispest small UI text,
+//           but blurred when scaled by a transform or camera, and a new atlas
+//           for every size (at most a few are kept).
+//   Sdf     one atlas of signed distance fields: sharp at any size, scale, zoom
+//           or turn, outlines nearly free; metrics scale linearly (unhinted).
+//           Drawn as Bitmap on backends without distance fields
+//           (capabilities().distance_fields).
+enum class TextRendering : u8 { Bitmap, Sdf };
+
 class IFontBackend {
 public:
     virtual ~IFontBackend() = default;
     virtual Vec2f measure(std::string_view text, f32 scale) const = 0;
     virtual void draw(Renderer2D& renderer, std::string_view text, Vec2f pos, f32 scale, Color color) const = 0;
+    // The text with an outline `outline` drawing units wide round it, drawn
+    // in one go; false when the font cannot (draw_text_outlined then stamps it).
+    virtual bool draw_outlined(Renderer2D& /*renderer*/, std::string_view /*text*/, Vec2f /*pos*/, f32 /*scale*/,
+                               Color /*color*/, f32 /*outline*/, Color /*outline_color*/) const {
+        return false;
+    }
 };
 
 class Font {
@@ -39,6 +55,8 @@ public:
 private:
     friend Vec2f measure_text(const Font& font, std::string_view text, f32 scale);
     friend void draw_text(Renderer2D& renderer, const Font& font, std::string_view text, Vec2f pos, f32 scale, Color color);
+    friend void draw_text_outlined(Renderer2D& renderer, const Font& font, std::string_view text, Vec2f pos,
+                                   f32 scale, Color color, f32 outline, Color outline_color);
 
     std::shared_ptr<const IFontBackend> _backend;
 };
@@ -48,15 +66,17 @@ Font bitmap_font();
 // back at point_size: pass the renderer's output/logical ratio (e.g. 2.46 for a
 // 960x540 logical canvas in a 2359-wide window) and text stays sharp instead
 // of being upscaled from logical-pixel glyphs. Measurements stay logical.
-Font load_ttf_font(const std::filesystem::path& path, f32 point_size, f32 oversample = 1.0f);
+// `rendering`: see TextRendering (oversample matters to Bitmap only).
+Font load_ttf_font(const std::filesystem::path& path, f32 point_size, f32 oversample = 1.0f,
+                   TextRendering rendering = TextRendering::Bitmap);
 
 // System UI font for professional-looking interfaces: tries the platform's
 // standard sans (Segoe UI / Arial / DejaVu / Liberation), cached per size,
 // falling back to bitmap_font() when no TTF is found. `_bold` returns the
 // matching bold cut (for title/emphasis tiers); falls back to the regular cut,
 // then to the bitmap font. Sizes are clamped to [8, 32]pt.
-Font system_ui_font(f32 point_size);
-Font system_ui_font_bold(f32 point_size);
+Font system_ui_font(f32 point_size, TextRendering rendering = TextRendering::Bitmap);
+Font system_ui_font_bold(f32 point_size, TextRendering rendering = TextRendering::Bitmap);
 bool system_ui_font_available(); // true when a real TTF backs system_ui_font
 
 struct TextWrapOptions {
@@ -96,6 +116,17 @@ void draw_text(Renderer2D& renderer,
                f32 scale,
                Color color);
 void draw_text(Renderer2D& renderer, std::string_view text, Vec2f pos, f32 scale, Color color);
+// The text with an outline `outline` drawing units wide round it: from the
+// distance field in one pass with an Sdf font, else four copies offset
+// left, right, up and down under the text.
+void draw_text_outlined(Renderer2D& renderer,
+                        const Font& font,
+                        std::string_view text,
+                        Vec2f pos,
+                        f32 scale,
+                        Color color,
+                        f32 outline,
+                        Color outline_color);
 void draw_text_centered(Renderer2D& renderer,
                         const Font& font,
                         std::string_view text,
