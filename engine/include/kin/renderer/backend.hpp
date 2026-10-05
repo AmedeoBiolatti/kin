@@ -28,14 +28,36 @@ namespace kin {
 
 class JobSystem;
 
+// Mirroring a sprite within its rectangle, left-right (X) and/or upside
+// down (Y), before it turns about its pivot.
+enum class Flip : u8 { None = 0, X = 1, Y = 2, XY = 3 };
+constexpr Flip operator|(Flip a, Flip b) { return static_cast<Flip>(static_cast<u8>(a) | static_cast<u8>(b)); }
+constexpr Flip operator^(Flip a, Flip b) { return static_cast<Flip>(static_cast<u8>(a) ^ static_cast<u8>(b)); }
+constexpr bool flips_x(Flip f) { return (static_cast<u8>(f) & 1u) != 0; }
+constexpr bool flips_y(Flip f) { return (static_cast<u8>(f) & 2u) != 0; }
+constexpr Flip flip_of(bool x, bool y) { return static_cast<Flip>((x ? 1u : 0u) | (y ? 2u : 0u)); }
+// `source` (texture pixels) read the other way round: what backends are given
+// for a flipped draw (a negative width or height reads right to left or bottom
+// to top).
+constexpr Rectf mirrored(Rectf source, Flip flip) {
+    if (flips_x(flip)) {
+        source = {source.x + source.w, source.y, -source.w, source.h};
+    }
+    if (flips_y(flip)) {
+        source = {source.x, source.y + source.h, source.w, -source.h};
+    }
+    return source;
+}
+
 // One quad of a draw_sprites() call: what draw_texture(texture, source, dest,
-// tint, rotation, pivot) would draw.
+// tint, rotation, pivot, flip) would draw.
 struct SpriteInstance {
     Rectf dest{};
     Rectf source{};             // texture pixels; empty means the whole texture
     Color tint = colors::white;
     f32 rotation = 0.0f;        // degrees, clockwise, about the pivot
     Vec2f pivot{0.5f, 0.5f};    // normalized within dest
+    Flip flip = Flip::None;
 };
 
 // How Renderer2D::draw_distance_field reads a distance-field texture: its
@@ -291,13 +313,15 @@ public:
     }
     // Many quads from one texture, in order. Backends that can draw them as one
     // instanced batch override this; the default draws them one by one.
+    // draw_texture's `source` may have a negative width or height: a flipped
+    // sprite (see mirrored()), read from the far side.
     virtual void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
         const Vec2i size = texture.size();
         for (const SpriteInstance& sprite : sprites) {
             const Rectf source = sprite.source.w > 0.0f && sprite.source.h > 0.0f
                 ? sprite.source
                 : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
-            draw_texture(texture, source, sprite.dest, sprite.tint, sprite.rotation, sprite.pivot);
+            draw_texture(texture, mirrored(source, sprite.flip), sprite.dest, sprite.tint, sprite.rotation, sprite.pivot);
         }
     }
 

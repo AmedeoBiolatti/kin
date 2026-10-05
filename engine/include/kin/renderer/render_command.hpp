@@ -85,6 +85,7 @@ struct RenderCommand {
     u64 sequence = 0;
     Rectf rect{};                   // destination; unused by Line, Clear, PopViewport, Custom
     bool output_pixel_rect = false; // rect is in output pixels, not world/logical units
+    Flip flip = Flip::None;         // Texture/Sprite: mirrored within rect, before turning
     Rectf source{};                 // Texture/Sprite: region of `texture`; empty means all of it (Texture only)
     Vec2f a{};                      // Line endpoints
     Vec2f b{};

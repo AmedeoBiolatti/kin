@@ -25,10 +25,14 @@ void register_builtin_properties(PropertyRegistry& registry, EcsWorld& world) {
     registry.add<SpriteRenderer>(world, "SpriteRenderer.pivot", &SpriteRenderer::pivot);
     registry.add<SpriteRenderer>(world, "SpriteRenderer.tint", &SpriteRenderer::tint);
     registry.add<SpriteRenderer>(world, "SpriteRenderer.rotation", &SpriteRenderer::rotation);
+    registry.add<SpriteRenderer>(world, "SpriteRenderer.flip_x", &SpriteRenderer::flip_x);
+    registry.add<SpriteRenderer>(world, "SpriteRenderer.flip_y", &SpriteRenderer::flip_y);
 
     registry.add<TextureRenderer>(world, "TextureRenderer.tint", &TextureRenderer::tint);
     registry.add<TextureRenderer>(world, "TextureRenderer.offset", &TextureRenderer::offset);
     registry.add<TextureRenderer>(world, "TextureRenderer.size", &TextureRenderer::size);
+    registry.add<TextureRenderer>(world, "TextureRenderer.flip_x", &TextureRenderer::flip_x);
+    registry.add<TextureRenderer>(world, "TextureRenderer.flip_y", &TextureRenderer::flip_y);
 
     registry.add<RectRenderer>(world, "RectRenderer.color", &RectRenderer::color);
     registry.add<RectRenderer>(world, "RectRenderer.size", &RectRenderer::size);

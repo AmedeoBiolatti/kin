@@ -46,8 +46,9 @@ public:
         rects.push_back(dest);
         commands.push_back("texture");
     }
-    void draw_texture(const kin::Texture&, kin::Rectf, kin::Rectf dest) override {
+    void draw_texture(const kin::Texture&, kin::Rectf source, kin::Rectf dest) override {
         rects.push_back(dest);
+        sources.push_back(source);
         commands.push_back("sprite");
     }
     void fill_rect(kin::Rectf rect, kin::Color color) override {
@@ -77,6 +78,7 @@ public:
     }
 
     std::vector<std::size_t> sprite_batches;
+    std::vector<kin::Rectf> sources;
     std::vector<std::string> commands;
     std::vector<kin::Rectf> rects;
     std::vector<kin::Color> colors;
@@ -417,6 +419,36 @@ void test_render_queue_groups() {
     assert(std::ranges::count(raw->commands, "push") == 0);
 }
 
+// A flip reaches the backend as a source read from the far side, from the
+// sprite lane and from the general one (a material) alike.
+void test_render_queue_flips_sprites() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    const kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{32, 16})};
+    const kin::Sprite sprite{.texture = texture, .source = {8.0f, 0.0f, 8.0f, 8.0f}};
+    const kin::Material2D material{.id = "plain"};
+
+    kin::RenderQueue queue{kin::RenderSortMode::Submission};
+    queue.draw_sprite({}, sprite, {0.0f, 0.0f, 8.0f, 8.0f}, kin::colors::white, {}, 0.0f, {0.5f, 0.5f}, kin::Flip::X);
+    queue.draw_sprite({}, sprite, {0.0f, 0.0f, 8.0f, 8.0f}, kin::colors::white, {.material = &material}, 0.0f,
+                      {0.5f, 0.5f}, kin::Flip::Y);
+    queue.draw_texture({}, texture, {0.0f, 0.0f, 32.0f, 16.0f}, kin::colors::white, {}, 0.0f, {0.5f, 0.5f}, kin::Flip::XY);
+    queue.draw_texture_region({}, texture, {0.0f, 4.0f, 8.0f, 4.0f}, {0.0f, 0.0f, 8.0f, 4.0f});
+    assert(std::any_of(queue.commands().begin(), queue.commands().end(), [&](const kin::RenderCommand& c) {
+        return c.material == &material && c.flip == kin::Flip::Y;
+    }));
+    queue.flush(renderer);
+
+    assert(raw->sources.size() == 4);
+    assert((raw->sources[0] == kin::Rectf{16.0f, 0.0f, -8.0f, 8.0f}));
+    assert((raw->sources[1] == kin::Rectf{8.0f, 8.0f, 8.0f, -8.0f}));
+    assert((raw->sources[2] == kin::Rectf{32.0f, 16.0f, -32.0f, -16.0f})); // the whole texture
+    assert((raw->sources[3] == kin::Rectf{0.0f, 4.0f, 8.0f, 4.0f}));        // unflipped
+    static_assert(kin::mirrored(kin::mirrored(kin::Rectf{1.0f, 2.0f, 3.0f, 4.0f}, kin::Flip::XY), kin::Flip::XY) ==
+                  kin::Rectf{1.0f, 2.0f, 3.0f, 4.0f});
+}
+
 void test_render_queue_pass_masks_and_text_command() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -608,6 +640,7 @@ int main() {
     test_render_queue_sort_matches_reference();
     test_render_queue_sprite_fields_and_bulk_submit();
     test_render_queue_groups();
+    test_render_queue_flips_sprites();
     test_render_queue_pass_masks_and_text_command();
     test_render_graph_pass_toggles_and_stats();
     test_default_render_graph_flushes_pass_masks();

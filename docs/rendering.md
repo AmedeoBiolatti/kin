@@ -48,6 +48,26 @@ size. `pivot` uses `SpriteRenderer.pivot` when it is non-negative, otherwise the
 catalog sprite pivot. With an unturned, unscaled entity the anchor is its
 position plus the offsets.
 
+### Mirroring
+
+`SpriteRenderer::flip_x` and `flip_y` (and `TextureRenderer`'s) mirror the
+image left-right and upside down about its pivot, which stays put: a hero with
+its pivot at its feet turns to face left on the spot. A negative world scale on
+an axis mirrors it the same way, and a flag and a negative scale on the same
+axis cancel out. The flags are animatable (`SpriteRenderer.flip_x`, ...).
+
+```cpp
+hero.get_mut<kin::SpriteRenderer>()->flip_x = velocity.x < 0.0f; // face where it walks
+```
+
+Below the ECS, `kin::Flip` (`None`, `X`, `Y`, `XY`) is the last argument of
+`Renderer2D::draw_texture` / `draw_sprite`, of `RenderQueue::draw_texture`,
+`draw_sprite` and `draw_texture_region`, and a field of `SpriteInstance`: the
+image is mirrored within `dest`, then turned about the pivot. Backends see a
+flipped draw as a source rectangle read from the far side (`kin::mirrored()`:
+a negative width or height), so it batches with unflipped sprites of the same
+texture; the SDL renderer's unbatched path turns it into `SDL_FlipMode`.
+
 Named layer helpers keep ordering stable:
 
 ```cpp
@@ -961,7 +981,7 @@ scene-owned resources.
 ### Sprite batches
 
 `Renderer2D::draw_sprites(texture, sprites)` draws many quads from one texture
-in order: each `SpriteInstance` (dest, source, tint, rotation, pivot) draws
+in order: each `SpriteInstance` (dest, source, tint, rotation, pivot, flip) draws
 what `draw_texture()` would. The SDL_GPU backend submits them as one instanced
 draw (a 52-byte instance per quad, expanded by `sprite_instanced.vert`); other
 backends draw them one by one. `RenderQueue` flushes hand every run of

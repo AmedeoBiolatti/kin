@@ -62,6 +62,10 @@ struct SpriteRenderer {
     f32 sort_y_offset = 0.0f;
     bool visible = true;
     bool static_renderable = false;
+    // Mirrored about the pivot, which stays put: left-right, upside down. A
+    // negative Transform2D scale on an axis mirrors it too (both cancel out).
+    bool flip_x = false;
+    bool flip_y = false;
 };
 
 struct TextureRenderer {
@@ -77,6 +81,9 @@ struct TextureRenderer {
     f32 sort_y_offset = 0.0f;
     bool visible = true;
     bool static_renderable = false;
+    // As SpriteRenderer's.
+    bool flip_x = false;
+    bool flip_y = false;
 };
 
 struct RectRenderer {

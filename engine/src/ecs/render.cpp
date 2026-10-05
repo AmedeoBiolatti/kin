@@ -51,6 +51,16 @@ Vec2f resolved_size(const SpriteRenderer& sprite, const ResolvedSprite& resolved
     return resolved.size;
 }
 
+// The flags, mirrored again on each axis the transform scales negatively.
+Flip flip_for(const WorldTransform& t, bool flip_x, bool flip_y) {
+    return flip_of(flip_x != (t.scale.x < 0.0f), flip_y != (t.scale.y < 0.0f));
+}
+
+// The pivot as a fraction of the mirrored image: the same point of the world.
+Vec2f mirrored_pivot(Vec2f pivot, Flip flip) {
+    return {flips_x(flip) ? 1.0f - pivot.x : pivot.x, flips_y(flip) ? 1.0f - pivot.y : pivot.y};
+}
+
 Vec2f resolved_pivot(const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
     if (sprite.pivot.x >= 0.0f && sprite.pivot.y >= 0.0f) {
         return sprite.pivot;
@@ -67,10 +77,10 @@ Vec2f sprite_anchor_pos(const WorldTransform& t, const SpriteRenderer& sprite, c
     return to_world(t, add(resolved.offset, sprite.offset));
 }
 
-// The sprite unturned about its anchor, scaled.
-Rectf sprite_draw_rect(const WorldTransform& t, const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
+// The sprite unturned about its anchor, scaled; `pivot` already mirrored.
+Rectf sprite_draw_rect(const WorldTransform& t, const SpriteRenderer& sprite, const ResolvedSprite& resolved,
+                       Vec2f pivot) {
     const Vec2f size = mul(resolved_size(sprite, resolved), abs(t.scale));
-    const Vec2f pivot = resolved_pivot(sprite, resolved);
     const Vec2f top_left = sub(sprite_anchor_pos(t, sprite, resolved), mul(size, pivot));
     return {top_left.x, top_left.y, size.x, size.y};
 }
@@ -91,10 +101,11 @@ Vec2f texture_size(const TextureRenderer& texture) {
     return {source.w, source.h};
 }
 
-// The texture unturned about its anchor (offset through the transform), scaled.
-Rectf texture_draw_rect(const WorldTransform& t, const TextureRenderer& texture) {
+// The texture unturned about its anchor (offset through the transform), scaled;
+// `pivot` already mirrored.
+Rectf texture_draw_rect(const WorldTransform& t, const TextureRenderer& texture, Vec2f pivot) {
     const Vec2f size = mul(texture_size(texture), abs(t.scale));
-    const Vec2f top_left = sub(to_world(t, texture.offset), mul(size, texture.pivot));
+    const Vec2f top_left = sub(to_world(t, texture.offset), mul(size, pivot));
     return {top_left.x, top_left.y, size.x, size.y};
 }
 
@@ -374,8 +385,10 @@ bool prepare_texture(const WorldTransform& transform, const TextureRenderer& tex
     if (!texture.visible || !texture.texture) {
         return false;
     }
-    const Rectf dest = texture_draw_rect(transform, texture);
-    if (!culler.visible(turned_bounds(dest, transform.rotation, texture.pivot))) {
+    const Flip flip = flip_for(transform, texture.flip_x, texture.flip_y);
+    const Vec2f pivot = mirrored_pivot(texture.pivot, flip);
+    const Rectf dest = texture_draw_rect(transform, texture, pivot);
+    if (!culler.visible(turned_bounds(dest, transform.rotation, pivot))) {
         return false;
     }
     out = {
@@ -386,7 +399,8 @@ bool prepare_texture(const WorldTransform& transform, const TextureRenderer& tex
         .dest = dest,
         .tint = texture.tint,
         .rotation = transform.rotation,
-        .pivot = texture.pivot,
+        .pivot = pivot,
+        .flip = flip,
     };
     return true;
 }
@@ -617,18 +631,20 @@ bool submit_sprite(RenderQueue& queue,
         return false;
     }
 
-    const Rectf dest = sprite_draw_rect(transform, sprite, resolved);
+    const Flip flip = flip_for(transform, sprite.flip_x, sprite.flip_y);
+    const Vec2f pivot = mirrored_pivot(resolved_pivot(sprite, resolved), flip);
+    const Rectf dest = sprite_draw_rect(transform, sprite, resolved, pivot);
     const f32 rotation = transform.rotation + sprite.rotation;
     // Turned about its pivot, the sprite stays inside the circle through its
     // farthest corner.
-    if (view && !render_view_visible(*view, turned_bounds(dest, rotation, resolved_pivot(sprite, resolved)))) {
+    if (view && !render_view_visible(*view, turned_bounds(dest, rotation, pivot))) {
         return false;
     }
     const RenderKey key = key_for(sprite.layer,
                                   sprite.order,
                                   sprite.y_sort,
                                   sprite_anchor_pos(transform, sprite, resolved).y + sprite.sort_y_offset);
-    queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, {}, rotation, resolved_pivot(sprite, resolved));
+    queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, {}, rotation, pivot, flip);
     return true;
 }
 
@@ -651,8 +667,10 @@ bool submit_texture(RenderQueue& queue,
         return false;
     }
 
-    const Rectf dest = texture_draw_rect(transform, texture);
-    if (view && !render_view_visible(*view, turned_bounds(dest, transform.rotation, texture.pivot))) {
+    const Flip flip = flip_for(transform, texture.flip_x, texture.flip_y);
+    const Vec2f pivot = mirrored_pivot(texture.pivot, flip);
+    const Rectf dest = texture_draw_rect(transform, texture, pivot);
+    if (view && !render_view_visible(*view, turned_bounds(dest, transform.rotation, pivot))) {
         return false;
     }
     const RenderKey key = key_for(texture.layer,
@@ -660,7 +678,7 @@ bool submit_texture(RenderQueue& queue,
                                   texture.y_sort,
                                   to_world(transform, texture.offset).y + texture.sort_y_offset);
     queue.draw_texture_region(key, texture.texture, texture_source_rect(texture), dest, texture.tint,
-                              transform.rotation, texture.pivot);
+                              transform.rotation, pivot, flip);
     return true;
 }
 
