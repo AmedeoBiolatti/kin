@@ -4,6 +4,7 @@
 #include <kin/platform/log.hpp>
 
 #include <cassert>
+#include <cmath>
 #ifdef _MSC_VER
 #include <crtdbg.h>
 #endif
@@ -90,7 +91,22 @@ public:
     std::vector<kin::Color> colors;
     std::vector<kin::f32> rotations;
     std::vector<kin::Vec2f> pivots;
+
+    void set_transform(const kin::Affine2& transform) override { transforms.push_back(transform); }
+    std::vector<kin::Affine2> transforms;
 };
+
+bool near(kin::f32 a, kin::f32 b) {
+    return std::abs(a - b) < 1e-3f;
+}
+
+bool near(kin::Vec2f a, kin::Vec2f b) {
+    return near(a.x, b.x) && near(a.y, b.y);
+}
+
+bool near(kin::Rectf a, kin::Rectf b) {
+    return near(a.x, b.x) && near(a.y, b.y) && near(a.w, b.w) && near(a.h, b.h);
+}
 
 void test_render_world_sorts_and_draws_sprites() {
     auto backend = std::make_unique<FakeBackend>();
@@ -175,21 +191,112 @@ void test_world_render_state_propagates_hierarchy_created_bottom_up() {
     world.component<kin::Transform2D>("Transform2D");
     world.component<kin::WorldTransform>("WorldTransform");
 
-    kin::EcsEntity leaf = world.entity("leaf").set(kin::Transform2D{{1.0f, 1.0f}, 0.25f});
-    kin::EcsEntity middle = world.entity("middle").set(kin::Transform2D{{10.0f, 10.0f}, 0.5f});
-    kin::EcsEntity root = world.entity("root").set(kin::Transform2D{{100.0f, 100.0f}, 1.0f});
+    kin::EcsEntity leaf = world.entity("leaf").set(kin::Transform2D{{1.0f, 0.0f}, 5.0f});
+    kin::EcsEntity middle = world.entity("middle").set(kin::Transform2D{{10.0f, 0.0f}, 0.0f, {2.0f, 2.0f}});
+    kin::EcsEntity root = world.entity("root").set(kin::Transform2D{{100.0f, 100.0f}, 90.0f});
     leaf.raw().child_of(middle.raw());
     middle.raw().child_of(root.raw());
 
+    // Each child's position goes through its parents' turn and scale.
     kin::WorldRenderState state{world};
     state.propagate_transforms();
-    assert((leaf.get<kin::WorldTransform>()->pos == kin::Vec2f{111.0f, 111.0f}));
-    assert(leaf.get<kin::WorldTransform>()->rotation == 1.75f);
+    const kin::WorldTransform* m = middle.get<kin::WorldTransform>();
+    const kin::WorldTransform* l = leaf.get<kin::WorldTransform>();
+    assert(near(m->pos, {100.0f, 110.0f}) && m->rotation == 90.0f && m->scale == (kin::Vec2f{2.0f, 2.0f}));
+    assert(near(l->pos, {100.0f, 112.0f}) && l->rotation == 95.0f && l->scale == (kin::Vec2f{2.0f, 2.0f}));
+    // The same, composed on demand.
+    assert(near(kin::world_position(leaf), {100.0f, 112.0f}));
 
     root.set(kin::Transform2D{{200.0f, 0.0f}, 0.0f});
     state.propagate_transforms();
-    assert((middle.get<kin::WorldTransform>()->pos == kin::Vec2f{210.0f, 10.0f}));
-    assert((leaf.get<kin::WorldTransform>()->pos == kin::Vec2f{211.0f, 11.0f}));
+    assert((middle.get<kin::WorldTransform>()->pos == kin::Vec2f{210.0f, 0.0f}));
+    assert((leaf.get<kin::WorldTransform>()->pos == kin::Vec2f{212.0f, 0.0f}));
+}
+
+// Without a WorldRenderState (no WorldTransform yet), world_transform() composes
+// up the ChildOf chain.
+void test_world_transform_composes_without_propagation() {
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    kin::EcsEntity root = world.entity("root").set(kin::Transform2D{{10.0f, 0.0f}, -90.0f, {3.0f, 1.0f}});
+    kin::EcsEntity child = world.entity("child").set(kin::Transform2D{{2.0f, 0.0f}, 10.0f, {0.5f, 0.5f}});
+    child.raw().child_of(root.raw());
+    const kin::WorldTransform t = kin::world_transform(child);
+    assert(near(t.pos, {10.0f, -6.0f}) && near(t.rotation, -80.0f) && near(t.scale, {1.5f, 0.5f}));
+    const kin::WorldTransform same = kin::compose(kin::compose({}, *root.get<kin::Transform2D>()), *child.get<kin::Transform2D>());
+    assert(near(same.pos, t.pos) && same.rotation == t.rotation);
+}
+
+// to_local() undoes compose().
+void test_to_local_inverts_compose() {
+    const kin::WorldTransform parent{{50.0f, -20.0f}, 30.0f, {2.0f, 0.5f}};
+    const kin::Transform2D child{{3.0f, 4.0f}, -10.0f, {1.5f, 1.5f}};
+    const kin::WorldTransform world = kin::compose(parent, child);
+    const kin::Transform2D back = kin::to_local(parent, world);
+    assert(near(back.pos, child.pos) && near(back.rotation, child.rotation) && near(back.scale, child.scale));
+    // A parent squashed flat along an axis keeps the child at its origin along it.
+    const kin::Transform2D flat = kin::to_local({{0.0f, 0.0f}, 0.0f, {0.0f, 1.0f}}, {{5.0f, 5.0f}});
+    assert(flat.pos == (kin::Vec2f{0.0f, 5.0f}));
+}
+
+// Renderers under a turned, scaled parent: offsets, sizes and line ends go
+// through it, and the drawing turns with it.
+void test_renderers_follow_parent_rotation_and_scale() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{16, 16})};
+
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::TextureRenderer>("TextureRenderer");
+    world.component<kin::RectRenderer>("RectRenderer");
+    world.component<kin::LineRenderer>("LineRenderer");
+    kin::EcsEntity parent = world.entity("parent").set(kin::Transform2D{{100.0f, 100.0f}, 90.0f, {2.0f, 2.0f}});
+    const auto child = [&](const char* name) {
+        kin::EcsEntity e = world.entity(name).set(kin::Transform2D{{10.0f, 0.0f}});
+        e.raw().child_of(parent.raw());
+        return e; // at (100, 120), turned 90, scaled 2
+    };
+    child("texture").set(kin::TextureRenderer{.texture = texture, .size = {4.0f, 4.0f}, .pivot = {0.5f, 0.5f}, .order = 0});
+    child("rect").set(kin::RectRenderer{.offset = {0.0f, 0.0f}, .size = {4.0f, 2.0f}, .color = kin::colors::white, .order = 1});
+    child("line").set(kin::LineRenderer{.a = {0.0f, 0.0f}, .b = {5.0f, 0.0f}, .color = kin::colors::white, .order = 2});
+
+    kin::render_world(world, renderer);
+    assert(raw->draws.size() == 1 && near(raw->draws[0], {96.0f, 116.0f, 8.0f, 8.0f}));
+    assert(raw->rotations[0] == 90.0f && raw->pivots[0] == (kin::Vec2f{0.5f, 0.5f}));
+    // The rectangle is scaled, then turned about the entity's origin by the transform.
+    assert(raw->rects.size() == 1 && near(raw->rects[0], {100.0f, 120.0f, 8.0f, 4.0f}));
+    assert(raw->transforms.size() == 2 && near(raw->transforms[0].apply({108.0f, 120.0f}), {100.0f, 128.0f}));
+    assert(raw->transforms[1].is_identity());
+    assert(raw->lines_a.size() == 1 && near(raw->lines_a[0], {100.0f, 120.0f}) && near(raw->lines_b[0], {100.0f, 130.0f}));
+}
+
+// A camera that zooms or turns is the renderer's transform while the queue
+// draws; callbacks draw without it, as under a camera that only moves.
+void test_queue_flush_applies_zooming_camera() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Camera2D camera;
+    camera.viewport = {100.0f, 50.0f};
+    camera.offset = {10.0f, 20.0f};
+    camera.zoom = 2.0f;
+
+    kin::RenderQueue queue;
+    queue.fill_rect({}, {60.0f, 45.0f, 4.0f, 4.0f}, kin::colors::white);
+    queue.custom({}, [](kin::Renderer2D& r) { r.fill_rect({0.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white); });
+    kin::RenderView view;
+    view.camera = &camera;
+    queue.flush(renderer, view);
+
+    assert(raw->rects.size() == 2 && raw->rects[0] == (kin::Rectf{60.0f, 45.0f, 4.0f, 4.0f}));
+    assert(raw->transforms.size() == 4);
+    assert(near(raw->transforms[0].apply({60.0f, 45.0f}), {50.0f, 25.0f})); // the view's centre stays put
+    assert(near(raw->transforms[1].apply({3.0f, 4.0f}), {3.0f, 4.0f}));     // the callback's
+    assert(raw->transforms[2] == raw->transforms[0]);
+    assert(raw->transforms[3].is_identity());
+    assert(renderer.transform().is_identity());
 }
 
 void test_world_render_state_propagates_hierarchy() {
@@ -683,6 +790,10 @@ int main() {
     test_render_world_sorts_and_draws_sprites();
     test_world_render_state_propagates_hierarchy();
     test_world_render_state_propagates_hierarchy_created_bottom_up();
+    test_world_transform_composes_without_propagation();
+    test_to_local_inverts_compose();
+    test_renderers_follow_parent_rotation_and_scale();
+    test_queue_flush_applies_zooming_camera();
     test_render_world_draws_primitives();
     test_render_world_draws_texture_renderer();
     test_sprite_pivot_offsets_and_y_sort();

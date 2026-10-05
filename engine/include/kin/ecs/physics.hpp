@@ -13,6 +13,17 @@ struct PhysicsCollider {
     PhysicsFixture fixture{};
 };
 
+// A Box2D body for the entity. Physics works in the world, Transform2D from
+// the entity's parent (flecs ChildOf): the sync converts between them.
+// - sync_from_physics (the default): the simulation leads. The body stays
+//   where it is in the world when its parent moves, and Transform2D is
+//   rewritten to say where that is from the parent.
+// - sync_to_physics: the entity leads. The body is moved to the entity's
+//   place in the world before each step, so it follows its parent (hitboxes,
+//   moving platforms). With both, the entity can move the body and the
+//   simulation carries on from there.
+// Bodies are made where the entity is in the world. They ignore scale (a
+// warning, once): size the colliders instead.
 struct PhysicsBodyComponent {
     PhysicsBody body{};
     PhysicsBodyDef def{};

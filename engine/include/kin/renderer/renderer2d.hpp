@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
 #include <kin/platform/window.hpp>
 #include <kin/renderer/material.hpp>
@@ -69,7 +70,6 @@ public:
         Renderer2D* _renderer = nullptr;
     };
 
-    // Sets the blend mode for the guard's scope and restores the previous one.
     // Ends a gpu_scope() when it goes.
     class GpuScope {
     public:
@@ -85,6 +85,7 @@ public:
         Renderer2D* _renderer = nullptr;
     };
 
+    // Sets the blend mode for the guard's scope and restores the previous one.
     class BlendModeGuard {
     public:
         BlendModeGuard() = default;
@@ -102,9 +103,6 @@ public:
         BlendMode _previous = BlendMode::Alpha;
     };
 
-    // Binds a render target for the guard's scope (push in ctor, pop in dtor).
-    // Distinct from the pool below: this manages which target is *bound*, not
-    // target lifetime. Mirrors ViewportGuard.
     // A layer (begin_layer): drawn into a pooled target, laid over when it goes.
     class LayerGuard {
     public:
@@ -120,6 +118,9 @@ public:
         Renderer2D* _renderer = nullptr;
     };
 
+    // Binds a render target for the guard's scope (push in ctor, pop in dtor).
+    // Distinct from the pool below: this manages which target is *bound*, not
+    // target lifetime. Mirrors ViewportGuard.
     class RenderTargetGuard {
     public:
         RenderTargetGuard() = default;
@@ -131,6 +132,21 @@ public:
 
         RenderTargetGuard(RenderTargetGuard&& other) noexcept;
         RenderTargetGuard& operator=(RenderTargetGuard&&) noexcept = delete;
+
+    private:
+        Renderer2D* _renderer = nullptr;
+    };
+
+    // Pops a push_transform() when it goes.
+    class TransformGuard {
+    public:
+        TransformGuard() = default;
+        explicit TransformGuard(Renderer2D* renderer) : _renderer(renderer) {}
+        ~TransformGuard();
+        TransformGuard(const TransformGuard&) = delete;
+        TransformGuard& operator=(const TransformGuard&) = delete;
+        TransformGuard(TransformGuard&& other) noexcept : _renderer(std::exchange(other._renderer, nullptr)) {}
+        TransformGuard& operator=(TransformGuard&&) noexcept = delete;
 
     private:
         Renderer2D* _renderer = nullptr;
@@ -353,6 +369,23 @@ public:
     ViewportGuard scoped_viewport(Rectf rect);
     NativeCoordinateGuard scoped_native_coordinates();
 
+    // Transforms. push_transform(m) maps everything drawn after it by m, then
+    // by the transforms pushed before it (m is the more local one), until
+    // pop_transform(). Shapes are transformed as if drawn and then moved,
+    // turned and scaled: a line or outline one unit wide grows with the scale.
+    // Viewports, clips, capture_backdrop and read_rgba stay in untransformed
+    // coordinates. A render target starts untransformed and the transform
+    // returns when it is popped; layers keep the transform. Applied to the
+    // vertices on the CPU, so draws batch across transform changes.
+    //
+    // With a camera:  auto view = renderer.scoped_transform(camera.view_transform());
+    void push_transform(const Affine2& transform);
+    void pop_transform();
+    TransformGuard scoped_transform(const Affine2& transform);
+    // Replaces the current transform (what the stack's top maps by).
+    void set_transform(const Affine2& transform);
+    const Affine2& transform() const { return _transform; }
+
     // Render targets (A1). create_render_target makes a target you own outright;
     // acquire_render_target borrows one from the engine pool (RAII-returned via
     // PooledTarget). On a backend without render_targets these yield empty
@@ -422,6 +455,10 @@ private:
     std::vector<std::unique_ptr<OpenLayer>> _layers;
     void end_layer();
     BlendMode _blend_mode = BlendMode::Alpha;
+    Affine2 _transform{};                 // what draws are mapped by now
+    std::vector<Affine2> _transform_stack; // push_transform's saved transforms
+    std::vector<Affine2> _target_transforms; // the transform outside each pushed render target
+    void apply_transform(const Affine2& transform);
 };
 
 // RAII checkout from the renderer's render-target pool. Move-only; returns its

@@ -152,6 +152,10 @@ public:
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
 
     void set_blend_mode(BlendMode mode) override { _blend = mode; }
+    void set_transform(const Affine2& transform) override {
+        _transform = transform;
+        _transformed = !transform.is_identity();
+    }
     void set_viewport(Rectf rect) override;
     void reset_viewport() override;
     void push_viewport(Rectf rect) override;
@@ -231,9 +235,16 @@ private:
     // span) and pushes it into the batch — no allocation or copy on the caller side.
     void push_triangles(std::span<gpu::GpuVertex> tris, SDL_GPUTexture* texture,
                         gpu::GpuBlendMode blend);
-    // Shifts vertices by the active viewport origin (SDL_SetRenderViewport semantics:
-    // draw coords are viewport-relative). No-op when no viewport offset is set.
-    void apply_view_offset(std::span<gpu::GpuVertex> verts) const;
+    // Maps vertices by the transform (set_transform), then shifts them by the
+    // active viewport origin (SDL_SetRenderViewport semantics: draw coords are
+    // viewport-relative). No-op with neither.
+    void place(std::span<gpu::GpuVertex> verts) const;
+    Vec2f place(Vec2f p) const {
+        if (_transformed) {
+            p = _transform.apply(p);
+        }
+        return {p.x + _view_offset.x, p.y + _view_offset.y};
+    }
     // Run the post-process chain over `_scene` (ping-pong scratch RTs) and return the
     // final texture to present. Returns `&_scene` when the chain is empty / degraded.
     const gpu::GpuTexture* run_post_chain();
@@ -313,6 +324,7 @@ private:
         std::vector<SDL_Rect> clip_stack;
         Vec2f view_offset{0.0f, 0.0f};
         std::vector<Vec2f> view_offset_stack;
+        Affine2 transform{};
     };
     std::vector<NativeState> _native_stack;
     std::vector<SDL_Rect> _clip_stack;
@@ -333,6 +345,9 @@ private:
     Vec2f _view_offset{0.0f, 0.0f};                      // active viewport origin (coord space); added to all verts
     std::vector<Vec2f> _view_offset_stack;              // saved offsets for push/pop_viewport
     std::vector<Vec2f> _saved_view_offsets;             // saved viewport origin per pushed render target
+    Affine2 _transform{};                               // set_transform's; applied before the view offset
+    bool _transformed = false;                          // _transform is not the identity
+    std::vector<Affine2> _saved_transforms;             // the transform outside each pushed render target
     // Reusable scratch for the rounded-rect / gradient geometry path — cleared (not
     // freed) each call so the per-frame UI rebuild doesn't churn the heap. The render
     // path is single-threaded and each builder fully consumes these before returning.

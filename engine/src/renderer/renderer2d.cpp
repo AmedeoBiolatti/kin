@@ -129,6 +129,9 @@ Renderer2D::NativeCoordinateGuard::NativeCoordinateGuard(Renderer2D& renderer)
     ++_renderer->_trace_native;
 #endif
     _renderer->_backend->push_native_coordinates();
+    // Native pixels are drawn untransformed, like a render target.
+    _renderer->_target_transforms.push_back(_renderer->_transform);
+    _renderer->apply_transform({});
 }
 
 Renderer2D::NativeCoordinateGuard::~NativeCoordinateGuard() {
@@ -137,6 +140,8 @@ Renderer2D::NativeCoordinateGuard::~NativeCoordinateGuard() {
         --_renderer->_trace_native;
 #endif
         _renderer->_backend->pop_native_coordinates();
+        _renderer->apply_transform(_renderer->_target_transforms.back());
+        _renderer->_target_transforms.pop_back();
     }
 }
 
@@ -682,10 +687,14 @@ void Renderer2D::end_layer() {
     if (!bounds || bounds->dest.w <= 0.0f || bounds->dest.h <= 0.0f) {
         return; // nothing drawn: nothing to lay over
     }
-    // The target holds premultiplied colour: opacity scales all of it.
+    // The target holds premultiplied colour: opacity scales all of it. Its
+    // bounds are where the transformed draws landed: laid over untransformed.
     const auto o = static_cast<u8>(std::clamp(layer->options.opacity, 0.0f, 1.0f) * 255.0f + 0.5f);
     const auto blend = scoped_blend_mode(layer->options.blend);
+    const Affine2 transform = _transform;
+    apply_transform({});
     draw_texture(layer->target.texture(), bounds->source, bounds->dest, Color::rgba(o, o, o, o));
+    apply_transform(transform);
 }
 
 ComputeShaderHandle Renderer2D::create_compute_shader(ShaderBlob spirv) {
@@ -969,6 +978,8 @@ void Renderer2D::push_render_target(const RenderTarget& target) {
     ++_trace_targets;
 #endif
     _backend->push_render_target(target);
+    _target_transforms.push_back(_transform);
+    apply_transform({});
 }
 
 void Renderer2D::pop_render_target() {
@@ -976,6 +987,46 @@ void Renderer2D::pop_render_target() {
     _trace_targets = std::max(_trace_targets - 1, 0);
 #endif
     _backend->pop_render_target();
+    if (!_target_transforms.empty()) {
+        apply_transform(_target_transforms.back());
+        _target_transforms.pop_back();
+    }
+}
+
+void Renderer2D::apply_transform(const Affine2& transform) {
+    if (transform == _transform) {
+        return;
+    }
+    _transform = transform;
+    _backend->set_transform(transform);
+}
+
+void Renderer2D::push_transform(const Affine2& transform) {
+    _transform_stack.push_back(_transform);
+    apply_transform(_transform * transform);
+}
+
+void Renderer2D::pop_transform() {
+    if (_transform_stack.empty()) {
+        return;
+    }
+    apply_transform(_transform_stack.back());
+    _transform_stack.pop_back();
+}
+
+void Renderer2D::set_transform(const Affine2& transform) {
+    apply_transform(transform);
+}
+
+Renderer2D::TransformGuard Renderer2D::scoped_transform(const Affine2& transform) {
+    push_transform(transform);
+    return TransformGuard{this};
+}
+
+Renderer2D::TransformGuard::~TransformGuard() {
+    if (_renderer) {
+        _renderer->pop_transform();
+    }
 }
 
 void Renderer2D::set_scale_mode(const Texture& texture, ScaleMode mode) {

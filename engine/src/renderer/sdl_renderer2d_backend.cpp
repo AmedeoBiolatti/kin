@@ -356,6 +356,7 @@ RendererBackendCapabilities SdlRenderer2DBackend::capabilities() const {
         .render_targets = true,
         .blend_modes = true,
         .min_max_blend = _min_max_blend,
+        .transforms = true,
         .materials_2d = _gpu_device != nullptr,
         .gradients = true,
         .text = false,
@@ -484,6 +485,8 @@ void SdlRenderer2DBackend::set_integer_logical_size(Vec2i size) {
 
 void SdlRenderer2DBackend::push_native_coordinates() {
     flush_batch();
+    _saved_transforms.push_back(_transform);
+    set_transform({});
     _logical_presentation_stack.push_back(_logical);
     _logical = {};
     apply_logical_presentation();
@@ -491,6 +494,10 @@ void SdlRenderer2DBackend::push_native_coordinates() {
 
 void SdlRenderer2DBackend::pop_native_coordinates() {
     flush_batch();
+    if (!_saved_transforms.empty()) {
+        set_transform(_saved_transforms.back());
+        _saved_transforms.pop_back();
+    }
     _logical = {};
     if (!_logical_presentation_stack.empty()) {
         _logical = _logical_presentation_stack.back();
@@ -549,7 +556,7 @@ Vec2f SdlRenderer2DBackend::logical_to_window(Vec2f logical) const {
 void SdlRenderer2DBackend::fill_rect(Rectf rect, Color color) {
     ++_stats.rect_fills_submitted;
 
-    if (_texture_batching_enabled) {
+    if (_texture_batching_enabled || _transformed) {
         // Solid quads batch into a single SDL_RenderGeometry call with a null
         // texture. They share the same _batch as textured quads, so every
         // existing flush_batch() point (clear, present, draw_rect, draw_line,
@@ -637,7 +644,7 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
         throw std::runtime_error("Texture was not created by SdlRenderer2DBackend");
     }
 
-    if (_texture_batching_enabled) {
+    if (_texture_batching_enabled || _transformed) {
         begin_batch(BatchKind::Texture, sdl_texture->handle(), texture);
         append_quad(dest, source, texture.size(), tint, rotation, pivot);
     } else {
@@ -655,6 +662,17 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
 }
 
 void SdlRenderer2DBackend::draw_rect(Rectf rect, Color color) {
+    if (_transformed) {
+        // Four one-unit strips inside the rectangle, as the GPU backend draws it.
+        if (rect.w <= 0.0f || rect.h <= 0.0f || color.a == 0) {
+            return;
+        }
+        fill_rect({rect.x, rect.y, rect.w, 1.0f}, color);
+        fill_rect({rect.x, rect.y + rect.h - 1.0f, rect.w, 1.0f}, color);
+        fill_rect({rect.x, rect.y, 1.0f, rect.h}, color);
+        fill_rect({rect.x + rect.w - 1.0f, rect.y, 1.0f, rect.h}, color);
+        return;
+    }
     flush_batch();
     ++_stats.direct_rect_outlines;
     const SDL_FColor sdl_color = to_sdl_color(color);
@@ -680,15 +698,15 @@ void SdlRenderer2DBackend::fill_rounded_rect(Rectf rect, f32 radius, Color color
     const Rectf solid_rect = inset_rect(rect, fringe);
     if (solid_rect.w <= 0.0f || solid_rect.h <= 0.0f) {
         const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
-        render_filled_loop(_handle, rounded_rect_loop(rect, r), color);
+        render_filled_loop(_handle, mapped(rounded_rect_loop(rect, r)), color);
         return;
     }
-    const std::vector<Vec2f> solid = rounded_rect_loop(solid_rect, std::max(0.0f, r - fringe));
+    const std::vector<Vec2f> solid = mapped(rounded_rect_loop(solid_rect, std::max(0.0f, r - fringe)));
     {
         const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
         render_filled_loop(_handle, solid, color);
     }
-    render_loop_ring(_handle, rounded_rect_loop(rect, r), alpha_scaled(color, 0.0f), solid, color);
+    render_loop_ring(_handle, mapped(rounded_rect_loop(rect, r)), alpha_scaled(color, 0.0f), solid, color);
 }
 
 void SdlRenderer2DBackend::draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width) {
@@ -716,20 +734,22 @@ void SdlRenderer2DBackend::draw_rounded_rect(Rectf rect, f32 radius, Color color
         return;
     }
 
-    const std::vector<Vec2f> outer_fringe = rounded_rect_loop(rect, base_radius);
-    const std::vector<Vec2f> outer_solid = rounded_rect_loop(outer_solid_rect, std::max(0.0f, base_radius - fringe));
+    const std::vector<Vec2f> outer_fringe = mapped(rounded_rect_loop(rect, base_radius));
+    const std::vector<Vec2f> outer_solid = mapped(rounded_rect_loop(outer_solid_rect, std::max(0.0f, base_radius - fringe)));
     render_loop_ring(_handle, outer_fringe, alpha_scaled(color, 0.0f), outer_solid, color);
     if (inner_rect.w <= 0.0f || inner_rect.h <= 0.0f) {
         const OpaqueDrawScope opaque(_handle, _blend, color.a == 255);
         render_filled_loop(_handle, outer_solid, color);
         return;
     }
-    const std::vector<Vec2f> inner_solid = rounded_rect_loop(inner_rect, std::max(0.0f, base_radius - border_width - fringe));
+    const std::vector<Vec2f> inner_solid =
+        mapped(rounded_rect_loop(inner_rect, std::max(0.0f, base_radius - border_width - fringe)));
     render_loop_ring(_handle, outer_solid, color, inner_solid, color);
 
     const Rectf inner_fringe_rect = inset_rect(rect, border_width);
     if (inner_fringe_rect.w > 0.0f && inner_fringe_rect.h > 0.0f) {
-        const std::vector<Vec2f> inner_fringe = rounded_rect_loop(inner_fringe_rect, std::max(0.0f, base_radius - border_width));
+        const std::vector<Vec2f> inner_fringe =
+            mapped(rounded_rect_loop(inner_fringe_rect, std::max(0.0f, base_radius - border_width)));
         render_loop_ring(_handle, inner_fringe, alpha_scaled(color, 0.0f), inner_solid, color);
     }
 }
@@ -751,15 +771,15 @@ void SdlRenderer2DBackend::fill_gradient_rect(Rectf rect, const Gradient& gradie
     const SDL_FColor bottom_right = end;
     const SDL_FColor bottom_left = vertical ? end : start;
 
-    const f32 x0 = rect.x;
-    const f32 y0 = rect.y;
-    const f32 x1 = rect.x + rect.w;
-    const f32 y1 = rect.y + rect.h;
+    const std::vector<Vec2f> corners = mapped({{rect.x, rect.y},
+                                               {rect.x + rect.w, rect.y},
+                                               {rect.x + rect.w, rect.y + rect.h},
+                                               {rect.x, rect.y + rect.h}});
     const std::array<SDL_Vertex, 4> vertices{{
-        {.position = {x0, y0}, .color = top_left, .tex_coord = {0.0f, 0.0f}},
-        {.position = {x1, y0}, .color = top_right, .tex_coord = {0.0f, 0.0f}},
-        {.position = {x1, y1}, .color = bottom_right, .tex_coord = {0.0f, 0.0f}},
-        {.position = {x0, y1}, .color = bottom_left, .tex_coord = {0.0f, 0.0f}},
+        {.position = {corners[0].x, corners[0].y}, .color = top_left, .tex_coord = {0.0f, 0.0f}},
+        {.position = {corners[1].x, corners[1].y}, .color = top_right, .tex_coord = {0.0f, 0.0f}},
+        {.position = {corners[2].x, corners[2].y}, .color = bottom_right, .tex_coord = {0.0f, 0.0f}},
+        {.position = {corners[3].x, corners[3].y}, .color = bottom_left, .tex_coord = {0.0f, 0.0f}},
     }};
     const std::array<int, 6> indices{{0, 1, 2, 0, 2, 3}};
     const OpaqueDrawScope opaque(_handle, _blend, gradient.start.a == 255 && gradient.end.a == 255);
@@ -854,12 +874,37 @@ void SdlRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
     SDL_SetGPURenderState(_handle, entry.state);
     // Draw the white texture stretched over `rect`; SDL feeds v_uv 0..1 and binds
     // it at sampler slot 0, so the custom fragment shader colors the surface.
-    const SDL_FRect dst = to_sdl_frect(rect);
-    SDL_RenderTexture(_handle, white->handle(), nullptr, &dst);
+    if (_transformed) {
+        const Vec2f origin = _transform.apply({rect.x, rect.y});
+        const Vec2f right = _transform.apply({rect.x + rect.w, rect.y});
+        const Vec2f down = _transform.apply({rect.x, rect.y + rect.h});
+        const SDL_FPoint o{origin.x, origin.y}, r{right.x, right.y}, d{down.x, down.y};
+        SDL_RenderTextureAffine(_handle, white->handle(), nullptr, &o, &r, &d);
+    } else {
+        const SDL_FRect dst = to_sdl_frect(rect);
+        SDL_RenderTexture(_handle, white->handle(), nullptr, &dst);
+    }
     SDL_SetGPURenderState(_handle, nullptr);
 }
 
 void SdlRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
+    if (_transformed) {
+        // A quad one unit wide over the pixel centres, as the GPU backend draws
+        // lines, then mapped: it widens with the scale.
+        a = {a.x + 0.5f, a.y + 0.5f};
+        b = {b.x + 0.5f, b.y + 0.5f};
+        const f32 dx = b.x - a.x, dy = b.y - a.y;
+        const f32 len = std::sqrt(dx * dx + dy * dy);
+        if (len <= 0.0001f || color.a == 0) {
+            return;
+        }
+        const f32 nx = -dy / len * 0.5f, ny = dx / len * 0.5f;
+        begin_batch(BatchKind::Color, nullptr);
+        append_corners({{_transform.apply({a.x + nx, a.y + ny}), _transform.apply({b.x + nx, b.y + ny}),
+                         _transform.apply({b.x - nx, b.y - ny}), _transform.apply({a.x - nx, a.y - ny})}},
+                       {}, color);
+        return;
+    }
     flush_batch();
     ++_stats.direct_lines;
     const SDL_FColor sdl_color = to_sdl_color(color);
@@ -955,6 +1000,8 @@ RenderTarget SdlRenderer2DBackend::create_render_target(Vec2i size, ScaleMode mo
 
 void SdlRenderer2DBackend::push_render_target(const RenderTarget& target) {
     flush_batch();
+    _saved_transforms.push_back(_transform);
+    set_transform({});
     _render_target_stack.push_back(SDL_GetRenderTarget(_handle));
 
     SDL_Texture* handle = nullptr;
@@ -972,6 +1019,10 @@ void SdlRenderer2DBackend::pop_render_target() {
         _render_target_stack.pop_back();
     }
     SDL_SetRenderTarget(_handle, previous);
+    if (!_saved_transforms.empty()) {
+        set_transform(_saved_transforms.back());
+        _saved_transforms.pop_back();
+    }
 }
 
 void SdlRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode) {
@@ -1065,23 +1116,10 @@ void SdlRenderer2DBackend::begin_batch(BatchKind kind, SDL_Texture* texture, Tex
 }
 
 void SdlRenderer2DBackend::append_quad(Rectf dest, Rectf source, Vec2i texture_size, Color color, f32 rotation, Vec2f pivot) {
-    constexpr int max_indices = 60'000;
-    if (_batch.indices.size() + 6 > max_indices) {
-        ++_stats.texture_batch_breaks;
-        const BatchKind kind = _batch.kind;
-        SDL_Texture* texture = _batch.texture;
-        Texture retained_texture = _batch.retained_texture;
-        flush_batch();
-        begin_batch(kind, texture, std::move(retained_texture));
-    }
-
-    _batch.opaque = _batch.opaque && color.a == 255;
-    const SDL_FColor sdl_color = to_sdl_color(color);
     const f32 u0 = texture_size.x > 0 ? source.x / static_cast<f32>(texture_size.x) : 0.0f;
     const f32 v0 = texture_size.y > 0 ? source.y / static_cast<f32>(texture_size.y) : 0.0f;
     const f32 u1 = texture_size.x > 0 ? (source.x + source.w) / static_cast<f32>(texture_size.x) : 0.0f;
     const f32 v1 = texture_size.y > 0 ? (source.y + source.h) / static_cast<f32>(texture_size.y) : 0.0f;
-    const int base = static_cast<int>(_batch.vertices.size());
 
     std::array<Vec2f, 4> positions{{
         {dest.x, dest.y},
@@ -1104,6 +1142,38 @@ void SdlRenderer2DBackend::append_quad(Rectf dest, Rectf source, Vec2i texture_s
         }
     }
 
+    if (_transformed) {
+        for (Vec2f& position : positions) {
+            position = _transform.apply(position);
+        }
+    }
+    append_corners(positions, {u0, v0, u1, v1}, color);
+}
+
+std::vector<Vec2f> SdlRenderer2DBackend::mapped(std::vector<Vec2f> loop) const {
+    if (_transformed) {
+        for (Vec2f& p : loop) {
+            p = _transform.apply(p);
+        }
+    }
+    return loop;
+}
+
+void SdlRenderer2DBackend::append_corners(const std::array<Vec2f, 4>& positions, const std::array<f32, 4>& uv,
+                                          Color color) {
+    constexpr int max_indices = 60'000;
+    if (_batch.indices.size() + 6 > max_indices) {
+        ++_stats.texture_batch_breaks;
+        const BatchKind kind = _batch.kind;
+        SDL_Texture* texture = _batch.texture;
+        Texture retained_texture = _batch.retained_texture;
+        flush_batch();
+        begin_batch(kind, texture, std::move(retained_texture));
+    }
+    _batch.opaque = _batch.opaque && color.a == 255;
+    const SDL_FColor sdl_color = to_sdl_color(color);
+    const f32 u0 = uv[0], v0 = uv[1], u1 = uv[2], v1 = uv[3];
+    const int base = static_cast<int>(_batch.vertices.size());
     _batch.vertices.push_back({.position = {positions[0].x, positions[0].y}, .color = sdl_color, .tex_coord = {u0, v0}});
     _batch.vertices.push_back({.position = {positions[1].x, positions[1].y}, .color = sdl_color, .tex_coord = {u1, v0}});
     _batch.vertices.push_back({.position = {positions[2].x, positions[2].y}, .color = sdl_color, .tex_coord = {u1, v1}});

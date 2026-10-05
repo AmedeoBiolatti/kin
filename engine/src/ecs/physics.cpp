@@ -1,7 +1,11 @@
 #include <kin/ecs/physics.hpp>
 
+#include <kin/platform/log.hpp>
+
 #include <algorithm>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace kin {
 namespace {
@@ -56,6 +60,36 @@ void push_contact_for_body(const BodyEntityMap& map, PhysicsBody body, const Phy
     }
 }
 
+// Transform2D turns in degrees, like the rest of kin; the physics world in
+// radians, like Box2D. The same sense on screen (y down): only the unit differs.
+constexpr f32 radians_per_degree = 3.14159265358979323846f / 180.0f;
+
+f32 to_physics_angle(f32 degrees) {
+    return degrees * radians_per_degree;
+}
+
+f32 from_physics_angle(f32 radians) {
+    return radians / radians_per_degree;
+}
+
+// Physics works in the world; Transform2D is relative to the entity's parent.
+// The entity's pose in the world now (not the WorldTransform of the last
+// render, which may be a frame old).
+WorldTransform world_pose(flecs::entity entity, const Transform2D& transform) {
+    if (!entity.parent()) {
+        return {transform.pos, transform.rotation, transform.scale};
+    }
+    return current_world_transform(entity);
+}
+
+i32 depth_of(flecs::entity entity) {
+    i32 depth = 0;
+    for (flecs::entity parent = entity.parent(); parent; parent = parent.parent()) {
+        ++depth;
+    }
+    return depth;
+}
+
 // Internal flecs-typed implementations. The public API (further down) takes
 // EcsWorld& and forwards via world.raw(), keeping flecs out of the
 // kin/ecs/physics.hpp surface.
@@ -65,8 +99,15 @@ void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
         if (!physics.is_alive(body.body)) {
             PhysicsBodyDef def = body.def;
             if (const Transform2D* transform = entity.get<Transform2D>()) {
-                def.position = transform->pos;
-                def.rotation = transform->rotation;
+                const WorldTransform pose = world_pose(entity, *transform);
+                def.position = pose.pos;
+                def.rotation = to_physics_angle(pose.rotation);
+                if (pose.scale != Vec2f{1.0f, 1.0f}) {
+                    static bool warned = false;
+                    if (!std::exchange(warned, true)) {
+                        KIN_LOG_WARN("physics", "a physics body's entity is scaled; bodies ignore scale (size the colliders instead)");
+                    }
+                }
             }
             if (def.user_id == 0) {
                 def.user_id = static_cast<u64>(entity.id());
@@ -98,11 +139,14 @@ void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
 }
 
 void sync_transforms_to_physics_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query<PhysicsBodyComponent, const Transform2D>().each([&](PhysicsBodyComponent& body, const Transform2D& transform) {
-        if (body.sync_to_physics && physics.is_alive(body.body)) {
-            physics.set_transform(body.body, transform.pos, transform.rotation);
-        }
-    });
+    // The entity leads: a body under a parent follows it.
+    world.query<PhysicsBodyComponent, const Transform2D>().each(
+        [&](flecs::entity entity, PhysicsBodyComponent& body, const Transform2D& transform) {
+            if (body.sync_to_physics && physics.is_alive(body.body)) {
+                const WorldTransform pose = world_pose(entity, transform);
+                physics.set_transform(body.body, pose.pos, to_physics_angle(pose.rotation));
+            }
+        });
 }
 
 void step_physics_raw(flecs::world& world, PhysicsWorld& physics, f32 dt, i32 velocity_iterations, i32 position_iterations) {
@@ -115,12 +159,37 @@ void step_physics_raw(flecs::world& world, PhysicsWorld& physics, f32 dt, i32 ve
 }
 
 void sync_transforms_from_physics_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query<PhysicsBodyComponent, Transform2D>().each([&](const PhysicsBodyComponent& body, Transform2D& transform) {
-        if (body.sync_from_physics && physics.is_alive(body.body)) {
-            transform.pos = physics.position(body.body);
-            transform.rotation = physics.rotation(body.body);
-        }
-    });
+    // The simulation leads: a body stays where it is in the world when its
+    // parent moves, and its Transform2D says where that is from the parent.
+    // Bodies under a parent are written parents first, so each is placed
+    // against where its parent has just been put.
+    struct Placed {
+        i32 depth = 0;
+        flecs::entity entity;
+        WorldTransform pose;
+    };
+    std::vector<Placed> parented;
+    world.query<PhysicsBodyComponent, Transform2D>().each(
+        [&](flecs::entity entity, const PhysicsBodyComponent& body, Transform2D& transform) {
+            if (!body.sync_from_physics || !physics.is_alive(body.body)) {
+                return;
+            }
+            const Vec2f pos = physics.position(body.body);
+            const f32 rotation = from_physics_angle(physics.rotation(body.body));
+            if (!entity.parent()) {
+                transform.pos = pos;
+                transform.rotation = rotation;
+                return;
+            }
+            parented.push_back({depth_of(entity), entity, {pos, rotation, {1.0f, 1.0f}}});
+        });
+    std::stable_sort(parented.begin(), parented.end(), [](const Placed& a, const Placed& b) { return a.depth < b.depth; });
+    for (const Placed& placed : parented) {
+        Transform2D* transform = placed.entity.get_mut<Transform2D>();
+        const Transform2D local = to_local(current_world_transform(placed.entity.parent()), placed.pose);
+        transform->pos = local.pos;
+        transform->rotation = local.rotation; // its scale stays its own
+    }
 }
 
 void collect_physics_contacts_raw(flecs::world& world, PhysicsWorld& physics) {

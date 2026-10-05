@@ -6,6 +6,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <array>
 #include <vector>
 
 namespace kin {
@@ -59,6 +60,10 @@ public:
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
 
     void set_blend_mode(BlendMode mode) override;
+    void set_transform(const Affine2& transform) override {
+        _transform = transform;
+        _transformed = !transform.is_identity();
+    }
     void set_viewport(Rectf rect) override;
     void reset_viewport() override;
     void push_viewport(Rectf rect) override;
@@ -101,6 +106,10 @@ private:
     void flush_batch();
     void begin_batch(BatchKind kind, SDL_Texture* texture, Texture retained_texture = {});
     void append_quad(Rectf dest, Rectf source, Vec2i texture_size, Color color, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
+    // Four corners (already placed) with their texture coordinates {u0, v0, u1, v1}.
+    void append_corners(const std::array<Vec2f, 4>& positions, const std::array<f32, 4>& uv, Color color);
+    // `loop` mapped by the transform.
+    std::vector<Vec2f> mapped(std::vector<Vec2f> loop) const;
 
     struct ShaderEntry {
         SDL_GPUShader* shader = nullptr;
@@ -124,6 +133,9 @@ private:
     bool _warned_min_max = false;
     RendererBackendStats _stats;
     bool _texture_batching_enabled = true;
+    Affine2 _transform{};          // set_transform's; geometry is mapped by it on the CPU
+    bool _transformed = false;     // _transform is not the identity
+    std::vector<Affine2> _saved_transforms; // outside each pushed render target / native scope
 };
 
 class SdlTextureBackend final : public ITextureBackend {

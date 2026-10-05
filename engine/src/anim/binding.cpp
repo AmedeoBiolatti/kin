@@ -18,6 +18,7 @@ const PropertyAccessor* PropertyRegistry::find(std::string_view key) const {
 void register_builtin_properties(PropertyRegistry& registry, EcsWorld& world) {
     registry.add<Transform2D>(world, "Transform2D.pos", &Transform2D::pos);
     registry.add<Transform2D>(world, "Transform2D.rotation", &Transform2D::rotation);
+    registry.add<Transform2D>(world, "Transform2D.scale", &Transform2D::scale);
 
     registry.add<SpriteRenderer>(world, "SpriteRenderer.offset", &SpriteRenderer::offset);
     registry.add<SpriteRenderer>(world, "SpriteRenderer.size", &SpriteRenderer::size);

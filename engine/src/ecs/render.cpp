@@ -1,5 +1,6 @@
 #include <kin/ecs/render.hpp>
 
+#include <kin/core/affine.hpp>
 #include <kin/core/jobs.hpp>
 
 #include <kin/ecs/particles.hpp>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace kin {
 namespace {
@@ -24,6 +26,22 @@ Vec2f sub(Vec2f a, Vec2f b) {
 
 Vec2f mul(Vec2f a, Vec2f b) {
     return {a.x * b.x, a.y * b.y};
+}
+
+Vec2f abs(Vec2f v) {
+    return {std::abs(v.x), std::abs(v.y)};
+}
+
+bool plain(const WorldTransform& t) {
+    return t.rotation == 0.0f && t.scale == Vec2f{1.0f, 1.0f};
+}
+
+// A point in the entity's own space, in the world.
+Vec2f to_world(const WorldTransform& t, Vec2f local) {
+    if (plain(t)) {
+        return add(t.pos, local);
+    }
+    return add(t.pos, Affine2::trs({}, t.rotation, t.scale).apply_vector(local));
 }
 
 Vec2f resolved_size(const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
@@ -44,14 +62,16 @@ bool resolve_sprite_renderer(const SpriteRenderer& sprite, ResolvedSprite& resol
     return sprite.visible && sprite.sprite.valid() && sprite.sprite.catalog->resolve(sprite.sprite.id, resolved);
 }
 
-Vec2f sprite_anchor_pos(Vec2f world_pos, const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
-    return add(add(world_pos, resolved.offset), sprite.offset);
+// Where the sprite's pivot lands: its offsets go through the transform.
+Vec2f sprite_anchor_pos(const WorldTransform& t, const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
+    return to_world(t, add(resolved.offset, sprite.offset));
 }
 
-Rectf sprite_draw_rect(Vec2f world_pos, const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
-    const Vec2f size = resolved_size(sprite, resolved);
+// The sprite unturned about its anchor, scaled.
+Rectf sprite_draw_rect(const WorldTransform& t, const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
+    const Vec2f size = mul(resolved_size(sprite, resolved), abs(t.scale));
     const Vec2f pivot = resolved_pivot(sprite, resolved);
-    const Vec2f top_left = sub(sprite_anchor_pos(world_pos, sprite, resolved), mul(size, pivot));
+    const Vec2f top_left = sub(sprite_anchor_pos(t, sprite, resolved), mul(size, pivot));
     return {top_left.x, top_left.y, size.x, size.y};
 }
 
@@ -71,10 +91,23 @@ Vec2f texture_size(const TextureRenderer& texture) {
     return {source.w, source.h};
 }
 
-Rectf texture_draw_rect(Vec2f world_pos, const TextureRenderer& texture) {
-    const Vec2f size = texture_size(texture);
-    const Vec2f top_left = sub(add(world_pos, texture.offset), mul(size, texture.pivot));
+// The texture unturned about its anchor (offset through the transform), scaled.
+Rectf texture_draw_rect(const WorldTransform& t, const TextureRenderer& texture) {
+    const Vec2f size = mul(texture_size(texture), abs(t.scale));
+    const Vec2f top_left = sub(to_world(t, texture.offset), mul(size, texture.pivot));
     return {top_left.x, top_left.y, size.x, size.y};
+}
+
+// What a rectangle turned by `rotation` about `pivot` (a fraction of it) may cover.
+Rectf turned_bounds(Rectf rect, f32 rotation, Vec2f pivot) {
+    if (rotation == 0.0f) {
+        return rect;
+    }
+    const Vec2f p{rect.x + rect.w * pivot.x, rect.y + rect.h * pivot.y};
+    const f32 dx = std::max(std::abs(p.x - rect.x), std::abs(rect.x + rect.w - p.x));
+    const f32 dy = std::max(std::abs(p.y - rect.y), std::abs(rect.y + rect.h - p.y));
+    const f32 r = std::sqrt(dx * dx + dy * dy);
+    return {p.x - r, p.y - r, 2 * r, 2 * r};
 }
 
 u64 pass_mask_for_layer(i32 layer) {
@@ -133,9 +166,16 @@ void WorldRenderState::propagate_transforms() {
             if (it.is_set(2)) {
                 parent = it.field<const WorldTransform>(2)[0];
             }
+            if (plain(parent)) {
+                for (const auto i : it) {
+                    self[i] = {add(parent.pos, local[i].pos), parent.rotation + local[i].rotation, local[i].scale};
+                }
+                continue;
+            }
+            const Affine2 linear = Affine2::trs({}, parent.rotation, parent.scale); // once per table
             for (const auto i : it) {
-                self[i].pos = add(local[i].pos, parent.pos);
-                self[i].rotation = local[i].rotation + parent.rotation;
+                self[i] = {add(parent.pos, linear.apply_vector(local[i].pos)), parent.rotation + local[i].rotation,
+                           mul(parent.scale, local[i].scale)};
             }
         }
     });
@@ -235,17 +275,19 @@ bool prepare_texture(const WorldTransform& transform, const TextureRenderer& tex
     if (!texture.visible || !texture.texture) {
         return false;
     }
-    const Vec2f pos = transform.pos;
-    const Rectf dest = texture_draw_rect(pos, texture);
-    if (!culler.visible(dest)) {
+    const Rectf dest = texture_draw_rect(transform, texture);
+    if (!culler.visible(turned_bounds(dest, transform.rotation, texture.pivot))) {
         return false;
     }
     out = {
-        .key = key_for(texture.layer, texture.order, texture.y_sort, pos.y + texture.offset.y + texture.sort_y_offset),
+        .key = key_for(texture.layer, texture.order, texture.y_sort,
+                       to_world(transform, texture.offset).y + texture.sort_y_offset),
         .texture = &texture.texture,
         .source = texture_source_rect(texture),
         .dest = dest,
         .tint = texture.tint,
+        .rotation = transform.rotation,
+        .pivot = texture.pivot,
     };
     return true;
 }
@@ -385,18 +427,53 @@ u32 draw_source_of_entity(DrawTrace& trace, flecs::entity entity, std::string_vi
 }
 #endif
 
-Vec2f world_position(flecs::entity entity) {
-    if (const auto* transform = entity.get<WorldTransform>()) {
-        return transform->pos;
-    }
+WorldTransform compose(const WorldTransform& parent, const Transform2D& child) {
+    return {to_world(parent, child.pos), parent.rotation + child.rotation, mul(parent.scale, child.scale)};
+}
 
-    Vec2f pos{};
+Transform2D to_local(const WorldTransform& parent, const WorldTransform& world) {
+    const auto divide = [](f32 a, f32 b) { return b == 0.0f ? 0.0f : a / b; };
+    Vec2f offset = sub(world.pos, parent.pos);
+    if (parent.rotation != 0.0f) {
+        offset = Affine2::rotation(-parent.rotation).apply_vector(offset);
+    }
+    return {{divide(offset.x, parent.scale.x), divide(offset.y, parent.scale.y)},
+            world.rotation - parent.rotation,
+            {divide(world.scale.x, parent.scale.x), divide(world.scale.y, parent.scale.y)}};
+}
+
+WorldTransform world_transform(flecs::entity entity) {
+    if (const auto* transform = entity.get<WorldTransform>()) {
+        return *transform;
+    }
+    return current_world_transform(entity);
+}
+
+WorldTransform current_world_transform(flecs::entity entity) {
+    // Up to the root, then composed back down.
+    std::vector<const Transform2D*> chain;
     for (flecs::entity current = entity; current; current = current.parent()) {
         if (const auto* transform = current.get<Transform2D>()) {
-            pos = add(pos, transform->pos);
+            chain.push_back(transform);
         }
     }
-    return pos;
+    WorldTransform world{};
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        world = compose(world, **it);
+    }
+    return world;
+}
+
+WorldTransform current_world_transform(const EcsEntity& entity) {
+    return current_world_transform(entity.raw());
+}
+
+WorldTransform world_transform(const EcsEntity& entity) {
+    return world_transform(entity.raw());
+}
+
+Vec2f world_position(flecs::entity entity) {
+    return world_transform(entity).pos;
 }
 
 Vec2f world_position(const EcsEntity& entity) {
@@ -409,9 +486,7 @@ bool submit_sprite(RenderQueue& queue, flecs::entity entity) {
         return false;
     }
 
-    const Vec2f pos = world_position(entity);
-    const WorldTransform transform{pos};
-    return submit_sprite(queue, entity, transform, *sprite);
+    return submit_sprite(queue, entity, world_transform(entity), *sprite);
 }
 
 bool submit_sprite(RenderQueue& queue,
@@ -425,29 +500,17 @@ bool submit_sprite(RenderQueue& queue,
         return false;
     }
 
-    const Vec2f pos = transform.pos;
-    const Rectf dest = sprite_draw_rect(pos, sprite, resolved);
+    const Rectf dest = sprite_draw_rect(transform, sprite, resolved);
     const f32 rotation = transform.rotation + sprite.rotation;
-    if (view) {
-        Rectf bounds = dest;
-        if (rotation != 0.0f) {
-            // Turned about its pivot, the sprite stays inside the circle through its
-            // farthest corner.
-            const Vec2f pivot = resolved_pivot(sprite, resolved);
-            const Vec2f p{dest.x + dest.w * pivot.x, dest.y + dest.h * pivot.y};
-            const f32 dx = std::max(std::abs(p.x - dest.x), std::abs(dest.x + dest.w - p.x));
-            const f32 dy = std::max(std::abs(p.y - dest.y), std::abs(dest.y + dest.h - p.y));
-            const f32 r = std::sqrt(dx * dx + dy * dy);
-            bounds = {p.x - r, p.y - r, 2 * r, 2 * r};
-        }
-        if (!render_view_visible(*view, bounds)) {
-            return false;
-        }
+    // Turned about its pivot, the sprite stays inside the circle through its
+    // farthest corner.
+    if (view && !render_view_visible(*view, turned_bounds(dest, rotation, resolved_pivot(sprite, resolved)))) {
+        return false;
     }
     const RenderKey key = key_for(sprite.layer,
                                   sprite.order,
                                   sprite.y_sort,
-                                  sprite_anchor_pos(pos, sprite, resolved).y + sprite.sort_y_offset);
+                                  sprite_anchor_pos(transform, sprite, resolved).y + sprite.sort_y_offset);
     queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, {}, rotation, resolved_pivot(sprite, resolved));
     return true;
 }
@@ -458,8 +521,7 @@ bool submit_texture(RenderQueue& queue, flecs::entity entity) {
         return false;
     }
 
-    const WorldTransform transform{world_position(entity)};
-    return submit_texture(queue, entity, transform, *texture);
+    return submit_texture(queue, entity, world_transform(entity), *texture);
 }
 
 bool submit_texture(RenderQueue& queue,
@@ -472,16 +534,16 @@ bool submit_texture(RenderQueue& queue,
         return false;
     }
 
-    const Vec2f pos = transform.pos;
-    const Rectf dest = texture_draw_rect(pos, texture);
-    if (view && !render_view_visible(*view, dest)) {
+    const Rectf dest = texture_draw_rect(transform, texture);
+    if (view && !render_view_visible(*view, turned_bounds(dest, transform.rotation, texture.pivot))) {
         return false;
     }
     const RenderKey key = key_for(texture.layer,
                                   texture.order,
                                   texture.y_sort,
-                                  pos.y + texture.offset.y + texture.sort_y_offset);
-    queue.draw_texture_region(key, texture.texture, texture_source_rect(texture), dest, texture.tint);
+                                  to_world(transform, texture.offset).y + texture.sort_y_offset);
+    queue.draw_texture_region(key, texture.texture, texture_source_rect(texture), dest, texture.tint,
+                              transform.rotation, texture.pivot);
     return true;
 }
 
@@ -491,8 +553,7 @@ bool submit_rect(RenderQueue& queue, flecs::entity entity) {
         return false;
     }
 
-    const WorldTransform transform{world_position(entity)};
-    return submit_rect(queue, entity, transform, *rect);
+    return submit_rect(queue, entity, world_transform(entity), *rect);
 }
 
 bool submit_rect(RenderQueue& queue,
@@ -505,16 +566,32 @@ bool submit_rect(RenderQueue& queue,
         return false;
     }
 
+    // Scaled about the entity's origin (a negative scale flips it over), then
+    // turned about it.
     const Vec2f pos = transform.pos;
-    const Rectf bounds{pos.x + rect.offset.x, pos.y + rect.offset.y, rect.size.x, rect.size.y};
-    if (view && !render_view_visible(*view, bounds)) {
+    const Vec2f s = transform.scale;
+    const f32 x0 = pos.x + s.x * rect.offset.x, x1 = pos.x + s.x * (rect.offset.x + rect.size.x);
+    const f32 y0 = pos.y + s.y * rect.offset.y, y1 = pos.y + s.y * (rect.offset.y + rect.size.y);
+    const Rectf bounds{std::min(x0, x1), std::min(y0, y1), std::abs(x1 - x0), std::abs(y1 - y0)};
+    if (bounds.w <= 0.0f || bounds.h <= 0.0f) {
+        return false;
+    }
+    const Vec2f pivot{(pos.x - bounds.x) / bounds.w, (pos.y - bounds.y) / bounds.h};
+    if (view && !render_view_visible(*view, turned_bounds(bounds, transform.rotation, pivot))) {
         return false;
     }
     const RenderKey key = key_for(rect.layer,
                                   rect.order,
                                   rect.y_sort,
-                                  pos.y + rect.offset.y + rect.sort_y_offset);
-    if (rect.outline) {
+                                  to_world(transform, rect.offset).y + rect.sort_y_offset);
+    if (transform.rotation != 0.0f) {
+        queue.submit({.type = rect.outline ? RenderCommandType::DrawRect : RenderCommandType::FillRect,
+                      .key = key,
+                      .rect = bounds,
+                      .color = rect.color,
+                      .rotation = transform.rotation,
+                      .pivot = pivot});
+    } else if (rect.outline) {
         queue.draw_rect(key, bounds, rect.color);
     } else {
         queue.fill_rect(key, bounds, rect.color);
@@ -528,8 +605,7 @@ bool submit_line(RenderQueue& queue, flecs::entity entity) {
         return false;
     }
 
-    const WorldTransform transform{world_position(entity)};
-    return submit_line(queue, entity, transform, *line);
+    return submit_line(queue, entity, world_transform(entity), *line);
 }
 
 bool submit_line(RenderQueue& queue,
@@ -543,8 +619,8 @@ bool submit_line(RenderQueue& queue,
     }
 
     const Vec2f pos = transform.pos;
-    const Vec2f a = add(pos, line.a);
-    const Vec2f b = add(pos, line.b);
+    const Vec2f a = to_world(transform, line.a);
+    const Vec2f b = to_world(transform, line.b);
     const Rectf bounds{
         std::min(a.x, b.x), std::min(a.y, b.y),
         std::abs(a.x - b.x), std::abs(a.y - b.y),

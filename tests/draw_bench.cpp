@@ -2,6 +2,7 @@
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
 #include <kin/platform/app.hpp>
 #include <kin/renderer/cached_target.hpp>
+#include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -585,6 +587,12 @@ int main(int argc, char** argv) {
         std::printf("shader: made in %.2f ms, first frame %.2f ms, second %.2f ms\n", ms(s0, s1), ms(s1, s2),
                     ms(s2, s3));
     }
+    // `camera`: everything drawn through a zoomed, turned camera's transform.
+    const bool camera = argc > 3 && std::string_view{argv[3]} == "camera";
+    kin::Camera2D view;
+    view.viewport = {1280.0f, 720.0f};
+    view.zoom = 1.25f;
+    view.rotation = 10.0f;
     const char* names[3] = {"draw_texture", "fill_rect", "draw_sprites"};
     for (int mode = 0; mode < 3; ++mode) {
         std::vector<double> records;
@@ -593,6 +601,10 @@ int main(int argc, char** argv) {
         for (int f = 0; f < frames; ++f) {
             const auto t0 = clock::now();
             renderer->clear(kin::Color::rgb(0, 0, 0));
+            std::optional<kin::Renderer2D::TransformGuard> through;
+            if (camera) {
+                through.emplace(renderer->scoped_transform(view.view_transform()));
+            }
             if (mode == 0) {
                 for (const kin::SpriteInstance& s : sprites) {
                     renderer->draw_texture(texture, s.source, s.dest, s.tint);
@@ -604,6 +616,7 @@ int main(int argc, char** argv) {
             } else {
                 renderer->draw_sprites(texture, sprites);
             }
+            through.reset();
             const auto t1 = clock::now();
             renderer->present();
             const auto t2 = clock::now();

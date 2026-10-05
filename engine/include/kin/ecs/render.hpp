@@ -20,15 +20,31 @@ class JobSystem;
 struct ParticleSystemComponent;
 struct ParticleFieldComponent;
 
+// Where an entity sits relative to its parent (flecs ChildOf), or to the world
+// without one: scaled, then turned (degrees, clockwise), then moved to `pos`.
+// A child's position, renderer offsets and size go through all of its
+// parents' transforms. Scale is per axis; under a turned parent it stays
+// along the child's own axes (no shear), and a negative scale draws as its
+// size, unmirrored.
 struct Transform2D {
     Vec2f pos{};
     f32 rotation = 0.0f;
+    Vec2f scale{1.0f, 1.0f};
 };
 
+// Transform2D composed through the hierarchy (WorldRenderState::propagate_transforms).
 struct WorldTransform {
     Vec2f pos{};
     f32 rotation = 0.0f;
+    Vec2f scale{1.0f, 1.0f};
 };
+
+// `child` (a Transform2D) under `parent` (a WorldTransform).
+WorldTransform compose(const WorldTransform& parent, const Transform2D& child);
+// The reverse: the Transform2D that puts a child at `world` under `parent`
+// (compose(parent, to_local(parent, world)) == world). An axis the parent
+// scales to zero keeps the child at the parent's origin along it.
+Transform2D to_local(const WorldTransform& parent, const WorldTransform& world);
 
 struct SpriteRenderer {
     SpriteRef sprite;
@@ -193,6 +209,14 @@ private:
 
 Vec2f world_position(flecs::entity entity);
 Vec2f world_position(const EcsEntity& entity);
+// The entity's WorldTransform when it has one, else its Transform2Ds composed
+// up the hierarchy.
+WorldTransform world_transform(flecs::entity entity);
+WorldTransform world_transform(const EcsEntity& entity);
+// Its Transform2Ds composed up the hierarchy now, whatever WorldTransform says
+// (that is only as fresh as the last propagate_transforms()).
+WorldTransform current_world_transform(flecs::entity entity);
+WorldTransform current_world_transform(const EcsEntity& entity);
 
 bool submit_sprite(Renderer2D& renderer, flecs::entity entity);
 bool submit_texture(Renderer2D& renderer, flecs::entity entity);
