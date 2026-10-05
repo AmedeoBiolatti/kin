@@ -35,6 +35,11 @@ enum class GpuBlendMode {
     Min,           // min(dst, src) per channel
 };
 
+// What a draw does with the stencil buffer (stencil clips). `Equal` draws
+// where the stencil holds the reference; `Increment` and `Decrement` change it
+// there instead of drawing colour (a clip pushed, popped).
+enum class GpuStencilOp : u8 { None, Equal, Increment, Decrement };
+
 struct GpuVertex {
     f32 x = 0.0f;
     f32 y = 0.0f;
@@ -139,7 +144,8 @@ public:
             const Range& last = _ranges.back();
             if (last.quads && last.texture == texture && last.sampler == sampler && last.blend == blend &&
                 last.fragment == nullptr && last.uniform_size == 0 && last.extra_count == 0 && last.storage_count == 0 &&
-                last.layout == GpuVertexLayout::Triangles && last.scissor.x == scissor.x &&
+                last.layout == GpuVertexLayout::Triangles && last.stencil == _stencil_op &&
+                last.stencil_ref == _stencil_ref && last.scissor.x == scissor.x &&
                 last.scissor.y == scissor.y && last.scissor.w == scissor.w && last.scissor.h == scissor.h) {
                 if (_vertices.capacity() - _vertices.size() < 4) {
                     _vertices.reserve(std::max<std::size_t>(_vertices.capacity() * 2, 4096));
@@ -185,6 +191,22 @@ public:
     void push_sdf(std::span<const GpuSdfInstance> instances, SDL_GPUShader* fragment, SDL_Rect scissor,
                   GpuBlendMode blend);
 
+    // The stencil test the pushes from now on draw with (None: none).
+    void set_stencil(GpuStencilOp op, u8 reference) {
+        _stencil_op = op;
+        _stencil_ref = reference;
+    }
+    // Stencil writes (Increment or Decrement where it is `reference`): triangles
+    // (or quads' corners) that draw no colour, count for no overdraw and leave
+    // layer bounds alone. `fragment` may discard (a mask read as a stencil).
+    void push_stencil(std::span<const GpuVertex> vertices, bool quads, GpuStencilOp op, u8 reference,
+                      SDL_GPUShader* fragment, SDL_GPUTexture* texture, SDL_Rect scissor, const void* uniform,
+                      u32 uniform_size, SDL_GPUSampler* sampler);
+    // Whether any range since begin() tests or writes the stencil.
+    bool uses_stencil() const {
+        return std::any_of(_ranges.begin(), _ranges.end(), [](const Range& r) { return r.stencil != GpuStencilOp::None; });
+    }
+
     bool empty() const {
         return _vertices.empty() && _instances.empty() && _shader_vertices.empty() && _shape_indices.empty() &&
                _sdf_instances.empty();
@@ -218,6 +240,11 @@ public:
         SDL_GPUTexture* white_texture = nullptr;   // used when a range's texture is null
         SDL_GPUSampler* sampler = nullptr;
         SDL_GPUTextureFormat target_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        // The target's stencil (stencil clips), if attached: cleared to 0 first
+        // or loaded with what earlier passes left.
+        SDL_GPUTexture* depth_stencil = nullptr;
+        SDL_GPUTextureFormat depth_stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        bool clear_stencil = true;
         GpuView view{};
         // Set: every range draws with this shader, additively, its own inputs
         // left unbound (the overdraw view).
@@ -246,6 +273,8 @@ private:
         u32 vertex_count = 0;   // or instance count; index count, for shapes
         GpuVertexLayout layout = GpuVertexLayout::Triangles; // which array it indexes
         bool quads = false; // its vertices are quads' corners, drawn indexed
+        GpuStencilOp stencil = GpuStencilOp::None;
+        u8 stencil_ref = 0;
     };
 
     // Adds `count` vertices of `layout` at `first` to the last range when its
@@ -257,6 +286,8 @@ private:
                    std::span<SDL_GPUBuffer* const> storage);
 
     const GpuTexture* _target = nullptr;
+    GpuStencilOp _stencil_op = GpuStencilOp::None;
+    u8 _stencil_ref = 0;
     SDL_FColor _clear{0.0f, 0.0f, 0.0f, 1.0f};
     bool _do_clear = true;
     std::vector<GpuVertex> _vertices;

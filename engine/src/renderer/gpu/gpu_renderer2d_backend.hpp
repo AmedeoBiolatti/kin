@@ -146,6 +146,11 @@ public:
     RenderTarget create_render_target(Vec2i size, ScaleMode mode) override;
     void push_render_target(const RenderTarget& target) override;
     bool push_layer_target(const RenderTarget& target) override;
+    bool draw_masked(const Texture& content, const Texture& mask, Rectf source, Rectf dest, Color tint,
+                     const MaskOptions& options) override;
+    bool push_stencil_clip(std::span<const Vec2f> triangles) override;
+    bool push_stencil_mask(const Texture& mask, Rectf source, Rectf dest, const MaskOptions& options) override;
+    void pop_stencil_clip() override;
     std::optional<LayerBounds> pop_layer_target() override;
     Vec2i current_target_pixels() const override { return current_size(); }
     void pop_render_target() override;
@@ -268,6 +273,8 @@ private:
     gpu::GpuShader _sdf_vertex_shader;     // sdf_shape.vert: one instance each
     std::vector<gpu::GpuSdfInstance> _sdf_scratch;
     gpu::GpuShader _distance_field_shader; // distance_field.frag: scalable text and icons
+    gpu::GpuShader _mask_shader;           // mask_composite.frag: a layer laid over through a mask
+    gpu::GpuShader _mask_stencil_shader;   // mask_stencil.frag: a mask layer read into the stencil
     ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
     bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;
@@ -342,9 +349,35 @@ private:
     std::vector<SDL_Rect> _clip_stack;
     // Pushed render targets; a layer's (push_layer_target) keeps the
     // coordinates it was pushed in, drawn at its own resolution.
+    // Stencil clips open on a target, innermost last: the stencil holds, at
+    // each pixel, how many it is inside; draws test it against their count.
+    struct StencilClip {
+        std::vector<gpu::GpuVertex> vertices; // placed: drawn again to pop it
+        bool quads = false;
+        SDL_GPUTexture* mask = nullptr; // a mask layer, through mask_stencil.frag
+        std::array<f32, 4> params{};
+    };
+    struct StencilState {
+        std::vector<StencilClip> clips;
+        gpu::GpuTexture* texture = nullptr; // from _stencil_pool, while the target is bound
+        bool loaded = false;                // holds what earlier passes wrote: load, not clear
+    };
+    struct PooledStencil {
+        gpu::GpuTexture texture;
+        bool in_use = false;
+    };
+    std::vector<std::unique_ptr<PooledStencil>> _stencil_pool;
+    StencilState _scene_stencil;
+    SDL_GPUTextureFormat _stencil_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+    StencilState& current_stencil();
+    // The batch's stencil test: the current target's open clips.
+    void sync_stencil();
+    void release_stencil(StencilState& state);
+    void open_stencil_clip(StencilClip clip);
     struct TargetEntry {
         const gpu::GpuTexture* texture = nullptr;
         Vec2f coords{}; // a layer's coordinate size; 0: the target's own pixels
+        StencilState stencil;
     };
     std::vector<TargetEntry> _rt_stack;
     // The draw coordinates' extent on the current target: a layer's, the

@@ -9,6 +9,33 @@ releases may change APIs.
 
 ### Added
 
+- Clips and masks: `Renderer2D::push_clip(path, rule)` clips to any path,
+  anti-aliased, under the transform; `push_mask(draw, options)` masks with
+  whatever `draw` draws, and `push_mask(texture, dest, options)` with a texture.
+  `kin::MaskOptions` (`kin/renderer/mask.hpp`) reads a mask's alpha or
+  luminance, as a soft `Alpha` mask or an all-or-nothing `Stencil` at a
+  threshold, optionally inverted, at a fraction of the resolution. Rectangles,
+  paths and masks share one stack, nest, and pop with `pop_clip()`;
+  `scoped_clip` and `scoped_mask` return guards. SDL_GPU composites in a shader
+  (`capabilities().masks`); SDL's renderer by blending, or on the CPU for
+  luminance and stencil masks and its software renderer. The shapes demo gives
+  its planets night sides and a telescope following the rocket.
+- Hard clips: `push_clip(path, rule, kin::ClipEdge::Hard)` keeps whole pixels;
+  on SDL_GPU (`capabilities().stencil_clips`) it draws into a pooled stencil
+  buffer instead of layers, about five times cheaper than a smooth clip, and
+  stencil-mode masks read their mask into it, drawing what they mask straight
+  on.
+- `kin::ClipRegion` (`kin/renderer/clip.hpp`): a clip as a value (a path, a
+  mask, a texture), pushed with `Renderer2D::push_clip(region)`.
+- `RenderQueue::draw_group(key, content, clip)`: a queue drawn as one command
+  at `key` through a clip, so clipped content keeps together in a sorted queue.
+- `kin::ClipGroup`: clips an entity's renderers and its descendants' to a
+  region in its own space, drawn as one group at its layer and order.
+- `Path::rounded_rect(rect, radii)` with a radius per corner;
+  `ui2::Context::push_clip(bounds, corner_radii)`, used by lists, tables and
+  trees to keep scrolled rows inside their panel's rounded corners.
+- Layers on SDL's renderer: `begin_layer` draws into a target and lays it over
+  at its opacity, as on SDL_GPU, instead of drawing straight through.
 - Text that scales: TTF fonts made with `ui2::TextRendering::Sdf`
   (`load_ttf_font`, `system_ui_font`, `system_ui_font_bold`) draw from one
   atlas of signed distance fields, sharp at any size, zoom or turn, under any

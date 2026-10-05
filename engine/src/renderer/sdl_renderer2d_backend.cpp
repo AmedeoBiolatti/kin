@@ -339,6 +339,9 @@ SdlRenderer2DBackend::~SdlRenderer2DBackend() {
     }
     _shaders.clear();
     _white_texture = {}; // free the SDL texture while the renderer is still alive
+    if (_mask_scratch) {
+        SDL_DestroyTexture(_mask_scratch);
+    }
     *_alive = false;
     if (_handle) {
         SDL_DestroyRenderer(_handle);
@@ -359,6 +362,7 @@ RendererBackendCapabilities SdlRenderer2DBackend::capabilities() const {
         .min_max_blend = _min_max_blend,
         .transforms = true,
         .shapes = true,
+        .masks = true,
         .materials_2d = _gpu_device != nullptr,
         .gradients = true,
         .text = false,
@@ -1050,6 +1054,7 @@ void SdlRenderer2DBackend::push_render_target(const RenderTarget& target) {
     _saved_transforms.push_back(_transform);
     set_transform({});
     _render_target_stack.push_back(SDL_GetRenderTarget(_handle));
+    _layer_stack.push_back(false);
 
     SDL_Texture* handle = nullptr;
     if (const auto* sdl = as_sdl(target.texture().backend().get())) {
@@ -1064,12 +1069,204 @@ void SdlRenderer2DBackend::pop_render_target() {
     if (!_render_target_stack.empty()) {
         previous = _render_target_stack.back();
         _render_target_stack.pop_back();
+        _layer_stack.pop_back();
     }
     SDL_SetRenderTarget(_handle, previous);
     if (!_saved_transforms.empty()) {
         set_transform(_saved_transforms.back());
         _saved_transforms.pop_back();
     }
+}
+
+bool SdlRenderer2DBackend::push_layer_target(const RenderTarget& target) {
+    const auto* sdl = as_sdl(target.texture().backend().get());
+    if (!sdl || !sdl->handle()) {
+        return false;
+    }
+    flush_batch();
+    // Drawn as the current target is: its logical presentation (or its pixels,
+    // stretched over the layer's), viewport and clip. The transform stays.
+    int w = 0, h = 0;
+    SDL_RendererLogicalPresentation mode = SDL_LOGICAL_PRESENTATION_DISABLED;
+    SDL_GetRenderLogicalPresentation(_handle, &w, &h, &mode);
+    if (mode == SDL_LOGICAL_PRESENTATION_DISABLED) {
+        SDL_GetCurrentRenderOutputSize(_handle, &w, &h);
+        mode = SDL_LOGICAL_PRESENTATION_STRETCH;
+    } else if (mode == SDL_LOGICAL_PRESENTATION_INTEGER_SCALE && target.size() != current_target_pixels()) {
+        mode = SDL_LOGICAL_PRESENTATION_LETTERBOX; // a smaller layer may not fit a whole multiple
+    }
+    const ViewportState view = capture_viewport();
+    _render_target_stack.push_back(SDL_GetRenderTarget(_handle));
+    _layer_stack.push_back(true);
+    SDL_SetRenderTarget(_handle, sdl->handle());
+    SDL_SetRenderLogicalPresentation(_handle, w, h, mode);
+    restore_viewport(view);
+    Uint8 r = 0, g = 0, b = 0, a = 0;
+    SDL_GetRenderDrawColor(_handle, &r, &g, &b, &a);
+    SDL_SetRenderDrawColor(_handle, 0, 0, 0, 0);
+    SDL_RenderClear(_handle); // all of it, whatever the viewport and clip
+    SDL_SetRenderDrawColor(_handle, r, g, b, a);
+    return true;
+}
+
+std::optional<IRenderer2DBackend::LayerBounds> SdlRenderer2DBackend::pop_layer_target() {
+    if (_layer_stack.empty() || !_layer_stack.back()) {
+        return std::nullopt;
+    }
+    flush_batch();
+    // All of the presentation, in draw coordinates (from the viewport's
+    // origin) and in the layer's pixels.
+    int w = 0, h = 0;
+    SDL_RendererLogicalPresentation mode = SDL_LOGICAL_PRESENTATION_DISABLED;
+    SDL_GetRenderLogicalPresentation(_handle, &w, &h, &mode);
+    SDL_FRect pixels{};
+    SDL_GetRenderLogicalPresentationRect(_handle, &pixels);
+    SDL_Rect viewport{};
+    SDL_GetRenderViewport(_handle, &viewport);
+    SDL_SetRenderTarget(_handle, _render_target_stack.back());
+    _render_target_stack.pop_back();
+    _layer_stack.pop_back();
+    return LayerBounds{.dest = {static_cast<f32>(-viewport.x), static_cast<f32>(-viewport.y), static_cast<f32>(w),
+                                static_cast<f32>(h)},
+                       .source = {pixels.x, pixels.y, pixels.w, pixels.h}};
+}
+
+Vec2i SdlRenderer2DBackend::current_target_pixels() const {
+    int w = 0, h = 0;
+    SDL_GetCurrentRenderOutputSize(_handle, &w, &h);
+    return {w, h};
+}
+
+namespace {
+
+// `rect` of a target texture as RGBA bytes, read with its view reset (the
+// target is done with: a popped layer).
+bool read_target(SDL_Renderer* renderer, SDL_Texture* target, const SDL_Rect& rect, std::vector<u8>& out) {
+    SDL_SetRenderTarget(renderer, target);
+    SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    SDL_SetRenderViewport(renderer, nullptr);
+    SDL_SetRenderClipRect(renderer, nullptr);
+    SDL_Surface* surface = SDL_RenderReadPixels(renderer, &rect);
+    if (!surface) {
+        return false;
+    }
+    SDL_Surface* rgba = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(surface);
+    if (!rgba) {
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(rgba->w) * static_cast<std::size_t>(rgba->h) * 4u);
+    const auto* src = static_cast<const u8*>(rgba->pixels);
+    for (int y = 0; y < rgba->h; ++y) {
+        std::memcpy(out.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(rgba->w) * 4u,
+                    src + static_cast<std::ptrdiff_t>(y) * rgba->pitch, static_cast<std::size_t>(rgba->w) * 4u);
+    }
+    SDL_DestroySurface(rgba);
+    return true;
+}
+
+} // namespace
+
+bool SdlRenderer2DBackend::draw_masked_by_blending(SDL_Texture* content, SDL_Texture* mask, Rectf source, Rectf dest,
+                                                   Color tint, const MaskOptions& options) {
+    // The content times the mask's alpha (or what it leaves) is a blend: the
+    // mask drawn over the content keeps that much of each channel. Renderers
+    // that blend so (not the software one) need no read back.
+    if (options.source != MaskSource::Alpha || options.mode != MaskMode::Alpha) {
+        return false;
+    }
+    const SDL_BlendFactor keep = options.invert ? SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_BLENDFACTOR_SRC_ALPHA;
+    const SDL_BlendMode multiply = SDL_ComposeCustomBlendMode(SDL_BLENDFACTOR_ZERO, keep, SDL_BLENDOPERATION_ADD,
+                                                              SDL_BLENDFACTOR_ZERO, keep, SDL_BLENDOPERATION_ADD);
+    SDL_BlendMode previous = SDL_BLENDMODE_NONE;
+    SDL_GetTextureBlendMode(mask, &previous);
+    if (!SDL_SetTextureBlendMode(mask, multiply)) {
+        return false;
+    }
+    SDL_Texture* current = SDL_GetRenderTarget(_handle);
+    SDL_SetRenderTarget(_handle, content); // a popped layer: its view is free to reset
+    SDL_SetRenderLogicalPresentation(_handle, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    SDL_SetRenderViewport(_handle, nullptr);
+    SDL_SetRenderClipRect(_handle, nullptr);
+    const SDL_FRect pixels{source.x, source.y, source.w, source.h};
+    SDL_SetTextureColorMod(mask, 255, 255, 255);
+    SDL_SetTextureAlphaMod(mask, 255);
+    const bool drawn = SDL_RenderTexture(_handle, mask, &pixels, &pixels);
+    SDL_SetTextureBlendMode(mask, previous);
+    SDL_SetRenderTarget(_handle, current);
+    if (!drawn) {
+        return false;
+    }
+    SDL_SetTextureColorMod(content, tint.r, tint.g, tint.b);
+    SDL_SetTextureAlphaMod(content, tint.a);
+    const SDL_FRect dst = to_sdl_frect(dest);
+    SDL_RenderTexture(_handle, content, &pixels, &dst);
+    SDL_SetTextureColorMod(content, 255, 255, 255);
+    SDL_SetTextureAlphaMod(content, 255);
+    ++_stats.texture_draws_submitted;
+    return true;
+}
+
+bool SdlRenderer2DBackend::draw_masked(const Texture& content, const Texture& mask, Rectf source, Rectf dest,
+                                       Color tint, const MaskOptions& options) {
+    const auto* c = as_sdl(content.backend().get());
+    const auto* m = as_sdl(mask.backend().get());
+    if (!c || !m || !c->handle() || !m->handle()) {
+        return false;
+    }
+    flush_batch();
+    if (draw_masked_by_blending(c->handle(), m->handle(), source, dest, tint, options)) {
+        return true;
+    }
+    const Vec2i size = content.size();
+    const int x0 = std::clamp(static_cast<int>(std::floor(source.x)), 0, size.x);
+    const int y0 = std::clamp(static_cast<int>(std::floor(source.y)), 0, size.y);
+    const int x1 = std::clamp(static_cast<int>(std::ceil(source.x + source.w)), 0, size.x);
+    const int y1 = std::clamp(static_cast<int>(std::ceil(source.y + source.h)), 0, size.y);
+    if (x1 <= x0 || y1 <= y0) {
+        return true;
+    }
+    const SDL_Rect rect{x0, y0, x1 - x0, y1 - y0};
+    SDL_Texture* current = SDL_GetRenderTarget(_handle);
+    std::vector<u8> pixels;
+    std::vector<u8> coverage;
+    const bool read = read_target(_handle, c->handle(), rect, pixels) && read_target(_handle, m->handle(), rect, coverage);
+    SDL_SetRenderTarget(_handle, current);
+    if (!read || pixels.size() != coverage.size()) {
+        return true;
+    }
+    // Premultiplied: every channel scales by the coverage.
+    constexpr f32 inv = 1.0f / 255.0f;
+    for (std::size_t i = 0; i < pixels.size(); i += 4) {
+        const f32 k = mask_coverage(options, coverage[i] * inv, coverage[i + 1] * inv, coverage[i + 2] * inv,
+                                    coverage[i + 3] * inv);
+        for (std::size_t j = 0; j < 4; ++j) {
+            pixels[i + j] = static_cast<u8>(static_cast<f32>(pixels[i + j]) * k + 0.5f);
+        }
+    }
+    if (!_mask_scratch || _mask_scratch_size.x < rect.w || _mask_scratch_size.y < rect.h) {
+        if (_mask_scratch) {
+            SDL_DestroyTexture(_mask_scratch);
+        }
+        _mask_scratch_size = {std::max(rect.w, _mask_scratch_size.x), std::max(rect.h, _mask_scratch_size.y)};
+        _mask_scratch = SDL_CreateTexture(_handle, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING,
+                                          _mask_scratch_size.x, _mask_scratch_size.y);
+        if (!_mask_scratch) {
+            _mask_scratch_size = {};
+            return true;
+        }
+        SDL_SetTextureBlendMode(_mask_scratch, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+    }
+    const SDL_Rect area{0, 0, rect.w, rect.h};
+    SDL_UpdateTexture(_mask_scratch, &area, pixels.data(), rect.w * 4);
+    SDL_SetTextureScaleMode(_mask_scratch, SDL_SCALEMODE_LINEAR);
+    SDL_SetTextureColorMod(_mask_scratch, tint.r, tint.g, tint.b);
+    SDL_SetTextureAlphaMod(_mask_scratch, tint.a);
+    const SDL_FRect src{source.x - static_cast<f32>(x0), source.y - static_cast<f32>(y0), source.w, source.h};
+    const SDL_FRect dst = to_sdl_frect(dest);
+    SDL_RenderTexture(_handle, _mask_scratch, &src, &dst);
+    ++_stats.texture_draws_submitted;
+    return true;
 }
 
 void SdlRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode) {

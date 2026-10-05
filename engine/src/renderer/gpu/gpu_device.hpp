@@ -54,6 +54,10 @@ public:
     GpuTexture create_render_texture(u32 width, u32 height,
                                      SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID);
     GpuTexture create_texture_from_rgba(const u8* pixels, u32 width, u32 height);
+    // A depth-stencil target of depth_stencil_format() (stencil clips).
+    GpuTexture create_depth_stencil(u32 width, u32 height);
+    // The depth-stencil format this device draws into, INVALID if none.
+    SDL_GPUTextureFormat depth_stencil_format() const;
     // A sampled texture of `format` (`texel_bytes` per texel) filled from `pixels`,
     // or with zeros when null. RGBA8 textures can also be render targets.
     GpuTexture create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,

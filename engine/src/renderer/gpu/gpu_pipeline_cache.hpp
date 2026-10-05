@@ -22,20 +22,27 @@ public:
     void init(SDL_GPUDevice* device) { _device = device; }
 
     // Returns a cached pipeline or creates one. Returns nullptr on failure.
+    // `depth_stencil`: the format of the stencil attached to the pass (INVALID:
+    // none), which `stencil` tests or writes.
     SDL_GPUGraphicsPipeline* get(SDL_GPUShader* vertex, SDL_GPUShader* fragment,
                                  GpuBlendMode blend, SDL_GPUTextureFormat target_format,
-                                 GpuVertexLayout layout = GpuVertexLayout::Triangles);
+                                 GpuVertexLayout layout = GpuVertexLayout::Triangles,
+                                 SDL_GPUTextureFormat depth_stencil = SDL_GPU_TEXTUREFORMAT_INVALID,
+                                 GpuStencilOp stencil = GpuStencilOp::None);
 
     void destroy();
     // Releases the pipelines made with `fragment` (it is being replaced). SDL
     // keeps them until the GPU is done with them.
     void forget(SDL_GPUShader* fragment);
 
-    // Calls fn(vertex, fragment, blend, format, layout) for each pipeline made.
+    // Calls fn(vertex, fragment, blend, format, layout) for each pipeline made
+    // without a stencil (those with one are made when a clip first needs them).
     template<typename Fn>
     void for_each(Fn&& fn) const {
         for (const Entry& e : _entries) {
-            fn(e.vertex, e.fragment, e.blend, e.format, e.layout);
+            if (e.depth_stencil == SDL_GPU_TEXTUREFORMAT_INVALID) {
+                fn(e.vertex, e.fragment, e.blend, e.format, e.layout);
+            }
         }
     }
 
@@ -46,6 +53,8 @@ private:
         GpuBlendMode blend = GpuBlendMode::Alpha;
         SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
         GpuVertexLayout layout = GpuVertexLayout::Triangles;
+        SDL_GPUTextureFormat depth_stencil = SDL_GPU_TEXTUREFORMAT_INVALID;
+        GpuStencilOp stencil = GpuStencilOp::None;
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
     };
 

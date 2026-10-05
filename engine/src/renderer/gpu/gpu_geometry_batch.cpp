@@ -66,7 +66,7 @@ void GpuGeometryBatch::push_instances(std::span<const GpuSpriteInstance> instanc
     if (!_ranges.empty()) {
         Range& last = _ranges.back();
         if (last.layout == GpuVertexLayout::SpriteInstances && last.texture == texture && last.sampler == sampler && last.blend == blend &&
-            same_scissor(last.scissor, scissor)) {
+            last.stencil == _stencil_op && last.stencil_ref == _stencil_ref && same_scissor(last.scissor, scissor)) {
             last.vertex_count += static_cast<u32>(instances.size());
             return;
         }
@@ -79,6 +79,8 @@ void GpuGeometryBatch::push_instances(std::span<const GpuSpriteInstance> instanc
     range.first_vertex = first;
     range.vertex_count = static_cast<u32>(instances.size());
     range.layout = GpuVertexLayout::SpriteInstances;
+    range.stencil = _stencil_op;
+    range.stencil_ref = _stencil_ref;
     _ranges.push_back(range);
 }
 
@@ -182,6 +184,22 @@ void GpuGeometryBatch::push_sdf(std::span<const GpuSdfInstance> instances, SDL_G
               scissor, blend, nullptr, 0, nullptr, {}, {});
 }
 
+void GpuGeometryBatch::push_stencil(std::span<const GpuVertex> vertices, bool quads, GpuStencilOp op, u8 reference,
+                                    SDL_GPUShader* fragment, SDL_GPUTexture* texture, SDL_Rect scissor,
+                                    const void* uniform, u32 uniform_size, SDL_GPUSampler* sampler) {
+    if (vertices.empty()) {
+        return;
+    }
+    const u32 first = static_cast<u32>(_vertices.size());
+    _vertices.insert(_vertices.end(), vertices.begin(), vertices.end());
+    const GpuStencilOp op_before = _stencil_op;
+    const u8 ref_before = _stencil_ref;
+    set_stencil(op, reference);
+    add_range(GpuVertexLayout::Triangles, quads, first, static_cast<u32>(vertices.size()), fragment, texture, scissor,
+              GpuBlendMode::Alpha, uniform, uniform_size, sampler, {}, {});
+    set_stencil(op_before, ref_before);
+}
+
 void GpuGeometryBatch::add_range(GpuVertexLayout layout, bool quads, u32 first, u32 count, SDL_GPUShader* fragment,
                                  SDL_GPUTexture* texture, SDL_Rect scissor, GpuBlendMode blend, const void* uniform,
                                  u32 uniform_size, SDL_GPUSampler* sampler,
@@ -205,6 +223,8 @@ void GpuGeometryBatch::add_range(GpuVertexLayout layout, bool quads, u32 first, 
                                          _extra_bindings.begin() + _ranges.back().extra_offset,
                                          same_binding) &&
                               _ranges.back().blend == blend &&
+                              _ranges.back().stencil == _stencil_op &&
+                              _ranges.back().stencil_ref == _stencil_ref &&
                               _ranges.back().storage_count == storage.size() &&
                               std::equal(storage.begin(), storage.end(),
                                          _storage_buffers.begin() + _ranges.back().storage_offset) &&
@@ -230,6 +250,8 @@ void GpuGeometryBatch::add_range(GpuVertexLayout layout, bool quads, u32 first, 
     range.vertex_count = count;
     range.layout = layout;
     range.quads = quads;
+    range.stencil = _stencil_op;
+    range.stencil_ref = _stencil_ref;
     if (uniform && uniform_size > 0) {
         range.uniform_offset = static_cast<u32>(_uniform_bytes.size());
         range.uniform_size = uniform_size;
@@ -255,9 +277,19 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     color_target.store_op = SDL_GPU_STOREOP_STORE;
     color_target.clear_color = _clear;
 
+    // The stencil, when attached: kept for later passes (the clips stay open).
+    SDL_GPUDepthStencilTargetInfo stencil_target{};
+    stencil_target.texture = ctx.depth_stencil;
+    stencil_target.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    stencil_target.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    stencil_target.stencil_load_op = ctx.clear_stencil ? SDL_GPU_LOADOP_CLEAR : SDL_GPU_LOADOP_LOAD;
+    stencil_target.stencil_store_op = SDL_GPU_STOREOP_STORE;
+    stencil_target.clear_stencil = 0;
+    const SDL_GPUDepthStencilTargetInfo* depth_stencil = ctx.depth_stencil ? &stencil_target : nullptr;
+
     if (empty() || _ranges.empty()) {
         // Nothing drawn — still honor the clear so the target is initialized.
-        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &color_target, 1, nullptr);
+        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &color_target, 1, depth_stencil);
         SDL_EndGPURenderPass(pass);
         reset();
         return;
@@ -297,7 +329,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
                                              static_cast<u32>(indices.size() * sizeof(u16)));
     }
 
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &color_target, 1, nullptr);
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(frame.command_buffer(), &color_target, 1, depth_stencil);
     // Quads draw through the static 16-bit indices, shapes through their own
     // 32-bit ones: which is bound now.
     enum class Indices { None, Quads, Shapes } bound_indices = Indices::None;
@@ -339,20 +371,32 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
     bool have_scissor = false;
     SDL_GPUTextureSamplerBinding bound_bindings[MaxShaderSamplers]{};
     u32 bound_binding_count = 0;
+    std::optional<u8> bound_reference;
 
     for (const Range& range : _ranges) {
-        SDL_GPUShader* fragment = ctx.override_fragment ? ctx.override_fragment
-                                : range.fragment         ? range.fragment
-                                                         : ctx.default_fragment;
-        const GpuBlendMode blend = ctx.override_fragment ? GpuBlendMode::Additive : range.blend;
+        // Stencil writes keep their own shader in the overdraw view (they draw no colour).
+        const bool stencil_write = range.stencil == GpuStencilOp::Increment || range.stencil == GpuStencilOp::Decrement;
+        const bool overridden = ctx.override_fragment && !stencil_write;
+        SDL_GPUShader* fragment = overridden      ? ctx.override_fragment
+                                : range.fragment ? range.fragment
+                                                 : ctx.default_fragment;
+        const GpuBlendMode blend = overridden ? GpuBlendMode::Additive : range.blend;
         SDL_GPUShader* vertex = range.layout == GpuVertexLayout::SpriteInstances ? ctx.instance_shader
                               : range.layout == GpuVertexLayout::ShaderVertices  ? ctx.shader_vertex_shader
                               : range.layout == GpuVertexLayout::ShapeVertices   ? ctx.shape_vertex_shader
                               : range.layout == GpuVertexLayout::SdfInstances    ? ctx.sdf_vertex_shader
                                                                                  : ctx.vertex_shader;
-        SDL_GPUGraphicsPipeline* pipeline = cache.get(vertex, fragment, blend, ctx.target_format, range.layout);
+        // Without a stencil attached, no range tests it.
+        const GpuStencilOp stencil = ctx.depth_stencil ? range.stencil : GpuStencilOp::None;
+        SDL_GPUGraphicsPipeline* pipeline =
+            cache.get(vertex, fragment, blend, ctx.target_format, range.layout,
+                      ctx.depth_stencil ? ctx.depth_stencil_format : SDL_GPU_TEXTUREFORMAT_INVALID, stencil);
         if (!pipeline) {
             continue;
+        }
+        if (stencil != GpuStencilOp::None && bound_reference != range.stencil_ref) {
+            SDL_SetGPUStencilReference(pass, range.stencil_ref);
+            bound_reference = range.stencil_ref;
         }
         bool pipeline_changed = false;
         if (pipeline != bound_pipeline) {
@@ -372,7 +416,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
             have_scissor = true;
         }
 
-        if (range.uniform_size > 0 && !ctx.override_fragment) {
+        if (range.uniform_size > 0 && !overridden) {
             SDL_PushGPUFragmentUniformData(frame.command_buffer(), 0,
                                            _uniform_bytes.data() + range.uniform_offset,
                                            range.uniform_size);
@@ -381,7 +425,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
         SDL_GPUTextureSamplerBinding tex_bindings[MaxShaderSamplers]{};
         tex_bindings[0].texture = range.texture ? range.texture : ctx.white_texture;
         tex_bindings[0].sampler = range.sampler ? range.sampler : ctx.sampler;
-        const u32 binding_count = ctx.override_fragment ? 1 : 1 + range.extra_count;
+        const u32 binding_count = overridden ? 1 : 1 + range.extra_count;
         for (u32 i = 0; i < range.extra_count; ++i) {
             const SDL_GPUTextureSamplerBinding& extra = _extra_bindings[range.extra_offset + i];
             tex_bindings[1 + i].texture = extra.texture ? extra.texture : ctx.white_texture;
@@ -396,7 +440,7 @@ void GpuGeometryBatch::flush(GpuFrame& frame, GpuDevice& device, GpuPipelineCach
             std::copy(tex_bindings, tex_bindings + binding_count, bound_bindings);
             bound_binding_count = binding_count;
         }
-        if (range.storage_count > 0 && !ctx.override_fragment) {
+        if (range.storage_count > 0 && !overridden) {
             SDL_BindGPUFragmentStorageBuffers(pass, 0, _storage_buffers.data() + range.storage_offset,
                                               range.storage_count);
         }

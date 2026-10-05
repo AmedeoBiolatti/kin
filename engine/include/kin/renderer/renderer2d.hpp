@@ -3,6 +3,8 @@
 #include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
 #include <kin/platform/window.hpp>
+#include <kin/renderer/clip.hpp>
+#include <kin/renderer/mask.hpp>
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/renderer/color.hpp>
@@ -119,6 +121,21 @@ public:
         Renderer2D* _renderer = nullptr;
     };
 
+    // A clip or mask (scoped_clip, scoped_mask), popped when the guard goes.
+    class ClipGuard {
+    public:
+        ClipGuard() = default;
+        explicit ClipGuard(Renderer2D* renderer) : _renderer(renderer) {}
+        ~ClipGuard();
+        ClipGuard(const ClipGuard&) = delete;
+        ClipGuard& operator=(const ClipGuard&) = delete;
+        ClipGuard(ClipGuard&& other) noexcept : _renderer(std::exchange(other._renderer, nullptr)) {}
+        ClipGuard& operator=(ClipGuard&&) noexcept = delete;
+
+    private:
+        Renderer2D* _renderer = nullptr;
+    };
+
     // Binds a render target for the guard's scope (push in ctor, pop in dtor).
     // Distinct from the pool below: this manages which target is *bound*, not
     // target lifetime. Mirrors ViewportGuard.
@@ -194,8 +211,9 @@ public:
     //
     // Only what the draws covered is laid over (and counted as overdraw), not
     // the whole target; `resolution` below 1 draws soft content (shadows, glow,
-    // light) at a fraction of the pixels. Layers nest. SDL_GPU; elsewhere the
-    // draws go straight to the current target (opacity not applied).
+    // light) at a fraction of the pixels. Layers nest. SDL_GPU and SDL's
+    // renderer; elsewhere the draws go straight to the current target (opacity
+    // not applied).
     struct LayerOptions {
         f32 opacity = 1.0f;
         f32 resolution = 1.0f; // of the current target's pixels, each way
@@ -393,8 +411,42 @@ public:
     void reset_viewport();
     void push_viewport(Rectf rect);
     void pop_viewport();
+    // Clips and masks: one stack, each popped by pop_clip() (or its guard).
+    //
+    //   push_clip(rect)                 the scissor: a rectangle in untransformed
+    //                                   coordinates, to whole pixels; free
+    //   push_clip(path, rule, edge)     inside a path, under the transform,
+    //                                   anti-aliased (or Hard: see ClipEdge)
+    //   push_mask(draw, options)        where `draw` draws: anything, under the
+    //                                   transform, read as `options` say
+    //   push_mask(texture, dest, opts)  a texture stretched over `dest`
+    //   push_clip(clip)                 any of these, as a kin::ClipRegion value
+    //
+    //     { auto clip = renderer.scoped_clip(kin::Path::circle(eye, 40.0f));
+    //       renderer.draw_texture(iris, iris_rect); }
+    //     { auto lit = renderer.scoped_mask([&](kin::Renderer2D& r) { r.draw_texture(light, light_rect); },
+    //                                       {.source = kin::MaskSource::Luminance});
+    //       draw_level(renderer); }
+    //
+    // Each nests in those open: a pixel shows as far as all of them let it.
+    // A path or mask draws through two pooled layers (the mask, then what it
+    // masks) and lays the second over through the first: a render pass each and
+    // the pixels they cover, so clip to rectangles where they will do (a
+    // rectangular path, unturned, clips as one). capabilities().masks: SDL_GPU,
+    // and SDL's renderer, which lays them over on the CPU (slow). Elsewhere a
+    // path clips to its bounds and a mask lets everything through.
     void push_clip(Rectf rect);
+    void push_clip(const Path& path, FillRule rule = FillRule::NonZero, ClipEdge edge = ClipEdge::Smooth);
+    void push_clip(const ClipRegion& clip);
+    void push_mask(const std::function<void(Renderer2D&)>& draw_mask, MaskOptions options = {});
+    void push_mask(const Texture& mask, Rectf dest, MaskOptions options = {});
     void pop_clip();
+    [[nodiscard]] ClipGuard scoped_clip(Rectf rect);
+    [[nodiscard]] ClipGuard scoped_clip(const Path& path, FillRule rule = FillRule::NonZero,
+                                        ClipEdge edge = ClipEdge::Smooth);
+    [[nodiscard]] ClipGuard scoped_clip(const ClipRegion& clip);
+    [[nodiscard]] ClipGuard scoped_mask(const std::function<void(Renderer2D&)>& draw_mask, MaskOptions options = {});
+    [[nodiscard]] ClipGuard scoped_mask(const Texture& mask, Rectf dest, MaskOptions options = {});
     ViewportGuard scoped_viewport(Rectf rect);
     NativeCoordinateGuard scoped_native_coordinates();
 
@@ -483,11 +535,16 @@ private:
     struct OpenLayer;
     std::vector<std::unique_ptr<OpenLayer>> _layers;
     void end_layer();
+    // Open clips and masks, innermost last.
+    struct OpenClip;
+    std::vector<std::unique_ptr<OpenClip>> _clips;
+    void end_mask(OpenClip& clip);
     BlendMode _blend_mode = BlendMode::Alpha;
     // The shapes drawn as they are called: reused buffers, and how finely to
     // tessellate under the current transform.
     ShapeMesh _shape_scratch;
     std::vector<PathContour> _contour_scratch;
+    std::vector<Vec2f> _stencil_scratch; // a hard clip's triangles
     struct ShapeDetail {
         f32 tolerance = 0.25f;
         f32 fringe = 1.0f;

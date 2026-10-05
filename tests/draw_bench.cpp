@@ -527,6 +527,61 @@ int layers(int frames) {
     return 0;
 }
 
+// Cards with rounded corners, each clipping 40 quads: unclipped, to a
+// rectangle (the scissor), to their rounded outline (a mask each), and to it
+// with a hard edge (the stencil, on SDL_GPU).
+int masks(int frames, int cards) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "mask-bench", .width = 1920, .height = 1080, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    const char* names[4] = {"unclipped", "rectangle clips", "rounded clips", "hard rounded"};
+    for (int mode = 0; mode < 4; ++mode) {
+        std::vector<double> record;
+        const auto frame = [&] {
+            const auto t0 = clock::now();
+            renderer->clear(kin::Color::rgb(30, 30, 40));
+            for (int c = 0; c < cards; ++c) {
+                const kin::Rectf card{static_cast<float>(20 + (c % 8) * 235), static_cast<float>(20 + (c / 8 % 7) * 150),
+                                      220.0f, 140.0f};
+                std::optional<kin::Renderer2D::ClipGuard> clip;
+                if (mode == 1) {
+                    clip.emplace(renderer->scoped_clip(card));
+                } else if (mode >= 2) {
+                    clip.emplace(renderer->scoped_clip(kin::Path::rounded_rect(card, 16.0f), kin::FillRule::NonZero,
+                                                       mode == 3 ? kin::ClipEdge::Hard : kin::ClipEdge::Smooth));
+                }
+                for (int i = 0; i < 40; ++i) {
+                    const float x = card.x - 20.0f + static_cast<float>((i * 37) % 240);
+                    const float y = card.y - 20.0f + static_cast<float>((i * 53) % 160);
+                    renderer->fill_rect(kin::Rectf{x, y, 40.0f, 30.0f}, kin::Color::rgba(200, 120 + i, 60, 200));
+                }
+            }
+            record.push_back(ms(t0, clock::now()));
+            renderer->present();
+        };
+        for (int f = 0; f < 10; ++f) {
+            frame();
+        }
+        record.clear();
+        std::vector<kin::u8> one;
+        kin::Vec2i one_size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+        const auto t0 = clock::now();
+        for (int f = 0; f < frames; ++f) {
+            frame();
+        }
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+        std::ranges::sort(record);
+        std::printf("%s: %d cards, %-16s recorded in %7.3f ms, back-to-back frame %7.3f ms\n",
+                    std::string(renderer->backend_name()).c_str(), cards, names[mode], record[record.size() / 2],
+                    ms(t0, clock::now()) / frames);
+    }
+    return 0;
+}
+
 // XC-121's other pattern: a 288 x 288 target drawn over 44 times a frame (layers
 // of 200 small quads covering it), then shown: every frame, or cached and drawn
 // only when its key changes (never, here).
@@ -594,6 +649,9 @@ int main(int argc, char** argv) {
         return layers(frames);
     }
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
+    if (argc > 3 && std::string_view{argv[3]} == "masks") {
+        return masks(frames, quads);
+    }
     if (argc > 3 && std::string_view{argv[3]} == "shapes") {
         return shapes(frames, quads);
     }

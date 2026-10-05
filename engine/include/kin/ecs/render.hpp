@@ -13,6 +13,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
 namespace kin {
 
@@ -118,6 +120,23 @@ struct ShapeRenderer {
     bool static_renderable = false;
 };
 
+// Cuts the renderers of its entity and of every entity below it (ChildOf) to
+// `clip`, given in the entity's own space: it moves, turns and scales with it.
+// They draw together, as one group at this layer and order (sorted among
+// themselves by their own), so a sorted world cannot interleave other things
+// between them. Groups nest. Clipped renderers are collected with the dynamic
+// ones, whatever their static_renderable says.
+//
+//     window.set(kin::ClipGroup{.clip = kin::ClipRegion::to_path(kin::Path::rounded_rect({-60, -40, 120, 80}, 12))});
+//     // the window's children only show inside its rounded frame
+struct ClipGroup {
+    ClipRegion clip;
+    i32 layer = layer_value(RenderLayer::World);
+    i32 order = 0;
+    bool y_sort = false;
+    f32 sort_y_offset = 0.0f;
+};
+
 struct StaticRenderable {
     i32 marker = 1;
 };
@@ -178,6 +197,13 @@ public:
 private:
     // TextureRenderer entities (static or dynamic ones), in parallel when options.jobs is set.
     void collect_textures(RenderQueue& queue, const SpriteRenderOptions& options, bool statics);
+    // Clip groups (ClipGroup): each one's queue, made or reused for this collect.
+    RenderQueue& group_queue(flecs::entity owner, const SpriteRenderOptions& options);
+    // Where row `row` of a table goes: its group's queue (its own ClipGroup or
+    // the nearest above it, field `field`), or `queue`.
+    RenderQueue& route(RenderQueue& queue, flecs::iter& it, std::size_t row, i8 field, const SpriteRenderOptions& options);
+    // Each group used, as one command in the group above it or in `queue`.
+    void submit_groups(RenderQueue& queue, const SpriteRenderOptions& options);
 
     flecs::world* _world = nullptr;
     flecs::observer _transform_observer;
@@ -193,13 +219,18 @@ private:
     // Own transform, local transform, and the parent's world transform (optional,
     // cascaded so parents are visited before their children).
     flecs::query<WorldTransform, const Transform2D, const WorldTransform> _transforms;
-    flecs::query<const Transform2D, const WorldTransform, const SpriteRenderer> _sprites;
-    flecs::query<const Transform2D, const WorldTransform, const TextureRenderer> _textures;
-    flecs::query<const Transform2D, const WorldTransform, const RectRenderer> _rects;
-    flecs::query<const Transform2D, const WorldTransform, const LineRenderer> _lines;
-    flecs::query<const Transform2D, const WorldTransform, const ShapeRenderer> _shapes;
-    flecs::query<const ParticleSystemComponent> _particle_systems;
-    flecs::query<const ParticleFieldComponent> _particle_fields;
+    // Each renderer with its ClipGroup, on itself or the nearest entity above
+    // (optional: field 3, or 1 for particles).
+    flecs::query<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*> _sprites;
+    flecs::query<const Transform2D, const WorldTransform, const TextureRenderer, const ClipGroup*> _textures;
+    flecs::query<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*> _rects;
+    flecs::query<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*> _lines;
+    flecs::query<const Transform2D, const WorldTransform, const ShapeRenderer, const ClipGroup*> _shapes;
+    flecs::query<const ParticleSystemComponent, const ClipGroup*> _particle_systems;
+    flecs::query<const ParticleFieldComponent, const ClipGroup*> _particle_fields;
+    // Clip groups' queues by owner; those used by the current collect, in order.
+    std::unordered_map<u64, std::shared_ptr<RenderQueue>> _group_queues;
+    std::vector<u64> _groups_used;
 };
 
 class StaticRenderCache {

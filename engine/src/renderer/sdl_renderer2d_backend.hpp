@@ -74,6 +74,15 @@ public:
     void push_clip(Rectf rect) override;
     void pop_clip() override;
 
+    // Layers draw into a target set up as the current one is (presentation,
+    // viewport, clip); SDL keeps no bounds, so all of it is laid over.
+    bool push_layer_target(const RenderTarget& target) override;
+    std::optional<LayerBounds> pop_layer_target() override;
+    Vec2i current_target_pixels() const override;
+    // On the CPU: both layers read back, multiplied, uploaded and drawn.
+    bool draw_masked(const Texture& content, const Texture& mask, Rectf source, Rectf dest, Color tint,
+                     const MaskOptions& options) override;
+
 private:
     enum class BatchKind {
         None,
@@ -106,6 +115,9 @@ private:
     ViewportState capture_viewport() const;
     void restore_viewport(const ViewportState& state);
     void apply_logical_presentation();
+    // draw_masked() as a blend, where the renderer has it and the options allow.
+    bool draw_masked_by_blending(SDL_Texture* content, SDL_Texture* mask, Rectf source, Rectf dest, Color tint,
+                                 const MaskOptions& options);
     void flush_batch();
     void begin_batch(BatchKind kind, SDL_Texture* texture, Texture retained_texture = {});
     void append_quad(Rectf dest, Rectf source, Vec2i texture_size, Color color, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f});
@@ -133,6 +145,9 @@ private:
     LogicalPresentationState _logical;         // what the game asked for
     LogicalPresentationState _applied_logical; // what SDL has; may differ at 1:1
     std::vector<SDL_Texture*> _render_target_stack;
+    std::vector<bool> _layer_stack; // for each pushed target, whether a layer's
+    SDL_Texture* _mask_scratch = nullptr; // draw_masked's result, streamed
+    Vec2i _mask_scratch_size{};
     GeometryBatch _batch;
     BlendMode _blend = BlendMode::Alpha;
     bool _min_max_blend = false;  // the driver takes BlendMode::Max and Min

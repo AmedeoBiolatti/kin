@@ -7,6 +7,7 @@
 #include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
 
+#include <array>
 #include <optional>
 #include <span>
 #include <string>
@@ -69,6 +70,9 @@ public:
 
     static Path rect(Rectf rect);
     static Path rounded_rect(Rectf rect, f32 radius); // radius at most half the shorter side
+    // Each corner its own: top-left, top-right, bottom-right, bottom-left (as
+    // CSS), each at most half the shorter side.
+    static Path rounded_rect(Rectf rect, std::array<f32, 4> radii);
     static Path circle(Vec2f center, f32 radius);
     static Path ellipse(Vec2f center, Vec2f radii);
     static Path line(Vec2f a, Vec2f b);

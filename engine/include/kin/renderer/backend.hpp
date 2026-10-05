@@ -7,6 +7,7 @@
 #include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/gradient.hpp>
+#include <kin/renderer/mask.hpp>
 #include <kin/renderer/post_process.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
@@ -58,6 +59,8 @@ struct RendererBackendCapabilities {
     bool shapes = false;          // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
     bool shape_primitives = false; // draw_shape_primitives() draws primitives whole
     bool distance_fields = false;  // draw_distance_field() draws
+    bool masks = false;            // layers, and draw_masked() lays one over through another
+    bool stencil_clips = false;    // push_stencil_clip(): hard-edged clips without layers
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -155,6 +158,27 @@ public:
     };
     virtual bool push_layer_target(const RenderTarget&) { return false; }
     virtual std::optional<LayerBounds> pop_layer_target() { return std::nullopt; }
+    // Masks (Renderer2D::push_mask): lays `content`, a layer target, over the
+    // current target at `dest` (in draw coordinates, as a layer is laid), each
+    // pixel times the coverage `options` reads from the same pixel of `mask`,
+    // a layer target of the same size. `source` is `dest` in both targets'
+    // pixels; `tint` (premultiplied, as for a layer) scales the result.
+    virtual bool draw_masked(const Texture& /*content*/, const Texture& /*mask*/, Rectf /*source*/, Rectf /*dest*/,
+                             Color /*tint*/, const MaskOptions& /*options*/) {
+        return false;
+    }
+    // Stencil clips (capabilities().stencil_clips; Renderer2D's hard clips):
+    // until the matching pop, draws to the current target show only inside
+    // `triangles` (draw coordinates, under the transform: the pixels whose
+    // centres they cover), and inside those pushed before. False: not had.
+    virtual bool push_stencil_clip(std::span<const Vec2f> /*triangles*/) { return false; }
+    // Or inside the pixels of `mask` (a layer target, laid over at `dest` as by
+    // draw_masked()) where `options` reads full coverage (a Stencil mask).
+    virtual bool push_stencil_mask(const Texture& /*mask*/, Rectf /*source*/, Rectf /*dest*/,
+                                   const MaskOptions& /*options*/) {
+        return false;
+    }
+    virtual void pop_stencil_clip() {}
     // The current target's size in pixels (a layer's resolution is a share of it).
     virtual Vec2i current_target_pixels() const { return {}; }
     // Draws show how many times each pixel is shaded instead of themselves.

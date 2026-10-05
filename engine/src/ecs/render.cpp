@@ -147,14 +147,97 @@ WorldRenderState::WorldRenderState(flecs::world& world)
                       .term_at(2).parent().cascade().optional()
                       .cached()
                       .build()),
-      _sprites(world.query_builder<const Transform2D, const WorldTransform, const SpriteRenderer>().cached().build()),
-      _textures(world.query_builder<const Transform2D, const WorldTransform, const TextureRenderer>().cached().build()),
-      _rects(world.query_builder<const Transform2D, const WorldTransform, const RectRenderer>().cached().build()),
-      _lines(world.query_builder<const Transform2D, const WorldTransform, const LineRenderer>().cached().build()),
-      _shapes(world.query_builder<const Transform2D, const WorldTransform, const ShapeRenderer>().cached().build()),
-      _particle_systems(world.query_builder<const ParticleSystemComponent>().cached().build()),
-      _particle_fields(world.query_builder<const ParticleFieldComponent>().cached().build()) {
+      _sprites(world.query_builder<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*>()
+                   .term_at(3).self().up().cached().build()),
+      _textures(world.query_builder<const Transform2D, const WorldTransform, const TextureRenderer, const ClipGroup*>()
+                    .term_at(3).self().up().cached().build()),
+      _rects(world.query_builder<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*>()
+                 .term_at(3).self().up().cached().build()),
+      _lines(world.query_builder<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*>()
+                 .term_at(3).self().up().cached().build()),
+      _shapes(world.query_builder<const Transform2D, const WorldTransform, const ShapeRenderer, const ClipGroup*>()
+                  .term_at(3).self().up().cached().build()),
+      _particle_systems(world.query_builder<const ParticleSystemComponent, const ClipGroup*>()
+                            .term_at(1).self().up().cached().build()),
+      _particle_fields(world.query_builder<const ParticleFieldComponent, const ClipGroup*>()
+                           .term_at(1).self().up().cached().build()) {
 }
+
+RenderQueue& WorldRenderState::group_queue(flecs::entity owner, const SpriteRenderOptions& options) {
+    std::shared_ptr<RenderQueue>& queue = _group_queues[owner.id()];
+    if (std::find(_groups_used.begin(), _groups_used.end(), owner.id()) == _groups_used.end()) {
+        // A queue still held by a command of an earlier collect is left to it.
+        if (!queue || queue.use_count() > 1) {
+            queue = std::make_shared<RenderQueue>();
+        }
+        queue->clear();
+        queue->set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
+        _groups_used.push_back(owner.id());
+    }
+    return *queue;
+}
+
+RenderQueue& WorldRenderState::route(RenderQueue& queue, flecs::iter& it, std::size_t row, i8 field,
+                                     const SpriteRenderOptions& options) {
+    if (!it.is_set(field)) {
+        return queue;
+    }
+    const flecs::entity owner = it.src(field); // none when the entity holds the ClipGroup itself
+    return group_queue(owner ? owner : it.entity(row), options);
+}
+
+void WorldRenderState::submit_groups(RenderQueue& queue, const SpriteRenderOptions& options) {
+    // Groups found above others join the list as they are reached.
+    for (std::size_t i = 0; i < _groups_used.size(); ++i) {
+        const flecs::entity owner{*_world, _groups_used[i]};
+        const auto* group = owner.is_alive() ? owner.get<ClipGroup>() : nullptr;
+        if (!group) {
+            continue;
+        }
+        RenderQueue* into = &queue;
+        for (flecs::entity above = owner.parent(); above; above = above.parent()) {
+            if (above.has<ClipGroup>()) {
+                into = &group_queue(above, options);
+                break;
+            }
+        }
+        const WorldTransform t = world_transform(owner);
+        into->draw_group(key_for(group->layer, group->order, group->y_sort, t.pos.y + group->sort_y_offset),
+                         _group_queues[owner.id()], group->clip.transformed(Affine2::trs(t.pos, t.rotation, t.scale)));
+    }
+    _groups_used.clear();
+}
+
+namespace {
+
+// fn(it, row, world transform, renderer) for each row of a renderer query.
+template <typename R, typename Fn>
+void each_row(flecs::query<const Transform2D, const WorldTransform, const R, const ClipGroup*>& query, Fn&& fn) {
+    query.run([&](flecs::iter& it) {
+        while (it.next()) {
+            const auto world = it.field<const WorldTransform>(1);
+            const auto renderers = it.field<const R>(2);
+            for (const auto i : it) {
+                fn(it, static_cast<std::size_t>(i), world[i], renderers[i]);
+            }
+        }
+    });
+}
+
+// fn(it, row, particles) for each row of a particle query.
+template <typename P, typename Fn>
+void each_particles(flecs::query<const P, const ClipGroup*>& query, Fn&& fn) {
+    query.run([&](flecs::iter& it) {
+        while (it.next()) {
+            const auto particles = it.field<const P>(0);
+            for (const auto i : it) {
+                fn(it, static_cast<std::size_t>(i), particles[i]);
+            }
+        }
+    });
+}
+
+} // namespace
 
 void WorldRenderState::propagate_transforms() {
     // Tables come in hierarchy depth order (cascade), and every entity in a table
@@ -187,45 +270,48 @@ void WorldRenderState::collect_all(RenderQueue& queue,
                                    SpriteRenderOptions options) {
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
-    _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
-        if (!include || include(entity)) {
-            submit_sprite(queue, entity, transform, sprite, options.view);
+    const auto to = [&](flecs::iter& it, std::size_t i) -> RenderQueue& { return route(queue, it, i, 3, options); };
+    const auto wanted = [&](flecs::iter& it, std::size_t i) { return !include || include(it.entity(i)); };
+    each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
+        if (wanted(it, i)) {
+            submit_sprite(to(it, i), it.entity(i), t, r, options.view);
         }
     });
-    _textures.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const TextureRenderer& texture) {
-        if (!include || include(entity)) {
-            submit_texture(queue, entity, transform, texture, options.view);
+    each_row(_textures, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TextureRenderer& r) {
+        if (wanted(it, i)) {
+            submit_texture(to(it, i), it.entity(i), t, r, options.view);
         }
     });
-    _rects.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const RectRenderer& rect) {
-        if (!include || include(entity)) {
-            submit_rect(queue, entity, transform, rect, options.view);
+    each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
+        if (wanted(it, i)) {
+            submit_rect(to(it, i), it.entity(i), t, r, options.view);
         }
     });
-    _lines.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const LineRenderer& line) {
-        if (!include || include(entity)) {
-            submit_line(queue, entity, transform, line, options.view);
+    each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
+        if (wanted(it, i)) {
+            submit_line(to(it, i), it.entity(i), t, r, options.view);
         }
     });
-    _shapes.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const ShapeRenderer& shape) {
-        if (!include || include(entity)) {
-            submit_shape(queue, entity, transform, shape, options.view);
+    each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
+        if (wanted(it, i)) {
+            submit_shape(to(it, i), it.entity(i), t, r, options.view);
         }
     });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
-    _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
-        if (!include || include(entity)) {
-            KIN_DRAW_ENTITY(entity, "ParticleSystemComponent");
-            submit_particles(queue, particles);
+    each_particles(_particle_systems, [&](flecs::iter& it, std::size_t i, const ParticleSystemComponent& particles) {
+        if (wanted(it, i)) {
+            KIN_DRAW_ENTITY(it.entity(i), "ParticleSystemComponent");
+            submit_particles(route(queue, it, i, 1, options), particles);
         }
     });
-    _particle_fields.each([&](flecs::entity entity, const ParticleFieldComponent& field) {
-        if (!include || include(entity)) {
-            KIN_DRAW_ENTITY(entity, "ParticleFieldComponent");
-            submit_particles(queue, field);
+    each_particles(_particle_fields, [&](flecs::iter& it, std::size_t i, const ParticleFieldComponent& field) {
+        if (wanted(it, i)) {
+            KIN_DRAW_ENTITY(it.entity(i), "ParticleFieldComponent");
+            submit_particles(route(queue, it, i, 1, options), field);
         }
     });
+    submit_groups(queue, options);
     if (options.view) {
         queue.cull(*options.view, unculled);
         queue.cull(*options.view, 0, existing);
@@ -235,25 +321,27 @@ void WorldRenderState::collect_all(RenderQueue& queue,
 void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions options) {
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
-    _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
-        if (sprite.static_renderable) {
-            submit_sprite(queue, entity, transform, sprite, options.view);
+    // Clipped renderers are left to collect_dynamic(): their groups are made there.
+    const auto take = [](flecs::iter& it, bool is_static) { return is_static && !it.is_set(3); };
+    each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_sprite(queue, it.entity(i), t, r, options.view);
         }
     });
     collect_textures(queue, options, true);
-    _rects.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const RectRenderer& rect) {
-        if (rect.static_renderable) {
-            submit_rect(queue, entity, transform, rect, options.view);
+    each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_rect(queue, it.entity(i), t, r, options.view);
         }
     });
-    _lines.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const LineRenderer& line) {
-        if (line.static_renderable) {
-            submit_line(queue, entity, transform, line, options.view);
+    each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_line(queue, it.entity(i), t, r, options.view);
         }
     });
-    _shapes.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const ShapeRenderer& shape) {
-        if (shape.static_renderable) {
-            submit_shape(queue, entity, transform, shape, options.view);
+    each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_shape(queue, it.entity(i), t, r, options.view);
         }
     });
     if (options.view) {
@@ -314,6 +402,15 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
             const auto world = it.field<const WorldTransform>(1);
             const auto textures = it.field<const TextureRenderer>(2);
             const i32 rows = static_cast<i32>(it.count());
+            if (it.is_set(3)) {
+                // Clipped: all dynamic, each into its group's queue.
+                if (!statics) {
+                    for (const auto i : it) {
+                        submit_texture(route(queue, it, i, 3, options), it.entity(i), world[i], textures[i], options.view);
+                    }
+                }
+                continue;
+            }
             if (!options.jobs || rows < parallel_min) {
                 for (const auto i : it) {
                     if (textures[i].static_renderable == statics) {
@@ -393,37 +490,41 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
 void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions options) {
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
-    _sprites.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const SpriteRenderer& sprite) {
-        if (!sprite.static_renderable) {
-            submit_sprite(queue, entity, transform, sprite, options.view);
+    const auto to = [&](flecs::iter& it, std::size_t i) -> RenderQueue& { return route(queue, it, i, 3, options); };
+    // Clipped renderers are all dynamic: their groups are made here.
+    const auto take = [](flecs::iter& it, bool is_static) { return !is_static || it.is_set(3); };
+    each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_sprite(to(it, i), it.entity(i), t, r, options.view);
         }
     });
     collect_textures(queue, options, false);
-    _rects.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const RectRenderer& rect) {
-        if (!rect.static_renderable) {
-            submit_rect(queue, entity, transform, rect, options.view);
+    each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_rect(to(it, i), it.entity(i), t, r, options.view);
         }
     });
-    _lines.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const LineRenderer& line) {
-        if (!line.static_renderable) {
-            submit_line(queue, entity, transform, line, options.view);
+    each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_line(to(it, i), it.entity(i), t, r, options.view);
         }
     });
-    _shapes.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const ShapeRenderer& shape) {
-        if (!shape.static_renderable) {
-            submit_shape(queue, entity, transform, shape, options.view);
+    each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
+        if (take(it, r.static_renderable)) {
+            submit_shape(to(it, i), it.entity(i), t, r, options.view);
         }
     });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
-    _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
-        KIN_DRAW_ENTITY(entity, "ParticleSystemComponent");
-        submit_particles(queue, particles);
+    each_particles(_particle_systems, [&](flecs::iter& it, std::size_t i, const ParticleSystemComponent& particles) {
+        KIN_DRAW_ENTITY(it.entity(i), "ParticleSystemComponent");
+        submit_particles(route(queue, it, i, 1, options), particles);
     });
-    _particle_fields.each([&](flecs::entity entity, const ParticleFieldComponent& field) {
-        KIN_DRAW_ENTITY(entity, "ParticleFieldComponent");
-        submit_particles(queue, field);
+    each_particles(_particle_fields, [&](flecs::iter& it, std::size_t i, const ParticleFieldComponent& field) {
+        KIN_DRAW_ENTITY(it.entity(i), "ParticleFieldComponent");
+        submit_particles(route(queue, it, i, 1, options), field);
     });
+    submit_groups(queue, options);
     if (options.view) {
         queue.cull(*options.view, unculled);
         queue.cull(*options.view, 0, existing);
