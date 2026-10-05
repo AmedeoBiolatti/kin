@@ -64,7 +64,14 @@ struct GpuShaderVertex {
 
 // Which vertex input a pipeline reads: GpuVertex triangles, GpuSpriteInstance
 // quads (one per instance), or GpuShaderVertex triangles.
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices };
+// Shapes' vertices (Renderer2D::draw_shape), drawn indexed: 16 bytes.
+struct GpuShapeVertex {
+    f32 x = 0.0f, y = 0.0f;
+    u8 r = 255, g = 255, b = 255, a = 255;
+    f32 edge = 0.0f; // how far past the outline, negated (shape.frag)
+};
+
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices };
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {
@@ -160,7 +167,14 @@ public:
                         GpuBlendMode blend,
                         SDL_GPUSampler* sampler = nullptr);
 
-    bool empty() const { return _vertices.empty() && _instances.empty() && _shader_vertices.empty(); }
+    // Indexed shape triangles (shape.vert): `indices` count from the first of
+    // `vertices`. Consecutive pushes with identical state coalesce.
+    void push_shapes(std::span<const GpuShapeVertex> vertices, std::span<const u32> indices, SDL_GPUShader* fragment,
+                     SDL_Rect scissor, GpuBlendMode blend);
+
+    bool empty() const {
+        return _vertices.empty() && _instances.empty() && _shader_vertices.empty() && _shape_indices.empty();
+    }
 
     // The pixels everything flushed since the last call covered, in the
     // targets' own pixels (overlaps count each time, clipping is not taken
@@ -184,6 +198,7 @@ public:
         SDL_GPUShader* vertex_shader = nullptr;   // shared 2D vertex shader
         SDL_GPUShader* instance_shader = nullptr; // sprite_instanced.vert, for instance ranges
         SDL_GPUShader* shader_vertex_shader = nullptr; // shader_geometry.vert, for GpuShaderVertex ranges
+        SDL_GPUShader* shape_vertex_shader = nullptr;  // shape.vert, for GpuShapeVertex ranges
         SDL_GPUShader* default_fragment = nullptr; // used when a range's fragment is null
         SDL_GPUTexture* white_texture = nullptr;   // used when a range's texture is null
         SDL_GPUSampler* sampler = nullptr;
@@ -212,8 +227,8 @@ private:
         GpuBlendMode blend = GpuBlendMode::Alpha;
         u32 uniform_offset = 0; // into _uniform_bytes; size 0 == none
         u32 uniform_size = 0;
-        u32 first_vertex = 0;   // or first instance, for an instanced range
-        u32 vertex_count = 0;   // or instance count
+        u32 first_vertex = 0;   // or first instance, for an instanced range; first index, for shapes
+        u32 vertex_count = 0;   // or instance count; index count, for shapes
         GpuVertexLayout layout = GpuVertexLayout::Triangles; // which array it indexes
         bool quads = false; // its vertices are quads' corners, drawn indexed
     };
@@ -232,6 +247,8 @@ private:
     std::vector<GpuVertex> _vertices;
     std::vector<GpuSpriteInstance> _instances;
     std::vector<GpuShaderVertex> _shader_vertices;
+    std::vector<GpuShapeVertex> _shape_vertices;
+    std::vector<u32> _shape_indices; // into _shape_vertices
     std::vector<Range> _ranges;
     std::vector<u8> _uniform_bytes;
     std::vector<SDL_GPUTextureSamplerBinding> _extra_bindings;
@@ -239,6 +256,8 @@ private:
     GpuBuffer _vertex_buffer;
     GpuBuffer _instance_buffer;
     GpuBuffer _shader_vertex_buffer;
+    GpuBuffer _shape_vertex_buffer;
+    GpuBuffer _shape_index_buffer;
     GpuBuffer _quad_indices; // 0 1 2 0 2 3, 4 5 6 4 6 7, ...: made once
     f64 _area = 0.0;         // covered by what is pushed, in draw coordinates
     struct Box {

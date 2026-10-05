@@ -9,6 +9,24 @@ releases may change APIs.
 
 ### Added
 
+- Vector shapes (`kin/renderer/path.hpp`, `shape.hpp`, `svg.hpp`):
+  - `kin::Path` (lines, curves, SVG arcs; rectangles, circles, polygons, arcs,
+    pies, stars; SVG path data read and written), filled under non-zero or
+    even-odd with holes, stroked with joins, caps and miter limits;
+  - anti-aliased at any scale: one pixel of soft edge from screen-space
+    derivatives on SDL_GPU, pulled in on the CPU on SDL_Renderer;
+  - `kin::Shape`: elements that compose (`add(shape, transform)`), tessellated
+    once into a `ShapeMesh` drawn by `Renderer2D::draw_shape` through any
+    transform and tint;
+  - SVG-lite: `read_svg` / `load_svg` read the flat-colour subset vector
+    editors export (paths, basic shapes, groups, `<use>`, transforms, styles,
+    inheritance), listing what they skip; `write_svg` / `save_svg` write it;
+  - immediate drawing: `fill_circle`, `draw_circle`, `fill_ellipse`,
+    `draw_ellipse`, `fill_polygon`, `draw_polygon`, `draw_polyline`,
+    `draw_line` with a width and cap, `draw_arc`, `fill_pie`, `fill_path`,
+    `stroke_path`;
+  - `kin::ShapeRenderer` and `RenderQueue::draw_shape`; `games/shapes_demo`.
+  - New dependency: mapbox earcut.hpp 3.2.4 (ISC), header-only, for fills.
 - Transforms: `Renderer2D::push_transform` / `pop_transform` / `scoped_transform`
   draw through a `kin::Affine2` (`kin/core/affine.hpp`), on both backends.
   Mapped on the CPU, so draws still batch across transform changes, and sprite

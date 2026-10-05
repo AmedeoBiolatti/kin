@@ -52,9 +52,10 @@ enum class RenderCommandType : u8 {
     PushViewport,
     PopViewport,
     Custom,
+    Shape, // a ShapeMesh (in `detail`), placed by detail->transform; `rect` bounds it
 };
 
-// Cold per-command payload, needed only by Text/Custom commands. Kept behind a
+// Cold per-command payload, needed only by Text/Custom/Shape commands. Kept behind a
 // pointer (null on the common Sprite/Texture/Rect/Line path) so the hot RenderCommand
 // stays small and cheap to construct, move (sort gather), and cache.
 struct RenderCommandDetail {
@@ -63,6 +64,8 @@ struct RenderCommandDetail {
     f32 text_scale = 1.0f;
     std::string debug_name;
     std::function<void(Renderer2D&)> callback;
+    std::shared_ptr<const ShapeMesh> shape;
+    Affine2 transform{};
 };
 
 // One queued draw. Kept small (checked below) because queues hold thousands and

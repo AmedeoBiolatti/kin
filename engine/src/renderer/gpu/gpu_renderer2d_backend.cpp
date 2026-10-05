@@ -205,6 +205,8 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     try {
         _shape_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
                                                   dir / "shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
+        _shape_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
+                                                         dir / "shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "shapes drawn with soft edges only", (LogFields{{.name = "reason", .value = e.what()}}));
     }
@@ -236,10 +238,10 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     _white = _device.create_texture_from_rgba(white.data(), 1, 1);
 
     _pipelines.init(_device.handle());
-    if (_shape_shader.handle() && _shader_vertex_shader.handle()) {
+    if (_shape_shader.handle() && _shape_vertex_shader.handle()) {
         // Shapes' pipeline now rather than at the first one drawn.
-        _pipelines.get(_shader_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha,
-                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::ShaderVertices);
+        _pipelines.get(_shape_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha,
+                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::ShapeVertices);
     }
     ensure_scene();
 
@@ -394,6 +396,7 @@ void GpuRenderer2DBackend::flush_to_frame() {
     ctx.vertex_shader = _vertex_shader.handle();
     ctx.instance_shader = _instance_shader.handle();
     ctx.shader_vertex_shader = _shader_vertex_shader.handle();
+    ctx.shape_vertex_shader = _shape_vertex_shader.handle();
     ctx.default_fragment = _fragment_shader.handle();
     ctx.white_texture = _white.handle();
     ctx.sampler = _sampler_linear; // default for solids/white & null-sampler ranges
@@ -457,7 +460,7 @@ void GpuRenderer2DBackend::prewarm_pipelines(std::string_view record) {
     int blend = 0, format = 0, layout = 0;
     while (in >> id >> blend >> format >> layout) {
         if (blend < 0 || blend > static_cast<int>(gpu::GpuBlendMode::Min) || layout < 0 ||
-            layout > static_cast<int>(gpu::GpuVertexLayout::ShaderVertices)) {
+            layout > static_cast<int>(gpu::GpuVertexLayout::ShapeVertices)) {
             continue;
         }
         _pipeline_hints.push_back(PipelineHint{.fragment = id,
@@ -478,6 +481,7 @@ void GpuRenderer2DBackend::make_hinted_pipelines(u64 fragment_id, SDL_GPUShader*
         }
         SDL_GPUShader* vertex = hint.layout == gpu::GpuVertexLayout::SpriteInstances ? _instance_shader.handle()
                               : hint.layout == gpu::GpuVertexLayout::ShaderVertices  ? _shader_vertex_shader.handle()
+                              : hint.layout == gpu::GpuVertexLayout::ShapeVertices   ? _shape_vertex_shader.handle()
                                                                                      : _vertex_shader.handle();
         if (vertex) {
             _pipelines.get(vertex, fragment, hint.blend, hint.format, hint.layout);
@@ -764,7 +768,7 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
                      static_cast<u8>((c.b * tint.b + 127) / 255),
                      static_cast<u8>(static_cast<f32>((c.a * tint.a + 127) / 255) * cover + 0.5f)};
     };
-    if (!_shape_shader.handle() || !_shader_vertex_shader.handle()) {
+    if (!_shape_shader.handle() || !_shape_vertex_shader.handle()) {
         // Without the shape shader: the soft edge as vertex alpha, in pixels
         // from the transform's scale.
         // A soft edge wider than a pixel is pulled in to one, along `outward`.
@@ -785,24 +789,17 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
         _batch.push(_scratch_verts, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
         return;
     }
-    _shader_vertex_scratch.clear();
-    _shader_vertex_scratch.reserve(indices.size());
-    for (const u32 i : indices) {
+    // Each vertex once, placed and tinted; the indices go as they are.
+    _shape_scratch.resize(vertices.size());
+    const bool tinted = !(tint == colors::white);
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
         const ShapeVertex& v = vertices[i];
         const Vec2f p = place(v.position);
-        const Color c = shade(v.color, 1.0f);
-        gpu::GpuShaderVertex out{};
-        out.x = p.x;
-        out.y = p.y;
-        out.r = c.r;
-        out.g = c.g;
-        out.b = c.b;
-        out.a = c.a;
-        out.custom[0] = v.edge;
-        _shader_vertex_scratch.push_back(out);
+        const Color c = tinted ? shade(v.color, 1.0f) : v.color;
+        _shape_scratch[i] = gpu::GpuShapeVertex{p.x, p.y, c.r, c.g, c.b, c.a, v.edge};
     }
-    _batch.push_shader_vertices(_shader_vertex_scratch, _shape_shader.handle(), nullptr, current_scissor(),
-                                resolve_blend(gpu::GpuBlendMode::Alpha), nullptr, 0, nullptr, {}, {});
+    _batch.push_shapes(_shape_scratch, indices, _shape_shader.handle(), current_scissor(),
+                       resolve_blend(gpu::GpuBlendMode::Alpha));
 }
 
 void GpuRenderer2DBackend::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
@@ -1993,6 +1990,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
         ctx.vertex_shader = _vertex_shader.handle();
         ctx.instance_shader = _instance_shader.handle();
         ctx.shader_vertex_shader = _shader_vertex_shader.handle();
+        ctx.shape_vertex_shader = _shape_vertex_shader.handle();
         ctx.default_fragment = _fragment_shader.handle();
         ctx.white_texture = _white.handle();
         ctx.sampler = _sampler_linear;

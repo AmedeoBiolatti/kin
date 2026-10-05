@@ -97,6 +97,8 @@ tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 - `games/hex_demo` — hex coordinates, picking, movement range and A* paths in
   all four hex layouts.
 - `games/lighting_demo` — ambient light, point lights and a flashlight at night.
+- `games/shapes_demo` — vector shapes composed in code and read from SVG,
+  turning through an entity hierarchy under a zooming, turning camera.
 - [examples/](examples/README.md) — **Signal Siege**, an arena survival game, and
   **Run Observatory**, a simulated LLM training tracker. Both support
   interactive use, seeded headless runs, screenshots, and benchmark workloads

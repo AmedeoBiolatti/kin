@@ -95,43 +95,31 @@ struct Out {
         mesh.vertices.push_back({p, color, edge, outward});
         return static_cast<u32>(mesh.vertices.size() - 1);
     }
+    Vec2f at(u32 i) const { return mesh.vertices[i].position; }
     void tri(u32 a, u32 b, u32 c) { mesh.indices.insert(mesh.indices.end(), {a, b, c}); }
     void quad(u32 a, u32 b, u32 c, u32 d) {
         tri(a, b, c);
         tri(a, c, d);
     }
-    // Triangles from `center` to each pair of neighbouring `points`.
-    void fan(Vec2f center, std::span<const Vec2f> points) {
-        if (points.size() < 2) {
-            return;
-        }
-        const u32 c = vertex(center);
-        u32 previous = vertex(points[0]);
-        for (std::size_t i = 1; i < points.size(); ++i) {
-            const u32 next = vertex(points[i]);
-            tri(c, previous, next);
-            previous = next;
-        }
-    }
 
-    // The soft edge along a closed outline whose outside is on perp(travel):
-    // from the outline (edge 0) out by `fringe` (edge -fringe), along each
-    // corner's miter so the strip has the same width beside both of its edges.
-    void fringe_ring(std::span<const Vec2f> pts, f32 fringe) {
-        const std::size_t n = pts.size();
+    // The soft edge along a closed outline of existing vertices, whose outside
+    // is on perp(travel): a rim `fringe` out (edge -fringe), along each corner's
+    // miter so the strip is as wide beside both its edges.
+    void fringe_ring(std::span<const u32> ring, f32 fringe) {
+        const std::size_t n = ring.size();
         if (n < 2 || fringe <= 0.0f) {
             return;
         }
         const u32 first = static_cast<u32>(mesh.vertices.size());
         for (std::size_t i = 0; i < n; ++i) {
-            const Vec2f p = pts[i];
-            Vec2f e0 = normalize(sub(p, pts[(i + n - 1) % n]));
-            Vec2f e1 = normalize(sub(pts[(i + 1) % n], p));
-            if (e0 == Vec2f{}) {
-                e0 = e1;
+            const Vec2f p = at(ring[i]);
+            // The nearest neighbours that are not on top of it.
+            Vec2f e0{}, e1{};
+            for (std::size_t k = 1; k < n && e0 == Vec2f{}; ++k) {
+                e0 = normalize(sub(p, at(ring[(i + n - k) % n])));
             }
-            if (e1 == Vec2f{}) {
-                e1 = e0;
+            for (std::size_t k = 1; k < n && e1 == Vec2f{}; ++k) {
+                e1 = normalize(sub(at(ring[(i + k) % n]), p));
             }
             Vec2f dm = mul(add(perp(e0), perp(e1)), 0.5f);
             const f32 d2 = dot(dm, dm);
@@ -144,12 +132,11 @@ struct Out {
             } else {
                 dm = perp(e0); // turning straight back
             }
-            vertex(p, 0.0f);
             vertex(add(p, mul(dm, fringe)), -fringe, dm);
         }
         for (u32 i = 0; i < n; ++i) {
             const u32 j = (i + 1) % static_cast<u32>(n);
-            quad(first + 2 * i, first + 2 * j, first + 2 * j + 1, first + 2 * i + 1);
+            quad(ring[i], ring[j], first + j, first + i);
         }
     }
 
@@ -161,14 +148,14 @@ struct Out {
         if (signed_area(pts) > 0.0f) {
             std::reverse(pts.begin(), pts.end()); // the inside on the right, as fringe_ring wants
         }
-        const u32 first = static_cast<u32>(mesh.vertices.size());
+        std::vector<u32> ring;
         for (const Vec2f& p : pts) {
-            vertex(p);
+            ring.push_back(vertex(p));
         }
-        for (u32 i = 1; i + 1 < pts.size(); ++i) {
-            tri(first, first + i, first + i + 1);
+        for (std::size_t i = 1; i + 1 < ring.size(); ++i) {
+            tri(ring[0], ring[i], ring[i + 1]);
         }
-        fringe_ring(pts, fringe);
+        fringe_ring(ring, fringe);
     }
 };
 
@@ -207,11 +194,13 @@ struct Ring {
     bool outer = false;
 };
 
+// A stroke as one strip: two vertices a point where the path bends gently
+// (the miters, shared by both segments), more where a join or cap needs them.
 void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeStyle& style, f32 fringe,
                     f32 tolerance) {
     clean(pts, closed);
     const f32 hw = style.width * 0.5f;
-    if (pts.empty()) {
+    if (pts.empty() || hw <= 0.0f) {
         return;
     }
     if (pts.size() == 1) {
@@ -230,130 +219,178 @@ void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeS
         out.convex(std::move(dot_pts), fringe);
         return;
     }
+    if (closed && pts.size() == 2) {
+        closed = false; // there and back: the same as the open line
+    }
 
     const std::size_t n = pts.size();
     const std::size_t segments = closed ? n : n - 1;
-    std::vector<Vec2f> dir(segments), nrm(segments);
+    thread_local std::vector<Vec2f> dir, nrm;
+    thread_local std::vector<f32> len;
+    dir.resize(segments);
+    nrm.resize(segments);
+    len.resize(segments);
     for (std::size_t k = 0; k < segments; ++k) {
-        dir[k] = normalize(sub(pts[(k + 1) % n], pts[k]));
+        const Vec2f d = sub(pts[(k + 1) % n], pts[k]);
+        len[k] = length(d);
+        dir[k] = mul(d, 1.0f / len[k]);
         nrm[k] = perp(dir[k]);
     }
-    // Each segment's own rectangle.
-    for (std::size_t k = 0; k < segments; ++k) {
-        const Vec2f a = pts[k], b = pts[(k + 1) % n], o = mul(nrm[k], hw);
-        out.quad(out.vertex(add(a, o)), out.vertex(add(b, o)), out.vertex(sub(b, o)), out.vertex(sub(a, o)));
+    if (!closed && style.cap == LineCap::Square) { // a square cap is the line run on by half its width
+        pts[0] = sub(pts[0], mul(dir[0], hw));
+        pts[n - 1] = add(pts[n - 1], mul(dir[segments - 1], hw));
     }
-
-    // Each corner: the wedge on its outer side, and the outline's points on
-    // both sides (in travelling order).
-    std::vector<std::vector<Vec2f>> left(n), right(n);
     const f32 step = arc_step(hw, tolerance);
-    const auto join = [&](std::size_t i, std::size_t in, std::size_t outgoing) {
-        const Vec2f p = pts[i];
-        const f32 turn = cross(dir[in], dir[outgoing]);
-        if (std::abs(turn) < 1e-6f && dot(dir[in], dir[outgoing]) > 0.0f) { // straight on
-            left[i] = {add(p, mul(nrm[in], hw))};
-            right[i] = {sub(p, mul(nrm[in], hw))};
-            return;
-        }
-        const f32 s = turn > 0.0f ? -1.0f : 1.0f; // the outer side
-        const Vec2f a = add(p, mul(nrm[in], s * hw)), b = add(p, mul(nrm[outgoing], s * hw));
-        std::vector<Vec2f> outer;
-        LineJoin kind = style.join;
-        Vec2f miter{};
-        if (kind == LineJoin::Miter) {
-            const Vec2f m = normalize(mul(add(nrm[in], nrm[outgoing]), s));
-            const f32 cos_half = dot(m, mul(nrm[in], s));
-            if (std::abs(turn) < 1e-6f || cos_half <= 0.0f || 1.0f / cos_half > style.miter_limit) {
-                kind = LineJoin::Bevel;
-            } else {
-                miter = add(p, mul(m, hw / cos_half));
-            }
-        }
-        if (kind == LineJoin::Miter) {
-            outer = {a, miter, b};
-        } else if (kind == LineJoin::Round) {
-            const f32 from = std::atan2(a.y - p.y, a.x - p.x);
-            f32 delta = std::atan2(b.y - p.y, b.x - p.x) - from;
-            while (delta > pi) delta -= 2.0f * pi;
-            while (delta < -pi) delta += 2.0f * pi;
-            const int count = std::max(1, static_cast<int>(std::ceil(std::abs(delta) / step)));
-            outer.push_back(a);
-            for (int k = 1; k < count; ++k) {
-                const f32 t = from + delta * static_cast<f32>(k) / static_cast<f32>(count);
-                outer.push_back({p.x + hw * std::cos(t), p.y + hw * std::sin(t)});
-            }
-            outer.push_back(b);
-        } else {
-            outer = {a, b};
-        }
-        out.fan(p, outer);
-        std::vector<Vec2f> inner{sub(p, mul(nrm[in], s * hw)), sub(p, mul(nrm[outgoing], s * hw))};
-        (s > 0.0f ? left[i] : right[i]) = std::move(outer);
-        (s > 0.0f ? right[i] : left[i]) = std::move(inner);
-    };
-
-    if (closed) {
-        for (std::size_t i = 0; i < n; ++i) {
-            join(i, (i + n - 1) % n, i);
-        }
-        std::vector<Vec2f> loop;
-        for (const auto& side : left) {
-            loop.insert(loop.end(), side.begin(), side.end());
-        }
-        out.fringe_ring(loop, fringe);
-        loop.clear();
-        for (const auto& side : right) {
-            loop.insert(loop.end(), side.begin(), side.end());
-        }
-        std::reverse(loop.begin(), loop.end()); // travelled backwards, its outside is on the left too
-        out.fringe_ring(loop, fringe);
-        return;
-    }
-
-    for (std::size_t i = 1; i + 1 < n; ++i) {
-        join(i, i - 1, i);
-    }
-    // One outline around the whole stroke: forward along the left, round the
-    // end, back along the right, round the start.
-    const Vec2f p0 = pts[0], pe = pts[n - 1];
-    const Vec2f t0 = dir[0], n0 = nrm[0], te = dir[segments - 1], ne = nrm[segments - 1];
-    const auto cap = [&](Vec2f p, Vec2f u, Vec2f t) {
-        // From p + u*hw round to p - u*hw, ahead along t; returns the points between.
-        std::vector<Vec2f> between;
-        if (style.cap == LineCap::Square) {
-            const Vec2f a = add(add(p, mul(u, hw)), mul(t, hw)), b = add(sub(p, mul(u, hw)), mul(t, hw));
-            out.quad(out.vertex(add(p, mul(u, hw))), out.vertex(a), out.vertex(b), out.vertex(sub(p, mul(u, hw))));
-            between = {a, b};
-        } else if (style.cap == LineCap::Round) {
-            const int count = std::max(2, static_cast<int>(std::ceil(pi / step)));
-            std::vector<Vec2f> arc{add(p, mul(u, hw))};
-            for (int k = 1; k < count; ++k) {
-                const f32 a = pi * static_cast<f32>(k) / static_cast<f32>(count);
-                const Vec2f q = add(p, add(mul(u, hw * std::cos(a)), mul(t, hw * std::sin(a))));
-                arc.push_back(q);
-                between.push_back(q);
-            }
-            arc.push_back(sub(p, mul(u, hw)));
-            out.fan(p, arc);
+    // Points on a circle round `p` from direction `u` towards `w` (unit,
+    // perpendicular) through `angle` radians; the ends left out.
+    const auto arc = [&](Vec2f p, Vec2f u, Vec2f w, f32 angle) {
+        std::vector<u32> between;
+        const int count = std::max(1, static_cast<int>(std::ceil(angle / step)));
+        for (int k = 1; k < count; ++k) {
+            const f32 t = angle * static_cast<f32>(k) / static_cast<f32>(count);
+            between.push_back(out.vertex(add(p, add(mul(u, hw * std::cos(t)), mul(w, hw * std::sin(t))))));
         }
         return between;
     };
-    std::vector<Vec2f> outline{add(p0, mul(n0, hw))};
-    for (std::size_t i = 1; i + 1 < n; ++i) {
-        outline.insert(outline.end(), left[i].begin(), left[i].end());
+
+    // Each point's vertices on the left (+normal) and right, in travelling
+    // order: spans of one pool, reused from call to call on this thread.
+    struct Side {
+        u32 first = 0, count = 0;
+    };
+    thread_local std::vector<u32> pool;
+    thread_local std::vector<Side> left_spans, right_spans;
+    pool.clear();
+    left_spans.assign(n, {});
+    right_spans.assign(n, {});
+    const auto keep = [&](std::vector<Side>& spans, std::size_t i, std::initializer_list<u32> vertices) {
+        spans[i] = {static_cast<u32>(pool.size()), static_cast<u32>(vertices.size())};
+        pool.insert(pool.end(), vertices);
+    };
+    const auto keep_list = [&](std::vector<Side>& spans, std::size_t i, const std::vector<u32>& vertices) {
+        spans[i] = {static_cast<u32>(pool.size()), static_cast<u32>(vertices.size())};
+        pool.insert(pool.end(), vertices.begin(), vertices.end());
+    };
+    const auto front = [&](const Side& side) { return pool[side.first]; };
+    const auto back = [&](const Side& side) { return pool[side.first + side.count - 1]; };
+    for (std::size_t i = 0; i < n; ++i) {
+        const Vec2f p = pts[i];
+        if (!closed && (i == 0 || i == n - 1)) {
+            const Vec2f o = mul(nrm[i == 0 ? 0 : segments - 1], hw);
+            keep(left_spans, i, {out.vertex(add(p, o))});
+            keep(right_spans, i, {out.vertex(sub(p, o))});
+            continue;
+        }
+        const std::size_t in = closed ? (i + n - 1) % n : i - 1, onward = i;
+        const Vec2f n0 = nrm[in], n1 = nrm[onward];
+        const f32 turn = cross(dir[in], dir[onward]);
+        if (std::abs(turn) < 1e-6f && dot(dir[in], dir[onward]) > 0.0f) { // straight on
+            keep(left_spans, i, {out.vertex(add(p, mul(n0, hw)))});
+            keep(right_spans, i, {out.vertex(sub(p, mul(n0, hw)))});
+            continue;
+        }
+        const f32 s = turn > 0.0f ? -1.0f : 1.0f; // the outer side: +1 left
+        const Vec2f u0 = mul(n0, s), u1 = mul(n1, s);
+        const Vec2f miter_dir = normalize(add(u0, u1));
+        const f32 cos_half = dot(miter_dir, u0);
+        const f32 miter = cos_half > 1e-4f ? hw / cos_half : 1e30f;
+        // On the inside both segments meet at the inner miter, while it stays
+        // within them; past that each keeps its own corner.
+        const f32 reach = cos_half > 1e-4f ? miter * std::sqrt(std::max(0.0f, 1.0f - cos_half * cos_half)) : 1e30f;
+        const bool inner_meets = reach <= std::min(len[in], len[onward]);
+        // Outside: one shared miter where it is allowed, or where a round or
+        // bevel join would differ from it by less than the tolerance.
+        const bool smooth = (style.join == LineJoin::Miter && cos_half > 1e-4f && 1.0f / cos_half <= style.miter_limit) ||
+                            (style.join != LineJoin::Miter && miter - hw <= tolerance);
+        thread_local std::vector<u32> outer, inner;
+        outer.clear();
+        inner.clear();
+        if (smooth) {
+            outer.push_back(out.vertex(add(p, mul(miter_dir, miter))));
+        } else {
+            outer.push_back(out.vertex(add(p, mul(u0, hw))));
+            if (style.join == LineJoin::Round) {
+                Vec2f w = sub(u1, mul(u0, dot(u0, u1)));
+                w = length(w) > 1e-6f ? normalize(w) : dir[in]; // straight back: round the front
+                const std::vector<u32> between = arc(p, u0, w, std::atan2(dot(u1, w), dot(u1, u0)));
+                outer.insert(outer.end(), between.begin(), between.end());
+            }
+            outer.push_back(out.vertex(add(p, mul(u1, hw))));
+        }
+        if (inner_meets) {
+            inner.push_back(out.vertex(sub(p, mul(miter_dir, miter))));
+        } else {
+            inner.push_back(out.vertex(sub(p, mul(u0, hw))));
+            inner.push_back(out.vertex(sub(p, mul(u1, hw))));
+        }
+        if (outer.size() > 1) {
+            const u32 hub = inner.size() == 1 ? inner[0] : out.vertex(p);
+            for (std::size_t k = 0; k + 1 < outer.size(); ++k) {
+                out.tri(hub, outer[k], outer[k + 1]);
+            }
+        }
+        keep_list(s > 0.0f ? left_spans : right_spans, i, outer);
+        keep_list(s > 0.0f ? right_spans : left_spans, i, inner);
     }
-    outline.push_back(add(pe, mul(ne, hw)));
-    const std::vector<Vec2f> end_cap = cap(pe, ne, te);
+    // The strip: each segment from its start's last vertices to its end's first.
+    for (std::size_t k = 0; k < segments; ++k) {
+        const std::size_t i = k, j = (k + 1) % n;
+        out.quad(back(left_spans[i]), front(left_spans[j]), front(right_spans[j]), back(right_spans[i]));
+    }
+    // A side's vertices forwards, or backwards, onto `outline`.
+    thread_local std::vector<u32> outline;
+    outline.clear();
+    const auto forwards = [&](const Side& side) {
+        outline.insert(outline.end(), pool.begin() + side.first, pool.begin() + side.first + side.count);
+    };
+    const auto backwards = [&](const Side& side) {
+        for (u32 k = side.count; k > 0; --k) {
+            outline.push_back(pool[side.first + k - 1]);
+        }
+    };
+
+    if (closed) {
+        // Two outlines: the left forwards, the right backwards (its outside on
+        // the left of travel too).
+        for (const Side& side : left_spans) {
+            forwards(side);
+        }
+        out.fringe_ring(outline, fringe);
+        outline.clear();
+        for (auto side = right_spans.rbegin(); side != right_spans.rend(); ++side) {
+            backwards(*side);
+        }
+        out.fringe_ring(outline, fringe);
+        return;
+    }
+    // Round caps: half circles fanned from the ends.
+    std::vector<u32> end_cap, start_cap;
+    if (style.cap == LineCap::Round) {
+        const Vec2f pe = pts[n - 1], p0 = pts[0];
+        end_cap = arc(pe, nrm[segments - 1], dir[segments - 1], pi);
+        start_cap = arc(p0, mul(nrm[0], -1.0f), mul(dir[0], -1.0f), pi);
+        const auto fan = [&](Vec2f center, u32 from, const std::vector<u32>& between, u32 to) {
+            const u32 hub = out.vertex(center);
+            u32 previous = from;
+            for (const u32 v : between) {
+                out.tri(hub, previous, v);
+                previous = v;
+            }
+            out.tri(hub, previous, to);
+        };
+        fan(pe, front(left_spans[n - 1]), end_cap, front(right_spans[n - 1]));
+        fan(p0, front(right_spans[0]), start_cap, front(left_spans[0]));
+    }
+    // One outline round it all: forwards along the left, round the end, back
+    // along the right, round the start.
+    for (const Side& side : left_spans) {
+        forwards(side);
+    }
     outline.insert(outline.end(), end_cap.begin(), end_cap.end());
-    outline.push_back(sub(pe, mul(ne, hw)));
-    for (std::size_t i = n - 2; i >= 1; --i) {
-        outline.insert(outline.end(), right[i].rbegin(), right[i].rend());
+    for (auto side = right_spans.rbegin(); side != right_spans.rend(); ++side) {
+        backwards(*side);
     }
-    outline.push_back(sub(p0, mul(n0, hw)));
-    const std::vector<Vec2f> start_cap = cap(p0, mul(n0, -1.0f), mul(t0, -1.0f));
     outline.insert(outline.end(), start_cap.begin(), start_cap.end());
-    clean(outline, true);
     out.fringe_ring(outline, fringe);
 }
 
@@ -445,34 +482,39 @@ void tessellate_fill(ShapeMesh& mesh, std::span<const PathContour> contours, Fil
             holes[parent].push_back(h);
         }
     }
+    // Each ring's vertices once: the fill's corners and its soft edge's inside.
+    std::vector<std::vector<u32>> ring_vertices(rings.size());
+    for (const std::size_t b : boundaries) {
+        for (const Vec2f& p : rings[b].pts) {
+            ring_vertices[b].push_back(out.vertex(p));
+        }
+    }
     std::vector<std::vector<Vec2f>> polygon;
+    std::vector<u32> polygon_vertices;
     for (const std::size_t o : boundaries) {
         if (!rings[o].outer) {
             continue;
         }
         polygon.clear();
+        polygon_vertices.clear();
         polygon.push_back(rings[o].pts);
+        polygon_vertices.insert(polygon_vertices.end(), ring_vertices[o].begin(), ring_vertices[o].end());
         for (const std::size_t h : holes[o]) {
             polygon.push_back(rings[h].pts);
-        }
-        const u32 base = static_cast<u32>(mesh.vertices.size());
-        for (const auto& ring : polygon) {
-            for (const Vec2f& p : ring) {
-                out.vertex(p);
-            }
+            polygon_vertices.insert(polygon_vertices.end(), ring_vertices[h].begin(), ring_vertices[h].end());
         }
         for (const u32 i : mapbox::earcut<u32>(polygon)) {
-            mesh.indices.push_back(base + i);
+            mesh.indices.push_back(polygon_vertices[i]);
         }
     }
-    // The soft edge outside each boundary: rings turned so the fill is on
-    // their right (fringe_ring's outside on the left).
+    // The soft edge outside each boundary, the ring turned so the fill is on
+    // its right (fringe_ring's outside on the left).
     for (const std::size_t b : boundaries) {
-        Ring& ring = rings[b];
-        if ((ring.outer && ring.area > 0.0f) || (!ring.outer && ring.area < 0.0f)) {
-            std::reverse(ring.pts.begin(), ring.pts.end());
+        std::vector<u32>& ring = ring_vertices[b];
+        if ((rings[b].outer && rings[b].area > 0.0f) || (!rings[b].outer && rings[b].area < 0.0f)) {
+            std::reverse(ring.begin(), ring.end());
         }
-        out.fringe_ring(ring.pts, fringe);
+        out.fringe_ring(ring, fringe);
     }
     grow_bounds(mesh, first);
 }

@@ -18,41 +18,33 @@ constexpr f32 kappa = 0.5522847498f;
 Vec2f add(Vec2f a, Vec2f b) { return {a.x + b.x, a.y + b.y}; }
 Vec2f sub(Vec2f a, Vec2f b) { return {a.x - b.x, a.y - b.y}; }
 Vec2f scale(Vec2f a, f32 s) { return {a.x * s, a.y * s}; }
-Vec2f lerp(Vec2f a, Vec2f b, f32 t) { return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t}; }
+// Curves are split into equal steps of their parameter, as many as Wang's
+// formula says keep every point within `tolerance` of the curve: close to the
+// fewest that do (halving until flat overshoots to a power of two).
+f32 length(Vec2f a) { return std::sqrt(a.x * a.x + a.y * a.y); }
 
-// How far `p` is from the line through `a` and `b`, squared (from `a` when they meet).
-f32 distance_to_line_sq(Vec2f p, Vec2f a, Vec2f b) {
-    const Vec2f ab = sub(b, a), ap = sub(p, a);
-    const f32 len_sq = ab.x * ab.x + ab.y * ab.y;
-    if (len_sq < 1e-12f) {
-        return ap.x * ap.x + ap.y * ap.y;
-    }
-    const f32 cross = ab.x * ap.y - ab.y * ap.x;
-    return cross * cross / len_sq;
+int curve_steps(f32 second_difference, f32 degree_factor, f32 tolerance) {
+    const f32 n = std::ceil(std::sqrt(degree_factor * second_difference / tolerance));
+    return std::clamp(static_cast<int>(n), 1, 1024);
 }
 
-void flatten_quad(std::vector<Vec2f>& out, Vec2f p0, Vec2f p1, Vec2f p2, f32 tolerance_sq, int depth) {
-    // A quadratic strays at most half as far as its control point is from the chord.
-    if (depth >= 16 || distance_to_line_sq(p1, p0, p2) * 0.25f <= tolerance_sq) {
-        out.push_back(p2);
-        return;
+void flatten_quad(std::vector<Vec2f>& out, Vec2f p0, Vec2f p1, Vec2f p2, f32 tolerance) {
+    const int n = curve_steps(length(add(sub(p0, scale(p1, 2.0f)), p2)), 0.25f, tolerance);
+    for (int i = 1; i <= n; ++i) {
+        const f32 t = static_cast<f32>(i) / static_cast<f32>(n), u = 1.0f - t;
+        out.push_back(i == n ? p2 : add(add(scale(p0, u * u), scale(p1, 2.0f * u * t)), scale(p2, t * t)));
     }
-    const Vec2f a = lerp(p0, p1, 0.5f), b = lerp(p1, p2, 0.5f), m = lerp(a, b, 0.5f);
-    flatten_quad(out, p0, a, m, tolerance_sq, depth + 1);
-    flatten_quad(out, m, b, p2, tolerance_sq, depth + 1);
 }
 
-void flatten_cubic(std::vector<Vec2f>& out, Vec2f p0, Vec2f p1, Vec2f p2, Vec2f p3, f32 tolerance_sq, int depth) {
-    // A cubic strays at most 3/4 as far as its farther control point is from the chord.
-    const f32 d = std::max(distance_to_line_sq(p1, p0, p3), distance_to_line_sq(p2, p0, p3)) * (9.0f / 16.0f);
-    if (depth >= 16 || d <= tolerance_sq) {
-        out.push_back(p3);
-        return;
+void flatten_cubic(std::vector<Vec2f>& out, Vec2f p0, Vec2f p1, Vec2f p2, Vec2f p3, f32 tolerance) {
+    const f32 m = std::max(length(add(sub(p0, scale(p1, 2.0f)), p2)), length(add(sub(p1, scale(p2, 2.0f)), p3)));
+    const int n = curve_steps(m, 0.75f, tolerance);
+    for (int i = 1; i <= n; ++i) {
+        const f32 t = static_cast<f32>(i) / static_cast<f32>(n), u = 1.0f - t;
+        out.push_back(i == n ? p3
+                             : add(add(scale(p0, u * u * u), scale(p1, 3.0f * u * u * t)),
+                                   add(scale(p2, 3.0f * u * t * t), scale(p3, t * t * t))));
     }
-    const Vec2f a = lerp(p0, p1, 0.5f), b = lerp(p1, p2, 0.5f), c = lerp(p2, p3, 0.5f);
-    const Vec2f ab = lerp(a, b, 0.5f), bc = lerp(b, c, 0.5f), m = lerp(ab, bc, 0.5f);
-    flatten_cubic(out, p0, a, ab, m, tolerance_sq, depth + 1);
-    flatten_cubic(out, m, bc, c, p3, tolerance_sq, depth + 1);
 }
 
 f32 vector_angle(Vec2f u, Vec2f v) {
@@ -318,7 +310,7 @@ Path Path::transformed(const Affine2& transform) const {
 }
 
 void Path::flatten(std::vector<PathContour>& out, f32 tolerance, const Affine2& transform) const {
-    const f32 tolerance_sq = std::max(tolerance, 1e-4f) * std::max(tolerance, 1e-4f);
+    tolerance = std::max(tolerance, 1e-4f);
     PathContour* contour = nullptr;
     std::size_t at = 0;
     const auto next = [&] { return transform.apply(_points[at++]); };
@@ -338,12 +330,12 @@ void Path::flatten(std::vector<PathContour>& out, f32 tolerance, const Affine2& 
             break;
         case Verb::Quad: {
             const Vec2f c = next(), p = next();
-            flatten_quad(contour->points, current(), c, p, tolerance_sq, 0);
+            flatten_quad(contour->points, current(), c, p, tolerance);
             break;
         }
         case Verb::Cubic: {
             const Vec2f c1 = next(), c2 = next(), p = next();
-            flatten_cubic(contour->points, current(), c1, c2, p, tolerance_sq, 0);
+            flatten_cubic(contour->points, current(), c1, c2, p, tolerance);
             break;
         }
         case Verb::Close:

@@ -258,6 +258,8 @@ private:
     gpu::GpuShader _shader_vertex_shader; // shader_geometry.vert; without it draw_shader_geometry draws nothing
     gpu::GpuShader _overdraw_count_shader; // the overdraw view's: one layer a draw
     gpu::GpuShader _shape_shader;          // shape.frag: anti-aliased shapes (draw_shape_mesh)
+    gpu::GpuShader _shape_vertex_shader;   // shape.vert: their indexed vertices
+    std::vector<gpu::GpuShapeVertex> _shape_scratch;
     ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
     bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;

@@ -168,16 +168,20 @@ void test_strokes() {
     expect_area("square cap", core_area(stroke(line, {.width = 10, .cap = kin::LineCap::Square})), 1100.0f, 0.01f);
     expect_area("round cap", core_area(stroke(line, {.width = 10, .cap = kin::LineCap::Round})), 1000.0f + pi * 25.0f,
                 1.0f);
-    // A right-angled corner: two segments, overlapping on the inside, and the
-    // join's wedge outside.
+    // A right-angled corner, nothing drawn twice: two 100 x 10 legs meeting at
+    // the miter; a bevel cuts its tip off; a round join rounds the corner.
     const std::vector<kin::Vec2f> corner{{0, 0}, {100, 0}, {100, 100}};
     const kin::Path bend = kin::Path::polyline(corner);
-    expect_area("miter", core_area(stroke(bend, {.width = 10})), 2025.0f, 0.1f);
-    expect_area("bevel", core_area(stroke(bend, {.width = 10, .join = kin::LineJoin::Bevel})), 2012.5f, 0.1f);
+    expect_area("miter", core_area(stroke(bend, {.width = 10})), 2000.0f, 0.1f);
+    expect_area("bevel", core_area(stroke(bend, {.width = 10, .join = kin::LineJoin::Bevel})), 2000.0f - 12.5f, 0.1f);
     expect_area("round join", core_area(stroke(bend, {.width = 10, .join = kin::LineJoin::Round})),
-                2000.0f + pi * 25.0f / 4.0f, 0.5f);
-    // Closed: four sides and four corners.
-    expect_area("closed", core_area(stroke(kin::Path::rect({0, 0, 100, 100}), {.width = 10})), 4100.0f, 0.1f);
+                2000.0f - 25.0f + pi * 25.0f / 4.0f, 0.1f);
+    // Closed: the ring between a 110 and a 90 square.
+    expect_area("closed", core_area(stroke(kin::Path::rect({0, 0, 100, 100}), {.width = 10})), 4000.0f, 0.1f);
+    // Short segments with a sharp turn: each keeps its own inner corner.
+    const std::vector<kin::Vec2f> zig{{0, 0}, {3, 0}, {0, 2}};
+    const kin::ShapeMesh tight = stroke(kin::Path::polyline(zig), {.width = 10, .join = kin::LineJoin::Round});
+    assert(!tight.empty() && tight.bounds.w < 30.0f);
     // A spike past the miter limit is bevelled: no far-flung point.
     const std::vector<kin::Vec2f> spike{{0, 0}, {100, 0}, {0, 5}};
     const kin::ShapeMesh sharp = stroke(kin::Path::polyline(spike), {.width = 10});

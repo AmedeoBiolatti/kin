@@ -129,6 +129,12 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, u0));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, pivot_x));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSpriteInstance, r));
+    } else if (layout == GpuVertexLayout::ShapeVertices) {
+        vb.pitch = sizeof(GpuShapeVertex);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuShapeVertex, x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuShapeVertex, r));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT, offsetof(GpuShapeVertex, edge));
     } else if (layout == GpuVertexLayout::ShaderVertices) {
         vb.pitch = sizeof(GpuShaderVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;

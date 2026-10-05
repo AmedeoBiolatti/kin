@@ -86,6 +86,10 @@ public:
     void push_viewport(Rectf rect);
     void pop_viewport();
     void custom(RenderKey key, std::function<void(Renderer2D&)> callback, std::string debug_name = {});
+    // A shape mesh, placed by `transform` and coloured by `tint`. The queue
+    // keeps the mesh alive until it is cleared.
+    void draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mesh, const Affine2& transform = {},
+                    Color tint = colors::white);
 
     // Reorders the commands into draw order, so commands() and the presorted
     // flushes see them sorted. Does nothing when nothing changed since the last sort.
