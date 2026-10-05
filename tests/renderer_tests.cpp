@@ -1359,6 +1359,38 @@ int sprite_batch_mismatches(kin::Renderer2D& renderer) {
     return mismatches;
 }
 
+// A texture kept past its renderer (in a static cache, say) and dropped while
+// a newer renderer runs must not touch the newer renderer's textures: SDL frees
+// a renderer's textures with it, and may hand their addresses to new ones.
+void test_textures_outliving_their_renderer() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "stale-texture-test", .width = 16, .height = 16, .hidden = true});
+    std::vector<kin::Texture> stale;
+    const std::array<kin::u8, 4> red{255, 0, 0, 255};
+    {
+        kin::Renderer2D old_renderer{window};
+        for (int i = 0; i < 32; ++i) {
+            stale.push_back(old_renderer.create_texture_from_rgba(red.data(), {1, 1}));
+        }
+    }
+    kin::Renderer2D renderer{window};
+    std::vector<kin::Texture> live;
+    for (int i = 0; i < 32; ++i) {
+        live.push_back(renderer.create_texture_from_rgba(red.data(), {1, 1}));
+    }
+    stale.clear();
+    kin::RenderTarget target = renderer.create_render_target({16, 16}, kin::ScaleMode::Nearest);
+    for (const kin::Texture& texture : live) {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(0, 0, 0));
+        renderer.draw_texture(texture, {0.0f, 0.0f, 16.0f, 16.0f});
+        std::vector<kin::u8> pixels;
+        kin::Vec2i size{};
+        assert(renderer.read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, pixels, size));
+        assert(pixel_near(pixels, size, 8, 8, kin::Color::rgb(255, 0, 0)));
+    }
+}
+
 void test_sprite_batches_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "sprite-batch-test", .width = 64, .height = 64, .hidden = true});
@@ -3228,6 +3260,7 @@ int main() {
     test_lighting_on_gpu_backend();
     test_lighting_declines_without_render_targets();
     test_sprite_batches_on_software_backend();
+    test_textures_outliving_their_renderer();
     test_sprite_batches_on_gpu_backend();
     return 0;
 }
