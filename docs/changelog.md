@@ -79,6 +79,27 @@ releases may change APIs.
   snapped away is paid back a whole step at a time, so game time keeps up.
 - `RendererBackendStats::gpu_frames_sampled` and `last_gpu_frame_span`: when
   new GPU timing arrived, and how many frames it covers.
+- Render probe: `--probe-render[=PATH]` on any `run_scene_app` game renders each
+  headless frame, compares it with the frames before it tile by tile, and
+  writes a `kin.render_probe/1` report of flicker (jitter, frame popping, single
+  wrong frames) and spikes, with when and where each happened. `--probe-fail`
+  fails the run when it finds anything; `--probe-tile=N` sets the tile size.
+  `kin::RenderProbe` runs the same analysis on frames from anywhere. The
+  `KIN_ENABLE_RENDER_PROBE` CMake option (on by default) compiles it out.
+- Render probe events name their culprits: the entities and render components
+  (or named scopes, or scenes) whose draws changed where the event happened,
+  and how (`moved`, `frame`, `color`, `appeared`, ...). `KIN_DRAW_SCOPE(label)`
+  and `KIN_DRAW_ENTITY(entity, component)` name draws made outside the ECS
+  render components.
+- Determinism check: `--check-determinism[=PATH]` on any `run_scene_app` game
+  runs it three times in lockstep (twice alike, once with one job worker),
+  hashing each frame's state, and reports the first frame where a run differs
+  with the entities, components and report fields that differ
+  (`kin.determinism/1`). `kin::hash_state` / `kin::describe_state` hash and list
+  a scene stack's state. The `KIN_ENABLE_DETERMINISM_CHECK` CMake option (on by
+  default) compiles it out.
+- `KIN_JOB_WORKERS` sets the default job system's worker count.
+- `ProcessOptions::environment` sets variables for a child process.
 
 ### Changed
 
@@ -133,6 +154,10 @@ releases may change APIs.
   submission, whose resources it then freed when the old frame finished: on
   Vulkan, a lost device a few seconds into `--profile`. Those frames are now
   submitted without a fence (and go untimed).
+- ui2 text moves the pen by each glyph's advance, not the width of its bitmap:
+  italic text is no longer letter-spaced, glyphs that overhang (an f or a j in
+  many faces) no longer push the next one away, and drawn text matches
+  `measure_text` more closely.
 
 ## [0.2.3] — 2026-10-01
 
