@@ -45,6 +45,22 @@ struct Renderer2D::OpenLayer {
     LayerOptions options;
 };
 
+// An open clip or mask (push_clip, push_mask).
+struct Renderer2D::OpenClip {
+    enum class Kind : u8 {
+        Scissor, // the backend's clip rectangle
+        Mask,    // two layers: the mask, then what it masks
+        Stencil, // the backend's stencil (a hard clip; `mask` kept while a mask layer is read)
+        Through, // nothing to undo: drawn straight through
+    };
+    Kind kind = Kind::Scissor;
+    MaskOptions options;
+    PooledTarget mask;
+    PooledTarget content;
+    IRenderer2DBackend::LayerBounds mask_bounds;
+    std::optional<Rectf> extent; // where the mask can be, when known (a backend may not say)
+};
+
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     // The SDL_GPU/Vulkan backend is now the default when a real GPU is available
@@ -989,12 +1005,198 @@ void Renderer2D::pop_viewport() {
     _backend->pop_viewport();
 }
 
+Renderer2D::ClipGuard::~ClipGuard() {
+    if (_renderer) {
+        _renderer->pop_clip();
+    }
+}
+
 void Renderer2D::push_clip(Rectf rect) {
     _backend->push_clip(rect);
+    _clips.push_back(std::make_unique<OpenClip>());
+}
+
+void Renderer2D::push_clip(const ClipRegion& clip) {
+    switch (clip.kind) {
+    case ClipRegion::Kind::Path:
+        if (clip.path) {
+            push_clip(*clip.path, clip.rule, clip.edge);
+            return;
+        }
+        break;
+    case ClipRegion::Kind::Mask:
+        if (clip.mask) {
+            push_mask(clip.mask, clip.options);
+            if (clip.extent) {
+                _clips.back()->extent = transformed_bounds(_transform, *clip.extent);
+            }
+            return;
+        }
+        break;
+    case ClipRegion::Kind::None: break;
+    }
+    auto none = std::make_unique<OpenClip>();
+    none->kind = OpenClip::Kind::Through;
+    _clips.push_back(std::move(none));
+}
+
+void Renderer2D::push_clip(const Path& path, FillRule rule, ClipEdge edge) {
+    // A rectangle that stays one under the transform is the scissor's.
+    if (const std::optional<PathPrimitive>& primitive = path.primitive();
+        primitive && primitive->kind == PathPrimitive::Kind::RoundedRect && primitive->radius <= 0.0f) {
+        const Affine2 m = _transform * primitive->transform;
+        if (m.b == 0.0f && m.c == 0.0f) {
+            const Vec2f h = primitive->half_size;
+            push_clip(transformed_bounds(m, {-h.x, -h.y, 2.0f * h.x, 2.0f * h.y}));
+            return;
+        }
+    }
+    if (edge == ClipEdge::Hard && capabilities().stencil_clips) {
+        // Its triangles straight into the stencil: no layers.
+        _contour_scratch.clear();
+        path.flatten(_contour_scratch, shape_detail().tolerance);
+        _shape_scratch.clear();
+        tessellate_fill(_shape_scratch, _contour_scratch, rule, colors::white, 0.0f);
+        _stencil_scratch.clear();
+        for (const u32 i : _shape_scratch.indices) {
+            _stencil_scratch.push_back(_shape_scratch.vertices[i].position);
+        }
+        if (_backend->push_stencil_clip(_stencil_scratch)) {
+            auto clip = std::make_unique<OpenClip>();
+            clip->kind = OpenClip::Kind::Stencil;
+            _clips.push_back(std::move(clip));
+            return;
+        }
+    }
+    if (!capabilities().masks) {
+        push_clip(transformed_bounds(_transform, path.bounds())); // no masks: the path's bounds
+        return;
+    }
+    // A hard edge: where the anti-aliased fill covers at least half a pixel.
+    const MaskOptions options = edge == ClipEdge::Hard ? MaskOptions{.mode = MaskMode::Stencil} : MaskOptions{};
+    push_mask([&](Renderer2D& renderer) { renderer.fill_path(path, colors::white, rule); }, options);
+    _clips.back()->extent = transformed_bounds(_transform, path.bounds());
+}
+
+void Renderer2D::push_mask(const Texture& mask, Rectf dest, MaskOptions options) {
+    push_mask([&](Renderer2D& renderer) { renderer.draw_texture(mask, dest); }, options);
+    _clips.back()->extent = transformed_bounds(_transform, dest);
+}
+
+void Renderer2D::push_mask(const std::function<void(Renderer2D&)>& draw_mask, MaskOptions options) {
+    auto clip = std::make_unique<OpenClip>();
+    clip->kind = OpenClip::Kind::Through;
+    clip->options = options;
+    const Vec2i pixels = _backend->current_target_pixels();
+    if (capabilities().masks && pixels.x > 0 && pixels.y > 0) {
+        const f32 resolution = std::clamp(options.resolution, 0.05f, 1.0f);
+        const Vec2i size{std::max(1, static_cast<i32>(std::ceil(static_cast<f32>(pixels.x) * resolution))),
+                         std::max(1, static_cast<i32>(std::ceil(static_cast<f32>(pixels.y) * resolution)))};
+        clip->mask = acquire_render_target(size, ScaleMode::Linear);
+        clip->content = acquire_render_target(size, ScaleMode::Linear);
+    }
+    if (clip->mask && clip->content && _backend->push_layer_target(clip->mask.target())) {
+        {
+            const auto blend = scoped_blend_mode(BlendMode::Alpha);
+            draw_mask(*this);
+        }
+        clip->mask_bounds = _backend->pop_layer_target().value_or(IRenderer2DBackend::LayerBounds{});
+        // A stencil mask with the backend's stencil: read into it where it was
+        // drawn, and what it masks drawn straight on (no second layer).
+        const IRenderer2DBackend::LayerBounds& m = clip->mask_bounds;
+        if (options.mode == MaskMode::Stencil && !options.invert && capabilities().stencil_clips &&
+            _backend->push_stencil_mask(clip->mask.texture(), m.source, m.dest, options)) {
+            clip->kind = OpenClip::Kind::Stencil;
+            clip->content = PooledTarget{};
+        } else if (_backend->push_layer_target(clip->content.target())) {
+            clip->kind = OpenClip::Kind::Mask;
+        }
+    }
+    if (clip->kind == OpenClip::Kind::Through) {
+        clip->mask = PooledTarget{};
+        clip->content = PooledTarget{};
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            KIN_LOG_WARN("render", "push_mask: no masks on this backend; drawing unmasked");
+        }
+    }
+    _clips.push_back(std::move(clip));
 }
 
 void Renderer2D::pop_clip() {
-    _backend->pop_clip();
+    if (_clips.empty()) {
+        _backend->pop_clip(); // pushed straight to the backend
+        return;
+    }
+    std::unique_ptr<OpenClip> clip = std::move(_clips.back());
+    _clips.pop_back();
+    switch (clip->kind) {
+    case OpenClip::Kind::Scissor: _backend->pop_clip(); break;
+    case OpenClip::Kind::Mask: end_mask(*clip); break;
+    case OpenClip::Kind::Stencil: _backend->pop_stencil_clip(); break;
+    case OpenClip::Kind::Through: break;
+    }
+}
+
+void Renderer2D::end_mask(OpenClip& clip) {
+    const std::optional<IRenderer2DBackend::LayerBounds> content = _backend->pop_layer_target();
+    if (!content || content->dest.w <= 0.0f || content->dest.h <= 0.0f) {
+        return; // nothing drawn
+    }
+    // Where the content shows: within the mask's drawing, unless inverted
+    // (then outside it too, where the mask is clear).
+    Rectf dest = content->dest;
+    const auto within = [&dest](Rectf m) {
+        const f32 x0 = std::max(dest.x, m.x), y0 = std::max(dest.y, m.y);
+        const f32 x1 = std::min(dest.x + dest.w, m.x + m.w), y1 = std::min(dest.y + dest.h, m.y + m.h);
+        dest = {x0, y0, std::max(0.0f, x1 - x0), std::max(0.0f, y1 - y0)};
+    };
+    if (!clip.options.invert) {
+        within(clip.mask_bounds.dest);
+        if (clip.extent) {
+            // Whole pixels around it, and a pixel more for its soft edge.
+            const Rectf e = *clip.extent;
+            const f32 x0 = std::floor(e.x) - 1.0f, y0 = std::floor(e.y) - 1.0f;
+            within({x0, y0, std::ceil(e.x + e.w) + 1.0f - x0, std::ceil(e.y + e.h) + 1.0f - y0});
+        }
+        if (dest.w <= 0.0f || dest.h <= 0.0f) {
+            return; // nothing drawn where the mask is
+        }
+    }
+    // Both layers map draw coordinates to their pixels alike.
+    const f32 sx = content->source.w / content->dest.w, sy = content->source.h / content->dest.h;
+    const Rectf source{content->source.x + (dest.x - content->dest.x) * sx,
+                       content->source.y + (dest.y - content->dest.y) * sy, dest.w * sx, dest.h * sy};
+    const auto blend = scoped_blend_mode(BlendMode::Alpha);
+    const Affine2 transform = _transform;
+    apply_transform({});
+    _backend->draw_masked(clip.content.texture(), clip.mask.texture(), source, dest, colors::white, clip.options);
+    apply_transform(transform);
+}
+
+Renderer2D::ClipGuard Renderer2D::scoped_clip(Rectf rect) {
+    push_clip(rect);
+    return ClipGuard{this};
+}
+
+Renderer2D::ClipGuard Renderer2D::scoped_clip(const Path& path, FillRule rule, ClipEdge edge) {
+    push_clip(path, rule, edge);
+    return ClipGuard{this};
+}
+
+Renderer2D::ClipGuard Renderer2D::scoped_clip(const ClipRegion& clip) {
+    push_clip(clip);
+    return ClipGuard{this};
+}
+
+Renderer2D::ClipGuard Renderer2D::scoped_mask(const std::function<void(Renderer2D&)>& draw_mask, MaskOptions options) {
+    push_mask(draw_mask, options);
+    return ClipGuard{this};
+}
+
+Renderer2D::ClipGuard Renderer2D::scoped_mask(const Texture& mask, Rectf dest, MaskOptions options) {
+    push_mask(mask, dest, options);
+    return ClipGuard{this};
 }
 
 RenderTarget Renderer2D::create_render_target(Vec2i size, ScaleMode mode) {

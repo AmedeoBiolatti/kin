@@ -53,11 +53,14 @@ enum class RenderCommandType : u8 {
     PopViewport,
     Custom,
     Shape, // a ShapeMesh (in `detail`), placed by detail->transform; `rect` bounds it
+    Group, // a queue of its own (detail->group) through detail->clip; `rect` bounds the clip, if it can
 };
 
 // Cold per-command payload, needed only by Text/Custom/Shape commands. Kept behind a
 // pointer (null on the common Sprite/Texture/Rect/Line path) so the hot RenderCommand
 // stays small and cheap to construct, move (sort gather), and cache.
+class RenderQueue;
+
 struct RenderCommandDetail {
     std::string text;
     Vec2f text_pos{};
@@ -66,6 +69,8 @@ struct RenderCommandDetail {
     std::function<void(Renderer2D&)> callback;
     std::shared_ptr<const ShapeMesh> shape;
     Affine2 transform{};
+    std::shared_ptr<RenderQueue> group;
+    ClipRegion clip;
 };
 
 // One queued draw. Kept small (checked below) because queues hold thousands and

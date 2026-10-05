@@ -214,6 +214,12 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         _distance_field_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
                                                            dir / "distance_field.frag.spv", /*uniform_buffers=*/1,
                                                            /*samplers=*/1);
+        _mask_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                                 dir / "mask_composite.frag.spv", /*uniform_buffers=*/1,
+                                                 /*samplers=*/2);
+        _mask_stencil_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                         SDL_GPU_SHADERFORMAT_SPIRV, dir / "mask_stencil.frag.spv",
+                                                         /*uniform_buffers=*/1, /*samplers=*/1);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "shapes drawn with soft edges only", (LogFields{{.name = "reason", .value = e.what()}}));
     }
@@ -245,6 +251,7 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     _white = _device.create_texture_from_rgba(white.data(), 1, 1);
 
     _pipelines.init(_device.handle());
+    _stencil_format = _device.depth_stencil_format();
     if (_shape_shader.handle() && _shape_vertex_shader.handle()) {
         // Shapes' pipeline now rather than at the first one drawn.
         _pipelines.get(_shape_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha,
@@ -257,6 +264,10 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     if (_sdf_shader.handle() && _sdf_vertex_shader.handle()) {
         _pipelines.get(_sdf_vertex_shader.handle(), _sdf_shader.handle(), gpu::GpuBlendMode::Alpha,
                        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::SdfInstances);
+    }
+    if (_mask_shader.handle()) {
+        _pipelines.get(_vertex_shader.handle(), _mask_shader.handle(), gpu::GpuBlendMode::Premultiplied,
+                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
     }
     ensure_scene();
 
@@ -301,6 +312,8 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .shapes = true,
         .shape_primitives = _sdf_shader.handle() && _sdf_vertex_shader.handle(),
         .distance_fields = static_cast<bool>(_distance_field_shader.handle()),
+        .masks = static_cast<bool>(_mask_shader.handle()),
+        .stencil_clips = _stencil_format != SDL_GPU_TEXTUREFORMAT_INVALID,
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -426,7 +439,125 @@ void GpuRenderer2DBackend::flush_to_frame() {
     ctx.view.scale[1] = 2.0f / std::max(1.0f, coord.y);
     ctx.view.translate[0] = -1.0f;
     ctx.view.translate[1] = -1.0f;
+    // The stencil goes with the passes that use it, kept from one to the next.
+    StencilState& stencil = current_stencil();
+    if (stencil.texture && _batch.uses_stencil()) {
+        ctx.depth_stencil = stencil.texture->handle();
+        ctx.depth_stencil_format = _stencil_format;
+        ctx.clear_stencil = !stencil.loaded;
+    }
     _batch.flush(*_frame, _device, _pipelines, ctx);
+    if (ctx.depth_stencil) {
+        stencil.loaded = true;
+    } else if (stencil.clips.empty()) {
+        stencil.loaded = false; // all zero: the next pass to need it may clear it
+    }
+}
+
+GpuRenderer2DBackend::StencilState& GpuRenderer2DBackend::current_stencil() {
+    return _rt_stack.empty() ? _scene_stencil : _rt_stack.back().stencil;
+}
+
+void GpuRenderer2DBackend::sync_stencil() {
+    const std::size_t depth = current_stencil().clips.size();
+    _batch.set_stencil(depth > 0 ? gpu::GpuStencilOp::Equal : gpu::GpuStencilOp::None, static_cast<u8>(depth));
+}
+
+void GpuRenderer2DBackend::release_stencil(StencilState& state) {
+    for (const std::unique_ptr<PooledStencil>& pooled : _stencil_pool) {
+        if (&pooled->texture == state.texture) {
+            pooled->in_use = false;
+        }
+    }
+    state = {};
+}
+
+void GpuRenderer2DBackend::open_stencil_clip(StencilClip clip) {
+    StencilState& state = current_stencil();
+    const gpu::GpuTexture& target = current_target();
+    if (!state.texture) {
+        // A stencil the target's size: a free one, else a new one (dropping
+        // free ones of other sizes, from before a resize).
+        std::erase_if(_stencil_pool, [&](const std::unique_ptr<PooledStencil>& p) {
+            return !p->in_use && (p->texture.width() != target.width() || p->texture.height() != target.height());
+        });
+        auto free = std::ranges::find_if(_stencil_pool, [](const auto& p) { return !p->in_use; });
+        if (free == _stencil_pool.end()) {
+            auto made = std::make_unique<PooledStencil>();
+            made->texture = _device.create_depth_stencil(target.width(), target.height());
+            _stencil_pool.push_back(std::move(made));
+            free = std::prev(_stencil_pool.end());
+        }
+        (*free)->in_use = true;
+        state.texture = &(*free)->texture;
+        state.loaded = false;
+    }
+    // Inside it and the clips already open: one more.
+    const SDL_Rect all{0, 0, static_cast<int>(target.width()), static_cast<int>(target.height())};
+    const auto depth = static_cast<u8>(state.clips.size());
+    _batch.push_stencil(clip.vertices, clip.quads, gpu::GpuStencilOp::Increment, depth,
+                        clip.mask ? _mask_stencil_shader.handle() : nullptr, clip.mask, all,
+                        clip.mask ? clip.params.data() : nullptr, clip.mask ? sizeof(clip.params) : 0,
+                        clip.mask ? _sampler_linear : nullptr);
+    state.clips.push_back(std::move(clip));
+    sync_stencil();
+}
+
+bool GpuRenderer2DBackend::push_stencil_clip(std::span<const Vec2f> triangles) {
+    if (_stencil_format == SDL_GPU_TEXTUREFORMAT_INVALID || current_stencil().clips.size() >= 255) {
+        return false;
+    }
+    ensure_frame();
+    StencilClip clip;
+    clip.vertices.reserve(triangles.size());
+    for (const Vec2f p : triangles) {
+        clip.vertices.push_back({p.x, p.y, 0.0f, 0.0f, 255, 255, 255, 255});
+    }
+    place(clip.vertices);
+    open_stencil_clip(std::move(clip));
+    return true;
+}
+
+bool GpuRenderer2DBackend::push_stencil_mask(const Texture& mask, Rectf source, Rectf dest, const MaskOptions& options) {
+    const auto* m = as_gpu(mask.backend().get());
+    if (_stencil_format == SDL_GPU_TEXTUREFORMAT_INVALID || !_mask_stencil_shader.handle() || !m || !m->texture() ||
+        current_stencil().clips.size() >= 255) {
+        return false;
+    }
+    ensure_frame();
+    retain(mask);
+    StencilClip clip;
+    clip.quads = true;
+    clip.mask = m->texture().handle();
+    clip.params = {options.source == MaskSource::Luminance ? 1.0f : 0.0f, 0.0f, options.threshold,
+                   options.invert ? 1.0f : 0.0f};
+    const Vec2i size = m->size();
+    const f32 u0 = source.x / static_cast<f32>(size.x), v0 = source.y / static_cast<f32>(size.y);
+    const f32 u1 = (source.x + source.w) / static_cast<f32>(size.x), v1 = (source.y + source.h) / static_cast<f32>(size.y);
+    clip.vertices = {{dest.x, dest.y, u0, v0, 255, 255, 255, 255},
+                     {dest.x + dest.w, dest.y, u1, v0, 255, 255, 255, 255},
+                     {dest.x + dest.w, dest.y + dest.h, u1, v1, 255, 255, 255, 255},
+                     {dest.x, dest.y + dest.h, u0, v1, 255, 255, 255, 255}};
+    place(clip.vertices);
+    open_stencil_clip(std::move(clip));
+    return true;
+}
+
+void GpuRenderer2DBackend::pop_stencil_clip() {
+    StencilState& state = current_stencil();
+    if (state.clips.empty() || !_frame) {
+        return;
+    }
+    // Drawn again, one fewer where it was in.
+    const StencilClip clip = std::move(state.clips.back());
+    state.clips.pop_back();
+    const gpu::GpuTexture& target = current_target();
+    const SDL_Rect all{0, 0, static_cast<int>(target.width()), static_cast<int>(target.height())};
+    _batch.push_stencil(clip.vertices, clip.quads, gpu::GpuStencilOp::Decrement, static_cast<u8>(state.clips.size() + 1),
+                        clip.mask ? _mask_stencil_shader.handle() : nullptr, clip.mask, all,
+                        clip.mask ? clip.params.data() : nullptr, clip.mask ? sizeof(clip.params) : 0,
+                        clip.mask ? _sampler_linear : nullptr);
+    sync_stencil();
 }
 
 void GpuRenderer2DBackend::clear(Color color) {
@@ -557,6 +688,8 @@ void GpuRenderer2DBackend::present() {
     const u64 flush_start = SDL_GetTicksNS();
     ensure_frame();
     flush_to_frame();
+    release_stencil(_scene_stencil); // clips end with the frame
+    _batch.set_stencil(gpu::GpuStencilOp::None, 0);
     // Full-scene post-processing: run the chain over the scene texture (ping-pong
     // scratch RTs); the result (scene-sized) is what gets blitted to the swapchain.
     const gpu::GpuTexture* presented = run_post_chain();
@@ -1521,6 +1654,7 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
     }
+    sync_stencil();
 }
 
 bool GpuRenderer2DBackend::push_layer_target(const RenderTarget& target) {
@@ -1540,6 +1674,42 @@ bool GpuRenderer2DBackend::push_layer_target(const RenderTarget& target) {
     _rt_stack.push_back(TargetEntry{.texture = &backend->texture(), .coords = coords});
     _batch.begin(current_target(), SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}, /*do_clear=*/true);
     _batch.begin_bounds();
+    sync_stencil();
+    return true;
+}
+
+bool GpuRenderer2DBackend::draw_masked(const Texture& content, const Texture& mask, Rectf source, Rectf dest,
+                                       Color tint, const MaskOptions& options) {
+    const auto* c = as_gpu(content.backend().get());
+    const auto* m = as_gpu(mask.backend().get());
+    if (!_mask_shader.handle() || !c || !m || !c->texture() || !m->texture()) {
+        return false;
+    }
+    if (dest.w <= 0.0f || dest.h <= 0.0f) {
+        return true;
+    }
+    ensure_frame();
+    retain(content);
+    retain(mask);
+    struct Uniforms {
+        f32 params[4];
+    } uniforms{{options.source == MaskSource::Luminance ? 1.0f : 0.0f, options.mode == MaskMode::Stencil ? 1.0f : 0.0f,
+                options.threshold, options.invert ? 1.0f : 0.0f}};
+    // The two layers are the same size: one set of coordinates reads both.
+    const Vec2i size = c->size();
+    const f32 u0 = source.x / static_cast<f32>(size.x), v0 = source.y / static_cast<f32>(size.y);
+    const f32 u1 = (source.x + source.w) / static_cast<f32>(size.x), v1 = (source.y + source.h) / static_cast<f32>(size.y);
+    std::array<gpu::GpuVertex, 4> corners{{
+        {dest.x, dest.y, u0, v0, tint.r, tint.g, tint.b, tint.a},
+        {dest.x + dest.w, dest.y, u1, v0, tint.r, tint.g, tint.b, tint.a},
+        {dest.x + dest.w, dest.y + dest.h, u1, v1, tint.r, tint.g, tint.b, tint.a},
+        {dest.x, dest.y + dest.h, u0, v1, tint.r, tint.g, tint.b, tint.a},
+    }};
+    place(corners);
+    const std::array<SDL_GPUTextureSamplerBinding, 1> extra{{{.texture = m->texture().handle(), .sampler = _sampler_linear}}};
+    _batch.push_quads(corners, _mask_shader.handle(), c->texture().handle(), current_scissor(),
+                      resolve_blend(gpu::GpuBlendMode::Premultiplied), &uniforms, sizeof(uniforms), _sampler_linear,
+                      extra);
     return true;
 }
 
@@ -1572,6 +1742,7 @@ void GpuRenderer2DBackend::pop_render_target() {
     if (_frame) {
         flush_to_frame();
     }
+    release_stencil(_rt_stack.back().stencil);
     _rt_stack.pop_back();
     if (!_saved_clip_stacks.empty()) {
         _clip_stack = std::move(_saved_clip_stacks.back());
@@ -1594,6 +1765,7 @@ void GpuRenderer2DBackend::pop_render_target() {
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
     }
+    sync_stencil();
 }
 
 void GpuRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode) {

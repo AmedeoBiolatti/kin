@@ -279,6 +279,7 @@ void scrolled_rows(Context& ctx,
                    f32& offset,
                    i32& first,
                    i32& visible,
+                   std::array<f32, 4> corners, // of the panel the body touches: rows keep inside them
                    DrawRow&& draw_row) {
     ScrollState scroll{
         .offset = {0.0f, offset},
@@ -292,7 +293,7 @@ void scrolled_rows(Context& ctx,
     offset = scroll.offset.y;
     first = step > 0.0f ? std::max(0, static_cast<i32>(std::floor(offset / step))) : 0;
     visible = std::max(0, std::min(count - first, static_cast<i32>(std::ceil(body.h / std::max(1.0f, step))) + 1));
-    ctx.push_clip(body);
+    ctx.push_clip(body, corners);
     const bool debug_zebra = ctx.theme().debug_component_tint;
     for (i32 i = first; i < first + visible && i < count; ++i) {
         const Rectf row{body.x, body.y + static_cast<f32>(i) * step - offset, body.w, step};
@@ -929,6 +930,7 @@ void run(Context& ctx, ListView& widget) {
 
     scrolled_rows(ctx, frame.content, step, count, widget.wheel_step, widget.enabled,
                   widget.offset, widget.first, widget.visible,
+                  std::array<f32, 4>{frame.inner_radius, frame.inner_radius, frame.inner_radius, frame.inner_radius},
                   [&](i32 i, Rectf cell) {
                       const Rectf row{cell.x, cell.y, cell.w, metrics.row_height};
                       const Id row_id = make_id(widget.id, static_cast<u64>(i));
@@ -1045,7 +1047,9 @@ void run(Context& ctx, Table& widget) {
         ctx.pop_clip();
     }
 
+    // Below the header: only the bottom corners are the panel's.
     scrolled_rows(ctx, body, row_h, row_count, 48.0f, true, widget.offset, widget.first, widget.visible,
+                  std::array<f32, 4>{0.0f, 0.0f, inner_radius, inner_radius},
                   [&](i32 r, Rectf row) {
                       if (r % 2 == 0) {
                           draw_table_row_stripe(ctx, row, table_content, inner_radius, ctx.theme().colors.surface_subtle);
@@ -1101,6 +1105,7 @@ void run(Context& ctx, TreeView& widget) {
 
     scrolled_rows(ctx, frame.content, step, count, 48.0f, widget.enabled,
                   widget.offset, widget.first, widget.visible,
+                  std::array<f32, 4>{frame.inner_radius, frame.inner_radius, frame.inner_radius, frame.inner_radius},
                   [&](i32 i, Rectf cell) {
                       const UiTreeItem& item = widget.items[static_cast<std::size_t>(i)];
                       const Rectf row{cell.x, cell.y, cell.w, metrics.row_height};

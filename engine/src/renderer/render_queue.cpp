@@ -233,6 +233,8 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
             command.detail->callback(renderer);
         }
         break;
+    case RenderCommandType::Group:
+        break; // drawn by execute_group(), before getting here
     case RenderCommandType::Shape:
         if (command.detail && command.detail->shape) {
             // `rect` arrives moved as the view moved the shape's bounds: the
@@ -387,6 +389,7 @@ Rectf render_command_bounds(const RenderCommand& command) {
     case RenderCommandType::Text:
     case RenderCommandType::PushViewport:
     case RenderCommandType::Shape:
+    case RenderCommandType::Group:
         return command.rect;
     case RenderCommandType::FillRect:
     case RenderCommandType::DrawRect:
@@ -398,6 +401,9 @@ Rectf render_command_bounds(const RenderCommand& command) {
 }
 
 bool render_command_visible(const RenderCommand& command, const RenderView& view) {
+    if (command.type == RenderCommandType::Group && (command.rect.w <= 0.0f || command.rect.h <= 0.0f)) {
+        return true; // a clip without bounds: the content culls itself
+    }
     if (command.type == RenderCommandType::Clear ||
         command.type == RenderCommandType::PushViewport ||
         command.type == RenderCommandType::PopViewport ||
@@ -408,10 +414,40 @@ bool render_command_visible(const RenderCommand& command, const RenderView& view
     return render_view_visible(view, render_command_bounds(command));
 }
 
+namespace {
+
+// A group: its clip, in the commands' coordinates (under a camera that only
+// moves, shifted as they are), then its content.
+void execute_group(Renderer2D& renderer, const RenderCommand& command, const RenderView* view) {
+    const RenderCommandDetail* detail = command.detail.get();
+    if (!detail || !detail->group) {
+        return;
+    }
+    const ViewShift shift{view};
+    if (shift.active) {
+        const auto moved = renderer.scoped_transform(Affine2::translation({-shift.offset.x, -shift.offset.y}));
+        renderer.push_clip(detail->clip);
+    } else {
+        renderer.push_clip(detail->clip);
+    }
+    if (view) {
+        detail->group->flush_within_view(renderer, *view);
+    } else {
+        detail->group->flush(renderer);
+    }
+    renderer.pop_clip();
+}
+
+} // namespace
+
 void execute_render_command(Renderer2D& renderer, const RenderCommand& command) {
 #ifdef KIN_ENABLE_RENDER_PROBE
     const DrawSourceScope scope{command.draw_source};
 #endif
+    if (command.type == RenderCommandType::Group) {
+        execute_group(renderer, command, nullptr);
+        return;
+    }
     const Rectf rect = command.output_pixel_rect ? output_to_logical(renderer, command.rect) : command.rect;
     execute_resolved(renderer, command, rect, command.a, command.b);
 }
@@ -420,6 +456,10 @@ void execute_render_command(Renderer2D& renderer, const RenderCommand& command, 
 #ifdef KIN_ENABLE_RENDER_PROBE
     const DrawSourceScope scope{command.draw_source};
 #endif
+    if (command.type == RenderCommandType::Group) {
+        execute_group(renderer, command, &view);
+        return;
+    }
     // output_pixel_rect commands bypass the view/camera transform entirely.
     if (command.output_pixel_rect) {
         const WithoutCamera outside{renderer, view};
@@ -458,6 +498,7 @@ void execute_render_command(Renderer2D& renderer, const RenderCommand& command, 
     case RenderCommandType::Clear:
     case RenderCommandType::PopViewport:
     case RenderCommandType::Custom:
+    case RenderCommandType::Group:
         break;
     }
     execute_resolved(renderer, command, rect, a, b);
@@ -755,6 +796,19 @@ void RenderQueue::draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mes
     submit(std::move(command));
 }
 
+void RenderQueue::draw_group(RenderKey key, std::shared_ptr<RenderQueue> content, ClipRegion clip) {
+    if (!content) {
+        return;
+    }
+    RenderCommand command{
+        .type = RenderCommandType::Group,
+        .key = key,
+        .rect = clip.bounds().value_or(Rectf{}),
+    };
+    command.detail = std::make_shared<RenderCommandDetail>(RenderCommandDetail{.group = std::move(content), .clip = std::move(clip)});
+    submit(std::move(command));
+}
+
 void RenderQueue::custom(RenderKey key, std::function<void(Renderer2D&)> callback, std::string debug_name) {
     RenderCommand command{
         .type = RenderCommandType::Custom,
@@ -1034,6 +1088,10 @@ void RenderQueue::flush(Renderer2D& renderer, const RenderView& view) {
 
 void RenderQueue::flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
     const CameraTransform camera{renderer, view};
+    flush_within_view(renderer, view, pass_mask);
+}
+
+void RenderQueue::flush_within_view(Renderer2D& renderer, const RenderView& view, u64 pass_mask) {
     SpriteRun run{renderer, _sprite_run};
     const Culler culler{view};
     const ViewShift shift{&view};

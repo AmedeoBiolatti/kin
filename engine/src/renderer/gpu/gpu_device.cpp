@@ -230,6 +230,33 @@ GpuTexture GpuDevice::create_render_texture(u32 width, u32 height, SDL_GPUTextur
     return GpuTexture{_shared, texture, width, height, format};
 }
 
+SDL_GPUTextureFormat GpuDevice::depth_stencil_format() const {
+    for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT}) {
+        if (SDL_GPUTextureSupportsFormat(_device, format, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)) {
+            return format;
+        }
+    }
+    return SDL_GPU_TEXTUREFORMAT_INVALID;
+}
+
+GpuTexture GpuDevice::create_depth_stencil(u32 width, u32 height) {
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D;
+    info.format = depth_stencil_format();
+    info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = 1;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture (depth-stencil) failed");
+    }
+    return GpuTexture{_shared, texture, width, height, info.format};
+}
+
 GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 height) {
     if (!pixels) {
         throw std::runtime_error("create_texture_from_rgba failed: invalid arguments");

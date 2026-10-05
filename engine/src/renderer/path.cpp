@@ -222,6 +222,37 @@ Path Path::rounded_rect(Rectf r, f32 radius) {
     return path;
 }
 
+Path Path::rounded_rect(Rectf r, std::array<f32, 4> radii) {
+    const f32 most = std::min(std::abs(r.w), std::abs(r.h)) * 0.5f;
+    for (f32& radius : radii) {
+        radius = std::clamp(radius, 0.0f, most);
+    }
+    if (radii[0] == radii[1] && radii[1] == radii[2] && radii[2] == radii[3]) {
+        return rounded_rect(r, radii[0]);
+    }
+    const f32 x0 = r.x, y0 = r.y, x1 = r.x + r.w, y1 = r.y + r.h;
+    const auto k = [](f32 radius) { return radius * (1.0f - kappa); };
+    const auto [tl, tr, br, bl] = radii;
+    Path path;
+    path.move_to({x0 + tl, y0}).line_to({x1 - tr, y0});
+    if (tr > 0.0f) {
+        path.cubic_to({x1 - k(tr), y0}, {x1, y0 + k(tr)}, {x1, y0 + tr});
+    }
+    path.line_to({x1, y1 - br});
+    if (br > 0.0f) {
+        path.cubic_to({x1, y1 - k(br)}, {x1 - k(br), y1}, {x1 - br, y1});
+    }
+    path.line_to({x0 + bl, y1});
+    if (bl > 0.0f) {
+        path.cubic_to({x0 + k(bl), y1}, {x0, y1 - k(bl)}, {x0, y1 - bl});
+    }
+    path.line_to({x0, y0 + tl});
+    if (tl > 0.0f) {
+        path.cubic_to({x0, y0 + k(tl)}, {x0 + k(tl), y0}, {x0 + tl, y0});
+    }
+    return path.close();
+}
+
 Path Path::circle(Vec2f center, f32 radius) {
     return ellipse(center, {radius, radius});
 }

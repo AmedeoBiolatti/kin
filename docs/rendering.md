@@ -135,7 +135,7 @@ either way: draw world coordinates in a callback with
 
 ## Shapes
 
-![The shapes demo: an orrery of planets, moons and an SVG rocket around a star](images/shapes_demo.png)
+![The shapes demo: an orrery of planets with night sides, moons and an SVG rocket around a star, and a telescope following the rocket](images/shapes_demo.png)
 
 Vector shapes are drawn anti-aliased, crisp at any zoom or turn, two ways:
 
@@ -624,8 +624,126 @@ through each other) go in a layer:
 
 In `kin_draw_bench 200 1 layers` (four layers of 30 shadows on a 2560 x 1440
 screen), whole-screen targets shaded 15.9 Mpixels a frame, `begin_layer` 2.3,
-and at half resolution 1.4. SDL_GPU; elsewhere the draws go straight to the
-current target and the opacity is not applied.
+and at half resolution 1.4. SDL_GPU and SDL's renderer (which keeps no
+bounds, so lays over all of its layers); elsewhere the draws go straight to
+the current target and the opacity is not applied.
+
+## Clips And Masks
+
+What is drawn can be cut to a rectangle, a path or a mask: anything drawn,
+read as how much of each pixel shows. All of them go on one stack, and
+`pop_clip()` (or a guard going) pops whichever is on top.
+
+```cpp
+{   // a portrait in a round frame, anti-aliased, under the camera like the rest
+    auto clip = renderer.scoped_clip(kin::Path::circle(centre, 40.0f));
+    renderer.draw_texture(portrait, frame);
+}
+{   // the level only where a light texture is bright
+    auto lit = renderer.scoped_mask([&](kin::Renderer2D& r) { r.draw_texture(light, light_rect); },
+                                    {.source = kin::MaskSource::Luminance});
+    draw_level(renderer);
+}
+{   // everything but a sprite's silhouette
+    auto cut = renderer.scoped_mask(hero_texture, hero_rect, {.mode = kin::MaskMode::Stencil, .invert = true});
+    draw_fog(renderer);
+}
+```
+
+| Call | Cuts to |
+| --- | --- |
+| `push_clip(rect)` | a rectangle, untransformed, to whole pixels: the scissor, free |
+| `push_clip(path, rule, edge)` | inside a path, under the transform: anti-aliased, or `ClipEdge::Hard` |
+| `push_mask(draw, options)` | whatever `draw` draws: shapes, sprites, text, a render target |
+| `push_mask(texture, dest, options)` | a texture stretched over `dest` |
+| `push_clip(region)` | any of these as a `kin::ClipRegion` value (`to_rect`, `to_path`, `to_mask`, `to_texture`) |
+
+`MaskOptions` says how the mask is read:
+
+- `source`: its `Alpha` (a shape, a silhouette), or its `Luminance` (white
+  shows, black hides, as SVG's masks).
+- `mode`: `Alpha` multiplies by it (soft edges, fades); `Stencil` shows all or
+  nothing, where it reaches `threshold` (cut-outs from a texture's alpha).
+- `invert`: show what is outside it instead.
+- `resolution`: below 1 for soft masks over soft content, at a fraction of the
+  pixels.
+
+Clips and masks nest, each within those open: a pixel shows as far as all of
+them let it. Masks drawn inside a layer, a render target or another mask work
+as anywhere else.
+
+A hard edge (`ClipEdge::Hard`) keeps each pixel whose centre is inside the
+path and drops the rest: no soft edge, but on SDL_GPU no layers either (see
+below). Use it for pixel art, and wherever many clips a frame matter more than
+smooth corners.
+
+### Queued and in the ECS
+
+A sorted `RenderQueue` reorders commands by their keys, so a clip cannot just
+be pushed before some of them and popped after. Clipped content goes in a
+group instead: a queue of its own, drawn as one command at the group's key,
+through its clip.
+
+```cpp
+auto panel = std::make_shared<kin::RenderQueue>(kin::RenderSortMode::LayerThenOrder);
+panel->draw_sprite(...);   // sorted among themselves by their own keys
+queue.draw_group({.layer = ui_layer, .order = 3}, panel,
+                 kin::ClipRegion::to_path(kin::Path::rounded_rect(frame, 12.0f)));
+```
+
+The clip is in the queue's coordinates: under the camera, when the queue is
+flushed with one. A group whose clip has bounds is culled by them; its content
+is culled as it draws. Groups nest.
+
+In the ECS, `kin::ClipGroup` on an entity clips its renderers and every
+entity's below it (ChildOf), in its own space, so the clip moves, turns and
+scales with it. Its subtree draws as one group at the ClipGroup's layer and
+order:
+
+```cpp
+window.set(kin::ClipGroup{.clip = kin::ClipRegion::to_path(kin::Path::rounded_rect({-60, -40, 120, 80}, 12)),
+                          .order = 10});
+```
+
+Groups below groups nest. Clipped renderers are collected with the dynamic
+ones (`collect_dynamic_world`), whatever their `static_renderable` says.
+
+ui2 widgets clip with `Context::push_clip(bounds, corner_radii)`: the list,
+table and tree bodies keep their scrolled rows inside the panel's rounded
+corners (only the corners the body touches).
+
+### How they are drawn, and what they cost
+
+A rectangle is the scissor. A path or a mask draws through two pooled layers:
+the mask is drawn into one, what it masks into the other, and the second is
+laid over through the first, only where the mask was drawn (unless inverted).
+A path that is a rectangle and stays one under the transform clips as a
+rectangle.
+
+On SDL_GPU (`capabilities().stencil_clips`) hard clips need no layers: the
+path's triangles are drawn into the target's stencil buffer, counting at each
+pixel how many clips it is inside, and what follows draws only where the count
+is full; popping draws them again to count back. Stencil-mode masks (not
+inverted) keep their mask layer but read it into the stencil, so what they
+mask draws straight on. The stencil buffer, one per target size, is pooled
+and attached only to the passes that clip. Elsewhere a hard clip is a
+stencil-mode mask of the path, with the same pixels.
+
+In `kin_draw_bench 200 50 masks` (50 cards of 40 quads each on a 1920 x 1080
+screen), recording the frame took 0.12 ms unclipped, 0.11 ms with rectangle
+clips, 1.15 ms with rounded-rectangle clips (about 20 microseconds of CPU for
+each mask, mostly for the render passes its layers begin and end) and 0.31 ms
+with hard ones (about 4 microseconds, tessellating each). Prefer rectangles
+where they will do and hard edges where they look right; a few dozen smooth
+masks a frame are fine.
+
+`capabilities().masks`: SDL_GPU lays masks over in a shader. SDL's renderer
+does it by blending for alpha masks (inverted or not, as path clips are),
+about 0.08 ms a mask on its GPU drivers; luminance and stencil masks, and its
+software renderer, read the layers back and multiply on the CPU, over the
+mask's bounds where they are known (paths and textures) and the whole target
+otherwise. Elsewhere a path clips to its bounds and a mask lets everything
+through, with a warning.
 
 ## Cached Targets
 

@@ -379,6 +379,44 @@ void test_render_queue_sprite_fields_and_bulk_submit() {
     assert(raw->rects[2].x == 10.0f && raw->rects[3].x == 11.0f && raw->rects[4].x == 12.0f);
 }
 
+// A group draws its content together at its own key, sorted among itself,
+// through its clip; under a camera that only moves, the clip moves with it.
+void test_render_queue_groups() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    auto content = std::make_shared<kin::RenderQueue>(kin::RenderSortMode::LayerThenOrder);
+    content->fill_rect({.order = 9}, {11.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);
+    content->fill_rect({.order = -9}, {10.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);
+    kin::RenderQueue queue{kin::RenderSortMode::LayerThenOrder};
+    queue.fill_rect({.order = 2}, {2.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);
+    queue.draw_group({.order = 1}, content, kin::ClipRegion::to_rect({10.0f, 0.0f, 5.0f, 5.0f}));
+    queue.fill_rect({.order = 0}, {0.0f, 0.0f, 1.0f, 1.0f}, kin::colors::white);
+    queue.flush(renderer);
+    // No masks here: the clip is its bounds, as the scissor (a viewport, to this backend).
+    assert((raw->commands == std::vector<std::string>{"fill", "push", "fill", "fill", "pop", "fill"}));
+    assert(raw->rects[0].x == 0.0f && raw->rects[1].x == 10.0f && raw->rects[2].x == 10.0f &&
+           raw->rects[3].x == 11.0f && raw->rects[4].x == 2.0f);
+
+    // Under a camera that only moves, the group culls by its clip and the clip moves.
+    kin::Camera2D camera;
+    camera.viewport = {100.0f, 100.0f};
+    camera.offset = {5.0f, 0.0f};
+    kin::RenderView view;
+    view.camera = &camera;
+    view.culling_enabled = true;
+    raw->commands.clear();
+    raw->rects.clear();
+    queue.flush(renderer, view);
+    // (The fills outside the group, at x 0 and 2, are now off screen.)
+    assert((raw->commands == std::vector<std::string>{"push", "fill", "fill", "pop"}));
+    assert(raw->rects[0].x == 5.0f && raw->rects[1].x == 5.0f && raw->rects[2].x == 6.0f);
+    camera.offset = {500.0f, 0.0f}; // the clip far off screen: the group is not drawn at all
+    raw->commands.clear();
+    queue.flush(renderer, view);
+    assert(std::ranges::count(raw->commands, "push") == 0);
+}
+
 void test_render_queue_pass_masks_and_text_command() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -569,6 +607,7 @@ int main() {
     test_render_queue_sprite_lane_keeps_order();
     test_render_queue_sort_matches_reference();
     test_render_queue_sprite_fields_and_bulk_submit();
+    test_render_queue_groups();
     test_render_queue_pass_masks_and_text_command();
     test_render_graph_pass_toggles_and_stats();
     test_default_render_graph_flushes_pass_masks();

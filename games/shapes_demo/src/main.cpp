@@ -2,7 +2,9 @@
 // whose ShapeRenderers turn with their parents (flecs ChildOf); the planets
 // and the sun are composed in code, the rocket read from SVG-lite; the HUD is
 // drawn with the immediate shape calls. The planets' names are Sdf text drawn
-// in the world, so they stay sharp as the camera zooms and turns.
+// in the world, so they stay sharp as the camera zooms and turns. Masks: each
+// planet's night side is a shadow clipped to its outline, and a telescope
+// follows the rocket through a round, soft-edged mask.
 //
 //   Q / E    turn the camera      - / =  or the wheel   zoom
 //   Space    pause                Esc   quit
@@ -146,6 +148,7 @@ public:
             _arms.push_back(arm);
             kin::EcsEntity p = body("planet", {.pos = {distance[i], 0}}, mesh_of(looks[i]), &arm, 3);
             _planets.push_back(p);
+            _planet_radii.push_back(std::array<float, 3>{18.0f, 26.0f, 14.0f}[i]);
             if (i != 1) {
                 kin::EcsEntity moon_arm = _world.entity().set(kin::Transform2D{});
                 moon_arm.child_of(p);
@@ -158,7 +161,7 @@ public:
             kin::EcsEntity arm = _world.entity().set(kin::Transform2D{});
             arm.child_of(_sun);
             _arms.push_back(arm);
-            body("rocket", {.pos = {400, 0}, .rotation = 180.0f, .scale = {0.9f, 0.9f}}, mesh_of(*rocket), &arm, 5);
+            _rocket = body("rocket", {.pos = {400, 0}, .rotation = 180.0f, .scale = {0.9f, 0.9f}}, mesh_of(*rocket), &arm, 5);
         }
         _camera.viewport = logical_size;
         _camera.look_at({0.0f, 0.0f});
@@ -199,7 +202,9 @@ public:
         _queue.clear();
         kin::collect_world(*_state, _queue, {}, {.sort_mode = kin::RenderSortMode::LayerThenOrder, .view = &view});
         _queue.flush(r, view);
+        draw_night_sides(r);
         draw_names(r);
+        draw_telescope(r);
         draw_hud(r);
     }
 
@@ -217,9 +222,66 @@ public:
         json.field("svg_warnings", static_cast<kin::i64>(_svg_warnings));
         json.field("bodies", static_cast<kin::i64>(_bodies));
         json.field("zoom", _camera.zoom);
+        json.field("masks", static_cast<kin::i64>(_masks));
     }
 
 private:
+    // Each planet's far side from the sun, darkened: a disc offset away from
+    // the sun, clipped to the planet's outline (in the world: it zooms and
+    // turns with the camera).
+    void draw_night_sides(kin::Renderer2D& r) {
+        const auto camera = r.scoped_transform(_camera.view_transform());
+        for (std::size_t i = 0; i < _planets.size(); ++i) {
+            const kin::Vec2f at = kin::current_world_transform(_planets[i]).pos;
+            const float length = std::max(std::hypot(at.x, at.y), 1.0f);
+            const kin::Vec2f away{at.x / length, at.y / length};
+            const float radius = _planet_radii[i];
+            const auto clip = r.scoped_clip(kin::Path::circle(at, radius));
+            r.fill_circle({at.x + away.x * radius * 0.7f, at.y + away.y * radius * 0.7f}, radius * 1.05f,
+                          kin::Color::rgba(4, 6, 20, 150));
+            ++_masks;
+        }
+    }
+
+    // The rocket, close up, seen through a round lens whose edge fades out: a
+    // mask from a texture's alpha.
+    void draw_telescope(kin::Renderer2D& r) {
+        if (!_rocket) {
+            return;
+        }
+        if (!_lens) {
+            constexpr int n = 64;
+            std::vector<kin::u8> texels(n * n * 4, 255);
+            for (int y = 0; y < n; ++y) {
+                for (int x = 0; x < n; ++x) {
+                    const float d = std::hypot(static_cast<float>(x) + 0.5f - n / 2.0f, static_cast<float>(y) + 0.5f - n / 2.0f);
+                    const float edge = std::clamp((n / 2.0f - d) / 6.0f, 0.0f, 1.0f);
+                    texels[static_cast<std::size_t>(y * n + x) * 4 + 3] = static_cast<kin::u8>(edge * edge * (3.0f - 2.0f * edge) * 255.0f);
+                }
+            }
+            _lens = r.create_texture_from_rgba(texels.data(), {n, n});
+            r.set_scale_mode(_lens, kin::ScaleMode::Linear);
+        }
+        const kin::Rectf lens{24.0f, logical_size.y - 204.0f, 180.0f, 180.0f};
+        const kin::Vec2f centre{lens.x + lens.w * 0.5f, lens.y + lens.h * 0.5f};
+        kin::Camera2D close = _camera;
+        close.zoom = _camera.zoom * 2.2f;
+        close.look_at(kin::current_world_transform(_rocket).pos);
+        kin::RenderView view;
+        view.camera = &close;
+        {
+            const auto mask = r.scoped_mask(_lens, lens);
+            ++_masks;
+            r.fill_rect(lens, kin::Color::rgb(8, 10, 22));
+            const auto shift = r.scoped_transform(
+                kin::Affine2::translation({centre.x - logical_size.x * 0.5f, centre.y - logical_size.y * 0.5f}));
+            _scope_queue.clear();
+            kin::collect_world(*_state, _scope_queue, {}, {.sort_mode = kin::RenderSortMode::LayerThenOrder, .view = &view});
+            _scope_queue.flush(r, view);
+        }
+        r.draw_circle(centre, lens.w * 0.5f - 3.0f, kin::Color::rgba(150, 162, 178, 120), 1.5f);
+    }
+
     // In the world, under the camera: the names zoom and turn with it.
     void draw_names(kin::Renderer2D& r) const {
         if (!_names) {
@@ -255,6 +317,11 @@ private:
     kin::EcsWorld _world;
     std::unique_ptr<kin::WorldRenderState> _state;
     kin::RenderQueue _queue;
+    kin::RenderQueue _scope_queue;
+    kin::Texture _lens;
+    int _masks = 0;
+    kin::EcsEntity _rocket;
+    std::vector<float> _planet_radii;
     kin::Camera2D _camera;
     kin::EcsEntity _sun;
     std::vector<kin::EcsEntity> _arms;

@@ -47,7 +47,15 @@ public:
     void fill_rect(kin::Rectf rect, kin::Color color) override {
         rects.push_back(rect);
         colors.push_back(color);
+        events.push_back("fill " + std::to_string(static_cast<int>(rect.x)));
     }
+    // No masks: a path clips to its bounds, which this records.
+    void push_clip(kin::Rectf rect) override {
+        events.push_back("clip " + std::to_string(static_cast<int>(rect.x)) + " " + std::to_string(static_cast<int>(rect.y)) +
+                         " " + std::to_string(static_cast<int>(rect.w)) + " " + std::to_string(static_cast<int>(rect.h)));
+    }
+    void pop_clip() override { events.push_back("pop"); }
+    std::vector<std::string> events;
     void draw_rect(kin::Rectf rect, kin::Color color) override {
         outlines.push_back(rect);
         colors.push_back(color);
@@ -584,6 +592,60 @@ void test_sprite_renderer_tint_rotation_and_pivot_reach_commands() {
     assert((raw->pivots[1] == kin::Vec2f{1.0f, 0.0f}));
 }
 
+// A ClipGroup cuts its entity's subtree to its clip (in its own space) and
+// keeps it together at its own key; groups nest; outside entities are untouched.
+void test_clip_groups_cut_and_keep_children_together() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::RectRenderer>("RectRenderer");
+    world.component<kin::ClipGroup>("ClipGroup");
+
+    world.entity("before").set(kin::Transform2D{{0.0f, 0.0f}}).set(kin::RectRenderer{.size = {1, 1}, .order = 0});
+    world.entity("after").set(kin::Transform2D{{2.0f, 0.0f}}).set(kin::RectRenderer{.size = {1, 1}, .order = 2});
+    // At (50, 50), scaled twice: its clip, 20 x 20 about its origin, covers 40 x 40.
+    kin::EcsEntity window = world.entity("window")
+                                .set(kin::Transform2D{.pos = {50.0f, 50.0f}, .scale = {2.0f, 2.0f}})
+                                .set(kin::ClipGroup{.clip = kin::ClipRegion::to_rect({-10.0f, -10.0f, 20.0f, 20.0f}), .order = 1});
+    kin::EcsEntity late = world.entity("late").set(kin::Transform2D{}).set(kin::RectRenderer{.size = {1, 1}, .order = 10});
+    late.raw().child_of(window.raw());
+    kin::EcsEntity early = world.entity("early").set(kin::Transform2D{.pos = {-5.0f, 0.0f}}).set(kin::RectRenderer{.size = {1, 1}, .order = -5});
+    early.raw().child_of(window.raw());
+    // A group in the group: at (60, 50), its 2 x 2 clip doubled, at order 5 among the window's.
+    kin::EcsEntity pane = world.entity("pane")
+                              .set(kin::Transform2D{.pos = {5.0f, 0.0f}})
+                              .set(kin::ClipGroup{.clip = kin::ClipRegion::to_rect({0.0f, 0.0f, 2.0f, 2.0f}), .order = 5});
+    pane.raw().child_of(window.raw());
+    kin::EcsEntity in_pane = world.entity("in_pane").set(kin::Transform2D{}).set(kin::RectRenderer{.size = {1, 1}, .order = -100});
+    in_pane.raw().child_of(pane.raw());
+
+    kin::RenderQueue queue;
+    kin::collect_world(world, queue, {}, {.sort_mode = kin::RenderSortMode::LayerThenOrder});
+    queue.flush(renderer);
+    const std::vector<std::string> expected{"fill 0",     "clip 30 30 40 40", "fill 40", "clip 60 50 4 4",
+                                            "fill 60",    "pop",              "fill 50", "pop",
+                                            "fill 2"};
+    if (raw->events != expected) {
+        for (const std::string& e : raw->events) {
+            std::fprintf(stderr, "%s\n", e.c_str());
+        }
+        assert(false);
+    }
+
+    // Static renderers inside a group are drawn with the dynamic ones.
+    late.set(kin::RectRenderer{.size = {1, 1}, .order = 10, .static_renderable = true});
+    kin::RenderQueue statics;
+    kin::collect_static_world(world, statics, {.sort_mode = kin::RenderSortMode::LayerThenOrder});
+    assert(statics.size() == 0);
+    kin::RenderQueue dynamics;
+    kin::collect_dynamic_world(world, dynamics, {.sort_mode = kin::RenderSortMode::LayerThenOrder});
+    raw->events.clear();
+    dynamics.flush(renderer);
+    assert(raw->events == expected);
+}
+
 void test_rotated_render_command_bounds_expand() {
     kin::RenderCommand command{
         .type = kin::RenderCommandType::Sprite,
@@ -854,6 +916,7 @@ int main() {
     test_render_world_draws_texture_renderer();
     test_sprite_pivot_offsets_and_y_sort();
     test_sprite_renderer_tint_rotation_and_pivot_reach_commands();
+    test_clip_groups_cut_and_keep_children_together();
     test_rotated_render_command_bounds_expand();
     test_top_down_render_applies_camera_and_culling();
     test_collect_culls_rotated_sprites();

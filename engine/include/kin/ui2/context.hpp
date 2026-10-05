@@ -9,6 +9,7 @@
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <string>
@@ -296,6 +297,10 @@ public:
 
     // Immediate draw helpers (logical space).
     void push_clip(Rectf bounds);
+    // With rounded corners (top-left, top-right, bottom-right, bottom-left), so
+    // what scrolls inside a rounded panel keeps off its corners. Pointer hits
+    // still clip to the rectangle.
+    void push_clip(Rectf bounds, std::array<f32, 4> corner_radii);
     void pop_clip();
     void fill_rect(Rectf rect, Color color);
     void outline_rect(Rectf rect, Color color);

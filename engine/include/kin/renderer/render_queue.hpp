@@ -86,6 +86,13 @@ public:
     void push_viewport(Rectf rect);
     void pop_viewport();
     void custom(RenderKey key, std::function<void(Renderer2D&)> callback, std::string debug_name = {});
+    // A group: `content`, a queue of its own (sorted as it says), drawn as one
+    // command at `key`, through `clip` (in the coordinates of this queue's
+    // commands: under the camera, if flushed with one). In a sorted queue this is
+    // how content cut by one clip stays together: whatever its own keys, it
+    // draws where the group does. Culled by the clip's bounds when it has them;
+    // the content is culled as it draws. Groups nest.
+    void draw_group(RenderKey key, std::shared_ptr<RenderQueue> content, ClipRegion clip = {});
     // A shape mesh, placed by `transform` and coloured by `tint`. The queue
     // keeps the mesh alive until it is cleared.
     void draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mesh, const Affine2& transform = {},
@@ -104,6 +111,9 @@ public:
     void flush(Renderer2D& renderer, u64 pass_mask);
     void flush(Renderer2D& renderer, const RenderView& view);
     void flush(Renderer2D& renderer, const RenderView& view, u64 pass_mask);
+    // As flush(renderer, view), with the view's camera already on the renderer:
+    // a group's content, flushed within its queue's flush.
+    void flush_within_view(Renderer2D& renderer, const RenderView& view, u64 pass_mask = render_pass_mask::all);
     void flush_presorted(Renderer2D& renderer, const RenderView& view, u64 pass_mask = render_pass_mask::all) const;
     void flush_merged_presorted(Renderer2D& renderer,
                                 std::span<const RenderCommand> other,

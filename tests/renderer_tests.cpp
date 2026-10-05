@@ -10,6 +10,9 @@
 #include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/sprite_sheet.hpp>
+#include <kin/platform/input.hpp>
+#include <kin/renderer/render_queue.hpp>
+#include <kin/ui2/context.hpp>
 #include <kin/ui2/text.hpp>
 
 #include <SDL3_image/SDL_image.h>
@@ -24,6 +27,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -2568,7 +2572,8 @@ void test_layers_on_software_backend() {
         renderer.fill_rect(kin::Rectf{16.0f, 0.0f, 16.0f, 16.0f}, kin::Color::rgb(255, 0, 0)); // after: not in a layer
         assert(renderer.read_rgba({0.0f, 0.0f, 32.0f, 16.0f}, px, size));
     }
-    assert(pixel_near(px, size, 8, 8, kin::Color::rgb(0, 0, 0), 2));
+    // SDL's renderer has layers too: half of the black over the white.
+    assert(pixel_near(px, size, 8, 8, kin::Color::rgb(128, 128, 128), 3));
     assert(pixel_near(px, size, 24, 8, kin::Color::rgb(255, 0, 0), 2));
 }
 
@@ -2832,6 +2837,316 @@ void check_sdf_text(kin::Renderer2D& renderer) {
         if (red < 6) {
             throw std::runtime_error("check_sdf_text: " + std::to_string(red) + " outline pixels");
         }
+    }
+}
+
+// Clips and masks (capabilities().masks): paths, inverted, from a texture's
+// alpha, as a stencil, by luminance, nested, transformed, empty. White is drawn
+// through each over black; a pixel's grey is how much the mask let through.
+void check_masks(kin::Renderer2D& renderer) {
+    assert(renderer.capabilities().masks);
+    const kin::Color white = kin::Color::rgb(255, 255, 255);
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    const std::array<kin::u8, 16> ramp_texels{255, 255, 255, 0,   255, 255, 255, 85,
+                                              255, 255, 255, 170, 255, 255, 255, 255};
+    const kin::Texture ramp = renderer.create_texture_from_rgba(ramp_texels.data(), {4, 1});
+    renderer.set_scale_mode(ramp, kin::ScaleMode::Nearest);
+    const kin::Path disc = kin::Path::circle({32.0f, 32.0f}, 16.0f);
+    const auto fill_disc = [&](kin::Renderer2D& r) { r.fill_path(disc, white); };
+    const auto whole = [&](kin::Renderer2D& r) { r.fill_rect({-200.0f, -200.0f, 400.0f, 400.0f}, white); };
+
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    std::string scene;
+    const auto draw = [&](std::string name, const std::function<void()>& body) {
+        scene = std::move(name);
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::Color::rgb(0, 0, 0));
+        body();
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+    };
+    const auto expect = [&](int x, int y, int grey) {
+        const kin::Color want = kin::Color::rgb(static_cast<kin::u8>(grey), static_cast<kin::u8>(grey), static_cast<kin::u8>(grey));
+        if (!pixel_near(px, size, x, y, want, 4)) {
+            const std::size_t i = (static_cast<std::size_t>(y) * size.x + x) * 4;
+            throw std::runtime_error("check_masks (" + std::string(renderer.backend_name()) + "): " + scene + " at " +
+                                     std::to_string(x) + "," + std::to_string(y) + " is " + std::to_string(px[i]) + "," +
+                                     std::to_string(px[i + 1]) + "," + std::to_string(px[i + 2]) + ", not " +
+                                     std::to_string(grey));
+        }
+    };
+
+    draw("a circle", [&] {
+        auto clip = renderer.scoped_clip(disc);
+        whole(renderer);
+    });
+    expect(32, 32, 255);
+    expect(32, 21, 255);
+    expect(32, 51, 0);
+    expect(4, 4, 0);
+
+    draw("a rectangle, moved and scaled", [&] {
+        auto move = renderer.scoped_transform(kin::Affine2::translation({8.0f, 8.0f}) * kin::Affine2::scaling({2.0f, 2.0f}));
+        auto clip = renderer.scoped_clip(kin::Path::rect({0.0f, 0.0f, 8.0f, 8.0f}));
+        whole(renderer);
+    });
+    expect(9, 9, 255);
+    expect(22, 22, 255);
+    expect(26, 26, 0);
+    expect(6, 6, 0);
+
+    draw("a turned square", [&] {
+        auto turn = renderer.scoped_transform(kin::Affine2::translation({32.0f, 32.0f}) * kin::Affine2::rotation(45.0f));
+        auto clip = renderer.scoped_clip(kin::Path::rect({-12.0f, -12.0f, 24.0f, 24.0f}));
+        whole(renderer);
+    });
+    expect(32, 20, 255); // towards a corner turned straight up, 17 px from the centre
+    expect(20, 20, 0);   // where the unturned square's corner was
+
+    draw("outside a circle", [&] {
+        auto mask = renderer.scoped_mask(fill_disc, {.invert = true});
+        whole(renderer);
+    });
+    expect(32, 32, 0);
+    expect(4, 4, 255);
+
+    draw("a texture's alpha", [&] {
+        auto mask = renderer.scoped_mask(ramp, {0.0f, 0.0f, 64.0f, 64.0f});
+        whole(renderer);
+    });
+    expect(8, 32, 0);
+    expect(24, 32, 85);
+    expect(40, 32, 170);
+    expect(56, 32, 255);
+
+    draw("a stencil from a texture's alpha", [&] {
+        auto mask = renderer.scoped_mask(ramp, {0.0f, 0.0f, 64.0f, 64.0f}, {.mode = kin::MaskMode::Stencil, .threshold = 0.5f});
+        whole(renderer);
+    });
+    expect(24, 32, 0);
+    expect(40, 32, 255);
+
+    draw("luminance", [&] {
+        auto mask = renderer.scoped_mask(
+            [&](kin::Renderer2D& r) {
+                r.fill_rect({0.0f, 0.0f, 32.0f, 64.0f}, white);
+                r.fill_rect({32.0f, 0.0f, 32.0f, 64.0f}, kin::Color::rgb(128, 128, 128));
+            },
+            {.source = kin::MaskSource::Luminance});
+        whole(renderer);
+    });
+    expect(16, 32, 255);
+    expect(48, 32, 128);
+
+    draw("nested: the circle's left half", [&] {
+        auto clip = renderer.scoped_clip(disc);
+        auto mask = renderer.scoped_mask([&](kin::Renderer2D& r) { r.fill_rect({0.0f, 0.0f, 32.0f, 64.0f}, white); });
+        whole(renderer);
+    });
+    expect(24, 32, 255);
+    expect(40, 32, 0);
+    expect(4, 32, 0);
+
+    draw("a mask drawn under the transform", [&] {
+        auto move = renderer.scoped_transform(kin::Affine2::translation({16.0f, 0.0f}));
+        auto clip = renderer.scoped_clip(kin::Path::circle({16.0f, 32.0f}, 8.0f));
+        whole(renderer);
+    });
+    expect(32, 32, 255);
+    expect(16, 32, 0);
+
+    draw("half-transparent red through a circle", [&] {
+        auto clip = renderer.scoped_clip(disc);
+        renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 0, 0, 128));
+    });
+    if (!pixel_near(px, size, 32, 32, kin::Color::rgb(128, 0, 0), 4) || !pixel_near(px, size, 4, 4, kin::Color::rgb(0, 0, 0), 4)) {
+        throw std::runtime_error("check_masks (" + std::string(renderer.backend_name()) + "): " + scene);
+    }
+
+    draw("an empty mask", [&] {
+        auto mask = renderer.scoped_mask([](kin::Renderer2D&) {});
+        whole(renderer);
+    });
+    expect(32, 32, 0);
+    draw("outside an empty mask", [&] {
+        auto mask = renderer.scoped_mask([](kin::Renderer2D&) {}, {.invert = true});
+        whole(renderer);
+    });
+    expect(32, 32, 255);
+
+    draw("a hard circle", [&] {
+        auto clip = renderer.scoped_clip(disc, kin::FillRule::NonZero, kin::ClipEdge::Hard);
+        whole(renderer);
+    });
+    expect(32, 32, 255);
+    expect(32, 47, 255); // its centre 15.5 from the circle's: in, wholly
+    expect(32, 48, 0);   // 16.5: out, wholly
+    expect(4, 4, 0);
+
+    const kin::Path wedge = kin::Path::polygon(std::array<kin::Vec2f, 3>{{{0.0f, 0.0f}, {64.0f, 0.0f}, {0.0f, 64.0f}}});
+    draw("hard clips nested, in a soft one, popped in turn", [&] {
+        renderer.push_clip(disc, kin::FillRule::NonZero, kin::ClipEdge::Hard);
+        renderer.push_clip(wedge, kin::FillRule::NonZero, kin::ClipEdge::Hard);
+        renderer.push_mask([&](kin::Renderer2D& r) { r.fill_rect({0.0f, 0.0f, 64.0f, 30.0f}, white); });
+        whole(renderer); // the circle, above the diagonal, above y 30
+        renderer.pop_clip();
+        renderer.fill_rect({0.0f, 40.0f, 64.0f, 1.0f}, white); // the circle and the diagonal still
+        renderer.pop_clip();
+        renderer.fill_rect({0.0f, 44.0f, 64.0f, 1.0f}, white); // the circle still
+        renderer.pop_clip();
+        renderer.fill_rect({0.0f, 62.0f, 64.0f, 2.0f}, white); // free
+    });
+    expect(24, 24, 255);
+    expect(40, 24, 0);  // below the diagonal
+    expect(24, 34, 0);  // below y 30, inside the rest
+    expect(20, 40, 255);
+    expect(28, 40, 0);  // the diagonal
+    expect(32, 44, 255);
+    expect(4, 44, 0);   // outside the circle
+    expect(32, 63, 255);
+
+    draw("a layer inside a hard clip", [&] {
+        auto clip = renderer.scoped_clip(disc, kin::FillRule::NonZero, kin::ClipEdge::Hard);
+        auto layer = renderer.begin_layer();
+        whole(renderer);
+    });
+    expect(32, 32, 255);
+    expect(4, 4, 0);
+
+    draw("a queued group, under a zooming camera", [&] {
+        auto content = std::make_shared<kin::RenderQueue>(kin::RenderSortMode::LayerThenOrder);
+        content->fill_rect({.order = -100}, {-200.0f, -200.0f, 400.0f, 400.0f}, white);
+        kin::RenderQueue queue{kin::RenderSortMode::LayerThenOrder};
+        queue.draw_group({.order = 5}, content, kin::ClipRegion::to_path(kin::Path::circle({16.0f, 16.0f}, 8.0f)));
+        queue.fill_rect({.order = 0}, {0.0f, 0.0f, 32.0f, 32.0f}, kin::Color::rgb(0, 0, 0)); // under the group
+        kin::Camera2D camera;
+        camera.viewport = {64.0f, 64.0f};
+        camera.zoom = 2.0f;
+        camera.look_at({16.0f, 16.0f});
+        kin::RenderView view;
+        view.camera = &camera;
+        queue.flush(renderer, view);
+    });
+    expect(32, 32, 255);
+    expect(32, 21, 255);
+    expect(32, 51, 0);
+    expect(4, 4, 0);
+
+    draw("a ui2 clip with two rounded corners", [&] {
+        kin::Input input;
+        input.begin_frame();
+        kin::ui2::Context ui;
+        ui.begin(input, renderer);
+        ui.push_clip({8.0f, 8.0f, 48.0f, 48.0f}, {16.0f, 16.0f, 0.0f, 0.0f});
+        ui.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, white);
+        ui.pop_clip();
+        ui.end();
+    });
+    expect(10, 10, 0);   // cut off by the rounded top-left corner
+    expect(53, 53, 255); // the square bottom-right corner
+    expect(32, 32, 255);
+    expect(4, 32, 0);
+
+    draw("a rectangle clip, then a mask, popped in turn", [&] {
+        renderer.push_clip(kin::Rectf{0.0f, 0.0f, 32.0f, 64.0f});
+        renderer.push_mask(fill_disc);
+        whole(renderer);
+        renderer.pop_clip();
+        renderer.fill_rect({40.0f, 0.0f, 8.0f, 8.0f}, white); // still within the rectangle
+        renderer.pop_clip();
+        renderer.fill_rect({56.0f, 0.0f, 8.0f, 8.0f}, white); // free
+    });
+    expect(24, 32, 255);
+    expect(40, 32, 0);
+    expect(44, 4, 0);
+    expect(60, 4, 255);
+}
+
+// Masks straight to a window drawn at twice its logical size.
+void check_masks_on_window(kin::Renderer2D& renderer) {
+    renderer.set_logical_size({32, 32});
+    renderer.clear(kin::Color::rgb(0, 0, 0));
+    {
+        auto clip = renderer.scoped_clip(kin::Path::circle({16.0f, 16.0f}, 8.0f));
+        renderer.fill_rect({0.0f, 0.0f, 32.0f, 32.0f}, kin::Color::rgb(255, 255, 255));
+    }
+    {   // the window's own stencil: a hard clip, then drawing free of it
+        auto clip = renderer.scoped_clip(kin::Path::rect({0.0f, 0.0f, 4.0f, 4.0f}).append(kin::Path::circle({28.0f, 28.0f}, 3.0f)),
+                                         kin::FillRule::NonZero, kin::ClipEdge::Hard);
+        renderer.fill_rect({0.0f, 0.0f, 32.0f, 32.0f}, kin::Color::rgb(0, 0, 255));
+    }
+    renderer.fill_rect({30.0f, 0.0f, 2.0f, 2.0f}, kin::Color::rgb(0, 255, 0));
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    assert(renderer.read_rgba({0.0f, 0.0f, 32.0f, 32.0f}, px, size));
+    const auto at = [&](float x, float y) {
+        return kin::Vec2i{static_cast<int>(x * static_cast<float>(size.x) / 32.0f),
+                          static_cast<int>(y * static_cast<float>(size.y) / 32.0f)};
+    };
+    const kin::Vec2i centre = at(16.0f, 16.0f), corner = at(2.0f, 2.0f), outside = at(16.0f, 27.0f);
+    const kin::Vec2i dot = at(28.0f, 28.0f), past = at(31.0f, 20.0f), free = at(31.0f, 1.0f);
+    if (!pixel_near(px, size, centre.x, centre.y, kin::Color::rgb(255, 255, 255)) ||
+        !pixel_near(px, size, corner.x, corner.y, kin::Color::rgb(0, 0, 255)) ||
+        !pixel_near(px, size, outside.x, outside.y, kin::Color::rgb(0, 0, 0)) ||
+        !pixel_near(px, size, dot.x, dot.y, kin::Color::rgb(0, 0, 255)) ||
+        !pixel_near(px, size, past.x, past.y, kin::Color::rgb(0, 0, 0)) ||
+        !pixel_near(px, size, free.x, free.y, kin::Color::rgb(0, 255, 0))) {
+        throw std::runtime_error("check_masks_on_window (" + std::string(renderer.backend_name()) + ")");
+    }
+}
+
+void test_masks_on_software_backend() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "mask-test", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{window};
+    check_masks(renderer);
+    check_masks_on_window(renderer);
+}
+
+// SDL's renderer on a GPU (its "gpu" driver) lays alpha masks over by
+// blending, without reading them back.
+void test_masks_on_accelerated_sdl_renderer() {
+    constexpr std::string_view test_name = "test_masks_on_accelerated_sdl_renderer";
+    bool ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "sdl-mask-test", .width = 64, .height = 64, .hidden = true});
+        kin::Renderer2D renderer{kin::make_render_backend(window, false, /*allow_gpu=*/false)};
+        if (renderer.backend_name() == "software") {
+            skip_or_require_gpu_test(test_name, "SDL chose its software renderer");
+            return;
+        }
+        ready = true;
+        check_masks(renderer);
+        check_masks_on_window(renderer);
+    } catch (const std::exception& e) {
+        if (ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+void test_masks_on_gpu_backend() {
+    constexpr std::string_view test_name = "test_masks_on_gpu_backend";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-mask-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        check_masks(*renderer);
+        check_masks_on_window(*renderer);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
     }
 }
 
@@ -3249,6 +3564,9 @@ int main() {
     test_transforms_on_software_backend();
     test_shapes_on_software_backend();
     test_shapes_on_gpu_backend();
+    test_masks_on_software_backend();
+    test_masks_on_gpu_backend();
+    test_masks_on_accelerated_sdl_renderer();
     test_transforms_on_gpu_backend();
     test_camera_zoom_and_rotation();
     test_gpu_scopes();

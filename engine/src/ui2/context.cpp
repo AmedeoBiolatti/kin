@@ -1265,6 +1265,17 @@ void Context::push_clip(Rectf bounds) {
     }
 }
 
+void Context::push_clip(Rectf bounds, std::array<f32, 4> corner_radii) {
+    if (std::ranges::all_of(corner_radii, [](f32 r) { return r <= 0.0f; })) {
+        push_clip(bounds);
+        return;
+    }
+    _clip_stack.push_back(_clip_stack.empty() ? bounds : rect_intersect(_clip_stack.back(), bounds));
+    if (_renderer) {
+        _renderer->push_clip(Path::rounded_rect(bounds, corner_radii));
+    }
+}
+
 void Context::pop_clip() {
     if (!_clip_stack.empty()) {
         _clip_stack.pop_back();
