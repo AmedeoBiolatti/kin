@@ -254,14 +254,16 @@ void App::pace_frame(u64& next_frame_ns) {
         return;
     }
     // Deadlines a period apart, not "a period after this frame ended", so the
-    // rate holds without drifting; a frame more than a period late starts over
-    // from now instead of rushing the next ones to catch up.
+    // rate holds without drifting. A frame past its deadline starts the next
+    // at once; one more than a period past it starts the deadlines over from
+    // now instead of rushing the next ones to catch up. Either way a late
+    // frame is never made later by a wait.
     const u64 period = static_cast<u64>(1'000'000'000.0 / static_cast<f64>(_max_fps));
     const u64 now = SDL_GetTicksNS();
-    if (next_frame_ns == 0 || now > next_frame_ns + period) {
+    next_frame_ns = next_frame_ns == 0 ? now : next_frame_ns + period;
+    if (now > next_frame_ns + period) {
         next_frame_ns = now;
     }
-    next_frame_ns += period;
     if (next_frame_ns > now) {
         SDL_DelayPrecise(next_frame_ns - now);
         _frame_stats.pacing_wait = static_cast<f32>(next_frame_ns - now) / 1'000'000'000.0f;

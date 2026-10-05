@@ -9,6 +9,7 @@
 #include <cassert>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -99,6 +100,25 @@ void test_frame_rate_cap() {
                                       11, &waited);
     assert(capped >= 10 * 0.020 * 0.9); // ten 20 ms periods between eleven frames
     assert(waited > 0.0f);              // and the loop says it slept for them
+
+    // A frame over its period is not made later still: the next starts at once.
+    // Each of these takes 30 ms against a 20 ms period (a wait after each
+    // would take them to 50 ms).
+    float late_waited = 0.0f;
+    int slow = 0;
+    kin::run_windowed_app({.title = "cap-late", .width = 32, .height = 32, .max_fps = 50.0f, .hidden = true},
+                          [](kin::FrameContext&) {}, [&](kin::FrameContext& ctx) {
+                              if (slow > 0) {
+                                  late_waited += ctx.app.frame_stats().pacing_wait;
+                              }
+                              ctx.renderer.clear(0, 0, 0);
+                              ctx.renderer.present();
+                              std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                              if (++slow == 8) {
+                                  ctx.app.quit();
+                              }
+                          });
+    assert(late_waited < 0.005f);
 
     // Headless runs are never paced: six frames at a 5 fps cap would take a second.
     const double headless = seconds_for({.title = "cap-headless", .width = 32, .height = 32, .mode = kin::AppMode::Headless,

@@ -13,8 +13,10 @@ namespace kin {
 
 class JsonWriter;
 
-// Minimal immutable JSON document model plus a hand-rolled parser, sized for
-// reading request payloads (server commands) rather than arbitrary large data.
+// Minimal immutable JSON document model plus a hand-rolled parser. A value
+// is small (its type, a number or bool inline, and one pointer): strings,
+// arrays and objects live in a box of their own, so a document of millions
+// of numbers (a large save) costs tens of bytes a number, not a hundred.
 // The companion JsonWriter handles serialization.
 class JsonValue {
 public:
@@ -23,12 +25,17 @@ public:
     using Array = std::vector<JsonValue>;
     using Object = std::map<std::string, JsonValue>;
 
-    JsonValue() = default;
-    JsonValue(bool value) : _type(Type::Bool), _bool(value) {}
-    JsonValue(f64 value) : _type(Type::Number), _number(value) {}
-    JsonValue(std::string value) : _type(Type::String), _string(std::move(value)) {}
-    JsonValue(Array value) : _type(Type::Array), _array(std::move(value)) {}
-    JsonValue(Object value) : _type(Type::Object), _object(std::move(value)) {}
+    JsonValue() noexcept;
+    JsonValue(bool value) noexcept;
+    JsonValue(f64 value) noexcept;
+    JsonValue(std::string value);
+    JsonValue(Array value);
+    JsonValue(Object value);
+    JsonValue(const JsonValue& other);
+    JsonValue(JsonValue&& other) noexcept;
+    JsonValue& operator=(const JsonValue& other);
+    JsonValue& operator=(JsonValue&& other) noexcept;
+    ~JsonValue();
 
     Type type() const { return _type; }
     bool is_null() const { return _type == Type::Null; }
@@ -43,16 +50,15 @@ public:
     i64 as_int(i64 fallback = 0) const {
         return is_number() ? static_cast<i64>(_number) : fallback;
     }
-    const std::string& as_string(const std::string& fallback = empty_string()) const {
-        return is_string() ? _string : fallback;
-    }
+    const std::string& as_string(const std::string& fallback = empty_string()) const;
     // Reject a temporary fallback: the function returns a reference, so binding
     // the result would dangle once the temporary dies. Callers needing a literal
     // default should hold it in a named std::string first.
     const std::string& as_string(std::string&& fallback) const = delete;
 
-    const Array& items() const { return _array; }
-    const Object& members() const { return _object; }
+    // Empty for a value of another type.
+    const Array& items() const;
+    const Object& members() const;
 
     // Object member lookup; returns nullptr when absent or not an object.
     const JsonValue* find(std::string_view key) const;
@@ -64,15 +70,19 @@ public:
     bool bool_at(std::string_view key, bool fallback = false) const;
     std::string string_at(std::string_view key, std::string_view fallback = {}) const;
 
+    // An object member moved out (the member left null), or nullopt when
+    // absent or not an object: a part of a parsed document kept without
+    // copying it.
+    std::optional<JsonValue> take_member(std::string_view key);
+
 private:
+    struct Box;
     static const std::string& empty_string();
 
     Type _type = Type::Null;
     bool _bool = false;
     f64 _number = 0.0;
-    std::string _string;
-    Array _array;
-    Object _object;
+    std::unique_ptr<Box> _box;  // a string's, an array's or an object's contents
 };
 
 struct JsonParseResult {
@@ -84,6 +94,11 @@ struct JsonParseResult {
 };
 
 JsonParseResult parse_json(std::string_view text);
+
+// The same, but the root object's member `skip` is passed over as text (its
+// strings and brackets must still close) and left out: what is around a large
+// payload, read without building the payload.
+JsonParseResult parse_json_skipping(std::string_view text, std::string_view skip);
 
 // Serializes a parsed value back out through a JsonWriter.
 void write_json(JsonWriter& out, const JsonValue& value);
