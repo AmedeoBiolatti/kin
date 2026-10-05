@@ -12,6 +12,7 @@
 #include <cstring>
 #include <filesystem>
 #include <span>
+#include <sstream>
 #include <string>
 #include <stdexcept>
 #include <utility>
@@ -185,6 +186,22 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         KIN_LOG_WARN_F("render", "instanced sprites unavailable; drawing them quad by quad",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    try {
+        _shader_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                          SDL_GPU_SHADERFORMAT_SPIRV,
+                                                          dir / "shader_geometry.vert.spv",
+                                                          /*uniform_buffers=*/1, /*samplers=*/0);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "shader geometry unavailable",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    try {
+        _overdraw_count_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                           SDL_GPU_SHADERFORMAT_SPIRV, dir / "overdraw_count.frag.spv",
+                                                           /*uniform_buffers=*/0, /*samplers=*/1);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "overdraw view unavailable", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
 
     SDL_GPUSamplerCreateInfo sampler_info{};
     sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
@@ -194,6 +211,11 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     sampler_info.min_filter = SDL_GPU_FILTER_LINEAR;
     sampler_info.mag_filter = SDL_GPU_FILTER_LINEAR;
     _sampler_linear = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
+    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+    sampler_info.max_lod = 1000.0f; // every level
+    _sampler_mipmapped = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
+    sampler_info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    sampler_info.max_lod = 0.0f;
     sampler_info.min_filter = SDL_GPU_FILTER_NEAREST;
     sampler_info.mag_filter = SDL_GPU_FILTER_NEAREST;
     _sampler_nearest = SDL_CreateGPUSampler(_device.handle(), &sampler_info);
@@ -218,13 +240,19 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
 GpuRenderer2DBackend::~GpuRenderer2DBackend() {
     if (_frame) {
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     _device.wait_idle();
     _gpu_timer.reset();
     _pipelines.destroy();
+    for (const ComputePipeline& compute : _compute_pipelines) {
+        SDL_ReleaseGPUComputePipeline(_device.handle(), compute.pipeline);
+    }
     if (_sampler_linear) {
         SDL_ReleaseGPUSampler(_device.handle(), _sampler_linear);
+    }
+    if (_sampler_mipmapped) {
+        SDL_ReleaseGPUSampler(_device.handle(), _sampler_mipmapped);
     }
     if (_sampler_nearest) {
         SDL_ReleaseGPUSampler(_device.handle(), _sampler_nearest);
@@ -237,6 +265,10 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .queued_2d = false,
         .render_targets = true,
         .blend_modes = true,
+        .min_max_blend = true,
+        .shader_geometry = static_cast<bool>(_shader_vertex_shader.handle()),
+        .data_buffers = true,
+        .compute = true,
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -278,7 +310,27 @@ void GpuRenderer2DBackend::ensure_scene() {
 }
 
 const gpu::GpuTexture& GpuRenderer2DBackend::current_target() const {
-    return _rt_stack.empty() ? _scene : *_rt_stack.back();
+    return _rt_stack.empty() ? _scene : *_rt_stack.back().texture;
+}
+
+f32 GpuRenderer2DBackend::coordinates_to_pixels() const {
+    return static_cast<f32>(current_size().x) / std::max(1.0f, coordinate_size().x);
+}
+
+Vec2i GpuRenderer2DBackend::coordinate_extent() const {
+    const Vec2f size = coordinate_size();
+    return {static_cast<i32>(std::ceil(size.x)), static_cast<i32>(std::ceil(size.y))};
+}
+
+Vec2f GpuRenderer2DBackend::coordinate_size() const {
+    if (!_rt_stack.empty() && _rt_stack.back().coords.x > 0.0f) {
+        return _rt_stack.back().coords;
+    }
+    if (scene_uses_logical_coordinates()) {
+        return {static_cast<f32>(_logical_size.x), static_cast<f32>(_logical_size.y)};
+    }
+    const Vec2i size = current_size();
+    return {static_cast<f32>(size.x), static_cast<f32>(size.y)};
 }
 
 Vec2i GpuRenderer2DBackend::current_size() const {
@@ -299,22 +351,45 @@ void GpuRenderer2DBackend::ensure_frame() {
     _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
 }
 
+void GpuRenderer2DBackend::end_frame() {
+    _frame.reset();
+    _retained.clear();
+    _retained_buffers.clear();
+    _retired_textures.clear();
+    _last_retained = nullptr;
+    ++_frame_serial;
+}
+
+void GpuRenderer2DBackend::retain(const Texture& texture) {
+    const ITextureBackend* backend = texture.backend().get();
+    if (backend != _last_retained) {
+        _retained.push_back(texture.backend());
+        _last_retained = backend;
+        if (const auto* gpu = as_gpu(backend)) {
+            gpu->mark_used(_frame_serial);
+        }
+    }
+}
+
 void GpuRenderer2DBackend::flush_to_frame() {
     // Draw coordinates are in "coordinate space": logical for the scene under logical
     // presentation, else the target's texture size. The uniform maps coord -> NDC so
     // logical coords fill the (native-res) scene texture; the rasterizer then renders
     // at native res. The batch sets the GPU viewport to the target's texture size.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2f coord = coordinate_size();
     gpu::GpuGeometryBatch::FlushContext ctx{};
     ctx.vertex_shader = _vertex_shader.handle();
     ctx.instance_shader = _instance_shader.handle();
+    ctx.shader_vertex_shader = _shader_vertex_shader.handle();
     ctx.default_fragment = _fragment_shader.handle();
     ctx.white_texture = _white.handle();
     ctx.sampler = _sampler_linear; // default for solids/white & null-sampler ranges
     ctx.target_format = current_target().format();
-    ctx.view.scale[0] = 2.0f / static_cast<f32>(std::max(1, coord.x));
-    ctx.view.scale[1] = 2.0f / static_cast<f32>(std::max(1, coord.y));
+    if (_overdraw_view) {
+        ctx.override_fragment = _overdraw_count_shader.handle();
+    }
+    ctx.view.scale[0] = 2.0f / std::max(1.0f, coord.x);
+    ctx.view.scale[1] = 2.0f / std::max(1.0f, coord.y);
     ctx.view.translate[0] = -1.0f;
     ctx.view.translate[1] = -1.0f;
     _batch.flush(*_frame, _device, _pipelines, ctx);
@@ -322,7 +397,8 @@ void GpuRenderer2DBackend::flush_to_frame() {
 
 void GpuRenderer2DBackend::clear(Color color) {
     ensure_scene();
-    _clear_color = to_fcolor(color);
+    // The overdraw view counts from nothing.
+    _clear_color = _overdraw_view && _overdraw_count_shader ? SDL_FColor{0.0f, 0.0f, 0.0f, 1.0f} : to_fcolor(color);
     if (!_frame) {
         _frame.emplace(_device.begin_frame());
     } else {
@@ -332,12 +408,107 @@ void GpuRenderer2DBackend::clear(Color color) {
     _clip_stack.clear();
 }
 
+SDL_GPUFence* GpuRenderer2DBackend::submit_for_scope() {
+    ensure_frame();
+    flush_to_frame();
+    SDL_GPUFence* fence = _frame->submit_with_fence();
+    end_frame();
+    return fence;
+}
+
+std::string GpuRenderer2DBackend::pipeline_record() const {
+    // One line a pipeline: fragment id, blend, target format, vertex layout.
+    std::string out = "kin.pipelines/1\n";
+    _pipelines.for_each([&](SDL_GPUShader*, SDL_GPUShader* fragment, gpu::GpuBlendMode blend,
+                            SDL_GPUTextureFormat format, gpu::GpuVertexLayout layout) {
+        u64 id = 0;
+        if (fragment != _fragment_shader.handle()) {
+            const auto it = _fragment_ids.find(fragment);
+            if (it == _fragment_ids.end()) {
+                return; // a shader made some other way: not known next run
+            }
+            id = it->second;
+        }
+        out += std::to_string(id) + ' ' + std::to_string(static_cast<int>(blend)) + ' ' +
+               std::to_string(static_cast<int>(format)) + ' ' + std::to_string(static_cast<int>(layout)) + '\n';
+    });
+    return out;
+}
+
+void GpuRenderer2DBackend::prewarm_pipelines(std::string_view record) {
+    if (!record.starts_with("kin.pipelines/1\n")) {
+        return; // none, or from another version
+    }
+    std::istringstream in{std::string{record.substr(16)}};
+    u64 id = 0;
+    int blend = 0, format = 0, layout = 0;
+    while (in >> id >> blend >> format >> layout) {
+        if (blend < 0 || blend > static_cast<int>(gpu::GpuBlendMode::Min) || layout < 0 ||
+            layout > static_cast<int>(gpu::GpuVertexLayout::ShaderVertices)) {
+            continue;
+        }
+        _pipeline_hints.push_back(PipelineHint{.fragment = id,
+                                               .blend = static_cast<gpu::GpuBlendMode>(blend),
+                                               .format = static_cast<SDL_GPUTextureFormat>(format),
+                                               .layout = static_cast<gpu::GpuVertexLayout>(layout)});
+    }
+    make_hinted_pipelines(0, _fragment_shader.handle()); // the engine's own, now
+    for (const auto& [fragment, fragment_id] : _fragment_ids) {
+        make_hinted_pipelines(fragment_id, fragment); // shaders already made
+    }
+}
+
+void GpuRenderer2DBackend::make_hinted_pipelines(u64 fragment_id, SDL_GPUShader* fragment) {
+    for (const PipelineHint& hint : _pipeline_hints) {
+        if (hint.fragment != fragment_id) {
+            continue;
+        }
+        SDL_GPUShader* vertex = hint.layout == gpu::GpuVertexLayout::SpriteInstances ? _instance_shader.handle()
+                              : hint.layout == gpu::GpuVertexLayout::ShaderVertices  ? _shader_vertex_shader.handle()
+                                                                                     : _vertex_shader.handle();
+        if (vertex) {
+            _pipelines.get(vertex, fragment, hint.blend, hint.format, hint.layout);
+        }
+    }
+}
+
+void GpuRenderer2DBackend::begin_gpu_scope(std::string_view name) {
+    if (!_gpu_timer || _scope) {
+        return; // timing off, or inside a scope already
+    }
+    _scope = std::string{name};
+    // Room for both its fences, or it goes untimed (a fence must never be
+    // dropped unsignalled). Only the render thread adds fences, and present
+    // ends the scope before adding the frame's.
+    _scope_timed = !_gpu_timer->full(2);
+    if (_scope_timed) {
+        _gpu_timer->track_scope_start(submit_for_scope());
+        _scope_pixels = _batch.pixels(); // flushed: everything before is counted
+    }
+}
+
+void GpuRenderer2DBackend::end_gpu_scope() {
+    if (!_scope) {
+        return;
+    }
+    std::string name = std::move(*_scope);
+    _scope.reset();
+    if (!_scope_timed || !_gpu_timer) {
+        return;
+    }
+    const u64 submit_ns = SDL_GetTicksNS();
+    SDL_GPUFence* fence = submit_for_scope(); // flushes the scope's draws, counting their pixels
+    _gpu_timer->track_scope_end(std::move(name), fence, submit_ns, _batch.pixels() - _scope_pixels);
+}
+
 void GpuRenderer2DBackend::set_gpu_timing_enabled(bool enabled) {
     if (enabled && !_gpu_timer) {
         _gpu_timer = std::make_unique<gpu::GpuFrameTimer>(_device.handle());
     } else if (!enabled && _gpu_timer) {
+        _scope.reset(); // its start fence goes with the timer
         _gpu_timer.reset();
         _stats.last_gpu_frame_ms = 0.0;
+        _untimed_frames = 0;
     }
 }
 
@@ -345,6 +516,8 @@ void GpuRenderer2DBackend::present() {
     const auto ms_between = [](u64 start_ns, u64 end_ns) {
         return static_cast<f64>(end_ns - start_ns) / 1'000'000.0;
     };
+    end_gpu_scope(); // a scope ends with its frame, before the frame's fence
+
     const u64 flush_start = SDL_GetTicksNS();
     ensure_frame();
     flush_to_frame();
@@ -374,29 +547,56 @@ void GpuRenderer2DBackend::present() {
         blit.filter = _integer_scale ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
         SDL_BlitGPUTexture(_frame->command_buffer(), &blit);
     }
-    if (_gpu_timer) {
+    // Only the render thread adds frames to the timer, so it cannot fill up
+    // between the check and track().
+    if (_gpu_timer && !_gpu_timer->full()) {
         SDL_GPUFence* fence = _frame->submit_with_fence();
-        if (!_gpu_timer->track(fence, _device.take_first_submit_ns())) {
-            SDL_ReleaseGPUFence(_device.handle(), fence);
-        }
-        if (const std::optional<f64> gpu_ms = _gpu_timer->collect()) {
-            _stats.last_gpu_frame_ms = *gpu_ms;
-        }
+        _gpu_timer->track(fence, _device.take_first_submit_ns(), std::exchange(_untimed_frames, 0));
     } else {
         _frame->submit();
         _device.take_first_submit_ns();
+        if (_gpu_timer) {
+            ++_untimed_frames;
+        }
     }
-    _frame.reset();
+    if (_gpu_timer) {
+        gpu::GpuTimerSamples samples = _gpu_timer->collect();
+        if (const std::optional<gpu::GpuFrameSample>& sample = samples.frame) {
+            // A span over untimed frames is shared out evenly.
+            _stats.last_gpu_frame_ms = sample->ms / static_cast<f64>(sample->frames);
+            _stats.last_gpu_frame_span = sample->frames;
+            ++_stats.gpu_frames_sampled;
+        }
+        const f64 screen = static_cast<f64>(_scene_size.x) * _scene_size.y;
+        for (gpu::GpuScopeSample& scope : samples.scopes) {
+            _scope_timings.push_back(GpuScopeTiming{.name = std::move(scope.name), .ms = scope.ms,
+                                                    .pixels = scope.pixels,
+                                                    .overdraw = screen > 0.0 ? scope.pixels / screen : 0.0});
+        }
+    }
+    end_frame();
+    // In the targets' own pixels, over the screen's: a scene drawn in logical
+    // coordinates is shaded at its native size.
+    _stats.last_pixels_drawn = _batch.take_pixels();
+    _stats.last_overdraw = _scene_size.x > 0 && _scene_size.y > 0
+                               ? _stats.last_pixels_drawn / (static_cast<f64>(_scene_size.x) * _scene_size.y)
+                               : 0.0;
     _stats.last_present_backend_ms = ms_between(acquire_start, SDL_GetTicksNS());
 }
 
 SDL_Rect GpuRenderer2DBackend::current_scissor() const {
     // Clips are stored in coordinate space (logical for the scene under logical
     // presentation, target pixels otherwise). The GPU scissor needs native texture
-    // pixels, so scale by the coord->texture factor (_view_scale for the scene, 1 for RTs).
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    // pixels, so scale by the coord->texture factor (a logical scene's or a layer's;
+    // 1 for plain render targets). Asked once a draw, it is kept until what it is
+    // made from changes.
     const Vec2i tex = current_size();
+    const f32 sc = coordinates_to_pixels();
+    const SDL_Rect top = _clip_stack.empty() ? SDL_Rect{0, 0, -1, -1} : _clip_stack.back();
+    ScissorKey key{top, sc, tex};
+    if (_scissor_cache && _scissor_cache->first == key) {
+        return _scissor_cache->second;
+    }
     SDL_Rect c;
     if (!_clip_stack.empty()) {
         const SDL_Rect& r = _clip_stack.back();
@@ -405,7 +605,9 @@ SDL_Rect GpuRenderer2DBackend::current_scissor() const {
     } else {
         c = {0, 0, tex.x, tex.y};
     }
-    return intersect(c, SDL_Rect{0, 0, tex.x, tex.y});
+    const SDL_Rect scissor = intersect(c, SDL_Rect{0, 0, tex.x, tex.y});
+    _scissor_cache.emplace(key, scissor);
+    return scissor;
 }
 
 void GpuRenderer2DBackend::apply_view_offset(std::span<gpu::GpuVertex> verts) const {
@@ -423,6 +625,8 @@ gpu::GpuBlendMode GpuRenderer2DBackend::resolve_blend(gpu::GpuBlendMode natural)
     case BlendMode::Additive: return gpu::GpuBlendMode::Additive;
     case BlendMode::Multiply: return gpu::GpuBlendMode::Multiply;
     case BlendMode::Replace: return gpu::GpuBlendMode::Replace;
+    case BlendMode::Max: return gpu::GpuBlendMode::Max;
+    case BlendMode::Min: return gpu::GpuBlendMode::Min;
     case BlendMode::Alpha: break;
     }
     return natural;
@@ -447,25 +651,22 @@ void GpuRenderer2DBackend::push_quad(
     SDL_GPUSampler* sampler
 ) {
     ensure_frame();
-    const f32 x0 = dest.x;
-    const f32 y0 = dest.y;
-    const f32 x1 = dest.x + dest.w;
-    const f32 y1 = dest.y + dest.h;
+    const f32 x0 = dest.x + _view_offset.x;
+    const f32 y0 = dest.y + _view_offset.y;
+    const f32 x1 = x0 + dest.w;
+    const f32 y1 = y0 + dest.h;
     const f32 u0 = uv.x;
     const f32 v0 = uv.y;
     const f32 u1 = uv.x + uv.w;
     const f32 v1 = uv.y + uv.h;
     const u8 r = color.r, g = color.g, b = color.b, a = color.a;
-    std::array<gpu::GpuVertex, 6> verts{{
+    std::array<gpu::GpuVertex, 4> corners{{
         {x0, y0, u0, v0, r, g, b, a},
         {x1, y0, u1, v0, r, g, b, a},
         {x1, y1, u1, v1, r, g, b, a},
-        {x0, y0, u0, v0, r, g, b, a},
-        {x1, y1, u1, v1, r, g, b, a},
         {x0, y1, u0, v1, r, g, b, a},
     }};
-    apply_view_offset(verts);
-    _batch.push(verts, nullptr, texture, current_scissor(), resolve_blend(blend), nullptr, 0, sampler);
+    _batch.push_quad(corners, texture, current_scissor(), resolve_blend(blend), sampler);
 }
 
 void GpuRenderer2DBackend::fill_rect(Rectf rect, Color color) {
@@ -506,17 +707,15 @@ void GpuRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     const f32 nx = -dy / len * 0.5f;
     const f32 ny = dx / len * 0.5f;
     const u8 r = color.r, g = color.g, bl = color.b, al = color.a;
-    std::array<gpu::GpuVertex, 6> verts{{
+    std::array<gpu::GpuVertex, 4> corners{{
         {a.x + nx, a.y + ny, 0.0f, 0.0f, r, g, bl, al},
         {b.x + nx, b.y + ny, 1.0f, 0.0f, r, g, bl, al},
-        {b.x - nx, b.y - ny, 1.0f, 1.0f, r, g, bl, al},
-        {a.x + nx, a.y + ny, 0.0f, 0.0f, r, g, bl, al},
         {b.x - nx, b.y - ny, 1.0f, 1.0f, r, g, bl, al},
         {a.x - nx, a.y - ny, 0.0f, 1.0f, r, g, bl, al},
     }};
     ensure_frame();
-    apply_view_offset(verts);
-    _batch.push(verts, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
+    apply_view_offset(corners);
+    _batch.push_quads(corners, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
 }
 
 void GpuRenderer2DBackend::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
@@ -591,6 +790,16 @@ Texture GpuRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
 
 namespace {
 
+// A shader known across runs (pipeline records): FNV-1a of its SPIR-V, never 0
+// (the default shader's).
+u64 spirv_id(ShaderBlob spirv) {
+    u64 id = 1469598103934665603ull;
+    for (u32 i = 0; i < spirv.size; ++i) {
+        id = (id ^ spirv.code[i]) * 1099511628211ull;
+    }
+    return id | 1;
+}
+
 SDL_GPUTextureFormat sdl_format(TextureFormat format) {
     switch (format) {
     case TextureFormat::Rgba8: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
@@ -619,8 +828,34 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
     }
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                            static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
-                           texture_format_bytes(backend->format()));
+                           texture_format_bytes(backend->format()), may_cycle(*backend, at, size));
+    if (backend->mipmapped()) {
+        _device.generate_mipmaps(backend->texture().handle());
+    }
     return true;
+}
+
+bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t /*bytes*/,
+                                         const std::function<void(std::span<u8>)>& fill) {
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend || !backend->texture()) {
+        return false;
+    }
+    _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
+                          static_cast<u32>(size.x), static_cast<u32>(size.y), texture_format_bytes(backend->format()),
+                          may_cycle(*backend, at, size), fill);
+    if (backend->mipmapped()) {
+        _device.generate_mipmaps(backend->texture().handle());
+    }
+    return true;
+}
+
+bool GpuRenderer2DBackend::may_cycle(const gpu::GpuTextureBackend& texture, Vec2i at, Vec2i size) const {
+    // Replacing the whole texture lets its storage be cycled, so the upload does
+    // not wait for earlier frames still reading it. Not when this frame already
+    // draws it: its queued draws bind the texture only when flushed, and must see
+    // the update as they would without cycling.
+    return at == Vec2i{0, 0} && size == texture.size() && texture.used_in_frame() != _frame_serial;
 }
 
 void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf dest) {
@@ -648,7 +883,8 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
-        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+        sampler_for(*backend);
+    retain(texture);
     push_quad(dest, uv, tint, backend->texture().handle(), blend, sampler);
 }
 
@@ -687,22 +923,21 @@ void GpuRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     const Vec2f p2 = rot(dest.x + dest.w, dest.y + dest.h);
     const Vec2f p3 = rot(dest.x, dest.y + dest.h);
     const u8 r = tint.r, g = tint.g, b = tint.b, a = tint.a;
-    std::array<gpu::GpuVertex, 6> verts{{
+    std::array<gpu::GpuVertex, 4> corners{{
         {p0.x, p0.y, u0, v0, r, g, b, a},
         {p1.x, p1.y, u1, v0, r, g, b, a},
         {p2.x, p2.y, u1, v1, r, g, b, a},
-        {p0.x, p0.y, u0, v0, r, g, b, a},
-        {p2.x, p2.y, u1, v1, r, g, b, a},
         {p3.x, p3.y, u0, v1, r, g, b, a},
     }};
-    apply_view_offset(verts);
+    apply_view_offset(corners);
     ensure_frame();
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
-        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
-    _batch.push(verts, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr, 0,
-                sampler);
+        sampler_for(*backend);
+    retain(texture);
+    _batch.push_quads(corners, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr,
+                      0, sampler);
 }
 
 void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites) {
@@ -791,7 +1026,8 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
     const gpu::GpuBlendMode blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied
                                                              : gpu::GpuBlendMode::Alpha;
     SDL_GPUSampler* sampler =
-        backend->scale_mode() == ScaleMode::Linear ? _sampler_linear : _sampler_nearest;
+        sampler_for(*backend);
+    retain(texture);
     _batch.push_instances(_instance_scratch, backend->texture().handle(), current_scissor(), resolve_blend(blend),
                           sampler);
 }
@@ -812,13 +1048,13 @@ bool GpuRenderer2DBackend::save_png(const char* path) {
             src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
         }
         _frame->submit();
-        _frame.reset();
-    } else if (scene_target && _scene && !_post_passes.empty()) {
+        end_frame();
+    } else if (scene_target && _scene && (!_post_passes.empty() || (_overdraw_view && _overdraw_count_shader))) {
         _frame.emplace(_device.begin_frame());
         src = run_post_chain();
         src_size = {static_cast<i32>(src->width()), static_cast<i32>(src->height())};
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     std::vector<u8> rgba;
     if (!_device.read_texture_rgba(*src, rgba)) {
@@ -846,7 +1082,7 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
     const Vec2i target_size = current_size();
     flush_to_frame();
     _frame->submit();
-    _frame.reset();
+    end_frame();
 
     std::vector<u8> full;
     if (!_device.read_texture_rgba(target, full)) {
@@ -856,8 +1092,7 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
     const int sh = target_size.y;
     // Under logical presentation the scene texture is native-res; scale the
     // logical-space region up to native pixels before reading.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    const f32 sc = coordinates_to_pixels();
     const Rectf native_region{logical_region.x * sc, logical_region.y * sc,
                               logical_region.w * sc, logical_region.h * sc};
     SDL_Rect r = intersect(to_sdl_rect(native_region), SDL_Rect{0, 0, sw, sh});
@@ -890,8 +1125,7 @@ bool GpuRenderer2DBackend::blit_region_to_target(Rectf region, const RenderTarge
 
     // Map the logical region to native target pixels (scene is native-res under logical
     // presentation; render targets are 1:1).
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    const f32 sc = coordinates_to_pixels();
     const gpu::GpuTexture& src = current_target();
 
     SDL_GPUBlitInfo blit{};
@@ -913,8 +1147,7 @@ bool GpuRenderer2DBackend::blit_region_to_target(Rectf region, const RenderTarge
 
 Vec2i GpuRenderer2DBackend::region_pixel_size(Rectf region) const {
     // The scene is native-res under logical presentation; render targets are 1:1.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const f32 sc = scene_logical ? _view_scale : 1.0f;
+    const f32 sc = coordinates_to_pixels();
     return {static_cast<i32>(region.w * sc + 0.5f), static_cast<i32>(region.h * sc + 0.5f)};
 }
 
@@ -922,7 +1155,7 @@ void GpuRenderer2DBackend::set_logical_size(Vec2i size) {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     _logical_size = size; // scene renders at this size; present letterboxes to the window
     _integer_scale = false;
@@ -933,7 +1166,7 @@ void GpuRenderer2DBackend::set_integer_logical_size(Vec2i size) {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
     _logical_size = size;
     _integer_scale = true;
@@ -944,7 +1177,7 @@ void GpuRenderer2DBackend::push_native_coordinates() {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
 
     _native_stack.push_back(NativeState{
@@ -965,7 +1198,7 @@ void GpuRenderer2DBackend::pop_native_coordinates() {
     if (_frame) {
         flush_to_frame();
         _frame->submit();
-        _frame.reset();
+        end_frame();
     }
 
     if (_native_stack.empty()) {
@@ -1047,6 +1280,7 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     if (!backend || !backend->texture()) {
         return;
     }
+    retain(target.texture());
     if (_frame) {
         flush_to_frame();
     }
@@ -1054,10 +1288,51 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     _clip_stack.clear();
     _saved_view_offsets.push_back(_view_offset);
     _view_offset = {0.0f, 0.0f}; // RT-internal draws use the target's native origin
-    _rt_stack.push_back(&backend->texture());
+    _rt_stack.push_back(TargetEntry{.texture = &backend->texture()});
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
     }
+}
+
+bool GpuRenderer2DBackend::push_layer_target(const RenderTarget& target) {
+    const auto* backend = as_gpu(target.texture().backend().get());
+    if (!backend || !backend->texture()) {
+        return false;
+    }
+    retain(target.texture());
+    const Vec2f coords = coordinate_size(); // the layer keeps these, at its own resolution
+    ensure_frame();
+    flush_to_frame();
+    // Clips and the viewport offset stay as they are: draws in the layer land
+    // where they would have outside it.
+    _saved_clip_stacks.push_back(_clip_stack);
+    _saved_view_offsets.push_back(_view_offset);
+    _rt_stack.push_back(TargetEntry{.texture = &backend->texture(), .coords = coords});
+    _batch.begin(current_target(), SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}, /*do_clear=*/true);
+    _batch.begin_bounds();
+    return true;
+}
+
+std::optional<IRenderer2DBackend::LayerBounds> GpuRenderer2DBackend::pop_layer_target() {
+    if (_rt_stack.empty() || _rt_stack.back().coords.x <= 0.0f) {
+        return std::nullopt;
+    }
+    const Vec2f coords = _rt_stack.back().coords;
+    const Vec2f pixels{static_cast<f32>(current_size().x) / coords.x, static_cast<f32>(current_size().y) / coords.y};
+    const std::optional<Rectf> drawn = _batch.end_bounds(); // in absolute draw coordinates
+    pop_render_target();
+    if (!drawn) {
+        return LayerBounds{}; // nothing drawn
+    }
+    // Within the layer, and back to the coordinates draws are given in.
+    const f32 x0 = std::max(0.0f, std::floor(drawn->x)), y0 = std::max(0.0f, std::floor(drawn->y));
+    const f32 x1 = std::min(coords.x, std::ceil(drawn->x + drawn->w));
+    const f32 y1 = std::min(coords.y, std::ceil(drawn->y + drawn->h));
+    if (x1 <= x0 || y1 <= y0) {
+        return LayerBounds{};
+    }
+    return LayerBounds{.dest = {x0 - _view_offset.x, y0 - _view_offset.y, x1 - x0, y1 - y0},
+                       .source = {x0 * pixels.x, y0 * pixels.y, (x1 - x0) * pixels.x, (y1 - y0) * pixels.y}};
 }
 
 void GpuRenderer2DBackend::pop_render_target() {
@@ -1086,10 +1361,27 @@ void GpuRenderer2DBackend::pop_render_target() {
 }
 
 void GpuRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode) {
-    // Per-texture sampling: draw_texture picks the nearest/linear sampler from this.
-    if (const auto* backend = as_gpu(texture.backend().get())) {
-        backend->set_scale_mode(mode);
+    // Per-texture sampling: draws pick their sampler from this (sampler_for).
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend) {
+        return;
     }
+    backend->set_scale_mode(mode);
+    if (mode == ScaleMode::Mipmapped && !backend->mipmapped() && !backend->premultiplied() &&
+        backend->format() == TextureFormat::Rgba8 && backend->texture()) {
+        // Remade with room for its mips; the old one stays alive until the
+        // frame's draws (which may name it) are submitted.
+        _retired_textures.push_back(backend->replace_texture(_device.make_mipmapped(backend->texture())));
+    }
+}
+
+SDL_GPUSampler* GpuRenderer2DBackend::sampler_for(const gpu::GpuTextureBackend& texture) const {
+    switch (texture.scale_mode()) {
+    case ScaleMode::Nearest: return _sampler_nearest;
+    case ScaleMode::Linear: return _sampler_linear;
+    case ScaleMode::Mipmapped: return texture.mipmapped() ? _sampler_mipmapped : _sampler_linear;
+    }
+    return _sampler_linear;
 }
 
 void GpuRenderer2DBackend::set_viewport(Rectf rect) {
@@ -1097,8 +1389,7 @@ void GpuRenderer2DBackend::set_viewport(Rectf rect) {
     // rect, AND subsequent draw coords become viewport-relative (origin at rect.x/y).
     // Clips are kept in coordinate space (logical for the scene under logical
     // presentation, target pixels otherwise); current_scissor() scales them.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2i coord = coordinate_extent();
     _clip_stack.clear();
     _clip_stack.push_back(intersect(to_sdl_rect(rect), SDL_Rect{0, 0, coord.x, coord.y}));
     _view_offset = {rect.x, rect.y};
@@ -1112,8 +1403,7 @@ void GpuRenderer2DBackend::reset_viewport() {
 void GpuRenderer2DBackend::push_viewport(Rectf rect) {
     // Save + set both the clip (absolute viewport rect, intersected with parent) and
     // the origin offset, mirroring SdlRenderer2DBackend::push_viewport.
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2i coord = coordinate_extent();
     const SDL_Rect parent = _clip_stack.empty() ? SDL_Rect{0, 0, coord.x, coord.y} : _clip_stack.back();
     _view_offset_stack.push_back(_view_offset);
     _clip_stack.push_back(intersect(to_sdl_rect(rect), parent));
@@ -1136,8 +1426,7 @@ void GpuRenderer2DBackend::push_clip(Rectf rect) {
     // SDL clip rects are viewport-relative, so shift by the active viewport origin to
     // absolute coordinate space, then intersect with the parent clip (current_scissor()
     // scales the result to native texture pixels at draw time).
-    const bool scene_logical = scene_uses_logical_coordinates();
-    const Vec2i coord = scene_logical ? _logical_size : current_size();
+    const Vec2i coord = coordinate_extent();
     const SDL_Rect parent = _clip_stack.empty() ? SDL_Rect{0, 0, coord.x, coord.y} : _clip_stack.back();
     const Rectf shifted{rect.x + _view_offset.x, rect.y + _view_offset.y, rect.w, rect.h};
     _clip_stack.push_back(intersect(to_sdl_rect(shifted), parent));
@@ -1166,12 +1455,21 @@ ShaderHandle GpuRenderer2DBackend::create_shader(const ShaderDesc& desc) {
     gpu::GpuShader shader = gpu::GpuShader::from_bytes(
         _device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
         std::span<const u8>{desc.spirv.code, desc.spirv.size},
-        desc.num_uniform_buffers, desc.num_samplers);
+        desc.num_uniform_buffers, desc.num_samplers, desc.num_storage_buffers);
     if (!shader) {
         KIN_LOG_ERROR_F("render", "create_shader: GpuShader::from_bytes failed",
                         (LogFields{{.name = "error", .value = SDL_GetError()}}));
         return {};
     }
+    // Its usual pipeline now, while the game loads, rather than at its first
+    // draw: on a cold driver cache that is a ~20 ms hitch. Every 2D target is
+    // RGBA8, and shader surfaces blend as alpha unless a blend mode is set.
+    _pipelines.get(_vertex_shader.handle(), shader.handle(), gpu::GpuBlendMode::Alpha,
+                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    // And whatever else an earlier run drew it with.
+    const u64 id = spirv_id(desc.spirv);
+    _fragment_ids[shader.handle()] = id;
+    make_hinted_pipelines(id, shader.handle());
     _shaders.push_back(std::move(shader));
     KIN_LOG_INFO_F("render", "shader created",
                    (LogFields{{.name = "handle", .value = std::to_string(_shaders.size())}}));
@@ -1195,6 +1493,12 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
 
 void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                                                std::span<const Texture> sources) {
+    draw_shader_surface(rect, handle, params, sources, std::span<const DataBuffer>{});
+}
+
+void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
+                                               std::span<const Texture> sources,
+                                               std::span<const DataBuffer> buffers) {
     if (handle.value == 0 || handle.value > _shaders.size() || rect.w <= 0.0f || rect.h <= 0.0f) {
         return;
     }
@@ -1202,29 +1506,12 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
     if (!shader) {
         return;
     }
-    ensure_frame();
-    // `sources[i]` -> fragment sampler i. An invalid source leaves the binding null,
-    // which the batch replaces with the white texture and default sampler. Slots the
-    // shader declares beyond the sources are bound the same way, so it never samples
-    // an unbound slot.
-    const auto resolve = [this](const Texture& src) {
-        SDL_GPUTextureSamplerBinding binding{};
-        if (const auto* backend = as_gpu(src.backend().get());
-            backend && backend->texture()) {
-            binding.texture = backend->texture().handle();
-            // Integer textures cannot be filtered, and 32-bit floats may not be.
-            const bool linear = backend->scale_mode() == ScaleMode::Linear && backend->format() == TextureFormat::Rgba8;
-            binding.sampler = linear ? _sampler_linear : _sampler_nearest;
-        }
-        return binding;
-    };
-    const std::size_t slots = std::min<std::size_t>(
-        std::max<std::size_t>({sources.size(), shader.samplers(), 1}), MaxShaderSamplers);
-    const SDL_GPUTextureSamplerBinding slot0 = sources.empty() ? SDL_GPUTextureSamplerBinding{} : resolve(sources[0]);
-    std::array<SDL_GPUTextureSamplerBinding, MaxShaderSamplers - 1> extra{};
-    for (std::size_t i = 1; i < slots && i < sources.size(); ++i) {
-        extra[i - 1] = resolve(sources[i]);
+    const std::optional<std::span<SDL_GPUBuffer* const>> storage = bind_buffers(shader, buffers);
+    if (!storage) {
+        return;
     }
+    ensure_frame();
+    const SourceBindings bindings = bind_sources(shader, sources);
     // Quad over `rect` (uv 0..1, white vertex color) tagged with the material fragment
     // shader + the ShaderParams uniform (fragment slot 0).
     const f32 x0 = rect.x, y0 = rect.y, x1 = rect.x + rect.w, y1 = rect.y + rect.h;
@@ -1237,9 +1524,274 @@ void GpuRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
         {x0, y1, 0.0f, 1.0f, 255, 255, 255, 255},
     }};
     apply_view_offset(verts);
-    _batch.push(verts, shader.handle(), slot0.texture, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha),
-                params.uniforms.data(), static_cast<u32>(params.uniforms.size() * sizeof(f32)),
-                slot0.sampler, std::span<const SDL_GPUTextureSamplerBinding>{extra.data(), slots - 1});
+    _batch.push(verts, shader.handle(), bindings.slot0.texture, current_scissor(),
+                resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
+                static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
+                std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(), bindings.extra_count}, *storage);
+}
+
+std::optional<std::span<SDL_GPUBuffer* const>> GpuRenderer2DBackend::bind_buffers(const gpu::GpuShader& shader,
+                                                                                std::span<const DataBuffer> buffers) {
+    if (buffers.size() < shader.storage_buffers()) {
+        // An unbound storage buffer is an error on the GPU: skip the draw.
+        KIN_LOG_ERROR_F("render", "shader draw skipped: fewer data buffers than the shader reads",
+                        (LogFields{{.name = "given", .value = std::to_string(buffers.size())},
+                                   {.name = "shader", .value = std::to_string(shader.storage_buffers())}}));
+        return std::nullopt;
+    }
+    _storage_scratch.clear();
+    for (const DataBuffer& buffer : buffers.first(shader.storage_buffers())) {
+        const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+        if (!gpu || !gpu->buffer()) {
+            KIN_LOG_ERROR("render", "shader draw skipped: a data buffer from another backend or invalid");
+            return std::nullopt;
+        }
+        gpu->mark_used(_frame_serial);
+        _retained_buffers.push_back(buffer.backend());
+        _storage_scratch.push_back(gpu->buffer().handle());
+    }
+    return std::span<SDL_GPUBuffer* const>{_storage_scratch};
+}
+
+bool GpuRenderer2DBackend::reload_shader(ShaderHandle handle, const ShaderDesc& desc) {
+    if (handle.value == 0 || handle.value > _shaders.size() || !desc.spirv.valid()) {
+        return false;
+    }
+    gpu::GpuShader shader;
+    try {
+        shader = gpu::GpuShader::from_bytes(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                            std::span<const u8>{desc.spirv.code, desc.spirv.size},
+                                            desc.num_uniform_buffers, desc.num_samplers, desc.num_storage_buffers);
+    } catch (const std::exception& e) {
+        KIN_LOG_ERROR_F("render", "reload_shader failed", (LogFields{{.name = "error", .value = e.what()}}));
+        return false;
+    }
+    // Queued draws name the old shader: record them before it goes.
+    if (_frame) {
+        flush_to_frame();
+        _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
+    }
+    gpu::GpuShader& slot = _shaders[static_cast<std::size_t>(handle.value) - 1];
+    _pipelines.forget(slot.handle());
+    _fragment_ids.erase(slot.handle());
+    slot = std::move(shader);
+    _pipelines.get(_vertex_shader.handle(), slot.handle(), gpu::GpuBlendMode::Alpha,
+                   SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::Triangles);
+    const u64 id = spirv_id(desc.spirv);
+    _fragment_ids[slot.handle()] = id;
+    make_hinted_pipelines(id, slot.handle());
+    return true;
+}
+
+ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) {
+    SDL_GPUComputePipelineCreateInfo info{};
+    info.code = spirv.code;
+    info.code_size = spirv.size;
+    info.entrypoint = "main";
+    info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    info.num_samplers = layout.samplers;
+    info.num_readonly_storage_textures = layout.storage_textures;
+    info.num_readonly_storage_buffers = layout.storage_buffers;
+    info.num_readwrite_storage_textures = layout.readwrite_storage_textures;
+    info.num_readwrite_storage_buffers = layout.readwrite_storage_buffers;
+    info.num_uniform_buffers = layout.uniform_buffers;
+    info.threadcount_x = layout.local_size[0];
+    info.threadcount_y = layout.local_size[1];
+    info.threadcount_z = layout.local_size[2];
+    SDL_GPUComputePipeline* pipeline = SDL_CreateGPUComputePipeline(_device.handle(), &info);
+    if (!pipeline) {
+        KIN_LOG_ERROR_F("render", "create_compute_shader: SDL_CreateGPUComputePipeline failed",
+                        (LogFields{{.name = "error", .value = SDL_GetError()}}));
+        return {};
+    }
+    _compute_pipelines.push_back(ComputePipeline{.pipeline = pipeline, .samplers = layout.samplers});
+    return ComputeShaderHandle{static_cast<u64>(_compute_pipelines.size())};
+}
+
+Texture GpuRenderer2DBackend::create_storage_texture(Vec2i size, TextureFormat format) {
+    gpu::GpuTexture tex = _device.create_texture(nullptr, static_cast<u32>(size.x), static_cast<u32>(size.y),
+                                                 sdl_format(format), texture_format_bytes(format),
+                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Nearest, format)};
+}
+
+bool GpuRenderer2DBackend::dispatch_compute(ComputeShaderHandle handle, Vec2i groups, const ComputeBindings& bindings) {
+    if (handle.value == 0 || handle.value > _compute_pipelines.size()) {
+        return false;
+    }
+    const ComputePipeline& compute = _compute_pipelines[static_cast<std::size_t>(handle.value) - 1];
+    std::vector<SDL_GPUStorageTextureReadWriteBinding> outputs;
+    for (const Texture& output : bindings.outputs) {
+        const auto* backend = as_gpu(output.backend().get());
+        if (!backend || !backend->texture()) {
+            KIN_LOG_ERROR("render", "dispatch_compute: an output is not a storage texture of this renderer");
+            return false;
+        }
+        retain(output);
+        outputs.push_back(SDL_GPUStorageTextureReadWriteBinding{.texture = backend->texture().handle()});
+    }
+    std::vector<SDL_GPUStorageBufferReadWriteBinding> output_buffers;
+    std::vector<SDL_GPUBuffer*> buffers;
+    for (const auto* list : {&bindings.output_buffers, &bindings.buffers}) {
+        for (const DataBuffer& buffer : *list) {
+            const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+            if (!gpu || !gpu->buffer()) {
+                KIN_LOG_ERROR("render", "dispatch_compute: a data buffer is not of this renderer");
+                return false;
+            }
+            gpu->mark_used(_frame_serial);
+            _retained_buffers.push_back(buffer.backend());
+            if (list == &bindings.output_buffers) {
+                output_buffers.push_back(SDL_GPUStorageBufferReadWriteBinding{.buffer = gpu->buffer().handle()});
+            } else {
+                buffers.push_back(gpu->buffer().handle());
+            }
+        }
+    }
+    // Draws so far go first; the dispatch records between them and the next.
+    ensure_frame();
+    flush_to_frame();
+    SDL_GPUCommandBuffer* commands = _frame->command_buffer();
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, outputs.data(), static_cast<u32>(outputs.size()),
+                                                       output_buffers.data(), static_cast<u32>(output_buffers.size()));
+    SDL_BindGPUComputePipeline(pass, compute.pipeline);
+    if (compute.samplers > 0) {
+        std::vector<SDL_GPUTextureSamplerBinding> samplers(compute.samplers);
+        for (std::size_t i = 0; i < samplers.size(); ++i) {
+            const auto* backend = i < bindings.sources.size() ? as_gpu(bindings.sources[i].backend().get()) : nullptr;
+            if (backend && backend->texture()) {
+                retain(bindings.sources[i]);
+                samplers[i] = {.texture = backend->texture().handle(), .sampler = _sampler_nearest};
+            } else {
+                samplers[i] = {.texture = _white.handle(), .sampler = _sampler_nearest};
+            }
+        }
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+    }
+    if (!buffers.empty()) {
+        SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), static_cast<u32>(buffers.size()));
+    }
+    if (bindings.params && !bindings.params->uniforms.empty()) {
+        SDL_PushGPUComputeUniformData(commands, 0, bindings.params->uniforms.data(),
+                                      static_cast<u32>(bindings.params->uniforms.size() * sizeof(f32)));
+    }
+    SDL_DispatchGPUCompute(pass, static_cast<u32>(groups.x), static_cast<u32>(groups.y), 1);
+    SDL_EndGPUComputePass(pass);
+    _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
+    return true;
+}
+
+DataBuffer GpuRenderer2DBackend::create_data_buffer(std::size_t bytes, const void* data) {
+    gpu::GpuBuffer buffer = _device.create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+                                                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                                                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
+                                                  nullptr, static_cast<u32>(bytes));
+    _device.upload_storage_buffer(buffer.handle(), 0, static_cast<u32>(bytes), data, /*cycle=*/false);
+    return DataBuffer{std::make_shared<gpu::GpuDataBuffer>(std::move(buffer))};
+}
+
+bool GpuRenderer2DBackend::update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                              const void* data) {
+    const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+    if (!gpu || !gpu->buffer()) {
+        return false;
+    }
+    // Replacing all of one this frame hasn't drawn with lets it cycle, as textures do.
+    const bool whole = offset == 0 && bytes == gpu->size() && gpu->used_in_frame() != _frame_serial;
+    _device.upload_storage_buffer(gpu->buffer().handle(), static_cast<u32>(offset), static_cast<u32>(bytes), data,
+                                  whole);
+    return true;
+}
+
+bool GpuRenderer2DBackend::write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                             const std::function<void(std::span<u8>)>& fill) {
+    const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
+    if (!gpu || !gpu->buffer()) {
+        return false;
+    }
+    const bool whole = offset == 0 && bytes == gpu->size() && gpu->used_in_frame() != _frame_serial;
+    _device.upload_storage_buffer(gpu->buffer().handle(), static_cast<u32>(offset), static_cast<u32>(bytes), nullptr,
+                                  whole, &fill);
+    return true;
+}
+
+GpuRenderer2DBackend::SourceBindings GpuRenderer2DBackend::bind_sources(const gpu::GpuShader& shader,
+                                                                        std::span<const Texture> sources) {
+    // `sources[i]` -> fragment sampler i. An invalid source leaves the binding null,
+    // which the batch replaces with the white texture and default sampler. Slots the
+    // shader declares beyond the sources are bound the same way, so it never samples
+    // an unbound slot.
+    const auto resolve = [this](const Texture& src) {
+        SDL_GPUTextureSamplerBinding binding{};
+        if (const auto* backend = as_gpu(src.backend().get());
+            backend && backend->texture()) {
+            retain(src);
+            binding.texture = backend->texture().handle();
+            // Integer textures cannot be filtered, and 32-bit floats may not be.
+            binding.sampler = backend->format() == TextureFormat::Rgba8 ? sampler_for(*backend) : _sampler_nearest;
+        }
+        return binding;
+    };
+    const std::size_t slots = std::min<std::size_t>(
+        std::max<std::size_t>({sources.size(), shader.samplers(), 1}), MaxShaderSamplers);
+    SourceBindings out;
+    out.slot0 = sources.empty() ? SDL_GPUTextureSamplerBinding{} : resolve(sources[0]);
+    for (std::size_t i = 1; i < slots && i < sources.size(); ++i) {
+        out.extra[i - 1] = resolve(sources[i]);
+    }
+    out.extra_count = slots - 1;
+    return out;
+}
+
+void GpuRenderer2DBackend::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                                                ShaderHandle handle, const ShaderParams& params,
+                                                std::span<const Texture> sources,
+                                                std::span<const DataBuffer> buffers) {
+    if (handle.value == 0 || handle.value > _shaders.size() || !_shader_vertex_shader.handle()) {
+        return;
+    }
+    const gpu::GpuShader& shader = _shaders[static_cast<std::size_t>(handle.value) - 1];
+    if (!shader) {
+        return;
+    }
+    const std::optional<std::span<SDL_GPUBuffer* const>> storage = bind_buffers(shader, buffers);
+    if (!storage) {
+        return;
+    }
+    ensure_frame();
+    const SourceBindings bindings = bind_sources(shader, sources);
+    // The batch draws triangle lists: indices are expanded here.
+    const auto convert = [this](const ShaderVertex& v) {
+        gpu::GpuShaderVertex out{};
+        out.x = v.position.x + _view_offset.x;
+        out.y = v.position.y + _view_offset.y;
+        out.u = v.uv.x;
+        out.v = v.uv.y;
+        out.r = v.color.r;
+        out.g = v.color.g;
+        out.b = v.color.b;
+        out.a = v.color.a;
+        std::copy(v.custom.begin(), v.custom.end(), out.custom);
+        return out;
+    };
+    _shader_vertex_scratch.clear();
+    if (indices.empty()) {
+        _shader_vertex_scratch.reserve(vertices.size());
+        for (const ShaderVertex& v : vertices) {
+            _shader_vertex_scratch.push_back(convert(v));
+        }
+    } else {
+        _shader_vertex_scratch.reserve(indices.size());
+        for (const u32 i : indices) {
+            _shader_vertex_scratch.push_back(convert(vertices[i]));
+        }
+    }
+    _batch.push_shader_vertices(_shader_vertex_scratch, shader.handle(), bindings.slot0.texture, current_scissor(),
+                                resolve_blend(gpu::GpuBlendMode::Alpha), params.uniforms.data(),
+                                static_cast<u32>(params.uniforms.size() * sizeof(f32)), bindings.slot0.sampler,
+                                std::span<const SDL_GPUTextureSamplerBinding>{bindings.extra.data(),
+                                                                               bindings.extra_count},
+                                *storage);
 }
 
 void GpuRenderer2DBackend::set_post_process(std::span<const PostProcessPass> passes) {
@@ -1247,7 +1799,19 @@ void GpuRenderer2DBackend::set_post_process(std::span<const PostProcessPass> pas
 }
 
 const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
-    if (_post_passes.empty() || !_frame || !_scene) {
+    // The overdraw view's own last pass instead of the game's: counts to colours.
+    std::vector<PostProcessPass> heat;
+    if (_overdraw_view && _overdraw_count_shader) {
+        if (!_overdraw_heat) {
+            const std::vector<u8> code = gpu::read_shader_file(std::filesystem::path{KIN_GPU_SHADER_DIR} / "overdraw_heat.frag.spv");
+            ShaderDesc desc;
+            desc.spirv = {code.data(), static_cast<u32>(code.size())};
+            _overdraw_heat = create_shader(desc);
+        }
+        heat.push_back(PostProcessPass{.shader = _overdraw_heat});
+    }
+    const std::vector<PostProcessPass>& passes = heat.empty() ? _post_passes : heat;
+    if (passes.empty() || !_frame || !_scene) {
         return &_scene;
     }
     // Scratch ping-pong targets sized to the scene (native resolution).
@@ -1278,7 +1842,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
 
     const gpu::GpuTexture* read = &_scene;
     gpu::GpuTexture* write = &_post_a;
-    for (const PostProcessPass& pass : _post_passes) {
+    for (const PostProcessPass& pass : passes) {
         if (pass.shader.value == 0 || pass.shader.value > _shaders.size()) {
             continue; // skip invalid pass (leaves `read` unchanged)
         }
@@ -1303,6 +1867,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
         gpu::GpuGeometryBatch::FlushContext ctx{};
         ctx.vertex_shader = _vertex_shader.handle();
         ctx.instance_shader = _instance_shader.handle();
+        ctx.shader_vertex_shader = _shader_vertex_shader.handle();
         ctx.default_fragment = _fragment_shader.handle();
         ctx.white_texture = _white.handle();
         ctx.sampler = _sampler_linear;

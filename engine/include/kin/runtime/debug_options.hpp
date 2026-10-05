@@ -48,6 +48,7 @@ struct RuntimeDebugOptions {
     bool texture_batching_enabled = true;
     bool detailed_render_timings_enabled = false;
     bool render_culling_diagnostics_enabled = false;
+    bool overdraw_view = false; // Renderer2D::set_overdraw_view
     RuntimeRenderDebugStats render_stats;
     std::function<void(std::string_view, f64)> record_timing;
     // Text rows for the debug overlay (e.g. per-system parallel execution

@@ -5,6 +5,7 @@
 #include <kin/scene/scene_manager.hpp>
 
 #include <functional>
+#include <filesystem>
 #include <iosfwd>
 #include <optional>
 #include <string>
@@ -30,6 +31,10 @@ struct HeadlessOptions {
     std::string report_path;
     std::string profile_json_path;
     std::string profile_text_path;
+    // --overdraw-view: start with the overdraw view on (Renderer2D::set_overdraw_view).
+    bool overdraw_view = false;
+    // --screenshot=PATH: the last frame saved as a PNG when the run ends.
+    std::string screenshot_path;
     // Run the game as a long-lived command server (--server) instead of a fixed
     // headless run. server_mode is "driven" (default) or "realtime";
     // server_transport is "stdio" (default) or "http".
@@ -97,6 +102,10 @@ struct SceneAppConfig {
     // reload between frames; never in headless or server runs, which stay
     // deterministic.
     FileWatcher* file_watcher = nullptr;
+    // Where a windowed run keeps the GPU pipelines it made, to make them while
+    // the next run loads (Renderer2D::pipeline_record). Unset: the user data
+    // folder, kin/<the window title>/pipelines.txt. Empty: not kept.
+    std::optional<std::filesystem::path> pipeline_record_path{};
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);

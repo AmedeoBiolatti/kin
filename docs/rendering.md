@@ -190,9 +190,153 @@ the uniform block is `layout(set = 3, binding = 0)`. Slots the shader declares
 but the draw does not fill are bound to a 1x1 white texture. Overloads taking no
 texture, one texture, or two textures are shorthands for the same call.
 
+`create_shader()` reads the SPIR-V itself (`kin::reflect_spirv`, about 10 µs):
+the texture, storage buffer and uniform block counts come from the shader, so a
+`ShaderDesc`'s may be left alone (one that disagrees is logged, and the
+shader's used). Its uniform block can then be set by member name:
+
+```cpp
+kin::ShaderParams params = renderer.shader_params(shader); // sized, with the layout
+params.set("strength", 0.5f);
+params.set("tint", std::array{1.0f, 0.8f, 0.6f, 1.0f});
+```
+
 `ShaderParams::uniforms` holds 16 floats by default. Resize it for more, up to
 `kin::MaxShaderUniformFloats` (4096, 16 KiB). Declare arrays in the shader as
 `vec4`s: std140 pads each element of a `float` array to 16 bytes.
+
+### Editing shaders while the game runs
+
+During development a shader can be loaded from its GLSL source and reloaded
+whenever the file is saved, keeping its handle:
+
+```cpp
+kin::ShaderFile lava{renderer, "shaders/lava.frag.glsl"};
+// each frame:
+lava.poll();                                  // recompiled and reloaded when saved
+renderer.draw_shader_surface(rect, lava.handle(), params);
+```
+
+It compiles with `glslc` (the Vulkan SDK's: the one kin was built with, or
+`KIN_GLSLC`), about 0.1 s a save; the reload itself takes ~0.02 ms. An edit
+that does not compile is logged (`ShaderFile::error()`) and the last good
+shader kept. `kin::compile_glsl()` compiles a file directly, and
+`Renderer2D::reload_shader()` replaces any shader in place. Shipped games load
+precompiled SPIR-V.
+
+### Pipelines
+
+The GPU needs a pipeline for each combination of shader, blend mode, target
+and vertex layout, and making one costs about 0.5 ms, or up to ~20 ms on a cold
+driver cache (first launch, new driver): a hitch on the frame that first draws
+it. So:
+
+- `create_shader()` makes the shader's usual pipeline (alpha blend, an RGBA8
+  target) at once.
+- `Renderer2D::pipeline_record()` lists the pipelines a run made, and
+  `prewarm_pipelines(record)` makes them while the next run loads: the engine's
+  own at once, a game's as its shader is created (shaders are known across runs
+  by their SPIR-V's hash). `run_scene_app` does this for windowed runs, keeping
+  the record in the user data folder (`kin/<window title>/pipelines.txt`, or
+  `SceneAppConfig::pipeline_record_path`; an empty path keeps none).
+
+On an RTX 4080 Laptop GPU with a cold driver cache, the first frame drawing a
+shader as triangles with `BlendMode::Max` took 10 ms without a record and
+0.8 ms with one (the pipeline was made during loading instead).
+
+### Shader geometry
+
+`draw_shader_surface()` covers a rectangle. For a shape that is really a
+polygon (a shadow, a hull, a beam), `draw_shader_geometry()` draws triangles
+with the same material shader, so the rasterizer decides what is inside and
+only the covered pixels run the shader:
+
+```cpp
+std::vector<kin::ShaderVertex> vertices;
+std::vector<kin::u32> indices;            // three per triangle; empty: vertices are triangles
+for (const Shadow& s : shadows) {
+    const auto first = static_cast<kin::u32>(vertices.size());
+    for (const kin::Vec2f p : s.hull) {
+        vertices.push_back({.position = p, .uv = s.uv_of(p), .custom = {s.index, s.height, 0, 0}});
+    }
+    for (kin::u32 i = 1; i + 1 < s.hull.size(); ++i) {   // a fan over the convex hull
+        indices.insert(indices.end(), {first, first + i, first + i + 1});
+    }
+}
+const auto max = renderer.scoped_blend_mode(kin::BlendMode::Max);
+renderer.draw_shader_geometry(vertices, indices, shadow_shader, params, sources);
+```
+
+- The fragment shader gets `color` and `uv` as for a surface, and each vertex's
+  `custom` as `layout(location = 2) in vec4`. One draw can then carry many
+  shapes, each with its own parameters, such as an index into a data texture.
+- Sources, params and the blend mode work as for `draw_shader_surface()`. With
+  `BlendMode::Max`, overlapping shapes combine by the larger, in any order.
+- Geometry that isn't whole triangles, or indexes past the vertices, is refused
+  and logged; nothing is drawn.
+- It needs `capabilities().shader_geometry`: the SDL_GPU backend has it, others
+  draw nothing.
+
+### Costly effects at lower resolution
+
+`draw_shader_surface_scaled(resolution, rect, shader, params, ...)` runs the
+shader into a pooled render target `resolution` times the size each way, then
+stretches it over `rect` with linear filtering. For smooth effects (fog, glow,
+soft light) the picture is the same and the cost a fraction: a full-screen
+effect at 1280 x 720 took 1.04 ms at full resolution, 0.32 ms at half and
+0.16 ms at a quarter, differing by under 0.1/255 a channel on average
+(`kin_draw_bench 60 1 scaled`). The shader must work from its UV, not
+`gl_FragCoord`.
+
+### Data buffers
+
+Per-object data a shader reads by index can be a storage buffer instead of a
+data texture: an array of structs, with no texel format to pack into and no
+16,384-row limit.
+
+```glsl
+layout(std430, set = 2, binding = 1) readonly buffer Casters { vec4 casters[]; }; // after 1 sampler
+```
+
+```cpp
+kin::DataBuffer casters = renderer.create_data_buffer(count * sizeof(Caster), data);
+renderer.update_data_buffer(casters, 0, count * sizeof(Caster), data);   // or write_data_buffer
+renderer.draw_shader_geometry(vertices, indices, shader, params, sources,
+                              std::span<const kin::DataBuffer>{&casters, 1});
+```
+
+Buffers bind after the shader's textures in set 2 (`kin/renderer/data_buffer.hpp`),
+go up with the frame's texture uploads, and need `capabilities().data_buffers`
+(SDL_GPU). A draw given fewer buffers than its shader reads is skipped and
+logged. Read speed matches a data texture (`kin_draw_bench 80 1 data`: 1000
+objects of 64 floats, 64 reads a pixel, about 0.15 ms either way).
+
+### Compute shaders
+
+Work that is the same small sum at every texel (light or fog fields, flow
+fields, coverage) can run on the GPU straight into a texture that later draws
+sample, instead of being computed on the CPU and uploaded:
+
+```glsl
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, set = 0, binding = 0) readonly buffer Lights { vec4 lights[]; };
+layout(set = 1, binding = 0, r32f) uniform writeonly image2D field;
+layout(set = 2, binding = 0) uniform Params { vec4 count; };
+```
+
+```cpp
+kin::ComputeShaderHandle shader = renderer.create_compute_shader(spirv);  // layout read from it
+kin::Texture field = renderer.create_storage_texture({512, 512}, kin::TextureFormat::R32Float);
+renderer.dispatch_compute(shader, {512, 512}, {.buffers = {&lights, 1}, .outputs = {&field, 1}, .params = &params});
+renderer.draw_shader_surface(rect, lighting, {}, std::span<const kin::Texture>{&field, 1});
+```
+
+Set 0 holds what the shader reads (sampled `sources`, then read-only
+`buffers`), set 1 what it writes (`outputs`, then `output_buffers`), set 2 the
+uniform block. The dispatch records in the frame between the draws around it.
+`capabilities().compute` (SDL_GPU). A 512 x 512 field of 64 lights took
+48.5 ms on the CPU (one core) and under 0.1 ms on the GPU, with 0.08 ms of CPU
+to record (`kin_draw_bench 30 1 compute`).
 
 ### Data textures
 
@@ -213,6 +357,47 @@ renderer.update_texture(height_map, {x, y}, {1, 1},
 | `R32Float` | 4 | `sampler2D`, `.r` |
 
 Read them with `texelFetch(tex, ivec2(x, y), 0)`: they are never filtered.
+
+On SDL_GPU, `create_texture()` and `update_texture()` don't each submit their
+own command buffer: a frame's uploads are recorded into one, sent to the GPU
+just before the frame (or a read-back), so updates made during a frame apply
+to the whole frame. Replacing a whole texture that the frame hasn't drawn yet
+cycles its storage, so the upload doesn't wait for earlier frames still reading
+it. Texels are copied with streaming stores (the staging memory is uncached),
+and with `Renderer2D::set_job_system()` uploads of 1 MB or more are copied on
+the workers too. Released textures are kept a few seconds (up to 256 MB) and
+reused by `create_texture()` for one of the same size and format, skipping the
+driver's create and destroy.
+
+An empty texture (`create_texture()` with no pixels) is cleared on the GPU
+rather than sent zeros. Draws send little: a quad is four corners (20 bytes
+each) drawn through an index buffer made once, and shaders and textures stay
+on the GPU, so a frame's traffic is its geometry and whatever textures change.
+
+Texels made each frame can skip the copy altogether: `write_texture()` hands
+its callback the upload memory itself to write them into.
+
+```cpp
+renderer.write_texture(shadow_data, {0, 0}, {1024, rows}, [&](std::span<kin::u8> texels) {
+    auto* out = reinterpret_cast<float*>(texels.data());
+    for (const Caster& c : casters) {   // in order, once: the memory is uncached
+        *out++ = c.height;
+    }
+});
+```
+
+The callback must not use the renderer. On other backends it writes a buffer
+that is then uploaded as by `update_texture()`. `backend_stats().texture_uploads` and `texture_upload_submits`
+count them; `kin_upload_bench [frames] [workers] [big]` measures them.
+
+CPU time per frame on an RTX 4080 Laptop GPU (kin 0.2.3, which submitted each
+upload on its own, took about 25 ms for the first row and then stalled 70 ms at
+present):
+
+| Uploads a frame | No job system | 3 workers |
+| --- | --- | --- |
+| 50 created and 50 replaced (256 KB each), 50 half updated | 2.1 ms | 2.1 ms |
+| 4 created and 4 replaced (16 MB each), 4 half updated | 11.4 ms | 4.6 ms |
 They need `capabilities().data_textures` (the SDL_GPU backend), are only for
 shaders (`draw_texture()` refuses them), and every slot that expects one must be
 given one, since an empty slot is bound to the white `Rgba8` texture.
@@ -221,6 +406,87 @@ Shaders need `capabilities().materials_2d`. The SDL_GPU backend supports all of
 the above. The SDL renderer's `gpu` driver draws shader surfaces without source
 textures, and other backends draw nothing, so check the capability and provide a
 fallback. `engine/shaders/` has working examples.
+
+## Layers
+
+Shapes that must combine before they are laid over the scene (shadows that
+darken once where they cross, parts of one piece of art that must not show
+through each other) go in a layer:
+
+```cpp
+{
+    const auto shadows = renderer.begin_layer({.opacity = 0.6f, .resolution = 0.5f});
+    for (const Building& b : buildings) {
+        draw_shadow(renderer, b);   // same coordinates, clips and viewport as outside
+    }
+}   // laid over the scene here, once
+```
+
+- The layer is a pooled render target. Draws inside use the coordinates they
+  would outside, so code moves into a layer unchanged.
+- Only the box around what was drawn is laid over (and counted as overdraw),
+  not the whole target: sparse layers cost what they cover.
+- `resolution` below 1 draws soft content at a fraction of the pixels.
+- `blend` sets how the layer is laid over (`Alpha` by default). Layers nest.
+
+In `kin_draw_bench 200 1 layers` (four layers of 30 shadows on a 2560 x 1440
+screen), whole-screen targets shaded 15.9 Mpixels a frame, `begin_layer` 2.3,
+and at half resolution 1.4. SDL_GPU; elsewhere the draws go straight to the
+current target and the opacity is not applied.
+
+## Cached Targets
+
+A render target whose content changes rarely (a minimap, an icon, a panel, a
+static part of the world) can be drawn again only when it does:
+
+```cpp
+kin::CachedTarget minimap;
+// each frame:
+if (minimap.stale(renderer, size, kin::cache_key(camera.x, camera.y, map.version()))) {
+    const auto bind = renderer.scoped_render_target(minimap.target());
+    renderer.clear(kin::Color::rgba(0, 0, 0, 0));
+    draw_minimap(renderer);
+}
+renderer.draw_texture(minimap.texture(), rect);
+```
+
+`stale()` is true the first time, when the size or the key changes, or after
+`invalidate()`; `kin::cache_key(...)` hashes plain values into a key.
+`reuses()` and `redraws()` count how it went. In `kin_draw_bench 200 1
+cached`, a 288 x 288 target of 44 layers cost 4.3 Mpixels and 0.5 ms of CPU a
+frame drawn every frame, and 0.08 Mpixels and 0.002 ms cached.
+
+## Mipmaps
+
+A texture drawn much smaller than it is (a big sprite sheet zoomed out, a
+high-resolution prerender) shimmers as it moves and reads memory wastefully.
+`renderer.set_scale_mode(texture, kin::ScaleMode::Mipmapped)` gives it mipmaps:
+smaller copies made on the GPU, sampled trilinearly. Updates remake them. On an
+RTX 4080 Laptop GPU, 4000 sprites of a 2048 x 2048 texture drawn at 24 x 24
+went from 0.29-0.36 to 0.21-0.23 ms a frame, and a 1-pixel checkerboard drawn
+that small from 31 levels off grey to 1 (`kin_draw_bench 1 1 mipmaps`). They
+cost a third more texture memory. SDL_GPU, RGBA8 textures that are not render
+targets; elsewhere `Mipmapped` is `Linear`.
+
+## Blend Modes
+
+`Renderer2D::set_blend_mode()` (or `scoped_blend_mode()`) sets how later draws
+combine with what is under them:
+
+| Mode | Result | For |
+|---|---|---|
+| `Alpha` | straight alpha over (the default) | most drawing |
+| `Additive` | dst + src * src alpha | lights, glows |
+| `Multiply` | dst * src | light maps, tinting |
+| `Replace` | src | copying |
+| `Max` | max(dst, src), each channel and alpha | overlapping shadows, fog of war, coverage, heat maps |
+| `Min` | min(dst, src), each channel and alpha | the reverse |
+
+`Max` and `Min` let overlapping shapes each be drawn on their own, in any order,
+into one target: two shadows that overlap darken it once, not twice. The source
+is not weighted by its alpha. The SDL_GPU backend has them; SDL's software
+renderer does not (`capabilities().min_max_blend` is false) and draws them as
+`Alpha`, logging a warning once.
 
 ## Lighting
 
@@ -330,3 +596,19 @@ native captures `prev_pos` each step, `begin_interpolated_view(ctx.alpha)`
 lerps the camera, and all `world_to_screen` consumers pick the interpolated
 view up automatically. Death/teleport visuals must force one final sync so the
 last pose is not interpolated from a stale previous position.
+
+### Frame pacing
+
+A display's frame times jitter around the step: at 60 steps a second, 16.5 ms
+then 16.9 ms. Counted as measured, the accumulator crosses a step boundary early
+or late, and some frames run 0 updates and the next 2, which shows as judder in
+whatever `update()` moves. `App::run` therefore counts a frame time within
+`AppConfig::snap_tolerance` (1 ms by default; `WindowedAppConfig` has it too) of
+a whole number of steps as exactly that many (`kin::FrameTimeSnapper`).
+
+- The time snapped away is kept and paid back a whole step at a time, so game
+  time keeps up with real time: a 59.94 Hz display drops one step every 17 s.
+- Frame times not near a whole number of steps (hitches, unpaced frames shorter
+  than a step) are counted as measured.
+- `AppFrameStats::snapped_frame_time` is what the accumulator was given.
+- Set `snap_tolerance` to 0 to count every frame as measured.

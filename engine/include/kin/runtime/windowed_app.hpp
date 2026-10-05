@@ -29,6 +29,8 @@ struct WindowedAppConfig {
     bool yield_when_unpaced = true;
     // Most frames a second (0: no cap; see AppConfig::max_fps).
     f32 max_fps = 0.0f;
+    // Frame times this near whole fixed steps count as whole (see AppConfig).
+    f32 snap_tolerance = 0.001f;
     i32 max_frames = 0;
     bool resizable = false;
     bool maximized = false;

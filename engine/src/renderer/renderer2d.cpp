@@ -2,6 +2,7 @@
 
 #include <kin/platform/log.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 
 #include <cmath>
 
@@ -18,6 +19,7 @@
 #include <fstream>
 #include <iterator>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -35,6 +37,14 @@
 #endif
 
 namespace kin {
+
+// An open layer (begin_layer). Defined before anything that needs its size
+// (the unique_ptrs holding it).
+struct Renderer2D::OpenLayer {
+    PooledTarget target;
+    LayerOptions options;
+};
+
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     // The SDL_GPU/Vulkan backend is now the default when a real GPU is available
@@ -217,6 +227,21 @@ void Renderer2D::reset_backend_stats() {
     _backend->reset_stats();
 }
 
+Renderer2D::GpuScope::~GpuScope() {
+    if (_renderer) {
+        _renderer->_backend->end_gpu_scope();
+    }
+}
+
+Renderer2D::GpuScope Renderer2D::gpu_scope(std::string_view name) {
+    _backend->begin_gpu_scope(name);
+    return GpuScope{this};
+}
+
+std::vector<GpuScopeTiming> Renderer2D::take_gpu_scope_timings() {
+    return _backend->take_gpu_scope_timings();
+}
+
 void Renderer2D::set_gpu_timing_enabled(bool enabled) {
     _backend->set_gpu_timing_enabled(enabled);
 }
@@ -320,6 +345,25 @@ bool Renderer2D::update_texture(const Texture& texture, Vec2i at, Vec2i size, co
         return _backend->update_texture(texture, at, size, pixels);
     } catch (const std::exception& error) {
         KIN_LOG_ERROR_F("render", "texture update failed", (LogFields{{.name = "error", .value = std::string{error.what()}}}));
+        return false;
+    }
+}
+
+bool Renderer2D::write_texture(const Texture& texture, Vec2i at, Vec2i size,
+                               const std::function<void(std::span<u8>)>& fill) {
+    const Vec2i whole = texture.size();
+    if (!texture.valid() || !fill || size.x <= 0 || size.y <= 0 || at.x < 0 || at.y < 0 || at.x + size.x > whole.x ||
+        at.y + size.y > whole.y) {
+        return false;
+    }
+    const std::size_t bytes = static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) *
+                              texture_format_bytes(texture.format());
+    try {
+        return _backend->write_texture(texture, at, size, bytes, fill);
+    } catch (const std::logic_error&) {
+        throw; // a misused fill
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "texture write failed", (LogFields{{.name = "error", .value = std::string{error.what()}}}));
         return false;
     }
 }
@@ -480,7 +524,70 @@ void Renderer2D::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
 }
 
 ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
-    return _backend->create_shader(desc);
+    ShaderDesc used = desc;
+    std::shared_ptr<const ShaderLayout> layout;
+    if (desc.spirv.valid()) {
+        std::string error;
+        if (std::optional<ShaderLayout> read = reflect_spirv(desc.spirv, &error)) {
+            const auto agree = [&](const char* what, u32 given, u32 declared, u32& into) {
+                // The default of one sampler stands for a shader that samples none.
+                if (given != declared && !(given == 1 && declared == 0 && std::string_view{what} == "samplers")) {
+                    KIN_LOG_WARN_F("render", "create_shader: ShaderDesc disagrees with the shader; using the shader's",
+                                   (LogFields{{.name = "what", .value = what},
+                                              {.name = "desc", .value = std::to_string(given)},
+                                              {.name = "shader", .value = std::to_string(declared)}}));
+                    into = declared;
+                }
+            };
+            agree("samplers", desc.num_samplers, read->samplers, used.num_samplers);
+            agree("uniform_buffers", desc.num_uniform_buffers, read->uniform_buffers, used.num_uniform_buffers);
+            agree("storage_buffers", desc.num_storage_buffers, read->storage_buffers, used.num_storage_buffers);
+            layout = std::make_shared<const ShaderLayout>(std::move(*read));
+        } else {
+            KIN_LOG_WARN_F("render", "create_shader: SPIR-V not readable; trusting the ShaderDesc",
+                           (LogFields{{.name = "error", .value = error}}));
+        }
+    }
+    const ShaderHandle handle = _backend->create_shader(used);
+    if (handle && layout) {
+        _shader_layouts[handle.value] = std::move(layout);
+    }
+    return handle;
+}
+
+bool Renderer2D::reload_shader(ShaderHandle shader, const ShaderDesc& desc) {
+    if (!shader || !desc.spirv.valid()) {
+        return false;
+    }
+    std::string error;
+    std::optional<ShaderLayout> layout = reflect_spirv(desc.spirv, &error);
+    if (!layout) {
+        KIN_LOG_ERROR_F("render", "reload_shader: SPIR-V not readable", (LogFields{{.name = "error", .value = error}}));
+        return false;
+    }
+    ShaderDesc used = desc;
+    used.num_samplers = std::max<u32>(layout->samplers, 1);
+    used.num_uniform_buffers = layout->uniform_buffers;
+    used.num_storage_buffers = layout->storage_buffers;
+    if (!_backend->reload_shader(shader, used)) {
+        return false;
+    }
+    _shader_layouts[shader.value] = std::make_shared<const ShaderLayout>(std::move(*layout));
+    return true;
+}
+
+std::shared_ptr<const ShaderLayout> Renderer2D::shader_layout(ShaderHandle shader) const {
+    const auto it = _shader_layouts.find(shader.value);
+    return it == _shader_layouts.end() ? nullptr : it->second;
+}
+
+ShaderParams Renderer2D::shader_params(ShaderHandle shader) const {
+    ShaderParams params;
+    params.layout = shader_layout(shader);
+    if (params.layout) {
+        params.uniforms.assign(std::max<std::size_t>(16, (params.layout->uniform_bytes + 3) / 4), 0.0f);
+    }
+    return params;
 }
 
 void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params) {
@@ -519,6 +626,216 @@ void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const Shad
     }
     KIN_TRACE_DRAW(DrawKind::Shader, rect, colors::white, sources.empty() ? nullptr : &sources.front());
     _backend->draw_shader_surface(rect, shader, params, sources);
+}
+
+void Renderer2D::draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                     std::span<const Texture> sources, std::span<const DataBuffer> buffers) {
+    if (!valid_params(params)) {
+        return;
+    }
+    if (sources.size() > MaxShaderSamplers || buffers.size() > MaxShaderStorageBuffers) {
+        KIN_LOG_ERROR("render", "draw_shader_surface: too many sources or buffers");
+        return;
+    }
+    _backend->draw_shader_surface(rect, shader, params, sources, buffers);
+}
+
+Renderer2D::LayerGuard::~LayerGuard() {
+    if (_renderer) {
+        _renderer->end_layer();
+    }
+}
+
+Renderer2D::LayerGuard Renderer2D::begin_layer(LayerOptions options) {
+    auto layer = std::make_unique<OpenLayer>();
+    layer->options = options;
+    const Vec2i pixels = _backend->current_target_pixels();
+    if (pixels.x > 0 && pixels.y > 0) {
+        const f32 resolution = std::clamp(options.resolution, 0.05f, 1.0f);
+        const Vec2i size{std::max(1, static_cast<i32>(std::ceil(static_cast<f32>(pixels.x) * resolution))),
+                         std::max(1, static_cast<i32>(std::ceil(static_cast<f32>(pixels.y) * resolution)))};
+        layer->target = acquire_render_target(size, ScaleMode::Linear);
+        if (layer->target && !_backend->push_layer_target(layer->target.target())) {
+            layer->target = PooledTarget{};
+        }
+    }
+    if (!layer->target) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            KIN_LOG_WARN("render", "begin_layer: no layers on this backend; drawing straight through");
+        }
+    }
+    _layers.push_back(std::move(layer));
+    return LayerGuard{this};
+}
+
+void Renderer2D::end_layer() {
+    if (_layers.empty()) {
+        return;
+    }
+    std::unique_ptr<OpenLayer> layer = std::move(_layers.back());
+    _layers.pop_back();
+    if (!layer->target) {
+        return;
+    }
+    const std::optional<IRenderer2DBackend::LayerBounds> bounds = _backend->pop_layer_target();
+    if (!bounds || bounds->dest.w <= 0.0f || bounds->dest.h <= 0.0f) {
+        return; // nothing drawn: nothing to lay over
+    }
+    // The target holds premultiplied colour: opacity scales all of it.
+    const auto o = static_cast<u8>(std::clamp(layer->options.opacity, 0.0f, 1.0f) * 255.0f + 0.5f);
+    const auto blend = scoped_blend_mode(layer->options.blend);
+    draw_texture(layer->target.texture(), bounds->source, bounds->dest, Color::rgba(o, o, o, o));
+}
+
+ComputeShaderHandle Renderer2D::create_compute_shader(ShaderBlob spirv) {
+    if (!capabilities().compute) {
+        return {};
+    }
+    std::string error;
+    const std::optional<ShaderLayout> layout = reflect_spirv(spirv, &error);
+    if (!layout) {
+        KIN_LOG_ERROR_F("render", "create_compute_shader: SPIR-V not readable", (LogFields{{.name = "error", .value = error}}));
+        return {};
+    }
+    try {
+        const ComputeShaderHandle handle = _backend->create_compute_shader(spirv, *layout);
+        if (handle) {
+            _compute_layouts[handle.value] = *layout;
+        }
+        return handle;
+    } catch (const std::exception& e) {
+        KIN_LOG_ERROR_F("render", "create_compute_shader failed", (LogFields{{.name = "error", .value = e.what()}}));
+        return {};
+    }
+}
+
+Texture Renderer2D::create_storage_texture(Vec2i size, TextureFormat format) {
+    if (size.x <= 0 || size.y <= 0 || !capabilities().compute) {
+        return {};
+    }
+    try {
+        return _backend->create_storage_texture(size, format);
+    } catch (const std::exception& e) {
+        KIN_LOG_ERROR_F("render", "create_storage_texture failed", (LogFields{{.name = "error", .value = e.what()}}));
+        return {};
+    }
+}
+
+bool Renderer2D::dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings) {
+    const auto it = _compute_layouts.find(shader.value);
+    if (it == _compute_layouts.end() || size.x <= 0 || size.y <= 0) {
+        return false;
+    }
+    const ShaderLayout& layout = it->second;
+    if (bindings.buffers.size() < layout.storage_buffers || bindings.outputs.size() < layout.readwrite_storage_textures ||
+        bindings.output_buffers.size() < layout.readwrite_storage_buffers ||
+        bindings.sources.size() > MaxShaderSamplers || (bindings.params && !valid_params(*bindings.params))) {
+        KIN_LOG_ERROR("render", "dispatch_compute: the bindings fall short of what the shader declares");
+        return false;
+    }
+    const Vec2i groups{(size.x + static_cast<i32>(layout.local_size[0]) - 1) / static_cast<i32>(layout.local_size[0]),
+                       (size.y + static_cast<i32>(layout.local_size[1]) - 1) / static_cast<i32>(layout.local_size[1])};
+    return _backend->dispatch_compute(shader, groups, bindings);
+}
+
+void Renderer2D::draw_shader_surface_scaled(f32 resolution, Rectf rect, ShaderHandle shader,
+                                            const ShaderParams& params, std::span<const Texture> sources,
+                                            std::span<const DataBuffer> buffers) {
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        return;
+    }
+    if (!(resolution > 0.0f && resolution < 1.0f) || !capabilities().render_targets) {
+        draw_shader_surface(rect, shader, params, sources, buffers);
+        return;
+    }
+    const Vec2i size{std::max(1, static_cast<i32>(std::ceil(rect.w * resolution))),
+                     std::max(1, static_cast<i32>(std::ceil(rect.h * resolution)))};
+    PooledTarget small = acquire_render_target(size, ScaleMode::Linear);
+    if (!small) {
+        draw_shader_surface(rect, shader, params, sources, buffers);
+        return;
+    }
+    {
+        // Straight alpha over transparent leaves premultiplied colour, which is
+        // what a render target holds and how it is drawn back.
+        const auto bind = scoped_render_target(small.target());
+        const auto blend = scoped_blend_mode(BlendMode::Alpha);
+        clear(Color::rgba(0, 0, 0, 0));
+        draw_shader_surface(Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)}, shader, params,
+                            sources, buffers);
+    }
+    draw_texture(small.texture(), rect);
+}
+
+namespace {
+// A range of a data buffer that lies inside it.
+bool within(const DataBuffer& buffer, std::size_t offset, std::size_t bytes) {
+    return buffer.valid() && bytes > 0 && offset <= buffer.size() && bytes <= buffer.size() - offset;
+}
+} // namespace
+
+DataBuffer Renderer2D::create_data_buffer(std::size_t bytes, const void* data) {
+    if (bytes == 0 || bytes > 0xFFFFFFFFu || !capabilities().data_buffers) {
+        return {};
+    }
+    try {
+        return _backend->create_data_buffer(bytes, data);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "data buffer creation failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+}
+
+bool Renderer2D::update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data) {
+    if (!data || !within(buffer, offset, bytes)) {
+        return false;
+    }
+    try {
+        return _backend->update_data_buffer(buffer, offset, bytes, data);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "data buffer update failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
+}
+
+bool Renderer2D::write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                   const std::function<void(std::span<u8>)>& fill) {
+    if (!fill || !within(buffer, offset, bytes)) {
+        return false;
+    }
+    try {
+        return _backend->write_data_buffer(buffer, offset, bytes, fill);
+    } catch (const std::logic_error&) {
+        throw; // a misused fill
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "data buffer write failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
+}
+
+void Renderer2D::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                                      ShaderHandle shader, const ShaderParams& params,
+                                      std::span<const Texture> sources, std::span<const DataBuffer> buffers) {
+    if (!valid_params(params) || vertices.empty()) {
+        return;
+    }
+    const auto refuse = [](std::string_view why) {
+        KIN_LOG_ERROR_F("render", "draw_shader_geometry: nothing drawn", (LogFields{{.name = "reason", .value = std::string{why}}}));
+    };
+    if (sources.size() > MaxShaderSamplers || buffers.size() > MaxShaderStorageBuffers) {
+        refuse("more sources or buffers than a shader can take");
+        return;
+    }
+    if (indices.empty() ? vertices.size() % 3 != 0 : indices.size() % 3 != 0) {
+        refuse("not a whole number of triangles");
+        return;
+    }
+    if (std::any_of(indices.begin(), indices.end(), [&](u32 i) { return i >= vertices.size(); })) {
+        refuse("an index past the vertices");
+        return;
+    }
+    _backend->draw_shader_geometry(vertices, indices, shader, params, sources, buffers);
 }
 
 void Renderer2D::set_post_process(std::span<const PostProcessPass> passes) {

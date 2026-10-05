@@ -1,7 +1,9 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/material.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/post_process.hpp>
@@ -10,7 +12,11 @@
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
+#include <functional>
+#include <cstddef>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -33,12 +39,38 @@ struct RendererBackendCapabilities {
     bool queued_2d = false;
     bool render_targets = false;
     bool blend_modes = false;
+    bool min_max_blend = false; // BlendMode::Max and Min honoured
+    bool shader_geometry = false; // draw_shader_geometry() draws
+    bool data_buffers = false;    // create_data_buffer() and shaders reading them
+    bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
     bool rendering_3d = false;
     // create_texture() accepts the data formats (R16Uint, Rg16Uint, R32Float).
     bool data_textures = false;
+};
+
+// A named part of a frame's GPU work (Renderer2D::gpu_scope) and its GPU time.
+struct GpuScopeTiming {
+    std::string name{};
+    f64 ms = 0.0;
+    // The pixels its draws shaded (as RendererBackendStats::last_pixels_drawn),
+    // and that over the screen's: its share of the frame's overdraw.
+    f64 pixels = 0.0;
+    f64 overdraw = 0.0;
+};
+
+// What a compute dispatch reads and writes (Renderer2D::dispatch_compute). In
+// the shader, set 0 holds the sampled `sources` then the read-only `buffers`,
+// set 1 the `outputs` (storage textures, from create_storage_texture) then the
+// `output_buffers`, and set 2 the uniform block (`params`).
+struct ComputeBindings {
+    std::span<const Texture> sources{};
+    std::span<const DataBuffer> buffers{};
+    std::span<const Texture> outputs{};
+    std::span<const DataBuffer> output_buffers{};
+    const ShaderParams* params = nullptr;
 };
 
 struct RendererBackendStats {
@@ -57,7 +89,22 @@ struct RendererBackendStats {
     f64 last_gpu_wait_ms = 0.0;
     // SDL_GPU with GPU timing on: the GPU time of the latest frame that finished,
     // usually one or two frames behind. Measured with fences, not timestamps.
+    // With the GPU far behind, some frames go untimed and the next sample spans
+    // them (last_gpu_frame_span frames): this is then their average.
     f64 last_gpu_frame_ms = 0.0;
+    u32 last_gpu_frame_span = 1;
+    // Samples taken so far: last_gpu_frame_ms is new when this has grown.
+    u64 gpu_frames_sampled = 0;
+    // SDL_GPU: the pixels the last frame's draws covered, in each target's own
+    // pixels (a logical scene at its native size; overlaps counted each time,
+    // clipping not taken off), and that over the screen's: how many times each
+    // pixel was shaded on average. Render targets count too.
+    f64 last_pixels_drawn = 0.0;
+    f64 last_overdraw = 0.0;
+    // SDL_GPU: texture uploads (create_texture, update_texture) so far, and the
+    // command buffers that carried them (batched: many uploads, one submit).
+    u64 texture_uploads = 0;
+    u64 texture_upload_submits = 0;
     u64 saved_texture_draws() const {
         return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
     }
@@ -80,6 +127,28 @@ public:
     virtual void reset_stats() {}
     // Measures each frame's GPU time (stats().last_gpu_frame_ms) where supported.
     virtual void set_gpu_timing_enabled(bool) {}
+    // The pipelines this run made, as text a later run passes to
+    // prewarm_pipelines to make them while it loads (before their first draw).
+    virtual std::string pipeline_record() const { return {}; }
+    virtual void prewarm_pipelines(std::string_view /*record*/) {}
+    // Layers (Renderer2D::begin_layer): a target drawn into in the current
+    // coordinates, at its own resolution; pop returns the box of what was drawn
+    // (in draw coordinates), empty when nothing was. False / nullopt: not had.
+    struct LayerBounds {
+        Rectf dest;   // what was drawn, in draw coordinates (empty: nothing)
+        Rectf source; // the same in the layer target's pixels
+    };
+    virtual bool push_layer_target(const RenderTarget&) { return false; }
+    virtual std::optional<LayerBounds> pop_layer_target() { return std::nullopt; }
+    // The current target's size in pixels (a layer's resolution is a share of it).
+    virtual Vec2i current_target_pixels() const { return {}; }
+    // Draws show how many times each pixel is shaded instead of themselves.
+    virtual void set_overdraw_view(bool) {}
+    // A named scope of GPU work, timed while GPU timing is on (else nothing).
+    virtual void begin_gpu_scope(std::string_view) {}
+    virtual void end_gpu_scope() {}
+    // The scopes that finished on the GPU since the last call.
+    virtual std::vector<GpuScopeTiming> take_gpu_scope_timings() { return {}; }
     virtual void set_texture_batching_enabled(bool) {}
     virtual bool texture_batching_enabled() const {
         return false;
@@ -142,6 +211,15 @@ public:
     virtual bool update_texture(const Texture& /*texture*/, Vec2i /*at*/, Vec2i /*size*/, const u8* /*pixels*/) {
         return false;
     }
+    // As update_texture, with `fill` writing the texels (`bytes` of them). The
+    // default fills a buffer and calls update_texture; SDL_GPU lets it write
+    // straight into the upload memory.
+    virtual bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,
+                               const std::function<void(std::span<u8>)>& fill) {
+        std::vector<u8> texels(bytes);
+        fill(texels);
+        return update_texture(texture, at, size, texels.data());
+    }
     virtual void draw_texture(const Texture& texture, Rectf dest) = 0;
     virtual void draw_texture(const Texture& texture, Rectf source, Rectf dest) = 0;
     virtual void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color) {
@@ -183,6 +261,8 @@ public:
     // returns a null handle (no shader support) so callers degrade to a fill; a
     // backend reporting capabilities().materials_2d builds a real shader/state.
     virtual ShaderHandle create_shader(const ShaderDesc&) { return {}; }
+    // Replaces a shader in place (its handle stays): false when it cannot.
+    virtual bool reload_shader(ShaderHandle, const ShaderDesc&) { return false; }
 
     // Draw `rect` with a custom-shader material. Default is a no-op; the UI layer
     // reads capabilities().materials_2d (false here) and supplies a fallback fill.
@@ -216,6 +296,41 @@ public:
         } else {
             draw_shader_surface(rect, shader, params, sources[0], sources[1]);
         }
+    }
+
+    // As above, with storage buffers bound after the textures. The default
+    // draws without them.
+    virtual void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                     std::span<const Texture> sources, std::span<const DataBuffer> /*buffers*/) {
+        draw_shader_surface(rect, shader, params, sources);
+    }
+
+    // Triangles with a material shader (Renderer2D::draw_shader_geometry); the
+    // indices are already checked. Backends without it draw nothing.
+    virtual void draw_shader_geometry(std::span<const ShaderVertex>, std::span<const u32>, ShaderHandle,
+                                      const ShaderParams&, std::span<const Texture>, std::span<const DataBuffer>) {}
+
+    // Compute (capabilities().compute): a pipeline from SPIR-V and its layout, a
+    // texture compute shaders can write, and a dispatch of `groups` workgroups
+    // recorded in the frame between the draws around it.
+    virtual ComputeShaderHandle create_compute_shader(ShaderBlob /*spirv*/, const ShaderLayout& /*layout*/) {
+        return {};
+    }
+    virtual Texture create_storage_texture(Vec2i /*size*/, TextureFormat /*format*/) { return {}; }
+    virtual bool dispatch_compute(ComputeShaderHandle, Vec2i /*groups*/, const ComputeBindings&) { return false; }
+
+    // Storage buffers for shaders (capabilities().data_buffers). `data` (or
+    // zeros) fills a new one; update/write replace `bytes` at `offset`.
+    virtual DataBuffer create_data_buffer(std::size_t /*bytes*/, const void* /*data*/) { return {}; }
+    virtual bool update_data_buffer(const DataBuffer&, std::size_t /*offset*/, std::size_t /*bytes*/,
+                                    const void* /*data*/) {
+        return false;
+    }
+    virtual bool write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                                   const std::function<void(std::span<u8>)>& fill) {
+        std::vector<u8> data(bytes);
+        fill(data);
+        return update_data_buffer(buffer, offset, bytes, data.data());
     }
 
     // Set the full-scene post-processing chain applied at present() time. Default is a

@@ -59,6 +59,7 @@ add_library(kin_engine STATIC
     src/physics/physics.cpp
     src/prefab/prefab_asset.cpp
     src/renderer/animation_import.cpp
+    src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
     src/renderer/render_profile.cpp
     src/renderer/render_queue.cpp
@@ -70,6 +71,8 @@ add_library(kin_engine STATIC
     src/renderer/sprite_catalog.cpp
     src/renderer/sprite_sheet.cpp
     src/renderer/sdl_renderer2d_backend.cpp
+    src/renderer/shader_compiler.cpp
+    src/renderer/shader_reflect.cpp
     src/renderer/gpu/gpu_buffer.cpp
     src/renderer/gpu/gpu_device.cpp
     src/renderer/gpu/gpu_frame_timer.cpp
@@ -162,10 +165,13 @@ find_program(KIN_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK
 set(_kin_gpu_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_compile_definitions(kin_engine PRIVATE KIN_GPU_SHADER_DIR="${_kin_gpu_shader_dir}")
 if(KIN_GLSLC)
+    # For runtime compiles (kin/renderer/shader_compiler.hpp) on this machine.
+    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
     file(MAKE_DIRECTORY "${_kin_gpu_shader_dir}")
     set(_kin_gpu_spv)
     foreach(_pair "textured_quad.vert.glsl:vertex" "textured_quad.frag.glsl:fragment"
-                  "sprite_instanced.vert.glsl:vertex"
+                  "sprite_instanced.vert.glsl:vertex" "shader_geometry.vert.glsl:vertex"
+                  "overdraw_count.frag.glsl:fragment" "overdraw_heat.frag.glsl:fragment"
                   "pp_vignette.frag.glsl:fragment" "pp_color_grade.frag.glsl:fragment"
                   "pp_scanline.frag.glsl:fragment" "pp_chroma.frag.glsl:fragment"
                   "pp_bloom_bright.frag.glsl:fragment" "pp_bloom_blur.frag.glsl:fragment"

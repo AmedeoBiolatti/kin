@@ -36,7 +36,9 @@ Any game using `run_scene_app` accepts:
 
 | Flag | Effect |
 |---|---|
-| `--profile` | Run headless profiling. Defaults to 600 frames unless `--frames` is set. |
+| `--profile` | Profile the run: windowed, until it quits or `--frames` N; with `--headless`, a 600-frame pass unless `--frames` is set. |
+| `--overdraw-view` | Start with the overdraw view on (SDL_GPU): the screen shows how many times each pixel is shaded, as colours. Also a debug overlay toggle. |
+| `--screenshot=PATH` | Save the last frame as a PNG when the run ends. |
 | `--profile-lines` | Enables manual macro capture for this run. |
 | `--profile-json=PATH` | Writes `kin.profile/1` JSON. Use `-` for stdout. |
 | `--profile-text=PATH` | Writes a human-readable summary. Use `-` for stdout. |
@@ -46,7 +48,7 @@ Any game using `run_scene_app` accepts:
 Example:
 
 ```powershell
-.\build\bin\ecs_systems_demo.exe --profile --frames=600 --seed=7 --profile-json=out\profile\ecs_systems_demo.json --profile-text=out\profile\ecs_systems_demo.txt
+.\build\bin\ecs_systems_demo.exe --headless --profile --frames=600 --seed=7 --profile-json=out\profile\ecs_systems_demo.json --profile-text=out\profile\ecs_systems_demo.txt
 ```
 
 Runtime profiles include these phase timings by default:
@@ -70,11 +72,59 @@ On the SDL_GPU backend two more rows show the GPU's side of the frame:
 - `gpu.frame`: the GPU time of each frame, from when its first command buffer
   was submitted (or the previous frame finished, if later) to when its fence
   signalled. SDL_GPU has no timestamp queries, so this is measured with fences
-  and a thread that waits on them; it trails the CPU by a frame or two.
+  and a thread that polls them; it trails the CPU by a frame or two. With the
+  GPU more than a few frames behind, some frames go untimed, and the next
+  sample is the average over them.
+- `gpu.<name>`: the GPU time of a part of the frame the game marked with
+  `Renderer2D::gpu_scope()`:
+
+  ```cpp
+  {
+      const auto scope = renderer.gpu_scope("shadows");
+      draw_shadows(renderer);
+  } // the scope ends here
+  ```
+
+  The scope's edges split the frame's submission so each side can carry a
+  fence: resolution is about 0.1 ms, and each scope adds two submissions.
+  Scopes do not nest (an inner one is ignored) and end at `present()`. While
+  GPU timing is off, `gpu_scope()` does nothing.
+
+- `render.overdraw` (not a time): how many times each screen pixel was shaded
+  that frame, on average: the pixels all draws covered, in each target's own
+  pixels (a logical scene at its native size; render targets included,
+  overlaps counted each time, clipping not taken off), over the screen's. In
+  2D this is usually where GPU time goes. The demos run 0.2 to 3.2; XC-121
+  runs 5 to 8.5, about half of it render targets composited over the scene.
+
+- `overdraw.<name>`: a `gpu_scope`'s share of `render.overdraw`, so a frame's
+  overdraw can be told apart by part.
+
+To see where the overdraw is, the debug overlay's *Overdraw view* toggle (or
+`--overdraw-view`) draws every draw as one layer where it covers and shows the
+counts as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or
+more. With `--screenshot=PATH` a run saves its last frame as a PNG. Only the
+screen's own draws show: a render target's composite counts once, whatever
+was drawn into it.
 
 GPU timing is on while a profile is recorded, `KIN_LOG_FRAME_STATS=1` is set,
 or the debug overlay is open; elsewhere `Renderer2D::set_gpu_timing_enabled`
 turns it on. `KIN_LOG_FRAME_STATS` logs `gpu_wait_ms` and `gpu_frame_ms` too.
+
+## Renderer Benchmarks
+
+With `KIN_BUILD_BENCHMARKS`, two programs time the SDL_GPU backend directly:
+
+- `kin_draw_bench [frames] [quads]`: a frame of `draw_texture` calls, of
+  `fill_rect` calls and one `draw_sprites` batch (min and median CPU time to
+  record them, present, GPU time), and a shader's first use. On an RTX 4080
+  Laptop GPU, 20,000 quads cost about 1.0 ms as `draw_texture` calls, 0.65 ms
+  as `fill_rect` calls and 0.19 ms as one `draw_sprites` batch: many sprites of
+  one texture are much cheaper batched (`RenderQueue` does so by itself).
+  Its third argument picks other runs: `pipelines`, `data`, `scaled`,
+  `compute`, `hotreload`, `surfaces`, `mipmaps`, `layers` and `cached` (see
+  `docs/rendering.md`).
+- `kin_upload_bench [frames] [workers] [big]`: texture creation and updates.
 
 ## Benchmark Profiles
 
@@ -161,7 +211,7 @@ no hard latency threshold: timings depend on the host scheduler and load.
 The [interactive performance examples](../examples/README.md) provide arena
 combat and a virtualized training dashboard. Build with `KIN_BUILD_EXAMPLES=ON`
 and run `kin_bench --suite examples` for their shared CPU workloads, or launch
-either app with `--profile` to measure full headless rendering.
+either app with `--headless --profile` to measure full headless rendering.
 
 Include:
 

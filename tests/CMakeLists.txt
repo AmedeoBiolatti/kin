@@ -69,10 +69,12 @@ kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
 # engine) they are not compiled and the tests that need them skip.
 set(_kin_test_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_compile_definitions(kin_renderer_tests PRIVATE KIN_TEST_SHADER_DIR="${_kin_test_shader_dir}")
+target_compile_definitions(kin_renderer_tests PRIVATE
+    KIN_GPU_SHADER_DIR_FOR_TESTS="${CMAKE_BINARY_DIR}/engine/shaders")
 if(KIN_GLSLC)
     file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
     set(_kin_test_spv)
-    foreach(_name four_sources data_formats)
+    foreach(_name four_sources data_formats custom_vertex storage_read bench_read_texture bench_read_buffer bench_heavy)
         add_custom_command(
             OUTPUT "${_kin_test_shader_dir}/${_name}.frag.spv"
             COMMAND "${KIN_GLSLC}" -fshader-stage=fragment
@@ -82,6 +84,17 @@ if(KIN_GLSLC)
             COMMENT "glslc: ${_name}.frag.glsl -> ${_name}.frag.spv"
             VERBATIM)
         list(APPEND _kin_test_spv "${_kin_test_shader_dir}/${_name}.frag.spv")
+    endforeach()
+    foreach(_name compute_gradient bench_light_field)
+        add_custom_command(
+            OUTPUT "${_kin_test_shader_dir}/${_name}.comp.spv"
+            COMMAND "${KIN_GLSLC}" -fshader-stage=compute
+                    -o "${_kin_test_shader_dir}/${_name}.comp.spv"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.comp.glsl"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.comp.glsl"
+            COMMENT "glslc: ${_name}.comp.glsl -> ${_name}.comp.spv"
+            VERBATIM)
+        list(APPEND _kin_test_spv "${_kin_test_shader_dir}/${_name}.comp.spv")
     endforeach()
     add_custom_target(kin_test_shaders DEPENDS ${_kin_test_spv})
     add_dependencies(kin_renderer_tests kin_test_shaders)
@@ -104,6 +117,18 @@ if(KIN_BUILD_BENCHMARKS)
     target_compile_definitions(kin_bench PRIVATE
         KIN_ENABLE_INSTRUMENTATION
     )
+
+    # SDL_GPU texture uploads: many data textures created and updated a frame.
+    add_executable(kin_upload_bench upload_bench.cpp)
+    target_link_libraries(kin_upload_bench PRIVATE kin::engine)
+    # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
+    add_executable(kin_draw_bench draw_bench.cpp)
+    target_link_libraries(kin_draw_bench PRIVATE kin::engine)
+    target_compile_definitions(kin_draw_bench PRIVATE KIN_TEST_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+        KIN_ENGINE_SHADER_SOURCE_DIR="${PROJECT_SOURCE_DIR}/engine/shaders")
+    if(TARGET kin_test_shaders)
+        add_dependencies(kin_draw_bench kin_test_shaders)
+    endif()
 
     if(TARGET kin_example_workloads)
         target_link_libraries(kin_bench PRIVATE kin_example_workloads)

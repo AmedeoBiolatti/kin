@@ -146,7 +146,7 @@ int main() {
         arg3,
     };
     const kin::HeadlessOptions runtime_profile_options = kin::parse_headless_options(7, runtime_profile_argv);
-    assert(runtime_profile_options.enabled);
+    assert(!runtime_profile_options.enabled); // profiles the window; --headless for a pass
     assert(runtime_profile_options.profile);
     assert(runtime_profile_options.profile_lines);
     assert(runtime_profile_options.profile_json_path == "profile.json");
@@ -405,6 +405,26 @@ int main() {
         assert(text.find("\"observed\": " + std::to_string(expected)) != std::string::npos);
     }
 
+    // A windowed run keeps its pipeline record where it is told (and reads it
+    // back the next time); a headless one keeps none.
+    {
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-pipeline-record-test";
+        std::filesystem::remove_all(dir);
+        const std::filesystem::path file = dir / "pipelines.txt";
+        for (int run = 0; run < 2; ++run) {
+            kin::SceneManager windowed;
+            windowed.push(std::make_unique<SeededReportScene>());
+            const int code = kin::run_scene_app({
+                .window = {.title = "pipelines", .width = 64, .height = 64, .hidden = true},
+                .headless = {.frames = 2},
+                .pipeline_record_path = file,
+            }, windowed);
+            assert(code == 0);
+            assert(std::filesystem::exists(file));
+        }
+        std::filesystem::remove_all(dir);
+    }
+
     // Runtime profile output is available for every game that uses
     // run_scene_app; no game-specific wiring is required.
     {
@@ -414,7 +434,7 @@ int main() {
         std::ostringstream profile_text;
         const int code = kin::run_scene_app({
             .window = {.title = "profiled", .width = 64, .height = 64},
-            .headless = {.profile = true, .frames = 3, .seed = 1},
+            .headless = {.enabled = true, .profile = true, .frames = 3, .seed = 1},
             .profile_json_output = &profile_json,
             .profile_text_output = &profile_text,
         }, profiled);

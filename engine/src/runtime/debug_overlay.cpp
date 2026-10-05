@@ -617,6 +617,7 @@ void RuntimeDebugOverlay::render(Input& input, Renderer2D& renderer) {
     toggle("debug.detail_timings", "Detailed timings", {right_x, control_y, toggle_w, row_h}, _options.detailed_render_timings_enabled);
     control_y += row_h + 6.0f;
     toggle("debug.cull_diagnostics", "Cull diagnostics", {left_x, control_y, toggle_w, row_h}, _options.render_culling_diagnostics_enabled);
+    toggle("debug.overdraw_view", "Overdraw view", {right_x, control_y, toggle_w, row_h}, _options.overdraw_view);
 
     ui.pop_clip();
     ui.surface(grip, row_alt_style);

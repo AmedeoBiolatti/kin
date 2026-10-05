@@ -1,6 +1,9 @@
 #include "gpu_pipeline_cache.hpp"
 
+#include <kin/platform/log.hpp>
+
 #include <cstddef>
+#include <string>
 
 namespace kin::gpu {
 
@@ -31,6 +34,19 @@ void set_blend(SDL_GPUColorTargetBlendState& blend, GpuBlendMode mode) {
         blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
         break;
+    case GpuBlendMode::Max:
+    case GpuBlendMode::Min: {
+        // The factors are ignored by MIN and MAX (Vulkan, D3D12, Metal alike).
+        const SDL_GPUBlendOp op = mode == GpuBlendMode::Max ? SDL_GPU_BLENDOP_MAX : SDL_GPU_BLENDOP_MIN;
+        blend.enable_blend = true;
+        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.color_blend_op = op;
+        blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.alpha_blend_op = op;
+        break;
+    }
     case GpuBlendMode::Premultiplied:
         blend.enable_blend = true;
         blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
@@ -59,6 +75,18 @@ GpuPipelineCache::~GpuPipelineCache() {
     destroy();
 }
 
+void GpuPipelineCache::forget(SDL_GPUShader* fragment) {
+    std::erase_if(_entries, [&](const Entry& e) {
+        if (e.fragment != fragment) {
+            return false;
+        }
+        if (_device && e.pipeline) {
+            SDL_ReleaseGPUGraphicsPipeline(_device, e.pipeline);
+        }
+        return true;
+    });
+}
+
 void GpuPipelineCache::destroy() {
     if (_device) {
         for (Entry& e : _entries) {
@@ -85,7 +113,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
 
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
-    SDL_GPUVertexAttribute attrs[4]{};
+    SDL_GPUVertexAttribute attrs[4]{}; // at most four, whichever layout
     u32 attr_count = 0;
     const auto attribute = [&](SDL_GPUVertexElementFormat format, u32 offset) {
         attrs[attr_count].location = attr_count;
@@ -101,6 +129,13 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, u0));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSpriteInstance, pivot_x));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSpriteInstance, r));
+    } else if (layout == GpuVertexLayout::ShaderVertices) {
+        vb.pitch = sizeof(GpuShaderVertex);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuShaderVertex, x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuShaderVertex, u));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuShaderVertex, r));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuShaderVertex, custom));
     } else {
         vb.pitch = sizeof(GpuVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
@@ -136,10 +171,16 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.target_info = target_info;
 
+    const u64 start_ns = SDL_GetTicksNS();
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(_device, &info);
     if (!pipeline) {
         return nullptr;
     }
+    // Made on first use: worth seeing when it lands mid-game (tens of ms on a
+    // cold driver cache).
+    KIN_LOG_DEBUG_F("render", "pipeline created",
+                    (LogFields{{.name = "ms", .value = std::to_string(static_cast<f64>(SDL_GetTicksNS() - start_ns) / 1e6)},
+                               {.name = "pipelines", .value = std::to_string(_entries.size() + 1)}}));
     _entries.push_back(Entry{vertex, fragment, blend, target_format, layout, pipeline});
     return pipeline;
 }

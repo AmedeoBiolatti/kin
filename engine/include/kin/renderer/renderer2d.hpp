@@ -12,10 +12,12 @@
 #include <kin/renderer/sprite.hpp>
 #include <kin/renderer/texture.hpp>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +70,21 @@ public:
     };
 
     // Sets the blend mode for the guard's scope and restores the previous one.
+    // Ends a gpu_scope() when it goes.
+    class GpuScope {
+    public:
+        GpuScope() = default;
+        explicit GpuScope(Renderer2D* renderer) : _renderer(renderer) {}
+        ~GpuScope();
+        GpuScope(const GpuScope&) = delete;
+        GpuScope& operator=(const GpuScope&) = delete;
+        GpuScope(GpuScope&& other) noexcept : _renderer(std::exchange(other._renderer, nullptr)) {}
+        GpuScope& operator=(GpuScope&&) noexcept = delete;
+
+    private:
+        Renderer2D* _renderer = nullptr;
+    };
+
     class BlendModeGuard {
     public:
         BlendModeGuard() = default;
@@ -88,6 +105,21 @@ public:
     // Binds a render target for the guard's scope (push in ctor, pop in dtor).
     // Distinct from the pool below: this manages which target is *bound*, not
     // target lifetime. Mirrors ViewportGuard.
+    // A layer (begin_layer): drawn into a pooled target, laid over when it goes.
+    class LayerGuard {
+    public:
+        LayerGuard() = default;
+        explicit LayerGuard(Renderer2D* renderer) : _renderer(renderer) {}
+        ~LayerGuard();
+        LayerGuard(const LayerGuard&) = delete;
+        LayerGuard& operator=(const LayerGuard&) = delete;
+        LayerGuard(LayerGuard&& other) noexcept : _renderer(std::exchange(other._renderer, nullptr)) {}
+        LayerGuard& operator=(LayerGuard&&) noexcept = delete;
+
+    private:
+        Renderer2D* _renderer = nullptr;
+    };
+
     class RenderTargetGuard {
     public:
         RenderTargetGuard() = default;
@@ -125,7 +157,41 @@ public:
     // GPU time per frame in backend_stats().last_gpu_frame_ms (SDL_GPU only; off
     // by default, as it costs a fence per frame and a waiting thread).
     void set_gpu_timing_enabled(bool enabled);
+    // Times the GPU work drawn until the returned guard goes, as `name`, while
+    // GPU timing is on (run_scene_app reports it as gpu.<name> under --profile
+    // and in the debug overlay); otherwise does nothing. SDL_GPU has no GPU
+    // timestamps, so the scope's edges split the frame's submission and are
+    // timed with fences: about 0.1 ms resolution, and a little overhead from
+    // the split. Scopes do not nest (an inner one is ignored) and end at present.
+    [[nodiscard]] GpuScope gpu_scope(std::string_view name);
+    // The scopes that finished on the GPU since the last call (a frame or two
+    // after they were drawn).
+    std::vector<GpuScopeTiming> take_gpu_scope_timings();
     void set_texture_batching_enabled(bool enabled);
+    // A layer: what is drawn until the guard goes lands in a pooled render
+    // target, in the same coordinates (clips and viewport too), and is then laid
+    // over the current target once, at `opacity`, with `blend`:
+    //
+    //     { auto shadows = renderer.begin_layer({.opacity = 0.6f, .resolution = 0.5f});
+    //       draw_shadows(renderer); }   // overlapping shadows darken once
+    //
+    // Only what the draws covered is laid over (and counted as overdraw), not
+    // the whole target; `resolution` below 1 draws soft content (shadows, glow,
+    // light) at a fraction of the pixels. Layers nest. SDL_GPU; elsewhere the
+    // draws go straight to the current target (opacity not applied).
+    struct LayerOptions {
+        f32 opacity = 1.0f;
+        f32 resolution = 1.0f; // of the current target's pixels, each way
+        BlendMode blend = BlendMode::Alpha;
+    };
+    [[nodiscard]] LayerGuard begin_layer(LayerOptions options);
+    [[nodiscard]] LayerGuard begin_layer() { return begin_layer(LayerOptions{}); }
+
+    // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
+    // every draw adds one layer where it covers, and the screen shows the counts
+    // as colours: black none, blue 1, green 2, yellow 4, red 8, white 16 or more.
+    // Only the screen's own draws show (a render target's composite counts once).
+    void set_overdraw_view(bool enabled) { _backend->set_overdraw_view(enabled); }
     bool texture_batching_enabled() const;
 
     void clear(Color color = colors::black);
@@ -159,6 +225,12 @@ public:
     // backend cannot (the software backend) or the region is outside the texture;
     // the texture is then unchanged, and the caller makes a new one.
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels);
+    // As update_texture, but `fill` writes the region's texels (row by row, in
+    // the texture's format) into the span it is given, which on SDL_GPU is the
+    // upload memory itself: no copy, for texels made each frame. That memory is
+    // uncached, so write it in order, once, and never read it. `fill` must not
+    // use the renderer. Elsewhere the span is a plain buffer.
+    bool write_texture(const Texture& texture, Vec2i at, Vec2i size, const std::function<void(std::span<u8>)>& fill);
     void draw_texture(const Texture& texture, Rectf dest);
     void draw_texture(const Texture& texture, Rectf source, Rectf dest);
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint);
@@ -186,7 +258,25 @@ public:
     void fill_rounded_rect(Rectf rect, f32 radius, Color color);
     void draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width = 1.0f);
     void fill_gradient_rect(Rectf rect, const Gradient& gradient);
+    // Reads the SPIR-V's layout (kin/renderer/shader_reflect.hpp): the sampler,
+    // storage buffer and uniform block counts come from it, so a ShaderDesc's
+    // counts may be left as they are (a mismatch is logged and the shader's
+    // own used).
     ShaderHandle create_shader(const ShaderDesc& desc);
+    // The pipelines (shader, blend mode, target, vertex layout) this run made, as
+    // text; a later run hands it to prewarm_pipelines, which makes them at once
+    // (the engine's own) or as their shader is created, instead of at their
+    // first draw: up to ~20 ms each on a cold driver cache. run_scene_app keeps
+    // it in the game's user data (windowed runs).
+    std::string pipeline_record() const { return _backend->pipeline_record(); }
+    void prewarm_pipelines(std::string_view record) { _backend->prewarm_pipelines(record); }
+    // Replaces a shader with a new version, keeping its handle (hot reload: see
+    // kin/renderer/shader_compiler.hpp). Draws already queued use the old one.
+    bool reload_shader(ShaderHandle shader, const ShaderDesc& desc);
+    // The layout read from a shader's SPIR-V (null when there was none).
+    std::shared_ptr<const ShaderLayout> shader_layout(ShaderHandle shader) const;
+    // Params sized for the shader's uniform block, settable by member name.
+    ShaderParams shader_params(ShaderHandle shader) const;
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params);
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                              const Texture& source);
@@ -196,6 +286,45 @@ public:
     // is an error: it is logged and nothing is drawn.
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
                              std::span<const Texture> sources);
+    // Triangles drawn with a material shader: only the pixels they cover run it.
+    // `indices` index `vertices` three at a time; empty, the vertices themselves
+    // are the triangles. Sources and params as for draw_shader_surface; the
+    // current blend mode applies. Needs capabilities().shader_geometry (SDL_GPU);
+    // elsewhere nothing is drawn.
+    void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
+                              ShaderHandle shader, const ShaderParams& params,
+                              std::span<const Texture> sources = {}, std::span<const DataBuffer> buffers = {});
+    // A shader surface that also reads storage buffers (`buffers[i]` after the
+    // shader's textures in set 2; kin/renderer/data_buffer.hpp).
+    void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                             std::span<const Texture> sources, std::span<const DataBuffer> buffers);
+
+    // A shader surface computed at `resolution` (0.5: half as many pixels each
+    // way, a quarter of the work) into a pooled render target, then stretched
+    // over `rect` with linear filtering: for smooth, costly effects (fog, glow,
+    // soft light). The shader must work from its UV, not gl_FragCoord. At 1 or
+    // more, or without render targets, it is a plain draw_shader_surface.
+    void draw_shader_surface_scaled(f32 resolution, Rectf rect, ShaderHandle shader, const ShaderParams& params,
+                                    std::span<const Texture> sources = {}, std::span<const DataBuffer> buffers = {});
+
+    // Compute shaders (capabilities().compute; elsewhere a null handle): made
+    // from SPIR-V, whose layout and workgroup size are read from it. A storage
+    // texture is one they can write (and other shaders sample, or draws draw).
+    // dispatch_compute runs enough workgroups to cover `size` threads (x, y),
+    // recorded in the frame in order with the draws around it; false when the
+    // bindings fall short of what the shader declares (logged).
+    ComputeShaderHandle create_compute_shader(ShaderBlob spirv);
+    Texture create_storage_texture(Vec2i size, TextureFormat format = TextureFormat::Rgba8);
+    bool dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings);
+
+    // Storage buffers for shaders (capabilities().data_buffers; elsewhere an
+    // invalid buffer). Filled from `data`, or zeros. Updates go to the GPU with
+    // the frame's texture uploads; write_data_buffer's `fill` writes straight
+    // into the upload memory (in order, once; it must not use the renderer).
+    DataBuffer create_data_buffer(std::size_t bytes, const void* data = nullptr);
+    bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data);
+    bool write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
+                           const std::function<void(std::span<u8>)>& fill);
     void draw_line(Vec2f a, Vec2f b, Color color);
     void draw_line(Vec2f a, Vec2f b, u8 r, u8 g, u8 b_color, u8 a_color = 255);
 
@@ -204,8 +333,13 @@ public:
     //   Additive  dst + src * src_alpha: lights, glows
     //   Multiply  dst * src (alpha ignored): light maps, tinting the scene
     //   Replace   src, no blending
+    //   Max       max(dst, src) per channel, alpha too (src not weighted by its
+    //             alpha): overlapping shadows, fog of war, coverage, heat maps
+    //   Min       min(dst, src) per channel, alpha too
     // A render target's premultiplied texture keeps its own blend under Alpha.
-    // Backends without blend modes (capabilities().blend_modes false) ignore it.
+    // Backends without blend modes (capabilities().blend_modes false) ignore it;
+    // those without Max and Min (capabilities().min_max_blend false: SDL's
+    // software renderer) draw them as Alpha and log a warning once.
     void set_blend_mode(BlendMode mode);
     BlendMode blend_mode() const { return _blend_mode; }
     BlendModeGuard scoped_blend_mode(BlendMode mode);
@@ -281,6 +415,12 @@ private:
     std::unique_ptr<IRenderer2DBackend> _backend;
     std::vector<RenderTargetPoolEntry> _rt_pool;
     std::unordered_map<int, ShaderHandle> _builtin_shaders; // BuiltinShader -> cached handle
+    std::unordered_map<u64, std::shared_ptr<const ShaderLayout>> _shader_layouts; // read from each shader's SPIR-V
+    std::unordered_map<u64, ShaderLayout> _compute_layouts;
+    // Open layers, innermost last (an invalid target: drawn straight through).
+    struct OpenLayer;
+    std::vector<std::unique_ptr<OpenLayer>> _layers;
+    void end_layer();
     BlendMode _blend_mode = BlendMode::Alpha;
 };
 
