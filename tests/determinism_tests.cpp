@@ -265,7 +265,9 @@ void test_check_finds_report_fields(const char* program) {
     const kin::JsonValue report = check(program, "report", 20, code);
     assert(code == 1);
     const kin::JsonValue& run = run_named(report, "repeat");
-    assert(run.int_at("first_frame") == 8);
+    // From frame 8 on, or later where a slow frame ran no update (these runs
+    // keep real time, so a frame's update count depends on the machine).
+    assert(run.int_at("first_frame") >= 8);
     const kin::JsonValue& difference = first_difference(run);
     assert(difference.string_at("component") == "(report)");
     const kin::JsonValue& field = difference.members().at("fields").items().front();

@@ -66,7 +66,11 @@ add_library(kin_engine STATIC
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp
     src/renderer/post_blur.cpp
+    src/renderer/path.cpp
+    src/renderer/shape.cpp
+    src/renderer/svg.cpp
     src/renderer/renderer2d.cpp
+    src/renderer/renderer2d_shapes.cpp
     src/renderer/static_texture_layer.cpp
     src/renderer/sprite_catalog.cpp
     src/renderer/sprite_sheet.cpp
@@ -157,6 +161,7 @@ target_link_libraries(kin_engine PUBLIC
     Lua::Lua
     sol2::sol2
 )
+target_link_libraries(kin_engine PRIVATE earcut_hpp::earcut_hpp) # used only inside the engine
 
 # SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK). The compiled
 # .spv land in a build dir referenced at runtime via KIN_GPU_SHADER_DIR. Without
@@ -172,6 +177,8 @@ if(KIN_GLSLC)
     foreach(_pair "textured_quad.vert.glsl:vertex" "textured_quad.frag.glsl:fragment"
                   "sprite_instanced.vert.glsl:vertex" "shader_geometry.vert.glsl:vertex"
                   "overdraw_count.frag.glsl:fragment" "overdraw_heat.frag.glsl:fragment"
+                  "shape.frag.glsl:fragment" "shape.vert.glsl:vertex"
+                  "sdf_shape.frag.glsl:fragment" "sdf_shape.vert.glsl:vertex"
                   "pp_vignette.frag.glsl:fragment" "pp_color_grade.frag.glsl:fragment"
                   "pp_scanline.frag.glsl:fragment" "pp_chroma.frag.glsl:fragment"
                   "pp_bloom_bright.frag.glsl:fragment" "pp_bloom_blur.frag.glsl:fragment"

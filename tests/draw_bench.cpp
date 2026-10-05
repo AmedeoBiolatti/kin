@@ -5,6 +5,7 @@
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
+#include <kin/renderer/svg.hpp>
 
 #include <algorithm>
 #include <array>
@@ -399,6 +400,79 @@ int mipmaps(kin::Window& window) {
 // of a 2560 x 1440 screen), laid over at one opacity: by hand into a whole-
 // screen target, or with begin_layer at full and at half resolution. Pixels
 // shaded a frame and frame time back to back.
+// Shapes: N circles and stars a frame, tessellated as they are drawn, drawn
+// from one cached mesh each, and merged into one mesh; plus what making meshes
+// and reading SVG costs.
+int shapes(int frames, int count) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "shape-bench", .width = 1280, .height = 720, .hidden = true});
+    auto renderer = std::make_unique<kin::Renderer2D>(kin::make_render_backend(window, false, true));
+    renderer->set_gpu_timing_enabled(true);
+    const auto at = [](int i) {
+        return kin::Vec2f{20.0f + static_cast<float>((i * 37) % 1240), 20.0f + static_cast<float>((i * 91) % 680)};
+    };
+    kin::Shape token;
+    token.fill_and_stroke(kin::Path::circle({0, 0}, 12), kin::Color::rgb(230, 90, 40), kin::Color::rgb(30, 40, 60),
+                          {.width = 2})
+        .fill(kin::Path::star({0, 0}, 8, 3.5f, 5), kin::colors::white);
+    const kin::ShapeMesh mesh = token.mesh();
+    kin::ShapeMesh merged;
+    for (int i = 0; i < count; ++i) {
+        merged.append(mesh, kin::Affine2::translation(at(i)));
+    }
+    const char* names[3] = {"immediate", "cached mesh", "one merged mesh"};
+    for (int mode = 0; mode < 3; ++mode) {
+        std::vector<double> record;
+        double gpu = 0.0;
+        int counted = 0;
+        for (int f = 0; f < frames; ++f) {
+            const auto t0 = clock::now();
+            renderer->clear(kin::Color::rgb(250, 248, 240));
+            if (mode == 0) {
+                for (int i = 0; i < count; ++i) {
+                    const kin::Vec2f p = at(i);
+                    renderer->fill_circle(p, 12.0f, kin::Color::rgb(230, 90, 40));
+                    renderer->draw_circle(p, 12.0f, kin::Color::rgb(30, 40, 60), 2.0f);
+                    renderer->fill_path(kin::Path::star(p, 8, 3.5f, 5), kin::colors::white);
+                }
+            } else if (mode == 1) {
+                for (int i = 0; i < count; ++i) {
+                    renderer->draw_shape(mesh, kin::Affine2::translation(at(i)));
+                }
+            } else {
+                renderer->draw_shape(merged);
+            }
+            const auto t1 = clock::now();
+            renderer->present();
+            if (f >= 10) {
+                record.push_back(ms(t0, t1));
+                gpu += renderer->backend_stats().last_gpu_frame_ms;
+                ++counted;
+            }
+        }
+        std::sort(record.begin(), record.end());
+        std::printf("%d tokens, %-16s record min %.3f / median %.3f ms, GPU %.2f ms\n", count, names[mode],
+                    record.front(), record[record.size() / 2], gpu / std::max(counted, 1));
+    }
+    std::printf("token mesh: %zu vertices, %zu triangles\n", mesh.vertices.size(), mesh.indices.size() / 3);
+    // Making meshes: the token, and a 200-element composition.
+    kin::Shape board;
+    for (int i = 0; i < 200; ++i) {
+        board.add(token, kin::Affine2::translation(at(i)) * kin::Affine2::rotation(static_cast<float>(i)));
+    }
+    auto t0 = clock::now();
+    const kin::ShapeMesh board_mesh = board.mesh();
+    std::printf("tessellating 200 tokens: %.3f ms (%zu vertices)\n", ms(t0, clock::now()), board_mesh.vertices.size());
+    const std::string svg = kin::write_svg(board);
+    t0 = clock::now();
+    const std::optional<kin::Shape> read = kin::read_svg(svg);
+    std::printf("reading their SVG (%zu KB): %.3f ms, %zu elements\n", svg.size() / 1024, ms(t0, clock::now()),
+                read ? read->elements.size() : 0);
+    return 0;
+}
+
 int layers(int frames) {
     using clock = std::chrono::steady_clock;
     const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
@@ -520,6 +594,9 @@ int main(int argc, char** argv) {
         return layers(frames);
     }
     const int quads = argc > 2 ? std::atoi(argv[2]) : 20000;
+    if (argc > 3 && std::string_view{argv[3]} == "shapes") {
+        return shapes(frames, quads);
+    }
     kin::App app{};
     kin::Window& window = app.create_window({.title = "draw-bench", .width = 1280, .height = 720, .hidden = true});
     std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);

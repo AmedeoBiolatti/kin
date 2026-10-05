@@ -9,6 +9,7 @@
 #include <kin/renderer/sprite_catalog.hpp>
 
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -101,6 +102,22 @@ struct LineRenderer {
     bool static_renderable = false;
 };
 
+// A vector shape (kin/renderer/shape.hpp) drawn at the entity: its mesh is
+// placed by the entity's world transform (a negative scale mirrors it) and
+// `offset` in the entity's own units, and coloured by `tint`. Meshes are
+// shared: many entities can draw one.
+struct ShapeRenderer {
+    std::shared_ptr<const ShapeMesh> mesh;
+    Vec2f offset{};
+    Color tint = colors::white;
+    i32 layer = layer_value(RenderLayer::World);
+    i32 order = 0;
+    bool y_sort = false;
+    f32 sort_y_offset = 0.0f;
+    bool visible = true;
+    bool static_renderable = false;
+};
+
 struct StaticRenderable {
     i32 marker = 1;
 };
@@ -180,6 +197,7 @@ private:
     flecs::query<const Transform2D, const WorldTransform, const TextureRenderer> _textures;
     flecs::query<const Transform2D, const WorldTransform, const RectRenderer> _rects;
     flecs::query<const Transform2D, const WorldTransform, const LineRenderer> _lines;
+    flecs::query<const Transform2D, const WorldTransform, const ShapeRenderer> _shapes;
     flecs::query<const ParticleSystemComponent> _particle_systems;
     flecs::query<const ParticleFieldComponent> _particle_fields;
 };
@@ -222,10 +240,12 @@ bool submit_sprite(Renderer2D& renderer, flecs::entity entity);
 bool submit_texture(Renderer2D& renderer, flecs::entity entity);
 bool submit_rect(Renderer2D& renderer, flecs::entity entity);
 bool submit_line(Renderer2D& renderer, flecs::entity entity);
+bool submit_shape(Renderer2D& renderer, flecs::entity entity);
 bool submit_sprite(RenderQueue& queue, flecs::entity entity);
 bool submit_texture(RenderQueue& queue, flecs::entity entity);
 bool submit_rect(RenderQueue& queue, flecs::entity entity);
 bool submit_line(RenderQueue& queue, flecs::entity entity);
+bool submit_shape(RenderQueue& queue, flecs::entity entity);
 bool submit_particles(RenderQueue& queue, flecs::entity entity);
 bool submit_sprite(RenderQueue& queue,
                    flecs::entity entity,
@@ -247,6 +267,11 @@ bool submit_line(RenderQueue& queue,
                  const WorldTransform& transform,
                  const LineRenderer& line,
                  const RenderView* view = nullptr);
+bool submit_shape(RenderQueue& queue,
+                  flecs::entity entity,
+                  const WorldTransform& transform,
+                  const ShapeRenderer& shape,
+                  const RenderView* view = nullptr);
 bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particles);
 bool submit_particles(RenderQueue& queue, const ParticleFieldComponent& field);
 void collect_world(flecs::world& world,

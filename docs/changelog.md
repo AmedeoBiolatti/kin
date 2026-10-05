@@ -9,6 +9,28 @@ releases may change APIs.
 
 ### Added
 
+- Vector shapes (`kin/renderer/path.hpp`, `shape.hpp`, `svg.hpp`):
+  - `kin::Path` (lines, curves, SVG arcs; rectangles, circles, polygons, arcs,
+    pies, stars; SVG path data read and written), filled under non-zero or
+    even-odd with holes, stroked with joins, caps and miter limits;
+  - anti-aliased at any scale: one pixel of soft edge from screen-space
+    derivatives on SDL_GPU, pulled in on the CPU on SDL_Renderer;
+  - circles, ellipses, rounded and sharp rectangles and capsules drawn whole
+    on SDL_GPU (one quad, the outline from its distance per pixel), as you go
+    or kept in meshes; 2000 cached tokens record in 0.88 ms (3.5 ms as
+    triangles);
+  - `kin::Shape`: elements that compose (`add(shape, transform)`), tessellated
+    once into a `ShapeMesh` drawn by `Renderer2D::draw_shape` through any
+    transform and tint;
+  - SVG-lite: `read_svg` / `load_svg` read the flat-colour subset vector
+    editors export (paths, basic shapes, groups, `<use>`, transforms, styles,
+    inheritance), listing what they skip; `write_svg` / `save_svg` write it;
+  - immediate drawing: `fill_circle`, `draw_circle`, `fill_ellipse`,
+    `draw_ellipse`, `fill_polygon`, `draw_polygon`, `draw_polyline`,
+    `draw_line` with a width and cap, `draw_arc`, `fill_pie`, `fill_path`,
+    `stroke_path`;
+  - `kin::ShapeRenderer` and `RenderQueue::draw_shape`; `games/shapes_demo`.
+  - New dependency: mapbox earcut.hpp 3.2.4 (ISC), header-only, for fills.
 - Transforms: `Renderer2D::push_transform` / `pop_transform` / `scoped_transform`
   draw through a `kin::Affine2` (`kin/core/affine.hpp`), on both backends.
   Mapped on the CPU, so draws still batch across transform changes, and sprite
@@ -172,6 +194,11 @@ releases may change APIs.
   parents first. Before, world positions were written into the
   parent-relative `Transform2D`. `kin::to_local(parent, world)` (the reverse of
   `compose`) and `kin::current_world_transform(entity)` support it.
+- `fill_rounded_rect` and `draw_rounded_rect` on SDL_Renderer: a border drew
+  as a faint one-pixel line instead of its width. Both now draw as shape
+  primitives on every backend.
+- The render probe traces draws where the renderer's transform puts them,
+  not where they would be without it.
 - The ECS physics sync converts angles: `Transform2D::rotation` is degrees, as
   everywhere in kin, and `PhysicsWorld` radians, as Box2D. Before, radians were
   written into `rotation`, so physics bodies' sprites barely turned.

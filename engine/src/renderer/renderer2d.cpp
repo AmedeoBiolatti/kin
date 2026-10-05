@@ -514,13 +514,41 @@ void Renderer2D::draw_rect(Vec2f pos, Vec2f size, u8 r, u8 g, u8 b, u8 a) {
 }
 
 void Renderer2D::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
-    KIN_TRACE_DRAW(DrawKind::Fill, rect, color);
-    _backend->fill_rounded_rect(rect, radius, color);
+    if (rect.w <= 0.0f || rect.h <= 0.0f || color.a == 0) {
+        return;
+    }
+    const ShapePrimitive primitive{.half_size = {rect.w * 0.5f, rect.h * 0.5f},
+                                   .radius = std::max(0.0f, radius),
+                                   .fill = color,
+                                   .transform = Affine2::translation({rect.x + rect.w * 0.5f, rect.y + rect.h * 0.5f})};
+    // Whole where the backend can, tessellated where it draws shapes, and its
+    // own rounded rectangle on a backend that does neither.
+    if (_backend->capabilities().shapes) {
+        draw_primitives({&primitive, 1}, colors::white);
+    } else {
+        KIN_TRACE_DRAW(DrawKind::Fill, rect, color);
+        _backend->fill_rounded_rect(rect, radius, color);
+    }
 }
 
 void Renderer2D::draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width) {
-    KIN_TRACE_DRAW(DrawKind::Outline, rect, color);
-    _backend->draw_rounded_rect(rect, radius, color, width);
+    if (rect.w <= 0.0f || rect.h <= 0.0f || color.a == 0 || width <= 0.0f) {
+        return;
+    }
+    // The border lies inside `rect`: a stroke centred half its width in.
+    const f32 inset = std::min(width, std::min(rect.w, rect.h)) * 0.5f;
+    const ShapePrimitive primitive{.half_size = {rect.w * 0.5f - inset, rect.h * 0.5f - inset},
+                                   .radius = std::max(0.0f, radius - inset),
+                                   .stroke = color,
+                                   .stroke_width = 2.0f * inset,
+                                   .round_join = radius > 0.0f,
+                                   .transform = Affine2::translation({rect.x + rect.w * 0.5f, rect.y + rect.h * 0.5f})};
+    if (_backend->capabilities().shapes) {
+        draw_primitives({&primitive, 1}, colors::white);
+    } else {
+        KIN_TRACE_DRAW(DrawKind::Outline, rect, color);
+        _backend->draw_rounded_rect(rect, radius, color, width);
+    }
 }
 
 void Renderer2D::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
@@ -1154,7 +1182,8 @@ void Renderer2D::trace_draw(DrawKind kind, Rectf dest, Color color, const Textur
     f32 y0 = dest.y;
     f32 x1 = dest.x + dest.w;
     f32 y1 = dest.y + dest.h;
-    if (rotation != 0.0f) {
+    if (rotation != 0.0f || !_transform.is_identity()) {
+        // Turned about its pivot, then mapped by the current transform.
         constexpr f32 pi = 3.14159265358979323846f;
         const f32 c = std::cos(rotation * pi / 180.0f);
         const f32 s = std::sin(rotation * pi / 180.0f);
@@ -1164,7 +1193,7 @@ void Renderer2D::trace_draw(DrawKind kind, Rectf dest, Color color, const Textur
         for (const Vec2f corner : {Vec2f{dest.x, dest.y}, Vec2f{dest.x + dest.w, dest.y}, Vec2f{dest.x, dest.y + dest.h},
                                    Vec2f{dest.x + dest.w, dest.y + dest.h}}) {
             const Vec2f d{corner.x - center.x, corner.y - center.y};
-            const Vec2f p{center.x + d.x * c - d.y * s, center.y + d.x * s + d.y * c};
+            const Vec2f p = _transform.apply({center.x + d.x * c - d.y * s, center.y + d.x * s + d.y * c});
             x0 = std::min(x0, p.x);
             y0 = std::min(y0, p.y);
             x1 = std::max(x1, p.x);

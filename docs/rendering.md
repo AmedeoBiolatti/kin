@@ -133,6 +133,136 @@ Output-pixel commands and `Text` / `Custom` callbacks draw without the camera
 either way: draw world coordinates in a callback with
 `renderer.scoped_transform(camera.view_transform())`.
 
+## Shapes
+
+![The shapes demo: an orrery of planets, moons and an SVG rocket around a star](images/shapes_demo.png)
+
+Vector shapes are drawn anti-aliased, crisp at any zoom or turn, two ways:
+
+- **Primitives** (circles, ellipses, rounded and sharp rectangles, capsules)
+  are drawn whole on SDL_GPU: one quad each, the outline computed per pixel
+  from its distance, fill and stroke together.
+- **Everything else** is tessellated into triangles: each outline gets a thin
+  soft edge whose vertices carry their distance past it, faded over one
+  screen pixel by the shape shader.
+
+The SDL_Renderer fallback tessellates primitives too, pulls soft edges in to a
+pixel on the CPU and fades them with vertex alpha.
+
+### Drawing as you go
+
+```cpp
+renderer.fill_circle({100, 100}, 20, kin::colors::white);
+renderer.draw_circle({100, 100}, 24, accent, 2.0f);
+renderer.draw_line(a, b, accent, 4.0f, kin::LineCap::Round);
+renderer.draw_polyline(points, ink, {.width = 3, .join = kin::LineJoin::Round});
+renderer.draw_arc(center, 30, -90, 45, gold, {.width = 6, .cap = kin::LineCap::Round});
+renderer.fill_path(kin::Path::star(center, 20, 8, 5), gold);
+```
+
+Also `fill_ellipse`, `draw_ellipse`, `fill_polygon`, `draw_polygon`,
+`fill_pie` and `stroke_path`. Circles, ellipses, `fill_rounded_rect`,
+`draw_rounded_rect` and `draw_line` with a width are primitives: cheap to draw
+as you go. The rest tessellate each call; for those drawn every frame, make a
+mesh once instead.
+
+### Paths
+
+`kin::Path` holds lines, quadratic and cubic curves, SVG arcs and closes, with
+helpers for rectangles, rounded rectangles, circles, ellipses, polygons,
+polylines, arcs, pies, regular polygons and stars. `Path::parse_svg("M0 0 L10 0
+...")` reads SVG path data, every command; `to_svg()` writes it. Curves are
+flattened to a tolerance (a quarter unit by default) with as few segments as
+that allows.
+
+Fills take SVG's `NonZero` and `EvenOdd` rules, holes and islands included
+(subpaths that cross each other are each filled whole). Strokes have a width,
+`Miter` (with `miter_limit`), `Round` or `Bevel` joins, and `Butt`, `Round` or
+`Square` caps; a zero-length subpath under a round or square cap is a dot.
+
+### Composing shapes
+
+A `kin::Shape` is a list of elements, each a path with a fill, a stroke, a
+transform and an id. Shapes are made of shapes: `add(other, transform)` places
+another shape's elements.
+
+```cpp
+kin::Shape wheel;
+wheel.fill(kin::Path::circle({0, 0}, 10), tyre)
+     .fill(kin::Path::circle({0, 0}, 4), hub);
+kin::Shape cart;
+cart.fill_and_stroke(kin::Path::rounded_rect({-30, -20, 60, 24}, 4), paint, ink, {.width = 2})
+    .add(wheel, kin::Affine2::translation({-18, 6}))
+    .add(wheel, kin::Affine2::translation({18, 6}));
+
+const kin::ShapeMesh mesh = cart.mesh();          // tessellate once
+renderer.draw_shape(mesh, kin::Affine2::translation(pos) * kin::Affine2::rotation(angle), tint);
+```
+
+`ShapeBuildOptions` sets the curve tolerance and the soft edge's width in shape
+units (2 by default, enough for drawing down to half size; the edge stays one
+pixel wide however large the mesh is drawn). `ShapeMesh::append(mesh,
+transform)` merges meshes into one. Stroke widths scale with their element's
+transform, as in SVG.
+
+A path made by `Path::rect`, `rounded_rect`, `circle` or `ellipse` (and SVG's
+`<rect>`, `<circle>` and `<ellipse>`) remembers it (`Path::primitive()`), and
+`Shape::mesh` keeps such an element as a primitive, in paint order with the
+triangles (`ShapeMesh::runs`). Two strokes stay triangles: a bevelled sharp
+corner, and an ellipse's stroke thicker than half its smaller radius (its
+distance is estimated, close only near the outline). `write_svg` writes
+primitives back as `<rect>`, `<circle>` and `<ellipse>`.
+
+### SVG-lite
+
+`kin::read_svg` / `load_svg` read what vector editors export for flat-coloured
+artwork into a `Shape`, and `write_svg` / `save_svg` write a Shape any browser
+opens:
+
+- elements: `<svg>` (viewBox), `<g>`, `<path>`, `<rect>` (with `rx`, `ry`),
+  `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`, and `<defs>`,
+  `<symbol>` and `<use>` for reuse;
+- the `transform` attribute, and `fill`, `fill-rule`, `fill-opacity`,
+  `stroke`, `stroke-width`, `stroke-linejoin`, `stroke-linecap`,
+  `stroke-miterlimit`, `stroke-opacity`, `opacity`, `color`, `display` and
+  `visibility`, as attributes or in `style=""`, inherited through groups;
+- colours as `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()`, the
+  basic names and `currentColor`.
+
+What is not read (gradients and patterns, text, images, masks, clip paths,
+filters, `<style>` sheets, dashes, units other than px) is listed in the
+`warnings` argument, and the rest of the file still reads. A group's opacity is
+multiplied into its elements' colours rather than composited as a group.
+
+### In the ECS
+
+`kin::ShapeRenderer{.mesh = shared_mesh}` draws a mesh at its entity. Unlike the
+sprite renderers it takes the whole world transform, so it turns, scales
+unevenly and mirrors (a negative scale) with the entity and its parents. It
+sorts (`layer`, `order`, `y_sort`), culls and follows cameras like the other
+renderers, and many entities can share one mesh. `RenderQueue::draw_shape`
+queues a mesh directly. `games/shapes_demo` is an orrery: planets and moons
+turning with their parents, shapes composed in code and a rocket read from
+SVG-lite, a zooming and turning camera.
+
+### Cost
+
+Primitives are one 56-byte instance each; triangles draw indexed, 16 bytes a
+vertex; both batch across transforms. `kin_draw_bench 200 2000 shapes` draws
+2000 tokens a frame, each a filled and stroked circle with a star on it
+(RTX 4080 Laptop):
+
+| | CPU to record | GPU |
+|---|---|---|
+| cached mesh, drawn 2000 times | 0.88 ms | 0.9 ms |
+| one merged mesh | 0.83 ms | 0.9 ms |
+| drawn as you go (the star tessellated each time) | 5.6 ms | 0.9 ms |
+
+The token is 1 primitive plus 20 vertices and 28 triangles for the star; as
+triangles alone it was 140 vertices and 206 triangles, and the cached mesh took
+3.5 ms. Tessellating 200 tokens takes 0.54 ms: make meshes once and draw them
+many times.
+
 ## Animation
 
 Sprite animation is driven by the general animation system. Sprite frames are

@@ -151,6 +151,7 @@ WorldRenderState::WorldRenderState(flecs::world& world)
       _textures(world.query_builder<const Transform2D, const WorldTransform, const TextureRenderer>().cached().build()),
       _rects(world.query_builder<const Transform2D, const WorldTransform, const RectRenderer>().cached().build()),
       _lines(world.query_builder<const Transform2D, const WorldTransform, const LineRenderer>().cached().build()),
+      _shapes(world.query_builder<const Transform2D, const WorldTransform, const ShapeRenderer>().cached().build()),
       _particle_systems(world.query_builder<const ParticleSystemComponent>().cached().build()),
       _particle_fields(world.query_builder<const ParticleFieldComponent>().cached().build()) {
 }
@@ -206,6 +207,11 @@ void WorldRenderState::collect_all(RenderQueue& queue,
             submit_line(queue, entity, transform, line, options.view);
         }
     });
+    _shapes.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const ShapeRenderer& shape) {
+        if (!include || include(entity)) {
+            submit_shape(queue, entity, transform, shape, options.view);
+        }
+    });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
     _particle_systems.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
@@ -243,6 +249,11 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
     _lines.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const LineRenderer& line) {
         if (line.static_renderable) {
             submit_line(queue, entity, transform, line, options.view);
+        }
+    });
+    _shapes.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const ShapeRenderer& shape) {
+        if (shape.static_renderable) {
+            submit_shape(queue, entity, transform, shape, options.view);
         }
     });
     if (options.view) {
@@ -396,6 +407,11 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
     _lines.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const LineRenderer& line) {
         if (!line.static_renderable) {
             submit_line(queue, entity, transform, line, options.view);
+        }
+    });
+    _shapes.each([&](flecs::entity entity, const Transform2D&, const WorldTransform& transform, const ShapeRenderer& shape) {
+        if (!shape.static_renderable) {
+            submit_shape(queue, entity, transform, shape, options.view);
         }
     });
     // Everything above was culled as it was submitted; only particles still need it.
@@ -636,6 +652,38 @@ bool submit_line(RenderQueue& queue,
     return true;
 }
 
+bool submit_shape(RenderQueue& queue, flecs::entity entity) {
+    const auto* shape = entity.get<ShapeRenderer>();
+    if (!shape || !shape->visible) {
+        return false;
+    }
+    return submit_shape(queue, entity, world_transform(entity), *shape);
+}
+
+bool submit_shape(RenderQueue& queue,
+                  [[maybe_unused]] flecs::entity entity,
+                  const WorldTransform& transform,
+                  const ShapeRenderer& shape,
+                  const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "ShapeRenderer");
+    if (!shape.visible || !shape.mesh || shape.mesh->empty()) {
+        return false;
+    }
+    // Unlike the sprite renderers, a mesh can take the whole transform: turns,
+    // uneven scales and mirroring included.
+    const Affine2 place = Affine2::trs(transform.pos, transform.rotation, transform.scale) *
+                          Affine2::translation(shape.offset);
+    if (view && !render_view_visible(*view, transformed_bounds(place, shape.mesh->bounds))) {
+        return false;
+    }
+    const RenderKey key = key_for(shape.layer,
+                                  shape.order,
+                                  shape.y_sort,
+                                  to_world(transform, shape.offset).y + shape.sort_y_offset);
+    queue.draw_shape(key, shape.mesh, place, shape.tint);
+    return true;
+}
+
 bool submit_particles(RenderQueue& queue, flecs::entity entity) {
     bool submitted = false;
     if (const auto* particles = entity.get<ParticleSystemComponent>()) {
@@ -717,6 +765,18 @@ bool submit_line(Renderer2D& renderer, flecs::entity entity) {
         return false;
     }
     queue.flush(renderer);
+    return true;
+}
+
+bool submit_shape(Renderer2D& renderer, flecs::entity entity) {
+    thread_local RenderQueue queue{RenderSortMode::Submission};
+    queue.clear();
+    queue.set_sort(RenderSortMode::Submission);
+    if (!submit_shape(queue, entity)) {
+        return false;
+    }
+    queue.flush(renderer);
+    queue.clear(); // let go of the mesh
     return true;
 }
 

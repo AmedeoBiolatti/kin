@@ -60,6 +60,8 @@ public:
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
 
     void set_blend_mode(BlendMode mode) override;
+    void draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices, u32 index_base,
+                         Color tint) override;
     void set_transform(const Affine2& transform) override {
         _transform = transform;
         _transformed = !transform.is_identity();
@@ -136,6 +138,8 @@ private:
     Affine2 _transform{};          // set_transform's; geometry is mapped by it on the CPU
     bool _transformed = false;     // _transform is not the identity
     std::vector<Affine2> _saved_transforms; // outside each pushed render target / native scope
+    std::vector<SDL_Vertex> _shape_vertices; // draw_shape_mesh's, reused
+    std::vector<int> _shape_indices;
 };
 
 class SdlTextureBackend final : public ITextureBackend {

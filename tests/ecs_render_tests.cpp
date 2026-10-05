@@ -9,6 +9,7 @@
 #include <crtdbg.h>
 #endif
 #include <memory>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -93,6 +94,16 @@ public:
     std::vector<kin::Vec2f> pivots;
 
     void set_transform(const kin::Affine2& transform) override { transforms.push_back(transform); }
+    void draw_shape_mesh(std::span<const kin::ShapeVertex> vertices, std::span<const kin::u32>, kin::u32,
+                         kin::Color tint) override {
+        shape_vertex_counts.push_back(vertices.size());
+        shape_tints.push_back(tint);
+        // Where the mesh's origin lands, under the transform set now.
+        shape_origins.push_back(transforms.empty() ? kin::Vec2f{} : transforms.back().apply({0.0f, 0.0f}));
+    }
+    std::vector<std::size_t> shape_vertex_counts;
+    std::vector<kin::Color> shape_tints;
+    std::vector<kin::Vec2f> shape_origins;
     std::vector<kin::Affine2> transforms;
 };
 
@@ -274,6 +285,50 @@ void test_renderers_follow_parent_rotation_and_scale() {
 
 // A camera that zooms or turns is the renderer's transform while the queue
 // draws; callbacks draw without it, as under a camera that only moves.
+// A ShapeRenderer takes the entity's whole transform (turn, uneven and
+// negative scale) and its offset, sorts and culls like the other renderers, and
+// moves with the camera.
+void test_shape_renderer() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Shape square;
+    square.fill(kin::Path::rect({0, 0, 4, 4}), kin::colors::white);
+    const auto mesh = std::make_shared<const kin::ShapeMesh>(square.mesh());
+
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::ShapeRenderer>("ShapeRenderer");
+    world.entity("turned")
+        .set(kin::Transform2D{{100.0f, 50.0f}, 90.0f, {2.0f, -1.0f}})
+        .set(kin::ShapeRenderer{.mesh = mesh, .offset = {1.0f, 0.0f}, .tint = kin::Color::rgb(255, 0, 0)});
+    world.entity("far").set(kin::Transform2D{{5000.0f, 5000.0f}}).set(kin::ShapeRenderer{.mesh = mesh});
+    world.entity("hidden").set(kin::Transform2D{}).set(kin::ShapeRenderer{.mesh = mesh, .visible = false});
+
+    kin::Camera2D camera;
+    camera.viewport = {320.0f, 180.0f};
+    camera.offset = {10.0f, 20.0f};
+    kin::render_top_down_world(world, renderer, {.camera = &camera});
+    // Only the one in view: (1, 0) scaled by (2, -1) is (2, 0), turned a quarter
+    // is (0, 2), at (100, 50) is (100, 52); the camera moves it by (-10, -20).
+    // (This backend draws no primitives: the square comes as triangles.)
+    assert(raw->shape_vertex_counts.size() == 1 && raw->shape_vertex_counts[0] > 0);
+    assert((raw->shape_tints[0] == kin::Color::rgb(255, 0, 0)));
+    assert(near(raw->shape_origins[0], {90.0f, 32.0f}));
+    assert(raw->transforms.back().is_identity());
+
+    // Queued directly, the queue keeps the mesh alive until it is cleared.
+    raw->shape_vertex_counts.clear();
+    kin::RenderQueue queue;
+    {
+        kin::Shape dot;
+        dot.fill(kin::Path::circle({0, 0}, 3), kin::colors::white);
+        queue.draw_shape({}, std::make_shared<const kin::ShapeMesh>(dot.mesh()), kin::Affine2::translation({7, 8}));
+    }
+    queue.flush(renderer);
+    assert(raw->shape_vertex_counts.size() == 1 && near(raw->shape_origins.back(), {7.0f, 8.0f}));
+}
+
 void test_queue_flush_applies_zooming_camera() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -794,6 +849,7 @@ int main() {
     test_to_local_inverts_compose();
     test_renderers_follow_parent_rotation_and_scale();
     test_queue_flush_applies_zooming_camera();
+    test_shape_renderer();
     test_render_world_draws_primitives();
     test_render_world_draws_texture_renderer();
     test_sprite_pivot_offsets_and_y_sort();

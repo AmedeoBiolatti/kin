@@ -233,6 +233,14 @@ void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf 
             command.detail->callback(renderer);
         }
         break;
+    case RenderCommandType::Shape:
+        if (command.detail && command.detail->shape) {
+            // `rect` arrives moved as the view moved the shape's bounds: the
+            // shape moves with it.
+            const Affine2 shift = Affine2::translation({rect.x - command.rect.x, rect.y - command.rect.y});
+            renderer.draw_shape(*command.detail->shape, shift * command.detail->transform, color);
+        }
+        break;
     }
 }
 
@@ -378,6 +386,7 @@ Rectf render_command_bounds(const RenderCommand& command) {
         };
     case RenderCommandType::Text:
     case RenderCommandType::PushViewport:
+    case RenderCommandType::Shape:
         return command.rect;
     case RenderCommandType::FillRect:
     case RenderCommandType::DrawRect:
@@ -439,6 +448,7 @@ void execute_render_command(Renderer2D& renderer, const RenderCommand& command, 
     case RenderCommandType::Text:
     case RenderCommandType::Texture:
     case RenderCommandType::Sprite:
+    case RenderCommandType::Shape:
         rect = to_view_rect(command.rect, view);
         break;
     case RenderCommandType::Line:
@@ -728,6 +738,21 @@ void RenderQueue::push_viewport(Rectf rect) {
 
 void RenderQueue::pop_viewport() {
     submit({.type = RenderCommandType::PopViewport});
+}
+
+void RenderQueue::draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mesh, const Affine2& transform,
+                             Color tint) {
+    if (!mesh || mesh->empty()) {
+        return;
+    }
+    RenderCommand command{
+        .type = RenderCommandType::Shape,
+        .key = key,
+        .rect = transformed_bounds(transform, mesh->bounds),
+        .color = tint,
+    };
+    command.detail = std::make_shared<RenderCommandDetail>(RenderCommandDetail{.shape = std::move(mesh), .transform = transform});
+    submit(std::move(command));
 }
 
 void RenderQueue::custom(RenderKey key, std::function<void(Renderer2D&)> callback, std::string debug_name) {
