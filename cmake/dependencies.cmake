@@ -174,6 +174,9 @@ FetchContent_Declare(SDL3_image
     GIT_REPOSITORY https://github.com/libsdl-org/SDL_image.git
     GIT_TAG release-3.4.4
     GIT_SHALLOW TRUE
+    # Only the vendored libraries the formats above use. The others (aom, dav1d,
+    # libjxl, ...) are most of a full checkout's ~1 GB of submodule history.
+    GIT_SUBMODULES external/jpeg external/libpng external/zlib
 )
 
 FetchContent_MakeAvailable(SDL3_image)

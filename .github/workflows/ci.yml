@@ -31,62 +31,56 @@ jobs:
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
+            # The SDL_GPU backend's tests skip without a GPU. This job also gives
+            # them Mesa's software Vulkan driver (lavapipe) and a virtual X
+            # display, and requires them to run. glslc compiles the backend's
+            # shaders; without them it cannot start.
+            gpu: true
+            packages: mesa-vulkan-drivers glslc xvfb
           - name: Linux Clang
             os: ubuntu-24.04
             cc: clang-18
             cxx: clang++-18
           - name: Windows MSVC
             os: windows-2022
+            cc: cl
+            cxx: cl
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-deps.sh
+        run: .github/scripts/install-linux-deps.sh ${{ matrix.packages }}
 
-      - name: Configure (Linux)
-        if: runner.os == 'Linux'
-        env:
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Configure (Windows)
+      # Puts cl on PATH, so Windows builds with Ninja like Linux does.
+      - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 
-      - name: Build
-        run: cmake --build build --config Release --parallel 4
-
-      - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure -j 4 --timeout 300
-
-  # The SDL_GPU backend's tests skip without a GPU, so the jobs above never run
-  # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
-  # virtual X display, and requires them to run.
-  gpu:
-    name: Linux GPU (lavapipe)
-    runs-on: ubuntu-24.04
-    env:
-      SDL_VIDEO_DRIVER: x11
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
-      KIN_REQUIRE_GPU_TESTS: "1"
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        # glslc compiles the GPU backend's shaders; without them it cannot start.
-        run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers glslc xvfb
+      # Pull requests reuse main's compiler cache; only pushes save one.
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.name }}
+          save: ${{ github.event_name == 'push' }}
 
       - name: Configure
         env:
-          CC: gcc-13
-          CXX: g++-13
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
-        run: cmake --build build --parallel 4 --target kin_renderer_tests
+        run: cmake --build build
 
       - name: Test
+        run: ctest --test-dir build --output-on-failure -j 4 --timeout 300
+
+      - name: Test SDL_GPU backend (lavapipe)
+        if: matrix.gpu
+        env:
+          SDL_VIDEO_DRIVER: x11
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          KIN_REQUIRE_GPU_TESTS: "1"
         run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-renderer$' --output-on-failure --timeout 300
