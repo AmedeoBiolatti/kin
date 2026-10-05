@@ -20,6 +20,15 @@
 
 namespace {
 
+// The clock as each run sees it: time since its process started. The checker
+// steps its runs in lockstep, so the raw clock can read the same in two of
+// them (Windows ticks every 100 ns); the runs start milliseconds apart.
+const auto process_start = std::chrono::steady_clock::now();
+
+kin::i64 clock_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - process_start).count();
+}
+
 struct Mover {
     kin::Vec2f pos{};
     kin::Vec2f velocity{};
@@ -63,8 +72,7 @@ public:
             mover.pos.y += mover.velocity.y;
         });
         if (_scenario == "clock" && _frame == 5) {
-            const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-            _world.lookup("stamp").set(Stamp{.value = static_cast<kin::i64>(now)});
+            _world.lookup("stamp").set(Stamp{.value = clock_ns()});
         }
         if (_scenario == "workers" && _frame == 3) {
             _world.lookup("stamp").set(Stamp{.value = kin::default_job_system().worker_count()});
@@ -80,7 +88,7 @@ public:
     void write_report(kin::JsonWriter& json) const override {
         json.field("frame", _frame);
         if (_scenario == "report" && _frame >= 7) {
-            json.field("elapsed_ns", static_cast<kin::i64>(std::chrono::steady_clock::now().time_since_epoch().count()));
+            json.field("elapsed_ns", clock_ns());
         }
     }
 
