@@ -10,7 +10,16 @@ layout(location = 3) in vec4 aColor;
 layout(set = 1, binding = 0) uniform UBO {
     vec2 uScale;
     vec2 uTranslate;
+    vec4 uFlags;
 } ubo;
+
+// Linear pipeline (uFlags.x): colours are given in sRGB, blended in linear light.
+vec4 decode_color(vec4 c) {
+    if (ubo.uFlags.x < 0.5) {
+        return c;
+    }
+    return vec4(mix(c.rgb / 12.92, pow((c.rgb + 0.055) / 1.055, vec3(2.4)), step(0.04045, c.rgb)), c.a);
+}
 
 layout(location = 0) out struct {
     vec4 Color;
@@ -28,7 +37,7 @@ void main() {
         const vec2 d = pos - aTurn.xy;
         pos = aTurn.xy + vec2(d.x * aTurn.z - d.y * aTurn.w, d.x * aTurn.w + d.y * aTurn.z);
     }
-    Out.Color = aColor;
+    Out.Color = decode_color(aColor);
     Out.UV = vec2(c.x == 0.0 ? aUV.x : aUV.z, c.y == 0.0 ? aUV.y : aUV.w);
     gl_Position = vec4(pos * ubo.uScale + ubo.uTranslate, 0.0, 1.0);
     gl_Position.y *= -1.0;

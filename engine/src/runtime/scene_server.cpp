@@ -1430,6 +1430,9 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
 
     // Software unless KIN_RENDER_BACKEND=gpu asks for the backend the game ships on.
     Renderer2D renderer{make_render_backend(window, false, false)};
+    if (config.window.color_space != ColorSpace::Gamma || config.window.hdr) {
+        renderer.set_color_space(config.window.color_space, config.window.hdr);
+    }
     if (config.window.logical_width > 0 && config.window.logical_height > 0) {
         if (config.window.integer_scale) {
             renderer.set_integer_logical_size(config.window.logical_width, config.window.logical_height);

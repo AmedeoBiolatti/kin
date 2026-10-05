@@ -278,7 +278,7 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     // being a render target: RGBA8 textures are anyway, data formats where the
     // device allows (it is one more kind, so pooled apart).
     const bool clear_on_gpu =
-        format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ||
+        format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM || format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ||
         (!pixels && SDL_GPUTextureSupportsFormat(_device, format, SDL_GPU_TEXTURETYPE_2D,
                                                  SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET));
     if (clear_on_gpu) {

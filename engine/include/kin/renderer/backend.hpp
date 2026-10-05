@@ -6,6 +6,7 @@
 #include <kin/renderer/material.hpp>
 #include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/mask.hpp>
 #include <kin/renderer/post_process.hpp>
@@ -61,6 +62,8 @@ struct RendererBackendCapabilities {
     bool distance_fields = false;  // draw_distance_field() draws
     bool masks = false;            // layers, and draw_masked() lays one over through another
     bool stencil_clips = false;    // push_stencil_clip(): hard-edged clips without layers
+    bool linear_color = false;     // set_color_space(Linear), and an HDR scene
+    bool color_output = false;     // set_color_output(): exposure, tonemapping, LUTs, dithering
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -179,6 +182,25 @@ public:
         return false;
     }
     virtual void pop_stencil_clip() {}
+    // The colour pipeline (Renderer2D::set_color_space): what textures made
+    // from now on, render targets and the scene store, and what colours are
+    // blended in. `hdr`: a float scene, keeping light above white. False: not
+    // had (Gamma without HDR always is).
+    virtual bool set_color_space(ColorSpace space, bool hdr) { return space == ColorSpace::Gamma && !hdr; }
+    // The image on its way to the display (Renderer2D::set_color_output), with
+    // its LUTs as textures (strips, size² x size).
+    struct ColorOutputState {
+        f32 exposure = 1.0f;
+        Tonemap tonemap = Tonemap::None;
+        bool dither = false;
+        Texture lut;
+        i32 lut_size = 0;
+        Texture lut_to;
+        i32 lut_to_size = 0;
+        f32 lut_mix = 0.0f;
+        f32 lut_strength = 1.0f;
+    };
+    virtual bool set_color_output(const ColorOutputState&) { return false; }
     // The current target's size in pixels (a layer's resolution is a share of it).
     virtual Vec2i current_target_pixels() const { return {}; }
     // Draws show how many times each pixel is shaded instead of themselves.

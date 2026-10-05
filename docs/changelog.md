@@ -9,6 +9,23 @@ releases may change APIs.
 
 ### Added
 
+- Colour: `Renderer2D::set_color_space(ColorSpace::Linear, hdr)` blends in
+  linear light (sRGB colour textures decoded as sampled, colours decoded in the
+  vertex shaders, sRGB or float targets) and encodes on the way out; `hdr`
+  keeps light above white in a 16-bit float scene. Opt-in, also as
+  `GameWindowInfo::color_space` / `hdr`; the gamma pipeline stays the default.
+  `set_color_output(ColorOutput)`: exposure, tonemapping (`Reinhard`, `Aces`),
+  grading through a 3D LUT cross-faded to a second, and dithering, in one pass
+  before the swapchain (about 0.13 ms at 1080p). SDL_GPU
+  (`capabilities().linear_color`, `color_output`).
+- `kin::ColorLut` (`kin/renderer/color_grading.hpp`): LUTs from `.cube` files
+  and PNG strips or grids, a neutral one to grade in an image editor, applied
+  on the CPU too.
+- Colour maths: `srgb_to_linear`, `linear_to_srgb`, `LinearColor`, OKLab
+  (`to_oklab`, `from_oklab`), and `mix(a, b, t, ColorMix)` in sRGB, linear
+  light or OKLab; `Gradient::mix`.
+- The lighting demo draws in linear HDR, tonemapped (ACES) and graded per
+  time of day; C switches to the gamma pipeline, G toggles grading.
 - Clips and masks: `Renderer2D::push_clip(path, rule)` clips to any path,
   anti-aliased, under the transform; `push_mask(draw, options)` masks with
   whatever `draw` draws, and `push_mask(texture, dest, options)` with a texture.

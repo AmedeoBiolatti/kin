@@ -56,6 +56,8 @@ WindowedAppConfig window_config(const GameInfo& info) {
         .logical_width = info.window.logical_width,
         .logical_height = info.window.logical_height,
         .integer_scale = info.window.integer_scale,
+        .color_space = info.window.color_space,
+        .hdr = info.window.hdr,
         .resizable = info.window.resizable,
         .borderless = info.window.borderless,
         .input_map = info.input_map,

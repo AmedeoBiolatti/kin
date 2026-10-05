@@ -9,7 +9,16 @@ layout(location = 2) in float aEdge;
 layout(set = 1, binding = 0) uniform UBO {
     vec2 uScale;
     vec2 uTranslate;
+    vec4 uFlags;
 } ubo;
+
+// Linear pipeline (uFlags.x): colours are given in sRGB, blended in linear light.
+vec4 decode_color(vec4 c) {
+    if (ubo.uFlags.x < 0.5) {
+        return c;
+    }
+    return vec4(mix(c.rgb / 12.92, pow((c.rgb + 0.055) / 1.055, vec3(2.4)), step(0.04045, c.rgb)), c.a);
+}
 
 layout(location = 0) out struct {
     vec4 Color;
@@ -18,7 +27,7 @@ layout(location = 0) out struct {
 layout(location = 2) out vec4 Custom;
 
 void main() {
-    Out.Color = aColor;
+    Out.Color = decode_color(aColor);
     Out.UV = vec2(0.0);
     Custom = vec4(aEdge, 0.0, 0.0, 0.0);
     gl_Position = vec4(aPos * ubo.uScale + ubo.uTranslate, 0.0, 1.0);

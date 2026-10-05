@@ -148,6 +148,8 @@ public:
     bool push_layer_target(const RenderTarget& target) override;
     bool draw_masked(const Texture& content, const Texture& mask, Rectf source, Rectf dest, Color tint,
                      const MaskOptions& options) override;
+    bool set_color_space(ColorSpace space, bool hdr) override;
+    bool set_color_output(const ColorOutputState& output) override;
     bool push_stencil_clip(std::span<const Vec2f> triangles) override;
     bool push_stencil_mask(const Texture& mask, Rectf source, Rectf dest, const MaskOptions& options) override;
     void pop_stencil_clip() override;
@@ -275,6 +277,25 @@ private:
     gpu::GpuShader _distance_field_shader; // distance_field.frag: scalable text and icons
     gpu::GpuShader _mask_shader;           // mask_composite.frag: a layer laid over through a mask
     gpu::GpuShader _mask_stencil_shader;   // mask_stencil.frag: a mask layer read into the stencil
+    gpu::GpuShader _color_output_shader;   // color_output.frag: exposure, tonemap, encode, LUTs, dither
+    // The colour pipeline: what the scene, render targets and post passes
+    // store, and what colour textures are made as (sRGB ones decode as sampled).
+    ColorSpace _color_space = ColorSpace::Gamma;
+    bool _hdr = false;
+    SDL_GPUTextureFormat _target_format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    SDL_GPUTextureFormat _color_texture_format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    ColorOutputState _color_output;
+    gpu::GpuTexture _output; // the output pass's result, displayed
+    // The output pass over `source` when it is wanted (a linear scene, a LUT),
+    // else `source`.
+    const gpu::GpuTexture* run_output_pass(const gpu::GpuTexture* source);
+    // `source` as 8-bit to read back: a float one encoded to sRGB in `scratch`
+    // (clipped at white), any other itself.
+    const gpu::GpuTexture* readable(const gpu::GpuTexture* source, gpu::GpuTexture& scratch);
+    // A colour as the current pipeline stores it (decoded in a linear one).
+    SDL_FColor stored_color(Color color) const;
+    // The built-in pipelines for the target format, made ahead of their first draw.
+    void warm_pipelines();
     ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
     bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;

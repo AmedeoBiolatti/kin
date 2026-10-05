@@ -569,7 +569,70 @@ void Renderer2D::draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 widt
 
 void Renderer2D::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
     KIN_TRACE_DRAW(DrawKind::Gradient, rect, mix(gradient.start, gradient.end, 0.5f));
-    _backend->fill_gradient_rect(rect, gradient);
+    const ColorMix native = _color_space == ColorSpace::Linear ? ColorMix::Linear : ColorMix::Srgb;
+    if (!gradient.mix || *gradient.mix == native) {
+        _backend->fill_gradient_rect(rect, gradient);
+        return;
+    }
+    // Mixed elsewhere than the pipeline blends: in bands, each a short gradient
+    // between colours mixed as asked.
+    constexpr int bands = 16;
+    const bool vertical = gradient.direction == GradientDirection::Vertical;
+    for (int i = 0; i < bands; ++i) {
+        const f32 t0 = static_cast<f32>(i) / bands, t1 = static_cast<f32>(i + 1) / bands;
+        const Rectf band = vertical ? Rectf{rect.x, rect.y + rect.h * t0, rect.w, rect.h * (t1 - t0)}
+                                    : Rectf{rect.x + rect.w * t0, rect.y, rect.w * (t1 - t0), rect.h};
+        _backend->fill_gradient_rect(band, {.start = mix(gradient.start, gradient.end, t0, *gradient.mix),
+                                            .end = mix(gradient.start, gradient.end, t1, *gradient.mix),
+                                            .direction = gradient.direction});
+    }
+}
+
+bool Renderer2D::set_color_space(ColorSpace space, bool hdr) {
+    if (space == _color_space && hdr == _hdr) {
+        return true;
+    }
+    if (!_backend->set_color_space(space, hdr)) {
+        KIN_LOG_WARN_F("render", "color space not supported here; unchanged",
+                       (LogFields{{.name = "space", .value = space == ColorSpace::Linear ? "linear" : "gamma"},
+                                  {.name = "hdr", .value = hdr ? "true" : "false"},
+                                  {.name = "backend", .value = std::string{backend_name()}}}));
+        return false;
+    }
+    _color_space = space;
+    _hdr = hdr;
+    trim_render_target_pool(); // pooled targets of the old format
+    return true;
+}
+
+void Renderer2D::set_color_output(ColorOutput output) {
+    // A LUT is uploaded as data (never decoded): a strip, read in the shader.
+    const auto upload = [&](const std::shared_ptr<const ColorLut>& lut, const std::shared_ptr<const ColorLut>& was,
+                            Texture& texture) {
+        if (!lut) {
+            texture = {};
+        } else if (lut != was || !texture) {
+            texture = create_texture({lut->size() * lut->size(), lut->size()}, TextureFormat::Rgba8, lut->strip().data());
+        }
+    };
+    upload(output.lut, _color_output.lut, _lut_texture);
+    upload(output.lut_to, _color_output.lut_to, _lut_to_texture);
+    _color_output = std::move(output);
+    const bool applied = _backend->set_color_output({
+        .exposure = _color_output.exposure,
+        .tonemap = _color_output.tonemap,
+        .dither = _color_output.dither,
+        .lut = _lut_texture,
+        .lut_size = _color_output.lut ? _color_output.lut->size() : 0,
+        .lut_to = _lut_to_texture,
+        .lut_to_size = _color_output.lut_to ? _color_output.lut_to->size() : 0,
+        .lut_mix = _color_output.lut_mix,
+        .lut_strength = _color_output.lut_strength,
+    });
+    static std::atomic<bool> warned{false};
+    if (!applied && !warned.exchange(true)) {
+        KIN_LOG_WARN("render", "set_color_output: no colour output on this backend; not applied");
+    }
 }
 
 ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
@@ -733,11 +796,15 @@ void Renderer2D::end_layer() {
     }
     // The target holds premultiplied colour: opacity scales all of it. Its
     // bounds are where the transformed draws landed: laid over untransformed.
-    const auto o = static_cast<u8>(std::clamp(layer->options.opacity, 0.0f, 1.0f) * 255.0f + 0.5f);
+    // (Colours are decoded in a linear pipeline, alpha is not: its colour
+    // channels carry the opacity encoded, so they decode to it.)
+    const f32 opacity = std::clamp(layer->options.opacity, 0.0f, 1.0f);
+    const auto o = static_cast<u8>(opacity * 255.0f + 0.5f);
+    const auto c = _color_space == ColorSpace::Linear ? static_cast<u8>(linear_to_srgb(opacity) * 255.0f + 0.5f) : o;
     const auto blend = scoped_blend_mode(layer->options.blend);
     const Affine2 transform = _transform;
     apply_transform({});
-    draw_texture(layer->target.texture(), bounds->source, bounds->dest, Color::rgba(o, o, o, o));
+    draw_texture(layer->target.texture(), bounds->source, bounds->dest, Color::rgba(c, c, c, o));
     apply_transform(transform);
 }
 
