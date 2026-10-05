@@ -7,102 +7,60 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-10-06
+
+A release for 2D drawing. Everything can be drawn through a transform, and
+cameras zoom and turn; vector shapes are composed in code or read from SVG;
+text stays sharp at any size; sprites mirror; anything can be clipped to a
+path, a texture or anything drawn; and an opt-in linear colour pipeline blends
+as light does, with HDR, tonemapping and LUT grading. Under them: layers,
+cached targets, compute shaders, mipmaps and a faster SDL_GPU backend, plus
+the render probe and the determinism check for finding what draws where and
+what differs between runs.
+
+### Upgrading from 0.2.3
+
+- Children follow their parents' rotation and scale, not only their position,
+  and renderer offsets, sizes and line ends go through the entity's world
+  transform. Code that turned or scaled children by hand to make up for it
+  should stop.
+- The ECS physics sync converts angles (`Transform2D::rotation` is degrees,
+  Box2D's radians) and works in world space for bodies under a parent. Games
+  that converted angles themselves should drop the conversion.
+- flecs is 4.0.5 (was 4.0.3): worlds in one process keep their own component
+  ids. A project that pins flecs itself should move to 4.0.5.
+- SDL's renderer now has layers: `begin_layer` draws into a target and applies
+  its opacity, where it drew straight through before.
+- `pop_clip()` pops whatever clip is on top, rectangle, path or mask; code that
+  only pushes rectangles is unaffected.
+- `IRenderer2DBackend` gains virtuals for shapes, distance fields, masks,
+  stencil clips, layers and colour, each with a default, so custom backends
+  build unchanged. `RenderCommandType` gains `Shape` and `Group`: a `switch`
+  over it may warn until they are handled.
+
 ### Added
 
-- Colour: `Renderer2D::set_color_space(ColorSpace::Linear, hdr)` blends in
-  linear light (sRGB colour textures decoded as sampled, colours decoded in the
-  vertex shaders, sRGB or float targets) and encodes on the way out; `hdr`
-  keeps light above white in a 16-bit float scene. Opt-in, also as
-  `GameWindowInfo::color_space` / `hdr`; the gamma pipeline stays the default.
-  `set_color_output(ColorOutput)`: exposure, tonemapping (`Reinhard`, `Aces`),
-  grading through a 3D LUT cross-faded to a second, and dithering, in one pass
-  before the swapchain (about 0.13 ms at 1080p). SDL_GPU
-  (`capabilities().linear_color`, `color_output`).
-- `kin::ColorLut` (`kin/renderer/color_grading.hpp`): LUTs from `.cube` files
-  and PNG strips or grids, a neutral one to grade in an image editor, applied
-  on the CPU too.
-- Colour maths: `srgb_to_linear`, `linear_to_srgb`, `LinearColor`, OKLab
-  (`to_oklab`, `from_oklab`), and `mix(a, b, t, ColorMix)` in sRGB, linear
-  light or OKLab; `Gradient::mix`.
-- The lighting demo draws in linear HDR, tonemapped (ACES) and graded per
-  time of day; C switches to the gamma pipeline, G toggles grading.
-- Clips and masks: `Renderer2D::push_clip(path, rule)` clips to any path,
-  anti-aliased, under the transform; `push_mask(draw, options)` masks with
-  whatever `draw` draws, and `push_mask(texture, dest, options)` with a texture.
-  `kin::MaskOptions` (`kin/renderer/mask.hpp`) reads a mask's alpha or
-  luminance, as a soft `Alpha` mask or an all-or-nothing `Stencil` at a
-  threshold, optionally inverted, at a fraction of the resolution. Rectangles,
-  paths and masks share one stack, nest, and pop with `pop_clip()`;
-  `scoped_clip` and `scoped_mask` return guards. SDL_GPU composites in a shader
-  (`capabilities().masks`); SDL's renderer by blending, or on the CPU for
-  luminance and stencil masks and its software renderer. The shapes demo gives
-  its planets night sides and a telescope following the rocket.
-- Hard clips: `push_clip(path, rule, kin::ClipEdge::Hard)` keeps whole pixels;
-  on SDL_GPU (`capabilities().stencil_clips`) it draws into a pooled stencil
-  buffer instead of layers, about five times cheaper than a smooth clip, and
-  stencil-mode masks read their mask into it, drawing what they mask straight
-  on.
-- `kin::ClipRegion` (`kin/renderer/clip.hpp`): a clip as a value (a path, a
-  mask, a texture), pushed with `Renderer2D::push_clip(region)`.
-- `RenderQueue::draw_group(key, content, clip)`: a queue drawn as one command
-  at `key` through a clip, so clipped content keeps together in a sorted queue.
-- `kin::ClipGroup`: clips an entity's renderers and its descendants' to a
-  region in its own space, drawn as one group at its layer and order.
-- `Path::rounded_rect(rect, radii)` with a radius per corner;
-  `ui2::Context::push_clip(bounds, corner_radii)`, used by lists, tables and
-  trees to keep scrolled rows inside their panel's rounded corners.
-- Layers on SDL's renderer: `begin_layer` draws into a target and lays it over
-  at its opacity, as on SDL_GPU, instead of drawing straight through.
-- Text that scales: TTF fonts made with `ui2::TextRendering::Sdf`
-  (`load_ttf_font`, `system_ui_font`, `system_ui_font_bold`) draw from one
-  atlas of signed distance fields, sharp at any size, zoom or turn, under any
-  transform or camera; their metrics scale linearly. The atlas is made once per
-  renderer from glyphs drawn at twice the size, distance-transformed on the job
-  system (about 15 ms). `ui2::draw_text_outlined` draws an outline from the
-  field in one pass (four stamped copies on other fonts); widgets'
-  `TextStyle::outline_width` uses it. `Renderer2D::draw_distance_field` draws
-  any distance-field texture. SDL_GPU (`capabilities().distance_fields`);
-  drawn as Bitmap elsewhere.
-- Vector shapes (`kin/renderer/path.hpp`, `shape.hpp`, `svg.hpp`):
-  - `kin::Path` (lines, curves, SVG arcs; rectangles, circles, polygons, arcs,
-    pies, stars; SVG path data read and written), filled under non-zero or
-    even-odd with holes, stroked with joins, caps and miter limits;
-  - anti-aliased at any scale: one pixel of soft edge from screen-space
-    derivatives on SDL_GPU, pulled in on the CPU on SDL_Renderer;
-  - circles, ellipses, rounded and sharp rectangles and capsules drawn whole
-    on SDL_GPU (one quad, the outline from its distance per pixel), as you go
-    or kept in meshes; 2000 cached tokens record in 0.88 ms (3.5 ms as
-    triangles);
-  - `kin::Shape`: elements that compose (`add(shape, transform)`), tessellated
-    once into a `ShapeMesh` drawn by `Renderer2D::draw_shape` through any
-    transform and tint;
-  - SVG-lite: `read_svg` / `load_svg` read the flat-colour subset vector
-    editors export (paths, basic shapes, groups, `<use>`, transforms, styles,
-    inheritance), listing what they skip; `write_svg` / `save_svg` write it;
-  - immediate drawing: `fill_circle`, `draw_circle`, `fill_ellipse`,
-    `draw_ellipse`, `fill_polygon`, `draw_polygon`, `draw_polyline`,
-    `draw_line` with a width and cap, `draw_arc`, `fill_pie`, `fill_path`,
-    `stroke_path`;
-  - `kin::ShapeRenderer` and `RenderQueue::draw_shape`; `games/shapes_demo`.
-  - New dependency: mapbox earcut.hpp 3.2.4 (ISC), header-only, for fills.
-- Mirrored sprites: `SpriteRenderer::flip_x` / `flip_y` and
-  `TextureRenderer::flip_x` / `flip_y`, mirrored about the pivot; a negative
-  world scale mirrors too (and cancels a flag). `kin::Flip` on
-  `Renderer2D::draw_texture` / `draw_sprite`, the `RenderQueue` texture and
-  sprite calls, and `SpriteInstance`; flipped sprites still batch, on both
-  backends. Animatable as `SpriteRenderer.flip_x` / `flip_y`.
-- Transforms: `Renderer2D::push_transform` / `pop_transform` / `scoped_transform`
-  draw through a `kin::Affine2` (`kin/core/affine.hpp`), on both backends.
-  Mapped on the CPU, so draws still batch across transform changes, and sprite
-  batches stay instanced under rotation and even scale. Through a zoomed,
-  turned camera 20,000 quads take about 5% more CPU to record
-  (`kin_draw_bench 300 20000 camera`); untransformed drawing costs what it did.
-- `Camera2D::zoom` and `rotation`, about the viewport's centre, with
-  `view_transform()`, `center()` and `look_at()`; `world_to_screen`,
-  `screen_to_world` and `visible_rect` follow them, and a `RenderQueue` flushed
-  with such a camera draws through it.
-- `Transform2D::scale` and `WorldTransform::scale`; `kin::world_transform(entity)`
-  and `kin::compose(parent, child)`.
+- Render probe: `--probe-render[=PATH]` on any `run_scene_app` game renders each
+  headless frame, compares it with the frames before it tile by tile, and
+  writes a `kin.render_probe/1` report of flicker (jitter, frame popping, single
+  wrong frames) and spikes, with when and where each happened. `--probe-fail`
+  fails the run when it finds anything; `--probe-tile=N` sets the tile size.
+  `kin::RenderProbe` runs the same analysis on frames from anywhere. The
+  `KIN_ENABLE_RENDER_PROBE` CMake option (on by default) compiles it out.
+- Render probe events name their culprits: the entities and render components
+  (or named scopes, or scenes) whose draws changed where the event happened,
+  and how (`moved`, `frame`, `color`, `appeared`, ...). `KIN_DRAW_SCOPE(label)`
+  and `KIN_DRAW_ENTITY(entity, component)` name draws made outside the ECS
+  render components.
+- Determinism check: `--check-determinism[=PATH]` on any `run_scene_app` game
+  runs it three times in lockstep (twice alike, once with one job worker),
+  hashing each frame's state, and reports the first frame where a run differs
+  with the entities, components and report fields that differ
+  (`kin.determinism/1`). `kin::hash_state` / `kin::describe_state` hash and list
+  a scene stack's state. The `KIN_ENABLE_DETERMINISM_CHECK` CMake option (on by
+  default) compiles it out.
+- `KIN_JOB_WORKERS` sets the default job system's worker count.
+- `ProcessOptions::environment` sets variables for a child process.
 - `kin::CachedTarget` and `kin::cache_key(...)`: a render target drawn again
   only when its key or size changes (`kin/renderer/cached_target.hpp`). A
   288 x 288 target of 44 layers: 4.3 Mpixels and 0.5 ms of CPU a frame redrawn,
@@ -173,38 +131,103 @@ releases may change APIs.
   snapped away is paid back a whole step at a time, so game time keeps up.
 - `RendererBackendStats::gpu_frames_sampled` and `last_gpu_frame_span`: when
   new GPU timing arrived, and how many frames it covers.
-- Render probe: `--probe-render[=PATH]` on any `run_scene_app` game renders each
-  headless frame, compares it with the frames before it tile by tile, and
-  writes a `kin.render_probe/1` report of flicker (jitter, frame popping, single
-  wrong frames) and spikes, with when and where each happened. `--probe-fail`
-  fails the run when it finds anything; `--probe-tile=N` sets the tile size.
-  `kin::RenderProbe` runs the same analysis on frames from anywhere. The
-  `KIN_ENABLE_RENDER_PROBE` CMake option (on by default) compiles it out.
-- Render probe events name their culprits: the entities and render components
-  (or named scopes, or scenes) whose draws changed where the event happened,
-  and how (`moved`, `frame`, `color`, `appeared`, ...). `KIN_DRAW_SCOPE(label)`
-  and `KIN_DRAW_ENTITY(entity, component)` name draws made outside the ECS
-  render components.
-- Determinism check: `--check-determinism[=PATH]` on any `run_scene_app` game
-  runs it three times in lockstep (twice alike, once with one job worker),
-  hashing each frame's state, and reports the first frame where a run differs
-  with the entities, components and report fields that differ
-  (`kin.determinism/1`). `kin::hash_state` / `kin::describe_state` hash and list
-  a scene stack's state. The `KIN_ENABLE_DETERMINISM_CHECK` CMake option (on by
-  default) compiles it out.
-- `KIN_JOB_WORKERS` sets the default job system's worker count.
-- `ProcessOptions::environment` sets variables for a child process.
+- Transforms: `Renderer2D::push_transform` / `pop_transform` / `scoped_transform`
+  draw through a `kin::Affine2` (`kin/core/affine.hpp`), on both backends.
+  Mapped on the CPU, so draws still batch across transform changes, and sprite
+  batches stay instanced under rotation and even scale. Through a zoomed,
+  turned camera 20,000 quads take about 5% more CPU to record
+  (`kin_draw_bench 300 20000 camera`); untransformed drawing costs what it did.
+- `Camera2D::zoom` and `rotation`, about the viewport's centre, with
+  `view_transform()`, `center()` and `look_at()`; `world_to_screen`,
+  `screen_to_world` and `visible_rect` follow them, and a `RenderQueue` flushed
+  with such a camera draws through it.
+- `Transform2D::scale` and `WorldTransform::scale`; `kin::world_transform(entity)`
+  and `kin::compose(parent, child)`.
+- Vector shapes (`kin/renderer/path.hpp`, `shape.hpp`, `svg.hpp`):
+  - `kin::Path` (lines, curves, SVG arcs; rectangles, circles, polygons, arcs,
+    pies, stars; SVG path data read and written), filled under non-zero or
+    even-odd with holes, stroked with joins, caps and miter limits;
+  - anti-aliased at any scale: one pixel of soft edge from screen-space
+    derivatives on SDL_GPU, pulled in on the CPU on SDL_Renderer;
+  - circles, ellipses, rounded and sharp rectangles and capsules drawn whole
+    on SDL_GPU (one quad, the outline from its distance per pixel), as you go
+    or kept in meshes; 2000 cached tokens record in 0.88 ms (3.5 ms as
+    triangles);
+  - `kin::Shape`: elements that compose (`add(shape, transform)`), tessellated
+    once into a `ShapeMesh` drawn by `Renderer2D::draw_shape` through any
+    transform and tint;
+  - SVG-lite: `read_svg` / `load_svg` read the flat-colour subset vector
+    editors export (paths, basic shapes, groups, `<use>`, transforms, styles,
+    inheritance), listing what they skip; `write_svg` / `save_svg` write it;
+  - immediate drawing: `fill_circle`, `draw_circle`, `fill_ellipse`,
+    `draw_ellipse`, `fill_polygon`, `draw_polygon`, `draw_polyline`,
+    `draw_line` with a width and cap, `draw_arc`, `fill_pie`, `fill_path`,
+    `stroke_path`;
+  - `kin::ShapeRenderer` and `RenderQueue::draw_shape`; `games/shapes_demo`.
+  - New dependency: mapbox earcut.hpp 3.2.4 (ISC), header-only, for fills.
+- Text that scales: TTF fonts made with `ui2::TextRendering::Sdf`
+  (`load_ttf_font`, `system_ui_font`, `system_ui_font_bold`) draw from one
+  atlas of signed distance fields, sharp at any size, zoom or turn, under any
+  transform or camera; their metrics scale linearly. The atlas is made once per
+  renderer from glyphs drawn at twice the size, distance-transformed on the job
+  system (about 15 ms). `ui2::draw_text_outlined` draws an outline from the
+  field in one pass (four stamped copies on other fonts); widgets'
+  `TextStyle::outline_width` uses it. `Renderer2D::draw_distance_field` draws
+  any distance-field texture. SDL_GPU (`capabilities().distance_fields`);
+  drawn as Bitmap elsewhere.
+- Clips and masks: `Renderer2D::push_clip(path, rule)` clips to any path,
+  anti-aliased, under the transform; `push_mask(draw, options)` masks with
+  whatever `draw` draws, and `push_mask(texture, dest, options)` with a texture.
+  `kin::MaskOptions` (`kin/renderer/mask.hpp`) reads a mask's alpha or
+  luminance, as a soft `Alpha` mask or an all-or-nothing `Stencil` at a
+  threshold, optionally inverted, at a fraction of the resolution. Rectangles,
+  paths and masks share one stack, nest, and pop with `pop_clip()`;
+  `scoped_clip` and `scoped_mask` return guards. SDL_GPU composites in a shader
+  (`capabilities().masks`); SDL's renderer by blending, or on the CPU for
+  luminance and stencil masks and its software renderer. The shapes demo gives
+  its planets night sides and a telescope following the rocket.
+- Hard clips: `push_clip(path, rule, kin::ClipEdge::Hard)` keeps whole pixels;
+  on SDL_GPU (`capabilities().stencil_clips`) it draws into a pooled stencil
+  buffer instead of layers, about five times cheaper than a smooth clip, and
+  stencil-mode masks read their mask into it, drawing what they mask straight
+  on.
+- `kin::ClipRegion` (`kin/renderer/clip.hpp`): a clip as a value (a path, a
+  mask, a texture), pushed with `Renderer2D::push_clip(region)`.
+- `RenderQueue::draw_group(key, content, clip)`: a queue drawn as one command
+  at `key` through a clip, so clipped content keeps together in a sorted queue.
+- `kin::ClipGroup`: clips an entity's renderers and its descendants' to a
+  region in its own space, drawn as one group at its layer and order.
+- `Path::rounded_rect(rect, radii)` with a radius per corner;
+  `ui2::Context::push_clip(bounds, corner_radii)`, used by lists, tables and
+  trees to keep scrolled rows inside their panel's rounded corners.
+- Layers on SDL's renderer: `begin_layer` draws into a target and lays it over
+  at its opacity, as on SDL_GPU, instead of drawing straight through.
+- Colour: `Renderer2D::set_color_space(ColorSpace::Linear, hdr)` blends in
+  linear light (sRGB colour textures decoded as sampled, colours decoded in the
+  vertex shaders, sRGB or float targets) and encodes on the way out; `hdr`
+  keeps light above white in a 16-bit float scene. Opt-in, also as
+  `GameWindowInfo::color_space` / `hdr`; the gamma pipeline stays the default.
+  `set_color_output(ColorOutput)`: exposure, tonemapping (`Reinhard`, `Aces`),
+  grading through a 3D LUT cross-faded to a second, and dithering, in one pass
+  before the swapchain (about 0.13 ms at 1080p). SDL_GPU
+  (`capabilities().linear_color`, `color_output`).
+- `kin::ColorLut` (`kin/renderer/color_grading.hpp`): LUTs from `.cube` files
+  and PNG strips or grids, a neutral one to grade in an image editor, applied
+  on the CPU too.
+- Colour maths: `srgb_to_linear`, `linear_to_srgb`, `LinearColor`, OKLab
+  (`to_oklab`, `from_oklab`), and `mix(a, b, t, ColorMix)` in sRGB, linear
+  light or OKLab; `Gradient::mix`.
+- The lighting demo draws in linear HDR, tonemapped (ACES) and graded per
+  time of day; C switches to the gamma pipeline, G toggles grading.
+- Mirrored sprites: `SpriteRenderer::flip_x` / `flip_y` and
+  `TextureRenderer::flip_x` / `flip_y`, mirrored about the pivot; a negative
+  world scale mirrors too (and cancels a flag). `kin::Flip` on
+  `Renderer2D::draw_texture` / `draw_sprite`, the `RenderQueue` texture and
+  sprite calls, and `SpriteInstance`; flipped sprites still batch, on both
+  backends. Animatable as `SpriteRenderer.flip_x` / `flip_y`.
 
 ### Changed
 
-- Children follow their parents' rotation and scale: `propagate_transforms()`
-  (and `world_position()`) turn and scale a child's position by its parents'.
-  Before, only positions and angles were added, so a child of a turned parent
-  stayed put while the parent turned.
-- Renderer offsets, sizes and line ends go through the entity's world
-  transform; `TextureRenderer` and `RectRenderer` now turn with their entity
-  (they ignored `rotation`), and queued `FillRect` / `DrawRect` commands honour
-  `rotation` and `pivot`.
 - SDL_GPU shader draws with the same params (and shader, sources, state) in a
   row are one draw call, not one each: 2000 small shader surfaces a frame went
   from 0.47 to 0.24 ms back to back (`kin_draw_bench 60 1 surfaces`).
@@ -238,33 +261,23 @@ releases may change APIs.
 - `gpu.frame` is recorded only on frames with a new GPU sample, instead of
   repeating the last one; a sample taken after untimed frames (the GPU far
   behind the CPU) is their average rather than their sum.
+- Children follow their parents' rotation and scale: `propagate_transforms()`
+  (and `world_position()`) turn and scale a child's position by its parents'.
+  Before, only positions and angles were added, so a child of a turned parent
+  stayed put while the parent turned.
+- Renderer offsets, sizes and line ends go through the entity's world
+  transform; `TextureRenderer` and `RectRenderer` now turn with their entity
+  (they ignored `rotation`), and queued `FillRect` / `DrawRect` commands honour
+  `rotation` and `pivot`.
+- ui2 lists, tables and trees keep their scrolled rows inside their panel's
+  rounded corners (`Context::push_clip(bounds, corner_radii)`).
 
 ### Fixed
 
-- Worlds in one process can register components in any order: flecs 4.0.5
-  (from 4.0.3) keeps C++ component ids per world. Before, a component first
-  registered in a second world could take the id another type had in the
-  first, and setting that type wrote past the component's storage (the
-  prefab tests crashed once `Transform2D` grew). The animation preview and the
-  tests run several worlds.
-- Physics bodies under a parent: the ECS sync works in the world and converts
-  to and from the parent's space. A simulated body (`sync_from_physics`) stays
-  put in the world when its parent moves; one the entity leads
-  (`sync_to_physics`) follows its parent. Bodies under bodies are written
-  parents first. Before, world positions were written into the
-  parent-relative `Transform2D`. `kin::to_local(parent, world)` (the reverse of
-  `compose`) and `kin::current_world_transform(entity)` support it.
-- Bitmap TTF fonts drawn at a scale that changes every frame opened a font face
-  and built a glyph atlas for every value, kept for good: now the most recent 12
-  faces and 8 atlases are kept.
-- `fill_rounded_rect` and `draw_rounded_rect` on SDL_Renderer: a border drew
-  as a faint one-pixel line instead of its width. Both now draw as shape
-  primitives on every backend.
-- The render probe traces draws where the renderer's transform puts them,
-  not where they would be without it.
-- The ECS physics sync converts angles: `Transform2D::rotation` is degrees, as
-  everywhere in kin, and `PhysicsWorld` radians, as Box2D. Before, radians were
-  written into `rotation`, so physics bodies' sprites barely turned.
+- ui2 text moves the pen by each glyph's advance, not the width of its bitmap:
+  italic text is no longer letter-spaced, glyphs that overhang (an f or a j in
+  many faces) no longer push the next one away, and drawn text matches
+  `measure_text` more closely.
 - SDL_GPU: a texture released right after it was drawn, before the frame was
   flushed, left the queued draw a dangling handle: a crash, or on Vulkan a lost
   device once SDL destroyed the image. The backend now keeps the textures the
@@ -280,10 +293,33 @@ releases may change APIs.
   submission, whose resources it then freed when the old frame finished: on
   Vulkan, a lost device a few seconds into `--profile`. Those frames are now
   submitted without a fence (and go untimed).
-- ui2 text moves the pen by each glyph's advance, not the width of its bitmap:
-  italic text is no longer letter-spaced, glyphs that overhang (an f or a j in
-  many faces) no longer push the next one away, and drawn text matches
-  `measure_text` more closely.
+- Worlds in one process can register components in any order: flecs 4.0.5
+  (from 4.0.3) keeps C++ component ids per world. Before, a component first
+  registered in a second world could take the id another type had in the
+  first, and setting that type wrote past the component's storage (the
+  prefab tests crashed once `Transform2D` grew). The animation preview and the
+  tests run several worlds.
+- Physics bodies under a parent: the ECS sync works in the world and converts
+  to and from the parent's space. A simulated body (`sync_from_physics`) stays
+  put in the world when its parent moves; one the entity leads
+  (`sync_to_physics`) follows its parent. Bodies under bodies are written
+  parents first. Before, world positions were written into the
+  parent-relative `Transform2D`. `kin::to_local(parent, world)` (the reverse of
+  `compose`) and `kin::current_world_transform(entity)` support it.
+- The ECS physics sync converts angles: `Transform2D::rotation` is degrees, as
+  everywhere in kin, and `PhysicsWorld` radians, as Box2D. Before, radians were
+  written into `rotation`, so physics bodies' sprites barely turned.
+- `fill_rounded_rect` and `draw_rounded_rect` on SDL_Renderer: a border drew
+  as a faint one-pixel line instead of its width. Both now draw as shape
+  primitives on every backend.
+- The render probe traces draws where the renderer's transform puts them,
+  not where they would be without it.
+- Bitmap TTF fonts drawn at a scale that changes every frame opened a font face
+  and built a glyph atlas for every value, kept for good: now the most recent 12
+  faces and 8 atlases are kept.
+- SDL_Renderer: a texture kept past its renderer (as the system fonts' static
+  cache keeps glyph atlases) no longer frees a texture of the next renderer
+  when it goes; the examples crashed on Windows.
 
 ## [0.2.3] — 2026-10-01
 
