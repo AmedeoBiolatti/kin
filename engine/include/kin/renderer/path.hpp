@@ -30,6 +30,20 @@ struct StrokeStyle {
     friend bool operator==(const StrokeStyle&, const StrokeStyle&) = default;
 };
 
+// What a path made by Path::rect, rounded_rect, circle or ellipse is, kept so
+// it can be drawn analytically (one quad, not triangles): a rounded rectangle
+// (circles included: corner radius = half size) or an ellipse, centred on the
+// origin of `transform`.
+struct PathPrimitive {
+    enum class Kind : u8 { RoundedRect, Ellipse };
+    Kind kind = Kind::RoundedRect;
+    Vec2f half_size{};
+    f32 radius = 0.0f; // RoundedRect: corner radius
+    Affine2 transform{};
+
+    friend bool operator==(const PathPrimitive&, const PathPrimitive&) = default;
+};
+
 // A flattened subpath: its points, and whether it closes back to the first.
 struct PathContour {
     std::vector<Vec2f> points;
@@ -71,6 +85,9 @@ public:
     bool empty() const { return _verbs.empty(); }
     std::span<const Verb> verbs() const { return _verbs; }
     std::span<const Vec2f> points() const { return _points; }
+    // Set while the path is still just a rect, rounded_rect, circle or ellipse
+    // (moved or appended whole into an empty path); any other edit clears it.
+    const std::optional<PathPrimitive>& primitive() const { return _primitive; }
     // The box around the points, control points included: the path is inside.
     Rectf bounds() const;
     Path transformed(const Affine2& transform) const;
@@ -90,6 +107,7 @@ private:
     std::vector<Verb> _verbs;
     std::vector<Vec2f> _points;
     Vec2f _subpath_start{};
+    std::optional<PathPrimitive> _primitive;
 };
 
 } // namespace kin

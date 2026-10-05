@@ -663,7 +663,7 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
 }
 
 void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
-                                           Color tint) {
+                                           u32 index_base, Color tint) {
     if (indices.empty() || tint.a == 0) {
         return;
     }
@@ -698,7 +698,10 @@ void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
                       static_cast<f32>(v.color.a) * static_cast<f32>(tint.a) / 65025.0f * cover},
             .tex_coord = {0.0f, 0.0f}});
     }
-    _shape_indices.assign(indices.begin(), indices.end());
+    _shape_indices.resize(indices.size());
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        _shape_indices[i] = static_cast<int>(indices[i] - index_base);
+    }
     ++_stats.direct_rect_fills;
     SDL_RenderGeometry(_handle, nullptr, _shape_vertices.data(), static_cast<int>(_shape_vertices.size()),
                        _shape_indices.data(), static_cast<int>(_shape_indices.size()));

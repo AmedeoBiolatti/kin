@@ -47,6 +47,7 @@ struct RendererBackendCapabilities {
     bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
     bool transforms = false;      // set_transform() honoured (Renderer2D::push_transform)
     bool shapes = false;          // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
+    bool shape_primitives = false; // draw_shape_primitives() draws primitives whole
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
@@ -351,9 +352,14 @@ public:
     // Anti-aliased triangles (Renderer2D::draw_shape): each vertex's colour
     // times `tint`, faded out over the pixel past the outline by its `edge`
     // (measured on the GPU, or from the transform's scale where shaders cannot
-    // measure pixels). Mapped like any draw.
+    // measure pixels). `indices` count from `index_base`: vertices[i -
+    // index_base]. Mapped like any draw.
     virtual void draw_shape_mesh(std::span<const ShapeVertex> /*vertices*/, std::span<const u32> /*indices*/,
-                                 Color /*tint*/) {}
+                                 u32 /*index_base*/, Color /*tint*/) {}
+    // Primitives drawn whole, outlines computed per pixel (circles, ellipses,
+    // rounded rectangles); false where the backend cannot, and Renderer2D
+    // tessellates them instead.
+    virtual bool draw_shape_primitives(std::span<const ShapePrimitive> /*primitives*/, Color /*tint*/) { return false; }
     // Worker threads the backend may use for large batches (null: none).
     virtual void set_job_system(JobSystem*) {}
 

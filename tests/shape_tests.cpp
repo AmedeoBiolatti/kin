@@ -2,6 +2,7 @@
 #include <kin/renderer/shape.hpp>
 #include <kin/renderer/svg.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -37,17 +38,22 @@ kin::f32 core_area(const kin::ShapeMesh& mesh) {
     return static_cast<kin::f32>(area);
 }
 
-kin::ShapeMesh fill(const kin::Path& path, kin::FillRule rule = kin::FillRule::NonZero) {
-    kin::Shape shape;
-    shape.fill(path, kin::colors::white, rule);
-    return shape.mesh();
+// The tessellator itself (Shape::mesh keeps circles and rectangles whole).
+kin::ShapeMesh fill(const kin::Path& path, kin::FillRule rule = kin::FillRule::NonZero, kin::f32 fringe = 2.0f) {
+    std::vector<kin::PathContour> contours;
+    path.flatten(contours, 0.25f);
+    kin::ShapeMesh mesh;
+    kin::tessellate_fill(mesh, contours, rule, kin::colors::white, fringe);
+    return mesh;
 }
 
 // Round joins and caps finely made, so their areas match a circle's.
 kin::ShapeMesh stroke(const kin::Path& path, kin::StrokeStyle style) {
-    kin::Shape shape;
-    shape.stroke(path, kin::colors::white, style);
-    return shape.mesh({.tolerance = 0.001f});
+    std::vector<kin::PathContour> contours;
+    path.flatten(contours, 0.001f);
+    kin::ShapeMesh mesh;
+    kin::tessellate_stroke(mesh, contours, style, kin::colors::white, 2.0f, 0.001f);
+    return mesh;
 }
 
 void expect_area(const char* what, kin::f32 got, kin::f32 want, kin::f32 eps) {
@@ -109,11 +115,11 @@ void test_svg_path_data() {
     assert(!kin::Path::parse_svg("M0 0 X1 1"));
     assert(!kin::Path::parse_svg("10 10"));
 
-    // Written and read back, the same path.
+    // Written and read back, the same outline (path data does not say "circle").
     for (const kin::Path& path : {kin::Path::circle({3.5f, -2.25f}, 7.0f), kin::Path::star({0, 0}, 10, 4, 5, 12.5f),
                                   kin::Path::rounded_rect({0, 0, 20, 10}, 3), kin::Path::pie({0, 0}, 5, 30, 300)}) {
         const std::optional<kin::Path> back = kin::Path::parse_svg(path.to_svg());
-        assert(back && *back == path);
+        assert(back && std::ranges::equal(back->verbs(), path.verbs()) && std::ranges::equal(back->points(), path.points()));
     }
 }
 
@@ -146,11 +152,7 @@ void test_fills() {
 
     // The soft edge: every vertex at 0 or -fringe, the rim outside the outline,
     // a fringe's width out (the corners along their miters).
-    kin::ShapeBuildOptions options;
-    options.fringe = 3.0f;
-    kin::Shape square;
-    square.fill(kin::Path::rect({0, 0, 10, 10}), kin::colors::white);
-    const kin::ShapeMesh mesh = square.mesh(options);
+    const kin::ShapeMesh mesh = fill(kin::Path::rect({0, 0, 10, 10}), kin::FillRule::NonZero, 3.0f);
     for (const kin::ShapeVertex& v : mesh.vertices) {
         assert(v.edge == 0.0f || v.edge == -3.0f);
         if (v.edge == -3.0f) {
@@ -205,6 +207,62 @@ void test_strokes() {
     assert(near(rim, -2.0f, 1e-4f));
 }
 
+// Circles, ellipses and rounded rectangles are kept as primitives, to be drawn
+// whole: in paths while they are nothing else, in meshes where their paint
+// allows, in paint order with the triangles.
+void test_primitives() {
+    using Kind = kin::PathPrimitive::Kind;
+    const auto prim = [](const kin::Path& p) { return p.primitive(); };
+    assert(prim(kin::Path::circle({1, 2}, 3)) && prim(kin::Path::circle({1, 2}, 3))->kind == Kind::RoundedRect &&
+           prim(kin::Path::circle({1, 2}, 3))->radius == 3.0f);
+    assert(prim(kin::Path::ellipse({0, 0}, {4, 2}))->kind == Kind::Ellipse);
+    assert(prim(kin::Path::rect({0, 0, 10, 4}))->radius == 0.0f);
+    assert((prim(kin::Path::rect({0, 0, 10, 4}))->transform == kin::Affine2::translation({5, 2})));
+    assert(prim(kin::Path::rounded_rect({0, 0, 10, 4}, 9))->radius == 2.0f); // at most half the shorter side
+    kin::Path edited = kin::Path::circle({0, 0}, 3);
+    edited.line_to({9, 9});
+    assert(!edited.primitive() && !kin::Path::star({0, 0}, 5, 2, 5).primitive());
+    kin::Path moved;
+    moved.append(kin::Path::circle({0, 0}, 3), kin::Affine2::translation({7, 0}));
+    assert(moved.primitive() && near(moved.primitive()->transform.apply({0, 0}), {7, 0}));
+    kin::Path two = kin::Path::circle({0, 0}, 3);
+    two.append(kin::Path::circle({9, 0}, 3));
+    assert(!two.primitive());
+
+    // A mesh: the star as triangles between two primitives, in order.
+    kin::Shape shape;
+    shape.fill_and_stroke(kin::Path::circle({0, 0}, 10), kin::colors::white, kin::colors::black, {.width = 2})
+        .fill(kin::Path::star({0, 0}, 8, 3, 5), kin::Color::rgb(255, 0, 0))
+        .stroke(kin::Path::rect({-20, -20, 40, 40}), kin::colors::black, {.width = 1});
+    const kin::ShapeMesh mesh = shape.mesh();
+    assert(mesh.primitives.size() == 2 && mesh.runs.size() == 3);
+    assert(mesh.runs[0].primitives && !mesh.runs[1].primitives && mesh.runs[2].primitives);
+    assert(mesh.primitives[0].fill.a == 255 && mesh.primitives[0].stroke_width == 2.0f);
+    assert(mesh.primitives[1].fill.a == 0 && mesh.primitives[1].radius == 0.0f && !mesh.primitives[1].round_join);
+    assert(near(mesh.bounds.x, -20.5f, 1e-3f) && near(mesh.bounds.w, 41.0f, 1e-3f));
+    // What cannot be drawn whole is tessellated: bevelled corners, thick
+    // strokes on ellipses.
+    kin::Shape bevel;
+    bevel.stroke(kin::Path::rect({0, 0, 10, 10}), kin::colors::white, {.width = 2, .join = kin::LineJoin::Bevel});
+    assert(bevel.mesh().primitives.empty() && !bevel.mesh().indices.empty());
+    kin::Shape thick;
+    thick.stroke(kin::Path::ellipse({0, 0}, {10, 4}), kin::colors::white, {.width = 3});
+    assert(thick.mesh().primitives.empty());
+    // Appended, with the transform.
+    kin::ShapeMesh two_meshes = mesh;
+    two_meshes.append(mesh, kin::Affine2::translation({100, 0}));
+    // (Primitives after primitives join one run: 5 runs, not 6.)
+    assert(two_meshes.primitives.size() == 4 && two_meshes.runs.size() == 5);
+    assert(two_meshes.runs[2].primitives && two_meshes.runs[2].count == 2);
+    assert(near(two_meshes.primitives[2].transform.apply({0, 0}), {100, 0}));
+    assert(two_meshes.runs[3].first == static_cast<kin::u32>(mesh.indices.size()) &&
+           two_meshes.runs[3].first_vertex == static_cast<kin::u32>(mesh.vertices.size()));
+    // As triangles (backends without them), a circle is a circle.
+    kin::ShapeMesh tessellated;
+    kin::tessellate_primitive(tessellated, mesh.primitives[0], 1.0f, 0.001f);
+    expect_area("tessellated circle fill and stroke", core_area(tessellated), pi * 100.0f + 2.0f * pi * 10.0f * 2.0f, 1.0f);
+}
+
 void test_composition() {
     kin::Shape dot;
     dot.fill(kin::Path::circle({0, 0}, 5), kin::Color::rgb(255, 0, 0));
@@ -216,12 +274,14 @@ void test_composition() {
     assert((row.elements[3].transform == kin::Affine2::translation({30, 20})));
     const kin::Rectf b = row.bounds();
     assert(near(b.x, 5.0f, 1e-3f) && near(b.y, -5.0f, 1e-3f) && near(b.w, 30.0f, 1e-3f) && near(b.h, 30.0f, 1e-3f));
-    expect_area("four dots", core_area(row.mesh({.tolerance = 0.001f})), 4.0f * pi * 25.0f, 1.0f);
+    // Four dots, each a circle drawn whole, where they were placed.
+    const kin::ShapeMesh dots = row.mesh();
+    assert(dots.primitives.size() == 4 && dots.indices.empty());
+    assert(near(dots.primitives[3].transform.apply({0, 0}), {30, 20}) && dots.primitives[3].radius == 5.0f);
     // Meshes compose too.
     kin::ShapeMesh twice = dot.mesh();
     twice.append(dot.mesh(), kin::Affine2::translation({100, 0}));
-    assert(twice.vertices.size() == 2 * dot.mesh().vertices.size());
-    assert(twice.bounds.x + twice.bounds.w > 104.0f);
+    assert(twice.primitives.size() == 2 && twice.bounds.x + twice.bounds.w > 104.0f);
 }
 
 void test_svg_reading() {
@@ -299,6 +359,8 @@ void test_svg_round_trip() {
     std::vector<std::string> warnings;
     const std::optional<kin::Shape> back = kin::read_svg(svg, nullptr, &warnings);
     assert(back && warnings.empty() && back->elements.size() == shape.elements.size());
+    // A circle and a rectangle write as <circle> and <rect> and read back as primitives.
+    assert(svg.find("<circle") != std::string::npos && svg.find("<rect") != std::string::npos);
     for (std::size_t i = 0; i < shape.elements.size(); ++i) {
         const kin::ShapeElement& a = shape.elements[i];
         const kin::ShapeElement& b = back->elements[i];
@@ -322,6 +384,7 @@ int main() {
     test_svg_path_data();
     test_fills();
     test_strokes();
+    test_primitives();
     test_composition();
     test_svg_reading();
     test_svg_round_trip();

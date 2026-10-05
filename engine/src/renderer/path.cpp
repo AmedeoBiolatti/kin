@@ -62,6 +62,7 @@ void Path::ensure_start() {
 }
 
 Path& Path::move_to(Vec2f p) {
+    _primitive.reset();
     _verbs.push_back(Verb::Move);
     _points.push_back(p);
     _subpath_start = p;
@@ -69,6 +70,7 @@ Path& Path::move_to(Vec2f p) {
 }
 
 Path& Path::line_to(Vec2f p) {
+    _primitive.reset();
     ensure_start();
     _verbs.push_back(Verb::Line);
     _points.push_back(p);
@@ -76,6 +78,7 @@ Path& Path::line_to(Vec2f p) {
 }
 
 Path& Path::quad_to(Vec2f control, Vec2f p) {
+    _primitive.reset();
     ensure_start();
     _verbs.push_back(Verb::Quad);
     _points.push_back(control);
@@ -84,6 +87,7 @@ Path& Path::quad_to(Vec2f control, Vec2f p) {
 }
 
 Path& Path::cubic_to(Vec2f control1, Vec2f control2, Vec2f p) {
+    _primitive.reset();
     ensure_start();
     _verbs.push_back(Verb::Cubic);
     _points.push_back(control1);
@@ -149,6 +153,7 @@ Path& Path::arc_to(Vec2f radii, f32 rotation, bool large_arc, bool sweep, Vec2f 
 }
 
 Path& Path::close() {
+    _primitive.reset();
     if (!_verbs.empty() && _verbs.back() != Verb::Close) {
         _verbs.push_back(Verb::Close);
     }
@@ -156,6 +161,12 @@ Path& Path::close() {
 }
 
 Path& Path::append(const Path& other, const Affine2& transform) {
+    // Into an empty path, a primitive stays one, moved by `transform`.
+    std::optional<PathPrimitive> primitive;
+    if (_verbs.empty() && other._primitive) {
+        primitive = other._primitive;
+        primitive->transform = transform * primitive->transform;
+    }
     std::size_t at = 0;
     for (const Verb verb : other._verbs) {
         const auto next = [&] { return transform.apply(other._points[at++]); };
@@ -175,12 +186,15 @@ Path& Path::append(const Path& other, const Affine2& transform) {
         case Verb::Close: close(); break;
         }
     }
+    _primitive = primitive;
     return *this;
 }
 
 Path Path::rect(Rectf r) {
     Path path;
     path.move_to({r.x, r.y}).line_to({r.x + r.w, r.y}).line_to({r.x + r.w, r.y + r.h}).line_to({r.x, r.y + r.h}).close();
+    path._primitive = PathPrimitive{.half_size = {std::abs(r.w) * 0.5f, std::abs(r.h) * 0.5f},
+                                    .transform = Affine2::translation({r.x + r.w * 0.5f, r.y + r.h * 0.5f})};
     return path;
 }
 
@@ -202,6 +216,9 @@ Path Path::rounded_rect(Rectf r, f32 radius) {
         .line_to({x0, y0 + radius})
         .cubic_to({x0, y0 + k}, {x0 + k, y0}, {x0 + radius, y0})
         .close();
+    path._primitive = PathPrimitive{.half_size = {std::abs(r.w) * 0.5f, std::abs(r.h) * 0.5f},
+                                    .radius = radius,
+                                    .transform = Affine2::translation({r.x + r.w * 0.5f, r.y + r.h * 0.5f})};
     return path;
 }
 
@@ -218,6 +235,11 @@ Path Path::ellipse(Vec2f c, Vec2f r) {
         .cubic_to({c.x - r.x, c.y - ky}, {c.x - kx, c.y - r.y}, {c.x, c.y - r.y})
         .cubic_to({c.x + kx, c.y - r.y}, {c.x + r.x, c.y - ky}, {c.x + r.x, c.y})
         .close();
+    const Vec2f half{std::abs(r.x), std::abs(r.y)};
+    path._primitive = half.x == half.y
+                          ? PathPrimitive{.half_size = half, .radius = half.x, .transform = Affine2::translation(c)}
+                          : PathPrimitive{.kind = PathPrimitive::Kind::Ellipse, .half_size = half,
+                                          .transform = Affine2::translation(c)};
     return path;
 }
 

@@ -60,7 +60,8 @@ public:
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
 
     void set_blend_mode(BlendMode mode) override;
-    void draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices, Color tint) override;
+    void draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices, u32 index_base,
+                         Color tint) override;
     void set_transform(const Affine2& transform) override {
         _transform = transform;
         _transformed = !transform.is_identity();

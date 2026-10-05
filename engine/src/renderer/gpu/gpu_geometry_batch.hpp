@@ -71,7 +71,17 @@ struct GpuShapeVertex {
     f32 edge = 0.0f; // how far past the outline, negated (shape.frag)
 };
 
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices };
+// A shape primitive (circle, ellipse, rounded rectangle) drawn whole: one
+// instance, a quad round it (sdf_shape.vert / .frag).
+struct GpuSdfInstance {
+    f32 a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f;  // its own units to draw coordinates
+    f32 tx = 0.0f, ty = 0.0f, half_w = 0.0f, half_h = 0.0f;
+    f32 radius = 0.0f, half_stroke = 0.0f, margin = 0.0f, kind = 0.0f; // kind: 0 rounded, 1 sharp, 2 ellipse
+    u8 fill_r = 0, fill_g = 0, fill_b = 0, fill_a = 0;
+    u8 stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 0;
+};
+
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances };
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {
@@ -167,13 +177,17 @@ public:
                         GpuBlendMode blend,
                         SDL_GPUSampler* sampler = nullptr);
 
-    // Indexed shape triangles (shape.vert): `indices` count from the first of
-    // `vertices`. Consecutive pushes with identical state coalesce.
-    void push_shapes(std::span<const GpuShapeVertex> vertices, std::span<const u32> indices, SDL_GPUShader* fragment,
-                     SDL_Rect scissor, GpuBlendMode blend);
+    // Indexed shape triangles (shape.vert): `indices` count from `index_base`
+    // (vertices[i - index_base]). Consecutive pushes with identical state coalesce.
+    void push_shapes(std::span<const GpuShapeVertex> vertices, std::span<const u32> indices, u32 index_base,
+                     SDL_GPUShader* fragment, SDL_Rect scissor, GpuBlendMode blend);
+    // Shape primitives, one instance each (sdf_shape.vert). Coalesce likewise.
+    void push_sdf(std::span<const GpuSdfInstance> instances, SDL_GPUShader* fragment, SDL_Rect scissor,
+                  GpuBlendMode blend);
 
     bool empty() const {
-        return _vertices.empty() && _instances.empty() && _shader_vertices.empty() && _shape_indices.empty();
+        return _vertices.empty() && _instances.empty() && _shader_vertices.empty() && _shape_indices.empty() &&
+               _sdf_instances.empty();
     }
 
     // The pixels everything flushed since the last call covered, in the
@@ -199,6 +213,7 @@ public:
         SDL_GPUShader* instance_shader = nullptr; // sprite_instanced.vert, for instance ranges
         SDL_GPUShader* shader_vertex_shader = nullptr; // shader_geometry.vert, for GpuShaderVertex ranges
         SDL_GPUShader* shape_vertex_shader = nullptr;  // shape.vert, for GpuShapeVertex ranges
+        SDL_GPUShader* sdf_vertex_shader = nullptr;    // sdf_shape.vert, for GpuSdfInstance ranges
         SDL_GPUShader* default_fragment = nullptr; // used when a range's fragment is null
         SDL_GPUTexture* white_texture = nullptr;   // used when a range's texture is null
         SDL_GPUSampler* sampler = nullptr;
@@ -249,6 +264,7 @@ private:
     std::vector<GpuShaderVertex> _shader_vertices;
     std::vector<GpuShapeVertex> _shape_vertices;
     std::vector<u32> _shape_indices; // into _shape_vertices
+    std::vector<GpuSdfInstance> _sdf_instances;
     std::vector<Range> _ranges;
     std::vector<u8> _uniform_bytes;
     std::vector<SDL_GPUTextureSamplerBinding> _extra_bindings;
@@ -258,6 +274,7 @@ private:
     GpuBuffer _shader_vertex_buffer;
     GpuBuffer _shape_vertex_buffer;
     GpuBuffer _shape_index_buffer;
+    GpuBuffer _sdf_buffer;
     GpuBuffer _quad_indices; // 0 1 2 0 2 3, 4 5 6 4 6 7, ...: made once
     f64 _area = 0.0;         // covered by what is pushed, in draw coordinates
     struct Box {

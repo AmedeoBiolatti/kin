@@ -483,6 +483,8 @@ public:
             ry = std::clamp(ry, 0.0f, h * 0.5f);
             if (rx <= 0.0f || ry <= 0.0f) {
                 path = Path::rect({x, y, w, h});
+            } else if (rx == ry) {
+                path = Path::rounded_rect({x, y, w, h}, rx);
             } else {
                 path.move_to({x + rx, y})
                     .line_to({x + w - rx, y})
@@ -762,11 +764,49 @@ std::string write_svg(const Shape& shape) {
     number(out, box.h);
     out += "\">\n";
     for (const ShapeElement& element : shape.elements) {
-        out += "  <path";
+        // A circle, ellipse or rectangle as itself (it reads back as one, to be
+        // drawn whole); anything else as a path.
+        const std::optional<PathPrimitive>& shape = element.path.primitive();
+        const bool simple = shape && shape->transform.is_translation();
+        const auto attribute = [&](std::string_view key, f32 value) {
+            out += ' ';
+            out += key;
+            out += "=\"";
+            number(out, value);
+            out += '"';
+        };
+        if (simple && shape->kind == PathPrimitive::Kind::Ellipse) {
+            out += "  <ellipse";
+        } else if (simple && shape->half_size.x == shape->half_size.y && shape->radius == shape->half_size.x) {
+            out += "  <circle";
+        } else if (simple) {
+            out += "  <rect";
+        } else {
+            out += "  <path";
+        }
         if (!element.id.empty()) {
             out += " id=\"" + escape(element.id) + "\"";
         }
-        out += " d=\"" + element.path.to_svg() + "\"";
+        if (!simple) {
+            out += " d=\"" + element.path.to_svg() + "\"";
+        } else if (shape->kind == PathPrimitive::Kind::Ellipse) {
+            attribute("cx", shape->transform.tx);
+            attribute("cy", shape->transform.ty);
+            attribute("rx", shape->half_size.x);
+            attribute("ry", shape->half_size.y);
+        } else if (shape->half_size.x == shape->half_size.y && shape->radius == shape->half_size.x) {
+            attribute("cx", shape->transform.tx);
+            attribute("cy", shape->transform.ty);
+            attribute("r", shape->radius);
+        } else {
+            attribute("x", shape->transform.tx - shape->half_size.x);
+            attribute("y", shape->transform.ty - shape->half_size.y);
+            attribute("width", 2.0f * shape->half_size.x);
+            attribute("height", 2.0f * shape->half_size.y);
+            if (shape->radius > 0.0f) {
+                attribute("rx", shape->radius);
+            }
+        }
         if (element.fill) {
             color_attributes(out, "fill", *element.fill);
             if (element.fill_rule == FillRule::EvenOdd) out += " fill-rule=\"evenodd\"";

@@ -2694,11 +2694,64 @@ void check_shapes(kin::Renderer2D& renderer) {
     expect(41, 55, white, "1.5 px past the bigger mesh");
 }
 
+// Primitives (drawn whole on SDL_GPU, tessellated on SDL_Renderer): the same
+// pixels either way.
+void check_primitives(kin::Renderer2D& renderer) {
+    const kin::Color white = kin::Color::rgb(255, 255, 255);
+    const kin::Color red = kin::Color::rgb(255, 0, 0);
+    const kin::Color green = kin::Color::rgb(0, 255, 0);
+    const kin::Color blue = kin::Color::rgb(0, 0, 255);
+    const kin::Color black = kin::Color::rgb(0, 0, 0);
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    kin::Shape ring;
+    ring.fill_and_stroke(kin::Path::circle({0, 0}, 8), red, black, {.width = 2});
+    kin::Shape dot;
+    dot.fill(kin::Path::circle({0, 0}, 1), kin::colors::white);
+    const kin::ShapeMesh ring_mesh = ring.mesh(), dot_mesh = dot.mesh();
+    assert(ring_mesh.primitives.size() == 1 && dot_mesh.primitives.size() == 1);
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(white);
+        renderer.fill_ellipse({16.0f, 16.0f}, {12.0f, 6.0f}, red);
+        renderer.draw_rounded_rect({36.0f, 4.0f, 24.0f, 24.0f}, 6.0f, blue, 3.0f);
+        renderer.draw_line({8.0f, 40.0f}, {28.0f, 40.0f}, green, 8.0f, kin::LineCap::Round);
+        renderer.draw_shape(ring_mesh, kin::Affine2::translation({48.0f, 48.0f}));
+        renderer.draw_shape(dot_mesh, kin::Affine2::translation({16.0f, 54.0f}) * kin::Affine2::scaling({8.0f, 8.0f}),
+                            black);
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+    }
+    const auto expect = [&](int x, int y, kin::Color color, const char* what) {
+        if (!pixel_near(px, size, x, y, color, 3)) {
+            const std::size_t i = (static_cast<std::size_t>(y) * size.x + x) * 4;
+            throw std::runtime_error(std::string("check_primitives (") + std::string(renderer.backend_name()) + "): " +
+                                     what + " at " + std::to_string(x) + "," + std::to_string(y) + " is " +
+                                     std::to_string(px[i]) + "," + std::to_string(px[i + 1]) + "," + std::to_string(px[i + 2]));
+        }
+    };
+    expect(16, 16, red, "ellipse");
+    expect(26, 16, red, "ellipse, along its long axis");
+    expect(16, 24, white, "past the ellipse's short axis");
+    expect(37, 16, blue, "rounded border");
+    expect(48, 16, white, "inside the border");
+    expect(34, 16, white, "outside the border");
+    expect(5, 40, green, "capsule's round cap");
+    expect(18, 43, green, "capsule");
+    expect(34, 40, white, "past the capsule");
+    expect(48, 48, red, "ring's fill");
+    expect(48, 40, black, "ring's stroke over its fill");
+    expect(16, 54, black, "dot drawn 8x");
+    expect(19, 54, black, "inside the dot drawn 8x");
+    expect(25, 54, white, "1.5 px past the dot drawn 8x");
+}
+
 void test_shapes_on_software_backend() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "shape-test", .width = 64, .height = 64, .hidden = true});
     kin::Renderer2D renderer{window};
     check_shapes(renderer);
+    check_primitives(renderer);
 }
 
 void test_shapes_on_gpu_backend() {
@@ -2714,7 +2767,9 @@ void test_shapes_on_gpu_backend() {
             return;
         }
         gpu_ready = true;
+        assert(renderer->capabilities().shape_primitives);
         check_shapes(*renderer);
+        check_primitives(*renderer);
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;

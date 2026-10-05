@@ -207,6 +207,10 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
                                                   dir / "shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
         _shape_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
                                                          dir / "shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
+        _sdf_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                                dir / "sdf_shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
+        _sdf_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
+                                                       dir / "sdf_shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "shapes drawn with soft edges only", (LogFields{{.name = "reason", .value = e.what()}}));
     }
@@ -242,6 +246,10 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
         // Shapes' pipeline now rather than at the first one drawn.
         _pipelines.get(_shape_vertex_shader.handle(), _shape_shader.handle(), gpu::GpuBlendMode::Alpha,
                        SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::ShapeVertices);
+    }
+    if (_sdf_shader.handle() && _sdf_vertex_shader.handle()) {
+        _pipelines.get(_sdf_vertex_shader.handle(), _sdf_shader.handle(), gpu::GpuBlendMode::Alpha,
+                       SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, gpu::GpuVertexLayout::SdfInstances);
     }
     ensure_scene();
 
@@ -284,6 +292,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .compute = true,
         .transforms = true,
         .shapes = true,
+        .shape_primitives = _sdf_shader.handle() && _sdf_vertex_shader.handle(),
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
@@ -397,6 +406,7 @@ void GpuRenderer2DBackend::flush_to_frame() {
     ctx.instance_shader = _instance_shader.handle();
     ctx.shader_vertex_shader = _shader_vertex_shader.handle();
     ctx.shape_vertex_shader = _shape_vertex_shader.handle();
+    ctx.sdf_vertex_shader = _sdf_vertex_shader.handle();
     ctx.default_fragment = _fragment_shader.handle();
     ctx.white_texture = _white.handle();
     ctx.sampler = _sampler_linear; // default for solids/white & null-sampler ranges
@@ -460,7 +470,7 @@ void GpuRenderer2DBackend::prewarm_pipelines(std::string_view record) {
     int blend = 0, format = 0, layout = 0;
     while (in >> id >> blend >> format >> layout) {
         if (blend < 0 || blend > static_cast<int>(gpu::GpuBlendMode::Min) || layout < 0 ||
-            layout > static_cast<int>(gpu::GpuVertexLayout::ShapeVertices)) {
+            layout > static_cast<int>(gpu::GpuVertexLayout::SdfInstances)) {
             continue;
         }
         _pipeline_hints.push_back(PipelineHint{.fragment = id,
@@ -482,6 +492,7 @@ void GpuRenderer2DBackend::make_hinted_pipelines(u64 fragment_id, SDL_GPUShader*
         SDL_GPUShader* vertex = hint.layout == gpu::GpuVertexLayout::SpriteInstances ? _instance_shader.handle()
                               : hint.layout == gpu::GpuVertexLayout::ShaderVertices  ? _shader_vertex_shader.handle()
                               : hint.layout == gpu::GpuVertexLayout::ShapeVertices   ? _shape_vertex_shader.handle()
+                              : hint.layout == gpu::GpuVertexLayout::SdfInstances    ? _sdf_vertex_shader.handle()
                                                                                      : _vertex_shader.handle();
         if (vertex) {
             _pipelines.get(vertex, fragment, hint.blend, hint.format, hint.layout);
@@ -758,7 +769,7 @@ void GpuRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
 }
 
 void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
-                                           Color tint) {
+                                           u32 index_base, Color tint) {
     if (indices.empty() || tint.a == 0) {
         return;
     }
@@ -776,7 +787,7 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
         const f32 rim = -1.0f / std::max(pixels_per_unit, 1e-6f);
         _scratch_verts.clear();
         for (const u32 i : indices) {
-            const ShapeVertex& v = vertices[i];
+            const ShapeVertex& v = vertices[i - index_base];
             Vec2f p = v.position;
             f32 edge = v.edge;
             if (edge < rim) {
@@ -798,8 +809,50 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
         const Color c = tinted ? shade(v.color, 1.0f) : v.color;
         _shape_scratch[i] = gpu::GpuShapeVertex{p.x, p.y, c.r, c.g, c.b, c.a, v.edge};
     }
-    _batch.push_shapes(_shape_scratch, indices, _shape_shader.handle(), current_scissor(),
+    _batch.push_shapes(_shape_scratch, indices, index_base, _shape_shader.handle(), current_scissor(),
                        resolve_blend(gpu::GpuBlendMode::Alpha));
+}
+
+bool GpuRenderer2DBackend::draw_shape_primitives(std::span<const ShapePrimitive> primitives, Color tint) {
+    if (!_sdf_shader.handle() || !_sdf_vertex_shader.handle()) {
+        return false;
+    }
+    if (primitives.empty() || tint.a == 0) {
+        return true;
+    }
+    ensure_frame();
+    const auto shade = [&](Color c) {
+        return std::array<u8, 4>{static_cast<u8>((c.r * tint.r + 127) / 255), static_cast<u8>((c.g * tint.g + 127) / 255),
+                                 static_cast<u8>((c.b * tint.b + 127) / 255), static_cast<u8>((c.a * tint.a + 127) / 255)};
+    };
+    const f32 pixels = coordinates_to_pixels();
+    _sdf_scratch.clear();
+    for (const ShapePrimitive& p : primitives) {
+        if (p.fill.a == 0 && (p.stroke.a == 0 || p.stroke_width <= 0.0f)) {
+            continue;
+        }
+        Affine2 m = _transformed ? _transform * p.transform : p.transform;
+        m.tx += _view_offset.x;
+        m.ty += _view_offset.y;
+        // The quad reaches a pixel and a half past the outline, in the
+        // primitive's own units, so the soft edge fits whatever the scale.
+        const f32 sx = std::sqrt(m.a * m.a + m.b * m.b), sy = std::sqrt(m.c * m.c + m.d * m.d);
+        const f32 margin = 1.5f / std::max(pixels * std::min(sx, sy), 1e-6f);
+        const bool stroked = p.stroke.a > 0 && p.stroke_width > 0.0f;
+        const f32 radius = std::clamp(p.radius, 0.0f, std::min(p.half_size.x, p.half_size.y));
+        const f32 kind = p.kind == PathPrimitive::Kind::Ellipse ? 2.0f
+                       : radius <= 0.0f && !p.round_join      ? 1.0f
+                                                               : 0.0f;
+        const std::array<u8, 4> fill = shade(p.fill), stroke = shade(stroked ? p.stroke : colors::transparent);
+        _sdf_scratch.push_back(gpu::GpuSdfInstance{
+            .a = m.a, .b = m.b, .c = m.c, .d = m.d, .tx = m.tx, .ty = m.ty,
+            .half_w = p.half_size.x, .half_h = p.half_size.y,
+            .radius = radius, .half_stroke = stroked ? p.stroke_width * 0.5f : 0.0f, .margin = margin, .kind = kind,
+            .fill_r = fill[0], .fill_g = fill[1], .fill_b = fill[2], .fill_a = fill[3],
+            .stroke_r = stroke[0], .stroke_g = stroke[1], .stroke_b = stroke[2], .stroke_a = stroke[3]});
+    }
+    _batch.push_sdf(_sdf_scratch, _sdf_shader.handle(), current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
+    return true;
 }
 
 void GpuRenderer2DBackend::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
@@ -1991,6 +2044,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
         ctx.instance_shader = _instance_shader.handle();
         ctx.shader_vertex_shader = _shader_vertex_shader.handle();
         ctx.shape_vertex_shader = _shape_vertex_shader.handle();
+        ctx.sdf_vertex_shader = _sdf_vertex_shader.handle();
         ctx.default_fragment = _fragment_shader.handle();
         ctx.white_texture = _white.handle();
         ctx.sampler = _sampler_linear;

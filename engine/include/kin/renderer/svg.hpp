@@ -34,7 +34,8 @@ std::optional<Shape> read_svg(std::string_view svg, std::string* error = nullptr
 std::optional<Shape> load_svg(const std::filesystem::path& path, std::string* error = nullptr,
                               std::vector<std::string>* warnings = nullptr);
 
-// Every element as a <path>, its transform as a matrix.
+// Circles, ellipses and rectangles as themselves, every other element as a
+// <path>; transforms as matrices.
 std::string write_svg(const Shape& shape);
 bool save_svg(const Shape& shape, const std::filesystem::path& path);
 

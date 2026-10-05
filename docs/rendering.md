@@ -137,11 +137,17 @@ either way: draw world coordinates in a callback with
 
 ![The shapes demo: an orrery of planets, moons and an SVG rocket around a star](images/shapes_demo.png)
 
-Vector shapes are drawn anti-aliased from triangles: each outline gets a thin
-soft edge whose vertices carry their distance past it, and the shape shader
-fades it over one screen pixel, so edges stay crisp at any zoom or turn. The
-SDL_Renderer fallback pulls the soft edge in to a pixel on the CPU and fades it
-with vertex alpha.
+Vector shapes are drawn anti-aliased, crisp at any zoom or turn, two ways:
+
+- **Primitives** (circles, ellipses, rounded and sharp rectangles, capsules)
+  are drawn whole on SDL_GPU: one quad each, the outline computed per pixel
+  from its distance, fill and stroke together.
+- **Everything else** is tessellated into triangles: each outline gets a thin
+  soft edge whose vertices carry their distance past it, faded over one
+  screen pixel by the shape shader.
+
+The SDL_Renderer fallback tessellates primitives too, pulls soft edges in to a
+pixel on the CPU and fades them with vertex alpha.
 
 ### Drawing as you go
 
@@ -155,8 +161,10 @@ renderer.fill_path(kin::Path::star(center, 20, 8, 5), gold);
 ```
 
 Also `fill_ellipse`, `draw_ellipse`, `fill_polygon`, `draw_polygon`,
-`fill_pie` and `stroke_path`. Each call tessellates; for anything drawn every
-frame, make a mesh once instead.
+`fill_pie` and `stroke_path`. Circles, ellipses, `fill_rounded_rect`,
+`draw_rounded_rect` and `draw_line` with a width are primitives: cheap to draw
+as you go. The rest tessellate each call; for those drawn every frame, make a
+mesh once instead.
 
 ### Paths
 
@@ -197,6 +205,14 @@ pixel wide however large the mesh is drawn). `ShapeMesh::append(mesh,
 transform)` merges meshes into one. Stroke widths scale with their element's
 transform, as in SVG.
 
+A path made by `Path::rect`, `rounded_rect`, `circle` or `ellipse` (and SVG's
+`<rect>`, `<circle>` and `<ellipse>`) remembers it (`Path::primitive()`), and
+`Shape::mesh` keeps such an element as a primitive, in paint order with the
+triangles (`ShapeMesh::runs`). Two strokes stay triangles: a bevelled sharp
+corner, and an ellipse's stroke thicker than half its smaller radius (its
+distance is estimated, close only near the outline). `write_svg` writes
+primitives back as `<rect>`, `<circle>` and `<ellipse>`.
+
 ### SVG-lite
 
 `kin::read_svg` / `load_svg` read what vector editors export for flat-coloured
@@ -231,11 +247,21 @@ SVG-lite, a zooming and turning camera.
 
 ### Cost
 
-Shapes draw indexed, 16 bytes a vertex, batched with each other across
-transforms. A filled and stroked circle with a star on it, 24 units across, is
-140 vertices and 206 triangles: about half are the soft edges. Tessellating
-costs far more than drawing a mesh, so make meshes once and draw them many
-times; the immediate calls are for the odd shape.
+Primitives are one 56-byte instance each; triangles draw indexed, 16 bytes a
+vertex; both batch across transforms. `kin_draw_bench 200 2000 shapes` draws
+2000 tokens a frame, each a filled and stroked circle with a star on it
+(RTX 4080 Laptop):
+
+| | CPU to record | GPU |
+|---|---|---|
+| cached mesh, drawn 2000 times | 0.88 ms | 0.9 ms |
+| one merged mesh | 0.83 ms | 0.9 ms |
+| drawn as you go (the star tessellated each time) | 5.6 ms | 0.9 ms |
+
+The token is 1 primitive plus 20 vertices and 28 triangles for the star; as
+triangles alone it was 140 vertices and 206 triangles, and the cached mesh took
+3.5 ms. Tessellating 200 tokens takes 0.54 ms: make meshes once and draw them
+many times.
 
 ## Animation
 

@@ -489,6 +489,10 @@ private:
     ShapeDetail shape_detail() const;
     void fill_contours(FillRule rule, Color color);
     void stroke_contours(const StrokeStyle& style, Color color);
+    void draw_shape_triangles(const ShapeMesh& mesh, const ShapeMesh::Run& run, Color tint);
+    // Whole where the backend can, else tessellated.
+    void draw_primitives(std::span<const ShapePrimitive> primitives, Color tint);
+    ShapeMesh _primitive_scratch;
     Affine2 _transform{};                 // what draws are mapped by now
     std::vector<Affine2> _transform_stack; // push_transform's saved transforms
     std::vector<Affine2> _target_transforms; // the transform outside each pushed render target

@@ -37,15 +37,42 @@ struct ShapeVertex {
     Vec2f outward{};
 };
 
-// Triangles ready to draw (Renderer2D::draw_shape).
+// A rounded rectangle (a circle, a capsule, a sharp rectangle) or an ellipse,
+// filled and/or stroked, drawn analytically: one quad, its outline computed
+// per pixel (on backends that can; triangles elsewhere). Centred on the origin
+// of `transform`, which may turn, scale and skew it.
+struct ShapePrimitive {
+    PathPrimitive::Kind kind = PathPrimitive::Kind::RoundedRect;
+    Vec2f half_size{};
+    f32 radius = 0.0f;                   // RoundedRect: corner radius, at most the smaller half size
+    Color fill = colors::transparent;    // alpha 0: not filled
+    Color stroke = colors::transparent;  // alpha 0, or no width: not stroked
+    f32 stroke_width = 0.0f;             // centred on the outline
+    bool round_join = false;             // a sharp rectangle's stroke: round outer corners, not mitred
+    Affine2 transform{};
+};
+
+// Shapes ready to draw (Renderer2D::draw_shape): triangles, and primitives
+// drawn whole, in the order they were added (`runs`).
 struct ShapeMesh {
     std::vector<ShapeVertex> vertices;
     std::vector<u32> indices; // three a triangle
-    Rectf bounds{};           // around the vertices, soft edge included
+    std::vector<ShapePrimitive> primitives;
+    // A stretch of triangles (vertices and the indices into them), or of
+    // primitives. A mesh made by hand with no runs is all one stretch of triangles.
+    struct Run {
+        bool primitives = false;
+        u32 first = 0;  // first index, or first primitive
+        u32 count = 0;  // indices, or primitives
+        u32 first_vertex = 0, vertex_count = 0; // the vertices a run of triangles uses
+    };
+    std::vector<Run> runs;
+    Rectf bounds{}; // around everything, soft edges included
 
-    bool empty() const { return indices.empty(); }
+    bool empty() const { return indices.empty() && primitives.empty(); }
     void clear();
-    // Appends `other`'s triangles, mapped by `transform` (edges scaled with it).
+    void add(const ShapePrimitive& primitive);
+    // Appends `other`, mapped by `transform` (edges scaled with it).
     void append(const ShapeMesh& other, const Affine2& transform = {});
 };
 
@@ -97,5 +124,11 @@ void tessellate_fill(ShapeMesh& mesh, std::span<const PathContour> contours, Fil
 // are in mesh units.
 void tessellate_stroke(ShapeMesh& mesh, std::span<const PathContour> contours, const StrokeStyle& style, Color color,
                        f32 fringe, f32 tolerance, const Affine2& transform = {});
+// A primitive as triangles, for backends that cannot draw it whole.
+void tessellate_primitive(ShapeMesh& mesh, const ShapePrimitive& primitive, f32 fringe, f32 tolerance);
+// The primitive an element draws as, when its path is one and its paint and
+// stroke can be drawn analytically (thick strokes on ellipses and bevelled
+// rectangle corners cannot).
+std::optional<ShapePrimitive> primitive_of(const ShapeElement& element);
 
 } // namespace kin

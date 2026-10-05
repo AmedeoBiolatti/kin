@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <numbers>
+#include <optional>
 #include <span>
 
 namespace mapbox::util {
@@ -159,12 +160,50 @@ struct Out {
     }
 };
 
+// Triangles appended since (first_vertex, first_index) join the last run of
+// triangles, or start one.
+void note_triangles(ShapeMesh& mesh, std::size_t first_vertex, std::size_t first_index) {
+    const u32 count = static_cast<u32>(mesh.indices.size() - first_index);
+    if (count == 0) {
+        return;
+    }
+    if (!mesh.runs.empty() && !mesh.runs.back().primitives) {
+        ShapeMesh::Run& run = mesh.runs.back();
+        run.count += count;
+        run.vertex_count = static_cast<u32>(mesh.vertices.size()) - run.first_vertex;
+        return;
+    }
+    mesh.runs.push_back({.primitives = false,
+                         .first = static_cast<u32>(first_index),
+                         .count = count,
+                         .first_vertex = static_cast<u32>(first_vertex),
+                         .vertex_count = static_cast<u32>(mesh.vertices.size() - first_vertex)});
+}
+
+void grow_bounds_by(ShapeMesh& mesh, Rectf r) {
+    const bool empty = mesh.bounds.w <= 0.0f && mesh.bounds.h <= 0.0f && mesh.vertices.empty() &&
+                       mesh.primitives.size() <= 1;
+    if (empty) {
+        mesh.bounds = r;
+        return;
+    }
+    const f32 x0 = std::min(mesh.bounds.x, r.x), y0 = std::min(mesh.bounds.y, r.y);
+    const f32 x1 = std::max(mesh.bounds.x + mesh.bounds.w, r.x + r.w), y1 = std::max(mesh.bounds.y + mesh.bounds.h, r.y + r.h);
+    mesh.bounds = {x0, y0, x1 - x0, y1 - y0};
+}
+
+Rectf primitive_bounds(const ShapePrimitive& p) {
+    const f32 reach = p.stroke.a > 0 ? p.stroke_width * 0.5f : 0.0f;
+    const Vec2f e{p.half_size.x + reach, p.half_size.y + reach};
+    return transformed_bounds(p.transform, {-e.x, -e.y, 2.0f * e.x, 2.0f * e.y});
+}
+
 void grow_bounds(ShapeMesh& mesh, std::size_t first) {
     if (first >= mesh.vertices.size()) {
         return;
     }
     f32 x0 = mesh.vertices[first].position.x, y0 = mesh.vertices[first].position.y, x1 = x0, y1 = y0;
-    if (first > 0 || mesh.bounds.w > 0.0f || mesh.bounds.h > 0.0f) {
+    if (first > 0 || mesh.bounds.w > 0.0f || mesh.bounds.h > 0.0f || !mesh.primitives.empty()) {
         x0 = std::min(x0, mesh.bounds.x);
         y0 = std::min(y0, mesh.bounds.y);
         x1 = std::max(x1, mesh.bounds.x + mesh.bounds.w);
@@ -399,10 +438,41 @@ void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeS
 void ShapeMesh::clear() {
     vertices.clear();
     indices.clear();
+    primitives.clear();
+    runs.clear();
     bounds = {};
 }
 
+void ShapeMesh::add(const ShapePrimitive& primitive) {
+    if (!runs.empty() && runs.back().primitives) {
+        ++runs.back().count;
+    } else {
+        runs.push_back({.primitives = true, .first = static_cast<u32>(primitives.size()), .count = 1});
+    }
+    primitives.push_back(primitive);
+    grow_bounds_by(*this, primitive_bounds(primitive));
+}
+
 void ShapeMesh::append(const ShapeMesh& other, const Affine2& transform) {
+    // A mesh made by hand has no runs: all of it is one of triangles.
+    std::vector<Run> other_runs = other.runs;
+    if (other_runs.empty() && !other.indices.empty()) {
+        other_runs.push_back({.count = static_cast<u32>(other.indices.size()),
+                              .vertex_count = static_cast<u32>(other.vertices.size())});
+    }
+    for (Run run : other_runs) {
+        if (run.primitives) {
+            for (u32 i = run.first; i < run.first + run.count; ++i) {
+                ShapePrimitive p = other.primitives[i];
+                p.transform = transform * p.transform;
+                add(p);
+            }
+            continue;
+        }
+        run.first += static_cast<u32>(indices.size());
+        run.first_vertex += static_cast<u32>(vertices.size());
+        runs.push_back(run);
+    }
     const std::size_t first = vertices.size();
     const u32 offset = static_cast<u32>(first);
     vertices.reserve(first + other.vertices.size());
@@ -422,6 +492,7 @@ void ShapeMesh::append(const ShapeMesh& other, const Affine2& transform) {
 
 void tessellate_fill(ShapeMesh& mesh, std::span<const PathContour> contours, FillRule rule, Color color, f32 fringe) {
     const std::size_t first = mesh.vertices.size();
+    const std::size_t first_index = mesh.indices.size();
     std::vector<Ring> rings;
     for (const PathContour& contour : contours) {
         Ring ring{.pts = contour.points};
@@ -516,6 +587,7 @@ void tessellate_fill(ShapeMesh& mesh, std::span<const PathContour> contours, Fil
         }
         out.fringe_ring(ring, fringe);
     }
+    note_triangles(mesh, first, first_index);
     grow_bounds(mesh, first);
 }
 
@@ -526,6 +598,7 @@ void tessellate_stroke(ShapeMesh& mesh, std::span<const PathContour> contours, c
         return;
     }
     const std::size_t first = mesh.vertices.size();
+    const std::size_t first_index = mesh.indices.size();
     Out out{mesh, color};
     for (const PathContour& contour : contours) {
         stroke_contour(out, contour.points, contour.closed, style, fringe / min_scale, tolerance / max_scale);
@@ -539,7 +612,58 @@ void tessellate_stroke(ShapeMesh& mesh, std::span<const PathContour> contours, c
             v.outward = mul(transform.apply_vector(v.outward), 1.0f / min_scale);
         }
     }
+    note_triangles(mesh, first, first_index);
     grow_bounds(mesh, first);
+}
+
+void tessellate_primitive(ShapeMesh& mesh, const ShapePrimitive& p, f32 fringe, f32 tolerance) {
+    const Rectf box{-p.half_size.x, -p.half_size.y, 2.0f * p.half_size.x, 2.0f * p.half_size.y};
+    const Path path = p.kind == PathPrimitive::Kind::Ellipse ? Path::ellipse({}, p.half_size)
+                                                             : Path::rounded_rect(box, p.radius);
+    const auto [min_scale, max_scale] = scales(p.transform);
+    std::vector<PathContour> contours;
+    if (p.fill.a > 0) {
+        path.flatten(contours, tolerance, p.transform);
+        tessellate_fill(mesh, contours, FillRule::NonZero, p.fill, fringe);
+    }
+    if (p.stroke.a > 0 && p.stroke_width > 0.0f) {
+        contours.clear();
+        path.flatten(contours, tolerance / std::max(max_scale, 1e-6f));
+        tessellate_stroke(mesh, contours,
+                          {.width = p.stroke_width, .join = p.round_join ? LineJoin::Round : LineJoin::Miter},
+                          p.stroke, fringe, tolerance, p.transform);
+    }
+}
+
+std::optional<ShapePrimitive> primitive_of(const ShapeElement& element) {
+    const std::optional<PathPrimitive>& shape = element.path.primitive();
+    if (!shape) {
+        return std::nullopt;
+    }
+    ShapePrimitive p{.kind = shape->kind,
+                     .half_size = shape->half_size,
+                     .radius = std::min(shape->radius, std::min(shape->half_size.x, shape->half_size.y)),
+                     .transform = element.transform * shape->transform};
+    if (element.fill) {
+        p.fill = *element.fill;
+    }
+    if (element.stroke && element.stroke_style.width > 0.0f) {
+        const StrokeStyle& s = element.stroke_style;
+        const bool sharp = shape->kind == PathPrimitive::Kind::RoundedRect && p.radius <= 0.0f;
+        // An ellipse's distance is estimated: good near its outline, not a
+        // thick stroke's width away. A sharp corner's bevel is not drawn.
+        if (shape->kind == PathPrimitive::Kind::Ellipse &&
+            s.width > 0.5f * std::min(shape->half_size.x, shape->half_size.y)) {
+            return std::nullopt;
+        }
+        if (sharp && (s.join == LineJoin::Bevel || (s.join == LineJoin::Miter && s.miter_limit < 1.4143f))) {
+            return std::nullopt;
+        }
+        p.stroke = *element.stroke;
+        p.stroke_width = s.width;
+        p.round_join = s.join == LineJoin::Round;
+    }
+    return p;
 }
 
 Shape& Shape::fill(Path path, Color color, FillRule rule) {
@@ -599,6 +723,10 @@ ShapeMesh Shape::mesh(ShapeBuildOptions options) const {
     ShapeMesh mesh;
     std::vector<PathContour> contours;
     for (const ShapeElement& element : elements) {
+        if (const std::optional<ShapePrimitive> primitive = primitive_of(element)) {
+            mesh.add(*primitive);
+            continue;
+        }
         if (element.fill) {
             contours.clear();
             element.path.flatten(contours, options.tolerance, element.transform);
