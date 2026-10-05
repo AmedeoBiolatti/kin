@@ -31,6 +31,13 @@ releases may change APIs.
 - `KIN_JOB_WORKERS` sets the default job system's worker count.
 - `ProcessOptions::environment` sets variables for a child process.
 
+### Fixed
+
+- ui2 text moves the pen by each glyph's advance, not the width of its bitmap:
+  italic text is no longer letter-spaced, glyphs that overhang (an f or a j in
+  many faces) no longer push the next one away, and drawn text matches
+  `measure_text` more closely.
+
 ## [0.2.3] — 2026-10-01
 
 Tools for building a game around its data: a game's own files hot-reload as
