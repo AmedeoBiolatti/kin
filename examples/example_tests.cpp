@@ -300,12 +300,12 @@ int main(int argc, char** argv) {
         assert(grid_model.has_power(1) && grid_model.available_cores()==0 && grid_model.ticks==0);
         input.begin_frame(); input.set_mouse_pos({300*scale,230*scale}); input.set_mouse_wheel_y(-100);
         grid_draw(); assert(grid.selected==3);
-        input.begin_frame(); input.set_action_pressed("grid_buy"); input.advance_keyboard_edges(); grid_draw();
+        input.begin_frame(); input.set_action_pressed("grid_buy"); input.advance_step_edges(); grid_draw();
         assert(grid.feedback=="Need 3 more cores");
         input.begin_frame(); input.set_mouse_pos({524*scale,117*scale});
         input.set_mouse_pressed(MouseButton::Left); grid_draw(); assert(grid.selected==31);
         for (int n=0;n<5;++n) {
-            input.begin_frame(); input.set_action_pressed("grid_next"); input.advance_keyboard_edges(); grid_draw();
+            input.begin_frame(); input.set_action_pressed("grid_next"); input.advance_step_edges(); grid_draw();
         }
         assert(grid.selected==36);
         input.begin_frame(); input.set_action_pressed("grid_buy"); grid_draw();
@@ -315,7 +315,7 @@ int main(int argc, char** argv) {
         for (Key key:{Key::Enter,Key::KeypadEnter}) {
             grid_model.reset(7); grid.selected=1;
             input.unbind("grid_buy"); input.bind("grid_buy",key);
-            input.begin_frame(); input.set_action_pressed("grid_buy"); input.advance_keyboard_edges(); grid_draw();
+            input.begin_frame(); input.set_action_pressed("grid_buy"); input.advance_step_edges(); grid_draw();
             assert(grid_model.has_power(1) && grid.feedback=="Installed DRIVE");
             input.begin_frame(); grid_draw(); assert(grid_model.available_cores()==0);
         }

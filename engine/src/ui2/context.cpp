@@ -821,7 +821,7 @@ bool Context::pointer_released(MouseButton button) const {
 }
 
 f32 Context::mouse_wheel_y() const {
-    return _input ? _input->mouse_wheel_y() : 0.0f;
+    return _input ? _input->frame_mouse_wheel_y() : 0.0f;
 }
 
 bool Context::key_pressed(Key key) const {
