@@ -22,6 +22,8 @@ std::size_t utf8_prev(std::string_view text, std::size_t pos);
 std::size_t utf8_floor(std::string_view text, std::size_t pos);
 // The code point starting at `pos` (U+FFFD for malformed bytes, 0 at the end).
 u32 utf8_decode(std::string_view text, std::size_t pos);
+// `cp` written to the end of `out` (U+FFFD for a surrogate or beyond U+10FFFF).
+void utf8_append(std::string& out, u32 cp);
 
 // Word stepping for editors. Characters are whitespace, word characters (letters,
 // digits, '_' and anything outside ASCII) or punctuation; a word is a run of one

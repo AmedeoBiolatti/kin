@@ -1,4 +1,5 @@
 #include <kin/assets/file_watcher.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/scripting/lua_script.hpp>
 
@@ -143,6 +144,38 @@ void test_modules_and_hot_reload(const fs::path& dir) {
 
 } // namespace
 
+void test_translations() {
+    kin::LuaScript script;
+    assert(script.load_string(R"(
+        function play() return tr("menu.play") end
+        function gold(n) return tr("hud.gold", {gold = n, who = "Ana", rich = n > 100}) end
+        function info() return l10n.locale() .. "|" .. l10n.direction() .. "|" .. tostring(l10n.has("menu.play")) end
+        function own(n) return l10n.format("{n, plural, one {# left} other {# left}}", {n = n}) end
+        function can_switch() return l10n.set_locale == nil end
+        function names() local out = "" for _, l in ipairs(l10n.languages()) do out = out .. l.name .. ";" end return out end
+    )"));
+    assert(script.call_for<std::string>("play") == "menu.play"); // no localization: the key
+    assert(script.call_for<std::string>("info") == "|ltr|false");
+
+    kin::Localization l10n;
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("menu.play", "Play");
+    en.strings.emplace("hud.gold", "{who}: {gold, plural, one {# coin} other {# coins}} {rich, select, true {(rich)} other {}}");
+    kin::LanguageFile ar{.locale = "ar", .name = "العربية"};
+    ar.strings.emplace("menu.play", "العب");
+    l10n.add("test", std::vector<kin::LanguageFile>{std::move(en), std::move(ar)});
+    kin::set_active_localization(&l10n);
+    assert(script.call_for<std::string>("play") == "Play");
+    assert(script.call_for<std::string>("gold", 1250) == "Ana: 1,250 coins (rich)");
+    assert(script.call_for<std::string>("gold", 1) == "Ana: 1 coin ");
+    assert(script.call_for<std::string>("own", 3000) == "3,000 left");
+    assert(script.call_for<bool>("can_switch") == true); // a sandbox reads, it does not switch
+    assert(script.call_for<std::string>("names") == "العربية;English;");
+    l10n.set_locale("ar");
+    assert(script.call_for<std::string>("info") == "ar|rtl|true");
+    kin::set_active_localization(nullptr);
+}
+
 int main() {
     std::vector<kin::LogEvent> log_events;
     kin::set_logger_config({
@@ -161,6 +194,7 @@ int main() {
     test_instruction_limit_stops_runaway_scripts();
     test_a_failed_load_keeps_the_last_good_script();
     test_modules_and_hot_reload(dir);
+    test_translations();
 
     fs::remove_all(dir);
     return 0;

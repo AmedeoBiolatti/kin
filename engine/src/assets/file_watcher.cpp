@@ -83,17 +83,20 @@ bool load_file(const std::filesystem::path& path, const FileWatcher::Loader& loa
 
 } // namespace
 
-bool FileWatcher::load_and_watch(std::filesystem::path path, Loader load, std::vector<std::string>* errors) {
+bool FileWatcher::load_and_watch(std::filesystem::path path, Loader load, std::vector<std::string>* errors, u32* id) {
     auto shared = std::make_shared<Loader>(std::move(load));
     std::vector<std::string> first_errors;
     const bool loaded = load_file(path, *shared, first_errors, false);
     if (errors) {
         errors->insert(errors->end(), first_errors.begin(), first_errors.end());
     }
-    watch(std::move(path), [shared](const std::filesystem::path& changed) {
+    const u32 watch_id = watch(std::move(path), [shared](const std::filesystem::path& changed) {
         std::vector<std::string> reload_errors;
         load_file(changed, *shared, reload_errors, true);
     });
+    if (id) {
+        *id = watch_id;
+    }
     return loaded;
 }
 

@@ -49,8 +49,10 @@ public:
     // cannot be read or is rejected is logged, and `load` should then leave the
     // data it had in place, so a mistake in an edit keeps the game running on
     // the last good version. Returns whether the first load succeeded; its
-    // messages go to `errors` when given. The file is watched either way.
-    bool load_and_watch(std::filesystem::path path, Loader load, std::vector<std::string>* errors = nullptr);
+    // messages go to `errors` when given. The file is watched either way, and
+    // `id`, when given, receives the watch's id for unwatch().
+    bool load_and_watch(std::filesystem::path path, Loader load, std::vector<std::string>* errors = nullptr,
+                        u32* id = nullptr);
 
     // Checks the files if `interval` has passed since the last check and runs
     // the callbacks of those that changed. Returns how many ran.

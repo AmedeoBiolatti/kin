@@ -6,6 +6,7 @@
 #include <kin/ui2/text.hpp>
 #include <kin/ecs/ui2.hpp>
 #include <kin/ecs/ui2_sync.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/layout.hpp>
 #include <kin/ui2/radix_colors.hpp>
@@ -204,6 +205,76 @@ void test_solve_grow_and_spacing() {
     ui2::solve(n, 0, {0, 0, 200, 100});
     assert(rect_eq(n[1].solved, 0, 0, 200, 30));
     assert(rect_eq(n[2].solved, 0, 40, 200, 30));
+}
+
+// Right to left: rows run from the right, nested boxes mirror inside their
+// parents, Start and End alignment swap; ECS layouts solve again on a switch.
+void test_right_to_left_layout() {
+    const auto build = [] {
+        std::vector<ui2::LayoutNode> n;
+        ui2::LayoutStyle root;
+        root.width = ui2::fixed(200);
+        root.height = ui2::fixed(100);
+        root.axis = ui2::UiLayoutAxis::Horizontal;
+        root.padding = {.left = 10.0f};
+        root.spacing = 5.0f;
+        n.push_back({root, {}, {}, {}, -1});
+        ui2::LayoutStyle box;
+        box.width = ui2::fixed(50);
+        box.height = ui2::fixed(20);
+        box.axis = ui2::UiLayoutAxis::Horizontal;
+        n.push_back({box, {}, {}, {}, 0});
+        n.push_back({box, {}, {}, {}, 0});
+        n[0].children = {1, 2};
+        ui2::LayoutStyle inner;
+        inner.width = ui2::fixed(10);
+        inner.height = ui2::fixed(10);
+        n.push_back({inner, {}, {}, {}, 2});
+        n[2].children = {3};
+        return n;
+    };
+    std::vector<ui2::LayoutNode> ltr = build();
+    ui2::solve(ltr, 0, {20, 0, 200, 100});
+    assert(rect_eq(ltr[1].solved, 30, 0, 50, 20));
+    assert(rect_eq(ltr[2].solved, 85, 0, 50, 20));
+    assert(rect_eq(ltr[3].solved, 85, 0, 10, 10));
+
+    ui2::set_ui_direction(TextDirection::RightToLeft);
+    assert(ui2::text_base_direction() == TextDirection::RightToLeft);
+    std::vector<ui2::LayoutNode> rtl = build();
+    ui2::solve(rtl, 0, {20, 0, 200, 100});
+    assert(rect_eq(rtl[1].solved, 160, 0, 50, 20)); // the first child at the right, padding on the right
+    assert(rect_eq(rtl[2].solved, 105, 0, 50, 20));
+    assert(rect_eq(rtl[3].solved, 145, 0, 10, 10)); // at its parent's right
+    assert(rect_eq(ui2::align_rect({0, 0, 100, 10}, {20, 10}, ui2::UiAlign::Start, ui2::UiAlign::Start), 80, 0, 20, 10));
+    assert(rect_eq(ui2::align_rect({0, 0, 100, 10}, {20, 10}, ui2::UiAlign::Center, ui2::UiAlign::Start), 40, 0, 20, 10));
+
+    // A retained tree solves again when the direction changes.
+    kin::EcsWorld world;
+    register_ui2_components(world);
+    auto root = ui2_entity(world, "root").root({0, 0, 200, 100});
+    auto row = ui2_entity(world, "row").layout(ui2::row(ui2::grow(), ui2::fit())).child_of(root);
+    kin::EcsEntity first = ui2_entity(world, "first")
+                               .label(ui2::Label{.text = "A"})
+                               .layout(ui2::fixed_box(40, 20))
+                               .child_of(row)
+                               .entity();
+    ui2::Context ui;
+    Input input;
+    std::vector<Rectf> fills;
+    Renderer2D renderer = make_recording_renderer(fills);
+    input.begin_frame();
+    ui.begin(input, renderer);
+    kin::update_ui2_world(world, ui);
+    ui.end();
+    assert(approx(first.get<Ui2Layout>()->solved.x, 160.0f));
+    ui2::set_ui_direction(TextDirection::LeftToRight);
+    assert(!ui2::text_base_direction());
+    input.begin_frame();
+    ui.begin(input, renderer);
+    kin::update_ui2_world(world, ui);
+    ui.end();
+    assert(approx(first.get<Ui2Layout>()->solved.x, 0.0f));
 }
 
 void test_solve_fit_autosize() {
@@ -4247,6 +4318,61 @@ void test_ecs_ui2_builder_components_and_hierarchy() {
     assert(!dynamic.has<Ui2Static>());
 }
 
+// Ui2Text: widgets take their text from the active localization, again when
+// the language changes, and the layout is solved again.
+void test_ecs_ui2_text_keys() {
+    kin::EcsWorld world;
+    register_ui2_components(world);
+
+    // Without a localization the key shows.
+    kin::EcsEntity bare = ui2_entity(world, "bare").label(ui2::Label{}).text_key("menu.play").entity();
+    assert(bare.get<ui2::Label>()->text == "menu.play");
+
+    kin::Localization l10n;
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("menu.play", "Play");
+    en.strings.emplace("hud.gold", "{gold, plural, one {# coin} other {# coins}}");
+    kin::LanguageFile fr{.locale = "fr", .name = "Français"};
+    fr.strings.emplace("menu.play", "Jouer");
+    fr.strings.emplace("hud.gold", "{gold, plural, one {# pièce} other {# pièces}}");
+    l10n.add("test", std::vector<kin::LanguageFile>{std::move(en), std::move(fr)});
+    kin::set_active_localization(&l10n);
+
+    auto root = ui2_entity(world, "root").root({0, 0, 200, 100});
+    kin::EcsEntity button = ui2_entity(world, "button")
+                                .button(ui2::Button{})
+                                .text_key("menu.play")
+                                .child_of(root)
+                                .entity();
+    kin::EcsEntity gold = ui2_entity(world, "gold")
+                              .label(ui2::Label{})
+                              .text_key("hud.gold", {{.name = "gold", .value = 1250.0}})
+                              .child_of(root)
+                              .entity();
+    // A key set before its widget is applied once the widget is there.
+    kin::EcsEntity late = ui2_entity(world, "late").text_key("menu.play").child_of(root).entity();
+    late.raw().set(ui2::WrappedText{});
+
+    assert(button.get<ui2::Button>()->label == "Play");
+    assert(gold.get<ui2::Label>()->text == "1,250 coins");
+    assert(kin::apply_ui2_text(world) == 2); // "bare" (now localized) and "late"
+    assert(late.get<ui2::WrappedText>()->text == "Play");
+    assert(kin::apply_ui2_text(world) == 0); // nothing changed since
+
+    const kin::u64 version = root.entity().get<Ui2LayoutCache>()->tree_version;
+    l10n.set_locale("fr");
+    assert(kin::apply_ui2_text(world) == 4);
+    assert(button.get<ui2::Button>()->label == "Jouer");
+    assert(gold.get<ui2::Label>()->text == "1\xC2\xA0" "250 pi\xC3\xA8" "ces");
+    assert(root.entity().get<Ui2LayoutCache>()->tree_version > version);
+
+    // Setting the component anew applies it at once on the next pass.
+    gold.raw().set(kin::Ui2Text{.key = "hud.gold", .args = {{.name = "gold", .value = 1.0}}});
+    assert(kin::apply_ui2_text(world) == 1);
+    assert(gold.get<ui2::Label>()->text == "1 pi\xC3\xA8" "ce");
+    kin::set_active_localization(nullptr);
+}
+
 void test_ecs_ui2_builder_widget_methods() {
     kin::EcsWorld world;
     register_ui2_components(world);
@@ -5985,6 +6111,8 @@ int main() {
     test_ui2_layout_presets();
     test_ecs_ui2_builder_components_and_hierarchy();
     test_ecs_ui2_builder_widget_methods();
+    test_ecs_ui2_text_keys();
+    test_right_to_left_layout();
     test_ecs_ui2_builder_button_click();
     test_ui2_theme_resolution_and_context_defaults();
     test_ui2_glass_theme();

@@ -15,6 +15,7 @@ namespace kin {
 
 class AssetServer;
 class FileWatcher;
+class Localization;
 
 struct HeadlessOptions {
     bool enabled = false;
@@ -67,6 +68,13 @@ struct HeadlessOptions {
     // --state-lockstep: the runs the check starts. After each update, print the
     // state's hash and wait for a command on standard input.
     bool state_lockstep = false;
+    // --locale=TAG: the language to show (Localization::set_locale), over the
+    // game's choice; --pseudo-locale is --locale=en-XA. Headless and server runs
+    // without it show the base language, so they stay the same on every machine.
+    std::string locale;
+    // --fail-on-missing-text: fail the run if any text was looked up by a key
+    // the shown language (and its fallbacks) lacks.
+    bool fail_on_missing_text = false;
     // The command line as given, program first (the check runs it again).
     std::vector<std::string> args;
 };
@@ -102,6 +110,11 @@ struct SceneAppConfig {
     // reload between frames; never in headless or server runs, which stay
     // deterministic.
     FileWatcher* file_watcher = nullptr;
+    // Optional translations. When set, run_scene_app makes them the active
+    // localization (kin::tr, retained ui2 text, dialogue, scripts), applies
+    // --locale, keeps ui2's direction (ui2::set_ui_direction) that of the
+    // language shown, and lists missing text in the run report.
+    Localization* localization = nullptr;
     // Where a windowed run keeps the GPU pipelines it made, to make them while
     // the next run loads (Renderer2D::pipeline_record). Unset: the user data
     // folder, kin/<the window title>/pipelines.txt. Empty: not kept.

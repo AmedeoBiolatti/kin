@@ -1,5 +1,6 @@
 #include <kin/scripting/lua_script.hpp>
 
+#include "lua_l10n.hpp"
 #include "lua_paths.hpp"
 
 #include <kin/assets/file_watcher.hpp>
@@ -68,6 +69,8 @@ std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependenci
     }
     (*lua)["math"]["random"] = sol::lua_nil;
     (*lua)["math"]["randomseed"] = sol::lua_nil;
+    // Translations to read, not the language to change.
+    scripting_detail::bind_l10n(*lua, false);
     (*lua)["print"] = [](sol::this_state state, sol::variadic_args args) {
         sol::state_view view{state};
         const sol::protected_function to_text = view["tostring"];

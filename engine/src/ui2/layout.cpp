@@ -556,6 +556,21 @@ void solve(std::vector<LayoutNode>& nodes, i32 root, Rectf available, LayoutScra
         nodes[static_cast<std::size_t>(root)].solved = available;
         arrange(nodes, scratch);
     }
+
+    // Right to left: the tree reflected about the root's centre line, which
+    // mirrors every child inside its parent.
+    if (ui_direction() == TextDirection::RightToLeft) {
+        const f32 axis = available.x * 2.0f + available.w;
+        std::vector<i32>& stack = scratch.flow_children;
+        stack.assign(nodes[static_cast<std::size_t>(root)].children.begin(),
+                     nodes[static_cast<std::size_t>(root)].children.end());
+        while (!stack.empty()) {
+            LayoutNode& node = nodes[static_cast<std::size_t>(stack.back())];
+            stack.pop_back();
+            node.solved.x = axis - node.solved.x - node.solved.w;
+            stack.insert(stack.end(), node.children.begin(), node.children.end());
+        }
+    }
 }
 
 void solve(std::vector<LayoutNode>& nodes, i32 root, Rectf available) {

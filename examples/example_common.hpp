@@ -38,10 +38,21 @@ public:
     const RunResult& best() const { return _best; }
     // Keeps `run` if it beats the best (a win, then longer, then more kills).
     bool record(const RunResult& run);
+    // The language the player chose on the title ("" until they choose).
+    const std::string& locale() const { return _locale; }
+    void set_locale(std::string locale);
 private:
+    void save();
     std::unique_ptr<SaveStore> _saves;
     RunResult _best;
+    std::string _locale;
 };
+
+// Signal Siege's text, by key, in the active localization (kin::tr): the
+// language files are examples/lang/*.kinlang.
+std::filesystem::path siege_language_dir();
+std::string power_name(int id);
+std::string power_description(int id);
 
 // Signal Siege's first scene: the title screen, or the arena for headless,
 // benchmark, screenshot and --power-grid runs. Tool runs (those, and server

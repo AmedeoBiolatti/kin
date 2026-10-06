@@ -1,6 +1,7 @@
 #include "workloads.hpp"
 
 #include <kin/anim/track.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/ui2/widgets.hpp>
 
 #include <algorithm>
@@ -17,9 +18,6 @@ constexpr Color teal = Color::rgb(103, 226, 206);
 constexpr Color glass = Color::rgba(8, 14, 22, 205);
 constexpr Color rim = Color::rgba(90, 200, 190, 80);
 constexpr Color track = Color::rgba(30, 40, 50, 230);
-
-constexpr std::array<std::string_view, 6> wave_notes{
-    "HOLD THE SECTOR", "HOSTILES ACCELERATE", "PRESSURE RISING", "HALFWAY THERE", "FINAL PUSH", "LAST STAND"};
 
 // The wave banner's motion, as kin animation property tracks: it fades in while
 // settling from a larger size, holds, then fades out.
@@ -96,14 +94,14 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
     Color hull_color = hull > .5f ? Color::rgb(102, 210, 163) : hull > .25f ? Color::rgb(236, 190, 90) : Color::rgb(240, 96, 90);
     if (_hurt > 0) hull_color = blend(hull_color, Color::rgb(255, 170, 160), _hurt / .35f);
     panel({16, 16, 300, 86});
-    text("SIGNAL SIEGE", 30, 23, 13, teal);
-    text("HULL", 30, 46, 11, muted);
+    text(tr("title.name"), 30, 23, 13, teal);
+    text(tr("hud.hull"), 30, 46, 11, muted);
     bar({78, 50, 188, 9}, hull, hull_color);
     text(std::to_string(std::max(0, arena.health)), 276, 45, 12, ink);
     const float ready = 1 - std::clamp(arena.dash_cooldown / arena.power_stats().dash_cooldown, 0.0f, 1.0f);
-    text("DASH", 30, 68, 11, muted);
+    text(tr("hud.dash"), 30, 68, 11, muted);
     bar({78, 73, 188, 4}, ready, ready >= 1 ? Color::rgb(120, 220, 255) : Color::rgb(66, 124, 164));
-    if (ready >= 1) text("READY", 276, 66, 10, Color::rgb(120, 220, 255));
+    if (ready >= 1) text(tr("hud.ready"), 276, 66, 10, Color::rgb(120, 220, 255));
 
     // Countdown and wave progress, top centre.
     panel({w * .5f - 130, 12, 260, 74});
@@ -112,7 +110,7 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
     std::snprintf(timer, sizeof timer, "%02d:%02d", remaining / 60, remaining % 60);
     centered(timer, 16, 30, remaining <= 10 ? Color::rgb(255, 214, 140) : ink);
     const int wave = std::min(6, 1 + int(arena.elapsed / 15));
-    centered("WAVE " + std::to_string(wave) + " / 6", 56, 12, muted);
+    centered(tr("hud.wave_of", {{"wave", wave}, {"waves", 6}}), 56, 12, muted);
     bar({w * .5f - 110, 76, 220, 3}, arena.elapsed / 90, teal);
 
     // Kills and cores, top right: rolling counters.
@@ -124,17 +122,16 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
     _kills.bounds = px({w - 222, 22, 96, 32});
     _kills.text_style = style(26, ink);
     ui2::run(_ui, _kills);
-    text("KILLS", w - 222, 58, 11, muted);
+    text(tr("hud.kills"), w - 222, 58, 11, muted);
     _cores.bounds = px({w - 118, 22, 96, 32});
     _cores.text_style = style(26, Color::rgb(120, 255, 180));
     ui2::run(_ui, _cores);
-    text("CORES", w - 118, 58, 11, muted);
+    text(tr("hud.cores"), w - 118, 58, 11, muted);
     int upgrades = 0;
     for (int id = 1; id < int(power_ups.size()); ++id) upgrades += arena.can_buy_power(id) ? 1 : 0;
     if (upgrades > 0) {
         const float pulse = .6f + .4f * std::sin(arena.elapsed * 5);
-        text("[U] " + std::to_string(upgrades) + (upgrades == 1 ? " UPGRADE READY" : " UPGRADES READY"), w - 222, 78, 10,
-             with_alpha(teal, pulse));
+        text(tr("hud.upgrades_ready", {{"n", upgrades}}), w - 222, 78, 10, with_alpha(teal, pulse));
     }
 
     // Wave banner: shown when a wave begins, driven by the property tracks.
@@ -150,8 +147,8 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
         } else {
             const float alpha = sample_f32(banner_alpha(), _banner);
             const float scale = sample_f32(banner_scale(), _banner);
-            centered("WAVE " + std::to_string(wave), h * .3f - 20 * scale, 40 * scale, with_alpha(Color::rgb(236, 246, 250), alpha));
-            centered(wave_notes[std::size_t(wave - 1)], h * .3f + 36, 14, with_alpha(teal, alpha));
+            centered(tr("hud.wave", {{"wave", wave}}), h * .3f - 20 * scale, 40 * scale, with_alpha(Color::rgb(236, 246, 250), alpha));
+            centered(tr("hud.wave_note." + std::to_string(wave)), h * .3f + 36, 14, with_alpha(teal, alpha));
         }
     }
 
@@ -165,7 +162,7 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
     // Controls fade out after the opening seconds (and return while paused).
     const float help = state.paused ? 1 : std::clamp((12 - arena.elapsed) / 2, 0.0f, 1.0f);
     if (help > 0) {
-        constexpr std::string_view controls = "WASD move / mouse + hold LMB fire / SPACE dash / U power grid / P pause / R restart / B autoplay";
+        const std::string controls = tr("hud.controls");
         const ui2::TextStyle s = style(13, with_alpha(muted, help));
         const auto lines = ui2::wrap_text(s.font, controls, (w - 380) * dpi, s.scale);
         float y = h - 20 - float(lines.size()) * 20;
@@ -174,8 +171,8 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
             y += 20;
         }
     }
-    const std::string stats = std::to_string(arena.enemy_count()) + " enemies   " + std::to_string(arena.shots.size()) +
-        " shots   " + std::to_string(state.commands) + " draws   F1 timings" + (state.autoplay ? "   AUTOPLAY" : "");
+    const std::string stats = tr(state.autoplay ? "hud.stats_autoplay" : "hud.stats",
+                                 {{"enemies", arena.enemy_count()}, {"shots", u64(arena.shots.size())}, {"draws", state.commands}});
     text(stats, w - 20 - width(stats, 11), h - 26, 11, Color::rgb(110, 150, 168));
 
     if (state.paused || arena.health <= 0 || (arena.won() && !state.autoplay)) {
@@ -183,9 +180,9 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
         ui2::Panel p{.bounds = px({(w - panel_w) * .5f, h * .5f - 75, panel_w, 150}), .color = Color::rgba(12, 22, 32, 238),
                      .border = rim};
         ui2::run(_ui, p);
-        centered(state.paused ? "PAUSED" : arena.health <= 0 ? "SIGNAL LOST" : "SECTOR SECURED", h * .5f - 46, 26,
+        centered(tr(state.paused ? "hud.paused" : arena.health <= 0 ? "results.lost" : "results.secured"), h * .5f - 46, 26,
                  Color::rgb(232, 211, 164));
-        centered(state.paused ? "P resume / R new run" : "R new run", h * .5f + 16, 15, muted);
+        centered(tr(state.paused ? "hud.paused_hint" : "hud.ended_hint"), h * .5f + 16, 15, muted);
     }
     _ui.end();
 }

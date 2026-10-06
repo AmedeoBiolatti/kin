@@ -7,7 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
-### Upgrading
+Localization: text by key in the player's language, switched while the game
+runs, and text in any script. See [localization](localization.md).
+
+### Upgrading from 0.2.5
 
 - `Input::mouse_wheel_y()` is now for `update()`: what the wheel turned since
   a fixed step last read it. Code that reads the wheel at render time should
@@ -23,6 +26,16 @@ releases may change APIs.
 - `AudioEngine::stats()` returns a copy, and `mixed_frames` is 64-bit.
 - `set_bus_volume("master", v)` now scales every bus under `master`, as the
   hierarchy says; before, it only reached voices playing on `master` itself.
+- `TextDirection` moved to `kin/core/bidi.hpp` (it is still `kin::TextDirection`).
+- `LanguageFile::direction` is optional: unset follows the locale tag.
+- ui2 TTF text beyond ASCII is laid out glyph by glyph from the face's metrics
+  instead of shaped as one string, so its width can change by a pixel or so.
+  Text that needs a shaper (right to left, Arabic, Indic, combining marks) is
+  still shaped, run by run.
+- `wrap_text` now breaks CJK text between characters, and long words between
+  characters rather than bytes.
+- The 5x7 bitmap font measures characters, not bytes, so UTF-8 text is
+  narrower than before.
 
 ### Added
 
@@ -110,6 +123,33 @@ releases may change APIs.
 - Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
   make a looping cue play its intro once and then repeat the loop, streamed or
   not.
+- `kin::Localization` (`kin/l10n/localization.hpp`): `.kinlang` (JSON) and CSV
+  language files, several per language, reloaded as they change; a fallback
+  chain (`fr-CA`, `fr`, the base); `text(key)` and `tr(key, args)`; missing
+  keys logged once and listed; `validate()` against the base; the
+  pseudo-locale `en-XA`. `system_locales()`, `match_locale()`,
+  `normalize_locale()` and `locale_direction()` for tags.
+- Messages (`kin/l10n/message_format.hpp`): arguments, `plural` (CLDR rules for
+  about 45 languages, `=N`, `#`), `select` and ICU quoting; numbers grouped for
+  the locale.
+- `--locale`, `--pseudo-locale` and `--fail-on-missing-text` on every
+  `run_scene_app` game; `SceneAppConfig::localization`; the run report's
+  `localization` section. Headless and server runs show the base language
+  unless told otherwise.
+- `Ui2Text` and `Ui2EntityBuilder::text_key`: retained widgets' text by key,
+  updated when the language changes.
+- Dialogue shown from the localization (`dialogue.<doc>.<node>`, choices,
+  speakers, history), with the dialogue's variables as values;
+  `dialogue_language_file` extracts a document's text.
+- `tr()` and an `l10n` table in `ScriptEngine` and `LuaScript` scripts.
+- `kin/core/bidi.hpp`: the Unicode bidirectional algorithm for a line's runs.
+- ui2 fonts: `TtfFontOptions` with `fallbacks`; `system_fallback_fonts()`,
+  which `system_ui_font` uses; `set_text_base_direction`.
+- `ui2::set_ui_direction`: right-to-left interfaces (layouts reflected,
+  `align_rect` Start and End swapped). `run_scene_app` follows the language.
+- `utf8_append`. `FileWatcher::load_and_watch` can return its watch id.
+- Signal Siege in English, French, Japanese and Arabic, with a language item
+  on its title. `kin_text_bench`.
 
 ### Changed
 
@@ -135,6 +175,14 @@ releases may change APIs.
   before. `write_report`'s buses list their effects.
 - A master limiter turns the mix down when voices add up past full scale,
   instead of hard-clipping it (`stats().limited_frames` counts how often).
+- ui2 TTF atlases (Bitmap and Sdf) grow as characters appear instead of
+  holding printable ASCII only, and kern beyond ASCII. Text beyond ASCII no
+  longer becomes a texture per string: 70 accented labels a frame measure and
+  draw 3.2x faster, Cyrillic 2.3x; ASCII is as before.
+- Right-to-left and shaped runs are ordered by the bidirectional algorithm
+  and drawn white and tinted, so one texture serves every colour.
+- Atlas pages keep their pixels, so backends without `update_texture` (the
+  software renderer) remake the page instead.
 
 ### Fixed
 
@@ -145,6 +193,7 @@ releases may change APIs.
 - `AppFrameStats::update_steps` counts the step being run inside `update()`
   under `App::run`, as it already did under `run_for`: 1 is a frame's first
   step (it was 0).
+
 
 ## [0.2.5] — 2026-10-06
 

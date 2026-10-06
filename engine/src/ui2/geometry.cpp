@@ -1,10 +1,15 @@
 #include <kin/ui2/geometry.hpp>
 
+#include <kin/ui2/text.hpp>
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 namespace kin::ui2 {
 namespace {
+
+std::atomic<TextDirection> g_ui_direction{TextDirection::LeftToRight};
 
 f32 aligned_pos(f32 parent_pos, f32 parent_size, f32 item_size, UiAlign align) {
     switch (align) {
@@ -183,7 +188,19 @@ Rectf centered_rect(Vec2f center, Vec2f size) {
     return {center.x - size.x * 0.5f, center.y - size.y * 0.5f, size.x, size.y};
 }
 
+void set_ui_direction(TextDirection direction) {
+    g_ui_direction.store(direction, std::memory_order_relaxed);
+    set_text_base_direction(direction == TextDirection::RightToLeft ? std::optional{direction} : std::nullopt);
+}
+
+TextDirection ui_direction() {
+    return g_ui_direction.load(std::memory_order_relaxed);
+}
+
 Rectf align_rect(Rectf parent, Vec2f size, UiAlign horizontal, UiAlign vertical) {
+    if (ui_direction() == TextDirection::RightToLeft) {
+        horizontal = horizontal == UiAlign::Start ? UiAlign::End : horizontal == UiAlign::End ? UiAlign::Start : horizontal;
+    }
     const f32 w = aligned_size(parent.w, size.x, horizontal);
     const f32 h = aligned_size(parent.h, size.y, vertical);
     return {

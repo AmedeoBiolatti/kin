@@ -1,5 +1,6 @@
 #include <kin/scripting/script_engine.hpp>
 
+#include "lua_l10n.hpp"
 #include "lua_paths.hpp"
 
 #include <kin/core/json.hpp>
@@ -1428,6 +1429,7 @@ bool ScriptEngine::call_optional_const(std::string_view name, Args&&... args) co
 }
 
 void ScriptEngine::register_bindings() {
+    scripting_detail::bind_l10n(_impl->lua, true);
     _impl->lua.new_usertype<ScriptEntityApi>("KinEntity",
         sol::no_constructor,
         "id", &ScriptEntityApi::id,

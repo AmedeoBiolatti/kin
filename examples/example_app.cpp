@@ -1,7 +1,9 @@
 #include "example_app.hpp"
 #include "example_common.hpp"
 #include "workloads.hpp"
+#include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <algorithm>
@@ -156,6 +158,18 @@ int run_example(int argc, char** argv, bool tracker) {
             headless.frames = options.capture_frame;
         if (!options.screenshot.empty() && headless.enabled && headless.frames > 0 && headless.frames < options.capture_frame)
             throw std::invalid_argument("--frames must reach --capture-frame for screenshot capture");
+        // Signal Siege's text, in the player's language unless they chose one
+        // on the title (kept with their best run) or --locale names one. The
+        // files reload as they are edited.
+        Localization l10n;
+        FileWatcher files;
+        if (!tracker) {
+            std::vector<std::string> errors;
+            l10n.load_directory(siege_language_dir(), errors, &files);
+            for (const std::string& error : errors) std::cerr << "Language file: " << error << '\n';
+            l10n.set_locale(system_locales());
+            set_active_localization(&l10n);
+        }
         SceneManager scenes;
         const bool start_in_arena = headless.enabled || options.benchmark || options.power_grid || !options.screenshot.empty();
         const bool tool_run = start_in_arena || headless.server;
@@ -164,9 +178,12 @@ int run_example(int argc, char** argv, bool tracker) {
             else manager.push(make_signal_siege(options, start_in_arena, tool_run));
         };
         build(scenes);
-        return run_scene_app({.window = window, .headless = headless, .game = &game,
+        const int code = run_scene_app({.window = window, .headless = headless, .game = &game,
             // The server renders every step: menus and HUD run in render().
-            .render_headless = !options.screenshot.empty() || headless.server, .reset_scenes = build}, scenes);
+            .render_headless = !options.screenshot.empty() || headless.server, .reset_scenes = build,
+            .file_watcher = tracker ? nullptr : &files, .localization = tracker ? nullptr : &l10n}, scenes);
+        set_active_localization(nullptr);
+        return code;
     } catch (const std::exception& e) {
         std::cerr << "Example error: " << e.what() << '\n'; return 1;
     }

@@ -22,6 +22,7 @@ add_library(kin_engine STATIC
     src/assets/asset_server.cpp
     src/assets/file_watcher.cpp
     src/assets/image.cpp
+    src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
     src/core/jobs.cpp
@@ -45,6 +46,9 @@ add_library(kin_engine STATIC
     src/ecs/time.cpp
     src/ecs/ui2.cpp
     src/ecs/ui2_sync.cpp
+    src/l10n/language_file.cpp
+    src/l10n/localization.cpp
+    src/l10n/message_format.cpp
     src/platform/app.cpp
     src/platform/input.cpp
     src/platform/file_dialogs.cpp
@@ -105,6 +109,7 @@ add_library(kin_engine STATIC
     src/save/save_store.cpp
     src/scripting/script_engine.cpp
     src/scripting/lua_audio.cpp
+    src/scripting/lua_l10n.cpp
     src/scripting/lua_paths.cpp
     src/scripting/lua_script.cpp
     src/scripting/script_scene.cpp
@@ -117,6 +122,8 @@ add_library(kin_engine STATIC
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
     src/ui2/text.cpp
+    src/ui2/text_script.cpp
+    src/ui2/text_ttf.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
     src/ui2/widget_internal.cpp
