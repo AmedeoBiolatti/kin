@@ -12,6 +12,7 @@ add_library(kin_engine STATIC
     src/audio/audio_catalog.cpp
     src/audio/audio_clip.cpp
     src/audio/audio_decoder.cpp
+    src/audio/audio_effects.cpp
     src/audio/audio_engine.cpp
     src/audio/audio_settings.cpp
     src/audio/sdl_audio_backend.cpp

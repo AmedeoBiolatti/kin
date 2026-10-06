@@ -926,6 +926,10 @@ void test_lua_audio() {
             audio.set_bus_paused("sfx", true)
             return hum
         end
+        function muffle()
+            audio.set_bus_effects("sfx", {{type = "lowpass", cutoff = 800}, {type = "reverb", wet = 0.2}})
+            audio.set_bus_effect("sfx", 1, {cutoff = 300})
+        end
         function finish()
             audio.stop(hum)
             audio.stop_music(0)
@@ -937,6 +941,10 @@ void test_lua_audio() {
     assert(audio.playing(kin::AudioHandle{static_cast<kin::u64>(*hum)}));
     assert(audio.music());
     assert(near(audio.bus_volume("master"), 0.8f) && audio.bus_paused("sfx"));
+    assert(script.call("muffle"));
+    const std::vector<kin::AudioEffect> effects = audio.bus_effects("sfx");
+    assert(effects.size() == 2 && effects[0].type == kin::AudioEffectType::LowPass && near(effects[0].cutoff, 300.0f));
+    assert(effects[1].type == kin::AudioEffectType::Reverb && near(effects[1].wet, 0.2f));
     assert(script.call_for<bool>("finish") == false);
     assert(!audio.music());
 
@@ -963,6 +971,127 @@ void test_catalog_ducks_roundtrip() {
     assert(loaded.ducks() == catalog.ducks());
 
     std::ofstream(dir / "bad.kinaudio") << "duck music volume=0.5\n";
+    bool threw = false;
+    try {
+        kin::load_audio_catalog(dir / "bad.kinaudio");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    assert(threw);
+}
+
+kin::AudioClip sine_clip(float hz, float amplitude = 0.5f, kin::i32 frames = 48000) {
+    std::vector<kin::f32> samples(static_cast<std::size_t>(frames));
+    for (kin::i32 i = 0; i < frames; ++i) {
+        samples[static_cast<std::size_t>(i)] = amplitude * std::sin(6.2831853f * hz * static_cast<float>(i) / 48000.0f);
+    }
+    return kin::make_memory_audio_clip("sine", std::move(samples), 1, 48000);
+}
+
+// Root-mean-square of the left channel over [from, to) frames.
+float rms_left(const std::vector<kin::f32>& out, int from, int to) {
+    double sum = 0.0;
+    for (int frame = from; frame < to; ++frame) {
+        sum += static_cast<double>(out[static_cast<std::size_t>(frame) * 2]) * out[static_cast<std::size_t>(frame) * 2];
+    }
+    return static_cast<float>(std::sqrt(sum / (to - from)));
+}
+
+// RMS of `hz` played on "sfx" with `effects` on `bus`.
+float filtered_rms(float hz, std::vector<kin::AudioEffect> effects, std::string_view bus = "sfx") {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", sine_clip(hz));
+    const kin::AudioCatalog catalog = bus_catalog();
+    audio.play(catalog, {.cue = "hum"});
+    audio.set_bus_effects(bus, std::move(effects));
+    return rms_left(render(audio, 9600), 4800, 9600);
+}
+
+// Low- and high-pass filters keep their band and cut the other, on the bus
+// they are on and on everything under it.
+void test_filters() {
+    const float full = 0.5f / std::sqrt(2.0f);
+    const kin::AudioEffect low{.type = kin::AudioEffectType::LowPass, .cutoff = 500.0f};
+    const kin::AudioEffect high{.type = kin::AudioEffectType::HighPass, .cutoff = 2000.0f};
+    assert(near(filtered_rms(100.0f, {low}), full, 0.02f));
+    assert(filtered_rms(8000.0f, {low}) < 0.01f);
+    assert(filtered_rms(8000.0f, {low}, "master") < 0.01f);
+    assert(filtered_rms(100.0f, {high}) < 0.01f);
+    assert(near(filtered_rms(8000.0f, {high}), full, 0.02f));
+    assert(near(filtered_rms(8000.0f, {{.type = kin::AudioEffectType::LowPass, .enabled = false, .cutoff = 500.0f}}),
+                full, 0.01f));
+    assert(near(filtered_rms(8000.0f, {low}, "ui"), full, 0.01f)); // another branch
+}
+
+// A reverb rings on after its input stops, and dies away.
+void test_reverb_tail() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f, 480));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "click", .clips = {"dc"}, .bus = "sfx"});
+    audio.set_bus_effects("sfx", {{.type = kin::AudioEffectType::Reverb, .room_size = 0.8f, .wet = 0.5f, .dry = 0.0f}});
+    audio.play(catalog, {.cue = "click"});
+    const std::vector<kin::f32> out = render(audio, 96000);
+    assert(audio.active_voice_count() == 0);
+    const float early = rms_left(out, 2000, 24000);
+    const float late = rms_left(out, 72000, 96000);
+    assert(early > 0.001f);
+    assert(late < early * 0.5f);
+    assert(std::ranges::all_of(out, [](kin::f32 v) { return std::isfinite(v) && std::fabs(v) <= 1.0f; }));
+}
+
+// A compressor brings a loud signal down by its ratio above the threshold.
+void test_compressor() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.9f));
+    const kin::AudioCatalog catalog = bus_catalog();
+    audio.play(catalog, {.cue = "hum"});
+    audio.set_bus_effects("master", {{.type = kin::AudioEffectType::Compressor, .threshold = -12.0f, .ratio = 4.0f,
+                                      .attack = 0.001f, .release = 0.1f}});
+    const std::vector<kin::f32> out = render(audio, 4800);
+    // 0.9 is -0.92 dB: 11.08 dB over, brought down to 2.77 dB over: -9.23 dB.
+    assert(near(out[2 * 4799], 0.346f, 0.005f));
+    assert(out[0] > out[2 * 4799]); // the attack takes a moment
+}
+
+// Effects change while playing, game chains outrank the catalog's, and the
+// catalog file carries them.
+void test_effect_changes_and_catalog() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", sine_clip(4000.0f));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.bus("sfx")->effects.push_back({.type = kin::AudioEffectType::LowPass, .cutoff = 200.0f});
+    audio.play(catalog, {.cue = "hum"});
+    assert(audio.bus_effects("sfx").size() == 1);
+    assert(rms_left(render(audio, 4800), 2400, 4800) < 0.01f);
+
+    // Sweep the cutoff open: the same filter, gliding.
+    audio.set_bus_effect("sfx", 0, {.type = kin::AudioEffectType::LowPass, .cutoff = 20000.0f});
+    render(audio, 9600);
+    assert(rms_left(render(audio, 4800), 0, 4800) > 0.3f);
+    assert(near(audio.bus_effects("sfx")[0].cutoff, 20000.0f));
+
+    // Another type replaces it.
+    audio.set_bus_effect("sfx", 0, {.type = kin::AudioEffectType::HighPass, .cutoff = 100.0f});
+    assert(audio.bus_effects("sfx")[0].type == kin::AudioEffectType::HighPass);
+
+    // The game's chain stays when the catalog is seen again.
+    audio.set_bus_effects("sfx", {});
+    audio.play(catalog, {.cue = "hum"});
+    assert(audio.bus_effects("sfx").empty());
+
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-effects";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    catalog.bus("master")->effects.push_back({.type = kin::AudioEffectType::Compressor, .threshold = -6.0f});
+    catalog.bus("ui")->effects.push_back({.type = kin::AudioEffectType::Reverb, .enabled = false, .room_size = 0.7f});
+    assert(kin::save_audio_catalog(catalog, dir / "audio.kinaudio"));
+    const kin::AudioCatalog loaded = kin::load_audio_catalog(dir / "audio.kinaudio");
+    for (const char* bus : {"master", "sfx", "ui"}) {
+        assert(loaded.bus(bus)->effects == catalog.bus(bus)->effects);
+    }
+
+    std::ofstream(dir / "bad.kinaudio") << "effect nowhere lowpass cutoff=100\n";
     bool threw = false;
     try {
         kin::load_audio_catalog(dir / "bad.kinaudio");
@@ -1001,5 +1130,9 @@ int main() {
     test_settings_and_report();
     test_lua_audio();
     test_catalog_ducks_roundtrip();
+    test_filters();
+    test_reverb_tail();
+    test_compressor();
+    test_effect_changes_and_catalog();
     return 0;
 }

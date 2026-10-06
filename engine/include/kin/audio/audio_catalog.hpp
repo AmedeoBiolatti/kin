@@ -61,6 +61,38 @@ struct AudioDuck {
     friend bool operator==(const AudioDuck&, const AudioDuck&) = default;
 };
 
+enum class AudioEffectType {
+    LowPass,
+    HighPass,
+    Reverb,
+    Compressor,
+};
+
+// One effect in a bus's chain. Only the fields for its type matter.
+struct AudioEffect {
+    AudioEffectType type = AudioEffectType::LowPass;
+    bool enabled = true;
+    // LowPass, HighPass: the corner frequency in Hz and its resonance.
+    f32 cutoff = 1000.0f;
+    f32 q = 0.7071f;
+    // Reverb (Freeverb): room size and damping 0..1, wet and dry levels, and
+    // stereo width 0..1.
+    f32 room_size = 0.5f;
+    f32 damping = 0.5f;
+    f32 wet = 0.3f;
+    f32 dry = 1.0f;
+    f32 width = 1.0f;
+    // Compressor: above `threshold` dB, the level rises 1/ratio as fast;
+    // attack and release in seconds, makeup gain in dB.
+    f32 threshold = -12.0f;
+    f32 ratio = 4.0f;
+    f32 attack = 0.01f;
+    f32 release = 0.1f;
+    f32 makeup = 0.0f;
+
+    friend bool operator==(const AudioEffect&, const AudioEffect&) = default;
+};
+
 struct AudioBus {
     std::string id;
     std::string parent;
@@ -69,6 +101,8 @@ struct AudioBus {
     bool paused = false;
     f32 fade_target = 1.0f;
     f32 fade_seconds = 0.0f;
+    // Applied in order to everything the bus plays, before its volume.
+    std::vector<AudioEffect> effects;
 };
 
 class AudioCatalog {
@@ -104,6 +138,8 @@ private:
 };
 
 std::string_view audio_category_name(AudioCategory category);
+std::string_view audio_effect_type_name(AudioEffectType type);
+bool parse_audio_effect_type(std::string_view value, AudioEffectType& out);
 bool parse_audio_category(std::string_view value, AudioCategory& out);
 
 AudioCatalog load_audio_catalog(const std::filesystem::path& path);

@@ -52,6 +52,11 @@ releases may change APIs.
 - Lua: `bind_lua_audio` gives scripts an `audio` table, and
   `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
   lets a host add its own bindings to a script scene's Lua state.
+- Audio effects per bus: low-pass and high-pass filters, a reverb
+  (Freeverb) and a compressor, in a bus's chain from `effect` lines in its
+  catalog or `set_bus_effects`; `set_bus_effect` changes one while it plays
+  (filters glide to a new cutoff, reverb tails carry on). Lua scripts get
+  `audio.set_bus_effects` and `audio.set_bus_effect`.
 - Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
   make a looping cue play its intro once and then repeat the loop, streamed or
   not.
@@ -72,6 +77,9 @@ releases may change APIs.
 - Spatial voices pan with an equal-power law, so a sound crossing the
   listener no longer dips in the middle, and gain and pan changes ramp over a
   block instead of stepping.
+- Buses are mixed on their own and added into their parents (submixes), in
+  blocks of at most 1024 frames; with no effects the output is the same as
+  before. `write_report`'s buses list their effects.
 - A master limiter turns the mix down when voices add up past full scale,
   instead of hard-clipping it (`stats().limited_frames` counts how often).
 

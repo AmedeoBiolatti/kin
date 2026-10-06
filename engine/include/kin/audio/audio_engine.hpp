@@ -102,6 +102,14 @@ public:
     // The bus's own volume, on top of the catalog's; children follow their
     // parents, so set_bus_volume("master", 0.5f) halves everything under master.
     void set_bus_volume(std::string_view bus, f32 volume, f32 fade = 0.0f);
+    // Replaces the bus's effect chain; until a game sets one, the bus uses its
+    // catalog's. Effects run on the bus's mix before its volume.
+    void set_bus_effects(std::string_view bus, std::vector<AudioEffect> effects);
+    // Changes one effect while it plays, e.g. sweeping a low-pass cutoff for a
+    // muffled pause menu; filter memory and reverb tails carry on. An effect
+    // of another type replaces it.
+    void set_bus_effect(std::string_view bus, std::size_t index, const AudioEffect& effect);
+    std::vector<AudioEffect> bus_effects(std::string_view bus) const;
     void set_bus_muted(std::string_view bus, bool muted);
     // A paused bus's voices fade out briefly and hold their place until resumed:
     // pause "sfx" with the game while "ui" keeps playing.
