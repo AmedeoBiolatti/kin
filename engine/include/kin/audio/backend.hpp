@@ -34,8 +34,13 @@ public:
 std::unique_ptr<IAudioBackend> create_null_audio_backend(i32 sample_rate = 48000, i32 channels = 2);
 std::unique_ptr<IAudioBackend> create_sdl_audio_backend(i32 sample_rate = 48000, i32 channels = 2);
 
-// Decodes a whole audio file to 32-bit float samples at the file's own sample
-// rate, as mono or stereo (files with more channels are mixed down to stereo).
+// Decodes a whole audio file (WAV, AIFF, FLAC, Ogg Vorbis or MP3) to 32-bit
+// float samples at the file's own sample rate, as mono or stereo. Throws
+// std::runtime_error if the file cannot be read.
 AudioClip load_audio_clip(const std::filesystem::path& path);
+// Reads an audio file into memory without decoding it: a streamed clip, which
+// voices decode as they play. For music and long ambience, where the decoded
+// samples would take ten times the memory.
+AudioClip load_audio_stream(const std::filesystem::path& path);
 
 } // namespace kin

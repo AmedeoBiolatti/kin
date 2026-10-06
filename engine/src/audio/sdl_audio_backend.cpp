@@ -1,6 +1,5 @@
 #include <kin/audio/backend.hpp>
 
-#include <kin/audio/audio_clip.hpp>
 #include <kin/platform/log.hpp>
 
 #include <SDL3/SDL.h>
@@ -118,82 +117,6 @@ std::unique_ptr<IAudioBackend> create_null_audio_backend(i32 sample_rate, i32 ch
 
 std::unique_ptr<IAudioBackend> create_sdl_audio_backend(i32 sample_rate, i32 channels) {
     return std::make_unique<SdlAudioBackend>(sample_rate, channels);
-}
-
-// Needs no audio device or SDL audio subsystem, so it is safe on worker threads.
-AudioClip load_audio_clip(const std::filesystem::path& path) {
-    SDL_AudioSpec src_spec{};
-    Uint8* wav = nullptr;
-    Uint32 wav_len = 0;
-    if (!SDL_LoadWAV(path.string().c_str(), &src_spec, &wav, &wav_len)) {
-        const std::string error = "SDL_LoadWAV failed for " + path.string() + ": " + SDL_GetError();
-        KIN_LOG_ERROR_F("audio",
-                        "audio clip load failed",
-                        (LogFields{
-                            {.name = "path", .value = path.string()},
-                            {.name = "error", .value = error},
-                        }));
-        throw std::runtime_error(error);
-    }
-
-    // Keep the file's rate (the mixer resamples as it plays) and at most two channels.
-    SDL_AudioSpec dst_spec{
-        .format = SDL_AUDIO_F32,
-        .channels = std::min(src_spec.channels, 2),
-        .freq = src_spec.freq,
-    };
-    SDL_AudioStream* stream = SDL_CreateAudioStream(&src_spec, &dst_spec);
-    if (!stream) {
-        SDL_free(wav);
-        const std::string error = std::string("SDL_CreateAudioStream failed: ") + SDL_GetError();
-        KIN_LOG_ERROR_F("audio",
-                        "audio conversion stream failed",
-                        (LogFields{
-                            {.name = "path", .value = path.string()},
-                            {.name = "error", .value = error},
-                        }));
-        throw std::runtime_error(error);
-    }
-
-    const bool put_ok = SDL_PutAudioStreamData(stream, wav, static_cast<int>(wav_len));
-    SDL_free(wav);
-    if (!put_ok || !SDL_FlushAudioStream(stream)) {
-        SDL_DestroyAudioStream(stream);
-        const std::string error = std::string("SDL audio conversion failed: ") + SDL_GetError();
-        KIN_LOG_ERROR_F("audio",
-                        "audio conversion failed",
-                        (LogFields{
-                            {.name = "path", .value = path.string()},
-                            {.name = "error", .value = error},
-                        }));
-        throw std::runtime_error(error);
-    }
-
-    const int available = SDL_GetAudioStreamAvailable(stream);
-    std::vector<f32> samples(static_cast<std::size_t>(std::max(0, available)) / sizeof(f32));
-    const int read = samples.empty() ? 0 : SDL_GetAudioStreamData(stream, samples.data(), available);
-    SDL_DestroyAudioStream(stream);
-    if (read < 0) {
-        const std::string error = std::string("SDL_GetAudioStreamData failed: ") + SDL_GetError();
-        KIN_LOG_ERROR_F("audio",
-                        "audio conversion read failed",
-                        (LogFields{
-                            {.name = "path", .value = path.string()},
-                            {.name = "error", .value = error},
-                        }));
-        throw std::runtime_error(error);
-    }
-    samples.resize(static_cast<std::size_t>(read) / sizeof(f32));
-
-    AudioClip clip = make_memory_audio_clip(path.filename().string(), std::move(samples), dst_spec.channels, dst_spec.freq);
-    KIN_LOG_INFO_F("audio",
-                   "audio clip loaded",
-                   (LogFields{
-                       {.name = "path", .value = path.string()},
-                       {.name = "frames", .value = std::to_string(clip.frame_count())},
-                       {.name = "channels", .value = std::to_string(clip.channels())},
-                   }));
-    return clip;
 }
 
 } // namespace kin

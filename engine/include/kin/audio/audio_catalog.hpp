@@ -23,6 +23,13 @@ enum class AudioCategory {
 struct AudioClipRef {
     std::string id;
     std::string path;
+    // Keep the file compressed and decode while playing (music, long ambience).
+    bool stream = false;
+    // Where a looping cue jumps back to, and where it jumps from, in frames at
+    // the file's sample rate; loop_end 0 is the end of the file. An intro
+    // plays once before the loop.
+    i64 loop_start = 0;
+    i64 loop_end = 0;
 };
 
 struct AudioCue {

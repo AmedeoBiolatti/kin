@@ -33,6 +33,13 @@ bool parse_i32(std::string_view text, i32& value) {
     return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
+bool parse_i64(std::string_view text, i64& value) {
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto parsed = std::from_chars(begin, end, value);
+    return parsed.ec == std::errc{} && parsed.ptr == end && value >= 0;
+}
+
 bool parse_bool(std::string_view text, bool& value) {
     if (text == "true" || text == "1" || text == "yes") {
         value = true;
@@ -213,6 +220,26 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
             if (!(in >> clip.id >> clip.path)) {
                 fail("clip requires id and path");
             }
+            for (std::string token; in >> token;) {
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    fail("clip options must be key=value");
+                }
+                const std::string_view key{token.data(), eq};
+                const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
+                if (key == "stream") {
+                    if (!parse_bool(value, clip.stream)) fail("invalid stream");
+                } else if (key == "loop_start") {
+                    if (!parse_i64(value, clip.loop_start)) fail("invalid loop_start");
+                } else if (key == "loop_end") {
+                    if (!parse_i64(value, clip.loop_end)) fail("invalid loop_end");
+                } else {
+                    fail("unknown clip option");
+                }
+            }
+            if (clip.loop_end > 0 && clip.loop_end <= clip.loop_start) {
+                fail("loop_end must be after loop_start");
+            }
             catalog.add_clip(std::move(clip));
             continue;
         }
@@ -311,7 +338,17 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
         out << '\n';
     }
     for (const AudioClipRef* clip : clips) {
-        out << "clip " << clip->id << ' ' << clip->path << '\n';
+        out << "clip " << clip->id << ' ' << clip->path;
+        if (clip->stream) {
+            out << " stream=true";
+        }
+        if (clip->loop_start > 0) {
+            out << " loop_start=" << clip->loop_start;
+        }
+        if (clip->loop_end > 0) {
+            out << " loop_end=" << clip->loop_end;
+        }
+        out << '\n';
     }
 
     std::vector<const AudioCue*> cues;
