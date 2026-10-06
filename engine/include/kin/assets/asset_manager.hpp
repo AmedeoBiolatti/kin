@@ -137,11 +137,17 @@ public:
         return (*loader)(resolved);
     }
 
-    // Stable cache key for an asset of type T at a relative path.
+    // Stable cache key for an asset of type T at a relative path: the path as
+    // the shown language has it (see localized_path), so a load after a
+    // language change gets that language's file.
     template<typename T>
     std::string cache_key(std::string_view relative_path) const {
-        return std::string(typeid(T).name()) + ":" + std::string(relative_path);
+        return std::string(typeid(T).name()) + ":" + localized_path(relative_path);
     }
+    // `relative_path` as the active localization has it: its variant at
+    // l10n/<locale>/<relative_path> if the shown language (or one it falls
+    // back to) has one (Localization::localized_path); else unchanged.
+    std::string localized_path(std::string_view relative_path) const;
 
     template<typename T>
     bool loaded(std::string_view relative_path) const {
@@ -188,6 +194,7 @@ public:
     void discover();
 
     const std::filesystem::path& root() const { return _root; }
+    // The file for `relative_path` (localized, as cache_key is).
     std::filesystem::path resolve(std::string_view relative_path) const;
     Stats stats() const;
     std::vector<std::string> loaded_asset_paths() const;

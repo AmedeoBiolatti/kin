@@ -317,6 +317,39 @@ void Localization::resolve_chain() {
     ++_generation;
     const std::scoped_lock lock(_mutex);
     _text_cache.clear();
+    _asset_exists.clear();
+}
+
+std::string Localization::localized_path(const std::filesystem::path& root, std::string_view relative) const {
+    const std::string& shown = pseudo() ? _base_locale : _locale;
+    std::vector<std::string> tags = locale_fallbacks(shown);
+    for (std::string& tag : locale_fallbacks(_base_locale)) {
+        if (std::ranges::find(tags, tag) == tags.end()) {
+            tags.push_back(std::move(tag));
+        }
+    }
+    const std::string root_key = root.generic_string() + "|";
+    for (const std::string& tag : tags) {
+        std::string candidate = "l10n/" + tag + "/";
+        candidate += relative;
+        const std::string key = root_key + candidate;
+        bool exists = false;
+        {
+            const std::scoped_lock lock(_mutex);
+            const auto found = _asset_exists.find(key);
+            if (found != _asset_exists.end()) {
+                exists = found->second;
+            } else {
+                std::error_code error;
+                exists = std::filesystem::is_regular_file(root / candidate, error);
+                _asset_exists.emplace(key, exists);
+            }
+        }
+        if (exists) {
+            return candidate;
+        }
+    }
+    return std::string{relative};
 }
 
 TextDirection Localization::direction() const {

@@ -1,4 +1,6 @@
+#include <kin/assets/asset_manager.hpp>
 #include <kin/assets/file_watcher.hpp>
+#include <kin/audio/audio_catalog.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/platform/log.hpp>
 
@@ -535,6 +537,42 @@ void test_files_and_reload(const fs::path& dir) {
     assert(!l10n.load_directory(dir / "no-such-dir", errors));
 }
 
+// Assets by language: l10n/<locale>/<path> where the shown language (or one it
+// falls back to) has one, for the asset manager and audio clips.
+void test_localized_assets(const fs::path& dir) {
+    const fs::path root = dir / "assets";
+    fs::create_directories(root / "l10n" / "fr" / "voice");
+    fs::create_directories(root / "voice");
+    write(root / "voice" / "intro.txt", "Hello");
+    write(root / "l10n" / "fr" / "voice" / "intro.txt", "Bonjour");
+    write(root / "voice" / "only_english.txt", "Only");
+
+    kin::Localization l10n;
+    l10n.add("en", language("en", {{"k", "v"}}));
+    l10n.add("fr", language("fr", {{"k", "v"}}));
+    assert(l10n.localized_path(root, "voice/intro.txt") == "voice/intro.txt");
+    l10n.set_locale("fr-CA");
+    assert(l10n.localized_path(root, "voice/intro.txt") == "l10n/fr/voice/intro.txt");
+    assert(l10n.localized_path(root, "voice/only_english.txt") == "voice/only_english.txt");
+
+    kin::AssetManager assets(root);
+    assets.register_loader<std::string>([](const fs::path& path) { return *kin::read_text_file(path); });
+    assert(*assets.load<std::string>("voice/intro.txt") == "Hello"); // no active localization
+    kin::set_active_localization(&l10n);
+    assert(*assets.load<std::string>("voice/intro.txt") == "Bonjour");
+    assert(assets.resolve("voice/intro.txt") == root / "l10n/fr/voice/intro.txt");
+    l10n.set_locale("en");
+    assert(*assets.load<std::string>("voice/intro.txt") == "Hello"); // another language, another file
+
+    kin::AudioCatalog audio;
+    audio.set_root(root);
+    audio.add_clip({.id = "intro", .path = "voice/intro.txt"});
+    l10n.set_locale("fr");
+    assert(audio.resolve_clip_path("intro") == root / "l10n/fr/voice/intro.txt");
+    kin::set_active_localization(nullptr);
+    assert(audio.resolve_clip_path("intro") == root / "voice/intro.txt");
+}
+
 } // namespace
 
 int main() {
@@ -561,6 +599,7 @@ int main() {
     test_pseudo_locale();
     test_validate();
     test_files_and_reload(dir);
+    test_localized_assets(dir);
 
     fs::remove_all(dir);
     return 0;

@@ -1,5 +1,7 @@
 #include <kin/assets/asset_manager.hpp>
 
+#include <kin/l10n/localization.hpp>
+
 #include <kin/audio/audio_catalog.hpp>
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/particles/particle_catalog.hpp>
@@ -188,8 +190,19 @@ void AssetManager::discover() {
                     }));
 }
 
+std::string AssetManager::localized_path(std::string_view relative_path) const {
+    // Already a localized path (as load_handle passes on): left as it is.
+    if (relative_path.starts_with("l10n/")) {
+        return std::string{relative_path};
+    }
+    if (const Localization* l10n = active_localization()) {
+        return l10n->localized_path(_root, relative_path);
+    }
+    return std::string{relative_path};
+}
+
 std::filesystem::path AssetManager::resolve(std::string_view relative_path) const {
-    return _root / std::filesystem::path{relative_path};
+    return _root / std::filesystem::path{localized_path(relative_path)};
 }
 
 AssetManager::Stats AssetManager::stats() const {

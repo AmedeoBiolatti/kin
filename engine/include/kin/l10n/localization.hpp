@@ -241,6 +241,15 @@ public:
     // for the pseudo-locale.
     const std::string& formatting_locale() const;
 
+    // Assets by language: `relative` (under `root`) as the shown language has
+    // it. A variant at l10n/<tag>/<relative> is taken for the first tag of the
+    // chain that has one ("l10n/fr-CA/audio/intro.wav", then
+    // "l10n/fr/audio/intro.wav"); else `relative` itself. AssetManager and
+    // AudioCatalog look their files up this way through the active
+    // localization. Which files exist is remembered until the next load or
+    // locale change.
+    std::string localized_path(const std::filesystem::path& root, std::string_view relative) const;
+
     // Keys looked up and not found, sorted.
     std::vector<std::string> missing_keys() const;
     void clear_missing_keys();
@@ -285,6 +294,7 @@ private:
     mutable std::mutex _mutex; // guards the caches below
     mutable std::unordered_map<std::string, std::unique_ptr<std::string>, TranslationHash, std::equal_to<>> _text_cache;
     mutable std::set<std::string, std::less<>> _missing;
+    mutable std::unordered_map<std::string, bool> _asset_exists; // "root|l10n/tag/relative"
 };
 
 // The Localization kin's own systems read (retained ui2 text, dialogue,

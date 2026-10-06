@@ -1,5 +1,7 @@
 #include <kin/audio/audio_catalog.hpp>
 
+#include <kin/l10n/localization.hpp>
+
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
@@ -114,7 +116,14 @@ const AudioCue* AudioCatalog::cue(std::string_view id) const {
 
 std::filesystem::path AudioCatalog::resolve_clip_path(std::string_view clip_id) const {
     const AudioClipRef* ref = clip(clip_id);
-    return ref ? _root / std::filesystem::path{ref->path} : std::filesystem::path{};
+    if (!ref) {
+        return {};
+    }
+    // A voice line in the player's language, where l10n/<locale>/ has one.
+    if (const Localization* l10n = active_localization()) {
+        return _root / std::filesystem::path{l10n->localized_path(_root, ref->path)};
+    }
+    return _root / std::filesystem::path{ref->path};
 }
 
 f32 AudioCatalog::effective_bus_volume(std::string_view bus_id) const {
