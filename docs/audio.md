@@ -4,6 +4,9 @@ Kin audio is an engine-level service with a thin ECS bridge. Games describe what
 should be heard in game terms: music cues, ambient beds, one-shot effects,
 looping emitters, animation events, and listener position.
 
+[What is missing](audio_missing.md) lists what kin's audio does not do yet,
+compared with Godot and Bevy, and the limits of what it does.
+
 ## Catalogs
 
 `AudioCatalog` maps cue ids to authored playback data and can be saved as a
