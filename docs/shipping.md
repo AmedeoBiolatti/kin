@@ -156,7 +156,7 @@ new build folder):
 | Profiling in Release (`KIN_ENABLE_RELEASE_PROFILING`) | On | Off |
 | Content pack | Built on request (`<game>_content`) | Built with the game |
 | Log | The console | Also `log.txt` in the game's user data folder (the previous run's is kept as `log.previous.txt`), when the game sets `GameInfo::id` |
-| glslc (`KIN_REQUIRE_GPU_SHADERS`) | Optional | Required |
+| GPU shaders (`KIN_REQUIRE_GPU_SHADERS`) | Optional | Required: glslc or `KIN_SPIRV_DIR` |
 | Windows | Console app, shared runtime | Windowed app, static runtime |
 | Linux | | libstdc++ and libgcc linked in |
 | Runtime GLSL compiles (`shader_compiler.hpp`) | With the glslc found at build time, or `KIN_GLSLC` | Only with `KIN_GLSLC` |
@@ -171,6 +171,17 @@ The engine's shaders are compiled with glslc and built into it. Without glslc a
 development build still works: the GPU backend has no shaders, and kin falls
 back to SDL_Renderer. A shipping build stops at configure instead, unless
 `KIN_REQUIRE_GPU_SHADERS=OFF` says to ship without them.
+
+glslc comes with the Vulkan SDK, as the `glslc` package on Debian and Ubuntu,
+and on Windows also from MSYS2 (`pacman -S mingw-w64-ucrt-x86_64-shaderc`, then
+`-DKIN_GLSLC=C:/msys64/ucrt64/bin/glslc.exe`). On a build machine where glslc
+does not run, compile the SPIR-V elsewhere (it is the same on every machine)
+and point the build at it:
+
+```sh
+cmake -DOUTPUT_DIR=$PWD/spirv -P cmake/kin_spirv.cmake   # where glslc runs
+cmake --preset ship -DKIN_SPIRV_DIR=$PWD/spirv            # on the build machine
+```
 
 A game's own shaders can be built in the same way:
 
@@ -196,11 +207,25 @@ code-signed, so SmartScreen warns about it until it is signed or has built up
 a reputation.
 
 **Linux.** libstdc++ and libgcc are linked in, and glibc stays shared, so the
-oldest system the game runs on has the glibc of the machine that built it.
-A build on Ubuntu 24.04 needs glibc 2.38. For older systems, Steam Deck and
-Steam's Linux runtime, build in the
-[Steam Runtime SDK](https://gitlab.steamos.cloud/steamrt/sniper/sdk)
-(sniper, glibc 2.31) with a C++23 compiler.
+oldest system the game runs on has the glibc of the machine that built it: a
+build on Ubuntu 24.04 needs glibc 2.38. Build in the
+[Steam Runtime SDK](https://gitlab.steamos.cloud/steamrt/sniper/sdk) (sniper,
+glibc 2.31) for Steam Deck, Steam's Linux runtime and older distributions. Its
+GCC 14 builds kin, but its CMake is too old and it has no glslc, so bring a
+CMake (3.22 or newer) and Ninja, and the SPIR-V from `kin_spirv.cmake`:
+
+```sh
+cmake -DOUTPUT_DIR=$PWD/spirv -P cmake/kin_spirv.cmake
+docker run --rm -v "$PWD:/src" -w /src -e CC=gcc-14 -e CXX=g++-14 \
+    registry.gitlab.steamos.cloud/steamrt/sniper/sdk bash -c '
+    export PATH=/src/.ci-tools/bin:$PATH    # CMake and Ninja, unpacked here
+    cmake --preset ship -DKIN_SPIRV_DIR=/src/spirv
+    cmake --build --preset ship --target my_game_package'
+```
+
+CI builds Signal Siege this way (`.github/workflows/ci.yml`, `ship-linux`),
+checks that it asks for nothing newer than glibc 2.31, and runs it in the
+runtime.
 
 **Steam.** The package's folder is a depot as it is: the executable, its pack
 and `licenses/`.
@@ -218,4 +243,3 @@ If a dependency moves a license file, configuring fails and names it.
   pack only gathers them).
 - A pack appended to the executable, for a single-file game.
 - Installers, code signing, a Linux `.desktop` file and icon, macOS bundles.
-- Building the Linux package in the Steam Runtime in CI.

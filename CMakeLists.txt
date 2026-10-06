@@ -72,8 +72,9 @@ option(KIN_ENABLE_DETERMINISM_CHECK "Build the determinism check (--check-determ
 option(KIN_ENABLE_AGENT_SERVER "Let games run as an agent server (--server)" ${_kin_developer_default})
 # Ship a game's content as one .kinpak archive beside it, rather than a folder.
 option(KIN_PACK_CONTENT "Pack each game's content into a .kinpak when it is installed" ON)
-# Stop at configure when glslc is missing, rather than build a GPU backend
-# with no shaders (games then fall back to SDL_Renderer).
+# Stop at configure when the GPU shaders cannot be built (no glslc, no
+# KIN_SPIRV_DIR), rather than build a GPU backend without them (games then
+# fall back to SDL_Renderer).
 option(KIN_REQUIRE_GPU_SHADERS "Require glslc for the GPU backend's shaders" ${KIN_SHIPPING})
 
 add_subdirectory(engine)

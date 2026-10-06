@@ -161,10 +161,12 @@ carries. See [shipping](shipping.md).
     `executable_dir`.
   - `KIN_ENABLE_AGENT_SERVER`, `KIN_PACK_CONTENT`, `KIN_REQUIRE_GPU_SHADERS`.
   - `kin_compile_glsl` and `kin_embed_files`, to build shaders and small files
-    into a binary.
+    into a binary; `cmake/kin_spirv.cmake` and `KIN_SPIRV_DIR`, for build
+    machines without glslc.
   - License texts of kin's dependencies, shipped in `licenses/` with each game.
-  - CI packages Signal Siege on Linux and Windows and runs it from another
-    folder.
+  - CI packages Signal Siege on Linux, built in the Steam Runtime (glibc
+    2.31), and on Windows with the GPU shaders, and runs it from another
+    folder (and, on Linux, in the runtime).
 - `kin::Localization` (`kin/l10n/localization.hpp`): `.kinlang` (JSON) and CSV
   language files, several per language, reloaded as they change; a fallback
   chain (`fr-CA`, `fr`, the base); `text(key)` and `tr(key, args)`; missing

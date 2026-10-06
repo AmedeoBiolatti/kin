@@ -3,8 +3,10 @@
 #   kin_compile_glsl(<out_var> OUTPUT_DIR <dir> SOURCES <a.frag.glsl> ...)
 #     Compiles each GLSL source to <dir>/<name>.spv with glslc, the stage taken
 #     from the name (.vert, .frag or .comp before .glsl), and sets <out_var> to
-#     the .spv files. Without glslc (KIN_GLSLC) it compiles nothing and sets
-#     <out_var> empty.
+#     the .spv files. With KIN_SPIRV_DIR it copies <name>.spv from there
+#     instead (made by cmake/kin_spirv.cmake where glslc runs), for build
+#     machines without glslc. With neither, it skips the shaders and <out_var>
+#     lists only those it has.
 #
 #   kin_embed_files(<target> NAME <function> [NAMESPACE <ns>] FILES <file> ...)
 #     Builds the files into <target>, readable by file name through
@@ -15,13 +17,33 @@
 #     at most (shaders, small tables); a game's content goes in its pack.
 
 find_program(KIN_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/Bin")
+set(KIN_SPIRV_DIR "" CACHE PATH "Already-compiled .spv files to use instead of glslc (cmake/kin_spirv.cmake makes them)")
 
 set(_KIN_EMBED_GENERATOR "${CMAKE_CURRENT_LIST_DIR}/kin_embed_generate.cmake")
 
 function(kin_compile_glsl out_var)
     cmake_parse_arguments(ARG "" "OUTPUT_DIR" "SOURCES" ${ARGN})
     set(outputs)
-    if(KIN_GLSLC)
+    if(KIN_SPIRV_DIR)
+        file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")
+        foreach(source IN LISTS ARG_SOURCES)
+            get_filename_component(name "${source}" NAME)
+            string(REGEX REPLACE "\\.glsl$" ".spv" spv_name "${name}")
+            set(prebuilt "${KIN_SPIRV_DIR}/${spv_name}")
+            if(NOT EXISTS "${prebuilt}")
+                message(WARNING "kin_compile_glsl: ${spv_name} is not in KIN_SPIRV_DIR (${KIN_SPIRV_DIR})")
+                continue()
+            endif()
+            set(output "${ARG_OUTPUT_DIR}/${spv_name}")
+            add_custom_command(
+                OUTPUT "${output}"
+                COMMAND "${CMAKE_COMMAND}" -E copy "${prebuilt}" "${output}"
+                DEPENDS "${prebuilt}"
+                COMMENT "SPIR-V: ${spv_name} from KIN_SPIRV_DIR"
+                VERBATIM)
+            list(APPEND outputs "${output}")
+        endforeach()
+    elseif(KIN_GLSLC)
         file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")
         foreach(source IN LISTS ARG_SOURCES)
             get_filename_component(source "${source}" ABSOLUTE)

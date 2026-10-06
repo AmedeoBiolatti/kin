@@ -210,14 +210,17 @@ endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.
 kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${_kin_gpu_shader_sources})
 kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
-if(KIN_GLSLC)
-    if(NOT KIN_SHIPPING)
-        # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
-        target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
+if(KIN_GLSLC AND NOT KIN_SHIPPING)
+    # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
+    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
+endif()
+list(LENGTH _kin_gpu_shader_sources _kin_gpu_wanted)
+list(LENGTH _kin_gpu_spv _kin_gpu_built)
+if(NOT _kin_gpu_built EQUAL _kin_gpu_wanted)
+    if(KIN_REQUIRE_GPU_SHADERS)
+        message(FATAL_ERROR "The GPU backend has ${_kin_gpu_built} of its ${_kin_gpu_wanted} shaders: install "
+                            "the Vulkan SDK (or your distribution's glslc), or pass KIN_SPIRV_DIR made by "
+                            "cmake/kin_spirv.cmake; or set KIN_REQUIRE_GPU_SHADERS=OFF to ship without them")
     endif()
-elseif(KIN_REQUIRE_GPU_SHADERS)
-    message(FATAL_ERROR "glslc not found: install the Vulkan SDK (or your distribution's glslc) to build "
-                        "the GPU backend's shaders, or set KIN_REQUIRE_GPU_SHADERS=OFF to ship without them")
-else()
-    message(STATUS "kin_engine: glslc not found; SDL_GPU backend shaders not compiled")
+    message(STATUS "kin_engine: ${_kin_gpu_built} of ${_kin_gpu_wanted} SDL_GPU backend shaders (glslc not found)")
 endif()

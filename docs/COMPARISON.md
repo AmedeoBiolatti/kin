@@ -48,8 +48,8 @@ These do:
 1. **Gamepad input, with UI focus moved by the D-pad.** Steam Deck can't really
    be supported without it.
 2. **Ogg playback and streamed music.** Music shipped as WAV is large.
-3. **Shipping:** a Linux build in the Steam Runtime for Steam Deck, and
-   probably a macOS build.
+3. **Shipping:** probably a macOS build, and installers or code signing once a
+   game is sold.
 4. **A tween API** for UI and card motion, built on the existing easing curves.
 
 Navigation meshes, joints, 2D skeletons, shadows and networking can wait until a

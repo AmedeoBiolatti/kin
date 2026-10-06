@@ -96,7 +96,7 @@ tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 | `KIN_ENABLE_DETERMINISM_CHECK` | `ON` | Determinism check, `--check-determinism` ([docs/testing.md](docs/testing.md#determinism-check)) |
 | `KIN_ENABLE_AGENT_SERVER` | `ON` | The agent server, `--server` ([docs/agent_interface.md](docs/agent_interface.md#server-mode)) |
 | `KIN_PACK_CONTENT` | `ON` | Ship a game's content as one `.kinpak` rather than a folder |
-| `KIN_REQUIRE_GPU_SHADERS` | `KIN_SHIPPING` | Stop at configure when glslc is missing |
+| `KIN_REQUIRE_GPU_SHADERS` | `KIN_SHIPPING` | Stop at configure when the GPU shaders cannot be built (no glslc or `KIN_SPIRV_DIR`) |
 
 ## Demos and examples
 
