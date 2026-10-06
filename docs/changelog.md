@@ -7,6 +7,47 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Upgrading
+
+- `IAudioBackend` is pulled instead of pushed: `queued_frames()` and
+  `queue_interleaved()` are replaced by `start(render)` and `stop()`, and
+  `AudioEngineConfig::queue_target_frames` is gone. Custom backends call the
+  render function from their audio thread.
+- `AudioEngine::stats()` returns a copy, and `mixed_frames` is 64-bit.
+- `set_bus_volume("master", v)` now scales every bus under `master`, as the
+  hierarchy says; before, it only reached voices playing on `master` itself.
+
+### Added
+
+- Audio: `AudioEngine::render()` mixes on the calling thread, for offline
+  rendering and tests. `set_bus_volume` takes a fade, `set_bus_muted` and
+  `set_bus_paused` mute or pause a bus and everything under it (pause
+  gameplay sound while UI sound plays on), and `AudioPlayRequest::fade_in`
+  fades a voice in.
+- Audio: `preload(catalog)` decodes a catalog's clips up front, and
+  `preload_async(catalog, jobs)` does it on worker threads; a `play()` that
+  needs a clip still loading waits for it instead of decoding it again.
+- Audio: a cue with several clips plays a random one (never the same twice
+  running), and `pitch_var` varies its pitch, both drawn from
+  `AudioEngineConfig::seed`.
+
+### Changed
+
+- Audio mixes on the device's audio thread, so a long frame no longer makes
+  it crackle, and output latency no longer depends on the frame rate.
+- `stop()` and `stop_bus()` honour their fade; even an immediate stop, or a
+  voice stolen for a new one, fades over 5 ms instead of clicking. A stopped
+  voice no longer counts as playing.
+- Clips keep their file's sample rate and channel count (mono stays mono)
+  and are resampled with linear interpolation as they play, which also
+  interpolates pitch changes. Engines run at other rates than 48 kHz now play
+  clips at the right pitch.
+- Spatial voices pan with an equal-power law, so a sound crossing the
+  listener no longer dips in the middle, and gain and pan changes ramp over a
+  block instead of stepping.
+- A master limiter turns the mix down when voices add up past full scale,
+  instead of hard-clipping it (`stats().limited_frames` counts how often).
+
 ## [0.2.5] — 2026-10-06
 
 A smaller release, for large saves and cheaper UI text. Saves can be written

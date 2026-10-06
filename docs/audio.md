@@ -31,8 +31,67 @@ kin::AudioPlayRequest request{
     .position = entity_pos,
     .has_position = true,
 };
-audio.play(catalog, request);
+kin::AudioHandle handle = audio.play(catalog, request);
+audio.stop(handle, 0.5f); // fade out over half a second
 ```
+
+Call the engine from one thread. With a device, mixing happens on the device's
+audio thread, so a slow frame does not starve the sound card; `update(dt)` once
+a frame ages voices and picks up clips that finished loading. With the null
+backend nothing consumes audio in real time, so `update(dt)` mixes `dt` seconds
+itself and voices still finish on time. `render(buffer)` mixes the next frames
+into a buffer on the calling thread, for offline rendering and tests.
+
+### Cues
+
+A cue with several clips plays a random one each time, never the same one twice
+in a row, and `pitch_var=0.1` varies its pitch by up to 10% either way. Both are
+drawn from `AudioEngineConfig::seed`, so the same requests sound the same on
+every run.
+
+Clips play at their own sample rate and are resampled, with linear
+interpolation, to the engine's. `fade_in` in a request fades the voice in.
+
+### Buses
+
+Bus volumes multiply down the hierarchy: the catalog's volume for each bus,
+times what the game set at runtime.
+
+```cpp
+audio.set_bus_volume("music", 0.6f);      // settings slider
+audio.set_bus_volume("music", 0.2f, 1.5f); // duck over 1.5 s
+audio.set_bus_muted("master", true);
+audio.set_bus_paused("sfx", true);        // pause menu: UI sounds keep playing
+audio.stop_bus("ambient", 2.0f);
+```
+
+A paused bus's voices fade out over a few milliseconds and keep their place
+until the bus is resumed. A stopped voice fades out too, however short the fade
+asked for, so nothing clicks; `playing()` is false from the moment it is stopped.
+
+### Voices
+
+Each category has a voice cap (`AudioEngineConfig`), and a cue can limit its own
+instances. When a cap is full, a new request takes over the voice that matters
+least (lowest priority, oldest, furthest away) if it matters more, and is culled
+otherwise; `stats()` counts both.
+
+Spatial cues fade with distance between `min` and `max` and pan with an
+equal-power law. A limiter on the output turns the mix down when voices add up
+past full scale instead of clipping.
+
+### Loading
+
+`play()` decodes a clip the first time a cue needs it. To keep decoding out of
+gameplay, load clips up front:
+
+```cpp
+audio.preload(catalog);                                  // now, e.g. on a loading screen
+audio.preload_async(catalog, kin::default_job_system()); // on worker threads
+```
+
+A `play()` that needs a clip still loading waits for that job rather than
+decoding the file again.
 
 The ECS bridge provides listeners, emitters, and one-shots:
 
@@ -85,6 +144,8 @@ render
 
 ## Backend
 
-The SDL-backed runtime hides backend details behind public Kin audio types and
-falls back to a null backend when device creation fails, so tests and headless
-logic do not require an audio device.
+`IAudioBackend` is where the mix goes. A device backend calls the engine's
+render function from its audio thread whenever the device needs more. The SDL
+backend does this with an SDL audio stream callback. The engine falls back to
+the null backend when no device opens, so tests and headless logic do not need
+an audio device.
