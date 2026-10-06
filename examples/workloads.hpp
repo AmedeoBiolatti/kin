@@ -244,6 +244,8 @@ public:
     void scripted_frame(Tracker& model, int frame, std::string_view scenario);
     int drawn_rows() const { return _drawn_rows; }
     bool wants_text_input() const { return _ui.wants_text_input(); }
+    // Text input on while a field is focused, the input method's list beside its caret.
+    void apply_text_input(Window& window) const { _ui.apply_text_input(window); }
 private:
     ui2::Context _ui;
     ui2::TextInput _search;

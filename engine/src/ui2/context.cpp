@@ -342,6 +342,8 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _debug_last_hue = 0.0f;
     _surface_fill_under = colors::black;
     _wants_text_input = false;
+    _text_input_area.reset();
+    _text_input_cursor = 0;
     _root = {};
     _popup_opened_this_frame = {};
     _popup_frame_bounds.clear();
@@ -842,6 +844,34 @@ bool Context::modifier_held(KeyModifiers modifiers) const {
 
 std::string_view Context::text_input() const {
     return _input ? _input->text_input() : std::string_view{};
+}
+
+std::string_view Context::text_composition() const {
+    return _input ? _input->text_composition() : std::string_view{};
+}
+
+i32 Context::text_composition_cursor() const {
+    return _input ? _input->text_composition_cursor() : 0;
+}
+
+void Context::set_text_input_area(Rectf area, f32 caret_x) {
+    if (!_renderer) {
+        return;
+    }
+    const Vec2f a = _renderer->logical_to_window({area.x, area.y});
+    const Vec2f b = _renderer->logical_to_window({area.x + area.w, area.y + area.h});
+    const Vec2f caret = _renderer->logical_to_window({caret_x, area.y});
+    _text_input_area = Rectf{std::min(a.x, b.x), std::min(a.y, b.y), std::abs(b.x - a.x), std::abs(b.y - a.y)};
+    _text_input_cursor = static_cast<i32>(caret.x - _text_input_area->x);
+}
+
+void Context::apply_text_input(Window& window) const {
+    if (window.text_input_enabled() != _wants_text_input) {
+        window.set_text_input_enabled(_wants_text_input);
+    }
+    if (_wants_text_input && _text_input_area) {
+        window.set_text_input_area(*_text_input_area, _text_input_cursor);
+    }
 }
 
 std::string Context::clipboard_text() const {

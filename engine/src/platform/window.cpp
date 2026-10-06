@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <cmath>
@@ -155,6 +156,15 @@ void Window::set_text_input_enabled(bool enabled) {
     } else {
         SDL_StopTextInput(to_sdl_window(_handle));
     }
+}
+
+void Window::set_text_input_area(Rectf area, i32 cursor) {
+    if (!_handle) {
+        return;
+    }
+    const SDL_Rect rect{static_cast<int>(area.x), static_cast<int>(area.y), std::max(1, static_cast<int>(area.w)),
+                        std::max(1, static_cast<int>(area.h))};
+    SDL_SetTextInputArea(to_sdl_window(_handle), &rect, cursor);
 }
 
 bool Window::text_input_enabled() const {

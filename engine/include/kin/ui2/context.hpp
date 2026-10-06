@@ -2,6 +2,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/platform/input.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/layout.hpp>
@@ -285,8 +286,20 @@ public:
     bool action_pressed(std::string_view action) const;
     bool modifier_held(KeyModifiers modifiers) const;
     std::string_view text_input() const;
+    // What an input method is composing (Input::text_composition), and its
+    // cursor in bytes.
+    std::string_view text_composition() const;
+    i32 text_composition_cursor() const;
     bool wants_text_input() const { return _wants_text_input; }
     void request_text_input() { _wants_text_input = true; }
+    // Where the focused editor's text is (drawing coordinates) and its caret's
+    // x there, for the input method's candidate list. Text inputs set it.
+    void set_text_input_area(Rectf area, f32 caret_x);
+    // The area last set this frame, in window coordinates.
+    std::optional<Rectf> text_input_area() const { return _text_input_area; }
+    // Starts or stops the window's text input as widgets want it, and tells
+    // the input method where the caret is: call it once a frame, after end().
+    void apply_text_input(Window& window) const;
     std::string clipboard_text() const;
     void set_clipboard_text(std::string_view text);
     UiTextInputState& text_input_state(Id id, std::string_view value = {});
@@ -424,6 +437,8 @@ private:
     f32 _debug_last_hue = 0.0f;               // hue of the last debug-tinted fill (font uses its complement)
     Color _surface_fill_under{};              // last opaque fill, used as text background for contrast
     bool _wants_text_input = false;
+    std::optional<Rectf> _text_input_area; // window coordinates
+    i32 _text_input_cursor = 0;
 
     std::vector<LayoutNode> _nodes;
     std::vector<i32> _stack;

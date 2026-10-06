@@ -307,8 +307,28 @@ bool has_right_to_left(std::string_view text) {
 }
 
 TextDirection first_strong_direction(std::string_view text, TextDirection fallback) {
-    const std::vector<Char> chars = decode(text);
-    return first_strong(chars, 0, chars.size(), false).value_or(fallback);
+    // Stops at the first strong character, without decoding the rest.
+    i32 isolates = 0;
+    for (std::size_t k = 0; k < text.size(); k = utf8_next(text, k)) {
+        const auto byte = static_cast<unsigned char>(text[k]);
+        if (byte < 0x80 && ((byte | 0x20) >= 'a' && (byte | 0x20) <= 'z')) {
+            if (isolates == 0) {
+                return TextDirection::LeftToRight;
+            }
+            continue;
+        }
+        const Bc t = bidi_class(byte < 0x80 ? byte : utf8_decode(text, k));
+        if (isolate_initiator(t)) {
+            ++isolates;
+        } else if (t == Bc::PDI) {
+            isolates = std::max(0, isolates - 1);
+        } else if (isolates == 0 && t == Bc::L) {
+            return TextDirection::LeftToRight;
+        } else if (isolates == 0 && strong_rtl(t)) {
+            return TextDirection::RightToLeft;
+        }
+    }
+    return fallback;
 }
 
 std::vector<BidiRun> bidi_runs(std::string_view line, std::optional<TextDirection> base) {

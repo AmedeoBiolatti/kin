@@ -112,6 +112,8 @@ public:
 
         _editing = _chat.state.active || _notes.state.active || _history.state.active;
         _ui.end();
+        // Text input (and an input method's candidates beside the caret) while editing.
+        _ui.apply_text_input(ctx.window);
     }
 
     void write_report(kin::JsonWriter& json) const override {

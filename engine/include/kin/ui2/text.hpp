@@ -103,6 +103,21 @@ const std::vector<std::filesystem::path>& system_fallback_fonts();
 // TTF font's layout.
 void set_text_base_direction(std::optional<TextDirection> direction);
 std::optional<TextDirection> text_base_direction();
+// The direction `text` lays out in: text_base_direction(), else that of its
+// first strong character (left to right if it has none).
+TextDirection paragraph_direction(std::string_view text);
+
+// Carets and selections in one line of text, wherever its characters fall when
+// it runs both ways. Offsets are bytes of `line` at character boundaries; x is
+// in drawing units from where draw_text puts the line's start. Within a
+// right-to-left run the caret moves leftwards as the offset grows.
+f32 caret_x(const Font& font, std::string_view line, std::size_t offset, f32 scale = 1.0f);
+// The caret offset whose x is nearest `x`.
+std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale = 1.0f);
+// The spans [x0, x1) the selection [begin, end) of `line` covers, left to
+// right: one where the line runs one way, several where directions mix.
+std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_view line, std::size_t begin,
+                                                 std::size_t end, f32 scale = 1.0f);
 
 // System UI font for professional-looking interfaces: tries the platform's
 // standard sans (Segoe UI / Arial / DejaVu / Liberation), cached per size,

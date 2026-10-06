@@ -105,7 +105,7 @@ public:
         const auto size = ctx.renderer.output_size();
         _dashboard.render(*_model, ctx.input, ctx.renderer, {float(size.x), float(size.y)}, ctx.dt, scale);
         _display_scale = scale;
-        ctx.window.set_text_input_enabled(_dashboard.wants_text_input());
+        _dashboard.apply_text_input(ctx.window);
         capture(ctx, _options, ++_render_frames, _captured);
     }
     void on_exit(SceneContext& ctx) override { ctx.window.set_text_input_enabled(false); }

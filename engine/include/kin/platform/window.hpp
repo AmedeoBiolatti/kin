@@ -75,6 +75,10 @@ public:
 
     void set_text_input_enabled(bool enabled);
     bool text_input_enabled() const;
+    // Where text is being typed, in window coordinates, so an input method
+    // puts its candidate list beside it rather than in a corner. `cursor` is
+    // the caret's x within `area`.
+    void set_text_input_area(Rectf area, i32 cursor = 0);
 
 private:
     friend class SdlRenderer2DBackend;

@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -611,6 +612,117 @@ std::vector<TextRange> wrap_text_ranges(const Font& font, std::string_view text,
         hard_begin = newline + 1;
     }
     return lines;
+}
+
+namespace {
+
+// A line's runs in display order, with where each starts and how wide it is.
+struct VisualRun {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    bool rtl = false;
+    f32 x = 0.0f;
+    f32 width = 0.0f;
+};
+
+std::vector<VisualRun> visual_runs(const Font& font, std::string_view line, f32 scale) {
+    std::vector<VisualRun> runs;
+    if (!has_right_to_left(line)) {
+        runs.push_back({0, line.size(), false, 0.0f, measure_text(font, line, scale).x});
+        return runs;
+    }
+    f32 x = 0.0f;
+    for (const BidiRun& run : bidi_runs(line, text_base_direction())) {
+        const f32 width = measure_text(font, line.substr(run.begin, run.end - run.begin), scale).x;
+        runs.push_back({run.begin, run.end, run.right_to_left(), x, width});
+        x += width;
+    }
+    return runs;
+}
+
+// The caret before `offset` (within [run.begin, run.end]) in `run`.
+f32 caret_in_run(const Font& font, std::string_view line, const VisualRun& run, std::size_t offset, f32 scale) {
+    const f32 prefix = offset <= run.begin ? 0.0f
+        : offset >= run.end                ? run.width
+                                           : measure_text(font, line.substr(run.begin, offset - run.begin), scale).x;
+    return run.rtl ? run.x + run.width - prefix : run.x + prefix;
+}
+
+} // namespace
+
+TextDirection paragraph_direction(std::string_view text) {
+    if (const std::optional<TextDirection> base = text_base_direction()) {
+        return *base;
+    }
+    return first_strong_direction(text);
+}
+
+f32 caret_x(const Font& font, std::string_view line, std::size_t offset, f32 scale) {
+    offset = std::min(offset, line.size());
+    const std::vector<VisualRun> runs = visual_runs(font, line, scale);
+    if (runs.empty()) {
+        return 0.0f;
+    }
+    // The run holding the character after the caret, else the one ending at it.
+    const VisualRun* at = nullptr;
+    for (const VisualRun& run : runs) {
+        if (run.begin <= offset && offset < run.end) {
+            at = &run;
+            break;
+        }
+        if (run.end == offset) {
+            at = &run;
+        }
+    }
+    return at ? caret_in_run(font, line, *at, offset, scale) : 0.0f;
+}
+
+std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale) {
+    std::size_t best = 0;
+    f32 best_distance = std::numeric_limits<f32>::max();
+    for (const VisualRun& run : visual_runs(font, line, scale)) {
+        // The stops caret_x gives: a run's end only where the line ends (elsewhere
+        // that offset belongs to the run after it).
+        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+            if (k >= run.end && k < line.size()) {
+                break;
+            }
+            const f32 distance = std::abs(caret_in_run(font, line, run, k, scale) - x);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = k;
+            }
+            if (k >= run.end) {
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_view line, std::size_t begin,
+                                                 std::size_t end, f32 scale) {
+    std::vector<std::pair<f32, f32>> spans;
+    end = std::min(end, line.size());
+    if (begin >= end) {
+        return spans;
+    }
+    for (const VisualRun& run : visual_runs(font, line, scale)) {
+        const std::size_t a = std::max(begin, run.begin);
+        const std::size_t b = std::min(end, run.end);
+        if (a >= b) {
+            continue;
+        }
+        const f32 xa = caret_in_run(font, line, run, a, scale);
+        const f32 xb = caret_in_run(font, line, run, b, scale);
+        const std::pair<f32, f32> span{std::min(xa, xb), std::max(xa, xb)};
+        if (!spans.empty() && std::abs(spans.back().second - span.first) < 0.01f) {
+            spans.back().second = span.second;
+        } else {
+            spans.push_back(span);
+        }
+    }
+    return spans;
 }
 
 std::vector<std::string> wrap_text(const Font& font, std::string_view text, f32 max_width, f32 scale) {
