@@ -216,7 +216,7 @@ void run(Context& ctx, MenuList& widget) {
             (it.hot || ctx.action_pressed("menu_right") || ctx.action_pressed("accept"))) {
             widget.submenu_requested = true;
             widget.submenu_id = item.submenu_id;
-            widget.submenu_anchor = row;
+            widget.submenu_anchor = ctx.to_screen(row);
         }
         if ((it.clicked || (widget.selected >= 0 && !selection_normalized && ctx.action_pressed("accept") && widget.selected == i)) && item.enabled && widget.enabled) {
             if (item.submenu_id.empty()) {
@@ -225,7 +225,7 @@ void run(Context& ctx, MenuList& widget) {
             } else {
                 widget.submenu_requested = true;
                 widget.submenu_id = item.submenu_id;
-                widget.submenu_anchor = row;
+                widget.submenu_anchor = ctx.to_screen(row);
             }
         }
         const bool selected = i == widget.selected;
@@ -281,6 +281,7 @@ void run(Context& ctx, MenuList& widget) {
 }
 
 void run(Context& ctx, MenuBar& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: menus run from the right
     widget.opened = -1;
     widget.opened_id.clear();
     widget.opened_menu = {};

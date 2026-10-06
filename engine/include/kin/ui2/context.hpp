@@ -349,6 +349,10 @@ public:
     };
     [[nodiscard]] MirrorGuard mirror_if_right_to_left(Rectf bounds);
     bool mirrored() const { return !_mirror_axes.empty(); }
+    // Through the open mirror scopes: where `rect` (drawing coordinates in the
+    // scopes) is on screen, and the pointer on screen (pointer() is in the scopes).
+    Rectf to_screen(Rectf rect) const;
+    Vec2f screen_pointer() const;
 
     // Immediate draw helpers (logical space).
     void push_clip(Rectf bounds);

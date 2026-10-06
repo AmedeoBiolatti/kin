@@ -539,7 +539,7 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
     }
     if (_modal_blocking) {
         const Rectf allowed = !_modal_stack.empty() ? _modal_stack.back() : _modal_bounds;
-        if (!contains(allowed, pointer())) {
+        if (!contains(allowed, screen_pointer())) {
             return out;
         }
     }
@@ -601,7 +601,7 @@ Context::ModalResult Context::begin_modal(Id id, Rectf bounds, ModalOptions opti
     result.open = true;
     result.opened = _modal_opened_this_frame == id;
     result.bounds = bounds;
-    _modal_bounds = bounds;
+    _modal_bounds = to_screen(bounds);
     _modal_blocking = options.block_background_input;
 
     Rectf screen = default_screen(_renderer);
@@ -609,7 +609,7 @@ Context::ModalResult Context::begin_modal(Id id, Rectf bounds, ModalOptions opti
         fill_rect(screen, options.overlay);
     }
     region(id, bounds, options.z);
-    _modal_stack.push_back(bounds);
+    _modal_stack.push_back(to_screen(bounds));
 
     if (options.close_on_escape && action_pressed("quit")) {
         close_modal(id);
@@ -664,7 +664,9 @@ bool Context::popup_open(Id id) const {
 }
 
 bool Context::popup_hovered_or_open(Id id) const {
-    return popup_open(id) || (_input && (contains_any(_popup_stack, pointer()) || contains_any(_popup_last_bounds, pointer())));
+    // Popup bounds are kept on screen (a mirrored widget's popup is reflected).
+    return popup_open(id) ||
+           (_input && (contains_any(_popup_stack, screen_pointer()) || contains_any(_popup_last_bounds, screen_pointer())));
 }
 
 Context::PopupResult Context::begin_popup(Id id, Rectf anchor, PopupOptions options) {
@@ -677,17 +679,29 @@ Context::PopupResult Context::begin_popup(Id id, Rectf anchor, PopupOptions opti
     if (screen.w <= 0.0f || screen.h <= 0.0f) {
         screen = default_screen(_renderer);
     }
-    Rectf bounds = flipped_popup_bounds(anchor, options, screen);
+    Rectf bounds{};
+    if (ui_direction() == TextDirection::RightToLeft && _mirror_axes.empty()) {
+        // Right to left: placed as left to right in the world reflected about
+        // the anchor, so a dropdown aligns to its anchor's right edge and a
+        // submenu opens to the left. (In a mirror scope the scope does this.)
+        const f32 axis = anchor.x * 2.0f + anchor.w;
+        const Rectf reflected_screen{axis - screen.x - screen.w, screen.y, screen.w, screen.h};
+        bounds = flipped_popup_bounds(anchor, options, reflected_screen);
+        bounds.x = axis - bounds.x - bounds.w;
+    } else {
+        bounds = flipped_popup_bounds(anchor, options, screen);
+    }
     result.open = true;
     result.opened = _popup_opened_this_frame == id;
     result.bounds = bounds;
 
     region(id, bounds, options.z);
-    _popup_stack.push_back(bounds);
-    _popup_frame_bounds.push_back(bounds);
+    _popup_stack.push_back(to_screen(bounds));
+    _popup_frame_bounds.push_back(to_screen(bounds));
 
     if (options.close_on_outside_click && _input && _popup_opened_this_frame != id && pointer_pressed() &&
-        !contains(bounds, pointer()) && !contains_any(_popup_stack, pointer()) && !contains_any(_popup_last_bounds, pointer())) {
+        !contains(bounds, pointer()) && !contains_any(_popup_stack, screen_pointer()) &&
+        !contains_any(_popup_last_bounds, screen_pointer())) {
         close_popup(id);
         _input->consume_mouse_frame_pressed(MouseButton::Left);
         result.open = false;
@@ -856,11 +870,25 @@ std::string Context::prompt_for_action(std::string_view action, const PromptOpti
     return result;
 }
 
+Vec2f Context::screen_pointer() const {
+    if (!_input) {
+        return {};
+    }
+    return _renderer ? _renderer->window_to_logical(_input->mouse_pos()) : _input->mouse_pos();
+}
+
+Rectf Context::to_screen(Rectf rect) const {
+    for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
+        rect.x = *axis - rect.x - rect.w;
+    }
+    return rect;
+}
+
 Vec2f Context::pointer() const {
     if (!_input) {
         return {};
     }
-    Vec2f p = _renderer ? _renderer->window_to_logical(_input->mouse_pos()) : _input->mouse_pos();
+    Vec2f p = screen_pointer();
     // Into the mirror scopes' own coordinates: the outermost reflection first.
     for (const f32 axis : _mirror_axes) {
         p.x = axis - p.x;
