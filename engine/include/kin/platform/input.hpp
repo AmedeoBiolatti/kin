@@ -215,16 +215,17 @@ class Input {
 public:
     void begin_frame();
 
-    // Consume the STICKY keyboard edges (read by update() via pressed()) between
-    // the first fixed step and render, so a multi-step frame does not re-fire a key
-    // in later steps. Per-frame keyboard edges (frame_pressed(), read by render-time
-    // UI) live one rendered frame; per-frame mouse edges are left intact and persist
-    // until the next stepping frame (see begin_frame). Render-time UI reads keyboard
-    // via frame_pressed().
-    void advance_keyboard_edges();
+    // Consume what update() reads that must reach exactly one fixed step: the STICKY
+    // keyboard edges (pressed()/released()) and the step wheel (mouse_wheel_y()).
+    // App::run calls it after the first fixed step, so a multi-step frame does not
+    // re-fire a key or re-apply a wheel notch in later steps. Per-frame keyboard edges
+    // (frame_pressed(), read by render-time UI) and the frame wheel live one rendered
+    // frame; per-frame mouse edges are left intact and persist until the next stepping
+    // frame (see begin_frame).
+    void advance_step_edges();
 
     // Consume this frame's per-frame edges (keyboard + mouse frame_pressed/released,
-    // key repeats, typed text and the wheel).
+    // key repeats, typed text and frame_mouse_wheel_y()).
     // A scene that fully handles its input in update() calls this so its own render()
     // redraw does not re-read the same edges (double nav / double click). Only the
     // calling scene is affected — edges already read are simply cleared early; the
@@ -260,6 +261,7 @@ public:
     //     claims the press (keeps `pressed` a single-frame edge for drag/grab capture).
     //   * PER-FRAME KEYBOARD edges — frame_pressed()/frame_released() — live exactly one
     //     rendered frame. Keyboard read from update() must use the sticky pressed() API.
+    //   * The wheel has a sticky and a per-frame reading too: see mouse_wheel_y().
     bool mouse_pressed(MouseButton button) const;
     bool mouse_held(MouseButton button) const;
     bool mouse_released(MouseButton button) const;
@@ -272,7 +274,17 @@ public:
     void consume_mouse_frame_pressed(MouseButton button);
     bool mouse_dragging(MouseButton button) const;
     Vec2f drag_delta(MouseButton button) const;
+    // The wheel, in notches (positive away from the player). Like pressed() and
+    // frame_pressed(), there are two:
+    //   * mouse_wheel_y(), for update(): what the wheel turned since a fixed step last
+    //     read it. It adds up across 0-step frames and is used up by the first step of
+    //     a frame (advance_step_edges), so later steps of that frame see 0.
+    //   * frame_mouse_wheel_y(), for render-time UI (ui2 scrolls with it): what the
+    //     wheel turned since the last rendered frame. Lives one rendered frame.
     f32 mouse_wheel_y() const { return _mouse_wheel_y; }
+    f32 frame_mouse_wheel_y() const { return _frame_mouse_wheel_y; }
+    // A wheel turn of `value` notches this frame, as the OS would report it: it adds
+    // to both mouse_wheel_y() and frame_mouse_wheel_y().
     void set_mouse_wheel_y(f32 value);
     void set_mouse_pos(Vec2f pos, WindowId window_id = 0);
     void set_mouse_held(MouseButton button, bool held);
@@ -353,7 +365,8 @@ private:
     Vec2f _mouse_pos_prev = {};
     WindowId _mouse_window = 0;
     WindowId _keyboard_window = 0;
-    f32 _mouse_wheel_y = 0.0f;
+    f32 _mouse_wheel_y = 0.0f;       // since a fixed step last read it
+    f32 _frame_mouse_wheel_y = 0.0f; // since the last rendered frame
     u64 _last_key_press_event_time_ns = 0;
     u64 _last_key_press_detected_time_ns = 0;
     std::string _text_input;

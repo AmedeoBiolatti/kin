@@ -113,6 +113,29 @@ FetchContent_Declare(sol2
 
 FetchContent_MakeAvailable(sol2)
 
+# Audio decoders (kin/audio/audio_decoder.hpp): dr_wav, dr_flac and dr_mp3, and
+# stb_vorbis. Single-file C libraries; engine/src/audio/codecs.c compiles them.
+# dr_libs is pinned past its last release for its fuzzing fixes.
+FetchContent_Declare(dr_libs
+    URL https://github.com/mackron/dr_libs/archive/dfe8377631000664666519fdb83da193fd8037f4.tar.gz
+    URL_HASH SHA256=4654acb029f4f2a43ac2edb60c4cb09f40615b4b5bee9709954f910cb979e5fd
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_GetProperties(dr_libs)
+if(NOT dr_libs_POPULATED)
+    FetchContent_Populate(dr_libs)
+endif()
+
+FetchContent_Declare(stb
+    URL https://github.com/nothings/stb/archive/2c980bb59875b0d32144a71867fbdebb2f77cd20.tar.gz
+    URL_HASH SHA256=9a955b1b49a4410088a2e0ee2a9c057c3c907d0c1d75454144cb980aca0ba515
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()
+
 # Polygon triangulation for filled shapes (kin/renderer/shape.hpp). Header-only.
 set(EARCUT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(EARCUT_BUILD_BENCH OFF CACHE BOOL "" FORCE)

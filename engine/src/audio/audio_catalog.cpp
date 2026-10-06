@@ -33,6 +33,13 @@ bool parse_i32(std::string_view text, i32& value) {
     return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
+bool parse_i64(std::string_view text, i64& value) {
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    const auto parsed = std::from_chars(begin, end, value);
+    return parsed.ec == std::errc{} && parsed.ptr == end && value >= 0;
+}
+
 bool parse_bool(std::string_view text, bool& value) {
     if (text == "true" || text == "1" || text == "yes") {
         value = true;
@@ -67,6 +74,7 @@ void AudioCatalog::clear() {
     _clips.clear();
     _buses.clear();
     _cues.clear();
+    _ducks.clear();
 }
 
 void AudioCatalog::set_root(std::filesystem::path root) {
@@ -89,6 +97,21 @@ void AudioCatalog::add_bus(AudioBus bus_value) {
 void AudioCatalog::add_cue(AudioCue cue_value) {
     if (!cue_value.id.empty()) {
         _cues[cue_value.id] = std::move(cue_value);
+    }
+}
+
+void AudioCatalog::add_duck(AudioDuck duck_value) {
+    if (duck_value.bus.empty() || duck_value.when.empty()) {
+        return;
+    }
+    // One rule per pair: a later one replaces it.
+    const auto same = std::ranges::find_if(_ducks, [&](const AudioDuck& existing) {
+        return existing.bus == duck_value.bus && existing.when == duck_value.when;
+    });
+    if (same != _ducks.end()) {
+        *same = std::move(duck_value);
+    } else {
+        _ducks.push_back(std::move(duck_value));
     }
 }
 
@@ -144,6 +167,54 @@ std::string_view audio_category_name(AudioCategory category) {
     case AudioCategory::Ui: return "ui";
     }
     return "sound";
+}
+
+std::string_view audio_rolloff_name(AudioRolloff rolloff) {
+    switch (rolloff) {
+    case AudioRolloff::Smooth: return "smooth";
+    case AudioRolloff::Linear: return "linear";
+    case AudioRolloff::Inverse: return "inverse";
+    }
+    return "smooth";
+}
+
+bool parse_audio_rolloff(std::string_view value, AudioRolloff& out) {
+    for (const AudioRolloff rolloff : {AudioRolloff::Smooth, AudioRolloff::Linear, AudioRolloff::Inverse}) {
+        if (value == audio_rolloff_name(rolloff)) {
+            out = rolloff;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string_view audio_effect_type_name(AudioEffectType type) {
+    switch (type) {
+    case AudioEffectType::LowPass: return "lowpass";
+    case AudioEffectType::HighPass: return "highpass";
+    case AudioEffectType::Reverb: return "reverb";
+    case AudioEffectType::Compressor: return "compressor";
+    case AudioEffectType::BandPass: return "bandpass";
+    case AudioEffectType::Notch: return "notch";
+    case AudioEffectType::Peak: return "peak";
+    case AudioEffectType::LowShelf: return "lowshelf";
+    case AudioEffectType::HighShelf: return "highshelf";
+    case AudioEffectType::Delay: return "delay";
+    }
+    return "lowpass";
+}
+
+bool parse_audio_effect_type(std::string_view value, AudioEffectType& out) {
+    for (const AudioEffectType type : {AudioEffectType::LowPass, AudioEffectType::HighPass, AudioEffectType::Reverb,
+                                       AudioEffectType::Compressor, AudioEffectType::BandPass, AudioEffectType::Notch,
+                                       AudioEffectType::Peak, AudioEffectType::LowShelf, AudioEffectType::HighShelf,
+                                       AudioEffectType::Delay}) {
+        if (value == audio_effect_type_name(type)) {
+            out = type;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool parse_audio_category(std::string_view value, AudioCategory& out) {
@@ -213,6 +284,26 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
             if (!(in >> clip.id >> clip.path)) {
                 fail("clip requires id and path");
             }
+            for (std::string token; in >> token;) {
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    fail("clip options must be key=value");
+                }
+                const std::string_view key{token.data(), eq};
+                const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
+                if (key == "stream") {
+                    if (!parse_bool(value, clip.stream)) fail("invalid stream");
+                } else if (key == "loop_start") {
+                    if (!parse_i64(value, clip.loop_start)) fail("invalid loop_start");
+                } else if (key == "loop_end") {
+                    if (!parse_i64(value, clip.loop_end)) fail("invalid loop_end");
+                } else {
+                    fail("unknown clip option");
+                }
+            }
+            if (clip.loop_end > 0 && clip.loop_end <= clip.loop_start) {
+                fail("loop_end must be after loop_start");
+            }
             catalog.add_clip(std::move(clip));
             continue;
         }
@@ -252,6 +343,24 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                     if (!parse_f32(value, cue.min_distance)) fail("invalid min");
                 } else if (key == "max") {
                     if (!parse_f32(value, cue.max_distance)) fail("invalid max");
+                } else if (key == "rolloff") {
+                    if (!parse_audio_rolloff(value, cue.rolloff)) fail("invalid rolloff (smooth, linear or inverse)");
+                } else if (key == "rolloff_power") {
+                    if (!parse_f32(value, cue.rolloff_power) || cue.rolloff_power <= 0.0f) fail("invalid rolloff_power");
+                } else if (key == "pan") {
+                    if (!parse_f32(value, cue.pan_strength)) fail("invalid pan");
+                } else if (key == "bpm") {
+                    if (!parse_f32(value, cue.bpm) || cue.bpm < 0.0f) fail("invalid bpm");
+                } else if (key == "beats_per_bar") {
+                    if (!parse_i32(value, cue.beats_per_bar) || cue.beats_per_bar < 1) fail("invalid beats_per_bar");
+                } else if (key == "beat_offset") {
+                    if (!parse_f32(value, cue.beat_offset)) fail("invalid beat_offset");
+                } else if (key == "layers") {
+                    if (!parse_bool(value, cue.layers)) fail("invalid layers");
+                } else if (key == "playlist") {
+                    if (!parse_bool(value, cue.playlist)) fail("invalid playlist");
+                } else if (key == "shuffle") {
+                    if (!parse_bool(value, cue.shuffle)) fail("invalid shuffle");
                 } else if (key == "clips") {
                     cue.clips = split_csv(value);
                 } else {
@@ -261,7 +370,90 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
             if (cue.clips.empty()) {
                 fail("cue requires clips");
             }
+            if (cue.layers && cue.playlist) {
+                fail("a cue is layers or a playlist, not both");
+            }
             catalog.add_cue(std::move(cue));
+            continue;
+        }
+
+        if (kind == "effect") {
+            std::string bus_id;
+            std::string type_text;
+            AudioEffect effect;
+            if (!(in >> bus_id >> type_text)) {
+                fail("effect requires a bus and a type");
+            }
+            if (!parse_audio_effect_type(type_text, effect.type)) {
+                fail("unknown effect type");
+            }
+            AudioBus* bus = catalog.bus(bus_id);
+            if (!bus) {
+                fail("effect on a bus not declared above it");
+            }
+            for (std::string token; in >> token;) {
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    fail("effect options must be key=value");
+                }
+                const std::string_view key{token.data(), eq};
+                const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
+                f32* field = key == "cutoff" || key == "freq" ? &effect.cutoff
+                    : key == "q" ? &effect.q
+                    : key == "gain" ? &effect.gain
+                    : key == "time" ? &effect.time
+                    : key == "feedback" ? &effect.feedback
+                    : key == "room" ? &effect.room_size
+                    : key == "damping" ? &effect.damping
+                    : key == "wet" ? &effect.wet
+                    : key == "dry" ? &effect.dry
+                    : key == "width" ? &effect.width
+                    : key == "threshold" ? &effect.threshold
+                    : key == "ratio" ? &effect.ratio
+                    : key == "attack" ? &effect.attack
+                    : key == "release" ? &effect.release
+                    : key == "makeup" ? &effect.makeup
+                    : nullptr;
+                if (key == "enabled") {
+                    if (!parse_bool(value, effect.enabled)) fail("invalid enabled");
+                } else if (!field) {
+                    fail("unknown effect option");
+                } else if (!parse_f32(value, *field)) {
+                    fail("invalid effect value");
+                }
+            }
+            bus->effects.push_back(effect);
+            continue;
+        }
+
+        if (kind == "duck") {
+            AudioDuck duck;
+            if (!(in >> duck.bus)) {
+                fail("duck requires a bus");
+            }
+            for (std::string token; in >> token;) {
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    fail("duck options must be key=value");
+                }
+                const std::string_view key{token.data(), eq};
+                const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
+                if (key == "when") {
+                    duck.when = std::string{value};
+                } else if (key == "volume") {
+                    if (!parse_f32(value, duck.volume) || duck.volume < 0.0f) fail("invalid volume");
+                } else if (key == "attack") {
+                    if (!parse_f32(value, duck.attack) || duck.attack < 0.0f) fail("invalid attack");
+                } else if (key == "release") {
+                    if (!parse_f32(value, duck.release) || duck.release < 0.0f) fail("invalid release");
+                } else {
+                    fail("unknown duck option");
+                }
+            }
+            if (duck.when.empty()) {
+                fail("duck requires when=<bus>");
+            }
+            catalog.add_duck(std::move(duck));
             continue;
         }
 
@@ -276,6 +468,7 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                        {.name = "buses", .value = std::to_string(catalog.buses().size())},
                        {.name = "clips", .value = std::to_string(catalog.clips().size())},
                        {.name = "cues", .value = std::to_string(catalog.cues().size())},
+                       {.name = "ducks", .value = std::to_string(catalog.ducks().size())},
                    }));
     return catalog;
 }
@@ -311,7 +504,17 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
         out << '\n';
     }
     for (const AudioClipRef* clip : clips) {
-        out << "clip " << clip->id << ' ' << clip->path << '\n';
+        out << "clip " << clip->id << ' ' << clip->path;
+        if (clip->stream) {
+            out << " stream=true";
+        }
+        if (clip->loop_start > 0) {
+            out << " loop_start=" << clip->loop_start;
+        }
+        if (clip->loop_end > 0) {
+            out << " loop_end=" << clip->loop_end;
+        }
+        out << '\n';
     }
 
     std::vector<const AudioCue*> cues;
@@ -333,7 +536,29 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
             << " loop=" << (cue->loop ? "true" : "false")
             << " spatial=" << (cue->spatial ? "true" : "false")
             << " min=" << cue->min_distance
-            << " max=" << cue->max_distance
+            << " max=" << cue->max_distance;
+        if (cue->rolloff != AudioRolloff::Smooth) {
+            out << " rolloff=" << audio_rolloff_name(cue->rolloff);
+        }
+        if (cue->rolloff_power != 1.0f) {
+            out << " rolloff_power=" << cue->rolloff_power;
+        }
+        if (cue->pan_strength != 1.0f) {
+            out << " pan=" << cue->pan_strength;
+        }
+        if (cue->bpm > 0.0f) {
+            out << " bpm=" << cue->bpm << " beats_per_bar=" << cue->beats_per_bar << " beat_offset=" << cue->beat_offset;
+        }
+        if (cue->layers) {
+            out << " layers=true";
+        }
+        if (cue->playlist) {
+            out << " playlist=true";
+        }
+        if (cue->shuffle) {
+            out << " shuffle=true";
+        }
+        out
             << " clips=";
         for (std::size_t i = 0; i < cue->clips.size(); ++i) {
             if (i > 0) {
@@ -342,6 +567,51 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
             out << cue->clips[i];
         }
         out << '\n';
+    }
+
+    bool first_effect = true;
+    for (const AudioBus* bus : buses) {
+        for (const AudioEffect& effect : bus->effects) {
+            out << (first_effect ? "\n" : "") << "effect " << bus->id << ' ' << audio_effect_type_name(effect.type);
+            first_effect = false;
+            if (!effect.enabled) {
+                out << " enabled=false";
+            }
+            switch (effect.type) {
+            case AudioEffectType::LowPass:
+            case AudioEffectType::HighPass:
+            case AudioEffectType::BandPass:
+            case AudioEffectType::Notch:
+                out << " cutoff=" << effect.cutoff << " q=" << effect.q;
+                break;
+            case AudioEffectType::Peak:
+            case AudioEffectType::LowShelf:
+            case AudioEffectType::HighShelf:
+                out << " freq=" << effect.cutoff << " gain=" << effect.gain << " q=" << effect.q;
+                break;
+            case AudioEffectType::Delay:
+                out << " time=" << effect.time << " feedback=" << effect.feedback << " wet=" << effect.wet
+                    << " dry=" << effect.dry;
+                break;
+            case AudioEffectType::Reverb:
+                out << " room=" << effect.room_size << " damping=" << effect.damping << " wet=" << effect.wet
+                    << " dry=" << effect.dry << " width=" << effect.width;
+                break;
+            case AudioEffectType::Compressor:
+                out << " threshold=" << effect.threshold << " ratio=" << effect.ratio << " attack=" << effect.attack
+                    << " release=" << effect.release << " makeup=" << effect.makeup;
+                break;
+            }
+            out << '\n';
+        }
+    }
+
+    if (!catalog.ducks().empty()) {
+        out << '\n';
+    }
+    for (const AudioDuck& duck : catalog.ducks()) {
+        out << "duck " << duck.bus << " when=" << duck.when << " volume=" << duck.volume
+            << " attack=" << duck.attack << " release=" << duck.release << '\n';
     }
 
     return static_cast<bool>(out);

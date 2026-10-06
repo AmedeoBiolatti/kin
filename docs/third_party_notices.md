@@ -21,6 +21,8 @@ components with it. Each license is in the fetched source tree, under
 | [Lua](https://www.lua.org) | 5.4.6 | MIT | Lua.org, PUC-Rio |
 | [sol2](https://github.com/ThePhD/sol2) | 3.3.1 | MIT | Rapptz, ThePhD, and contributors |
 | [earcut.hpp](https://github.com/mapbox/earcut.hpp) | 3.2.4 | ISC | Mapbox |
+| [dr_libs](https://github.com/mackron/dr_libs) (dr_wav, dr_flac, dr_mp3) | commit dfe8377 (dr_wav 0.14.6, dr_flac 0.13.4, dr_mp3 0.7.4 pre-release) | Public domain (Unlicense) or MIT-0 | David Reid |
+| [stb_vorbis](https://github.com/nothings/stb) | 1.22 (commit 2c980bb) | Public domain (Unlicense) or MIT | Sean Barrett |
 
 ## Libraries bundled by SDL_image and SDL_ttf
 
