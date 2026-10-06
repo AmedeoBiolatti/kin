@@ -1,3 +1,4 @@
+#include <kin/l10n/localization.hpp>
 #include "arena_art.hpp"
 #include "example_common.hpp"
 #include "siege_audio.hpp"
@@ -157,6 +158,12 @@ int main(int argc, char** argv) {
         return 0;
     }
     using namespace examples;
+    // Signal Siege's text in English, from its language files, all of which check out.
+    kin::Localization l10n;
+    std::vector<std::string> l10n_errors;
+    assert(l10n.load_directory(siege_language_dir(), l10n_errors) && l10n_errors.empty());
+    assert(l10n.languages().size() == 4 && l10n.validate().empty());
+    kin::set_active_localization(&l10n);
     Arena first(180, 42), second(180, 42), different(180, 43);
     assert(first.checksum() == second.checksum());
     assert(first.checksum() != different.checksum());

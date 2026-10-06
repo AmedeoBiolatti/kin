@@ -1,0 +1,233 @@
+{
+  "locale": "en",
+  "name": "English",
+  "strings": {
+    "title": {
+      "name": "SIGNAL SIEGE",
+      "tagline": "Hold the sector for ninety seconds.",
+      "play": "PLAY",
+      "watch": "WATCH AUTOPLAY",
+      "language": "LANGUAGE: {name}",
+      "quit": "QUIT",
+      "best": "BEST  {time}  /  {kills, plural, one {# KILL} other {# KILLS}}",
+      "best_won": "BEST  SECTOR SECURED  /  {kills, plural, one {# KILL} other {# KILLS}}",
+      "controls": "WASD move   mouse aim   hold LMB fire   SPACE dash   U power grid"
+    },
+    "hud": {
+      "hull": "HULL",
+      "dash": "DASH",
+      "ready": "READY",
+      "kills": "KILLS",
+      "cores": "CORES",
+      "wave": "WAVE {wave}",
+      "wave_of": "WAVE {wave} / {waves}",
+      "upgrades_ready": "[U] {n, plural, one {# UPGRADE READY} other {# UPGRADES READY}}",
+      "wave_note": {
+        "1": "HOLD THE SECTOR",
+        "2": "HOSTILES ACCELERATE",
+        "3": "PRESSURE RISING",
+        "4": "HALFWAY THERE",
+        "5": "FINAL PUSH",
+        "6": "LAST STAND"
+      },
+      "controls": "WASD move / mouse + hold LMB fire / SPACE dash / U power grid / P pause / R restart / B autoplay",
+      "stats": "{enemies} enemies   {shots} shots   {draws} draws   F1 timings",
+      "stats_autoplay": "{enemies} enemies   {shots} shots   {draws} draws   F1 timings   AUTOPLAY",
+      "paused": "PAUSED",
+      "paused_hint": "P resume / R new run",
+      "ended_hint": "R new run"
+    },
+    "results": {
+      "secured": "SECTOR SECURED",
+      "lost": "SIGNAL LOST",
+      "new_best": "NEW BEST RUN",
+      "time": "TIME SURVIVED",
+      "kills": "KILLS",
+      "cores": "CORES COLLECTED",
+      "upgrades": "UPGRADES INSTALLED",
+      "retry": "RETRY  [ENTER]",
+      "title": "TITLE  [ESC]"
+    },
+    "grid": {
+      "title": "POWER GRID",
+      "summary": "{count} upgrades  /  CORES {cores}  /  PAUSED",
+      "return": "RETURN [U]",
+      "branch": {
+        "mobility": "MOBILITY",
+        "weapons": "WEAPONS",
+        "salvage": "SALVAGE",
+        "ballistics": "BALLISTICS",
+        "defense": "DEFENSE",
+        "recovery": "RECOVERY"
+      },
+      "tab": "{name}  {owned}/{total}",
+      "help": "Left/Right: upgrade   Up/Down or wheel: branch",
+      "owned": "OWNED",
+      "cost": "{n, plural, one {# core} other {# cores}}",
+      "tier": "{name}  /  TIER {tier}",
+      "install": "INSTALL [ENTER]",
+      "installed": "INSTALLED",
+      "locked": "LOCKED",
+      "reason": {
+        "installed": "Installed",
+        "ended": "Run ended. Press R to start a new run.",
+        "requires": "Requires {name}",
+        "need": "Need {n, plural, one {# more core} other {# more cores}}",
+        "ready": "Ready: {n, plural, one {# core} other {# cores}}"
+      },
+      "feedback": {
+        "installed": "Installed {name}"
+      }
+    },
+    "power": {
+      "0": {
+        "name": "UPLINK",
+        "text": "Collect green cores to expand your power grid."
+      },
+      "1": {
+        "name": "DRIVE",
+        "text": "+60 movement speed."
+      },
+      "2": {
+        "name": "BLINK",
+        "text": "Dash cooldown reduced by 0.6 seconds."
+      },
+      "3": {
+        "name": "AMPLIFIER",
+        "text": "+1 projectile damage."
+      },
+      "4": {
+        "name": "OVERCLOCK",
+        "text": "Fire interval reduced by 25%."
+      },
+      "5": {
+        "name": "MAGNET",
+        "text": "+120 core attraction radius."
+      },
+      "6": {
+        "name": "HULL",
+        "text": "+40 maximum health; repair 40 health."
+      },
+      "7": {
+        "name": "AFTERBURN",
+        "text": "+200 dash speed."
+      },
+      "8": {
+        "name": "PHASE",
+        "text": "+0.08 seconds of dash immunity."
+      },
+      "9": {
+        "name": "VECTOR",
+        "text": "+40 movement speed."
+      },
+      "10": {
+        "name": "SLIPSTREAM",
+        "text": "Dash cooldown reduced by 0.2 seconds."
+      },
+      "11": {
+        "name": "HOT LOAD",
+        "text": "+0.5 projectile damage."
+      },
+      "12": {
+        "name": "FAST CYCLE",
+        "text": "Fire interval reduced by another 15%."
+      },
+      "13": {
+        "name": "BREAKER",
+        "text": "+1 projectile damage."
+      },
+      "14": {
+        "name": "REDLINE",
+        "text": "Fire interval reduced by another 15%."
+      },
+      "15": {
+        "name": "TRACTOR",
+        "text": "+160 core pulling speed."
+      },
+      "16": {
+        "name": "HARVEST",
+        "text": "+1 health repaired per collected core."
+      },
+      "17": {
+        "name": "LONG REACH",
+        "text": "+120 core attraction radius."
+      },
+      "18": {
+        "name": "VACUUM",
+        "text": "+240 core pulling speed."
+      },
+      "19": {
+        "name": "ACCELERATOR",
+        "text": "+150 friendly projectile speed."
+      },
+      "20": {
+        "name": "STABILIZER",
+        "text": "+0.4 seconds of friendly projectile life."
+      },
+      "21": {
+        "name": "SPLITTER",
+        "text": "+1 spread projectile per volley."
+      },
+      "22": {
+        "name": "RAIL COIL",
+        "text": "+200 friendly projectile speed."
+      },
+      "23": {
+        "name": "LONG SHOT",
+        "text": "+0.5 seconds of friendly projectile life."
+      },
+      "24": {
+        "name": "FAN SHOT",
+        "text": "+2 spread projectiles per volley."
+      },
+      "25": {
+        "name": "PLATING",
+        "text": "Reduce incoming hit damage by 1 (minimum 1)."
+      },
+      "26": {
+        "name": "BULKHEAD",
+        "text": "+20 maximum health; repair 20 health."
+      },
+      "27": {
+        "name": "ABLATIVE",
+        "text": "Reduce incoming hit damage by another 1."
+      },
+      "28": {
+        "name": "FORTRESS",
+        "text": "+30 maximum health; repair 30 health."
+      },
+      "29": {
+        "name": "REACTIVE",
+        "text": "Reduce incoming hit damage by another 1."
+      },
+      "30": {
+        "name": "BASTION",
+        "text": "+40 maximum health; repair 40 health."
+      },
+      "31": {
+        "name": "NANITES",
+        "text": "Regenerate 1 health per second."
+      },
+      "32": {
+        "name": "RECYCLER",
+        "text": "+1 health repaired per collected core."
+      },
+      "33": {
+        "name": "REBUILD",
+        "text": "Regenerate another 1 health per second."
+      },
+      "34": {
+        "name": "RESERVES",
+        "text": "+20 maximum health; repair 20 health."
+      },
+      "35": {
+        "name": "SALVAGER",
+        "text": "+2 health repaired per collected core."
+      },
+      "36": {
+        "name": "LIFELINE",
+        "text": "Regenerate another 2 health per second."
+      }
+    }
+  }
+}

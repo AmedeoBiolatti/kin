@@ -10,6 +10,8 @@ add_library(kin_example_workloads STATIC
 )
 target_include_directories(kin_example_workloads PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(kin_example_workloads PUBLIC kin::engine)
+# Signal Siege's language files, read where they are (and reloaded as they change).
+target_compile_definitions(kin_example_workloads PRIVATE KIN_EXAMPLES_LANG_DIR="${CMAKE_CURRENT_SOURCE_DIR}/lang")
 kin_enable_release_optimizations(kin_example_workloads)
 
 foreach(example signal_siege run_observatory)

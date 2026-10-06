@@ -6,6 +6,7 @@
 
 #include <kin/anim/track.hpp>
 #include <kin/core/json.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/save/save_store.hpp>
 #include <kin/scene/transitions.hpp>
 #include <kin/ui2/widgets.hpp>
@@ -26,7 +27,13 @@ constexpr Color gold = Color::rgb(236, 214, 160);
 // What the scenes of one app run share: options, sound, and the best run.
 struct Siege {
     Siege(Options o, bool tool_run) : options(std::move(o)), audio(options.mute || options.benchmark || tool_run) {
-        if (!tool_run) best.emplace();
+        if (!tool_run) {
+            best.emplace();
+            // The language chosen last time (--locale, when given, still wins).
+            if (Localization* l10n = active_localization(); l10n && !best->locale().empty()) {
+                l10n->set_locale(best->locale());
+            }
+        }
     }
     Options options;
     SiegeAudio audio;
@@ -193,7 +200,6 @@ private:
 class TitleScene final : public Scene {
 public:
     explicit TitleScene(std::shared_ptr<Siege> siege) : _siege(std::move(siege)), _attract(140, 3) {
-        _menu.items = {{.id = "play", .label = "PLAY"}, {.id = "demo", .label = "WATCH AUTOPLAY"}, {.id = "quit", .label = "QUIT"}};
     }
     std::string_view name() const override { return "Signal Siege Title"; }
     void on_enter(SceneContext&) override { _siege->audio.set_drone(true); }
@@ -222,11 +228,22 @@ public:
         const Screen screen{renderer, _ui, dpi, output.x / dpi, output.y / dpi};
         const float y0 = screen.h * .22f + 30 * rise(_time);
         const float alpha = std::clamp(_time / .5f, 0.0f, 1.0f);
-        screen.centered("SIGNAL SIEGE", y0, 64, with_alpha(teal, alpha));
-        screen.centered("Hold the sector for ninety seconds.", y0 + 84, 16, with_alpha(ink, alpha));
+        screen.centered(tr("title.name"), y0, 64, with_alpha(teal, alpha));
+        screen.centered(tr("title.tagline"), y0 + 84, 16, with_alpha(ink, alpha));
 
-        const float menu_w = 280;
-        _menu.bounds = screen.px({(screen.w - menu_w) * .5f, y0 + 140, menu_w, 3 * 44.0f});
+        // Labels from the language shown, which the language item changes.
+        const Localization* l10n = active_localization();
+        std::string language = l10n ? l10n->locale() : std::string{};
+        if (l10n) {
+            for (const LanguageInfo& info : l10n->languages()) {
+                if (info.locale == l10n->locale()) language = info.name;
+            }
+        }
+        _menu.items = {{.id = "play", .label = tr("title.play")}, {.id = "demo", .label = tr("title.watch")},
+                       {.id = "language", .label = tr("title.language", {{"name", language}})},
+                       {.id = "quit", .label = tr("title.quit")}};
+        const float menu_w = 320;
+        _menu.bounds = screen.px({(screen.w - menu_w) * .5f, y0 + 140, menu_w, 4 * 44.0f});
         _menu.row_height = 40 * dpi;
         _menu.row_spacing = 4 * dpi;
         _menu.text_style = screen.style(18, ink);
@@ -238,11 +255,11 @@ public:
 
         if (_siege->best && _siege->best->best().time > 0) {
             const RunResult& record = _siege->best->best();
-            const std::string best = std::string{record.won ? "BEST  SECTOR SECURED" : "BEST  " + clock_text(record.time)} +
-                "  /  " + std::to_string(record.kills) + " KILLS";
-            screen.centered(best, y0 + 300, 13, gold);
+            const std::string best = record.won ? tr("title.best_won", {{"kills", record.kills}})
+                                                : tr("title.best", {{"time", clock_text(record.time)}, {"kills", record.kills}});
+            screen.centered(best, y0 + 344, 13, gold);
         }
-        screen.centered("WASD move   mouse aim   hold LMB fire   SPACE dash   U power grid", screen.h - 48, 13, muted);
+        screen.centered(tr("title.controls"), screen.h - 48, 13, muted);
         _ui.end();
         capture(ctx, _siege->options, ++_frames, _captured);
     }
@@ -253,7 +270,19 @@ private:
     void activate(SceneContext& ctx, std::string_view id) {
         _siege->audio.play("ui_select");
         if (id == "quit") { ctx.app.quit(); return; }
+        if (id == "language") { next_language(); return; }
         ctx.scenes.push(transition_to(std::make_unique<ArenaScene>(_siege, id == "demo", true), TransitionKind::Iris, .7f));
+    }
+    // The next loaded language, kept for the next session.
+    void next_language() {
+        Localization* l10n = active_localization();
+        if (!l10n) return;
+        const std::vector<LanguageInfo> languages = l10n->languages();
+        if (languages.empty()) return;
+        auto current = std::ranges::find(languages, l10n->locale(), &LanguageInfo::locale);
+        const std::size_t next = current == languages.end() ? 0 : std::size_t(current - languages.begin() + 1) % languages.size();
+        l10n->set_locale(languages[next].locale);
+        if (_siege->best) _siege->best->set_locale(l10n->locale());
     }
     std::shared_ptr<Siege> _siege;
     Arena _attract;
@@ -300,11 +329,12 @@ public:
 
         const float y0 = screen.h * .2f + 24 * rise(_time);
         const float alpha = std::clamp(_time / .4f, 0.0f, 1.0f);
-        screen.centered(_result.won ? "SECTOR SECURED" : "SIGNAL LOST", y0, 48,
+        screen.centered(tr(_result.won ? "results.secured" : "results.lost"), y0, 48,
                         with_alpha(_result.won ? teal : Color::rgb(240, 120, 110), alpha));
-        if (_new_best) screen.centered("NEW BEST RUN", y0 + 66, 14, with_alpha(gold, .6f + .4f * std::sin(_time * 4)));
+        if (_new_best) screen.centered(tr("results.new_best"), y0 + 66, 14, with_alpha(gold, .6f + .4f * std::sin(_time * 4)));
 
-        constexpr std::array<std::string_view, 4> labels{"TIME SURVIVED", "KILLS", "CORES COLLECTED", "UPGRADES INSTALLED"};
+        const std::array<std::string, 4> labels{tr("results.time"), tr("results.kills"), tr("results.cores"),
+                                                tr("results.upgrades")};
         const float left = screen.w * .5f - 200;
         for (std::size_t i = 0; i < _rows.size(); ++i) {
             ui2::AnimatedValue& row = _rows[i];
@@ -322,8 +352,8 @@ public:
             ui2::run(_ui, b);
             return b.clicked;
         };
-        const bool retry_clicked = button("results-retry", "RETRY  [ENTER]", screen.w * .5f - 190);
-        const bool title_clicked = button("results-title", "TITLE  [ESC]", screen.w * .5f + 10);
+        const bool retry_clicked = button("results-retry", tr("results.retry"), screen.w * .5f - 190);
+        const bool title_clicked = button("results-title", tr("results.title"), screen.w * .5f + 10);
         _ui.end();
         if (!_leaving && retry_clicked) retry(ctx);
         if (!_leaving && title_clicked) title(ctx);
@@ -367,7 +397,34 @@ BestRunStore::BestRunStore(std::filesystem::path root)
         _best.time = static_cast<float>(loaded.payload.number_at("best_time", 0));
         _best.kills = static_cast<int>(loaded.payload.int_at("best_kills", 0));
         _best.won = loaded.payload.bool_at("best_won", false);
+        _locale = loaded.payload.string_at("locale");
     }
+}
+
+void BestRunStore::set_locale(std::string locale) {
+    _locale = std::move(locale);
+    save();
+}
+
+void BestRunStore::save() {
+    _saves->write_settings([&](JsonWriter& json) {
+        json.begin_object()
+            .field("best_time", static_cast<f64>(_best.time)).field("best_kills", _best.kills).field("best_won", _best.won)
+            .field("locale", _locale)
+            .end_object();
+    });
+}
+
+std::filesystem::path siege_language_dir() {
+    return KIN_EXAMPLES_LANG_DIR;
+}
+
+std::string power_name(int id) {
+    return tr("power." + std::to_string(id) + ".name");
+}
+
+std::string power_description(int id) {
+    return tr("power." + std::to_string(id) + ".text");
 }
 
 bool BestRunStore::record(const RunResult& run) {
@@ -375,11 +432,7 @@ bool BestRunStore::record(const RunResult& run) {
         (run.time > _best.time + .01f || (std::abs(run.time - _best.time) <= .01f && run.kills > _best.kills)));
     if (!better) return false;
     _best = run;
-    _saves->write_settings([&](JsonWriter& json) {
-        json.begin_object()
-            .field("best_time", static_cast<f64>(_best.time)).field("best_kills", _best.kills).field("best_won", _best.won)
-            .end_object();
-    });
+    save();
     return true;
 }
 

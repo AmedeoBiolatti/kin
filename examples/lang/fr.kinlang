@@ -1,0 +1,233 @@
+{
+  "locale": "fr",
+  "name": "Français",
+  "strings": {
+    "title": {
+      "name": "SIGNAL SIEGE",
+      "tagline": "Tenez le secteur pendant quatre-vingt-dix secondes.",
+      "play": "JOUER",
+      "watch": "REGARDER LA DÉMO",
+      "language": "LANGUE : {name}",
+      "quit": "QUITTER",
+      "best": "RECORD  {time}  /  {kills, plural, one {# ÉLIMINATION} many {# ÉLIMINATIONS} other {# ÉLIMINATIONS}}",
+      "best_won": "RECORD  SECTEUR SÉCURISÉ  /  {kills, plural, one {# ÉLIMINATION} many {# ÉLIMINATIONS} other {# ÉLIMINATIONS}}",
+      "controls": "WASD déplacer   souris viser   clic gauche tirer   ESPACE ruée   U réseau d'énergie"
+    },
+    "hud": {
+      "hull": "COQUE",
+      "dash": "RUÉE",
+      "ready": "PRÊTE",
+      "kills": "ÉLIM.",
+      "cores": "NOYAUX",
+      "wave": "VAGUE {wave}",
+      "wave_of": "VAGUE {wave} / {waves}",
+      "upgrades_ready": "[U] {n, plural, one {# AMÉLIORATION PRÊTE} many {# AMÉLIORATIONS PRÊTES} other {# AMÉLIORATIONS PRÊTES}}",
+      "wave_note": {
+        "1": "TENEZ LE SECTEUR",
+        "2": "LES HOSTILES ACCÉLÈRENT",
+        "3": "LA PRESSION MONTE",
+        "4": "À MI-CHEMIN",
+        "5": "DERNIER EFFORT",
+        "6": "BAROUD D'HONNEUR"
+      },
+      "controls": "WASD déplacer / souris + clic gauche maintenu tirer / ESPACE ruée / U réseau d'énergie / P pause / R recommencer / B démo",
+      "stats": "{enemies} ennemis   {shots} tirs   {draws} dessins   F1 mesures",
+      "stats_autoplay": "{enemies} ennemis   {shots} tirs   {draws} dessins   F1 mesures   DÉMO",
+      "paused": "PAUSE",
+      "paused_hint": "P reprendre / R nouvelle partie",
+      "ended_hint": "R nouvelle partie"
+    },
+    "results": {
+      "secured": "SECTEUR SÉCURISÉ",
+      "lost": "SIGNAL PERDU",
+      "new_best": "NOUVEAU RECORD",
+      "time": "TEMPS DE SURVIE",
+      "kills": "ÉLIMINATIONS",
+      "cores": "NOYAUX COLLECTÉS",
+      "upgrades": "AMÉLIORATIONS INSTALLÉES",
+      "retry": "REJOUER  [ENTRÉE]",
+      "title": "TITRE  [ÉCHAP]"
+    },
+    "grid": {
+      "title": "RÉSEAU D'ÉNERGIE",
+      "summary": "{count} améliorations  /  NOYAUX {cores}  /  EN PAUSE",
+      "return": "RETOUR [U]",
+      "branch": {
+        "mobility": "MOBILITÉ",
+        "weapons": "ARMES",
+        "salvage": "COLLECTE",
+        "ballistics": "BALISTIQUE",
+        "defense": "DÉFENSE",
+        "recovery": "RÉPARATION"
+      },
+      "tab": "{name}  {owned}/{total}",
+      "help": "Gauche/Droite : amélioration   Haut/Bas ou molette : branche",
+      "owned": "ACQUIS",
+      "cost": "{n, plural, one {# noyau} many {# noyaux} other {# noyaux}}",
+      "tier": "{name}  /  NIVEAU {tier}",
+      "install": "INSTALLER [ENTRÉE]",
+      "installed": "INSTALLÉ",
+      "locked": "VERROUILLÉ",
+      "reason": {
+        "installed": "Installé",
+        "ended": "Partie terminée. Appuyez sur R pour recommencer.",
+        "requires": "Nécessite {name}",
+        "need": "Il manque {n, plural, one {# noyau} many {# noyaux} other {# noyaux}}",
+        "ready": "Prêt : {n, plural, one {# noyau} many {# noyaux} other {# noyaux}}"
+      },
+      "feedback": {
+        "installed": "{name} installé"
+      }
+    },
+    "power": {
+      "0": {
+        "name": "LIAISON",
+        "text": "Collectez les noyaux verts pour étendre votre réseau d'énergie."
+      },
+      "1": {
+        "name": "PROPULSION",
+        "text": "+60 de vitesse de déplacement."
+      },
+      "2": {
+        "name": "CLIGNEMENT",
+        "text": "Recharge de la ruée réduite de 0,6 seconde."
+      },
+      "3": {
+        "name": "AMPLIFICATEUR",
+        "text": "+1 aux dégâts des projectiles."
+      },
+      "4": {
+        "name": "SURCADENCE",
+        "text": "Intervalle de tir réduit de 25 %."
+      },
+      "5": {
+        "name": "AIMANT",
+        "text": "+120 au rayon d'attraction des noyaux."
+      },
+      "6": {
+        "name": "COQUE",
+        "text": "+40 de santé maximale ; répare 40 de santé."
+      },
+      "7": {
+        "name": "POSTCOMBUSTION",
+        "text": "+200 de vitesse de ruée."
+      },
+      "8": {
+        "name": "PHASE",
+        "text": "+0,08 seconde d'immunité pendant la ruée."
+      },
+      "9": {
+        "name": "VECTEUR",
+        "text": "+40 de vitesse de déplacement."
+      },
+      "10": {
+        "name": "SILLAGE",
+        "text": "Recharge de la ruée réduite de 0,2 seconde."
+      },
+      "11": {
+        "name": "CHARGE CHAUDE",
+        "text": "+0,5 aux dégâts des projectiles."
+      },
+      "12": {
+        "name": "CYCLE RAPIDE",
+        "text": "Intervalle de tir réduit de 15 % de plus."
+      },
+      "13": {
+        "name": "BRISEUR",
+        "text": "+1 aux dégâts des projectiles."
+      },
+      "14": {
+        "name": "ZONE ROUGE",
+        "text": "Intervalle de tir réduit de 15 % de plus."
+      },
+      "15": {
+        "name": "TRACTEUR",
+        "text": "+160 à la vitesse d'attraction des noyaux."
+      },
+      "16": {
+        "name": "MOISSON",
+        "text": "+1 de santé réparée par noyau collecté."
+      },
+      "17": {
+        "name": "LONGUE PORTÉE",
+        "text": "+120 au rayon d'attraction des noyaux."
+      },
+      "18": {
+        "name": "ASPIRATEUR",
+        "text": "+240 à la vitesse d'attraction des noyaux."
+      },
+      "19": {
+        "name": "ACCÉLÉRATEUR",
+        "text": "+150 à la vitesse des projectiles alliés."
+      },
+      "20": {
+        "name": "STABILISATEUR",
+        "text": "+0,4 seconde de durée de vie des projectiles alliés."
+      },
+      "21": {
+        "name": "DIVISEUR",
+        "text": "+1 projectile dispersé par salve."
+      },
+      "22": {
+        "name": "BOBINE RAIL",
+        "text": "+200 à la vitesse des projectiles alliés."
+      },
+      "23": {
+        "name": "TIR LOINTAIN",
+        "text": "+0,5 seconde de durée de vie des projectiles alliés."
+      },
+      "24": {
+        "name": "ÉVENTAIL",
+        "text": "+2 projectiles dispersés par salve."
+      },
+      "25": {
+        "name": "BLINDAGE",
+        "text": "Réduit de 1 les dégâts subis (minimum 1)."
+      },
+      "26": {
+        "name": "CLOISON",
+        "text": "+20 de santé maximale ; répare 20 de santé."
+      },
+      "27": {
+        "name": "ABLATIF",
+        "text": "Réduit les dégâts subis de 1 de plus."
+      },
+      "28": {
+        "name": "FORTERESSE",
+        "text": "+30 de santé maximale ; répare 30 de santé."
+      },
+      "29": {
+        "name": "RÉACTIF",
+        "text": "Réduit les dégâts subis de 1 de plus."
+      },
+      "30": {
+        "name": "BASTION",
+        "text": "+40 de santé maximale ; répare 40 de santé."
+      },
+      "31": {
+        "name": "NANITES",
+        "text": "Régénère 1 point de santé par seconde."
+      },
+      "32": {
+        "name": "RECYCLEUR",
+        "text": "+1 de santé réparée par noyau collecté."
+      },
+      "33": {
+        "name": "RECONSTRUCTION",
+        "text": "Régénère 1 point de santé de plus par seconde."
+      },
+      "34": {
+        "name": "RÉSERVES",
+        "text": "+20 de santé maximale ; répare 20 de santé."
+      },
+      "35": {
+        "name": "RÉCUPÉRATEUR",
+        "text": "+2 de santé réparée par noyau collecté."
+      },
+      "36": {
+        "name": "BOUÉE",
+        "text": "Régénère 2 points de santé de plus par seconde."
+      }
+    }
+  }
+}
