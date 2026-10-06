@@ -59,6 +59,8 @@ struct AppFrameStats {
     f32 accumulator_before_update = 0.0f;
     f32 accumulator_after_update = 0.0f;
     f32 alpha = 0.0f;
+    // Fixed steps run this frame. Inside update() it counts the step being run, so 1
+    // means the first step of the frame (under both App::run and App::run_for).
     i32 update_steps = 0;
     bool hit_max_steps = false;
     f32 pacing_wait = 0.0f; // seconds slept after the previous frame to hold max_fps

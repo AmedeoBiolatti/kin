@@ -165,7 +165,7 @@ void TrackerDashboard::render(Tracker& model, Input& input, Renderer2D& renderer
     const Vec2f physical_pointer = _ui.pointer();
     const Vec2f pointer{physical_pointer.x / dpi, physical_pointer.y / dpi};
     if (pointer.x >= rows.x && pointer.x <= rows.x + rows.w && pointer.y >= rows.y && pointer.y <= rows.y + rows.h)
-        _offset -= input.mouse_wheel_y() * 72;
+        _offset -= input.frame_mouse_wheel_y() * 72;
     _offset = std::clamp(_offset, 0.0f, std::max(0.0f, float(model.visible.size()) * row_height - rows.h));
     const int first = int(_offset / row_height), last = std::min(int(model.visible.size()), first + int(rows.h / row_height) + 2);
     _drawn_rows = last - first;
