@@ -214,11 +214,11 @@ std::optional<PackLocation> locate(const std::filesystem::path& path) {
 const ContentPack::Entry* find_entry(const PackLocation& location) {
     const ContentPack::Entry* entry = location.pack->find(location.inner);
     if (!entry && !location.inner.empty()) {
-        if (const ContentPack::Entry* near = location.pack->find_ignoring_case(location.inner)) {
+        if (const ContentPack::Entry* similar = location.pack->find_ignoring_case(location.inner)) {
             // Found on a case-insensitive disk while it was made, missing now.
             KIN_LOG_ERROR_F("content", "content file not found: letter case differs from the packed file",
                             (LogFields{{.name = "path", .value = location.inner},
-                                       {.name = "packed", .value = near->path},
+                                       {.name = "packed", .value = similar->path},
                                        {.name = "pack", .value = location.pack->file().string()}}));
         }
     }
