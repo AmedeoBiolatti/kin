@@ -5,12 +5,13 @@
 #include <kin/audio/spatial_audio.hpp>
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
-#include <vector>
 
 namespace kin {
+
+class JobSystem;
 
 struct AudioHandle {
     u64 id = 0;
@@ -26,16 +27,20 @@ struct AudioPlayRequest {
     f32 volume = 1.0f;
     f32 pitch = 1.0f;
     i32 priority_boost = 0;
+    // Seconds to fade in from silence; 0 starts at full volume.
+    f32 fade_in = 0.0f;
 };
 
 struct AudioEngineConfig {
     i32 sample_rate = 48000;
-    i32 channels = 2;
+    i32 channels = 2; // 1 or 2
     i32 music_voices = 2;
     i32 ambient_voices = 12;
     i32 sound_effect_voices = 64;
     i32 ui_voices = 8;
-    i32 queue_target_frames = 2048;
+    // Seeds which clip a cue with several clips plays and its pitch variation,
+    // so a run with the same requests sounds the same.
+    u64 seed = 0x6b696e2d617564ULL;
 };
 
 struct AudioEngineStats {
@@ -43,72 +48,76 @@ struct AudioEngineStats {
     i32 played_requests = 0;
     i32 culled_requests = 0;
     i32 stolen_voices = 0;
-    i32 mixed_frames = 0;
+    i64 mixed_frames = 0;
+    // Output frames the master limiter turned down to keep the mix from clipping.
+    i64 limited_frames = 0;
 };
 
+// Plays cues from an AudioCatalog. Call it from one thread (the game thread);
+// with a device backend, mixing happens on the device's audio thread.
 class AudioEngine {
 public:
     explicit AudioEngine(AudioEngineConfig config = {});
     AudioEngine(std::unique_ptr<IAudioBackend> backend, AudioEngineConfig config = {});
+    ~AudioEngine();
+    AudioEngine(AudioEngine&& other) noexcept;
+    AudioEngine& operator=(AudioEngine&& other) noexcept;
+    AudioEngine(const AudioEngine&) = delete;
+    AudioEngine& operator=(const AudioEngine&) = delete;
 
+    // Ages voices and picks up clips preload_async finished. With a backend that
+    // is not real time, it also mixes `dt` seconds, so voices finish on time.
     void update(f32 dt);
+    // Mixes the next frames into `interleaved` (frames * channels()) on the
+    // calling thread: offline rendering and tests. With a device backend that is
+    // pulling, the frames rendered here are never heard.
+    void render(std::span<f32> interleaved);
+
     // Registers a clip made in memory (e.g. synthesized, or from make_memory_audio_clip)
     // under a clip id, which cues then name like a file-backed clip; it needs no
     // catalog entry and takes precedence over one with the same id.
     void add_clip(std::string_view clip_id, AudioClip clip);
+    // Loads every clip the catalog names now, so play() never stops to decode.
+    void preload(const AudioCatalog& catalog);
+    // Decodes the catalog's clips on `jobs`. A play() that needs a clip still
+    // loading waits for that job instead of decoding the file again.
+    void preload_async(const AudioCatalog& catalog, JobSystem& jobs);
+
     AudioHandle play(const AudioCatalog& catalog, const AudioPlayRequest& request);
+    // Stops a voice, fading out over `fade` seconds (a few milliseconds at least,
+    // so nothing clicks). playing() is false from the call on.
     void stop(AudioHandle handle, f32 fade = 0.0f);
+    // Stops every voice on `bus` and on the buses under it.
     void stop_bus(std::string_view bus, f32 fade = 0.0f);
-    void set_bus_volume(std::string_view bus, f32 volume);
+    // The bus's own volume, on top of the catalog's; children follow their
+    // parents, so set_bus_volume("master", 0.5f) halves everything under master.
+    void set_bus_volume(std::string_view bus, f32 volume, f32 fade = 0.0f);
+    void set_bus_muted(std::string_view bus, bool muted);
+    // A paused bus's voices fade out briefly and hold their place until resumed:
+    // pause "sfx" with the game while "ui" keeps playing.
+    void set_bus_paused(std::string_view bus, bool paused);
     void set_listener(Vec2f position);
     void set_position(AudioHandle handle, Vec2f position);
 
     bool playing(AudioHandle handle) const;
     i32 active_voice_count() const;
     i32 active_voice_count(AudioCategory category) const;
+    // The volume set_bus_volume set (or is fading to); 1 by default.
     f32 bus_volume(std::string_view bus) const;
+    bool bus_muted(std::string_view bus) const;
+    bool bus_paused(std::string_view bus) const;
+    // Catalog and runtime volumes multiplied up the bus hierarchy; 0 if any is muted.
     f32 effective_bus_volume(const AudioCatalog& catalog, std::string_view bus) const;
-    const AudioEngineStats& stats() const { return _stats; }
+    i32 sample_rate() const;
+    i32 channels() const;
+    bool device_available() const;
+    AudioEngineStats stats() const;
     void reset_stats();
 
 private:
-    struct Voice {
-        AudioHandle handle;
-        std::string cue_id;
-        std::string bus;
-        AudioCategory category = AudioCategory::Sound;
-        const AudioClip* clip = nullptr;
-        f64 cursor = 0.0;
-        f32 volume = 1.0f;
-        f32 pitch = 1.0f;
-        i32 priority = 0;
-        f32 age = 0.0f;
-        bool loop = false;
-        bool spatial = false;
-        f32 min_distance = 32.0f;
-        f32 max_distance = 512.0f;
-        Vec2f position{};
-        bool has_position = false;
-    };
-
-    const AudioClip* load_clip(const AudioCatalog& catalog, std::string_view clip_id);
-    i32 category_cap(AudioCategory category) const;
-    i32 category_bias(AudioCategory category) const;
-    f32 distance_penalty(const AudioCue& cue, const AudioPlayRequest& request) const;
-    f32 voice_score(const Voice& voice) const;
-    bool allocate_voice(const AudioCue& cue, const AudioPlayRequest& request, i32& out_index);
-    void mix_frames(const AudioCatalog* catalog, i32 frames);
-
-    AudioEngineConfig _config;
+    struct State;
     std::unique_ptr<IAudioBackend> _backend;
-    const AudioCatalog* _catalog = nullptr;
-    Vec2f _listener{};
-    u64 _next_handle = 1;
-    std::vector<Voice> _voices;
-    std::unordered_map<std::string, AudioClip> _clip_cache;
-    std::unordered_map<std::string, AudioClip> _memory_clips;
-    std::unordered_map<std::string, f32> _bus_overrides;
-    AudioEngineStats _stats;
+    std::unique_ptr<State> _state;
 };
 
 } // namespace kin
