@@ -1443,6 +1443,40 @@ void test_input_mouse_edges_survive_zero_step_frames() {
     assert(!input.frame_pressed("hop"));
 }
 
+// ui2 scrolls with the frame wheel, so a render-time list moves on the frame the
+// notch lands, whether or not that frame ran a fixed step (which uses up the step
+// wheel, mouse_wheel_y(), before render).
+void test_ui2_wheel_scrolls_in_render_with_or_without_a_step() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::ScrollView scroll{.bounds = {0, 0, 100, 50}, .content_height = 500.0f};
+    input.set_mouse_pos({10, 10});
+
+    bool prev_stepped = true; // App initialises advance_input = true.
+    // One rendered frame as App::run runs it, with `notches` turned this frame.
+    const auto frame = [&](bool steps, f32 notches) {
+        InputFrameTestHook::begin_frame(input, prev_stepped);
+        prev_stepped = steps;
+        if (notches != 0.0f) {
+            input.set_mouse_wheel_y(notches);
+        }
+        if (steps) {
+            input.advance_step_edges();
+            assert(input.mouse_wheel_y() == 0.0f);
+        }
+        ui.begin(input, renderer);
+        ui2::run(ui, scroll);
+        ui.end();
+        return scroll.offset;
+    };
+
+    assert(approx(frame(false, -1.0f), 48.0f)); // 0-step frame
+    assert(approx(frame(false, 0.0f), 48.0f));  // not again on the next one
+    assert(approx(frame(true, -1.0f), 96.0f));  // stepping frame
+    assert(approx(frame(true, 0.0f), 96.0f));
+}
+
 // A single click must register exactly once whether ui2 widgets are driven from
 // update() (runs only on stepping frames) or render() (runs every frame), at
 // refresh > sim rate where most frames run zero steps. Regression for the
@@ -5889,6 +5923,7 @@ int main() {
     test_editor_widget_measure();
     test_ui2_control_height_alignment();
     test_scroll_view_geometry_and_wheel();
+    test_ui2_wheel_scrolls_in_render_with_or_without_a_step();
     test_scroll_primitives();
     test_text_input_editing();
     test_number_input_editing();

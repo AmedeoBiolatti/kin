@@ -1,6 +1,8 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/log.hpp>
 
+#include <SDL3/SDL.h>
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -153,9 +155,61 @@ void test_frame_time_snapper() {
     assert(snapper.advance(0.0069f, 1.0f / 60.0f, 0.001f) == 0.0069f); // 144 Hz, unpaced
 }
 
+void push_wheel_notch() {
+    SDL_Event event{};
+    event.type = SDL_EVENT_MOUSE_WHEEL;
+    event.wheel.y = 1.0f;
+    const bool pushed = SDL_PushEvent(&event);
+    assert(pushed);
+    (void)pushed;
+}
+
+// Each wheel notch reaches exactly one fixed step through App::run: mouse_wheel_y()
+// adds up across 0-step frames and is used up by a frame's first step, while
+// frame_mouse_wheel_y() (what ui2 scrolls with) lives one rendered frame, stepped or
+// not. time_scale picks the steps: 0 runs none, a huge one runs max_steps.
+void test_mouse_wheel_reaches_one_step() {
+    kin::App app{{.mode = kin::AppMode::Headless, .max_steps = 3}};
+    std::vector<float> step_wheel;
+    std::vector<int> step_numbers;
+    std::vector<float> render_wheel;
+    std::vector<int> render_steps;
+    app.set_time_scale(0.0f);
+    push_wheel_notch();
+    app.run([&](float) {
+        step_wheel.push_back(app.input().mouse_wheel_y());
+        step_numbers.push_back(app.frame_stats().update_steps);
+    },
+            [&](float) {
+        render_wheel.push_back(app.input().frame_mouse_wheel_y());
+        render_steps.push_back(app.frame_stats().update_steps);
+        switch (render_wheel.size()) {
+        case 1: // 0-step frame with a notch; another follows
+            push_wheel_notch();
+            break;
+        case 2: // the next frame steps and sees both
+            app.set_time_scale(1e9f);
+            break;
+        case 3: // a frame with one notch and three steps
+            push_wheel_notch();
+            break;
+        default:
+            app.quit();
+            break;
+        }
+    });
+    assert((render_steps == std::vector<int>{0, 0, 3, 3}));
+    assert((render_wheel == std::vector<float>{1.0f, 1.0f, 0.0f, 1.0f}));
+    assert((step_wheel == std::vector<float>{2.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}));
+    // update_steps counts the step being run, as under run_for.
+    assert((step_numbers == std::vector<int>{1, 2, 3, 1, 2, 3}));
+}
+
 int main() {
     test_logging();
     test_frame_time_snapper();
+    // Its own App, before the one below: each App inits and quits SDL.
+    test_mouse_wheel_reaches_one_step();
 
     kin::App app{{.mode = kin::AppMode::Headless}};
 
@@ -272,7 +326,7 @@ int main() {
     keypad.bind("install",kin::Key::KeypadEnter);
     keypad.set_action_pressed("install");
     assert(keypad.frame_pressed(kin::Key::KeypadEnter));
-    keypad.advance_keyboard_edges();
+    keypad.advance_step_edges();
     assert(keypad.frame_pressed("install"));
     assert(kin::binding_name(keypad.map().bindings("install")->front())=="KeypadEnter");
     keypad.begin_frame();
@@ -308,7 +362,7 @@ int main() {
     assert(app.input().pressed("copy"));
     assert(app.input().frame_pressed("copy"));
     assert(app.input().mouse_frame_pressed(kin::MouseButton::Left));
-    app.input().advance_keyboard_edges();
+    app.input().advance_step_edges();
     assert(!app.input().pressed("copy"));                                    // sticky consumed (update)
     assert(app.input().frame_pressed("copy"));                              // frame edge survives (render)
     assert(app.input().mouse_frame_pressed(kin::MouseButton::Left));         // mouse preserved (render)
@@ -316,9 +370,10 @@ int main() {
     assert(!app.input().frame_pressed("copy"));                             // cleared next frame
     assert(!app.input().mouse_frame_pressed(kin::MouseButton::Left));        // cleared next frame
 
-    app.run_for(2, [](kin::f32 dt, kin::i32 frame) {
+    app.run_for(2, [&app](kin::f32 dt, kin::i32 frame) {
         assert(dt > 0.0f);
         assert(frame >= 0);
+        assert(app.frame_stats().update_steps == 1);
     });
 
     return 0;
