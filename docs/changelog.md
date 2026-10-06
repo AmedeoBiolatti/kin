@@ -13,6 +13,10 @@ runs, and text in any script. See [localization](localization.md).
 ### Upgrading from 0.2.5
 
 - `TextDirection` moved to `kin/core/bidi.hpp` (it is still `kin::TextDirection`).
+- Games with text fields should call `ui.apply_text_input(window)` after
+  `ui.end()` each frame (it replaces `window.set_text_input_enabled(ui.wants_text_input())`).
+- `TtfFontOptions::fallbacks` and `system_fallback_fonts()` are `FontSource`s
+  (a path converts to one).
 - `LanguageFile::direction` is optional: unset follows the locale tag.
 - ui2 TTF text beyond ASCII is laid out glyph by glyph from the face's metrics
   instead of shaped as one string, so its width can change by a pixel or so.
@@ -52,6 +56,21 @@ runs, and text in any script. See [localization](localization.md).
 - `utf8_append`. `FileWatcher::load_and_watch` can return its watch id.
 - Signal Siege in English, French, Japanese and Arabic, with a language item
   on its title. `kin_text_bench`.
+- Input methods: `Input::text_composition()`; `TextInput` and `TextEdit`
+  show the composition at the caret; `Window::set_text_input_area` and
+  `ui2::Context::apply_text_input` place the candidate list.
+- Right-to-left editing: `ui2::caret_x`, `caret_at`, `selection_spans` and
+  `paragraph_direction`; `TextInput` and `TextEdit` use them.
+- `ui2::Context::push_mirror` / `mirror_if_right_to_left`: widgets mirror their
+  insides in right-to-left interfaces (Toggle, Slider, ProgressBar,
+  LabeledBar, IconButton, ResourceRow, IconMeter, MenuList, TabBar, ComboBox,
+  ListView; ScrollView's scrollbar moves left).
+- `ui2::fit_text`, `TextOverflow::Ellipsis` and `Shrink` (Label, and the new
+  `Button::overflow`); `ui2::collect_overflows`; the run report's
+  `ui_overflow` and `--fail-on-text-overflow`.
+- Fonts per language: `TtfFontOptions::language_fallbacks`, `FontSource`
+  (a face of a collection), `system_language_fonts()`,
+  `ui2::set_text_language`.
 
 ### Changed
 

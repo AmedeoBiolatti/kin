@@ -167,6 +167,63 @@ TTF fonts (`ui2::load_ttf_font`, `ui2::system_ui_font`) draw any script:
 - `wrap_text` breaks CJK text between characters, never before closing
   punctuation (`。」`) or after an opening bracket.
 
+## Fonts per language
+
+Japanese, Chinese and Korean share code points but draw some characters
+differently (直, 骨, 角), so each wants its own font. A font can name fallbacks
+by language, tried before its other fallbacks while `ui2::text_language()`
+matches:
+
+```cpp
+auto font = kin::ui2::load_ttf_font("fonts/Lato.ttf", 16, kin::ui2::TtfFontOptions{
+    .fallbacks = {"fonts/NotoSansArabic.ttf"},
+    .language_fallbacks = {{"ja", "fonts/NotoSansJP.otf"},
+                           {"zh-Hant", "fonts/NotoSansTC.otf"},
+                           {"zh", "fonts/NotoSansSC.otf"},
+                           {"ko", "fonts/NotoSansKR.otf"}},
+});
+```
+
+`run_scene_app` sets the text language from the localization, and fonts
+switch their fallbacks (and shape with the language) when it changes, so
+themes made with them follow without being made again. `FontSource{path, face}`
+names a face of a collection (`.ttc`). `system_language_fonts()` finds the
+system's: Yu Gothic, Microsoft YaHei, Microsoft JhengHei and Malgun Gothic on
+Windows; the matching faces of Noto Sans CJK on Linux. `system_ui_font` uses
+them.
+
+## Text input
+
+- **Input methods.** A Japanese, Chinese or Korean player types through an
+  IME: `Input::text_composition()` holds what is being composed. `TextInput`
+  and `TextEdit` show it at the caret, underlined, and leave the keys to the
+  IME until it commits the text. Call `ui.apply_text_input(window)` once a
+  frame after `ui.end()`: it starts text input while a field is focused and
+  puts the IME's candidate list beside the caret.
+- **Right-to-left editing.** Right-to-left text sits at the field's right
+  edge, the caret moves leftwards through it, selections split where
+  directions mix, and the arrow keys move the way they point.
+  `ui2::caret_x`, `caret_at` and `selection_spans` do this for any line, for
+  editors of a game's own.
+
+## Text that does not fit
+
+Translations run longer than English. A `Label` or `Button` can cut its text
+with an ellipsis (`TextOverflow::Ellipsis`) or shrink it to fit, to 70%, and
+then cut (`TextOverflow::Shrink`); `ui2::fit_text` does the same for text a
+game draws itself.
+
+Text that overflows its widget is listed in the run report under
+`ui_overflow` (widget, text, width it had and width it wanted), and
+`--fail-on-text-overflow` fails the run. With the pseudo-locale this finds
+the layouts a longer language will break:
+
+```sh
+./game --headless --frames 600 --pseudo-locale --fail-on-text-overflow --report=-
+```
+
+Text drawn at a position rather than in a widget has no bounds to overflow.
+
 ## Right-to-left interfaces
 
 `run_scene_app` keeps `ui2::set_ui_direction` in step with the language shown.
@@ -177,8 +234,12 @@ For a right-to-left language it:
 - swaps `Start` and `End` in `align_rect`;
 - makes text paragraphs right to left (`ui2::set_text_base_direction`).
 
-UI drawn at fixed positions (a HUD placed by hand) is not moved, and widgets
-keep their inner order (a checkbox's box before its label).
+Widgets with a left and a right mirror their insides: a checkbox's box goes
+to the right of its label, sliders and progress bars fill from the right, tabs
+and menus run from the right, and a scroll view's scrollbar is on the left.
+Text and images inside still read the right way round. A widget of a game's
+own can do the same with `ui.mirror_if_right_to_left(bounds)`. UI drawn at
+fixed positions (a HUD placed by hand) is not moved.
 
 ## Choosing the language
 
@@ -200,8 +261,10 @@ Arabic.
 
 ## Limits
 
-- Text editing (`TextInput`, `TextEdit`) moves its caret left to right through
-  the stored text: right-to-left editing is not supported.
+- The caret moves through text in stored order (with the arrows swapped in a
+  right-to-left paragraph), not visually through mixed-direction text.
+- A `TextEdit` lays a right-to-left paragraph out by its first strong
+  character for the whole text, not per paragraph.
 - Shaped runs are drawn from a texture each, kept in a cache; they have no
   distance-field outline (an outlined one is stamped).
 - Plural rules cover cardinals; ordinals (`1st`, `2nd`) are not built in.
