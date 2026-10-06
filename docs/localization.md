@@ -11,6 +11,8 @@ and did not find.
   runs both ways.
 - `kin/ui2/text.hpp`: fonts that draw any script, with fallback fonts.
 
+![Signal Siege's power grid in Arabic: titles, tabs and upgrade names shaped right to left, with numbers kept left to right](images/signal_siege_arabic.png)
+
 ## Start
 
 ```cpp
