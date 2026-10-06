@@ -9,9 +9,13 @@ add_library(kin_engine STATIC
     src/anim/state_machine.cpp
     src/anim/track.cpp
     src/anim/value.cpp
+    src/audio/audio_analysis.cpp
     src/audio/audio_catalog.cpp
     src/audio/audio_clip.cpp
+    src/audio/audio_decoder.cpp
+    src/audio/audio_effects.cpp
     src/audio/audio_engine.cpp
+    src/audio/audio_settings.cpp
     src/audio/sdl_audio_backend.cpp
     src/audio/spatial_audio.cpp
     src/assets/asset_manager.cpp
@@ -105,6 +109,7 @@ add_library(kin_engine STATIC
     src/scene/transitions.cpp
     src/save/save_store.cpp
     src/scripting/script_engine.cpp
+    src/scripting/lua_audio.cpp
     src/scripting/lua_l10n.cpp
     src/scripting/lua_paths.cpp
     src/scripting/lua_script.cpp
@@ -174,6 +179,12 @@ target_link_libraries(kin_engine PUBLIC
     sol2::sol2
 )
 target_link_libraries(kin_engine PRIVATE earcut_hpp::earcut_hpp) # used only inside the engine
+
+# Third-party audio decoders, built as C without kin's warnings.
+add_library(kin_audio_codecs STATIC src/audio/codecs.c)
+target_include_directories(kin_audio_codecs SYSTEM PUBLIC "${dr_libs_SOURCE_DIR}" "${stb_SOURCE_DIR}")
+target_compile_options(kin_audio_codecs PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w>" "$<$<C_COMPILER_ID:MSVC>:/w>")
+target_link_libraries(kin_engine PRIVATE kin_audio_codecs)
 
 # SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK). The compiled
 # .spv land in a build dir referenced at runtime via KIN_GPU_SHADER_DIR. Without

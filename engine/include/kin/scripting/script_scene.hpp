@@ -87,6 +87,9 @@ struct ScriptSceneConfig {
     const ScriptComponentRegistry* components = nullptr;
     std::function<void(ScriptScene&)> before_load;
     std::function<void(ScriptScene&, SceneContext&)> before_update;
+    // Binds the host's own API into each fresh Lua state (every load and
+    // reload), before the script runs: e.g. kin::bind_lua_audio.
+    std::function<void(sol::state&)> bind;
     bool hot_reload =
 #ifdef NDEBUG
         false;

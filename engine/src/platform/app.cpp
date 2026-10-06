@@ -201,21 +201,24 @@ void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)>
 
         i32 steps = 0;
         while (_running && accumulator >= fixed_dt && steps < max_steps) {
+            // Counts the step being run, so update() sees 1 in a frame's first step,
+            // as under run_for.
+            _frame_stats.update_steps = steps + 1;
             update(fixed_dt);
             accumulator -= fixed_dt;
             ++steps;
-            _frame_stats.update_steps = steps;
             _frame_stats.accumulator_after_update = accumulator;
             if (steps == 1) {
-                // Consume the KEYBOARD edges after the FIRST fixed step so navigation
-                // read in update() does not re-fire in later steps or in render()
-                // (ui2's MenuScene reads nav in both update() and render()). Mouse,
-                // text and wheel edges are intentionally preserved: render-time
+                // Consume the KEYBOARD edges and the step wheel after the FIRST fixed
+                // step so navigation read in update() does not re-fire in later steps
+                // or in render() (ui2's MenuScene reads nav in both update() and
+                // render()), and a wheel notch reaches exactly one step. Mouse, text
+                // and frame-wheel edges are intentionally preserved: render-time
                 // immediate UI (ui2 reads clicks via mouse_frame_pressed in render())
                 // is the sole consumer of those, so clearing them here dropped roughly
                 // half of all clicks — whichever frames ran a fixed step. Held state in
                 // _key_cur/_mouse_cur is left intact regardless.
-                _input.advance_keyboard_edges();
+                _input.advance_step_edges();
             }
         }
         if (steps == max_steps && accumulator >= fixed_dt) {

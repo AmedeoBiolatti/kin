@@ -1247,7 +1247,7 @@ struct ScriptDialoguePlayerApi {
 
 } // namespace
 
-ScriptEngine::ScriptEngine()
+ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     : _impl(std::make_unique<Impl>()) {
     _impl->lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
     sol::table package = _impl->lua.create_table();
@@ -1255,6 +1255,9 @@ ScriptEngine::ScriptEngine()
     package["path"] = "";
     _impl->lua["package"] = package;
     register_bindings();
+    if (bind) {
+        bind(_impl->lua);
+    }
 }
 
 ScriptEngine::~ScriptEngine() = default;

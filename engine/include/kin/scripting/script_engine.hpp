@@ -3,9 +3,14 @@
 #include <kin/scene/scene.hpp>
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace sol {
+class state;
+} // namespace sol
 
 namespace kin {
 
@@ -14,7 +19,9 @@ class ScriptScene;
 
 class ScriptEngine {
 public:
-    ScriptEngine();
+    // `bind` adds the host's own API (e.g. bind_lua_audio) to the fresh state,
+    // after kin's bindings and before any script runs.
+    explicit ScriptEngine(const std::function<void(sol::state&)>& bind = {});
     ~ScriptEngine();
 
     ScriptEngine(const ScriptEngine&) = delete;

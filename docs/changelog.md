@@ -12,6 +12,20 @@ runs, and text in any script. See [localization](localization.md).
 
 ### Upgrading from 0.2.5
 
+- `Input::mouse_wheel_y()` is now for `update()`: what the wheel turned since
+  a fixed step last read it. Code that reads the wheel at render time should
+  read `frame_mouse_wheel_y()` instead (ui2 already does).
+- `Input::advance_keyboard_edges()` is now `advance_step_edges()`: it also uses
+  up the step wheel.
+- `Input::set_mouse_wheel_y(v)` adds `v`, as a wheel event would, instead of
+  replacing the value.
+- `IAudioBackend` is pulled instead of pushed: `queued_frames()` and
+  `queue_interleaved()` are replaced by `start(render)` and `stop()`, and
+  `AudioEngineConfig::queue_target_frames` is gone. Custom backends call the
+  render function from their audio thread.
+- `AudioEngine::stats()` returns a copy, and `mixed_frames` is 64-bit.
+- `set_bus_volume("master", v)` now scales every bus under `master`, as the
+  hierarchy says; before, it only reached voices playing on `master` itself.
 - `TextDirection` moved to `kin/core/bidi.hpp` (it is still `kin::TextDirection`).
 - Games with text fields should call `ui.apply_text_input(window)` after
   `ui.end()` each frame (it replaces `window.set_text_input_enabled(ui.wants_text_input())`).
@@ -29,6 +43,90 @@ runs, and text in any script. See [localization](localization.md).
 
 ### Added
 
+- `Input::frame_mouse_wheel_y()`: the wheel since the last rendered frame, for
+  render-time UI, as `frame_pressed()` is to `pressed()`.
+- Audio: `AudioEngine::render()` mixes on the calling thread, for offline
+  rendering and tests. `set_bus_volume` takes a fade, `set_bus_muted` and
+  `set_bus_paused` mute or pause a bus and everything under it (pause
+  gameplay sound while UI sound plays on), and `AudioPlayRequest::fade_in`
+  fades a voice in.
+- Audio: `preload(catalog)` decodes a catalog's clips up front, and
+  `preload_async(catalog, jobs)` does it on worker threads; a `play()` that
+  needs a clip still loading waits for it instead of decoding it again.
+- Audio: a cue with several clips plays a random one (never the same twice
+  running), and `pitch_var` varies its pitch, both drawn from
+  `AudioEngineConfig::seed`.
+
+- Audio formats: Ogg Vorbis, MP3, FLAC and AIFF play alongside WAV, decoded
+  by stb_vorbis and dr_libs (new dependencies, fetched by CMake like the
+  others). `load_audio_clip` recognises a file by its contents.
+- Streamed clips: `clip theme music/theme.ogg stream=true` keeps the file
+  compressed in memory and decodes it as it plays, for music and long
+  ambience. `load_audio_stream` loads one directly, and `AudioDecoder` /
+  `open_audio_decoder` decode a file held in memory.
+- Music: `play_music(catalog, cue, crossfade)` keeps one music cue playing
+  and crossfades to the next; asking for the cue already playing keeps it
+  going. `stop_music`, `music()`.
+- Voice control: `set_volume(handle, volume, fade)`, `set_pitch(handle,
+  pitch)` and `playback_position(handle)`.
+- Ducking: `duck music when=dialogue volume=0.3 attack=0.15 release=0.8` in a
+  catalog turns a bus down while another plays (`AudioCatalog::add_duck`).
+- `write_audio_settings` / `apply_audio_settings` keep the output device, bus
+  volumes and mutes in a settings file, `AudioEngine::bus_states()` lists them, and
+  `AudioEngine::write_report` writes stats, buses and voices for a scene's
+  report.
+- Lua: `bind_lua_audio` gives scripts an `audio` table, and
+  `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
+  lets a host add its own bindings to a script scene's Lua state.
+- Adaptive music: `play_music(catalog, cue, AudioMusicTransition{crossfade,
+  sync, match_position})` changes music on the next beat, bar or clip end
+  (cue `bpm=`, `beats_per_bar=`, `beat_offset=`), optionally from the same
+  position. `layers=true` cues play their clips in step as stems
+  (`set_music_layer`), and `playlist=true` cues play their clips back to back
+  with no gap (`shuffle=true` for random order). `music_position()` gives the
+  beat and bar, and `play_synced` plays a cue on the next beat or bar. Voices
+  can start and stop on an exact output frame. Lua has `play_music` with
+  options, `set_music_layer`, `music_position` and `play_synced`.
+- More audio effects: `bandpass` and `notch` filters, an EQ `peak` band,
+  `lowshelf` and `highshelf` (with `gain` in dB; `freq` names the frequency),
+  and a `delay` (`time`, `feedback`, `wet`, `dry`) whose time glides when
+  changed.
+- Audio levels: `bus_level(bus)` and `output_level()` give each bus's and the
+  output's peak and RMS (always on, in `write_report` too), and
+  `enable_analysis(bus)` with `spectrum(bus, bands)` / `magnitude(bus, from,
+  to)` give a frequency spectrum for visualizers. Lua's `audio` table has
+  `bus_level`, `output_level`, `enable_analysis` and `spectrum`.
+- Audio reloading: `AudioEngine::watch(files)` reloads clip files when they
+  change (new plays get the new version), `watch_catalog(files, path,
+  catalog)` reloads a catalog file and applies it, and `apply_catalog`
+  applies a catalog edited in code. A broken edit keeps the last good
+  version.
+- ECS audio: `AudioEmitter` has `volume`, `pitch`, `paused`, `fade_in` and
+  `when_done` (`Restart`, `Keep`, `Remove`, `Despawn`); removing an emitter
+  or destroying its entity fades its sound out. `AudioOneShot` has `volume`
+  and `pitch`.
+- Audio voices: `seek(handle, seconds)` (declicked, streams too) and
+  `set_paused(handle, paused)` / `paused(handle)` for one voice.
+- Audio memory: `unload_unused()`, `unload(catalog)` and `remove_clip(id)`
+  free cached clips, and `loaded_clip_count()` / `loaded_clip_bytes()` say
+  what the cache holds. Finished voices hand their clips back to the game
+  thread to be freed.
+- Distance curves: a cue's `rolloff=smooth|linear|inverse`,
+  `rolloff_power=` and `pan=` strength (`AudioRolloff`, `SpatialAudio`).
+- Output devices: `list_audio_output_devices()`,
+  `AudioEngine::set_output_device(name)` and `output_device()`; a chosen
+  device that is unplugged falls back to the default and back again.
+  `create_sdl_audio_backend` takes a device name.
+- Lua's `audio` table adds `seek`, `position`, `set_paused`, `paused`,
+  `output_devices`, `set_output_device` and `output_device`.
+- Audio effects per bus: low-pass and high-pass filters, a reverb
+  (Freeverb) and a compressor, in a bus's chain from `effect` lines in its
+  catalog or `set_bus_effects`; `set_bus_effect` changes one while it plays
+  (filters glide to a new cutoff, reverb tails carry on). Lua scripts get
+  `audio.set_bus_effects` and `audio.set_bus_effect`.
+- Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
+  make a looping cue play its intro once and then repeat the loop, streamed or
+  not.
 - `kin::Localization` (`kin/l10n/localization.hpp`): `.kinlang` (JSON) and CSV
   language files, several per language, reloaded as they change; a fallback
   chain (`fr-CA`, `fr`, the base); `text(key)` and `tr(key, args)`; missing
@@ -83,6 +181,28 @@ runs, and text in any script. See [localization](localization.md).
 
 ### Changed
 
+- `AudioEngineConfig::music_voices` defaults to 8 (from 2), as music layers
+  and crossfades each take a voice.
+
+- WAV files are decoded by dr_wav instead of `SDL_LoadWAV`, and loading a
+  clip no longer initialises SDL's audio subsystem.
+- Audio mixes on the device's audio thread, so a long frame no longer makes
+  it crackle, and output latency no longer depends on the frame rate.
+- `stop()` and `stop_bus()` honour their fade; even an immediate stop, or a
+  voice stolen for a new one, fades over 5 ms instead of clicking. A stopped
+  voice no longer counts as playing.
+- Clips keep their file's sample rate and channel count (mono stays mono)
+  and are resampled with linear interpolation as they play, which also
+  interpolates pitch changes. Engines run at other rates than 48 kHz now play
+  clips at the right pitch.
+- Spatial voices pan with an equal-power law, so a sound crossing the
+  listener no longer dips in the middle, and gain and pan changes ramp over a
+  block instead of stepping.
+- Buses are mixed on their own and added into their parents (submixes), in
+  blocks of at most 1024 frames; with no effects the output is the same as
+  before. `write_report`'s buses list their effects.
+- A master limiter turns the mix down when voices add up past full scale,
+  instead of hard-clipping it (`stats().limited_frames` counts how often).
 - ui2 TTF atlases (Bitmap and Sdf) grow as characters appear instead of
   holding printable ASCII only, and kern beyond ASCII. Text beyond ASCII no
   longer becomes a texture per string: 70 accented labels a frame measure and
@@ -91,6 +211,17 @@ runs, and text in any script. See [localization](localization.md).
   and drawn white and tinted, so one texture serves every colour.
 - Atlas pages keep their pixels, so backends without `update_texture` (the
   software renderer) remake the page instead.
+
+### Fixed
+
+- A wheel notch read in `update()` reaches exactly one fixed step. It was
+  cleared every rendered frame, so above the sim rate a notch on a frame that
+  ran no step was lost (about half of them at 120 Hz), and a frame that ran
+  several steps applied it in each.
+- `AppFrameStats::update_steps` counts the step being run inside `update()`
+  under `App::run`, as it already did under `run_for`: 1 is a frame's first
+  step (it was 0).
+
 
 ## [0.2.5] — 2026-10-06
 

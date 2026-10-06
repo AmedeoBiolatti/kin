@@ -295,6 +295,7 @@ public:
     bool pointer_pressed(MouseButton button = MouseButton::Left) const;
     bool pointer_held(MouseButton button = MouseButton::Left) const;
     bool pointer_released(MouseButton button = MouseButton::Left) const;
+    // The wheel this rendered frame (Input::frame_mouse_wheel_y).
     f32 mouse_wheel_y() const;
     bool key_pressed(Key key) const;
     // Pressed this frame, or auto-repeated while held: for keys that act again

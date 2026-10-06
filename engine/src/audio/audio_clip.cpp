@@ -1,5 +1,7 @@
 #include <kin/audio/audio_clip.hpp>
 
+#include <kin/audio/audio_decoder.hpp>
+
 #include <utility>
 
 namespace kin {
@@ -28,6 +30,22 @@ f32 AudioClip::duration() const {
 
 std::span<const f32> AudioClip::samples() const {
     return _backend ? _backend->samples() : std::span<const f32>{};
+}
+
+bool AudioClip::streamed() const {
+    return _backend && _backend->streamed();
+}
+
+std::size_t AudioClip::memory_bytes() const {
+    return _backend ? _backend->memory_bytes() : 0;
+}
+
+std::unique_ptr<AudioDecoder> AudioClip::open_stream() const {
+    return _backend ? _backend->open_stream() : nullptr;
+}
+
+std::unique_ptr<AudioDecoder> IAudioClipBackend::open_stream() const {
+    return nullptr;
 }
 
 MemoryAudioClipBackend::MemoryAudioClipBackend(std::vector<f32> samples)

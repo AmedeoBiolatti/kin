@@ -24,7 +24,7 @@ public:
     void set_drone(bool playing);
     void update(float dt);
 
-    const AudioEngineStats& stats() const { return _engine.stats(); }
+    AudioEngineStats stats() const { return _engine.stats(); }
     const AudioCatalog& catalog() const { return _catalog; }
 
 private:
