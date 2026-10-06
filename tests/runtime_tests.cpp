@@ -2,7 +2,9 @@
 #include <kin/core/json.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/l10n/localization.hpp>
+#include <kin/ui2/context.hpp>
 #include <kin/ui2/geometry.hpp>
+#include <kin/ui2/widgets.hpp>
 #include <kin/runtime/debug_overlay.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
@@ -17,6 +19,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -75,6 +79,23 @@ public:
 
 private:
     kin::i32 _frames = 0;
+};
+
+// A label too narrow for its text.
+class TightLabelScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "Tight"; }
+    void update(kin::SceneContext& ctx) override {
+        _ui.begin(ctx.input, ctx.renderer);
+        kin::ui2::Label label{.bounds = {0, 0, 20, 40}, .text = "Much too long"};
+        kin::ui2::run(_ui, label);
+        kin::ui2::Label fitted{.bounds = {0, 40, 60, 40}, .text = "Fits with dots", .overflow = kin::ui2::TextOverflow::Ellipsis};
+        kin::ui2::run(_ui, fitted);
+        _ui.end();
+    }
+
+private:
+    kin::ui2::Context _ui;
 };
 
 // Looks its text up through kin::tr, as game code would.
@@ -536,6 +557,31 @@ int main() {
         run({}, text);
         assert(kin::ui2::ui_direction() == kin::TextDirection::LeftToRight);
         kin::set_active_localization(nullptr);
+    }
+
+    // Text that does not fit is listed in the report, and fails the run when asked.
+    {
+        const char* overflow_argv[] = {"game", "--fail-on-text-overflow"};
+        assert(kin::parse_headless_options(2, const_cast<char**>(overflow_argv)).fail_on_text_overflow);
+        const auto run = [](bool fail) {
+            kin::SceneManager scenes;
+            scenes.push(std::make_unique<TightLabelScene>());
+            std::ostringstream report;
+            const int code = kin::run_scene_app({
+                .window = {.title = "overflow", .width = 64, .height = 64},
+                .headless = {.enabled = true, .frames = 3, .fail_on_text_overflow = fail},
+                .report_output = &report,
+            }, scenes);
+            return std::pair{code, report.str()};
+        };
+        auto [code, text] = run(false);
+        assert(code == 0);
+        assert(text.find("\"ui_overflow\"") != std::string::npos);
+        assert(text.find("\"text\": \"Much too long\"") != std::string::npos);
+        assert(text.find("Fits with dots") == std::string::npos); // fitted: not an overflow
+        std::tie(code, text) = run(true);
+        assert(code == 1 && text.find("1 text overflow(s): Label \\\"Much too long\\\"") != std::string::npos);
+        assert(!kin::ui2::collecting_overflows());
     }
 
     // Failure contract: a scene that fails stops the run early, reports the

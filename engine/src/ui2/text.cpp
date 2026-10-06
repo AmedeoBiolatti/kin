@@ -614,6 +614,58 @@ std::vector<TextRange> wrap_text_ranges(const Font& font, std::string_view text,
     return lines;
 }
 
+FittedText fit_text(const Font& font, std::string_view text, f32 max_width, f32 scale, TextFit fit, f32 min_scale) {
+    FittedText out{std::string{text}, scale, false};
+    if (text.empty() || measure_text(font, text, scale).x <= max_width) {
+        return out;
+    }
+    if (fit == TextFit::Shrink) {
+        const f32 width = measure_text(font, text, scale).x;
+        const f32 smallest = scale * std::clamp(min_scale, 0.05f, 1.0f);
+        out.scale = std::max(smallest, scale * max_width / std::max(width, 1.0f));
+        out.changed = true;
+        // Rounding may leave it a hair wide; step down until it fits.
+        for (int i = 0; i < 4 && out.scale > smallest && measure_text(font, text, out.scale).x > max_width; ++i) {
+            out.scale = std::max(smallest, out.scale * 0.98f);
+        }
+        if (measure_text(font, text, out.scale).x <= max_width) {
+            return out;
+        }
+    }
+    // The 5x7 font has no "…".
+    const std::string_view ellipsis = font && font.identity() != bitmap_font().identity() ? "\xE2\x80\xA6" : "...";
+    // The most characters that fit with the ellipsis: a binary search over the boundaries.
+    std::vector<std::size_t> boundaries;
+    for (std::size_t k = 0; k < text.size(); k = utf8_next(text, k)) {
+        boundaries.push_back(k);
+    }
+    const auto fits = [&](std::size_t count) {
+        std::string candidate{text.substr(0, boundaries[count])};
+        while (!candidate.empty() && candidate.back() == ' ') {
+            candidate.pop_back();
+        }
+        candidate += ellipsis;
+        return measure_text(font, candidate, out.scale).x <= max_width;
+    };
+    std::size_t lo = 0;
+    std::size_t hi = boundaries.size() - 1;
+    while (lo < hi) {
+        const std::size_t mid = (lo + hi + 1) / 2;
+        if (fits(mid)) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    out.text.assign(text.substr(0, boundaries[lo]));
+    while (!out.text.empty() && out.text.back() == ' ') {
+        out.text.pop_back();
+    }
+    out.text += ellipsis;
+    out.changed = true;
+    return out;
+}
+
 namespace {
 
 // A line's runs in display order, with where each starts and how wide it is.

@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <utility>
 
 namespace kin::ui2 {
@@ -450,8 +452,50 @@ void Context::end() {
     _renderer = nullptr;
 }
 
+namespace {
+
+std::atomic<bool> g_collect_overflows{false};
+std::mutex g_overflows_mutex;
+std::vector<OverflowRecord> g_overflows;
+
+void collect_overflow(std::string_view widget, std::string_view detail, Rectf bounds, Vec2f wanted) {
+    const std::scoped_lock lock(g_overflows_mutex);
+    for (OverflowRecord& record : g_overflows) {
+        if (record.widget == widget && record.detail == detail) {
+            record.bounds = bounds;
+            record.wanted = wanted;
+            ++record.seen;
+            return;
+        }
+    }
+    if (g_overflows.size() < 256) {
+        g_overflows.push_back({std::string{widget}, std::string{detail}, bounds, wanted, 1});
+    }
+}
+
+} // namespace
+
+void collect_overflows(bool enabled) {
+    g_collect_overflows.store(enabled, std::memory_order_relaxed);
+}
+
+bool collecting_overflows() {
+    return g_collect_overflows.load(std::memory_order_relaxed);
+}
+
+std::vector<OverflowRecord> collected_overflows() {
+    const std::scoped_lock lock(g_overflows_mutex);
+    return g_overflows;
+}
+
+void clear_collected_overflows() {
+    const std::scoped_lock lock(g_overflows_mutex);
+    g_overflows.clear();
+}
+
 void Context::report_overflow(std::string_view widget, Rectf bounds, Vec2f wanted, std::string_view detail) {
-    if (!_debug.detect_overflow) {
+    const bool collect = collecting_overflows();
+    if (!_debug.detect_overflow && !collect) {
         return;
     }
     constexpr f32 epsilon = 0.5f;
@@ -469,6 +513,12 @@ void Context::report_overflow(std::string_view widget, Rectf bounds, Vec2f wante
         .wanted = wanted,
         .overflow = overflow,
     };
+    if (collect) {
+        collect_overflow(widget, detail, bounds, wanted);
+    }
+    if (!_debug.detect_overflow) {
+        return;
+    }
     if (_debug.log_overflow) {
         KIN_LOG_WARN_F("ui",
                        "ui2 overflow",

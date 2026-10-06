@@ -107,6 +107,22 @@ std::optional<TextDirection> text_base_direction();
 // first strong character (left to right if it has none).
 TextDirection paragraph_direction(std::string_view text);
 
+// How text that is too wide for its room is made to fit.
+//   Ellipsis  cut at a character and ended with "…" (its logical end: the
+//             left end of right-to-left text)
+//   Shrink    drawn smaller, down to min_scale of its scale, then cut as Ellipsis
+enum class TextFit : u8 { Ellipsis, Shrink };
+
+struct FittedText {
+    std::string text; // what to draw
+    f32 scale = 1.0f; // at what scale
+    bool changed = false; // cut or shrunk
+};
+
+// `text` (one line) fitted into `max_width` drawing units.
+FittedText fit_text(const Font& font, std::string_view text, f32 max_width, f32 scale, TextFit fit,
+                    f32 min_scale = 0.7f);
+
 // Carets and selections in one line of text, wherever its characters fall when
 // it runs both ways. Offsets are bytes of `line` at character boundaries; x is
 // in drawing units from where draw_text puts the line's start. Within a

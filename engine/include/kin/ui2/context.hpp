@@ -23,6 +23,23 @@ namespace kin::ui2 {
 
 // One persistent Context per UI. Drives interaction (region), layout (the scope
 // builder), and drawing. Create once; call begin()/.../end() each frame.
+// A widget whose content did not fit its bounds (Context::report_overflow),
+// gathered from every Context: once per widget and text, with how many
+// times it was seen.
+struct OverflowRecord {
+    std::string widget;
+    std::string detail; // the text, for text widgets
+    Rectf bounds{};
+    Vec2f wanted{};
+    u64 seen = 0;
+};
+// While on, every Context's overflows are gathered whatever its debug
+// options (run_scene_app turns this on for its run report). At most 256.
+void collect_overflows(bool enabled);
+bool collecting_overflows();
+std::vector<OverflowRecord> collected_overflows();
+void clear_collected_overflows();
+
 class Context {
 public:
     Context();

@@ -831,15 +831,23 @@ void run(Context& ctx, Panel& widget) {
 }
 
 void run(Context& ctx, Label& widget) {
-    const TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
-    const Vec2f size = measure_text(text_style.font, widget.text, text_style.scale);
+    TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    std::string_view text = widget.text;
+    FittedText fitted;
+    if (widget.overflow == TextOverflow::Ellipsis || widget.overflow == TextOverflow::Shrink) {
+        fitted = fit_text(text_style.font, widget.text, widget.bounds.w, text_style.scale,
+                          widget.overflow == TextOverflow::Shrink ? TextFit::Shrink : TextFit::Ellipsis);
+        text = fitted.text;
+        text_style.scale = fitted.scale;
+    }
+    const Vec2f size = measure_text(text_style.font, text, text_style.scale);
     ctx.report_overflow("Label", widget.bounds, size, widget.text);
     const Rectf aligned = align_rect(widget.bounds, size, widget.horizontal, widget.vertical);
     const Vec2f pos{aligned.x, aligned.y};
     if (widget.overflow == TextOverflow::Clip) {
         ctx.push_clip(widget.bounds);
     }
-    ctx.text(widget.text, pos, text_style);
+    ctx.text(text, pos, text_style);
     if (widget.overflow == TextOverflow::Clip) {
         ctx.pop_clip();
     }
@@ -901,8 +909,17 @@ void run(Context& ctx, Button& widget) {
 
     ctx.surface(widget.bounds, ctx.resolve_animated(widget.id, style.surface, it, false, widget.enabled));
 
-    const Vec2f text = measure_text(text_style.font, widget.label, text_style.scale);
     const UiPadding padding = intrinsic_padding(style);
+    TextStyle fitted_style = text_style;
+    std::string_view label = widget.label;
+    FittedText fitted;
+    if (widget.overflow == TextOverflow::Ellipsis || widget.overflow == TextOverflow::Shrink) {
+        fitted = fit_text(text_style.font, widget.label, widget.bounds.w - padding.left - padding.right, text_style.scale,
+                          widget.overflow == TextOverflow::Shrink ? TextFit::Shrink : TextFit::Ellipsis);
+        label = fitted.text;
+        fitted_style.scale = fitted.scale;
+    }
+    const Vec2f text = measure_text(fitted_style.font, label, fitted_style.scale);
     ctx.report_overflow("Button",
                         widget.bounds,
                         {text.x + padding.left + padding.right, text.y + padding.top + padding.bottom},
@@ -911,7 +928,7 @@ void run(Context& ctx, Button& widget) {
         widget.bounds.x + (widget.bounds.w - text.x) * 0.5f,
         widget.bounds.y + (widget.bounds.h - text.y) * 0.5f,
     };
-    ctx.text(widget.label, pos, text_style);
+    ctx.text(label, pos, fitted_style);
 }
 
 // Thick stroke as stacked 1px lines offset along the segment normal — works on

@@ -273,6 +273,33 @@ void test_right_to_left_runs() {
     assert(two.y > one.y * 1.8f && std::abs(two.x - one.x) < 1e-3f);
 }
 
+// Text too wide is cut with an ellipsis or drawn smaller.
+void test_fitting_text() {
+    const ui2::Font font = ui2::bitmap_font(); // 6 units a character, less 1
+    const auto fit = [&](std::string_view text, f32 width, ui2::TextFit how) {
+        return ui2::fit_text(font, text, width, 1.0f, how);
+    };
+    const ui2::FittedText same = fit("Hello", 40.0f, ui2::TextFit::Ellipsis);
+    assert(same.text == "Hello" && !same.changed && same.scale == 1.0f);
+    assert(fit("Hello world", 30.0f, ui2::TextFit::Ellipsis).text == "He...");
+    assert(fit("Hello world", 47.0f, ui2::TextFit::Ellipsis).text == "Hello..."); // the space before "..." goes
+    // Shrinking as far as allowed (0.7), then cutting.
+    const ui2::FittedText shrunk = fit("Hello world", 60.0f, ui2::TextFit::Shrink);
+    assert(shrunk.text == "Hello world" && shrunk.scale < 1.0f && ui2::measure_text(font, shrunk.text, shrunk.scale).x <= 60.0f);
+    const ui2::FittedText cut = fit("Hello world", 30.0f, ui2::TextFit::Shrink);
+    assert(cut.scale == 0.7f && cut.text == "Hell..." && cut.changed);
+    // Characters are never split.
+    assert(fit(nihongo + nihongo, 23.0f, ui2::TextFit::Ellipsis).text == u8s({0x65E5}) + "...");
+
+    // A TTF font ends with a real ellipsis.
+    const std::filesystem::path path = plain_system_font();
+    if (!path.empty()) {
+        const ui2::Font ttf = ui2::load_ttf_font(path, 16.0f);
+        const ui2::FittedText real = ui2::fit_text(ttf, "A rather long label", 60.0f, 1.0f, ui2::TextFit::Ellipsis);
+        assert(real.text.ends_with("\xE2\x80\xA6") && ui2::measure_text(ttf, real.text).x <= 60.0f);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -288,5 +315,6 @@ int main() {
     test_atlas_grows_with_new_characters();
     test_fallback_fonts();
     test_right_to_left_runs();
+    test_fitting_text();
     return 0;
 }

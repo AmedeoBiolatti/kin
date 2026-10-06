@@ -26,6 +26,7 @@
 #endif
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_server.hpp>
+#include <kin/ui2/context.hpp>
 #include <kin/ui2/geometry.hpp>
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
 #include <kin/runtime/state_hash.hpp>
@@ -75,6 +76,21 @@ void write_run_report(std::ostream& out,
         }
         json.end_array();
         json.end_object();
+    }
+    if (ui2::collecting_overflows()) {
+        json.key("ui_overflow").begin_array();
+        for (const ui2::OverflowRecord& record : ui2::collected_overflows()) {
+            json.begin_object();
+            json.field("widget", record.widget);
+            json.field("text", record.detail);
+            json.field("width", static_cast<f64>(record.bounds.w));
+            json.field("wanted_width", static_cast<f64>(record.wanted.x));
+            json.field("height", static_cast<f64>(record.bounds.h));
+            json.field("wanted_height", static_cast<f64>(record.wanted.y));
+            json.field("frames", record.seen);
+            json.end_object();
+        }
+        json.end_array();
     }
     json.key("scenes").begin_array();
     for (i32 i = 0; i < scenes.depth(); ++i) {
@@ -232,6 +248,8 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.locale = std::string{Localization::pseudo_locale};
         } else if (arg == "--fail-on-missing-text") {
             options.fail_on_missing_text = true;
+        } else if (arg == "--fail-on-text-overflow") {
+            options.fail_on_text_overflow = true;
         } else if (arg == "--server") {
             options.server = true;
         } else if (arg.starts_with("--server-mode=")) {
@@ -508,6 +526,20 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             ui2::set_ui_direction(config.localization->direction());
         }
     };
+    // Widgets whose text does not fit, for the report (and --fail-on-text-overflow).
+    struct OverflowCollection {
+        bool on = false;
+        ~OverflowCollection() {
+            if (on) {
+                ui2::collect_overflows(false);
+            }
+        }
+    } overflow_collection;
+    if (config.report_output || !config.headless.report_path.empty() || config.headless.fail_on_text_overflow) {
+        ui2::clear_collected_overflows();
+        ui2::collect_overflows(true);
+        overflow_collection.on = true;
+    }
     const RngKey root_key = make_key(config.headless.seed);
     const bool want_report = config.report_output != nullptr || !config.headless.report_path.empty();
     std::string report_snapshot;
@@ -564,6 +596,15 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             run_report.fail(reason.str());
         }
 #endif
+        if (config.headless.fail_on_text_overflow) {
+            if (const auto overflows = ui2::collected_overflows(); !overflows.empty()) {
+                std::string reason = std::to_string(overflows.size()) + " text overflow(s):";
+                for (std::size_t i = 0; i < overflows.size() && i < 5; ++i) {
+                    reason += " " + overflows[i].widget + " \"" + overflows[i].detail + "\"";
+                }
+                run_report.fail(std::move(reason));
+            }
+        }
         if (config.localization && config.headless.fail_on_missing_text) {
             if (const auto missing = config.localization->missing_keys(); !missing.empty()) {
                 std::string reason = "missing text in " + config.localization->locale() + ":";
