@@ -107,6 +107,15 @@ config.asset_server = &server;
 return kin::run_scene_app(config, scenes);
 ```
 
+## Content and packs
+
+`AssetManager`'s root is usually the game's content root, from
+`kin::find_content_root` (`kin/assets/content.hpp`). While the game is made,
+that is the source folder. Once it ships, it is a `.kinpak` archive mounted in
+the folder's place. Every loader reads through the content layer, so the same
+relative paths work either way. `discover()` lists a pack's files as it lists
+a folder's. See [shipping](shipping.md).
+
 ## Hot-reloading game data
 
 `kin::FileWatcher` (`kin/assets/file_watcher.hpp`) reloads a game's own data
@@ -140,6 +149,7 @@ config.file_watcher = &files; // run_scene_app polls it once per frame
   change game state directly. Headless and server runs never poll, so their data
   stays what it was when the run began and they stay deterministic. A game that
   runs its own loop calls `poll()` itself.
+- Files in a pack never change, so nothing is reported for them.
 
 ## Scope (V1)
 

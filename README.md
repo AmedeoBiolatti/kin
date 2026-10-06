@@ -89,9 +89,14 @@ tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 | `KIN_BUILD_EXAMPLES` | top-level only | Performance examples in `examples/` |
 | `KIN_BUILD_BENCHMARKS` | top-level only | `kin_bench` and other benchmark runners |
 | `KIN_BUILD_TESTS` | top-level only | Engine tests (with `BUILD_TESTING`) |
+| `KIN_SHIPPING` | `OFF` | A build to give to players ([docs/shipping.md](docs/shipping.md)); the `ship` preset sets it, which turns off release profiling, the render probe, the determinism check and the agent server |
 | `KIN_ENABLE_PROFILING` | `OFF` | Manual profiling macros ([docs/profiling.md](docs/profiling.md)) |
-| `KIN_ENABLE_RENDER_PROBE` | `ON` | Headless render probe, `--probe-render` ([docs/testing.md](docs/testing.md#render-probe)); turn off for shipping builds |
-| `KIN_ENABLE_DETERMINISM_CHECK` | `ON` | Determinism check, `--check-determinism` ([docs/testing.md](docs/testing.md#determinism-check)); turn off for shipping builds |
+| `KIN_ENABLE_RELEASE_PROFILING` | `ON` | Profiling macros in Release builds |
+| `KIN_ENABLE_RENDER_PROBE` | `ON` | Headless render probe, `--probe-render` ([docs/testing.md](docs/testing.md#render-probe)) |
+| `KIN_ENABLE_DETERMINISM_CHECK` | `ON` | Determinism check, `--check-determinism` ([docs/testing.md](docs/testing.md#determinism-check)) |
+| `KIN_ENABLE_AGENT_SERVER` | `ON` | The agent server, `--server` ([docs/agent_interface.md](docs/agent_interface.md#server-mode)) |
+| `KIN_PACK_CONTENT` | `ON` | Ship a game's content as one `.kinpak` rather than a folder |
+| `KIN_REQUIRE_GPU_SHADERS` | `KIN_SHIPPING` | Stop at configure when glslc is missing |
 
 ## Demos and examples
 
@@ -140,8 +145,15 @@ FetchContent_MakeAvailable(kin)
 
 add_executable(my_game src/main.cpp)
 target_link_libraries(my_game PRIVATE kin::engine)
-kin_configure_game_assets(my_game my_game)   # assets/ beside the CMakeLists
+kin_game(my_game TITLE "My Game")   # content/ beside the CMakeLists
 ```
+
+The game finds that content with
+`kin::find_content_root(KIN_GAME_CONTENT, argc, argv)`. While it is made, the
+content is read from the source folder. Once it ships, it is read from one
+`.kinpak` beside the executable.
+`cmake --preset ship && cmake --build --preset ship --target my_game_package`
+makes the archive players get ([shipping](docs/shipping.md)).
 
 Or with a local checkout beside the game:
 
@@ -150,7 +162,7 @@ set(KIN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../kin" CACHE PATH "Source tree of the 
 add_subdirectory("${KIN_DIR}" kin)
 ```
 
-Kin has no install rules yet, so `find_package(kin)` is not supported.
+Kin installs games, not itself, so `find_package(kin)` is not supported.
 
 ## Documentation
 
@@ -159,7 +171,7 @@ Kin has no install rules yet, so `find_package(kin)` is not supported.
 | Agents and automation | [agent_interface](docs/agent_interface.md), [testing](docs/testing.md), [profiling](docs/profiling.md) |
 | ECS | [entities](docs/ecs_entities.md), [components](docs/ecs_components.md), [data components](docs/ecs_data_components.md), [systems](docs/ecs_systems.md), [events](docs/ecs_events.md), [prefabs](docs/ecs_prefabs.md), [inspection](docs/ecs_inspection.md), [editor workflow](docs/ecs_editor_workflow.md) |
 | Engine | [rendering](docs/rendering.md), [animation](docs/animation_system.md), [UI](docs/ui.md), [audio](docs/audio.md), [assets](docs/assets.md), [localization](docs/localization.md), [scripting](docs/scripting.md), [files and processes](docs/platform.md), [background jobs](docs/jobs.md), [hex grids](docs/hex_grids.md) |
-| Project | [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
+| Project | [shipping a game](docs/shipping.md), [manifest](docs/manifest.md), [changelog](docs/changelog.md), [third-party notices](docs/third_party_notices.md) |
 
 ## Contributing
 

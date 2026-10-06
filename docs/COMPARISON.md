@@ -11,7 +11,7 @@ are described as of mid-2026, so their newest releases may differ.
 | **Gamepad and touch** | Gamepads, rumble, touch, UI focus moved by a controller | Gamepads, rumble, touch | **Missing.** Bindings are keyboard and mouse only, and kin never opens a gamepad or reads touch. The manifest names Steam Deck as a target. |
 | **Localization** | Translations from CSV or gettext, plurals, pseudo-localization, right-to-left text, font fallback | Not built in (third-party crates) | **Strong core:** text by key from JSON or CSV files that hot-reload, a fallback chain, ICU-style plurals and selects, pseudo-locale, missing-text reports and `--fail-on-missing-text`, fallback fonts, bidi and HarfBuzz-shaped Arabic and Indic text, CJK line breaking, mirrored layouts. IME input, right-to-left editing and mirrored widgets, ellipsis and shrink-to-fit with overflow reports, fonts per language. Ordinals, gettext catalogues, assets by language. **Missing:** date, currency and list formatting; translator tooling (key extraction). |
 | **Audio formats and effects** | Ogg, MP3 and WAV; streamed music; effects per bus (reverb, EQ, compressor, filters); adaptive music | Ogg, MP3, FLAC and WAV; no effects | **WAV only** (`SDL_LoadWAV`), no streaming, no effects. Buses, cue priority, positional sound and pitch variation are there. |
-| **Platforms and shipping** | Windows, Linux, macOS, Android, iOS, web; assets packed into one file, optionally encrypted | Same platforms, web through WebAssembly | **Windows and Linux only.** No macOS in CI, no web or mobile, no install rules, no asset packing. |
+| **Platforms and shipping** | Windows, Linux, macOS, Android, iOS, web; assets packed into one file, optionally encrypted | Same platforms, web through WebAssembly | **Windows and Linux only.** No macOS in CI, no web or mobile. Games ship as a folder: the executable, one `.kinpak` content pack (uncompressed, not encrypted) and license texts, archived by a `<game>_package` target; Windows builds are windowed apps on the static runtime. No installers or code signing. |
 | **Editor** | Full editor: scenes, inspector, tilemap painting, animation timeline, debugger | No official editor yet; inspector crates and a remote protocol | **No visual editor.** There is a play/edit session API and live world inspection through flecs. That fits kin's code-and-agent-first design, but there is no level or tilemap painting. |
 | **Physics** | Many shapes, joints, a character controller (`move_and_slide`), one-way platforms, gravity areas | None built in (the Avian and Rapier crates are rich) | **Box2D, with only boxes and circles exposed.** No polygon, capsule or chain shapes, no joints, no shape casts, no character controller. Raycasts, point and box queries, sensors and collision filtering are there. |
 | **Navigation** | Navigation meshes, agents that avoid each other, obstacles | Not built in | **Grids only:** A* on square and hex grids through a path server. No navigation mesh or avoidance. |
@@ -48,8 +48,8 @@ These do:
 1. **Gamepad input, with UI focus moved by the D-pad.** Steam Deck can't really
    be supported without it.
 2. **Ogg playback and streamed music.** Music shipped as WAV is large.
-3. **Shipping:** install rules or `find_package`, asset packing, and probably a
-   macOS build.
+3. **Shipping:** a Linux build in the Steam Runtime for Steam Deck, and
+   probably a macOS build.
 4. **A tween API** for UI and card motion, built on the existing easing curves.
 
 Navigation meshes, joints, 2D skeletons, shadows and networking can wait until a

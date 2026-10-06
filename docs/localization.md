@@ -297,7 +297,7 @@ if (saved.empty()) {
 
 A language menu lists `l10n.languages()` by `name`, calls `set_locale` and
 saves `l10n.locale()`. Signal Siege's title (`examples/siege_scenes.cpp`) does
-this, with its text in `examples/lang/` in English, French, Japanese and
+this, with its text in `examples/content/lang/` in English, French, Japanese and
 Arabic.
 
 ## Limits

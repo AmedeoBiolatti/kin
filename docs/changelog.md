@@ -10,6 +10,10 @@ releases may change APIs.
 Localization: text by key in the player's language, switched while the game
 runs, and text in any script. See [localization](localization.md).
 
+Shipping: a game builds into a folder players can run anywhere, with its
+executable, its content in one `.kinpak` archive, and the license texts it
+carries. See [shipping](shipping.md).
+
 ### Upgrading from 0.2.5
 
 - `Input::mouse_wheel_y()` is now for `update()`: what the wheel turned since
@@ -26,6 +30,17 @@ runs, and text in any script. See [localization](localization.md).
 - `AudioEngine::stats()` returns a copy, and `mixed_frames` is 64-bit.
 - `set_bus_volume("master", v)` now scales every bus under `master`, as the
   hierarchy says; before, it only reached voices playing on `master` itself.
+- Every engine loader reads through the content layer (`kin/assets/content.hpp`).
+  Paths are unchanged, and a `.kinpak` mounted at a folder now answers for it.
+- `kin_configure_game_assets` also sets the game up with `kin_game`. That adds
+  install rules, the targets `<game>_content` and `<game>_package`, and
+  `KIN_GAME_CONTENT`.
+- The engine's GPU shaders are built into it; `KIN_GPU_SHADER_DIR` is gone.
+- The agent server's HTTP transport listens on `127.0.0.1` only (it listened
+  on every interface).
+- `ScriptEngine::load_file` reports a missing script as `cannot open <path>`.
+- Signal Siege's language files moved to `examples/content/lang/`.
+
 - `TextDirection` moved to `kin/core/bidi.hpp` (it is still `kin::TextDirection`).
 - Games with text fields should call `ui.apply_text_input(window)` after
   `ui.end()` each frame (it replaces `window.set_text_input_enabled(ui.wants_text_input())`).
@@ -127,6 +142,29 @@ runs, and text in any script. See [localization](localization.md).
 - Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
   make a looping cue play its intro once and then repeat the loop, streamed or
   not.
+- Shipping ([shipping](shipping.md)):
+  - `kin_game(target ...)` in CMake. It sets up the game's content, Windows
+    version info and icon, install rules, `<game>_content` (the pack) and
+    `<game>_package` (a `.zip` or `.tar.gz` under `packages/`).
+  - `KIN_SHIPPING` and the `ship` / `ship-vs` presets: no agent server, render
+    probe, determinism check or release profiling. Windows games are windowed
+    apps on the static runtime; Linux games link libstdc++ in. The log goes
+    with the game's saves.
+  - `.kinpak` content packs: `ContentPack`, `write_content_pack`,
+    `mount_content_pack`, and the `kin_pack` tool (`create`, `list`, `verify`,
+    `extract`).
+  - Content reads from a pack or disk: `read_content_file`,
+    `read_content_text`, `view_content_file`, `content_file_exists`,
+    `content_directory_exists`, `content_file_size`, `list_content_files`.
+  - `find_content_root` (`--content`, `KIN_CONTENT`, the source folder in
+    development, then beside the executable), `content_root`,
+    `executable_dir`.
+  - `KIN_ENABLE_AGENT_SERVER`, `KIN_PACK_CONTENT`, `KIN_REQUIRE_GPU_SHADERS`.
+  - `kin_compile_glsl` and `kin_embed_files`, to build shaders and small files
+    into a binary.
+  - License texts of kin's dependencies, shipped in `licenses/` with each game.
+  - CI packages Signal Siege on Linux and Windows and runs it from another
+    folder.
 - `kin::Localization` (`kin/l10n/localization.hpp`): `.kinlang` (JSON) and CSV
   language files, several per language, reloaded as they change; a fallback
   chain (`fr-CA`, `fr`, the base); `text(key)` and `tr(key, args)`; missing
