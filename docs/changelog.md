@@ -7,6 +7,31 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Upgrading from 0.2.5
+
+- `Input::mouse_wheel_y()` is now for `update()`: what the wheel turned since
+  a fixed step last read it. Code that reads the wheel at render time should
+  read `frame_mouse_wheel_y()` instead (ui2 already does).
+- `Input::advance_keyboard_edges()` is now `advance_step_edges()`: it also uses
+  up the step wheel.
+- `Input::set_mouse_wheel_y(v)` adds `v`, as a wheel event would, instead of
+  replacing the value.
+
+### Added
+
+- `Input::frame_mouse_wheel_y()`: the wheel since the last rendered frame, for
+  render-time UI, as `frame_pressed()` is to `pressed()`.
+
+### Fixed
+
+- A wheel notch read in `update()` reaches exactly one fixed step. It was
+  cleared every rendered frame, so above the sim rate a notch on a frame that
+  ran no step was lost (about half of them at 120 Hz), and a frame that ran
+  several steps applied it in each.
+- `AppFrameStats::update_steps` counts the step being run inside `update()`
+  under `App::run`, as it already did under `run_for`: 1 is a frame's first
+  step (it was 0).
+
 ## [0.2.5] — 2026-10-06
 
 A smaller release, for large saves and cheaper UI text. Saves can be written
