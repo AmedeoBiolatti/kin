@@ -61,6 +61,17 @@ end
   first result as an `R`. A handler the script does not define is not an error.
 - `lua()` is the live `sol::state`, for anything this API does not cover.
 
+## Translations
+
+Scripts read text by key from the active localization, as C++ does
+([localization](localization.md)):
+
+```lua
+function status(gold) return tr("shop.gold", {gold = gold}) end
+-- l10n.locale(), l10n.direction(), l10n.has(key), l10n.format(pattern, values),
+-- l10n.languages(); ScriptEngine scripts can also l10n.set_locale(tag).
+```
+
 ## Errors
 
 Nothing a script does stops the game. A load or call that fails returns false,

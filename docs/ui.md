@@ -80,6 +80,23 @@ see them zoomed and turned).
 distance-field texture this way: alpha 0.5 on the outline, rising inside and
 falling outside over `DistanceFieldStyle::spread` texels.
 
+## Text Beyond ASCII
+
+TTF fonts draw any script: characters that do not join (Latin, Greek,
+Cyrillic, CJK) from an atlas that grows as they appear, right-to-left and
+shaped text (Arabic, Hebrew, Indic scripts) run by run through HarfBuzz. A
+font can borrow the characters it lacks from fallback fonts:
+
+```cpp
+auto font = kin::ui2::load_ttf_font("fonts/Lato.ttf", 16,
+    kin::ui2::TtfFontOptions{.fallbacks = {"fonts/NotoSansJP.ttf", "fonts/NotoSansArabic.ttf"}});
+```
+
+`system_ui_font` falls back to the system's own (`system_fallback_fonts()`).
+`wrap_text` breaks CJK text between characters. `set_ui_direction(RightToLeft)`
+mirrors layouts for right-to-left languages. See
+[localization](localization.md) for translations, text by key and the details.
+
 ## Text Editing
 
 `TextInput` is one line; `TextEdit` is a multi-line editor for chat boxes and notes

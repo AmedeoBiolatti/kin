@@ -53,6 +53,11 @@ sessions with kin's `SaveStore`. Screens change with kin's scene transitions
   Left/Right chooses an upgrade; Up/Down or the wheel switches branch. Main Enter
   and keypad Enter install, with immediate success or failure feedback.
   No exclusive branches or permanent purchases.
+- Its text is in English, French, Japanese and Arabic (`examples/lang/*.kinlang`,
+  reloaded as they are edited). It starts in the system's language; **LANGUAGE**
+  on the title cycles them and is kept with the best run. `--locale=ja`,
+  `--pseudo-locale` and `--fail-on-missing-text` work as in any kin game
+  ([localization](../docs/localization.md)).
 - `--power-grid`: start on the upgrade screen, also usable for screenshot runs.
 - `--mute`: no sound.
 
