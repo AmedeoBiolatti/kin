@@ -1,4 +1,5 @@
 #include "sdl_renderer2d_backend.hpp"
+#include "rounded_rect_loop.hpp"
 
 #include <kin/platform/log.hpp>
 
@@ -90,39 +91,7 @@ Rectf inset_rect(Rectf rect, f32 inset) {
 
 std::vector<Vec2f> rounded_rect_loop(Rectf rect, f32 radius) {
     std::vector<Vec2f> points;
-    if (rect.w <= 0.0f || rect.h <= 0.0f) {
-        return points;
-    }
-
-    const f32 r = std::clamp(radius, 0.0f, std::min(rect.w, rect.h) * 0.5f);
-    if (r <= 0.0f) {
-        points.push_back({rect.x, rect.y});
-        points.push_back({rect.x + rect.w, rect.y});
-        points.push_back({rect.x + rect.w, rect.y + rect.h});
-        points.push_back({rect.x, rect.y + rect.h});
-        return points;
-    }
-
-    const i32 segments = std::max(8, static_cast<i32>(std::ceil(r * 2.0f)));
-    constexpr f32 pi = 3.14159265358979323846f;
-    constexpr f32 half_pi = pi * 0.5f;
-    const std::array<Vec2f, 4> centers{{
-        {rect.x + rect.w - r, rect.y + r},
-        {rect.x + rect.w - r, rect.y + rect.h - r},
-        {rect.x + r, rect.y + rect.h - r},
-        {rect.x + r, rect.y + r},
-    }};
-    const std::array<f32, 4> starts{{-half_pi, 0.0f, half_pi, pi}};
-    points.reserve(static_cast<std::size_t>((segments + 1) * 4));
-    for (std::size_t corner = 0; corner < centers.size(); ++corner) {
-        for (i32 i = 0; i <= segments; ++i) {
-            const f32 t = starts[corner] + (static_cast<f32>(i) / static_cast<f32>(segments)) * half_pi;
-            points.push_back({
-                centers[corner].x + std::cos(t) * r,
-                centers[corner].y + std::sin(t) * r,
-            });
-        }
-    }
+    kin::rounded_rect_loop(rect, radius, points);
     return points;
 }
 
