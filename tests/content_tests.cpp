@@ -192,6 +192,7 @@ void test_reads(const fs::path& root) {
     const kin::Image hero = kin::load_image(root / "hero.bmp");
     assert(hero.size.x == 2 && hero.size.y == 2);
     assert(kin::load_audio_clip(root / "sounds/hit.wav").valid());
+    assert(kin::load_audio_stream(root / "sounds/hit.wav").valid()); // streamed music reads the same way
 
     kin::AssetManager assets{root};
     kin::register_default_asset_loaders(assets);

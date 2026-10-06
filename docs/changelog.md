@@ -40,7 +40,6 @@ carries. See [shipping](shipping.md).
   on every interface).
 - `ScriptEngine::load_file` reports a missing script as `cannot open <path>`.
 - Signal Siege's language files moved to `examples/content/lang/`.
-
 - `TextDirection` moved to `kin/core/bidi.hpp` (it is still `kin::TextDirection`).
 - Games with text fields should call `ui.apply_text_input(window)` after
   `ui.end()` each frame (it replaces `window.set_text_input_enabled(ui.wants_text_input())`).
