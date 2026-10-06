@@ -18,6 +18,7 @@ add_library(kin_engine STATIC
     src/assets/asset_server.cpp
     src/assets/file_watcher.cpp
     src/assets/image.cpp
+    src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
     src/core/jobs.cpp
@@ -116,6 +117,8 @@ add_library(kin_engine STATIC
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
     src/ui2/text.cpp
+    src/ui2/text_script.cpp
+    src/ui2/text_ttf.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
     src/ui2/widget_internal.cpp

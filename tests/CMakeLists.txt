@@ -56,9 +56,11 @@ kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_te
 kin_add_test(kin_ecs_lifecycle_tests kin-ecs-lifecycle SOURCES ecs_lifecycle_tests.cpp)
 kin_add_test(kin_ui2_tests kin-ui2 SOURCES ui2_tests.cpp)
 kin_add_test(kin_ui2_text_edit_tests kin-ui2-text-edit SOURCES ui2_text_edit_tests.cpp)
+kin_add_test(kin_ui2_text_tests kin-ui2-text SOURCES ui2_text_tests.cpp)
 kin_add_test(kin_ui2_theme_file_tests kin-ui2-theme-file SOURCES ui2_theme_file_tests.cpp)
 kin_add_test(kin_dialogue_tests kin-dialogue SOURCES dialogue_tests.cpp)
 kin_add_test(kin_l10n_tests kin-l10n SOURCES l10n_tests.cpp)
+kin_add_test(kin_bidi_tests kin-bidi SOURCES bidi_tests.cpp)
 kin_add_test(kin_assets_tests kin-assets SOURCES assets_tests.cpp anim_asset_loader_tests.cpp)
 kin_add_test(kin_file_watcher_tests kin-file-watcher SOURCES file_watcher_tests.cpp)
 kin_add_test(kin_lua_script_tests kin-lua-script SOURCES lua_script_tests.cpp)
@@ -123,6 +125,9 @@ if(KIN_BUILD_BENCHMARKS)
     # SDL_GPU texture uploads: many data textures created and updated a frame.
     add_executable(kin_upload_bench upload_bench.cpp)
     target_link_libraries(kin_upload_bench PRIVATE kin::engine)
+    # ui2 text on the CPU: labels measured and drawn, ASCII and beyond.
+    add_executable(kin_text_bench text_bench.cpp)
+    target_link_libraries(kin_text_bench PRIVATE kin::engine)
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)
     target_link_libraries(kin_draw_bench PRIVATE kin::engine)

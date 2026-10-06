@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/bidi.hpp>
 #include <kin/core/types.hpp>
 #include <kin/l10n/message_format.hpp>
 
@@ -20,9 +21,6 @@
 namespace kin {
 
 class FileWatcher;
-
-// Which way a language's text runs.
-enum class TextDirection : u8 { LeftToRight, RightToLeft };
 
 // ---------------------------------------------------------------------------
 // Locale tags
