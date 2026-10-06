@@ -16,11 +16,13 @@ namespace kin {
 //   "{gold} gold"                                       an argument
 //   "{n, plural, =0 {no cards} one {# card} other {# cards}}"
 //   "{who, select, female {her turn} male {his turn} other {their turn}}"
+//   "{place, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}"
 //   "{n, number}"                                       the same as "{n}"
 //
 // In a plural, `#` is the number, formatted for the locale; `=N` matches one
 // value exactly and wins over the categories (zero, one, two, few, many,
-// other: see plural_category). A plural or select must have `other`, which
+// other: see plural_category). A selectordinal is a plural of ordinal
+// numbers ("1st", "2nd"; see ordinal_category). A plural or select must have `other`, which
 // is also what an absent category falls back to. Branches nest.
 //
 // Numbers are grouped and use the locale's decimal sign ("12,500.5" in
@@ -67,6 +69,13 @@ PluralCategory plural_category(std::string_view locale, f64 n);
 // The categories `locale`'s language uses, `other` last.
 std::span<const PluralCategory> plural_categories(std::string_view locale);
 
+// The same for ordinals (CLDR): English one (1st, 21st), two (2nd), few (3rd),
+// other (4th, 11th); French one (1er) and other; Italian many (l'8, l'11);
+// rules for ca, en, fil, fr, hi, hu, it, ms, ro, sv, tl, uk, vi. Other
+// languages have one form.
+PluralCategory ordinal_category(std::string_view locale, f64 n);
+std::span<const PluralCategory> ordinal_categories(std::string_view locale);
+
 // `n` written for `locale`: grouped, its decimal sign, at most three decimals.
 std::string format_number(std::string_view locale, f64 n);
 
@@ -90,7 +99,7 @@ std::string format_message(std::string_view pattern,
 struct MessageShape {
     struct Argument {
         std::string name;
-        std::string kind; // "", "number", "plural" or "select"
+        std::string kind; // "", "number", "plural", "selectordinal" or "select"
         std::vector<std::string> branches; // a plural's or select's keys ("one", "=0", ...)
 
         friend bool operator==(const Argument&, const Argument&) = default;

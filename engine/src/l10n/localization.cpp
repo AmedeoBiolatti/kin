@@ -91,11 +91,12 @@ std::string join_categories(std::span<const PluralCategory> categories) {
 // What a translation's plural forms lack for its language.
 void check_plurals(const MessageShape& shape, std::string_view locale, std::string_view key,
                    std::vector<LocalizationIssue>& out) {
-    const std::span<const PluralCategory> needed = plural_categories(locale);
     for (const MessageShape::Argument& arg : shape.arguments) {
-        if (arg.kind != "plural") {
+        if (arg.kind != "plural" && arg.kind != "selectordinal") {
             continue;
         }
+        const std::span<const PluralCategory> needed =
+            arg.kind == "plural" ? plural_categories(locale) : ordinal_categories(locale);
         std::string lacking;
         for (PluralCategory c : needed) {
             if (std::ranges::find(arg.branches, plural_category_name(c)) == arg.branches.end()) {
@@ -489,7 +490,8 @@ std::vector<LocalizationIssue> Localization::validate() const {
                 if (in_base == wanted.end()) {
                     add_issue(issues, Severity::Warning, locale, key,
                               "'{" + arg.name + "}' is not in the base text: it shows as written unless the game gives it");
-                } else if ((arg.kind == "plural" || arg.kind == "number") && in_base->kind == "select") {
+                } else if ((arg.kind == "plural" || arg.kind == "selectordinal" || arg.kind == "number") &&
+                           in_base->kind == "select") {
                     add_issue(issues, Severity::Error, locale, key,
                               "'{" + arg.name + "}' is a number here but a choice in the base text");
                 }

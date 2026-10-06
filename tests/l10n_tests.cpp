@@ -84,6 +84,40 @@ void test_plural_rules() {
     assert(kin::plural_categories("ru").back() == Other);
 }
 
+void test_ordinals() {
+    using enum PluralCategory;
+    assert(kin::ordinal_category("en", 1) == One && kin::ordinal_category("en", 21) == One);
+    assert(kin::ordinal_category("en", 11) == Other && kin::ordinal_category("en", 12) == Other);
+    assert(kin::ordinal_category("en", 2) == Two && kin::ordinal_category("en", 3) == Few);
+    assert(kin::ordinal_category("en", 113) == Other && kin::ordinal_category("en", 104) == Other);
+    assert(kin::ordinal_category("fr", 1) == One && kin::ordinal_category("fr", 2) == Other);
+    assert(kin::ordinal_category("it", 8) == Many && kin::ordinal_category("it", 9) == Other);
+    assert(kin::ordinal_category("sv", 22) == One && kin::ordinal_category("sv", 12) == Other);
+    assert(kin::ordinal_category("de", 1) == Other && kin::ordinal_categories("de").size() == 1);
+    assert(kin::ordinal_categories("en").size() == 4);
+
+    const std::string_view place = "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}";
+    assert(kin::format_message(place, "en", {{"n", 1}}) == "1st");
+    assert(kin::format_message(place, "en", {{"n", 22}}) == "22nd");
+    assert(kin::format_message(place, "en", {{"n", 13}}) == "13th");
+    assert(kin::format_message(place, "en", {{"n", 1003}}) == "1,003rd");
+    assert(kin::format_message("{n, selectordinal, one {#er} other {#e}}", "fr", {{"n", 1}}) == "1er");
+
+    kin::MessageShape shape;
+    std::string error;
+    assert(kin::inspect_message(place, shape, error) && shape.arguments[0].kind == "selectordinal");
+    assert(!kin::inspect_message("{n, selectordinal, first {x} other {y}}", shape, error));
+
+    // Validation asks for the ordinal forms the language uses.
+    kin::Localization l10n;
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("place", std::string{place});
+    en.strings.emplace("short", "{n, selectordinal, one {#st} other {#th}}");
+    l10n.add("base", std::move(en));
+    const auto issues = l10n.validate();
+    assert(issues.size() == 1 && issues[0].key == "short" && issues[0].message.find("no two, few") != std::string::npos);
+}
+
 void test_numbers() {
     assert(kin::format_number("en", 12500.5) == "12,500.5");
     assert(kin::format_number("en", 999) == "999");
@@ -433,6 +467,7 @@ int main() {
     fs::create_directories(dir);
 
     test_plural_rules();
+    test_ordinals();
     test_numbers();
     test_messages();
     test_locale_tags();
