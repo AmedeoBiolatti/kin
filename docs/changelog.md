@@ -7,6 +7,34 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- Saves: `SaveStoreConfig::compact` writes settings and slots without
+  indentation or line breaks, a fraction of the size and the time for large
+  payloads; either form reads back. `SaveSlotInfo::summary` is a short line of
+  the game's own, kept beside the slot's info so `list_slots` shows it.
+- `parse_json_skipping(text, key)` parses a document passing over the root
+  object's member `key` unbuilt, and `JsonValue::take_member` moves a member
+  out of a parsed document instead of copying it.
+
+### Changed
+
+- `JsonValue` keeps strings, arrays and objects in a box of their own: a value
+  is at most 32 bytes (was over a hundred), so a parsed save of millions of
+  numbers costs a fraction of the memory. `items()` and `members()` return an
+  empty container for a value of another type, as before; a value moved from
+  is left null.
+- `SaveStore::list_slots` reads each slot's info without parsing its payload,
+  and `read_slot` / `read_settings` move the payload out of the parsed file
+  instead of copying it.
+
+### Fixed
+
+- Frame pacing under `max_fps`: when frames fell more than a period behind,
+  the deadlines started over a full period from now, so a slow frame was
+  followed by a wait. They now start over from now: a late frame is never
+  made later by a wait.
+
 ## [0.2.4] — 2026-10-06
 
 A release for 2D drawing. Everything can be drawn through a transform, and

@@ -18,6 +18,9 @@ struct SaveStoreConfig {
     std::string game_id;
     std::string game_version;
     std::filesystem::path root_override;
+    // Files written without indentation or line breaks: a fraction of the
+    // size (and the time) for large payloads; read either way.
+    bool compact = false;
 };
 
 enum class SaveErrorCode {
@@ -46,6 +49,9 @@ struct SaveSlotInfo {
     i64 updated_at_unix = 0;
     i64 play_time_seconds = 0;
     i32 payload_version = 1;
+    // A short line of the game's own, kept beside the rest so a listing
+    // (list_slots) has it without reading the payload; empty: none.
+    std::string summary;
 };
 
 struct SaveLoadResult {
@@ -82,11 +88,15 @@ public:
 private:
     SaveResult validate_store() const;
     SaveResult validate_slot(std::string_view slot_id) const;
+    // A slot read and checked; its payload too, or passed over unread
+    // (list_slots: only the slot's info).
+    SaveLoadResult read_slot_file(std::string_view slot_id, bool with_payload) const;
 
     std::string _game_id;
     std::string _game_version;
     std::filesystem::path _root;
     bool _valid_game_id = false;
+    bool _compact = false;
 };
 
 } // namespace kin

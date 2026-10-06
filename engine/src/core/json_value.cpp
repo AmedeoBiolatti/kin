@@ -4,6 +4,7 @@
 #include <charconv>
 #include <cstdint>
 #include <kin/core/json.hpp>
+#include <utility>
 
 namespace kin {
 
@@ -39,17 +40,93 @@ void write_json(JsonWriter& out, const JsonValue& value) {
     }
 }
 
+struct JsonValue::Box {
+    std::string string;
+    Array array;
+    Object object;
+};
+
+JsonValue::JsonValue() noexcept = default;
+
+JsonValue::JsonValue(bool value) noexcept : _type(Type::Bool), _bool(value) {}
+
+JsonValue::JsonValue(f64 value) noexcept : _type(Type::Number), _number(value) {}
+
+JsonValue::JsonValue(std::string value) : _type(Type::String), _box(std::make_unique<Box>()) {
+    _box->string = std::move(value);
+}
+
+JsonValue::JsonValue(Array value) : _type(Type::Array), _box(std::make_unique<Box>()) {
+    _box->array = std::move(value);
+}
+
+JsonValue::JsonValue(Object value) : _type(Type::Object), _box(std::make_unique<Box>()) {
+    _box->object = std::move(value);
+}
+
+JsonValue::JsonValue(const JsonValue& other)
+    : _type(other._type), _bool(other._bool), _number(other._number),
+      _box(other._box ? std::make_unique<Box>(*other._box) : nullptr) {}
+
+JsonValue& JsonValue::operator=(const JsonValue& other) {
+    if (this != &other) {
+        JsonValue copy{other};
+        *this = std::move(copy);
+    }
+    return *this;
+}
+
+// A value moved from is left null, not a string or container without its box.
+JsonValue::JsonValue(JsonValue&& other) noexcept
+    : _type(std::exchange(other._type, Type::Null)), _bool(other._bool), _number(other._number),
+      _box(std::move(other._box)) {}
+
+JsonValue& JsonValue::operator=(JsonValue&& other) noexcept {
+    _type = std::exchange(other._type, Type::Null);
+    _bool = other._bool;
+    _number = other._number;
+    _box = std::move(other._box);
+    return *this;
+}
+
+JsonValue::~JsonValue() = default;
+
 const std::string& JsonValue::empty_string() {
     static const std::string value;
     return value;
+}
+
+const std::string& JsonValue::as_string(const std::string& fallback) const {
+    return is_string() ? _box->string : fallback;
+}
+
+const JsonValue::Array& JsonValue::items() const {
+    static const Array none;
+    return is_array() ? _box->array : none;
+}
+
+const JsonValue::Object& JsonValue::members() const {
+    static const Object none;
+    return is_object() ? _box->object : none;
 }
 
 const JsonValue* JsonValue::find(std::string_view key) const {
     if (!is_object()) {
         return nullptr;
     }
-    const auto found = _object.find(std::string{key});
-    return found == _object.end() ? nullptr : &found->second;
+    const auto found = _box->object.find(std::string{key});
+    return found == _box->object.end() ? nullptr : &found->second;
+}
+
+std::optional<JsonValue> JsonValue::take_member(std::string_view key) {
+    if (!is_object()) {
+        return std::nullopt;
+    }
+    const auto found = _box->object.find(std::string{key});
+    if (found == _box->object.end()) {
+        return std::nullopt;
+    }
+    return std::exchange(found->second, JsonValue{});
 }
 
 i64 JsonValue::int_at(std::string_view key, i64 fallback) const {
@@ -79,7 +156,7 @@ namespace {
 
 class Parser {
 public:
-    explicit Parser(std::string_view text) : _text(text) {}
+    explicit Parser(std::string_view text, std::string_view skip = {}) : _text(text), _skip(skip) {}
 
     JsonParseResult run() {
         skip_ws();
@@ -138,7 +215,15 @@ private:
         }
     }
 
+    // Containers entered, while one is being read (the root's members at 1).
+    struct Inside {
+        i32& depth;
+        explicit Inside(i32& d) : depth(d) { ++depth; }
+        ~Inside() { --depth; }
+    };
+
     bool parse_object(JsonValue& out) {
+        const Inside inside{_depth};
         ++_pos; // consume '{'
         JsonValue::Object object;
         skip_ws();
@@ -161,11 +246,18 @@ private:
                 return fail("expected ':' after object key");
             }
             ++_pos;
-            JsonValue value;
-            if (!parse_value(value)) {
-                return false;
+            if (_depth == 1 && !_skip.empty() && key == _skip) {
+                // The root's member passed over: read through, not built.
+                if (!skip_value()) {
+                    return false;
+                }
+            } else {
+                JsonValue value;
+                if (!parse_value(value)) {
+                    return false;
+                }
+                object.insert_or_assign(std::move(key), std::move(value));
             }
-            object.insert_or_assign(std::move(key), std::move(value));
             skip_ws();
             if (eof()) {
                 return fail("unterminated object");
@@ -184,7 +276,58 @@ private:
         return true;
     }
 
+    // Over one value without building it: a scalar read as usual, a string
+    // or a container scanned to its end (its strings and brackets closing).
+    bool skip_value() {
+        skip_ws();
+        if (eof()) {
+            return fail("unexpected end of input");
+        }
+        if (peek() == '"') {
+            return skip_string();
+        }
+        if (peek() != '{' && peek() != '[') {
+            JsonValue scalar;
+            return parse_value(scalar);
+        }
+        i32 open = 0;
+        while (!eof()) {
+            const char c = peek();
+            if (c == '"') {
+                if (!skip_string()) {
+                    return false;
+                }
+                continue;
+            }
+            ++_pos;
+            if (c == '{' || c == '[') {
+                ++open;
+            } else if ((c == '}' || c == ']') && --open == 0) {
+                return true;
+            }
+        }
+        return fail("unterminated value");
+    }
+
+    bool skip_string() {
+        ++_pos;  // consume opening quote
+        while (!eof()) {
+            const char c = _text[_pos++];
+            if (c == '"') {
+                return true;
+            }
+            if (c == '\\') {
+                if (eof()) {
+                    return fail("unterminated escape");
+                }
+                ++_pos;
+            }
+        }
+        return fail("unterminated string");
+    }
+
     bool parse_array(JsonValue& out) {
+        const Inside inside{_depth};
         ++_pos; // consume '['
         JsonValue::Array array;
         skip_ws();
@@ -339,6 +482,8 @@ private:
     }
 
     std::string_view _text;
+    std::string_view _skip;  // the root object's member passed over, if any
+    i32 _depth = 0;          // objects and arrays in, below the root's members
     std::size_t _pos = 0;
     std::string _error;
 };
@@ -347,6 +492,10 @@ private:
 
 JsonParseResult parse_json(std::string_view text) {
     return Parser{text}.run();
+}
+
+JsonParseResult parse_json_skipping(std::string_view text, std::string_view skip) {
+    return Parser{text, skip}.run();
 }
 
 } // namespace kin

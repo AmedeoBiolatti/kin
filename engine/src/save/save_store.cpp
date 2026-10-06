@@ -141,6 +141,7 @@ SaveSlotInfo parse_slot_info(const JsonValue& root) {
     info.updated_at_unix = root.int_at("updated_at");
     info.play_time_seconds = root.int_at("play_time_seconds");
     info.payload_version = static_cast<i32>(root.int_at("payload_version", 1));
+    info.summary = root.string_at("summary");
     return info;
 }
 
@@ -185,7 +186,8 @@ SaveStore::SaveStore(SaveStoreConfig config)
     : _game_id(std::move(config.game_id)),
       _game_version(std::move(config.game_version)),
       _root(config.root_override.empty() ? user_data_dir("kin") / _game_id : std::move(config.root_override)),
-      _valid_game_id(valid_save_id(_game_id)) {
+      _valid_game_id(valid_save_id(_game_id)),
+      _compact(config.compact) {
 }
 
 std::filesystem::path SaveStore::settings_path() const {
@@ -219,7 +221,7 @@ SaveResult SaveStore::write_settings(std::function<void(JsonWriter&)> write_payl
     }
     const i64 now = current_save_time_unix();
     std::ostringstream out;
-    JsonWriter json(out);
+    JsonWriter json(out, !_compact);
     json.begin_object();
     json.field("schema", settings_schema);
     json.field("game_id", std::string_view{_game_id});
@@ -248,7 +250,7 @@ SaveLoadResult SaveStore::read_settings() const {
     if (!parsed.ok()) {
         return load_error(SaveErrorCode::ParseError, parsed.error, path);
     }
-    const JsonValue& root = *parsed.value;
+    JsonValue& root = *parsed.value;
     if (SaveResult envelope = validate_envelope(root, settings_schema, _game_id, path); !envelope.ok) {
         return {.result = envelope};
     }
@@ -257,8 +259,8 @@ SaveLoadResult SaveStore::read_settings() const {
     result.result = ok_result(path);
     result.info.game_version = root.string_at("game_version");
     result.info.updated_at_unix = root.int_at("updated_at");
-    if (const JsonValue* payload = root.find("payload")) {
-        result.payload = *payload;
+    if (std::optional<JsonValue> payload = root.take_member("payload")) {
+        result.payload = std::move(*payload);
     }
     return result;
 }
@@ -274,7 +276,7 @@ SaveResult SaveStore::write_slot(std::string_view slot_id,
     const i64 updated_at = info.updated_at_unix != 0 ? info.updated_at_unix : now;
 
     std::ostringstream out;
-    JsonWriter json(out);
+    JsonWriter json(out, !_compact);
     json.begin_object();
     json.field("schema", save_schema);
     json.field("game_id", std::string_view{_game_id});
@@ -285,6 +287,9 @@ SaveResult SaveStore::write_slot(std::string_view slot_id,
     json.field("updated_at", updated_at);
     json.field("play_time_seconds", info.play_time_seconds);
     json.field("payload_version", info.payload_version);
+    if (!info.summary.empty()) {
+        json.field("summary", std::string_view{info.summary});
+    }
     write_payload_field(json, write_payload);
     json.end_object();
     out << '\n';
@@ -292,6 +297,10 @@ SaveResult SaveStore::write_slot(std::string_view slot_id,
 }
 
 SaveLoadResult SaveStore::read_slot(std::string_view slot_id) const {
+    return read_slot_file(slot_id, true);
+}
+
+SaveLoadResult SaveStore::read_slot_file(std::string_view slot_id, bool with_payload) const {
     if (SaveResult slot = validate_slot(slot_id); !slot.ok) {
         return {.result = slot};
     }
@@ -304,11 +313,11 @@ SaveLoadResult SaveStore::read_slot(std::string_view slot_id) const {
     if (!read_ok) {
         return load_error(SaveErrorCode::IoError, "failed to read save slot", path);
     }
-    JsonParseResult parsed = parse_json(text);
+    JsonParseResult parsed = with_payload ? parse_json(text) : parse_json_skipping(text, "payload");
     if (!parsed.ok()) {
         return load_error(SaveErrorCode::ParseError, parsed.error, path);
     }
-    const JsonValue& root = *parsed.value;
+    JsonValue& root = *parsed.value;
     if (SaveResult envelope = validate_envelope(root, save_schema, _game_id, path); !envelope.ok) {
         return {.result = envelope};
     }
@@ -319,8 +328,8 @@ SaveLoadResult SaveStore::read_slot(std::string_view slot_id) const {
     SaveLoadResult result;
     result.result = ok_result(path);
     result.info = parse_slot_info(root);
-    if (const JsonValue* payload = root.find("payload")) {
-        result.payload = *payload;
+    if (std::optional<JsonValue> payload = root.take_member("payload")) {
+        result.payload = std::move(*payload);
     }
     return result;
 }
@@ -343,7 +352,7 @@ std::vector<SaveSlotInfo> SaveStore::list_slots() const {
         if (!valid_save_id(slot_id)) {
             continue;
         }
-        SaveLoadResult loaded = read_slot(slot_id);
+        SaveLoadResult loaded = read_slot_file(slot_id, false);  // the info alone
         if (loaded.result.ok) {
             slots.push_back(std::move(loaded.info));
         }

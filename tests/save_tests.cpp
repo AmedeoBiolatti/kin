@@ -1,10 +1,12 @@
 #include <kin/platform/user_data.hpp>
+#include <kin/core/json_value.hpp>
 #include <kin/save/save_store.hpp>
 
 #include <cassert>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -245,6 +247,93 @@ void test_manual_game_state_roundtrip() {
 
 } // namespace
 
+// Compact files: no indentation or line breaks, read back the same; the
+// listing reads each slot's info and passes its payload over unread.
+void test_compact_slots() {
+    const std::filesystem::path temp = unique_temp_root("compact");
+    kin::set_save_time_override(1760000200);
+    kin::SaveStore store{{
+        .game_id = "compact_game",
+        .game_version = "1.0",
+        .root_override = temp / "compact_game",
+        .compact = true,
+    }};
+    kin::SaveSlotInfo info;
+    info.title = "Compact";
+    info.summary = "seed 54";
+    assert(store.write_slot("small", info, [](kin::JsonWriter& json) {
+        json.begin_object().field("note", "a [bracket] and a \"quote\" {brace}");
+        json.key("cells").begin_array();
+        for (int i = 0; i < 1000; ++i) {
+            json.value(i);
+        }
+        json.end_array().end_object();
+    }).ok);
+    std::string text;
+    {
+        std::ifstream in{store.slot_path("small"), std::ios::binary};  // closed before the files go
+        text.assign(std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{});
+    }
+    assert(text.find('\n') == text.size() - 1);  // one line, then its end
+    assert(text.find("  ") == std::string::npos);
+    const kin::SaveLoadResult loaded = store.read_slot("small");
+    assert(loaded.result.ok);
+    assert(loaded.payload.string_at("note") == "a [bracket] and a \"quote\" {brace}");
+    assert(loaded.payload.find("cells")->items().size() == 1000);
+    assert(loaded.payload.find("cells")->items()[999].as_int() == 999);
+
+    // A payload that would not parse (but whose brackets close): listed by
+    // its info, which is all the listing reads; refused when read whole.
+    write_text(store.slot_path("broken"),
+               R"({"schema":"kin.save/1","game_id":"compact_game","game_version":"1.0","slot_id":"broken",)"
+               R"("title":"Listed","payload":{"cells":[1,2x,3],"s":"]}"},"updated_at":5})");
+    const std::vector<kin::SaveSlotInfo> slots = store.list_slots();
+    assert(slots.size() == 2);
+    assert(slots[0].slot_id == "broken" && slots[0].title == "Listed" && slots[0].updated_at_unix == 5);
+    assert(slots[0].summary.empty() && slots[1].summary == "seed 54");  // the listing's own line, unread payloads
+    assert(!store.read_slot("broken").result.ok);
+
+    // Pretty files (an older store's) read the same.
+    kin::SaveStore pretty{{.game_id = "compact_game", .game_version = "1.0", .root_override = temp / "compact_game"}};
+    assert(pretty.write_slot("pretty", info, [](kin::JsonWriter& json) { json.begin_object().field("n", 3).end_object(); }).ok);
+    assert(store.read_slot("pretty").payload.int_at("n") == 3);
+
+    kin::clear_save_time_override();
+    std::filesystem::remove_all(temp);
+}
+
+// The value model: small values, deep copies, members moved out, and the
+// parser passing over a root member (only the root's) without building it.
+void test_json_values() {
+    static_assert(sizeof(kin::JsonValue) <= 32);
+    kin::JsonParseResult parsed = kin::parse_json(R"({"a":[1,{"b":"x"}],"keep":{"payload":7},"payload":{"big":[1,2,3]}})");
+    assert(parsed.ok());
+    kin::JsonValue copy = *parsed.value;
+    std::optional<kin::JsonValue> taken = parsed.value->take_member("payload");
+    assert(taken && taken->find("big")->items().size() == 3);
+    assert(parsed.value->find("payload")->is_null());   // moved out
+    assert(copy.find("payload")->find("big")->items()[2].as_int() == 3);  // the copy kept its own
+    assert(!parsed.value->take_member("missing"));
+    assert(copy.find("a")->items()[1].string_at("b") == "x");
+
+    const kin::JsonParseResult skipped =
+        kin::parse_json_skipping(R"({"payload":{"s":"\"}]","n":[[1],[2]]},"keep":{"payload":7},"after":true})", "payload");
+    assert(skipped.ok());
+    assert(!skipped.value->find("payload"));
+    assert(skipped.value->find("keep")->int_at("payload") == 7);  // not the root's: kept
+    assert(skipped.value->bool_at("after"));
+    assert(kin::parse_json_skipping(R"({"payload":3,"x":1})", "payload").value->int_at("x") == 1);
+    assert(!kin::parse_json_skipping(R"({"payload":{"unclosed":[1,2})", "payload").ok());
+
+    kin::JsonValue from{std::string{"moved"}};
+    const kin::JsonValue to = std::move(from);
+    assert(to.as_string() == "moved");
+    assert(from.is_null() && from.as_string().empty());  // NOLINT(bugprone-use-after-move): left null
+
+    const kin::JsonValue number{3.5};
+    assert(number.items().empty() && number.members().empty() && number.as_string().empty());
+}
+
 int main() {
     test_user_data_override_and_roots();
     test_id_validation();
@@ -252,5 +341,7 @@ int main() {
     test_slots();
     test_load_errors();
     test_manual_game_state_roundtrip();
+    test_compact_slots();
+    test_json_values();
     return 0;
 }
