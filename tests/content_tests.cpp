@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -272,7 +273,8 @@ void test_mount_through_link(const fs::path& work) {
     }
     const fs::path root = work / "link" / "game";
     kin::mount_content_pack(root, kin::ContentPack::open(work / "game.kinpak"));
-    assert(kin::content_file_exists(work / "real" / "game" / "hero.bmp"));
+    const fs::path real = fs::weakly_canonical(work / "real"); // also a Windows short name made long
+    assert(kin::content_file_exists(real / "game" / "hero.bmp"));
     assert(kin::content_file_exists(fs::weakly_canonical(root / "scripts" / "util.lua")));
     kin::LuaScriptOptions options;
     options.module_root = root / "scripts";
@@ -280,7 +282,7 @@ void test_mount_through_link(const fs::path& work) {
     assert(script.load_file(root / "scripts/main.lua"));
     assert(script.call_for<int>("answer") == 42);
     kin::unmount_content_pack(root);
-    assert(!kin::content_file_exists(work / "real" / "game" / "hero.bmp"));
+    assert(!kin::content_file_exists(real / "game" / "hero.bmp"));
 }
 
 void test_find_content_root(const fs::path& work, const fs::path& source) {
@@ -313,7 +315,7 @@ void test_find_content_root(const fs::path& work, const fs::path& source) {
 
 } // namespace
 
-int main() {
+int main() try {
     const fs::path work = fs::temp_directory_path() / "kin_content_tests";
     fs::remove_all(work);
     fs::create_directories(work);
@@ -328,4 +330,7 @@ int main() {
     kin::unmount_all_content_packs();
     fs::remove_all(work);
     return 0;
+} catch (const std::exception& e) {
+    std::cerr << "kin-content: " << e.what() << '\n';
+    return 1;
 }
