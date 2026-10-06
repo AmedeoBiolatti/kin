@@ -33,6 +33,10 @@ releases may change APIs.
   SDL_ttf each call: 210 measures of HUD labels went from 2.7 ms to 0.05 ms a
   frame. Drawing no longer asks SDL_ttf for each glyph pair's kerning. Other
   text (beyond ASCII) is still shaped by SDL_ttf.
+- Rounded rectangles: both backends build the outline from one shared
+  `rounded_rect_loop`, whose corner arcs come from a table of cos and sin a
+  segment count, not from `cos`/`sin` for every point of every fill and
+  outline: the same points, about 3.4x faster to build.
 
 ### Fixed
 
