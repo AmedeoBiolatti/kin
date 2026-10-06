@@ -14,6 +14,7 @@
 #include <optional>
 #include <sstream>
 #include <kin/assets/file_watcher.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
@@ -53,7 +54,8 @@ void write_run_report(std::ostream& out,
                       const RunReport& report,
                       u64 seed,
                       i32 frames,
-                      const SceneManager& scenes) {
+                      const SceneManager& scenes,
+                      const Localization* localization) {
     JsonWriter json(out);
     json.begin_object();
     json.field("schema", "kin.run_report/1");
@@ -63,6 +65,16 @@ void write_run_report(std::ostream& out,
     }
     json.field("seed", seed);
     json.field("frames", frames);
+    if (localization) {
+        json.key("localization").begin_object();
+        json.field("locale", localization->locale());
+        json.key("missing_text").begin_array();
+        for (const std::string& key : localization->missing_keys()) {
+            json.value(key);
+        }
+        json.end_array();
+        json.end_object();
+    }
     json.key("scenes").begin_array();
     for (i32 i = 0; i < scenes.depth(); ++i) {
         const Scene* scene = scenes.at(i);
@@ -210,6 +222,15 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
         } else if (arg == "--state-lockstep") {
             options.enabled = true;
             options.state_lockstep = true;
+        } else if (arg.starts_with("--locale=")) {
+            options.locale = arg.substr(9);
+        } else if (arg == "--locale" && i + 1 < argc) {
+            options.locale = argv[i + 1];
+            ++i;
+        } else if (arg == "--pseudo-locale") {
+            options.locale = std::string{Localization::pseudo_locale};
+        } else if (arg == "--fail-on-missing-text") {
+            options.fail_on_missing_text = true;
         } else if (arg == "--server") {
             options.server = true;
         } else if (arg.starts_with("--server-mode=")) {
@@ -355,6 +376,19 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                        {.name = "frames", .value = std::to_string(config.headless.frames)},
                        {.name = "seed", .value = std::to_string(config.headless.seed)},
                    }));
+
+    if (config.localization) {
+        Localization& l10n = *config.localization;
+        set_active_localization(&l10n);
+        const bool headless_run = config.headless.enabled || config.headless.list_actions ||
+            config.headless.profile_render || config.headless.server || config.headless.check_determinism;
+        if (!config.headless.locale.empty()) {
+            l10n.set_locale(config.headless.locale);
+        } else if (headless_run) {
+            l10n.set_locale(l10n.base_locale());
+        }
+        KIN_LOG_INFO_F("runtime", "locale", (LogFields{{.name = "locale", .value = l10n.locale()}}));
+    }
 
     if (config.headless.check_determinism && !config.headless.state_lockstep) {
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
@@ -520,6 +554,16 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             run_report.fail(reason.str());
         }
 #endif
+        if (config.localization && config.headless.fail_on_missing_text) {
+            if (const auto missing = config.localization->missing_keys(); !missing.empty()) {
+                std::string reason = "missing text in " + config.localization->locale() + ":";
+                for (const std::string& key : missing) {
+                    reason += ' ';
+                    reason += key;
+                }
+                run_report.fail(std::move(reason));
+            }
+        }
         if (!config.headless.screenshot_path.empty() && !frame.renderer.save_png(config.headless.screenshot_path)) {
             KIN_LOG_ERROR_F("runtime", "screenshot not saved",
                             (LogFields{{.name = "path", .value = config.headless.screenshot_path}}));
@@ -532,7 +576,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         }
         if (want_report) {
             std::ostringstream report;
-            write_run_report(report, run_report, config.headless.seed, frames_run, scenes);
+            write_run_report(report, run_report, config.headless.seed, frames_run, scenes, config.localization);
             report_snapshot = report.str();
         }
         if (user_shutdown) {
@@ -914,7 +958,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             if (!report_snapshot.empty()) {
                 out << report_snapshot;
             } else {
-                write_run_report(out, run_report, config.headless.seed, frames_run, scenes);
+                write_run_report(out, run_report, config.headless.seed, frames_run, scenes, config.localization);
             }
         };
         if (config.report_output) {

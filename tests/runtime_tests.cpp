@@ -1,6 +1,7 @@
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/rng.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/runtime/debug_overlay.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
@@ -73,6 +74,19 @@ public:
 
 private:
     kin::i32 _frames = 0;
+};
+
+// Looks its text up through kin::tr, as game code would.
+class TextScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "Text"; }
+
+    void update(kin::SceneContext&) override { _shown = kin::tr("menu.play") + "|" + kin::tr("menu.unknown"); }
+
+    void write_report(kin::JsonWriter& json) const override { json.field("shown", _shown); }
+
+private:
+    std::string _shown;
 };
 
 } // namespace
@@ -466,6 +480,52 @@ int main() {
         assert(json_text.find("\"name\": \"update\"") != std::string::npos);
         assert(text.find("runtime profile profiled") != std::string::npos);
         assert(text.find("render.scene") != std::string::npos);
+    }
+
+    // Localization: --locale picks the language, a headless run without it shows
+    // the base one, and missing text is reported (and fails the run if asked).
+    {
+        const char* locale_argv[] = {"game", "--locale=fr-CA", "--fail-on-missing-text"};
+        const kin::HeadlessOptions locale_options = kin::parse_headless_options(3, const_cast<char**>(locale_argv));
+        assert(locale_options.locale == "fr-CA" && locale_options.fail_on_missing_text);
+        const char* pseudo_argv[] = {"game", "--pseudo-locale"};
+        assert(kin::parse_headless_options(2, const_cast<char**>(pseudo_argv)).locale == "en-XA");
+
+        kin::Localization l10n;
+        kin::LanguageFile en{.locale = "en", .name = "English"};
+        en.strings.emplace("menu.play", "Play");
+        kin::LanguageFile fr{.locale = "fr", .name = "Français"};
+        fr.strings.emplace("menu.play", "Jouer");
+        l10n.add("test", std::vector<kin::LanguageFile>{std::move(en), std::move(fr)});
+        l10n.set_locale("fr"); // the game's choice: a headless run sets it aside
+
+        const auto run = [&](kin::HeadlessOptions options, std::string& text) {
+            kin::SceneManager scenes;
+            scenes.push(std::make_unique<TextScene>());
+            std::ostringstream report;
+            options.enabled = true;
+            options.frames = 2;
+            const int code = kin::run_scene_app({
+                .window = {.title = "l10n", .width = 64, .height = 64},
+                .headless = std::move(options),
+                .report_output = &report,
+                .localization = &l10n,
+            }, scenes);
+            text = report.str();
+            return code;
+        };
+        std::string text;
+        assert(run({}, text) == 0);
+        assert(kin::active_localization() == &l10n);
+        assert(text.find("\"shown\": \"Play|menu.unknown\"") != std::string::npos);
+        assert(text.find("\"locale\": \"en\"") != std::string::npos);
+        assert(text.find("\"missing_text\": [\n      \"menu.unknown\"") != std::string::npos);
+
+        l10n.clear_missing_keys();
+        assert(run(locale_options, text) == 1);
+        assert(text.find("\"shown\": \"Jouer|menu.unknown\"") != std::string::npos);
+        assert(text.find("missing text in fr: menu.unknown") != std::string::npos);
+        kin::set_active_localization(nullptr);
     }
 
     // Failure contract: a scene that fails stops the run early, reports the

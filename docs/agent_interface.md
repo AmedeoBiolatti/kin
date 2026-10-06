@@ -37,6 +37,9 @@ an explicit `--seed`.
 | `--profile` | Profile the run: windowed, until it quits or `--frames` N; with `--headless`, a 600-frame pass unless `--frames` is set. |
 | `--overdraw-view` | Start with the overdraw view on (SDL_GPU): the screen shows how many times each pixel is shaded, as colours. Also a debug overlay toggle. |
 | `--screenshot=PATH` | Save the last frame as a PNG when the run ends. |
+| `--locale=TAG` / `--locale TAG` | Show the game in this language (see [localization](localization.md)), over its own choice. Headless and server runs without it use the base language. |
+| `--pseudo-locale` | Show the pseudo-locale (`en-XA`): accented, longer, bracketed text, to find untranslated strings and layouts that will not fit. |
+| `--fail-on-missing-text` | Fail the run if any text was looked up by a key the shown language lacks. The run report always lists them under `localization.missing_text`. |
 | `--profile-lines` | Enable compiled-in Kin profile line/block capture. |
 | `--profile-json=PATH` | Write `kin.profile/1` JSON to PATH (`-` for stdout). |
 | `--profile-text=PATH` | Write a text profile summary to PATH (`-` for stdout). |
