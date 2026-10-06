@@ -71,6 +71,15 @@ runs, and text in any script. See [localization](localization.md).
 - Fonts per language: `TtfFontOptions::language_fallbacks`, `FontSource`
   (a face of a collection), `system_language_fonts()`,
   `ui2::set_text_language`.
+- Ordinals: `{n, selectordinal, ...}`, `ordinal_category`, `ordinal_categories`.
+- gettext: `parse_gettext` and `write_gettext`; `.po` files load from language
+  directories.
+- Assets by language: `Localization::localized_path` (`l10n/<locale>/<path>`),
+  used by `AssetManager` and `AudioCatalog`.
+- `ui2::caret_move`: the arrows move the caret on screen through
+  mixed-direction text in `TextInput` and `TextEdit`.
+- Popups in right-to-left interfaces: placed reflected about their anchor;
+  `MenuBar` mirrors; `Context::to_screen` and `screen_pointer`.
 
 ### Changed
 

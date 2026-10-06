@@ -78,6 +78,25 @@ Columns named `comment`, `context`, `notes` or `description`, or starting with
 untranslated key. `write_language_file` writes a `.kinlang` back out (keys
 sorted).
 
+gettext catalogues (`.po`), which most translation tools and services use,
+load too:
+
+```po
+msgctxt "hand.cards"
+msgid "%d card"
+msgid_plural "%d cards"
+msgstr[0] "%d karta"
+msgstr[1] "%d karty"
+msgstr[2] "%d kart"
+```
+
+An entry's key is its `msgctxt` (or its `msgid` without one) and `msgstr` is a
+kin message. Plural entries become `{n, plural, ...}`: each category the
+language uses takes the form the header's `Plural-Forms` picks for a number
+of it, `%d` becoming `#`. Fuzzy, obsolete and untranslated entries are left
+out. `write_gettext(base, &translation)` writes a catalogue for translators
+(msgctxt the key, msgid the base text); without a translation, a template.
+
 ## Fallback
 
 A key runs down a chain: the locale shown (`fr-CA`), the tags it falls back to
@@ -96,6 +115,7 @@ Text with values in it follows a subset of ICU MessageFormat:
 | `{gold} gold` | the value; numbers are grouped for the locale (`12,500.5`, `12 500,5`, `12.500,5`) |
 | `{n, plural, =0 {none} one {# card} other {# cards}}` | the CLDR category of `n` for the language; `#` is `n`; `=N` matches exactly |
 | `{who, select, her {her turn} other {their turn}}` | the branch named by a string value |
+| `{place, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}` | an ordinal's CLDR category (`ordinal_category`) |
 | `'{name}'` | quoted text: an apostrophe before `{`, `}` or `#` starts it, `''` is one apostrophe |
 
 A plural or select needs `other`, which a missing category falls back to.
@@ -192,6 +212,24 @@ system's: Yu Gothic, Microsoft YaHei, Microsoft JhengHei and Malgun Gothic on
 Windows; the matching faces of Noto Sans CJK on Linux. `system_ui_font` uses
 them.
 
+## Assets by language
+
+A texture, data file or voice line can have a version per language, at
+`l10n/<locale>/<path>` under the asset root:
+
+```
+assets/voice/intro.wav            the base language's
+assets/l10n/fr/voice/intro.wav    French (and fr-CA, which falls back to fr)
+assets/l10n/ja/ui/title.png       Japanese
+```
+
+`AssetManager` and `AudioCatalog` look files up through the active
+localization (`Localization::localized_path`), so `assets.load<Image>("ui/title.png")`
+and a voice cue's clip come in the player's language where the game has
+them. A load after a language change gets that language's file; handles kept
+from before still hold the old one, so load again when
+`Localization::generation()` changes.
+
 ## Text input
 
 - **Input methods.** A Japanese, Chinese or Korean player types through an
@@ -201,9 +239,10 @@ them.
   frame after `ui.end()`: it starts text input while a field is focused and
   puts the IME's candidate list beside the caret.
 - **Right-to-left editing.** Right-to-left text sits at the field's right
-  edge, the caret moves leftwards through it, selections split where
-  directions mix, and the arrow keys move the way they point.
-  `ui2::caret_x`, `caret_at` and `selection_spans` do this for any line, for
+  edge, the caret moves leftwards through it, and selections split where
+  directions mix. The arrow keys move the caret on screen, through text that
+  runs both ways (Ctrl steps by word through the text). `ui2::caret_x`,
+  `caret_at`, `caret_move` and `selection_spans` do this for any line, for
   editors of a game's own.
 
 ## Text that does not fit
@@ -238,7 +277,9 @@ Widgets with a left and a right mirror their insides: a checkbox's box goes
 to the right of its label, sliders and progress bars fill from the right, tabs
 and menus run from the right, and a scroll view's scrollbar is on the left.
 Text and images inside still read the right way round. A widget of a game's
-own can do the same with `ui.mirror_if_right_to_left(bounds)`. UI drawn at
+own can do the same with `ui.mirror_if_right_to_left(bounds)`. Popups are
+placed as their left-to-right selves reflected about their anchor: a dropdown
+aligns to its anchor's right edge, a submenu opens to the left. UI drawn at
 fixed positions (a HUD placed by hand) is not moved.
 
 ## Choosing the language
@@ -261,12 +302,9 @@ Arabic.
 
 ## Limits
 
-- The caret moves through text in stored order (with the arrows swapped in a
-  right-to-left paragraph), not visually through mixed-direction text.
 - A `TextEdit` lays a right-to-left paragraph out by its first strong
   character for the whole text, not per paragraph.
 - Shaped runs are drawn from a texture each, kept in a cache; they have no
   distance-field outline (an outlined one is stamped).
-- Plural rules cover cardinals; ordinals (`1st`, `2nd`) are not built in.
 - Isolates (U+2066-2069) are treated as embeddings, and brackets are not
   paired (UAX #9 N0).
