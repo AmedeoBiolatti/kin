@@ -260,6 +260,29 @@ void test_mounts(const fs::path& work, const fs::path& source) {
     assert(view && std::memcmp(view->bytes.data(), "first", 5) == 0);
 }
 
+// A path that reaches the mount point another way (a symlink here; on Windows
+// also a short 8.3 name) still reaches the pack once it is made canonical, as
+// the Lua loaders make module paths.
+void test_mount_through_link(const fs::path& work) {
+    std::error_code error;
+    fs::create_directories(work / "real", error);
+    fs::create_directory_symlink(work / "real", work / "link", error);
+    if (error) {
+        return; // no symlinks here (Windows without the privilege)
+    }
+    const fs::path root = work / "link" / "game";
+    kin::mount_content_pack(root, kin::ContentPack::open(work / "game.kinpak"));
+    assert(kin::content_file_exists(work / "real" / "game" / "hero.bmp"));
+    assert(kin::content_file_exists(fs::weakly_canonical(root / "scripts" / "util.lua")));
+    kin::LuaScriptOptions options;
+    options.module_root = root / "scripts";
+    kin::LuaScript script{options};
+    assert(script.load_file(root / "scripts/main.lua"));
+    assert(script.call_for<int>("answer") == 42);
+    kin::unmount_content_pack(root);
+    assert(!kin::content_file_exists(work / "real" / "game" / "hero.bmp"));
+}
+
 void test_find_content_root(const fs::path& work, const fs::path& source) {
     // The source folder, while the game is made.
     assert(kin::find_content_root({.name = "game", .dev_dir = source}) == source.lexically_normal());
@@ -299,6 +322,7 @@ int main() {
     test_pack_round_trip(work, source);
     test_damaged_packs(work);
     test_mounts(work, source);
+    test_mount_through_link(work);
     test_find_content_root(work, source);
 
     kin::unmount_all_content_packs();

@@ -167,8 +167,18 @@ std::optional<std::string> read_disk_file(const std::filesystem::path& path) {
 
 struct Mount {
     std::filesystem::path point; // normalized, absolute
+    // The same through the file system: symlinks resolved, Windows short
+    // names long. Code that makes paths canonical (the Lua loaders do) reaches
+    // the pack this way.
+    std::filesystem::path canonical;
     std::shared_ptr<const ContentPack> pack;
 };
+
+std::filesystem::path canonical_form(const std::filesystem::path& point) {
+    std::error_code error;
+    std::filesystem::path result = std::filesystem::weakly_canonical(point, error);
+    return error ? point : normalized(result);
+}
 
 struct Mounts {
     std::shared_mutex mutex;
@@ -194,19 +204,25 @@ std::optional<PackLocation> locate(const std::filesystem::path& path) {
         return std::nullopt;
     }
     const std::filesystem::path query = normalized(path);
-    for (const Mount& mount : state.list) {
-        const std::filesystem::path relative = query.lexically_relative(mount.point);
+    const auto inside = [&](const std::filesystem::path& point) -> std::optional<std::string> {
+        const std::filesystem::path relative = query.lexically_relative(point);
         if (relative.empty()) {
-            continue;
+            return std::nullopt;
         }
-        const std::string inner = utf8(relative);
-        if (inner == "..") {
-            continue;
+        std::string inner = utf8(relative);
+        if (inner == ".." || inner.starts_with("../")) {
+            return std::nullopt;
         }
-        if (inner.starts_with("../")) {
-            continue;
+        return inner == "." ? std::string{} : inner;
+    };
+    for (const Mount& mount : state.list) {
+        std::optional<std::string> inner = inside(mount.point);
+        if (!inner && mount.canonical != mount.point) {
+            inner = inside(mount.canonical);
         }
-        return PackLocation{mount.pack, inner == "." ? std::string{} : inner};
+        if (inner) {
+            return PackLocation{mount.pack, std::move(*inner)};
+        }
     }
     return std::nullopt;
 }
@@ -504,7 +520,7 @@ void mount_content_pack(const std::filesystem::path& mount_point, std::shared_pt
     std::unique_lock lock{state.mutex};
     const std::filesystem::path point = normalized(mount_point);
     std::erase_if(state.list, [&](const Mount& m) { return m.point == point; });
-    state.list.push_back({point, std::move(pack)});
+    state.list.push_back({point, canonical_form(point), std::move(pack)});
     std::ranges::stable_sort(state.list, std::greater<>{}, [](const Mount& m) { return m.point.native().size(); });
 }
 
