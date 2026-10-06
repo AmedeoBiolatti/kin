@@ -254,6 +254,14 @@ void test_right_to_left_runs() {
     ui2::set_text_base_direction(std::nullopt);
     assert(!ui2::text_base_direction());
 
+    // "3 سلام" right to left: the word on the left, then the space, then the 3.
+    ui2::set_text_base_direction(TextDirection::RightToLeft);
+    draws.clear();
+    ui2::draw_text(rec.renderer, font, "3 " + salam, {0, 0}, 1.0f, colors::white);
+    assert(draws.size() == 2);
+    assert(draws[1].dest.x > draws[0].dest.x + draws[0].dest.w + 2.0f); // a space's width between
+    ui2::set_text_base_direction(std::nullopt);
+
     // Arabic letters join: shaped as one run, drawn once.
     draws.clear();
     ui2::draw_text(rec.renderer, font, salam, {0, 0}, 1.0f, colors::white);

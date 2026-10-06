@@ -1104,15 +1104,14 @@ private:
             }
             f32 x = 0.0f;
             f32 height = metrics.font_height;
-            for (const BidiRun& run : bidi_runs(line_text, base)) {
-                const std::string_view part = line_text.substr(run.begin, run.end - run.begin);
-                Segment segment{.begin = start + run.begin, .end = start + run.end, .line = line, .rtl = run.right_to_left(), .x = x};
-                segment.shaped = segment.rtl;
-                for (std::size_t k = 0; !segment.shaped && k < part.size();) {
-                    segment.shaped = needs_shaping(next_code_point(part, k));
+            const auto add = [&](std::size_t begin, std::size_t end, bool shaped, bool rtl) {
+                if (begin == end) {
+                    return;
                 }
-                if (segment.shaped) {
-                    const Vec2f size = shaped_size(face, part, segment.rtl);
+                const std::string_view part = line_text.substr(begin, end - begin);
+                Segment segment{.begin = start + begin, .end = start + end, .line = line, .shaped = shaped, .rtl = rtl, .x = x};
+                if (shaped) {
+                    const Vec2f size = shaped_size(face, part, rtl);
                     segment.width = size.x;
                     height = std::max(height, size.y);
                 } else {
@@ -1120,6 +1119,29 @@ private:
                 }
                 x += segment.width;
                 out.segments.push_back(segment);
+            };
+            for (const BidiRun& run : bidi_runs(line_text, base)) {
+                const std::string_view part = line_text.substr(run.begin, run.end - run.begin);
+                bool shaped = run.right_to_left();
+                for (std::size_t k = 0; !shaped && k < part.size();) {
+                    shaped = needs_shaping(next_code_point(part, k));
+                }
+                if (!shaped) {
+                    add(run.begin, run.end, false, false);
+                    continue;
+                }
+                // Spaces at a shaped run's ends are laid out here, on the side
+                // the run's direction puts them: a shaper may not keep them.
+                std::size_t lead = 0;
+                while (lead < part.size() && part[lead] == ' ') ++lead;
+                std::size_t trail = 0;
+                while (trail < part.size() - lead && part[part.size() - 1 - trail] == ' ') ++trail;
+                const std::size_t core_begin = run.begin + lead;
+                const std::size_t core_end = run.end - trail;
+                const bool rtl = run.right_to_left();
+                add(rtl ? core_end : run.begin, rtl ? run.end : core_begin, false, false);
+                add(core_begin, core_end, true, rtl);
+                add(rtl ? run.begin : core_end, rtl ? core_begin : run.end, false, false);
             }
             out.size.x = std::max(out.size.x, x);
             bottom = static_cast<f32>(line) * metrics.line_step + height;
