@@ -5781,6 +5781,30 @@ void test_ui2_theme_variant_registry() {
     assert(!theme.variant("gold_button")->surface.normal.use_skin);
 }
 
+// TTF text is laid out from the face's metrics and the font's kerning as
+// HarfBuzz reads it (GPOS too, which TTF_GetGlyphKerning misses), the same
+// walk for drawing and measuring. "AVAVAVAV" has seven kerned pairs where
+// "AAAAVVVV" has one: it measures narrower. Lines stack; other text is still
+// shaped by SDL_ttf.
+void test_text_kerning_and_lines() {
+    if (!ui2::system_ui_font_available()) {
+        return;
+    }
+    for (const ui2::TextRendering rendering : {ui2::TextRendering::Bitmap, ui2::TextRendering::Sdf}) {
+        const ui2::Font font = ui2::system_ui_font(16, rendering);
+        const Vec2f kerned = ui2::measure_text(font, "AVAVAVAV", 1.0f);
+        const Vec2f apart = ui2::measure_text(font, "AAAAVVVV", 1.0f);
+        assert(kerned.x < apart.x - 2.0f);
+        assert(std::abs(kerned.y - apart.y) < 1e-3f);
+
+        const Vec2f one = ui2::measure_text(font, "Ab", 1.0f);
+        const Vec2f two = ui2::measure_text(font, "Ab\nAb", 1.0f);
+        assert(std::abs(two.x - one.x) < 1e-3f && two.y > one.y * 1.8f);
+        assert(ui2::measure_text(font, "", 1.0f).y > 0.0f); // an empty line is a line high
+        assert(ui2::measure_text(font, "na\xc3\xafve", 1.0f).x > 0.0f); // UTF-8: shaped by SDL_ttf
+    }
+}
+
 // Sdf fonts measure linearly: twice the scale, exactly twice the size. Bitmap
 // fonts keep only a few sizes however many are asked for. Outlines: one draw
 // from an Sdf font's field, four stamped copies under the text otherwise.
@@ -5819,6 +5843,7 @@ void test_text_rendering_modes() {
 
 int main() {
     test_text_rendering_modes();
+    test_text_kerning_and_lines();
 #if defined(_MSC_VER)
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
