@@ -293,6 +293,9 @@ public:
 
     std::span<const f32> samples() const override { return {}; }
     bool streamed() const override { return true; }
+    std::size_t memory_bytes() const override {
+        return _bytes->size() + (_seek_table ? _seek_table->size() * sizeof(drmp3_seek_point) : 0);
+    }
     std::unique_ptr<AudioDecoder> open_stream() const override {
         return open_decoder(_bytes, _seek_table, _frame_count);
     }

@@ -45,13 +45,27 @@ releases may change APIs.
   pitch)` and `playback_position(handle)`.
 - Ducking: `duck music when=dialogue volume=0.3 attack=0.15 release=0.8` in a
   catalog turns a bus down while another plays (`AudioCatalog::add_duck`).
-- `write_audio_settings` / `apply_audio_settings` keep bus volumes and mutes
-  in a settings file, `AudioEngine::bus_states()` lists them, and
+- `write_audio_settings` / `apply_audio_settings` keep the output device, bus
+  volumes and mutes in a settings file, `AudioEngine::bus_states()` lists them, and
   `AudioEngine::write_report` writes stats, buses and voices for a scene's
   report.
 - Lua: `bind_lua_audio` gives scripts an `audio` table, and
   `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
   lets a host add its own bindings to a script scene's Lua state.
+- Audio voices: `seek(handle, seconds)` (declicked, streams too) and
+  `set_paused(handle, paused)` / `paused(handle)` for one voice.
+- Audio memory: `unload_unused()`, `unload(catalog)` and `remove_clip(id)`
+  free cached clips, and `loaded_clip_count()` / `loaded_clip_bytes()` say
+  what the cache holds. Finished voices hand their clips back to the game
+  thread to be freed.
+- Distance curves: a cue's `rolloff=smooth|linear|inverse`,
+  `rolloff_power=` and `pan=` strength (`AudioRolloff`, `SpatialAudio`).
+- Output devices: `list_audio_output_devices()`,
+  `AudioEngine::set_output_device(name)` and `output_device()`; a chosen
+  device that is unplugged falls back to the default and back again.
+  `create_sdl_audio_backend` takes a device name.
+- Lua's `audio` table adds `seek`, `position`, `set_paused`, `paused`,
+  `output_devices`, `set_output_device` and `output_device`.
 - Audio effects per bus: low-pass and high-pass filters, a reverb
   (Freeverb) and a compressor, in a bus's chain from `effect` lines in its
   catalog or `set_bus_effects`; `set_bus_effect` changes one while it plays

@@ -169,6 +169,25 @@ std::string_view audio_category_name(AudioCategory category) {
     return "sound";
 }
 
+std::string_view audio_rolloff_name(AudioRolloff rolloff) {
+    switch (rolloff) {
+    case AudioRolloff::Smooth: return "smooth";
+    case AudioRolloff::Linear: return "linear";
+    case AudioRolloff::Inverse: return "inverse";
+    }
+    return "smooth";
+}
+
+bool parse_audio_rolloff(std::string_view value, AudioRolloff& out) {
+    for (const AudioRolloff rolloff : {AudioRolloff::Smooth, AudioRolloff::Linear, AudioRolloff::Inverse}) {
+        if (value == audio_rolloff_name(rolloff)) {
+            out = rolloff;
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string_view audio_effect_type_name(AudioEffectType type) {
     switch (type) {
     case AudioEffectType::LowPass: return "lowpass";
@@ -316,6 +335,12 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                     if (!parse_f32(value, cue.min_distance)) fail("invalid min");
                 } else if (key == "max") {
                     if (!parse_f32(value, cue.max_distance)) fail("invalid max");
+                } else if (key == "rolloff") {
+                    if (!parse_audio_rolloff(value, cue.rolloff)) fail("invalid rolloff (smooth, linear or inverse)");
+                } else if (key == "rolloff_power") {
+                    if (!parse_f32(value, cue.rolloff_power) || cue.rolloff_power <= 0.0f) fail("invalid rolloff_power");
+                } else if (key == "pan") {
+                    if (!parse_f32(value, cue.pan_strength)) fail("invalid pan");
                 } else if (key == "clips") {
                     cue.clips = split_csv(value);
                 } else {
@@ -485,7 +510,17 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
             << " loop=" << (cue->loop ? "true" : "false")
             << " spatial=" << (cue->spatial ? "true" : "false")
             << " min=" << cue->min_distance
-            << " max=" << cue->max_distance
+            << " max=" << cue->max_distance;
+        if (cue->rolloff != AudioRolloff::Smooth) {
+            out << " rolloff=" << audio_rolloff_name(cue->rolloff);
+        }
+        if (cue->rolloff_power != 1.0f) {
+            out << " rolloff_power=" << cue->rolloff_power;
+        }
+        if (cue->pan_strength != 1.0f) {
+            out << " pan=" << cue->pan_strength;
+        }
+        out
             << " clips=";
         for (std::size_t i = 0; i < cue->clips.size(); ++i) {
             if (i > 0) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/audio/audio_clip.hpp>
+#include <kin/audio/spatial_audio.hpp>
 #include <kin/assets/asset_manager.hpp>
 #include <kin/core/types.hpp>
 
@@ -46,6 +47,9 @@ struct AudioCue {
     bool spatial = false;
     f32 min_distance = 32.0f;
     f32 max_distance = 512.0f;
+    AudioRolloff rolloff = AudioRolloff::Smooth;
+    f32 rolloff_power = 1.0f;
+    f32 pan_strength = 1.0f;
 };
 
 // Turns `bus` down to `volume` while anything plays on `when` (or a bus under
@@ -141,6 +145,8 @@ std::string_view audio_category_name(AudioCategory category);
 std::string_view audio_effect_type_name(AudioEffectType type);
 bool parse_audio_effect_type(std::string_view value, AudioEffectType& out);
 bool parse_audio_category(std::string_view value, AudioCategory& out);
+std::string_view audio_rolloff_name(AudioRolloff rolloff);
+bool parse_audio_rolloff(std::string_view value, AudioRolloff& out);
 
 AudioCatalog load_audio_catalog(const std::filesystem::path& path);
 bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path& path);

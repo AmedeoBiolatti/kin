@@ -36,6 +36,10 @@ bool AudioClip::streamed() const {
     return _backend && _backend->streamed();
 }
 
+std::size_t AudioClip::memory_bytes() const {
+    return _backend ? _backend->memory_bytes() : 0;
+}
+
 std::unique_ptr<AudioDecoder> AudioClip::open_stream() const {
     return _backend ? _backend->open_stream() : nullptr;
 }

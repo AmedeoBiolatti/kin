@@ -20,12 +20,14 @@ class AudioEngine;
 //
 // Functions: play(cue[, opts]) -> handle (opts: volume, pitch, x, y, priority,
 // fade_in), stop(h[, fade]), playing(h), set_volume(h, v[, fade]),
-// set_pitch(h, p), set_position(h, x, y), play_music(cue[, crossfade]),
+// set_pitch(h, p), set_position(h, x, y), seek(h, seconds), position(h),
+// set_paused(h, paused), paused(h), play_music(cue[, crossfade]),
 // stop_music([fade]), set_bus_volume(bus, v[, fade]), bus_volume(bus),
 // set_bus_muted(bus, muted), set_bus_paused(bus, paused), stop_bus(bus[, fade]),
 // set_bus_effects(bus, {{type = "lowpass", cutoff = 800}, ...}),
 // set_bus_effect(bus, index, {cutoff = 400}) (1-based; fields left out keep
-// their values), set_listener(x, y). Effect fields are named as in a
+// their values), output_devices() -> {names}, set_output_device(name) ("" for
+// the default), output_device(), set_listener(x, y). Effect fields are named as in a
 // .kinaudio effect line.
 //
 // For a LuaScript, call it from LuaScriptOptions::setup; for a ScriptScene,

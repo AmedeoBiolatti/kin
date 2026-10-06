@@ -883,7 +883,10 @@ void test_settings_and_report() {
     assert(parsed.ok());
     const kin::JsonValue* settings = parsed.value->find("audio");
     assert(settings && settings->is_object());
-    assert(!settings->contains("sfx")); // a pause is not a setting
+    assert(!settings->contains("device")); // the default device is not written
+    const kin::JsonValue* saved_buses = settings->find("buses");
+    assert(saved_buses && saved_buses->contains("master") && saved_buses->contains("ui"));
+    assert(!saved_buses->contains("sfx")); // a pause is not a setting
 
     kin::AudioEngine restored = null_engine();
     kin::apply_audio_settings(restored, *settings);
@@ -1101,6 +1104,201 @@ void test_effect_changes_and_catalog() {
     assert(threw);
 }
 
+// seek() jumps within a clip, fading out and back in so the jump does not
+// click; a voice that has not sounded yet jumps straight away, streamed too.
+void test_seek() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("ramp", ramp_clip(48000, 1.0f / 48000.0f));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "ramp", .clips = {"ramp"}, .bus = "sfx"});
+    const kin::AudioHandle ramp = audio.play(catalog, {.cue = "ramp"});
+    render(audio, 1000);
+    assert(audio.seek(ramp, 0.5f));
+    assert(near(audio.playback_position(ramp), 0.5f, 1e-4f));
+    const std::vector<kin::f32> jump = render(audio, 480);
+    float largest_step = 0.0f;
+    for (std::size_t frame = 1; frame < 480; ++frame) {
+        largest_step = std::max(largest_step, std::fabs(jump[frame * 2] - jump[(frame - 1) * 2]));
+    }
+    assert(largest_step < 0.01f); // a cut from 0.02 to 0.5 would step by 0.48
+    // Faded out over 240 frames, jumped, and played 240 frames from 0.5 s.
+    assert(near(render(audio, 1)[0], (24000.0f + 240.0f) / 48000.0f, 5.0f / 48000.0f));
+    assert(!audio.seek(kin::AudioHandle{12345}, 0.1f));
+
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-seek";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    write_ramp_wav(dir / "ramp.wav", 3000);
+    for (const bool stream : {false, true}) {
+        kin::AudioCatalog files;
+        files.set_root(dir);
+        files.add_clip({.id = "ramp", .path = "ramp.wav", .stream = stream});
+        files.add_cue({.id = "ramp", .clips = {"ramp"}, .bus = "sfx"});
+        kin::AudioEngine engine = null_engine();
+        const kin::AudioHandle handle = engine.play(files, {.cue = "ramp"});
+        assert(engine.seek(handle, 2000.0f / 48000.0f)); // not heard yet: no fade
+        assert(source_frame(render(engine, 1)[0]) == 2000);
+    }
+}
+
+// set_paused holds one voice where it is while others play on.
+void test_pause_one_voice() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("ramp", ramp_clip(48000, 1.0f / 48000.0f));
+    audio.add_clip("dc", dc_clip(0.25f));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "ramp", .clips = {"ramp"}, .bus = "sfx"});
+    const kin::AudioHandle ramp = audio.play(catalog, {.cue = "ramp"});
+    const kin::AudioHandle hum = audio.play(catalog, {.cue = "hum"});
+    render(audio, 1000);
+
+    audio.set_paused(ramp, true);
+    assert(audio.paused(ramp) && audio.playing(ramp) && !audio.paused(hum));
+    render(audio, 100);
+    const std::vector<kin::f32> held = render(audio, 1000);
+    assert(std::ranges::all_of(held, [](kin::f32 v) { return near(v, 0.25f); })); // just the hum
+
+    audio.set_paused(ramp, false);
+    render(audio, 100);
+    // Held for 1000 frames: the ramp is at frame 1200, not 2200.
+    assert(near(render(audio, 1)[0] - 0.25f, 1200.0f / 48000.0f, 1e-4f));
+}
+
+// A clip backend that records the thread it was freed on.
+struct TrackedBackend final : kin::IAudioClipBackend {
+    std::vector<kin::f32> data = std::vector<kin::f32>(480, 0.1f);
+    std::thread::id* freed_on = nullptr;
+    ~TrackedBackend() override { *freed_on = std::this_thread::get_id(); }
+    std::span<const kin::f32> samples() const override { return data; }
+};
+
+// Cached clips are freed when asked, never while a voice plays them, and on
+// the game thread rather than the audio thread.
+void test_unloading() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-unload";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    write_wav(dir / "beep.wav");
+    write_wav(dir / "boop.wav");
+    const kin::AudioCatalog catalog = make_catalog(dir);
+
+    kin::AudioEngine audio = null_engine();
+    audio.preload(catalog);
+    assert(audio.loaded_clip_count() == 2);
+    assert(audio.loaded_clip_bytes() == 2 * 64 * sizeof(kin::f32)); // two 64-frame mono clips
+    const kin::AudioHandle theme = audio.play(catalog, {.cue = "theme"}); // loops "beep"
+    assert(audio.unload_unused() == 1); // boop
+    assert(audio.loaded_clip_count() == 1);
+    audio.stop(theme);
+    render(audio, 480);
+    assert(audio.unload_unused() == 1);
+    assert(audio.loaded_clip_count() == 0 && audio.loaded_clip_bytes() == 0);
+
+    // unload() drops a catalog's clips at once; playing voices keep theirs.
+    const kin::AudioHandle again = audio.play(catalog, {.cue = "theme"});
+    audio.unload(catalog);
+    assert(audio.loaded_clip_count() == 0 && audio.playing(again));
+    assert(render(audio, 16)[0] != 0.0f);
+
+    // The last owner of a clip lets go on the game thread.
+    std::thread::id freed_on{};
+    auto backend = std::make_shared<TrackedBackend>();
+    backend->freed_on = &freed_on;
+    audio.add_clip("tracked", kin::AudioClip{"tracked", kin::AudioFormat::F32, 1, 48000, 480, std::move(backend)});
+    kin::AudioCatalog tracked = bus_catalog();
+    tracked.add_cue({.id = "tracked", .clips = {"tracked"}, .bus = "sfx"});
+    std::thread::id mixer_thread{};
+    {
+        assert(audio.play(tracked, {.cue = "tracked"}));
+        audio.remove_clip("tracked");
+        std::thread mixer{[&] {
+            mixer_thread = std::this_thread::get_id();
+            render(audio, 960); // the voice finishes on this "audio" thread
+        }};
+        mixer.join();
+    }
+    assert(freed_on == std::thread::id{});
+    audio.update(0.0f);
+    assert(freed_on == std::this_thread::get_id() && freed_on != mixer_thread);
+}
+
+// Distance curves: shape, power and pan strength, from the catalog.
+void test_rolloff() {
+    const auto gain = [](kin::AudioRolloff rolloff, float distance, float power = 1.0f) {
+        return kin::calculate_spatial_audio({0.0f, 0.0f}, {distance, 0.0f},
+                                            {.min_distance = 10.0f, .max_distance = 100.0f, .rolloff = rolloff,
+                                             .rolloff_power = power}).gain;
+    };
+    using enum kin::AudioRolloff;
+    for (const kin::AudioRolloff rolloff : {Smooth, Linear, Inverse}) {
+        assert(gain(rolloff, 5.0f) == 1.0f && gain(rolloff, 10.0f) == 1.0f);
+        assert(gain(rolloff, 100.0f) == 0.0f && gain(rolloff, 150.0f) == 0.0f);
+    }
+    assert(near(gain(Linear, 32.5f), 0.75f));
+    assert(near(gain(Smooth, 32.5f), 1.0f - 0.15625f));
+    assert(near(gain(Inverse, 20.0f), (0.5f - 0.1f) / 0.9f));
+    assert(near(gain(Linear, 32.5f, 2.0f), 0.5625f));
+    assert(kin::calculate_spatial_audio({0.0f, 0.0f}, {50.0f, 0.0f}, {.max_distance = 100.0f, .pan_strength = 0.0f}).pan == 0.0f);
+
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "far", .clips = {"dc"}, .bus = "sfx", .loop = true, .spatial = true, .min_distance = 10.0f,
+                     .max_distance = 100.0f, .rolloff = Linear, .rolloff_power = 2.0f, .pan_strength = 0.0f});
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    audio.play(catalog, {.cue = "far", .position = {32.5f, 0.0f}, .has_position = true});
+    const std::vector<kin::f32> out = render(audio, 16);
+    assert(near(out[0], 0.5f * 0.5625f) && near(out[1], out[0])); // no pan
+
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-rolloff";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    assert(kin::save_audio_catalog(catalog, dir / "audio.kinaudio"));
+    const kin::AudioCatalog reloaded = kin::load_audio_catalog(dir / "audio.kinaudio");
+    const kin::AudioCue* loaded = reloaded.cue("far");
+    assert(loaded && loaded->rolloff == Linear && loaded->rolloff_power == 2.0f && loaded->pan_strength == 0.0f);
+}
+
+// Output devices, with SDL's dummy driver (one device).
+void test_output_devices() {
+    kin::AudioEngine silent = null_engine();
+    assert(!silent.set_output_device("anything") && silent.output_device().empty());
+
+    SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
+    const std::vector<std::string> devices = kin::list_audio_output_devices();
+    if (devices.empty()) {
+        std::fprintf(stderr, "device selection test skipped: no devices\n");
+        return;
+    }
+    kin::AudioEngine audio{kin::create_sdl_audio_backend(48000, 2, "no such device")};
+    assert(audio.device_available() && audio.output_device().empty()); // unknown: the default
+
+    assert(audio.set_output_device(devices.front()));
+    assert(audio.output_device() == devices.front());
+    assert(!audio.set_output_device("no such device"));
+    assert(audio.output_device() == devices.front());
+
+    // Still mixing after the switch.
+    const kin::i64 before = audio.stats().mixed_frames;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (audio.stats().mixed_frames == before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    assert(audio.stats().mixed_frames > before);
+
+    std::ostringstream text;
+    {
+        kin::JsonWriter json{text, false};
+        kin::write_audio_settings(json, audio);
+    }
+    const kin::JsonParseResult parsed = kin::parse_json(text.str());
+    assert(parsed.ok() && parsed.value->string_at("device") == devices.front());
+
+    assert(audio.set_output_device(""));
+    assert(audio.output_device().empty());
+    kin::apply_audio_settings(audio, *parsed.value);
+    assert(audio.output_device() == devices.front());
+}
+
 } // namespace
 
 int main() {
@@ -1134,5 +1332,10 @@ int main() {
     test_reverb_tail();
     test_compressor();
     test_effect_changes_and_catalog();
+    test_seek();
+    test_pause_one_voice();
+    test_unloading();
+    test_rolloff();
+    test_output_devices();
     return 0;
 }

@@ -19,7 +19,23 @@ SpatialAudioResult calculate_spatial_audio(Vec2f listener, Vec2f source, Spatial
     const f32 distance = std::sqrt(dx * dx + dy * dy);
     const f32 range = std::max(0.001f, spatial.max_distance - spatial.min_distance);
     const f32 t = std::clamp((distance - spatial.min_distance) / range, 0.0f, 1.0f);
-    const f32 gain = 1.0f - smoothstep(t);
+    f32 gain = 1.0f;
+    switch (spatial.rolloff) {
+    case AudioRolloff::Smooth: gain = 1.0f - smoothstep(t); break;
+    case AudioRolloff::Linear: gain = 1.0f - t; break;
+    case AudioRolloff::Inverse: {
+        // min/d, shifted and scaled so it still reaches 0 at max_distance.
+        const f32 near = std::max(spatial.min_distance, 1.0f);
+        const f32 far = std::max(spatial.max_distance, near + 0.001f);
+        const f32 d = std::clamp(distance, near, far);
+        gain = (near / d - near / far) / (1.0f - near / far);
+        break;
+    }
+    }
+    gain = std::clamp(gain, 0.0f, 1.0f);
+    if (spatial.rolloff_power != 1.0f && gain > 0.0f) {
+        gain = std::pow(gain, std::max(0.01f, spatial.rolloff_power));
+    }
     const f32 pan = std::clamp(dx / std::max(1.0f, spatial.max_distance), -1.0f, 1.0f) * spatial.pan_strength;
     return {
         .gain = gain,

@@ -95,6 +95,15 @@ void bind_lua_audio(sol::state_view lua, AudioEngine& audio, const AudioCatalog&
             engine->set_bus_effect(bus, index - 1, effect_from(fields, chain[index - 1]));
         }
     };
+    table["seek"] = [engine](i64 handle, f32 seconds) { return engine->seek(handle_of(handle), seconds); };
+    table["position"] = [engine](i64 handle) { return engine->playback_position(handle_of(handle)); };
+    table["set_paused"] = [engine](i64 handle, bool paused) { engine->set_paused(handle_of(handle), paused); };
+    table["paused"] = [engine](i64 handle) { return engine->paused(handle_of(handle)); };
+    table["output_devices"] = [] {
+        return sol::as_table(list_audio_output_devices());
+    };
+    table["set_output_device"] = [engine](const std::string& name) { return engine->set_output_device(name); };
+    table["output_device"] = [engine]() { return engine->output_device(); };
     table["set_listener"] = [engine](f32 x, f32 y) { engine->set_listener({x, y}); };
 }
 
