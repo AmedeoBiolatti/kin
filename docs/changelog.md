@@ -7,6 +7,24 @@ releases may change APIs.
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-10-06
+
+A smaller release, for large saves and cheaper UI text. Saves can be written
+compact, carry a one-line summary and list without reading their payloads,
+and a parsed JSON value is a quarter of the size it was. ui2 text is kerned
+as the font says, draws exactly as wide as it measures and measures about 50
+times faster; rounded rectangles are built without trigonometry.
+
+### Upgrading from 0.2.4
+
+- `JsonValue`'s layout changed (strings, arrays and objects are boxed):
+  rebuild everything that includes `kin/core/json_value.hpp`. A value moved
+  from is now null.
+- Fonts kerned in GPOS now draw kerned, so their lines are narrower than
+  before, and `measure()` changes by about a pixel for most fonts (heights
+  follow the line's ink, as SDL_ttf's do). Layouts that hard-code text widths
+  may want a look.
+
 ### Added
 
 - Saves: `SaveStoreConfig::compact` writes settings and slots without
@@ -751,7 +769,9 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.4...v0.2.5
+[0.2.4]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...v0.2.1
