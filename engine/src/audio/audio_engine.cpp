@@ -2,6 +2,8 @@
 
 #include <kin/audio/audio_decoder.hpp>
 
+#include "audio_effects.hpp"
+
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/rng.hpp>
@@ -27,6 +29,9 @@ constexpr f32 declick_seconds = 0.005f;
 constexpr f32 limiter_release_seconds = 0.05f;
 // Frames update() mixes at once for a backend that is not real time.
 constexpr i32 render_chunk_frames = 1024;
+// The mixer works in blocks of at most this many frames, so each bus's buffer
+// is allocated once and parameter changes land within ~20 ms.
+constexpr i32 block_frames = 1024;
 // Frames a streamed voice decodes at a time.
 constexpr i32 stream_buffer_frames = 1024;
 
@@ -66,10 +71,19 @@ struct AudioEngine::State {
         f32 step = 0.0f; // volume change per output frame while fading
         bool muted = false;
         bool paused = false;
-        // Resolved through the parents at the start of each mixed block.
+        // Resolved at the start of each mixed block.
         f32 duck = 1.0f; // from the duck rules aimed at this bus
-        f32 gain = 1.0f;
+        f32 own_gain = 1.0f; // this bus's level alone, applied as it adds into its parent
+        f32 gain = 1.0f; // through all its parents (for reports)
         bool paused_now = false;
+        i32 depth = 0;
+        // The bus's submix: its voices and child buses, then its effects.
+        std::vector<f32> buffer;
+        bool active = false; // anything reached the buffer this block
+        f32 applied_gain = -1.0f; // own_gain at the end of the last block; <0 before the first
+        std::vector<std::unique_ptr<AudioEffectProcessor>> effects;
+        std::vector<AudioEffect> effect_source; // the catalog chain `effects` came from
+        bool effects_from_game = false; // set_bus_effects wins over the catalog
     };
 
     struct Duck {
@@ -148,6 +162,7 @@ struct AudioEngine::State {
     mutable std::mutex mutex;
     std::vector<Voice> voices;
     std::vector<Bus> buses;
+    std::vector<i32> bus_order; // deepest buses first, so children mix before parents
     std::unordered_map<std::string, i32> bus_index;
     std::vector<AudioDuck> duck_source; // the catalog rules `ducks` was built from
     std::vector<Duck> ducks;
@@ -186,8 +201,20 @@ struct AudioEngine::State {
         }
         const i32 index = static_cast<i32>(buses.size());
         buses.push_back({.id = std::string{id}});
+        buses.back().buffer.assign(static_cast<std::size_t>(block_frames * channels), 0.0f);
+        bus_order.push_back(index);
         bus_index.emplace(std::string{id}, index);
         return index;
+    }
+
+    std::vector<std::unique_ptr<AudioEffectProcessor>> make_effects(const std::vector<AudioEffect>& chain) const {
+        std::vector<std::unique_ptr<AudioEffectProcessor>> made;
+        for (const AudioEffect& effect : chain) {
+            if (auto processor = make_audio_effect(effect, sample_rate)) {
+                made.push_back(std::move(processor));
+            }
+        }
+        return made;
     }
 
     // Registers `id` and its parents, refreshing what the catalog says about them.
@@ -199,6 +226,10 @@ struct AudioEngine::State {
             Bus& bus = buses[static_cast<std::size_t>(child)];
             bus.authored = authored->volume;
             bus.authored_muted = authored->muted;
+            if (!bus.effects_from_game && bus.effect_source != authored->effects) {
+                bus.effects = make_effects(authored->effects);
+                bus.effect_source = authored->effects;
+            }
             if (authored->parent.empty()) {
                 bus.parent = no_bus;
                 break;
@@ -263,12 +294,17 @@ struct AudioEngine::State {
             }
             bus.duck = 1.0f;
             bus.paused_now = false;
+            bus.depth = 0;
             const Bus* level = &bus;
             for (i32 guard = 0; level && guard < 32; ++guard) {
                 bus.paused_now = bus.paused_now || level->paused;
                 level = level->parent == no_bus ? nullptr : &buses[static_cast<std::size_t>(level->parent)];
+                bus.depth += level ? 1 : 0;
             }
         }
+        std::ranges::sort(bus_order, [&](i32 a, i32 b) {
+            return buses[static_cast<std::size_t>(a)].depth > buses[static_cast<std::size_t>(b)].depth;
+        });
 
         for (Duck& duck : ducks) {
             const bool active = std::ranges::any_of(voices, [&](const Voice& voice) {
@@ -284,13 +320,13 @@ struct AudioEngine::State {
         }
 
         for (Bus& bus : buses) {
+            bus.own_gain = bus.muted || bus.authored_muted ? 0.0f : bus.authored * bus.volume * bus.duck;
+        }
+        for (Bus& bus : buses) {
             f32 gain = 1.0f;
             const Bus* level = &bus;
             for (i32 guard = 0; level && guard < 32; ++guard) {
-                if (level->muted || level->authored_muted) {
-                    gain = 0.0f;
-                }
-                gain *= level->authored * level->volume * level->duck;
+                gain *= level->own_gain;
                 level = level->parent == no_bus ? nullptr : &buses[static_cast<std::size_t>(level->parent)];
             }
             bus.gain = gain;
@@ -554,19 +590,36 @@ struct AudioEngine::State {
     }
 
     void mix(std::span<f32> out) {
+        const std::size_t stride = static_cast<std::size_t>(channels);
+        const i32 total = static_cast<i32>(out.size() / stride);
+        for (i32 at = 0; at < total; at += block_frames) {
+            const i32 frames = std::min(block_frames, total - at);
+            mix_block(out.subspan(static_cast<std::size_t>(at) * stride, static_cast<std::size_t>(frames) * stride), frames);
+        }
+        std::erase_if(voices, [](const Voice& voice) { return voice.done; });
+        stats.active_voices = static_cast<i32>(std::ranges::count_if(voices, [](const Voice& voice) {
+            return !voice.stopping;
+        }));
+    }
+
+    void mix_block(std::span<f32> out, i32 frames) {
+        const std::size_t samples = static_cast<std::size_t>(frames * channels);
         std::ranges::fill(out, 0.0f);
-        const i32 frames = static_cast<i32>(out.size() / static_cast<std::size_t>(channels));
-        if (frames <= 0) {
-            return;
+        for (Bus& bus : buses) {
+            std::fill_n(bus.buffer.begin(), samples, 0.0f);
+            bus.active = !bus.effects.empty(); // effects can ring on after their input stops
         }
         advance_buses(frames);
 
         for (Voice& voice : voices) {
+            if (voice.done) {
+                continue;
+            }
             if (!voice.clip || !voice.clip->valid()) {
                 voice.done = true;
                 continue;
             }
-            const Bus* bus = voice.bus == no_bus ? nullptr : &buses[static_cast<std::size_t>(voice.bus)];
+            Bus* bus = voice.bus == no_bus ? nullptr : &buses[static_cast<std::size_t>(voice.bus)];
             const bool paused = bus && bus->paused_now;
             if (paused && (voice.fresh || (voice.gain_left == 0.0f && voice.gain_right == 0.0f))) {
                 continue; // silent and holding its place
@@ -578,7 +631,7 @@ struct AudioEngine::State {
                 voice.volume = voice.volume_frames == 0 ? voice.volume_target
                                                         : voice.volume + voice.volume_step * static_cast<f32>(n);
             }
-            f32 gain = paused ? 0.0f : voice.volume * (bus ? bus->gain : 1.0f);
+            f32 gain = paused ? 0.0f : voice.volume;
             PanGains pan{};
             if (voice.spatial && voice.has_position) {
                 const SpatialAudioResult spatial = calculate_spatial_audio(listener, voice.position, {
@@ -589,15 +642,46 @@ struct AudioEngine::State {
                 pan = pan_gains(spatial.pan);
             }
             gain = std::max(0.0f, gain);
-            mix_voice(voice, out, frames, {.left = gain * pan.left, .right = gain * pan.right});
+            std::span<f32> dest = out;
+            if (bus) {
+                bus->active = true;
+                dest = std::span<f32>{bus->buffer.data(), samples};
+            }
+            mix_voice(voice, dest, frames, {.left = gain * pan.left, .right = gain * pan.right});
+        }
+
+        // Each bus runs its effects over its submix, then adds it into its
+        // parent at its own volume, ramped across the block.
+        for (const i32 index : bus_order) {
+            Bus& bus = buses[static_cast<std::size_t>(index)];
+            const f32 from = bus.applied_gain < 0.0f ? bus.own_gain : bus.applied_gain;
+            bus.applied_gain = bus.own_gain;
+            if (!bus.active) {
+                continue;
+            }
+            const std::span<f32> block{bus.buffer.data(), samples};
+            for (const auto& effect : bus.effects) {
+                effect->process(block, channels);
+            }
+            f32* dest = out.data();
+            if (bus.parent != no_bus) {
+                Bus& parent = buses[static_cast<std::size_t>(bus.parent)];
+                parent.active = true;
+                dest = parent.buffer.data();
+            }
+            const f32 ramp = (bus.own_gain - from) / static_cast<f32>(frames);
+            const std::size_t stride = static_cast<std::size_t>(channels);
+            for (i32 frame = 0; frame < frames; ++frame) {
+                const f32 gain = from + ramp * static_cast<f32>(frame);
+                for (std::size_t c = 0; c < stride; ++c) {
+                    const std::size_t i = static_cast<std::size_t>(frame) * stride + c;
+                    dest[i] += block[i] * gain;
+                }
+            }
         }
 
         limit(out, frames);
         stats.mixed_frames += frames;
-        std::erase_if(voices, [](const Voice& voice) { return voice.done; });
-        stats.active_voices = static_cast<i32>(std::ranges::count_if(voices, [](const Voice& voice) {
-            return !voice.stopping;
-        }));
     }
 
     // --- clips (game thread) ---
@@ -994,6 +1078,51 @@ void AudioEngine::set_bus_volume(std::string_view bus, f32 volume, f32 fade) {
                    }));
 }
 
+void AudioEngine::set_bus_effects(std::string_view bus, std::vector<AudioEffect> effects) {
+    State& s = *_state;
+    auto made = s.make_effects(effects); // allocate before taking the lock
+    {
+        const std::scoped_lock lock{s.mutex};
+        State::Bus& state = s.buses[static_cast<std::size_t>(s.ensure_bus(bus))];
+        std::swap(state.effects, made); // the old chain is freed after unlocking
+        state.effect_source = std::move(effects);
+        state.effects_from_game = true;
+    }
+}
+
+void AudioEngine::set_bus_effect(std::string_view bus, std::size_t index, const AudioEffect& effect) {
+    State& s = *_state;
+    {
+        const std::scoped_lock lock{s.mutex};
+        const auto found = s.bus_index.find(std::string{bus});
+        if (found == s.bus_index.end()) {
+            return;
+        }
+        State::Bus& state = s.buses[static_cast<std::size_t>(found->second)];
+        if (index >= state.effects.size()) {
+            return;
+        }
+        if (state.effects[index]->effect().type == effect.type) {
+            state.effects[index]->set(effect); // keeps its state: no click
+            state.effect_source[index] = effect;
+            return;
+        }
+    }
+    std::unique_ptr<AudioEffectProcessor> made = make_audio_effect(effect, s.sample_rate);
+    const std::scoped_lock lock{s.mutex};
+    State::Bus& state = s.buses[static_cast<std::size_t>(s.bus_index.at(std::string{bus}))];
+    if (index < state.effects.size()) {
+        std::swap(state.effects[index], made);
+        state.effect_source[index] = effect;
+    }
+}
+
+std::vector<AudioEffect> AudioEngine::bus_effects(std::string_view bus) const {
+    const std::scoped_lock lock{_state->mutex};
+    const State::Bus* state = _state->find_bus(bus);
+    return state ? state->effect_source : std::vector<AudioEffect>{};
+}
+
 void AudioEngine::set_bus_muted(std::string_view bus, bool muted) {
     const std::scoped_lock lock{_state->mutex};
     _state->buses[static_cast<std::size_t>(_state->ensure_bus(bus))].muted = muted;
@@ -1201,6 +1330,11 @@ void AudioEngine::write_report(JsonWriter& json) const {
         json.field("duck", static_cast<f64>(bus.duck));
         json.field("muted", bus.muted);
         json.field("paused", bus.paused);
+        json.key("effects").begin_array();
+        for (const auto& effect : bus.effects) {
+            json.value(audio_effect_type_name(effect->effect().type));
+        }
+        json.end_array();
         json.end_object();
     }
     json.end_array();

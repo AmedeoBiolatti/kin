@@ -2,7 +2,10 @@
 
 #include <kin/audio/audio_engine.hpp>
 
+#include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace kin {
 namespace {
@@ -13,6 +16,25 @@ AudioHandle handle_of(i64 id) {
 
 i64 id_of(AudioHandle handle) {
     return static_cast<i64>(handle.id);
+}
+
+// Fields a Lua table sets on `effect`, named as in a .kinaudio effect line.
+AudioEffect effect_from(const sol::table& table, AudioEffect effect) {
+    if (const sol::optional<std::string> type = table["type"]) {
+        if (!parse_audio_effect_type(*type, effect.type)) {
+            throw std::runtime_error("unknown effect type '" + *type + "'");
+        }
+    }
+    effect.enabled = table.get_or("enabled", effect.enabled);
+    const std::pair<const char*, f32*> fields[] = {
+        {"cutoff", &effect.cutoff}, {"q", &effect.q}, {"room", &effect.room_size}, {"damping", &effect.damping},
+        {"wet", &effect.wet}, {"dry", &effect.dry}, {"width", &effect.width}, {"threshold", &effect.threshold},
+        {"ratio", &effect.ratio}, {"attack", &effect.attack}, {"release", &effect.release}, {"makeup", &effect.makeup},
+    };
+    for (const auto& [name, field] : fields) {
+        *field = table.get_or(name, *field);
+    }
+    return effect;
 }
 
 } // namespace
@@ -58,6 +80,20 @@ void bind_lua_audio(sol::state_view lua, AudioEngine& audio, const AudioCatalog&
     table["set_bus_paused"] = [engine](const std::string& bus, bool paused) { engine->set_bus_paused(bus, paused); };
     table["stop_bus"] = [engine](const std::string& bus, sol::optional<f32> fade) {
         engine->stop_bus(bus, fade.value_or(0.0f));
+    };
+    table["set_bus_effects"] = [engine](const std::string& bus, sol::table effects) {
+        std::vector<AudioEffect> chain;
+        for (std::size_t i = 1; i <= effects.size(); ++i) {
+            chain.push_back(effect_from(effects[i], {}));
+        }
+        engine->set_bus_effects(bus, std::move(chain));
+    };
+    // 1-based; fields not given keep their current values.
+    table["set_bus_effect"] = [engine](const std::string& bus, std::size_t index, sol::table fields) {
+        const std::vector<AudioEffect> chain = engine->bus_effects(bus);
+        if (index >= 1 && index <= chain.size()) {
+            engine->set_bus_effect(bus, index - 1, effect_from(fields, chain[index - 1]));
+        }
     };
     table["set_listener"] = [engine](f32 x, f32 y) { engine->set_listener({x, y}); };
 }

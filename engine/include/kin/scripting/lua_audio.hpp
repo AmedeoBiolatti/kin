@@ -23,7 +23,10 @@ class AudioEngine;
 // set_pitch(h, p), set_position(h, x, y), play_music(cue[, crossfade]),
 // stop_music([fade]), set_bus_volume(bus, v[, fade]), bus_volume(bus),
 // set_bus_muted(bus, muted), set_bus_paused(bus, paused), stop_bus(bus[, fade]),
-// set_listener(x, y).
+// set_bus_effects(bus, {{type = "lowpass", cutoff = 800}, ...}),
+// set_bus_effect(bus, index, {cutoff = 400}) (1-based; fields left out keep
+// their values), set_listener(x, y). Effect fields are named as in a
+// .kinaudio effect line.
 //
 // For a LuaScript, call it from LuaScriptOptions::setup; for a ScriptScene,
 // from ScriptSceneConfig::bind.

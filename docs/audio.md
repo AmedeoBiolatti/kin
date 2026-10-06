@@ -102,6 +102,34 @@ audio.stop_music(1.0f);
 playing voice relative to its cue, and `playback_position(handle)` says how many
 seconds into its clip it is.
 
+### Effects
+
+A bus can run effects over everything it plays, children included, before its
+volume: low- and high-pass filters, a reverb and a compressor. Each bus is
+mixed on its own and added into its parent, so an effect on `master` hears the
+whole game, and one on `sfx` only the sound effects.
+
+```text
+effect sfx lowpass cutoff=800 q=0.7
+effect ambient reverb room=0.7 damping=0.5 wet=0.3 dry=1 width=1
+effect master compressor threshold=-12 ratio=4 attack=0.01 release=0.1 makeup=0
+```
+
+`effect` lines follow the `bus` they name; `enabled=false` keeps an effect in
+the chain but bypassed. At runtime, `set_bus_effects(bus, chain)` replaces a
+bus's chain (the catalog's no longer applies to it), and `set_bus_effect(bus,
+index, effect)` changes one while it plays: a filter's cutoff glides to the new
+value over about 20 ms, and a reverb keeps its tail, so a muffled pause menu is
+a cutoff sweep:
+
+```cpp
+kin::AudioEffect muffled{.type = kin::AudioEffectType::LowPass, .cutoff = 400.0f};
+audio.set_bus_effects("sfx", {muffled});
+// later
+muffled.cutoff = 20000.0f;
+audio.set_bus_effect("sfx", 0, muffled);
+```
+
 ### Ducking
 
 A `duck` line turns one bus down while anything plays on another, or on a bus
@@ -189,6 +217,8 @@ kin::ScriptSceneConfig config{
 local door = audio.play("door", {volume = 0.8, x = 120, y = 40})
 audio.play_music("town", 2.0)
 audio.set_bus_paused("sfx", true)
+audio.set_bus_effects("sfx", {{type = "lowpass", cutoff = 800}})
+audio.set_bus_effect("sfx", 1, {cutoff = 300}) -- 1-based; other fields kept
 ```
 
 Handles are integers. A `LuaScript` binds it the same way from `setup`.

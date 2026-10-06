@@ -169,6 +169,27 @@ std::string_view audio_category_name(AudioCategory category) {
     return "sound";
 }
 
+std::string_view audio_effect_type_name(AudioEffectType type) {
+    switch (type) {
+    case AudioEffectType::LowPass: return "lowpass";
+    case AudioEffectType::HighPass: return "highpass";
+    case AudioEffectType::Reverb: return "reverb";
+    case AudioEffectType::Compressor: return "compressor";
+    }
+    return "lowpass";
+}
+
+bool parse_audio_effect_type(std::string_view value, AudioEffectType& out) {
+    for (const AudioEffectType type : {AudioEffectType::LowPass, AudioEffectType::HighPass, AudioEffectType::Reverb,
+                                       AudioEffectType::Compressor}) {
+        if (value == audio_effect_type_name(type)) {
+            out = type;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool parse_audio_category(std::string_view value, AudioCategory& out) {
     if (value == "music") {
         out = AudioCategory::Music;
@@ -308,6 +329,52 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
             continue;
         }
 
+        if (kind == "effect") {
+            std::string bus_id;
+            std::string type_text;
+            AudioEffect effect;
+            if (!(in >> bus_id >> type_text)) {
+                fail("effect requires a bus and a type");
+            }
+            if (!parse_audio_effect_type(type_text, effect.type)) {
+                fail("unknown effect type");
+            }
+            AudioBus* bus = catalog.bus(bus_id);
+            if (!bus) {
+                fail("effect on a bus not declared above it");
+            }
+            for (std::string token; in >> token;) {
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    fail("effect options must be key=value");
+                }
+                const std::string_view key{token.data(), eq};
+                const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
+                f32* field = key == "cutoff" ? &effect.cutoff
+                    : key == "q" ? &effect.q
+                    : key == "room" ? &effect.room_size
+                    : key == "damping" ? &effect.damping
+                    : key == "wet" ? &effect.wet
+                    : key == "dry" ? &effect.dry
+                    : key == "width" ? &effect.width
+                    : key == "threshold" ? &effect.threshold
+                    : key == "ratio" ? &effect.ratio
+                    : key == "attack" ? &effect.attack
+                    : key == "release" ? &effect.release
+                    : key == "makeup" ? &effect.makeup
+                    : nullptr;
+                if (key == "enabled") {
+                    if (!parse_bool(value, effect.enabled)) fail("invalid enabled");
+                } else if (!field) {
+                    fail("unknown effect option");
+                } else if (!parse_f32(value, *field)) {
+                    fail("invalid effect value");
+                }
+            }
+            bus->effects.push_back(effect);
+            continue;
+        }
+
         if (kind == "duck") {
             AudioDuck duck;
             if (!(in >> duck.bus)) {
@@ -427,6 +494,32 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
             out << cue->clips[i];
         }
         out << '\n';
+    }
+
+    bool first_effect = true;
+    for (const AudioBus* bus : buses) {
+        for (const AudioEffect& effect : bus->effects) {
+            out << (first_effect ? "\n" : "") << "effect " << bus->id << ' ' << audio_effect_type_name(effect.type);
+            first_effect = false;
+            if (!effect.enabled) {
+                out << " enabled=false";
+            }
+            switch (effect.type) {
+            case AudioEffectType::LowPass:
+            case AudioEffectType::HighPass:
+                out << " cutoff=" << effect.cutoff << " q=" << effect.q;
+                break;
+            case AudioEffectType::Reverb:
+                out << " room=" << effect.room_size << " damping=" << effect.damping << " wet=" << effect.wet
+                    << " dry=" << effect.dry << " width=" << effect.width;
+                break;
+            case AudioEffectType::Compressor:
+                out << " threshold=" << effect.threshold << " ratio=" << effect.ratio << " attack=" << effect.attack
+                    << " release=" << effect.release << " makeup=" << effect.makeup;
+                break;
+            }
+            out << '\n';
+        }
     }
 
     if (!catalog.ducks().empty()) {
