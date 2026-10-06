@@ -28,8 +28,8 @@ small, stays honest about its scope, and grows alongside the games built with it
 ![Signal Siege: the cyan player ship, marked by a ground ring, fires at red star, orange plate and purple ring enemies while pink enemy bullets stream across a dark steel deck](docs/images/signal_siege.png)
 
 <sub>Signal Siege, an arena survival example: a 1280x800 frame from kin's GPU backend, captured through the scene server
-while its autoplay benchmark runs: <code>KIN_RENDER_BACKEND=gpu signal_siege --server --benchmark --seed=7 --mute</code>,
-then <code>sim.tick</code> and <code>view.screenshot</code> requests.</sub>
+while its autoplay benchmark runs: <code>KIN_RENDER_BACKEND=gpu signal_siege --server --benchmark --seed=7 --mute --ui-scale 1</code>,
+then <code>sim.tick</code> (4,800 frames) and <code>view.screenshot</code> requests.</sub>
 
 ## Features
 
@@ -46,6 +46,10 @@ then <code>sim.tick</code> and <code>view.screenshot</code> requests.</sub>
 - **Agent interface** — every game gets deterministic headless runs with a JSON
   report, a line-JSON/HTTP control server, screenshots, and profiling from the
   same command-line flags ([docs/agent_interface.md](docs/agent_interface.md)).
+
+| ![The shapes demo: an orrery of planets with night sides, moons and an SVG rocket around a star](docs/images/shapes_demo.png) | ![The lighting demo at night: lamps, a campfire, a cyan crystal and a flashlight beam, in linear HDR](docs/images/lighting_demo.png) | ![Signal Siege in Japanese: the HUD, the wave banner and the controls line translated](docs/images/signal_siege_japanese.png) |
+|:-:|:-:|:-:|
+| <sub>Vector shapes and SVG under a camera that zooms and turns ([rendering](docs/rendering.md#shapes))</sub> | <sub>2D lights in linear HDR, tonemapped and graded ([rendering](docs/rendering.md))</sub> | <sub>Signal Siege in Japanese: text by key, in any script, switched while it runs ([localization](docs/localization.md))</sub> |
 
 ## Platforms
 
