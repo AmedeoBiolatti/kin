@@ -308,6 +308,31 @@ public:
     UiComboState& combo_state(Id id, i32 selected = 0);
     ColorPickerMode& color_picker_mode(Id id, ColorPickerMode mode = ColorPickerMode::Hsv);
 
+    // Mirrors what is drawn inside `bounds`, and the pointer read there, as a
+    // right-to-left interface wants a widget's insides: shapes, clips and the
+    // places of text and images are reflected across the bounds, while text
+    // and images still read the right way round. Scopes nest. Widgets with a
+    // left and a right (a checkbox, a slider, tabs) mirror themselves this way
+    // while ui_direction() is right to left; mirror_if_right_to_left does that.
+    void push_mirror(Rectf bounds);
+    void pop_mirror();
+    class MirrorGuard {
+    public:
+        MirrorGuard(Context* ctx, Rectf bounds) : _ctx(ctx) {
+            if (_ctx) _ctx->push_mirror(bounds);
+        }
+        ~MirrorGuard() {
+            if (_ctx) _ctx->pop_mirror();
+        }
+        MirrorGuard(const MirrorGuard&) = delete;
+        MirrorGuard& operator=(const MirrorGuard&) = delete;
+
+    private:
+        Context* _ctx;
+    };
+    [[nodiscard]] MirrorGuard mirror_if_right_to_left(Rectf bounds);
+    bool mirrored() const { return !_mirror_axes.empty(); }
+
     // Immediate draw helpers (logical space).
     void push_clip(Rectf bounds);
     // With rounded corners (top-left, top-right, bottom-right, bottom-left), so
@@ -438,6 +463,7 @@ private:
     Color _surface_fill_under{};              // last opaque fill, used as text background for contrast
     bool _wants_text_input = false;
     std::optional<Rectf> _text_input_area; // window coordinates
+    std::vector<f32> _mirror_axes;          // 2x + w of each mirror scope's bounds, innermost last
     i32 _text_input_cursor = 0;
 
     std::vector<LayoutNode> _nodes;

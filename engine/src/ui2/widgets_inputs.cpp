@@ -187,6 +187,7 @@ void run_combo_popup(Context& ctx, ComboBox& widget) {
 }
 
 void run(Context& ctx, ComboBox& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     widget.style = themed_widget_style(widget.style, ctx.theme().input);
     widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
     const TextInputLayoutMetrics metrics = text_input_layout_metrics(widget.text_style, widget.style);

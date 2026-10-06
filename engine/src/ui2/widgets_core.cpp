@@ -981,6 +981,7 @@ void draw_check(Context& ctx, Rectf box, f32 thickness, Color color) {
 }
 
 void run(Context& ctx, Toggle& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.changed = false;
@@ -1010,6 +1011,7 @@ void run(Context& ctx, Toggle& widget) {
 }
 
 void run(Context& ctx, Slider& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const WidgetStyle style = themed_widget_style(widget.style, ctx.theme().input);
     const SliderLayoutMetrics metrics = slider_layout_metrics(widget, ctx.theme().preset);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
@@ -1072,6 +1074,7 @@ void run(Context& ctx, Slider& widget) {
 }
 
 void run(Context& ctx, ProgressBar& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const f32 value = std::clamp(widget.value, 0.0f, 1.0f);
     const ProgressBarLayoutMetrics metrics = progress_bar_layout_metrics(ctx.theme().preset);
     const ProgressBar defaults{};
@@ -1112,6 +1115,7 @@ void run(Context&, Spacer&) {
 }
 
 void run(Context& ctx, IconButton& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     widget.style = themed_widget_style(widget.style, ctx.theme().button);
     widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
@@ -1624,13 +1628,16 @@ void run(Context& ctx, ScrollView& widget) {
         widget.content_size.x > 0.0f ? widget.content_size.x : widget.bounds.w,
         widget.content_size.y > 0.0f ? widget.content_size.y : widget.content_height,
     };
+    // Right to left, the scrollbar is on the left. (Not a mirror scope: games
+    // read viewport and content in screen coordinates.)
+    const bool rtl = ui_direction() == TextDirection::RightToLeft;
     widget.viewport = {
-        widget.bounds.x,
+        rtl ? widget.bounds.x + bar : widget.bounds.x,
         widget.bounds.y,
         std::max(0.0f, widget.bounds.w - bar),
         std::max(0.0f, widget.bounds.h - (widget.horizontal ? bar : 0.0f)),
     };
-    widget.track = {widget.viewport.x + widget.viewport.w, widget.bounds.y, bar, widget.bounds.h};
+    widget.track = {rtl ? widget.bounds.x : widget.viewport.x + widget.viewport.w, widget.bounds.y, bar, widget.bounds.h};
     widget.h_track = {widget.viewport.x, widget.viewport.y + widget.viewport.h, widget.viewport.w, bar};
 
     widget.scroll.offset = widget.scroll.offset.x == 0.0f && widget.scroll.offset.y == 0.0f ? Vec2f{0.0f, widget.offset} : widget.scroll.offset;
@@ -1676,6 +1683,7 @@ void run(Context& ctx, ScrollView& widget) {
 }
 
 void run(Context& ctx, ResourceRow& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     widget.style = themed_widget_style(widget.style, ctx.theme().panel);
     widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
     f32 x = widget.bounds.x;
@@ -1714,6 +1722,7 @@ void run(Context& ctx, ResourceRow& widget) {
 }
 
 void run(Context& ctx, LabeledBar& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const LabeledBar defaults{};
     const Color background = widget.background == defaults.background ? ctx.theme().progress_background : widget.background;
     const Color fill = widget.fill == defaults.fill ? ctx.theme().progress_fill : widget.fill;
@@ -1749,6 +1758,7 @@ void run(Context& ctx, LabeledBar& widget) {
 }
 
 void run(Context& ctx, IconMeter& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const i32 max_count = std::max(0, widget.max);
     Vec2f icon_size = widget.icon_size;
     if (icon_size.x <= 0.0f && widget.icon.valid()) {

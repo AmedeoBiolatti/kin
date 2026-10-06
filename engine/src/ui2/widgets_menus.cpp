@@ -108,6 +108,7 @@ Vec2f measure(const TabBar& widget) {
 }
 
 void run(Context& ctx, MenuList& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     widget.activated = -1;
     widget.activated_id.clear();
     widget.hovered = -1;
@@ -348,6 +349,7 @@ void run(Context& ctx, MenuBar& widget) {
 }
 
 void run(Context& ctx, TabBar& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     widget.activated = -1;
     widget.activated_id.clear();
     widget.closed = -1;

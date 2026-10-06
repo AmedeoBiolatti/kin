@@ -2,6 +2,8 @@
 
 #include <kin/ui2/text.hpp>
 
+#include "mirror_internal.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -10,6 +12,7 @@ namespace kin::ui2 {
 namespace {
 
 std::atomic<TextDirection> g_ui_direction{TextDirection::LeftToRight};
+thread_local int g_mirror_depth = 0;
 
 f32 aligned_pos(f32 parent_pos, f32 parent_size, f32 item_size, UiAlign align) {
     switch (align) {
@@ -188,6 +191,12 @@ Rectf centered_rect(Vec2f center, Vec2f size) {
     return {center.x - size.x * 0.5f, center.y - size.y * 0.5f, size.x, size.y};
 }
 
+namespace mirror_detail {
+int depth() { return g_mirror_depth; }
+void enter() { ++g_mirror_depth; }
+void leave() { --g_mirror_depth; }
+} // namespace mirror_detail
+
 void set_ui_direction(TextDirection direction) {
     g_ui_direction.store(direction, std::memory_order_relaxed);
     set_text_base_direction(direction == TextDirection::RightToLeft ? std::optional{direction} : std::nullopt);
@@ -198,7 +207,7 @@ TextDirection ui_direction() {
 }
 
 Rectf align_rect(Rectf parent, Vec2f size, UiAlign horizontal, UiAlign vertical) {
-    if (ui_direction() == TextDirection::RightToLeft) {
+    if (ui_direction() == TextDirection::RightToLeft && g_mirror_depth == 0) {
         horizontal = horizontal == UiAlign::Start ? UiAlign::End : horizontal == UiAlign::End ? UiAlign::Start : horizontal;
     }
     const f32 w = aligned_size(parent.w, size.x, horizontal);

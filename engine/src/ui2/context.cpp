@@ -4,6 +4,8 @@
 #include <kin/platform/log.hpp>
 #include <kin/renderer/post_blur.hpp>
 
+#include "mirror_internal.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -333,6 +335,10 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _diagnostics.clear();
     _draw_scopes.clear();
     _clip_stack.clear();
+    while (!_mirror_axes.empty()) {
+        _mirror_axes.pop_back(); // a scope left open last frame
+        mirror_detail::leave();
+    }
     _frame_region_ids.clear();
     _frame_dup_reported.clear();
     _draw_ops.clear();
@@ -804,10 +810,36 @@ Vec2f Context::pointer() const {
     if (!_input) {
         return {};
     }
-    if (_renderer) {
-        return _renderer->window_to_logical(_input->mouse_pos());
+    Vec2f p = _renderer ? _renderer->window_to_logical(_input->mouse_pos()) : _input->mouse_pos();
+    // Into the mirror scopes' own coordinates: the outermost reflection first.
+    for (const f32 axis : _mirror_axes) {
+        p.x = axis - p.x;
     }
-    return _input->mouse_pos();
+    return p;
+}
+
+void Context::push_mirror(Rectf bounds) {
+    const f32 axis = bounds.x * 2.0f + bounds.w;
+    _mirror_axes.push_back(axis);
+    mirror_detail::enter();
+    if (_renderer) {
+        _renderer->push_transform(Affine2{-1.0f, 0.0f, 0.0f, 1.0f, axis, 0.0f});
+    }
+}
+
+void Context::pop_mirror() {
+    if (_mirror_axes.empty()) {
+        return;
+    }
+    _mirror_axes.pop_back();
+    mirror_detail::leave();
+    if (_renderer) {
+        _renderer->pop_transform();
+    }
+}
+
+Context::MirrorGuard Context::mirror_if_right_to_left(Rectf bounds) {
+    return MirrorGuard{ui_direction() == TextDirection::RightToLeft ? this : nullptr, bounds};
 }
 
 bool Context::pointer_pressed(MouseButton button) const {
@@ -1289,6 +1321,10 @@ void Context::check_draw(std::string_view kind, Rectf rect, bool corner_exempt) 
 }
 
 void Context::push_clip(Rectf bounds) {
+    // Clips are untransformed: reflected here, innermost scope first.
+    for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
+        bounds.x = *axis - bounds.x - bounds.w;
+    }
     _clip_stack.push_back(_clip_stack.empty() ? bounds : rect_intersect(_clip_stack.back(), bounds));
     if (_renderer) {
         _renderer->push_clip(bounds);
@@ -1299,6 +1335,10 @@ void Context::push_clip(Rectf bounds, std::array<f32, 4> corner_radii) {
     if (std::ranges::all_of(corner_radii, [](f32 r) { return r <= 0.0f; })) {
         push_clip(bounds);
         return;
+    }
+    for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
+        bounds.x = *axis - bounds.x - bounds.w;
+        corner_radii = {corner_radii[1], corner_radii[0], corner_radii[3], corner_radii[2]};
     }
     _clip_stack.push_back(_clip_stack.empty() ? bounds : rect_intersect(_clip_stack.back(), bounds));
     if (_renderer) {
@@ -1733,6 +1773,11 @@ void Context::sprite(const Sprite& sprite, Rectf bounds, Color tint, bool corner
     if (_renderer && sprite.valid() && bounds.w > 0.0f && bounds.h > 0.0f && tint.a > 0) {
         check_draw("sprite", bounds, corner_exempt);
         record_draw(DrawOp::Kind::Sprite, bounds, 0.0f, 0.0f, tint);
+        // Images keep their orientation in a mirror scope (see text()).
+        std::optional<Renderer2D::TransformGuard> unmirror;
+        if (!_mirror_axes.empty()) {
+            unmirror.emplace(_renderer->scoped_transform(Affine2{-1.0f, 0.0f, 0.0f, 1.0f, bounds.x * 2.0f + bounds.w, 0.0f}));
+        }
         _renderer->draw_texture(sprite.texture, sprite.source, bounds, tint);
     }
 }
@@ -1774,6 +1819,13 @@ void Context::text(std::string_view value, Vec2f pos, const TextStyle& style) {
         color = hsv_color(std::fmod(_debug_last_hue + 0.5f, 1.0f), 1.0f, 1.0f, 255);
     }
     const Vec2f base{std::round(pos.x), std::round(pos.y)};
+    // In a mirror scope the text goes to its reflected place but reads the
+    // right way: reflected once more, about its own middle.
+    std::optional<Renderer2D::TransformGuard> unmirror;
+    if (!_mirror_axes.empty()) {
+        const f32 middle = base.x + measure_text(style.font, value, style.scale).x * 0.5f;
+        unmirror.emplace(_renderer->scoped_transform(Affine2{-1.0f, 0.0f, 0.0f, 1.0f, middle * 2.0f, 0.0f}));
+    }
     // The drop shadow under the text, the outline round it (from the distance
     // field with an Sdf font, else four offset copies). Skipped in the debug
     // wireframe theme (already recoloured) for clarity.

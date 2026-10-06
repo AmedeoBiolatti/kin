@@ -277,6 +277,99 @@ void test_right_to_left_layout() {
     assert(approx(first.get<Ui2Layout>()->solved.x, 0.0f));
 }
 
+// Records fills where a backend that honours transforms would put them.
+class TransformingBackend final : public IRenderer2DBackend {
+public:
+    explicit TransformingBackend(std::vector<Rectf>* fills) : _fills(fills) {}
+    std::string_view name() const override { return "transforming"; }
+    void clear(Color) override {}
+    void present() override {}
+    void set_logical_size(Vec2i) override {}
+    void set_integer_logical_size(Vec2i) override {}
+    Vec2i output_size() const override { return {640, 360}; }
+    Vec2f window_to_logical(Vec2f v) const override { return v; }
+    Vec2f logical_to_window(Vec2f v) const override { return v; }
+    Texture create_texture_from_rgba(const u8*, Vec2i) override { return {}; }
+    void draw_texture(const Texture&, Rectf dest) override { record(dest); }
+    void draw_texture(const Texture&, Rectf, Rectf dest) override { record(dest); }
+    void fill_rect(Rectf rect, Color) override { record(rect); }
+    void draw_rect(Rectf, Color) override {}
+    void draw_line(Vec2f, Vec2f, Color) override {}
+    void set_viewport(Rectf) override {}
+    void reset_viewport() override {}
+    void push_viewport(Rectf) override {}
+    void pop_viewport() override {}
+    void set_transform(const Affine2& transform) override { _transform = transform; }
+
+private:
+    void record(Rectf r) {
+        const Vec2f a = _transform.apply({r.x, r.y});
+        const Vec2f b = _transform.apply({r.x + r.w, r.y + r.h});
+        _fills->push_back({std::min(a.x, b.x), std::min(a.y, b.y), std::abs(b.x - a.x), std::abs(b.y - a.y)});
+    }
+    std::vector<Rectf>* _fills;
+    Affine2 _transform{};
+};
+
+// Right to left, a checkbox's box is on the right with its label to its left,
+// still reading forwards, and a slider grows leftwards.
+void test_right_to_left_widgets() {
+    const auto toggle_fills = [](bool rtl) {
+        ui2::set_ui_direction(rtl ? TextDirection::RightToLeft : TextDirection::LeftToRight);
+        std::vector<Rectf> fills;
+        Renderer2D renderer{std::make_unique<TransformingBackend>(&fills)};
+        Input input;
+        ui2::Context ui;
+        input.begin_frame();
+        ui.begin(input, renderer);
+        ui2::Toggle toggle{.id = ui2::make_id("t"), .bounds = {100, 0, 200, 20}, .label = "AB"};
+        toggle.text_style.font = ui2::bitmap_font();
+        ui2::run(ui, toggle);
+        ui.end();
+        return fills;
+    };
+    const std::vector<Rectf> ltr = toggle_fills(false);
+    const std::vector<Rectf> rtl = toggle_fills(true);
+    ui2::set_ui_direction(TextDirection::LeftToRight);
+    assert(!ltr.empty() && ltr.size() == rtl.size());
+    // Left to right everything starts at the left edge; right to left at the right.
+    const auto min_x = [](const std::vector<Rectf>& r) {
+        return std::ranges::min(r, {}, &Rectf::x).x;
+    };
+    const auto max_right = [](const std::vector<Rectf>& r) {
+        f32 right = 0.0f;
+        for (const Rectf& f : r) right = std::max(right, f.x + f.w);
+        return right;
+    };
+    assert(approx(min_x(ltr), 100.0f));
+    assert(approx(max_right(rtl), 300.0f));
+    // The label's pixels (the last fills, after the box) read forwards: "A"
+    // (drawn first) is left of "B" in both directions.
+    const auto label_order = [](const std::vector<Rectf>& r) {
+        const std::size_t half = r.size() - (r.size() - 1) / 2; // the glyph pixels, A's then B's
+        return r[half].x < r.back().x;
+    };
+    assert(label_order(ltr) && label_order(rtl));
+
+    // A slider pressed near its left end is near its maximum right to left.
+    ui2::set_ui_direction(TextDirection::RightToLeft);
+    std::vector<Rectf> fills;
+    Renderer2D renderer = make_recording_renderer(fills);
+    Input input;
+    ui2::Context ui;
+    ui2::Slider slider{.id = ui2::make_id("s"), .bounds = {0, 0, 100, 20}, .value = 0.0f, .min = 0.0f, .max = 1.0f};
+    for (int frame = 0; frame < 3; ++frame) {
+        input.begin_frame();
+        input.set_mouse_pos({10, 10});
+        if (frame == 1) input.set_mouse_pressed(MouseButton::Left);
+        ui.begin(input, renderer);
+        ui2::run(ui, slider);
+        ui.end();
+    }
+    ui2::set_ui_direction(TextDirection::LeftToRight);
+    assert(slider.value > 0.85f);
+}
+
 void test_solve_fit_autosize() {
     std::vector<ui2::LayoutNode> n;
     ui2::LayoutStyle root;
@@ -6078,6 +6171,7 @@ int main() {
     test_ecs_ui2_builder_widget_methods();
     test_ecs_ui2_text_keys();
     test_right_to_left_layout();
+    test_right_to_left_widgets();
     test_ecs_ui2_builder_button_click();
     test_ui2_theme_resolution_and_context_defaults();
     test_ui2_glass_theme();
