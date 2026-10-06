@@ -6,6 +6,7 @@
 #include <kin/ui2/text.hpp>
 #include <kin/ecs/ui2.hpp>
 #include <kin/ecs/ui2_sync.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/layout.hpp>
 #include <kin/ui2/radix_colors.hpp>
@@ -4213,6 +4214,61 @@ void test_ecs_ui2_builder_components_and_hierarchy() {
     assert(!dynamic.has<Ui2Static>());
 }
 
+// Ui2Text: widgets take their text from the active localization, again when
+// the language changes, and the layout is solved again.
+void test_ecs_ui2_text_keys() {
+    kin::EcsWorld world;
+    register_ui2_components(world);
+
+    // Without a localization the key shows.
+    kin::EcsEntity bare = ui2_entity(world, "bare").label(ui2::Label{}).text_key("menu.play").entity();
+    assert(bare.get<ui2::Label>()->text == "menu.play");
+
+    kin::Localization l10n;
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("menu.play", "Play");
+    en.strings.emplace("hud.gold", "{gold, plural, one {# coin} other {# coins}}");
+    kin::LanguageFile fr{.locale = "fr", .name = "Français"};
+    fr.strings.emplace("menu.play", "Jouer");
+    fr.strings.emplace("hud.gold", "{gold, plural, one {# pièce} other {# pièces}}");
+    l10n.add("test", std::vector<kin::LanguageFile>{std::move(en), std::move(fr)});
+    kin::set_active_localization(&l10n);
+
+    auto root = ui2_entity(world, "root").root({0, 0, 200, 100});
+    kin::EcsEntity button = ui2_entity(world, "button")
+                                .button(ui2::Button{})
+                                .text_key("menu.play")
+                                .child_of(root)
+                                .entity();
+    kin::EcsEntity gold = ui2_entity(world, "gold")
+                              .label(ui2::Label{})
+                              .text_key("hud.gold", {{.name = "gold", .value = 1250.0}})
+                              .child_of(root)
+                              .entity();
+    // A key set before its widget is applied once the widget is there.
+    kin::EcsEntity late = ui2_entity(world, "late").text_key("menu.play").child_of(root).entity();
+    late.raw().set(ui2::WrappedText{});
+
+    assert(button.get<ui2::Button>()->label == "Play");
+    assert(gold.get<ui2::Label>()->text == "1,250 coins");
+    assert(kin::apply_ui2_text(world) == 2); // "bare" (now localized) and "late"
+    assert(late.get<ui2::WrappedText>()->text == "Play");
+    assert(kin::apply_ui2_text(world) == 0); // nothing changed since
+
+    const kin::u64 version = root.entity().get<Ui2LayoutCache>()->tree_version;
+    l10n.set_locale("fr");
+    assert(kin::apply_ui2_text(world) == 4);
+    assert(button.get<ui2::Button>()->label == "Jouer");
+    assert(gold.get<ui2::Label>()->text == "1\xC2\xA0" "250 pi\xC3\xA8" "ces");
+    assert(root.entity().get<Ui2LayoutCache>()->tree_version > version);
+
+    // Setting the component anew applies it at once on the next pass.
+    gold.raw().set(kin::Ui2Text{.key = "hud.gold", .args = {{.name = "gold", .value = 1.0}}});
+    assert(kin::apply_ui2_text(world) == 1);
+    assert(gold.get<ui2::Label>()->text == "1 pi\xC3\xA8" "ce");
+    kin::set_active_localization(nullptr);
+}
+
 void test_ecs_ui2_builder_widget_methods() {
     kin::EcsWorld world;
     register_ui2_components(world);
@@ -5950,6 +6006,7 @@ int main() {
     test_ui2_layout_presets();
     test_ecs_ui2_builder_components_and_hierarchy();
     test_ecs_ui2_builder_widget_methods();
+    test_ecs_ui2_text_keys();
     test_ecs_ui2_builder_button_click();
     test_ui2_theme_resolution_and_context_defaults();
     test_ui2_glass_theme();

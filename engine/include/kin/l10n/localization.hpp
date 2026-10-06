@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <span>
 #include <string>
@@ -59,7 +60,7 @@ using TranslationTable = std::unordered_map<std::string, std::string, Translatio
 struct LanguageFile {
     std::string locale;      // "fr", "pt-BR" (normalized)
     std::string name;        // its own name, for a language menu: "Français"
-    TextDirection direction = TextDirection::LeftToRight;
+    std::optional<TextDirection> direction; // unset: the tag's (locale_direction)
     TranslationTable strings; // key -> pattern (see message_format.hpp)
 };
 
@@ -233,7 +234,7 @@ public:
     void clear_missing_keys();
 
     // Checks every language against the base: keys missing or extra, broken
-    // patterns, arguments the base does not give, plural forms the language
+    // patterns, arguments the base does not use, plural forms the language
     // needs. Errors break text on screen; warnings are worth a look.
     std::vector<LocalizationIssue> validate() const;
 

@@ -236,7 +236,9 @@ void Localization::rebuild() {
             if (!file.name.empty() && file.name != file.locale) {
                 language.info.name = file.name;
             }
-            language.info.direction = file.direction;
+            if (file.direction) {
+                language.info.direction = *file.direction;
+            }
             for (const auto& [key, pattern] : file.strings) {
                 language.strings.insert_or_assign(key, pattern);
             }
@@ -485,8 +487,8 @@ std::vector<LocalizationIssue> Localization::validate() const {
             for (const MessageShape::Argument& arg : shape.arguments) {
                 const auto in_base = std::ranges::find(wanted, arg.name, &MessageShape::Argument::name);
                 if (in_base == wanted.end()) {
-                    add_issue(issues, Severity::Error, locale, key,
-                              "'{" + arg.name + "}' is not in the base text, so nothing will fill it");
+                    add_issue(issues, Severity::Warning, locale, key,
+                              "'{" + arg.name + "}' is not in the base text: it shows as written unless the game gives it");
                 } else if ((arg.kind == "plural" || arg.kind == "number") && in_base->kind == "select") {
                     add_issue(issues, Severity::Error, locale, key,
                               "'{" + arg.name + "}' is a number here but a choice in the base text");

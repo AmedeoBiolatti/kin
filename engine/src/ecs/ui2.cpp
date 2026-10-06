@@ -3,6 +3,8 @@
 
 #include "ui2_internal.hpp"
 
+#include <kin/l10n/localization.hpp>
+
 #include <algorithm>
 #include <functional>
 #include <string>
@@ -981,6 +983,83 @@ void ui2_mark_dirty(flecs::entity entity) {
     mark_ui2_entity_dirty(entity);
 }
 
+namespace {
+
+// Puts `text`'s translation into the entity's widget if the language changed
+// since it last did; true if a widget's text changed.
+bool apply_ui2_text_to(flecs::entity entity, Ui2Text& text, std::vector<MessageArg>& args) {
+    const Localization* l10n = active_localization();
+    // Generations start at 1, so a fresh component (0) is always applied.
+    const u64 generation = l10n ? l10n->generation() : 1;
+    if (text.applied_generation == generation && text.applied_from == l10n) {
+        return false;
+    }
+    text.applied_from = l10n;
+    text.applied_generation = generation;
+    args.clear();
+    for (const Ui2TextArg& arg : text.args) {
+        if (const f64* number = std::get_if<f64>(&arg.value)) {
+            args.emplace_back(arg.name, *number);
+        } else {
+            args.emplace_back(arg.name, std::string_view{std::get<std::string>(arg.value)});
+        }
+    }
+    std::string value = l10n ? l10n->tr(text.key, args) : text.key;
+    if (auto* label = entity.get_mut<ui2::Label>()) {
+        label->text = std::move(value);
+    } else if (auto* wrapped = entity.get_mut<ui2::WrappedText>()) {
+        wrapped->text = std::move(value);
+    } else if (auto* button = entity.get_mut<ui2::Button>()) {
+        button->label = std::move(value);
+    } else if (auto* toggle = entity.get_mut<ui2::Toggle>()) {
+        toggle->label = std::move(value);
+    } else if (auto* icon_button = entity.get_mut<ui2::IconButton>()) {
+        icon_button->label = std::move(value);
+    } else if (auto* prompt = entity.get_mut<ui2::PromptLabel>()) {
+        prompt->text = std::move(value);
+    } else if (auto* nameplate = entity.get_mut<ui2::Nameplate>()) {
+        nameplate->label = std::move(value);
+    } else if (auto* bar = entity.get_mut<ui2::LabeledBar>()) {
+        bar->label = std::move(value);
+    } else if (auto* advanced = entity.get_mut<ui2::AdvancedText>()) {
+        advanced->markup = std::move(value);
+    } else {
+        text.applied_generation = 0; // no widget yet: try again next time
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+Ui2EntityBuilder& Ui2EntityBuilder::text_key(std::string key, std::vector<Ui2TextArg> args) {
+    flecs::entity entity = _entity.raw();
+    entity.set(Ui2Text{.key = std::move(key), .args = std::move(args)});
+    std::vector<MessageArg> scratch;
+    if (apply_ui2_text_to(entity, *entity.get_mut<Ui2Text>(), scratch)) {
+        mark_ui2_entity_dirty(entity);
+    }
+    return *this;
+}
+
+std::size_t apply_ui2_text(EcsWorld& world) {
+    return apply_ui2_text(world.raw());
+}
+
+std::size_t apply_ui2_text(flecs::world& world) {
+    std::vector<flecs::entity> changed;
+    std::vector<MessageArg> args;
+    world.each([&](flecs::entity entity, Ui2Text& text) {
+        if (apply_ui2_text_to(entity, text, args)) {
+            changed.push_back(entity);
+        }
+    });
+    for (flecs::entity entity : changed) {
+        mark_ui2_entity_dirty(entity);
+    }
+    return changed.size();
+}
+
 void register_ui2_components(EcsWorld& world) {
     register_ui2_components(world.raw());
 }
@@ -997,6 +1076,7 @@ void register_ui2_components(flecs::world& world) {
     world.component<Ui2ScrollContainer>("Ui2ScrollContainer");
     world.component<Ui2SyncKey>("Ui2SyncKey");
     world.component<Ui2SyncIndex>("Ui2SyncIndex");
+    world.component<Ui2Text>("Ui2Text");
 
     register_ui2_dirty_observers<Ui2Root>(world, "root", true);
     register_ui2_dirty_observers<Ui2Layout>(world, "layout", true);
@@ -1013,6 +1093,7 @@ void update_ui2_world(EcsWorld& world, ui2::Context& ui, Ui2WorldRenderScratch& 
 void update_ui2_world(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScratch& scratch, Ui2WorldRenderOptions options) {
     std::vector<Ui2WorldRecord>& records = scratch.records;
     records.clear();
+    apply_ui2_text(world);
     solve_ui2_layout(world, ui, scratch);
 
     // Container surfaces participate in the same

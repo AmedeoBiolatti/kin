@@ -38,7 +38,7 @@ std::string_view trim(std::string_view s) {
     return s;
 }
 
-bool parse_direction(std::string_view text, TextDirection& out) {
+bool parse_direction(std::string_view text, std::optional<TextDirection>& out) {
     if (text == "ltr") {
         out = TextDirection::LeftToRight;
         return true;
@@ -319,7 +319,6 @@ bool parse_language_file(std::string_view text, LanguageFile& out, std::vector<s
         errors.emplace_back("'locale' must be a language tag, like \"fr\" or \"pt-BR\"");
     } else {
         file.locale = normalize_locale(locale->as_string());
-        file.direction = locale_direction(file.locale);
     }
     file.name = root.string_at("name", file.locale);
     if (const JsonValue* direction = root.find("direction")) {
@@ -372,7 +371,6 @@ bool parse_language_csv(std::string_view text, std::vector<LanguageFile>& out, s
             LanguageFile file;
             file.locale = normalize_locale(name);
             file.name = file.locale;
-            file.direction = locale_direction(file.locale);
             if (std::ranges::any_of(columns, [&](const auto& col) { return col.second.locale == file.locale; })) {
                 errors.push_back("line 1: two columns for '" + file.locale + "'");
             }
@@ -465,8 +463,8 @@ std::string write_language_file(const LanguageFile& file) {
     json.begin_object();
     json.field("locale", file.locale);
     json.field("name", file.name);
-    if (file.direction != locale_direction(file.locale)) {
-        json.field("direction", file.direction == TextDirection::RightToLeft ? "rtl" : "ltr");
+    if (file.direction) {
+        json.field("direction", *file.direction == TextDirection::RightToLeft ? "rtl" : "ltr");
     }
     std::vector<const std::pair<const std::string, std::string>*> sorted;
     sorted.reserve(file.strings.size());

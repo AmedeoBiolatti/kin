@@ -2,6 +2,7 @@
 
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
+#include <kin/l10n/localization.hpp>
 
 #include <algorithm>
 #include <fstream>
@@ -9,6 +10,26 @@
 
 namespace kin {
 namespace {
+
+std::string dialogue_prefix(const DialogueDocument& document) {
+    return document.id.empty() ? std::string{"dialogue."} : "dialogue." + document.id + ".";
+}
+
+// The dialogue's variables as message arguments (views into `variables`).
+std::vector<MessageArg> variable_args(const std::unordered_map<std::string, DialogueVariable>& variables) {
+    std::vector<MessageArg> args;
+    args.reserve(variables.size());
+    for (const auto& [name, variable] : variables) {
+        if (const auto* number = std::get_if<f64>(&variable.value)) {
+            args.emplace_back(name, *number);
+        } else if (const auto* boolean = std::get_if<bool>(&variable.value)) {
+            args.emplace_back(name, *boolean ? std::string_view{"true"} : std::string_view{"false"});
+        } else {
+            args.emplace_back(name, std::string_view{std::get<std::string>(variable.value)});
+        }
+    }
+    return args;
+}
 
 bool contains_string(const std::vector<std::string>& values, std::string_view value) {
     return std::ranges::find(values, value) != values.end();
@@ -408,14 +429,38 @@ DialogueViewModel DialoguePlayer::current_view(bool show_disabled_choices) const
     view.ended = _state.ended;
     view.node_id = _state.current_node;
     view.history = _state.history;
+
+    const Localization* l10n = _document ? active_localization() : nullptr;
+    std::vector<MessageArg> args;
+    if (l10n) {
+        args = variable_args(_state.variables);
+    }
+    // The translation under `key` if there is one, else the document's text.
+    const auto localized = [&](const std::string& key, const std::string& fallback) -> std::string {
+        if (!l10n || !l10n->has(key)) {
+            return fallback;
+        }
+        return l10n->tr(key, args);
+    };
+    if (l10n) {
+        for (DialogueHistoryEntry& entry : view.history) {
+            entry.text_markup = localized(dialogue_text_key(*_document, entry.node_id), entry.text_markup);
+        }
+    }
+
     const DialogueNode* current = node(_state.current_node);
     if (!current) return view;
     if (current->kind == DialogueNodeKind::Line) {
         view.speaker_id = current->line.speaker_id;
-        view.text_markup = current->line.text_markup;
+        view.text_markup = localized(dialogue_text_key(*_document, current->id), current->line.text_markup);
         view.speaker_portrait = current->line.portrait;
         if (const DialogueSpeaker* s = speaker(current->line.speaker_id)) {
             view.speaker_name = s->name;
+            if (l10n) {
+                const std::string own = dialogue_speaker_key(*_document, s->id);
+                const std::string shared = "speakers." + s->id;
+                view.speaker_name = l10n->has(own) ? l10n->tr(own, args) : localized(shared, s->name);
+            }
             view.speaker_color = s->name_color;
             if (view.speaker_portrait.empty()) view.speaker_portrait = s->portrait;
         }
@@ -424,11 +469,50 @@ DialogueViewModel DialoguePlayer::current_view(bool show_disabled_choices) const
             bool enabled = choice.enabled;
             for (const DialogueCondition& condition : choice.conditions) enabled = enabled && condition_met(condition);
             if (enabled || show_disabled_choices) {
-                view.choices.push_back({choice.id, choice.text_markup, enabled, contains_string(_state.visited_choices, choice.id)});
+                view.choices.push_back({choice.id,
+                                        localized(dialogue_text_key(*_document, current->id, choice.id), choice.text_markup),
+                                        enabled,
+                                        contains_string(_state.visited_choices, choice.id)});
             }
         }
     }
     return view;
+}
+
+std::string dialogue_text_key(const DialogueDocument& document, std::string_view node_id, std::string_view choice_id) {
+    std::string key = dialogue_prefix(document);
+    key += node_id;
+    if (!choice_id.empty()) {
+        key += '.';
+        key += choice_id;
+    }
+    return key;
+}
+
+std::string dialogue_speaker_key(const DialogueDocument& document, std::string_view speaker_id) {
+    return dialogue_prefix(document) + "speakers." + std::string{speaker_id};
+}
+
+LanguageFile dialogue_language_file(const DialogueDocument& document, std::string_view locale) {
+    LanguageFile file;
+    file.locale = normalize_locale(locale);
+    file.name = file.locale;
+    for (const DialogueSpeaker& speaker : document.speakers) {
+        if (!speaker.name.empty()) {
+            file.strings.insert_or_assign("speakers." + speaker.id, speaker.name);
+        }
+    }
+    for (const DialogueNode& node : document.nodes) {
+        if (node.kind == DialogueNodeKind::Line && !node.line.text_markup.empty()) {
+            file.strings.insert_or_assign(dialogue_text_key(document, node.id), node.line.text_markup);
+        }
+        for (const DialogueChoice& choice : node.choices) {
+            if (!choice.text_markup.empty()) {
+                file.strings.insert_or_assign(dialogue_text_key(document, node.id, choice.id), choice.text_markup);
+            }
+        }
+    }
+    return file;
 }
 
 std::vector<DialogueEvent> DialoguePlayer::consume_events() {

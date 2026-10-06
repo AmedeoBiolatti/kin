@@ -5,10 +5,14 @@
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
 
+#include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace kin {
+
+class Localization;
 
 struct Ui2Static {
     i32 marker = 1;
@@ -66,6 +70,26 @@ struct Ui2ScrollContainer {
     Rectf v_thumb{};
     Rectf h_track{};
     Rectf h_thumb{};
+};
+
+// A value put into a Ui2Text's message ("{gold}").
+struct Ui2TextArg {
+    std::string name;
+    std::variant<f64, std::string> value;
+};
+
+// A widget's text by translation key. update_ui2_world puts the active
+// localization's text (kin::tr) into the entity's widget - Label::text,
+// WrappedText::text, Button::label, Toggle::label, IconButton::label,
+// PromptLabel::text, Nameplate::label, LabeledBar::label or
+// AdvancedText::markup - and lays the tree out again, when the language
+// changes or the component is set anew (a new key or new args).
+struct Ui2Text {
+    std::string key;
+    std::vector<Ui2TextArg> args;
+    // What was applied last: by which localization, at which generation.
+    const Localization* applied_from = nullptr;
+    u64 applied_generation = 0;
 };
 
 struct Ui2WorldRenderOptions {
@@ -273,6 +297,8 @@ public:
     Ui2EntityBuilder& table(ui2::Table widget);
     Ui2EntityBuilder& tree_view(ui2::TreeView widget);
     Ui2EntityBuilder& property_grid(ui2::PropertyGrid widget);
+    // The widget's text by translation key (see Ui2Text).
+    Ui2EntityBuilder& text_key(std::string key, std::vector<Ui2TextArg> args = {});
     Ui2EntityBuilder& layer(i32 order);
     Ui2EntityBuilder& static_ui(bool enabled = true);
     Ui2EntityBuilder& child_of(EcsEntity parent);
@@ -292,6 +318,12 @@ void register_ui2_components(flecs::world& world);
 
 void ui2_mark_dirty(EcsEntity entity);
 void ui2_mark_dirty(flecs::entity entity);
+
+// Puts translated text into the widgets of entities with Ui2Text where the
+// language changed since; update_ui2_world calls it first. Returns how many
+// widgets it changed.
+std::size_t apply_ui2_text(flecs::world& world);
+std::size_t apply_ui2_text(EcsWorld& world);
 
 void update_ui2_world(EcsWorld& world,
                       ui2::Context& ui,

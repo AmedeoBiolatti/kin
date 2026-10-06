@@ -157,6 +157,28 @@ struct DialogueState {
     std::vector<DialogueEvent> events;
 };
 
+// Translated dialogue. While there is an active localization (see
+// kin/l10n/localization.hpp), DialoguePlayer::current_view shows each line,
+// choice and speaker name from it where it has the key, and the document's
+// own text where it does not:
+//
+//   dialogue.<document id>.<node id>               a line
+//   dialogue.<document id>.<node id>.<choice id>   a choice
+//   dialogue.<document id>.speakers.<speaker id>   a speaker's name, else
+//   speakers.<speaker id>                          one shared by every document
+//
+// (Without a document id, "dialogue.<node id>".) Translated text is a message
+// (see message_format.hpp) given the dialogue's variables, so "{gold}" and
+// plurals of them work. History entries are shown in the current language too.
+std::string dialogue_text_key(const DialogueDocument& document, std::string_view node_id,
+                              std::string_view choice_id = {});
+std::string dialogue_speaker_key(const DialogueDocument& document, std::string_view speaker_id);
+// The document's own text under those keys (speakers as speakers.<id>), as a
+// language for Localization::add or write_language_file: what translators
+// start from, and what lets Localization::validate see untranslated lines.
+struct LanguageFile;
+LanguageFile dialogue_language_file(const DialogueDocument& document, std::string_view locale = "en");
+
 class DialoguePlayer {
 public:
     void start(const DialogueDocument& document, std::string_view start_node = {});

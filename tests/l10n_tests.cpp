@@ -201,7 +201,7 @@ void test_language_files() {
     })", file, errors);
     assert(ok && errors.empty());
     assert(file.locale == "fr-FR" && file.name == "Français");
-    assert(file.direction == kin::TextDirection::LeftToRight);
+    assert(!file.direction); // the tag's
     assert(file.strings.size() == 3 && file.strings.at("menu.play") == "Jouer");
 
     // A failed parse leaves the output alone.
@@ -216,7 +216,7 @@ void test_language_files() {
     assert(!kin::parse_language_file("[1, 2", file, errors));
 
     errors.clear();
-    assert(kin::parse_language_file(R"({"locale": "ar", "strings": {}})", file, errors));
+    assert(kin::parse_language_file(R"({"locale": "ar", "direction": "rtl", "strings": {}})", file, errors));
     assert(file.direction == kin::TextDirection::RightToLeft);
 
     // Writing then reading gives the file back.
@@ -263,7 +263,6 @@ kin::LanguageFile language(std::string locale, std::initializer_list<std::pair<c
     kin::LanguageFile file;
     file.locale = std::move(locale);
     file.name = file.locale;
-    file.direction = kin::locale_direction(file.locale);
     for (const auto& [key, value] : strings) {
         file.strings.emplace(key, value);
     }
@@ -323,6 +322,18 @@ void test_lookups() {
     const auto infos = l10n.languages();
     assert(infos.size() == 3 && infos[0].locale == "en" && infos[2].locale == "fr-CA");
 
+    // Direction: the tag's, unless a file says otherwise.
+    l10n.add("ar", language("ar", {{"menu.play", "العب"}}));
+    l10n.set_locale("ar");
+    assert(l10n.direction() == kin::TextDirection::RightToLeft);
+    kin::LanguageFile odd = language("ar", {});
+    odd.direction = kin::TextDirection::LeftToRight;
+    l10n.add("ar-ltr", std::move(odd));
+    assert(l10n.direction() == kin::TextDirection::LeftToRight);
+    l10n.remove_source("ar-ltr");
+    l10n.remove_source("ar");
+    l10n.set_locale("fr");
+
     // The active localization behind kin::tr.
     assert(kin::tr("menu.play") == "menu.play");
     kin::set_active_localization(&l10n);
@@ -363,7 +374,7 @@ void test_validate() {
     const auto issues = l10n.validate();
     assert(has_issue(issues, "en", "broken", "unclosed", Severity::Error));
     assert(has_issue(issues, "pl", "play", "not translated", Severity::Warning));
-    assert(has_issue(issues, "pl", "gold", "'{coins}' is not in the base text", Severity::Error));
+    assert(has_issue(issues, "pl", "gold", "'{coins}' is not in the base text", Severity::Warning));
     assert(has_issue(issues, "pl", "gold", "does not use '{gold}'", Severity::Warning));
     assert(has_issue(issues, "pl", "cards", "has no few, many", Severity::Warning));
     assert(has_issue(issues, "pl", "who", "a number here but a choice", Severity::Error));
