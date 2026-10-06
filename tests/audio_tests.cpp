@@ -1,6 +1,11 @@
 #include <kin/audio/audio.hpp>
 #include <kin/anim/player.hpp>
 #include <kin/core/jobs.hpp>
+#include <kin/core/json.hpp>
+#include <kin/core/json_value.hpp>
+#include <kin/scripting/lua_audio.hpp>
+#include <kin/scripting/lua_script.hpp>
+#include <kin/scripting/script_engine.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/platform/log.hpp>
 
@@ -14,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -768,6 +774,204 @@ void test_catalog_clip_options() {
     assert(threw);
 }
 
+// A duck rule turns its bus down while its trigger bus plays, and back up after.
+void test_ducking() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("music", dc_clip(0.5f));
+    audio.add_clip("silent", dc_clip(0.0f, 4800));
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "master"});
+    catalog.add_bus({.id = "music", .parent = "master"});
+    catalog.add_bus({.id = "dialogue", .parent = "master"});
+    catalog.add_bus({.id = "lines", .parent = "dialogue"});
+    catalog.add_cue({.id = "theme", .clips = {"music"}, .category = kin::AudioCategory::Music, .bus = "music", .loop = true});
+    catalog.add_cue({.id = "line", .clips = {"silent"}, .bus = "lines"});
+    catalog.add_duck({.bus = "music", .when = "dialogue", .volume = 0.25f, .attack = 0.01f, .release = 0.02f});
+
+    audio.play(catalog, {.cue = "theme"});
+    assert(near(render(audio, 64)[0], 0.5f));
+    const kin::AudioHandle line = audio.play(catalog, {.cue = "line"}); // on a bus under "dialogue"
+    render(audio, 960); // attack: 10 ms
+    assert(near(render(audio, 64)[0], 0.125f, 1e-3f));
+
+    audio.stop(line);
+    render(audio, 240); // the stop's declick
+    const std::vector<kin::f32> releasing = render(audio, 480);
+    assert(releasing[0] > 0.125f && releasing[0] < 0.5f);
+    render(audio, 960);
+    assert(near(render(audio, 64)[0], 0.5f, 1e-3f));
+}
+
+// One music cue at a time: the same cue keeps playing, another crossfades.
+void test_music() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("a", dc_clip(0.2f));
+    audio.add_clip("b", dc_clip(0.4f));
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "music"});
+    catalog.add_cue({.id = "town", .clips = {"a"}, .category = kin::AudioCategory::Music, .bus = "music", .loop = true});
+    catalog.add_cue({.id = "cave", .clips = {"b"}, .category = kin::AudioCategory::Music, .bus = "music", .loop = true});
+
+    const kin::AudioHandle town = audio.play_music(catalog, "town", 0.0f);
+    assert(town && audio.music() == town);
+    assert(near(render(audio, 64)[0], 0.2f));
+    assert(audio.play_music(catalog, "town") == town);
+
+    const kin::AudioHandle cave = audio.play_music(catalog, "cave", 0.1f);
+    assert(cave != town && audio.music() == cave && !audio.playing(town));
+    const std::vector<kin::f32> crossfade = render(audio, 2400);
+    assert(near(crossfade[2 * 2399], 0.1f + 0.2f, 0.01f)); // halfway: half of each
+    render(audio, 2400);
+    assert(near(render(audio, 64)[0], 0.4f));
+    assert(audio.active_voice_count() == 1);
+
+    audio.stop_music(0.0f);
+    assert(!audio.music());
+    render(audio, 480);
+    assert(render(audio, 64)[0] == 0.0f);
+}
+
+// set_volume fades a voice, set_pitch changes its rate, and playback_position
+// says how far it got.
+void test_voice_controls() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    audio.add_clip("ramp", ramp_clip(48000, 0.00001f));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "half", .clips = {"dc"}, .bus = "sfx", .volume = 0.5f, .loop = true});
+    catalog.add_cue({.id = "ramp", .clips = {"ramp"}, .bus = "sfx"});
+
+    const kin::AudioHandle hum = audio.play(catalog, {.cue = "half"});
+    assert(near(render(audio, 64)[0], 0.25f));
+    audio.set_volume(hum, 2.0f, 0.1f); // relative to the cue's 0.5
+    const std::vector<kin::f32> fading = render(audio, 2400);
+    assert(fading[2 * 2399] > 0.3f && fading[2 * 2399] < 0.45f);
+    render(audio, 2400);
+    assert(near(render(audio, 64)[0], 0.5f));
+    audio.stop(hum, 0.0f);
+    render(audio, 480);
+
+    const kin::AudioHandle ramp = audio.play(catalog, {.cue = "ramp"});
+    render(audio, 4800);
+    assert(near(audio.playback_position(ramp), 0.1f, 0.001f));
+    audio.set_pitch(ramp, 2.0f);
+    const std::vector<kin::f32> fast = render(audio, 101);
+    assert(near(fast[2 * 100] - fast[0], 200 * 0.00001f, 1e-5f));
+    assert(near(audio.playback_position(ramp), (4800.0f + 202.0f) / 48000.0f, 0.001f));
+    assert(audio.playback_position(kin::AudioHandle{999}) == 0.0f);
+}
+
+// Bus volumes and mutes go into a settings file and come back.
+void test_settings_and_report() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    const kin::AudioCatalog catalog = bus_catalog();
+    audio.play(catalog, {.cue = "hum"});
+    audio.set_bus_volume("master", 0.5f);
+    audio.set_bus_muted("ui", true);
+    audio.set_bus_paused("sfx", true);
+
+    std::ostringstream text;
+    {
+        kin::JsonWriter json{text, false};
+        json.begin_object();
+        json.key("audio");
+        kin::write_audio_settings(json, audio);
+        json.end_object();
+    }
+    const kin::JsonParseResult parsed = kin::parse_json(text.str());
+    assert(parsed.ok());
+    const kin::JsonValue* settings = parsed.value->find("audio");
+    assert(settings && settings->is_object());
+    assert(!settings->contains("sfx")); // a pause is not a setting
+
+    kin::AudioEngine restored = null_engine();
+    kin::apply_audio_settings(restored, *settings);
+    assert(near(restored.bus_volume("master"), 0.5f));
+    assert(restored.bus_muted("ui") && !restored.bus_paused("sfx"));
+    assert(near(restored.effective_bus_volume(catalog, "sfx"), 0.5f));
+    assert(restored.effective_bus_volume(catalog, "ui") == 0.0f);
+
+    std::ostringstream report_text;
+    {
+        kin::JsonWriter json{report_text, false};
+        audio.write_report(json);
+    }
+    const kin::JsonParseResult report = kin::parse_json(report_text.str());
+    assert(report.ok());
+    assert(report.value->find("stats")->int_at("played_requests") == 1);
+    assert(report.value->find("voices")->items().size() == 1);
+    assert(report.value->find("voices")->items()[0].string_at("cue") == "hum");
+    assert(report.value->find("music")->is_null());
+    const auto& buses = report.value->find("buses")->items();
+    assert(std::ranges::any_of(buses, [](const kin::JsonValue& bus) {
+        return bus.string_at("id") == "sfx" && bus.bool_at("paused");
+    }));
+}
+
+// Lua scripts drive the engine through bind_lua_audio, in a LuaScript and in a
+// ScriptScene's engine.
+void test_lua_audio() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "theme", .clips = {"dc"}, .category = kin::AudioCategory::Music, .bus = "ui", .loop = true});
+
+    kin::LuaScript script{{.setup = [&](sol::state& lua) { kin::bind_lua_audio(lua, audio, catalog); }}};
+    assert(script.load_string(R"(
+        function start()
+            hum = audio.play("hum", {volume = 0.5, x = 10, y = 20, fade_in = 0})
+            audio.play_music("theme", 0)
+            audio.set_bus_volume("master", 0.8, 0.5)
+            audio.set_bus_paused("sfx", true)
+            return hum
+        end
+        function finish()
+            audio.stop(hum)
+            audio.stop_music(0)
+            return audio.playing(hum)
+        end
+    )"));
+    const auto hum = script.call_for<kin::i64>("start");
+    assert(hum && *hum > 0);
+    assert(audio.playing(kin::AudioHandle{static_cast<kin::u64>(*hum)}));
+    assert(audio.music());
+    assert(near(audio.bus_volume("master"), 0.8f) && audio.bus_paused("sfx"));
+    assert(script.call_for<bool>("finish") == false);
+    assert(!audio.music());
+
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-lua";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "scene.lua") << "assert(audio and audio.play, 'audio not bound')\n";
+    kin::ScriptEngine bound{[&](sol::state& lua) { kin::bind_lua_audio(lua, audio, catalog); }};
+    assert(bound.load_file(dir / "scene.lua"));
+    kin::ScriptEngine unbound;
+    assert(!unbound.load_file(dir / "scene.lua"));
+}
+
+void test_catalog_ducks_roundtrip() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-ducks";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    kin::AudioCatalog catalog;
+    catalog.add_duck({.bus = "music", .when = "dialogue", .volume = 0.3f, .attack = 0.2f, .release = 1.0f});
+    catalog.add_duck({.bus = "music", .when = "dialogue", .volume = 0.4f}); // replaces the first
+    catalog.add_duck({.bus = "ambient", .when = "dialogue"});
+    assert(catalog.ducks().size() == 2);
+    assert(kin::save_audio_catalog(catalog, dir / "audio.kinaudio"));
+    const kin::AudioCatalog loaded = kin::load_audio_catalog(dir / "audio.kinaudio");
+    assert(loaded.ducks() == catalog.ducks());
+
+    std::ofstream(dir / "bad.kinaudio") << "duck music volume=0.5\n";
+    bool threw = false;
+    try {
+        kin::load_audio_catalog(dir / "bad.kinaudio");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    assert(threw);
+}
+
 } // namespace
 
 int main() {
@@ -791,5 +995,11 @@ int main() {
     test_loop_points_and_streaming();
     test_stream_matches_decoded();
     test_catalog_clip_options();
+    test_ducking();
+    test_music();
+    test_voice_controls();
+    test_settings_and_report();
+    test_lua_audio();
+    test_catalog_ducks_roundtrip();
     return 0;
 }

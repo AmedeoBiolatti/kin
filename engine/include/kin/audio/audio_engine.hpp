@@ -8,10 +8,12 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace kin {
 
 class JobSystem;
+class JsonWriter;
 
 struct AudioHandle {
     u64 id = 0;
@@ -51,6 +53,14 @@ struct AudioEngineStats {
     i64 mixed_frames = 0;
     // Output frames the master limiter turned down to keep the mix from clipping.
     i64 limited_frames = 0;
+};
+
+// A bus's runtime state: what the game set on it, on top of the catalog.
+struct AudioBusState {
+    std::string id;
+    f32 volume = 1.0f;
+    bool muted = false;
+    bool paused = false;
 };
 
 // Plays cues from an AudioCatalog. Call it from one thread (the game thread);
@@ -98,8 +108,22 @@ public:
     void set_bus_paused(std::string_view bus, bool paused);
     void set_listener(Vec2f position);
     void set_position(AudioHandle handle, Vec2f position);
+    // A voice's volume on top of its cue's, and its pitch on top of the cue's
+    // (with the cue's variation kept).
+    void set_volume(AudioHandle handle, f32 volume, f32 fade = 0.0f);
+    void set_pitch(AudioHandle handle, f32 pitch);
+
+    // The music: one cue at a time. Playing another crossfades to it over
+    // `crossfade` seconds; playing the cue already playing keeps it going, so
+    // each scene can name its music without restarting it.
+    AudioHandle play_music(const AudioCatalog& catalog, std::string_view cue, f32 crossfade = 1.0f);
+    void stop_music(f32 fade = 1.0f);
+    AudioHandle music() const;
 
     bool playing(AudioHandle handle) const;
+    // Seconds into the clip the voice has played (looping wraps); 0 if it is
+    // not playing.
+    f32 playback_position(AudioHandle handle) const;
     i32 active_voice_count() const;
     i32 active_voice_count(AudioCategory category) const;
     // The volume set_bus_volume set (or is fading to); 1 by default.
@@ -108,11 +132,15 @@ public:
     bool bus_paused(std::string_view bus) const;
     // Catalog and runtime volumes multiplied up the bus hierarchy; 0 if any is muted.
     f32 effective_bus_volume(const AudioCatalog& catalog, std::string_view bus) const;
+    // Every bus the engine knows, in the order it met them.
+    std::vector<AudioBusState> bus_states() const;
     i32 sample_rate() const;
     i32 channels() const;
     bool device_available() const;
     AudioEngineStats stats() const;
     void reset_stats();
+    // Stats, buses and voices as a JSON object, for a scene's write_report.
+    void write_report(JsonWriter& json) const;
 
 private:
     struct State;

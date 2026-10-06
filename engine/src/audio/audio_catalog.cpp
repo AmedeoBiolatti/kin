@@ -74,6 +74,7 @@ void AudioCatalog::clear() {
     _clips.clear();
     _buses.clear();
     _cues.clear();
+    _ducks.clear();
 }
 
 void AudioCatalog::set_root(std::filesystem::path root) {
@@ -96,6 +97,21 @@ void AudioCatalog::add_bus(AudioBus bus_value) {
 void AudioCatalog::add_cue(AudioCue cue_value) {
     if (!cue_value.id.empty()) {
         _cues[cue_value.id] = std::move(cue_value);
+    }
+}
+
+void AudioCatalog::add_duck(AudioDuck duck_value) {
+    if (duck_value.bus.empty() || duck_value.when.empty()) {
+        return;
+    }
+    // One rule per pair: a later one replaces it.
+    const auto same = std::ranges::find_if(_ducks, [&](const AudioDuck& existing) {
+        return existing.bus == duck_value.bus && existing.when == duck_value.when;
+    });
+    if (same != _ducks.end()) {
+        *same = std::move(duck_value);
+    } else {
+        _ducks.push_back(std::move(duck_value));
     }
 }
 
@@ -292,6 +308,37 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
             continue;
         }
 
+        if (kind == "duck") {
+            AudioDuck duck;
+            if (!(in >> duck.bus)) {
+                fail("duck requires a bus");
+            }
+            for (std::string token; in >> token;) {
+                const std::size_t eq = token.find('=');
+                if (eq == std::string::npos) {
+                    fail("duck options must be key=value");
+                }
+                const std::string_view key{token.data(), eq};
+                const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
+                if (key == "when") {
+                    duck.when = std::string{value};
+                } else if (key == "volume") {
+                    if (!parse_f32(value, duck.volume) || duck.volume < 0.0f) fail("invalid volume");
+                } else if (key == "attack") {
+                    if (!parse_f32(value, duck.attack) || duck.attack < 0.0f) fail("invalid attack");
+                } else if (key == "release") {
+                    if (!parse_f32(value, duck.release) || duck.release < 0.0f) fail("invalid release");
+                } else {
+                    fail("unknown duck option");
+                }
+            }
+            if (duck.when.empty()) {
+                fail("duck requires when=<bus>");
+            }
+            catalog.add_duck(std::move(duck));
+            continue;
+        }
+
         fail("unknown directive");
     }
 
@@ -303,6 +350,7 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                        {.name = "buses", .value = std::to_string(catalog.buses().size())},
                        {.name = "clips", .value = std::to_string(catalog.clips().size())},
                        {.name = "cues", .value = std::to_string(catalog.cues().size())},
+                       {.name = "ducks", .value = std::to_string(catalog.ducks().size())},
                    }));
     return catalog;
 }
@@ -379,6 +427,14 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
             out << cue->clips[i];
         }
         out << '\n';
+    }
+
+    if (!catalog.ducks().empty()) {
+        out << '\n';
+    }
+    for (const AudioDuck& duck : catalog.ducks()) {
+        out << "duck " << duck.bus << " when=" << duck.when << " volume=" << duck.volume
+            << " attack=" << duck.attack << " release=" << duck.release << '\n';
     }
 
     return static_cast<bool>(out);

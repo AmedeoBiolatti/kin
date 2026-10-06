@@ -87,6 +87,33 @@ A paused bus's voices fade out over a few milliseconds and keep their place
 until the bus is resumed. A stopped voice fades out too, however short the fade
 asked for, so nothing clicks; `playing()` is false from the moment it is stopped.
 
+### Music
+
+`play_music` plays one music cue at a time. Playing another crossfades to it,
+and playing the cue already on keeps it going, so each scene can name its music
+in `on_enter` without restarting a track that carries over:
+
+```cpp
+audio.play_music(catalog, "town", 2.0f); // crossfade over 2 s
+audio.stop_music(1.0f);
+```
+
+`set_volume(handle, volume, fade)` and `set_pitch(handle, pitch)` change a
+playing voice relative to its cue, and `playback_position(handle)` says how many
+seconds into its clip it is.
+
+### Ducking
+
+A `duck` line turns one bus down while anything plays on another, or on a bus
+under it:
+
+```text
+duck music when=dialogue volume=0.3 attack=0.15 release=0.8
+```
+
+`volume` is how far down it goes, and `attack` and `release` are the seconds it
+takes to go down and to come back up.
+
 ### Voices
 
 Each category has a voice cap (`AudioEngineConfig`), and a cue can limit its own
@@ -121,6 +148,50 @@ void consume_audio_one_shots(EcsWorld& world, AudioEngine& audio, const AudioCat
 
 `AudioEmitter` and `AudioListener` follow `Transform2D`. `AudioOneShot` is a
 transient component that plays once and is removed.
+
+## Settings
+
+`write_audio_settings` and `apply_audio_settings` keep the player's bus volumes
+and mutes in the game's settings file:
+
+```cpp
+store.write_settings([&](kin::JsonWriter& json) {
+    json.begin_object();
+    json.key("audio");
+    kin::write_audio_settings(json, audio);
+    json.end_object();
+});
+
+const kin::SaveLoadResult loaded = store.read_settings();
+if (const kin::JsonValue* settings = loaded.result.ok ? loaded.payload.find("audio") : nullptr) {
+    kin::apply_audio_settings(audio, *settings);
+}
+```
+
+## Reports
+
+`audio.write_report(json)` writes the engine's stats, buses (with their volume,
+gain and duck) and voices. A scene can call it from its own `write_report`, so
+agents and tests can see what is playing.
+
+## Lua
+
+`bind_lua_audio` (`kin/scripting/lua_audio.hpp`) gives scripts an `audio` table:
+
+```cpp
+kin::ScriptSceneConfig config{
+    .script_path = "scripts/town.lua",
+    .bind = [&](sol::state& lua) { kin::bind_lua_audio(lua, audio, catalog); },
+};
+```
+
+```lua
+local door = audio.play("door", {volume = 0.8, x = 120, y = 40})
+audio.play_music("town", 2.0)
+audio.set_bus_paused("sfx", true)
+```
+
+Handles are integers. A `LuaScript` binds it the same way from `setup`.
 
 ## Animation Integration
 
