@@ -92,6 +92,17 @@ public:
     // Decodes the catalog's clips on `jobs`. A play() that needs a clip still
     // loading waits for that job instead of decoding the file again.
     void preload_async(const AudioCatalog& catalog, JobSystem& jobs);
+    // Frees cached clips no voice is playing and returns how many; a later
+    // play() loads them again. Call between levels, or after unload().
+    i32 unload_unused();
+    // Drops the catalog's clips from the cache. Voices playing them keep them
+    // until they finish; then they are freed.
+    void unload(const AudioCatalog& catalog);
+    // Forgets a clip add_clip registered.
+    void remove_clip(std::string_view clip_id);
+    i32 loaded_clip_count() const;
+    // Memory the loaded clips take: decoded samples, or a streamed file's bytes.
+    std::size_t loaded_clip_bytes() const;
 
     AudioHandle play(const AudioCatalog& catalog, const AudioPlayRequest& request);
     // Stops a voice, fading out over `fade` seconds (a few milliseconds at least,
@@ -120,6 +131,13 @@ public:
     // (with the cue's variation kept).
     void set_volume(AudioHandle handle, f32 volume, f32 fade = 0.0f);
     void set_pitch(AudioHandle handle, f32 pitch);
+    // Jumps to `seconds` into the clip, with a few milliseconds' fade out and
+    // back in. False if the voice is not playing (or a stream cannot seek).
+    bool seek(AudioHandle handle, f32 seconds);
+    // Pauses one voice: it fades out and holds its place until resumed, and
+    // still counts as playing.
+    void set_paused(AudioHandle handle, bool paused);
+    bool paused(AudioHandle handle) const;
 
     // The music: one cue at a time. Playing another crossfades to it over
     // `crossfade` seconds; playing the cue already playing keeps it going, so
@@ -145,6 +163,13 @@ public:
     i32 sample_rate() const;
     i32 channels() const;
     bool device_available() const;
+    // Plays on the named output device (a name from list_audio_output_devices);
+    // "" is the system default, which follows the system's choice. False if
+    // the device cannot be opened (playback stays where it was). If the
+    // device is unplugged, playback moves to the default and back when it
+    // returns.
+    bool set_output_device(std::string_view name);
+    std::string output_device() const;
     AudioEngineStats stats() const;
     void reset_stats();
     // Stats, buses and voices as a JSON object, for a scene's write_report.

@@ -22,6 +22,8 @@ public:
     // Decoded samples; empty for a streamed clip.
     virtual std::span<const f32> samples() const = 0;
     virtual bool streamed() const { return false; }
+    // Memory the clip holds: its samples, or a streamed file's bytes.
+    virtual std::size_t memory_bytes() const { return samples().size_bytes(); }
     // A new decoder positioned at the start, for a streamed clip; null otherwise.
     virtual std::unique_ptr<AudioDecoder> open_stream() const;
 };
@@ -50,6 +52,7 @@ public:
     // playing it decodes as it goes (see load_audio_stream).
     bool streamed() const;
     std::unique_ptr<AudioDecoder> open_stream() const;
+    std::size_t memory_bytes() const;
 
 private:
     std::string _name;

@@ -19,11 +19,14 @@ class JsonWriter;
 //       kin::apply_audio_settings(audio, *settings);
 //   }
 //
-// Writes an object with the volume and mute of every bus the game changed
-// from its default; pauses are not settings and are left out.
+// Writes the output device the player chose (if not the default) and the
+// volume and mute of every bus the game changed from its default:
+//   {"device": "Headphones", "buses": {"music": {"volume": 0.6, "muted": false}}}
+// Pauses are not settings and are left out.
 void write_audio_settings(JsonWriter& json, const AudioEngine& audio);
-// Sets the volumes and mutes write_audio_settings wrote. Unknown buses are
-// created, so settings can be applied before any sound has played.
+// Sets the device, volumes and mutes write_audio_settings wrote. Unknown buses
+// are created, so settings can be applied before any sound has played; a
+// device that is no longer plugged in leaves the default.
 void apply_audio_settings(AudioEngine& audio, const JsonValue& settings);
 
 } // namespace kin

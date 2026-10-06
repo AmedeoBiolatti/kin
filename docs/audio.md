@@ -100,7 +100,10 @@ audio.stop_music(1.0f);
 
 `set_volume(handle, volume, fade)` and `set_pitch(handle, pitch)` change a
 playing voice relative to its cue, and `playback_position(handle)` says how many
-seconds into its clip it is.
+seconds into its clip it is. `seek(handle, seconds)` jumps within the clip,
+fading out and back in over a few milliseconds so the jump does not click; it
+works on streamed clips too. `set_paused(handle, true)` pauses one voice the way
+a paused bus does: it goes quiet, keeps its place, and still counts as playing.
 
 ### Effects
 
@@ -149,8 +152,17 @@ instances. When a cap is full, a new request takes over the voice that matters
 least (lowest priority, oldest, furthest away) if it matters more, and is culled
 otherwise; `stats()` counts both.
 
-Spatial cues fade with distance between `min` and `max` and pan with an
-equal-power law. A limiter on the output turns the mix down when voices add up
+Spatial cues fade with distance between `min` (full volume) and `max`
+(silent), along the cue's `rolloff` curve:
+
+- `smooth` (the default): holds near the source and eases out at the edge.
+- `linear`.
+- `inverse`: falls fast near the source and slowly far away, like real sound,
+  still reaching silence at `max`.
+
+`rolloff_power=2` squares the curve (it falls sooner), and `0.5` makes it fall
+later. They pan with an equal-power law; `pan=0.5` halves how far a cue pans,
+and `pan=0` keeps it centred. A limiter on the output turns the mix down when voices add up
 past full scale instead of clipping.
 
 ### Loading
@@ -166,6 +178,28 @@ audio.preload_async(catalog, kin::default_job_system()); // on worker threads
 A `play()` that needs a clip still loading waits for that job rather than
 decoding the file again.
 
+Loaded clips stay cached until the game frees them:
+
+```cpp
+audio.unload(level_catalog); // drop a level's clips (voices playing them keep them)
+audio.unload_unused();       // free every cached clip nothing is playing
+audio.loaded_clip_bytes();   // what the cache holds now
+```
+
+A voice that finishes hands its clip back to the game thread, and `update()`
+frees it there, so the audio thread never frees a clip's samples.
+
+### Output devices
+
+```cpp
+for (const std::string& name : kin::list_audio_output_devices()) { /* a settings menu */ }
+audio.set_output_device("Headphones"); // "" is the system default
+```
+
+The default follows whatever the system chooses. If the device the game chose
+is unplugged, playback moves to the default and moves back when it returns
+(checked about once a second in `update()`).
+
 The ECS bridge provides listeners, emitters, and one-shots:
 
 ```cpp
@@ -179,8 +213,9 @@ transient component that plays once and is removed.
 
 ## Settings
 
-`write_audio_settings` and `apply_audio_settings` keep the player's bus volumes
-and mutes in the game's settings file:
+`write_audio_settings` and `apply_audio_settings` keep the player's output
+device, bus volumes and mutes in the game's settings file, as
+`{"device": "Headphones", "buses": {"music": {"volume": 0.6, "muted": false}}}`:
 
 ```cpp
 store.write_settings([&](kin::JsonWriter& json) {
