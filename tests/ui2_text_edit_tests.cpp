@@ -524,6 +524,19 @@ void test_carets_in_both_directions() {
     assert(ui2::caret_x(font, mixed, 3) > ui2::caret_x(font, mixed, 5));
     assert(ui2::caret_x(font, mixed, 5) > ui2::caret_x(font, mixed, 9));
     assert(ui2::caret_x(font, mixed, 9) > ui2::caret_x(font, mixed, 2));
+    // The arrows walk the line on screen: right from "ab" into the Hebrew at
+    // its left end (its last letter), then leftwards through it in the text.
+    std::vector<std::size_t> walk{0};
+    while (const auto next = ui2::caret_move(font, mixed, walk.back(), 1)) {
+        walk.push_back(*next);
+    }
+    assert((walk == std::vector<std::size_t>{0, 1, 2, 9, 7, 5, 3}));
+    std::vector<std::size_t> back{3};
+    while (const auto next = ui2::caret_move(font, mixed, back.back(), -1)) {
+        back.push_back(*next);
+    }
+    assert((back == std::vector<std::size_t>{3, 5, 7, 9, 2, 1, 0}));
+
     // Selecting "b א" covers the b on the left and the alef at the far right.
     const auto spans = ui2::selection_spans(font, mixed, 1, 5);
     assert(spans.size() == 2 && spans[0].first < spans[1].first);
@@ -600,6 +613,17 @@ void test_text_edit_right_to_left() {
     assert(h.edit.state.caret == 0);
     h.key(Key::Left);
     assert(h.edit.state.caret == 2);
+    // In mixed text the arrows move on screen, and on to the next line at the end.
+    Harness mixed{editor("ab " + hebrew + "\ncd")};
+    mixed.activate();
+    mixed.key(Key::Home);
+    mixed.key(Key::Right);
+    mixed.key(Key::Right);
+    mixed.key(Key::Right);
+    assert(mixed.edit.state.caret == 9); // past "ab", at the Hebrew's left end (its last letter)
+    mixed.key(Key::Right);
+    assert(mixed.edit.state.caret == 7);
+
     // A click near the right edge puts the caret at the start of the text.
     h.click({h.edit.bounds.x + h.edit.bounds.w - 6.0f, h.at(0).y});
     assert(h.edit.state.caret == 0);

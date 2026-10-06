@@ -291,10 +291,19 @@ UiTextInputResult edit_text_input(Context& ctx,
             }
         }
 
-        if (ctx.key_typed(left_key) || ctx.action_pressed("text_left")) {
+        // The arrows move the caret on screen, through text that runs both
+        // ways; by word (Ctrl) they step through the text, the way they point.
+        const auto visual = [&](i32 step) {
+            return caret_move(text_style.font, state.text, state.caret, step, text_style.scale).value_or(state.caret);
+        };
+        if (ctx.key_typed(Key::Left) && !ctrl) {
+            move_text_caret(state, visual(-1), select_left);
+        } else if ((ctrl && ctx.key_typed(left_key)) || ctx.action_pressed("text_left")) {
             move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret), select_left);
         }
-        if (ctx.key_typed(right_key) || ctx.action_pressed("text_right")) {
+        if (ctx.key_typed(Key::Right) && !ctrl) {
+            move_text_caret(state, visual(1), select_right);
+        } else if ((ctrl && ctx.key_typed(right_key)) || ctx.action_pressed("text_right")) {
             move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret), select_right);
         }
         if (ctx.key_pressed(Key::Home) || ctx.action_pressed("text_home")) {

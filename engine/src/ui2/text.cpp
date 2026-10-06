@@ -822,6 +822,31 @@ std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale) 
     return best;
 }
 
+std::optional<std::size_t> caret_move(const Font& font, std::string_view line, std::size_t offset, i32 step,
+                                      f32 scale) {
+    offset = std::min(offset, line.size());
+    const f32 from = caret_x(font, line, offset, scale);
+    std::optional<std::size_t> best;
+    f32 best_x = 0.0f;
+    for (const VisualRun& run : visual_runs(font, line, scale)) {
+        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+            if (k >= run.end && k < line.size()) {
+                break; // that offset belongs to the next run (as in caret_x)
+            }
+            const f32 x = caret_in_run(font, line, run, k, scale);
+            const bool ahead = step < 0 ? x < from - 0.01f : x > from + 0.01f;
+            if (k != offset && ahead && (!best || (step < 0 ? x > best_x : x < best_x))) {
+                best = k;
+                best_x = x;
+            }
+            if (k >= run.end) {
+                break;
+            }
+        }
+    }
+    return best;
+}
+
 std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_view line, std::size_t begin,
                                                  std::size_t end, f32 scale) {
     std::vector<std::pair<f32, f32>> spans;

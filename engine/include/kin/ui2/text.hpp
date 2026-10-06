@@ -163,6 +163,11 @@ FittedText fit_text(const Font& font, std::string_view text, f32 max_width, f32 
 f32 caret_x(const Font& font, std::string_view line, std::size_t offset, f32 scale = 1.0f);
 // The caret offset whose x is nearest `x`.
 std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale = 1.0f);
+// The caret one step left (`step` < 0) or right of `offset` on screen, as the
+// arrow keys move it through text that runs both ways; nullopt at that end
+// of the line.
+std::optional<std::size_t> caret_move(const Font& font, std::string_view line, std::size_t offset, i32 step,
+                                      f32 scale = 1.0f);
 // The spans [x0, x1) the selection [begin, end) of `line` covers, left to
 // right: one where the line runs one way, several where directions mix.
 std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_view line, std::size_t begin,

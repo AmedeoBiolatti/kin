@@ -49,6 +49,9 @@ private:
     std::size_t line_of(std::size_t offset);
     std::size_t line_last_offset(std::size_t line);
     f32 x_in_line(std::size_t line, std::size_t offset);
+    // The caret one step left or right on screen, or through the text (on to
+    // the next line) at the line's end.
+    std::size_t visual_step(i32 step, bool forward);
     // Where a line starts: 0, or, right to left, so that it ends at the right.
     f32 line_start(std::size_t line);
     bool right_to_left() const { return paragraph_direction(_s.text) == TextDirection::RightToLeft; }
@@ -174,6 +177,17 @@ std::size_t Editor::line_last_offset(std::size_t line) {
         return utf8_prev(_s.text, range.end);
     }
     return range.end;
+}
+
+std::size_t Editor::visual_step(i32 step, bool forward) {
+    const std::size_t line = line_of(_s.caret);
+    const TextRange range = lines()[line];
+    const std::optional<std::size_t> moved =
+        caret_move(_w.text_style.font, view_of(_s.text, range), _s.caret - range.begin, step, _w.text_style.scale);
+    if (moved) {
+        return std::min(range.begin + *moved, line_last_offset(line));
+    }
+    return forward ? utf8_next(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret);
 }
 
 f32 Editor::line_start(std::size_t line) {
@@ -430,18 +444,20 @@ void Editor::handle_keys() {
         redo();
     }
 
-    if (typed(Key::Left)) {
-        if (_s.has_selection() && !shift) {
-            move_caret(_s.selection_start(), false);
-        } else {
-            move_caret(ctrl ? utf8_word_left(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret), shift);
+    // The arrows move the caret on screen (through text that runs both ways),
+    // on to the next or previous line at a line's end; by word (Ctrl) they
+    // step through the text the way they point.
+    for (const i32 step : {-1, 1}) {
+        if (composing || !_ctx.key_typed(step < 0 ? Key::Left : Key::Right)) {
+            continue;
         }
-    }
-    if (typed(Key::Right)) {
+        const bool forward = (step > 0) != rtl;
         if (_s.has_selection() && !shift) {
-            move_caret(_s.selection_end(), false);
+            move_caret(forward ? _s.selection_end() : _s.selection_start(), false);
+        } else if (ctrl) {
+            move_caret(forward ? utf8_word_right(_s.text, _s.caret) : utf8_word_left(_s.text, _s.caret), shift);
         } else {
-            move_caret(ctrl ? utf8_word_right(_s.text, _s.caret) : utf8_next(_s.text, _s.caret), shift);
+            move_caret(visual_step(step, forward), shift);
         }
     }
     if (typed(Key::Up)) {
