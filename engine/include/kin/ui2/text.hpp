@@ -67,6 +67,25 @@ private:
 // base letter and other characters left blank.
 Font bitmap_font();
 
+// A font file, and which face of it when it is a collection (.ttc).
+struct FontSource {
+    std::filesystem::path path;
+    i32 face = 0;
+
+    FontSource() = default;
+    FontSource(std::filesystem::path p, i32 f = 0) : path(std::move(p)), face(f) {}
+    FontSource(const char* p) : path(p) {}
+    FontSource(const std::string& p) : path(p) {}
+    friend bool operator==(const FontSource&, const FontSource&) = default;
+};
+
+// A fallback font for one language: Japanese, Chinese and Korean share code
+// points but draw some differently, so each wants its own font.
+struct LanguageFont {
+    std::string language; // a tag or its start: "ja", "zh-Hans", "zh-Hant", "ko"
+    FontSource font;
+};
+
 struct TtfFontOptions {
     // Rasterizes glyphs at point_size * oversample and draws them back at
     // point_size: pass the renderer's output/logical ratio (e.g. 2.46 for a
@@ -78,7 +97,11 @@ struct TtfFontOptions {
     // Fonts for the characters this one lacks, tried in order: a CJK, Arabic
     // or Hebrew font behind a Latin one (system_fallback_fonts() lists the
     // system's). Each opens only when a character needs it.
-    std::vector<std::filesystem::path> fallbacks;
+    std::vector<FontSource> fallbacks;
+    // Tried before `fallbacks` while text_language() is (or starts with) their
+    // language: the right font for Japanese, Chinese or Korean. The font
+    // follows a change of language, as do themes made with it.
+    std::vector<LanguageFont> language_fallbacks;
 };
 
 // A TrueType or OpenType font. Text is laid out glyph by glyph from an atlas
@@ -94,7 +117,17 @@ Font load_ttf_font(const std::filesystem::path& path, f32 point_size, f32 oversa
 // Fonts installed with the system that cover the scripts a UI font often
 // lacks (CJK, Arabic, Hebrew, Thai, Devanagari, ...), most useful first. Empty
 // where none are found. system_ui_font falls back to them.
-const std::vector<std::filesystem::path>& system_fallback_fonts();
+const std::vector<FontSource>& system_fallback_fonts();
+// The system's fonts for Japanese, Simplified and Traditional Chinese and
+// Korean, by language (the right face of a collection such as Noto Sans CJK),
+// for TtfFontOptions::language_fallbacks. system_ui_font uses them.
+const std::vector<LanguageFont>& system_language_fonts();
+
+// The language text is shown in (a BCP 47 tag, "" for none): fonts choose
+// their language_fallbacks by it, and HarfBuzz shapes with it (forms that
+// differ by language). run_scene_app sets it from the localization.
+void set_text_language(std::string_view language);
+std::string text_language();
 
 // The direction of a paragraph of text whose characters run both ways (see
 // kin/core/bidi.hpp): unset, each line's first strong character decides, as

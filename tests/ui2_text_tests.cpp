@@ -39,6 +39,7 @@ class TextureBackend final : public IRenderer2DBackend {
 public:
     std::vector<Draw> draws;
     i32 textures_made = 0;
+    u64 last_pixels = 0; // a hash of the last texture's pixels
 
     std::string_view name() const override { return "texture-recording"; }
     void clear(Color) override {}
@@ -48,8 +49,12 @@ public:
     Vec2i output_size() const override { return {640, 360}; }
     Vec2f window_to_logical(Vec2f v) const override { return v; }
     Vec2f logical_to_window(Vec2f v) const override { return v; }
-    Texture create_texture_from_rgba(const u8*, Vec2i size) override {
+    Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override {
         ++textures_made;
+        last_pixels = 1469598103934665603ull;
+        for (std::size_t i = 0; pixels && i < static_cast<std::size_t>(size.x * size.y * 4); ++i) {
+            last_pixels = (last_pixels ^ pixels[i]) * 1099511628211ull;
+        }
         return Texture{std::make_shared<FakeTexture>(size)};
     }
     void draw_texture(const Texture& texture, Rectf dest) override { draws.push_back({texture, {}, dest}); }
@@ -159,12 +164,12 @@ std::filesystem::path plain_system_font() {
     return {};
 }
 
-std::filesystem::path cjk_fallback() {
-    for (const std::filesystem::path& path : ui2::system_fallback_fonts()) {
-        const std::string name = path.filename().string();
+ui2::FontSource cjk_fallback() {
+    for (const ui2::FontSource& font : ui2::system_fallback_fonts()) {
+        const std::string name = font.path.filename().string();
         for (const char* cjk : {"CJK", "msyh", "YuGoth", "meiryo", "Droid", "PingFang", "Hiragino"}) {
             if (name.find(cjk) != std::string::npos) {
-                return path;
+                return font;
             }
         }
     }
@@ -199,8 +204,8 @@ void test_atlas_grows_with_new_characters() {
 
 void test_fallback_fonts() {
     const std::filesystem::path path = plain_system_font();
-    const std::filesystem::path cjk = cjk_fallback();
-    if (path.empty() || cjk.empty()) {
+    const ui2::FontSource cjk = cjk_fallback();
+    if (path.empty() || cjk.path.empty()) {
         return;
     }
     const ui2::Font plain = ui2::load_ttf_font(path, 16.0f);
@@ -300,6 +305,42 @@ void test_fitting_text() {
     }
 }
 
+// Fonts follow the text language: a Japanese and a Chinese face draw the same
+// ideograph differently.
+void test_language_fonts() {
+    const std::vector<ui2::LanguageFont>& fonts = ui2::system_language_fonts();
+    const auto font_for = [&](std::string_view language) -> const ui2::LanguageFont* {
+        const auto found = std::ranges::find(fonts, language, &ui2::LanguageFont::language);
+        return found == fonts.end() ? nullptr : &*found;
+    };
+    const std::filesystem::path path = plain_system_font();
+    const ui2::LanguageFont* ja = font_for("ja");
+    const ui2::LanguageFont* zh = font_for("zh");
+    if (path.empty() || !ja || !zh) {
+        return;
+    }
+    // Collections hold a face per language.
+    if (ja->font.path == zh->font.path) {
+        assert(ja->font.face != zh->font.face);
+    }
+    assert(fonts.front().language.size() >= fonts.back().language.size()); // particular tags first
+
+    const ui2::Font font = ui2::load_ttf_font(path, 32.0f, ui2::TtfFontOptions{.language_fallbacks = fonts});
+    Recording rec = make_recording();
+    const std::string nao = u8s({0x76F4}); // 直: its strokes differ between Japanese and Chinese
+    const auto pixels_in = [&](std::string_view language) {
+        ui2::set_text_language(language);
+        ui2::draw_text(rec.renderer, font, nao, {0, 0}, 1.0f, colors::white);
+        return rec.backend->last_pixels;
+    };
+    const u64 japanese = pixels_in("ja-JP");
+    const u64 chinese = pixels_in("zh-Hans");
+    assert(japanese != chinese);
+    assert(pixels_in("ja") == japanese);
+    assert(ui2::text_language() == "ja");
+    ui2::set_text_language({});
+}
+
 } // namespace
 
 int main() {
@@ -316,5 +357,6 @@ int main() {
     test_fallback_fonts();
     test_right_to_left_runs();
     test_fitting_text();
+    test_language_fonts();
     return 0;
 }

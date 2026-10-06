@@ -28,6 +28,7 @@
 #include <kin/runtime/scene_server.hpp>
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/geometry.hpp>
+#include <kin/ui2/text.hpp>
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
 #include <kin/runtime/state_hash.hpp>
 #endif
@@ -524,6 +525,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         if (config.localization && config.localization->generation() != seen_l10n_generation) {
             seen_l10n_generation = config.localization->generation();
             ui2::set_ui_direction(config.localization->direction());
+            ui2::set_text_language(config.localization->formatting_locale());
         }
     };
     // Widgets whose text does not fit, for the report (and --fail-on-text-overflow).

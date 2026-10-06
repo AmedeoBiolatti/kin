@@ -324,7 +324,9 @@ Font cached_system_font(f32 point_size, bool bold, TextRendering rendering) {
     const std::filesystem::path& path = system_ui_font_path(bold);
     Font font = path.empty() ? bitmap_font()
                              : load_ttf_font(path, static_cast<f32>(clamped),
-                                             TtfFontOptions{.rendering = rendering, .fallbacks = system_fallback_fonts()});
+                                             TtfFontOptions{.rendering = rendering,
+                                                            .fallbacks = system_fallback_fonts(),
+                                                            .language_fallbacks = system_language_fonts()});
     cache.emplace(key, font);
     return font;
 }
@@ -343,11 +345,11 @@ bool system_ui_font_available() {
     return !system_ui_font_path(false).empty();
 }
 
-const std::vector<std::filesystem::path>& system_fallback_fonts() {
-    static const std::vector<std::filesystem::path> fonts = [] {
+const std::vector<FontSource>& system_fallback_fonts() {
+    static const std::vector<FontSource> fonts = [] {
         // Per script, the first that exists; scripts a UI font most often
         // lacks first. Fonts that cover several scripts come early.
-        const std::initializer_list<std::initializer_list<const char*>> scripts{
+        const std::vector<std::vector<const char*>> scripts{
             // Hebrew, Arabic, Greek, Cyrillic
             {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
              "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"},
@@ -370,17 +372,85 @@ const std::vector<std::filesystem::path>& system_fallback_fonts() {
              "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
              "/System/Library/Fonts/Kohinoor.ttc"},
         };
-        std::vector<std::filesystem::path> found;
+        std::vector<FontSource> found;
         for (const auto& candidates : scripts) {
             for (const char* candidate : candidates) {
                 std::error_code error;
                 if (std::filesystem::exists(candidate, error) &&
-                    std::ranges::find(found, std::filesystem::path{candidate}) == found.end()) {
+                    std::ranges::find(found, FontSource{candidate}) == found.end()) {
                     found.emplace_back(candidate);
                     break;
                 }
             }
         }
+        return found;
+    }();
+    return fonts;
+}
+
+const std::vector<LanguageFont>& system_language_fonts() {
+    static const std::vector<LanguageFont> fonts = [] {
+        struct Candidate {
+            const char* path;
+            const char* family; // in a collection, the face whose family has this
+        };
+        // The more particular tags first: a font chain takes every match in order.
+        const std::vector<std::pair<const char*, std::vector<Candidate>>> languages{
+            {"ja", {{"C:/Windows/Fonts/YuGothM.ttc", ""}, {"C:/Windows/Fonts/meiryo.ttc", ""},
+                    {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " JP"},
+                    {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " JP"},
+                    {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " JP"},
+                    {"/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf", ""},
+                    {"/System/Library/Fonts/\xE3\x83\x92\xE3\x83\xA9\xE3\x82\xAE\xE3\x83\x8E\xE8\xA7\x92\xE3\x82\xB4\xE3\x82\xB7\xE3\x83\x83\xE3\x82\xAF W3.ttc", ""}}},
+            {"ko", {{"C:/Windows/Fonts/malgun.ttf", ""},
+                    {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " KR"},
+                    {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " KR"},
+                    {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " KR"},
+                    {"/usr/share/fonts/truetype/unfonts-core/UnDotum.ttf", ""},
+                    {"/System/Library/Fonts/AppleSDGothicNeo.ttc", ""}}},
+            {"zh-HK", {{"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " HK"},
+                       {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " HK"},
+                       {"/System/Library/Fonts/PingFang.ttc", " HK"}}},
+            {"zh-Hant", {{"C:/Windows/Fonts/msjh.ttc", ""},
+                         {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " TC"},
+                         {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " TC"},
+                         {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " TC"},
+                         {"/System/Library/Fonts/PingFang.ttc", " TC"}}},
+            {"zh", {{"C:/Windows/Fonts/msyh.ttc", ""},
+                    {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " SC"},
+                    {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " SC"},
+                    {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " SC"},
+                    {"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", ""},
+                    {"/System/Library/Fonts/PingFang.ttc", " SC"}}},
+        };
+        std::vector<LanguageFont> found;
+        const auto add = [&](const char* language, const std::vector<Candidate>& candidates) {
+            for (const Candidate& candidate : candidates) {
+                std::error_code error;
+                if (!std::filesystem::exists(candidate.path, error)) {
+                    continue;
+                }
+                if (const std::optional<i32> face = text_detail::find_font_face(candidate.path, candidate.family)) {
+                    found.push_back({language, FontSource{candidate.path, *face}});
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const auto& [language, candidates] : languages) {
+            add(language, candidates);
+        }
+        // Traditional Chinese by region too (zh-TW, zh-MO), with the zh-Hant font.
+        for (const LanguageFont& font : std::vector<LanguageFont>{found}) {
+            if (font.language == "zh-Hant") {
+                found.push_back({"zh-TW", font.font});
+                found.push_back({"zh-MO", font.font});
+            }
+        }
+        // More particular first.
+        std::ranges::stable_sort(found, [](const LanguageFont& a, const LanguageFont& b) {
+            return a.language.size() > b.language.size();
+        });
         return found;
     }();
     return fonts;

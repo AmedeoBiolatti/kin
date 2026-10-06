@@ -16,6 +16,7 @@
 #include <cmath>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -722,6 +723,44 @@ struct AtlasGlyphs {
     AtlasGlyph& at(u32 c) { return c < 128 ? ascii[c] : others.at(c); }
 };
 
+// The language text is shown in, and a count of its changes, which fonts
+// watch to choose their language fallbacks again.
+std::mutex g_language_mutex;
+std::string g_language;
+std::atomic<u64> g_language_generation{1};
+
+std::string current_language() {
+    const std::scoped_lock lock(g_language_mutex);
+    return g_language;
+}
+
+// Whether `language` is `wanted` or a more particular tag of it ("zh-Hant-TW" of "zh-Hant").
+bool language_matches(std::string_view language, std::string_view wanted) {
+    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c == '_' ? '-' : c; };
+    if (wanted.empty() || language.size() < wanted.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < wanted.size(); ++i) {
+        if (lower(language[i]) != lower(wanted[i])) {
+            return false;
+        }
+    }
+    return language.size() == wanted.size() || language[wanted.size()] == '-' || language[wanted.size()] == '_';
+}
+
+TTF_Font* open_font(const FontSource& source, f32 size) {
+    if (source.face == 0) {
+        return TTF_OpenFont(source.path.string().c_str(), size);
+    }
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetStringProperty(props, TTF_PROP_FONT_CREATE_FILENAME_STRING, source.path.string().c_str());
+    SDL_SetFloatProperty(props, TTF_PROP_FONT_CREATE_SIZE_FLOAT, size);
+    SDL_SetNumberProperty(props, TTF_PROP_FONT_CREATE_FACE_NUMBER, source.face);
+    TTF_Font* font = TTF_OpenFontWithProperties(props);
+    SDL_DestroyProperties(props);
+    return font;
+}
+
 std::atomic<bool> g_has_base_direction{false};
 std::atomic<TextDirection> g_base_direction{TextDirection::LeftToRight};
 
@@ -738,11 +777,13 @@ public:
         : _path(path), _point_size(point_size), _oversample(std::max(1.0f, options.oversample)),
           _rendering(options.rendering), _kerning(path) {
         ensure_ttf();
-        for (const std::filesystem::path& fallback : options.fallbacks) {
-            if (!fallback.empty() && fallback != path) {
-                _fallbacks.push_back({.path = fallback});
+        for (const FontSource& fallback : options.fallbacks) {
+            if (!fallback.path.empty() && !(fallback.path == path && fallback.face == 0)) {
+                _general_fallbacks.push_back(fallback);
             }
         }
+        _language_fallbacks = options.language_fallbacks;
+        refresh_language();
         if (!face_for_scale(1.0f)) {
             throw std::runtime_error(std::string{"TTF_OpenFont failed: "} + SDL_GetError());
         }
@@ -758,14 +799,11 @@ public:
             close(face);
         }
         close(_sdf);
-        for (Fallback& fallback : _fallbacks) {
-            if (fallback.probe) {
-                TTF_CloseFont(fallback.probe);
-            }
-        }
+        close_probes();
     }
 
     Vec2f measure(std::string_view text, f32 scale) const override {
+        refresh_language();
         if (_rendering == TextRendering::Sdf) {
             // Linear: the large face's size, scaled down.
             FontFace* face = sdf_face();
@@ -786,6 +824,7 @@ public:
 
     bool draw_outlined(Renderer2D& renderer, std::string_view text, Vec2f pos, f32 scale, Color color, f32 outline,
                        Color outline_color) const override {
+        refresh_language();
         return _rendering == TextRendering::Sdf && renderer.capabilities().distance_fields &&
                draw_distance_fields(renderer, text, pos, scale, color, outline, outline_color);
     }
@@ -794,6 +833,7 @@ public:
         if (text.empty()) {
             return;
         }
+        refresh_language();
         if (_rendering == TextRendering::Sdf && renderer.capabilities().distance_fields &&
             draw_distance_fields(renderer, text, pos, scale, color, 0.0f, colors::transparent)) {
             return;
@@ -833,7 +873,7 @@ public:
 
 private:
     struct Fallback {
-        std::filesystem::path path;
+        FontSource source;
         TTF_Font* probe = nullptr; // a small face, to ask which characters it has
         bool tried = false;
     };
@@ -927,6 +967,7 @@ private:
         if (!_sdf.font) {
             _sdf.point_size = sdf_base * static_cast<f32>(sdf_supersample);
             _sdf.font = TTF_OpenFont(_path.string().c_str(), _sdf.point_size);
+            set_language(_sdf.font);
         }
         return _sdf.font ? &_sdf : nullptr;
     }
@@ -941,14 +982,94 @@ private:
 
     // ---- Fallbacks ----
 
+    // Shapes with the text language (forms that differ by language).
+    void set_language(TTF_Font* font) const {
+        if (font && !_language.empty()) {
+            TTF_SetFontLanguage(font, _language.c_str());
+        }
+    }
+
+    void close_probes() const {
+        for (Fallback& fallback : _fallbacks) {
+            if (fallback.probe) {
+                TTF_CloseFont(fallback.probe);
+                fallback.probe = nullptr;
+            }
+        }
+    }
+
+    // Follows set_text_language: the fallbacks for the language, before the
+    // general ones. A change drops what was made from the old ones.
+    void refresh_language() const {
+        const u64 generation = g_language_generation.load(std::memory_order_acquire);
+        if (generation == _language_generation) {
+            return;
+        }
+        _language_generation = generation;
+        _language = current_language();
+        std::vector<FontSource> chain;
+        for (const LanguageFont& font : _language_fallbacks) {
+            if (language_matches(_language, font.language) && std::ranges::find(chain, font.font) == chain.end()) {
+                chain.push_back(font.font);
+            }
+        }
+        for (const FontSource& font : _general_fallbacks) {
+            if (std::ranges::find(chain, font) == chain.end()) {
+                chain.push_back(font);
+            }
+        }
+        // Shaping depends on the language: shaped runs are made again.
+        _cache.clear();
+        for (FontFace* face : all_faces()) {
+            face->shaped_sizes.clear();
+            set_language(face->font);
+        }
+        const bool same = chain.size() == _fallbacks.size() &&
+                          std::ranges::equal(chain, _fallbacks, {}, {}, &Fallback::source);
+        if (same) {
+            return;
+        }
+        // Other fallbacks: glyphs may come from other faces now.
+        for (FontFace* face : all_faces()) {
+            if (face->font) {
+                TTF_ClearFallbackFonts(face->font);
+            }
+            for (TTF_Font*& fallback : face->fallbacks) {
+                if (fallback) {
+                    TTF_CloseFont(fallback);
+                    fallback = nullptr;
+                }
+            }
+            face->fallbacks.clear();
+            face->fallbacks_attached = false;
+            face->metrics.reset();
+        }
+        _glyph_atlases.clear();
+        _sdf_atlases.clear();
+        close_probes();
+        _fallbacks.clear();
+        for (const FontSource& font : chain) {
+            _fallbacks.push_back({.source = font});
+        }
+    }
+
+    std::vector<FontFace*> all_faces() const {
+        std::vector<FontFace*> faces;
+        for (FontFace& face : _faces) {
+            faces.push_back(&face);
+        }
+        faces.push_back(&_sdf);
+        return faces;
+    }
+
     TTF_Font* probe(std::size_t i) const {
         Fallback& fallback = _fallbacks[i];
         if (!fallback.tried) {
             fallback.tried = true;
-            fallback.probe = TTF_OpenFont(fallback.path.string().c_str(), 16.0f);
+            fallback.probe = open_font(fallback.source, 16.0f);
             if (!fallback.probe) {
                 KIN_LOG_WARN_F("ui", "fallback font open failed",
-                               (LogFields{{.name = "path", .value = fallback.path.string()},
+                               (LogFields{{.name = "path", .value = fallback.source.path.string()},
                                           {.name = "error", .value = SDL_GetError()}}));
             }
         }
@@ -972,7 +1093,8 @@ private:
     TTF_Font* fallback_font(FontFace& face, std::size_t i) const {
         face.fallbacks.resize(_fallbacks.size(), nullptr);
         if (!face.fallbacks[i] && probe(i)) {
-            face.fallbacks[i] = TTF_OpenFont(_fallbacks[i].path.string().c_str(), face.point_size);
+            face.fallbacks[i] = open_font(_fallbacks[i].source, face.point_size);
+            set_language(face.fallbacks[i]);
         }
         return face.fallbacks[i];
     }
@@ -1240,6 +1362,7 @@ private:
                                        {.name = "error", .value = SDL_GetError()}}));
             return nullptr;
         }
+        set_language(font);
         _faces.push_back({.point_size = size, .font = font, .last_used = _face_tick});
         return &_faces.back();
     }
@@ -1607,7 +1730,11 @@ private:
     f32 _point_size = 0.0f;
     f32 _oversample = 1.0f;
     TextRendering _rendering = TextRendering::Bitmap;
-    mutable std::vector<Fallback> _fallbacks;
+    std::vector<FontSource> _general_fallbacks;
+    std::vector<LanguageFont> _language_fallbacks;
+    mutable std::vector<Fallback> _fallbacks; // the chain for the text language
+    mutable std::string _language;
+    mutable u64 _language_generation = 0;
     mutable FontFace _sdf; // Sdf: the large face, opened on first use
     mutable KerningTable _kerning;
     mutable std::vector<SdfAtlas> _sdf_atlases;
@@ -1619,6 +1746,21 @@ private:
 };
 
 } // namespace
+
+void set_text_language(std::string_view language) {
+    {
+        const std::scoped_lock lock(g_language_mutex);
+        if (g_language == language) {
+            return;
+        }
+        g_language = language;
+    }
+    g_language_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::string text_language() {
+    return current_language();
+}
 
 void set_text_base_direction(std::optional<TextDirection> direction) {
     if (direction) {
@@ -1632,6 +1774,27 @@ std::optional<TextDirection> text_base_direction() {
 }
 
 namespace text_detail {
+
+std::optional<i32> find_font_face(const std::filesystem::path& path, std::string_view family) {
+    ensure_ttf();
+    for (i32 face = 0; face < 16; ++face) {
+        TTF_Font* font = open_font({path, face}, 12.0f);
+        if (!font) {
+            return std::nullopt;
+        }
+        const char* name = TTF_GetFontFamilyName(font);
+        const bool match = family.empty() || (name && std::string_view{name}.find(family) != std::string_view::npos);
+        const int faces = TTF_GetNumFontFaces(font);
+        TTF_CloseFont(font);
+        if (match) {
+            return face;
+        }
+        if (face + 1 >= faces) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
 
 std::shared_ptr<const IFontBackend> make_ttf_backend(const std::filesystem::path& path, f32 point_size,
                                                      const TtfFontOptions& options) {
