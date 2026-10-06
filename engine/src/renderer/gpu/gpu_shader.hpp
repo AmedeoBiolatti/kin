@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace kin::gpu {
@@ -29,6 +30,12 @@ public:
                                 u32 uniform_buffers = 0,
                                 u32 samplers = 0,
                                 u32 storage_buffers = 0);
+    // One of the engine's own SPIR-V shaders, built into it (embedded_gpu_shader);
+    // throws if this build has none by that name (glslc was not found).
+    static GpuShader from_embedded(GpuDevice& device, SDL_GPUShaderStage stage,
+                                   std::string_view file_name,
+                                   u32 uniform_buffers = 0,
+                                   u32 samplers = 0);
     static GpuShader from_file(GpuDevice& device, SDL_GPUShaderStage stage,
                                SDL_GPUShaderFormat format,
                                const std::filesystem::path& path,

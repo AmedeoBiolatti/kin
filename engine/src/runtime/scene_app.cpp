@@ -125,13 +125,26 @@ void write_bindings(std::ostream& out, const std::vector<InputBinding>& bindings
     }
 }
 
-void configure_runtime_logging(const HeadlessOptions& options) {
+void configure_runtime_logging(const HeadlessOptions& options, const GameInfo* game) {
     reset_logger_config_from_environment();
     LoggerConfig config = logger_config();
 
     if (!options.log_path.empty()) {
         config.file_path = options.log_path;
     }
+#ifdef KIN_SHIPPING
+    // Players have no console: this run's log, and the one before, go with the
+    // game's saves, where a bug report can find them.
+    if (config.file_path.empty() && game && !game->id.empty()) {
+        const std::filesystem::path dir = user_data_dir(game->id);
+        std::error_code error;
+        std::filesystem::create_directories(dir, error);
+        std::filesystem::rename(dir / "log.txt", dir / "log.previous.txt", error);
+        config.file_path = dir / "log.txt";
+    }
+#else
+    (void)game;
+#endif
     if (options.log_level) {
         config.min_level = *options.log_level;
     }
@@ -386,7 +399,7 @@ void write_render_profile_report(std::ostream& out, const RuntimeDebugOverlay& o
 }
 
 int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
-    configure_runtime_logging(config.headless);
+    configure_runtime_logging(config.headless, config.game);
     KIN_LOG_INFO_F("runtime",
                    "scene app starting",
                    (LogFields{
@@ -420,6 +433,10 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     }
 
     if (config.headless.server) {
+#ifndef KIN_ENABLE_AGENT_SERVER
+        KIN_LOG_ERROR("runtime", "agent server requested, but this build has KIN_ENABLE_AGENT_SERVER off");
+        return 1;
+#else
         ServerConfig server{
             .window = config.window,
             .transport = parse_server_transport(config.headless.server_transport),
@@ -432,6 +449,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             .asset_server = config.asset_server,
         };
         return run_scene_server(server, scenes);
+#endif
     }
 
     if (config.headless.print_game_info) {

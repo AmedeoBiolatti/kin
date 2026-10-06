@@ -3,6 +3,7 @@
 #include "lua_l10n.hpp"
 #include "lua_paths.hpp"
 
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/ecs/render.hpp>
@@ -67,11 +68,22 @@ std::optional<std::filesystem::path> resolve_lua_module(const std::filesystem::p
         asset_root / relative,
     };
     for (const std::filesystem::path& candidate : candidates) {
-        if (path_within_root(candidate, asset_root) && std::filesystem::exists(candidate)) {
+        if (path_within_root(candidate, asset_root) && content_file_exists(candidate)) {
             return normalized_dependency_path(candidate);
         }
     }
     return std::nullopt;
+}
+
+// Loads a script from the content (a mounted pack or disk), named as
+// luaL_loadfile names it, so errors read "path:line: message". Nullopt if the
+// file cannot be read.
+std::optional<sol::load_result> load_lua_file(sol::state_view lua, const std::filesystem::path& path) {
+    const std::optional<std::string> code = read_content_file(path);
+    if (!code) {
+        return std::nullopt;
+    }
+    return lua.load(*code, "@" + path.string());
 }
 
 Color script_color(i32 r, i32 g, i32 b) {
@@ -1289,7 +1301,11 @@ bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std:
         }
         record_dependency(*module_path);
 
-        sol::load_result loaded = lua.load_file(module_path->string());
+        std::optional<sol::load_result> read = load_lua_file(lua, *module_path);
+        if (!read) {
+            throw std::runtime_error("cannot open " + module_path->string());
+        }
+        sol::load_result& loaded = *read;
         if (!loaded.valid()) {
             sol::error error = loaded;
             throw std::runtime_error(error.what());
@@ -1318,7 +1334,12 @@ bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std:
     }
     record_dependency(resolved_script);
 
-    sol::load_result loaded = _impl->lua.load_file(resolved_script.string());
+    std::optional<sol::load_result> read = load_lua_file(_impl->lua, resolved_script);
+    if (!read) {
+        _last_error = "cannot open " + resolved_script.string();
+        return false;
+    }
+    sol::load_result& loaded = *read;
     if (!loaded.valid()) {
         sol::error error = loaded;
         _last_error = error.what();

@@ -62,6 +62,7 @@ kin_add_test(kin_dialogue_tests kin-dialogue SOURCES dialogue_tests.cpp)
 kin_add_test(kin_l10n_tests kin-l10n SOURCES l10n_tests.cpp)
 kin_add_test(kin_bidi_tests kin-bidi SOURCES bidi_tests.cpp)
 kin_add_test(kin_assets_tests kin-assets SOURCES assets_tests.cpp anim_asset_loader_tests.cpp)
+kin_add_test(kin_content_tests kin-content SOURCES content_tests.cpp)
 kin_add_test(kin_file_watcher_tests kin-file-watcher SOURCES file_watcher_tests.cpp)
 kin_add_test(kin_lua_script_tests kin-lua-script SOURCES lua_script_tests.cpp)
 kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp

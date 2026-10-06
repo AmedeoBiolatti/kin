@@ -1,5 +1,6 @@
 #include <kin/l10n/localization.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
@@ -169,18 +170,12 @@ bool Localization::load_text(const std::filesystem::path& path, std::string_view
 
 bool Localization::load_directory(const std::filesystem::path& dir, std::vector<std::string>& errors,
                                   FileWatcher* watcher) {
-    std::error_code ec;
-    std::vector<std::filesystem::path> files;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (entry.is_regular_file(ec) && is_language_file(entry.path())) {
-            files.push_back(entry.path());
-        }
-    }
-    if (ec) {
-        errors.push_back(dir.string() + ": " + ec.message());
+    if (!content_directory_exists(dir)) {
+        errors.push_back(dir.string() + ": no such folder");
         return false;
     }
-    std::ranges::sort(files);
+    std::vector<std::filesystem::path> files = list_content_files(dir, false);
+    std::erase_if(files, [](const std::filesystem::path& path) { return !is_language_file(path); });
     bool ok = true;
     for (const std::filesystem::path& path : files) {
         if (!watcher) {
@@ -340,8 +335,7 @@ std::string Localization::localized_path(const std::filesystem::path& root, std:
             if (found != _asset_exists.end()) {
                 exists = found->second;
             } else {
-                std::error_code error;
-                exists = std::filesystem::is_regular_file(root / candidate, error);
+                exists = content_file_exists(root / candidate);
                 _asset_exists.emplace(key, exists);
             }
         }

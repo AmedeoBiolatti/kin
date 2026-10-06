@@ -1,5 +1,6 @@
 #include <kin/audio/audio_decoder.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/audio/audio_clip.hpp>
 #include <kin/audio/backend.hpp>
 #include <kin/platform/log.hpp>
@@ -13,7 +14,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -343,17 +343,12 @@ std::unique_ptr<AudioDecoder> open_audio_decoder(AudioFileBytes bytes) {
 }
 
 AudioFileBytes read_audio_file(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file) {
+    const std::optional<ContentBytes> content = view_content_file(path); // from a pack, or disk
+    if (!content) {
         throw std::runtime_error("cannot open " + path.string());
     }
-    const std::streamsize size = file.tellg();
-    auto bytes = std::make_shared<std::vector<u8>>(static_cast<std::size_t>(std::max<std::streamsize>(0, size)));
-    file.seekg(0);
-    if (size > 0 && !file.read(reinterpret_cast<char*>(bytes->data()), size)) {
-        throw std::runtime_error("cannot read " + path.string());
-    }
-    return bytes;
+    const auto* data = reinterpret_cast<const u8*>(content->bytes.data());
+    return std::make_shared<const std::vector<u8>>(data, data + content->bytes.size());
 }
 
 // Needs no audio device, so it is safe on worker threads.

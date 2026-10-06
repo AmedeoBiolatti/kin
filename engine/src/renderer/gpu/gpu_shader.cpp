@@ -1,4 +1,5 @@
 #include "gpu_shader.hpp"
+#include "embedded_gpu_shader.hpp"
 
 #include "gpu_device.hpp"
 
@@ -80,6 +81,16 @@ GpuShader GpuShader::from_file(GpuDevice& device, SDL_GPUShaderStage stage,
                                u32 samplers) {
     const std::vector<u8> bytes = read_shader_file(path);
     return from_bytes(device, stage, format, bytes, uniform_buffers, samplers);
+}
+
+GpuShader GpuShader::from_embedded(GpuDevice& device, SDL_GPUShaderStage stage, std::string_view file_name,
+                                   u32 uniform_buffers, u32 samplers) {
+    const std::span<const unsigned char> bytes = embedded_gpu_shader(file_name);
+    if (bytes.empty()) {
+        throw std::runtime_error("shader " + std::string{file_name} +
+                                 " is not built into this engine (glslc was not found when it was built)");
+    }
+    return from_bytes(device, stage, SDL_GPU_SHADERFORMAT_SPIRV, bytes, uniform_buffers, samplers);
 }
 
 void GpuShader::release() {

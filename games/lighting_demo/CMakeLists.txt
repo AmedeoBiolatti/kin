@@ -6,6 +6,8 @@ target_link_libraries(lighting_demo PRIVATE
     kin::engine
 )
 
+kin_game(lighting_demo TITLE "Lighting Demo")
+
 target_compile_options(lighting_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

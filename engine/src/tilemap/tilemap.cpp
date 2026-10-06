@@ -1,5 +1,6 @@
 #include <kin/tilemap/tilemap.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 
@@ -1983,11 +1984,11 @@ void TileMap::invalidate_render_cache_for_dirty(const TileLayer& layer, TileRect
 }
 
 TileMap load_tilemap(const std::filesystem::path& path) {
-    std::ifstream in{path};
-    if (!in) {
+    const std::optional<std::string> read = read_content_text(path);
+    if (!read) {
         return {};
     }
-    const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    const std::string& text = *read;
     if (looks_like_json(text)) {
         JsonParseResult parsed = parse_json(text);
         if (parsed.ok()) {

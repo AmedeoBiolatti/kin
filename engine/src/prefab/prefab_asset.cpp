@@ -1,5 +1,6 @@
 #include <kin/prefab/prefab_asset.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/render.hpp>
@@ -423,13 +424,11 @@ bool set_runtime_name(EcsWorld& world, EcsEntity entity, std::string_view name) 
 
 PrefabLoadResult load_prefab_asset(const std::filesystem::path& path,
                                    const EcsComponentRegistry& components) {
-    std::ifstream in(path);
-    if (!in) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         return {.diagnostics = {"failed to open prefab '" + path.string() + "'"}};
     }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return parse_prefab_asset(buffer.str(), components, path.string());
+    return parse_prefab_asset(*text, components, path.string());
 }
 
 PrefabLoadResult parse_prefab_asset(std::string_view text,

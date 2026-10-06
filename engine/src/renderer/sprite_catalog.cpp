@@ -1,6 +1,7 @@
 #include <kin/renderer/sprite_catalog.hpp>
 
 #include <kin/assets/asset_server.hpp>
+#include <kin/assets/content.hpp>
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
@@ -212,8 +213,8 @@ std::vector<std::string> SpriteCatalog::sprite_ids() const {
 }
 
 SpriteCatalog load_sprite_catalog(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         KIN_LOG_ERROR_F("asset",
                         "sprite catalog open failed",
                         (LogFields{
@@ -222,6 +223,7 @@ SpriteCatalog load_sprite_catalog(const std::filesystem::path& path) {
                         }));
         throw std::runtime_error("Failed to open sprite catalog: " + path.string());
     }
+    std::istringstream file{*text};
 
     SpriteCatalog catalog;
     std::string line;

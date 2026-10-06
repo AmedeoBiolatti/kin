@@ -1,5 +1,7 @@
 #include "lua_paths.hpp"
 
+#include <kin/assets/content.hpp>
+
 #include <algorithm>
 #include <string>
 
@@ -49,7 +51,7 @@ std::optional<std::filesystem::path> module_path(const std::filesystem::path& ro
     std::ranges::replace(relative, '.', '/');
     relative += ".lua";
     const std::filesystem::path candidate = root / relative;
-    if (!path_within_root(candidate, root) || !std::filesystem::exists(candidate)) {
+    if (!path_within_root(candidate, root) || !content_file_exists(candidate)) {
         return std::nullopt;
     }
     return normalized_path(candidate);

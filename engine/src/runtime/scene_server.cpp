@@ -1329,6 +1329,7 @@ int run_http(ServerContext& ctx, const GameInfo* game, ServerMode mode, u16 port
     desc.callback = http_reply;
     desc.ctx = &state;
     desc.port = port;
+    desc.ipaddr = "127.0.0.1"; // this machine only: whoever reaches the server drives the game
     desc.cache_timeout = 0.0; // state changes every tick; never serve cached replies
 
     ecs_http_server_t* server = ecs_http_server_init(&desc);

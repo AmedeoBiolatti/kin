@@ -1,5 +1,6 @@
 #include <kin/audio/audio_catalog.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/l10n/localization.hpp>
 
 #include <kin/platform/log.hpp>
@@ -251,8 +252,8 @@ bool parse_audio_category(std::string_view value, AudioCategory& out) {
 }
 
 AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         KIN_LOG_ERROR_F("asset",
                         "audio catalog open failed",
                         (LogFields{
@@ -261,6 +262,7 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                         }));
         throw std::runtime_error("Failed to open audio catalog: " + path.string());
     }
+    std::istringstream file{*text};
 
     AudioCatalog catalog;
     catalog.set_root(path.parent_path());

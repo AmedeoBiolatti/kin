@@ -1,5 +1,7 @@
 #include <kin/runtime/game_info.hpp>
 
+#include <kin/assets/content.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -88,10 +90,11 @@ const std::string* field(const GameInfo& info, std::string_view key) {
 }
 
 GameInfo load_game_info(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         throw std::runtime_error("Failed to open game info: " + path.string());
     }
+    std::istringstream file{*text};
 
     GameInfo info;
     std::string line;

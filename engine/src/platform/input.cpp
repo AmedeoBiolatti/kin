@@ -1,5 +1,6 @@
 #include <kin/platform/input.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
 
@@ -328,14 +329,15 @@ void write_modifiers(std::ostream& out, KeyModifiers modifiers) {
 }
 
 InputMap load_input_map(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         KIN_LOG_ERROR_F("input",
                         "input map open failed",
                         (LogFields{{.name = "path", .value = path.string()},
                                    {.name = "error", .value = "open_failed"}}));
         throw std::runtime_error("Failed to open input map: " + path.string());
     }
+    std::istringstream file{*text};
 
     InputMap map;
     std::string line;

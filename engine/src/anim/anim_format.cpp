@@ -1,6 +1,7 @@
 #include <kin/anim/anim_format.hpp>
 
 #include <kin/assets/asset_manager.hpp>
+#include <kin/assets/content.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -800,15 +801,13 @@ std::vector<AnimationDiagnostic> validate_animation_registry_fragment(const Anim
 }
 
 AnimationRegistryFragment load_animation_registry_fragment(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         throw std::runtime_error("Failed to open animation asset: " + path.string());
     }
-    std::ostringstream text;
-    text << file.rdbuf();
     AnimationRegistryFragment fragment;
     std::string error;
-    if (!parse_animation_registry_fragment(text.str(), fragment, error)) {
+    if (!parse_animation_registry_fragment(*text, fragment, error)) {
         throw std::runtime_error(path.string() + ": " + error);
     }
     fragment.source_path = path;

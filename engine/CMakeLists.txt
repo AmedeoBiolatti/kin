@@ -19,6 +19,7 @@ add_library(kin_engine STATIC
     src/audio/sdl_audio_backend.cpp
     src/audio/spatial_audio.cpp
     src/assets/asset_manager.cpp
+    src/assets/content.cpp
     src/assets/asset_server.cpp
     src/assets/file_watcher.cpp
     src/assets/image.cpp
@@ -154,6 +155,12 @@ if(KIN_ENABLE_RENDER_PROBE)
     target_sources(kin_engine PRIVATE src/renderer/draw_trace.cpp src/runtime/render_probe.cpp)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_RENDER_PROBE)
 endif()
+if(KIN_ENABLE_AGENT_SERVER)
+    target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
+endif()
+if(KIN_SHIPPING)
+    target_compile_definitions(kin_engine PUBLIC KIN_SHIPPING)
+endif()
 if(KIN_ENABLE_DETERMINISM_CHECK)
     target_sources(kin_engine PRIVATE src/runtime/determinism_check.cpp src/runtime/state_hash.cpp)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_DETERMINISM_CHECK)
@@ -186,47 +193,31 @@ target_include_directories(kin_audio_codecs SYSTEM PUBLIC "${dr_libs_SOURCE_DIR}
 target_compile_options(kin_audio_codecs PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w>" "$<$<C_COMPILER_ID:MSVC>:/w>")
 target_link_libraries(kin_engine PRIVATE kin_audio_codecs)
 
-# SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK). The compiled
-# .spv land in a build dir referenced at runtime via KIN_GPU_SHADER_DIR. Without
-# glslc the engine still builds; the GPU backend just won't find its shaders.
-find_program(KIN_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/Bin")
-set(_kin_gpu_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
-target_compile_definitions(kin_engine PRIVATE KIN_GPU_SHADER_DIR="${_kin_gpu_shader_dir}")
+# SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK), built into
+# the engine (kin_embed_files), so a game needs no shader files beside it.
+# Without glslc the engine still builds; the GPU backend then has no shaders and
+# kin falls back to SDL_Renderer. Shipping builds require them (KIN_REQUIRE_GPU_SHADERS).
+set(_kin_gpu_shader_sources)
+foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader_geometry.vert
+              overdraw_count.frag overdraw_heat.frag shape.frag shape.vert sdf_shape.frag sdf_shape.vert
+              distance_field.frag mask_composite.frag mask_stencil.frag color_output.frag
+              pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
+              pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
+              transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
+              transition_iris.frag transition_crossfade.frag)
+    list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
+endforeach()
+# The .spv files stay in the build too, for tests that read every engine shader.
+kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${_kin_gpu_shader_sources})
+kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
 if(KIN_GLSLC)
-    # For runtime compiles (kin/renderer/shader_compiler.hpp) on this machine.
-    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
-    file(MAKE_DIRECTORY "${_kin_gpu_shader_dir}")
-    set(_kin_gpu_spv)
-    foreach(_pair "textured_quad.vert.glsl:vertex" "textured_quad.frag.glsl:fragment"
-                  "sprite_instanced.vert.glsl:vertex" "shader_geometry.vert.glsl:vertex"
-                  "overdraw_count.frag.glsl:fragment" "overdraw_heat.frag.glsl:fragment"
-                  "shape.frag.glsl:fragment" "shape.vert.glsl:vertex"
-                  "sdf_shape.frag.glsl:fragment" "sdf_shape.vert.glsl:vertex"
-                  "distance_field.frag.glsl:fragment" "mask_composite.frag.glsl:fragment"
-                  "mask_stencil.frag.glsl:fragment" "color_output.frag.glsl:fragment"
-                  "pp_vignette.frag.glsl:fragment" "pp_color_grade.frag.glsl:fragment"
-                  "pp_scanline.frag.glsl:fragment" "pp_chroma.frag.glsl:fragment"
-                  "pp_bloom_bright.frag.glsl:fragment" "pp_bloom_blur.frag.glsl:fragment"
-                  "pp_bloom_combine.frag.glsl:fragment"
-                  "transition_dissolve.frag.glsl:fragment" "transition_pixelate.frag.glsl:fragment"
-                  "transition_wipe.frag.glsl:fragment" "transition_iris.frag.glsl:fragment"
-                  "transition_crossfade.frag.glsl:fragment")
-        string(REPLACE ":" ";" _parts "${_pair}")
-        list(GET _parts 0 _src_name)
-        list(GET _parts 1 _stage)
-        string(REPLACE ".glsl" ".spv" _out_name "${_src_name}")
-        add_custom_command(
-            OUTPUT "${_kin_gpu_shader_dir}/${_out_name}"
-            COMMAND "${KIN_GLSLC}" -fshader-stage=${_stage}
-                    -o "${_kin_gpu_shader_dir}/${_out_name}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_src_name}"
-            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_src_name}"
-            COMMENT "glslc: ${_src_name} -> ${_out_name}"
-            VERBATIM)
-        list(APPEND _kin_gpu_spv "${_kin_gpu_shader_dir}/${_out_name}")
-    endforeach()
-    add_custom_target(kin_engine_gpu_shaders DEPENDS ${_kin_gpu_spv})
-    add_dependencies(kin_engine kin_engine_gpu_shaders)
+    if(NOT KIN_SHIPPING)
+        # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
+        target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
+    endif()
+elseif(KIN_REQUIRE_GPU_SHADERS)
+    message(FATAL_ERROR "glslc not found: install the Vulkan SDK (or your distribution's glslc) to build "
+                        "the GPU backend's shaders, or set KIN_REQUIRE_GPU_SHADERS=OFF to ship without them")
 else()
     message(STATUS "kin_engine: glslc not found; SDL_GPU backend shaders not compiled")
 endif()

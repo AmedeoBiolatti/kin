@@ -24,8 +24,28 @@
 #include <utility>
 #include <vector>
 
+#include "../assets/content_io.hpp"
+
 namespace kin::ui2 {
 namespace {
+
+// Opens a font from the content (a mounted pack, or disk), face `source.face`.
+TTF_Font* open_font(const FontSource& source, f32 size) {
+    SDL_IOStream* stream = open_content_stream(source.path);
+    if (!stream) {
+        return nullptr;
+    }
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetPointerProperty(props, TTF_PROP_FONT_CREATE_IOSTREAM_POINTER, stream);
+    SDL_SetBooleanProperty(props, TTF_PROP_FONT_CREATE_IOSTREAM_AUTOCLOSE_BOOLEAN, true); // closed with the font, or on failure
+    SDL_SetFloatProperty(props, TTF_PROP_FONT_CREATE_SIZE_FLOAT, size);
+    if (source.face != 0) {
+        SDL_SetNumberProperty(props, TTF_PROP_FONT_CREATE_FACE_NUMBER, source.face);
+    }
+    TTF_Font* font = TTF_OpenFontWithProperties(props);
+    SDL_DestroyProperties(props);
+    return font;
+}
 
 using text_detail::kernable;
 using text_detail::needs_shaping;
@@ -328,7 +348,7 @@ private:
         if (_face || _failed) {
             return _face != nullptr;
         }
-        _face = TTF_OpenFont(_path.string().c_str(), size);
+        _face = open_font({_path, 0}, size);
         if (!_face) {
             _failed = true;
             return false;
@@ -748,19 +768,6 @@ bool language_matches(std::string_view language, std::string_view wanted) {
     return language.size() == wanted.size() || language[wanted.size()] == '-' || language[wanted.size()] == '_';
 }
 
-TTF_Font* open_font(const FontSource& source, f32 size) {
-    if (source.face == 0) {
-        return TTF_OpenFont(source.path.string().c_str(), size);
-    }
-    const SDL_PropertiesID props = SDL_CreateProperties();
-    SDL_SetStringProperty(props, TTF_PROP_FONT_CREATE_FILENAME_STRING, source.path.string().c_str());
-    SDL_SetFloatProperty(props, TTF_PROP_FONT_CREATE_SIZE_FLOAT, size);
-    SDL_SetNumberProperty(props, TTF_PROP_FONT_CREATE_FACE_NUMBER, source.face);
-    TTF_Font* font = TTF_OpenFontWithProperties(props);
-    SDL_DestroyProperties(props);
-    return font;
-}
-
 std::atomic<bool> g_has_base_direction{false};
 std::atomic<TextDirection> g_base_direction{TextDirection::LeftToRight};
 
@@ -966,7 +973,7 @@ private:
     FontFace* sdf_face() const {
         if (!_sdf.font) {
             _sdf.point_size = sdf_base * static_cast<f32>(sdf_supersample);
-            _sdf.font = TTF_OpenFont(_path.string().c_str(), _sdf.point_size);
+            _sdf.font = open_font({_path, 0}, _sdf.point_size);
             set_language(_sdf.font);
         }
         return _sdf.font ? &_sdf : nullptr;
@@ -1353,7 +1360,7 @@ private:
             _faces.erase(oldest);
         }
 
-        TTF_Font* font = TTF_OpenFont(_path.string().c_str(), size);
+        TTF_Font* font = open_font({_path, 0}, size);
         if (!font) {
             KIN_LOG_ERROR_F("ui",
                             "font open failed",

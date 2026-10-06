@@ -1,5 +1,6 @@
 #include <kin/scene/scene_asset.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/render.hpp>
@@ -7,7 +8,6 @@
 #include <algorithm>
 #include <fstream>
 #include <ostream>
-#include <sstream>
 #include <unordered_set>
 
 namespace kin {
@@ -333,13 +333,11 @@ void register_scene_metadata_components(EcsWorld& world) {
 
 SceneLoadResult load_scene_asset(const std::filesystem::path& path,
                                  const EcsComponentRegistry& components) {
-    std::ifstream in(path);
-    if (!in) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         return {.diagnostics = {"failed to open scene '" + path.string() + "'"}};
     }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return parse_scene_asset(buffer.str(), components, path.string());
+    return parse_scene_asset(*text, components, path.string());
 }
 
 SceneLoadResult parse_scene_asset(std::string_view text,
