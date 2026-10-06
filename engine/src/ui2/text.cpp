@@ -347,13 +347,235 @@ void ensure_ttf() {
     (void)initialized;
 }
 
+// ---- Laying out printable ASCII from a face's metrics ----
+
+constexpr i32 first_glyph = 32; // ' '
+constexpr i32 glyph_count = 95; // ' ' to '~'
+
+// A font's kerning between printable ASCII pairs, in ems, as SDL_ttf shapes
+// text with HarfBuzz: GPOS kerning as well as a legacy 'kern' table.
+// (TTF_GetGlyphKerning reads only the legacy table, which most current fonts
+// leave empty.) SDL_ttf has no call for a pair's kerning, so it is solved
+// from the width SDL_ttf measures for the two glyphs together, at a large size
+// for precision. A row is solved the first time its glyph leads a pair; one
+// table serves every size of the font.
+class KerningTable {
+public:
+    explicit KerningTable(std::filesystem::path path) : _path(std::move(path)) {}
+    KerningTable(const KerningTable&) = delete;
+    KerningTable& operator=(const KerningTable&) = delete;
+    ~KerningTable() {
+        if (_face) {
+            TTF_CloseFont(_face);
+        }
+    }
+
+    f32 em(unsigned char previous, unsigned char ch) {
+        const auto row = static_cast<std::size_t>(previous - first_glyph);
+        if (!_solved[row]) {
+            solve_row(row);
+        }
+        return _em[row * glyph_count + static_cast<std::size_t>(ch - first_glyph)];
+    }
+
+private:
+    static constexpr f32 size = 512.0f;
+
+    struct Ink {
+        int min_x = 0;
+        int max_x = 0;
+        int advance = 0;
+        bool found = false;
+    };
+
+    void solve_row(std::size_t row) {
+        _solved[row] = true;
+        if (!_face) {
+            _face = TTF_OpenFont(_path.string().c_str(), size);
+            if (!_face) {
+                return;
+            }
+            for (i32 i = 0; i < glyph_count; ++i) {
+                Ink& ink = _ink[static_cast<std::size_t>(i)];
+                int min_y = 0;
+                int max_y = 0;
+                ink.found = TTF_GetGlyphMetrics(_face, static_cast<Uint32>(i + first_glyph), &ink.min_x, &ink.max_x, &min_y,
+                                                &max_y, &ink.advance);
+            }
+        }
+        const Ink& a = _ink[row];
+        if (!a.found) {
+            return;
+        }
+        const char pair_a = static_cast<char>(row + first_glyph);
+        for (std::size_t col = 0; col < glyph_count; ++col) {
+            const Ink& b = _ink[col];
+            const char pair[2] = {pair_a, static_cast<char>(col + first_glyph)};
+            int w = 0;
+            int h = 0;
+            if (!b.found || !TTF_GetStringSize(_face, pair, 2, &w, &h)) {
+                continue;
+            }
+            // SDL_ttf measures from the leftmost ink (or the pen's start) to
+            // the rightmost ink (or the pen's end); b's pen is a's advance
+            // plus the kerning.
+            const int left = std::min(0, a.min_x);
+            const int kerning = w + left - a.advance - std::max(b.max_x, b.advance);
+            if (a.advance + kerning + b.min_x < left) {
+                continue; // b's ink would start the measure: the width says nothing of the kerning
+            }
+            _em[row * glyph_count + col] = static_cast<f32>(kerning) / size;
+        }
+    }
+
+    std::filesystem::path _path;
+    TTF_Font* _face = nullptr;
+    std::array<Ink, glyph_count> _ink{};
+    std::array<bool, glyph_count> _solved{};
+    std::array<f32, glyph_count * glyph_count> _em{};
+};
+
+// Everything about a face that lays out printable ASCII, read once: each
+// glyph's advance and ink and the line's height, with the font's kerning
+// scaled to the face. Drawing and measuring then never ask SDL_ttf per glyph.
+struct GlyphMetrics {
+    struct Glyph {
+        f32 advance = 0.0f;    // the pen's move; 0: no glyph (moves as a space)
+        f32 ink_left = 0.0f;   // where the ink starts, from the pen
+        f32 ink_right = 0.0f;  // and where it ends
+        f32 ink_top = 0.0f;    // from the top of the line, down
+        f32 ink_bottom = 0.0f;
+    };
+    std::array<Glyph, 128> glyphs{};
+    f32 font_height = 0.0f; // a line's height before any ink beyond it
+    f32 line_step = 0.0f;   // from one line to the next
+    f32 pixels_per_em = 0.0f;
+    KerningTable* kerning = nullptr;
+
+    f32 kern(unsigned char previous, unsigned char ch) const {
+        return kerning ? kerning->em(previous, ch) * pixels_per_em : 0.0f;
+    }
+};
+
+GlyphMetrics read_glyph_metrics(TTF_Font* font, f32 pixels_per_em, KerningTable* kerning) {
+    GlyphMetrics metrics;
+    metrics.font_height = static_cast<f32>(std::max(1, TTF_GetFontHeight(font)));
+    metrics.line_step = metrics.font_height;
+    metrics.pixels_per_em = pixels_per_em;
+    metrics.kerning = kerning;
+    const f32 ascent = static_cast<f32>(TTF_GetFontAscent(font));
+    for (char ch = first_glyph; ch < first_glyph + glyph_count; ++ch) {
+        const std::string text{ch};
+        int extent_w = 0;
+        int extent_h = 0;
+        if (!TTF_GetStringSize(font, text.c_str(), text.size(), &extent_w, &extent_h)) {
+            continue;
+        }
+        // The pen moves by the glyph's advance, not by the width of its
+        // bitmap: a glyph that overhangs its advance (italics, an f or a j)
+        // would otherwise push the next one away.
+        int min_x = 0;
+        int max_x = extent_w;
+        int min_y = 0;
+        int max_y = 0;
+        int advance = extent_w;
+        if (!TTF_GetGlyphMetrics(font, static_cast<Uint32>(ch), &min_x, &max_x, &min_y, &max_y, &advance)) {
+            min_x = 0;
+            max_x = extent_w;
+            advance = extent_w;
+        }
+        metrics.glyphs[static_cast<std::size_t>(ch)] = {
+            .advance = static_cast<f32>(std::max(1, advance)),
+            .ink_left = static_cast<f32>(min_x),
+            .ink_right = static_cast<f32>(max_x),
+            .ink_top = ascent - static_cast<f32>(max_y),
+            .ink_bottom = ascent - static_cast<f32>(min_y),
+        };
+        metrics.line_step = std::max(metrics.line_step, static_cast<f32>(extent_h));
+    }
+    return metrics;
+}
+
+bool printable_ascii(std::string_view text) {
+    return std::ranges::all_of(text, [](char ch) {
+        const auto value = static_cast<unsigned char>(ch);
+        return value == '\n' || value == '\r' || value == '\t' || (value >= first_glyph && value < first_glyph + glyph_count);
+    });
+}
+
+// Printable ASCII laid out as SDL_ttf lays out a line: the pen moves by each
+// glyph's advance and the kerning before it; '\n' starts a line, '\t' is four
+// spaces and '\r' nothing. `visit(ch, pen)` is called for each glyph, the pen
+// in face pixels from the text's origin (the top of its first line). Returns
+// the size SDL_ttf measures a line: from the leftmost ink, or the pen's start,
+// to the rightmost ink or the pen's end, and from the line's top to its
+// bottom unless ink reaches beyond them. So text draws as wide as it measures.
+template <typename Visit>
+Vec2f walk_glyphs(const GlyphMetrics& metrics, std::string_view text, Visit&& visit) {
+    const GlyphMetrics::Glyph& space = metrics.glyphs[static_cast<std::size_t>(' ')];
+    const f32 space_advance = space.advance > 0.0f ? space.advance : metrics.font_height * 0.5f;
+    struct Bounds {
+        f32 left = 0.0f;
+        f32 top = 0.0f;
+        f32 right = 0.0f;
+        f32 bottom = 0.0f;
+    };
+    Vec2f pen{0.0f, 0.0f};
+    Bounds line;  // this line's ink, or its pen and height where they reach further
+    Bounds text_; // every line's
+    unsigned char previous = 0;
+    const auto start_line = [&] {
+        line = {.left = 0.0f, .top = pen.y, .right = 0.0f, .bottom = pen.y + metrics.font_height};
+    };
+    const auto end_line = [&] {
+        text_.right = std::max(text_.right, std::max(line.right, pen.x) - line.left);
+        text_.top = std::min(text_.top, line.top);
+        text_.bottom = std::max(text_.bottom, line.bottom);
+    };
+    start_line();
+    for (const char ch : text) {
+        if (ch == '\r') {
+            continue;
+        }
+        if (ch == '\n') {
+            end_line();
+            pen = {0.0f, pen.y + metrics.line_step};
+            start_line();
+            previous = 0;
+            continue;
+        }
+        if (ch == '\t') {
+            pen.x += space_advance * 4.0f;
+            previous = 0;
+            continue;
+        }
+        const auto value = static_cast<unsigned char>(ch);
+        if (previous != 0) {
+            pen.x += metrics.kern(previous, value);
+        }
+        previous = value;
+        const GlyphMetrics::Glyph& glyph = metrics.glyphs[value];
+        if (glyph.advance > 0.0f) {
+            line.left = std::min(line.left, pen.x + glyph.ink_left);
+            line.top = std::min(line.top, pen.y + glyph.ink_top);
+            line.right = std::max(line.right, pen.x + glyph.ink_right);
+            line.bottom = std::max(line.bottom, pen.y + glyph.ink_bottom);
+        }
+        visit(value, pen);
+        pen.x += glyph.advance > 0.0f ? glyph.advance : space_advance;
+    }
+    end_line();
+    return {text_.right, text_.bottom - text_.top}; // text_.right: the widest line's width
+}
+
 class TtfFontBackend final : public IFontBackend {
 public:
     TtfFontBackend(const std::filesystem::path& path, f32 point_size, f32 oversample = 1.0f,
                    TextRendering rendering = TextRendering::Bitmap)
-        : _path(path), _point_size(point_size), _oversample(std::max(1.0f, oversample)), _rendering(rendering) {
+        : _path(path), _point_size(point_size), _oversample(std::max(1.0f, oversample)), _rendering(rendering),
+          _kerning(path) {
         ensure_ttf();
-        if (!font_for_scale(1.0f)) {
+        if (!face_for_scale(1.0f)) {
             throw std::runtime_error(std::string{"TTF_OpenFont failed: "} + SDL_GetError());
         }
         KIN_LOG_INFO_F("ui",
@@ -368,34 +590,30 @@ public:
                 TTF_CloseFont(face.font);
             }
         }
-        if (_sdf_face) {
-            TTF_CloseFont(_sdf_face);
+        if (_sdf.font) {
+            TTF_CloseFont(_sdf.font);
         }
     }
 
+    // Printable ASCII is measured by the walk that draws it, from the face's
+    // metrics; other text is shaped by SDL_ttf.
     Vec2f measure(std::string_view text, f32 scale) const override {
         if (_rendering == TextRendering::Sdf) {
             // Linear: the large face's size, scaled down.
-            TTF_Font* face = sdf_face();
-            int w = 0, h = 0;
-            const std::string copy{text};
-            if (!face || !TTF_GetStringSize(face, copy.c_str(), copy.size(), &w, &h)) {
+            FontFace* face = sdf_face();
+            if (!face) {
                 return {};
             }
             const f32 s = sdf_scale(scale) / static_cast<f32>(sdf_supersample);
-            return {static_cast<f32>(w) * s, static_cast<f32>(h) * s};
+            const Vec2f size = measure_face(*face, text);
+            return {size.x * s, size.y * s};
         }
-        TTF_Font* font = font_for_scale(scale);
-        if (!font) {
+        FontFace* face = face_for_scale(scale);
+        if (!face) {
             return {};
         }
-        int w = 0;
-        int h = 0;
-        const std::string copy{text};
-        if (!TTF_GetStringSize(font, copy.c_str(), copy.size(), &w, &h)) {
-            return {};
-        }
-        return {static_cast<f32>(w) / _oversample, static_cast<f32>(h) / _oversample};
+        const Vec2f size = measure_face(*face, text);
+        return {size.x / _oversample, size.y / _oversample};
     }
 
     bool draw_outlined(Renderer2D& renderer, std::string_view text, Vec2f pos, f32 scale, Color color, f32 outline,
@@ -413,12 +631,13 @@ public:
             return;
         }
 
-        TTF_Font* font = font_for_scale(scale);
-        if (!font) {
+        FontFace* face = face_for_scale(scale);
+        if (!face) {
             return;
         }
+        TTF_Font* font = face->font;
 
-        if (draw_from_glyph_atlas(renderer, font, text, pos, scale, color)) {
+        if (draw_from_glyph_atlas(renderer, *face, text, pos, scale, color)) {
             return;
         }
 
@@ -442,6 +661,7 @@ private:
         f32 point_size = 0.0f;
         TTF_Font* font = nullptr;
         u64 last_used = 0;
+        std::unique_ptr<GlyphMetrics> metrics; // read on first use
     };
 
     struct CachedTextTexture {
@@ -454,11 +674,11 @@ private:
         u64 last_used = 0;
     };
 
+    // An atlas holds the glyphs' pixels; where they go comes from the face's
+    // GlyphMetrics.
     struct CachedGlyph {
         Rectf source{};
         Vec2i size{};
-        f32 advance = 0.0f;
-        f32 left = 0.0f;  // where the bitmap starts, from the pen: below 0 for a glyph that overhangs it
         bool drawable = false;
     };
 
@@ -467,15 +687,12 @@ private:
         f32 scale = 1.0f;
         Texture texture;
         std::array<CachedGlyph, 128> glyphs{};
-        f32 line_height = 0.0f;
         u64 last_used = 0;
     };
 
     struct GlyphSurface {
         char ch = 0;
         Vec2i size{};
-        f32 advance = 0.0f;
-        f32 left = 0.0f;
         std::vector<u8> pixels;
     };
 
@@ -487,9 +704,7 @@ private:
     static constexpr i32 sdf_supersample = 2;
 
     struct SdfGlyph {
-        Rectf source{};    // in the atlas, margin included
-        f32 advance = 0.0f; // base pixels
-        f32 left = 0.0f;    // where the glyph's box starts, from the pen (base pixels)
+        Rectf source{}; // in the atlas, margin included
         bool drawable = false;
     };
 
@@ -497,17 +712,41 @@ private:
         u64 renderer_id = 0;
         Texture texture;
         std::array<SdfGlyph, 128> glyphs{};
-        f32 line_height = 0.0f; // base pixels
     };
 
     // Base pixels to drawing units at `scale`.
     f32 sdf_scale(f32 scale) const { return _point_size * std::max(0.0f, scale) / sdf_base; }
 
-    TTF_Font* sdf_face() const {
-        if (!_sdf_face) {
-            _sdf_face = TTF_OpenFont(_path.string().c_str(), sdf_base * static_cast<f32>(sdf_supersample));
+    // The large face the fields are drawn from: a pixel of it is
+    // 1 / `sdf_supersample` of a base pixel.
+    FontFace* sdf_face() const {
+        if (!_sdf.font) {
+            _sdf.point_size = sdf_base * static_cast<f32>(sdf_supersample);
+            _sdf.font = TTF_OpenFont(_path.string().c_str(), _sdf.point_size);
         }
-        return _sdf_face;
+        return _sdf.font ? &_sdf : nullptr;
+    }
+
+    const GlyphMetrics& metrics_of(FontFace& face) const {
+        if (!face.metrics) {
+            // A face's point size is its pixels per em (SDL_ttf's 72 dpi).
+            face.metrics = std::make_unique<GlyphMetrics>(read_glyph_metrics(face.font, face.point_size, &_kerning));
+        }
+        return *face.metrics;
+    }
+
+    // In the face's pixels.
+    Vec2f measure_face(FontFace& face, std::string_view text) const {
+        if (printable_ascii(text)) {
+            return walk_glyphs(metrics_of(face), text, [](unsigned char, Vec2f) {});
+        }
+        int w = 0;
+        int h = 0;
+        const std::string copy{text};
+        if (!TTF_GetStringSize(face.font, copy.c_str(), copy.size(), &w, &h)) {
+            return {};
+        }
+        return {static_cast<f32>(w), static_cast<f32>(h)};
     }
 
     SdfAtlas* find_sdf_atlas(Renderer2D& renderer) const {
@@ -524,14 +763,13 @@ private:
     }
 
     SdfAtlas build_sdf_atlas(Renderer2D& renderer) const {
-        TTF_Font* face = sdf_face();
-        if (!face) {
+        FontFace* large = sdf_face();
+        if (!large) {
             return {};
         }
-        constexpr f32 k = static_cast<f32>(sdf_supersample);
+        TTF_Font* face = large->font;
         SdfAtlas atlas;
         atlas.renderer_id = renderer.id();
-        atlas.line_height = static_cast<f32>(TTF_GetFontHeight(face)) / k;
         // Each glyph drawn large here (SDL_ttf wants one thread), its distance
         // field made on the job system's workers.
         struct Made {
@@ -541,19 +779,8 @@ private:
             DistanceField field;
         };
         std::vector<Made> made;
-        for (char ch = 32; ch < 127; ++ch) {
-            // As the Bitmap atlas: the pen moves by the advance, and the
-            // bitmap starts at the left bearing when that is left of the pen.
-            int min_x = 0, max_x = 0, min_y = 0, max_y = 0, advance = 0;
-            if (!TTF_GetGlyphMetrics(face, static_cast<Uint32>(ch), &min_x, &max_x, &min_y, &max_y, &advance)) {
-                continue;
-            }
-            SdfGlyph& glyph = atlas.glyphs[static_cast<std::size_t>(ch)];
-            glyph.advance = static_cast<f32>(std::max(1, advance)) / k;
-            glyph.left = static_cast<f32>(std::min(0, min_x)) / k;
-            if (ch == ' ') {
-                continue;
-            }
+        // ' ' has no pixels; its advance is in the face's GlyphMetrics.
+        for (char ch = first_glyph + 1; ch < first_glyph + glyph_count; ++ch) {
             const std::string text{ch};
             SDL_Surface* surface = TTF_RenderText_Blended(face, text.c_str(), text.size(), SDL_Color{255, 255, 255, 255});
             if (!surface) {
@@ -616,11 +843,11 @@ private:
 
     bool draw_distance_fields(Renderer2D& renderer, std::string_view text, Vec2f pos, f32 scale, Color color,
                               f32 outline, Color outline_color) const {
-        if (!can_use_glyph_atlas(text)) {
+        if (!printable_ascii(text)) {
             return false;
         }
         SdfAtlas* atlas = find_sdf_atlas(renderer);
-        TTF_Font* face = sdf_face();
+        FontFace* face = sdf_face();
         if (!atlas || !face) {
             return false;
         }
@@ -628,42 +855,23 @@ private:
         if (s <= 0.0f) {
             return true;
         }
-        constexpr f32 k = static_cast<f32>(sdf_supersample);
-        const SdfGlyph& space = atlas->glyphs[static_cast<std::size_t>(' ')];
-        const f32 space_advance = space.advance > 0.0f ? space.advance : atlas->line_height * 0.5f;
+        const f32 face_s = s / static_cast<f32>(sdf_supersample); // the large face's pixels to drawing units
+        const GlyphMetrics& metrics = metrics_of(*face);
         thread_local std::vector<SpriteInstance> quads;
         quads.clear();
-        Vec2f pen{0.0f, 0.0f}; // base pixels from `pos`
-        Uint32 previous = 0;
-        for (const char ch : text) {
-            if (ch == '\r') {
-                continue;
+        walk_glyphs(metrics, text, [&](unsigned char ch, Vec2f pen) {
+            const SdfGlyph& glyph = atlas->glyphs[ch];
+            if (!glyph.drawable) {
+                return;
             }
-            if (ch == '\n') {
-                pen = {0.0f, pen.y + atlas->line_height};
-                previous = 0;
-                continue;
-            }
-            if (ch == '\t') {
-                pen.x += space_advance * 4.0f;
-                previous = 0;
-                continue;
-            }
-            const auto value = static_cast<unsigned char>(ch);
-            int kerning = 0;
-            if (previous != 0 && TTF_GetGlyphKerning(face, previous, value, &kerning)) {
-                pen.x += static_cast<f32>(kerning) / k;
-            }
-            previous = value;
-            const SdfGlyph& glyph = atlas->glyphs[value];
-            if (glyph.drawable) {
-                quads.push_back({.dest = {pos.x + (pen.x + glyph.left - sdf_spread) * s, pos.y + (pen.y - sdf_spread) * s,
-                                          glyph.source.w * s, glyph.source.h * s},
-                                 .source = glyph.source,
-                                 .tint = color});
-            }
-            pen.x += glyph.advance > 0.0f ? glyph.advance : space_advance;
-        }
+            // As the Bitmap atlas: the glyph's box starts at its ink when that
+            // is left of the pen, and its field reaches `sdf_spread` beyond.
+            const f32 left = std::min(0.0f, metrics.glyphs[ch].ink_left);
+            quads.push_back({.dest = {pos.x + (pen.x + left) * face_s - sdf_spread * s,
+                                      pos.y + pen.y * face_s - sdf_spread * s, glyph.source.w * s, glyph.source.h * s},
+                             .source = glyph.source,
+                             .tint = color});
+        });
         // The outline, in drawing units, as field pixels (at most what the
         // field holds outside the glyph).
         const DistanceFieldStyle field{.spread = sdf_spread,
@@ -690,7 +898,7 @@ private:
     // exactly one pixel either way.
     f32 snap(f32 v) const { return std::round(v * _oversample) / _oversample; }
 
-    TTF_Font* font_for_scale(f32 scale) const {
+    FontFace* face_for_scale(f32 scale) const {
         const f32 size = effective_point_size(_point_size * _oversample, scale);
         ++_face_tick;
         auto found = std::ranges::find_if(_faces, [&](const FontFace& face) {
@@ -698,7 +906,7 @@ private:
         });
         if (found != _faces.end()) {
             found->last_used = _face_tick;
-            return found->font;
+            return &*found;
         }
         if (_faces.size() >= max_faces) {
             // A scale that keeps changing (an animation) would open faces
@@ -717,15 +925,8 @@ private:
                                        {.name = "error", .value = SDL_GetError()}}));
             return nullptr;
         }
-        _faces.push_back({.point_size = size, .font = font, .last_used = _face_tick});
-        return font;
-    }
-
-    static bool can_use_glyph_atlas(std::string_view text) {
-        return std::ranges::all_of(text, [](char ch) {
-            const auto value = static_cast<unsigned char>(ch);
-            return value == '\n' || value == '\r' || value == '\t' || (value >= 32 && value < 127);
-        });
+        _faces.push_back({.point_size = size, .font = font, .last_used = _face_tick, .metrics = nullptr});
+        return &_faces.back();
     }
 
     GlyphAtlas* find_glyph_atlas(Renderer2D& renderer, TTF_Font* font, f32 scale) const {
@@ -758,35 +959,9 @@ private:
         surfaces.reserve(95);
         i32 max_w = 1;
         i32 max_h = 1;
-        for (char ch = 32; ch < 127; ++ch) {
+        // ' ' has no pixels; its advance is in the face's GlyphMetrics.
+        for (char ch = first_glyph + 1; ch < first_glyph + glyph_count; ++ch) {
             const std::string text{ch};
-            int extent_w = 0;
-            int extent_h = 0;
-            if (!TTF_GetStringSize(font, text.c_str(), text.size(), &extent_w, &extent_h)) {
-                continue;
-            }
-            // The pen moves by the glyph's advance, not by the width of its
-            // bitmap: a glyph that overhangs its advance (italics, an f or a
-            // j) would otherwise push the next one away. Its bitmap starts at
-            // its left bearing when that is left of the pen (SDL_ttf renders a
-            // string from min(0, the first glyph's left)).
-            int min_x = 0;
-            int max_x = 0;
-            int min_y = 0;
-            int max_y = 0;
-            int advance_w = extent_w;
-            if (!TTF_GetGlyphMetrics(font, static_cast<Uint32>(ch), &min_x, &max_x, &min_y, &max_y, &advance_w)) {
-                advance_w = extent_w;
-                min_x = 0;
-            }
-            const f32 left = static_cast<f32>(std::min(0, min_x));
-            atlas.glyphs[static_cast<std::size_t>(ch)].advance = static_cast<f32>(std::max(1, advance_w));
-            atlas.line_height = std::max(atlas.line_height, static_cast<f32>(std::max(1, extent_h)));
-
-            if (ch == ' ') {
-                continue;
-            }
-
             SDL_Surface* surface = TTF_RenderText_Blended(font, text.c_str(), text.size(), SDL_Color{255, 255, 255, 255});
             if (!surface) {
                 continue;
@@ -800,8 +975,6 @@ private:
             GlyphSurface glyph;
             glyph.ch = ch;
             glyph.size = {converted->w, converted->h};
-            glyph.advance = static_cast<f32>(std::max(1, advance_w));
-            glyph.left = left;
             glyph.pixels.resize(static_cast<std::size_t>(converted->w * converted->h * 4));
             const auto* src = static_cast<const u8*>(converted->pixels);
             for (int y = 0; y < converted->h; ++y) {
@@ -837,8 +1010,6 @@ private:
             atlas.glyphs[static_cast<std::size_t>(glyph.ch)] = {
                 .source = {static_cast<f32>(dst_x), static_cast<f32>(dst_y), static_cast<f32>(glyph.size.x), static_cast<f32>(glyph.size.y)},
                 .size = glyph.size,
-                .advance = glyph.advance,
-                .left = glyph.left,
                 .drawable = true,
             };
             for (i32 y = 0; y < glyph.size.y; ++y) {
@@ -849,70 +1020,43 @@ private:
         }
 
         atlas.texture = renderer.create_texture_from_rgba(pixels.data(), atlas_size);
-        if (atlas.line_height <= 0.0f) {
-            atlas.line_height = static_cast<f32>(max_h);
-        }
         return atlas;
     }
 
-    bool draw_from_glyph_atlas(Renderer2D& renderer, TTF_Font* font, std::string_view text, Vec2f pos, f32 scale, Color color) const {
-        if (!can_use_glyph_atlas(text)) {
+    bool draw_from_glyph_atlas(Renderer2D& renderer, FontFace& face, std::string_view text, Vec2f pos, f32 scale,
+                               Color color) const {
+        if (!printable_ascii(text)) {
             return false;
         }
 
-        GlyphAtlas* atlas = find_glyph_atlas(renderer, font, scale);
+        GlyphAtlas* atlas = find_glyph_atlas(renderer, face.font, scale);
         if (!atlas) {
             return false;
         }
 
-        Vec2f cursor = pos;
         const f32 inv = 1.0f / _oversample;
-        const f32 line_height = atlas->line_height * inv;
-        const f32 space_advance = (atlas->glyphs[static_cast<std::size_t>(' ')].advance > 0.0f
-            ? atlas->glyphs[static_cast<std::size_t>(' ')].advance
-            : atlas->line_height * 0.5f) * inv;
-        // Advances and kerning follow the font, so text draws as wide as
-        // measure() (TTF_GetStringSize) says and carets and selections line up.
-        Uint32 previous = 0;
-        for (char ch : text) {
-            if (ch == '\r') {
-                continue;
+        const GlyphMetrics& metrics = metrics_of(face);
+        walk_glyphs(metrics, text, [&](unsigned char ch, Vec2f pen) {
+            const CachedGlyph& glyph = atlas->glyphs[ch];
+            if (!glyph.drawable) {
+                return;
             }
-            if (ch == '\n') {
-                cursor.x = pos.x;
-                cursor.y += line_height;
-                previous = 0;
-                continue;
-            }
-            if (ch == '\t') {
-                cursor.x += space_advance * 4.0f;
-                previous = 0;
-                continue;
-            }
-
-            const auto value = static_cast<unsigned char>(ch);
-            int kerning = 0;
-            if (previous != 0 && TTF_GetGlyphKerning(font, previous, value, &kerning)) {
-                cursor.x += static_cast<f32>(kerning) * inv;
-            }
-            previous = value;
-            const CachedGlyph& glyph = atlas->glyphs[static_cast<std::size_t>(value)];
-            if (glyph.drawable) {
-                // Pixel-snap the destination: the glyph atlas is integer-sized, so an
-                // integer dest is a 1:1 blit (crisp). Fractional positions (from
-                // accumulated sub-pixel advances) make the GPU linear-sample off-grid,
-                // which softens and unevens the text. The fractional pen is kept for
-                // correct average advance; only the draw position rounds.
-                renderer.draw_texture(atlas->texture,
-                                      glyph.source,
-                                      {snap(cursor.x + glyph.left * inv),
-                                       snap(cursor.y),
-                                       static_cast<f32>(glyph.size.x) * inv,
-                                       static_cast<f32>(glyph.size.y) * inv},
-                                      color);
-            }
-            cursor.x += glyph.advance > 0.0f ? glyph.advance * inv : space_advance;
-        }
+            // The bitmap starts at the ink when that is left of the pen (SDL_ttf
+            // renders a string from min(0, its first glyph's left)). Pixel-snap
+            // the destination: the glyph atlas is integer-sized, so an integer
+            // dest is a 1:1 blit (crisp). Fractional positions (from accumulated
+            // sub-pixel advances) make the GPU linear-sample off-grid, which
+            // softens and unevens the text. The fractional pen is kept for
+            // correct average advance; only the draw position rounds.
+            const f32 left = std::min(0.0f, metrics.glyphs[ch].ink_left);
+            renderer.draw_texture(atlas->texture,
+                                  glyph.source,
+                                  {snap(pos.x + (pen.x + left) * inv),
+                                   snap(pos.y + pen.y * inv),
+                                   static_cast<f32>(glyph.size.x) * inv,
+                                   static_cast<f32>(glyph.size.y) * inv},
+                                  color);
+        });
         return true;
     }
 
@@ -986,7 +1130,8 @@ private:
     f32 _point_size = 0.0f;
     f32 _oversample = 1.0f;
     TextRendering _rendering = TextRendering::Bitmap;
-    mutable TTF_Font* _sdf_face = nullptr;
+    mutable FontFace _sdf; // Sdf: the large face, opened on first use
+    mutable KerningTable _kerning;
     mutable std::vector<SdfAtlas> _sdf_atlases;
     mutable u64 _face_tick = 0;
     mutable std::vector<FontFace> _faces;

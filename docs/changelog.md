@@ -27,6 +27,12 @@ releases may change APIs.
 - `SaveStore::list_slots` reads each slot's info without parsing its payload,
   and `read_slot` / `read_settings` move the payload out of the parsed file
   instead of copying it.
+- ui2 TTF text: drawing (Bitmap and Sdf) and `measure()` lay printable ASCII
+  out by one walk over the face's metrics, read once a face, so text draws
+  exactly as wide as it measures. Measuring no longer shapes the string with
+  SDL_ttf each call: 210 measures of HUD labels went from 2.7 ms to 0.05 ms a
+  frame. Drawing no longer asks SDL_ttf for each glyph pair's kerning. Other
+  text (beyond ASCII) is still shaped by SDL_ttf.
 
 ### Fixed
 
@@ -34,6 +40,12 @@ releases may change APIs.
   the deadlines started over a full period from now, so a slow frame was
   followed by a wait. They now start over from now: a late frame is never
   made later by a wait.
+- ui2 TTF text is kerned as the font says: kerning now comes from HarfBuzz
+  (GPOS as well as a legacy `kern` table), solved per pair from SDL_ttf's
+  shaped widths and shared by every size of a font. Drawing used
+  `TTF_GetGlyphKerning`, which reads only the legacy table, so fonts kerned in
+  GPOS (Lato, EB Garamond, Noto Sans) drew unkerned and wider than they
+  measured, by up to 41 px on a line at 37 px.
 
 ## [0.2.4] — 2026-10-06
 
