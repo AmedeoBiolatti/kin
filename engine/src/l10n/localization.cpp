@@ -17,7 +17,7 @@ std::atomic<Localization*> g_active{nullptr};
 bool is_language_file(const std::filesystem::path& path) {
     std::string ext = path.extension().string();
     std::ranges::transform(ext, ext.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; });
-    return ext == ".kinlang" || ext == ".csv";
+    return ext == ".kinlang" || ext == ".csv" || ext == ".po";
 }
 
 std::string source_name(const std::filesystem::path& path) {
@@ -145,6 +145,12 @@ bool Localization::load_text(const std::filesystem::path& path, std::string_view
     bool ok = false;
     if (ext == ".csv") {
         ok = parse_language_csv(text, languages, own);
+    } else if (ext == ".po") {
+        LanguageFile file;
+        ok = parse_gettext(text, file, own, path.stem().string());
+        if (ok) {
+            languages.push_back(std::move(file));
+        }
     } else {
         LanguageFile file;
         ok = parse_language_file(text, file, own);

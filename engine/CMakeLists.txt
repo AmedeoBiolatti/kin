@@ -42,6 +42,7 @@ add_library(kin_engine STATIC
     src/ecs/time.cpp
     src/ecs/ui2.cpp
     src/ecs/ui2_sync.cpp
+    src/l10n/gettext.cpp
     src/l10n/language_file.cpp
     src/l10n/localization.cpp
     src/l10n/message_format.cpp

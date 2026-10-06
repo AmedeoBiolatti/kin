@@ -293,6 +293,89 @@ void test_csv() {
     assert(files.size() == 2); // failures leave the output alone
 }
 
+void test_gettext() {
+    std::vector<std::string> errors;
+    kin::LanguageFile po;
+    const std::string text = R"(# A translator's comment
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: pl\n"
+"Plural-Forms: nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+msgctxt "menu.play"
+msgid "Play"
+msgstr "Graj"
+
+#: src/hud.cpp:12
+msgid "Hold the line"
+msgstr ""
+"Utrzymaj "
+"lini\u0119"
+
+msgctxt "hand.cards"
+msgid "%d card"
+msgid_plural "%d cards"
+msgstr[0] "%d karta"
+msgstr[1] "%d karty"
+msgstr[2] "%d kart"
+
+#, fuzzy
+msgctxt "menu.quit"
+msgid "Quit"
+msgstr "Wyjdz?"
+
+msgctxt "menu.options"
+msgid "Options"
+msgstr ""
+
+#~ msgctxt "old"
+#~ msgid "Old"
+#~ msgstr "Stary"
+)";
+    assert(kin::parse_gettext(text, po, errors) && errors.empty());
+    assert(po.locale == "pl");
+    assert(po.strings.at("menu.play") == "Graj");
+    assert(po.strings.at("Hold the line") == "Utrzymaj liniu0119"); // unknown escapes keep their letter
+    assert(!po.strings.contains("menu.quit"));    // fuzzy: unchecked
+    assert(!po.strings.contains("menu.options")); // untranslated
+    assert(!po.strings.contains("old"));          // obsolete
+    const std::string& cards = po.strings.at("hand.cards");
+    assert(kin::format_message(cards, "pl", {{"n", 1}}) == "1 karta");
+    assert(kin::format_message(cards, "pl", {{"n", 3}}) == "3 karty");
+    assert(kin::format_message(cards, "pl", {{"n", 5}}) == "5 kart");
+    assert(kin::format_message(cards, "pl", {{"n", 22}}) == "22 karty");
+
+    // Malformed: a plural with the wrong number of forms, no language.
+    assert(!kin::parse_gettext("msgid \"\"\nmsgstr \"Plural-Forms: nplurals=2; plural=n != 1;\\n\"\n\n"
+                               "msgid \"a\"\nmsgid_plural \"as\"\nmsgstr[0] \"x\"\n",
+                               po, errors, "fr"));
+    assert(!kin::parse_gettext("msgid \"a\"\nmsgstr \"b\"\n", po, errors)); // no language
+
+    // Written out for translators and read back.
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("menu.play", "Play");
+    en.strings.emplace("story", "Line one\nLine \"two\"");
+    kin::LanguageFile fr{.locale = "fr", .name = "Fran\xC3\xA7" "ais"};
+    fr.strings.emplace("menu.play", "Jouer");
+    fr.strings.emplace("story", "Ligne un\nLigne \"deux\"");
+    const std::string out = kin::write_gettext(en, &fr);
+    assert(out.find("msgctxt \"menu.play\"\nmsgid \"Play\"\nmsgstr \"Jouer\"") != std::string::npos);
+    kin::LanguageFile back;
+    errors.clear();
+    assert(kin::parse_gettext(out, back, errors) && back.locale == "fr" && back.strings == fr.strings);
+    const std::string pot = kin::write_gettext(en);
+    assert(kin::parse_gettext(pot, back, errors, "de") && back.strings.empty()); // a template: nothing translated
+
+    // A .po in a language directory loads like the others.
+    kin::Localization l10n;
+    l10n.add("en", std::move(en));
+    errors.clear();
+    assert(l10n.load_text("lang/pl.po", text, errors) && l10n.has_language("pl"));
+    l10n.set_locale("pl");
+    assert(l10n.tr("hand.cards", {{"n", 4}}) == "4 karty");
+}
+
 kin::LanguageFile language(std::string locale, std::initializer_list<std::pair<const std::string, std::string>> strings) {
     kin::LanguageFile file;
     file.locale = std::move(locale);
@@ -473,6 +556,7 @@ int main() {
     test_locale_tags();
     test_language_files();
     test_csv();
+    test_gettext();
     test_lookups();
     test_pseudo_locale();
     test_validate();

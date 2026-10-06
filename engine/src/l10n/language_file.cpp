@@ -443,6 +443,13 @@ bool load_language_files(const std::filesystem::path& path, std::vector<Language
     bool ok = false;
     if (same_text_ignoring_case(path.extension().string(), ".csv")) {
         ok = parse_language_csv(*text, out, own);
+    } else if (same_text_ignoring_case(path.extension().string(), ".po")) {
+        LanguageFile file;
+        ok = parse_gettext(*text, file, own, path.stem().string());
+        if (ok) {
+            out.clear();
+            out.push_back(std::move(file));
+        }
     } else {
         LanguageFile file;
         ok = parse_language_file(*text, file, own);
