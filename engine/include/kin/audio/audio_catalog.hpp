@@ -70,15 +70,27 @@ enum class AudioEffectType {
     HighPass,
     Reverb,
     Compressor,
+    BandPass,
+    Notch,
+    Peak,      // an EQ band: boosts or cuts around `cutoff` by `gain` dB
+    LowShelf,  // boosts or cuts below `cutoff` by `gain` dB
+    HighShelf, // boosts or cuts above `cutoff` by `gain` dB
+    Delay,
 };
 
 // One effect in a bus's chain. Only the fields for its type matter.
 struct AudioEffect {
     AudioEffectType type = AudioEffectType::LowPass;
     bool enabled = true;
-    // LowPass, HighPass: the corner frequency in Hz and its resonance.
+    // Filters and EQ: the frequency in Hz (corner, centre or shelf) and the
+    // resonance or bandwidth; Peak and the shelves boost or cut by `gain` dB.
     f32 cutoff = 1000.0f;
     f32 q = 0.7071f;
+    f32 gain = 0.0f;
+    // Delay: seconds between echoes and how much of each feeds the next (with
+    // the reverb's `wet` and `dry` levels).
+    f32 time = 0.25f;
+    f32 feedback = 0.4f;
     // Reverb (Freeverb): room size and damping 0..1, wet and dry levels, and
     // stereo width 0..1.
     f32 room_size = 0.5f;

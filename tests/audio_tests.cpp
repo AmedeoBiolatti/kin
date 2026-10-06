@@ -1002,9 +1002,9 @@ float rms_left(const std::vector<kin::f32>& out, int from, int to) {
 }
 
 // RMS of `hz` played on "sfx" with `effects` on `bus`.
-float filtered_rms(float hz, std::vector<kin::AudioEffect> effects, std::string_view bus = "sfx") {
+float filtered_rms(float hz, std::vector<kin::AudioEffect> effects, std::string_view bus = "sfx", float amplitude = 0.5f) {
     kin::AudioEngine audio = null_engine();
-    audio.add_clip("dc", sine_clip(hz));
+    audio.add_clip("dc", sine_clip(hz, amplitude));
     const kin::AudioCatalog catalog = bus_catalog();
     audio.play(catalog, {.cue = "hum"});
     audio.set_bus_effects(bus, std::move(effects));
@@ -1412,6 +1412,117 @@ void test_ecs_emitters() {
     assert(near(render(audio, 16)[0], 0.25f));
 }
 
+// Band-pass, notch, an EQ peak and shelves shape their bands as their gains say.
+void test_eq_effects() {
+    using enum kin::AudioEffectType;
+    const float full = 0.5f / std::sqrt(2.0f);
+    const auto ratio = [](float hz, kin::AudioEffect effect) {
+        const float in = 0.1f / std::sqrt(2.0f);
+        return filtered_rms(hz, {effect}, "sfx", 0.1f) / in;
+    };
+    const kin::AudioEffect band{.type = BandPass, .cutoff = 1000.0f, .q = 2.0f};
+    assert(near(filtered_rms(1000.0f, {band}), full, 0.01f));
+    assert(filtered_rms(100.0f, {band}) < 0.05f * full * 2.0f);
+    assert(filtered_rms(10000.0f, {band}) < 0.05f * full * 2.0f);
+    const kin::AudioEffect notch{.type = Notch, .cutoff = 1000.0f, .q = 2.0f};
+    assert(filtered_rms(1000.0f, {notch}) < 0.01f);
+    assert(near(filtered_rms(100.0f, {notch}), full, 0.01f));
+
+    const float plus12 = std::pow(10.0f, 12.0f / 20.0f);
+    const float plus6 = std::pow(10.0f, 6.0f / 20.0f);
+    assert(near(ratio(1000.0f, {.type = Peak, .cutoff = 1000.0f, .q = 1.0f, .gain = 12.0f}), plus12, 0.1f));
+    assert(near(ratio(1000.0f, {.type = Peak, .cutoff = 1000.0f, .q = 1.0f, .gain = -12.0f}), 1.0f / plus12, 0.02f));
+    assert(near(ratio(10000.0f, {.type = Peak, .cutoff = 1000.0f, .q = 1.0f, .gain = 12.0f}), 1.0f, 0.05f));
+    assert(near(ratio(1000.0f, {.type = Peak, .cutoff = 1000.0f, .gain = 0.0f}), 1.0f, 0.01f));
+    assert(near(ratio(40.0f, {.type = LowShelf, .cutoff = 300.0f, .gain = 6.0f}), plus6, 0.08f));
+    assert(near(ratio(8000.0f, {.type = LowShelf, .cutoff = 300.0f, .gain = 6.0f}), 1.0f, 0.03f));
+    assert(near(ratio(15000.0f, {.type = HighShelf, .cutoff = 2000.0f, .gain = 6.0f}), plus6, 0.08f));
+    assert(near(ratio(100.0f, {.type = HighShelf, .cutoff = 2000.0f, .gain = 6.0f}), 1.0f, 0.03f));
+}
+
+// A delay repeats what it hears `time` later, each echo `feedback` times the last.
+void test_delay() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f, 48));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "click", .clips = {"dc"}, .bus = "sfx"});
+    audio.set_bus_effects("sfx", {{.type = kin::AudioEffectType::Delay, .time = 0.1f, .feedback = 0.5f, .wet = 1.0f,
+                                   .dry = 0.0f}});
+    audio.play(catalog, {.cue = "click"});
+    const std::vector<kin::f32> out = render(audio, 15000);
+    assert(near(out[2 * 20], 0.0f)); // dry 0: nothing until the first echo
+    assert(near(out[2 * (4800 + 20)], 0.5f, 0.01f));
+    assert(near(out[2 * (9600 + 20)], 0.25f, 0.01f));
+    assert(near(out[2 * (14400 + 20)], 0.125f, 0.01f));
+    assert(near(out[2 * 7000], 0.0f));
+
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-eq";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    kin::AudioCatalog saved = bus_catalog();
+    saved.bus("sfx")->effects = {{.type = kin::AudioEffectType::Peak, .cutoff = 2500.0f, .q = 1.5f, .gain = -4.0f},
+                                 {.type = kin::AudioEffectType::Delay, .time = 0.3f, .feedback = 0.35f, .wet = 0.4f,
+                                  .dry = 0.9f},
+                                 {.type = kin::AudioEffectType::Notch, .cutoff = 60.0f, .q = 4.0f}};
+    assert(kin::save_audio_catalog(saved, dir / "audio.kinaudio"));
+    assert(kin::load_audio_catalog(dir / "audio.kinaudio").bus("sfx")->effects == saved.bus("sfx")->effects);
+}
+
+// Level meters follow what each bus sends and the output; they fall back after.
+void test_level_meters() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", sine_clip(440.0f));
+    const kin::AudioCatalog catalog = bus_catalog();
+    const kin::AudioHandle hum = audio.play(catalog, {.cue = "hum"});
+    audio.set_bus_volume("sfx", 0.5f);
+    render(audio, 48000);
+    const kin::AudioLevel sfx = audio.bus_level("sfx");
+    assert(near(sfx.peak, 0.25f, 0.005f) && near(sfx.rms, 0.25f / std::sqrt(2.0f), 0.005f));
+    assert(near(audio.bus_level("master").rms, sfx.rms, 0.005f));
+    assert(near(audio.output_level().peak, 0.25f, 0.005f));
+    assert(audio.bus_level("ui").peak == 0.0f);
+    assert(audio.bus_level("nowhere").peak == 0.0f);
+
+    audio.stop(hum);
+    render(audio, 96000);
+    assert(audio.output_level().peak < 0.01f && audio.bus_level("sfx").rms < 0.01f);
+}
+
+// Spectrum analysis finds a tone in its band, on a bus or the output.
+void test_spectrum() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", sine_clip(1000.0f));
+    const kin::AudioCatalog catalog = bus_catalog();
+    assert(audio.spectrum("", 8).empty()); // off until enabled
+    audio.enable_analysis("");
+    audio.enable_analysis("sfx");
+    audio.play(catalog, {.cue = "hum"});
+    render(audio, 4800);
+
+    const std::vector<kin::f32> bands = audio.spectrum("", 30);
+    assert(bands.size() == 30);
+    const auto loudest = std::ranges::max_element(bands) - bands.begin();
+    // 20 Hz..20 kHz in 30 bands: 1 kHz falls in band 17.
+    assert(loudest == 17 && near(bands[17], 0.5f, 0.06f));
+    assert(bands[5] < 0.01f && bands[28] < 0.01f);
+    assert(near(audio.magnitude("sfx", 900.0f, 1100.0f), 0.5f, 0.06f));
+    assert(audio.magnitude("sfx", 3000.0f, 6000.0f) < 0.01f);
+    assert(audio.spectrum("ui", 8).empty());
+
+    audio.enable_analysis("sfx", false);
+    assert(audio.spectrum("sfx", 8).empty());
+
+    kin::LuaScript script{{.setup = [&](sol::state& lua) { kin::bind_lua_audio(lua, audio, catalog); }}};
+    assert(script.load_string(R"(
+        function check()
+            local peak, rms = audio.bus_level("sfx")
+            local bands = audio.spectrum("", 4)
+            return peak > 0.4 and rms > 0.1 and #bands == 4 -- rms is still rising after 0.1 s
+        end
+    )"));
+    assert(script.call_for<bool>("check") == true);
+}
+
 } // namespace
 
 int main() {
@@ -1452,5 +1563,9 @@ int main() {
     test_output_devices();
     test_hot_reload();
     test_ecs_emitters();
+    test_eq_effects();
+    test_delay();
+    test_level_meters();
+    test_spectrum();
     return 0;
 }

@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -27,7 +28,8 @@ AudioEffect effect_from(const sol::table& table, AudioEffect effect) {
     }
     effect.enabled = table.get_or("enabled", effect.enabled);
     const std::pair<const char*, f32*> fields[] = {
-        {"cutoff", &effect.cutoff}, {"q", &effect.q}, {"room", &effect.room_size}, {"damping", &effect.damping},
+        {"cutoff", &effect.cutoff}, {"freq", &effect.cutoff}, {"q", &effect.q}, {"gain", &effect.gain},
+        {"time", &effect.time}, {"feedback", &effect.feedback}, {"room", &effect.room_size}, {"damping", &effect.damping},
         {"wet", &effect.wet}, {"dry", &effect.dry}, {"width", &effect.width}, {"threshold", &effect.threshold},
         {"ratio", &effect.ratio}, {"attack", &effect.attack}, {"release", &effect.release}, {"makeup", &effect.makeup},
     };
@@ -104,6 +106,21 @@ void bind_lua_audio(sol::state_view lua, AudioEngine& audio, const AudioCatalog&
     };
     table["set_output_device"] = [engine](const std::string& name) { return engine->set_output_device(name); };
     table["output_device"] = [engine]() { return engine->output_device(); };
+    // Two results: peak and rms, linear (1 is full scale).
+    table["bus_level"] = [engine](const std::string& bus) {
+        const AudioLevel level = engine->bus_level(bus);
+        return std::make_tuple(level.peak, level.rms);
+    };
+    table["output_level"] = [engine]() {
+        const AudioLevel level = engine->output_level();
+        return std::make_tuple(level.peak, level.rms);
+    };
+    table["enable_analysis"] = [engine](const std::string& bus, sol::optional<bool> enabled) {
+        engine->enable_analysis(bus, enabled.value_or(true));
+    };
+    table["spectrum"] = [engine](const std::string& bus, i32 bands, sol::optional<f32> min_hz, sol::optional<f32> max_hz) {
+        return sol::as_table(engine->spectrum(bus, bands, min_hz.value_or(20.0f), max_hz.value_or(20000.0f)));
+    };
     table["set_listener"] = [engine](f32 x, f32 y) { engine->set_listener({x, y}); };
 }
 

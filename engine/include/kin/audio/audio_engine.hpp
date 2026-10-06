@@ -56,6 +56,13 @@ struct AudioEngineStats {
     i64 limited_frames = 0;
 };
 
+// How loud something is playing, in linear amplitude (1 is full scale): the
+// peak falls back over ~0.3 s, and rms is the average over about as long.
+struct AudioLevel {
+    f32 peak = 0.0f;
+    f32 rms = 0.0f;
+};
+
 // A bus's runtime state: what the game set on it, on top of the catalog.
 struct AudioBusState {
     std::string id;
@@ -173,6 +180,20 @@ public:
     f32 effective_bus_volume(const AudioCatalog& catalog, std::string_view bus) const;
     // Every bus the engine knows, in the order it met them.
     std::vector<AudioBusState> bus_states() const;
+    // Level meters: what a bus sends to its parent (after its effects and
+    // volume), and the final output. Always on.
+    AudioLevel bus_level(std::string_view bus) const;
+    AudioLevel output_level() const;
+    // Starts (or stops) recording the last 2048 frames a bus plays, "" for the
+    // final output, so spectrum() can analyse them. Off by default.
+    void enable_analysis(std::string_view bus, bool enabled = true);
+    // The amplitude in each of `bands` frequency bands, spaced evenly in pitch
+    // from min_hz to max_hz: a sine of amplitude A reads about A in its band.
+    // Computed on the calling thread from the last ~43 ms; empty if analysis
+    // is off for the bus.
+    std::vector<f32> spectrum(std::string_view bus, i32 bands, f32 min_hz = 20.0f, f32 max_hz = 20000.0f) const;
+    // The strongest amplitude between two frequencies (one band of spectrum()).
+    f32 magnitude(std::string_view bus, f32 from_hz, f32 to_hz) const;
     i32 sample_rate() const;
     i32 channels() const;
     bool device_available() const;

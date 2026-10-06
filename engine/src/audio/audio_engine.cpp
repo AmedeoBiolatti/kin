@@ -3,6 +3,7 @@
 #include <kin/audio/audio_decoder.hpp>
 #include <kin/assets/file_watcher.hpp>
 
+#include "audio_analysis.hpp"
 #include "audio_effects.hpp"
 
 #include <kin/core/jobs.hpp>
@@ -30,6 +31,8 @@ constexpr f32 declick_seconds = 0.005f;
 constexpr f32 limiter_release_seconds = 0.05f;
 // Frames update() mixes at once for a backend that is not real time.
 constexpr i32 render_chunk_frames = 1024;
+// How quickly level meters fall back after a peak, and average loudness.
+constexpr f32 meter_seconds = 0.3f;
 // The mixer works in blocks of at most this many frames, so each bus's buffer
 // is allocated once and parameter changes land within ~20 ms.
 constexpr i32 block_frames = 1024;
@@ -62,6 +65,14 @@ PanGains pan_gains(f32 pan) {
 } // namespace
 
 struct AudioEngine::State {
+    // A level meter, and (when enabled) the recent frames for a spectrum.
+    struct Meter {
+        f32 peak = 0.0f;
+        f32 mean_square = 0.0f;
+        std::vector<f32> history; // mono; empty when analysis is off
+        std::size_t history_pos = 0;
+    };
+
     struct Bus {
         std::string id;
         i32 parent = no_bus;
@@ -85,6 +96,7 @@ struct AudioEngine::State {
         std::vector<std::unique_ptr<AudioEffectProcessor>> effects;
         std::vector<AudioEffect> effect_source; // the catalog chain `effects` came from
         bool effects_from_game = false; // set_bus_effects wins over the catalog
+        Meter meter;
     };
 
     struct Duck {
@@ -181,6 +193,7 @@ struct AudioEngine::State {
     AudioEngineStats stats;
     f32 limiter_env = 0.0f;
     f32 limiter_release = 0.0f;
+    Meter output_meter;
     // What finished voices held, handed back for the game thread to free (in
     // update()), so the audio thread never frees a clip's samples. Reserved up
     // front; past capacity the audio thread frees them itself.
@@ -648,6 +661,32 @@ struct AudioEngine::State {
         }
     }
 
+    // Folds a block (what a bus sent to its parent, or the output) into a meter;
+    // `block` null measures silence.
+    void measure(Meter& meter, const f32* block, i32 frames) {
+        const std::size_t stride = static_cast<std::size_t>(channels);
+        f32 peak = 0.0f;
+        f32 sum = 0.0f;
+        const bool record = !meter.history.empty();
+        for (i32 frame = 0; frame < frames; ++frame) {
+            f32 mono = 0.0f;
+            for (std::size_t c = 0; c < stride && block; ++c) {
+                const f32 v = block[static_cast<std::size_t>(frame) * stride + c];
+                peak = std::max(peak, std::fabs(v));
+                sum += v * v;
+                mono += v;
+            }
+            if (record) {
+                meter.history[meter.history_pos] = mono / static_cast<f32>(stride);
+                meter.history_pos = (meter.history_pos + 1) % meter.history.size();
+            }
+        }
+        const f32 keep = std::exp(-static_cast<f32>(frames) / (meter_seconds * static_cast<f32>(sample_rate)));
+        const f32 mean_square = sum / static_cast<f32>(static_cast<std::size_t>(frames) * stride);
+        meter.peak = std::max(peak, meter.peak * keep);
+        meter.mean_square = mean_square + (meter.mean_square - mean_square) * keep;
+    }
+
     void mix(std::span<f32> out) {
         const std::size_t stride = static_cast<std::size_t>(channels);
         const i32 total = static_cast<i32>(out.size() / stride);
@@ -730,6 +769,7 @@ struct AudioEngine::State {
             const f32 from = bus.applied_gain < 0.0f ? bus.own_gain : bus.applied_gain;
             bus.applied_gain = bus.own_gain;
             if (!bus.active) {
+                measure(bus.meter, nullptr, frames);
                 continue;
             }
             const std::span<f32> block{bus.buffer.data(), samples};
@@ -748,12 +788,15 @@ struct AudioEngine::State {
                 const f32 gain = from + ramp * static_cast<f32>(frame);
                 for (std::size_t c = 0; c < stride; ++c) {
                     const std::size_t i = static_cast<std::size_t>(frame) * stride + c;
-                    dest[i] += block[i] * gain;
+                    block[i] *= gain; // what the bus sends, for its meter
+                    dest[i] += block[i];
                 }
             }
+            measure(bus.meter, block.data(), frames);
         }
 
         limit(out, frames);
+        measure(output_meter, out.data(), frames);
         stats.mixed_frames += frames;
     }
 
@@ -1470,6 +1513,72 @@ void AudioEngine::apply_catalog(const AudioCatalog& catalog) {
     _state->apply_catalog(catalog);
 }
 
+namespace {
+
+AudioLevel level_of(f32 peak, f32 mean_square) {
+    return {.peak = peak, .rms = std::sqrt(std::max(0.0f, mean_square))};
+}
+
+} // namespace
+
+AudioLevel AudioEngine::bus_level(std::string_view bus) const {
+    const std::scoped_lock lock{_state->mutex};
+    const State::Bus* state = _state->find_bus(bus);
+    return state ? level_of(state->meter.peak, state->meter.mean_square) : AudioLevel{};
+}
+
+AudioLevel AudioEngine::output_level() const {
+    const std::scoped_lock lock{_state->mutex};
+    return level_of(_state->output_meter.peak, _state->output_meter.mean_square);
+}
+
+void AudioEngine::enable_analysis(std::string_view bus, bool enabled) {
+    State& s = *_state;
+    std::vector<f32> history(enabled ? static_cast<std::size_t>(audio_analysis_frames) : 0, 0.0f);
+    const std::scoped_lock lock{s.mutex};
+    State::Meter& meter = bus.empty() ? s.output_meter : s.buses[static_cast<std::size_t>(s.ensure_bus(bus))].meter;
+    if (meter.history.empty() != enabled) {
+        return; // already as asked
+    }
+    std::swap(meter.history, history); // the old buffer is freed after unlocking
+    meter.history_pos = 0;
+}
+
+std::vector<f32> AudioEngine::spectrum(std::string_view bus, i32 bands, f32 min_hz, f32 max_hz) const {
+    std::vector<f32> recent;
+    {
+        const std::scoped_lock lock{_state->mutex};
+        const State::Meter* meter = &_state->output_meter;
+        if (!bus.empty()) {
+            const State::Bus* state = _state->find_bus(bus);
+            meter = state ? &state->meter : nullptr;
+        }
+        if (!meter || meter->history.empty()) {
+            return {};
+        }
+        // Oldest first.
+        recent.reserve(meter->history.size());
+        recent.insert(recent.end(), meter->history.begin() + static_cast<std::ptrdiff_t>(meter->history_pos), meter->history.end());
+        recent.insert(recent.end(), meter->history.begin(), meter->history.begin() + static_cast<std::ptrdiff_t>(meter->history_pos));
+    }
+    const std::vector<f32> bins = audio_spectrum_bins(recent);
+    const f32 rate = static_cast<f32>(_state->sample_rate);
+    const f32 low = std::max(1.0f, min_hz);
+    const f32 high = std::max(low * 1.001f, std::min(max_hz, rate * 0.5f));
+    std::vector<f32> result(static_cast<std::size_t>(std::max(0, bands)));
+    for (std::size_t band = 0; band < result.size(); ++band) {
+        const f32 from = low * std::pow(high / low, static_cast<f32>(band) / static_cast<f32>(result.size()));
+        const f32 to = low * std::pow(high / low, static_cast<f32>(band + 1) / static_cast<f32>(result.size()));
+        result[band] = audio_band_magnitude(bins, rate, from, to);
+    }
+    return result;
+}
+
+f32 AudioEngine::magnitude(std::string_view bus, f32 from_hz, f32 to_hz) const {
+    const std::vector<f32> band = spectrum(bus, 1, from_hz, to_hz);
+    return band.empty() ? 0.0f : band.front();
+}
+
 i32 AudioEngine::loaded_clip_count() const {
     return static_cast<i32>(_state->clip_cache.size() + _state->memory_clips.size());
 }
@@ -1606,6 +1715,8 @@ void AudioEngine::write_report(JsonWriter& json) const {
     json.field("device", _backend->available());
     json.field("output_device", _backend->device());
     json.field("loaded_clips", static_cast<i32>(s.clip_cache.size() + s.memory_clips.size()));
+    json.field("peak", static_cast<f64>(s.output_meter.peak));
+    json.field("rms", static_cast<f64>(std::sqrt(s.output_meter.mean_square)));
     json.field("sample_rate", s.sample_rate);
     json.key("stats").begin_object();
     json.field("active_voices", s.stats.active_voices);
@@ -1630,6 +1741,8 @@ void AudioEngine::write_report(JsonWriter& json) const {
         json.field("duck", static_cast<f64>(bus.duck));
         json.field("muted", bus.muted);
         json.field("paused", bus.paused);
+        json.field("peak", static_cast<f64>(bus.meter.peak));
+        json.field("rms", static_cast<f64>(std::sqrt(bus.meter.mean_square)));
         json.key("effects").begin_array();
         for (const auto& effect : bus.effects) {
             json.value(audio_effect_type_name(effect->effect().type));

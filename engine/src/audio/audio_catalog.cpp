@@ -194,13 +194,21 @@ std::string_view audio_effect_type_name(AudioEffectType type) {
     case AudioEffectType::HighPass: return "highpass";
     case AudioEffectType::Reverb: return "reverb";
     case AudioEffectType::Compressor: return "compressor";
+    case AudioEffectType::BandPass: return "bandpass";
+    case AudioEffectType::Notch: return "notch";
+    case AudioEffectType::Peak: return "peak";
+    case AudioEffectType::LowShelf: return "lowshelf";
+    case AudioEffectType::HighShelf: return "highshelf";
+    case AudioEffectType::Delay: return "delay";
     }
     return "lowpass";
 }
 
 bool parse_audio_effect_type(std::string_view value, AudioEffectType& out) {
     for (const AudioEffectType type : {AudioEffectType::LowPass, AudioEffectType::HighPass, AudioEffectType::Reverb,
-                                       AudioEffectType::Compressor}) {
+                                       AudioEffectType::Compressor, AudioEffectType::BandPass, AudioEffectType::Notch,
+                                       AudioEffectType::Peak, AudioEffectType::LowShelf, AudioEffectType::HighShelf,
+                                       AudioEffectType::Delay}) {
         if (value == audio_effect_type_name(type)) {
             out = type;
             return true;
@@ -375,8 +383,11 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                 }
                 const std::string_view key{token.data(), eq};
                 const std::string_view value{token.data() + eq + 1, token.size() - eq - 1};
-                f32* field = key == "cutoff" ? &effect.cutoff
+                f32* field = key == "cutoff" || key == "freq" ? &effect.cutoff
                     : key == "q" ? &effect.q
+                    : key == "gain" ? &effect.gain
+                    : key == "time" ? &effect.time
+                    : key == "feedback" ? &effect.feedback
                     : key == "room" ? &effect.room_size
                     : key == "damping" ? &effect.damping
                     : key == "wet" ? &effect.wet
@@ -542,7 +553,18 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
             switch (effect.type) {
             case AudioEffectType::LowPass:
             case AudioEffectType::HighPass:
+            case AudioEffectType::BandPass:
+            case AudioEffectType::Notch:
                 out << " cutoff=" << effect.cutoff << " q=" << effect.q;
+                break;
+            case AudioEffectType::Peak:
+            case AudioEffectType::LowShelf:
+            case AudioEffectType::HighShelf:
+                out << " freq=" << effect.cutoff << " gain=" << effect.gain << " q=" << effect.q;
+                break;
+            case AudioEffectType::Delay:
+                out << " time=" << effect.time << " feedback=" << effect.feedback << " wet=" << effect.wet
+                    << " dry=" << effect.dry;
                 break;
             case AudioEffectType::Reverb:
                 out << " room=" << effect.room_size << " damping=" << effect.damping << " wet=" << effect.wet

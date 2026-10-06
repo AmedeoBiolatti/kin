@@ -52,6 +52,15 @@ releases may change APIs.
 - Lua: `bind_lua_audio` gives scripts an `audio` table, and
   `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
   lets a host add its own bindings to a script scene's Lua state.
+- More audio effects: `bandpass` and `notch` filters, an EQ `peak` band,
+  `lowshelf` and `highshelf` (with `gain` in dB; `freq` names the frequency),
+  and a `delay` (`time`, `feedback`, `wet`, `dry`) whose time glides when
+  changed.
+- Audio levels: `bus_level(bus)` and `output_level()` give each bus's and the
+  output's peak and RMS (always on, in `write_report` too), and
+  `enable_analysis(bus)` with `spectrum(bus, bands)` / `magnitude(bus, from,
+  to)` give a frequency spectrum for visualizers. Lua's `audio` table has
+  `bus_level`, `output_level`, `enable_analysis` and `spectrum`.
 - Audio reloading: `AudioEngine::watch(files)` reloads clip files when they
   change (new plays get the new version), `watch_catalog(files, path,
   catalog)` reloads a catalog file and applies it, and `apply_catalog`

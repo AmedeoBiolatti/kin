@@ -108,7 +108,13 @@ a paused bus does: it goes quiet, keeps its place, and still counts as playing.
 ### Effects
 
 A bus can run effects over everything it plays, children included, before its
-volume: low- and high-pass filters, a reverb and a compressor. Each bus is
+volume:
+
+- Filters: low-pass, high-pass, band-pass and notch.
+- EQ: a peak band and low and high shelves.
+- A delay.
+- A reverb.
+- A compressor. Each bus is
 mixed on its own and added into its parent, so an effect on `master` hears the
 whole game, and one on `sfx` only the sound effects.
 
@@ -116,7 +122,16 @@ whole game, and one on `sfx` only the sound effects.
 effect sfx lowpass cutoff=800 q=0.7
 effect ambient reverb room=0.7 damping=0.5 wet=0.3 dry=1 width=1
 effect master compressor threshold=-12 ratio=4 attack=0.01 release=0.1 makeup=0
+effect music peak freq=2500 gain=-3 q=1.2      # EQ: dB up or down around freq
+effect music lowshelf freq=120 gain=4
+effect music highshelf freq=8000 gain=-2
+effect ui bandpass cutoff=1500 q=2             # also: notch
+effect sfx delay time=0.3 feedback=0.4 wet=0.5 dry=1
 ```
+
+A delay's new `time` glides in rather than jumping, so changing it while
+playing does not crackle. Its line holds up to twice the first time it was made
+with (one second at least).
 
 `effect` lines follow the `bus` they name; `enabled=false` keeps an effect in
 the chain but bypassed. At runtime, `set_bus_effects(bus, chain)` replaces a
@@ -132,6 +147,32 @@ audio.set_bus_effects("sfx", {muffled});
 muffled.cutoff = 20000.0f;
 audio.set_bus_effect("sfx", 0, muffled);
 ```
+
+### Levels and spectrum
+
+Every bus and the final output keep a level meter: what the bus sends to its
+parent, after its effects and volume.
+
+```cpp
+kin::AudioLevel music = audio.bus_level("music"); // peak and rms, 1 is full scale
+kin::AudioLevel out = audio.output_level();
+```
+
+The peak falls back over about 0.3 s after a hit, and `rms` averages over about
+as long, which suits a meter display.
+
+For a music visualizer, turn on analysis for a bus (`""` is the output) and ask
+for its spectrum each frame:
+
+```cpp
+audio.enable_analysis("music");
+std::vector<float> bars = audio.spectrum("music", 32);    // 20 Hz..20 kHz, spaced by pitch
+float bass = audio.magnitude("music", 40.0f, 120.0f);
+```
+
+Each value is an amplitude: a tone of amplitude 0.5 reads about 0.5 in its band.
+The mixer only records the last 2048 frames of an analysed bus, and the FFT runs
+on the thread that asks.
 
 ### Ducking
 
@@ -285,6 +326,9 @@ audio.play_music("town", 2.0)
 audio.set_bus_paused("sfx", true)
 audio.set_bus_effects("sfx", {{type = "lowpass", cutoff = 800}})
 audio.set_bus_effect("sfx", 1, {cutoff = 300}) -- 1-based; other fields kept
+local peak, rms = audio.bus_level("music")
+audio.enable_analysis("music")
+local bars = audio.spectrum("music", 16)
 ```
 
 Handles are integers. A `LuaScript` binds it the same way from `setup`.

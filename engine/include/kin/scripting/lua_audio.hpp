@@ -27,7 +27,9 @@ class AudioEngine;
 // set_bus_effects(bus, {{type = "lowpass", cutoff = 800}, ...}),
 // set_bus_effect(bus, index, {cutoff = 400}) (1-based; fields left out keep
 // their values), output_devices() -> {names}, set_output_device(name) ("" for
-// the default), output_device(), set_listener(x, y). Effect fields are named as in a
+// the default), output_device(), bus_level(bus) -> peak, rms, output_level(),
+// enable_analysis(bus[, enabled]) ("" is the output), spectrum(bus, bands[,
+// min_hz, max_hz]) -> {amplitudes}, set_listener(x, y). Effect fields are named as in a
 // .kinaudio effect line.
 //
 // For a LuaScript, call it from LuaScriptOptions::setup; for a ScriptScene,
