@@ -26,6 +26,7 @@
 #endif
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_server.hpp>
+#include <kin/ui2/geometry.hpp>
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
 #include <kin/runtime/state_hash.hpp>
 #endif
@@ -498,6 +499,15 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
     StateCoverage lockstep_coverage;
 #endif
+    // The UI reads the way the shown language does (ui2::set_ui_direction),
+    // checked whenever the localization changes.
+    u64 seen_l10n_generation = 0;
+    const auto sync_ui_direction = [&] {
+        if (config.localization && config.localization->generation() != seen_l10n_generation) {
+            seen_l10n_generation = config.localization->generation();
+            ui2::set_ui_direction(config.localization->direction());
+        }
+    };
     const RngKey root_key = make_key(config.headless.seed);
     const bool want_report = config.report_output != nullptr || !config.headless.report_path.empty();
     std::string report_snapshot;
@@ -687,6 +697,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             profile_session.set_frame(frames_run);
         }
         kin::SceneContext scene_ctx = make_scene_context(ctx);
+        sync_ui_direction();
         runtime_detail::pump_scene_assets(config.asset_server, window.mode != AppMode::Headless);
         if (config.file_watcher && window.mode != AppMode::Headless) {
             config.file_watcher->poll();
@@ -730,6 +741,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     }, [&](FrameContext& ctx) {
         prepare_frame(ctx);
         kin::SceneContext scene_ctx = make_scene_context(ctx);
+        sync_ui_direction();
         f64 render_scene_ms = 0.0;
         f64 overlay_ms = 0.0;
         f64 present_ms = 0.0;

@@ -336,7 +336,8 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     bool layout_dirty = false;
     world.each([&](flecs::entity root_entity, const Ui2Root& root) {
         const Ui2LayoutCache* cache = root_entity.get<Ui2LayoutCache>();
-        if (!cache || cache->root_bounds != root.bounds || cache->solved_version != cache->tree_version) {
+        if (!cache || cache->root_bounds != root.bounds || cache->solved_version != cache->tree_version ||
+            cache->solved_direction != ui2::ui_direction()) {
             layout_dirty = true;
         }
     });
@@ -379,9 +380,11 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     world.each([&](flecs::entity root_entity, Ui2Root& root) {
         Ui2LayoutCache& cache = root_entity.ensure<Ui2LayoutCache>();
         const bool root_bounds_changed = cache.root_bounds != root.bounds;
-        if (!root_bounds_changed && cache.solved_version == cache.tree_version) {
+        if (!root_bounds_changed && cache.solved_version == cache.tree_version &&
+            cache.solved_direction == ui2::ui_direction()) {
             return;
         }
+        cache.solved_direction = ui2::ui_direction();
 
         std::vector<ui2::LayoutNode>& nodes = cache.nodes;
         nodes.clear();

@@ -2,6 +2,7 @@
 #include <kin/core/json.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/l10n/localization.hpp>
+#include <kin/ui2/geometry.hpp>
 #include <kin/runtime/debug_overlay.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
@@ -525,6 +526,15 @@ int main() {
         assert(run(locale_options, text) == 1);
         assert(text.find("\"shown\": \"Jouer|menu.unknown\"") != std::string::npos);
         assert(text.find("missing text in fr: menu.unknown") != std::string::npos);
+
+        // An Arabic run lays the UI out right to left.
+        l10n.add("ar", kin::LanguageFile{.locale = "ar", .name = "Arabic"});
+        kin::HeadlessOptions arabic;
+        arabic.locale = "ar";
+        run(arabic, text);
+        assert(kin::ui2::ui_direction() == kin::TextDirection::RightToLeft);
+        run({}, text);
+        assert(kin::ui2::ui_direction() == kin::TextDirection::LeftToRight);
         kin::set_active_localization(nullptr);
     }
 

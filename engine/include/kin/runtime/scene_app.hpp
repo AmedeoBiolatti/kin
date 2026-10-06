@@ -112,7 +112,8 @@ struct SceneAppConfig {
     FileWatcher* file_watcher = nullptr;
     // Optional translations. When set, run_scene_app makes them the active
     // localization (kin::tr, retained ui2 text, dialogue, scripts), applies
-    // --locale, and lists missing text in the run report.
+    // --locale, keeps ui2's direction (ui2::set_ui_direction) that of the
+    // language shown, and lists missing text in the run report.
     Localization* localization = nullptr;
     // Where a windowed run keeps the GPU pipelines it made, to make them while
     // the next run loads (Renderer2D::pipeline_record). Unset: the user data

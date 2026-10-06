@@ -30,6 +30,7 @@ struct Ui2LayoutCache {
     u64 solved_version = 0;
     u64 tree_version = 1;
     Rectf root_bounds{};
+    TextDirection solved_direction = TextDirection::LeftToRight; // ui2::ui_direction() when solved
     std::vector<ui2::LayoutNode> nodes;
     std::vector<EcsId> order;
     u64 solve_count = 0;

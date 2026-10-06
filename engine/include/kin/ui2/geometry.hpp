@@ -1,11 +1,21 @@
 #pragma once
 
+#include <kin/core/bidi.hpp>
 #include <kin/core/types.hpp>
 
 #include <optional>
 #include <vector>
 
 namespace kin::ui2 {
+
+// The direction a UI reads in. RightToLeft mirrors it for Arabic, Hebrew and
+// the other right-to-left languages: layouts (solve) are reflected so rows run
+// from the right and overlays anchored left sit right, align_rect swaps Start
+// and End across, and text paragraphs run right to left
+// (set_text_base_direction). Widgets keep their inner order (a checkbox's box
+// before its label). Set it with the language (Localization::direction()).
+void set_ui_direction(TextDirection direction);
+TextDirection ui_direction();
 
 enum class UiAlign {
     Start,
