@@ -62,6 +62,71 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure -j 4 --timeout 300
 
+  # Signal Siege as players get it: a shipping build, packaged, unpacked
+  # elsewhere and run from another folder, so a game that needs anything from
+  # the build tree or the working folder fails here. The packages are kept as
+  # artifacts.
+  ship:
+    name: Ship ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-24.04
+            preset: ship
+          - name: Windows
+            os: windows-2022
+            preset: ship-vs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-linux-deps.sh glslc
+
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: cmake --preset ship
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        # The runner has no glslc: this build's GPU backend has no shaders, so
+        # the game falls back to SDL_Renderer.
+        run: cmake --preset ship-vs -DKIN_REQUIRE_GPU_SHADERS=OFF
+
+      - name: Package
+        run: cmake --build --preset ${{ matrix.preset }} --target signal_siege_package --parallel 4
+
+      - name: Run the package from elsewhere
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/ship" && cd "$RUNNER_TEMP/ship"
+          for archive in "$GITHUB_WORKSPACE"/build-ship/packages/signal_siege-*.*; do
+            cmake -E tar xf "$archive"
+          done
+          game=$(ls -d signal_siege-*/)
+          # French only if the pack's French file loaded (it falls back to
+          # English without), and none of its text missing.
+          "./${game}signal_siege" --headless --frames=120 --seed=7 --locale=fr --fail-on-missing-text \
+            --mute --report=report.json
+          grep -q '"status": "ok"' report.json
+          grep -q '"locale": "fr"' report.json
+          test -f "${game}licenses/SDL.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signal-siege-${{ matrix.name }}
+          path: |
+            build-ship/packages/*.zip
+            build-ship/packages/*.tar.gz
+          if-no-files-found: error
+
   # The SDL_GPU backend's tests skip without a GPU, so the jobs above never run
   # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
   # virtual X display, and requires them to run.
