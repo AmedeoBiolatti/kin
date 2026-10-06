@@ -1,6 +1,7 @@
 #include <kin/audio/audio_engine.hpp>
 
 #include <kin/audio/audio_decoder.hpp>
+#include <kin/assets/file_watcher.hpp>
 
 #include "audio_effects.hpp"
 
@@ -198,6 +199,16 @@ struct AudioEngine::State {
     std::vector<f32> scratch;
     AudioHandle music;
     std::string music_cue;
+    // Files watched for changes (watch(), watch_catalog()).
+    struct WatchRef {
+        FileWatcher* files = nullptr;
+        std::weak_ptr<const void> alive;
+        u32 id = 0;
+    };
+    FileWatcher* clip_files = nullptr; // set by watch(): clip files are watched as they load
+    std::weak_ptr<const void> clip_files_alive;
+    std::unordered_map<std::string, WatchRef> clip_watches; // by cache key
+    std::vector<WatchRef> catalog_watches;
     f32 device_poll = 0.0f; // seconds since the backend last checked its device
 
     RngKey next_key() {
@@ -765,7 +776,71 @@ struct AudioEngine::State {
     std::shared_ptr<const AudioClip> take_loaded(const std::string& key, Job<AudioClip>& job) {
         auto clip = std::make_shared<const AudioClip>(std::move(job.get()));
         clip_cache.insert_or_assign(key, clip);
+        watch_clip(key);
         return clip;
+    }
+
+    static void unwatch(const WatchRef& ref) {
+        if (ref.files && !ref.alive.expired()) {
+            ref.files->unwatch(ref.id);
+        }
+    }
+
+    // Reloads a cached clip's file when it changes, if watch() was called. The
+    // cache key is the file's path, with "|stream" for a streamed copy.
+    void watch_clip(const std::string& key) {
+        if (!clip_files || clip_files_alive.expired() || clip_watches.contains(key)) {
+            return;
+        }
+        const bool stream = key.ends_with("|stream");
+        const std::filesystem::path path{stream ? key.substr(0, key.size() - 7) : key};
+        const u32 id = clip_files->watch(path, [this, key, path, stream](const std::filesystem::path&) {
+            if (!clip_cache.contains(key)) {
+                return;
+            }
+            try {
+                // Voices playing the old version keep it; new plays get this one.
+                clip_cache.insert_or_assign(key, std::make_shared<const AudioClip>(load_file(path, stream)));
+                KIN_LOG_INFO_F("audio", "audio clip reloaded", (LogFields{{.name = "path", .value = path.string()}}));
+            } catch (const std::exception& error) {
+                KIN_LOG_WARN_F("audio",
+                               "audio clip reload failed, keeping the last version",
+                               (LogFields{
+                                   {.name = "path", .value = path.string()},
+                                   {.name = "error", .value = error.what()},
+                               }));
+            }
+        });
+        clip_watches.emplace(key, WatchRef{clip_files, clip_files_alive, id});
+    }
+
+    void forget_clip(const std::string& key) {
+        if (const auto found = clip_watches.find(key); found != clip_watches.end()) {
+            unwatch(found->second);
+            clip_watches.erase(found);
+        }
+        clip_cache.erase(key);
+    }
+
+    void unwatch_all() {
+        for (const auto& [key, ref] : clip_watches) {
+            unwatch(ref);
+        }
+        for (const WatchRef& ref : catalog_watches) {
+            unwatch(ref);
+        }
+        clip_watches.clear();
+        catalog_watches.clear();
+    }
+
+    // Registers every bus and duck rule of the catalog now (play() otherwise
+    // does it for the buses a cue uses).
+    void apply_catalog(const AudioCatalog& catalog) {
+        const std::scoped_lock lock{mutex};
+        for (const auto& [id, bus] : catalog.buses()) {
+            sync_bus(catalog, id);
+        }
+        sync_ducks(catalog);
     }
 
     void poll_loading() {
@@ -824,6 +899,7 @@ struct AudioEngine::State {
             } else {
                 clip = std::make_shared<const AudioClip>(load_file(path, ref->stream));
                 clip_cache.emplace(key, clip);
+                watch_clip(key);
             }
         } catch (const std::exception& error) {
             KIN_LOG_ERROR_F("audio",
@@ -907,6 +983,9 @@ AudioEngine::AudioEngine(std::unique_ptr<IAudioBackend> backend, AudioEngineConf
 }
 
 AudioEngine::~AudioEngine() {
+    if (_state) {
+        _state->unwatch_all();
+    }
     if (_backend) {
         _backend->stop();
     }
@@ -918,6 +997,9 @@ AudioEngine& AudioEngine::operator=(AudioEngine&& other) noexcept {
     if (this != &other) {
         if (_backend) {
             _backend->stop(); // before the state it renders from goes away
+        }
+        if (_state) {
+            _state->unwatch_all();
         }
         _backend = std::move(other._backend);
         _state = std::move(other._state);
@@ -1332,7 +1414,16 @@ i32 AudioEngine::unload_unused() {
     State& s = *_state;
     s.free_retired(); // finished voices let go of their clips
     // Only the cache holds these: no voice is playing them.
-    return static_cast<i32>(std::erase_if(s.clip_cache, [](const auto& entry) { return entry.second.use_count() == 1; }));
+    std::vector<std::string> unused;
+    for (const auto& [key, clip] : s.clip_cache) {
+        if (clip.use_count() == 1) {
+            unused.push_back(key);
+        }
+    }
+    for (const std::string& key : unused) {
+        s.forget_clip(key);
+    }
+    return static_cast<i32>(unused.size());
 }
 
 void AudioEngine::unload(const AudioCatalog& catalog) {
@@ -1340,10 +1431,43 @@ void AudioEngine::unload(const AudioCatalog& catalog) {
     for (const auto& [id, clip] : catalog.clips()) {
         const std::filesystem::path path = catalog.resolve_clip_path(id);
         for (const bool stream : {false, true}) {
-            s.clip_cache.erase(State::cache_key(path, stream));
+            s.forget_clip(State::cache_key(path, stream));
             s.loading.erase(State::cache_key(path, stream));
         }
     }
+}
+
+void AudioEngine::watch(FileWatcher& files) {
+    State& s = *_state;
+    s.clip_files = &files;
+    s.clip_files_alive = files.lifetime();
+    for (const auto& [key, clip] : s.clip_cache) {
+        s.watch_clip(key);
+    }
+}
+
+void AudioEngine::watch_catalog(FileWatcher& files, std::filesystem::path path, AudioCatalog& catalog) {
+    State& s = *_state;
+    const u32 id = files.watch(path, [state = &s, &catalog, path](const std::filesystem::path&) {
+        try {
+            AudioCatalog loaded = load_audio_catalog(path);
+            catalog = std::move(loaded);
+            state->apply_catalog(catalog);
+            KIN_LOG_INFO_F("audio", "audio catalog reloaded", (LogFields{{.name = "path", .value = path.string()}}));
+        } catch (const std::exception& error) {
+            KIN_LOG_WARN_F("audio",
+                           "audio catalog reload failed, keeping the last version",
+                           (LogFields{
+                               {.name = "path", .value = path.string()},
+                               {.name = "error", .value = error.what()},
+                           }));
+        }
+    });
+    s.catalog_watches.push_back({&files, files.lifetime(), id});
+}
+
+void AudioEngine::apply_catalog(const AudioCatalog& catalog) {
+    _state->apply_catalog(catalog);
 }
 
 i32 AudioEngine::loaded_clip_count() const {

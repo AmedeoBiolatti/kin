@@ -52,6 +52,15 @@ releases may change APIs.
 - Lua: `bind_lua_audio` gives scripts an `audio` table, and
   `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
   lets a host add its own bindings to a script scene's Lua state.
+- Audio reloading: `AudioEngine::watch(files)` reloads clip files when they
+  change (new plays get the new version), `watch_catalog(files, path,
+  catalog)` reloads a catalog file and applies it, and `apply_catalog`
+  applies a catalog edited in code. A broken edit keeps the last good
+  version.
+- ECS audio: `AudioEmitter` has `volume`, `pitch`, `paused`, `fade_in` and
+  `when_done` (`Restart`, `Keep`, `Remove`, `Despawn`); removing an emitter
+  or destroying its entity fades its sound out. `AudioOneShot` has `volume`
+  and `pitch`.
 - Audio voices: `seek(handle, seconds)` (declicked, streams too) and
   `set_paused(handle, paused)` / `paused(handle)` for one voice.
 - Audio memory: `unload_unused()`, `unload(catalog)` and `remove_clip(id)`

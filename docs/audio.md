@@ -189,6 +189,22 @@ audio.loaded_clip_bytes();   // what the cache holds now
 A voice that finishes hands its clip back to the game thread, and `update()`
 frees it there, so the audio thread never frees a clip's samples.
 
+### Reloading
+
+While a game runs, edited audio files can be picked up without a restart:
+
+```cpp
+audio.watch(files);                                     // clip files, as they load
+audio.watch_catalog(files, root / "audio.kinaudio", catalog);
+```
+
+Polling the `FileWatcher` (which `run_scene_app` does every frame) runs the
+reloads. A changed clip is decoded again: new plays use it, and voices already
+playing finish with the old version. A changed catalog replaces `catalog` and
+applies its buses, effects and duck rules at once. A file that fails to load
+keeps the last good version. `apply_catalog(catalog)` applies a catalog edited in
+code the same way.
+
 ### Output devices
 
 ```cpp
@@ -208,8 +224,23 @@ void update_audio_emitters(EcsWorld& world, AudioEngine& audio, const AudioCatal
 void consume_audio_one_shots(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog);
 ```
 
-`AudioEmitter` and `AudioListener` follow `Transform2D`. `AudioOneShot` is a
-transient component that plays once and is removed.
+`AudioEmitter` and `AudioListener` follow `Transform2D`. An emitter's `volume`,
+`pitch` and `paused` apply to its sound every update, and `when_done` says what
+happens when the sound ends:
+
+- `Restart` (the default): play it again.
+- `Keep`: stay, silent.
+- `Remove`: remove the emitter.
+- `Despawn`: destroy the entity, for a sound fired and forgotten.
+
+Removing an emitter, or destroying its entity, fades its sound out.
+`AudioOneShot` is a transient component that plays once (with its own `volume`
+and `pitch`) and is removed.
+
+```cpp
+world.entity().set(kin::Transform2D{.pos = door})
+              .set(kin::AudioEmitter{.cue = "creak", .when_done = kin::AudioEmitterEnd::Despawn});
+```
 
 ## Settings
 

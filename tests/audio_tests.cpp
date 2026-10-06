@@ -1,5 +1,6 @@
 #include <kin/audio/audio.hpp>
 #include <kin/anim/player.hpp>
+#include <kin/assets/file_watcher.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
@@ -1299,6 +1300,118 @@ void test_output_devices() {
     assert(audio.output_device() == devices.front());
 }
 
+// Edited clip and catalog files are picked up while the game runs; a broken
+// catalog keeps the last good one.
+void test_hot_reload() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-reload";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    write_wav(dir / "beep.wav", 8000, 4800);
+    const auto write_catalog = [&](float sfx_volume, bool with_cue) {
+        std::ofstream out(dir / "audio.kinaudio");
+        out << "bus master 1\nbus sfx " << sfx_volume << " master\nclip beep beep.wav\n";
+        out << "cue hum sound sfx loop=true clips=beep\n";
+        if (with_cue) {
+            out << "cue blip sound sfx clips=beep\n";
+        }
+    };
+    write_catalog(1.0f, false);
+    kin::AudioCatalog catalog = kin::load_audio_catalog(dir / "audio.kinaudio");
+
+    kin::FileWatcher files;
+    kin::AudioEngine audio = null_engine();
+    audio.watch(files);
+    audio.watch_catalog(files, dir / "audio.kinaudio", catalog);
+    const kin::AudioHandle old_voice = audio.play(catalog, {.cue = "hum"});
+    const float before = render(audio, 16)[0];
+    assert(near(before, 8000.0f / 32768.0f, 1e-3f));
+
+    // A louder file, and a catalog that halves sfx and adds a cue.
+    write_wav(dir / "beep.wav", 16000, 2400);
+    write_catalog(0.5f, true);
+    files.poll_now();
+    files.poll_now(); // a change is reported once the file has held still for a poll
+    assert(catalog.cue("blip") != nullptr);
+    assert(near(catalog.bus("sfx")->volume, 0.5f));
+    render(audio, 1024); // the bus volume ramps
+    assert(near(render(audio, 16)[0], before * 0.5f, 1e-3f)); // the playing voice keeps the old samples
+    audio.stop(old_voice);
+    render(audio, 480);
+    audio.play(catalog, {.cue = "blip"});
+    assert(near(render(audio, 16)[0], 16000.0f / 32768.0f * 0.5f, 1e-3f)); // new plays get the new file
+
+    // A broken edit is reported and ignored.
+    std::ofstream(dir / "audio.kinaudio") << "bus master\n";
+    files.poll_now();
+    files.poll_now();
+    assert(catalog.cue("blip") != nullptr);
+
+    // Unloaded clips are no longer watched.
+    audio.unload(catalog);
+    assert(audio.loaded_clip_count() == 0);
+}
+
+// Emitters carry volume, pitch and pause, can remove or despawn themselves
+// when done, and silence their sound when they go away.
+void test_ecs_emitters() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    audio.add_clip("short", dc_clip(0.5f, 480));
+    kin::AudioCatalog catalog = bus_catalog();
+    catalog.add_cue({.id = "short", .clips = {"short"}, .bus = "sfx"});
+
+    kin::EcsWorld world;
+    kin::EcsEntity hum = world.entity("hum");
+    hum.set(kin::Transform2D{});
+    hum.set(kin::AudioEmitter{.cue = "hum", .volume = 0.5f});
+    kin::update_audio_emitters(world, audio, catalog);
+    assert(near(render(audio, 16)[0], 0.25f));
+
+    hum.raw().get_mut<kin::AudioEmitter>()->paused = true;
+    kin::update_audio_emitters(world, audio, catalog);
+    render(audio, 1024);
+    assert(render(audio, 16)[0] == 0.0f);
+    assert(hum.raw().get<kin::AudioEmitter>()->playing);
+    hum.raw().get_mut<kin::AudioEmitter>()->paused = false;
+    hum.raw().get_mut<kin::AudioEmitter>()->volume = 1.0f;
+    kin::update_audio_emitters(world, audio, catalog);
+    render(audio, 1024);
+    assert(near(render(audio, 16)[0], 0.5f));
+
+    // Removing the emitter stops its sound.
+    hum.raw().remove<kin::AudioEmitter>();
+    kin::update_audio_emitters(world, audio, catalog);
+    render(audio, 4800);
+    assert(audio.active_voice_count() == 0);
+
+    kin::EcsEntity removes = world.entity("removes");
+    removes.set(kin::Transform2D{});
+    removes.set(kin::AudioEmitter{.cue = "short", .when_done = kin::AudioEmitterEnd::Remove});
+    kin::EcsEntity despawns = world.entity("despawns");
+    despawns.set(kin::Transform2D{});
+    despawns.set(kin::AudioEmitter{.cue = "short", .when_done = kin::AudioEmitterEnd::Despawn});
+    kin::EcsEntity keeps = world.entity("keeps");
+    keeps.set(kin::Transform2D{});
+    keeps.set(kin::AudioEmitter{.cue = "short", .when_done = kin::AudioEmitterEnd::Keep});
+    kin::update_audio_emitters(world, audio, catalog);
+    assert(audio.active_voice_count() == 3);
+    render(audio, 960);
+    kin::update_audio_emitters(world, audio, catalog);
+    kin::update_audio_emitters(world, audio, catalog);
+    assert(!removes.raw().has<kin::AudioEmitter>());
+    assert(!despawns.raw().is_alive());
+    assert(keeps.raw().has<kin::AudioEmitter>() && !keeps.raw().get<kin::AudioEmitter>()->playing);
+    assert(audio.active_voice_count() == 0); // nothing restarted
+
+    // One-shots carry volume and pitch too.
+    render(audio, 9600); // let the limiter recover from the three voices above
+    kin::EcsEntity shot = world.entity("shot");
+    shot.set(kin::Transform2D{});
+    shot.set(kin::AudioOneShot{.cue = "short", .volume = 0.5f});
+    kin::consume_audio_one_shots(world, audio, catalog);
+    assert(near(render(audio, 16)[0], 0.25f));
+}
+
 } // namespace
 
 int main() {
@@ -1337,5 +1450,7 @@ int main() {
     test_unloading();
     test_rolloff();
     test_output_devices();
+    test_hot_reload();
+    test_ecs_emitters();
     return 0;
 }

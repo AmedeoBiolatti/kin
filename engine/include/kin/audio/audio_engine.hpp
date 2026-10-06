@@ -12,6 +12,7 @@
 
 namespace kin {
 
+class FileWatcher;
 class JobSystem;
 class JsonWriter;
 
@@ -100,6 +101,18 @@ public:
     void unload(const AudioCatalog& catalog);
     // Forgets a clip add_clip registered.
     void remove_clip(std::string_view clip_id);
+    // Reloads clip files the engine loaded when they change on disk (polling
+    // `files` runs the reloads). New plays use the new version; voices already
+    // playing finish with the old. A file that fails to decode keeps the last
+    // good version. `files` may be destroyed first.
+    void watch(FileWatcher& files);
+    // Reloads the catalog file at `path` into `catalog` when it changes, and
+    // applies its buses, effects and duck rules at once; a broken edit keeps
+    // the last good catalog. `catalog` must outlive the watch (or the engine).
+    void watch_catalog(FileWatcher& files, std::filesystem::path path, AudioCatalog& catalog);
+    // Registers all of a catalog's buses, effects and duck rules now, rather
+    // than as cues first play on them: after editing a catalog in code.
+    void apply_catalog(const AudioCatalog& catalog);
     i32 loaded_clip_count() const;
     // Memory the loaded clips take: decoded samples, or a streamed file's bytes.
     std::size_t loaded_clip_bytes() const;
