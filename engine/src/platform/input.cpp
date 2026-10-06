@@ -449,19 +449,21 @@ void Input::begin_frame() {
     begin_frame(true);
 }
 
-void Input::advance_keyboard_edges() {
-    // Consume only the STICKY keyboard edges (read by update() via pressed()), so a
-    // fast frame running several fixed steps does not re-fire a key in later steps.
-    // The per-frame keyboard edges (read by render() via frame_pressed(): text-field
-    // backspace/arrows/enter, etc.) and all mouse/text/wheel edges are deliberately
-    // left intact so render-time immediate UI sees this frame's input. (Clearing the
-    // frame edges here dropped ~half of render-time keystrokes; clearing the mouse
-    // edges dropped ~half of clicks.) Per-frame keyboard edges live exactly one
-    // rendered frame; per-frame mouse edges live until the next stepping frame (see
-    // begin_frame) so update()-time ui2 can observe a click from a 0-step frame.
+void Input::advance_step_edges() {
+    // Consume only what update() reads (the STICKY keyboard edges via pressed(), and
+    // the step wheel), so a fast frame running several fixed steps does not re-fire a
+    // key or re-apply a wheel notch in later steps. The per-frame keyboard edges (read
+    // by render() via frame_pressed(): text-field backspace/arrows/enter, etc.), the
+    // frame wheel and all mouse/text edges are deliberately left intact so render-time
+    // immediate UI sees this frame's input. (Clearing the frame edges here dropped
+    // ~half of render-time keystrokes; clearing the mouse edges dropped ~half of
+    // clicks.) Per-frame keyboard edges live exactly one rendered frame; per-frame
+    // mouse edges live until the next stepping frame (see begin_frame) so update()-time
+    // ui2 can observe a click from a 0-step frame.
     _key_prev = _key_cur;
     _key_pressed.fill(false);
     _key_released.fill(false);
+    _mouse_wheel_y = 0.0f;
 }
 
 void Input::consume_frame_edges() {
@@ -470,7 +472,7 @@ void Input::consume_frame_edges() {
     _key_frame_released.fill(false);
     _mouse_frame_pressed.fill(false);
     _mouse_frame_released.fill(false);
-    _mouse_wheel_y = 0.0f;
+    _frame_mouse_wheel_y = 0.0f;
     _text_input.clear();
 }
 
@@ -488,6 +490,9 @@ void Input::begin_frame(bool advance_transients) {
         _mouse_released.fill(false);
         _mouse_frame_pressed.fill(false);
         _mouse_frame_released.fill(false);
+        // App::run already used the step wheel up in that step (advance_step_edges);
+        // this clears it for callers that step without it (run_for, tests).
+        _mouse_wheel_y = 0.0f;
     } else {
         // A 0-step frame (refresh > sim rate): the per-frame MOUSE edges PERSIST so UI
         // driven from update() can still read a click that landed here on the next
@@ -497,6 +502,7 @@ void Input::begin_frame(bool advance_transients) {
         // them so a claimed press does not re-fire (e.g. re-capturing a drag origin)
         // while it persists. Release edges are left to persist; their consumers are
         // guarded by active/drag state that clears once, so they do not re-fire.
+        // The step wheel keeps adding up until a step reads it.
         for (i32 button = 0; button < MOUSE_BUTTON_COUNT; ++button) {
             if (_mouse_frame_pressed_consumed[button]) {
                 _mouse_frame_pressed[button] = false;
@@ -516,7 +522,7 @@ void Input::begin_frame(bool advance_transients) {
     _key_frame_repeated.fill(false);
     _key_frame_released.fill(false);
     _mouse_pos_prev = _mouse_pos;
-    _mouse_wheel_y = 0.0f;
+    _frame_mouse_wheel_y = 0.0f;
     _text_input.clear();
 }
 
@@ -566,6 +572,7 @@ void Input::process_native_event(const void* native_event) {
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
         _mouse_wheel_y += event.wheel.y;
+        _frame_mouse_wheel_y += event.wheel.y;
         _mouse_window = static_cast<WindowId>(event.wheel.windowID);
     } else if (event.type == SDL_EVENT_TEXT_INPUT && event.text.text) {
         _text_input += event.text.text;
@@ -701,7 +708,8 @@ Vec2f Input::drag_delta(MouseButton button) const {
 }
 
 void Input::set_mouse_wheel_y(f32 value) {
-    _mouse_wheel_y = value;
+    _mouse_wheel_y += value;
+    _frame_mouse_wheel_y += value;
 }
 
 void Input::set_mouse_pos(Vec2f pos, WindowId window_id) {

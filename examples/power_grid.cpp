@@ -36,7 +36,7 @@ bool render_power_grid(Arena& arena, Input& input, Renderer2D& renderer,
     if (input.frame_pressed("grid_down")) branch=(branch+1)%6;
     if (input.frame_pressed("grid_up")) branch=(branch+5)%6;
     const Rectf map{16,154,w-32,h-294};
-    if (over(map) && input.mouse_wheel_y()!=0) branch=(branch+(input.mouse_wheel_y()<0?1:5))%6;
+    if (over(map) && input.frame_mouse_wheel_y()!=0) branch=(branch+(input.frame_mouse_wheel_y()<0?1:5))%6;
     const float tab_w=(w-40)/3;
     std::array<Rectf,6> tabs{};
     for (int row=0;row<6;++row) {
