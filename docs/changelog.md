@@ -61,6 +61,33 @@ releases may change APIs.
 - Lua: `bind_lua_audio` gives scripts an `audio` table, and
   `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
   lets a host add its own bindings to a script scene's Lua state.
+- Adaptive music: `play_music(catalog, cue, AudioMusicTransition{crossfade,
+  sync, match_position})` changes music on the next beat, bar or clip end
+  (cue `bpm=`, `beats_per_bar=`, `beat_offset=`), optionally from the same
+  position. `layers=true` cues play their clips in step as stems
+  (`set_music_layer`), and `playlist=true` cues play their clips back to back
+  with no gap (`shuffle=true` for random order). `music_position()` gives the
+  beat and bar, and `play_synced` plays a cue on the next beat or bar. Voices
+  can start and stop on an exact output frame. Lua has `play_music` with
+  options, `set_music_layer`, `music_position` and `play_synced`.
+- More audio effects: `bandpass` and `notch` filters, an EQ `peak` band,
+  `lowshelf` and `highshelf` (with `gain` in dB; `freq` names the frequency),
+  and a `delay` (`time`, `feedback`, `wet`, `dry`) whose time glides when
+  changed.
+- Audio levels: `bus_level(bus)` and `output_level()` give each bus's and the
+  output's peak and RMS (always on, in `write_report` too), and
+  `enable_analysis(bus)` with `spectrum(bus, bands)` / `magnitude(bus, from,
+  to)` give a frequency spectrum for visualizers. Lua's `audio` table has
+  `bus_level`, `output_level`, `enable_analysis` and `spectrum`.
+- Audio reloading: `AudioEngine::watch(files)` reloads clip files when they
+  change (new plays get the new version), `watch_catalog(files, path,
+  catalog)` reloads a catalog file and applies it, and `apply_catalog`
+  applies a catalog edited in code. A broken edit keeps the last good
+  version.
+- ECS audio: `AudioEmitter` has `volume`, `pitch`, `paused`, `fade_in` and
+  `when_done` (`Restart`, `Keep`, `Remove`, `Despawn`); removing an emitter
+  or destroying its entity fades its sound out. `AudioOneShot` has `volume`
+  and `pitch`.
 - Audio voices: `seek(handle, seconds)` (declicked, streams too) and
   `set_paused(handle, paused)` / `paused(handle)` for one voice.
 - Audio memory: `unload_unused()`, `unload(catalog)` and `remove_clip(id)`
@@ -85,6 +112,9 @@ releases may change APIs.
   not.
 
 ### Changed
+
+- `AudioEngineConfig::music_voices` defaults to 8 (from 2), as music layers
+  and crossfades each take a voice.
 
 - WAV files are decoded by dr_wav instead of `SDL_LoadWAV`, and loading a
   clip no longer initialises SDL's audio subsystem.

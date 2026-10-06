@@ -12,6 +12,7 @@
 
 namespace kin {
 
+class FileWatcher;
 class JobSystem;
 class JsonWriter;
 
@@ -36,7 +37,7 @@ struct AudioPlayRequest {
 struct AudioEngineConfig {
     i32 sample_rate = 48000;
     i32 channels = 2; // 1 or 2
-    i32 music_voices = 2;
+    i32 music_voices = 8; // layers and crossfades each take one
     i32 ambient_voices = 12;
     i32 sound_effect_voices = 64;
     i32 ui_voices = 8;
@@ -53,6 +54,41 @@ struct AudioEngineStats {
     i64 mixed_frames = 0;
     // Output frames the master limiter turned down to keep the mix from clipping.
     i64 limited_frames = 0;
+};
+
+// When a music change (or a synced sound) starts, relative to the music
+// playing now: at once, on its next beat or bar (its cue needs a `bpm`), or
+// where its clip ends (or loops).
+enum class AudioSync {
+    Now,
+    Beat,
+    Bar,
+    End,
+};
+
+struct AudioMusicTransition {
+    f32 crossfade = 1.0f; // seconds the old music fades out and the new fades in
+    AudioSync sync = AudioSync::Now;
+    // Start the new music where the old one is (at the sync point), for
+    // arrangements of one piece that share a tempo: calm and tense versions.
+    bool match_position = false;
+};
+
+// Where the music is: seconds into its clip and, if its cue has a bpm, the
+// beat (counted from 0 at beat_offset), the bar, and the beat within the bar.
+struct AudioMusicPosition {
+    bool playing = false;
+    f32 seconds = 0.0f;
+    f32 beat = 0.0f;
+    i32 bar = 0;
+    f32 beat_in_bar = 0.0f;
+};
+
+// How loud something is playing, in linear amplitude (1 is full scale): the
+// peak falls back over ~0.3 s, and rms is the average over about as long.
+struct AudioLevel {
+    f32 peak = 0.0f;
+    f32 rms = 0.0f;
 };
 
 // A bus's runtime state: what the game set on it, on top of the catalog.
@@ -100,6 +136,18 @@ public:
     void unload(const AudioCatalog& catalog);
     // Forgets a clip add_clip registered.
     void remove_clip(std::string_view clip_id);
+    // Reloads clip files the engine loaded when they change on disk (polling
+    // `files` runs the reloads). New plays use the new version; voices already
+    // playing finish with the old. A file that fails to decode keeps the last
+    // good version. `files` may be destroyed first.
+    void watch(FileWatcher& files);
+    // Reloads the catalog file at `path` into `catalog` when it changes, and
+    // applies its buses, effects and duck rules at once; a broken edit keeps
+    // the last good catalog. `catalog` must outlive the watch (or the engine).
+    void watch_catalog(FileWatcher& files, std::filesystem::path path, AudioCatalog& catalog);
+    // Registers all of a catalog's buses, effects and duck rules now, rather
+    // than as cues first play on them: after editing a catalog in code.
+    void apply_catalog(const AudioCatalog& catalog);
     i32 loaded_clip_count() const;
     // Memory the loaded clips take: decoded samples, or a streamed file's bytes.
     std::size_t loaded_clip_bytes() const;
@@ -143,8 +191,22 @@ public:
     // `crossfade` seconds; playing the cue already playing keeps it going, so
     // each scene can name its music without restarting it.
     AudioHandle play_music(const AudioCatalog& catalog, std::string_view cue, f32 crossfade = 1.0f);
+    // Changes music on the beat, the bar or the clip's end, and optionally from
+    // the same position. A cue with `layers` plays all its clips together, in
+    // step; one with `playlist` plays its clips one after another, gaplessly
+    // (call update() every frame so the next is lined up in time). The catalog
+    // must outlive the music.
+    AudioHandle play_music(const AudioCatalog& catalog, std::string_view cue, const AudioMusicTransition& transition);
     void stop_music(f32 fade = 1.0f);
+    // The music's first layer (or a playlist's clip playing now).
     AudioHandle music() const;
+    // A layer's volume (layers are named by their clip ids), kept for later
+    // music with the same layers: raise "drums" as a fight starts.
+    void set_music_layer(std::string_view layer, f32 volume, f32 fade = 0.0f);
+    AudioMusicPosition music_position() const;
+    // Plays a cue starting on the music's next beat, bar or clip end: a
+    // stinger that lands in time. With no music it plays now.
+    AudioHandle play_synced(const AudioCatalog& catalog, const AudioPlayRequest& request, AudioSync sync);
 
     bool playing(AudioHandle handle) const;
     // Seconds into the clip the voice has played (looping wraps); 0 if it is
@@ -160,6 +222,20 @@ public:
     f32 effective_bus_volume(const AudioCatalog& catalog, std::string_view bus) const;
     // Every bus the engine knows, in the order it met them.
     std::vector<AudioBusState> bus_states() const;
+    // Level meters: what a bus sends to its parent (after its effects and
+    // volume), and the final output. Always on.
+    AudioLevel bus_level(std::string_view bus) const;
+    AudioLevel output_level() const;
+    // Starts (or stops) recording the last 2048 frames a bus plays, "" for the
+    // final output, so spectrum() can analyse them. Off by default.
+    void enable_analysis(std::string_view bus, bool enabled = true);
+    // The amplitude in each of `bands` frequency bands, spaced evenly in pitch
+    // from min_hz to max_hz: a sine of amplitude A reads about A in its band.
+    // Computed on the calling thread from the last ~43 ms; empty if analysis
+    // is off for the bus.
+    std::vector<f32> spectrum(std::string_view bus, i32 bands, f32 min_hz = 20.0f, f32 max_hz = 20000.0f) const;
+    // The strongest amplitude between two frequencies (one band of spectrum()).
+    f32 magnitude(std::string_view bus, f32 from_hz, f32 to_hz) const;
     i32 sample_rate() const;
     i32 channels() const;
     bool device_available() const;

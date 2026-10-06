@@ -4,6 +4,9 @@ Kin audio is an engine-level service with a thin ECS bridge. Games describe what
 should be heard in game terms: music cues, ambient beds, one-shot effects,
 looping emitters, animation events, and listener position.
 
+[What is missing](audio_missing.md) lists what kin's audio does not do yet,
+compared with Godot and Bevy, and the limits of what it does.
+
 ## Catalogs
 
 `AudioCatalog` maps cue ids to authored playback data and can be saved as a
@@ -105,10 +108,52 @@ fading out and back in over a few milliseconds so the jump does not click; it
 works on streamed clips too. `set_paused(handle, true)` pauses one voice the way
 a paused bus does: it goes quiet, keeps its place, and still counts as playing.
 
+### Adaptive music
+
+A music cue can carry its tempo, so changes land in time:
+
+```text
+cue explore music music loop=true bpm=110 beats_per_bar=4 clips=explore
+cue combat  music music loop=true bpm=110 beats_per_bar=4 clips=combat
+cue battle  music music loop=true bpm=140 layers=true clips=drums,bass,strings
+cue radio   music music loop=true playlist=true shuffle=true clips=song1,song2,song3
+```
+
+```cpp
+// Into combat on the next bar, from the same place in the piece:
+audio.play_music(catalog, "combat", {.crossfade = 0.5f, .sync = kin::AudioSync::Bar, .match_position = true});
+```
+
+- `sync` is `Now`, `Beat`, `Bar` or `End` (where the current clip ends or
+  loops). The new music starts on that exact frame, and the old one fades out
+  from it. `beat_offset=` is the seconds before the first beat, for a pickup.
+- `match_position` starts the new music where the old one is, for
+  arrangements of one piece that share a tempo.
+- A `layers=true` cue plays all its clips together, in step, as stems.
+  `audio.set_music_layer("drums", 1.0f, 2.0f)` fades one in. The layer volumes
+  carry over to later music with the same layer names.
+- A `playlist=true` cue plays its clips one after another with no gap.
+  `loop=true` repeats the list, and `shuffle=true` plays it in random order,
+  never the same clip twice running. `update()` lines up the next clip a
+  couple of seconds ahead, so call it every frame.
+- `music_position()` gives seconds, beat, bar and beat within the bar, for
+  gameplay or UI that moves with the music.
+- `play_synced(catalog, request, kin::AudioSync::Beat)` plays any cue (a
+  stinger) on the music's next beat, bar or end.
+
+The default `music_voices` is 8, since each layer, and both sides of a
+crossfade, take a voice.
+
 ### Effects
 
 A bus can run effects over everything it plays, children included, before its
-volume: low- and high-pass filters, a reverb and a compressor. Each bus is
+volume:
+
+- Filters: low-pass, high-pass, band-pass and notch.
+- EQ: a peak band and low and high shelves.
+- A delay.
+- A reverb.
+- A compressor. Each bus is
 mixed on its own and added into its parent, so an effect on `master` hears the
 whole game, and one on `sfx` only the sound effects.
 
@@ -116,7 +161,16 @@ whole game, and one on `sfx` only the sound effects.
 effect sfx lowpass cutoff=800 q=0.7
 effect ambient reverb room=0.7 damping=0.5 wet=0.3 dry=1 width=1
 effect master compressor threshold=-12 ratio=4 attack=0.01 release=0.1 makeup=0
+effect music peak freq=2500 gain=-3 q=1.2      # EQ: dB up or down around freq
+effect music lowshelf freq=120 gain=4
+effect music highshelf freq=8000 gain=-2
+effect ui bandpass cutoff=1500 q=2             # also: notch
+effect sfx delay time=0.3 feedback=0.4 wet=0.5 dry=1
 ```
+
+A delay's new `time` glides in rather than jumping, so changing it while
+playing does not crackle. Its line holds up to twice the first time it was made
+with (one second at least).
 
 `effect` lines follow the `bus` they name; `enabled=false` keeps an effect in
 the chain but bypassed. At runtime, `set_bus_effects(bus, chain)` replaces a
@@ -132,6 +186,32 @@ audio.set_bus_effects("sfx", {muffled});
 muffled.cutoff = 20000.0f;
 audio.set_bus_effect("sfx", 0, muffled);
 ```
+
+### Levels and spectrum
+
+Every bus and the final output keep a level meter: what the bus sends to its
+parent, after its effects and volume.
+
+```cpp
+kin::AudioLevel music = audio.bus_level("music"); // peak and rms, 1 is full scale
+kin::AudioLevel out = audio.output_level();
+```
+
+The peak falls back over about 0.3 s after a hit, and `rms` averages over about
+as long, which suits a meter display.
+
+For a music visualizer, turn on analysis for a bus (`""` is the output) and ask
+for its spectrum each frame:
+
+```cpp
+audio.enable_analysis("music");
+std::vector<float> bars = audio.spectrum("music", 32);    // 20 Hz..20 kHz, spaced by pitch
+float bass = audio.magnitude("music", 40.0f, 120.0f);
+```
+
+Each value is an amplitude: a tone of amplitude 0.5 reads about 0.5 in its band.
+The mixer only records the last 2048 frames of an analysed bus, and the FFT runs
+on the thread that asks.
 
 ### Ducking
 
@@ -189,6 +269,22 @@ audio.loaded_clip_bytes();   // what the cache holds now
 A voice that finishes hands its clip back to the game thread, and `update()`
 frees it there, so the audio thread never frees a clip's samples.
 
+### Reloading
+
+While a game runs, edited audio files can be picked up without a restart:
+
+```cpp
+audio.watch(files);                                     // clip files, as they load
+audio.watch_catalog(files, root / "audio.kinaudio", catalog);
+```
+
+Polling the `FileWatcher` (which `run_scene_app` does every frame) runs the
+reloads. A changed clip is decoded again: new plays use it, and voices already
+playing finish with the old version. A changed catalog replaces `catalog` and
+applies its buses, effects and duck rules at once. A file that fails to load
+keeps the last good version. `apply_catalog(catalog)` applies a catalog edited in
+code the same way.
+
 ### Output devices
 
 ```cpp
@@ -208,8 +304,23 @@ void update_audio_emitters(EcsWorld& world, AudioEngine& audio, const AudioCatal
 void consume_audio_one_shots(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog);
 ```
 
-`AudioEmitter` and `AudioListener` follow `Transform2D`. `AudioOneShot` is a
-transient component that plays once and is removed.
+`AudioEmitter` and `AudioListener` follow `Transform2D`. An emitter's `volume`,
+`pitch` and `paused` apply to its sound every update, and `when_done` says what
+happens when the sound ends:
+
+- `Restart` (the default): play it again.
+- `Keep`: stay, silent.
+- `Remove`: remove the emitter.
+- `Despawn`: destroy the entity, for a sound fired and forgotten.
+
+Removing an emitter, or destroying its entity, fades its sound out.
+`AudioOneShot` is a transient component that plays once (with its own `volume`
+and `pitch`) and is removed.
+
+```cpp
+world.entity().set(kin::Transform2D{.pos = door})
+              .set(kin::AudioEmitter{.cue = "creak", .when_done = kin::AudioEmitterEnd::Despawn});
+```
 
 ## Settings
 
@@ -254,6 +365,13 @@ audio.play_music("town", 2.0)
 audio.set_bus_paused("sfx", true)
 audio.set_bus_effects("sfx", {{type = "lowpass", cutoff = 800}})
 audio.set_bus_effect("sfx", 1, {cutoff = 300}) -- 1-based; other fields kept
+local peak, rms = audio.bus_level("music")
+audio.enable_analysis("music")
+local bars = audio.spectrum("music", 16)
+audio.play_music("combat", {crossfade = 0.5, sync = "bar", match_position = true})
+audio.set_music_layer("drums", 0.0, 2.0)
+local beat = audio.music_position().beat
+audio.play_synced("stinger", "beat")
 ```
 
 Handles are integers. A `LuaScript` binds it the same way from `setup`.

@@ -9,6 +9,7 @@ add_library(kin_engine STATIC
     src/anim/state_machine.cpp
     src/anim/track.cpp
     src/anim/value.cpp
+    src/audio/audio_analysis.cpp
     src/audio/audio_catalog.cpp
     src/audio/audio_clip.cpp
     src/audio/audio_decoder.cpp

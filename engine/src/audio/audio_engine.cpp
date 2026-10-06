@@ -1,7 +1,9 @@
 #include <kin/audio/audio_engine.hpp>
 
 #include <kin/audio/audio_decoder.hpp>
+#include <kin/assets/file_watcher.hpp>
 
+#include "audio_analysis.hpp"
 #include "audio_effects.hpp"
 
 #include <kin/core/jobs.hpp>
@@ -29,6 +31,8 @@ constexpr f32 declick_seconds = 0.005f;
 constexpr f32 limiter_release_seconds = 0.05f;
 // Frames update() mixes at once for a backend that is not real time.
 constexpr i32 render_chunk_frames = 1024;
+// How quickly level meters fall back after a peak, and average loudness.
+constexpr f32 meter_seconds = 0.3f;
 // The mixer works in blocks of at most this many frames, so each bus's buffer
 // is allocated once and parameter changes land within ~20 ms.
 constexpr i32 block_frames = 1024;
@@ -61,6 +65,14 @@ PanGains pan_gains(f32 pan) {
 } // namespace
 
 struct AudioEngine::State {
+    // A level meter, and (when enabled) the recent frames for a spectrum.
+    struct Meter {
+        f32 peak = 0.0f;
+        f32 mean_square = 0.0f;
+        std::vector<f32> history; // mono; empty when analysis is off
+        std::size_t history_pos = 0;
+    };
+
     struct Bus {
         std::string id;
         i32 parent = no_bus;
@@ -84,6 +96,7 @@ struct AudioEngine::State {
         std::vector<std::unique_ptr<AudioEffectProcessor>> effects;
         std::vector<AudioEffect> effect_source; // the catalog chain `effects` came from
         bool effects_from_game = false; // set_bus_effects wins over the catalog
+        Meter meter;
     };
 
     struct Duck {
@@ -138,6 +151,11 @@ struct AudioEngine::State {
         Vec2f position{};
         bool has_position = false;
         bool paused = false;
+        // Output frames to start and stop on (scheduled music and stingers):
+        // start_at in the past means now; stop_at -1 means not scheduled.
+        i64 start_at = 0;
+        i64 stop_at = -1;
+        f32 stop_fade = 0.0f;
         // A seek waiting for the voice to fade out (-1: none), and the fade to
         // return to after the jump.
         i64 seek_frame = -1;
@@ -180,6 +198,8 @@ struct AudioEngine::State {
     AudioEngineStats stats;
     f32 limiter_env = 0.0f;
     f32 limiter_release = 0.0f;
+    Meter output_meter;
+    i64 output_frame = 0; // frames mixed so far: the clock scheduled voices start on
     // What finished voices held, handed back for the game thread to free (in
     // update()), so the audio thread never frees a clip's samples. Reserved up
     // front; past capacity the audio thread frees them itself.
@@ -196,8 +216,34 @@ struct AudioEngine::State {
     std::unordered_map<std::string, std::size_t> last_clip; // per cue, so variations do not repeat
     f64 pending_frames = 0.0;
     std::vector<f32> scratch;
-    AudioHandle music;
-    std::string music_cue;
+    // The music (play_music): its cue, the voice of each layer (one for a cue
+    // without layers; for a playlist, the clip playing now) and, for a
+    // playlist, the next clip, scheduled to start where this one ends.
+    struct MusicLayer {
+        std::string name; // the layer's clip id; "" for a cue without layers
+        AudioHandle handle;
+    };
+    struct Music {
+        const AudioCatalog* catalog = nullptr;
+        AudioCue cue;
+        std::vector<MusicLayer> layers;
+        std::size_t index = 0; // playlist: the clip playing now
+        AudioHandle next;
+        std::size_t next_index = 0;
+        bool finished = false; // playlist: reached the end of a list that does not loop
+    };
+    Music music;
+    std::unordered_map<std::string, f32> layer_volumes; // set_music_layer, kept across cues
+    // Files watched for changes (watch(), watch_catalog()).
+    struct WatchRef {
+        FileWatcher* files = nullptr;
+        std::weak_ptr<const void> alive;
+        u32 id = 0;
+    };
+    FileWatcher* clip_files = nullptr; // set by watch(): clip files are watched as they load
+    std::weak_ptr<const void> clip_files_alive;
+    std::unordered_map<std::string, WatchRef> clip_watches; // by cache key
+    std::vector<WatchRef> catalog_watches;
     f32 device_poll = 0.0f; // seconds since the backend last checked its device
 
     RngKey next_key() {
@@ -325,7 +371,8 @@ struct AudioEngine::State {
 
         for (Duck& duck : ducks) {
             const bool active = std::ranges::any_of(voices, [&](const Voice& voice) {
-                return !voice.stopping && !voice.done && !voice.paused && voice.bus != no_bus &&
+                return !voice.stopping && !voice.done && !voice.paused && voice.start_at <= output_frame &&
+                       voice.bus != no_bus &&
                        !buses[static_cast<std::size_t>(voice.bus)].paused_now && bus_under(voice.bus, duck.when);
             });
             const f32 target = active ? duck.volume : 1.0f;
@@ -561,7 +608,9 @@ struct AudioEngine::State {
         return true;
     }
 
-    void mix_voice(Voice& voice, std::span<f32> out, i32 frames, PanGains target) {
+    // Mixes `frames` frames of a voice, starting at frame `first` of the block
+    // (a scheduled start), and stops it at `stop_offset` if that is in the block.
+    void mix_voice(Voice& voice, std::span<f32> out, i32 frames, PanGains target, i32 first = 0, i32 stop_offset = -1) {
         if (!voice.primed) {
             prime(voice);
             if (voice.done) {
@@ -574,11 +623,15 @@ struct AudioEngine::State {
             voice.gain_right = target.right;
         }
 
-        const f32 ramp_left = (target.left - voice.gain_left) / static_cast<f32>(frames);
-        const f32 ramp_right = (target.right - voice.gain_right) / static_cast<f32>(frames);
+        const f32 ramp_left = (target.left - voice.gain_left) / static_cast<f32>(frames - first);
+        const f32 ramp_right = (target.right - voice.gain_right) / static_cast<f32>(frames - first);
         const f64 step = static_cast<f64>(std::max(0.01f, voice.pitch)) * voice.rate_ratio;
         const std::size_t stride = static_cast<std::size_t>(channels);
-        for (i32 frame = 0; frame < frames && !voice.done; ++frame) {
+        for (i32 frame = first; frame < frames && !voice.done; ++frame) {
+            if (frame == stop_offset) {
+                voice.stop_at = -1;
+                stop_voice(voice, voice.stop_fade);
+            }
             const f32 t = static_cast<f32>(voice.frac);
             const f32 left = (voice.f0[0] + (voice.f1[0] - voice.f0[0]) * t) * voice.gain_left * voice.fade;
             const f32 right = (voice.f0[1] + (voice.f1[1] - voice.f0[1]) * t) * voice.gain_right * voice.fade;
@@ -637,6 +690,32 @@ struct AudioEngine::State {
         }
     }
 
+    // Folds a block (what a bus sent to its parent, or the output) into a meter;
+    // `block` null measures silence.
+    void measure(Meter& meter, const f32* block, i32 frames) {
+        const std::size_t stride = static_cast<std::size_t>(channels);
+        f32 peak = 0.0f;
+        f32 sum = 0.0f;
+        const bool record = !meter.history.empty();
+        for (i32 frame = 0; frame < frames; ++frame) {
+            f32 mono = 0.0f;
+            for (std::size_t c = 0; c < stride && block; ++c) {
+                const f32 v = block[static_cast<std::size_t>(frame) * stride + c];
+                peak = std::max(peak, std::fabs(v));
+                sum += v * v;
+                mono += v;
+            }
+            if (record) {
+                meter.history[meter.history_pos] = mono / static_cast<f32>(stride);
+                meter.history_pos = (meter.history_pos + 1) % meter.history.size();
+            }
+        }
+        const f32 keep = std::exp(-static_cast<f32>(frames) / (meter_seconds * static_cast<f32>(sample_rate)));
+        const f32 mean_square = sum / static_cast<f32>(static_cast<std::size_t>(frames) * stride);
+        meter.peak = std::max(peak, meter.peak * keep);
+        meter.mean_square = mean_square + (meter.mean_square - mean_square) * keep;
+    }
+
     void mix(std::span<f32> out) {
         const std::size_t stride = static_cast<std::size_t>(channels);
         const i32 total = static_cast<i32>(out.size() / stride);
@@ -670,6 +749,7 @@ struct AudioEngine::State {
         }
         advance_buses(frames);
 
+        const i64 block_end = output_frame + frames;
         for (Voice& voice : voices) {
             if (voice.done) {
                 continue;
@@ -677,6 +757,17 @@ struct AudioEngine::State {
             if (!voice.clip || !voice.clip->valid()) {
                 voice.done = true;
                 continue;
+            }
+            if (voice.start_at >= block_end) {
+                if (voice.stopping) {
+                    voice.done = true; // stopped before it started
+                }
+                continue; // scheduled for a later block
+            }
+            const i32 first = static_cast<i32>(std::max<i64>(0, voice.start_at - output_frame));
+            i32 stop_offset = -1;
+            if (voice.stop_at >= 0 && !voice.stopping && voice.stop_at < block_end) {
+                stop_offset = static_cast<i32>(std::max<i64>(first, voice.stop_at - output_frame));
             }
             Bus* bus = voice.bus == no_bus ? nullptr : &buses[static_cast<std::size_t>(voice.bus)];
             const bool paused = voice.paused || (bus && bus->paused_now);
@@ -709,7 +800,7 @@ struct AudioEngine::State {
                 bus->active = true;
                 dest = std::span<f32>{bus->buffer.data(), samples};
             }
-            mix_voice(voice, dest, frames, {.left = gain * pan.left, .right = gain * pan.right});
+            mix_voice(voice, dest, frames, {.left = gain * pan.left, .right = gain * pan.right}, first, stop_offset);
         }
 
         // Each bus runs its effects over its submix, then adds it into its
@@ -719,6 +810,7 @@ struct AudioEngine::State {
             const f32 from = bus.applied_gain < 0.0f ? bus.own_gain : bus.applied_gain;
             bus.applied_gain = bus.own_gain;
             if (!bus.active) {
+                measure(bus.meter, nullptr, frames);
                 continue;
             }
             const std::span<f32> block{bus.buffer.data(), samples};
@@ -737,13 +829,310 @@ struct AudioEngine::State {
                 const f32 gain = from + ramp * static_cast<f32>(frame);
                 for (std::size_t c = 0; c < stride; ++c) {
                     const std::size_t i = static_cast<std::size_t>(frame) * stride + c;
-                    dest[i] += block[i] * gain;
+                    block[i] *= gain; // what the bus sends, for its meter
+                    dest[i] += block[i];
                 }
             }
+            measure(bus.meter, block.data(), frames);
         }
 
         limit(out, frames);
+        measure(output_meter, out.data(), frames);
+        output_frame += frames;
         stats.mixed_frames += frames;
+    }
+
+    // --- music timing (mutex held) ---
+
+    Voice* find_voice(AudioHandle handle) {
+        for (Voice& voice : voices) {
+            if (voice.handle == handle && !voice.done) {
+                return &voice;
+            }
+        }
+        return nullptr;
+    }
+
+    // The voice that keeps the music's time: its first layer still playing.
+    const Voice* music_voice() {
+        for (const MusicLayer& layer : music.layers) {
+            if (const Voice* voice = find_voice(layer.handle); voice && !voice->stopping) {
+                return voice;
+            }
+        }
+        return nullptr;
+    }
+
+    // Where in its clip (in source frames) a voice is at the start of the next
+    // block, or will start.
+    static f64 source_position(const Voice& voice) {
+        if (!voice.primed) {
+            return static_cast<f64>(voice.next_frame);
+        }
+        return static_cast<f64>(voice.next_frame - (voice.at_end ? 1 : 2)) + voice.frac;
+    }
+
+    static f64 source_end(const Voice& voice) {
+        const f64 frames = voice.clip->frame_count();
+        return voice.loop && voice.loop_end > 0 ? std::min(static_cast<f64>(voice.loop_end), frames) : frames;
+    }
+
+    // The output frame of the music's next beat, bar or clip end (now, for
+    // AudioSync::Now, without music, or for a beat without a tempo).
+    i64 sync_frame(AudioSync sync) {
+        const Voice* voice = sync == AudioSync::Now ? nullptr : music_voice();
+        if (!voice) {
+            return output_frame;
+        }
+        const i64 base = std::max(output_frame, voice->start_at);
+        const f64 position = source_position(*voice);
+        const f64 rate = voice->clip->sample_rate();
+        f64 target = source_end(*voice);
+        if (sync == AudioSync::Beat || sync == AudioSync::Bar) {
+            if (music.cue.bpm <= 0.0f) {
+                return output_frame;
+            }
+            const f64 unit = 60.0 / music.cue.bpm * rate * (sync == AudioSync::Bar ? std::max(1, music.cue.beats_per_bar) : 1);
+            const f64 origin = music.cue.beat_offset * rate;
+            const f64 next = std::floor((position - origin) / unit + 1e-9) + 1.0;
+            target = std::min(target, origin + next * unit);
+        }
+        const f64 speed = voice->rate_ratio * std::max(0.01f, voice->pitch);
+        return base + static_cast<i64>(std::ceil(std::max(0.0, target - position) / speed));
+    }
+
+    // Seconds into its clip the music will be at output frame `at`.
+    f64 music_seconds_at(i64 at) {
+        const Voice* voice = music_voice();
+        if (!voice) {
+            return 0.0;
+        }
+        const f64 speed = voice->rate_ratio * std::max(0.01f, voice->pitch);
+        f64 position = source_position(*voice) + static_cast<f64>(std::max<i64>(0, at - std::max(output_frame, voice->start_at))) * speed;
+        const f64 end = source_end(*voice);
+        if (position >= end) {
+            position = voice->loop ? static_cast<f64>(voice->loop_start) + (position - end) : end;
+        }
+        return position / voice->clip->sample_rate();
+    }
+
+    void stop_music_voices(i64 at, f32 fade) {
+        std::vector<AudioHandle> handles;
+        for (const MusicLayer& layer : music.layers) {
+            handles.push_back(layer.handle);
+        }
+        handles.push_back(music.next);
+        for (const AudioHandle handle : handles) {
+            if (Voice* voice = find_voice(handle)) {
+                if (at <= output_frame) {
+                    stop_voice(*voice, fade);
+                } else {
+                    voice->stop_at = at;
+                    voice->stop_fade = fade;
+                }
+            }
+        }
+    }
+
+    f32 layer_volume(const std::string& name) const {
+        const auto found = layer_volumes.find(name);
+        return found == layer_volumes.end() ? 1.0f : found->second;
+    }
+
+    // Schedules a playlist's next clip where the current one ends, once that
+    // is less than two seconds away, and moves on when it starts.
+    void advance_playlist() {
+        if (!music.catalog || !music.cue.playlist || music.finished || music.layers.empty()) {
+            return;
+        }
+        {
+            const std::scoped_lock lock{mutex};
+            const Voice* current = find_voice(music.layers.front().handle);
+            if (!current || current->stopping) {
+                if (!music.next || !find_voice(music.next)) {
+                    music.finished = true; // stopped, or the list ran out
+                    return;
+                }
+                music.layers.front().handle = music.next;
+                music.index = music.next_index;
+                music.next = {};
+            }
+            if (music.next || sync_frame(AudioSync::End) - output_frame > 2 * sample_rate) {
+                return;
+            }
+        }
+        const std::size_t count = music.cue.clips.size();
+        std::size_t next = music.index + 1;
+        if (music.cue.shuffle && count > 1) {
+            next = static_cast<std::size_t>(rng_i32(next_key(), 0, static_cast<i32>(count) - 2));
+            next += next >= music.index ? 1 : 0;
+        } else if (next >= count) {
+            if (!music.cue.loop) {
+                music.finished = true;
+                return;
+            }
+            next = 0;
+        }
+        Prepared part;
+        if (!prepare(*music.catalog, music.cue, music.cue.clips[next], part)) {
+            music.finished = true;
+            return;
+        }
+        part.cue = &music.cue;
+        part.loop = false;
+        const std::scoped_lock lock{mutex};
+        const i64 start = sync_frame(AudioSync::End);
+        music.next = commit(*music.catalog, std::move(part), {.cue = music.cue.id, .volume = layer_volume("")}, start, 0.0);
+        music.next_index = next;
+    }
+
+    // --- playing (game thread) ---
+
+    const AudioCue* find_cue(const AudioCatalog& catalog, std::string_view id) {
+        const AudioCue* cue = catalog.cue(id);
+        if (!cue || cue->clips.empty()) {
+            {
+                const std::scoped_lock lock{mutex};
+                ++stats.culled_requests;
+            }
+            KIN_LOG_WARN_F("audio",
+                           "audio play rejected",
+                           (LogFields{
+                               {.name = "cue", .value = std::string{id}},
+                               {.name = "reason", .value = cue ? "cue has no clips" : "missing cue"},
+                           }));
+            return nullptr;
+        }
+        return cue;
+    }
+
+    // A voice about to be added: its clip loaded and its stream opened, which
+    // happens before taking the lock so the audio thread never waits on it.
+    struct Prepared {
+        const AudioCue* cue = nullptr;
+        std::string clip_id;
+        std::shared_ptr<const AudioClip> clip;
+        std::unique_ptr<AudioDecoder> stream;
+        f32 variation = 0.0f;
+        bool loop = false;
+    };
+
+    bool prepare(const AudioCatalog& catalog, const AudioCue& cue, const std::string& clip_id, Prepared& out) {
+        // Variation is drawn for every request, played or not, so which requests
+        // get culled never changes what the others sound like.
+        out.cue = &cue;
+        out.clip_id = clip_id;
+        out.loop = cue.loop;
+        out.variation = cue.pitch_variance > 0.0f ? rng_f32(next_key(), -cue.pitch_variance, cue.pitch_variance) : 0.0f;
+        out.clip = load_clip(catalog, clip_id);
+        if (out.clip && out.clip->streamed()) {
+            try {
+                out.stream = out.clip->open_stream();
+            } catch (const std::exception& error) {
+                KIN_LOG_ERROR_F("audio",
+                                "audio stream open failed",
+                                (LogFields{
+                                    {.name = "clip", .value = clip_id},
+                                    {.name = "error", .value = error.what()},
+                                }));
+            }
+        }
+        if (!out.clip || (out.clip->streamed() && !out.stream)) {
+            const std::scoped_lock lock{mutex};
+            ++stats.culled_requests;
+            KIN_LOG_WARN_F("audio",
+                           "audio play rejected",
+                           (LogFields{
+                               {.name = "cue", .value = cue.id},
+                               {.name = "clip", .value = clip_id},
+                               {.name = "reason", .value = "clip unavailable"},
+                           }));
+            return false;
+        }
+        return true;
+    }
+
+    // Adds a prepared voice (mutex held). It starts on output frame
+    // `start_at` (now if that has passed), `start_seconds` into its clip.
+    AudioHandle commit(const AudioCatalog& catalog, Prepared part, const AudioPlayRequest& request, i64 start_at,
+                       f64 start_seconds) {
+        const AudioCue& cue = *part.cue;
+        sync_ducks(catalog);
+        i32 steal = -1;
+        if (!allocate_voice(cue, request, steal)) {
+            // Culling is the voice limits doing their job, and a busy game does it
+            // every frame: count it (stats().culled_requests), log only at debug.
+            ++stats.culled_requests;
+            KIN_LOG_DEBUG_F("audio",
+                            "audio play rejected",
+                            (LogFields{
+                                {.name = "cue", .value = cue.id},
+                                {.name = "category", .value = std::string{audio_category_name(cue.category)}},
+                                {.name = "reason", .value = "voice limit or priority"},
+                            }));
+            return {};
+        }
+        if (steal >= 0) {
+            // The stolen voice fades out over a few milliseconds beside the new one.
+            stop_voice(voices[static_cast<std::size_t>(steal)], 0.0f);
+            ++stats.stolen_voices;
+        }
+
+        const AudioClip& clip = *part.clip;
+        Voice voice{
+            .handle = AudioHandle{next_handle++},
+            .cue_id = cue.id,
+            .bus = sync_bus(catalog, cue.bus),
+            .category = cue.category,
+            .clip = part.clip,
+            .rate_ratio = static_cast<f64>(clip.sample_rate()) / static_cast<f64>(sample_rate),
+            .stream = std::move(part.stream),
+            .volume = std::max(0.0f, cue.volume * request.volume),
+            .cue_volume = std::max(0.0f, cue.volume),
+            .volume_target = std::max(0.0f, cue.volume * request.volume),
+            .base_pitch = std::max(0.01f, cue.pitch * (1.0f + part.variation)),
+            .pitch = std::max(0.01f, cue.pitch * request.pitch * (1.0f + part.variation)),
+            .priority = cue.priority + request.priority_boost,
+            .loop = part.loop,
+            .spatial = cue.spatial,
+            .min_distance = cue.min_distance,
+            .max_distance = cue.max_distance,
+            .rolloff = cue.rolloff,
+            .rolloff_power = cue.rolloff_power,
+            .pan_strength = cue.pan_strength,
+            .position = request.position,
+            .has_position = request.has_position,
+            .start_at = start_at,
+        };
+        if (const AudioClipRef* ref = catalog.clip(part.clip_id)) {
+            voice.loop_start = ref->loop_start;
+            voice.loop_end = ref->loop_end;
+        }
+        if (voice.stream) {
+            voice.stream_buffer.resize(static_cast<std::size_t>(stream_buffer_frames * clip.channels()));
+        }
+        if (start_seconds > 0.0) {
+            const i64 frame = std::clamp<i64>(std::llround(start_seconds * clip.sample_rate()), 0,
+                                              std::max(0, clip.frame_count() - 1));
+            jump(voice, frame);
+        }
+        if (request.fade_in > 0.0f) {
+            voice.fade = 0.0f;
+            start_fade(voice, 1.0f, request.fade_in);
+        }
+        const AudioHandle handle = voice.handle;
+        voices.push_back(std::move(voice));
+        ++stats.played_requests;
+        stats.active_voices = static_cast<i32>(std::ranges::count_if(voices, [](const Voice& v) { return !v.stopping; }));
+        KIN_LOG_DEBUG_F("audio",
+                        "audio cue playing",
+                        (LogFields{
+                            {.name = "cue", .value = cue.id},
+                            {.name = "clip", .value = part.clip_id},
+                            {.name = "bus", .value = cue.bus},
+                            {.name = "category", .value = std::string{audio_category_name(cue.category)}},
+                        }));
+        return handle;
     }
 
     // --- clips (game thread) ---
@@ -765,7 +1154,71 @@ struct AudioEngine::State {
     std::shared_ptr<const AudioClip> take_loaded(const std::string& key, Job<AudioClip>& job) {
         auto clip = std::make_shared<const AudioClip>(std::move(job.get()));
         clip_cache.insert_or_assign(key, clip);
+        watch_clip(key);
         return clip;
+    }
+
+    static void unwatch(const WatchRef& ref) {
+        if (ref.files && !ref.alive.expired()) {
+            ref.files->unwatch(ref.id);
+        }
+    }
+
+    // Reloads a cached clip's file when it changes, if watch() was called. The
+    // cache key is the file's path, with "|stream" for a streamed copy.
+    void watch_clip(const std::string& key) {
+        if (!clip_files || clip_files_alive.expired() || clip_watches.contains(key)) {
+            return;
+        }
+        const bool stream = key.ends_with("|stream");
+        const std::filesystem::path path{stream ? key.substr(0, key.size() - 7) : key};
+        const u32 id = clip_files->watch(path, [this, key, path, stream](const std::filesystem::path&) {
+            if (!clip_cache.contains(key)) {
+                return;
+            }
+            try {
+                // Voices playing the old version keep it; new plays get this one.
+                clip_cache.insert_or_assign(key, std::make_shared<const AudioClip>(load_file(path, stream)));
+                KIN_LOG_INFO_F("audio", "audio clip reloaded", (LogFields{{.name = "path", .value = path.string()}}));
+            } catch (const std::exception& error) {
+                KIN_LOG_WARN_F("audio",
+                               "audio clip reload failed, keeping the last version",
+                               (LogFields{
+                                   {.name = "path", .value = path.string()},
+                                   {.name = "error", .value = error.what()},
+                               }));
+            }
+        });
+        clip_watches.emplace(key, WatchRef{clip_files, clip_files_alive, id});
+    }
+
+    void forget_clip(const std::string& key) {
+        if (const auto found = clip_watches.find(key); found != clip_watches.end()) {
+            unwatch(found->second);
+            clip_watches.erase(found);
+        }
+        clip_cache.erase(key);
+    }
+
+    void unwatch_all() {
+        for (const auto& [key, ref] : clip_watches) {
+            unwatch(ref);
+        }
+        for (const WatchRef& ref : catalog_watches) {
+            unwatch(ref);
+        }
+        clip_watches.clear();
+        catalog_watches.clear();
+    }
+
+    // Registers every bus and duck rule of the catalog now (play() otherwise
+    // does it for the buses a cue uses).
+    void apply_catalog(const AudioCatalog& catalog) {
+        const std::scoped_lock lock{mutex};
+        for (const auto& [id, bus] : catalog.buses()) {
+            sync_bus(catalog, id);
+        }
+        sync_ducks(catalog);
     }
 
     void poll_loading() {
@@ -824,6 +1277,7 @@ struct AudioEngine::State {
             } else {
                 clip = std::make_shared<const AudioClip>(load_file(path, ref->stream));
                 clip_cache.emplace(key, clip);
+                watch_clip(key);
             }
         } catch (const std::exception& error) {
             KIN_LOG_ERROR_F("audio",
@@ -907,6 +1361,9 @@ AudioEngine::AudioEngine(std::unique_ptr<IAudioBackend> backend, AudioEngineConf
 }
 
 AudioEngine::~AudioEngine() {
+    if (_state) {
+        _state->unwatch_all();
+    }
     if (_backend) {
         _backend->stop();
     }
@@ -918,6 +1375,9 @@ AudioEngine& AudioEngine::operator=(AudioEngine&& other) noexcept {
     if (this != &other) {
         if (_backend) {
             _backend->stop(); // before the state it renders from goes away
+        }
+        if (_state) {
+            _state->unwatch_all();
         }
         _backend = std::move(other._backend);
         _state = std::move(other._state);
@@ -934,6 +1394,7 @@ void AudioEngine::update(f32 dt) {
             voice.age += std::max(0.0f, dt);
         }
     }
+    s.advance_playlist();
     s.free_retired();
 
     s.device_poll += std::max(0.0f, dt);
@@ -993,128 +1454,16 @@ void AudioEngine::preload_async(const AudioCatalog& catalog, JobSystem& jobs) {
 
 AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayRequest& request) {
     State& s = *_state;
-    const AudioCue* cue = catalog.cue(request.cue);
-    if (!cue || cue->clips.empty()) {
-        {
-            const std::scoped_lock lock{s.mutex};
-            ++s.stats.culled_requests;
-        }
-        KIN_LOG_WARN_F("audio",
-                       "audio play rejected",
-                       (LogFields{
-                           {.name = "cue", .value = std::string{request.cue}},
-                           {.name = "reason", .value = cue ? "cue has no clips" : "missing cue"},
-                       }));
+    const AudioCue* cue = s.find_cue(catalog, request.cue);
+    if (!cue) {
         return {};
     }
-
-    // Variation is drawn for every request, played or not, so which requests
-    // get culled never changes what the others sound like.
-    const std::string& clip_id = s.choose_clip(*cue);
-    const f32 variation = cue->pitch_variance > 0.0f
-        ? rng_f32(s.next_key(), -cue->pitch_variance, cue->pitch_variance)
-        : 0.0f;
-
-    // Decoding (when the clip is not loaded yet) happens before taking the lock,
-    // so the audio thread never waits on it.
-    const std::shared_ptr<const AudioClip> clip = s.load_clip(catalog, clip_id);
-    std::unique_ptr<AudioDecoder> stream;
-    if (clip && clip->streamed()) {
-        try {
-            stream = clip->open_stream();
-        } catch (const std::exception& error) {
-            KIN_LOG_ERROR_F("audio",
-                            "audio stream open failed",
-                            (LogFields{
-                                {.name = "clip", .value = clip_id},
-                                {.name = "error", .value = error.what()},
-                            }));
-        }
+    State::Prepared part;
+    if (!s.prepare(catalog, *cue, s.choose_clip(*cue), part)) {
+        return {};
     }
     const std::scoped_lock lock{s.mutex};
-    if (!clip || (clip->streamed() && !stream)) {
-        ++s.stats.culled_requests;
-        KIN_LOG_WARN_F("audio",
-                       "audio play rejected",
-                       (LogFields{
-                           {.name = "cue", .value = cue->id},
-                           {.name = "clip", .value = clip_id},
-                           {.name = "reason", .value = "clip unavailable"},
-                       }));
-        return {};
-    }
-
-    s.sync_ducks(catalog);
-    i32 steal = -1;
-    if (!s.allocate_voice(*cue, request, steal)) {
-        // Culling is the voice limits doing their job, and a busy game does it
-        // every frame: count it (stats().culled_requests), log only at debug.
-        ++s.stats.culled_requests;
-        KIN_LOG_DEBUG_F("audio",
-                        "audio play rejected",
-                        (LogFields{
-                            {.name = "cue", .value = std::string{request.cue}},
-                            {.name = "category", .value = std::string{audio_category_name(cue->category)}},
-                            {.name = "reason", .value = "voice limit or priority"},
-                        }));
-        return {};
-    }
-    if (steal >= 0) {
-        // The stolen voice fades out over a few milliseconds beside the new one.
-        s.stop_voice(s.voices[static_cast<std::size_t>(steal)], 0.0f);
-        ++s.stats.stolen_voices;
-    }
-
-    State::Voice voice{
-        .handle = AudioHandle{s.next_handle++},
-        .cue_id = cue->id,
-        .bus = s.sync_bus(catalog, cue->bus),
-        .category = cue->category,
-        .clip = clip,
-        .rate_ratio = static_cast<f64>(clip->sample_rate()) / static_cast<f64>(s.sample_rate),
-        .stream = std::move(stream),
-        .volume = std::max(0.0f, cue->volume * request.volume),
-        .cue_volume = std::max(0.0f, cue->volume),
-        .volume_target = std::max(0.0f, cue->volume * request.volume),
-        .base_pitch = std::max(0.01f, cue->pitch * (1.0f + variation)),
-        .pitch = std::max(0.01f, cue->pitch * request.pitch * (1.0f + variation)),
-        .priority = cue->priority + request.priority_boost,
-        .loop = cue->loop,
-        .spatial = cue->spatial,
-        .min_distance = cue->min_distance,
-        .max_distance = cue->max_distance,
-        .rolloff = cue->rolloff,
-        .rolloff_power = cue->rolloff_power,
-        .pan_strength = cue->pan_strength,
-        .position = request.position,
-        .has_position = request.has_position,
-    };
-    if (const AudioClipRef* ref = catalog.clip(clip_id)) {
-        voice.loop_start = ref->loop_start;
-        voice.loop_end = ref->loop_end;
-    }
-    if (voice.stream) {
-        voice.stream_buffer.resize(static_cast<std::size_t>(stream_buffer_frames * clip->channels()));
-    }
-    if (request.fade_in > 0.0f) {
-        voice.fade = 0.0f;
-        s.start_fade(voice, 1.0f, request.fade_in);
-    }
-    const AudioHandle handle = voice.handle;
-    s.voices.push_back(std::move(voice));
-    ++s.stats.played_requests;
-    s.stats.active_voices = static_cast<i32>(std::ranges::count_if(s.voices, [](const State::Voice& v) {
-        return !v.stopping;
-    }));
-    KIN_LOG_DEBUG_F("audio",
-                    "audio cue playing",
-                    (LogFields{
-                        {.name = "cue", .value = cue->id},
-                        {.name = "clip", .value = clip_id},
-                        {.name = "bus", .value = cue->bus},
-                        {.name = "category", .value = std::string{audio_category_name(cue->category)}},
-                    }));
-    return handle;
+    return s.commit(catalog, std::move(part), request, 0, 0.0);
 }
 
 void AudioEngine::stop(AudioHandle handle, f32 fade) {
@@ -1263,27 +1612,127 @@ void AudioEngine::set_pitch(AudioHandle handle, f32 pitch) {
 }
 
 AudioHandle AudioEngine::play_music(const AudioCatalog& catalog, std::string_view cue, f32 crossfade) {
+    return play_music(catalog, cue, AudioMusicTransition{.crossfade = crossfade});
+}
+
+AudioHandle AudioEngine::play_music(const AudioCatalog& catalog, std::string_view cue_id, const AudioMusicTransition& transition) {
     State& s = *_state;
-    if (s.music && s.music_cue == cue && playing(s.music)) {
-        return s.music;
+    if (s.music.catalog && s.music.cue.id == cue_id && music()) {
+        return music(); // already playing: keep it going
     }
-    if (s.music) {
-        stop(s.music, crossfade);
+    const AudioCue* cue = s.find_cue(catalog, cue_id);
+    if (!cue) {
+        return {};
     }
-    s.music = play(catalog, {.cue = std::string{cue}, .fade_in = crossfade});
-    s.music_cue = s.music ? std::string{cue} : std::string{};
-    return s.music;
+
+    // Load every layer before taking the lock, so they all start on one frame.
+    std::vector<State::Prepared> parts;
+    std::vector<std::string> names;
+    std::size_t index = 0;
+    if (cue->layers) {
+        for (const std::string& clip : cue->clips) {
+            State::Prepared part;
+            if (s.prepare(catalog, *cue, clip, part)) {
+                parts.push_back(std::move(part));
+                names.push_back(clip);
+            }
+        }
+    } else {
+        std::string clip_id;
+        if (cue->playlist) {
+            index = cue->shuffle ? static_cast<std::size_t>(rng_i32(s.next_key(), 0, static_cast<i32>(cue->clips.size()) - 1)) : 0;
+            clip_id = cue->clips[index];
+        } else {
+            clip_id = s.choose_clip(*cue);
+        }
+        State::Prepared part;
+        if (s.prepare(catalog, *cue, clip_id, part)) {
+            part.loop = cue->loop && !cue->playlist; // a playlist loops the list, not each clip
+            parts.push_back(std::move(part));
+            names.emplace_back();
+        }
+    }
+    if (parts.empty()) {
+        return {};
+    }
+
+    State::Music next{.catalog = &catalog, .cue = *cue, .index = index};
+    const std::scoped_lock lock{s.mutex};
+    const i64 start = s.sync_frame(transition.sync);
+    const f64 start_seconds = transition.match_position ? s.music_seconds_at(start) : 0.0;
+    s.stop_music_voices(start, transition.crossfade);
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        parts[i].cue = &next.cue;
+        const AudioHandle handle = s.commit(catalog, std::move(parts[i]), {
+            .cue = cue->id,
+            .volume = s.layer_volume(names[i]),
+            .fade_in = transition.crossfade,
+        }, start, start_seconds);
+        if (handle) {
+            next.layers.push_back({.name = names[i], .handle = handle});
+        }
+    }
+    s.music = std::move(next);
+    return s.music.layers.empty() ? AudioHandle{} : s.music.layers.front().handle;
 }
 
 void AudioEngine::stop_music(f32 fade) {
     State& s = *_state;
-    stop(s.music, fade);
+    const std::scoped_lock lock{s.mutex};
+    s.stop_music_voices(s.output_frame, fade);
     s.music = {};
-    s.music_cue.clear();
 }
 
 AudioHandle AudioEngine::music() const {
-    return playing(_state->music) ? _state->music : AudioHandle{};
+    const std::scoped_lock lock{_state->mutex};
+    const State::Voice* voice = _state->music_voice();
+    return voice ? voice->handle : AudioHandle{};
+}
+
+void AudioEngine::set_music_layer(std::string_view layer, f32 volume, f32 fade) {
+    State& s = *_state;
+    s.layer_volumes[std::string{layer}] = std::max(0.0f, volume);
+    std::vector<AudioHandle> handles;
+    for (const State::MusicLayer& entry : s.music.layers) {
+        if (entry.name == layer) {
+            handles.push_back(entry.handle);
+        }
+    }
+    for (const AudioHandle handle : handles) {
+        set_volume(handle, volume, fade);
+    }
+}
+
+AudioMusicPosition AudioEngine::music_position() const {
+    const std::scoped_lock lock{_state->mutex};
+    State& s = *_state;
+    const State::Voice* voice = s.music_voice();
+    if (!voice || voice->start_at > s.output_frame) {
+        return {};
+    }
+    AudioMusicPosition position{.playing = true};
+    position.seconds = static_cast<f32>(State::source_position(*voice) / voice->clip->sample_rate());
+    if (s.music.cue.bpm > 0.0f) {
+        const i32 per_bar = std::max(1, s.music.cue.beats_per_bar);
+        position.beat = (position.seconds - s.music.cue.beat_offset) * s.music.cue.bpm / 60.0f;
+        position.bar = static_cast<i32>(std::floor(position.beat / static_cast<f32>(per_bar)));
+        position.beat_in_bar = position.beat - static_cast<f32>(position.bar * per_bar);
+    }
+    return position;
+}
+
+AudioHandle AudioEngine::play_synced(const AudioCatalog& catalog, const AudioPlayRequest& request, AudioSync sync) {
+    State& s = *_state;
+    const AudioCue* cue = s.find_cue(catalog, request.cue);
+    if (!cue) {
+        return {};
+    }
+    State::Prepared part;
+    if (!s.prepare(catalog, *cue, s.choose_clip(*cue), part)) {
+        return {};
+    }
+    const std::scoped_lock lock{s.mutex};
+    return s.commit(catalog, std::move(part), request, s.sync_frame(sync), 0.0);
 }
 
 bool AudioEngine::seek(AudioHandle handle, f32 seconds) {
@@ -1332,7 +1781,16 @@ i32 AudioEngine::unload_unused() {
     State& s = *_state;
     s.free_retired(); // finished voices let go of their clips
     // Only the cache holds these: no voice is playing them.
-    return static_cast<i32>(std::erase_if(s.clip_cache, [](const auto& entry) { return entry.second.use_count() == 1; }));
+    std::vector<std::string> unused;
+    for (const auto& [key, clip] : s.clip_cache) {
+        if (clip.use_count() == 1) {
+            unused.push_back(key);
+        }
+    }
+    for (const std::string& key : unused) {
+        s.forget_clip(key);
+    }
+    return static_cast<i32>(unused.size());
 }
 
 void AudioEngine::unload(const AudioCatalog& catalog) {
@@ -1340,10 +1798,109 @@ void AudioEngine::unload(const AudioCatalog& catalog) {
     for (const auto& [id, clip] : catalog.clips()) {
         const std::filesystem::path path = catalog.resolve_clip_path(id);
         for (const bool stream : {false, true}) {
-            s.clip_cache.erase(State::cache_key(path, stream));
+            s.forget_clip(State::cache_key(path, stream));
             s.loading.erase(State::cache_key(path, stream));
         }
     }
+}
+
+void AudioEngine::watch(FileWatcher& files) {
+    State& s = *_state;
+    s.clip_files = &files;
+    s.clip_files_alive = files.lifetime();
+    for (const auto& [key, clip] : s.clip_cache) {
+        s.watch_clip(key);
+    }
+}
+
+void AudioEngine::watch_catalog(FileWatcher& files, std::filesystem::path path, AudioCatalog& catalog) {
+    State& s = *_state;
+    const u32 id = files.watch(path, [state = &s, &catalog, path](const std::filesystem::path&) {
+        try {
+            AudioCatalog loaded = load_audio_catalog(path);
+            catalog = std::move(loaded);
+            state->apply_catalog(catalog);
+            KIN_LOG_INFO_F("audio", "audio catalog reloaded", (LogFields{{.name = "path", .value = path.string()}}));
+        } catch (const std::exception& error) {
+            KIN_LOG_WARN_F("audio",
+                           "audio catalog reload failed, keeping the last version",
+                           (LogFields{
+                               {.name = "path", .value = path.string()},
+                               {.name = "error", .value = error.what()},
+                           }));
+        }
+    });
+    s.catalog_watches.push_back({&files, files.lifetime(), id});
+}
+
+void AudioEngine::apply_catalog(const AudioCatalog& catalog) {
+    _state->apply_catalog(catalog);
+}
+
+namespace {
+
+AudioLevel level_of(f32 peak, f32 mean_square) {
+    return {.peak = peak, .rms = std::sqrt(std::max(0.0f, mean_square))};
+}
+
+} // namespace
+
+AudioLevel AudioEngine::bus_level(std::string_view bus) const {
+    const std::scoped_lock lock{_state->mutex};
+    const State::Bus* state = _state->find_bus(bus);
+    return state ? level_of(state->meter.peak, state->meter.mean_square) : AudioLevel{};
+}
+
+AudioLevel AudioEngine::output_level() const {
+    const std::scoped_lock lock{_state->mutex};
+    return level_of(_state->output_meter.peak, _state->output_meter.mean_square);
+}
+
+void AudioEngine::enable_analysis(std::string_view bus, bool enabled) {
+    State& s = *_state;
+    std::vector<f32> history(enabled ? static_cast<std::size_t>(audio_analysis_frames) : 0, 0.0f);
+    const std::scoped_lock lock{s.mutex};
+    State::Meter& meter = bus.empty() ? s.output_meter : s.buses[static_cast<std::size_t>(s.ensure_bus(bus))].meter;
+    if (meter.history.empty() != enabled) {
+        return; // already as asked
+    }
+    std::swap(meter.history, history); // the old buffer is freed after unlocking
+    meter.history_pos = 0;
+}
+
+std::vector<f32> AudioEngine::spectrum(std::string_view bus, i32 bands, f32 min_hz, f32 max_hz) const {
+    std::vector<f32> recent;
+    {
+        const std::scoped_lock lock{_state->mutex};
+        const State::Meter* meter = &_state->output_meter;
+        if (!bus.empty()) {
+            const State::Bus* state = _state->find_bus(bus);
+            meter = state ? &state->meter : nullptr;
+        }
+        if (!meter || meter->history.empty()) {
+            return {};
+        }
+        // Oldest first.
+        recent.reserve(meter->history.size());
+        recent.insert(recent.end(), meter->history.begin() + static_cast<std::ptrdiff_t>(meter->history_pos), meter->history.end());
+        recent.insert(recent.end(), meter->history.begin(), meter->history.begin() + static_cast<std::ptrdiff_t>(meter->history_pos));
+    }
+    const std::vector<f32> bins = audio_spectrum_bins(recent);
+    const f32 rate = static_cast<f32>(_state->sample_rate);
+    const f32 low = std::max(1.0f, min_hz);
+    const f32 high = std::max(low * 1.001f, std::min(max_hz, rate * 0.5f));
+    std::vector<f32> result(static_cast<std::size_t>(std::max(0, bands)));
+    for (std::size_t band = 0; band < result.size(); ++band) {
+        const f32 from = low * std::pow(high / low, static_cast<f32>(band) / static_cast<f32>(result.size()));
+        const f32 to = low * std::pow(high / low, static_cast<f32>(band + 1) / static_cast<f32>(result.size()));
+        result[band] = audio_band_magnitude(bins, rate, from, to);
+    }
+    return result;
+}
+
+f32 AudioEngine::magnitude(std::string_view bus, f32 from_hz, f32 to_hz) const {
+    const std::vector<f32> band = spectrum(bus, 1, from_hz, to_hz);
+    return band.empty() ? 0.0f : band.front();
 }
 
 i32 AudioEngine::loaded_clip_count() const {
@@ -1482,6 +2039,8 @@ void AudioEngine::write_report(JsonWriter& json) const {
     json.field("device", _backend->available());
     json.field("output_device", _backend->device());
     json.field("loaded_clips", static_cast<i32>(s.clip_cache.size() + s.memory_clips.size()));
+    json.field("peak", static_cast<f64>(s.output_meter.peak));
+    json.field("rms", static_cast<f64>(std::sqrt(s.output_meter.mean_square)));
     json.field("sample_rate", s.sample_rate);
     json.key("stats").begin_object();
     json.field("active_voices", s.stats.active_voices);
@@ -1493,7 +2052,14 @@ void AudioEngine::write_report(JsonWriter& json) const {
     json.end_object();
     json.key("music");
     if (current_music) {
-        json.value(s.music_cue);
+        json.begin_object();
+        json.field("cue", s.music.cue.id);
+        json.key("layers").begin_array();
+        for (const State::MusicLayer& layer : s.music.layers) {
+            json.value(layer.name);
+        }
+        json.end_array();
+        json.end_object();
     } else {
         json.value_null();
     }
@@ -1506,6 +2072,8 @@ void AudioEngine::write_report(JsonWriter& json) const {
         json.field("duck", static_cast<f64>(bus.duck));
         json.field("muted", bus.muted);
         json.field("paused", bus.paused);
+        json.field("peak", static_cast<f64>(bus.meter.peak));
+        json.field("rms", static_cast<f64>(std::sqrt(bus.meter.mean_square)));
         json.key("effects").begin_array();
         for (const auto& effect : bus.effects) {
             json.value(audio_effect_type_name(effect->effect().type));

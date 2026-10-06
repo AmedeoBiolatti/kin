@@ -39,7 +39,7 @@ public:
         const std::size_t stride = static_cast<std::size_t>(channels);
         const std::size_t frames = interleaved.size() / stride;
         for (std::size_t frame = 0; frame < frames; ++frame) {
-            if (frame % update_every == 0 && (_cutoff != target_cutoff() || _q != _effect.q)) {
+            if (frame % update_every == 0 && (_cutoff != target_cutoff() || _q != _effect.q || _gain != _effect.gain)) {
                 const f32 target = target_cutoff();
                 _cutoff += (target - _cutoff) * _glide;
                 if (std::fabs(target - _cutoff) < 0.01f) {
@@ -65,27 +65,123 @@ private:
 
     void compute() {
         _q = _effect.q;
+        _gain = _effect.gain;
         const f32 w0 = 2.0f * std::numbers::pi_v<f32> * _cutoff / _sample_rate;
-        const f32 cos_w0 = std::cos(w0);
+        const f32 c = std::cos(w0);
         const f32 alpha = std::sin(w0) / (2.0f * std::max(_q, 0.05f));
-        const f32 a0 = 1.0f + alpha;
-        const bool low = _effect.type == AudioEffectType::LowPass;
-        const f32 b1 = low ? 1.0f - cos_w0 : -(1.0f + cos_w0);
-        const f32 b0 = (low ? 1.0f - cos_w0 : 1.0f + cos_w0) * 0.5f;
+        const f32 a = std::pow(10.0f, _gain / 40.0f); // amplitude, for peak and shelves
+        const f32 root = 2.0f * std::sqrt(a) * alpha;
+        f32 b0 = 1.0f, b1 = 0.0f, b2 = 0.0f, a0 = 1.0f, a1 = 0.0f, a2 = 0.0f;
+        switch (_effect.type) {
+        case AudioEffectType::LowPass:
+            b0 = b2 = (1.0f - c) * 0.5f, b1 = 1.0f - c, a0 = 1.0f + alpha, a1 = -2.0f * c, a2 = 1.0f - alpha;
+            break;
+        case AudioEffectType::HighPass:
+            b0 = b2 = (1.0f + c) * 0.5f, b1 = -(1.0f + c), a0 = 1.0f + alpha, a1 = -2.0f * c, a2 = 1.0f - alpha;
+            break;
+        case AudioEffectType::BandPass: // 0 dB at the centre
+            b0 = alpha, b1 = 0.0f, b2 = -alpha, a0 = 1.0f + alpha, a1 = -2.0f * c, a2 = 1.0f - alpha;
+            break;
+        case AudioEffectType::Notch:
+            b0 = b2 = 1.0f, b1 = -2.0f * c, a0 = 1.0f + alpha, a1 = -2.0f * c, a2 = 1.0f - alpha;
+            break;
+        case AudioEffectType::Peak:
+            b0 = 1.0f + alpha * a, b1 = -2.0f * c, b2 = 1.0f - alpha * a;
+            a0 = 1.0f + alpha / a, a1 = -2.0f * c, a2 = 1.0f - alpha / a;
+            break;
+        case AudioEffectType::LowShelf:
+            b0 = a * ((a + 1.0f) - (a - 1.0f) * c + root);
+            b1 = 2.0f * a * ((a - 1.0f) - (a + 1.0f) * c);
+            b2 = a * ((a + 1.0f) - (a - 1.0f) * c - root);
+            a0 = (a + 1.0f) + (a - 1.0f) * c + root;
+            a1 = -2.0f * ((a - 1.0f) + (a + 1.0f) * c);
+            a2 = (a + 1.0f) + (a - 1.0f) * c - root;
+            break;
+        case AudioEffectType::HighShelf:
+            b0 = a * ((a + 1.0f) + (a - 1.0f) * c + root);
+            b1 = -2.0f * a * ((a - 1.0f) + (a + 1.0f) * c);
+            b2 = a * ((a + 1.0f) + (a - 1.0f) * c - root);
+            a0 = (a + 1.0f) - (a - 1.0f) * c + root;
+            a1 = 2.0f * ((a - 1.0f) - (a + 1.0f) * c);
+            a2 = (a + 1.0f) - (a - 1.0f) * c - root;
+            break;
+        default:
+            break;
+        }
         _b0 = b0 / a0;
         _b1 = b1 / a0;
-        _b2 = b0 / a0;
-        _a1 = -2.0f * cos_w0 / a0;
-        _a2 = (1.0f - alpha) / a0;
+        _b2 = b2 / a0;
+        _a1 = a1 / a0;
+        _a2 = a2 / a0;
     }
 
     f32 _sample_rate;
     f32 _glide;
     f32 _cutoff = 1000.0f;
     f32 _q = 0.7071f;
+    f32 _gain = 0.0f;
     f32 _b0 = 1.0f, _b1 = 0.0f, _b2 = 0.0f, _a1 = 0.0f, _a2 = 0.0f;
     std::array<f32, 2> _z1{};
     std::array<f32, 2> _z2{};
+};
+
+// A feedback delay: echoes `time` apart, each `feedback` times the last. A new
+// time glides in (the read point moves like a tape head), so changing it does
+// not crackle; the line holds up to twice the first time asked for (at least
+// a second, at most five).
+class Delay final : public AudioEffectProcessor {
+public:
+    Delay(const AudioEffect& effect, i32 sample_rate)
+        : _sample_rate(static_cast<f32>(sample_rate)),
+          _glide(1.0f - std::exp(-1.0f / (0.05f * static_cast<f32>(sample_rate)))) {
+        const f32 seconds = std::clamp(effect.time * 2.0f, 1.0f, 5.0f);
+        _length = static_cast<std::size_t>(seconds * _sample_rate) + 2;
+        _line.assign(_length * 2, 0.0f);
+        set(effect);
+        _delay = _target;
+    }
+
+    void set(const AudioEffect& effect) override {
+        _effect = effect;
+        _target = std::clamp(effect.time * _sample_rate, 1.0f, static_cast<f32>(_length - 2));
+    }
+
+    void process(std::span<f32> interleaved, i32 channels) override {
+        if (!_effect.enabled) {
+            return;
+        }
+        const std::size_t stride = static_cast<std::size_t>(channels);
+        const std::size_t frames = interleaved.size() / stride;
+        const f32 feedback = std::clamp(_effect.feedback, 0.0f, 0.98f);
+        const f32 wet = std::max(0.0f, _effect.wet);
+        const f32 dry = std::max(0.0f, _effect.dry);
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            _delay += (_target - _delay) * _glide;
+            f32 read = static_cast<f32>(_write) - _delay;
+            if (read < 0.0f) {
+                read += static_cast<f32>(_length);
+            }
+            const std::size_t i0 = static_cast<std::size_t>(read);
+            const std::size_t i1 = i0 + 1 == _length ? 0 : i0 + 1;
+            const f32 t = read - static_cast<f32>(i0);
+            for (std::size_t c = 0; c < stride && c < 2; ++c) {
+                f32& sample = interleaved[frame * stride + c];
+                const f32 echo = _line[i0 * 2 + c] + (_line[i1 * 2 + c] - _line[i0 * 2 + c]) * t;
+                _line[_write * 2 + c] = sample + echo * feedback;
+                sample = sample * dry + echo * wet;
+            }
+            _write = _write + 1 == _length ? 0 : _write + 1;
+        }
+    }
+
+private:
+    f32 _sample_rate;
+    f32 _glide;
+    std::size_t _length = 0;
+    std::vector<f32> _line; // stereo frames
+    std::size_t _write = 0;
+    f32 _delay = 1.0f; // frames
+    f32 _target = 1.0f;
 };
 
 // Jezar's Freeverb: eight damped comb filters into four allpasses per side,
@@ -241,7 +337,13 @@ private:
 std::unique_ptr<AudioEffectProcessor> make_audio_effect(const AudioEffect& effect, i32 sample_rate) {
     switch (effect.type) {
     case AudioEffectType::LowPass:
-    case AudioEffectType::HighPass: return std::make_unique<BiquadFilter>(effect, sample_rate);
+    case AudioEffectType::HighPass:
+    case AudioEffectType::BandPass:
+    case AudioEffectType::Notch:
+    case AudioEffectType::Peak:
+    case AudioEffectType::LowShelf:
+    case AudioEffectType::HighShelf: return std::make_unique<BiquadFilter>(effect, sample_rate);
+    case AudioEffectType::Delay: return std::make_unique<Delay>(effect, sample_rate);
     case AudioEffectType::Reverb: return std::make_unique<Freeverb>(effect, sample_rate);
     case AudioEffectType::Compressor: return std::make_unique<Compressor>(effect, sample_rate);
     }
