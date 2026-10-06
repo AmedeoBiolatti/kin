@@ -47,6 +47,20 @@ releases may change APIs.
   compressed in memory and decodes it as it plays, for music and long
   ambience. `load_audio_stream` loads one directly, and `AudioDecoder` /
   `open_audio_decoder` decode a file held in memory.
+- Music: `play_music(catalog, cue, crossfade)` keeps one music cue playing
+  and crossfades to the next; asking for the cue already playing keeps it
+  going. `stop_music`, `music()`.
+- Voice control: `set_volume(handle, volume, fade)`, `set_pitch(handle,
+  pitch)` and `playback_position(handle)`.
+- Ducking: `duck music when=dialogue volume=0.3 attack=0.15 release=0.8` in a
+  catalog turns a bus down while another plays (`AudioCatalog::add_duck`).
+- `write_audio_settings` / `apply_audio_settings` keep bus volumes and mutes
+  in a settings file, `AudioEngine::bus_states()` lists them, and
+  `AudioEngine::write_report` writes stats, buses and voices for a scene's
+  report.
+- Lua: `bind_lua_audio` gives scripts an `audio` table, and
+  `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
+  lets a host add its own bindings to a script scene's Lua state.
 - Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
   make a looping cue play its intro once and then repeat the loop, streamed or
   not.

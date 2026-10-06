@@ -13,6 +13,7 @@ add_library(kin_engine STATIC
     src/audio/audio_clip.cpp
     src/audio/audio_decoder.cpp
     src/audio/audio_engine.cpp
+    src/audio/audio_settings.cpp
     src/audio/sdl_audio_backend.cpp
     src/audio/spatial_audio.cpp
     src/assets/asset_manager.cpp
@@ -101,6 +102,7 @@ add_library(kin_engine STATIC
     src/scene/transitions.cpp
     src/save/save_store.cpp
     src/scripting/script_engine.cpp
+    src/scripting/lua_audio.cpp
     src/scripting/lua_paths.cpp
     src/scripting/lua_script.cpp
     src/scripting/script_scene.cpp

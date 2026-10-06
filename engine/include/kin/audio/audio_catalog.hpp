@@ -48,6 +48,19 @@ struct AudioCue {
     f32 max_distance = 512.0f;
 };
 
+// Turns `bus` down to `volume` while anything plays on `when` (or a bus under
+// it), e.g. music ducking under dialogue. `attack` and `release` are the
+// seconds it takes to go down and come back.
+struct AudioDuck {
+    std::string bus;
+    std::string when;
+    f32 volume = 0.5f;
+    f32 attack = 0.1f;
+    f32 release = 0.5f;
+
+    friend bool operator==(const AudioDuck&, const AudioDuck&) = default;
+};
+
 struct AudioBus {
     std::string id;
     std::string parent;
@@ -67,6 +80,7 @@ public:
     void add_clip(AudioClipRef clip);
     void add_bus(AudioBus bus);
     void add_cue(AudioCue cue);
+    void add_duck(AudioDuck duck);
 
     const AudioClipRef* clip(std::string_view id) const;
     const AudioBus* bus(std::string_view id) const;
@@ -79,12 +93,14 @@ public:
     const std::unordered_map<std::string, AudioClipRef>& clips() const { return _clips; }
     const std::unordered_map<std::string, AudioBus>& buses() const { return _buses; }
     const std::unordered_map<std::string, AudioCue>& cues() const { return _cues; }
+    const std::vector<AudioDuck>& ducks() const { return _ducks; }
 
 private:
     std::filesystem::path _root;
     std::unordered_map<std::string, AudioClipRef> _clips;
     std::unordered_map<std::string, AudioBus> _buses;
     std::unordered_map<std::string, AudioCue> _cues;
+    std::vector<AudioDuck> _ducks;
 };
 
 std::string_view audio_category_name(AudioCategory category);

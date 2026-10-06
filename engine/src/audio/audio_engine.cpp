@@ -3,6 +3,7 @@
 #include <kin/audio/audio_decoder.hpp>
 
 #include <kin/core/jobs.hpp>
+#include <kin/core/json.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/platform/log.hpp>
 
@@ -66,8 +67,18 @@ struct AudioEngine::State {
         bool muted = false;
         bool paused = false;
         // Resolved through the parents at the start of each mixed block.
+        f32 duck = 1.0f; // from the duck rules aimed at this bus
         f32 gain = 1.0f;
         bool paused_now = false;
+    };
+
+    struct Duck {
+        i32 bus = no_bus;
+        i32 when = no_bus;
+        f32 volume = 0.5f;
+        i32 attack_frames = 0;
+        i32 release_frames = 0;
+        f32 level = 1.0f; // 1 untouched, `volume` fully ducked
     };
 
     struct Voice {
@@ -95,6 +106,11 @@ struct AudioEngine::State {
         bool at_end = false; // f1 is past the end of the clip
         bool done = false;
         f32 volume = 1.0f;
+        f32 cue_volume = 1.0f; // set_volume is relative to it
+        f32 volume_target = 1.0f; // set_volume fades by block toward it
+        f32 volume_step = 0.0f;
+        i32 volume_frames = 0;
+        f32 base_pitch = 1.0f; // the cue's pitch and variation; set_pitch scales it
         f32 pitch = 1.0f;
         i32 priority = 0;
         f32 age = 0.0f;
@@ -133,6 +149,8 @@ struct AudioEngine::State {
     std::vector<Voice> voices;
     std::vector<Bus> buses;
     std::unordered_map<std::string, i32> bus_index;
+    std::vector<AudioDuck> duck_source; // the catalog rules `ducks` was built from
+    std::vector<Duck> ducks;
     Vec2f listener{};
     AudioEngineStats stats;
     f32 limiter_env = 0.0f;
@@ -147,6 +165,8 @@ struct AudioEngine::State {
     std::unordered_map<std::string, std::size_t> last_clip; // per cue, so variations do not repeat
     f64 pending_frames = 0.0;
     std::vector<f32> scratch;
+    AudioHandle music;
+    std::string music_cue;
 
     RngKey next_key() {
         auto [next, sub] = split(rng);
@@ -206,6 +226,32 @@ struct AudioEngine::State {
         return found == bus_index.end() ? nullptr : &buses[static_cast<std::size_t>(found->second)];
     }
 
+    // Rebuilds the duck rules when the catalog's changed, keeping how far each
+    // surviving rule had ducked.
+    void sync_ducks(const AudioCatalog& catalog) {
+        if (catalog.ducks() == duck_source) {
+            return;
+        }
+        std::vector<Duck> next;
+        for (const AudioDuck& authored : catalog.ducks()) {
+            Duck duck{
+                .bus = sync_bus(catalog, authored.bus),
+                .when = sync_bus(catalog, authored.when),
+                .volume = std::max(0.0f, authored.volume),
+                .attack_frames = authored.attack > 0.0f ? frames_for(authored.attack) : 0,
+                .release_frames = authored.release > 0.0f ? frames_for(authored.release) : 0,
+            };
+            for (const Duck& old : ducks) {
+                if (old.bus == duck.bus && old.when == duck.when) {
+                    duck.level = old.level;
+                }
+            }
+            next.push_back(duck);
+        }
+        ducks = std::move(next);
+        duck_source = catalog.ducks();
+    }
+
     void advance_buses(i32 frames) {
         for (Bus& bus : buses) {
             if (bus.step != 0.0f) {
@@ -215,21 +261,39 @@ struct AudioEngine::State {
                     bus.step = 0.0f;
                 }
             }
+            bus.duck = 1.0f;
+            bus.paused_now = false;
+            const Bus* level = &bus;
+            for (i32 guard = 0; level && guard < 32; ++guard) {
+                bus.paused_now = bus.paused_now || level->paused;
+                level = level->parent == no_bus ? nullptr : &buses[static_cast<std::size_t>(level->parent)];
+            }
         }
+
+        for (Duck& duck : ducks) {
+            const bool active = std::ranges::any_of(voices, [&](const Voice& voice) {
+                return !voice.stopping && !voice.done && voice.bus != no_bus &&
+                       !buses[static_cast<std::size_t>(voice.bus)].paused_now && bus_under(voice.bus, duck.when);
+            });
+            const f32 target = active ? duck.volume : 1.0f;
+            const i32 ramp = active ? duck.attack_frames : duck.release_frames;
+            const f32 step = ramp > 0 ? std::fabs(1.0f - duck.volume) / static_cast<f32>(ramp) * static_cast<f32>(frames)
+                                      : std::fabs(target - duck.level);
+            duck.level = duck.level < target ? std::min(target, duck.level + step) : std::max(target, duck.level - step);
+            buses[static_cast<std::size_t>(duck.bus)].duck *= duck.level;
+        }
+
         for (Bus& bus : buses) {
             f32 gain = 1.0f;
-            bool paused = false;
             const Bus* level = &bus;
             for (i32 guard = 0; level && guard < 32; ++guard) {
                 if (level->muted || level->authored_muted) {
                     gain = 0.0f;
                 }
-                gain *= level->authored * level->volume;
-                paused = paused || level->paused;
+                gain *= level->authored * level->volume * level->duck;
                 level = level->parent == no_bus ? nullptr : &buses[static_cast<std::size_t>(level->parent)];
             }
             bus.gain = gain;
-            bus.paused_now = paused;
         }
     }
 
@@ -508,6 +572,12 @@ struct AudioEngine::State {
                 continue; // silent and holding its place
             }
 
+            if (voice.volume_frames > 0) {
+                const i32 n = std::min(frames, voice.volume_frames);
+                voice.volume_frames -= n;
+                voice.volume = voice.volume_frames == 0 ? voice.volume_target
+                                                        : voice.volume + voice.volume_step * static_cast<f32>(n);
+            }
             f32 gain = paused ? 0.0f : voice.volume * (bus ? bus->gain : 1.0f);
             PanGains pan{};
             if (voice.spatial && voice.has_position) {
@@ -807,6 +877,7 @@ AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayReques
         return {};
     }
 
+    s.sync_ducks(catalog);
     i32 steal = -1;
     if (!s.allocate_voice(*cue, request, steal)) {
         // Culling is the voice limits doing their job, and a busy game does it
@@ -836,6 +907,9 @@ AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayReques
         .rate_ratio = static_cast<f64>(clip->sample_rate()) / static_cast<f64>(s.sample_rate),
         .stream = std::move(stream),
         .volume = std::max(0.0f, cue->volume * request.volume),
+        .cue_volume = std::max(0.0f, cue->volume),
+        .volume_target = std::max(0.0f, cue->volume * request.volume),
+        .base_pitch = std::max(0.01f, cue->pitch * (1.0f + variation)),
         .pitch = std::max(0.01f, cue->pitch * request.pitch * (1.0f + variation)),
         .priority = cue->priority + request.priority_boost,
         .loop = cue->loop,
@@ -946,6 +1020,69 @@ void AudioEngine::set_position(AudioHandle handle, Vec2f position) {
     }
 }
 
+void AudioEngine::set_volume(AudioHandle handle, f32 volume, f32 fade) {
+    const std::scoped_lock lock{_state->mutex};
+    for (State::Voice& voice : _state->voices) {
+        if (voice.handle != handle) {
+            continue;
+        }
+        // Relative to the cue's volume, as AudioPlayRequest::volume is.
+        voice.volume_target = std::max(0.0f, voice.cue_volume * volume);
+        if (fade > 0.0f) {
+            voice.volume_frames = _state->frames_for(fade);
+            voice.volume_step = (voice.volume_target - voice.volume) / static_cast<f32>(voice.volume_frames);
+        } else {
+            voice.volume = voice.volume_target;
+            voice.volume_frames = 0;
+        }
+    }
+}
+
+void AudioEngine::set_pitch(AudioHandle handle, f32 pitch) {
+    const std::scoped_lock lock{_state->mutex};
+    for (State::Voice& voice : _state->voices) {
+        if (voice.handle == handle) {
+            voice.pitch = std::max(0.01f, voice.base_pitch * pitch);
+        }
+    }
+}
+
+AudioHandle AudioEngine::play_music(const AudioCatalog& catalog, std::string_view cue, f32 crossfade) {
+    State& s = *_state;
+    if (s.music && s.music_cue == cue && playing(s.music)) {
+        return s.music;
+    }
+    if (s.music) {
+        stop(s.music, crossfade);
+    }
+    s.music = play(catalog, {.cue = std::string{cue}, .fade_in = crossfade});
+    s.music_cue = s.music ? std::string{cue} : std::string{};
+    return s.music;
+}
+
+void AudioEngine::stop_music(f32 fade) {
+    State& s = *_state;
+    stop(s.music, fade);
+    s.music = {};
+    s.music_cue.clear();
+}
+
+AudioHandle AudioEngine::music() const {
+    return playing(_state->music) ? _state->music : AudioHandle{};
+}
+
+f32 AudioEngine::playback_position(AudioHandle handle) const {
+    const std::scoped_lock lock{_state->mutex};
+    for (const State::Voice& voice : _state->voices) {
+        if (voice.handle == handle && !voice.stopping && voice.clip) {
+            // f0, the frame the output is leaving, is two behind the next read.
+            const f64 frame = voice.primed ? static_cast<f64>(voice.next_frame - (voice.at_end ? 1 : 2)) + voice.frac : 0.0;
+            return static_cast<f32>(std::max(0.0, frame) / static_cast<f64>(voice.clip->sample_rate()));
+        }
+    }
+    return 0.0f;
+}
+
 bool AudioEngine::playing(AudioHandle handle) const {
     const std::scoped_lock lock{_state->mutex};
     return std::ranges::any_of(_state->voices, [handle](const State::Voice& voice) {
@@ -1002,6 +1139,16 @@ f32 AudioEngine::effective_bus_volume(const AudioCatalog& catalog, std::string_v
     return volume;
 }
 
+std::vector<AudioBusState> AudioEngine::bus_states() const {
+    const std::scoped_lock lock{_state->mutex};
+    std::vector<AudioBusState> states;
+    states.reserve(_state->buses.size());
+    for (const State::Bus& bus : _state->buses) {
+        states.push_back({.id = bus.id, .volume = bus.target, .muted = bus.muted, .paused = bus.paused});
+    }
+    return states;
+}
+
 i32 AudioEngine::sample_rate() const {
     return _state->sample_rate;
 }
@@ -1022,6 +1169,54 @@ AudioEngineStats AudioEngine::stats() const {
 void AudioEngine::reset_stats() {
     const std::scoped_lock lock{_state->mutex};
     _state->stats = {};
+}
+
+void AudioEngine::write_report(JsonWriter& json) const {
+    const AudioHandle current_music = music();
+    const std::scoped_lock lock{_state->mutex};
+    const State& s = *_state;
+    json.begin_object();
+    json.field("device", _backend->available());
+    json.field("sample_rate", s.sample_rate);
+    json.key("stats").begin_object();
+    json.field("active_voices", s.stats.active_voices);
+    json.field("played_requests", s.stats.played_requests);
+    json.field("culled_requests", s.stats.culled_requests);
+    json.field("stolen_voices", s.stats.stolen_voices);
+    json.field("mixed_frames", s.stats.mixed_frames);
+    json.field("limited_frames", s.stats.limited_frames);
+    json.end_object();
+    json.key("music");
+    if (current_music) {
+        json.value(s.music_cue);
+    } else {
+        json.value_null();
+    }
+    json.key("buses").begin_array();
+    for (const State::Bus& bus : s.buses) {
+        json.begin_object();
+        json.field("id", bus.id);
+        json.field("volume", static_cast<f64>(bus.target));
+        json.field("gain", static_cast<f64>(bus.gain));
+        json.field("duck", static_cast<f64>(bus.duck));
+        json.field("muted", bus.muted);
+        json.field("paused", bus.paused);
+        json.end_object();
+    }
+    json.end_array();
+    json.key("voices").begin_array();
+    for (const State::Voice& voice : s.voices) {
+        json.begin_object();
+        json.field("handle", voice.handle.id);
+        json.field("cue", voice.cue_id);
+        json.field("bus", voice.bus == no_bus ? std::string_view{} : std::string_view{s.buses[static_cast<std::size_t>(voice.bus)].id});
+        json.field("category", audio_category_name(voice.category));
+        json.field("volume", static_cast<f64>(voice.volume));
+        json.field("stopping", voice.stopping);
+        json.end_object();
+    }
+    json.end_array();
+    json.end_object();
 }
 
 } // namespace kin
