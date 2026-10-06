@@ -50,6 +50,17 @@ struct AudioCue {
     AudioRolloff rolloff = AudioRolloff::Smooth;
     f32 rolloff_power = 1.0f;
     f32 pan_strength = 1.0f;
+    // Music: the tempo, for changes on the beat or bar (0: none), beats in a
+    // bar, and the seconds before the first beat.
+    f32 bpm = 0.0f;
+    i32 beats_per_bar = 4;
+    f32 beat_offset = 0.0f;
+    // Music: play all clips together as layers, or one after another as a
+    // playlist (loop=true repeats the list; shuffle plays it in random order).
+    // Otherwise a cue plays one random clip.
+    bool layers = false;
+    bool playlist = false;
+    bool shuffle = false;
 };
 
 // Turns `bus` down to `volume` while anything plays on `when` (or a bus under

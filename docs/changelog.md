@@ -52,6 +52,15 @@ releases may change APIs.
 - Lua: `bind_lua_audio` gives scripts an `audio` table, and
   `ScriptSceneConfig::bind` (with the matching `ScriptEngine` constructor)
   lets a host add its own bindings to a script scene's Lua state.
+- Adaptive music: `play_music(catalog, cue, AudioMusicTransition{crossfade,
+  sync, match_position})` changes music on the next beat, bar or clip end
+  (cue `bpm=`, `beats_per_bar=`, `beat_offset=`), optionally from the same
+  position. `layers=true` cues play their clips in step as stems
+  (`set_music_layer`), and `playlist=true` cues play their clips back to back
+  with no gap (`shuffle=true` for random order). `music_position()` gives the
+  beat and bar, and `play_synced` plays a cue on the next beat or bar. Voices
+  can start and stop on an exact output frame. Lua has `play_music` with
+  options, `set_music_layer`, `music_position` and `play_synced`.
 - More audio effects: `bandpass` and `notch` filters, an EQ `peak` band,
   `lowshelf` and `highshelf` (with `gain` in dB; `freq` names the frequency),
   and a `delay` (`time`, `feedback`, `wet`, `dry`) whose time glides when
@@ -94,6 +103,9 @@ releases may change APIs.
   not.
 
 ### Changed
+
+- `AudioEngineConfig::music_voices` defaults to 8 (from 2), as music layers
+  and crossfades each take a voice.
 
 - WAV files are decoded by dr_wav instead of `SDL_LoadWAV`, and loading a
   clip no longer initialises SDL's audio subsystem.

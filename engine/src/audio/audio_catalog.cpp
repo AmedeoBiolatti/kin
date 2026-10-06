@@ -349,6 +349,18 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
                     if (!parse_f32(value, cue.rolloff_power) || cue.rolloff_power <= 0.0f) fail("invalid rolloff_power");
                 } else if (key == "pan") {
                     if (!parse_f32(value, cue.pan_strength)) fail("invalid pan");
+                } else if (key == "bpm") {
+                    if (!parse_f32(value, cue.bpm) || cue.bpm < 0.0f) fail("invalid bpm");
+                } else if (key == "beats_per_bar") {
+                    if (!parse_i32(value, cue.beats_per_bar) || cue.beats_per_bar < 1) fail("invalid beats_per_bar");
+                } else if (key == "beat_offset") {
+                    if (!parse_f32(value, cue.beat_offset)) fail("invalid beat_offset");
+                } else if (key == "layers") {
+                    if (!parse_bool(value, cue.layers)) fail("invalid layers");
+                } else if (key == "playlist") {
+                    if (!parse_bool(value, cue.playlist)) fail("invalid playlist");
+                } else if (key == "shuffle") {
+                    if (!parse_bool(value, cue.shuffle)) fail("invalid shuffle");
                 } else if (key == "clips") {
                     cue.clips = split_csv(value);
                 } else {
@@ -357,6 +369,9 @@ AudioCatalog load_audio_catalog(const std::filesystem::path& path) {
             }
             if (cue.clips.empty()) {
                 fail("cue requires clips");
+            }
+            if (cue.layers && cue.playlist) {
+                fail("a cue is layers or a playlist, not both");
             }
             catalog.add_cue(std::move(cue));
             continue;
@@ -530,6 +545,18 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
         }
         if (cue->pan_strength != 1.0f) {
             out << " pan=" << cue->pan_strength;
+        }
+        if (cue->bpm > 0.0f) {
+            out << " bpm=" << cue->bpm << " beats_per_bar=" << cue->beats_per_bar << " beat_offset=" << cue->beat_offset;
+        }
+        if (cue->layers) {
+            out << " layers=true";
+        }
+        if (cue->playlist) {
+            out << " playlist=true";
+        }
+        if (cue->shuffle) {
+            out << " shuffle=true";
         }
         out
             << " clips=";

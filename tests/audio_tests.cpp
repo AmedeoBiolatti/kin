@@ -1523,6 +1523,194 @@ void test_spectrum() {
     assert(script.call_for<bool>("check") == true);
 }
 
+// Music at 120 bpm in 4/4 (a beat is 24000 frames, a bar 96000), on its own bus.
+kin::AudioCatalog music_catalog() {
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "music"});
+    catalog.add_bus({.id = "sfx"});
+    const auto music = [&](const char* id, std::vector<std::string> clips, bool loop = true) {
+        catalog.add_cue({.id = id, .clips = std::move(clips), .category = kin::AudioCategory::Music, .bus = "music",
+                         .loop = loop, .bpm = 120.0f});
+    };
+    music("calm", {"calm"});
+    music("tense", {"tense"});
+    return catalog;
+}
+
+kin::AudioEngine music_engine() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("calm", dc_clip(0.2f, 4 * 48000));
+    audio.add_clip("tense", dc_clip(0.4f, 4 * 48000));
+    return audio;
+}
+
+// A change synced to the bar, the beat or the clip's end lands on that exact frame.
+void test_music_sync() {
+    const kin::AudioCatalog catalog = music_catalog();
+    struct Case {
+        kin::AudioSync sync;
+        int frame; // where the change lands, counted from the start of the music
+    };
+    for (const Case c : {Case{kin::AudioSync::Bar, 96000}, Case{kin::AudioSync::Beat, 24000},
+                         Case{kin::AudioSync::End, 4 * 48000}, Case{kin::AudioSync::Now, 14400}}) {
+        kin::AudioEngine audio = music_engine();
+        audio.play_music(catalog, "calm", 0.0f);
+        render(audio, 14400); // 0.3 s in
+        const kin::AudioHandle tense = audio.play_music(catalog, "tense", {.crossfade = 0.0f, .sync = c.sync});
+        assert(tense && audio.music() == tense);
+        const std::vector<kin::f32> out = render(audio, c.frame - 14400 + 1000);
+        const int at = c.frame - 14400;
+        if (at > 10) {
+            assert(near(out[static_cast<std::size_t>(at - 10) * 2], 0.2f)); // still calm
+        }
+        assert(near(out[static_cast<std::size_t>(at + 300) * 2], 0.4f)); // tense, calm faded out
+        assert(out[static_cast<std::size_t>(at) * 2] > 0.4f); // tense starts on the frame, calm still fading
+    }
+}
+
+// Layers start together and keep their volumes into the next layered cue;
+// match_position picks up the new music where the old one was.
+void test_music_layers_and_matching() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("drums", ramp_clip(48000, 0.000001f));
+    audio.add_clip("bass", ramp_clip(48000, 0.000002f));
+    audio.add_clip("drums2", dc_clip(0.05f));
+    audio.add_clip("bass2", dc_clip(0.15f));
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "music"});
+    catalog.add_cue({.id = "fight", .clips = {"drums", "bass"}, .category = kin::AudioCategory::Music, .bus = "music",
+                     .loop = true, .layers = true});
+    catalog.add_cue({.id = "boss", .clips = {"drums2", "bass2"}, .category = kin::AudioCategory::Music, .bus = "music",
+                     .loop = true, .layers = true});
+    audio.play_music(catalog, "fight", 0.0f);
+    const std::vector<kin::f32> both = render(audio, 2000);
+    assert(near(both[2 * 1500], 0.000003f * 1500.0f, 1e-6f)); // both layers from frame 0
+
+    audio.set_music_layer("bass", 0.0f);
+    audio.set_music_layer("bass2", 0.0f);
+    render(audio, 1024);
+    assert(near(render(audio, 1)[0], 0.000001f * 3024.0f, 1e-6f)); // drums alone, at frame 2000 + 1024
+    audio.play_music(catalog, "boss", 0.0f);
+    render(audio, 480);
+    assert(near(render(audio, 1)[0], 0.05f)); // bass2 starts silent too
+
+    // Same tempo, other arrangement: continue from the same place.
+    kin::AudioEngine matched = null_engine();
+    matched.add_clip("a", ramp_clip(48000, 0.00001f));
+    matched.add_clip("b", ramp_clip(48000, 0.00002f));
+    kin::AudioCatalog pair;
+    pair.add_bus({.id = "music"});
+    pair.add_cue({.id = "a", .clips = {"a"}, .category = kin::AudioCategory::Music, .bus = "music"});
+    pair.add_cue({.id = "b", .clips = {"b"}, .category = kin::AudioCategory::Music, .bus = "music"});
+    matched.play_music(pair, "a", 0.0f);
+    render(matched, 24000);
+    matched.play_music(pair, "b", {.crossfade = 0.0f, .match_position = true});
+    render(matched, 300);
+    assert(near(render(matched, 1)[0], 0.00002f * (24000.0f + 300.0f), 1e-4f));
+}
+
+// A playlist plays its clips back to back with no gap, and loops the list.
+void test_music_playlist() {
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("one", dc_clip(0.1f, 4800));
+    audio.add_clip("two", dc_clip(0.2f, 4800));
+    audio.add_clip("three", dc_clip(0.3f, 4800));
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "music"});
+    catalog.add_cue({.id = "radio", .clips = {"one", "two"}, .category = kin::AudioCategory::Music, .bus = "music",
+                     .loop = true, .playlist = true});
+    catalog.add_cue({.id = "once", .clips = {"one", "two"}, .category = kin::AudioCategory::Music, .bus = "music",
+                     .playlist = true});
+    catalog.add_cue({.id = "mix", .clips = {"one", "two", "three"}, .category = kin::AudioCategory::Music,
+                     .bus = "music", .loop = true, .playlist = true, .shuffle = true});
+
+    audio.play_music(catalog, "radio", 0.0f);
+    std::vector<kin::f32> out;
+    for (int block = 0; block < 6; ++block) {
+        audio.update(0.0f); // lines up the next clip
+        const std::vector<kin::f32> part = render(audio, 2400);
+        out.insert(out.end(), part.begin(), part.end());
+    }
+    for (int frame = 0; frame < 14400; ++frame) {
+        const float expected = (frame / 4800) % 2 == 0 ? 0.1f : 0.2f;
+        assert(near(out[static_cast<std::size_t>(frame) * 2], expected)); // no gap, no overlap
+    }
+
+    audio.play_music(catalog, "once", 0.0f);
+    render(audio, 480);
+    for (int block = 0; block < 6; ++block) {
+        audio.update(0.0f);
+        render(audio, 2400);
+    }
+    assert(!audio.music() && audio.active_voice_count() == 0);
+
+    audio.play_music(catalog, "mix", 0.0f);
+    std::vector<float> order;
+    for (int block = 0; block < 24; ++block) {
+        audio.update(0.0f);
+        const float v = render(audio, 2400)[0];
+        if (block % 2 == 0) {
+            order.push_back(v);
+        }
+    }
+    for (std::size_t i = 1; i < order.size(); ++i) {
+        assert(!near(order[i], order[i - 1])); // shuffled, never the same clip twice running
+    }
+}
+
+// The music's position in beats and bars, and stingers synced to it.
+void test_music_position_and_stingers() {
+    kin::AudioCatalog catalog = music_catalog();
+    catalog.add_cue({.id = "hit", .clips = {"stinger"}, .bus = "sfx"});
+    kin::AudioEngine audio = music_engine();
+    audio.add_clip("stinger", dc_clip(0.3f, 4800));
+    assert(!audio.music_position().playing);
+    audio.play_music(catalog, "calm", 0.0f);
+    render(audio, 60000); // 1.25 s
+    const kin::AudioMusicPosition position = audio.music_position();
+    assert(position.playing && near(position.seconds, 1.25f, 1e-3f));
+    assert(near(position.beat, 2.5f, 1e-3f) && position.bar == 0 && near(position.beat_in_bar, 2.5f, 1e-3f));
+
+    audio.play_synced(catalog, {.cue = "hit"}, kin::AudioSync::Beat); // the next beat is at 1.5 s
+    const std::vector<kin::f32> out = render(audio, 13000);
+    assert(near(out[2 * (12000 - 10)], 0.2f));
+    assert(near(out[2 * (12000 + 10)], 0.5f));
+
+    // Catalog round trip of the music options.
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-music-options";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    catalog.add_cue({.id = "mix", .clips = {"a", "b"}, .category = kin::AudioCategory::Music, .bus = "music",
+                     .loop = true, .bpm = 96.0f, .beats_per_bar = 3, .beat_offset = 0.5f, .playlist = true,
+                     .shuffle = true});
+    assert(kin::save_audio_catalog(catalog, dir / "audio.kinaudio"));
+    const kin::AudioCatalog loaded = kin::load_audio_catalog(dir / "audio.kinaudio");
+    const kin::AudioCue* mix = loaded.cue("mix");
+    assert(mix && mix->bpm == 96.0f && mix->beats_per_bar == 3 && mix->beat_offset == 0.5f && mix->playlist &&
+           mix->shuffle && !mix->layers);
+    std::ofstream(dir / "bad.kinaudio") << "bus music 1\ncue x music music layers=true playlist=true clips=a\n";
+    bool threw = false;
+    try {
+        kin::load_audio_catalog(dir / "bad.kinaudio");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    assert(threw);
+
+    // From Lua.
+    kin::AudioEngine scripted = music_engine();
+    kin::LuaScript script{{.setup = [&](sol::state& lua) { kin::bind_lua_audio(lua, scripted, catalog); }}};
+    assert(script.load_string(R"(
+        function start() audio.play_music("calm", 0) end
+        function change() return audio.play_music("tense", {crossfade = 0, sync = "bar"}) end
+        function where() return audio.music_position().beat end
+    )"));
+    assert(script.call("start"));
+    render(scripted, 24000);
+    assert(near(*script.call_for<float>("where"), 1.0f, 1e-3f));
+    assert(script.call_for<kin::i64>("change").value_or(0) > 0);
+}
+
 } // namespace
 
 int main() {
@@ -1567,5 +1755,9 @@ int main() {
     test_delay();
     test_level_meters();
     test_spectrum();
+    test_music_sync();
+    test_music_layers_and_matching();
+    test_music_playlist();
+    test_music_position_and_stingers();
     return 0;
 }

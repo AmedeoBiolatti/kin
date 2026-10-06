@@ -37,7 +37,7 @@ struct AudioPlayRequest {
 struct AudioEngineConfig {
     i32 sample_rate = 48000;
     i32 channels = 2; // 1 or 2
-    i32 music_voices = 2;
+    i32 music_voices = 8; // layers and crossfades each take one
     i32 ambient_voices = 12;
     i32 sound_effect_voices = 64;
     i32 ui_voices = 8;
@@ -54,6 +54,34 @@ struct AudioEngineStats {
     i64 mixed_frames = 0;
     // Output frames the master limiter turned down to keep the mix from clipping.
     i64 limited_frames = 0;
+};
+
+// When a music change (or a synced sound) starts, relative to the music
+// playing now: at once, on its next beat or bar (its cue needs a `bpm`), or
+// where its clip ends (or loops).
+enum class AudioSync {
+    Now,
+    Beat,
+    Bar,
+    End,
+};
+
+struct AudioMusicTransition {
+    f32 crossfade = 1.0f; // seconds the old music fades out and the new fades in
+    AudioSync sync = AudioSync::Now;
+    // Start the new music where the old one is (at the sync point), for
+    // arrangements of one piece that share a tempo: calm and tense versions.
+    bool match_position = false;
+};
+
+// Where the music is: seconds into its clip and, if its cue has a bpm, the
+// beat (counted from 0 at beat_offset), the bar, and the beat within the bar.
+struct AudioMusicPosition {
+    bool playing = false;
+    f32 seconds = 0.0f;
+    f32 beat = 0.0f;
+    i32 bar = 0;
+    f32 beat_in_bar = 0.0f;
 };
 
 // How loud something is playing, in linear amplitude (1 is full scale): the
@@ -163,8 +191,22 @@ public:
     // `crossfade` seconds; playing the cue already playing keeps it going, so
     // each scene can name its music without restarting it.
     AudioHandle play_music(const AudioCatalog& catalog, std::string_view cue, f32 crossfade = 1.0f);
+    // Changes music on the beat, the bar or the clip's end, and optionally from
+    // the same position. A cue with `layers` plays all its clips together, in
+    // step; one with `playlist` plays its clips one after another, gaplessly
+    // (call update() every frame so the next is lined up in time). The catalog
+    // must outlive the music.
+    AudioHandle play_music(const AudioCatalog& catalog, std::string_view cue, const AudioMusicTransition& transition);
     void stop_music(f32 fade = 1.0f);
+    // The music's first layer (or a playlist's clip playing now).
     AudioHandle music() const;
+    // A layer's volume (layers are named by their clip ids), kept for later
+    // music with the same layers: raise "drums" as a fight starts.
+    void set_music_layer(std::string_view layer, f32 volume, f32 fade = 0.0f);
+    AudioMusicPosition music_position() const;
+    // Plays a cue starting on the music's next beat, bar or clip end: a
+    // stinger that lands in time. With no music it plays now.
+    AudioHandle play_synced(const AudioCatalog& catalog, const AudioPlayRequest& request, AudioSync sync);
 
     bool playing(AudioHandle handle) const;
     // Seconds into the clip the voice has played (looping wraps); 0 if it is
