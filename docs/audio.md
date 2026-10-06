@@ -15,11 +15,29 @@ bus music 0.8 master
 bus sfx 1 master
 
 clip step audio/step.wav
-clip hit audio/hit.wav
+clip hit audio/hit.ogg
+clip theme music/theme.ogg stream=true loop_start=211680
 
 cue footstep sound sfx priority=20 spatial=true min=24 max=220 volume=0.7 clips=step
 cue impact sound sfx priority=40 spatial=true clips=hit
+cue theme music music loop=true clips=theme
 ```
+
+### Clips
+
+Kin plays WAV, AIFF, FLAC, Ogg Vorbis and MP3, recognising a file by its
+contents. Mono files stay mono. Files with more than two channels play their
+first two; Ogg Vorbis is mixed down to stereo properly. Ogg Opus is not supported.
+
+A clip is decoded whole when it is first loaded, which suits short sounds. With
+`stream=true` the file stays compressed in memory and each voice decodes it
+while it plays: a three-minute stereo track takes a few megabytes instead of
+about 70 MB. Use it for music and long ambience.
+
+`loop_start` and `loop_end` are frames at the file's own sample rate. A looping
+cue plays from the start, and on reaching `loop_end` (or the end of the file)
+jumps back to `loop_start`, so music can have an intro that plays once. A cue
+that does not loop plays the whole file.
 
 ## Runtime
 

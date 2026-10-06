@@ -595,6 +595,179 @@ void test_device_thread_mixes() {
     assert(audio.stats().mixed_frames > 2400);
 }
 
+const std::filesystem::path fixtures{KIN_AUDIO_FIXTURES};
+
+float rms(const kin::AudioClip& clip, int channel) {
+    double sum = 0.0;
+    const auto samples = clip.samples();
+    for (kin::i32 frame = 0; frame < clip.frame_count(); ++frame) {
+        const double v = samples[static_cast<std::size_t>(frame * clip.channels() + channel)];
+        sum += v * v;
+    }
+    return static_cast<float>(std::sqrt(sum / clip.frame_count()));
+}
+
+// Upward zero crossings per second on one channel: its frequency.
+float frequency(const kin::AudioClip& clip, int channel) {
+    const auto samples = clip.samples();
+    int crossings = 0;
+    for (kin::i32 frame = 1; frame < clip.frame_count(); ++frame) {
+        const float a = samples[static_cast<std::size_t>((frame - 1) * clip.channels() + channel)];
+        const float b = samples[static_cast<std::size_t>(frame * clip.channels() + channel)];
+        crossings += a < 0.0f && b >= 0.0f ? 1 : 0;
+    }
+    return static_cast<float>(crossings) * static_cast<float>(clip.sample_rate()) / static_cast<float>(clip.frame_count());
+}
+
+// Each format decodes to the tone it holds: 0.5 s at 44.1 kHz, a 440 Hz sine at
+// 0.5 on the left and a 660 Hz sine at 0.25 on the right.
+void test_decodes_every_format() {
+    for (const char* name : {"tone.ogg", "tone.mp3", "tone.flac"}) {
+        const kin::AudioClip clip = kin::load_audio_clip(fixtures / name);
+        assert(clip.valid() && !clip.streamed());
+        assert(clip.channels() == 2);
+        assert(clip.sample_rate() == 44100);
+        assert(std::abs(clip.frame_count() - 22050) <= 1152); // an MP3 may pad a frame
+        assert(near(rms(clip, 0), 0.5f / std::sqrt(2.0f), 0.02f));
+        assert(near(rms(clip, 1), 0.25f / std::sqrt(2.0f), 0.02f));
+        assert(near(frequency(clip, 0), 440.0f, 10.0f));
+        assert(near(frequency(clip, 1), 660.0f, 10.0f));
+    }
+
+    // Streamed, the file stays compressed and a decoder reads it.
+    const kin::AudioClip stream = kin::load_audio_stream(fixtures / "tone.ogg");
+    assert(stream.valid() && stream.streamed() && stream.samples().empty());
+    assert(stream.frame_count() == kin::load_audio_clip(fixtures / "tone.ogg").frame_count());
+    auto decoder = stream.open_stream();
+    assert(decoder && decoder->channels() == 2 && decoder->sample_rate() == 44100);
+
+    // Formats kin cannot read fail with a reason.
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-formats";
+    std::filesystem::create_directories(dir);
+    {
+        std::ofstream opus(dir / "voice.opus", std::ios::binary);
+        std::string page(64, '\0');
+        page.replace(0, 4, "OggS");
+        page.replace(28, 8, "OpusHead");
+        opus << page;
+        std::ofstream text(dir / "notes.wav");
+        text << "not audio";
+    }
+    for (const char* name : {"voice.opus", "notes.wav", "missing.ogg"}) {
+        bool threw = false;
+        try {
+            kin::load_audio_clip(dir / name);
+        } catch (const std::runtime_error& error) {
+            threw = std::string_view{error.what()}.find(name) != std::string_view::npos;
+        }
+        assert(threw);
+    }
+}
+
+// A 48 kHz mono WAV whose sample i is (i % 4096) / 4096, so the output names
+// the source frame it came from.
+std::filesystem::path write_ramp_wav(const std::filesystem::path& path, kin::i32 frames) {
+    std::ofstream out(path, std::ios::binary);
+    const kin::u32 data_bytes = static_cast<kin::u32>(frames * 2);
+    out.write("RIFF", 4);
+    write_u32(out, 36 + data_bytes);
+    out.write("WAVEfmt ", 8);
+    write_u32(out, 16);
+    write_u16(out, 1);
+    write_u16(out, 1);
+    write_u32(out, 48000);
+    write_u32(out, 96000);
+    write_u16(out, 2);
+    write_u16(out, 16);
+    out.write("data", 4);
+    write_u32(out, data_bytes);
+    for (kin::i32 i = 0; i < frames; ++i) {
+        write_u16(out, static_cast<kin::u16>((i % 4096) * 8));
+    }
+    return path;
+}
+
+int source_frame(float sample) {
+    return static_cast<int>(std::lround(sample * 4096.0f));
+}
+
+// Loop points: a looping cue plays its intro once, then repeats from loop_start
+// to loop_end; a streamed clip loops the same as a decoded one.
+void test_loop_points_and_streaming() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-loops";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    write_ramp_wav(dir / "ramp.wav", 3000);
+
+    for (const bool stream : {false, true}) {
+        kin::AudioCatalog catalog;
+        catalog.set_root(dir);
+        catalog.add_clip({.id = "ramp", .path = "ramp.wav", .stream = stream, .loop_start = 1000, .loop_end = 2000});
+        catalog.add_cue({.id = "theme", .clips = {"ramp"}, .category = kin::AudioCategory::Music, .bus = "music",
+                         .loop = true});
+        catalog.add_cue({.id = "once", .clips = {"ramp"}, .bus = "sfx"});
+        kin::AudioEngine audio = null_engine();
+        assert(audio.play(catalog, {.cue = "theme"}));
+        const std::vector<kin::f32> out = render(audio, 5000);
+        for (int frame = 0; frame < 5000; ++frame) {
+            const int expected = frame < 2000 ? frame : 1000 + (frame - 2000) % 1000;
+            assert(source_frame(out[static_cast<std::size_t>(frame) * 2]) == expected);
+        }
+
+        // Without loop, the loop points do not cut the clip short.
+        audio.stop_bus("music");
+        render(audio, 480);
+        const kin::AudioHandle once = audio.play(catalog, {.cue = "once"});
+        const std::vector<kin::f32> whole = render(audio, 3100);
+        assert(source_frame(whole[2 * 2999]) == 2999);
+        assert(whole[2 * 3050] == 0.0f);
+        assert(!audio.playing(once));
+    }
+}
+
+// A streamed and a decoded copy of a file sound the same, sample for sample.
+void test_stream_matches_decoded() {
+    for (const char* name : {"tone.ogg", "tone.flac", "tone.mp3"}) {
+        std::vector<std::vector<kin::f32>> outputs;
+        for (const bool stream : {false, true}) {
+            kin::AudioCatalog catalog;
+            catalog.set_root(fixtures);
+            catalog.add_clip({.id = "tone", .path = name, .stream = stream});
+            catalog.add_cue({.id = "tone", .clips = {"tone"}, .bus = "sfx"});
+            kin::AudioEngine audio = null_engine();
+            assert(audio.play(catalog, {.cue = "tone"}));
+            outputs.push_back(render(audio, 30000));
+        }
+        assert(outputs[0] == outputs[1]);
+        assert(std::ranges::any_of(outputs[0], [](kin::f32 v) { return v > 0.4f; }));
+    }
+}
+
+void test_catalog_clip_options() {
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-clip-options";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    kin::AudioCatalog catalog;
+    catalog.add_bus({.id = "music"});
+    catalog.add_clip({.id = "theme", .path = "theme.ogg", .stream = true, .loop_start = 44100, .loop_end = 441000});
+    catalog.add_clip({.id = "hit", .path = "hit.wav"});
+    catalog.add_cue({.id = "theme", .clips = {"theme"}, .category = kin::AudioCategory::Music, .bus = "music"});
+    assert(kin::save_audio_catalog(catalog, dir / "audio.kinaudio"));
+    const kin::AudioCatalog loaded = kin::load_audio_catalog(dir / "audio.kinaudio");
+    const kin::AudioClipRef* theme = loaded.clip("theme");
+    assert(theme && theme->stream && theme->loop_start == 44100 && theme->loop_end == 441000);
+    assert(!loaded.clip("hit")->stream && loaded.clip("hit")->loop_end == 0);
+
+    std::ofstream(dir / "bad.kinaudio") << "clip theme theme.ogg loop_start=10 loop_end=5\n";
+    bool threw = false;
+    try {
+        kin::load_audio_catalog(dir / "bad.kinaudio");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    assert(threw);
+}
+
 } // namespace
 
 int main() {
@@ -614,5 +787,9 @@ int main() {
     test_mono_output();
     test_preload_async();
     test_device_thread_mixes();
+    test_decodes_every_format();
+    test_loop_points_and_streaming();
+    test_stream_matches_decoded();
+    test_catalog_clip_options();
     return 0;
 }

@@ -40,8 +40,21 @@ releases may change APIs.
   running), and `pitch_var` varies its pitch, both drawn from
   `AudioEngineConfig::seed`.
 
+- Audio formats: Ogg Vorbis, MP3, FLAC and AIFF play alongside WAV, decoded
+  by stb_vorbis and dr_libs (new dependencies, fetched by CMake like the
+  others). `load_audio_clip` recognises a file by its contents.
+- Streamed clips: `clip theme music/theme.ogg stream=true` keeps the file
+  compressed in memory and decodes it as it plays, for music and long
+  ambience. `load_audio_stream` loads one directly, and `AudioDecoder` /
+  `open_audio_decoder` decode a file held in memory.
+- Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
+  make a looping cue play its intro once and then repeat the loop, streamed or
+  not.
+
 ### Changed
 
+- WAV files are decoded by dr_wav instead of `SDL_LoadWAV`, and loading a
+  clip no longer initialises SDL's audio subsystem.
 - Audio mixes on the device's audio thread, so a long frame no longer makes
   it crackle, and output latency no longer depends on the frame rate.
 - `stop()` and `stop_bus()` honour their fade; even an immediate stop, or a

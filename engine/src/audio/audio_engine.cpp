@@ -1,5 +1,7 @@
 #include <kin/audio/audio_engine.hpp>
 
+#include <kin/audio/audio_decoder.hpp>
+
 #include <kin/core/jobs.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/platform/log.hpp>
@@ -24,6 +26,8 @@ constexpr f32 declick_seconds = 0.005f;
 constexpr f32 limiter_release_seconds = 0.05f;
 // Frames update() mixes at once for a backend that is not real time.
 constexpr i32 render_chunk_frames = 1024;
+// Frames a streamed voice decodes at a time.
+constexpr i32 stream_buffer_frames = 1024;
 
 bool same_voice_bucket(AudioCategory a, AudioCategory b) {
     if ((a == AudioCategory::Sound || a == AudioCategory::Effect) &&
@@ -79,6 +83,14 @@ struct AudioEngine::State {
         f32 f1[2]{};
         f64 frac = 0.0;
         f64 rate_ratio = 1.0; // clip rate / output rate
+        // Loop points from the catalog's clip, in source frames.
+        i64 loop_start = 0;
+        i64 loop_end = 0;
+        // A streamed clip's decoder, and the frames it decoded last.
+        std::unique_ptr<AudioDecoder> stream;
+        std::vector<f32> stream_buffer;
+        i64 stream_pos = 0;
+        i64 stream_count = 0;
         bool primed = false;
         bool at_end = false; // f1 is past the end of the clip
         bool done = false;
@@ -343,20 +355,51 @@ struct AudioEngine::State {
 
     // --- mixing (mutex held) ---
 
-    static bool read_frame(Voice& voice, f32 (&out)[2]) {
-        const AudioClip& clip = *voice.clip;
-        const i32 frames = clip.frame_count();
-        if (voice.next_frame >= frames) {
-            if (!voice.loop || frames <= 0) {
+    // Jumps back to the loop start.
+    static bool rewind(Voice& voice) {
+        const i64 start = std::clamp<i64>(voice.loop_start, 0, std::max(0, voice.clip->frame_count() - 1));
+        if (voice.stream) {
+            if (!voice.stream->seek(start)) {
                 return false;
             }
-            voice.next_frame = 0;
+            voice.stream_pos = voice.stream_count = 0;
         }
-        const std::span<const f32> samples = clip.samples();
-        const i32 clip_channels = clip.channels();
-        const std::size_t index = static_cast<std::size_t>(voice.next_frame) * static_cast<std::size_t>(clip_channels);
-        out[0] = samples[index];
-        out[1] = clip_channels > 1 ? samples[index + 1] : out[0];
+        voice.next_frame = start;
+        return true;
+    }
+
+    static bool refill(Voice& voice, i64 end) {
+        const i64 channels = voice.clip->channels();
+        const i64 want = std::min<i64>(static_cast<i64>(voice.stream_buffer.size()) / channels, end - voice.next_frame);
+        voice.stream_pos = 0;
+        voice.stream_count = want > 0
+            ? voice.stream->read(std::span<f32>{voice.stream_buffer.data(), static_cast<std::size_t>(want * channels)})
+            : 0;
+        return voice.stream_count > 0;
+    }
+
+    static bool read_frame(Voice& voice, f32 (&out)[2]) {
+        const AudioClip& clip = *voice.clip;
+        const i64 frames = clip.frame_count();
+        const i64 end = voice.loop && voice.loop_end > 0 ? std::min(voice.loop_end, frames) : frames;
+        if (voice.next_frame >= end && (!voice.loop || !rewind(voice))) {
+            return false;
+        }
+        const std::size_t channels = static_cast<std::size_t>(clip.channels());
+        const f32* frame = nullptr;
+        if (voice.stream) {
+            if (voice.stream_pos >= voice.stream_count && !refill(voice, end)) {
+                // The file ended before its header said it would.
+                if (!voice.loop || !rewind(voice) || !refill(voice, end)) {
+                    return false;
+                }
+            }
+            frame = voice.stream_buffer.data() + static_cast<std::size_t>(voice.stream_pos++) * channels;
+        } else {
+            frame = clip.samples().data() + static_cast<std::size_t>(voice.next_frame) * channels;
+        }
+        out[0] = frame[0];
+        out[1] = channels > 1 ? frame[1] : frame[0];
         ++voice.next_frame;
         return true;
     }
@@ -515,18 +558,28 @@ struct AudioEngine::State {
         }
     }
 
+    // Streamed and decoded copies of one file are cached apart.
+    static std::string cache_key(const std::filesystem::path& path, bool stream) {
+        return path.generic_string() + (stream ? "|stream" : "");
+    }
+
+    static AudioClip load_file(const std::filesystem::path& path, bool stream) {
+        return stream ? load_audio_stream(path) : load_audio_clip(path);
+    }
+
     std::shared_ptr<const AudioClip> load_clip(const AudioCatalog& catalog, std::string_view clip_id) {
         if (const auto found = memory_clips.find(std::string{clip_id}); found != memory_clips.end()) {
             return found->second->valid() ? found->second : nullptr;
         }
+        const AudioClipRef* ref = catalog.clip(clip_id);
         const std::filesystem::path path = catalog.resolve_clip_path(clip_id);
-        if (path.empty()) {
+        if (!ref || path.empty()) {
             KIN_LOG_WARN_F("audio",
                            "audio clip missing from catalog",
                            (LogFields{{.name = "clip", .value = std::string{clip_id}}}));
             return nullptr;
         }
-        const std::string key = path.generic_string();
+        const std::string key = cache_key(path, ref->stream);
         if (const auto found = clip_cache.find(key); found != clip_cache.end()) {
             return found->second->valid() ? found->second : nullptr;
         }
@@ -539,7 +592,7 @@ struct AudioEngine::State {
                 loading.erase(pending);
                 clip = take_loaded(key, job);
             } else {
-                clip = std::make_shared<const AudioClip>(load_audio_clip(path));
+                clip = std::make_shared<const AudioClip>(load_file(path, ref->stream));
                 clip_cache.emplace(key, clip);
             }
         } catch (const std::exception& error) {
@@ -691,11 +744,13 @@ void AudioEngine::preload_async(const AudioCatalog& catalog, JobSystem& jobs) {
             continue;
         }
         std::filesystem::path path = catalog.resolve_clip_path(id);
-        const std::string key = path.generic_string();
+        const std::string key = State::cache_key(path, clip.stream);
         if (s.clip_cache.contains(key) || s.loading.contains(key)) {
             continue;
         }
-        s.loading.emplace(key, jobs.run([path = std::move(path)] { return load_audio_clip(path); }));
+        s.loading.emplace(key, jobs.run([path = std::move(path), stream = clip.stream] {
+            return State::load_file(path, stream);
+        }));
     }
 }
 
@@ -726,8 +781,21 @@ AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayReques
     // Decoding (when the clip is not loaded yet) happens before taking the lock,
     // so the audio thread never waits on it.
     const std::shared_ptr<const AudioClip> clip = s.load_clip(catalog, clip_id);
+    std::unique_ptr<AudioDecoder> stream;
+    if (clip && clip->streamed()) {
+        try {
+            stream = clip->open_stream();
+        } catch (const std::exception& error) {
+            KIN_LOG_ERROR_F("audio",
+                            "audio stream open failed",
+                            (LogFields{
+                                {.name = "clip", .value = clip_id},
+                                {.name = "error", .value = error.what()},
+                            }));
+        }
+    }
     const std::scoped_lock lock{s.mutex};
-    if (!clip) {
+    if (!clip || (clip->streamed() && !stream)) {
         ++s.stats.culled_requests;
         KIN_LOG_WARN_F("audio",
                        "audio play rejected",
@@ -766,6 +834,7 @@ AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayReques
         .category = cue->category,
         .clip = clip,
         .rate_ratio = static_cast<f64>(clip->sample_rate()) / static_cast<f64>(s.sample_rate),
+        .stream = std::move(stream),
         .volume = std::max(0.0f, cue->volume * request.volume),
         .pitch = std::max(0.01f, cue->pitch * request.pitch * (1.0f + variation)),
         .priority = cue->priority + request.priority_boost,
@@ -776,6 +845,13 @@ AudioHandle AudioEngine::play(const AudioCatalog& catalog, const AudioPlayReques
         .position = request.position,
         .has_position = request.has_position,
     };
+    if (const AudioClipRef* ref = catalog.clip(clip_id)) {
+        voice.loop_start = ref->loop_start;
+        voice.loop_end = ref->loop_end;
+    }
+    if (voice.stream) {
+        voice.stream_buffer.resize(static_cast<std::size_t>(stream_buffer_frames * clip->channels()));
+    }
     if (request.fade_in > 0.0f) {
         voice.fade = 0.0f;
         s.start_fade(voice, 1.0f, request.fade_in);
