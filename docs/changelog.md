@@ -7,12 +7,17 @@ releases may change APIs.
 
 ## [Unreleased]
 
-Localization: text by key in the player's language, switched while the game
-runs, and text in any script. See [localization](localization.md).
+## [0.2.6] — 2026-10-07
 
-Shipping: a game builds into a folder players can run anywhere, with its
-executable, its content in one `.kinpak` archive, and the license texts it
-carries. See [shipping](shipping.md).
+A release for sound, other languages and shipping. Audio mixes on the
+device's own thread, plays Ogg Vorbis, MP3 and FLAC as well as WAV, streams
+music, crossfades it and changes it on the beat, and runs effects per bus
+(see [audio](audio.md)). Text comes by key in the player's language, in any
+script and right to left, with input methods, fonts per language and text that
+fits its box (see [localization](localization.md)). A game builds into a
+folder players can run anywhere, with its executable, its content in one
+`.kinpak` archive, and the license texts it carries (see
+[shipping](shipping.md)).
 
 ### Upgrading from 0.2.5
 
@@ -70,7 +75,6 @@ carries. See [shipping](shipping.md).
 - Audio: a cue with several clips plays a random one (never the same twice
   running), and `pitch_var` varies its pitch, both drawn from
   `AudioEngineConfig::seed`.
-
 - Audio formats: Ogg Vorbis, MP3, FLAC and AIFF play alongside WAV, decoded
   by stb_vorbis and dr_libs (new dependencies, fetched by CMake like the
   others). `load_audio_clip` recognises a file by its contents.
@@ -222,7 +226,6 @@ carries. See [shipping](shipping.md).
 
 - `AudioEngineConfig::music_voices` defaults to 8 (from 2), as music layers
   and crossfades each take a voice.
-
 - WAV files are decoded by dr_wav instead of `SDL_LoadWAV`, and loading a
   clip no longer initialises SDL's audio subsystem.
 - Audio mixes on the device's audio thread, so a long frame no longer makes
@@ -260,7 +263,6 @@ carries. See [shipping](shipping.md).
 - `AppFrameStats::update_steps` counts the step being run inside `update()`
   under `App::run`, as it already did under `run_for`: 1 is a frame's first
   step (it was 0).
-
 
 ## [0.2.5] — 2026-10-06
 
@@ -1024,7 +1026,8 @@ First public release.
 - Demos (`games/`), the Signal Siege and Run Observatory examples, `kin_bench`,
   and the engine test suite.
 
-[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.2...v0.2.3
