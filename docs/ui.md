@@ -92,7 +92,10 @@ auto font = kin::ui2::load_ttf_font("fonts/Lato.ttf", 16,
     kin::ui2::TtfFontOptions{.fallbacks = {"fonts/NotoSansJP.ttf", "fonts/NotoSansArabic.ttf"}});
 ```
 
-`system_ui_font` falls back to the system's own (`system_fallback_fonts()`).
+`system_ui_font` falls back to the system's own (`system_fallback_fonts()`,
+and per language `system_language_fonts()`). Text fields take input methods
+(`ui.apply_text_input(window)` after `ui.end()`) and edit right-to-left text;
+`TextOverflow::Ellipsis` and `Shrink` fit labels and buttons.
 `wrap_text` breaks CJK text between characters. `set_ui_direction(RightToLeft)`
 mirrors layouts for right-to-left languages. See
 [localization](localization.md) for translations, text by key and the details.

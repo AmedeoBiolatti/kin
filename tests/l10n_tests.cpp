@@ -1,4 +1,6 @@
+#include <kin/assets/asset_manager.hpp>
 #include <kin/assets/file_watcher.hpp>
+#include <kin/audio/audio_catalog.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/platform/log.hpp>
 
@@ -82,6 +84,40 @@ void test_plural_rules() {
     assert(kin::plural_categories("ar").size() == 6);
     assert(kin::plural_categories("ja").size() == 1);
     assert(kin::plural_categories("ru").back() == Other);
+}
+
+void test_ordinals() {
+    using enum PluralCategory;
+    assert(kin::ordinal_category("en", 1) == One && kin::ordinal_category("en", 21) == One);
+    assert(kin::ordinal_category("en", 11) == Other && kin::ordinal_category("en", 12) == Other);
+    assert(kin::ordinal_category("en", 2) == Two && kin::ordinal_category("en", 3) == Few);
+    assert(kin::ordinal_category("en", 113) == Other && kin::ordinal_category("en", 104) == Other);
+    assert(kin::ordinal_category("fr", 1) == One && kin::ordinal_category("fr", 2) == Other);
+    assert(kin::ordinal_category("it", 8) == Many && kin::ordinal_category("it", 9) == Other);
+    assert(kin::ordinal_category("sv", 22) == One && kin::ordinal_category("sv", 12) == Other);
+    assert(kin::ordinal_category("de", 1) == Other && kin::ordinal_categories("de").size() == 1);
+    assert(kin::ordinal_categories("en").size() == 4);
+
+    const std::string_view place = "{n, selectordinal, one {#st} two {#nd} few {#rd} other {#th}}";
+    assert(kin::format_message(place, "en", {{"n", 1}}) == "1st");
+    assert(kin::format_message(place, "en", {{"n", 22}}) == "22nd");
+    assert(kin::format_message(place, "en", {{"n", 13}}) == "13th");
+    assert(kin::format_message(place, "en", {{"n", 1003}}) == "1,003rd");
+    assert(kin::format_message("{n, selectordinal, one {#er} other {#e}}", "fr", {{"n", 1}}) == "1er");
+
+    kin::MessageShape shape;
+    std::string error;
+    assert(kin::inspect_message(place, shape, error) && shape.arguments[0].kind == "selectordinal");
+    assert(!kin::inspect_message("{n, selectordinal, first {x} other {y}}", shape, error));
+
+    // Validation asks for the ordinal forms the language uses.
+    kin::Localization l10n;
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("place", std::string{place});
+    en.strings.emplace("short", "{n, selectordinal, one {#st} other {#th}}");
+    l10n.add("base", std::move(en));
+    const auto issues = l10n.validate();
+    assert(issues.size() == 1 && issues[0].key == "short" && issues[0].message.find("no two, few") != std::string::npos);
 }
 
 void test_numbers() {
@@ -259,6 +295,89 @@ void test_csv() {
     assert(files.size() == 2); // failures leave the output alone
 }
 
+void test_gettext() {
+    std::vector<std::string> errors;
+    kin::LanguageFile po;
+    const std::string text = R"(# A translator's comment
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: pl\n"
+"Plural-Forms: nplurals=3; plural=(n==1 ? 0 : n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20) ? 1 : 2);\n"
+
+msgctxt "menu.play"
+msgid "Play"
+msgstr "Graj"
+
+#: src/hud.cpp:12
+msgid "Hold the line"
+msgstr ""
+"Utrzymaj "
+"lini\u0119"
+
+msgctxt "hand.cards"
+msgid "%d card"
+msgid_plural "%d cards"
+msgstr[0] "%d karta"
+msgstr[1] "%d karty"
+msgstr[2] "%d kart"
+
+#, fuzzy
+msgctxt "menu.quit"
+msgid "Quit"
+msgstr "Wyjdz?"
+
+msgctxt "menu.options"
+msgid "Options"
+msgstr ""
+
+#~ msgctxt "old"
+#~ msgid "Old"
+#~ msgstr "Stary"
+)";
+    assert(kin::parse_gettext(text, po, errors) && errors.empty());
+    assert(po.locale == "pl");
+    assert(po.strings.at("menu.play") == "Graj");
+    assert(po.strings.at("Hold the line") == "Utrzymaj liniu0119"); // unknown escapes keep their letter
+    assert(!po.strings.contains("menu.quit"));    // fuzzy: unchecked
+    assert(!po.strings.contains("menu.options")); // untranslated
+    assert(!po.strings.contains("old"));          // obsolete
+    const std::string& cards = po.strings.at("hand.cards");
+    assert(kin::format_message(cards, "pl", {{"n", 1}}) == "1 karta");
+    assert(kin::format_message(cards, "pl", {{"n", 3}}) == "3 karty");
+    assert(kin::format_message(cards, "pl", {{"n", 5}}) == "5 kart");
+    assert(kin::format_message(cards, "pl", {{"n", 22}}) == "22 karty");
+
+    // Malformed: a plural with the wrong number of forms, no language.
+    assert(!kin::parse_gettext("msgid \"\"\nmsgstr \"Plural-Forms: nplurals=2; plural=n != 1;\\n\"\n\n"
+                               "msgid \"a\"\nmsgid_plural \"as\"\nmsgstr[0] \"x\"\n",
+                               po, errors, "fr"));
+    assert(!kin::parse_gettext("msgid \"a\"\nmsgstr \"b\"\n", po, errors)); // no language
+
+    // Written out for translators and read back.
+    kin::LanguageFile en{.locale = "en", .name = "English"};
+    en.strings.emplace("menu.play", "Play");
+    en.strings.emplace("story", "Line one\nLine \"two\"");
+    kin::LanguageFile fr{.locale = "fr", .name = "Fran\xC3\xA7" "ais"};
+    fr.strings.emplace("menu.play", "Jouer");
+    fr.strings.emplace("story", "Ligne un\nLigne \"deux\"");
+    const std::string out = kin::write_gettext(en, &fr);
+    assert(out.find("msgctxt \"menu.play\"\nmsgid \"Play\"\nmsgstr \"Jouer\"") != std::string::npos);
+    kin::LanguageFile back;
+    errors.clear();
+    assert(kin::parse_gettext(out, back, errors) && back.locale == "fr" && back.strings == fr.strings);
+    const std::string pot = kin::write_gettext(en);
+    assert(kin::parse_gettext(pot, back, errors, "de") && back.strings.empty()); // a template: nothing translated
+
+    // A .po in a language directory loads like the others.
+    kin::Localization l10n;
+    l10n.add("en", std::move(en));
+    errors.clear();
+    assert(l10n.load_text("lang/pl.po", text, errors) && l10n.has_language("pl"));
+    l10n.set_locale("pl");
+    assert(l10n.tr("hand.cards", {{"n", 4}}) == "4 karty");
+}
+
 kin::LanguageFile language(std::string locale, std::initializer_list<std::pair<const std::string, std::string>> strings) {
     kin::LanguageFile file;
     file.locale = std::move(locale);
@@ -418,6 +537,42 @@ void test_files_and_reload(const fs::path& dir) {
     assert(!l10n.load_directory(dir / "no-such-dir", errors));
 }
 
+// Assets by language: l10n/<locale>/<path> where the shown language (or one it
+// falls back to) has one, for the asset manager and audio clips.
+void test_localized_assets(const fs::path& dir) {
+    const fs::path root = dir / "assets";
+    fs::create_directories(root / "l10n" / "fr" / "voice");
+    fs::create_directories(root / "voice");
+    write(root / "voice" / "intro.txt", "Hello");
+    write(root / "l10n" / "fr" / "voice" / "intro.txt", "Bonjour");
+    write(root / "voice" / "only_english.txt", "Only");
+
+    kin::Localization l10n;
+    l10n.add("en", language("en", {{"k", "v"}}));
+    l10n.add("fr", language("fr", {{"k", "v"}}));
+    assert(l10n.localized_path(root, "voice/intro.txt") == "voice/intro.txt");
+    l10n.set_locale("fr-CA");
+    assert(l10n.localized_path(root, "voice/intro.txt") == "l10n/fr/voice/intro.txt");
+    assert(l10n.localized_path(root, "voice/only_english.txt") == "voice/only_english.txt");
+
+    kin::AssetManager assets(root);
+    assets.register_loader<std::string>([](const fs::path& path) { return *kin::read_text_file(path); });
+    assert(*assets.load<std::string>("voice/intro.txt") == "Hello"); // no active localization
+    kin::set_active_localization(&l10n);
+    assert(*assets.load<std::string>("voice/intro.txt") == "Bonjour");
+    assert(assets.resolve("voice/intro.txt") == root / "l10n/fr/voice/intro.txt");
+    l10n.set_locale("en");
+    assert(*assets.load<std::string>("voice/intro.txt") == "Hello"); // another language, another file
+
+    kin::AudioCatalog audio;
+    audio.set_root(root);
+    audio.add_clip({.id = "intro", .path = "voice/intro.txt"});
+    l10n.set_locale("fr");
+    assert(audio.resolve_clip_path("intro") == root / "l10n/fr/voice/intro.txt");
+    kin::set_active_localization(nullptr);
+    assert(audio.resolve_clip_path("intro") == root / "voice/intro.txt");
+}
+
 } // namespace
 
 int main() {
@@ -433,15 +588,18 @@ int main() {
     fs::create_directories(dir);
 
     test_plural_rules();
+    test_ordinals();
     test_numbers();
     test_messages();
     test_locale_tags();
     test_language_files();
     test_csv();
+    test_gettext();
     test_lookups();
     test_pseudo_locale();
     test_validate();
     test_files_and_reload(dir);
+    test_localized_assets(dir);
 
     fs::remove_all(dir);
     return 0;

@@ -1,5 +1,6 @@
 #include <kin/dialogue/dialogue.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/l10n/localization.hpp>
@@ -599,11 +600,9 @@ DialogueLoadResult parse_dialogue(std::string_view json) {
 }
 
 DialogueLoadResult load_dialogue(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return {.error = "failed to open dialogue file"};
-    std::stringstream buffer;
-    buffer << in.rdbuf();
-    return parse_dialogue(buffer.str());
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) return {.error = "failed to open dialogue file"};
+    return parse_dialogue(*text);
 }
 
 std::string dialogue_to_json(const DialogueDocument& document) {

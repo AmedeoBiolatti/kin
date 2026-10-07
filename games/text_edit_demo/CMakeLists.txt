@@ -6,6 +6,8 @@ target_link_libraries(text_edit_demo PRIVATE
     kin::engine
 )
 
+kin_game(text_edit_demo TITLE "Text Edit Demo")
+
 target_compile_options(text_edit_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

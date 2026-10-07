@@ -1,4 +1,6 @@
 #include <kin/l10n/localization.hpp>
+
+#include <kin/assets/content.hpp>
 #include "arena_art.hpp"
 #include "example_common.hpp"
 #include "siege_audio.hpp"
@@ -159,6 +161,7 @@ int main(int argc, char** argv) {
     }
     using namespace examples;
     // Signal Siege's text in English, from its language files, all of which check out.
+    assert(!kin::find_content_root(KIN_GAME_CONTENT).empty());
     kin::Localization l10n;
     std::vector<std::string> l10n_errors;
     assert(l10n.load_directory(siege_language_dir(), l10n_errors) && l10n_errors.empty());

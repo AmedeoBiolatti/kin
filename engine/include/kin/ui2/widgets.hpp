@@ -68,9 +68,16 @@ enum class ScrollAxis {
     Horizontal,
 };
 
+// What a widget does with text wider than its bounds.
+//   Visible   draws it all, past the bounds (reported as an overflow)
+//   Clip      cuts it off at the bounds (reported as an overflow)
+//   Ellipsis  ends it with "…" where it would leave the bounds
+//   Shrink    draws it smaller to fit (to 70%), then with "…"
 enum class TextOverflow {
     Visible,
     Clip,
+    Ellipsis,
+    Shrink,
 };
 
 struct ScrollState {
@@ -150,6 +157,7 @@ struct Button {
     std::string label;
     TextStyle text_style{};
     WidgetStyle style{};
+    TextOverflow overflow = TextOverflow::Visible;
     bool enabled = true;
     i32 z = 0;
     Interaction interaction{};

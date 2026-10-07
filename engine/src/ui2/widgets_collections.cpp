@@ -890,6 +890,7 @@ void run(Context& ctx, IconGrid& widget) {
 }
 
 void run(Context& ctx, ListView& widget) {
+    const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const auto _draw_scope = ctx.draw_scope("ListView", widget.bounds, ctx.theme().panel_surface.radius);
     widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
     widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);

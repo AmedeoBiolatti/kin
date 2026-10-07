@@ -6,6 +6,8 @@ target_link_libraries(shapes_demo PRIVATE
     kin::engine
 )
 
+kin_game(shapes_demo TITLE "Shapes Demo")
+
 target_compile_options(shapes_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

@@ -1,6 +1,7 @@
 #include "iso_draw.hpp"
 #include "iso_math.hpp"
 #include "iso_order.hpp"
+#include "isometric_shader.hpp"
 
 #include <kin/platform/input.hpp>
 #include <kin/renderer/shader.hpp>
@@ -10,10 +11,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -105,16 +104,9 @@ kin::u32 hash_cell(kin::Vec2i cell, kin::u32 salt = 0) {
 }
 
 kin::ShaderHandle create_spirv_shader(kin::Renderer2D& renderer, const char* spv_name) {
-#ifdef KIN_ISOMETRIC_DEMO_SHADER_DIR
-    const std::filesystem::path path = std::filesystem::path{KIN_ISOMETRIC_DEMO_SHADER_DIR} / spv_name;
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return {};
-    }
-
-    const std::vector<kin::u8> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const std::span<const unsigned char> bytes = isometric_shader(spv_name);
     if (bytes.empty()) {
-        return {};
+        return {}; // glslc was not found when the demo was built
     }
 
     kin::ShaderDesc desc;
@@ -122,11 +114,6 @@ kin::ShaderHandle create_spirv_shader(kin::Renderer2D& renderer, const char* spv
     desc.num_uniform_buffers = 1;
     desc.spirv = {bytes.data(), static_cast<kin::u32>(bytes.size())};
     return renderer.create_shader(desc);
-#else
-    (void)renderer;
-    (void)spv_name;
-    return {};
-#endif
 }
 
 kin::ShaderParams water_params(kin::Color color_a, kin::Color color_b, kin::f32 time, kin::Vec2i cell) {

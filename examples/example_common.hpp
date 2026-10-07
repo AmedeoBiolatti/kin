@@ -49,7 +49,8 @@ private:
 };
 
 // Signal Siege's text, by key, in the active localization (kin::tr): the
-// language files are examples/lang/*.kinlang.
+// language files are content/lang/*.kinlang (examples/content while it is
+// made, the pack once it ships).
 std::filesystem::path siege_language_dir();
 std::string power_name(int id);
 std::string power_description(int id);

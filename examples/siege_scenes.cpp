@@ -5,6 +5,7 @@
 #include "workloads.hpp"
 
 #include <kin/anim/track.hpp>
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/save/save_store.hpp>
@@ -416,7 +417,7 @@ void BestRunStore::save() {
 }
 
 std::filesystem::path siege_language_dir() {
-    return KIN_EXAMPLES_LANG_DIR;
+    return content_root() / "lang";
 }
 
 std::string power_name(int id) {

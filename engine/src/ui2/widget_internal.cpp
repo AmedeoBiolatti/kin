@@ -137,22 +137,19 @@ void move_text_caret(UiTextInputState& state, std::size_t caret, bool select) {
 }
 
 std::size_t caret_from_text_pos(const UiTextInputState& state, f32 x, f32 text_x, const Font& font, f32 scale) {
-    if (state.text.empty() || x <= text_x) {
+    if (state.text.empty()) {
         return 0;
     }
+    return caret_at(font, state.text, x - text_x, scale);
+}
 
-    const std::string_view text{state.text};
-    f32 before = 0.0f;
-    for (std::size_t i = 0; i < text.size();) {
-        const std::size_t next = utf8_next(text, i);
-        const f32 after = measure_text(font, text.substr(0, next), scale).x;
-        if (x < text_x + (before + after) * 0.5f) {
-            return i;
-        }
-        before = after;
-        i = next;
+f32 text_input_text_x(Rectf bounds, const TextInputLayoutMetrics& metrics, std::string_view text, const TextStyle& text_style) {
+    if (paragraph_direction(text) != TextDirection::RightToLeft) {
+        return bounds.x + metrics.padding.left;
     }
-    return text.size();
+    // Right to left: the text sits against the right edge, as it reads from there.
+    const f32 width = text.empty() ? 0.0f : measure_text(text_style.font, text, text_style.scale).x;
+    return bounds.x + bounds.w - metrics.padding.right - width;
 }
 
 bool same_padding(UiPadding a, UiPadding b) {
@@ -223,7 +220,7 @@ UiTextInputResult edit_text_input(Context& ctx,
     if ((it.pressed || it.focused) && enabled) {
         state.active = true;
         if (it.pressed) {
-            const f32 text_x = bounds.x + metrics.padding.left;
+            const f32 text_x = text_input_text_x(bounds, metrics, state.text, text_style);
             move_text_caret(state,
                             caret_from_text_pos(state, ctx.pointer().x, text_x, text_style.font, text_style.scale),
                             false);
@@ -237,8 +234,25 @@ UiTextInputResult edit_text_input(Context& ctx,
         state.active = false;
     }
 
+    // While an input method composes, the keys are its own.
+    const bool composing = state.active && !ctx.text_composition().empty();
     if (state.active) {
         ctx.request_text_input();
+        // Typed (or committed by an input method) text, even mid-composition.
+        const std::string_view input_text = ctx.text_input();
+        if (!input_text.empty() && !ctx.modifier_held(KeyModifiers::Ctrl)) {
+            erase_selection(state);
+            state.text.insert(state.caret, input_text.data(), input_text.size());
+            state.caret += input_text.size();
+            state.clear_selection();
+            result.changed = true;
+        }
+    }
+    if (state.active && !composing) {
+        // Right to left, the arrows still move the way they point.
+        const bool rtl = paragraph_direction(state.text) == TextDirection::RightToLeft;
+        const Key left_key = rtl ? Key::Right : Key::Left;
+        const Key right_key = rtl ? Key::Left : Key::Right;
         const bool shift = ctx.modifier_held(KeyModifiers::Shift);
         const bool ctrl = ctx.modifier_held(KeyModifiers::Ctrl);
         const bool select_left = shift || (!ctx.key_pressed(Key::Left) && ctx.action_pressed("text_select_left"));
@@ -277,10 +291,19 @@ UiTextInputResult edit_text_input(Context& ctx,
             }
         }
 
-        if (ctx.key_typed(Key::Left) || ctx.action_pressed("text_left")) {
+        // The arrows move the caret on screen, through text that runs both
+        // ways; by word (Ctrl) they step through the text, the way they point.
+        const auto visual = [&](i32 step) {
+            return caret_move(text_style.font, state.text, state.caret, step, text_style.scale).value_or(state.caret);
+        };
+        if (ctx.key_typed(Key::Left) && !ctrl) {
+            move_text_caret(state, visual(-1), select_left);
+        } else if ((ctrl && ctx.key_typed(left_key)) || ctx.action_pressed("text_left")) {
             move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret), select_left);
         }
-        if (ctx.key_typed(Key::Right) || ctx.action_pressed("text_right")) {
+        if (ctx.key_typed(Key::Right) && !ctrl) {
+            move_text_caret(state, visual(1), select_right);
+        } else if ((ctrl && ctx.key_typed(right_key)) || ctx.action_pressed("text_right")) {
             move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret), select_right);
         }
         if (ctx.key_pressed(Key::Home) || ctx.action_pressed("text_home")) {
@@ -290,14 +313,6 @@ UiTextInputResult edit_text_input(Context& ctx,
             move_text_caret(state, state.text.size(), select_end);
         }
 
-        const std::string_view input_text = ctx.text_input();
-        if (!input_text.empty() && !ctrl) {
-            erase_selection(state);
-            state.text.insert(state.caret, input_text.data(), input_text.size());
-            state.caret += input_text.size();
-            state.clear_selection();
-            result.changed = true;
-        }
         if (ctx.key_typed(Key::Backspace) || ctx.action_pressed("text_backspace")) {
             if (erase_selection(state)) {
                 result.changed = true;
@@ -335,26 +350,37 @@ UiTextInputResult edit_text_input(Context& ctx,
 void draw_text_input(Context& ctx, Rectf bounds, const UiTextInputState& state, const TextStyle& text_style, const WidgetStyle& style, Color frame) {
     ctx.surface(bounds, with_fill_border(ctx.theme().input_surface, style.track, frame));
     const TextInputLayoutMetrics metrics = text_input_layout_metrics(text_style, style);
-    const Vec2f text_size = measure_text(text_style.font, state.text.empty() ? "Mg" : state.text, text_style.scale);
-    const Vec2f text_pos{bounds.x + metrics.padding.left, bounds.y + (bounds.h - text_size.y) * 0.5f};
-    if (state.has_selection()) {
-        const auto [start, end] = selection_range(state);
-        const f32 x0 = text_pos.x + measure_text(text_style.font, std::string_view{state.text}.substr(0, start), text_style.scale).x;
-        const f32 x1 = text_pos.x + measure_text(text_style.font, std::string_view{state.text}.substr(0, end), text_style.scale).x;
-        ctx.fill_rect({x0,
-                       bounds.y + metrics.padding.top * 0.5f,
-                       std::max(1.0f, x1 - x0),
-                       std::max(0.0f, bounds.h - metrics.padding.top * 0.5f - metrics.padding.bottom * 0.5f)},
-                      widget_border(style, WidgetColorState::Focused));
+    // What an input method is composing shows at the caret, underlined, until it is typed.
+    const std::string_view composition = state.active ? ctx.text_composition() : std::string_view{};
+    std::string shown;
+    std::size_t caret = state.caret;
+    if (!composition.empty()) {
+        shown = state.text;
+        shown.insert(state.caret, composition);
+        caret = state.caret + static_cast<std::size_t>(std::clamp(ctx.text_composition_cursor(), 0, static_cast<i32>(composition.size())));
     }
-    ctx.text(state.text, text_pos, text_style);
+    const std::string_view text = composition.empty() ? std::string_view{state.text} : std::string_view{shown};
+    const Vec2f text_size = measure_text(text_style.font, text.empty() ? "Mg" : text, text_style.scale);
+    const Vec2f text_pos{text_input_text_x(bounds, metrics, text, text_style), bounds.y + (bounds.h - text_size.y) * 0.5f};
+    const f32 top = bounds.y + metrics.padding.top * 0.5f;
+    const f32 height = std::max(0.0f, bounds.h - metrics.padding.top * 0.5f - metrics.padding.bottom * 0.5f);
+    if (state.has_selection() && composition.empty()) {
+        const auto [start, end] = selection_range(state);
+        for (const auto& [x0, x1] : selection_spans(text_style.font, text, start, end, text_style.scale)) {
+            ctx.fill_rect({text_pos.x + x0, top, std::max(1.0f, x1 - x0), height}, widget_border(style, WidgetColorState::Focused));
+        }
+    }
+    ctx.text(text, text_pos, text_style);
+    if (!composition.empty()) {
+        for (const auto& [x0, x1] : selection_spans(text_style.font, text, state.caret, state.caret + composition.size(), text_style.scale)) {
+            ctx.fill_rect({text_pos.x + x0, text_pos.y + text_size.y, std::max(1.0f, x1 - x0), std::max(1.0f, text_style.scale)},
+                          text_style.color);
+        }
+    }
     if (state.active) {
-        const f32 caret_x = text_pos.x + measure_text(text_style.font, std::string_view{state.text}.substr(0, state.caret), text_style.scale).x;
-        ctx.fill_rect({caret_x,
-                       bounds.y + metrics.padding.top * 0.5f,
-                       1.0f,
-                       std::max(0.0f, bounds.h - metrics.padding.top * 0.5f - metrics.padding.bottom * 0.5f)},
-                      text_style.color);
+        const f32 caret_x = text_pos.x + ui2::caret_x(text_style.font, text, caret, text_style.scale);
+        ctx.fill_rect({caret_x, top, 1.0f, height}, text_style.color);
+        ctx.set_text_input_area({bounds.x, top, bounds.w, height}, caret_x);
     }
 }
 

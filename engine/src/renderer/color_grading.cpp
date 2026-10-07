@@ -1,5 +1,6 @@
 #include <kin/renderer/color_grading.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 
 #include <algorithm>
@@ -7,8 +8,6 @@
 #include <charconv>
 #include <cmath>
 #include <exception>
-#include <fstream>
-#include <sstream>
 
 namespace kin {
 
@@ -186,13 +185,11 @@ std::optional<ColorLut> ColorLut::load(const std::filesystem::path& path, std::s
     std::string extension = path.extension().string();
     std::ranges::transform(extension, extension.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if (extension == ".cube") {
-        std::ifstream in{path, std::ios::binary};
-        if (!in) {
+        const std::optional<std::string> text = read_content_file(path);
+        if (!text) {
             return fail(error, "cannot open " + path.string());
         }
-        std::ostringstream text;
-        text << in.rdbuf();
-        return parse_cube(text.str(), error);
+        return parse_cube(*text, error);
     }
     try {
         const Image image = load_image(path);

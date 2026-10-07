@@ -2,6 +2,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/platform/input.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/layout.hpp>
@@ -22,6 +23,23 @@ namespace kin::ui2 {
 
 // One persistent Context per UI. Drives interaction (region), layout (the scope
 // builder), and drawing. Create once; call begin()/.../end() each frame.
+// A widget whose content did not fit its bounds (Context::report_overflow),
+// gathered from every Context: once per widget and text, with how many
+// times it was seen.
+struct OverflowRecord {
+    std::string widget;
+    std::string detail; // the text, for text widgets
+    Rectf bounds{};
+    Vec2f wanted{};
+    u64 seen = 0;
+};
+// While on, every Context's overflows are gathered whatever its debug
+// options (run_scene_app turns this on for its run report). At most 256.
+void collect_overflows(bool enabled);
+bool collecting_overflows();
+std::vector<OverflowRecord> collected_overflows();
+void clear_collected_overflows();
+
 class Context {
 public:
     Context();
@@ -286,8 +304,20 @@ public:
     bool action_pressed(std::string_view action) const;
     bool modifier_held(KeyModifiers modifiers) const;
     std::string_view text_input() const;
+    // What an input method is composing (Input::text_composition), and its
+    // cursor in bytes.
+    std::string_view text_composition() const;
+    i32 text_composition_cursor() const;
     bool wants_text_input() const { return _wants_text_input; }
     void request_text_input() { _wants_text_input = true; }
+    // Where the focused editor's text is (drawing coordinates) and its caret's
+    // x there, for the input method's candidate list. Text inputs set it.
+    void set_text_input_area(Rectf area, f32 caret_x);
+    // The area last set this frame, in window coordinates.
+    std::optional<Rectf> text_input_area() const { return _text_input_area; }
+    // Starts or stops the window's text input as widgets want it, and tells
+    // the input method where the caret is: call it once a frame, after end().
+    void apply_text_input(Window& window) const;
     std::string clipboard_text() const;
     void set_clipboard_text(std::string_view text);
     UiTextInputState& text_input_state(Id id, std::string_view value = {});
@@ -295,6 +325,35 @@ public:
     UiTextEditState& text_edit_state(Id id, std::string_view initial = {});
     UiComboState& combo_state(Id id, i32 selected = 0);
     ColorPickerMode& color_picker_mode(Id id, ColorPickerMode mode = ColorPickerMode::Hsv);
+
+    // Mirrors what is drawn inside `bounds`, and the pointer read there, as a
+    // right-to-left interface wants a widget's insides: shapes, clips and the
+    // places of text and images are reflected across the bounds, while text
+    // and images still read the right way round. Scopes nest. Widgets with a
+    // left and a right (a checkbox, a slider, tabs) mirror themselves this way
+    // while ui_direction() is right to left; mirror_if_right_to_left does that.
+    void push_mirror(Rectf bounds);
+    void pop_mirror();
+    class MirrorGuard {
+    public:
+        MirrorGuard(Context* ctx, Rectf bounds) : _ctx(ctx) {
+            if (_ctx) _ctx->push_mirror(bounds);
+        }
+        ~MirrorGuard() {
+            if (_ctx) _ctx->pop_mirror();
+        }
+        MirrorGuard(const MirrorGuard&) = delete;
+        MirrorGuard& operator=(const MirrorGuard&) = delete;
+
+    private:
+        Context* _ctx;
+    };
+    [[nodiscard]] MirrorGuard mirror_if_right_to_left(Rectf bounds);
+    bool mirrored() const { return !_mirror_axes.empty(); }
+    // Through the open mirror scopes: where `rect` (drawing coordinates in the
+    // scopes) is on screen, and the pointer on screen (pointer() is in the scopes).
+    Rectf to_screen(Rectf rect) const;
+    Vec2f screen_pointer() const;
 
     // Immediate draw helpers (logical space).
     void push_clip(Rectf bounds);
@@ -425,6 +484,9 @@ private:
     f32 _debug_last_hue = 0.0f;               // hue of the last debug-tinted fill (font uses its complement)
     Color _surface_fill_under{};              // last opaque fill, used as text background for contrast
     bool _wants_text_input = false;
+    std::optional<Rectf> _text_input_area; // window coordinates
+    std::vector<f32> _mirror_axes;          // 2x + w of each mirror scope's bounds, innermost last
+    i32 _text_input_cursor = 0;
 
     std::vector<LayoutNode> _nodes;
     std::vector<i32> _stack;

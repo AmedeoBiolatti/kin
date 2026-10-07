@@ -1,4 +1,7 @@
 #include <kin/assets/asset_manager.hpp>
+#include <kin/assets/content.hpp>
+
+#include <kin/l10n/localization.hpp>
 
 #include <kin/audio/audio_catalog.hpp>
 #include <kin/dialogue/dialogue.hpp>
@@ -34,7 +37,7 @@ std::string lowercase_extension(std::filesystem::path path) {
 }
 
 AssetStatus status_for_path(const std::filesystem::path& path) {
-    return std::filesystem::exists(path) ? AssetStatus::Discovered : AssetStatus::Missing;
+    return content_file_exists(path) ? AssetStatus::Discovered : AssetStatus::Missing;
 }
 
 } // namespace
@@ -158,7 +161,7 @@ void AssetManager::unload(std::string_view relative_path) {
 }
 
 void AssetManager::discover() {
-    if (!std::filesystem::exists(_root)) {
+    if (!content_directory_exists(_root)) {
         KIN_LOG_WARN_F("asset",
                        "asset discovery root missing",
                        (LogFields{{.name = "root", .value = _root.string()}}));
@@ -166,12 +169,8 @@ void AssetManager::discover() {
     }
 
     std::size_t discovered_count = 0;
-    for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(_root)) {
-        if (!entry.is_regular_file()) {
-            continue;
-        }
-
-        const std::filesystem::path relative = std::filesystem::relative(entry.path(), _root);
+    for (const std::filesystem::path& file : list_content_files(_root, true)) {
+        const std::filesystem::path relative = file.lexically_relative(_root);
         AssetMetadata discovered = make_metadata(normalized_relative_path(relative));
         if (auto found = _metadata.find(discovered.path); found != _metadata.end() && found->second.status == AssetStatus::Loaded) {
             discovered.status = AssetStatus::Loaded;
@@ -188,8 +187,19 @@ void AssetManager::discover() {
                     }));
 }
 
+std::string AssetManager::localized_path(std::string_view relative_path) const {
+    // Already a localized path (as load_handle passes on): left as it is.
+    if (relative_path.starts_with("l10n/")) {
+        return std::string{relative_path};
+    }
+    if (const Localization* l10n = active_localization()) {
+        return l10n->localized_path(_root, relative_path);
+    }
+    return std::string{relative_path};
+}
+
 std::filesystem::path AssetManager::resolve(std::string_view relative_path) const {
-    return _root / std::filesystem::path{relative_path};
+    return _root / std::filesystem::path{localized_path(relative_path)};
 }
 
 AssetManager::Stats AssetManager::stats() const {
@@ -235,8 +245,8 @@ AssetMetadata AssetManager::make_metadata(std::string relative_path) const {
         .type = infer_asset_type(relative_path),
         .status = status_for_path(resolved),
     };
-    if (std::filesystem::exists(resolved) && std::filesystem::is_regular_file(resolved)) {
-        metadata.size_bytes = std::filesystem::file_size(resolved);
+    if (const std::optional<u64> size = content_file_size(resolved)) {
+        metadata.size_bytes = *size;
     }
     return metadata;
 }

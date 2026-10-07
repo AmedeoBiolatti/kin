@@ -97,7 +97,21 @@ bool parse_language_file(std::string_view text, LanguageFile& out, std::vector<s
 // order mark is skipped.
 bool parse_language_csv(std::string_view text, std::vector<LanguageFile>& out, std::vector<std::string>& errors);
 
-// Either, by the path's extension (.kinlang or .csv).
+// A gettext catalogue (.po), as translation tools and services trade them.
+// An entry's key is its msgctxt, or its msgid when it has none, and msgstr is
+// a kin message (see message_format.hpp). An entry with plural forms
+// (msgid_plural, msgstr[N]) becomes "{n, plural, ...}": each category the
+// language uses takes the form the header's Plural-Forms picks for a number of
+// that category, its "%d" becoming "#". Fuzzy and obsolete entries and empty
+// translations are left out. The header's "Language:" names the locale, else
+// `locale` (the file's name, when loaded from one).
+bool parse_gettext(std::string_view text, LanguageFile& out, std::vector<std::string>& errors,
+                   std::string_view locale = {});
+// The base language's strings as a .po for translators: msgctxt the key, msgid
+// the base text, msgstr the translation's (empty in a template, without one).
+std::string write_gettext(const LanguageFile& base, const LanguageFile* translation = nullptr);
+
+// Any of them, by the path's extension (.kinlang, .csv or .po).
 bool load_language_files(const std::filesystem::path& path, std::vector<LanguageFile>& out,
                          std::vector<std::string>& errors);
 
@@ -168,7 +182,7 @@ public:
     // A .kinlang or .csv file. False, with messages, if it cannot be read or
     // parsed; what the file gave before stays.
     bool load_file(const std::filesystem::path& path, std::vector<std::string>& errors);
-    // Every .kinlang and .csv file in `dir`, in name order. With `watcher`,
+    // Every .kinlang, .csv and .po file in `dir`, in name order. With `watcher`,
     // each reloads when it changes (see FileWatcher::load_and_watch).
     bool load_directory(const std::filesystem::path& dir, std::vector<std::string>& errors,
                         FileWatcher* watcher = nullptr);
@@ -227,6 +241,15 @@ public:
     // for the pseudo-locale.
     const std::string& formatting_locale() const;
 
+    // Assets by language: `relative` (under `root`) as the shown language has
+    // it. A variant at l10n/<tag>/<relative> is taken for the first tag of the
+    // chain that has one ("l10n/fr-CA/audio/intro.wav", then
+    // "l10n/fr/audio/intro.wav"); else `relative` itself. AssetManager and
+    // AudioCatalog look their files up this way through the active
+    // localization. Which files exist is remembered until the next load or
+    // locale change.
+    std::string localized_path(const std::filesystem::path& root, std::string_view relative) const;
+
     // Keys looked up and not found, sorted.
     std::vector<std::string> missing_keys() const;
     void clear_missing_keys();
@@ -271,6 +294,7 @@ private:
     mutable std::mutex _mutex; // guards the caches below
     mutable std::unordered_map<std::string, std::unique_ptr<std::string>, TranslationHash, std::equal_to<>> _text_cache;
     mutable std::set<std::string, std::less<>> _missing;
+    mutable std::unordered_map<std::string, bool> _asset_exists; // "root|l10n/tag/relative"
 };
 
 // The Localization kin's own systems read (retained ui2 text, dialogue,

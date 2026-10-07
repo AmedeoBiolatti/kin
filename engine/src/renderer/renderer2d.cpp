@@ -6,6 +6,7 @@
 
 #include <cmath>
 
+#include "embedded_gpu_shader.hpp"
 #include "sdl_renderer2d_backend.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
 
@@ -16,7 +17,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iterator>
 #include <stdexcept>
 #include <string_view>
@@ -993,7 +993,6 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         return it->second;
     }
     ShaderHandle handle{};
-#ifdef KIN_GPU_SHADER_DIR
     if (capabilities().materials_2d) {
         // Map the built-in id to its compiled SPIR-V file + the sampler count its
         // descriptor declares (2 for the two-input combine/crossfade shaders).
@@ -1014,25 +1013,19 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         case BuiltinShader::TransitionCrossfade: file = "transition_crossfade.frag.spv"; samplers = 2; break;
         }
         if (file) {
-            const std::filesystem::path path = std::filesystem::path{KIN_GPU_SHADER_DIR} / file;
-            std::ifstream in(path, std::ios::binary);
-            if (in) {
-                const std::vector<u8> bytes((std::istreambuf_iterator<char>(in)),
-                                            std::istreambuf_iterator<char>());
-                if (!bytes.empty()) {
-                    ShaderDesc desc;
-                    desc.spirv = {bytes.data(), static_cast<u32>(bytes.size())};
-                    desc.num_samplers = samplers;
-                    desc.num_uniform_buffers = 1;
-                    handle = create_shader(desc);
-                }
+            const std::span<const unsigned char> bytes = gpu::embedded_gpu_shader(file);
+            if (!bytes.empty()) {
+                ShaderDesc desc;
+                desc.spirv = {bytes.data(), static_cast<u32>(bytes.size())};
+                desc.num_samplers = samplers;
+                desc.num_uniform_buffers = 1;
+                handle = create_shader(desc);
             } else {
-                KIN_LOG_ERROR_F("render", "builtin_shader: .spv not found",
-                                (LogFields{{.name = "path", .value = path.string()}}));
+                KIN_LOG_ERROR_F("render", "builtin_shader: not built into this engine (glslc was not found)",
+                                (LogFields{{.name = "shader", .value = file}}));
             }
         }
     }
-#endif
     _builtin_shaders[key] = handle; // cache (incl. null on degrade) so we don't re-probe
     return handle;
 }

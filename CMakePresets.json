@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "ship",
+      "displayName": "Shipping (Ninja)",
+      "description": "Games for players: KIN_SHIPPING, Release, no tests. On Windows, run from a Visual Studio developer prompt.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-ship",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "KIN_SHIPPING": "ON",
+        "KIN_BUILD_TESTS": "OFF",
+        "KIN_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "ship-vs",
+      "displayName": "Shipping (Visual Studio 2022)",
+      "inherits": "ship",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "ship", "configurePreset": "ship", "configuration": "Release" },
+    { "name": "ship-vs", "configurePreset": "ship-vs", "configuration": "Release" }
+  ]
+}

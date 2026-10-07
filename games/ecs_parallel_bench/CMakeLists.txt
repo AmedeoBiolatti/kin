@@ -6,6 +6,8 @@ target_link_libraries(ecs_parallel_bench PRIVATE
     kin::engine
 )
 
+kin_game(ecs_parallel_bench TITLE "ECS Parallel Bench")
+
 target_compile_options(ecs_parallel_bench PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

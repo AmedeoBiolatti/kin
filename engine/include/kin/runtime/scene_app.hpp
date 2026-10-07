@@ -75,6 +75,11 @@ struct HeadlessOptions {
     // --fail-on-missing-text: fail the run if any text was looked up by a key
     // the shown language (and its fallbacks) lacks.
     bool fail_on_missing_text = false;
+    // --fail-on-text-overflow: fail the run if any ui2 widget's text did not
+    // fit its bounds (Label, Button, Toggle, ...: those that report overflow).
+    // The run report lists them under ui_overflow either way. With
+    // --pseudo-locale it finds layouts too tight for longer languages.
+    bool fail_on_text_overflow = false;
     // The command line as given, program first (the check runs it again).
     std::vector<std::string> args;
 };

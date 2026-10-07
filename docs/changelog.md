@@ -10,6 +10,10 @@ releases may change APIs.
 Localization: text by key in the player's language, switched while the game
 runs, and text in any script. See [localization](localization.md).
 
+Shipping: a game builds into a folder players can run anywhere, with its
+executable, its content in one `.kinpak` archive, and the license texts it
+carries. See [shipping](shipping.md).
+
 ### Upgrading from 0.2.5
 
 - `Input::mouse_wheel_y()` is now for `update()`: what the wheel turned since
@@ -26,7 +30,21 @@ runs, and text in any script. See [localization](localization.md).
 - `AudioEngine::stats()` returns a copy, and `mixed_frames` is 64-bit.
 - `set_bus_volume("master", v)` now scales every bus under `master`, as the
   hierarchy says; before, it only reached voices playing on `master` itself.
+- Every engine loader reads through the content layer (`kin/assets/content.hpp`).
+  Paths are unchanged, and a `.kinpak` mounted at a folder now answers for it.
+- `kin_configure_game_assets` also sets the game up with `kin_game`. That adds
+  install rules, the targets `<game>_content` and `<game>_package`, and
+  `KIN_GAME_CONTENT`.
+- The engine's GPU shaders are built into it; `KIN_GPU_SHADER_DIR` is gone.
+- The agent server's HTTP transport listens on `127.0.0.1` only (it listened
+  on every interface).
+- `ScriptEngine::load_file` reports a missing script as `cannot open <path>`.
+- Signal Siege's language files moved to `examples/content/lang/`.
 - `TextDirection` moved to `kin/core/bidi.hpp` (it is still `kin::TextDirection`).
+- Games with text fields should call `ui.apply_text_input(window)` after
+  `ui.end()` each frame (it replaces `window.set_text_input_enabled(ui.wants_text_input())`).
+- `TtfFontOptions::fallbacks` and `system_fallback_fonts()` are `FontSource`s
+  (a path converts to one).
 - `LanguageFile::direction` is optional: unset follows the locale tag.
 - ui2 TTF text beyond ASCII is laid out glyph by glyph from the face's metrics
   instead of shaped as one string, so its width can change by a pixel or so.
@@ -123,6 +141,31 @@ runs, and text in any script. See [localization](localization.md).
 - Loop points: `loop_start=` and `loop_end=` on a catalog clip (in frames)
   make a looping cue play its intro once and then repeat the loop, streamed or
   not.
+- Shipping ([shipping](shipping.md)):
+  - `kin_game(target ...)` in CMake. It sets up the game's content, Windows
+    version info and icon, install rules, `<game>_content` (the pack) and
+    `<game>_package` (a `.zip` or `.tar.gz` under `packages/`).
+  - `KIN_SHIPPING` and the `ship` / `ship-vs` presets: no agent server, render
+    probe, determinism check or release profiling. Windows games are windowed
+    apps on the static runtime; Linux games link libstdc++ in. The log goes
+    with the game's saves.
+  - `.kinpak` content packs: `ContentPack`, `write_content_pack`,
+    `mount_content_pack`, and the `kin_pack` tool (`create`, `list`, `verify`,
+    `extract`).
+  - Content reads from a pack or disk: `read_content_file`,
+    `read_content_text`, `view_content_file`, `content_file_exists`,
+    `content_directory_exists`, `content_file_size`, `list_content_files`.
+  - `find_content_root` (`--content`, `KIN_CONTENT`, the source folder in
+    development, then beside the executable), `content_root`,
+    `executable_dir`.
+  - `KIN_ENABLE_AGENT_SERVER`, `KIN_PACK_CONTENT`, `KIN_REQUIRE_GPU_SHADERS`.
+  - `kin_compile_glsl` and `kin_embed_files`, to build shaders and small files
+    into a binary; `cmake/kin_spirv.cmake` and `KIN_SPIRV_DIR`, for build
+    machines without glslc.
+  - License texts of kin's dependencies, shipped in `licenses/` with each game.
+  - CI packages Signal Siege on Linux, built in the Steam Runtime (glibc
+    2.31), and on Windows with the GPU shaders, and runs it from another
+    folder (and, on Linux, in the runtime).
 - `kin::Localization` (`kin/l10n/localization.hpp`): `.kinlang` (JSON) and CSV
   language files, several per language, reloaded as they change; a fallback
   chain (`fr-CA`, `fr`, the base); `text(key)` and `tr(key, args)`; missing
@@ -150,6 +193,30 @@ runs, and text in any script. See [localization](localization.md).
 - `utf8_append`. `FileWatcher::load_and_watch` can return its watch id.
 - Signal Siege in English, French, Japanese and Arabic, with a language item
   on its title. `kin_text_bench`.
+- Input methods: `Input::text_composition()`; `TextInput` and `TextEdit`
+  show the composition at the caret; `Window::set_text_input_area` and
+  `ui2::Context::apply_text_input` place the candidate list.
+- Right-to-left editing: `ui2::caret_x`, `caret_at`, `selection_spans` and
+  `paragraph_direction`; `TextInput` and `TextEdit` use them.
+- `ui2::Context::push_mirror` / `mirror_if_right_to_left`: widgets mirror their
+  insides in right-to-left interfaces (Toggle, Slider, ProgressBar,
+  LabeledBar, IconButton, ResourceRow, IconMeter, MenuList, TabBar, ComboBox,
+  ListView; ScrollView's scrollbar moves left).
+- `ui2::fit_text`, `TextOverflow::Ellipsis` and `Shrink` (Label, and the new
+  `Button::overflow`); `ui2::collect_overflows`; the run report's
+  `ui_overflow` and `--fail-on-text-overflow`.
+- Fonts per language: `TtfFontOptions::language_fallbacks`, `FontSource`
+  (a face of a collection), `system_language_fonts()`,
+  `ui2::set_text_language`.
+- Ordinals: `{n, selectordinal, ...}`, `ordinal_category`, `ordinal_categories`.
+- gettext: `parse_gettext` and `write_gettext`; `.po` files load from language
+  directories.
+- Assets by language: `Localization::localized_path` (`l10n/<locale>/<path>`),
+  used by `AssetManager` and `AudioCatalog`.
+- `ui2::caret_move`: the arrows move the caret on screen through
+  mixed-direction text in `TextInput` and `TextEdit`.
+- Popups in right-to-left interfaces: placed reflected about their anchor;
+  `MenuBar` mirrors; `Context::to_screen` and `screen_pointer`.
 
 ### Changed
 

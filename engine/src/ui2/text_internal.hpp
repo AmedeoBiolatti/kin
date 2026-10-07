@@ -8,6 +8,7 @@
 #include <kin/ui2/text.hpp>
 
 #include <memory>
+#include <optional>
 #include <string_view>
 
 namespace kin::ui2::text_detail {
@@ -29,6 +30,10 @@ bool no_break_after(u32 c);
 
 // Pairs a TrueType font is worth asking to kern: below the CJK blocks.
 inline bool kernable(u32 c) { return c < 0x2E80; }
+
+// The face of a font collection whose family name contains `family`
+// (" JP", " SC"), or nullopt; an empty `family` takes face 0 of a file that opens.
+std::optional<i32> find_font_face(const std::filesystem::path& path, std::string_view family);
 
 std::shared_ptr<const IFontBackend> make_ttf_backend(const std::filesystem::path& path, f32 point_size,
                                                      const TtfFontOptions& options);

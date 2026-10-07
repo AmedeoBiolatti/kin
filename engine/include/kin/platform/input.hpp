@@ -299,6 +299,14 @@ public:
     void set_clipboard_text(std::string_view text);
 
     std::string_view text_input() const { return _text_input; }
+    // Text an input method (IME) is composing, not yet typed: what a Japanese,
+    // Chinese or Korean player is spelling before they pick it. Shown at the
+    // caret, underlined; text_input() receives it once committed. Empty when
+    // nothing is being composed. `cursor` is the byte offset of the IME's own
+    // cursor within it.
+    std::string_view text_composition() const { return _composition; }
+    i32 text_composition_cursor() const { return _composition_cursor; }
+    void set_text_composition(std::string_view text, i32 cursor = -1);
     std::string clipboard_text() const;
 
     // Files dropped since they were last taken, oldest first. Taking clears
@@ -370,6 +378,8 @@ private:
     u64 _last_key_press_event_time_ns = 0;
     u64 _last_key_press_detected_time_ns = 0;
     std::string _text_input;
+    std::string _composition;
+    i32 _composition_cursor = 0;
     std::vector<DroppedFile> _dropped_files;
     std::optional<Vec2f> _drop_position;
     std::string _clipboard_text;

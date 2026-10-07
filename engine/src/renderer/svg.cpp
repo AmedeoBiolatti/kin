@@ -1,5 +1,7 @@
 #include <kin/renderer/svg.hpp>
 
+#include <kin/assets/content.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -8,7 +10,6 @@
 #include <fstream>
 #include <numbers>
 #include <set>
-#include <sstream>
 #include <unordered_map>
 #include <utility>
 
@@ -738,14 +739,12 @@ std::optional<Shape> read_svg(std::string_view svg, std::string* error, std::vec
 }
 
 std::optional<Shape> load_svg(const std::filesystem::path& path, std::string* error, std::vector<std::string>* warnings) {
-    std::ifstream in{path, std::ios::binary};
-    if (!in) {
+    const std::optional<std::string> text = read_content_file(path);
+    if (!text) {
         if (error) *error = "cannot open " + path.string();
         return std::nullopt;
     }
-    std::ostringstream text;
-    text << in.rdbuf();
-    return read_svg(text.str(), error, warnings);
+    return read_svg(*text, error, warnings);
 }
 
 std::string write_svg(const Shape& shape) {

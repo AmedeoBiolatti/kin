@@ -49,6 +49,12 @@ private:
     std::size_t line_of(std::size_t offset);
     std::size_t line_last_offset(std::size_t line);
     f32 x_in_line(std::size_t line, std::size_t offset);
+    // The caret one step left or right on screen, or through the text (on to
+    // the next line) at the line's end.
+    std::size_t visual_step(i32 step, bool forward);
+    // Where a line starts: 0, or, right to left, so that it ends at the right.
+    f32 line_start(std::size_t line);
+    bool right_to_left() const { return paragraph_direction(_s.text) == TextDirection::RightToLeft; }
     std::size_t offset_at_x(std::size_t line, f32 x);
     std::size_t offset_at(Vec2f pointer);
 
@@ -173,30 +179,40 @@ std::size_t Editor::line_last_offset(std::size_t line) {
     return range.end;
 }
 
+std::size_t Editor::visual_step(i32 step, bool forward) {
+    const std::size_t line = line_of(_s.caret);
+    const TextRange range = lines()[line];
+    const std::optional<std::size_t> moved =
+        caret_move(_w.text_style.font, view_of(_s.text, range), _s.caret - range.begin, step, _w.text_style.scale);
+    if (moved) {
+        return std::min(range.begin + *moved, line_last_offset(line));
+    }
+    return forward ? utf8_next(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret);
+}
+
+f32 Editor::line_start(std::size_t line) {
+    if (!right_to_left()) {
+        return 0.0f;
+    }
+    const f32 width = measure_text(_w.text_style.font, view_of(_s.text, lines()[line]), _w.text_style.scale).x;
+    const f32 room = _w.wrap ? _view.viewport.w : std::max(_view.viewport.w, _s.layout.widest);
+    return std::max(0.0f, room - width);
+}
+
 f32 Editor::x_in_line(std::size_t line, std::size_t offset) {
     const TextRange range = lines()[line];
     offset = std::clamp(offset, range.begin, range.end);
-    return measure_text(_w.text_style.font, view_of(_s.text, {range.begin, offset}), _w.text_style.scale).x;
+    return line_start(line) +
+           caret_x(_w.text_style.font, view_of(_s.text, range), offset - range.begin, _w.text_style.scale);
 }
 
 // The character boundary on `line` nearest to x (relative to the line's start).
 std::size_t Editor::offset_at_x(std::size_t line, f32 x) {
     const TextRange range = lines()[line];
     const std::size_t last = line_last_offset(line);
-    if (x <= 0.0f) {
-        return range.begin;
-    }
-    f32 before = 0.0f;
-    for (std::size_t i = range.begin; i < last;) {
-        const std::size_t next = utf8_next(_s.text, i);
-        const f32 after = measure_text(_w.text_style.font, view_of(_s.text, {range.begin, next}), _w.text_style.scale).x;
-        if (x < (before + after) * 0.5f) {
-            return i;
-        }
-        before = after;
-        i = next;
-    }
-    return last;
+    const std::size_t at =
+        range.begin + caret_at(_w.text_style.font, view_of(_s.text, range), x - line_start(line), _w.text_style.scale);
+    return std::min(at, last);
 }
 
 std::size_t Editor::offset_at(Vec2f pointer) {
@@ -392,7 +408,19 @@ void Editor::handle_keys() {
     const bool shift = _ctx.modifier_held(KeyModifiers::Shift);
     const bool ctrl = _ctx.modifier_held(KeyModifiers::Ctrl);
     const bool editable = !_w.read_only;
-    const auto typed = [&](Key key) { return _ctx.key_typed(key); };
+    // While an input method composes, the keys are its own; the arrows move
+    // the way they point in right-to-left text.
+    const bool composing = !_ctx.text_composition().empty();
+    const bool rtl = right_to_left();
+    const auto typed = [&](Key key) {
+        if (composing) {
+            return false;
+        }
+        if (rtl && (key == Key::Left || key == Key::Right)) {
+            key = key == Key::Left ? Key::Right : Key::Left;
+        }
+        return _ctx.key_typed(key);
+    };
 
     if (ctrl && typed(Key::A)) {
         move_caret(0, false);
@@ -416,18 +444,20 @@ void Editor::handle_keys() {
         redo();
     }
 
-    if (typed(Key::Left)) {
-        if (_s.has_selection() && !shift) {
-            move_caret(_s.selection_start(), false);
-        } else {
-            move_caret(ctrl ? utf8_word_left(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret), shift);
+    // The arrows move the caret on screen (through text that runs both ways),
+    // on to the next or previous line at a line's end; by word (Ctrl) they
+    // step through the text the way they point.
+    for (const i32 step : {-1, 1}) {
+        if (composing || !_ctx.key_typed(step < 0 ? Key::Left : Key::Right)) {
+            continue;
         }
-    }
-    if (typed(Key::Right)) {
+        const bool forward = (step > 0) != rtl;
         if (_s.has_selection() && !shift) {
-            move_caret(_s.selection_end(), false);
+            move_caret(forward ? _s.selection_end() : _s.selection_start(), false);
+        } else if (ctrl) {
+            move_caret(forward ? utf8_word_right(_s.text, _s.caret) : utf8_word_left(_s.text, _s.caret), shift);
         } else {
-            move_caret(ctrl ? utf8_word_right(_s.text, _s.caret) : utf8_next(_s.text, _s.caret), shift);
+            move_caret(visual_step(step, forward), shift);
         }
     }
     if (typed(Key::Up)) {
@@ -552,20 +582,27 @@ void Editor::draw(const Interaction& it) {
     const std::size_t sel_end = _s.selection_end();
     const Color selection = widget_border(_w.style, WidgetColorState::Focused);
     const f32 break_width = measure_text(_w.text_style.font, " ", _w.text_style.scale).x;
+    const bool rtl = right_to_left();
 
     for (std::size_t i = first; i < last; ++i) {
         const TextRange range = all[i];
         const f32 y = vp.y + static_cast<f32>(i) * _view.pitch - _s.scroll.y;
+        const f32 start = x0 + line_start(i);
         if (_s.has_selection() && sel_start <= range.end && sel_end > range.begin) {
-            const f32 xa = x0 + x_in_line(i, std::max(sel_start, range.begin));
-            f32 xb = x0 + x_in_line(i, std::min(sel_end, range.end));
-            if (sel_end > range.end) {
-                xb += break_width; // the selection runs on past this line's break
+            const std::string_view line = view_of(_s.text, range);
+            const std::size_t a = std::max(sel_start, range.begin) - range.begin;
+            const std::size_t b = std::min(sel_end, range.end) - range.begin;
+            for (const auto& [xa, xb] : selection_spans(_w.text_style.font, line, a, b, _w.text_style.scale)) {
+                _ctx.fill_rect({start + xa, y, std::max(1.0f, xb - xa), _view.line_height}, selection);
             }
-            _ctx.fill_rect({xa, y, std::max(1.0f, xb - xa), _view.line_height}, selection);
+            if (sel_end > range.end) {
+                // The selection runs on past this line's break, at its end.
+                const f32 width = measure_text(_w.text_style.font, line, _w.text_style.scale).x;
+                _ctx.fill_rect({rtl ? start - break_width : start + width, y, break_width, _view.line_height}, selection);
+            }
         }
         if (range.end > range.begin) {
-            _ctx.text(view_of(_s.text, range), {x0, y}, _w.text_style);
+            _ctx.text(view_of(_s.text, range), {start, y}, _w.text_style);
         }
     }
     if (_s.text.empty() && !_w.placeholder.empty()) {
@@ -578,6 +615,21 @@ void Editor::draw(const Interaction& it) {
         const std::size_t line = line_of(_s.caret);
         const f32 y = vp.y + static_cast<f32>(line) * _view.pitch - _s.scroll.y;
         _ctx.fill_rect({x0 + x_in_line(line, _s.caret), y, std::max(1.0f, _w.text_style.scale * 0.5f), _view.line_height}, _w.text_style.color);
+    }
+    // What an input method is composing, over the text at the caret, underlined.
+    if (_s.active && _w.enabled && !_w.read_only) {
+        const std::size_t line = line_of(_s.caret);
+        const f32 y = vp.y + static_cast<f32>(line) * _view.pitch - _s.scroll.y;
+        const f32 caret = x0 + x_in_line(line, _s.caret);
+        const std::string_view composition = _ctx.text_composition();
+        if (!composition.empty()) {
+            const f32 width = measure_text(_w.text_style.font, composition, _w.text_style.scale).x;
+            const f32 x = rtl ? caret - width : caret;
+            _ctx.fill_rect({x, y, width, _view.line_height}, _w.style.track);
+            _ctx.text(composition, {x, y}, _w.text_style);
+            _ctx.fill_rect({x, y + _view.line_height - 1.0f, width, 1.0f}, _w.text_style.color);
+        }
+        _ctx.set_text_input_area({vp.x, y, vp.w, _view.line_height}, caret);
     }
     _ctx.pop_clip();
 

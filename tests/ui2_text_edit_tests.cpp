@@ -493,7 +493,147 @@ void test_context_keeps_state() {
 
 } // namespace
 
+// Hebrew alef, bet, gimel: right to left. The 5x7 font draws them blank but
+// six units wide, which is all the caret needs.
+const std::string hebrew = "\xD7\x90\xD7\x91\xD7\x92";
+
+// Carets in a right-to-left line run leftwards; a mixed line maps each
+// character boundary to one x and back.
+void test_carets_in_both_directions() {
+    const ui2::Font font = ui2::bitmap_font();
+    assert(ui2::caret_x(font, "abc", 0) == 0.0f);
+    assert(ui2::caret_x(font, "abc", 2) == 11.0f);
+    assert(ui2::caret_at(font, "abc", 10.0f) == 2);
+
+    assert(ui2::paragraph_direction(hebrew) == TextDirection::RightToLeft);
+    assert(ui2::caret_x(font, hebrew, 0) == 17.0f); // the start is at the right
+    assert(ui2::caret_x(font, hebrew, 2) == 12.0f);
+    assert(ui2::caret_x(font, hebrew, 6) == 0.0f);
+    for (std::size_t k : {0u, 2u, 4u, 6u}) {
+        assert(ui2::caret_at(font, hebrew, ui2::caret_x(font, hebrew, k)) == k);
+    }
+
+    // "ab אבג": the Hebrew word to the right of "ab" in a left-to-right line.
+    // Each offset has its own x (where the runs meet, the offset belongs to the run after it).
+    const std::string mixed = "ab " + hebrew;
+    for (std::size_t k = 0; k <= mixed.size(); k = k < mixed.size() ? kin::utf8_next(mixed, k) : k + 1) {
+        const f32 x = ui2::caret_x(font, mixed, k);
+        assert(ui2::caret_at(font, mixed, x) == k);
+    }
+    // The Hebrew starts at the right and runs leftwards, to just after "ab ".
+    assert(ui2::caret_x(font, mixed, 3) > ui2::caret_x(font, mixed, 5));
+    assert(ui2::caret_x(font, mixed, 5) > ui2::caret_x(font, mixed, 9));
+    assert(ui2::caret_x(font, mixed, 9) > ui2::caret_x(font, mixed, 2));
+    // The arrows walk the line on screen: right from "ab" into the Hebrew at
+    // its left end (its last letter), then leftwards through it in the text.
+    std::vector<std::size_t> walk{0};
+    while (const auto next = ui2::caret_move(font, mixed, walk.back(), 1)) {
+        walk.push_back(*next);
+    }
+    assert((walk == std::vector<std::size_t>{0, 1, 2, 9, 7, 5, 3}));
+    std::vector<std::size_t> back{3};
+    while (const auto next = ui2::caret_move(font, mixed, back.back(), -1)) {
+        back.push_back(*next);
+    }
+    assert((back == std::vector<std::size_t>{3, 5, 7, 9, 2, 1, 0}));
+
+    // Selecting "b א" covers the b on the left and the alef at the far right.
+    const auto spans = ui2::selection_spans(font, mixed, 1, 5);
+    assert(spans.size() == 2 && spans[0].first < spans[1].first);
+    assert(spans[1].second == ui2::caret_x(font, mixed, 3));
+}
+
+// Right to left, a TextInput's text sits at the right, and the arrows move the
+// caret the way they point.
+void test_text_input_right_to_left() {
+    Input input;
+    Renderer2D renderer{std::make_unique<NullBackend>()};
+    ui2::Context ui;
+    ui2::TextInput text{.id = ui2::make_id("rtl"), .bounds = {0, 0, 200, 24}};
+    text.text_style.font = ui2::bitmap_font();
+    text.state.text = hebrew;
+    text.state.caret = 0;
+    text.state.active = true;
+    const auto key = [&](Key k) {
+        input.begin_frame();
+        input.set_key_pressed(k);
+        ui.begin(input, renderer);
+        ui2::run(ui, text);
+        ui.end();
+        input.set_key_released(k);
+    };
+    key(Key::Left); // visually left: further into the word
+    assert(text.state.caret == 2);
+    key(Key::Right);
+    assert(text.state.caret == 0);
+    // The caret's area, for the input method, is at the field's right side.
+    assert(ui.text_input_area() && ui.text_input_area()->w == 200.0f);
+}
+
+// An input method's composition shows but is not typed until committed, and
+// the keys it uses do not move the caret meanwhile.
+void test_input_method_composition() {
+    Harness h{editor("ab")};
+    h.activate();
+    h.key(Key::End);
+    h.frame([](Input& in) { in.set_text_composition("\xE3\x81\x8B", 3); }); // か
+    assert(h.text() == "ab" && h.input.text_composition() == "\xE3\x81\x8B");
+    assert(h.ui.wants_text_input() && h.ui.text_input_area());
+    h.key(Key::Left); // the IME's, not the editor's
+    assert(h.edit.state.caret == 2);
+    h.frame([](Input& in) {
+        in.set_text_composition({});
+        in.set_text_input("\xE8\xA2\x8B"); // committed: 袋
+    });
+    assert(h.text() == "ab\xE8\xA2\x8B" && h.edit.state.caret == 5);
+
+    // Composition events arrive from SDL with the cursor in characters.
+    Input input;
+    SDL_Event editing{};
+    editing.type = SDL_EVENT_TEXT_EDITING;
+    char composing[] = "\xE3\x81\x8B\xE3\x82\x93"; // かん
+    editing.edit.text = composing;
+    editing.edit.start = 1;
+    kin::InputFrameTestHook::event(input, editing);
+    assert(input.text_composition() == composing && input.text_composition_cursor() == 3);
+    SDL_Event committed{};
+    committed.type = SDL_EVENT_TEXT_INPUT;
+    char typed[] = "\xE6\xBC\xA2";
+    committed.text.text = typed;
+    kin::InputFrameTestHook::event(input, committed);
+    assert(input.text_composition().empty() && input.text_input() == typed);
+}
+
+// A right-to-left TextEdit: lines end at the right edge, and the caret moves
+// the way the arrows point.
+void test_text_edit_right_to_left() {
+    Harness h{editor(hebrew)};
+    h.activate();
+    h.key(Key::Home);
+    assert(h.edit.state.caret == 0);
+    h.key(Key::Left);
+    assert(h.edit.state.caret == 2);
+    // In mixed text the arrows move on screen, and on to the next line at the end.
+    Harness mixed{editor("ab " + hebrew + "\ncd")};
+    mixed.activate();
+    mixed.key(Key::Home);
+    mixed.key(Key::Right);
+    mixed.key(Key::Right);
+    mixed.key(Key::Right);
+    assert(mixed.edit.state.caret == 9); // past "ab", at the Hebrew's left end (its last letter)
+    mixed.key(Key::Right);
+    assert(mixed.edit.state.caret == 7);
+
+    // A click near the right edge puts the caret at the start of the text.
+    h.click({h.edit.bounds.x + h.edit.bounds.w - 6.0f, h.at(0).y});
+    assert(h.edit.state.caret == 0);
+}
+
 int main() {
+    test_carets_in_both_directions();
+    test_text_input_right_to_left();
+    test_input_method_composition();
+    test_text_edit_right_to_left();
     test_utf8_stepping();
     test_wrap_text_ranges();
     test_key_repeat_events();

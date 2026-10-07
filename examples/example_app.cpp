@@ -105,7 +105,7 @@ public:
         const auto size = ctx.renderer.output_size();
         _dashboard.render(*_model, ctx.input, ctx.renderer, {float(size.x), float(size.y)}, ctx.dt, scale);
         _display_scale = scale;
-        ctx.window.set_text_input_enabled(_dashboard.wants_text_input());
+        _dashboard.apply_text_input(ctx.window);
         capture(ctx, _options, ++_render_frames, _captured);
     }
     void on_exit(SceneContext& ctx) override { ctx.window.set_text_input_enabled(false); }
@@ -126,7 +126,7 @@ private:
 };
 }
 
-int run_example(int argc, char** argv, bool tracker) {
+int run_example(int argc, char** argv, bool tracker, const ContentSearch& content) {
     try {
         const Options options = parse(argc, argv);
         if (options.help) {
@@ -164,6 +164,10 @@ int run_example(int argc, char** argv, bool tracker) {
         Localization l10n;
         FileWatcher files;
         if (!tracker) {
+            if (find_content_root(content, argc, argv).empty()) {
+                std::cerr << "Signal Siege: its content was not found\n";
+                return 1;
+            }
             std::vector<std::string> errors;
             l10n.load_directory(siege_language_dir(), errors, &files);
             for (const std::string& error : errors) std::cerr << "Language file: " << error << '\n';

@@ -1,5 +1,7 @@
 #include <kin/platform/input.hpp>
 
+#include <kin/assets/content.hpp>
+#include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
 
 #include <SDL3/SDL.h>
@@ -327,14 +329,15 @@ void write_modifiers(std::ostream& out, KeyModifiers modifiers) {
 }
 
 InputMap load_input_map(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         KIN_LOG_ERROR_F("input",
                         "input map open failed",
                         (LogFields{{.name = "path", .value = path.string()},
                                    {.name = "error", .value = "open_failed"}}));
         throw std::runtime_error("Failed to open input map: " + path.string());
     }
+    std::istringstream file{*text};
 
     InputMap map;
     std::string line;
@@ -576,7 +579,13 @@ void Input::process_native_event(const void* native_event) {
         _mouse_window = static_cast<WindowId>(event.wheel.windowID);
     } else if (event.type == SDL_EVENT_TEXT_INPUT && event.text.text) {
         _text_input += event.text.text;
+        _composition.clear(); // committed
+        _composition_cursor = 0;
         _keyboard_window = static_cast<WindowId>(event.text.windowID);
+    } else if (event.type == SDL_EVENT_TEXT_EDITING) {
+        // SDL gives the cursor in characters; kept as bytes.
+        set_text_composition(event.edit.text ? event.edit.text : "", event.edit.start);
+        _keyboard_window = static_cast<WindowId>(event.edit.windowID);
     } else if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION) {
         _drop_position = Vec2f{event.drop.x, event.drop.y};
     } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) {
@@ -748,6 +757,19 @@ void Input::set_mouse_pressed(MouseButton button) {
     _mouse_pressed[raw_button] = true;
     _mouse_frame_pressed[raw_button] = true;
     _drag_start[raw_button] = _mouse_pos;
+}
+
+void Input::set_text_composition(std::string_view text, i32 cursor) {
+    _composition = text;
+    if (cursor < 0) {
+        _composition_cursor = static_cast<i32>(_composition.size());
+        return;
+    }
+    std::size_t at = 0;
+    for (i32 i = 0; i < cursor && at < _composition.size(); ++i) {
+        at = utf8_next(_composition, at);
+    }
+    _composition_cursor = static_cast<i32>(at);
 }
 
 void Input::set_text_input(std::string_view text) {

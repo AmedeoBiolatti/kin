@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -323,7 +324,9 @@ Font cached_system_font(f32 point_size, bool bold, TextRendering rendering) {
     const std::filesystem::path& path = system_ui_font_path(bold);
     Font font = path.empty() ? bitmap_font()
                              : load_ttf_font(path, static_cast<f32>(clamped),
-                                             TtfFontOptions{.rendering = rendering, .fallbacks = system_fallback_fonts()});
+                                             TtfFontOptions{.rendering = rendering,
+                                                            .fallbacks = system_fallback_fonts(),
+                                                            .language_fallbacks = system_language_fonts()});
     cache.emplace(key, font);
     return font;
 }
@@ -342,11 +345,11 @@ bool system_ui_font_available() {
     return !system_ui_font_path(false).empty();
 }
 
-const std::vector<std::filesystem::path>& system_fallback_fonts() {
-    static const std::vector<std::filesystem::path> fonts = [] {
+const std::vector<FontSource>& system_fallback_fonts() {
+    static const std::vector<FontSource> fonts = [] {
         // Per script, the first that exists; scripts a UI font most often
         // lacks first. Fonts that cover several scripts come early.
-        const std::initializer_list<std::initializer_list<const char*>> scripts{
+        const std::vector<std::vector<const char*>> scripts{
             // Hebrew, Arabic, Greek, Cyrillic
             {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
              "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"},
@@ -369,17 +372,85 @@ const std::vector<std::filesystem::path>& system_fallback_fonts() {
              "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
              "/System/Library/Fonts/Kohinoor.ttc"},
         };
-        std::vector<std::filesystem::path> found;
+        std::vector<FontSource> found;
         for (const auto& candidates : scripts) {
             for (const char* candidate : candidates) {
                 std::error_code error;
                 if (std::filesystem::exists(candidate, error) &&
-                    std::ranges::find(found, std::filesystem::path{candidate}) == found.end()) {
+                    std::ranges::find(found, FontSource{candidate}) == found.end()) {
                     found.emplace_back(candidate);
                     break;
                 }
             }
         }
+        return found;
+    }();
+    return fonts;
+}
+
+const std::vector<LanguageFont>& system_language_fonts() {
+    static const std::vector<LanguageFont> fonts = [] {
+        struct Candidate {
+            const char* path;
+            const char* family; // in a collection, the face whose family has this
+        };
+        // The more particular tags first: a font chain takes every match in order.
+        const std::vector<std::pair<const char*, std::vector<Candidate>>> languages{
+            {"ja", {{"C:/Windows/Fonts/YuGothM.ttc", ""}, {"C:/Windows/Fonts/meiryo.ttc", ""},
+                    {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " JP"},
+                    {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " JP"},
+                    {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " JP"},
+                    {"/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf", ""},
+                    {"/System/Library/Fonts/\xE3\x83\x92\xE3\x83\xA9\xE3\x82\xAE\xE3\x83\x8E\xE8\xA7\x92\xE3\x82\xB4\xE3\x82\xB7\xE3\x83\x83\xE3\x82\xAF W3.ttc", ""}}},
+            {"ko", {{"C:/Windows/Fonts/malgun.ttf", ""},
+                    {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " KR"},
+                    {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " KR"},
+                    {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " KR"},
+                    {"/usr/share/fonts/truetype/unfonts-core/UnDotum.ttf", ""},
+                    {"/System/Library/Fonts/AppleSDGothicNeo.ttc", ""}}},
+            {"zh-HK", {{"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " HK"},
+                       {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " HK"},
+                       {"/System/Library/Fonts/PingFang.ttc", " HK"}}},
+            {"zh-Hant", {{"C:/Windows/Fonts/msjh.ttc", ""},
+                         {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " TC"},
+                         {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " TC"},
+                         {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " TC"},
+                         {"/System/Library/Fonts/PingFang.ttc", " TC"}}},
+            {"zh", {{"C:/Windows/Fonts/msyh.ttc", ""},
+                    {"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", " SC"},
+                    {"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", " SC"},
+                    {"/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc", " SC"},
+                    {"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf", ""},
+                    {"/System/Library/Fonts/PingFang.ttc", " SC"}}},
+        };
+        std::vector<LanguageFont> found;
+        const auto add = [&](const char* language, const std::vector<Candidate>& candidates) {
+            for (const Candidate& candidate : candidates) {
+                std::error_code error;
+                if (!std::filesystem::exists(candidate.path, error)) {
+                    continue;
+                }
+                if (const std::optional<i32> face = text_detail::find_font_face(candidate.path, candidate.family)) {
+                    found.push_back({language, FontSource{candidate.path, *face}});
+                    return true;
+                }
+            }
+            return false;
+        };
+        for (const auto& [language, candidates] : languages) {
+            add(language, candidates);
+        }
+        // Traditional Chinese by region too (zh-TW, zh-MO), with the zh-Hant font.
+        for (const LanguageFont& font : std::vector<LanguageFont>{found}) {
+            if (font.language == "zh-Hant") {
+                found.push_back({"zh-TW", font.font});
+                found.push_back({"zh-MO", font.font});
+            }
+        }
+        // More particular first.
+        std::ranges::stable_sort(found, [](const LanguageFont& a, const LanguageFont& b) {
+            return a.language.size() > b.language.size();
+        });
         return found;
     }();
     return fonts;
@@ -611,6 +682,194 @@ std::vector<TextRange> wrap_text_ranges(const Font& font, std::string_view text,
         hard_begin = newline + 1;
     }
     return lines;
+}
+
+FittedText fit_text(const Font& font, std::string_view text, f32 max_width, f32 scale, TextFit fit, f32 min_scale) {
+    FittedText out{std::string{text}, scale, false};
+    if (text.empty() || measure_text(font, text, scale).x <= max_width) {
+        return out;
+    }
+    if (fit == TextFit::Shrink) {
+        const f32 width = measure_text(font, text, scale).x;
+        const f32 smallest = scale * std::clamp(min_scale, 0.05f, 1.0f);
+        out.scale = std::max(smallest, scale * max_width / std::max(width, 1.0f));
+        out.changed = true;
+        // Rounding may leave it a hair wide; step down until it fits.
+        for (int i = 0; i < 4 && out.scale > smallest && measure_text(font, text, out.scale).x > max_width; ++i) {
+            out.scale = std::max(smallest, out.scale * 0.98f);
+        }
+        if (measure_text(font, text, out.scale).x <= max_width) {
+            return out;
+        }
+    }
+    // The 5x7 font has no "…".
+    const std::string_view ellipsis = font && font.identity() != bitmap_font().identity() ? "\xE2\x80\xA6" : "...";
+    // The most characters that fit with the ellipsis: a binary search over the boundaries.
+    std::vector<std::size_t> boundaries;
+    for (std::size_t k = 0; k < text.size(); k = utf8_next(text, k)) {
+        boundaries.push_back(k);
+    }
+    const auto fits = [&](std::size_t count) {
+        std::string candidate{text.substr(0, boundaries[count])};
+        while (!candidate.empty() && candidate.back() == ' ') {
+            candidate.pop_back();
+        }
+        candidate += ellipsis;
+        return measure_text(font, candidate, out.scale).x <= max_width;
+    };
+    std::size_t lo = 0;
+    std::size_t hi = boundaries.size() - 1;
+    while (lo < hi) {
+        const std::size_t mid = (lo + hi + 1) / 2;
+        if (fits(mid)) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    out.text.assign(text.substr(0, boundaries[lo]));
+    while (!out.text.empty() && out.text.back() == ' ') {
+        out.text.pop_back();
+    }
+    out.text += ellipsis;
+    out.changed = true;
+    return out;
+}
+
+namespace {
+
+// A line's runs in display order, with where each starts and how wide it is.
+struct VisualRun {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+    bool rtl = false;
+    f32 x = 0.0f;
+    f32 width = 0.0f;
+};
+
+std::vector<VisualRun> visual_runs(const Font& font, std::string_view line, f32 scale) {
+    std::vector<VisualRun> runs;
+    if (!has_right_to_left(line)) {
+        runs.push_back({0, line.size(), false, 0.0f, measure_text(font, line, scale).x});
+        return runs;
+    }
+    f32 x = 0.0f;
+    for (const BidiRun& run : bidi_runs(line, text_base_direction())) {
+        const f32 width = measure_text(font, line.substr(run.begin, run.end - run.begin), scale).x;
+        runs.push_back({run.begin, run.end, run.right_to_left(), x, width});
+        x += width;
+    }
+    return runs;
+}
+
+// The caret before `offset` (within [run.begin, run.end]) in `run`.
+f32 caret_in_run(const Font& font, std::string_view line, const VisualRun& run, std::size_t offset, f32 scale) {
+    const f32 prefix = offset <= run.begin ? 0.0f
+        : offset >= run.end                ? run.width
+                                           : measure_text(font, line.substr(run.begin, offset - run.begin), scale).x;
+    return run.rtl ? run.x + run.width - prefix : run.x + prefix;
+}
+
+} // namespace
+
+TextDirection paragraph_direction(std::string_view text) {
+    if (const std::optional<TextDirection> base = text_base_direction()) {
+        return *base;
+    }
+    return first_strong_direction(text);
+}
+
+f32 caret_x(const Font& font, std::string_view line, std::size_t offset, f32 scale) {
+    offset = std::min(offset, line.size());
+    const std::vector<VisualRun> runs = visual_runs(font, line, scale);
+    if (runs.empty()) {
+        return 0.0f;
+    }
+    // The run holding the character after the caret, else the one ending at it.
+    const VisualRun* at = nullptr;
+    for (const VisualRun& run : runs) {
+        if (run.begin <= offset && offset < run.end) {
+            at = &run;
+            break;
+        }
+        if (run.end == offset) {
+            at = &run;
+        }
+    }
+    return at ? caret_in_run(font, line, *at, offset, scale) : 0.0f;
+}
+
+std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale) {
+    std::size_t best = 0;
+    f32 best_distance = std::numeric_limits<f32>::max();
+    for (const VisualRun& run : visual_runs(font, line, scale)) {
+        // The stops caret_x gives: a run's end only where the line ends (elsewhere
+        // that offset belongs to the run after it).
+        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+            if (k >= run.end && k < line.size()) {
+                break;
+            }
+            const f32 distance = std::abs(caret_in_run(font, line, run, k, scale) - x);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = k;
+            }
+            if (k >= run.end) {
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+std::optional<std::size_t> caret_move(const Font& font, std::string_view line, std::size_t offset, i32 step,
+                                      f32 scale) {
+    offset = std::min(offset, line.size());
+    const f32 from = caret_x(font, line, offset, scale);
+    std::optional<std::size_t> best;
+    f32 best_x = 0.0f;
+    for (const VisualRun& run : visual_runs(font, line, scale)) {
+        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+            if (k >= run.end && k < line.size()) {
+                break; // that offset belongs to the next run (as in caret_x)
+            }
+            const f32 x = caret_in_run(font, line, run, k, scale);
+            const bool ahead = step < 0 ? x < from - 0.01f : x > from + 0.01f;
+            if (k != offset && ahead && (!best || (step < 0 ? x > best_x : x < best_x))) {
+                best = k;
+                best_x = x;
+            }
+            if (k >= run.end) {
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_view line, std::size_t begin,
+                                                 std::size_t end, f32 scale) {
+    std::vector<std::pair<f32, f32>> spans;
+    end = std::min(end, line.size());
+    if (begin >= end) {
+        return spans;
+    }
+    for (const VisualRun& run : visual_runs(font, line, scale)) {
+        const std::size_t a = std::max(begin, run.begin);
+        const std::size_t b = std::min(end, run.end);
+        if (a >= b) {
+            continue;
+        }
+        const f32 xa = caret_in_run(font, line, run, a, scale);
+        const f32 xb = caret_in_run(font, line, run, b, scale);
+        const std::pair<f32, f32> span{std::min(xa, xb), std::max(xa, xb)};
+        if (!spans.empty() && std::abs(spans.back().second - span.first) < 0.01f) {
+            spans.back().second = span.second;
+        } else {
+            spans.push_back(span);
+        }
+    }
+    return spans;
 }
 
 std::vector<std::string> wrap_text(const Font& font, std::string_view text, f32 max_width, f32 scale) {

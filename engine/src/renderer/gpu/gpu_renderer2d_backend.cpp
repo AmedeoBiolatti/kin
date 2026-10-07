@@ -1,6 +1,7 @@
 #include <kin/core/jobs.hpp>
 #include "gpu_renderer2d_backend.hpp"
 #include "../rounded_rect_loop.hpp"
+#include "embedded_gpu_shader.hpp"
 
 #include <kin/platform/log.hpp>
 
@@ -133,60 +134,52 @@ void append_loop_ring(std::vector<gpu::GpuVertex>& out, const std::vector<Vec2f>
 
 GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     : _window(&window), _device(window, device_options(vsync)) {
-    const std::filesystem::path dir{KIN_GPU_SHADER_DIR};
-    _vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX,
-                                               SDL_GPU_SHADERFORMAT_SPIRV,
-                                               dir / "textured_quad.vert.spv",
+    _vertex_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                               "textured_quad.vert.spv",
                                                /*uniform_buffers=*/1, /*samplers=*/0);
-    _fragment_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                 SDL_GPU_SHADERFORMAT_SPIRV,
-                                                 dir / "textured_quad.frag.spv",
+    _fragment_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                 "textured_quad.frag.spv",
                                                  /*uniform_buffers=*/0, /*samplers=*/1);
     try {
-        _instance_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX,
-                                                     SDL_GPU_SHADERFORMAT_SPIRV,
-                                                     dir / "sprite_instanced.vert.spv",
+        _instance_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                     "sprite_instanced.vert.spv",
                                                      /*uniform_buffers=*/1, /*samplers=*/0);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "instanced sprites unavailable; drawing them quad by quad",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
-        _shader_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX,
-                                                          SDL_GPU_SHADERFORMAT_SPIRV,
-                                                          dir / "shader_geometry.vert.spv",
+        _shader_vertex_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                          "shader_geometry.vert.spv",
                                                           /*uniform_buffers=*/1, /*samplers=*/0);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "shader geometry unavailable",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
-        _overdraw_count_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                           SDL_GPU_SHADERFORMAT_SPIRV, dir / "overdraw_count.frag.spv",
+        _overdraw_count_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "overdraw_count.frag.spv",
                                                            /*uniform_buffers=*/0, /*samplers=*/1);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "overdraw view unavailable", (LogFields{{.name = "reason", .value = e.what()}}));
     }
     try {
-        _shape_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
-                                                  dir / "shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
-        _shape_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
-                                                         dir / "shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
-        _sdf_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
-                                                dir / "sdf_shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
-        _sdf_vertex_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_VERTEX, SDL_GPU_SHADERFORMAT_SPIRV,
-                                                       dir / "sdf_shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
-        _distance_field_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
-                                                           dir / "distance_field.frag.spv", /*uniform_buffers=*/1,
+        _shape_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                  "shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
+        _shape_vertex_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                         "shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
+        _sdf_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                "sdf_shape.frag.spv", /*uniform_buffers=*/0, /*samplers=*/1);
+        _sdf_vertex_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_VERTEX,
+                                                       "sdf_shape.vert.spv", /*uniform_buffers=*/1, /*samplers=*/0);
+        _distance_field_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                           "distance_field.frag.spv", /*uniform_buffers=*/1,
                                                            /*samplers=*/1);
-        _mask_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
-                                                 dir / "mask_composite.frag.spv", /*uniform_buffers=*/1,
+        _mask_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                 "mask_composite.frag.spv", /*uniform_buffers=*/1,
                                                  /*samplers=*/2);
-        _color_output_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                         SDL_GPU_SHADERFORMAT_SPIRV, dir / "color_output.frag.spv",
+        _color_output_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "color_output.frag.spv",
                                                          /*uniform_buffers=*/1, /*samplers=*/3);
-        _mask_stencil_shader = gpu::GpuShader::from_file(_device, SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                                         SDL_GPU_SHADERFORMAT_SPIRV, dir / "mask_stencil.frag.spv",
+        _mask_stencil_shader = gpu::GpuShader::from_embedded(_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mask_stencil.frag.spv",
                                                          /*uniform_buffers=*/1, /*samplers=*/1);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "shapes drawn with soft edges only", (LogFields{{.name = "reason", .value = e.what()}}));
@@ -2333,7 +2326,7 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
     std::vector<PostProcessPass> heat;
     if (_overdraw_view && _overdraw_count_shader) {
         if (!_overdraw_heat) {
-            const std::vector<u8> code = gpu::read_shader_file(std::filesystem::path{KIN_GPU_SHADER_DIR} / "overdraw_heat.frag.spv");
+            const std::span<const unsigned char> code = gpu::embedded_gpu_shader("overdraw_heat.frag.spv");
             ShaderDesc desc;
             desc.spirv = {code.data(), static_cast<u32>(code.size())};
             _overdraw_heat = create_shader(desc);

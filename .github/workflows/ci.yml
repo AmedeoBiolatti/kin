@@ -62,6 +62,98 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure -j 4 --timeout 300
 
+  # Signal Siege as Linux players get it. It is built in the Steam Runtime
+  # (sniper, glibc 2.31), so it runs on Steam Deck and older distributions,
+  # then unpacked elsewhere and run from another folder, both on this runner
+  # and in the runtime: a game that needs anything from the build tree or the
+  # working folder fails here. The package is kept as an artifact.
+  ship-linux:
+    name: Ship Linux (Steam Runtime)
+    runs-on: ubuntu-24.04
+    env:
+      SNIPER_SDK: registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest
+      CMAKE_VERSION: 3.31.6
+      NINJA_VERSION: 1.12.1
+    steps:
+      - uses: actions/checkout@v4
+
+      # SPIR-V is the same on every machine, and glslc does not run in the runtime.
+      - name: Compile the shaders
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends glslc
+          cmake -DOUTPUT_DIR="$PWD/spirv" -P cmake/kin_spirv.cmake
+
+      # The runtime's CMake is older than kin needs.
+      - name: CMake and Ninja for the runtime
+        run: |
+          mkdir -p .ci-tools/bin
+          curl -fsSL "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-linux-x86_64.tar.gz" \
+            | tar xz -C .ci-tools --strip-components=1
+          curl -fsSLo ninja.zip "https://github.com/ninja-build/ninja/releases/download/v$NINJA_VERSION/ninja-linux.zip"
+          unzip -q ninja.zip -d .ci-tools/bin
+          rm ninja.zip
+
+      - name: Package in the Steam Runtime
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e CC=gcc-14 -e CXX=g++-14 "$SNIPER_SDK" bash -euxc '
+            export PATH=/src/.ci-tools/bin:$PATH
+            cmake --preset ship -DKIN_SPIRV_DIR=/src/spirv
+            cmake --build --preset ship --target signal_siege_package --parallel 4'
+
+      - name: Needs nothing newer than the runtime
+        run: |
+          tar xzf build-ship/packages/signal_siege-*.tar.gz -C "$RUNNER_TEMP"
+          game=$(ls "$RUNNER_TEMP"/signal_siege-*/signal_siege)
+          newest=$(objdump -T "$game" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "Newest glibc symbol: $newest"
+          test "$(printf '%s\n' "$newest" GLIBC_2.31 | sort -V | tail -1)" = GLIBC_2.31
+          if objdump -p "$game" | grep -q 'NEEDED.*libstdc++'; then
+            echo "The game links libstdc++ from the system"
+            exit 1
+          fi
+
+      - name: Run the package from elsewhere
+        run: bash .github/scripts/run-shipped-siege.sh "$PWD/build-ship/packages" "$RUNNER_TEMP/run"
+
+      - name: Run the package in the Steam Runtime
+        run: |
+          docker run --rm -v "$PWD:/src" -e PATH="/src/.ci-tools/bin:/usr/local/bin:/usr/bin:/bin" "$SNIPER_SDK" \
+            bash /src/.github/scripts/run-shipped-siege.sh /src/build-ship/packages /tmp/run
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signal-siege-linux
+          path: build-ship/packages/*.tar.gz
+          if-no-files-found: error
+
+  # Signal Siege as Windows players get it, with the GPU backend's shaders
+  # (glslc from the runner's MSYS2), run from another folder.
+  ship-windows:
+    name: Ship Windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install glslc
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-shaderc && /ucrt64/bin/glslc --version"
+
+      - name: Configure
+        run: cmake --preset ship-vs -DKIN_GLSLC=C:/msys64/ucrt64/bin/glslc.exe
+
+      - name: Package
+        run: cmake --build --preset ship-vs --target signal_siege_package --parallel 4
+
+      - name: Run the package from elsewhere
+        shell: bash
+        run: bash .github/scripts/run-shipped-siege.sh "$GITHUB_WORKSPACE/build-ship/packages" "$RUNNER_TEMP/run"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signal-siege-windows
+          path: build-ship/packages/*.zip
+          if-no-files-found: error
+
   # The SDL_GPU backend's tests skip without a GPU, so the jobs above never run
   # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
   # virtual X display, and requires them to run.

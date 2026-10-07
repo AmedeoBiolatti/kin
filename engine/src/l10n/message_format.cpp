@@ -266,6 +266,77 @@ PluralCategory categorize(Rule rule, const Operands& o) {
 }
 
 // ---------------------------------------------------------------------------
+// Ordinal rules (CLDR 44)
+
+enum class OrdinalRule : u8 { Other, English, OneIsOne, Italian, Swedish, Catalan, Hungarian, Hindi, Ukrainian };
+
+OrdinalRule ordinal_rule_for(std::string_view locale) {
+    std::array<char, 8> buffer{};
+    const std::string_view l = language_of(locale, buffer);
+    if (l == "en") return OrdinalRule::English;
+    if (l == "fr" || l == "ms" || l == "ro" || l == "vi" || l == "fil" || l == "tl") return OrdinalRule::OneIsOne;
+    if (l == "it") return OrdinalRule::Italian;
+    if (l == "sv") return OrdinalRule::Swedish;
+    if (l == "ca") return OrdinalRule::Catalan;
+    if (l == "hu") return OrdinalRule::Hungarian;
+    if (l == "hi") return OrdinalRule::Hindi;
+    if (l == "uk") return OrdinalRule::Ukrainian;
+    return OrdinalRule::Other;
+}
+
+std::span<const PluralCategory> ordinal_categories_of(OrdinalRule rule) {
+    static constexpr std::array other{P::Other};
+    static constexpr std::array one_other{P::One, P::Other};
+    static constexpr std::array one_two_few_other{P::One, P::Two, P::Few, P::Other};
+    static constexpr std::array many_other{P::Many, P::Other};
+    static constexpr std::array few_other{P::Few, P::Other};
+    static constexpr std::array one_two_few_many_other{P::One, P::Two, P::Few, P::Many, P::Other};
+    switch (rule) {
+    case OrdinalRule::English:
+    case OrdinalRule::Catalan: return one_two_few_other;
+    case OrdinalRule::OneIsOne:
+    case OrdinalRule::Swedish:
+    case OrdinalRule::Hungarian: return one_other;
+    case OrdinalRule::Italian: return many_other;
+    case OrdinalRule::Hindi: return one_two_few_many_other;
+    case OrdinalRule::Ukrainian: return few_other;
+    case OrdinalRule::Other: return other;
+    }
+    return other;
+}
+
+PluralCategory ordinal(OrdinalRule rule, f64 value) {
+    const i64 n = static_cast<i64>(std::llround(std::fabs(value)));
+    const i64 n10 = n % 10;
+    const i64 n100 = n % 100;
+    switch (rule) {
+    case OrdinalRule::English:
+        if (n10 == 1 && n100 != 11) return P::One;
+        if (n10 == 2 && n100 != 12) return P::Two;
+        if (n10 == 3 && n100 != 13) return P::Few;
+        return P::Other;
+    case OrdinalRule::OneIsOne: return n == 1 ? P::One : P::Other;
+    case OrdinalRule::Italian: return n == 11 || n == 8 || n == 80 || n == 800 ? P::Many : P::Other;
+    case OrdinalRule::Swedish: return (n10 == 1 || n10 == 2) && n100 != 11 && n100 != 12 ? P::One : P::Other;
+    case OrdinalRule::Catalan:
+        if (n == 1 || n == 3) return P::One;
+        if (n == 2) return P::Two;
+        if (n == 4) return P::Few;
+        return P::Other;
+    case OrdinalRule::Hungarian: return n == 1 || n == 5 ? P::One : P::Other;
+    case OrdinalRule::Hindi:
+        if (n == 1) return P::One;
+        if (n == 2 || n == 3) return P::Two;
+        if (n == 4) return P::Few;
+        if (n == 6) return P::Many;
+        return P::Other;
+    case OrdinalRule::Ukrainian: return n10 == 3 && n100 != 13 ? P::Few : P::Other;
+    case OrdinalRule::Other: return P::Other;
+    }
+    return P::Other;
+}
+
+// ---------------------------------------------------------------------------
 // Numbers
 
 struct NumberSymbols {
@@ -422,7 +493,7 @@ std::optional<Argument> split_argument(std::string_view inner) {
     const std::string_view after = inner.substr(comma + 1);
     const std::size_t comma2 = after.find(',');
     arg.kind = trim(after.substr(0, comma2));
-    if (arg.kind != "number" && arg.kind != "plural" && arg.kind != "select") {
+    if (arg.kind != "number" && arg.kind != "plural" && arg.kind != "select" && arg.kind != "selectordinal") {
         return std::nullopt;
     }
     if (comma2 != std::string_view::npos) {
@@ -567,7 +638,7 @@ struct Formatter {
                 continue;
             }
             const Branch* chosen = nullptr;
-            if (arg->kind == "plural") {
+            if (arg->kind == "plural" || arg->kind == "selectordinal") {
                 const f64* n = std::get_if<f64>(&value->value);
                 f64 x = 0.0;
                 if (n) {
@@ -587,7 +658,8 @@ struct Formatter {
                     }
                 }
                 if (!chosen) {
-                    const std::string_view category = plural_category_name(categorize(rule, operands_of(x)));
+                    const std::string_view category = plural_category_name(
+                        arg->kind == "plural" ? categorize(rule, operands_of(x)) : ordinal(ordinal_rule_for(locale), x));
                     for (const Branch& b : own) {
                         if (b.key == category) {
                             chosen = &b;
@@ -662,7 +734,8 @@ bool inspect(std::string_view text, MessageShape& shape, std::string& error, boo
         } else if (found->kind.empty() && !arg->kind.empty()) {
             found->kind = std::string{arg->kind};
         }
-        if (arg->kind != "plural" && arg->kind != "select") {
+        const bool plural = arg->kind == "plural" || arg->kind == "selectordinal";
+        if (!plural && arg->kind != "select") {
             continue;
         }
         std::vector<Branch> branches;
@@ -672,7 +745,7 @@ bool inspect(std::string_view text, MessageShape& shape, std::string& error, boo
         }
         const std::size_t index = static_cast<std::size_t>(found - shape.arguments.begin());
         for (const Branch& b : branches) {
-            if (arg->kind == "plural" && b.key[0] != '=') {
+            if (plural && b.key[0] != '=') {
                 PluralCategory unused{};
                 if (!parse_plural_category(b.key, unused)) {
                     error = "unknown plural category '" + std::string{b.key} + "'";
@@ -683,7 +756,7 @@ bool inspect(std::string_view text, MessageShape& shape, std::string& error, boo
             if (std::ranges::find(keys, b.key) == keys.end()) {
                 keys.emplace_back(b.key);
             }
-            if (!inspect(b.body, shape, error, in_plural || arg->kind == "plural")) {
+            if (!inspect(b.body, shape, error, in_plural || plural)) {
                 return false;
             }
         }
@@ -721,6 +794,14 @@ PluralCategory plural_category(std::string_view locale, f64 n) {
 
 std::span<const PluralCategory> plural_categories(std::string_view locale) {
     return categories_of(rule_for(locale));
+}
+
+PluralCategory ordinal_category(std::string_view locale, f64 n) {
+    return ordinal(ordinal_rule_for(locale), n);
+}
+
+std::span<const PluralCategory> ordinal_categories(std::string_view locale) {
+    return ordinal_categories_of(ordinal_rule_for(locale));
 }
 
 std::string format_number(std::string_view locale, f64 n) {

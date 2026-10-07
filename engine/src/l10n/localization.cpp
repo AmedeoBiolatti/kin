@@ -1,5 +1,6 @@
 #include <kin/l10n/localization.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
@@ -17,7 +18,7 @@ std::atomic<Localization*> g_active{nullptr};
 bool is_language_file(const std::filesystem::path& path) {
     std::string ext = path.extension().string();
     std::ranges::transform(ext, ext.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : c; });
-    return ext == ".kinlang" || ext == ".csv";
+    return ext == ".kinlang" || ext == ".csv" || ext == ".po";
 }
 
 std::string source_name(const std::filesystem::path& path) {
@@ -91,11 +92,12 @@ std::string join_categories(std::span<const PluralCategory> categories) {
 // What a translation's plural forms lack for its language.
 void check_plurals(const MessageShape& shape, std::string_view locale, std::string_view key,
                    std::vector<LocalizationIssue>& out) {
-    const std::span<const PluralCategory> needed = plural_categories(locale);
     for (const MessageShape::Argument& arg : shape.arguments) {
-        if (arg.kind != "plural") {
+        if (arg.kind != "plural" && arg.kind != "selectordinal") {
             continue;
         }
+        const std::span<const PluralCategory> needed =
+            arg.kind == "plural" ? plural_categories(locale) : ordinal_categories(locale);
         std::string lacking;
         for (PluralCategory c : needed) {
             if (std::ranges::find(arg.branches, plural_category_name(c)) == arg.branches.end()) {
@@ -144,6 +146,12 @@ bool Localization::load_text(const std::filesystem::path& path, std::string_view
     bool ok = false;
     if (ext == ".csv") {
         ok = parse_language_csv(text, languages, own);
+    } else if (ext == ".po") {
+        LanguageFile file;
+        ok = parse_gettext(text, file, own, path.stem().string());
+        if (ok) {
+            languages.push_back(std::move(file));
+        }
     } else {
         LanguageFile file;
         ok = parse_language_file(text, file, own);
@@ -162,18 +170,12 @@ bool Localization::load_text(const std::filesystem::path& path, std::string_view
 
 bool Localization::load_directory(const std::filesystem::path& dir, std::vector<std::string>& errors,
                                   FileWatcher* watcher) {
-    std::error_code ec;
-    std::vector<std::filesystem::path> files;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (entry.is_regular_file(ec) && is_language_file(entry.path())) {
-            files.push_back(entry.path());
-        }
-    }
-    if (ec) {
-        errors.push_back(dir.string() + ": " + ec.message());
+    if (!content_directory_exists(dir)) {
+        errors.push_back(dir.string() + ": no such folder");
         return false;
     }
-    std::ranges::sort(files);
+    std::vector<std::filesystem::path> files = list_content_files(dir, false);
+    std::erase_if(files, [](const std::filesystem::path& path) { return !is_language_file(path); });
     bool ok = true;
     for (const std::filesystem::path& path : files) {
         if (!watcher) {
@@ -310,6 +312,38 @@ void Localization::resolve_chain() {
     ++_generation;
     const std::scoped_lock lock(_mutex);
     _text_cache.clear();
+    _asset_exists.clear();
+}
+
+std::string Localization::localized_path(const std::filesystem::path& root, std::string_view relative) const {
+    const std::string& shown = pseudo() ? _base_locale : _locale;
+    std::vector<std::string> tags = locale_fallbacks(shown);
+    for (std::string& tag : locale_fallbacks(_base_locale)) {
+        if (std::ranges::find(tags, tag) == tags.end()) {
+            tags.push_back(std::move(tag));
+        }
+    }
+    const std::string root_key = root.generic_string() + "|";
+    for (const std::string& tag : tags) {
+        std::string candidate = "l10n/" + tag + "/";
+        candidate += relative;
+        const std::string key = root_key + candidate;
+        bool exists = false;
+        {
+            const std::scoped_lock lock(_mutex);
+            const auto found = _asset_exists.find(key);
+            if (found != _asset_exists.end()) {
+                exists = found->second;
+            } else {
+                exists = content_file_exists(root / candidate);
+                _asset_exists.emplace(key, exists);
+            }
+        }
+        if (exists) {
+            return candidate;
+        }
+    }
+    return std::string{relative};
 }
 
 TextDirection Localization::direction() const {
@@ -489,7 +523,8 @@ std::vector<LocalizationIssue> Localization::validate() const {
                 if (in_base == wanted.end()) {
                     add_issue(issues, Severity::Warning, locale, key,
                               "'{" + arg.name + "}' is not in the base text: it shows as written unless the game gives it");
-                } else if ((arg.kind == "plural" || arg.kind == "number") && in_base->kind == "select") {
+                } else if ((arg.kind == "plural" || arg.kind == "selectordinal" || arg.kind == "number") &&
+                           in_base->kind == "select") {
                     add_issue(issues, Severity::Error, locale, key,
                               "'{" + arg.name + "}' is a number here but a choice in the base text");
                 }

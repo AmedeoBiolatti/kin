@@ -1,6 +1,7 @@
 #include <kin/particles/particle_catalog.hpp>
 
 #include <kin/assets/asset_manager.hpp>
+#include <kin/assets/content.hpp>
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
@@ -188,8 +189,8 @@ bool parse_particle_pixel_policy(std::string_view value, ParticlePixelPolicy& ou
 }
 
 ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
-    std::ifstream file(path);
-    if (!file) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         KIN_LOG_ERROR_F("asset",
                         "particle catalog open failed",
                         (LogFields{
@@ -198,6 +199,7 @@ ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
                         }));
         throw std::runtime_error("Failed to open particle catalog: " + path.string());
     }
+    std::istringstream file{*text};
 
     ParticleCatalog catalog;
     std::string line;

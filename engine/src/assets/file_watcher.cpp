@@ -1,26 +1,16 @@
 #include <kin/assets/file_watcher.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
-#include <fstream>
 #include <memory>
-#include <sstream>
 #include <utility>
 
 namespace kin {
 
 std::optional<std::string> read_text_file(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        return std::nullopt;
-    }
-    std::ostringstream text;
-    text << file.rdbuf();
-    if (file.bad()) {
-        return std::nullopt;
-    }
-    return std::move(text).str();
+    return read_content_file(path);
 }
 
 FileWatcher::FileWatcher()

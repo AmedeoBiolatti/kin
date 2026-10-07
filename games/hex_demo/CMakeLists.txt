@@ -6,6 +6,8 @@ target_link_libraries(hex_demo PRIVATE
     kin::engine
 )
 
+kin_game(hex_demo TITLE "Hex Demo")
+
 target_compile_options(hex_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>
     $<$<CXX_COMPILER_ID:MSVC>:/W4>

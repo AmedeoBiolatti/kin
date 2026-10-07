@@ -1,11 +1,10 @@
 #include <kin/ecs/component_schema.hpp>
 
+#include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 
 #include <algorithm>
-#include <fstream>
-#include <sstream>
 #include <unordered_set>
 
 namespace kin {
@@ -100,13 +99,11 @@ void apply_metadata(EcsComponentRegistry::DataComponentBuilder& builder, const C
 } // namespace
 
 ComponentSchemaLoadResult load_component_schema_asset(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
         return {.diagnostics = {"failed to open component schema '" + path.string() + "'"}};
     }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return parse_component_schema_asset(buffer.str(), path.string());
+    return parse_component_schema_asset(*text, path.string());
 }
 
 ComponentSchemaLoadResult parse_component_schema_asset(std::string_view text, std::string_view source) {

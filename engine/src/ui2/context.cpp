@@ -4,10 +4,14 @@
 #include <kin/platform/log.hpp>
 #include <kin/renderer/post_blur.hpp>
 
+#include "mirror_internal.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <utility>
 
 namespace kin::ui2 {
@@ -333,6 +337,10 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _diagnostics.clear();
     _draw_scopes.clear();
     _clip_stack.clear();
+    while (!_mirror_axes.empty()) {
+        _mirror_axes.pop_back(); // a scope left open last frame
+        mirror_detail::leave();
+    }
     _frame_region_ids.clear();
     _frame_dup_reported.clear();
     _draw_ops.clear();
@@ -342,6 +350,8 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _debug_last_hue = 0.0f;
     _surface_fill_under = colors::black;
     _wants_text_input = false;
+    _text_input_area.reset();
+    _text_input_cursor = 0;
     _root = {};
     _popup_opened_this_frame = {};
     _popup_frame_bounds.clear();
@@ -442,8 +452,50 @@ void Context::end() {
     _renderer = nullptr;
 }
 
+namespace {
+
+std::atomic<bool> g_collect_overflows{false};
+std::mutex g_overflows_mutex;
+std::vector<OverflowRecord> g_overflows;
+
+void collect_overflow(std::string_view widget, std::string_view detail, Rectf bounds, Vec2f wanted) {
+    const std::scoped_lock lock(g_overflows_mutex);
+    for (OverflowRecord& record : g_overflows) {
+        if (record.widget == widget && record.detail == detail) {
+            record.bounds = bounds;
+            record.wanted = wanted;
+            ++record.seen;
+            return;
+        }
+    }
+    if (g_overflows.size() < 256) {
+        g_overflows.push_back({std::string{widget}, std::string{detail}, bounds, wanted, 1});
+    }
+}
+
+} // namespace
+
+void collect_overflows(bool enabled) {
+    g_collect_overflows.store(enabled, std::memory_order_relaxed);
+}
+
+bool collecting_overflows() {
+    return g_collect_overflows.load(std::memory_order_relaxed);
+}
+
+std::vector<OverflowRecord> collected_overflows() {
+    const std::scoped_lock lock(g_overflows_mutex);
+    return g_overflows;
+}
+
+void clear_collected_overflows() {
+    const std::scoped_lock lock(g_overflows_mutex);
+    g_overflows.clear();
+}
+
 void Context::report_overflow(std::string_view widget, Rectf bounds, Vec2f wanted, std::string_view detail) {
-    if (!_debug.detect_overflow) {
+    const bool collect = collecting_overflows();
+    if (!_debug.detect_overflow && !collect) {
         return;
     }
     constexpr f32 epsilon = 0.5f;
@@ -461,6 +513,12 @@ void Context::report_overflow(std::string_view widget, Rectf bounds, Vec2f wante
         .wanted = wanted,
         .overflow = overflow,
     };
+    if (collect) {
+        collect_overflow(widget, detail, bounds, wanted);
+    }
+    if (!_debug.detect_overflow) {
+        return;
+    }
     if (_debug.log_overflow) {
         KIN_LOG_WARN_F("ui",
                        "ui2 overflow",
@@ -481,7 +539,7 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
     }
     if (_modal_blocking) {
         const Rectf allowed = !_modal_stack.empty() ? _modal_stack.back() : _modal_bounds;
-        if (!contains(allowed, pointer())) {
+        if (!contains(allowed, screen_pointer())) {
             return out;
         }
     }
@@ -543,7 +601,7 @@ Context::ModalResult Context::begin_modal(Id id, Rectf bounds, ModalOptions opti
     result.open = true;
     result.opened = _modal_opened_this_frame == id;
     result.bounds = bounds;
-    _modal_bounds = bounds;
+    _modal_bounds = to_screen(bounds);
     _modal_blocking = options.block_background_input;
 
     Rectf screen = default_screen(_renderer);
@@ -551,7 +609,7 @@ Context::ModalResult Context::begin_modal(Id id, Rectf bounds, ModalOptions opti
         fill_rect(screen, options.overlay);
     }
     region(id, bounds, options.z);
-    _modal_stack.push_back(bounds);
+    _modal_stack.push_back(to_screen(bounds));
 
     if (options.close_on_escape && action_pressed("quit")) {
         close_modal(id);
@@ -606,7 +664,9 @@ bool Context::popup_open(Id id) const {
 }
 
 bool Context::popup_hovered_or_open(Id id) const {
-    return popup_open(id) || (_input && (contains_any(_popup_stack, pointer()) || contains_any(_popup_last_bounds, pointer())));
+    // Popup bounds are kept on screen (a mirrored widget's popup is reflected).
+    return popup_open(id) ||
+           (_input && (contains_any(_popup_stack, screen_pointer()) || contains_any(_popup_last_bounds, screen_pointer())));
 }
 
 Context::PopupResult Context::begin_popup(Id id, Rectf anchor, PopupOptions options) {
@@ -619,17 +679,29 @@ Context::PopupResult Context::begin_popup(Id id, Rectf anchor, PopupOptions opti
     if (screen.w <= 0.0f || screen.h <= 0.0f) {
         screen = default_screen(_renderer);
     }
-    Rectf bounds = flipped_popup_bounds(anchor, options, screen);
+    Rectf bounds{};
+    if (ui_direction() == TextDirection::RightToLeft && _mirror_axes.empty()) {
+        // Right to left: placed as left to right in the world reflected about
+        // the anchor, so a dropdown aligns to its anchor's right edge and a
+        // submenu opens to the left. (In a mirror scope the scope does this.)
+        const f32 axis = anchor.x * 2.0f + anchor.w;
+        const Rectf reflected_screen{axis - screen.x - screen.w, screen.y, screen.w, screen.h};
+        bounds = flipped_popup_bounds(anchor, options, reflected_screen);
+        bounds.x = axis - bounds.x - bounds.w;
+    } else {
+        bounds = flipped_popup_bounds(anchor, options, screen);
+    }
     result.open = true;
     result.opened = _popup_opened_this_frame == id;
     result.bounds = bounds;
 
     region(id, bounds, options.z);
-    _popup_stack.push_back(bounds);
-    _popup_frame_bounds.push_back(bounds);
+    _popup_stack.push_back(to_screen(bounds));
+    _popup_frame_bounds.push_back(to_screen(bounds));
 
     if (options.close_on_outside_click && _input && _popup_opened_this_frame != id && pointer_pressed() &&
-        !contains(bounds, pointer()) && !contains_any(_popup_stack, pointer()) && !contains_any(_popup_last_bounds, pointer())) {
+        !contains(bounds, pointer()) && !contains_any(_popup_stack, screen_pointer()) &&
+        !contains_any(_popup_last_bounds, screen_pointer())) {
         close_popup(id);
         _input->consume_mouse_frame_pressed(MouseButton::Left);
         result.open = false;
@@ -798,14 +870,54 @@ std::string Context::prompt_for_action(std::string_view action, const PromptOpti
     return result;
 }
 
+Vec2f Context::screen_pointer() const {
+    if (!_input) {
+        return {};
+    }
+    return _renderer ? _renderer->window_to_logical(_input->mouse_pos()) : _input->mouse_pos();
+}
+
+Rectf Context::to_screen(Rectf rect) const {
+    for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
+        rect.x = *axis - rect.x - rect.w;
+    }
+    return rect;
+}
+
 Vec2f Context::pointer() const {
     if (!_input) {
         return {};
     }
-    if (_renderer) {
-        return _renderer->window_to_logical(_input->mouse_pos());
+    Vec2f p = screen_pointer();
+    // Into the mirror scopes' own coordinates: the outermost reflection first.
+    for (const f32 axis : _mirror_axes) {
+        p.x = axis - p.x;
     }
-    return _input->mouse_pos();
+    return p;
+}
+
+void Context::push_mirror(Rectf bounds) {
+    const f32 axis = bounds.x * 2.0f + bounds.w;
+    _mirror_axes.push_back(axis);
+    mirror_detail::enter();
+    if (_renderer) {
+        _renderer->push_transform(Affine2{-1.0f, 0.0f, 0.0f, 1.0f, axis, 0.0f});
+    }
+}
+
+void Context::pop_mirror() {
+    if (_mirror_axes.empty()) {
+        return;
+    }
+    _mirror_axes.pop_back();
+    mirror_detail::leave();
+    if (_renderer) {
+        _renderer->pop_transform();
+    }
+}
+
+Context::MirrorGuard Context::mirror_if_right_to_left(Rectf bounds) {
+    return MirrorGuard{ui_direction() == TextDirection::RightToLeft ? this : nullptr, bounds};
 }
 
 bool Context::pointer_pressed(MouseButton button) const {
@@ -842,6 +954,34 @@ bool Context::modifier_held(KeyModifiers modifiers) const {
 
 std::string_view Context::text_input() const {
     return _input ? _input->text_input() : std::string_view{};
+}
+
+std::string_view Context::text_composition() const {
+    return _input ? _input->text_composition() : std::string_view{};
+}
+
+i32 Context::text_composition_cursor() const {
+    return _input ? _input->text_composition_cursor() : 0;
+}
+
+void Context::set_text_input_area(Rectf area, f32 caret_x) {
+    if (!_renderer) {
+        return;
+    }
+    const Vec2f a = _renderer->logical_to_window({area.x, area.y});
+    const Vec2f b = _renderer->logical_to_window({area.x + area.w, area.y + area.h});
+    const Vec2f caret = _renderer->logical_to_window({caret_x, area.y});
+    _text_input_area = Rectf{std::min(a.x, b.x), std::min(a.y, b.y), std::abs(b.x - a.x), std::abs(b.y - a.y)};
+    _text_input_cursor = static_cast<i32>(caret.x - _text_input_area->x);
+}
+
+void Context::apply_text_input(Window& window) const {
+    if (window.text_input_enabled() != _wants_text_input) {
+        window.set_text_input_enabled(_wants_text_input);
+    }
+    if (_wants_text_input && _text_input_area) {
+        window.set_text_input_area(*_text_input_area, _text_input_cursor);
+    }
 }
 
 std::string Context::clipboard_text() const {
@@ -1259,6 +1399,10 @@ void Context::check_draw(std::string_view kind, Rectf rect, bool corner_exempt) 
 }
 
 void Context::push_clip(Rectf bounds) {
+    // Clips are untransformed: reflected here, innermost scope first.
+    for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
+        bounds.x = *axis - bounds.x - bounds.w;
+    }
     _clip_stack.push_back(_clip_stack.empty() ? bounds : rect_intersect(_clip_stack.back(), bounds));
     if (_renderer) {
         _renderer->push_clip(bounds);
@@ -1269,6 +1413,10 @@ void Context::push_clip(Rectf bounds, std::array<f32, 4> corner_radii) {
     if (std::ranges::all_of(corner_radii, [](f32 r) { return r <= 0.0f; })) {
         push_clip(bounds);
         return;
+    }
+    for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
+        bounds.x = *axis - bounds.x - bounds.w;
+        corner_radii = {corner_radii[1], corner_radii[0], corner_radii[3], corner_radii[2]};
     }
     _clip_stack.push_back(_clip_stack.empty() ? bounds : rect_intersect(_clip_stack.back(), bounds));
     if (_renderer) {
@@ -1703,6 +1851,11 @@ void Context::sprite(const Sprite& sprite, Rectf bounds, Color tint, bool corner
     if (_renderer && sprite.valid() && bounds.w > 0.0f && bounds.h > 0.0f && tint.a > 0) {
         check_draw("sprite", bounds, corner_exempt);
         record_draw(DrawOp::Kind::Sprite, bounds, 0.0f, 0.0f, tint);
+        // Images keep their orientation in a mirror scope (see text()).
+        std::optional<Renderer2D::TransformGuard> unmirror;
+        if (!_mirror_axes.empty()) {
+            unmirror.emplace(_renderer->scoped_transform(Affine2{-1.0f, 0.0f, 0.0f, 1.0f, bounds.x * 2.0f + bounds.w, 0.0f}));
+        }
         _renderer->draw_texture(sprite.texture, sprite.source, bounds, tint);
     }
 }
@@ -1744,6 +1897,13 @@ void Context::text(std::string_view value, Vec2f pos, const TextStyle& style) {
         color = hsv_color(std::fmod(_debug_last_hue + 0.5f, 1.0f), 1.0f, 1.0f, 255);
     }
     const Vec2f base{std::round(pos.x), std::round(pos.y)};
+    // In a mirror scope the text goes to its reflected place but reads the
+    // right way: reflected once more, about its own middle.
+    std::optional<Renderer2D::TransformGuard> unmirror;
+    if (!_mirror_axes.empty()) {
+        const f32 middle = base.x + measure_text(style.font, value, style.scale).x * 0.5f;
+        unmirror.emplace(_renderer->scoped_transform(Affine2{-1.0f, 0.0f, 0.0f, 1.0f, middle * 2.0f, 0.0f}));
+    }
     // The drop shadow under the text, the outline round it (from the distance
     // field with an Sdf font, else four offset copies). Skipped in the debug
     // wireframe theme (already recoloured) for clarity.

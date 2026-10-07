@@ -40,6 +40,7 @@ an explicit `--seed`.
 | `--locale=TAG` / `--locale TAG` | Show the game in this language (see [localization](localization.md)), over its own choice. Headless and server runs without it use the base language. |
 | `--pseudo-locale` | Show the pseudo-locale (`en-XA`): accented, longer, bracketed text, to find untranslated strings and layouts that will not fit. |
 | `--fail-on-missing-text` | Fail the run if any text was looked up by a key the shown language lacks. The run report always lists them under `localization.missing_text`. |
+| `--fail-on-text-overflow` | Fail the run if any ui2 widget's text did not fit its bounds. The run report always lists them under `ui_overflow`; with `--pseudo-locale` this finds layouts too tight for longer languages. |
 | `--profile-lines` | Enable compiled-in Kin profile line/block capture. |
 | `--profile-json=PATH` | Write `kin.profile/1` JSON to PATH (`-` for stdout). |
 | `--profile-text=PATH` | Write a text profile summary to PATH (`-` for stdout). |
@@ -74,7 +75,8 @@ void write_report(kin::JsonWriter& json) const override {
 ## Server Mode
 
 `--server` runs the game as a long-lived JSON-RPC command server. An agent starts
-the process once and drives it with commands.
+the process once and drives it with commands. Shipping builds leave it out
+(`KIN_ENABLE_AGENT_SERVER`; [shipping](shipping.md)), and `--server` fails there.
 
 ```text
 --server-transport=stdio|http      # default stdio
@@ -125,6 +127,7 @@ curl -s localhost:8137/world.snapshot
 curl -s localhost:8137/server.shutdown
 ```
 
+The server listens on `127.0.0.1` only, so other machines cannot drive the game.
 Success is `200`, bad request/params is `400`, and unknown method is `404`.
 Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 

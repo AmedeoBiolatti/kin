@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <string>
 
+#include "content_io.hpp"
+
 namespace kin {
 namespace {
 
@@ -20,7 +22,8 @@ std::string path_string(const std::filesystem::path& path) {
 
 Image load_image(const std::filesystem::path& path) {
     const std::string filename = path_string(path);
-    SDL_Surface* loaded = IMG_Load(filename.c_str());
+    SDL_IOStream* stream = open_content_stream(path);
+    SDL_Surface* loaded = stream ? IMG_Load_IO(stream, true) : nullptr;
     if (!loaded) {
         const std::string error = "IMG_Load failed for " + filename + ": " + SDL_GetError();
         KIN_LOG_ERROR_F("asset",
