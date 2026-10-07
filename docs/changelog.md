@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- `create_texture_from_rgba(pixels, size, ScaleMode::Mipmapped)`: a texture
+  made with its mipmaps from the start. `set_scale_mode(Mipmapped)` on a
+  finished texture copies it whole (two of them in memory for a moment); for
+  a big prerendered sheet, create it this way.
+
 ## [0.2.6] — 2026-10-07
 
 A release for sound, other languages and shipping. Audio mixes on the

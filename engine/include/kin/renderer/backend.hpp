@@ -275,6 +275,15 @@ public:
     virtual Vec2f logical_to_window(Vec2f logical) const = 0;
 
     virtual Texture create_texture_from_rgba(const u8* pixels, Vec2i size) = 0;
+    // As above, sampled with `mode` from the start (Mipmapped: its smaller
+    // levels made with the upload, no second copy of the texture).
+    virtual Texture create_texture_from_rgba(const u8* pixels, Vec2i size, ScaleMode mode) {
+        Texture texture = create_texture_from_rgba(pixels, size);
+        if (texture.valid()) {
+            set_scale_mode(texture, mode);
+        }
+        return texture;
+    }
     // A texture of `format`, filled from `pixels` (size.x * size.y texels, rows
     // top to bottom) or with zeros when null. The default handles Rgba8 only and
     // returns an invalid texture for the data formats.

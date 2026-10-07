@@ -2155,6 +2155,13 @@ void test_gpu_mipmaps() {
             throw std::runtime_error(std::string(test_name) + ": off grey " + std::to_string(mipmapped) +
                                      " with mipmaps, " + std::to_string(aliased) + " without");
         }
+        // Made mipmapped from the start, it samples the same.
+        const kin::Texture direct = renderer->create_texture_from_rgba(checker.data(), {n, n}, kin::ScaleMode::Mipmapped);
+        const double direct_off = drawn_small(direct).first;
+        if (!(direct_off < 8.0)) {
+            throw std::runtime_error(std::string(test_name) + ": off grey " + std::to_string(direct_off) +
+                                     " made mipmapped");
+        }
         // Updating it remakes the smaller levels.
         std::vector<kin::u8> red(static_cast<std::size_t>(n) * n * 4);
         for (std::size_t i = 0; i < red.size(); i += 4) {
@@ -2163,6 +2170,8 @@ void test_gpu_mipmaps() {
         }
         assert(renderer->update_texture(smooth, {0, 0}, {n, n}, red.data()));
         assert(color_near(drawn_small(smooth).second, kin::Color::rgb(255, 0, 0), 2));
+        assert(renderer->update_texture(direct, {0, 0}, {n, n}, red.data()));
+        assert(color_near(drawn_small(direct).second, kin::Color::rgb(255, 0, 0), 2));
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;

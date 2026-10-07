@@ -796,7 +796,9 @@ smaller copies made on the GPU, sampled trilinearly. Updates remake them. On an
 RTX 4080 Laptop GPU, 4000 sprites of a 2048 x 2048 texture drawn at 24 x 24
 went from 0.29-0.36 to 0.21-0.23 ms a frame, and a 1-pixel checkerboard drawn
 that small from 31 levels off grey to 1 (`kin_draw_bench 1 1 mipmaps`). They
-cost a third more texture memory. SDL_GPU, RGBA8 textures that are not render
+cost a third more texture memory. Make a big one mipmapped from the start with
+`create_texture_from_rgba(pixels, size, kin::ScaleMode::Mipmapped)`; switching a
+finished texture copies it whole first. SDL_GPU, RGBA8 textures that are not render
 targets; elsewhere `Mipmapped` is `Linear`.
 
 ## Blend Modes

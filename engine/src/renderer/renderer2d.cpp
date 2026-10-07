@@ -420,6 +420,21 @@ Texture Renderer2D::create_texture_from_rgba(const u8* pixels, Vec2i size) {
     }
 }
 
+Texture Renderer2D::create_texture_from_rgba(const u8* pixels, Vec2i size, ScaleMode mode) {
+    try {
+        return _backend->create_texture_from_rgba(pixels, size, mode);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render",
+                        "texture creation failed",
+                        (LogFields{
+                            {.name = "width", .value = std::to_string(size.x)},
+                            {.name = "height", .value = std::to_string(size.y)},
+                            {.name = "error", .value = error.what()},
+                        }));
+        throw;
+    }
+}
+
 void Renderer2D::draw_texture(const Texture& texture, Rectf dest) {
     if (drawable(texture)) {
         KIN_TRACE_DRAW(DrawKind::Texture, dest, colors::white, &texture);

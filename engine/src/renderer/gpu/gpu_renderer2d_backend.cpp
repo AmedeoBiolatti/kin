@@ -1231,6 +1231,24 @@ Texture GpuRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
     return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex))};
 }
 
+Texture GpuRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i size, ScaleMode mode) {
+    if (mode != ScaleMode::Mipmapped) {
+        Texture texture = create_texture_from_rgba(pixels, size);
+        if (texture.valid()) {
+            set_scale_mode(texture, mode);
+        }
+        return texture;
+    }
+    if (!pixels || size.x <= 0 || size.y <= 0) {
+        return {};
+    }
+    gpu::GpuTexture tex = _device.create_texture(pixels, static_cast<u32>(size.x), static_cast<u32>(size.y),
+                                                 _color_texture_format, 4, 0, /*mipmapped=*/true);
+    auto backend = std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Mipmapped);
+    backend->set_mipmapped();
+    return Texture{std::move(backend)};
+}
+
 namespace {
 
 // A shader known across runs (pipeline records): FNV-1a of its SPIR-V, never 0

@@ -48,6 +48,8 @@ public:
         return std::exchange(_texture, std::move(texture));
     }
     bool mipmapped() const { return _mipmapped; }
+    // Made with its smaller levels (create_texture_from_rgba with Mipmapped).
+    void set_mipmapped() const { _mipmapped = true; }
     // Render targets store premultiplied alpha; sampling them out uses the
     // premultiplied blend (matches the SDL backend's BLEND_PREMULTIPLIED).
     bool premultiplied() const { return _premultiplied; }
@@ -122,6 +124,7 @@ public:
     Vec2f logical_to_window(Vec2f logical) const override;
 
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
+    Texture create_texture_from_rgba(const u8* pixels, Vec2i size, ScaleMode mode) override;
     Texture create_texture(Vec2i size, TextureFormat format, const void* pixels) override;
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,

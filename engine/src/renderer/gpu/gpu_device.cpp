@@ -19,6 +19,15 @@ namespace kin::gpu {
 
 namespace {
 
+// Levels of a full chain down to 1 x 1.
+u32 mip_level_count(u32 w, u32 h) {
+    u32 levels = 1;
+    while ((std::max(w, h) >> levels) > 0) {
+        ++levels;
+    }
+    return levels;
+}
+
 // Force SPIR-V so SDL_GPU selects the Vulkan backend.
 constexpr SDL_GPUShaderFormat SupportedShaderFormats = SDL_GPU_SHADERFORMAT_SPIRV;
 constexpr u32 DefaultUploadRingSize = 1024u * 1024u;
@@ -265,7 +274,7 @@ GpuTexture GpuDevice::create_texture_from_rgba(const u8* pixels, u32 width, u32 
 }
 
 GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
-                                     u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage) {
+                                     u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage, bool mipmapped) {
     if (width == 0 || height == 0 || texel_bytes == 0) {
         throw std::runtime_error("create_texture failed: invalid arguments");
     }
@@ -290,10 +299,16 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     texture_info.layer_count_or_depth = 1;
     texture_info.num_levels = 1;
     texture_info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    if (mipmapped) {
+        if (!clear_on_gpu) {
+            throw std::runtime_error("create_texture failed: only RGBA8 textures can have mipmaps");
+        }
+        texture_info.num_levels = mip_level_count(width, height);
+    }
 
     // A released texture of the same kind, if the pool has one: its first upload
     // replaces it whole, cycled in case a frame on the GPU still reads it.
-    SDL_GPUTexture* raw_texture = _texture_pool->take(width, height, format, texture_info.usage);
+    SDL_GPUTexture* raw_texture = mipmapped ? nullptr : _texture_pool->take(width, height, format, texture_info.usage);
     const bool reused = raw_texture != nullptr;
     if (!reused) {
         raw_texture = SDL_CreateGPUTexture(_device, &texture_info);
@@ -308,9 +323,15 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
         } else {
             stage_texture_upload(raw_texture, 0, 0, width, height, pixels, texel_bytes, /*cycle=*/reused);
         }
+        if (mipmapped) {
+            generate_mipmaps(raw_texture);
+        }
     } catch (...) {
         SDL_ReleaseGPUTexture(_device, raw_texture);
         throw;
+    }
+    if (mipmapped) {
+        return GpuTexture{_shared, raw_texture, width, height, format};
     }
     const u64 bytes = static_cast<u64>(width) * height * texel_bytes;
     return GpuTexture{_shared, raw_texture, width, height, format, _texture_pool, bytes, texture_info.usage};
@@ -462,10 +483,7 @@ void GpuDevice::end_upload_pass() {
 
 GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
     const u32 w = source.width(), h = source.height();
-    u32 levels = 1;
-    while ((std::max(w, h) >> levels) > 0) {
-        ++levels;
-    }
+    const u32 levels = mip_level_count(w, h);
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = source.format();
