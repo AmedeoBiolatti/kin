@@ -9,7 +9,7 @@ built to be driven from code, the command line, and automated agents. It starts
 small, stays honest about its scope, and grows alongside the games built with it.
 [The manifest](docs/manifest.md) explains the design philosophy.
 
-> **Status — v0.2.5.** The engine, its test suite, demos (`games/`) and two
+> **Status — v0.2.6.** The engine, its test suite, demos (`games/`) and two
 > performance examples (`examples/`). 0.2 adds hex grids, 2D lighting, a shared
 > job system and richer shaders; 0.2.1 adds a multi-line text editor, faster
 > rendering and tilemaps, and fixes a GPU crash on exit; 0.2.2 draws large
@@ -21,7 +21,10 @@ small, stays honest about its scope, and grows alongside the games built with it
 > vector shapes and SVG, text that scales, mirrored sprites, clips and masks of
 > any shape, and an opt-in linear colour pipeline with HDR, tonemapping and LUT
 > grading; 0.2.5 adds compact saves and slot summaries, kerns ui2 text as the
-> font says and measures it far faster; see the
+> font says and measures it far faster; 0.2.6 mixes audio on its own thread,
+> with streamed Ogg/MP3/FLAC, effects per bus and adaptive music, adds
+> localization (text in any script, right to left, input methods) and ships
+> games as folders with a content pack, for Linux and Windows; see the
 > [changelog](docs/changelog.md). APIs are young and may change between minor
 > versions.
 
@@ -143,7 +146,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(kin
     GIT_REPOSITORY https://github.com/AmedeoBiolatti/kin.git
-    GIT_TAG v0.2.5
+    GIT_TAG v0.2.6
 )
 FetchContent_MakeAvailable(kin)
 

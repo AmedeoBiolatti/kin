@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(kin VERSION 0.2.5 LANGUAGES C CXX)
+project(kin VERSION 0.2.6 LANGUAGES C CXX)
 
 include(CTest)
 

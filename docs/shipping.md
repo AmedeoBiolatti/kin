@@ -4,7 +4,7 @@ A game built with kin ships as a folder: the executable, its content packed into
 one `.kinpak` archive beside it, and the license texts it must carry.
 
 ```text
-signal_siege-0.2.5-linux-x86_64/
+signal_siege-0.2.6-linux-x86_64/
   signal_siege             (signal_siege.exe on Windows)
   signal_siege.kinpak      the game's content: images, sounds, fonts, text, scripts, data
   licenses/                kin's license and those of the libraries built into it
