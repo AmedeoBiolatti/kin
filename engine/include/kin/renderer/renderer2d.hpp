@@ -265,6 +265,10 @@ public:
 
     Texture create_texture_from_rgba(const u8* pixels, i32 width, i32 height);
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size);
+    // Sampled with `mode` from the start. With Mipmapped the smaller levels are
+    // made with the upload, where set_scale_mode(Mipmapped) afterwards copies the
+    // whole texture (a second one, briefly, in memory).
+    Texture create_texture_from_rgba(const u8* pixels, Vec2i size, ScaleMode mode);
     // A texture of any TextureFormat, filled from `pixels` (size.x * size.y texels
     // of texture_format_bytes(format) each, rows top to bottom) or with zeros when
     // null. The data formats need capabilities().data_textures: without it this
