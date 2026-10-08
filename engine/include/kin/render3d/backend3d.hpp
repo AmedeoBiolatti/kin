@@ -71,6 +71,10 @@ struct Render3DStats {
     u32 ao_instances = 0;  // meshes drawn into it
     u32 ao_dispatches = 0; // compute dispatches (the occlusion and its blur)
     u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
+    u32 taa_dispatches = 0; // compute dispatches of the temporal anti-aliasing (the resolve, and the sharpen): 0 when off
+    bool taa_reset = false; // its history was not used this render: the first, after a resize or reset_history(), or the camera changed kind
+    Vec2f taa_jitter{};     // this render's offset in pixels (0, 0 when off)
+    u32 samples = 0;        // samples a pixel of the scene took: the view's, or 1 with temporal anti-aliasing
     u32 lights = 0;    // point lights used
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
     u64 triangles = 0;
@@ -85,6 +89,9 @@ public:
     virtual Texture texture() const = 0;
     virtual Vec2i size() const = 0;
     virtual u32 samples() const = 0;
+    // Forgets the temporal anti-aliasing's history, so the next frame starts
+    // afresh (a camera cut, a scene change).
+    virtual void reset_history() {}
 };
 
 class IRenderer3DBackend {

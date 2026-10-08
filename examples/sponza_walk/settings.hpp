@@ -96,6 +96,13 @@ struct Settings {
     float contact_thickness = 0.1f;
     float contact_intensity = 1.0f;
     int contact_steps = 20;
+    // Temporal anti-aliasing (replaces MSAA while on)
+    bool taa = false;
+    float taa_blend = 0.9f;
+    float taa_sharpness = 0.0f;
+    float taa_jitter_scale = 1.0f;
+    int taa_jitter_samples = 8;
+    bool taa_freeze = false;
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};
@@ -165,6 +172,12 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                              .thickness = s.contact_thickness,
                              .intensity = s.contact_intensity,
                              .steps = static_cast<u32>(std::clamp(s.contact_steps, 4, 64))};
+    scene.taa = {.enabled = s.taa,
+                 .blend = s.taa_blend,
+                 .sharpness = s.taa_sharpness,
+                 .jitter_scale = s.taa_jitter_scale,
+                 .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, 16)),
+                 .freeze_jitter = s.taa_freeze};
     scene.cull = s.cull;
 }
 

@@ -55,6 +55,14 @@ public:
         return s.y > 0 ? static_cast<f32>(s.x) / static_cast<f32>(s.y) : 1.0f;
     }
     IView3DBackend* backend() const { return _backend.get(); }
+    // Drops the history Scene3D::taa blends in, so that the next frame does
+    // not show the one before: call it when the camera cuts to somewhere
+    // else, or the scene is replaced. (A resize does it by itself.)
+    void reset_history() {
+        if (_backend) {
+            _backend->reset_history();
+        }
+    }
 
 private:
     std::shared_ptr<IView3DBackend> _backend;

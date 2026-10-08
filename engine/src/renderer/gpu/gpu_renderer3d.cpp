@@ -7,6 +7,7 @@
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
+#include <kin/render3d/taa.hpp>
 #include <kin/renderer/color.hpp>
 
 #include <algorithm>
@@ -135,6 +136,19 @@ struct ContactUniforms {
     f32 sizes[4];
     f32 sun[4];   // toward the sun in view space, 1 if orthographic
     f32 shape[4]; // distance, thickness, intensity, steps
+};
+// prepass_velocity.vert's, a draw.
+struct VelocityUniforms {
+    f32 view_projection[16]; // jittered: where the pixel is drawn
+    f32 current[16];         // this frame's, without the jitter
+    f32 prior[16];           // the last frame's
+    u32 first[4];            // x: the draw's first instance
+};
+// taa.comp's.
+struct TaaUniforms {
+    f32 sizes[4];  // the picture's width and height, and 1 over them
+    f32 params[4]; // history weight, 1 when there is no history, 1 to sharpen, sharpness
+    f32 jitter[4]; // this frame's offset in pixels
 };
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
@@ -351,6 +365,31 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     } catch (const std::exception& e) {
         KIN_LOG_INFO_F("render", "3D: ambient occlusion and contact shadows not available", (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    // Temporal anti-aliasing: the velocity pre-pass, four-float colour targets
+    // to draw it into and a float storage texture for the history, over what
+    // the pre-pass already needs.
+    if (_ao_available) {
+        try {
+            _prepass_velocity_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_velocity.vert.spv",
+                                                                       /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/2);
+            _prepass_velocity_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "prepass_velocity.frag.spv");
+            _prepass_velocity_mask_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "prepass_velocity_mask.frag.spv",
+                                                                     /*uniform_buffers=*/1, /*samplers=*/1);
+            if (!SDL_GPUTextureSupportsFormat(handle, hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                              SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+                !SDL_GPUTextureSupportsFormat(handle, hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                              SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
+                throw std::runtime_error("no four-float colour target or storage texture");
+            }
+            _taa_pipeline = make_compute(handle, "taa.comp.spv", 4);
+            if (!_taa_pipeline) {
+                throw std::runtime_error(std::string{"compute pipeline not made: "} + SDL_GetError());
+            }
+            _taa_available = true;
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: temporal anti-aliasing not available", (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+    }
     {
         // Image-based light: compute filters an environment into mips; sampled
         // by direction, so u wraps and v stops at the poles.
@@ -408,7 +447,7 @@ GpuRenderer3D::~GpuRenderer3D() {
     if (_environment_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _environment_sampler);
     }
-    for (SDL_GPUComputePipeline* compute : {_filter_pipeline, _gtao_pipeline, _ao_blur_pipeline, _contact_pipeline}) {
+    for (SDL_GPUComputePipeline* compute : {_filter_pipeline, _gtao_pipeline, _ao_blur_pipeline, _contact_pipeline, _taa_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
@@ -515,6 +554,18 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                                  .samples = sample_count(samples),
                                                  .wireframe = pass == Pass::Wire,
                                                  .depth_bias = pass == Pass::Wire});
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask) const {
+    // The pre-pass with velocity: one sample, the normal and the velocity in four floats.
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _prepass_velocity_vertex_shader.handle(),
+                                                 .fragment = (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
+                                                 .blend = GpuBlendMode::Replace,
+                                                 .format = hdr_format,
+                                                 .layout = GpuVertexLayout::MeshVertices,
+                                                 .depth_stencil = depth,
+                                                 .depth = GpuDepthTest::TestWrite,
+                                                 .cull = cull ? GpuCull::Back : GpuCull::None});
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const {
@@ -758,6 +809,7 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
         view._bloom_b = std::move(bloom_b);
         view._pick = std::move(pick);
         view._pick_depth = std::move(pick_depth);
+        release_taa(view); // sized for the old targets
         view._samples = samples;
         view._hdr = hdr;
         view._format = format;
@@ -841,11 +893,12 @@ u32 GpuRenderer3D::ensure_shadow_map(u32 resolution, u32 layers) {
     return 0;
 }
 
-bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, bool want_contact) {
+bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, bool want_contact, bool velocity) {
     const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
+    const SDL_GPUTextureFormat normals_format = velocity ? hdr_format : ao_normal_format;
     const u32 aw = half ? std::max(1u, (w + 1) / 2) : w, ah = half ? std::max(1u, (h + 1) / 2) : h;
     const auto sized = [](const GpuTexture& t, u32 tw, u32 th) { return t && t.width() == tw && t.height() == th; };
-    const bool have_base = sized(view._ao_depth, w, h) && view._ao_normals;
+    const bool have_base = sized(view._ao_depth, w, h) && view._ao_normals && view._ao_normals.format() == normals_format;
     const bool have_ao = !want_ao || sized(view._ao, aw, ah);
     const bool have_contact = !want_contact || sized(view._contact, w, h);
     if (have_base && have_ao && have_contact) {
@@ -856,7 +909,7 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
         if (!have_base) {
             GpuTexture depth = _device->create_target(w, h, _ao_depth_format,
                                                       SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
-            GpuTexture normals = _device->create_target(w, h, ao_normal_format,
+            GpuTexture normals = _device->create_target(w, h, normals_format,
                                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
             view._ao_depth = std::move(depth);
             view._ao_normals = std::move(normals);
@@ -887,15 +940,21 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
     }
     // Made now rather than on the first draw, as the view's own.
     for (const bool cull : {true, false}) {
-        pipeline(ao_normal_format, 1, cull, Pass::Prepass, false);
-        pipeline(ao_normal_format, 1, cull, Pass::Prepass, true);
+        if (velocity) {
+            for (const bool mask : {false, true}) {
+                velocity_pipeline(_ao_depth_format, cull, mask);
+                velocity_pipeline(_depth_format, cull, mask);
+            }
+        } else {
+            pipeline(ao_normal_format, 1, cull, Pass::Prepass, false);
+            pipeline(ao_normal_format, 1, cull, Pass::Prepass, true);
+        }
     }
     return true;
 }
 
-void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
+void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                                       const AmbientOcclusion3D& ao, Render3DStats& stats) {
-    const Mat4f projection = camera.projection_matrix(aspect);
     const Mat4f inverse = projection.inverse();
     const f32 w = static_cast<f32>(view._ao.width()), h = static_cast<f32>(view._ao.height());
     const f32 depth_w = static_cast<f32>(view._ao_depth.width()), depth_h = static_cast<f32>(view._ao_depth.height());
@@ -941,9 +1000,8 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     dispatch(_ao_blur_pipeline, view._ao, {depth, SDL_GPUTextureSamplerBinding{view._ao_across.handle(), _point_sampler}}, &blur, sizeof(blur));
 }
 
-void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
+void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                                             const ContactShadows3D& contact, const Vec3f& sun, Render3DStats& stats) {
-    const Mat4f projection = camera.projection_matrix(aspect);
     const Mat4f inverse = projection.inverse();
     const f32 w = static_cast<f32>(view._contact.width()), h = static_cast<f32>(view._contact.height());
     const SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
@@ -990,7 +1048,7 @@ void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuV
     dispatch(_ao_blur_pipeline, view._contact, {depth, SDL_GPUTextureSamplerBinding{view._contact_across.handle(), _point_sampler}}, &blur, sizeof(blur));
 }
 
-void GpuRenderer3D::finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view) {
+void GpuRenderer3D::finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain) {
     const auto pass_into = [&](const GpuTexture& target, SDL_GPUGraphicsPipeline* p, std::span<const SDL_GPUTexture* const> sources,
                                const f32 (&params)[4]) {
         if (!p) {
@@ -1017,10 +1075,10 @@ void GpuRenderer3D::finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view) 
         SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
         SDL_EndGPURenderPass(pass);
     };
-    const bool bloom = view._options.bloom > 0.0f && view._bloom_a && view._bloom_b;
+    const bool bloom = !plain && view._options.bloom > 0.0f && view._bloom_a && view._bloom_b;
     if (bloom) {
         SDL_GPUGraphicsPipeline* p = fullscreen(_bloom_shader.handle(), hdr_format);
-        const SDL_GPUTexture* scene = view._scene.handle();
+        const SDL_GPUTexture* scene = source.handle();
         const SDL_GPUTexture* a = view._bloom_a.handle();
         const SDL_GPUTexture* b = view._bloom_b.handle();
         const f32 w = static_cast<f32>(view._bloom_a.width()), h = static_cast<f32>(view._bloom_a.height());
@@ -1040,12 +1098,267 @@ void GpuRenderer3D::finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view) 
     // Out to the 2D pipeline's format: tonemapped and encoded for a gamma
     // one, tonemapped for an sRGB-stored one, left HDR for a float one.
     const SDL_GPUTextureFormat output = view._output_format;
-    const f32 mode = output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 0.0f
+    // A plain (8-bit) view has no exposure or tonemap: its light is cut off at white, as drawn without
+    // temporal anti-aliasing, and only encoded for a gamma target.
+    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.0f : 2.0f)
+                   : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 0.0f
                    : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.0f
                                                                          : 2.0f;
-    const std::array<const SDL_GPUTexture*, 2> sources{view._scene.handle(), bloom ? view._bloom_a.handle() : view._scene.handle()};
-    const f32 params[4] = {bloom ? view._options.bloom : 0.0f, view._options.exposure, mode, 0.0f};
+    const std::array<const SDL_GPUTexture*, 2> sources{source.handle(), bloom ? view._bloom_a.handle() : source.handle()};
+    const f32 params[4] = {bloom ? view._options.bloom : 0.0f, plain ? 1.0f : view._options.exposure, mode, 0.0f};
     pass_into(view._resolved->texture(), fullscreen(_output_shader.handle(), output), sources, params);
+}
+
+void GpuRenderer3D::release_taa(GpuView3D& view) {
+    // Nothing made, nothing to forget: the common case of a view that never used it.
+    if (!view._taa_depth && !view._taa_history[0] && !view._taa_valid) {
+        return;
+    }
+    view._taa_depth = {};
+    view._taa_in = {};
+    view._taa_sharp = {};
+    view._taa_motion = {};
+    view._taa_history = {};
+    view._taa_valid = false;
+    view._taa_frame = 0;
+    view._taa_last = {};
+    view._taa_now = {};
+}
+
+bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
+    const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
+    const auto sized = [&](const GpuTexture& t) { return t && t.width() == w && t.height() == h; };
+    bool made = false;
+    try {
+        constexpr SDL_GPUTextureUsageFlags stored = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+        if (!sized(view._taa_depth)) {
+            view._taa_depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+            made = true;
+        }
+        for (GpuTexture& history : view._taa_history) {
+            if (!sized(history)) {
+                history = _device->create_target(w, h, hdr_format, stored);
+                view._taa_valid = false; // nothing in it
+                made = true;
+            }
+        }
+        if (!sized(view._taa_motion)) {
+            view._taa_motion = _device->create_target(w, h, hdr_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            view._taa_valid = false;
+            made = true;
+        }
+        if (!view._hdr && !sized(view._taa_in)) {
+            view._taa_in = _device->create_target(w, h, hdr_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+            made = true;
+        }
+        if (sharpen && !sized(view._taa_sharp)) {
+            view._taa_sharp = _device->create_target(w, h, hdr_format, stored);
+            made = true;
+        } else if (!sharpen) {
+            view._taa_sharp = {};
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: temporal anti-aliasing targets not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        release_taa(view);
+        return false;
+    }
+    if (made) {
+        // Made now rather than on the first draw, as the view's own.
+        for (const Pass pass : {Pass::Opaque, Pass::Alpha, Pass::Additive}) {
+            pipeline(hdr_format, 1, true, pass);
+            pipeline(hdr_format, 1, false, pass);
+        }
+        fullscreen(_output_shader.handle(), view._output_format);
+    }
+    return true;
+}
+
+namespace {
+
+// Hashes for matching copies from one frame to the next.
+u64 mix64(u64 x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+} // namespace
+
+void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
+    // A copy's past is looked for in the last frame's copies of the same mesh in the
+    // same scene (the world or the overlay): by its MeshInstance::id when it has one
+    // (a copy of that mesh with that id), else by its place in the mesh's copies in
+    // draw order, when there are as many as before and it has not moved more than
+    // eight times its size (else it is probably another one). Failing that, by where it
+    // is: the nearest copy of the mesh last frame within twice its size (a crowd that
+    // lost one in the middle of its list, or gained one, still matches). A copy none of
+    // these find has no past: new. The camera's own motion is not part of any of this.
+    GpuCopyHistory& now = view._taa_now;
+    const GpuCopyHistory& last = view._taa_last;
+    now.groups.clear();
+    now.ids.clear();
+    struct Group {
+        u64 key;
+        u32 first, count, used;
+        bool grid_made = false;
+        f32 cell = 1.0f;
+        std::unordered_multimap<u64, u32> grid; // last frame's copies' centres by cell (made only if needed)
+    };
+    std::vector<Group> groups;
+    std::vector<u32> group_of(_refs.size());
+    {
+        std::unordered_map<u64, u32> index;
+        for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+            const DrawRef& ref = _refs[r];
+            const u64 key = mix64(reinterpret_cast<std::uintptr_t>(ref.mesh) * 2 + ref.scene);
+            const auto [it, added] = index.try_emplace(key, static_cast<u32>(groups.size()));
+            if (added) {
+                groups.emplace_back(Group{key, 0, 0, 0});
+            }
+            group_of[r] = it->second;
+            groups[it->second].count += ref.draw->count;
+        }
+    }
+    u32 total = 0;
+    for (Group& g : groups) {
+        g.first = total;
+        total += g.count;
+        now.groups[g.key] = {g.first, g.count};
+    }
+    now.matrices.resize(total);
+    _taa_prev.resize(total);
+    u32 flat = 0;
+    for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+        const DrawRef& ref = _refs[r];
+        Group& g = groups[group_of[r]];
+        const auto past = last.groups.find(g.key);
+        const bool known = history_usable && past != last.groups.end();
+        const bool same_count = known && past->second.second == g.count;
+        for (u32 i = 0; i < ref.draw->count; ++i, ++flat) {
+            const MeshInstance& instance = ref.instances[i];
+            const u32 slot = g.first + g.used++;
+            now.matrices[slot] = instance.transform;
+            Mat4f before = instance.transform;
+            bool fresh = false;
+            if (history_usable) {
+                bool by_id = false;
+                if (instance.id != 0) {
+                    const u64 id_key = mix64(g.key ^ (static_cast<u64>(instance.id) * 0x9e3779b97f4a7c15ULL));
+                    if (now.ids.emplace(id_key, slot).second) { // a second copy with the id is matched by place
+                        const auto it = last.ids.find(id_key);
+                        if (it != last.ids.end()) {
+                            before = last.matrices[it->second];
+                        } else {
+                            fresh = true;
+                        }
+                        by_id = true;
+                    }
+                }
+                if (!by_id) {
+                    bool matched = false;
+                    if (same_count) {
+                        before = last.matrices[past->second.first + (slot - g.first)];
+                        // Most copies have not moved at all: no need to measure how far.
+                        matched = std::memcmp(before.m, instance.transform.m, sizeof(before.m)) == 0;
+                    }
+                    if (!matched && known) {
+                        Vec3f c;
+                        f32 radius = 0.0f;
+                        sphere_of(instance.transform, ref.center, ref.radius, c, radius);
+                        matched = same_count && length_squared(c - before.apply(ref.center)) <= 64.0f * radius * radius + 1e-6f;
+                    }
+                    if (!matched && known) {
+                        Vec3f c;
+                        f32 radius = 0.0f;
+                        sphere_of(instance.transform, ref.center, ref.radius, c, radius);
+                        // By place in the world: the nearest of last frame's copies of this mesh within twice its size.
+                        const f32 reach = std::max(2.0f * radius, 1e-3f);
+                        const auto cell_of = [&](f32 v) { return static_cast<i32>(std::floor(v / g.cell)); };
+                        const auto key_of = [](i32 x, i32 y, i32 z) {
+                            return mix64((static_cast<u64>(static_cast<u32>(x)) << 42) ^ (static_cast<u64>(static_cast<u32>(y)) << 21) ^
+                                         static_cast<u64>(static_cast<u32>(z)));
+                        };
+                        if (!g.grid_made) {
+                            g.grid_made = true;
+                            g.cell = reach;
+                            for (u32 k = 0; k < past->second.second; ++k) {
+                                const Vec3f p = last.matrices[past->second.first + k].apply(ref.center);
+                                g.grid.emplace(key_of(cell_of(p.x), cell_of(p.y), cell_of(p.z)), k);
+                            }
+                        }
+                        f32 best = reach * reach;
+                        u32 found = ~0u;
+                        const i32 cx = cell_of(c.x), cy = cell_of(c.y), cz = cell_of(c.z);
+                        const i32 span = std::max(1, static_cast<i32>(std::ceil(reach / g.cell)));
+                        for (i32 dz = -span; dz <= span; ++dz) {
+                            for (i32 dy = -span; dy <= span; ++dy) {
+                                for (i32 dx = -span; dx <= span; ++dx) {
+                                    const auto [from, to] = g.grid.equal_range(key_of(cx + dx, cy + dy, cz + dz));
+                                    for (auto it = from; it != to; ++it) {
+                                        const f32 d = length_squared(last.matrices[past->second.first + it->second].apply(ref.center) - c);
+                                        if (d < best) {
+                                            best = d;
+                                            found = it->second;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        matched = found != ~0u;
+                        if (matched) {
+                            before = last.matrices[past->second.first + found];
+                        }
+                    }
+                    fresh = !matched;
+                }
+            }
+            if (fresh) {
+                before = instance.transform;
+            }
+            before.m[3] = fresh ? 1.0f : 0.0f; // a zero in any placing: free to say "no past"
+            _taa_prev[flat] = before;
+        }
+    }
+}
+
+const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
+                                             const TemporalAA3D& taa, bool reset, Vec2f jitter, Render3DStats& stats) {
+    const f32 w = static_cast<f32>(view._size.x), h = static_cast<f32>(view._size.y);
+    const u32 groups_x = (static_cast<u32>(view._size.x) + 7) / 8, groups_y = (static_cast<u32>(view._size.y) + 7) / 8;
+    const GpuTexture& past_motion = reset ? view._ao_normals : view._taa_motion;
+    const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history, f32 sharpen, f32 sharpness) {
+        const SDL_GPUStorageTextureReadWriteBinding output{.texture = target.handle(), .mip_level = 0, .layer = 0, .cycle = false};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        SDL_BindGPUComputePipeline(pass, _taa_pipeline);
+        const std::array<SDL_GPUTextureSamplerBinding, 4> inputs{
+            SDL_GPUTextureSamplerBinding{current.handle(), _point_sampler}, SDL_GPUTextureSamplerBinding{history.handle(), _owner->_sampler_linear},
+            SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler}, SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler}};
+        SDL_BindGPUComputeSamplers(pass, 0, inputs.data(), 4);
+        const TaaUniforms u{{w, h, 1.0f / w, 1.0f / h}, {std::clamp(taa.blend, 0.0f, 0.98f), reset ? 1.0f : 0.0f, sharpen, sharpness}, {jitter.x, jitter.y, 0.0f, 0.0f}};
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        SDL_DispatchGPUCompute(pass, groups_x, groups_y, 1);
+        SDL_EndGPUComputePass(pass);
+        ++stats.taa_dispatches;
+        return true;
+    };
+    const u32 write = 1 - view._taa_read;
+    // A history never written is not read (the shader stops at "no history"), but something valid is bound.
+    if (!dispatch(view._taa_history[write], input, reset ? input : view._taa_history[view._taa_read], 0.0f, 0.0f)) {
+        return &input;
+    }
+    view._taa_read = write;
+    const GpuTexture* shown = &view._taa_history[write];
+    const f32 sharpness = std::clamp(taa.sharpness, 0.0f, 1.0f);
+    if (sharpness > 0.0f && view._taa_sharp && dispatch(view._taa_sharp, *shown, *shown, 1.0f, sharpness)) {
+        shown = &view._taa_sharp;
+    }
+    return shown;
 }
 
 bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DStats& stats) {
@@ -1068,6 +1381,56 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             frustums[s] = frustum_of(view_projections[s]);
         }
     }
+
+    // Temporal anti-aliasing (Scene3D::taa): every pass that draws the picture
+    // uses a projection moved by this frame's sub-pixel jitter (`drawn`), while
+    // what decides what is seen (the frustums, the cascades' fit) and what is
+    // asked of the picture (the pick pass, Camera3D::project and ray) stay
+    // exact. It replaces MSAA, and the sums that need the main pass's own
+    // depth (the occlusion's, the contact shadows') are given the jittered
+    // projection, so that they unproject what the pre-pass drew.
+    const TemporalAA3D& taa_settings = scene.taa;
+    bool taa = taa_settings.enabled;
+    if (taa && !_taa_available) {
+        if (!_taa_warned) {
+            _taa_warned = true;
+            KIN_LOG_WARN("render", "3D: temporal anti-aliasing asked for, but this device cannot do it: off");
+        }
+        taa = false;
+    }
+    const f32 sun_strength = scene.lights.sun.color.x + scene.lights.sun.color.y + scene.lights.sun.color.z;
+    if (taa && !(ensure_taa_targets(*view, taa_settings.sharpness > 0.0f) &&
+                 ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, scene.ambient_occlusion.enabled,
+                                   scene.contact_shadows.enabled && sun_strength > 0.0f, /*velocity=*/true))) {
+        taa = false;
+    }
+    if (!taa) {
+        release_taa(*view);
+    }
+    std::array<Mat4f, 2> drawn = view_projections;
+    Mat4f main_projection; // what the pre-pass's compute unprojects with: the camera's, jittered with temporal anti-aliasing
+    Vec2f jitter{};
+    bool taa_reset = false;
+    if (taa) {
+        const u32 period = std::clamp(taa_settings.jitter_samples, 1u, max_taa_jitter_samples);
+        const Vec2f raw = taa_jitter(taa_settings.freeze_jitter ? 0u : view->_taa_frame++, period);
+        jitter = {raw.x * taa_settings.jitter_scale, raw.y * taa_settings.jitter_scale};
+        for (u32 s = 0; s < 2; ++s) {
+            if (scenes[s]) {
+                drawn[s] = jitter_projection(view_projections[s], jitter, view->_size);
+            }
+        }
+        main_projection = jitter_projection(scene.camera.projection_matrix(aspect), jitter, view->_size);
+        // The history is of no use after a resize, a cut, or a change of the kind of camera
+        // (its pixels no longer line up).
+        const bool ortho = scene.camera.projection == Projection3D::Orthographic;
+        taa_reset = !view->_taa_valid || view->_taa_reset_asked || ortho != view->_taa_ortho;
+        view->_taa_ortho = ortho;
+        view->_taa_reset_asked = false;
+    }
+    stats.taa_reset = taa_reset;
+    stats.taa_jitter = jitter;
+    stats.samples = taa ? 1u : view->_samples;
 
     // The sun's shadow: an orthographic view along its light over the area.
     const Lights3D& lights = scene.lights;
@@ -1252,6 +1615,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         visible_total += ref.out_count;
     }
     stats.culled = total - visible_total;
+    if (taa) {
+        match_copies(*view, !taa_reset);
+    }
 
     // The copies, straight into the upload memory; alpha-blended ones furthest first.
     if (written > 0) {
@@ -1261,7 +1627,13 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             _instances = std::make_shared<GpuBuffer>(
                 _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, size));
         }
-        const auto write = [&](const DrawRef& ref, const MeshInstance& instance, u8* out, u32 at) {
+        if (taa) {
+            _taa_ordered.resize(written);
+        }
+        const auto write = [&](const DrawRef& ref, const MeshInstance& instance, u8* out, u32 at, u32 flat) {
+            if (taa) {
+                _taa_ordered[at] = _taa_prev[flat]; // each copy's own slot: safe from the workers
+            }
             const Color m = ref.draw->material.color;
             GpuInstance3D g;
             std::memcpy(g.model, instance.transform.m, sizeof(g.model));
@@ -1293,7 +1665,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 for (u32 i = piece.begin; i < piece.end; ++i) {
                     const u8 v = _visible[piece.flat + i - piece.begin];
                     if ((v & 3) != 0) {
-                        write(ref, ref.instances[i], out.data(), (v & 1) ? at++ : at_extra++);
+                        write(ref, ref.instances[i], out.data(), (v & 1) ? at++ : at_extra++, piece.flat + i - piece.begin);
                     }
                 }
             });
@@ -1314,12 +1686,22 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 std::sort(_sorted.begin(), _sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
                 u32 at = ref.out_first;
                 for (const auto& [d, i] : _sorted) {
-                    write(ref, ref.instances[i], out.data(), at++);
+                    write(ref, ref.instances[i], out.data(), at++, flat + i);
                 }
             }
         };
         // Cycled: a view rendered earlier this frame keeps the instances it drew.
         _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
+
+        // Temporal anti-aliasing: each copy's matrix of the frame before, in the same places (the velocity pre-pass reads it).
+        if (taa) {
+            const u32 previous_bytes = written * static_cast<u32>(sizeof(Mat4f));
+            if (!_previous || _previous->size() < previous_bytes) {
+                const u32 size = std::max({previous_bytes, _previous ? _previous->size() * 2 : 0u, 32u * 1024u});
+                _previous = std::make_shared<GpuBuffer>(_device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, size));
+            }
+            _device->upload_storage_buffer(_previous->handle(), 0, previous_bytes, _taa_ordered.data(), /*cycle=*/true);
+        }
 
         // The cascades' lists: where each copy that casts into one went.
         if (cascades > 1 && listed > 0) {
@@ -1415,7 +1797,8 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     if (environment && (!_filter_pipeline || !environment->specular)) {
         environment = nullptr;
     }
-    const bool encode = view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;     // a gamma target
+    // A temporally anti-aliased picture is drawn in linear light into float and encoded after the resolve.
+    const bool encode = !taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;     // a gamma target
     const bool decode = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
     bool occluded = false; // the world has ambient occlusion this render (set below, before it is drawn)
     bool contacted = false; // and contact shadows
@@ -1596,8 +1979,58 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         _contact_warned = true;
         KIN_LOG_WARN("render", "3D: contact shadows asked for, but this device cannot do it: off");
     }
-    if ((ao.enabled || want_contact) && _ao_available && storage &&
-        ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact)) {
+    // The overlay in front of the world, seen by its own camera, and the velocity pass for it.
+    const bool overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
+    SDL_GPUBuffer* previous_storage = taa && _previous ? _previous->handle() : nullptr;
+    // The velocity pre-pass's draws of one scene's opaque meshes (the world's with the pre-pass, the overlay's alone).
+    const auto draw_velocity = [&](SDL_GPURenderPass* target_pass, u32 which, SDL_GPUTextureFormat depth_format) {
+        if (!previous_storage) {
+            return;
+        }
+        VelocityUniforms u{};
+        std::memcpy(u.view_projection, drawn[which].m, sizeof(u.view_projection));
+        std::memcpy(u.current, view_projections[which].m, sizeof(u.current));
+        std::memcpy(u.prior, (taa_reset ? view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
+        const std::array<SDL_GPUBuffer*, 2> buffers{storage, previous_storage};
+        SDL_GPUGraphicsPipeline* bound_velocity = nullptr;
+        const GpuMesh3D* mesh_bound = nullptr;
+        for (const u32 index : _order) {
+            const DrawRef& ref = _refs[index];
+            if (ref.scene != which || pass_of(ref.draw->material) != Pass::Opaque) {
+                continue;
+            }
+            const Material3D& occluder = ref.draw->material;
+            const bool cutout = occluder.blend == Blend3D::Mask;
+            SDL_GPUGraphicsPipeline* p = velocity_pipeline(depth_format, !occluder.double_sided, cutout);
+            if (!p) {
+                continue;
+            }
+            if (p != bound_velocity) {
+                SDL_BindGPUGraphicsPipeline(target_pass, p);
+                SDL_BindGPUVertexStorageBuffers(target_pass, 0, buffers.data(), 2);
+                bound_velocity = p;
+            }
+            if (ref.mesh != mesh_bound) {
+                const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
+                SDL_BindGPUVertexBuffers(target_pass, 0, &vertices, 1);
+                const SDL_GPUBufferBinding indices{ref.mesh->indices, 0};
+                SDL_BindGPUIndexBuffer(target_pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                mesh_bound = ref.mesh;
+            }
+            if (cutout) {
+                bind_cutout(target_pass, occluder);
+            }
+            u.first[0] = ref.out_first;
+            SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+            SDL_DrawGPUIndexedPrimitives(target_pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
+            if (which == 0) {
+                ++stats.ao_draws;
+                stats.ao_instances += ref.out_count;
+            }
+        }
+    };
+    if ((ao.enabled || want_contact || taa) && _ao_available && (storage || taa) &&
+        ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, taa)) {
         SDL_GPUColorTargetInfo target{};
         target.texture = view->_ao_normals.handle();
         target.clear_color = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -1616,12 +2049,15 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), 0.0f, 1.0f};
             SDL_SetGPUViewport(prepass, &viewport);
             DrawUniforms u{};
-            std::memcpy(u.view_projection, view_projections[0].m, sizeof(u.view_projection));
+            std::memcpy(u.view_projection, drawn[0].m, sizeof(u.view_projection));
             SDL_GPUGraphicsPipeline* bound_prepass = nullptr;
             const GpuMesh3D* mesh_bound = nullptr;
+            if (taa) {
+                draw_velocity(prepass, 0, _ao_depth_format);
+            }
             for (const u32 index : _order) {
                 const DrawRef& ref = _refs[index];
-                if (ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque) {
+                if (taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque) {
                     continue;
                 }
                 const Material3D& occluder = ref.draw->material;
@@ -1652,32 +2088,63 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 stats.ao_instances += ref.out_count;
             }
             SDL_EndGPURenderPass(prepass);
+            if (!taa) {
+                main_projection = scene.camera.projection_matrix(aspect);
+            }
             if (ao.enabled) {
-                compute_occlusion(commands, *view, scene.camera, aspect, ao, stats);
+                compute_occlusion(commands, *view, scene.camera, main_projection, ao, stats);
                 occluded = stats.ao_dispatches > 0;
             }
             if (want_contact) {
-                compute_contact_shadows(commands, *view, scene.camera, aspect, contact, lights.sun.direction, stats);
+                compute_contact_shadows(commands, *view, scene.camera, main_projection, contact, lights.sun.direction, stats);
                 contacted = stats.contact_dispatches > 0;
             }
         }
     }
 
+    // The overlay's velocity (temporal anti-aliasing): drawn over the pre-pass's
+    // normals and velocity, against a depth of its own (the main pass's, which it
+    // clears after), so that the gun is not given the velocity of the world behind
+    // it. The compute passes that read the pre-pass are recorded already.
+    if (taa && overlaid && previous_storage) {
+        SDL_GPUColorTargetInfo target{};
+        target.texture = view->_ao_normals.handle();
+        target.load_op = SDL_GPU_LOADOP_LOAD;
+        target.store_op = SDL_GPU_STOREOP_STORE;
+        SDL_GPUDepthStencilTargetInfo overlay_depth{};
+        overlay_depth.texture = view->_taa_depth.handle();
+        overlay_depth.clear_depth = 0.0f;
+        overlay_depth.load_op = SDL_GPU_LOADOP_CLEAR;
+        overlay_depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+        overlay_depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        overlay_depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        overlay_depth.cycle = true;
+        if (SDL_GPURenderPass* gun = SDL_BeginGPURenderPass(commands, &target, 1, &overlay_depth)) {
+            const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), 0.0f, 1.0f};
+            SDL_SetGPUViewport(gun, &viewport);
+            draw_velocity(gun, 1, _depth_format);
+            SDL_EndGPURenderPass(gun);
+        }
+    }
+
     // The scene (and its overlay): into the multisampled colour, resolved into
-    // what 2D draws, or into the float scene when HDR.
+    // what 2D draws, or into the float scene when HDR. With temporal
+    // anti-aliasing: one sample, into the float picture the resolve reads.
     // An HDR view holds linear light whatever the 2D pipeline stores.
     SDL_FColor clear = _owner->stored_color(view->_options.background);
-    if (view->_hdr) {
+    if (view->_hdr || taa) {
         const LinearColor l = to_linear(view->_options.background);
         clear = {l.r, l.g, l.b, l.a};
     }
     clear = {clear.r * clear.a, clear.g * clear.a, clear.b * clear.a, clear.a};
-    SDL_GPUTexture* resolved = view->_hdr ? view->_scene.handle() : view->_resolved->texture().handle();
+    SDL_GPUTexture* resolved = taa ? (view->_hdr ? view->_scene.handle() : view->_taa_in.handle())
+                             : view->_hdr ? view->_scene.handle()
+                                          : view->_resolved->texture().handle();
     SDL_GPUColorTargetInfo colour{};
     colour.clear_color = clear;
     colour.load_op = SDL_GPU_LOADOP_CLEAR;
     colour.cycle = true; // a frame still reading the last picture keeps it
-    if (view->_colour) {
+    if (view->_colour && !taa) {
         colour.texture = view->_colour.handle();
         colour.store_op = SDL_GPU_STOREOP_RESOLVE;
         colour.resolve_texture = resolved;
@@ -1687,7 +2154,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         colour.store_op = SDL_GPU_STOREOP_STORE;
     }
     SDL_GPUDepthStencilTargetInfo depth{};
-    depth.texture = view->_depth.handle();
+    depth.texture = taa ? view->_taa_depth.handle() : view->_depth.handle();
     depth.clear_depth = 0.0f; // reverse Z: the far plane
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
     depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -1702,7 +2169,6 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     // With an overlay, the scene's depths go in [0, 0.9] and the overlay's in
     // [0.9, 1]: nearer (reverse Z) than all of the scene, yet depth-tested
     // against itself, in one pass.
-    const bool overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && overlaid ? overlay_split : 1.0f;
         const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), lo, hi};
@@ -1713,7 +2179,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     begin_scene(0);
 
     DrawUniforms draw_uniforms{};
-    std::memcpy(draw_uniforms.view_projection, view_projections[0].m, sizeof(draw_uniforms.view_projection));
+    std::memcpy(draw_uniforms.view_projection, drawn[0].m, sizeof(draw_uniforms.view_projection));
     const SDL_GPUTextureSamplerBinding environment_bindings[2] = {
         environment ? SDL_GPUTextureSamplerBinding{environment->specular.handle(), _environment_sampler}
                     : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
@@ -1738,10 +2204,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         if (ref.scene != current_scene) {
             current_scene = ref.scene;
             begin_scene(current_scene);
-            std::memcpy(draw_uniforms.view_projection, view_projections[current_scene].m, sizeof(draw_uniforms.view_projection));
+            std::memcpy(draw_uniforms.view_projection, drawn[current_scene].m, sizeof(draw_uniforms.view_projection));
         }
         const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(material.shader.backend().get());
-        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !material.double_sided, pass_of(material), false,
+        SDL_GPUGraphicsPipeline* p = pipeline(taa ? hdr_format : view->_format, taa ? 1u : view->_samples, !material.double_sided, pass_of(material), false,
                                               custom ? custom->shader.handle() : nullptr);
         if (!p) {
             continue;
@@ -1793,6 +2259,22 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         stats.triangles += static_cast<u64>(ref.mesh->index_count / 3) * ref.out_count;
     }
     SDL_EndGPURenderPass(pass);
+
+    // The resolve: this frame into the history, before bloom and the tonemap,
+    // which see the finished picture. The next frame finds the cameras and the
+    // copies as they are now.
+    const GpuTexture* shown = nullptr;
+    if (taa) {
+        shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings, taa_reset, jitter, stats);
+        view->_taa_valid = true;
+        for (u32 s = 0; s < 2; ++s) {
+            if (scenes[s]) {
+                view->_taa_prior[s] = view_projections[s];
+            }
+        }
+        std::swap(view->_taa_last, view->_taa_now);
+        std::swap(view->_ao_normals, view->_taa_motion); // this frame's velocity is the next one's past
+    }
 
     // What is under each pixel: the scene's opaque and alpha meshes (not its
     // wireframes, glows or overlay) again, writing position and id.
@@ -1852,8 +2334,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             SDL_EndGPURenderPass(picking);
         }
     }
-    if (view->_hdr) {
-        finish_hdr(commands, *view);
+    if (taa) {
+        finish_hdr(commands, *view, *shown, /*plain=*/!view->_hdr);
+    } else if (view->_hdr) {
+        finish_hdr(commands, *view, view->_scene, /*plain=*/false);
     }
     resume_2d();
     return true;

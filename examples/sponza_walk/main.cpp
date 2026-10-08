@@ -63,6 +63,9 @@ const std::map<std::string, std::string>& presets() {
         {"ao", "ao=on"},
         {"ao-half", "ao=on,ao_half=on"},
         {"contact", "contact=on"},
+        {"taa", "taa=on"},
+        {"taa-sharp", "taa=on,taa_sharpness=0.4"},
+        {"taa-frozen", "taa=on,taa_freeze=on"},
         {"no-shadows", "shadows=off"},
         {"cascades1", "cascades=1"},
         {"cascades4", "cascades=4,shadow_distance=60"},
@@ -190,7 +193,7 @@ struct Row {
 };
 
 struct Hooks {
-    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset;
+    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset, reset_history;
 };
 
 struct Caps {
@@ -384,6 +387,15 @@ private:
         slider("contact_thickness", "Thickness", s.contact_thickness, 0.02f, 1.0f);
         slider("contact_intensity", "Intensity", s.contact_intensity, 0.0f, 1.0f);
         islider("contact_steps", "Steps", s.contact_steps, 4, 64);
+
+        section("Temporal anti-aliasing");
+        check("taa", "TAA (replaces MSAA)", s.taa);
+        slider("taa_blend", "History kept", s.taa_blend, 0.0f, 0.98f);
+        slider("taa_sharpness", "Sharpen", s.taa_sharpness, 0.0f, 1.0f);
+        slider("taa_jitter_scale", "Jitter scale (0: no AA)", s.taa_jitter_scale, 0.0f, 2.0f);
+        islider("taa_jitter_samples", "Jitter samples", s.taa_jitter_samples, 1, 16);
+        check("taa_freeze", "Freeze jitter (debug)", s.taa_freeze);
+        button("taa_reset_history", "Reset history (a camera cut)", _h.reset_history);
 
         section("View");
         std::vector<std::string> samples;
@@ -633,6 +645,7 @@ private:
         h.screenshot = [this] { _shot_requested = true; };
         h.print = [this] { print_settings(); };
         h.reset = [this] { reset_all(); };
+        h.reset_history = [this] { _view.reset_history(); };
         _controls = std::make_unique<Controls>(_s, std::move(h), _caps);
     }
 
@@ -896,6 +909,11 @@ private:
                 << json_number(_s.contact_thickness) << ", \"intensity\": " << json_number(_s.contact_intensity)
                 << ", \"steps\": " << _s.contact_steps << "}";
         }
+        if (_s.taa) {
+            out << ",\n  \"taa\": {\"blend\": " << json_number(_s.taa_blend) << ", \"sharpness\": " << json_number(_s.taa_sharpness)
+                << ", \"jitter_scale\": " << json_number(_s.taa_jitter_scale) << ", \"jitter_samples\": " << _s.taa_jitter_samples
+                << ", \"freeze_jitter\": " << (_s.taa_freeze ? "true" : "false") << "}";
+        }
         out << "\n  camera: {\"eye\": " << json_vec(_pos) << ", \"target\": " << json_vec(_pos + f) << ", \"fov\": " << json_number(_s.fov) << "}\n";
         std::cout << out.str() << std::flush;
     }
@@ -1028,8 +1046,8 @@ private:
         std::vector<std::string> lines;
         std::snprintf(line, sizeof line, "%.0f fps   %.2f ms frame   cpu render %.2f ms", 1000.0 / std::max(0.01f, _frame_ms), _frame_ms, st.cpu_ms);
         lines.push_back(line);
-        std::snprintf(line, sizeof line, "gpu %.2f ms%s   msaa x%u   %dx%d", be.last_gpu_frame_ms, _s.gpu_timing ? "" : " (off)", _key.samples,
-                      out.x, out.y);
+        std::snprintf(line, sizeof line, "gpu %.2f ms%s   %s x%u   %dx%d", be.last_gpu_frame_ms, _s.gpu_timing ? "" : " (off)",
+                      st.taa_dispatches > 0 ? "taa, samples" : "msaa", st.samples > 0 ? st.samples : _key.samples, out.x, out.y);
         lines.push_back(line);
         std::snprintf(line, sizeof line, "draws %u   meshes %u   culled %u   tris %.2fM", st.draws, st.instances, st.culled,
                       double(st.triangles) / 1e6);
@@ -1045,6 +1063,11 @@ private:
         lines.push_back(line);
         if (_s.contact) {
             std::snprintf(line, sizeof line, "contact shadows: %u dispatches", st.contact_dispatches);
+            lines.push_back(line);
+        }
+        if (_s.taa) {
+            std::snprintf(line, sizeof line, st.taa_dispatches > 0 ? "taa: %u dispatches, jitter %+.2f %+.2f%s" : "taa: asked for, not available",
+                          st.taa_dispatches, st.taa_jitter.x, st.taa_jitter.y, st.taa_reset ? ", history reset" : "");
             lines.push_back(line);
         }
         std::snprintf(line, sizeof line, "speed %.1f m/s   eye %.1f %.1f %.1f", _s.move_speed, _pos.x, _pos.y, _pos.z);

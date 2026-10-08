@@ -8,6 +8,8 @@
 //                 [--ao] [--ao-radius R] [--ao-intensity I] [--ao-half]
 //                 [--contact-shadows] [--contact-distance D] [--contact-steps N]
 //                 [--contact-thickness T]
+//                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
+//                 [--supersample N] [--samples N]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -23,12 +25,23 @@
 // set the rest), likewise a label of its own. Likewise
 // `contact_shadows: {enabled, distance, thickness, intensity, steps}` and
 // --contact-shadows (with --contact-distance, --contact-steps, --contact-thickness).
+// And `taa: {enabled, blend, sharpness, jitter_scale, jitter_samples}` and --taa (with
+// --taa-blend, --taa-sharpness): temporal anti-aliasing, whose history needs frames to
+// settle, so --taa-frames N makes the run at least N frames before each picture (the
+// timing loop's own frames count; the default is 32). Every frame is a step of time:
+// a scene with `"animated": true` (the procedural `motion`) is posed by the frame's
+// time, which is 0 at the picture and negative before it (so every run's picture shows
+// the same moment, and --repeat is 1 for it: the frames are the animation); a camera's
+// `pan` is units a frame it has moved, arriving at its `eye` at the picture. --supersample N
+// writes <camera>_ss.png too (--samples N sets the view's MSAA for a whole run): the same picture drawn at N x the size with 4x MSAA, with TAA
+// off, and averaged down in linear light (the still picture to judge static parts by).
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/taa.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
 #include <algorithm>
@@ -145,6 +158,58 @@ struct Crowd {
     }
 };
 
+// A scene made for temporal anti-aliasing (`procedural: "motion"`): high-contrast thin things
+// (a fence of posts and rails, a wire, poles at three depths), and four things moving in
+// a way that is a pure function of time: a bar orbiting, a cross turning, a block going to
+// and fro, a bright pole sliding in front of the fence. Time is in frames; 0 is the picture.
+struct Motion {
+    kin::Mesh floor, wall, post, rail, wire, pole, block, bar, cross_bar, ball;
+
+    void make(kin::Renderer3D& r3d) {
+        floor = r3d.create_mesh(kin::meshes::box({16.0f, 0.2f, 12.0f}));
+        wall = r3d.create_mesh(kin::meshes::box({16.0f, 4.0f, 0.2f}));
+        post = r3d.create_mesh(kin::meshes::box({0.035f, 1.2f, 0.035f}));
+        rail = r3d.create_mesh(kin::meshes::box({4.0f, 0.03f, 0.03f}));
+        wire = r3d.create_mesh(kin::meshes::box({6.0f, 0.012f, 0.012f}));
+        pole = r3d.create_mesh(kin::meshes::box({0.02f, 2.4f, 0.02f}));
+        block = r3d.create_mesh(kin::meshes::box({0.5f, 0.5f, 0.5f}));
+        bar = r3d.create_mesh(kin::meshes::box({0.9f, 0.05f, 0.05f}));
+        cross_bar = r3d.create_mesh(kin::meshes::box({1.0f, 0.03f, 0.03f}));
+        ball = r3d.create_mesh(kin::meshes::sphere(0.18f, 24, 12));
+    }
+
+    void draw(kin::Scene3D& scene, int t) const {
+        const float time = static_cast<float>(t);
+        const kin::Material3D dark{.color = kin::Color::rgb(28, 30, 36), .roughness = 0.9f};
+        const kin::Material3D bright{.color = kin::Color::rgb(245, 245, 240), .roughness = 0.6f};
+        const kin::Material3D warm{.color = kin::Color::rgb(255, 150, 60), .roughness = 0.5f};
+        const kin::Material3D unlit_white{.color = kin::Color::rgb(255, 255, 255), .unlit = true};
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = kin::Color::rgb(70, 74, 82), .roughness = 0.9f});
+        scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.0f}), dark);
+        // A fence: 60 posts every 6.5 cm, two rails (white against the dark wall).
+        for (int i = 0; i < 60; ++i) {
+            scene.draw(post, Mat4f::translation({-1.95f + 0.065f * static_cast<float>(i), 0.6f, -1.0f}), bright);
+        }
+        scene.draw(rail, Mat4f::translation({0.0f, 0.35f, -1.0f}), bright);
+        scene.draw(rail, Mat4f::translation({0.0f, 1.0f, -1.0f}), bright);
+        // A wire across, and poles at three depths.
+        scene.draw(wire, Mat4f::translation({0.0f, 1.9f, -2.0f}) * Mat4f::rotation_z(4.0f), unlit_white);
+        for (int i = 0; i < 3; ++i) {
+            scene.draw(pole, Mat4f::translation({2.2f + 0.5f * static_cast<float>(i), 1.2f, -2.5f + 1.2f * static_cast<float>(i)}), bright);
+        }
+        // Moving: a bar orbiting on a circle at 3 degrees a frame, a cross turning at 4, a block going to and fro, a pole sliding.
+        const float orbit = time * 3.0f * 3.14159265f / 180.0f;
+        scene.draw(bar, Mat4f::translation({-2.6f + 0.6f * std::cos(orbit), 1.0f + 0.6f * std::sin(orbit), -0.4f}) * Mat4f::rotation_z(time * 3.0f + 90.0f), warm);
+        const Mat4f turn = Mat4f::translation({-3.6f, 0.9f, -0.4f}) * Mat4f::rotation_y(time * 4.0f);
+        scene.draw(cross_bar, turn, warm);
+        scene.draw(cross_bar, turn * Mat4f::rotation_y(90.0f), warm);
+        const float to_and_fro = 1.5f * std::sin(time * 0.05f);
+        scene.draw(block, Mat4f::translation({3.5f + to_and_fro, 0.25f, -0.2f}) * Mat4f::rotation_y(time * 2.0f), warm);
+        scene.draw(ball, Mat4f::translation({-0.8f + 1.2f * std::sin(time * 0.04f), 0.5f, 0.6f}), warm);
+        scene.draw(pole, Mat4f::translation({0.6f * std::sin(time * 0.06f), 1.2f, 0.2f}), warm);
+    }
+};
+
 kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Placed& p : placed) {
@@ -176,6 +241,9 @@ int main(int argc, char** argv) {
     bool contact_override = false;
     double contact_distance = 0.0, contact_thickness = 0.0; // 0: the scene's
     int contact_steps = 0;
+    bool taa_override = false;
+    double taa_blend = 0.0, taa_sharpness = 0.0; // 0: the scene's (the default blend)
+    int taa_frames = 32, supersample = 1, samples_override = 0; // 0: the scene's
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -214,6 +282,20 @@ int main(int argc, char** argv) {
         } else if (a == "--contact-steps") {
             contact_override = true;
             contact_steps = std::atoi(next().c_str());
+        } else if (a == "--taa") {
+            taa_override = true;
+        } else if (a == "--taa-blend") {
+            taa_override = true;
+            taa_blend = std::atof(next().c_str());
+        } else if (a == "--taa-sharpness") {
+            taa_override = true;
+            taa_sharpness = std::atof(next().c_str());
+        } else if (a == "--taa-frames") {
+            taa_frames = std::max(1, std::atoi(next().c_str()));
+        } else if (a == "--samples") {
+            samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
+        } else if (a == "--supersample") {
+            supersample = std::clamp(std::atoi(next().c_str()), 1, 6);
         } else if (a == "--no-gpu-timing") {
             gpu_timing = false;
         } else if (a == "--width") {
@@ -305,14 +387,22 @@ int main(int argc, char** argv) {
         if (is_crowd) {
             crowd.make(r3d, static_cast<int>(doc.number_at("count", 20000)));
         }
+        Motion motion;
+        const bool is_motion = doc.string_at("procedural") == "motion";
+        if (is_motion) {
+            motion.make(r3d);
+        }
+        const bool animated = doc.bool_at("animated");
         const double load_ms = ms_since(load_start);
-        const kin::Bounds3 bounds = is_crowd ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}} : bounds_of(placed);
+        const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
+                                    : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
+                                                : bounds_of(placed);
 
         // The view.
         const kin::JsonValue* v = doc.find("view");
         const kin::JsonValue none{};
         const kin::JsonValue& view_doc = v ? *v : none;
-        kin::View3D view = r3d.create_view({width, height}, {.samples = static_cast<kin::u32>(view_doc.number_at("samples", 4)),
+        kin::View3D view = r3d.create_view({width, height}, {.samples = static_cast<kin::u32>(samples_override > 0 ? samples_override : view_doc.number_at("samples", 4)),
                                                              .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
                                                              .hdr = view_doc.bool_at("hdr"),
                                                              .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
@@ -333,7 +423,7 @@ int main(int argc, char** argv) {
         }
 
         kin::Scene3D scene;
-        const auto fill_scene = [&] {
+        const auto fill_scene = [&](int time) {
             scene.clear();
             const kin::JsonValue* l = doc.find("lights");
             const kin::JsonValue& lights = l ? *l : none;
@@ -407,6 +497,24 @@ int main(int argc, char** argv) {
                     cs.steps = static_cast<kin::u32>(contact_steps);
                 }
             }
+            scene.taa = {};
+            if (const kin::JsonValue* t = doc.find("taa")) {
+                kin::TemporalAA3D& taa = scene.taa;
+                taa.enabled = t->bool_at("enabled", true);
+                taa.blend = static_cast<float>(t->number_at("blend", taa.blend));
+                taa.sharpness = static_cast<float>(t->number_at("sharpness", taa.sharpness));
+                taa.jitter_scale = static_cast<float>(t->number_at("jitter_scale", taa.jitter_scale));
+                taa.jitter_samples = static_cast<kin::u32>(t->number_at("jitter_samples", taa.jitter_samples));
+            }
+            if (taa_override) {
+                scene.taa.enabled = true;
+                if (taa_blend > 0.0) {
+                    scene.taa.blend = static_cast<float>(taa_blend);
+                }
+                if (taa_sharpness > 0.0) {
+                    scene.taa.sharpness = static_cast<float>(taa_sharpness);
+                }
+            }
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
                     scene.add_light({.position = vec3(p.find("position")), .color = vec3(p.find("color")),
@@ -418,6 +526,9 @@ int main(int argc, char** argv) {
             }
             if (is_crowd) {
                 crowd.draw(scene);
+            }
+            if (is_motion) {
+                motion.draw(scene, time);
             }
         };
 
@@ -444,12 +555,24 @@ int main(int argc, char** argv) {
                 const float pitch = static_cast<float>(fit->number_at("pitch", 30.0)) * 3.14159265f / 180.0f;
                 eye = target + Vec3f{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * distance;
             }
-            fill_scene();
-            scene.camera = kin::Camera3D::look_at(eye, target, fov);
-            scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
+            // The scene at `time` (frames; 0 is the picture, earlier is negative), the camera
+            // having panned `pan` units a frame to reach `eye` at 0.
+            const Vec3f pan = vec3(c.find("pan"));
+            const auto pose = [&](int time) {
+                fill_scene(time);
+                const Vec3f moved = pan * static_cast<float>(time);
+                scene.camera = kin::Camera3D::look_at(eye + moved, target + moved, fov);
+                scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
+            };
+            // A temporal history starts afresh at each camera, and runs long enough to settle.
+            view.reset_history();
+            pose(0); // for what the scene asks of temporal anti-aliasing
+            const int run = warmup + frames + (scene.taa.enabled ? std::max(0, taa_frames - warmup - frames) : 0);
+            const int each = animated ? 1 : repeat;
 
             // The first picture: pipelines and targets made, the GPU waited for.
             const auto first_start = std::chrono::steady_clock::now();
+            pose(-run - 1);
             renderer.clear(kin::Color::rgb(0, 0, 0));
             r3d.render(view, scene);
             renderer.draw_texture(view.texture(), full);
@@ -458,23 +581,23 @@ int main(int argc, char** argv) {
             renderer.present();
 
             std::vector<double> cpu, gpu;
-            for (int f = 0; f < warmup + frames; ++f) {
-                fill_scene();
+            for (int f = 0; f < run; ++f) {
+                pose(f - run);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
-                for (int k = 0; k < repeat; ++k) {
+                for (int k = 0; k < each; ++k) {
                     r3d.render(view, scene);
                 }
                 renderer.draw_texture(view.texture(), full);
                 renderer.present();
-                if (f >= warmup) {
+                if (f >= run - frames) {
                     cpu.push_back(r3d.stats().cpu_ms);
-                    gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / repeat);
+                    gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
                 }
             }
             wait_for_gpu();
 
             // The picture.
-            fill_scene();
+            pose(0);
             renderer.clear(kin::Color::rgb(0, 0, 0));
             r3d.render(view, scene);
             const kin::Render3DStats stats = r3d.stats();
@@ -490,6 +613,62 @@ int main(int argc, char** argv) {
             }
             const fs::path png = out / name / (camera_name + ".png");
             kin::save_image(image, png);
+            // The same moment drawn large and averaged down, with temporal anti-aliasing off.
+            if (supersample > 1) {
+                const kin::Vec2i big_size{width * supersample, height * supersample};
+                kin::View3D big = r3d.create_view(big_size, {.samples = 4,
+                                                               .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
+                                                               .hdr = view_doc.bool_at("hdr"),
+                                                               .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
+                                                               .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
+                kin::RenderTarget target = renderer.create_render_target(big_size);
+                pose(0);
+                scene.taa.enabled = false;
+                kin::Image large;
+                if (big && target.valid()) {
+                    renderer.push_render_target(target);
+                    renderer.clear(kin::Color::rgb(0, 0, 0));
+                    r3d.render(big, scene);
+                    const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x), static_cast<float>(big_size.y)};
+                    renderer.draw_texture(big.texture(), big_rect);
+                    renderer.read_rgba(big_rect, large.rgba, large.size);
+                    renderer.pop_render_target();
+                    renderer.present();
+                }
+                if (large.size.x == big_size.x && large.size.y == big_size.y) {
+                    kin::Image small = image;
+                    const auto decode = [](kin::u8 v) {
+                        const float c = static_cast<float>(v) / 255.0f;
+                        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+                    };
+                    const auto encode = [](float c) {
+                        c = std::clamp(c, 0.0f, 1.0f);
+                        return static_cast<kin::u8>(std::lround((c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f) * 255.0f));
+                    };
+                    for (int y = 0; y < height; ++y) {
+                        for (int x = 0; x < width; ++x) {
+                            float sum[3] = {0, 0, 0};
+                            for (int sy = 0; sy < supersample; ++sy) {
+                                for (int sx = 0; sx < supersample; ++sx) {
+                                    const std::size_t i = (static_cast<std::size_t>(y * supersample + sy) * static_cast<std::size_t>(big_size.x) +
+                                                           static_cast<std::size_t>(x * supersample + sx)) * 4;
+                                    for (int ch = 0; ch < 3; ++ch) {
+                                        sum[ch] += decode(large.rgba[i + static_cast<std::size_t>(ch)]);
+                                    }
+                                }
+                            }
+                            const std::size_t o = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4;
+                            for (int ch = 0; ch < 3; ++ch) {
+                                small.rgba[o + static_cast<std::size_t>(ch)] = encode(sum[ch] / static_cast<float>(supersample * supersample));
+                            }
+                            small.rgba[o + 3] = 255;
+                        }
+                    }
+                    kin::save_image(small, out / name / (camera_name + "_ss.png"));
+                } else {
+                    std::fprintf(stderr, "  %s: could not draw the supersampled picture\n", camera_name.c_str());
+                }
+            }
             const Summary cpu_s = summarize(cpu), gpu_s = summarize(gpu);
             std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
@@ -507,7 +686,8 @@ int main(int argc, char** argv) {
                    << ", \"shadow_casters\": " << stats.shadow_casters << ", \"shadow_cascades\": " << stats.shadow_cascades
                    << ", \"cascade_casters\": [" << stats.cascade_casters[0] << ", " << stats.cascade_casters[1] << ", "
                    << stats.cascade_casters[2] << ", " << stats.cascade_casters[3] << "], \"ao_draws\": " << stats.ao_draws << ", \"ao_instances\": " << stats.ao_instances
-                   << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches << ", \"lights\": " << stats.lights << "}";
+                   << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
+                   << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights << "}";
         }
         report << "]}";
     }

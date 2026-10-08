@@ -164,8 +164,9 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   the sun (angles, intensity, L animates it), fill light, hemisphere and ground
   ambient, an environment (HDRIs from the cache), point lights (K drops one at
   the camera), shadows (map size, cascades, distance, area), ambient occlusion,
-  contact shadows (distance, thickness, intensity, steps),
-  MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
+  contact shadows (distance, thickness, intensity, steps), temporal anti-aliasing
+  (history kept, sharpen, jitter scale and samples, a freeze-jitter debug switch and a
+  reset-history button), MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
   and every material feature (textures, normal maps, metallic-roughness maps,
   emissive, cut-out, double-sided, shadows, unlit, roughness and metallic
   overrides). F3 shows the stats (frame, CPU and GPU time, draws, triangles,
@@ -175,7 +176,7 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8
-  --screenshot out.png --preset ao` (or `--preset contact`) renders from the start camera and writes the
+  --screenshot out.png --preset ao` (or `--preset contact`, `--preset taa`, with `--spin 0.4` for a moving camera and enough `--frames` to settle) renders from the start camera and writes the
   picture (`--hud` puts the panel in it, `--spin DEG` turns the camera a frame,
   `--print-settings` prints the settings). `ctest -R sponza-walk` does this and
   checks the picture is not blank; it skips without Sponza or a GPU.

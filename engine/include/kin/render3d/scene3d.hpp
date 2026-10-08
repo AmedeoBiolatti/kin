@@ -221,6 +221,29 @@ struct ContactShadows3D {
     u32 steps = 20;        // samples along the march (4 to 64)
 };
 
+// Temporal anti-aliasing: each frame is drawn a fraction of a pixel off (a
+// jitter), and a compute pass blends it into the picture of the frames before
+// (reprojected by how everything moved, and clamped to the colours near it),
+// so edges and fine detail settle to what many samples a pixel would give.
+// It replaces MSAA while on: the view draws one sample a pixel whatever
+// View3DOptions::samples asks. Costs a velocity pre-pass (shared with ambient
+// occlusion and contact shadows), a history picture and a compute dispatch, so
+// it is off unless asked for; off, the picture and the cost are as without it.
+//
+// The history belongs to the view (made by the first frame that asks, dropped
+// by the first that does not), not the scene: the scene is rebuilt each frame.
+// A camera cut should call View3D::reset_history(). Moving meshes are matched
+// from one frame to the next by draw order or MeshInstance::id: see
+// docs/rendering_3d.md for how, and what it cannot do.
+struct TemporalAA3D {
+    bool enabled = false;
+    f32 blend = 0.9f;        // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
+    f32 sharpness = 0.0f;    // a small local-contrast boost on the result, 0 (off) to 1; costs one more dispatch
+    f32 jitter_scale = 1.0f; // the jitter's reach: 1 is a pixel; 0 turns the jitter off (no anti-aliasing, for looking at the rest)
+    u32 jitter_samples = 8;  // frames before the jitter sequence repeats (1 to 16)
+    bool freeze_jitter = false; // debug: the same offset every frame, to see the history working without the jitter's crawl
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -231,6 +254,7 @@ public:
     Lights3D lights{};
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
+    TemporalAA3D taa{};
     // Copies wholly outside the camera's view are skipped (each tested as the
     // sphere round its mesh's bounds, moved and scaled with it).
     bool cull = true;

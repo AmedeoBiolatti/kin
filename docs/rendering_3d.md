@@ -267,6 +267,77 @@ the pre-pass shows in `ao_draws` and `ao_instances`. Custom shaders see a tenth
 sampler (`uContactShadow`) in kin's include; ones compiled before still work.
 Full size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
 
+### Temporal anti-aliasing
+
+`scene.taa = {.enabled = true, .blend = 0.9f, .sharpness = 0.0f,
+.jitter_scale = 1.0f, .jitter_samples = 8, .freeze_jitter = false}` (off by
+default; off, the picture is bit-identical and nothing extra exists: no pass,
+no buffer). Each frame is drawn a Halton (2, 3) fraction of a pixel off
+(`kin::taa_jitter`, `kin/render3d/taa.hpp`), and a compute pass blends it into
+the picture of the frames before. **It replaces MSAA while on**: the view
+draws one sample a pixel whatever `View3DOptions::samples` asks
+(`stats().samples` says 1).
+
+- **Where the settings live.** On the scene, like occlusion: it can be switched
+  live without making the view again. What it keeps between frames, the
+  history, belongs to the **view** (the scene is rebuilt every frame): made by
+  the first frame that asks, dropped by the first that doesn't. `View3D::reset_history()`
+  drops it by hand (a camera cut, a scene swapped); a resize, the first frame
+  and a change from a perspective to an orthographic camera do it by themselves
+  (`stats().taa_reset`).
+- **Jitter** moves the projection of the passes that draw the picture (the main
+  pass, the pre-pass, the occlusion and contact-shadow maths that unproject its
+  depth, the overlay). The frustum culling, the shadow cascades' fit, the pick
+  pass, `Camera3D::project` and `ray` use the exact matrices.
+- **Velocity** is written by the pre-pass (shared with ambient occlusion and
+  contact shadows, drawn once; it writes four floats, the normal and the
+  velocity, instead of two) from each copy's matrix of the frame before, kept in
+  a buffer of its own beside the instances (the 128 B instance is untouched) and
+  the view's last view-projection. The first-person overlay has its own pass
+  and its own previous camera, so a gun is neither smeared by the world behind
+  it nor trailed.
+- **Matching copies from frame to frame** (the scene is rebuilt, so nothing
+  says which copy is which): by `MeshInstance::id` when it isn't 0 (give moving
+  things stable ids to get the best); else by place in the mesh's copies in
+  draw order, if there are as many as last frame and the copy hasn't moved more
+  than eight times its size; else by where it was (the nearest copy of the mesh
+  within twice its size). A copy none of these find, or a mesh not drawn last frame,
+  has no past: its velocity points off the screen, and the resolve uses no history there.
+  Limits: copies of one mesh that cross within twice their size while the list
+  also changes can swap pasts (a wrong velocity of at most that distance; the
+  clip below bounds the damage); the key is the mesh, not the material, so a
+  material that changes between frames does not break matching; a copy that
+  moves more than twice its size in a frame has no history (bullets: give them
+  ids). Costs CPU: about 0.3 ms a render for 22,000 copies.
+- **Resolve** (`taa.comp`): reproject by velocity, read the history with a
+  Catmull-Rom filter (five taps), clip it to a 3 x 3 box of this frame's colours in
+  YCoCg (mean and spread, inside the neighbours' range), mix with weight `blend`,
+  less where the surface read from moved differently from this one (the
+  velocity the last frame had there), where the history is read between pixels,
+  with speed and with how far the clip moved it; none off the screen, for a new
+  copy or the first frame. This frame's colour is read from its 3 x 3 neighbours
+  by how near the pixel centre each sample fell (a Gaussian), not as the pixel's
+  own sample, which would pull the picture to wherever the last few jitters were
+  (with the jitter at 0 it is the pixel's own). Light is compressed
+  (`c / (1 + max c)`) for the clip and the mix. `sharpness` (0 to 1) adds a
+  local-contrast boost kept inside the neighbours' range, one more dispatch.
+- **Before the post chain**: bloom, exposure and the tonemap work on the
+  resolved picture. An 8-bit view is drawn in linear float into a texture of its
+  own, resolved, then clipped at white and encoded (`view_output.frag` mode 3);
+  what it loses is MSAA's resolve in encoded values (edges are averaged in linear light,
+  as an HDR view's are), and the extra RGBA16F targets.
+- **Not covered:** blended, additive and wireframe meshes have no velocity
+  (they take the opaque mesh's behind them: sparks and glass trail a little, the clip keeps it
+  short); a camera cut needs `reset_history()`; a pan of exactly half pixels a
+  frame lines the jitter up with the motion and leaves part of each pixel
+  unvisited (rates that don't repeat are fine); thin detail in a pan
+  is softer than MSAA's. The occlusion's and contact shadows' per-pixel noise
+  is fixed, not varied by frame: left.
+- Without RGBA16F as target and storage, or without what the pre-pass needs, it is off with
+  one line in the log. `stats()` has `taa_dispatches` (0 when off, 2 with
+  sharpening), `taa_reset`, `taa_jitter` and `samples`.
+  See the plan's G2d results for numbers.
+
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
@@ -351,7 +422,7 @@ Agents send motion with the server's `input.mouse {dx, dy}`.
 
 [examples/sponza_walk](../examples/sponza_walk) flies a camera round Sponza
 (fetched by `tools/reference/fetch.py`) with every feature of the renderer on
-a switch: lights, shadows (cascades), occlusion, contact shadows, MSAA, HDR and bloom, and each
+a switch: lights, shadows (cascades), occlusion, contact shadows, temporal anti-aliasing, MSAA, HDR and bloom, and each
 material feature (done to copies of the model's materials, so the model is
 kept). Its settings are one struct applied to a `Scene3D` each frame, so a new
 feature is a field and a row in its table of switches; `--set`, `--preset` and
@@ -396,6 +467,7 @@ lit by strong lights. The glow belongs to the view, so 2D drawn over it
 scene)` draws the scene into it, recorded between the 2D drawn before and
 after; a view keeps its picture until rendered again, so a still model needs
 no rendering each frame. `resize(view, size)` gives it a new size and texture.
+`view.reset_history()` drops the history temporal anti-aliasing keeps.
 
 `Renderer3D::capabilities()` says what the device has (depth bits, most
 samples); `stats()` what the last render drew (draw calls, instances, copies

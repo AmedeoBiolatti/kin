@@ -173,7 +173,7 @@ if(KIN_EXPERIMENTAL_3D)
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
-                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp
+                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/taa.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
                                       src/renderer/gpu/gpu_renderer3d.cpp)
     set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
@@ -229,7 +229,8 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
               transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag
               fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp
-              prepass.vert prepass.frag prepass_mask.frag gtao.comp ao_blur.comp contact.comp)
+              prepass.vert prepass.frag prepass_mask.frag gtao.comp ao_blur.comp contact.comp
+              prepass_velocity.vert prepass_velocity.frag prepass_velocity_mask.frag taa.comp)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.

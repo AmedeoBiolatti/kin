@@ -1350,7 +1350,7 @@ march's samples on the screen blocks nothing (checked by making the thickness
 both run (3 and 3 dispatches); 4x MSAA; the overlay is unchanged; with no sun,
 no passes.
 
-#### G2d — Temporal anti-aliasing
+#### G2d — Temporal anti-aliasing. Done.
 
 Halton (2,3) jitter of the projection, 8 samples; a velocity buffer from
 the previous frame's transforms, kept in a separate per-instance buffer
@@ -1366,10 +1366,156 @@ no-TAA picture within noise; no trails behind moving enemies in a Signal
 Breach capture; a new reference scene with a moving object. Of the four, the
 likeliest to be cut if the cost or the fiddliness is too much.
 
+#### G2d — results
+
+Built: `Scene3D::taa` (`TemporalAA3D {enabled = false, blend = 0.9, sharpness = 0,
+jitter_scale = 1, jitter_samples = 8, freeze_jitter = false}`), `View3D::reset_history()`,
+`kin/render3d/taa.hpp` (`taa_jitter`, `jitter_projection`: pure), the velocity
+pre-pass (`prepass_velocity.*`), `taa.comp`, `Render3DStats::{taa_dispatches,
+taa_reset, taa_jitter, samples}`; docs/rendering_3d.md has the whole design. The
+decisions, short:
+
+- **Setting on the scene, history on the view.** Like occlusion, so it switches live
+  without making the view again; the history (two RGBA16F, a one-sample depth, the
+  last frame's velocity, for an 8-bit view a float picture before the resolve) is the
+  view's, made by the first frame that asks and dropped by the first that doesn't.
+- **Velocity in the pre-pass, not an extra target of the main pass.** The pre-pass
+  exists already for occlusion and contact shadows (shared, one draw), custom
+  material shaders have one colour output (a second would be garbage), and the main
+  pass's pipelines stay as they were. The normal and the velocity share one RGBA16F
+  target, so no multiple targets in the pipeline cache. Cost: a second draw of the
+  opaque meshes when nothing else asked for the pre-pass (kiln: +1.3 ms).
+- **Previous transforms in a buffer of their own** (64 B a copy, same slots as the
+  instances), with a "no past" flag in a zero of the matrix: the 128 B instance and
+  the shadow and pre-pass instance data are untouched.
+- **Matching** by id, else draw order when the count agrees, else the nearest copy last
+  frame, else new (limits in rendering_3d.md). Tests lose and gain a copy of a crowd
+  every frame and still keep their history (sabotaged: halves it).
+- **Overlay jittered with the rest** and given its own velocity pass and previous camera
+  (sabotaged: the gun's edge error is five times higher).
+- **MSAA is replaced** (one sample a pixel; a 4x view with TAA equals a 1x one).
+- **Off** is the old renderer: every picture of `g2d` equals `g1b_final` (kiln's own
+  noise aside), Signal Breach frame 1800 is byte-identical to `g2c_breach_off.png`, and
+  a same-session A/B of the off path against the previous commit's build shows the
+  same GPU times within noise.
+
+What went wrong on the way, because it shaped the shader: with the history read at
+the pixel centre and each frame's raw sample taken as the pixel's, the picture drifted
+a fraction of a pixel toward the last few jitters whenever the history was short
+(any motion): a camera pan was worse than no anti-aliasing. Fixes that stayed:
+Karis' Gaussian reconstruction of this frame at the pixel centre, less history where
+the history is read between pixels, and rejecting history by the velocity the
+last frame had at the spot it is read from (the first version let the ghost of a
+moving block through on high-frequency content).
+
+*Off against `g1b_final`:* all 21 pictures identical (kiln 72 to 79 dB, its own jitter).
+
+*Distance to Cycles, mean levels / SSIM against `truth` (1280 x 720, 120 frames, TAA
+pictures after 130 frames):*
+
+| Picture | 1 sample | MSAA 4x (`g2d`) | TAA (`g2d_taa`) |
+|---|---|---|---|
+| cornell | 10.24 / .8849 | 10.20 / .8868 | 10.20 / .8872 |
+| helmet front / side | 0.69 / .9880, 0.72 / .9868 | 0.66 / .9894, 0.68 / .9886 | 0.58 / .9916, 0.62 / .9902 |
+| ibl_helmet front / side | 1.39, 1.49 | 1.38, 1.48 | 1.35, 1.45 |
+| ibl_spheres front / grazing | 10.91 / .9324, 15.16 / .9209 | 9.49 / .9386, 10.81 / .9342 | 9.53 / .9392, 10.83 / .9351 |
+| kiln close / game | 1.66, 0.77 | 1.55, 0.67 | 1.51, 0.65 |
+| shadows overview / contact / fence / grazing | 2.43, 4.80, 3.73, 6.89 | 2.38, 4.75, 3.53, 6.86 | 2.41, 4.79, 3.52, 6.89 |
+| spheres front / grazing | 3.64, 4.09 | 3.60, 4.05 | 3.60, 4.07 |
+| sponza nave / roof | 50.13, 34.05 | 50.10, 33.98 | 49.97, 33.89 |
+| furnace | 0.23 | 0.23 | 0.23 |
+
+Honest reading: the mean distance is dominated by what is not edges, so TAA
+is within 0.05 of MSAA 4x everywhere and slightly better on the helmet; its SSIM is
+higher than MSAA 4x's in every picture (a still camera: edges settle to what many
+samples give). Where one sample is clearly worse (`ibl_spheres` grazing 15.2 against
+10.8) TAA is level with MSAA 4x. With AO, contact shadows and 4 cascades together
+(sponza, shadows): `g2d_all` (no TAA) / `g2d_taa_all`: sponza nave 48.63 / 48.50, roof
+32.04 / 31.95, shadows overview 2.54 / 2.59, contact 5.08 / 5.13, fence 4.04 / 4.00,
+grazing 7.05 / 7.08 (SSIM higher with TAA in all six); stable (frame-to-frame change
+0.06 levels in the unit test).
+
+*GPU cost, ms a render (RTX 4080 Laptop; `*` where compare.py marks it; TAA draws
+one sample, so a scene that was cheap under MSAA 4x pays the fixed passes):*
+
+| Picture | off (MSAA 4x) | TAA |
+|---|---|---|
+| cornell / furnace | 0.076 / 0.039 | 0.149 / 0.140 * |
+| spheres front / grazing | 0.130 / 0.078 | 0.246 * / 0.246 * |
+| shadows overview / contact / fence / grazing | 0.092 / 0.096 / 0.095 / 0.116 | 0.172 * / 0.224 * / 0.230 * / 0.251 * |
+| helmet front / side | 0.152 / 0.168 | 0.243 * / 0.247 * |
+| sponza nave / roof | 0.347 / 0.287 | 0.528 * / 0.422 * |
+| kiln close / game | 4.609 / 4.277 | 6.156 * / 5.972 * |
+| crowd first_person / mid_deck / above | 1.230 / 0.732 / 1.336 (1.07 / 0.58 / 1.29 earlier) | 1.618 * / 0.923 * / 1.649 * |
+| sponza + AO + contact + 4 cascades, nave / roof | 1.076 / 1.000 | 1.193 * / 1.086 * |
+| shadows + the same, overview / fence | 0.520 / 0.756 | 0.673 * / 0.849 * |
+
+(Small scenes' absolute numbers scatter 20 to 30%.) The fixed cost is about 0.07 to
+0.15 ms (pre-pass, resolve, output pass); big scenes add the second geometry pass (kiln
++1.4 ms, 5 M triangles; crowd +0.4 to 0.5 ms); with occlusion and contact shadows on, the
+pre-pass is shared and TAA adds 0.09 to 0.15 ms. CPU: `render()` +0.3 ms for the crowd's 22,000
+copies (matching), +0.005 to 0.01 ms for small scenes. Sharpening: one more dispatch,
+small. **Signal Breach**: not turned on in the game; with a temporary override (reverted
+and grepped for) frame 1800 draws correctly (gun in front, enemies, particles), no ghosts,
+enemy edges about as aliased as the MSAA frame's.
+
+*The `motion` scene* (new, `procedural: "motion"`, no Cycles truth; judged against a 4 x 4
+supersample with 4x MSAA of the same moment, `kin_reference --supersample 4`, error
+in mean square levels; the fence region in brackets):
+
+| Camera | 1 sample | MSAA 4x | TAA |
+|---|---|---|---|
+| still (objects move, camera still) | 69.7 (490) | 13.4 (98) | 16.2 (98) |
+| pan (camera moves 1.8 px a frame at the fence) | 69.7 (490) | 13.4 (98) | 43.8 (299) |
+| close (fence near) | 111.6 (216) | 17.5 (36) | 23.1 (25) |
+
+(The pan picture's error depends on the frame's jitter phase: 40 to 70 over the settings tried.)
+Looked at (`reference_out/g2d_taa_ss`): the turning cross, the orbiting bar, the block, the
+ball and the sliding pole show no trails or ghosts; a faint streak on the fence next to the ball
+for a frame or two; thin white posts in a pan break up a little (thin-feature TAA's usual
+fault, about 3x MSAA's error); no flicker still; static detail as sharp as MSAA's. Jitter crawl was not
+visible in stills; a live walk was not seen. Moving-camera evidence: `sponza_walk --spin`
+headless frames, the `pan` camera, and the unit tests' pans; not live mouse movement or the
+panel's click path (not testable here; `--preset taa` and `--print-settings` were run).
+
+Tests (`kin_render3d_tests`, RTX 4080 and lavapipe): `test_taa_jitter` (values, period,
+range, distinct, centred, clamp, the projection shift at any depth); `test_gpu_taa` (off is
+the old picture and runs nothing; a still scene settles, frame to frame 0.05 levels; edge
+levels 2 against 45, error against a 16 sample reference 99.6 against 11.9; no jitter is
+no anti-aliasing; frozen and short jitters; sharpening steepens edges 61%; reset and resize
+and `reset_history`; a camera cut; a 4x MSAA view draws one sample and equals a 1x one; a
+block moving by place and by id leaves no trail and stays white; a new mesh or copy is white
+at once; one that goes leaves nothing); `test_gpu_taa_over_detail` (a block over a 1-pixel
+checker leaves no ghost, panning over a textured surface at four rates is
+0.1 to 0.6 of the plain picture's error); `test_gpu_taa_crowd` (losing and gaining copies);
+`test_gpu_taa_overlay` (the gun's edge, in and out, against a supersample); `test_gpu_taa_with_occlusion`
+(pre-pass drawn once, 3 + 3 + 1 dispatches, crease dark, stable); `test_gpu_taa_pick` (pick is the
+same every frame with the jitter); `test_gpu_taa_hdr` (bloom on the resolved picture).
+Two checks were made by breaking the code (overlay velocity off, place matching off) and
+seeing the tests fail.
+
+Not done: varying the occlusion's noise by frame; velocity for blended and additive
+meshes; a depth-based disocclusion test (the velocity one is used); the pan's jitter-phase
+dependence; Signal Breach has no TAA switch.
+
 Every new or changed scene (moving object, thin geometry for AO halos) gets
 a `truth` render. Unit tests for the cascade fit and the Halton sequence;
 pixel tests with tolerance on the RTX 4080 and lavapipe (compute on
 lavapipe checked); the 3D-off build keeps building.
+
+#### G2 summary
+
+| Step | Gains | Costs (RTX 4080 Laptop, 1280 x 720) | Default |
+|---|---|---|---|
+| G2a cascades | sharp shadows near the camera in a large `shadow_area` (3 px edge to 1 px at 60 m, test) | casters drawn again for each cascade; nothing in the small reference scenes (identical pictures) | 1 cascade (off) |
+| G2b pre-pass and GTAO | ambient and environment light shut off in creases: Sponza 50.1 to 48.7 (radius 0.5), further with a larger radius | +0.25 to 0.55 ms in small scenes, +0.9 to 1.0 ms in the crowd (not turned on in Signal Breach) | off |
+| G2c contact shadows | small contact shadows a coarse map misses | +0.15 to 0.3 ms (shared pre-pass with AO: +0.2 to 0.3 more); no gain on the reference scenes' distances | off |
+| G2d TAA | edges and fine detail as good as or better than MSAA 4x (SSIM) from one sample, steadier; works with the rest | +0.07 to 0.15 ms fixed, second geometry pass in big scenes (kiln +1.4, crowd +0.4); +0.09 to 0.15 over AO + contact; CPU +0.3 ms for 22,000 copies | off |
+
+Every feature is off by default and the picture and cost are then those of
+`g1b_final` (checked per step, byte for byte in Signal Breach). None of the four
+brought kin measurably nearer Cycles by mean distance; they are quality
+and stability features (SSIM, edges, creases), and AO and cascades matter most in bigger levels.
 
 ### G3 — Adaptive meshes, GPU-driven drawing
 

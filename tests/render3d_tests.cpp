@@ -3,6 +3,7 @@
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
+#include <kin/render3d/taa.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 
@@ -2075,6 +2076,933 @@ void test_gpu_material_shader() {
     });
 }
 
+
+// --- Temporal anti-aliasing (G2d) ---
+
+// The jitter: Halton (2, 3) from its second element, in pixels in [-0.5, 0.5),
+// repeating with the period, every point of a period different, centred on the
+// pixel; a projection moved by it shifts every point by that much whatever its depth.
+void test_taa_jitter() {
+    const kin::Vec2f first = kin::taa_jitter(0);
+    assert(std::abs(first.x - 0.0f) < 1e-6f && std::abs(first.y - (1.0f / 3.0f - 0.5f)) < 1e-6f); // Halton(1): (1/2, 1/3)
+    const kin::Vec2f second = kin::taa_jitter(1); // Halton(2): (1/4, 2/3)
+    assert(std::abs(second.x - (0.25f - 0.5f)) < 1e-6f && std::abs(second.y - (2.0f / 3.0f - 0.5f)) < 1e-6f);
+    kin::Vec2f sum{};
+    for (kin::u32 period : {1u, 4u, 8u, 16u}) {
+        for (kin::u32 f = 0; f < 3 * period + 5; ++f) {
+            const kin::Vec2f j = kin::taa_jitter(f, period);
+            assert(j.x >= -0.5f && j.x < 0.5f && j.y >= -0.5f && j.y < 0.5f);
+            assert(j.x == kin::taa_jitter(f % period, period).x && j.y == kin::taa_jitter(f % period, period).y); // repeats
+        }
+    }
+    for (kin::u32 a = 0; a < 8; ++a) {
+        const kin::Vec2f j = kin::taa_jitter(a);
+        sum = {sum.x + j.x, sum.y + j.y};
+        for (kin::u32 b = a + 1; b < 8; ++b) {
+            const kin::Vec2f k = kin::taa_jitter(b);
+            assert(std::abs(j.x - k.x) > 1e-4f || std::abs(j.y - k.y) > 1e-4f); // all different within a period
+        }
+    }
+    assert(std::abs(sum.x / 8.0f) < 0.1f && std::abs(sum.y / 8.0f) < 0.1f); // and centred on the pixel
+    // Out of range periods are clamped; 1 is a single point.
+    assert(kin::taa_jitter(5, 1).x == kin::taa_jitter(0, 1).x && kin::taa_jitter(0, 0).y == kin::taa_jitter(9, 1).y);
+    assert(kin::taa_jitter(17, 99).x == kin::taa_jitter(1, 16).x);
+    // The shifted projection: a point near and a point far both land the same distance from where they were, in pixels.
+    const kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+    const Mat4f vp = camera.view_projection(4.0f / 3.0f);
+    const kin::Vec2f pixels{0.3f, -0.4f};
+    const Mat4f moved = kin::jitter_projection(vp, pixels, {160, 120});
+    for (const Vec3f p : {Vec3f{0.5f, 0.2f, 3.0f}, Vec3f{-1.0f, 0.7f, -20.0f}}) {
+        const Vec3f a = vp.apply_projective(p), b = moved.apply_projective(p);
+        assert(std::abs((b.x - a.x) * 80.0f - pixels.x) < 1e-3f); // ndc 2 across 160 pixels
+        assert(std::abs((a.y - b.y) * 60.0f - pixels.y) < 1e-3f); // rows run down
+        assert(std::abs(a.z - b.z) < 1e-6f);
+    }
+}
+
+int level(Color c) { return c.g; }
+
+// The linear light of an 8-bit sRGB value, and back.
+float decode_srgb(kin::u8 v) {
+    const float c = static_cast<float>(v) / 255.0f;
+    return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+}
+kin::u8 encode_srgb(float c) {
+    c = std::clamp(c, 0.0f, 1.0f);
+    const float e = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+    return static_cast<kin::u8>(std::lround(e * 255.0f));
+}
+
+// A fixed orthographic camera, 10 pixels a unit over the 160 x 120 window.
+kin::Camera3D flat_camera(float dx = 0.0f, float dy = 0.0f) {
+    kin::Camera3D camera;
+    camera.position = {dx, dy, 5.0f};
+    camera.projection = kin::Projection3D::Orthographic;
+    camera.height = 12.0f;
+    camera.z_near = 0.1f;
+    camera.z_far = 20.0f;
+    return camera;
+}
+
+// A wide plane (80 x 12 units, at z = 0) with a hard-edged checker texture of 4-pixel cells under flat_camera,
+// sampled at a point, so that the texture aliases as a game's fine detail does.
+struct PatternSurface {
+    kin::Mesh mesh;
+    kin::Texture texture;
+};
+
+PatternSurface make_pattern_surface(kin::Renderer3D& r3d, kin::Renderer2D& renderer) {
+    std::vector<kin::u8> texels(640 * 480 * 4);
+    for (int y = 0; y < 480; ++y) {
+        for (int x = 0; x < 640; ++x) {
+            const kin::u8 v = ((x / 16 + y / 16) % 2 == 0) ? 30 : 220;
+            const std::size_t i = static_cast<std::size_t>(y * 640 + x) * 4;
+            texels[i] = texels[i + 1] = texels[i + 2] = v;
+            texels[i + 3] = 255;
+        }
+    }
+    kin::MeshData plane;
+    plane.vertices = {{{-40, -6, 0}, {0, 0, 1}, {0, 1}}, {{40, -6, 0}, {0, 0, 1}, {5, 1}},
+                      {{40, 6, 0}, {0, 0, 1}, {5, 0}}, {{-40, 6, 0}, {0, 0, 1}, {0, 0}}};
+    plane.indices = {0, 1, 2, 0, 2, 3};
+    return {r3d.create_mesh(plane), renderer.create_texture_from_rgba(texels.data(), {640, 480})};
+}
+
+// Temporal anti-aliasing: off is the old picture and runs nothing; on, a still
+// scene settles to a picture with the intermediate levels along edges that one
+// sample a pixel can't make, near what a supersampled render gives; a moving
+// object leaves no trail and a new one no ghost; the history is dropped on a
+// resize, a reset and by a changed camera kind; a view asked for 4x MSAA draws
+// one sample; the gun overlay stays in front and is not smeared; picking does
+// not see the jitter; works with ambient occlusion and contact shadows, with an
+// HDR view and bloom.
+void test_gpu_taa() {
+    with_gpu("test_gpu_taa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh slab = r3d.create_mesh(kin::meshes::box({6.0f, 4.0f, 0.1f}));
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({2.0f, 2.0f, 0.1f}));
+        const kin::Mesh other = r3d.create_mesh(kin::meshes::box({2.0f, 2.0f, 0.2f}));
+        const Color black = Color::rgb(0, 0, 0);
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = black});
+        kin::Scene3D scene;
+        scene.camera = flat_camera();
+        const auto shoot = [&](kin::View3D& target, const kin::Scene3D& s) {
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(target, s));
+            renderer.draw_texture(target.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto still = [&](const kin::Camera3D& camera) {
+            scene.clear();
+            scene.camera = camera;
+            scene.draw(slab, Mat4f::rotation_z(25.0f), white);
+        };
+
+        // Off: the old picture, nothing run; the other settings do nothing.
+        still(flat_camera());
+        const Pixels plain = shoot(view, scene);
+        assert(r3d.stats().taa_dispatches == 0 && !r3d.stats().taa_reset && r3d.stats().samples == 1);
+        scene.taa = {.enabled = false, .blend = 0.5f, .sharpness = 1.0f, .jitter_scale = 3.0f};
+        assert(shoot(view, scene).rgba == plain.rgba);
+        assert(r3d.stats().taa_dispatches == 0 && r3d.stats().taa_jitter.x == 0.0f);
+
+        // On, still: the first frame resets, later ones do not; a dispatch each.
+        scene.taa = {.enabled = true};
+        const Pixels first = shoot(view, scene);
+        if (r3d.stats().taa_dispatches == 0) {
+            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+            return;
+        }
+        assert(r3d.stats().taa_dispatches == 1 && r3d.stats().taa_reset && r3d.stats().samples == 1);
+        const kin::Vec2f jitter_one = r3d.stats().taa_jitter;
+        assert(jitter_one.x == kin::taa_jitter(0).x && jitter_one.y == kin::taa_jitter(0).y);
+        // The first frame is the plain picture, a fraction of a pixel off: edge pixels differ, the middle does not.
+        expect(first.at(80, 60), Color::rgb(255, 255, 255), "inside the slab, first frame");
+        expect(first.at(5, 5), black, "outside the slab, first frame");
+        Pixels previous = first, now = first;
+        for (int f = 1; f < 24; ++f) {
+            previous = now;
+            now = shoot(view, scene);
+            assert(!r3d.stats().taa_reset && r3d.stats().taa_dispatches == 1);
+            const kin::Vec2f j = r3d.stats().taa_jitter, want = kin::taa_jitter(static_cast<kin::u32>(f));
+            assert(j.x == want.x && j.y == want.y);
+        }
+        // Converged: a frame to the next differs little.
+        long diff = 0, worst = 0;
+        for (std::size_t i = 0; i < now.rgba.size(); ++i) {
+            const long d = std::abs(static_cast<long>(now.rgba[i]) - static_cast<long>(previous.rgba[i]));
+            diff += d;
+            worst = std::max(worst, d);
+        }
+        const double mean_diff = static_cast<double>(diff) / static_cast<double>(now.rgba.size());
+        std::cerr << "taa: still, frame 23 to 24: mean " << mean_diff << ", worst " << worst << " levels\n";
+        assert(mean_diff < 0.3 && worst < 45);
+
+        // Edges: more levels than one sample a pixel has, and nearer a 16x supersample than the plain picture.
+        std::array<Pixels, 16> samples;
+        for (int i = 0; i < 16; ++i) {
+            still(flat_camera((static_cast<float>(i % 4) + 0.5f) / 4.0f * 0.1f - 0.05f, (static_cast<float>(i / 4) + 0.5f) / 4.0f * 0.1f - 0.05f));
+            scene.taa = {};
+            samples[static_cast<std::size_t>(i)] = shoot(view, scene);
+        }
+        std::vector<int> reference(160 * 120);
+        std::vector<std::size_t> edge;
+        for (int y = 0; y < 120; ++y) {
+            for (int x = 0; x < 160; ++x) {
+                float sum = 0.0f;
+                for (const Pixels& p : samples) {
+                    sum += decode_srgb(p.at(x, y).g);
+                }
+                reference[static_cast<std::size_t>(y * 160 + x)] = encode_srgb(sum / 16.0f);
+                if (reference[static_cast<std::size_t>(y * 160 + x)] > 3 && reference[static_cast<std::size_t>(y * 160 + x)] < 252) {
+                    edge.push_back(static_cast<std::size_t>(y * 160 + x));
+                }
+            }
+        }
+        const auto error = [&](const Pixels& p) {
+            double e = 0.0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const double d = level(p.at(x, y)) - reference[static_cast<std::size_t>(y * 160 + x)];
+                    e += d * d;
+                }
+            }
+            return e / (160.0 * 120.0);
+        };
+        const auto levels = [&](const Pixels& p) {
+            std::vector<int> seen;
+            for (const std::size_t i : edge) {
+                seen.push_back(level(p.at(static_cast<int>(i % 160), static_cast<int>(i / 160))));
+            }
+            std::sort(seen.begin(), seen.end());
+            return static_cast<int>(std::unique(seen.begin(), seen.end()) - seen.begin());
+        };
+        const double plain_error = error(plain), taa_error = error(now);
+        std::cerr << "taa: " << edge.size() << " edge pixels, distinct levels " << levels(plain) << " plain, " << levels(now)
+                  << " with; mean square error against 16 samples " << plain_error << " plain, " << taa_error << " with\n";
+        assert(levels(plain) <= 3 && levels(now) >= 12);
+        assert(taa_error < plain_error * 0.5);
+
+        // Settings: no jitter is no anti-aliasing (the same picture as plain), a frozen one stays put.
+        still(flat_camera());
+        scene.taa = {.enabled = true, .jitter_scale = 0.0f};
+        for (int f = 0; f < 6; ++f) {
+            shoot(view, scene);
+        }
+        assert(levels(shoot(view, scene)) <= 3 && r3d.stats().taa_jitter.x == 0.0f && r3d.stats().taa_jitter.y == 0.0f);
+        scene.taa = {.enabled = true, .freeze_jitter = true};
+        shoot(view, scene);
+        const kin::Vec2f frozen = r3d.stats().taa_jitter;
+        shoot(view, scene);
+        assert(r3d.stats().taa_jitter.x == frozen.x && r3d.stats().taa_jitter.y == frozen.y);
+        scene.taa = {.enabled = true, .jitter_samples = 2};
+        const kin::Vec2f a = (shoot(view, scene), r3d.stats().taa_jitter);
+        shoot(view, scene);
+        shoot(view, scene);
+        assert(r3d.stats().taa_jitter.x == a.x && r3d.stats().taa_jitter.y == a.y); // a period of 2
+
+        // Sharpening is one more dispatch: flat areas are left alone and edges are steeper.
+        const auto steepness = [](const Pixels& p) {
+            long sum = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x + 1 < 160; ++x) {
+                    const long d = level(p.at(x + 1, y)) - level(p.at(x, y));
+                    sum += d * d;
+                }
+            }
+            return sum;
+        };
+        scene.taa = {.enabled = true};
+        Pixels soft;
+        for (int f = 0; f < 16; ++f) {
+            soft = shoot(view, scene);
+        }
+        scene.taa = {.enabled = true, .sharpness = 1.0f};
+        Pixels sharp;
+        for (int f = 0; f < 16; ++f) {
+            sharp = shoot(view, scene);
+        }
+        std::cerr << "taa: steepness (sum of squared differences along rows) " << steepness(soft) << " soft, " << steepness(sharp) << " sharpened\n";
+        assert(r3d.stats().taa_dispatches == 2);
+        assert(steepness(sharp) > steepness(soft) + steepness(soft) / 20);
+        expect(sharp.at(80, 60), Color::rgb(255, 255, 255), "inside the slab, sharpened");
+        expect(sharp.at(5, 5), black, "outside the slab, sharpened");
+
+        // Resets: a reset_history() and a resize each drop it; the frame after shows no blend (two levels at the edge).
+        scene.taa = {.enabled = true};
+        for (int f = 0; f < 12; ++f) {
+            shoot(view, scene);
+        }
+        assert(!r3d.stats().taa_reset && levels(shoot(view, scene)) >= 12);
+        view.reset_history();
+        const Pixels after_reset = shoot(view, scene);
+        assert(r3d.stats().taa_reset && levels(after_reset) <= 3);
+        assert(!(shoot(view, scene), r3d.stats().taa_reset));
+        assert(r3d.resize(view, {160, 120}) && r3d.resize(view, {120, 90}));
+        assert(r3d.resize(view, {160, 120}));
+        shoot(view, scene);
+        assert(r3d.stats().taa_reset);
+
+        // A camera cut: a picture of something else after reset_history() has nothing of the first.
+        for (int f = 0; f < 10; ++f) {
+            shoot(view, scene);
+        }
+        scene.clear();
+        scene.draw(slab, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f), white);
+        const Pixels before_cut = shoot(view, scene);
+        assert(level(before_cut.at(80, 60)) > 240);
+        scene.clear(); // an empty scene: the slab is gone
+        view.reset_history();
+        const Pixels cut = shoot(view, scene);
+        assert(level(cut.at(80, 60)) < 4 && level(cut.at(70, 55)) < 4);
+        // Without a reset the history is clipped by what is there; still no slab after a few frames.
+        for (int f = 0; f < 3; ++f) {
+            assert(level(shoot(view, scene).at(80, 60)) < 4);
+        }
+
+        // A view asked for 4x MSAA draws one sample with it on, and four off.
+        kin::View3D multisampled = r3d.create_view({160, 120}, {.samples = 4, .background = black});
+        still(flat_camera());
+        scene.taa = {};
+        shoot(multisampled, scene);
+        const kin::u32 msaa_samples = r3d.stats().samples;
+        scene.taa = {.enabled = true};
+        view.reset_history();
+        Pixels one, four;
+        for (int f = 0; f < 10; ++f) {
+            one = shoot(view, scene);
+        }
+        for (int f = 0; f < 10; ++f) {
+            four = shoot(multisampled, scene);
+        }
+        std::cerr << "taa: samples " << msaa_samples << " off, " << r3d.stats().samples << " on\n";
+        assert(r3d.stats().samples == 1 && (msaa_samples == 1 || msaa_samples == 4 || msaa_samples == 2 || msaa_samples == 8));
+        assert(multisampled.samples() == msaa_samples || msaa_samples == 1);
+        // The same sequence on the same scene: the same picture (up to a level's rounding).
+        long worst_msaa = 0;
+        for (std::size_t i = 0; i < one.rgba.size(); ++i) {
+            worst_msaa = std::max(worst_msaa, std::labs(static_cast<long>(one.rgba[i]) - static_cast<long>(four.rgba[i])));
+        }
+        assert(worst_msaa <= 2);
+        // And it works again with it off.
+        scene.taa = {};
+        assert(shoot(multisampled, scene).rgba != four.rgba || msaa_samples == 1);
+        assert(r3d.stats().taa_dispatches == 0 && r3d.stats().samples == msaa_samples);
+
+        // Motion: a block moving 3 pixels a frame leaves no trail (matched by place, then by id) and stays white.
+        for (const kin::u32 id : {0u, 9u}) {
+            view.reset_history();
+            scene.taa = {.enabled = true};
+            int worst_trail = 0, worst_inside = 255;
+            for (int f = 0; f < 40; ++f) {
+                scene.clear();
+                const float x = -6.0f + 0.3f * static_cast<float>(f); // the centre, in units; 10 pixels a unit
+                scene.draw(block, Mat4f::translation({x, 0.0f, 0.0f}), white, kin::colors::white, id);
+                const Pixels p = shoot(view, scene);
+                if (f >= 6) {
+                    const float old_x = x - 0.3f * 6.0f; // where it was six frames ago
+                    const int cx = static_cast<int>(80.0f + old_x * 10.0f);
+                    // The pixels of the old footprint further than 4 behind the block's trailing edge.
+                    for (int dx = -9; dx <= 9; ++dx) {
+                        for (int dy = -9; dy <= 9; ++dy) {
+                            const int px = cx + dx;
+                            if (px >= 0 && px < 160 && px < static_cast<int>(80.0f + x * 10.0f) - 10 - 4) {
+                                worst_trail = std::max(worst_trail, level(p.at(px, 60 + dy)));
+                            }
+                        }
+                    }
+                    worst_inside = std::min(worst_inside, level(p.at(static_cast<int>(80.0f + x * 10.0f), 60)));
+                }
+            }
+            std::cerr << "taa: moving block (id " << id << "): worst trail " << worst_trail << ", least inside " << worst_inside << "\n";
+            assert(worst_trail < 12 && worst_inside > 245);
+            assert(r3d.stats().taa_dispatches == 1);
+        }
+
+        // A mesh that appears is white at once; so is a copy added to a mesh already drawn (the count changes).
+        for (const bool same_mesh : {false, true}) {
+            view.reset_history();
+            int appeared = 0;
+            for (int f = 0; f < 12; ++f) {
+                scene.clear();
+                scene.draw(slab, Mat4f::translation({0.0f, 3.0f, -1.0f}), {.color = Color::rgb(60, 60, 60), .unlit = true});
+                scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
+                if (f >= 8) {
+                    scene.draw(same_mesh ? block : other, Mat4f::translation({4.0f, -2.0f, 0.0f}), white);
+                }
+                const Pixels p = shoot(view, scene);
+                if (f == 8) {
+                    appeared = level(p.at(120, 80));
+                }
+            }
+            std::cerr << "taa: appeared " << (same_mesh ? "as a copy" : "as a mesh") << ": " << appeared << " at once\n";
+            assert(appeared > 245);
+        }
+        // And one that disappears leaves nothing: gone after a frame or two.
+        scene.clear();
+        scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
+        scene.draw(block, Mat4f::translation({4.0f, -2.0f, 0.0f}), white);
+        for (int f = 0; f < 6; ++f) {
+            shoot(view, scene);
+        }
+        scene.clear();
+        scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
+        shoot(view, scene);
+        shoot(view, scene);
+        assert(level(shoot(view, scene).at(120, 80)) < 12);
+    });
+}
+
+// Where history could ghost: a block crossing a 1-pixel checkerboard, whose
+// neighbourhoods span dark to light so the clip lets a wrong history through,
+// and a camera panning over a coarser one. The pixels the block has left must
+// look as they do without it, and a panned picture must stay near the supersampled one.
+void test_gpu_taa_over_detail() {
+    with_gpu("test_gpu_taa_over_detail", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh back = r3d.create_mesh(kin::meshes::box({20.0f, 14.0f, 0.1f}));
+        const kin::Mesh cell = r3d.create_mesh(kin::meshes::box({0.1f, 0.1f, 0.1f}));
+        const kin::Mesh big_cell = r3d.create_mesh(kin::meshes::box({0.4f, 0.4f, 0.1f}));
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({2.0f, 2.0f, 0.1f}));
+        const kin::Material3D light{.color = Color::rgb(220, 220, 220), .unlit = true};
+        const kin::Material3D dark{.color = Color::rgb(30, 30, 30), .unlit = true};
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::Scene3D scene;
+        std::vector<kin::MeshInstance> small_cells, large_cells;
+        for (int y = 0; y < 120; ++y) {
+            for (int x = 0; x < 160; ++x) {
+                if ((x + y) % 2 == 0) {
+                    small_cells.push_back({Mat4f::translation({(static_cast<float>(x) - 79.5f) * 0.1f, (59.5f - static_cast<float>(y)) * 0.1f, 0.2f})});
+                }
+            }
+        }
+        // Cells of 4 pixels, wide enough for the pan; 0.07 off the pixel grid so that edges fall inside pixels.
+        for (int y = -2; y < 33; ++y) {
+            for (int x = -80; x < 80; ++x) {
+                if ((x + y) % 2 == 0) {
+                    large_cells.push_back({Mat4f::translation({static_cast<float>(x) * 0.4f + 0.27f, (14.5f - static_cast<float>(y)) * 0.4f - 0.2f, 0.2f})});
+                }
+            }
+        }
+        const auto shoot = [&](kin::View3D& target, const kin::Scene3D& s) {
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(target, s));
+            renderer.draw_texture(target.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto checker = [&](float cam_x, bool large, bool with_block, float block_x) {
+            scene.clear();
+            scene.camera = flat_camera(cam_x, 0.0f);
+            scene.draw(back, Mat4f::translation({cam_x, 0.0f, 0.0f}), light);
+            scene.draw_instanced(large ? big_cell : cell, large ? std::span<const kin::MeshInstance>{large_cells} : std::span<const kin::MeshInstance>{small_cells}, dark);
+            if (with_block) {
+                scene.draw(block, Mat4f::translation({block_x, 0.0f, 0.3f}), white);
+            }
+        };
+        const PatternSurface pattern_surface = make_pattern_surface(r3d, renderer);
+        const kin::Mesh& surface = pattern_surface.mesh;
+        const kin::Texture& pattern = pattern_surface.texture;
+        const auto textured = [&](float cam_x) {
+            scene.clear();
+            scene.camera = flat_camera(cam_x, 0.0f);
+            scene.draw(surface, Mat4f::identity(), {.unlit = true, .texture = pattern, .wrap_u = kin::Wrap3D::Repeat});
+        };
+        // A 16-sample reference (the camera shifted by sub-pixel steps), in linear light, drawn on a view of its own
+        // so that the temporal view keeps its history.
+        kin::View3D plain_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        const auto supersample = [&](float cam_x, bool large, bool with_block = false, float block_x = 0.0f, bool use_texture = false) {
+            std::vector<float> sum(160 * 120, 0.0f);
+            scene.taa = {};
+            for (int i = 0; i < 16; ++i) {
+                if (use_texture) {
+                    textured(cam_x);
+                } else {
+                    checker(cam_x, large, with_block, block_x);
+                }
+                scene.camera = flat_camera(cam_x + ((static_cast<float>(i % 4) + 0.5f) / 4.0f - 0.5f) * 0.1f,
+                                           ((static_cast<float>(i / 4) + 0.5f) / 4.0f - 0.5f) * 0.1f);
+                const Pixels p = shoot(plain_view, scene);
+                for (int y = 0; y < 120; ++y) {
+                    for (int x = 0; x < 160; ++x) {
+                        sum[static_cast<std::size_t>(y * 160 + x)] += decode_srgb(p.at(x, y).g) / 16.0f;
+                    }
+                }
+            }
+            std::vector<int> out(sum.size());
+            for (std::size_t i = 0; i < sum.size(); ++i) {
+                out[i] = encode_srgb(sum[i]);
+            }
+            return out;
+        };
+        const auto mean_square = [&](const Pixels& p, const std::vector<int>& truth) {
+            double e = 0.0;
+            for (int i = 0; i < 160 * 120; ++i) {
+                const double d = level(p.at(i % 160, i / 160)) - truth[static_cast<std::size_t>(i)];
+                e += d * d;
+            }
+            return e / (160.0 * 120.0);
+        };
+        scene.taa = {.enabled = true};
+        checker(0.0f, false, false, 0.0f);
+        shoot(view, scene);
+        if (r3d.stats().taa_dispatches == 0) {
+            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+            return;
+        }
+        const std::vector<int> reference = supersample(0.0f, false);
+
+        // The block crosses, 3 pixels a frame. Where it has been, the picture is as bright as the checker alone
+        // drawn the same way (a ghost of the white block would lift the zone's mean; the 1-pixel pattern is softened
+        // by the reconstruction filter, so what is compared is the same softened picture, and by its mean).
+        kin::View3D alone_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        Pixels alone;
+        for (int f = 0; f < 30; ++f) {
+            scene.taa = {.enabled = true};
+            checker(0.0f, false, false, 0.0f);
+            alone = shoot(alone_view, scene);
+        }
+        view.reset_history();
+        double worst_zone = 0.0;
+        for (int f = 0; f < 44; ++f) {
+            scene.taa = {.enabled = true};
+            const float x = -7.0f + 0.3f * static_cast<float>(f);
+            checker(0.0f, false, true, x);
+            const Pixels p = shoot(view, scene);
+            if (f >= 8) {
+                // The zone: the pixels the block covered six frames ago, now clear of it by 3 pixels.
+                const int old_centre = static_cast<int>(80.0f + (x - 1.8f) * 10.0f);
+                double got = 0.0, want = 0.0;
+                int count = 0;
+                for (int px = old_centre - 10; px < old_centre + 10; ++px) {
+                    if (px >= 0 && px < 160 && px < static_cast<int>(80.0f + x * 10.0f) - 10 - 3) {
+                        for (int py = 50; py < 70; ++py) {
+                            got += level(p.at(px, py));
+                            want += level(alone.at(px, py));
+                            ++count;
+                        }
+                    }
+                }
+                if (count > 0) {
+                    worst_zone = std::max(worst_zone, std::abs(got - want) / count);
+                }
+            }
+        }
+        std::cerr << "taa: checkerboard behind a moving block: worst difference of the trail zone's mean " << worst_zone << " levels\n";
+        assert(worst_zone < 12.0);
+
+        // The camera pans over 4-pixel cells. Over the last 16 frames (two jitter periods) the picture's error
+        // against the supersample of each frame's own pose, next to the same pose drawn without it.
+        double errors[4][2] = {};
+        int index = 0;
+        for (const float step : {0.0f, 0.0213f, 0.1f, 0.237f}) {
+            view.reset_history();
+            double taa_error = 0.0, plain_error = 0.0;
+            for (int f = 0; f < 48; ++f) {
+                const float cam_x = -5.03f + step * static_cast<float>(f); // 0.3 of a pixel off the pattern's grid
+                scene.taa = {.enabled = true};
+                textured(cam_x);
+                const Pixels p = shoot(view, scene);
+                if (f >= 32) {
+                    const std::vector<int> truth = supersample(cam_x, true, false, 0.0f, true);
+                    scene.taa = {};
+                    textured(cam_x);
+                    taa_error += mean_square(p, truth) / 16.0;
+                    plain_error += mean_square(shoot(plain_view, scene), truth) / 16.0;
+                }
+            }
+            std::cerr << "taa: panning " << step * 10.0f << " px a frame over 4 px cells: mean square error against 16 samples, over a period: "
+                      << taa_error << " with, " << plain_error << " without\n";
+            errors[index][0] = taa_error;
+            errors[index][1] = plain_error;
+            ++index;
+        }
+        // Held still it settles to a fraction of the plain picture's error; panning slowly or by whole pixels a frame
+        // it stays well under it; panning fast the history is trusted less (every sub-pixel shift blurs it, and
+        // what it lacks is made up by the one sample a frame) and the gain is smaller, but there is some.
+        assert(errors[0][0] < errors[0][1] * 0.25);
+        assert(errors[1][0] < errors[1][1] * 0.5 && errors[2][0] < errors[2][1] * 0.4);
+        assert(errors[3][0] < errors[3][1] * 0.75);
+
+    });
+}
+
+// A crowd of one mesh that loses a copy from the middle of its list (and gains
+// one at the front) while it moves: the places in the list no longer say which
+// copy is which, so the copies are matched by where they were. The pixels a
+// block has left must look as they do without it, as with a list that does not change.
+void test_gpu_taa_crowd() {
+    with_gpu("test_gpu_taa_crowd", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const PatternSurface world = make_pattern_surface(r3d, renderer);
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({1.6f, 1.6f, 0.2f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D alone_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::Scene3D scene;
+        scene.camera = flat_camera(-5.03f, 0.0f);
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
+        const auto shoot = [&](kin::View3D& target) {
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(target, scene));
+            renderer.draw_texture(target.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto draw_world = [&] {
+            scene.clear();
+            scene.draw(world.mesh, Mat4f::identity(), {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
+        };
+        // The pattern alone, drawn the same way.
+        scene.taa = {.enabled = true};
+        Pixels alone;
+        for (int f = 0; f < 30; ++f) {
+            draw_world();
+            alone = shoot(alone_view);
+        }
+        if (r3d.stats().taa_dispatches == 0) {
+            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+            return;
+        }
+        for (const bool churn : {false, true}) {
+            view.reset_history();
+            double worst = 0.0;
+            for (int f = 0; f < 60; ++f) {
+                draw_world();
+                std::vector<kin::MeshInstance> crowd;
+                // Five blocks moving right 1.7 pixels a frame, 3.2 units apart; with churn, from frame 24 on the first is gone on even
+                // frames and another stands first in the list on odd ones: the number of copies changes every frame.
+                for (int i = 0; i < 5; ++i) {
+                    if (churn && i == 0 && f >= 24 && f % 2 == 0) {
+                        continue;
+                    }
+                    crowd.push_back({Mat4f::translation({-12.0f + 3.2f * static_cast<float>(i) + 0.17f * static_cast<float>(f), 0.0f, 0.3f})});
+                }
+                if (churn && f >= 24 && f % 2 == 1) {
+                    crowd.insert(crowd.begin(), {Mat4f::translation({-5.0f, 3.5f, 0.3f})});
+                }
+                scene.draw_instanced(block, crowd, white);
+                const Pixels p = shoot(view);
+                if (f >= 40) {
+                    // Behind the block that began third (index 2): where it was 5 frames ago, 3 pixels clear of it now.
+                    const float x = -12.0f + 3.2f * 2.0f + 0.17f * static_cast<float>(f);
+                    const int old_centre = static_cast<int>(80.0f + (x + 5.03f - 0.85f) * 10.0f);
+                    double got = 0.0, want = 0.0;
+                    int count = 0;
+                    for (int px = old_centre - 7; px < old_centre + 7; ++px) {
+                        if (px >= 0 && px < 160 && px < static_cast<int>(80.0f + (x + 5.03f) * 10.0f) - 8 - 3) {
+                            for (int py = 52; py < 68; ++py) {
+                                got += level(p.at(px, py));
+                                want += level(alone.at(px, py));
+                                ++count;
+                            }
+                        }
+                    }
+                    if (count > 0) {
+                        worst = std::max(worst, std::abs(got - want) / count);
+                    }
+                }
+            }
+            std::cerr << "taa: crowd " << (churn ? "losing and gaining copies" : "unchanged") << ": worst difference of the trail zone's mean " << worst << " levels\n";
+            assert(worst < 12.0);
+        }
+        // Matched by where they were, the blocks keep their history through the churn: their edges (white on black)
+        // are anti-aliased, not the 0 and 255 a frame with no history has.
+        double edge_levels[2] = {};
+        for (const bool churn : {false, true}) {
+            view.reset_history();
+            double soft_edges = 0.0;
+            for (int f = 0; f < 60; ++f) {
+                scene.clear();
+                std::vector<kin::MeshInstance> crowd;
+                for (int i = 0; i < 5; ++i) {
+                    if (churn && i == 0 && f >= 24 && f % 2 == 0) {
+                        continue;
+                    }
+                    crowd.push_back({Mat4f::translation({-12.0f + 3.2f * static_cast<float>(i) + 0.17f * static_cast<float>(f), 0.0f, 0.3f})});
+                }
+                if (churn && f >= 24 && f % 2 == 1) {
+                    crowd.insert(crowd.begin(), {Mat4f::translation({-5.0f, 3.5f, 0.3f})});
+                }
+                scene.draw_instanced(block, crowd, white);
+                const Pixels p = shoot(view);
+                if (f >= 40 && f < 50) {
+                    const float x = -12.0f + 3.2f * 2.0f + 0.17f * static_cast<float>(f);
+                    const int left = static_cast<int>(80.0f + (x + 5.03f - 0.8f) * 10.0f);
+                    for (int px = left - 1; px <= left + 1; ++px) {
+                        for (int py = 54; py < 66; ++py) {
+                            const int v = level(p.at(px, py));
+                            soft_edges += (v > 20 && v < 235) ? 0.1 : 0.0; // a tenth for each of ten frames
+                        }
+                    }
+                }
+            }
+            std::cerr << "taa: crowd " << (churn ? "losing and gaining copies" : "unchanged") << ": anti-aliased pixels on a block's left edge, of 36: " << soft_edges << "\n";
+            edge_levels[churn ? 1 : 0] = soft_edges;
+        }
+        // With the list changing, the edges are as soft as with it unchanged (without a match they would have no history: none).
+        assert(edge_levels[0] > 3.0 && edge_levels[1] > edge_levels[0] * 0.6);
+    });
+}
+
+// Temporal anti-aliasing and the first-person overlay: the gun is drawn in
+// front with its own velocity, so it neither smears over a world that moves
+// behind it nor leaves a trail when it moves itself. Judged by the picture
+// round the gun's silhouette against a supersample of the same frame, with a
+// patterned world behind it (a plain one would let the clip hide a wrong history).
+void test_gpu_taa_overlay() {
+    with_gpu("test_gpu_taa_overlay", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const PatternSurface world = make_pattern_surface(r3d, renderer);
+        const kin::Mesh gun = r3d.create_mesh(kin::meshes::box({3.0f, 2.0f, 0.5f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D plain_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::Scene3D scene;
+        const kin::Material3D hands{.color = Color::rgb(200, 40, 40), .unlit = true};
+        const auto build = [&](float cam_x, float gun_x, float dx, float dy) {
+            scene.clear();
+            scene.camera = flat_camera(cam_x + dx, dy);
+            scene.draw(world.mesh, Mat4f::identity(), {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
+            kin::Scene3D& overlay = scene.overlay();
+            overlay.camera = flat_camera(dx, dy);
+            overlay.draw(gun, Mat4f::translation({gun_x, -1.5f, 0.0f}), hands);
+        };
+        const auto shoot = [&](kin::View3D& target) {
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(target, scene));
+            renderer.draw_texture(target.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        // The same frame at 16 sub-pixel offsets, averaged in linear light.
+        const auto truth = [&](float cam_x, float gun_x) {
+            std::vector<float> sum(160 * 120 * 3, 0.0f);
+            scene.taa = {};
+            for (int i = 0; i < 16; ++i) {
+                build(cam_x, gun_x, ((static_cast<float>(i % 4) + 0.5f) / 4.0f - 0.5f) * 0.1f, ((static_cast<float>(i / 4) + 0.5f) / 4.0f - 0.5f) * 0.1f);
+                const Pixels p = shoot(plain_view);
+                for (int k = 0; k < 160 * 120; ++k) {
+                    const Color c = p.at(k % 160, k / 160);
+                    sum[static_cast<std::size_t>(k) * 3] += decode_srgb(c.r) / 16.0f;
+                    sum[static_cast<std::size_t>(k) * 3 + 1] += decode_srgb(c.g) / 16.0f;
+                    sum[static_cast<std::size_t>(k) * 3 + 2] += decode_srgb(c.b) / 16.0f;
+                }
+            }
+            return sum;
+        };
+        // The pixels within 3 of the gun's silhouette, in and out of it: where it meets the world and nowhere else.
+        struct Ring {
+            double inside = 0.0, outside = 0.0;
+        };
+        const auto ring_error = [&](const Pixels& p, const std::vector<float>& want, float gun_x) {
+            const auto left = static_cast<int>(80.0f + (gun_x - 1.5f) * 10.0f), right = left + 29, top = static_cast<int>(60.0f + 0.5f * 10.0f),
+                       bottom = top + 19;
+            double e_in = 0.0, e_out = 0.0;
+            int n_in = 0, n_out = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const bool inside = x >= left && x <= right && y >= top && y <= bottom;
+                    const int depth = inside ? std::min({x - left, right - x, y - top, bottom - y})
+                                             : std::max({left - x, x - right, top - y, y - bottom});
+                    if (depth > 3) {
+                        continue;
+                    }
+                    const Color c = p.at(x, y);
+                    const std::size_t k = static_cast<std::size_t>(y * 160 + x) * 3;
+                    const double dr = c.r - encode_srgb(want[k]), dg = c.g - encode_srgb(want[k + 1]);
+                    (inside ? e_in : e_out) += (dr * dr + dg * dg) / 2.0;
+                    ++(inside ? n_in : n_out);
+                }
+            }
+            return Ring{n_in > 0 ? e_in / n_in : 0.0, n_out > 0 ? e_out / n_out : 0.0};
+        };
+        // The camera pans 2.4 pixels a frame, the gun fixed to the screen; then the gun moves 1.4 pixels a frame over a still world (rates that do not repeat
+        // the jitter's pattern: a pan of exactly half pixels a frame lines the samples up with it and leaves part of each pixel unvisited).
+        for (const bool gun_moves : {false, true}) {
+            view.reset_history();
+            Ring taa_error, plain_error;
+            for (int f = 0; f < 48; ++f) {
+                const float cam_x = gun_moves ? 0.037f : -5.03f + 0.237f * static_cast<float>(f); // off the pattern's grid, as a game's world is
+                const float gun_x = gun_moves ? -4.0f + 0.137f * static_cast<float>(f) : 0.0f;
+                scene.taa = {.enabled = true};
+                build(cam_x, gun_x, 0.0f, 0.0f);
+                const Pixels p = shoot(view);
+                if (r3d.stats().taa_dispatches == 0) {
+                    std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+                    return;
+                }
+                if (f >= 32) {
+                    const std::vector<float> want = truth(cam_x, gun_x);
+                    scene.taa = {};
+                    build(cam_x, gun_x, 0.0f, 0.0f);
+                    const Ring with = ring_error(p, want, gun_x), without = ring_error(shoot(plain_view), want, gun_x);
+                    taa_error.inside += with.inside / 16.0;
+                    taa_error.outside += with.outside / 16.0;
+                    plain_error.inside += without.inside / 16.0;
+                    plain_error.outside += without.outside / 16.0;
+                    // The gun's own middle is its colour, whatever happens at its edges.
+                    expect(p.at(static_cast<int>(80.0f + gun_x * 10.0f), 60 + 10 + 5), Color::rgb(200, 40, 40), "the gun, inside", 4);
+                }
+            }
+            std::cerr << "taa: gun edge error against 16 samples (" << (gun_moves ? "gun moving" : "camera panning") << "), in the gun "
+                      << taa_error.inside << " with, " << plain_error.inside << " without; in the world beside it " << taa_error.outside << " with, "
+                      << plain_error.outside << " without\n";
+            // The gun's side of its edge is no worse than the plain picture's, give or take the reconstruction filter's softening of the edge pixels (a gun given the world's velocity carries its pattern in: over 85);
+            // the world's side no more than a little worse, where the history is dropped round the gun.
+            assert(taa_error.inside < plain_error.inside * 1.1 + 45.0);
+            assert(taa_error.outside < plain_error.outside * 1.15);
+        }
+    });
+}
+
+// Ambient occlusion and contact shadows with temporal anti-aliasing: the
+// pre-pass is drawn once and shared (jittered like the main pass), each
+// effect runs, the foot of the wall is dark and the picture settles.
+void test_gpu_taa_with_occlusion() {
+    with_gpu("test_gpu_taa_with_occlusion", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh wall = r3d.create_mesh(kin::meshes::box({20.0f, 4.0f, 0.2f}));
+        const kin::Mesh pole = r3d.create_mesh(kin::meshes::box({0.2f, 1.0f, 0.2f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({-2.0f, 3.0f, 6.0f}, {0.0f, 0.3f, -2.0f}, 50.0f);
+        scene.lights.sun = {.direction = {1.0f, 0.7f, 0.3f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.5f, 0.5f, 0.5f};
+        const auto render = [&](bool taa, bool ao, bool contact, int frames) {
+            scene.taa.enabled = taa;
+            scene.ambient_occlusion = {.enabled = ao, .radius = 3.0f};
+            scene.contact_shadows = {.enabled = contact};
+            Pixels p, last;
+            for (int f = 0; f < frames; ++f) {
+                scene.clear();
+                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -2.1f}), {.color = Color::rgb(200, 200, 200)});
+                scene.draw(pole, Mat4f::translation({1.0f, 0.5f, 1.0f}), {.color = Color::rgb(200, 200, 200)});
+                renderer.clear(kin::colors::black);
+                assert(r3d.render(view, scene));
+                renderer.draw_texture(view.texture(), screen);
+                last = std::move(p);
+                p = read(renderer);
+                renderer.present();
+            }
+            return std::pair{p, last};
+        };
+        const auto [aoed, aoed_last] = render(false, true, true, 1);
+        if (r3d.stats().ao_dispatches == 0) {
+            std::cerr << "ambient occlusion: not available on this device, skipped\n";
+            return;
+        }
+        const auto at = [&](const Pixels& p, Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        const Vec3f foot{0.0f, 0.0f, -1.8f}, open{-2.0f, 0.0f, 2.0f};
+        const auto [off, off_last] = render(false, false, false, 1);
+        const auto [on, on_last] = render(true, true, true, 30);
+        if (r3d.stats().taa_dispatches == 0) {
+            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+            return;
+        }
+        const kin::Render3DStats& stats = r3d.stats();
+        std::cerr << "taa+ao+contact: pre-pass draws " << stats.ao_draws << ", ao " << stats.ao_dispatches << ", contact " << stats.contact_dispatches
+                  << ", taa " << stats.taa_dispatches << "\n";
+        assert(stats.ao_draws == 3 && stats.ao_instances == 3 && stats.ao_dispatches == 3 && stats.contact_dispatches == 3 && stats.taa_dispatches == 1);
+        assert(stats.samples == 1);
+        // The crease is still dark with it, against the open floor; and the picture is still.
+        std::cerr << "taa+ao+contact: the crease " << brightness(at(off, foot)) << " plain, " << brightness(at(aoed, foot)) << " with occlusion, "
+                  << brightness(at(on, foot)) << " with that and temporal anti-aliasing\n";
+        assert(brightness(at(on, foot)) < brightness(at(off, foot)) * 97 / 100);
+        long diff = 0;
+        for (std::size_t i = 0; i < on.rgba.size(); ++i) {
+            diff += std::labs(static_cast<long>(on.rgba[i]) - static_cast<long>(on_last.rgba[i]));
+        }
+        std::cerr << "taa+ao+contact: mean frame to frame change " << static_cast<double>(diff) / static_cast<double>(on.rgba.size()) << "\n";
+        assert(static_cast<double>(diff) / static_cast<double>(on.rgba.size()) < 0.5);
+        // Close to the plain picture where nothing is at an edge.
+        expect(at(on, open), at(off, open), "the open floor, with and without temporal anti-aliasing", 6);
+        // And TAA alone shares the pre-pass without occlusion.
+        render(true, false, false, 2);
+        assert(stats.ao_draws == 3 && stats.ao_dispatches == 0 && stats.contact_dispatches == 0 && stats.taa_dispatches == 1);
+        render(false, false, false, 1);
+        assert(stats.ao_draws == 0 && stats.taa_dispatches == 0);
+    });
+}
+
+// Pick is exact: the same pixel gives the same answer every frame with the
+// jitter on, and the one without it.
+void test_gpu_taa_pick() {
+    with_gpu("test_gpu_taa_pick", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({2.0f, 2.0f, 2.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        // An edge pixel of the box: where the jitter would change what is under it.
+        const auto edge = scene.camera.project({1.0f, 0.0f, 1.0f}, screen);
+        assert(edge);
+        const kin::Vec2i pixel{static_cast<int>(edge->pos.x), static_cast<int>(edge->pos.y)};
+        kin::PickResult reference;
+        for (const bool taa : {false, true}) {
+            scene.taa.enabled = taa;
+            for (int f = 0; f < 10; ++f) {
+                scene.clear();
+                scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 4);
+                renderer.clear(kin::colors::black);
+                assert(r3d.render(view, scene));
+                const kin::PickResult p = r3d.pick(view, pixel);
+                if (taa && r3d.stats().taa_dispatches == 0) {
+                    std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+                    return;
+                }
+                if (f == 0 && !taa) {
+                    reference = p;
+                }
+                assert(p.hit == reference.hit && p.id == reference.id);
+                assert(kin::length(p.position - reference.position) < 1e-5f);
+                renderer.present();
+            }
+        }
+        // The camera's own projection is untouched by it.
+        const auto again = scene.camera.project({1.0f, 0.0f, 1.0f}, screen);
+        assert(again && again->pos.x == edge->pos.x && again->pos.y == edge->pos.y);
+    });
+}
+
+// An HDR view with bloom: the glow and the tonemap are made from the
+// resolved picture, and a bright cube's glow shows as without it.
+void test_gpu_taa_hdr() {
+    with_gpu("test_gpu_taa_hdr", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh cube = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f}));
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .bloom = 1.0f});
+        const auto side = scene.camera.project({0.55f, 0.0f, 0.3f}, screen);
+        assert(side);
+        Pixels p;
+        for (int f = 0; f < 12; ++f) {
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            p = read(renderer);
+            renderer.present();
+            scene.taa.enabled = true;
+        }
+        if (r3d.stats().taa_dispatches == 0) {
+            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+            return;
+        }
+        assert(brightness(p.at(side->pos)) > 40); // the glow
+        const Color middle = p.at(80, 60);
+        assert(middle.r > 230 && middle.g > 150);
+    });
+}
+
 int main() {
     test_meshes_face_out();
     test_mesh_validation_and_append();
@@ -2111,6 +3039,14 @@ int main() {
     test_gpu_cascades();
     test_gpu_ambient_occlusion();
     test_gpu_contact_shadows();
+    test_taa_jitter();
+    test_gpu_taa();
+    test_gpu_taa_over_detail();
+    test_gpu_taa_crowd();
+    test_gpu_taa_overlay();
+    test_gpu_taa_with_occlusion();
+    test_gpu_taa_pick();
+    test_gpu_taa_hdr();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

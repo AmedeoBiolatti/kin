@@ -6,7 +6,7 @@ layout(location = 0) in vec2 vUV;
 layout(set = 2, binding = 0) uniform sampler2D uScene;
 layout(set = 2, binding = 1) uniform sampler2D uBloom;
 layout(set = 3, binding = 0) uniform Params {
-    vec4 a; // x: bloom strength (0: none), y: exposure, z: 0 tonemap and encode, 1 tonemap, 2 neither (an HDR 2D pipeline)
+    vec4 a; // x: bloom strength (0: none), y: exposure, z: 0 tonemap and encode, 1 tonemap, 2 neither (an HDR 2D pipeline), 3 encode only (a temporally anti-aliased 8-bit view: no exposure or tonemap)
 } params;
 layout(location = 0) out vec4 FragColor;
 
@@ -28,7 +28,7 @@ void main() {
     if (params.a.z < 1.5) {
         c = aces(c * params.a.y);
     }
-    if (params.a.z < 0.5 && alpha > 0.0) {
+    if ((params.a.z < 0.5 || params.a.z > 2.5) && alpha > 0.0) {
         c = encode(c / alpha) * alpha;
     }
     FragColor = vec4(c, alpha);

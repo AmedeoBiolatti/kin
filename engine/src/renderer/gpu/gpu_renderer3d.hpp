@@ -14,6 +14,7 @@
 #include <array>
 #include <memory>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace kin {
@@ -73,11 +74,21 @@ public:
     GpuShader shader;
 };
 
+// Where last frame's copies were, for the velocity of this frame's (Scene3D::taa):
+// the matrices of every copy of the scene, kept by group (a mesh in a scene), and
+// those with a MeshInstance::id by that id.
+struct GpuCopyHistory {
+    std::unordered_map<u64, std::pair<u32, u32>> groups; // a group's first matrix and how many
+    std::unordered_map<u64, u32> ids;                    // a mesh's copy by id: its matrix
+    std::vector<Mat4f> matrices;
+};
+
 class GpuView3D final : public IView3DBackend {
 public:
     Texture texture() const override;
     Vec2i size() const override { return _size; }
     u32 samples() const override { return _samples; }
+    void reset_history() override { _taa_reset_asked = true; }
 
 private:
     friend class GpuRenderer3D;
@@ -99,6 +110,21 @@ private:
     // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
     // normals are shared): the march, blurred across, blurred down; R8, the view's size.
     GpuTexture _contact_raw, _contact_across, _contact;
+    // With Scene3D::taa, made by the first render that asks and dropped by the
+    // first that does not: one-sample depth for the main pass (the view's own
+    // may be multisampled), the 8-bit view's float picture before the resolve
+    // (an HDR view draws into _scene), the history (this frame's resolve and the
+    // one before, swapped each frame) and the sharpened result.
+    GpuTexture _taa_depth, _taa_in, _taa_sharp;
+    GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
+    std::array<GpuTexture, 2> _taa_history;
+    u32 _taa_read = 0;               // which of the two holds the last frame
+    u32 _taa_frame = 0;              // frames drawn with it, for the jitter
+    bool _taa_valid = false;         // the history holds a picture to blend
+    bool _taa_reset_asked = false;   // View3D::reset_history()
+    bool _taa_ortho = false;         // the camera's kind when it was made
+    std::array<Mat4f, 2> _taa_prior{}; // the scene's and the overlay's view-projections last frame (no jitter)
+    GpuCopyHistory _taa_last, _taa_now;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
 };
 
@@ -134,6 +160,9 @@ private:
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                          SDL_GPUShader* custom = nullptr) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
+    // The pre-pass with velocity, into a target of the two-float normal's size
+    // and four floats, over a depth of `depth`.
+    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -145,16 +174,29 @@ private:
     // `half`), or reports they can't be made.
     // The pre-pass's depth and normals always; the occlusion's three targets
     // with `want_ao`, the contact shadows' with `want_contact`.
-    bool ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, bool want_contact);
+    // With `velocity` the pre-pass's normals are four floats, the last two the velocity.
+    bool ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, bool want_contact, bool velocity);
     // Records the compute passes that turn the view's pre-pass into its occlusion.
-    void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
+    // `projection` is the one the main pass draws with (jittered, with temporal anti-aliasing).
+    void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                            const AmbientOcclusion3D& ao, Render3DStats& stats);
     // Records the compute passes that march the view's pre-pass toward the sun
     // (`sun`: toward it in world space) and blur the result.
-    void compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
+    void compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                                  const ContactShadows3D& contact, const Vec3f& sun, Render3DStats& stats);
-    // The view's HDR passes: bloom, then out to what 2D draws.
-    void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view);
+    // The view's passes after the picture is drawn: bloom (HDR), then out to what 2D draws.
+    // `source` is the picture (the view's float scene, or the temporal resolve's);
+    // `plain` is an 8-bit view's resolved picture, which only needs encoding.
+    void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain);
+    // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
+    bool ensure_taa_targets(GpuView3D& view, bool sharpen);
+    void release_taa(GpuView3D& view);
+    // Where each copy of `_refs` was last frame, into _taa_prev (a matrix a copy, flat as _visible is) and the
+    // view's record for the next.
+    void match_copies(GpuView3D& view, bool history_usable);
+    // Resolves `input` into the history and returns the picture to show.
+    const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input, const TemporalAA3D& taa,
+                                  bool reset, Vec2f jitter, Render3DStats& stats);
 
     GpuRenderer2DBackend* _owner = nullptr;
     GpuDevice* _device = nullptr;
@@ -175,6 +217,17 @@ private:
     GpuShader _prepass_vertex_shader;     // prepass.vert
     GpuShader _prepass_shader;            // prepass.frag
     GpuShader _prepass_mask_shader;       // prepass_mask.frag
+    GpuShader _prepass_velocity_vertex_shader; // prepass_velocity.vert
+    GpuShader _prepass_velocity_shader;        // prepass_velocity.frag
+    GpuShader _prepass_velocity_mask_shader;   // prepass_velocity_mask.frag
+    // Temporal anti-aliasing needs the pre-pass and four-float colour targets,
+    // and a float storage texture; else it is off (said once, when asked for).
+    bool _taa_available = false;
+    bool _taa_warned = false;
+    SDL_GPUComputePipeline* _taa_pipeline = nullptr; // taa.comp
+    std::shared_ptr<GpuBuffer> _previous;            // last frame's matrix of each copy in _instances; grows
+    std::vector<Mat4f> _taa_prev;                    // render()'s scratch: a matrix per copy of the scene
+    std::vector<Mat4f> _taa_ordered;                 // and per copy in _instances
     // Ambient occlusion needs these formats and two compute pipelines; where
     // the device lacks one it is off (a line in the log the first time it is asked for).
     SDL_GPUTextureFormat _ao_depth_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
