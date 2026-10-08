@@ -1,0 +1,9 @@
+{
+ "name": "furnace",
+ "purpose": "The white furnace: white spheres of every metallic and roughness in an even white sky, no sun. An energy-conserving material that lets no light out it did not take in disappears into the sky.",
+ "models": [{"file": "made/furnace.glb"}],
+ "view": {"samples": 4, "background": [255, 255, 255]},
+ "lights": {"ambient": [1.0, 1.0, 1.0]},
+ "cameras": [{"name": "front", "eye": [0.0, 2.6, 6.8], "target": [0.0, 0.3, 0.0], "fov": 40}],
+ "truth": {"world": [1, 1, 1], "sun": false, "samples": 256}
+}

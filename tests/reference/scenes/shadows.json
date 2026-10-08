@@ -1,0 +1,109 @@
+{
+ "name": "shadows",
+ "purpose": "Shadow quality under a low sun: thin poles (long thin shadows), plates at 2 cm to 1.2 m (contact, peter-panning), steps and a wall the light grazes (acne), a slatted fence (fine detail), a sphere and a box resting on the floor.",
+ "models": [
+  {
+   "file": "made/shadows.glb"
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   120,
+   150,
+   190
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    1.0,
+    0.35,
+    0.4
+   ],
+   "color": [
+    1.3,
+    1.25,
+    1.15
+   ]
+  },
+  "ambient": [
+   0.18,
+   0.2,
+   0.26
+  ],
+  "shadow_area": [
+   [
+    -8,
+    -0.2,
+    -8
+   ],
+   [
+    8,
+    3.0,
+    8
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "overview",
+   "eye": [
+    0.0,
+    7.0,
+    11.0
+   ],
+   "target": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "fov": 50
+  },
+  {
+   "name": "contact",
+   "eye": [
+    -1.0,
+    1.0,
+    2.2
+   ],
+   "target": [
+    -1.0,
+    0.0,
+    0.0
+   ],
+   "fov": 50
+  },
+  {
+   "name": "fence",
+   "eye": [
+    -3.2,
+    1.2,
+    5.5
+   ],
+   "target": [
+    -3.6,
+    0.2,
+    2.6
+   ],
+   "fov": 45
+  },
+  {
+   "name": "grazing",
+   "eye": [
+    3.0,
+    1.0,
+    1.0
+   ],
+   "target": [
+    2.0,
+    0.6,
+    -5.0
+   ],
+   "fov": 55
+  }
+ ],
+ "truth": {
+  "samples": 512
+ }
+}

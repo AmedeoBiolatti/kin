@@ -1,7 +1,8 @@
 """Writes small glTF 2.0 binary files (.glb) from Python, standard library only.
 
 kin's tests and examples make their models with this (kin/render3d/model.hpp
-reads them): boxes, quads and prisms with materials and embedded PNG textures.
+reads them): boxes, quads, prisms, spheres and polygons with materials
+(metallic-roughness factors, emissive strength) and embedded PNG textures.
 
     model = Glb()
     red = model.material(color=(1, 0, 0, 1))
@@ -41,6 +42,48 @@ def box(size, color=None):
         uvs += [(0, 1), (1, 1), (1, 0), (0, 0)]
         indices += [base, base + 1, base + 2, base, base + 2, base + 3]
     return positions, normals, uvs, indices
+
+
+def sphere(radius, segments=32, rings=16):
+    """A UV sphere, smooth, its poles on Y."""
+    positions, normals, uvs, indices = [], [], [], []
+    for r in range(rings + 1):
+        v = r / rings
+        phi = math.pi * v
+        for s in range(segments + 1):
+            u = s / segments
+            theta = 2 * math.pi * u
+            n = (math.sin(phi) * math.cos(theta), math.cos(phi), -math.sin(phi) * math.sin(theta))
+            positions.append(tuple(c * radius for c in n))
+            normals.append(n)
+            uvs.append((u, v))
+    for r in range(rings):
+        for s in range(segments):
+            a = r * (segments + 1) + s
+            b = a + segments + 1
+            if r != 0:
+                indices += [a, b, a + 1]
+            if r != rings - 1:
+                indices += [a + 1, b, b + 1]
+    return positions, normals, uvs, indices
+
+
+def polygon(corners, toward=None):
+    """A flat convex polygon (a fan), its normal from its corners' order, or
+    turned to face `toward` (a point) when given."""
+    a, b, c = corners[0], corners[1], corners[2]
+    u = [b[i] - a[i] for i in range(3)]
+    w = [c[i] - a[i] for i in range(3)]
+    n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]]
+    if toward is not None and sum(n[i] * (toward[i] - a[i]) for i in range(3)) < 0:
+        corners = list(reversed(corners))
+        n = [-x for x in n]
+    length = math.sqrt(sum(x * x for x in n)) or 1.0
+    n = tuple(x / length for x in n)
+    indices = []
+    for i in range(1, len(corners) - 1):
+        indices += [0, i, i + 1]
+    return list(corners), [n] * len(corners), [(0, 0)] * len(corners), indices
 
 
 def quad(width, height):
@@ -116,16 +159,19 @@ class Glb:
         return len(self.json["textures"]) - 1
 
     def material(self, name="", color=(1, 1, 1, 1), texture=None, emissive=(0, 0, 0), blend=False, double_sided=False,
-                 unlit=False):
-        pbr = {"baseColorFactor": list(color), "metallicFactor": 0.0, "roughnessFactor": 1.0}
+                 unlit=False, metallic=0.0, roughness=1.0, emissive_strength=None):
+        pbr = {"baseColorFactor": list(color), "metallicFactor": metallic, "roughnessFactor": roughness}
         if texture is not None:
             pbr["baseColorTexture"] = {"index": texture}
         m = {"name": name, "pbrMetallicRoughness": pbr, "emissiveFactor": list(emissive), "doubleSided": double_sided}
         if blend:
             m["alphaMode"] = "BLEND"
         if unlit:
-            m["extensions"] = {"KHR_materials_unlit": {}}
+            m.setdefault("extensions", {})["KHR_materials_unlit"] = {}
             self.extensions.add("KHR_materials_unlit")
+        if emissive_strength is not None:
+            m.setdefault("extensions", {})["KHR_materials_emissive_strength"] = {"emissiveStrength": emissive_strength}
+            self.extensions.add("KHR_materials_emissive_strength")
         self.json["materials"].append(m)
         return len(self.json["materials"]) - 1
 

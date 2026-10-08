@@ -389,6 +389,7 @@ GpuRenderer2DBackend::~GpuRenderer2DBackend() {
         end_frame();
     }
     _device.wait_idle();
+    release_unshown_fences(true);
     _gpu_timer.reset();
     _pipelines.destroy();
     for (const ComputePipeline& compute : _compute_pipelines) {
@@ -792,6 +793,36 @@ void GpuRenderer2DBackend::end_gpu_scope() {
     _gpu_timer->track_scope_end(std::move(name), fence, submit_ns, _batch.pixels() - _scope_pixels);
 }
 
+void GpuRenderer2DBackend::hold_back_unshown_frame() {
+    // Queued after the frame: its fence signals once the frame is done. Not
+    // the frame's own fence, which the GPU timer may own.
+    if (SDL_GPUCommandBuffer* marker = SDL_AcquireGPUCommandBuffer(_device.handle())) {
+        if (SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(marker)) {
+            _unshown_fences.push_back(fence);
+        }
+    }
+    while (_unshown_fences.size() > max_unshown_in_flight) {
+        SDL_GPUFence* oldest = _unshown_fences.front();
+        SDL_WaitForGPUFences(_device.handle(), true, &oldest, 1);
+        SDL_ReleaseGPUFence(_device.handle(), oldest); // signalled: safe to release
+        _unshown_fences.pop_front();
+    }
+}
+
+void GpuRenderer2DBackend::release_unshown_fences(bool wait) {
+    // A fence is released only once signalled.
+    while (!_unshown_fences.empty()) {
+        SDL_GPUFence* oldest = _unshown_fences.front();
+        if (wait) {
+            SDL_WaitForGPUFences(_device.handle(), true, &oldest, 1);
+        } else if (!SDL_QueryGPUFence(_device.handle(), oldest)) {
+            return;
+        }
+        SDL_ReleaseGPUFence(_device.handle(), oldest);
+        _unshown_fences.pop_front();
+    }
+}
+
 void GpuRenderer2DBackend::set_gpu_timing_enabled(bool enabled) {
     if (enabled && !_gpu_timer) {
         _gpu_timer = std::make_unique<gpu::GpuFrameTimer>(_device.handle());
@@ -851,6 +882,11 @@ void GpuRenderer2DBackend::present() {
         if (_gpu_timer) {
             ++_untimed_frames;
         }
+    }
+    if (acquired && _frame && _frame->swapchain_texture()) {
+        release_unshown_fences(false); // shown again: SDL holds the CPU back
+    } else {
+        hold_back_unshown_frame();
     }
     if (_gpu_timer) {
         gpu::GpuTimerSamples samples = _gpu_timer->collect();

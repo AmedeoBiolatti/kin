@@ -621,6 +621,155 @@ at M3, so each is compared with its own `--no-shadows`):
 The pictures are the same to the bit (frames 600 and 1800 of the
 benchmark, both binaries).
 
+## Advanced graphics (stage D)
+
+Past a shooter that looks like one: materials and custom shaders, sharper
+and steadier pictures, meshes that adapt to the screen, and ray tracing.
+SDL_GPU (3.4) has vertex, fragment and compute shaders, indirect draws and
+dispatches; no ray-tracing pipelines, no tessellation, geometry or mesh
+shaders. Ray tracing and adaptive meshes are built on compute, which runs on
+every SDL_GPU backend.
+
+Every change in this stage is judged on the same scenes, before and after,
+for how it looks and how fast it is: G0 first.
+
+### G0 — Reference scenes. Done.
+
+Scenes that each stress one thing, rendered from fixed cameras at a fixed
+size, timed, and compared: against the picture before a change (what it
+changed), and against a ground truth, Blender's Cycles rendering the same
+scene (how far kin is from it).
+
+The scenes (`tests/reference/scenes/*.json`: models, cameras, lights, the
+sky, the view's size and samples, what each is for):
+
+| Scene | From | For |
+|---|---|---|
+| `cornell` | made here: the Cornell box's published geometry | light bouncing, an area light, soft shadows (G1 lights, G4) |
+| `spheres` | made here: a 5 x 5 grid of spheres, metal by roughness, on a floor | materials (G1); a white-furnace variant |
+| `shadows` | made here: poles, thin plates, steps, objects touching the ground, a low sun | acne, peter-panning, aliasing, contact (G2) |
+| `helmet` | Khronos glTF samples: FlightHelmet (CC0) | textured materials, normal maps (G1) |
+| `sponza` | Khronos glTF samples: Sponza (Crytek's licence: fetched, never committed) | an interior: shadows, many materials, bounced light (G2, G4) |
+| `crowd` | made in code: Signal Breach's deck and 20,000 instanced enemies | instancing, shadows, GPU culling (G3) |
+| `kiln` | local only: kin-render-studio's export, 5.15 million triangles | dense meshes and LOD (G3); traced against Cycles (G4) |
+
+The tools (`tools/reference/`):
+
+- `fetch.py`: the downloaded scenes, pinned to a commit of
+  KhronosGroup/glTF-Sample-Assets and checked by SHA-256, into a cache
+  (`KIN_REFERENCE_CACHE`, by default `~/.cache/kin/reference`); the made
+  ones written there too (`make_scenes.py`, with `tools/models/glb.py`).
+- `kin_reference` (C++): renders scenes' cameras to PNGs and a JSON of
+  times (`render()` on the CPU, the GPU's time with the view rendered N
+  times a frame so it outweighs the timer's noise, the first frame, the
+  load) and what was drawn.
+- `blender_truth.py`: the same scenes and cameras in Cycles (lights mapped
+  to Blender's units by a calibration render), Standard view transform, kept
+  by the scene's hash and Blender's version.
+- `compare.py`: a pair of pictures: mean difference a channel, PSNR, SSIM,
+  p99, pixels more than 8 levels apart, a difference image; times side by
+  side; an HTML report.
+- `run.py`: renders with a build into `out/<label>`, compares two labels,
+  or a label against the truth.
+
+Acceptance: every scene renders on the RTX 4080 and on lavapipe; the same
+binary twice gives the same pictures; the timing noise of each scene is
+measured (what a later change must beat to count); the truth exists for
+the scenes Cycles can render; the report for kin as it is now is the
+baseline the rest of the stage is measured against.
+
+What was built, as above, plus `studio_mesh_to_glb.py` (the kiln from the
+studio's export, numpy). The downloads are pinned to glTF-Sample-Assets
+edc7c9e and checked against `tools/reference/assets.lock.json`. Cycles'
+lights are kin's mapped: a white plane under a sun of kin colour 0.5 shows
+0.7333 in Cycles and 0.7354 in kin (the same level, stored). Sponza's light
+was chosen so that its galleries are not black in Cycles (the sun down the
+courtyard's length, a brighter sky); its ground-floor aisle stays near
+black there at any light kin's other scenes use, so it has no camera.
+
+**Found on the way, fixed**: a hidden or minimized window gets no swapchain
+texture, so SDL never held the CPU back, and frames (with the render
+targets each cycles) piled up without bound when the GPU was the slower:
+8-12 GB of GPU memory after a few seconds of the crowd rendered 8 times a
+frame, then `VK_ERROR_DEVICE_LOST` loading the kiln. A frame that shows
+nothing now queues an empty command buffer with a fence after it, and the
+CPU waits for the oldest when more than two are pending (not the frame's
+own fence, which the GPU timer may own; fences released only once
+signalled). Peak GPU memory 1.1-1.75 GB on the same runs. This is the 2D
+backend's, not 3D's: it belongs on main too.
+
+The baseline (`run.py render g0 --frames 120`, RTX 4080, 1280 x 720, 4x
+MSAA, the view rendered 8 times a frame for the GPU's time):
+
+| Scene / camera | render() CPU ms | GPU ms | against Cycles: mean levels, PSNR dB, SSIM, pixels over 8 |
+|---|---|---|---|
+| cornell/front | 0.013 | 0.058 | 10.2, 22.6, 0.879, 45% |
+| furnace/front | 0.010 | 0.039 | 0.2, 48.6, 0.998, 0.2% |
+| spheres/front | 0.017 | 0.115 | 5.7, 24.9, 0.967, 24% |
+| spheres/grazing | 0.017 | 0.108 | 5.8, 24.7, 0.964, 23% |
+| shadows/overview | 0.026 | 0.075 | 2.5, 34.6, 0.990, 8% |
+| shadows/contact | 0.015 | 0.077 | 5.2, 29.1, 0.971, 23% |
+| shadows/fence | 0.023 | 0.090 | 4.1, 31.4, 0.975, 24% |
+| shadows/grazing | 0.014 | 0.095 | 6.7, 28.9, 0.990, 50% |
+| helmet/front | 0.011 | 0.146 | 2.1, 27.3, 0.973, 9% |
+| helmet/side | 0.012 | 0.153 | 2.0, 29.8, 0.968, 12% |
+| sponza/nave | 0.065 | 0.250 | 43.4, 14.5, 0.492, 98% |
+| sponza/roof | 0.049 | 0.231 | 28.9, 16.9, 0.652, 91% |
+| kiln/game | 0.026 | 5.37 | 0.8, 38.0, 0.994, 4% |
+| kiln/close | 0.026 | 6.09 | 2.5, 33.1, 0.981, 16% |
+| crowd/first_person | 0.48-1.07 | 1.24 | (speed only) |
+| crowd/mid_deck | 0.40-0.47 | 0.62-0.66 | |
+| crowd/above | 0.47-0.70 | 1.31-1.34 | |
+
+What the distances are: the Cornell box lacks bounced light and the area
+light's soft shadows; the spheres lack reflections and metal (kin's
+materials are matte); the shadows differ in their edges (Cycles' sun is
+sharp, kin filters 3 x 3) and in the sky light kin does not let the scene
+hide; the helmet in its normal and roughness maps; Sponza most of all: kin's
+ambient reaches everywhere, Cycles' sky only through the roof, and its
+alpha-cut plants are black in kin. The furnace passes only because kin's
+materials are matte (Cycles' own let a little through at the extremes).
+
+The noise: the same binary twice gives the same pictures to the bit but
+for a few pixels of kiln/close (a level apart: coplanar faces); the GPU's
+times agree within about 5% on scenes over 0.2 ms and up to 30% under
+0.1 ms; render() on the CPU varies twice over on the crowd (its workers).
+A change counts where it moves a median by more than either run's p10-p90
+spread (`compare.py` marks it `*`). On lavapipe every scene renders (the
+kiln at 4.4-7.7 s a frame) and its pictures are within 0.5 levels of the
+4080's (p99 at most 3).
+
+### G1 — Materials and custom shaders
+
+glTF's metallic-roughness materials with normal, occlusion and emissive
+maps; physical light falloff; image-based light (an HDR environment,
+prefiltered in compute: diffuse and specular); custom 3D material shaders
+(a fragment shader with kin's lighting as an include) and passes of one's
+own on an HDR view. Checks: the white furnace, the sphere grid and the
+helmet against Cycles.
+
+### G2 — Sharper, steadier pictures
+
+Cascaded shadow maps, ambient occlusion (GTAO), temporal anti-aliasing
+(motion vectors), contact shadows. Checks: the shadow scene and Sponza
+against before, and their costs.
+
+### G3 — Adaptive meshes, GPU-driven drawing
+
+Culling in compute (frustum, and occlusion against the last frame's depth)
+into indirect draws; meshes split into clusters of about 128 triangles with
+simpler versions of each (meshoptimizer), chosen each frame by their error
+on screen, crack-free. Checks: the kiln and the crowd, against full detail
+and against before.
+
+### G4 — Ray tracing in compute
+
+A bounding-volume hierarchy (built on the CPU, then on the GPU for what
+moves) and ray queries in compute; a progressive path tracer (the studio's
+Trace view, converging toward Cycles); ray-traced shadows, occlusion and
+reflections for games, at reduced rate and accumulated. Checks: Cornell,
+Sponza and the kiln against Cycles by samples; rays a second.
+
 ### Later, each on request
 
 Gamepad aiming (unless kin's gamepad input lands first, then in M2);

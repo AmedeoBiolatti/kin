@@ -21,6 +21,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <deque>
 #include <memory>
 #include <tuple>
 #include <optional>
@@ -353,6 +354,15 @@ private:
     std::unordered_map<SDL_GPUShader*, u64> _fragment_ids; // created shaders' hashes
     void make_hinted_pipelines(u64 fragment_id, SDL_GPUShader* fragment);
     u32 _untimed_frames = 0; // submitted without a fence since the last timed one (timer full)
+    // Frames that showed nothing (a hidden or minimized window: no swapchain
+    // texture, so SDL does not hold the CPU back): each one's end, an empty
+    // command buffer's fence after it. More than max_unshown_in_flight
+    // pending: the oldest is waited for, so the CPU can't run ahead and pile
+    // up frames (and the render targets they cycle) without bound.
+    static constexpr std::size_t max_unshown_in_flight = 2;
+    std::deque<SDL_GPUFence*> _unshown_fences;
+    void hold_back_unshown_frame();
+    void release_unshown_fences(bool wait);
     // The open gpu_scope(): its name, and whether it is timed (the timer had room).
     std::optional<std::string> _scope;
     bool _scope_timed = false;

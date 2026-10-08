@@ -1,0 +1,70 @@
+{
+ "name": "spheres",
+ "purpose": "Materials: metallic by rows (0 at the front to 1 at the back), roughness by columns (0 left to 1 right), under a sun and a sky.",
+ "models": [
+  {
+   "file": "made/spheres.glb"
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   96,
+   120,
+   160
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    1.0,
+    0.7
+   ],
+   "color": [
+    1.1,
+    1.06,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.16,
+   0.19,
+   0.25
+  ],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    2.6,
+    6.8
+   ],
+   "target": [
+    0.0,
+    0.3,
+    0.0
+   ],
+   "fov": 40
+  },
+  {
+   "name": "grazing",
+   "eye": [
+    -5.0,
+    0.8,
+    3.5
+   ],
+   "target": [
+    0.0,
+    0.4,
+    0.0
+   ],
+   "fov": 40
+  }
+ ],
+ "truth": {
+  "samples": 512
+ }
+}

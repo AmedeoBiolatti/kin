@@ -53,12 +53,25 @@ releases may change APIs.
   from degenerate triangles), a fill light, ambient light from below
   (`Lights3D::ground_ambient`) and `Material3D::receives_shadow`. Large meshes
   are uploaded in pieces, written straight into the upload memory.
+- Reference scenes for 3D (`tests/reference/scenes`, `tools/reference`):
+  the Cornell box, material spheres, a white furnace, a shadow test,
+  Khronos' Flight Helmet and Sponza (fetched, pinned, checked), a crowd of
+  20,000 and the studio's kiln (local); `kin_reference` renders and times
+  them, Blender's Cycles renders the same cameras as the truth, and
+  `compare.py` reports the pictures' distances and the times.
 - 3D shadows cost less: casters whose shadow can't fall in view are left
   out of the shadow map, single-sided meshes cast with their front faces
   only (a lone quad facing away from the sun casts nothing: make it
   double-sided), the shadow pass has its own vertex shader, and the map is
   no longer cycled. At 20,000 enemies Signal Breach's shadows take about a
   fifth of the GPU time they did. `Render3DStats::shadow_casters`.
+
+### Fixed
+
+- SDL_GPU: a hidden or minimized window let the CPU run frames ahead of
+  the GPU without bound (no swapchain texture, so nothing waited): GPU
+  memory grew until the device was lost. Such frames now wait for the
+  GPU when more than two are pending.
 
 ## [0.2.6] — 2026-10-07
 

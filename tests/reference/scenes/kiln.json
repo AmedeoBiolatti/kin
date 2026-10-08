@@ -1,0 +1,19 @@
+{
+ "name": "kiln",
+ "purpose": "A dense mesh: kin-render-studio's kiln, 5.15 million triangles, in the rig's light (key from azimuth 135, 52 up; fill). Local only: made from the studio's export by tools/reference/studio_mesh_to_glb.py into <cache>/local/kiln.glb.",
+ "optional": true,
+ "models": [{"file": "local/kiln.glb"}],
+ "view": {"samples": 4, "background": [58, 64, 74]},
+ "lights": {
+  "sun": {"direction": [-0.4364, 0.788, -0.4364], "color": [1.15, 1.09, 1.01]},
+  "fill": {"direction": [0.1424, 0.5736, 0.8067], "color": [0.22, 0.22, 0.22]},
+  "ambient": [0.42, 0.42, 0.42],
+  "ground_ambient": [0.18, 0.18, 0.18],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {"name": "game", "fit": {"yaw": 0, "pitch": 50, "margin": 1.05}, "fov": 35, "near": 0.01},
+  {"name": "close", "fit": {"yaw": 40, "pitch": 25, "margin": 0.45}, "fov": 35, "near": 0.01}
+ ],
+ "truth": {"samples": 512}
+}

@@ -135,6 +135,11 @@ if(KIN_BUILD_BENCHMARKS)
     # ui2 text on the CPU: labels measured and drawn, ASCII and beyond.
     add_executable(kin_text_bench text_bench.cpp)
     target_link_libraries(kin_text_bench PRIVATE kin::engine)
+    # The 3D reference scenes (docs/3d_plan.md, G0): pictures and times.
+    if(KIN_EXPERIMENTAL_3D)
+        add_executable(kin_reference ${PROJECT_SOURCE_DIR}/tools/reference/kin_reference.cpp)
+        target_link_libraries(kin_reference PRIVATE kin::engine)
+    endif()
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)
     target_link_libraries(kin_draw_bench PRIVATE kin::engine)
