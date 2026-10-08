@@ -92,6 +92,10 @@ private:
     GpuTexture _scene;             // HDR: the resolved float picture
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     GpuTexture _pick, _pick_depth; // with View3DOptions::pick: position and id a pixel
+    // With Scene3D::ambient_occlusion, made by the first render that asks:
+    // the pre-pass's depth and normals (one sample, whatever the view's), and
+    // the occlusion (raw, blurred across, blurred down: R8, the view's size or half).
+    GpuTexture _ao_depth, _ao_normals, _ao_raw, _ao_across, _ao;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
 };
 
@@ -118,20 +122,28 @@ public:
 
 private:
     // In the order a scene's draws are made (shadow and pick are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick };
+    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
-    // `mask`: for a Blend3D::Mask material, in the shadow and pick passes (the
-    // others discard in mesh.frag itself).
+    // `mask`: for a Blend3D::Mask material, in the shadow, pick and pre-passes
+    // (the others discard in mesh.frag itself).
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                          SDL_GPUShader* custom = nullptr) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
-    // The shadow map at `resolution`, made or remade; false without one.
-    bool ensure_shadow_map(u32 resolution);
+    // The shadow map at `resolution` with up to `layers` layers (one a cascade),
+    // made or remade: how many it has (fewer if the device could not make
+    // them all, said once in the log), 0 without a map.
+    u32 ensure_shadow_map(u32 resolution, u32 layers);
     // Records the compute passes that make `environment`'s filtered copies.
     void filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment);
+    // Makes `view`'s ambient occlusion targets for its size (half of it when
+    // `half`), or reports they can't be made.
+    bool ensure_ao_targets(GpuView3D& view, bool half);
+    // Records the compute passes that turn the view's pre-pass into its occlusion.
+    void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
+                           const AmbientOcclusion3D& ao, Render3DStats& stats);
     // The view's HDR passes: bloom, then out to what 2D draws.
     void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view);
 
@@ -151,11 +163,24 @@ private:
     GpuShader _shadow_mask_shader;        // shadow_mask.frag
     GpuShader _shadow_mask_vertex_shader; // shadow_mask.vert
     GpuShader _pick_mask_shader;          // pick_mask.frag
+    GpuShader _prepass_vertex_shader;     // prepass.vert
+    GpuShader _prepass_shader;            // prepass.frag
+    GpuShader _prepass_mask_shader;       // prepass_mask.frag
+    // Ambient occlusion needs these formats and two compute pipelines; where
+    // the device lacks one it is off (a line in the log the first time it is asked for).
+    SDL_GPUTextureFormat _ao_depth_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
+    bool _ao_available = false;
+    bool _ao_warned = false;
+    SDL_GPUComputePipeline* _gtao_pipeline = nullptr;    // gtao.comp
+    SDL_GPUComputePipeline* _ao_blur_pipeline = nullptr; // ao_blur.comp
+    SDL_GPUSampler* _point_sampler = nullptr;            // texel by texel, for compute
     SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's
     SDL_GPUSampler* _environment_sampler = nullptr; // wraps round, clamps at the poles, mipmapped
     SDL_GPUComputePipeline* _filter_pipeline = nullptr; // env_filter.comp
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;
+    u32 _shadow_layers = 0;
+    u32 _shadow_layers_limit = 4; // lowered when the device would not make more
     GpuTexture _no_shadow; // 1 x 1, all far: every comparison lit
     bool _no_shadow_cleared = false;
     // Samplers for materials' textures by filter and wrap (made on first use).
@@ -163,6 +188,7 @@ private:
     std::array<SDL_GPUSampler*, 27> _samplers{};
     std::vector<std::shared_ptr<GpuMaterialShader3D>> _material_shaders;
     std::shared_ptr<GpuBuffer> _instances; // grows
+    std::shared_ptr<GpuBuffer> _caster_lists; // the cascades' lists of copies (indices into _instances); grows
     std::array<f32, 256> _srgb_to_linear{};
 
     // render()'s scratch, kept between frames.
@@ -178,6 +204,8 @@ private:
         u32 out_first = 0; // where its copies go in the instance buffer:
         u32 out_count = 0; // those the camera sees,
         u32 out_extra = 0; // then those only the sun sees (casting into view)
+        std::array<u32, 4> cascade_first{}; // with cascades: each one's list of copies,
+        std::array<u32, 4> cascade_count{}; // in _caster_list
     };
     struct Piece {
         u32 ref = 0;
@@ -185,11 +213,14 @@ private:
         u32 flat = 0;           // the first's place among all the frame's copies
         u32 seen = 0, extra = 0;
         u32 out = 0, out_extra = 0;
+        std::array<u32, 4> cascade{};     // copies casting into each cascade
+        std::array<u32, 4> cascade_out{}; // where they go in its list
     };
     std::vector<DrawRef> _refs;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start
-    std::vector<u8> _visible;  // a copy: 1 the camera sees it, 2 only the sun does
+    std::vector<u8> _visible;  // a copy: bit 0 the camera sees it, bit 1 only the sun does, bit 2 + k it casts into cascade k
+    std::vector<u32> _caster_list; // the cascades' lists, uploaded
     std::vector<u32> _order;   // draws sorted
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first
 };

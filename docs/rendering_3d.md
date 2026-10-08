@@ -188,6 +188,55 @@ lone quad facing away from the sun (a ceiling seen from below) casts
 nothing. Make it `double_sided` to cast from both sides. `stats()` counts
 the shadow map's draw calls and the meshes drawn into it.
 
+**Cascades.** One map over a big area is coarse: its texels are the area's
+size over `shadow_resolution`, the same far and near. `lights.shadow_cascades`
+(1 by default: the single map above, the picture unchanged; 2 to 4, more is
+4) splits the camera's view by depth instead, nearer cascades covering less,
+and gives each its own `shadow_resolution` square map (a layer of one depth
+array, a shadow pass each). `lights.shadow_distance` (100 units by default,
+never past the camera's `z_far`) is how far from the camera they reach;
+the splits are a blend of logarithmic and linear (0.6 of the log one), so
+the first cascade covers a few metres and the last the rest. Each cascade's
+box is the sphere round its slice of the view, so it keeps its size as the
+camera turns, snapped to whole texels in the sun's space so edges don't
+shimmer as it moves; `shadow_area` still limits it, and is what casts and
+receives. `mesh.frag` picks the cascade by the depth of the pixel along the
+camera's forward, and fades into the next over the last tenth of each range
+(no visible seam), with 3x3 taps and a depth bias and normal offset that
+scale with the cascade's texel. A copy casts into each cascade whose slice its
+shadow may fall in (the same test as above, a cascade at a time), so a
+far-off thing isn't drawn into the near maps. Without a depth array to render
+into the renderer makes fewer layers (down to one: the single map), says so
+once in the log, and never fails. Costs more than one map: a pass and the
+casters of each cascade, a few more taps; use it where the area is
+much bigger than what the camera sees close up. `stats()` has
+`shadow_cascades` and the copies drawn into each (`cascade_casters`).
+
+### Ambient occlusion
+
+`scene.ambient_occlusion = {.enabled = true, .radius = 0.5f, .intensity = 1.0f,
+.half_resolution = false}` (off by default; off, the picture and the cost are
+those of a renderer without it). The opaque and cut-out meshes the camera
+sees are drawn first into a depth and world-normal pre-pass (one sample,
+whatever the view's MSAA; the main pass is not changed and does not reuse its
+depth); GTAO (2 slices, 8 steps a side, a thickness heuristic) runs in compute
+from it, then a depth-aware blur (R8 result). `mesh.frag` multiplies the
+ambient light and the environment's diffuse by it (Jimenez et al.'s
+multi-bounce fit, from the surface's colour) and the environment's reflections
+by a specular occlusion term; the sun, fill and point lights are not touched.
+`radius` is how far (units) something can still shut light off: a few tenths
+of the size of what you want creased (0.5 for props, several units for rooms);
+`intensity` is the power the result is raised to. Blended, additive and
+wireframe meshes read no occlusion (they would read what is behind them),
+nor does the first-person overlay, which is not in the pre-pass either: its
+own lighting stays as it was. Where the device lacks a sampled depth, a
+two-float colour target or an R8 storage texture, occlusion is off with one
+line in the log. `half_resolution` computes at half the view's size (about a
+third of the cost; a little softer at depth edges). `stats()` has
+`ao_draws`, `ao_instances` and `ao_dispatches` (0 when off). Costs a second
+draw of every opaque copy and about 0.3 ms or more of compute at 1280 x 720:
+see the plan's G2b results.
+
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
@@ -268,6 +317,17 @@ look at its next step. `Input::mouse_motion()` is the same for `update()`.
 Agents send motion with the server's `input.mouse {dx, dy}`.
 [Signal Breach](../examples/signal_breach/main.cpp) does all of this.
 
+## Sponza Walk
+
+[examples/sponza_walk](../examples/sponza_walk) flies a camera round Sponza
+(fetched by `tools/reference/fetch.py`) with every feature of the renderer on
+a switch: lights, shadows (cascades), occlusion, MSAA, HDR and bloom, and each
+material feature (done to copies of the model's materials, so the model is
+kept). Its settings are one struct applied to a `Scene3D` each frame, so a new
+feature is a field and a row in its table of switches; `--set`, `--preset` and
+`--headless --screenshot` use the same table. See the
+[examples README](../examples/README.md#sponza-walk).
+
 ## Cameras
 
 `kin::Camera3D` is a position, a rotation and a projection
@@ -309,7 +369,7 @@ no rendering each frame. `resize(view, size)` gives it a new size and texture.
 
 `Renderer3D::capabilities()` says what the device has (depth bits, most
 samples); `stats()` what the last render drew (draw calls, instances, copies
-culled, shadow draws and casters, point lights, triangles, CPU time).
+culled, shadow draws and casters (and per cascade), point lights, triangles, CPU time).
 
 ## Cost
 

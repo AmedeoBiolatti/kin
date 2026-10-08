@@ -14,13 +14,14 @@ layout(location = 2) in vec2 vUV;
 layout(location = 3) in vec3 vWorld;
 
 layout(set = 2, binding = 0) uniform sampler2D uBase;         // white when the material has none
-layout(set = 2, binding = 1) uniform sampler2DShadow uShadow; // depth from the sun, compared
+layout(set = 2, binding = 1) uniform sampler2DArrayShadow uShadow; // depth from the sun, a layer a cascade, compared
 layout(set = 2, binding = 2) uniform sampler2D uMetalRough;   // G roughness, B metallic: white without
 layout(set = 2, binding = 3) uniform sampler2D uNormalMap;    // tangent space; any without (see maps.x)
 layout(set = 2, binding = 4) uniform sampler2D uOcclusion;    // R: white without
 layout(set = 2, binding = 5) uniform sampler2D uEmissive;     // any without (see maps.y)
 layout(set = 2, binding = 6) uniform sampler2D uEnvSpecular;   // the environment's, a level a roughness (with frame.environment.w)
 layout(set = 2, binding = 7) uniform sampler2D uEnvIrradiance; // and what a diffuse surface facing each way receives, over pi
+layout(set = 2, binding = 8) uniform sampler2D uAmbientOcclusion; // R: the share of ambient light that reaches the view's pixels (white without)
 
 const int MAX_LIGHTS = 16;
 const float PI = 3.14159265358979;
@@ -36,15 +37,20 @@ layout(set = 3, binding = 0) uniform Frame {
     vec4 eye;           // xyz: the camera, in world space
     vec4 environment;   // x: intensity, y: the specular's last level, w: 1 with an environment (else the hemisphere)
     mat4 environment_matrix; // world to the environment's space
-    mat4 shadow_matrix; // world to the shadow map's clip space
-    vec4 shadow;        // x: depth bias, y: normal offset (world units), z: a texel (uv)
+    mat4 shadow_matrix[4]; // world to the shadow map's clip space, a cascade each
+    vec4 shadow;        // x: cascades (1: one map over the area), z: a texel (uv)
+    vec4 cascade_bias[4]; // per cascade: x: depth bias, y: normal offset (world units)
+    vec4 cascade_end;   // the view depth where each cascade ends
+    vec4 cascade_blend; // and where it starts to fade into the next
+    vec4 cascade_forward; // xyz: the camera's forward, to measure view depth along
+    vec4 occlusion;     // x: 1 with ambient occlusion, zw: 1 / the view's size
     vec4 lights[MAX_LIGHTS * 2]; // position.xyz and radius; colour.rgb (linear)
 } frame;
 // The draw's.
 layout(set = 3, binding = 1) uniform Material {
     vec4 params; // x: emissive, y: unlit, z: receives the sun's shadow, w: alpha cutoff (0: none)
     vec4 pbr;    // x: metallic, y: roughness, z: normal scale, w: occlusion strength
-    vec4 maps;   // x: has a normal map, y: has an emissive map
+    vec4 maps;   // x: has a normal map, y: has an emissive map, z: opaque (it is in the occlusion pre-pass)
 } material;
 
 // Custom material shaders (Material3D::shader) include this file and write
@@ -70,27 +76,52 @@ vec3 encode(vec3 c) {
     return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
 }
 
-// How much of the sun reaches here: 3x3 comparisons against the shadow map,
-// from a point pushed a little off the surface (no self-shadowing acne).
-// Reverse Z: the map keeps the depth nearest the sun, the greatest.
+// The share of the sun one cascade lets through: 3x3 comparisons against its
+// layer of the shadow map, from a point pushed a little off the surface (no
+// self-shadowing acne). Reverse Z: the map keeps the depth nearest the sun,
+// the greatest. -1 where the point is outside the cascade's map.
+float cascade_light(int k, vec3 n) {
+    const vec4 clip = frame.shadow_matrix[k] * vec4(vWorld + n * frame.cascade_bias[k].y, 1.0);
+    const vec3 ndc = clip.xyz / clip.w;
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    const float ref = ndc.z + frame.cascade_bias[k].x;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            lit += texture(uShadow, vec4(uv + vec2(x, y) * frame.shadow.z, float(k), ref));
+        }
+    }
+    return lit / 9.0;
+}
+
+// How much of the sun reaches here. With cascades, the one whose slice of
+// the view holds this depth, faded into the next over the last tenth of its
+// range (so the border isn't a visible seam); one map is just cascade 0.
 float sunlight(vec3 n) {
     if (frame.flags.z < 0.5 || material.params.z < 0.5) {
         return 1.0;
     }
-    const vec4 clip = frame.shadow_matrix * vec4(vWorld + n * frame.shadow.y, 1.0);
-    const vec3 ndc = clip.xyz / clip.w;
-    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
-        return 1.0;
+    const int count = int(frame.shadow.x);
+    if (count <= 1) {
+        const float one = cascade_light(0, n);
+        return one < 0.0 ? 1.0 : one;
     }
-    const float ref = ndc.z + frame.shadow.x;
-    float lit = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            lit += texture(uShadow, vec3(uv + vec2(x, y) * frame.shadow.z, ref));
-        }
+    const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
+    int k = 0;
+    for (int i = 0; i < count - 1; ++i) {
+        k += depth > frame.cascade_end[i] ? 1 : 0;
     }
-    return lit / 9.0;
+    float lit = cascade_light(k, n);
+    if (k < count - 1 && depth > frame.cascade_blend[k]) {
+        const float t = clamp((depth - frame.cascade_blend[k]) / max(frame.cascade_end[k] - frame.cascade_blend[k], 1e-4), 0.0, 1.0);
+        const float next = cascade_light(k + 1, n);
+        // Outside one's map (its fit stops at the area), the other's word stands.
+        lit = lit < 0.0 ? next : next < 0.0 ? lit : mix(lit, next, t);
+    }
+    return lit < 0.0 ? 1.0 : lit;
 }
 
 // Where the equirectangular environment shows a direction (render3d/environment.hpp).
@@ -149,6 +180,15 @@ vec2 environment_brdf(float roughness, float n_v) {
     const vec4 r = roughness * c0 + c1;
     const float a004 = min(r.x * r.x, exp2(-9.28 * n_v)) * r.x + r.y;
     return vec2(-1.04, 1.04) * a004 + r.zw;
+}
+
+// The ambient occlusion of the pixel (1: none, or this surface has none).
+// Only what the pre-pass drew has it: a blended surface would read what is behind it.
+float screen_occlusion() {
+    if (frame.occlusion.x < 0.5 || material.maps.z < 0.5) {
+        return 1.0;
+    }
+    return texture(uAmbientOcclusion, gl_FragCoord.xy * frame.occlusion.zw).r;
 }
 
 // What a surface of reflectance `f0` reflects of a white sky, a rough one's
@@ -305,6 +345,21 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     }
     const vec3 dielectric = sky_reflectance(vec3(0.04), ab);
     const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
+    if (frame.occlusion.x > 0.5 && material.maps.z > 0.5) {
+        // Ambient occlusion: the diffuse light by Jimenez et al.'s multi-bounce
+        // fit (light bounces between nearby surfaces, the more the brighter
+        // they are, so a pale crease is not as dark as a dark one), the
+        // reflections by Lagarde's specular occlusion (a smooth surface seen
+        // head on is hidden less than a rough one at a slant). Returned from
+        // here, so the arithmetic without it is the same as it always was.
+        const float ao = screen_occlusion();
+        const vec3 a = 2.0404 * base - vec3(0.3324);
+        const vec3 b = -4.7951 * base + vec3(0.6417);
+        const vec3 c = 2.7552 * base + vec3(0.6903);
+        const vec3 diffuse_light = s.diffuse * (vec3(1.0) - dielectric) * around * max(vec3(ao), ((ao * a + b) * ao + c) * ao);
+        const vec3 specular_light = reflectance * above * clamp(pow(s.n_v + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
+        return light + (diffuse_light + specular_light) * occlusion;
+    }
     return light + (s.diffuse * (vec3(1.0) - dielectric) * around + reflectance * above) * occlusion;
 }
 

@@ -4,13 +4,21 @@
 //
 //   kin_reference <scene.json>... --out DIR [--cache DIR] [--frames N]
 //                 [--warmup N] [--repeat N] [--width W --height H]
+//                 [--cascades N] [--shadow-distance D]
+//                 [--ao] [--ao-radius R] [--ao-intensity I] [--ao-half]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
 // Breach's deck and 20,000 enemies in code. Times: `render()` on the CPU,
 // and the GPU's frame with the view rendered --repeat times in it (divided
 // by that: the 3D work then outweighs the rest of the frame and the
-// timer's noise), median, p10 and p90 over --frames frames.
+// timer's noise), median, p10 and p90 over --frames frames. A scene's
+// `lights` may set `shadow_cascades` and `shadow_distance`; --cascades and
+// --shadow-distance set them for every scene of a run instead (a label of
+// its own, so the default pictures stay comparable). A scene file may have
+// `ambient_occlusion: {enabled, radius, intensity, half_resolution}`; --ao turns
+// it on for every scene (with --ao-radius, --ao-intensity and --ao-half to
+// set the rest), likewise a label of its own.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -157,6 +165,10 @@ int main(int argc, char** argv) {
     fs::path cache = cache_env ? fs::path{cache_env} : fs::path{home ? home : "."} / ".cache" / "kin" / "reference";
     int frames = 60, warmup = 10, repeat = 8, width = 1280, height = 720;
     bool gpu_timing = true;
+    int cascades_override = 0; // 0: the scene's own
+    double distance_override = 0.0;
+    bool ao_override = false, ao_half = false;
+    double ao_radius = 0.0, ao_intensity = 0.0; // 0: the scene's
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -170,6 +182,20 @@ int main(int argc, char** argv) {
             warmup = std::max(0, std::atoi(next().c_str()));
         } else if (a == "--repeat") {
             repeat = std::max(1, std::atoi(next().c_str()));
+        } else if (a == "--cascades") {
+            cascades_override = std::max(1, std::atoi(next().c_str()));
+        } else if (a == "--shadow-distance") {
+            distance_override = std::atof(next().c_str());
+        } else if (a == "--ao") {
+            ao_override = true;
+        } else if (a == "--ao-half") {
+            ao_override = ao_half = true;
+        } else if (a == "--ao-radius") {
+            ao_override = true;
+            ao_radius = std::atof(next().c_str());
+        } else if (a == "--ao-intensity") {
+            ao_override = true;
+            ao_intensity = std::atof(next().c_str());
         } else if (a == "--no-gpu-timing") {
             gpu_timing = false;
         } else if (a == "--width") {
@@ -317,6 +343,30 @@ int main(int argc, char** argv) {
                     scene.lights.shadow_area = {vec3(&area->items()[0]), vec3(&area->items()[1])};
                 }
                 scene.lights.shadow_resolution = static_cast<kin::u32>(lights.number_at("shadow_resolution", 2048));
+                scene.lights.shadow_cascades = static_cast<kin::u32>(lights.number_at("shadow_cascades", 1));
+                scene.lights.shadow_distance = static_cast<float>(lights.number_at("shadow_distance", scene.lights.shadow_distance));
+                if (cascades_override > 0) {
+                    scene.lights.shadow_cascades = static_cast<kin::u32>(cascades_override);
+                }
+                if (distance_override > 0.0) {
+                    scene.lights.shadow_distance = static_cast<float>(distance_override);
+                }
+            }
+            if (const kin::JsonValue* occlusion = doc.find("ambient_occlusion")) {
+                scene.ambient_occlusion.enabled = occlusion->bool_at("enabled", true);
+                scene.ambient_occlusion.radius = static_cast<float>(occlusion->number_at("radius", scene.ambient_occlusion.radius));
+                scene.ambient_occlusion.intensity = static_cast<float>(occlusion->number_at("intensity", scene.ambient_occlusion.intensity));
+                scene.ambient_occlusion.half_resolution = occlusion->bool_at("half_resolution", false);
+            }
+            if (ao_override) {
+                scene.ambient_occlusion.enabled = true;
+                scene.ambient_occlusion.half_resolution = scene.ambient_occlusion.half_resolution || ao_half;
+                if (ao_radius > 0.0) {
+                    scene.ambient_occlusion.radius = static_cast<float>(ao_radius);
+                }
+                if (ao_intensity > 0.0) {
+                    scene.ambient_occlusion.intensity = static_cast<float>(ao_intensity);
+                }
             }
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
@@ -402,9 +452,9 @@ int main(int argc, char** argv) {
             const fs::path png = out / name / (camera_name + ".png");
             kin::save_image(image, png);
             const Summary cpu_s = summarize(cpu), gpu_s = summarize(gpu);
-            std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters\n",
+            std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
-                        static_cast<unsigned long long>(stats.triangles), stats.shadow_casters);
+                        static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
             if (!first_camera) {
                 report << ",";
             }
@@ -415,7 +465,10 @@ int main(int argc, char** argv) {
                    << ", \"first_ms\": " << first_ms << ", \"cpu_ms\": " << json_summary(cpu_s) << ", \"gpu_ms\": " << json_summary(gpu_s)
                    << ", \"draws\": " << stats.draws << ", \"instances\": " << stats.instances << ", \"culled\": " << stats.culled
                    << ", \"triangles\": " << stats.triangles << ", \"shadow_draws\": " << stats.shadow_draws
-                   << ", \"shadow_casters\": " << stats.shadow_casters << ", \"lights\": " << stats.lights << "}";
+                   << ", \"shadow_casters\": " << stats.shadow_casters << ", \"shadow_cascades\": " << stats.shadow_cascades
+                   << ", \"cascade_casters\": [" << stats.cascade_casters[0] << ", " << stats.cascade_casters[1] << ", "
+                   << stats.cascade_casters[2] << ", " << stats.cascade_casters[3] << "], \"ao_draws\": " << stats.ao_draws << ", \"ao_instances\": " << stats.ao_instances
+                   << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"lights\": " << stats.lights << "}";
         }
         report << "]}";
     }

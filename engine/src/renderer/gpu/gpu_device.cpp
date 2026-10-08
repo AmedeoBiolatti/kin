@@ -248,6 +248,24 @@ GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat 
     return GpuTexture{_shared, texture, width, height, format};
 }
 
+GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
+                                           SDL_GPUTextureUsageFlags usage) {
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D_ARRAY;
+    info.format = format;
+    info.usage = usage;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = layers;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture (target array) failed");
+    }
+    return GpuTexture{_shared, texture, width, height, format};
+}
+
 SDL_GPUTextureFormat GpuDevice::depth_stencil_format() const {
     for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT}) {
         if (SDL_GPUTextureSupportsFormat(_device, format, SDL_GPU_TEXTURETYPE_2D,

@@ -176,9 +176,34 @@ struct Lights3D {
     // (the level, say). Empty: no shadows. Smaller is sharper.
     Bounds3 shadow_area{};
     u32 shadow_resolution = 2048; // the shadow map's side, in texels
+    // 1: one map over the whole area. 2 to 4 (more is 4): that many maps, each
+    // fitted to a slice of the camera's view, nearer ones sharper, for a
+    // level too big for one map to be sharp. Each is `shadow_resolution`
+    // square. The area still limits what casts and receives. Without a
+    // depth array to render into, one map is used.
+    u32 shadow_cascades = 1;
+    // With cascades: how far from the camera they reach (units; past it the
+    // sun is not shadowed; never beyond the camera's far plane).
+    f32 shadow_distance = 100.0f;
     // At most 16 light a frame: those that reach the view, the strongest
     // and nearest first. Cleared with the draws.
     std::vector<PointLight> points;
+};
+
+// Ambient occlusion (GTAO) of the scene's own surfaces: how much of the
+// ambient or environment light a crease, a corner or the foot of a wall is
+// shut off from. Costs a depth and normal pre-pass of the opaque meshes and
+// three compute dispatches, so it is off unless asked for; off, the picture
+// and the cost are as without the feature. It dims only the ambient light and
+// the environment (diffuse, and reflections by a specular occlusion term),
+// never the sun, the fill or the point lights, and not the overlay.
+struct AmbientOcclusion3D {
+    bool enabled = false;
+    f32 radius = 0.5f;    // how far from a surface something can still shut light off (units)
+    f32 intensity = 1.0f; // the darkening's power: 1 is the plain answer, more is stronger
+    // Computed at half the view's size, blurred and read up: about a third of
+    // the cost, a little blurrier at edges.
+    bool half_resolution = false;
 };
 
 class Scene3D {
@@ -189,6 +214,7 @@ public:
 
     Camera3D camera{};
     Lights3D lights{};
+    AmbientOcclusion3D ambient_occlusion{};
     // Copies wholly outside the camera's view are skipped (each tested as the
     // sphere round its mesh's bounds, moved and scaled with it).
     bool cull = true;

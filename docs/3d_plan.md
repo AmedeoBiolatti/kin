@@ -897,9 +897,345 @@ filter the first frame (not timed separately: a few compute dispatches of 256 to
 
 ### G2 — Sharper, steadier pictures
 
-Cascaded shadow maps, ambient occlusion (GTAO), temporal anti-aliasing
-(motion vectors), contact shadows. Checks: the shadow scene and Sponza
-against before, and their costs.
+Four steps, each judged on the G0 scenes against the one before (`g1b_final`
+first, then `g2a`, `g2b`, ...), for how it looks and what it costs. Every
+feature is off by default and the picture is then the same to the bit.
+The renderer is forward with MSAA and one sun map, with no depth or normal
+pre-pass: AO, contact shadows and TAA each need one.
+
+#### G2a — Cascaded shadow maps. Done.
+
+`Lights3D::shadow_cascades` (1: today's single map, unchanged) and
+`shadow_distance`. 3 to 4 orthographic cascades, split by a log/linear
+blend of near and far, each fitted to its slice of the view frustum and
+snapped to texels so edges don't shimmer. One depth array (a layer a
+cascade), one shadow pass a layer. `mesh.frag` picks the cascade by view
+depth, blends over the last tenth of each range, and filters 3 x 3; the bias
+scales with the cascade. `shadow_area` stays the limit of what casts and
+receives. Caster skipping and back-face culling stay, run per cascade.
+Checks: `shadows` and `sponza` against `truth`; GPU cost per cascade (the
+risk is casters drawn again for each).
+
+#### G2a — results
+
+Built: `Lights3D::shadow_cascades` (1 to 4; 1 is the single map and the
+default) and `shadow_distance` (100 by default, clamped to the camera's far
+plane); `kin/render3d/shadow_cascades.hpp`, the splits and the fit as pure
+functions (`cascade_splits`, `fit_shadow_cascades`); a depth array of
+`shadow_cascades` layers (`GpuDevice::create_target_array`), one shadow pass
+a layer; `mesh.frag` picks, blends and filters.
+
+- **Splits.** 0.6 of the logarithmic split and 0.4 of the linear one. With a
+  near of 0.05 and 100 units that is 10, 21, 39, 100: the log split alone gave
+  the first cascade 0.3 units, which wastes a whole map on the gun.
+- **Fit.** Each cascade's box is the bounding sphere of its slice (on the
+  view's axis, equally far from the near and far corners; the radius is
+  rounded up to 1/16), so its size does not change as the camera turns, with
+  its centre snapped to whole texels in the sun's space (a space fixed by the
+  area, so a grid in it stays put in the world). The unit test moves and turns
+  the camera and checks every probe point's texel position shifts by a whole
+  number and the scale is the same. Where the area is smaller than the
+  sphere on an axis the box is the area itself (also fixed): small levels get
+  the single map's resolution in every cascade, as they should. The depth
+  range is the whole area's, so whatever is between the slice and the sun casts.
+- **Blend.** Each cascade fades into the next over the last tenth of its
+  range, so the next cascade's slice starts there (the slices overlap by
+  that). Where one's map doesn't hold the point (its box stops at the area's
+  edge) the other's answer is used; with neither, lit.
+- **Bias.** The depth bias and the normal offset are per cascade, as the
+  single map's were (a texel's worth of depth, one and a half off the
+  surface), from that cascade's texel.
+- **Casters per cascade.** The caster test of the single map (the sphere in
+  the map's volume, its shadow swept down the light into the view) is run
+  per cascade, against the cascade's own volume and its slice of the view. A
+  seen copy that isn't in a cascade's volume isn't drawn into it. Each
+  cascade has a list of the instance indices it takes (a 4-byte entry,
+  not another copy of the 128 B instance); `shadow.vert` and
+  `shadow_mask.vert` read through it when `Draw::first.y` is not 0, and run as
+  before (one run from `first.x`) when it is. Back-face culling and cut-out
+  casters work as before. `Render3DStats::shadow_cascades` and
+  `cascade_casters[4]` count them.
+- **Always an array.** `uShadow` is a `sampler2DArrayShadow` for either path
+  (one layer is the single map; it samples the same). If the device can't make
+  a 2D array of the depth format there are no shadows at all, as when it could
+  not make a sampled depth (none known; Vulkan, D3D12 and Metal all can). If
+  it can make fewer layers than asked it makes fewer, with one line in the
+  log, and doesn't ask again.
+- **Reference scenes.** `lights.shadow_cascades` and `lights.shadow_distance`
+  in a scene's JSON, and `kin_reference --cascades N --shadow-distance D` to set them for
+  a whole run (a label of its own: the default scenes are unchanged, so older
+  labels stay comparable): `run.py render g2a_c4 --scenes shadows,sponza --cascades 4`.
+
+Checks (RTX 4080, 1280 x 720, 4x MSAA, 120 frames, `kin_reference`):
+
+*Picture with one cascade against `g1b_final`:* identical in every scene
+(mean 0.00, PSNR "identical") but `kiln` (72 to 80 dB, and the same between two
+runs of this build: its noise, not the change).
+
+*Distance to Cycles, mean levels (lower is better):*
+
+| Picture | `g1b_final` / `g2a` (1 cascade) | `g2a_c4` (4 cascades) |
+|---|---|---|
+| shadows/overview | 2.38 | 2.38 |
+| shadows/contact | 4.75 | 4.70 |
+| shadows/fence | 3.53 | 3.44 |
+| shadows/grazing | 6.86 | 6.86 |
+| sponza/nave | 50.10 | 50.07 |
+| sponza/roof | 33.98 | 33.89 |
+
+That is the expected answer: both scenes have small areas (16 m, 30 m), where
+2048 texels are already 1 cm, and the cascades fall back to the area's box. The
+remaining distance to Cycles is not shadow resolution (the truth's sun is a
+point too; what is left on `shadows` was not looked into, on Sponza it is the
+ambient light). Cascades
+pay where the area is much bigger than what is near. A scratch scene (not
+committed: `shadows` with the area at 300 x 300 m) shows it: with one map the
+shadows near the camera are a smear of about 15 cm texels, with four they are
+as sharp as in the 16 m scene.
+
+*Sharpness far from the camera (unit test `test_gpu_cascades`, 300 m area, a
+block 60 m away seen by a 12 degree lens):* the shadow edge is 3 pixels wide
+with one map, 1 with four (lavapipe and the RTX 4080 alike).
+
+*Casters drawn (`Render3DStats`; copies counted once for each cascade they are
+drawn into):*
+
+| Picture | one map | 4 cascades, per cascade | 4 cascades, total |
+|---|---|---|---|
+| shadows/overview | 45 | 28 / 45 / 2 / 0 | 75 |
+| shadows/contact | 20 | 20 / 2 / 1 / 0 | 23 |
+| sponza/nave | 103 | 82 / 78 / 16 / 0 | 176 |
+| sponza/roof | 68 | 68 / 36 / 2 / 0 | 106 |
+| crowd/first_person | 18,671 | 2,889 / 6,203 / 9,258 / 4,575 | 22,925 |
+| crowd/mid_deck | 8,778 | 2,807 / 6,216 / 2,337 / 0 | 11,360 |
+| crowd/above | 21,536 | 0 / 0 / 5,792 / 20,369 | 26,161 |
+
+(the crowd's last cascade covers the rest of the view; a cascade with no
+casters costs its clear and nothing else). Copies are drawn again where a
+cascade's volume overlaps the next one's, 1.2 to 1.7 times in all: the risk
+the plan named, and less than it feared because each cascade only takes what
+reaches its slice.
+
+*GPU time, ms per render* (`compare.py`'s `*` only where the medians move by
+more than the p10-p90 spread; the machine was busy, load 4 to 11, other sessions
+compiling, so the tiny scenes scatter 30%):
+
+| Picture | `g1b_final`, 1 cascade (`g2a`) | 4 cascades |
+|---|---|---|
+| shadows/overview | 0.075, 0.077 | 0.122 `*` |
+| shadows/contact | 0.077, 0.093 | 0.117 |
+| sponza/nave | 0.317, 0.328 | 0.463 `*` |
+| sponza/roof | 0.300, 0.288 | 0.442 `*` |
+| crowd/first_person | 1.07, 1.09 | 1.32 `*` |
+| crowd/mid_deck | 0.58, 0.67 | 0.72 |
+| crowd/above | 1.29, 1.33 | 1.89 `*` |
+
+Four cascades cost 1.4 to 1.6 times a render of Sponza (+0.14 ms) and 1.2 to
+1.4 times of the crowd (+0.2 to 0.5 ms): a pass a cascade (clear, state,
+the casters) and nine taps for each of the two maps a pixel in a blend
+reads. Three would cost a little less; that is the knob.
+
+*The single-map path's own cost,* the commit before against this one,
+interleaved, three runs each (the machine busy, load 11): crowd, Sponza and
+`spheres` the same within the noise (minimum of three: 1.076/1.078, 0.674/0.668,
+1.327/1.332, 0.326/0.327, 0.285/0.290 ms); the small `shadows` pictures
+0.083-0.107 to 0.110-0.133 ms (+0.02 to 0.03 ms, one more storage buffer in
+the shadow vertex shaders, an array texture and a branch on `first.y`;
+`compare.py` does not mark it, and it is within the scatter of those runs;
+not confirmed as real).
+
+*Pictures.* `shadows` and `sponza` with four cascades look the same as with
+one: no seam at the cascade borders, no acne, in the pictures looked at
+(`overview`, `nave`, and crops of the 300 m scratch scene's `contact` and
+`fence`). Not tested: shimmer in a moving sequence (the snapping is covered by
+the unit test, not by a moving capture), and cascade borders on thin
+geometry seen at a grazing angle. One artefact: with a fine cascade the
+3 x 3 filter covers less ground, so the texel stair-steps of an edge that
+isn't along the map's axes show where a picture magnifies the shadow more than
+about 4 times (a close-up `contact` of a 1 cm texel map at 2.6 mm a pixel
+has steps; the single map, with the same texel, shows softer ones). Smoothing
+that wants a wider or rotated kernel for the nearest cascade, or a PCSS-like
+one: left.
+
+Signal Breach (`--headless --benchmark --seed=7 --ui-scale 1 --enemies 2000
+--frames=1800 --screenshot ... --capture-frame 1800`): the frame is the same
+kind as before (deck, enemies' shadows, gun, HUD); its settings were not
+changed (`shadow_cascades` stays 1), and the `crowd` reference scene, which is
+the same deck and enemies, is identical to `g1b_final`.
+
+#### G2b — Pre-pass and ambient occlusion (GTAO). Done.
+
+A depth and view-normal pre-pass (vertex-only, normals from the mesh;
+resolved to one sample under MSAA). GTAO in compute at half or full
+resolution (2 slices, 8 to 12 steps, a thickness heuristic), a depth-aware
+blur, an R8 texture. `mesh.frag` multiplies ambient and environment diffuse
+by it (with the multi-bounce approximation) and environment reflections by a
+specular-occlusion term; the sun and point lights are not touched.
+`Scene3D::ambient_occlusion {enabled, radius, intensity}`. Checks:
+`ibl_spheres`, `sponza`, `cornell`; `furnace` must not darken with it off.
+If the pre-pass costs too much in Signal Breach, AO becomes opt-in per scene.
+
+#### G2b — results
+
+Built: `Scene3D::ambient_occlusion` (`AmbientOcclusion3D {enabled = false,
+radius = 0.5, intensity = 1, half_resolution = false}`), a depth and normal
+pre-pass, GTAO and a blur in compute, and the lighting changes in
+`kin_material.inc.glsl`.
+
+- **Pre-pass.** `prepass.vert` (mesh.vert's placing and the world normal, from
+  the same instance buffer and the same culled copies as the main pass: no
+  extra upload), `prepass.frag` (octahedral normal in RG16F, the side the
+  viewer sees) and `prepass_mask.frag` (the cut-out's alpha test). One sample
+  into its own D32 depth and normal targets whatever the view's MSAA, so
+  "resolve" costs nothing. The main pass is **not** changed to depth-equal:
+  its depth is multisampled and the pre-pass's is not, so it cannot reuse it,
+  and the off path stays untouched.
+- **GTAO.** `gtao.comp`: 2 slices, 8 steps a side with squared spacing, noise
+  per pixel for the angle and the offsets, distance falloff over the outer
+  0.615 of the radius, a thickness heuristic (a sample under the horizon pulls
+  it down 15% of the way), reach capped at 12% of the view's height in pixels;
+  `ao_blur.comp` twice (across, down), 7 taps, weighted by depth difference.
+  Three R8 targets per view, made by the first render that asks (never when
+  off), full size or half. Needs a sampled D32 (or D24), RG16F as a colour
+  target and R8 as a storage texture; else one INFO line and no occlusion.
+  Checked on lavapipe too.
+- **Lighting.** Ambient and environment diffuse times the multi-bounce term,
+  environment reflections times Lagarde's specular occlusion; sun, fill and
+  point lights untouched (a test: with the ambient light at zero a floor at
+  the foot of a wall is the same with and without). The glTF occlusion map is
+  separate and still multiplies both. The AO branch returns early in
+  `kin_lit`, so the arithmetic without it is the old arithmetic.
+- **Overlay.** Not occluded and not in the pre-pass (its frame's occlusion flag
+  is 0): the world's occlusion at a pixel says nothing about a gun in front
+  of it; the gun's own lighting is as before. Blended, additive, wireframe
+  meshes are not occluded either (`maps.z`).
+- **Reference scenes.** `ambient_occlusion {enabled, radius, intensity,
+  half_resolution}` in the scene JSON; `kin_reference --ao [--ao-radius R
+  --ao-intensity I --ao-half]` for a whole run (labels of their own).
+- **Counters.** `Render3DStats::ao_draws`, `ao_instances`, `ao_dispatches`. No
+  GPU scope inside `render()` (a scope splits the frame's command buffer);
+  cost is read as the difference between runs with it on and off.
+
+*AO off against `g1b_final`:* every picture identical but `kiln`
+(72.7 and 80.2 dB, its own jitter). (An earlier shader draft that applied the
+terms in one expression was not identical in 7 pictures at 106-112 dB, from
+fused multiply-adds: hence the early return.) Signal Breach frame 1800 with it
+off is byte-identical to `g2a_breach_1800.png`.
+
+*Distance to Cycles, mean levels (lower is better), defaults (radius 0.5):*
+
+| Picture | off (`g2b`) | `g2b_ao` | `g2b_ao_half` |
+|---|---|---|---|
+| ibl_spheres front / grazing | 9.49 / 10.81 | 9.80 / 10.89 | 9.80 / 10.88 |
+| sponza nave / roof | 50.10 / 33.98 | 48.67 / 32.13 | 48.68 / 32.15 |
+| cornell | 10.20 | 10.20 | 10.20 |
+| spheres front / grazing | 3.60 / 4.05 | 3.62 / 4.01 | 3.61 / 4.01 |
+| helmet front / side | 0.66 / 0.68 | 0.67 / 0.70 | 0.67 / 0.70 |
+| ibl_helmet front / side | 1.38 / 1.48 | 1.45 / 1.62 | 1.46 / 1.62 |
+| kiln close / game | 1.55 / 0.67 | 1.06 / 0.49 | 1.08 / 0.50 |
+| shadows overview / contact / fence / grazing | 2.38 / 4.75 / 3.53 / 6.86 | 2.51 / 5.10 / 4.02 / 7.05 | 2.52 / 5.11 / 3.98 / 7.05 |
+| furnace | 0.23 | 0.22 | 0.21 |
+
+Honest reading: occlusion alone does not bring kin nearer Cycles in most
+scenes. It helps Sponza and the kiln; it makes `ibl_spheres`, `shadows` and
+`ibl_helmet` a little worse, because Cycles also has what kin lacks and AO
+only takes away: bounced light (the spheres' undersides are lit by the white
+floor in Cycles, dark with AO), the sky's sun shadows and a lit floor. Cornell
+has no ambient light (a point light), so nothing changes. Furnace did not get
+darker (0.23 to 0.22/0.21): a lone sphere on its plane has almost no occlusion
+at radius 0.5; at radius 2 it reached 0.85 (the sphere's own ground), so
+a large radius in a furnace does darken, as the geometry really occludes.
+Radius is the knob: Sponza with `--ao-radius 4 --ao-intensity 1` is 46.99 /
+28.85, `4 / 2` is 44.42 / 25.18, `8 / 2` is 38.80 / 20.63 (and the picture then
+reads like Cycles: recesses and arches dark; no label kept for these, they are
+`ao_s_*` in `reference_out`).
+
+*GPU cost, ms per render* (RTX 4080 Laptop, 1280 x 720, 4x MSAA, 120 frames,
+machine busy so tiny scenes scatter 20-30%; all `*` in compare.py):
+
+| Picture | off | AO full | AO half |
+|---|---|---|---|
+| cornell | 0.077 | 0.32 | 0.17 |
+| spheres front | 0.098 | 0.48 | 0.29 |
+| ibl_spheres front | 0.077 | 0.41 | 0.16 |
+| shadows overview / contact | 0.075 / 0.077 | 0.35 / 0.61 | 0.22 / 0.31 |
+| helmet front | 0.152 | 0.27 | 0.22 |
+| sponza nave / roof | 0.317 / 0.300 | 0.87 / 0.80 | 0.60 / 0.52 |
+| kiln close / game | 4.78 / 4.27 | 7.08 / 6.19 | 6.54 / 6.10 |
+| crowd first_person / mid_deck / above (three runs) | 1.11-1.36 / 0.70-0.79 / 1.49-1.61 | 2.18-2.30 / 1.52-1.64 / 2.28-2.29 | 1.90-1.97 / 1.19 / 2.21 |
+
+Where it goes (skipping stages, same machine): the pre-pass is cheap in small
+scenes (+0.01 to 0.05 ms) and +0.33 ms in the crowd (18,671 copies drawn a
+second time); the blurs are about 0.1 ms; GTAO itself is 0.2-0.45 ms and
+grows when a surface is near the camera (a larger reach in pixels; the cap
+at 12% of the height keeps it bounded). It is bound by depth taps (about 32 a
+pixel), not arithmetic: unprojecting by the inverse's few terms instead of a
+matrix, `cycle = false` on the storage writes and a smaller reach cap each
+bought 10-30%; fewer steps (4 against 10) bought 0.08 ms.
+
+**Too expensive for the crowd as a default:** Signal Breach's deck costs about
++0.9 to 1.0 ms with full AO, which roughly doubles its 3D GPU time; half
+resolution still adds +0.5 to 0.8 (the pre-pass of every enemy is a third of
+it). The plan's rule applies: AO is opt-in per scene, off by default, and
+Signal Breach does not turn it on (the game has no setting; its frame was
+captured with a temporary override, reverted). A depth mip chain for far taps
+and drawing only large occluders into the pre-pass are the next savings; not
+done.
+
+*Pictures looked at* (`reference_out/g2b*`, `tmp_ao/*`): ibl_spheres, sponza
+nave and roof (default, and radius 8 / intensity 2), cornell, the Signal
+Breach frame off and on (forced, radius 1). Off: unchanged. On: soft
+darkening under the spheres, in Sponza's arch and column creases (radius 8
+gives deep recesses like Cycles'); in Breach only the wall's foot darkens a
+little and the pink shots and enemies are unaffected. No light leaking, no
+banding or visible noise after the blur at 1280 x 720, and no halo round the
+thin rods on Sponza's roof. Known limits, seen or by construction: at a large
+radius a near column darkens the far wall right up to its silhouette (a hard
+edge, as every screen-space AO has); a multisampled edge pixel reads the AO of
+the pixel's centre, so a silhouette can carry the neighbour's occlusion
+(not seen as a visible fringe); half resolution is bilinear at depth edges
+(slight bleed, not measured); anything off screen or outside the depth
+buffer occludes nothing; double-sided thin geometry uses the side seen. Not
+tested: moving captures (the noise is fixed per pixel, so it does not shimmer
+in a still view; not checked in motion), a first-person scene with AO on in
+Breach, orthographic cameras (the shader has the branch; not looked at).
+
+Tests: `test_gpu_ambient_occlusion` (RTX 4080 and lavapipe): off equals
+default and runs no passes; the wall's foot, 0.2 away, is darker with it and
+open floor and the high wall are not; it fades away from the crease;
+intensity darkens more; half resolution and 4x MSAA also darken; a sunlit
+floor with no ambient light is unchanged and with some never gets less than
+the sun's; blended meshes and the overlay are not in the pre-pass and the
+overlay's pixels are unchanged. No unit test of pure maths: the maths is in
+GLSL (the GPU test covers it); C++ only builds uniforms.
+
+#### G2c — Contact shadows
+
+A screen-space march toward the sun through the pre-pass depth (16 to 24
+steps, about half a metre, a thickness test, per-pixel noise), multiplying
+the sun term only. Fixes the contacts the cascades can't resolve. Check:
+`shadows` (poles, plates, objects on the ground).
+
+#### G2d — Temporal anti-aliasing
+
+Halton (2,3) jitter of the projection, 8 samples; a velocity buffer from
+the previous frame's transforms, kept in a separate per-instance buffer
+(not in the 128 B `GpuInstance3D`, so the path without TAA is untouched;
+instances matched by draw and index, the unmatched moving by the camera
+alone); a compute resolve with an RGBA16F history, reprojection, YCoCg
+neighbourhood clamp with variance clipping, and a lower blend on
+disocclusion. TAA replaces MSAA when on. Bloom and post effects run after the
+resolve; the 2D overlay is not jittered; `pick` uses the unjittered
+matrices; the first-person overlay has its own velocity or is left out;
+camera cuts reset the history. Checks: a still camera converges to the
+no-TAA picture within noise; no trails behind moving enemies in a Signal
+Breach capture; a new reference scene with a moving object. Of the four, the
+likeliest to be cut if the cost or the fiddliness is too much.
+
+Every new or changed scene (moving object, thin geometry for AO halos) gets
+a `truth` render. Unit tests for the cascade fit and the Halton sequence;
+pixel tests with tolerance on the RTX 4080 and lavapipe (compute on
+lavapipe checked); the 3D-off build keeps building.
 
 ### G3 — Adaptive meshes, GPU-driven drawing
 

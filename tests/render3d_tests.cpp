@@ -2,6 +2,7 @@
 #include <kin/ecs/render3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/shadow_cascades.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 
@@ -15,6 +16,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -110,6 +112,93 @@ void expect(Color got, Color want, std::string_view what, int tolerance = 3) {
     if (!near(got, want, tolerance)) {
         std::cerr << what << ": got " << got << ", want " << want << '\n';
         assert(false);
+    }
+}
+
+// --- Cascaded shadow maps (G2a) ---
+
+// The splits are increasing, end at the distance (never past the far plane),
+// and the log blend gives the near cascades less than the linear one.
+void test_cascade_splits() {
+    const auto s = kin::cascade_splits(0.1f, 100.0f, 4);
+    assert(s[0] == 0.1f && s[4] == 100.0f);
+    for (int i = 0; i < 4; ++i) {
+        assert(s[i + 1] > s[i]);
+    }
+    assert(s[1] < 25.0f && s[2] < 50.0f && s[3] < 75.0f); // nearer than a linear split
+    const auto one = kin::cascade_splits(0.5f, 40.0f, 1);
+    assert(one[0] == 0.5f && one[1] == 40.0f);
+    const auto log_only = kin::cascade_splits(1.0f, 16.0f, 4, 1.0f);
+    assert(std::abs(log_only[1] - 2.0f) < 1e-3f && std::abs(log_only[2] - 4.0f) < 1e-3f && std::abs(log_only[3] - 8.0f) < 1e-3f);
+    const auto linear = kin::cascade_splits(0.0f, 100.0f, 4, 0.0f);
+    assert(std::abs(linear[2] - 50.0f) < 0.1f);
+}
+
+// Where a world point lands in a cascade, in texels of a map `res` square.
+kin::Vec3f in_texels(const kin::ShadowCascade& c, Vec3f world, float res) {
+    const Vec3f ndc = c.view_projection.apply_projective(world);
+    return {(ndc.x * 0.5f + 0.5f) * res, (0.5f - ndc.y * 0.5f) * res, ndc.z};
+}
+
+// Each cascade holds its slice of the view (corners inside its box), they
+// overlap by the blend, the distance is clamped to the far plane, and the
+// grid is snapped: moving the camera shifts the picture by whole texels.
+void test_cascade_fit() {
+    kin::Camera3D camera = kin::Camera3D::look_at({3.0f, 5.0f, 20.0f}, {0.0f, 0.0f, -10.0f}, 60.0f);
+    camera.z_near = 0.1f;
+    const kin::Bounds3 area{{-200.0f, -1.0f, -200.0f}, {200.0f, 30.0f, 200.0f}};
+    const Vec3f to_sun = kin::normalize(Vec3f{1.0f, 1.2f, 0.3f});
+    const float aspect = 16.0f / 9.0f;
+    const float res = 2048.0f;
+    const kin::ShadowCascades plan = kin::fit_shadow_cascades(camera, aspect, to_sun, area, 4, 120.0f, 2048);
+    assert(plan.count == 4);
+    for (kin::u32 k = 0; k < 4; ++k) {
+        const kin::ShadowCascade& c = plan.cascade[k];
+        assert(c.slice_far > c.slice_near && c.texel_world > 0.0f && c.depth_range > 0.0f);
+        if (k > 0) {
+            // It starts where the one before starts to fade out.
+            assert(c.slice_near == plan.cascade[k - 1].blend_from && c.slice_near < plan.cascade[k - 1].slice_far);
+            assert(plan.cascade[k - 1].blend_from > plan.cascade[k - 1].slice_near);
+        }
+        // Every corner of the slice is inside the cascade's box (texels in 0..res, depth in 0..1).
+        for (const float d : {c.slice_near, c.slice_far}) {
+            const float hh = d * std::tan(30.0f * 3.14159265f / 180.0f), hw = hh * aspect;
+            for (int i = 0; i < 4; ++i) {
+                const Vec3f world = camera.position + camera.forward() * d + camera.right() * ((i & 1) ? hw : -hw) +
+                                    camera.up() * ((i & 2) ? hh : -hh);
+                const Vec3f t = in_texels(c, world, res);
+                assert(t.x >= -0.5f && t.x <= res + 0.5f && t.y >= -0.5f && t.y <= res + 0.5f && t.z > 0.0f && t.z < 1.0f);
+            }
+        }
+        // Further cascades are coarser (more world per texel).
+        if (k > 0) {
+            assert(c.texel_world > plan.cascade[k - 1].texel_world);
+        }
+    }
+    assert(plan.cascade[3].slice_far == 120.0f && plan.cascade[3].blend_from == plan.cascade[3].slice_far);
+
+    // Clamped to the far plane; and a single cascade covers it all.
+    camera.z_far = 50.0f;
+    assert(kin::fit_shadow_cascades(camera, aspect, to_sun, area, 3, 500.0f, 2048).cascade[2].slice_far == 50.0f);
+    assert(kin::fit_shadow_cascades(camera, aspect, to_sun, area, 9, 500.0f, 2048).count == 4); // capped
+    assert(kin::fit_shadow_cascades(camera, aspect, to_sun, area, 1, 500.0f, 2048).count == 1);
+    assert(kin::fit_shadow_cascades(camera, aspect, to_sun, kin::Bounds3{}, 4, 100.0f, 2048).count == 0); // no area, none
+    camera.z_far = std::numeric_limits<float>::infinity();
+
+    // Snapping: the camera moved by a fraction of a texel (and turned a
+    // little) shifts every point's place in each map by a whole number of
+    // texels, and leaves its scale alone, so edges don't crawl.
+    const Vec3f probe{7.3f, 0.4f, -12.9f};
+    kin::Camera3D moved = camera;
+    moved.position = camera.position + Vec3f{0.0137f, 0.0f, -0.0291f};
+    moved.rotation = kin::Quatf::yaw_pitch(0.4f, -0.3f);
+    const kin::ShadowCascades after = kin::fit_shadow_cascades(moved, aspect, to_sun, area, 4, 120.0f, 2048);
+    for (kin::u32 k = 0; k < 4; ++k) {
+        const Vec3f a = in_texels(plan.cascade[k], probe, res), b = in_texels(after.cascade[k], probe, res);
+        assert(std::abs(plan.cascade[k].texel_world - after.cascade[k].texel_world) < 1e-5f);
+        for (const float shift : {b.x - a.x, b.y - a.y}) {
+            assert(std::abs(shift - std::round(shift)) < 0.02f);
+        }
     }
 }
 
@@ -1249,6 +1338,178 @@ void test_gpu_shadows_into_view() {
     });
 }
 
+// Cascaded shadows (G2a). A block 60 m from the camera, a narrow lens on its
+// shadow's far edge: one 2048 map over a 300 m area is coarse there, a cascade
+// fitted to that part of the view is not. The edge's width in pixels (the
+// pixels between a tenth and nine tenths of the way from shade to light)
+// must shrink; the shadow is where it was; one cascade is the single map's
+// picture exactly; each cascade draws only its own casters.
+void test_gpu_cascades() {
+    with_gpu("test_gpu_cascades", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({300.0f, 0.2f, 300.0f}));
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({4.0f, 4.0f, 4.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({-6.0f, 40.0f, 0.0f}, {-6.0f, 0.0f, -45.0f}, 12.0f);
+        scene.camera.z_near = 1.0f;
+        scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}}; // shadows fall toward -x
+        scene.lights.ambient = {0.1f, 0.1f, 0.1f};
+        scene.lights.shadow_area = kin::Bounds3{{-150.0f, -0.2f, -150.0f}, {150.0f, 10.0f, 150.0f}};
+        const auto render = [&](kin::u32 cascades) {
+            scene.lights.shadow_cascades = cascades;
+            scene.clear();
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            scene.draw(block, Mat4f::translation({0.0f, 2.0f, -45.0f}), {.color = Color::rgb(180, 60, 60)});
+            // Out of every cascade but the farthest: far to the side and behind.
+            scene.draw(block, Mat4f::translation({-100.0f, 2.0f, -140.0f}), {.color = Color::rgb(180, 60, 60)});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        // The edge along z = -45, from open floor (x = -10) into the shadow (x = -4.5); the
+        // block's shadow runs from x = -6 (the top's edge) to its foot at x = -2.
+        const auto edge = [&](const Pixels& p) {
+            const auto luma = [&](float x) { return brightness(p.at(scene.camera.project({x, 0.0f, -45.0f}, screen)->pos)); };
+            const int lit = luma(-10.0f), shade = luma(-4.5f);
+            assert(lit > 2 * shade && shade > 0); // the shadow is there
+            int width = 0;
+            const int y = static_cast<int>(scene.camera.project({-6.0f, 0.0f, -45.0f}, screen)->pos.y);
+            for (int x = 0; x < 160; ++x) {
+                const int b = brightness(p.at(x, y));
+                width += (b > shade + (lit - shade) / 10 && b < shade + (lit - shade) * 9 / 10) ? 1 : 0;
+            }
+            return width;
+        };
+        const Pixels single = render(1);
+        assert(r3d.stats().shadow_cascades == 1 && r3d.stats().cascade_casters[0] == r3d.stats().shadow_casters);
+        const int single_edge = edge(single);
+        const Pixels none = render(0); // asked for none: one
+        assert(r3d.stats().shadow_cascades == 1);
+        assert(single.rgba == none.rgba);
+
+        const Pixels cascaded = render(4);
+        const kin::Render3DStats stats = r3d.stats();
+        assert(stats.shadow_cascades == 4 && stats.shadow_draws >= 4);
+        // Each cascade's own casters: the far block is in the last only, so the
+        // nearest has fewer than the farthest, and together they are the total.
+        assert(stats.cascade_casters[0] + stats.cascade_casters[1] + stats.cascade_casters[2] + stats.cascade_casters[3] == stats.shadow_casters);
+        assert(stats.cascade_casters[0] < stats.cascade_casters[3]);
+        const int cascaded_edge = edge(cascaded);
+        std::cerr << "cascades: shadow edge " << single_edge << " px with one map, " << cascaded_edge << " px with four\n";
+        assert(cascaded_edge < single_edge);
+        assert(cascaded_edge <= 2);
+        renderer.present();
+    });
+}
+
+// Ambient occlusion (G2b): the foot of a wall is darker than with it off and
+// open floor is not; only the ambient light is dimmed (the sun is not); off,
+// the pre-pass and the compute are not run; the overlay and blended meshes
+// are not in it.
+void test_gpu_ambient_occlusion() {
+    with_gpu("test_gpu_ambient_occlusion", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh wall = r3d.create_mesh(kin::meshes::box({20.0f, 4.0f, 0.2f}));
+        const kin::Mesh pane = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 0.01f}));
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view_msaa = r3d.create_view({160, 120}, {.samples = 4});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, 6.0f}, {0.0f, 0.3f, -2.0f}, 50.0f);
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+        // The floor's top is at y = 0, the wall's front at z = -2.
+        const auto render = [&](const kin::AmbientOcclusion3D& ao, bool pane_in_front = false, bool gun = false, kin::View3D* target = nullptr) {
+            scene.clear();
+            scene.ambient_occlusion = ao;
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -2.1f}), {.color = Color::rgb(200, 200, 200)});
+            if (pane_in_front) {
+                scene.draw(pane, Mat4f::translation({0.0f, 0.5f, 0.5f}),
+                           {.color = Color::rgba(255, 255, 255, 128), .blend = kin::Blend3D::Alpha});
+            }
+            if (gun) {
+                kin::Scene3D& hands = scene.overlay();
+                hands.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
+                hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
+            }
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(target ? *target : view, scene));
+            renderer.draw_texture((target ? *target : view).texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto at = [&](const Pixels& p, Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        const Vec3f foot{0.0f, 0.0f, -1.8f}, wall_foot{0.0f, 0.15f, -2.0f}, open{0.0f, 0.0f, 2.6f}, high_wall{0.0f, 3.0f, -2.0f};
+
+        const Pixels off = render({.enabled = false, .radius = 3.0f});
+        assert(r3d.stats().ao_draws == 0 && r3d.stats().ao_instances == 0 && r3d.stats().ao_dispatches == 0);
+        const Pixels plain = render({});
+        assert(plain.rgba == off.rgba); // off is off, whatever its other settings
+
+        const Pixels on = render({.enabled = true, .radius = 3.0f});
+        if (r3d.stats().ao_dispatches == 0) {
+            std::cerr << "ambient occlusion: not available on this device, skipped\n";
+            return;
+        }
+        assert(r3d.stats().ao_draws == 2 && r3d.stats().ao_instances == 2 && r3d.stats().ao_dispatches == 3);
+        // The crease: both sides of it darker; the open floor and the high wall, not.
+        const int foot_off = brightness(at(off, foot)), foot_on = brightness(at(on, foot));
+        const int wall_off = brightness(at(off, wall_foot)), wall_on = brightness(at(on, wall_foot));
+        std::cerr << "ao: floor at the foot " << foot_off << " -> " << foot_on << ", wall at the foot " << wall_off << " -> " << wall_on
+                  << ", open floor " << brightness(at(off, open)) << " -> " << brightness(at(on, open)) << ", high wall "
+                  << brightness(at(off, high_wall)) << " -> " << brightness(at(on, high_wall)) << "\n";
+        assert(foot_on < foot_off * 95 / 100);
+        assert(wall_on < wall_off * 96 / 100);
+        expect(at(on, open), at(off, open), "open floor with occlusion", 3);
+        expect(at(on, high_wall), at(off, high_wall), "the wall high above the floor with occlusion", 6);
+        // Further from the crease it fades: between the foot and the open floor.
+        const int mid = brightness(at(on, {0.0f, 0.0f, -0.6f}));
+        assert(mid > foot_on && mid <= brightness(at(off, {0.0f, 0.0f, -0.6f})));
+
+        // More intensity is darker; half the size is still occluded; with 4x MSAA too.
+        assert(brightness(at(render({.enabled = true, .radius = 3.0f, .intensity = 2.0f}), foot)) < foot_on);
+        assert(brightness(at(render({.enabled = true, .radius = 3.0f, .half_resolution = true}), foot)) < foot_off * 96 / 100);
+        const Pixels multisampled_off = render({}, false, false, &view_msaa);
+        const Pixels multisampled = render({.enabled = true, .radius = 3.0f}, false, false, &view_msaa);
+        assert(brightness(at(multisampled, foot)) < brightness(at(multisampled_off, foot)) * 95 / 100);
+        expect(at(multisampled, open), at(multisampled_off, open), "open floor with occlusion, multisampled", 3);
+
+        // Only the ambient light is dimmed: with none, a floor lit by the sun
+        // is the same with or without; with both, the sun's light stays.
+        scene.lights.sun = {.direction = {0.0f, 1.0f, 1.0f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        const Pixels sun_off = render({});
+        const Pixels sun_on = render({.enabled = true, .radius = 3.0f});
+        expect(at(sun_on, foot), at(sun_off, foot), "sunlit floor at the foot of a wall", 3);
+        expect(at(sun_on, wall_foot), at(sun_off, wall_foot), "sunlit wall at its foot", 3);
+        scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+        const Pixels both_off = render({});
+        const Pixels both_on = render({.enabled = true, .radius = 3.0f});
+        const int sun_part = brightness(at(sun_off, foot));
+        assert(brightness(at(both_on, foot)) >= sun_part); // never less than the sun alone gives
+        assert(brightness(at(both_on, foot)) < brightness(at(both_off, foot)));
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+
+        // Blended meshes are not in the pre-pass; the overlay is neither occluded nor drawn into it.
+        render({.enabled = true, .radius = 3.0f}, true);
+        assert(r3d.stats().ao_instances == 2);
+        const Pixels gun_off = render({}, false, true);
+        const Pixels gun_on = render({.enabled = true, .radius = 3.0f}, false, true);
+        assert(r3d.stats().ao_instances == 2);
+        const auto hands = scene.overlay().camera.project({0.5f, -0.3f, -1.5f}, screen);
+        assert(hands);
+        expect(gun_on.at(hands->pos), gun_off.at(hands->pos), "the overlay is not occluded", 2);
+    });
+}
+
 } // namespace
 
 // --- Physically based materials (G1a) ---
@@ -1698,6 +1959,8 @@ int main() {
     test_mesh_validation_and_append();
     test_scene_merges_draws();
     test_cameras();
+    test_cascade_splits();
+    test_cascade_fit();
     test_ecs_entities();
     test_sdl_renderer_has_no_3d();
     test_gpu_reports_3d();
@@ -1724,6 +1987,8 @@ int main() {
     test_gpu_large_mesh();
     test_gpu_shadow_faces();
     test_gpu_shadows_into_view();
+    test_gpu_cascades();
+    test_gpu_ambient_occlusion();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

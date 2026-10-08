@@ -58,6 +58,10 @@ public:
     // colour, depth and resolve targets).
     GpuTexture create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
                              SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1);
+    // As create_target, but a 2D array of `layers` (one pass renders into a
+    // layer; a shader samples the array): cascaded shadow maps.
+    GpuTexture create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
+                                   SDL_GPUTextureUsageFlags usage);
     // A depth-stencil target of depth_stencil_format() (stencil clips).
     GpuTexture create_depth_stencil(u32 width, u32 height);
     // The depth-stencil format this device draws into, INVALID if none.
