@@ -65,6 +65,7 @@ SDL_GPUSampleCount sample_count(u32 samples) {
 }
 
 constexpr SDL_GPUTextureFormat hdr_format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+constexpr SDL_GPUTextureFormat pick_format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT; // position, id
 constexpr u32 max_lights = 16;
 // The overlay's slice of the depth range: reverse Z, so in front of the scene's.
 constexpr f32 overlay_split = 0.9f;
@@ -80,13 +81,16 @@ struct FrameUniforms {
     f32 sun_direction[4];
     f32 sun_color[4];
     f32 ambient[4];
+    f32 ground_ambient[4];
+    f32 fill_direction[4];
+    f32 fill_color[4];
     f32 flags[4]; // encode to sRGB, decode textures, shadows, point lights
     f32 shadow_matrix[16];
     f32 shadow[4]; // depth bias, normal offset, a texel (uv)
     f32 lights[max_lights * 2 * 4];
 };
 struct MaterialUniforms {
-    f32 params[4]; // emissive, unlit
+    f32 params[4]; // emissive, unlit, receives the sun's shadow
 };
 
 // A view's six bounding planes from its view-projection matrix, reverse Z:
@@ -193,6 +197,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                                  /*uniform_buffers=*/1, /*samplers=*/1);
         _output_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output.frag.spv",
                                                   /*uniform_buffers=*/1, /*samplers=*/2);
+        _pick_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "pick.frag.spv");
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
     }
@@ -244,11 +249,21 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                                      .depth = GpuDepthTest::TestWrite,
                                                      .depth_only = true});
     }
+    if (pass == Pass::Pick) {
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
+                                                     .fragment = _pick_shader.handle(),
+                                                     .blend = GpuBlendMode::Replace,
+                                                     .format = pick_format,
+                                                     .layout = GpuVertexLayout::MeshVertices,
+                                                     .depth_stencil = _depth_format,
+                                                     .depth = GpuDepthTest::TestWrite,
+                                                     .cull = cull ? GpuCull::Back : GpuCull::None});
+    }
     // Opaque: written over what is there, alpha and all; transparent: blended,
-    // tested against the depth but not writing it.
-    const GpuBlendMode blend = pass == Pass::Opaque ? GpuBlendMode::Replace
-                             : pass == Pass::Alpha  ? GpuBlendMode::Premultiplied
-                                                    : GpuBlendMode::PremultipliedAdditive;
+    // tested against the depth but not writing it; wireframes over the faces.
+    const GpuBlendMode blend = pass == Pass::Opaque || pass == Pass::Wire ? GpuBlendMode::Replace
+                             : pass == Pass::Alpha                       ? GpuBlendMode::Premultiplied
+                                                                         : GpuBlendMode::PremultipliedAdditive;
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
                                                  .fragment = _fragment_shader.handle(),
                                                  .blend = blend,
@@ -256,8 +271,10 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                                  .layout = GpuVertexLayout::MeshVertices,
                                                  .depth_stencil = _depth_format,
                                                  .depth = pass == Pass::Opaque ? GpuDepthTest::TestWrite : GpuDepthTest::Test,
-                                                 .cull = cull ? GpuCull::Back : GpuCull::None,
-                                                 .samples = sample_count(samples)});
+                                                 .cull = cull && pass != Pass::Wire ? GpuCull::Back : GpuCull::None,
+                                                 .samples = sample_count(samples),
+                                                 .wireframe = pass == Pass::Wire,
+                                                 .depth_bias = pass == Pass::Wire});
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const {
@@ -269,23 +286,12 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_
 }
 
 std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
-    std::vector<GpuMeshVertex> vertices;
-    vertices.reserve(data.vertices.size());
-    for (const MeshVertex& v : data.vertices) {
-        vertices.push_back({v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.uv.x, v.uv.y,
-                            v.color.r, v.color.g, v.color.b, v.color.a});
-    }
-    std::vector<u32> indices = data.indices;
-    if (indices.empty()) {
-        indices.resize(data.vertices.size());
-        for (u32 i = 0; i < static_cast<u32>(indices.size()); ++i) {
-            indices[i] = i;
-        }
-    }
+    const std::size_t vertex_count = data.vertices.size();
+    const std::size_t index_count = data.indices.empty() ? vertex_count : data.indices.size();
     try {
         auto mesh = std::make_shared<GpuMesh3D>(_device->shared());
-        const u32 vertex_bytes = static_cast<u32>(vertices.size() * sizeof(GpuMeshVertex));
-        const u32 index_bytes = static_cast<u32>(indices.size() * sizeof(u32));
+        const u32 vertex_bytes = static_cast<u32>(vertex_count * sizeof(GpuMeshVertex));
+        const u32 index_bytes = static_cast<u32>(index_count * sizeof(u32));
         const SDL_GPUBufferCreateInfo vertex_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = vertex_bytes, .props = 0};
         const SDL_GPUBufferCreateInfo index_info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = index_bytes, .props = 0};
         mesh->vertices = SDL_CreateGPUBuffer(_device->handle(), &vertex_info);
@@ -293,10 +299,54 @@ std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
         if (!mesh->vertices || !mesh->indices) {
             throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
         }
+        // Written straight into the upload's memory (no copy of a large
+        // model's vertices on the way), in slices on the workers when there
+        // are many; a large mesh in pieces the device's usual staging memory
+        // takes (not a new staging buffer as large as it, written for the
+        // first time).
+        constexpr std::size_t slice = 64u * 1024u;
+        constexpr std::size_t piece_bytes = 8u * 1024u * 1024u;
+        const auto in_slices = [&](std::size_t count, const auto& write) {
+            const auto slices = static_cast<i32>((count + slice - 1) / slice);
+            if (_owner->_jobs && slices > 2) {
+                _owner->_jobs->parallel_for(slices, [&](i32 i) {
+                    const std::size_t begin = static_cast<std::size_t>(i) * slice;
+                    write(begin, std::min(count, begin + slice));
+                });
+            } else {
+                write(0, count);
+            }
+        };
         // With the texture uploads: on the GPU before the next frame draws.
-        _device->upload_storage_buffer(mesh->vertices, 0, vertex_bytes, vertices.data(), false);
-        _device->upload_storage_buffer(mesh->indices, 0, index_bytes, indices.data(), false);
-        mesh->index_count = static_cast<u32>(indices.size());
+        const auto upload = [&](SDL_GPUBuffer* buffer, std::size_t count, std::size_t size, const auto& write) {
+            const std::size_t per_piece = std::max<std::size_t>(1, piece_bytes / size);
+            for (std::size_t first = 0; first < count; first += per_piece) {
+                const std::size_t n = std::min(per_piece, count - first);
+                const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+                    in_slices(n, [&](std::size_t begin, std::size_t end) { write(out.data(), first, begin, end); });
+                };
+                _device->upload_storage_buffer(buffer, static_cast<u32>(first * size), static_cast<u32>(n * size), nullptr, false, &fill);
+            }
+        };
+        upload(mesh->vertices, vertex_count, sizeof(GpuMeshVertex), [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+            auto* to = reinterpret_cast<GpuMeshVertex*>(out);
+            for (std::size_t i = begin; i < end; ++i) {
+                const MeshVertex& v = data.vertices[first + i];
+                to[i] = {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.uv.x, v.uv.y,
+                         v.color.r, v.color.g, v.color.b, v.color.a};
+            }
+        });
+        upload(mesh->indices, index_count, sizeof(u32), [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+            auto* to = reinterpret_cast<u32*>(out);
+            if (data.indices.empty()) {
+                for (std::size_t i = begin; i < end; ++i) {
+                    to[i] = static_cast<u32>(first + i); // in order: three vertices a triangle
+                }
+            } else {
+                std::memcpy(to + begin, data.indices.data() + first + begin, (end - begin) * sizeof(u32));
+            }
+        });
+        mesh->index_count = static_cast<u32>(index_count);
         return mesh;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = e.what()}}));
@@ -320,6 +370,12 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
                                         : GpuTexture{};
         GpuTexture depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
                                                   sample_count(samples));
+        GpuTexture pick, pick_depth;
+        if (view._options.pick && _pick_shader &&
+            SDL_GPUTextureSupportsFormat(_device->handle(), pick_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET)) {
+            pick = _device->create_target(w, h, pick_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
+            pick_depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+        }
         GpuTexture bloom_a, bloom_b;
         if (hdr && view._options.bloom > 0.0f) {
             bloom_a = _device->create_target(std::max(1u, w / 2), std::max(1u, h / 2), hdr_format, drawn);
@@ -333,6 +389,8 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
         view._depth = std::move(depth);
         view._bloom_a = std::move(bloom_a);
         view._bloom_b = std::move(bloom_b);
+        view._pick = std::move(pick);
+        view._pick_depth = std::move(pick_depth);
         view._samples = samples;
         view._hdr = hdr;
         view._format = format;
@@ -345,6 +403,10 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
     for (const Pass pass : {Pass::Opaque, Pass::Alpha, Pass::Additive}) {
         pipeline(format, samples, true, pass);
         pipeline(format, samples, false, pass);
+    }
+    if (view._pick) {
+        pipeline(pick_format, 1, true, Pass::Pick);
+        pipeline(pick_format, 1, false, Pass::Pick);
     }
     if (hdr) {
         fullscreen(_bloom_shader.handle(), hdr_format);
@@ -518,7 +580,8 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 continue;
             }
             const Bounds3& b = draw.mesh.bounds();
-            const bool caster = shadows && s == 0 && draw.material.blend == Blend3D::Opaque && draw.material.casts_shadow;
+            const bool caster = shadows && s == 0 && draw.material.blend == Blend3D::Opaque && draw.material.casts_shadow &&
+                                !draw.material.wireframe;
             _refs.push_back({&draw, scenes[s]->instances().data() + draw.first, mesh, s,
                              scenes[s]->cull ? &frustums[s] : nullptr, caster, b.center(), b.radius(), 0, 0, 0});
         }
@@ -634,7 +697,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             const Vec3f x = cross(c1, c2);
             const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
             const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
-            const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
+            f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
+            const u32 id = instance.id + 1; // 0: nothing there
+            std::memcpy(&normal[3], &id, sizeof(id));
             std::memcpy(g.normal, normal, sizeof(g.normal));
             const Color tint = instance.tint;
             g.color[0] = _srgb_to_linear[m.r] * _srgb_to_linear[tint.r];
@@ -685,7 +750,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     // The draws in order: the scene, then the overlay; in each, opaque, then
     // alpha-blended (furthest first), then additive; then pipeline and mesh.
     const auto pass_of = [](const Material3D& m) {
-        return m.blend == Blend3D::Opaque ? Pass::Opaque : m.blend == Blend3D::Alpha ? Pass::Alpha : Pass::Additive;
+        return m.wireframe ? Pass::Wire : m.blend == Blend3D::Opaque ? Pass::Opaque : m.blend == Blend3D::Alpha ? Pass::Alpha : Pass::Additive;
     };
     _order.clear();
     for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
@@ -742,6 +807,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))), 0.0f);
         put(f.sun_color, lights.sun.color, 0.0f);
         put(f.ambient, lights.ambient, 0.0f);
+        put(f.ground_ambient, lights.ground_ambient.value_or(lights.ambient), 0.0f);
+        const bool fill = length_squared(lights.fill.direction) > 0;
+        put(f.fill_direction, fill ? normalize(to_space.apply_vector(normalize(lights.fill.direction))) : Vec3f{}, 0.0f);
+        put(f.fill_color, fill ? lights.fill.color : Vec3f{}, 0.0f);
         const bool lit_by_sun_shadow = shadows && s == 0;
         put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
             static_cast<f32>(chosen.size()));
@@ -913,7 +982,8 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         }
         draw_uniforms.first[0] = ref.out_first;
         SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
-        const MaterialUniforms m{{material.emissive, material.unlit ? 1.0f : 0.0f, 0.0f, 0.0f}};
+        const MaterialUniforms m{{material.emissive, material.unlit || material.wireframe ? 1.0f : 0.0f,
+                                  material.receives_shadow ? 1.0f : 0.0f, 0.0f}};
         SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
         SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
         ++stats.draws;
@@ -921,11 +991,92 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         stats.triangles += static_cast<u64>(ref.mesh->index_count / 3) * ref.out_count;
     }
     SDL_EndGPURenderPass(pass);
+
+    // What is under each pixel: the scene's opaque and alpha meshes (not its
+    // wireframes, glows or overlay) again, writing position and id.
+    if (view->_pick) {
+        SDL_GPUColorTargetInfo target{};
+        target.texture = view->_pick.handle();
+        target.clear_color = {0.0f, 0.0f, 0.0f, 0.0f}; // id 0: nothing
+        target.load_op = SDL_GPU_LOADOP_CLEAR;
+        target.store_op = SDL_GPU_STOREOP_STORE;
+        target.cycle = true;
+        SDL_GPUDepthStencilTargetInfo pick_depth{};
+        pick_depth.texture = view->_pick_depth.handle();
+        pick_depth.clear_depth = 0.0f;
+        pick_depth.load_op = SDL_GPU_LOADOP_CLEAR;
+        pick_depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+        pick_depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        pick_depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        pick_depth.cycle = true;
+        if (SDL_GPURenderPass* picking = SDL_BeginGPURenderPass(commands, &target, 1, &pick_depth)) {
+            const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), 0.0f, 1.0f};
+            SDL_SetGPUViewport(picking, &viewport);
+            DrawUniforms u{};
+            std::memcpy(u.view_projection, view_projections[0].m, sizeof(u.view_projection));
+            SDL_GPUGraphicsPipeline* bound_pick = nullptr;
+            const GpuMesh3D* mesh_bound = nullptr;
+            for (const u32 index : _order) {
+                const DrawRef& ref = _refs[index];
+                const Pass kind = pass_of(ref.draw->material);
+                if (ref.scene != 0 || (kind != Pass::Opaque && kind != Pass::Alpha)) {
+                    continue;
+                }
+                SDL_GPUGraphicsPipeline* p = pipeline(pick_format, 1, !ref.draw->material.double_sided, Pass::Pick);
+                if (!p) {
+                    continue;
+                }
+                if (p != bound_pick) {
+                    SDL_BindGPUGraphicsPipeline(picking, p);
+                    SDL_BindGPUVertexStorageBuffers(picking, 0, &storage, 1);
+                    bound_pick = p;
+                }
+                if (ref.mesh != mesh_bound) {
+                    const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
+                    SDL_BindGPUVertexBuffers(picking, 0, &vertices, 1);
+                    const SDL_GPUBufferBinding indices{ref.mesh->indices, 0};
+                    SDL_BindGPUIndexBuffer(picking, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                    mesh_bound = ref.mesh;
+                }
+                u.first[0] = ref.out_first;
+                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                SDL_DrawGPUIndexedPrimitives(picking, ref.mesh->index_count, ref.out_count, 0, 0, 0);
+            }
+            SDL_EndGPURenderPass(picking);
+        }
+    }
     if (view->_hdr) {
         finish_hdr(commands, *view);
     }
     resume_2d();
     return true;
+}
+
+PickResult GpuRenderer3D::pick(IView3DBackend& base, Vec2i pixel) {
+    auto* view = dynamic_cast<GpuView3D*>(&base);
+    if (!view || !view->_pick || pixel.x < 0 || pixel.y < 0 || pixel.x >= view->_size.x || pixel.y >= view->_size.y) {
+        return {};
+    }
+    // What is recorded so far goes to the GPU first (2D carries on in a new
+    // command buffer, as after a read-back).
+    if (_owner->_frame) {
+        _owner->flush_to_frame();
+        _owner->_frame->submit();
+        _owner->end_frame();
+    }
+    std::vector<u8> texel;
+    if (!_device->read_texture_region(view->_pick, static_cast<u32>(pixel.x), static_cast<u32>(pixel.y), 1, 1, 16, texel) ||
+        texel.size() < 16) {
+        return {};
+    }
+    f32 values[4];
+    std::memcpy(values, texel.data(), sizeof(values));
+    u32 id = 0;
+    std::memcpy(&id, &values[3], sizeof(id));
+    if (id == 0) {
+        return {};
+    }
+    return {.hit = true, .id = id - 1, .position = {values[0], values[1], values[2]}};
 }
 
 } // namespace kin::gpu

@@ -16,6 +16,7 @@
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -38,8 +39,15 @@ struct Material3D {
     bool unlit = false;        // its colour as it is, no light or shade
     bool double_sided = false; // its back faces drawn too (else culled)
     Blend3D blend = Blend3D::Opaque;
-    // Opaque meshes cast the sun's shadow (Lights3D::shadow_area) unless this is off.
+    // Opaque meshes cast the sun's shadow (Lights3D::shadow_area) unless this
+    // is off, and take it unless `receives_shadow` is.
     bool casts_shadow = true;
+    bool receives_shadow = true;
+    // Only its triangles' edges, a pixel wide, in its colour (no light),
+    // drawn just in front of the faces they edge: a model's wireframe drawn
+    // over it, or lines (triangles a, b, b) on the ground. Needs line fill
+    // (desktop GPUs have it): where its pipeline can't be made, not drawn.
+    bool wireframe = false;
     // The base colour's texture (the mesh's UVs), times the colours above;
     // none: white.
     Texture texture{};
@@ -52,6 +60,7 @@ struct Material3D {
 struct MeshInstance {
     Mat4f transform{};
     Color tint = colors::white;
+    u32 id = 0; // what Renderer3D::pick says is under a pixel showing it
 };
 
 // Light from far away, in one direction: the sun.
@@ -69,7 +78,12 @@ struct PointLight {
 
 struct Lights3D {
     DirectionalLight sun{};
+    // A second sun that casts no shadow, to lift the far side (black: none).
+    DirectionalLight fill{.direction = {0.6f, 0.4f, -0.5f}, .color = {0.0f, 0.0f, 0.0f}};
     Vec3f ambient{0.25f, 0.25f, 0.28f}; // light from everywhere, linear
+    // With it, ambient light comes from the sky above (`ambient`) to the
+    // ground below (this), by which way a face looks; without, from all round.
+    std::optional<Vec3f> ground_ambient{};
     // Where the sun casts shadows: a box round what casts and receives them
     // (the level, say). Empty: no shadows. Smaller is sharper.
     Bounds3 shadow_area{};
@@ -101,7 +115,7 @@ public:
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced).
     void draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material = {},
-              Color tint = colors::white);
+              Color tint = colors::white, u32 id = 0);
     // Each part of `model` (model.hpp), placed by `transform`.
     void draw(const Model& model, const Mat4f& transform, Color tint = colors::white);
     // Many copies of `mesh`, in one draw.

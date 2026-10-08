@@ -207,6 +207,11 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
                                       : key.cull == GpuCull::Front ? SDL_GPU_CULLMODE_FRONT
                                                                    : SDL_GPU_CULLMODE_NONE;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+    if (key.depth_bias) {
+        info.rasterizer_state.enable_depth_bias = true;
+        info.rasterizer_state.depth_bias_constant_factor = 2.0f;
+        info.rasterizer_state.depth_bias_slope_factor = 1.0f;
+    }
     info.multisample_state.sample_count = key.samples;
     info.target_info = target_info;
     if (key.depth != GpuDepthTest::None && key.depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID) {

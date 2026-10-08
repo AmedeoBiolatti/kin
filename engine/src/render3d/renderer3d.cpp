@@ -87,6 +87,13 @@ bool Renderer3D::resize(View3D& view, Vec2i size) {
     return _backend && _backend->resize_view(*view.backend(), size);
 }
 
+PickResult Renderer3D::pick(View3D& view, Vec2i pixel) {
+    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        return {};
+    }
+    return _backend->pick(*view.backend(), pixel);
+}
+
 bool Renderer3D::render(View3D& view, const Scene3D& scene) {
     _stats = {};
     if (!view.valid()) {

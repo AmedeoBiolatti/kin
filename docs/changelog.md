@@ -48,6 +48,11 @@ releases may change APIs.
 - Signal Breach: shadows, muzzle-flash and explosion lights, glowing shots,
   additive sparks and tracers, a glTF gun and crates, sound in 3D;
   `--no-shadows`, `--no-bloom`, `--no-lights` to measure each.
+- 3D picking (`View3DOptions::pick`, `Renderer3D::pick`: the id given with a
+  draw and the world point under a pixel), wireframe materials (also lines
+  from degenerate triangles), a fill light, ambient light from below
+  (`Lights3D::ground_ambient`) and `Material3D::receives_shadow`. Large meshes
+  are uploaded in pieces, written straight into the upload memory.
 
 ## [0.2.6] — 2026-10-07
 

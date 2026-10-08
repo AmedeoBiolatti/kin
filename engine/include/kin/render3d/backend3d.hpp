@@ -43,6 +43,17 @@ struct View3DOptions {
     // strong (0: none). Emissive materials past 1 glow.
     f32 bloom = 0.0f;
     f32 bloom_threshold = 1.0f;
+    // What is under each pixel kept too (Renderer3D::pick): one more pass
+    // over the scene's opaque meshes.
+    bool pick = false;
+};
+
+// What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
+// camera there (its MeshInstance::id) and the point of it the pixel shows.
+struct PickResult {
+    bool hit = false; // false: nothing but background there
+    u32 id = 0;
+    Vec3f position{};
 };
 
 // What the last render() drew.
@@ -78,6 +89,8 @@ public:
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
     virtual bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) = 0;
+    // What `pixel` of the view's last render shows; waits for the GPU.
+    virtual PickResult pick(IView3DBackend& view, Vec2i pixel) = 0;
 };
 
 } // namespace kin

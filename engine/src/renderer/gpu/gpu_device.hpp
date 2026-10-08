@@ -104,6 +104,8 @@ public:
     // Download `src` to tightly-packed RGBA8 (waits for the GPU). Returns false on
     // failure. Used by the backend's read_rgba.
     bool read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba);
+    // A region of `src` (`texel_bytes` a texel), tightly packed (waits for the GPU).
+    bool read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out);
 
     GpuFrame begin_frame(bool acquire_swapchain = false);
     void clear_render_target(GpuFrame& frame, const GpuTexture& target, ClearColor color);

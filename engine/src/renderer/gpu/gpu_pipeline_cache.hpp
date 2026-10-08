@@ -36,6 +36,9 @@ struct GpuPipelineKey {
     bool wireframe = false;
     // No colour target, depth only (a shadow map); `format` is ignored.
     bool depth_only = false;
+    // Pulled toward the camera (reverse Z), drawn over the faces it lies on:
+    // wireframes, lines on the ground.
+    bool depth_bias = false;
 
     friend bool operator==(const GpuPipelineKey&, const GpuPipelineKey&) = default;
 };

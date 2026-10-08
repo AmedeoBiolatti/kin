@@ -488,18 +488,87 @@ The plan as it was:
   on, and each feature's cost alone (a GPU scope per pass); shot tests for a
   muzzle light on a wall and a shadow on the deck.
 
-### M4 — Studio parity
+### M4 — Studio parity. Done.
 
-- **Picking**: an optional R32_UINT id target written beside colour;
-  `view.pick(point)` returns the id and the 3D point (from depth), read back
-  only for the pixels asked.
-- **Wireframe** (line fill mode, where the device has it) and a highlight
-  tint per draw (the studio's glow on changed parts).
-- The ground with the map's grid lines; the studio's mesh export loaded into
-  `MeshData`; a view kept and not re-rendered while nothing changes.
-- Acceptance: kin-render-studio's 3D tab drawn by `View3D`; the kiln within
-  a few levels per channel of the CPU picture; picture time against the M0
-  baseline; picking returns the same part.
+What was built, in kin:
+
+- **Picking**: `View3DOptions::pick` gives a view a second, single-sampled
+  target (RGBA32F: the world point, and the id as the alpha's bits) drawn
+  after the main pass by the scene's opaque and alpha meshes (`pick.frag`;
+  not wireframes, additive glows or the overlay). The id is the draw's
+  (`Scene3D::draw(..., id)`, `MeshInstance::id`), carried in a spare float
+  of each copy's normal matrix. `Renderer3D::pick(view, pixel)` submits what
+  the frame has recorded and reads one texel back
+  (`GpuDevice::read_texture_region`); 2D goes on in a new command buffer.
+  0.2-0.6 ms a pick on the RTX 4080, with the frame's work before it.
+- **Wireframe**: `Material3D::wireframe`: line fill, unlit, depth-tested with
+  a small depth bias (a pipeline key field), after the opaque draws; no
+  shadow, no pick. A degenerate triangle (a, b, b) is a line: the studio's
+  grid is drawn that way.
+- **Light the studio needs**: `Lights3D::fill` (a second sun, no shadow),
+  `ground_ambient` (hemisphere ambient: faces mix by how far they face up)
+  and `Material3D::receives_shadow`.
+- **Large meshes**: `create_mesh` writes vertices and indices straight into
+  the upload memory as it converts them, on the job system when there are
+  many, in 8 MB pieces (a 5-million-triangle mesh needs no 512 MB staging
+  buffer).
+- No highlight tint was needed in the engine: the studio's glow mixes the
+  changed parts' material colours toward the highlight.
+
+In kin-render-studio (branch `exp/3d-view`, built against this branch):
+`GpuModelView` (app/src/model_gpu_view.*) draws `ModelRaster`'s picture with
+kin's 3D: a mesh per part per material (Blender's z up turned to kin's y
+up, each triangle wound to face its normal), the rig's key as the sun
+(1.15 x its colour, casting onto the ground only), its fill (0.22), the sky's
+light from above and below (0.42, 0.18), emitting materials unlit, the
+ground lit in the colour that comes out as the raster's unlit ground, the
+hex grid as wireframe lines, the model's edges (the Wire button) as a wireframe, the
+glow as a colour mix. It answers `part_at`, `point_at` and `screen_of` like
+the raster, the last pixel's pick kept until the picture changes. The view
+draws again only when what is asked changes, always at the screen's pixels
+with 4x MSAA (the CPU drew at half size while turning). Without
+`KIN_EXPERIMENTAL_3D`, or on SDL_Renderer, or with `KRS_CPU_MODEL_VIEW=1`,
+the CPU raster draws as before. `krs_model_view_check` draws a model both
+ways and compares pictures, times and picks.
+
+What was measured (`krs_model_view_check`, 1280x800, the raster at 2x2
+against 4x MSAA, the first of six orbits 7 degrees apart; RTX 4080 Laptop;
+the machine was busier than at M0, so the raster is timed again beside it):
+
+| Model | Triangles | CPU raster now, 1x / 2x2 (min / median ms) | M0 baseline 1x / 2x2 | GPU view, drawn and waited for | `render()` CPU |
+|---|---|---|---|---|---|
+| arm_head | 1,452 | 6.6 / 7.4, 20.7 / 21.9 | 2.5 / 2.8, 9.0 / 11.2 | 0.76-0.83 / 0.88-0.91 | 0.20 / 0.22 |
+| plant | 244,628 | 35.2 / 36.7, 70.1 / 72.1 | 13.2 / 15.0, 26.6 / 27.7 | 1.30 / 1.43 | 0.65 / 0.82 |
+| kiln | 5,150,778 | 156 / 188, 222 / 263 | 68.2 / 70.6, 96.8 / 106.0 | 6.0-7.0 / 7.4-8.3 | 0.6 / 0.8-1.1 |
+
+- **The pictures**: per colour channel, the mean difference is 0.21 levels
+  (kiln), 0.23 (plant), 0.27 (arm_head); median 0, p95 0-1, p99 6. Pixels
+  more than 8 levels apart: 0.90%, 0.85%, 0.53%; more than 24: 0.28%,
+  0.37%, 0.16%. What differs: edges (MSAA's samples are not the raster's
+  2x2), the grid's one-pixel lines a fraction of a pixel apart, the shadow
+  a few levels lighter (the GPU lights the ground without the sun; the
+  raster darkens its colour by 0.58), soft shadow edges (3x3 PCF against the
+  raster's hard ones), and on the kiln a plank whose coplanar faces the two
+  break the other way (the raster keeps the first drawn, the GPU the last).
+  Wire mode: 0.54 levels mean (the GPU's edges a pixel wide, the raster's
+  half that).
+- **Picking**: of 4,000 pixels across the picture, the same part, ground or
+  nothing at 99.97-100% against the raster drawn without supersampling (it
+  answers for a pixel's middle, as the GPU does); on the model 99.81% (kiln,
+  one pixel of 515), 100% (plant, arm_head). Against the 2x2 raster, which
+  answers for the sample right and below the middle, 97.9-99.5% on the
+  model. Points: 0.8-6 mm apart on models 2-4 m across. `screen_of` agrees
+  to a hundredth of a pixel.
+- **Loading**: the kiln's meshes take 0.63-0.80 s to build and upload once
+  (its 15.5 million vertices are 556 MB; page faults on new memory are most
+  of it); the plant 71 ms. On the UI thread for now.
+- lavapipe draws the same picture (arm_head: 0.29 levels mean, the same
+  picks) at 35 ms.
+
+Left over: build the vertices on the studio's loading thread and spread the
+kiln's upload over frames (the load hitch); the studio's live 3D tab was not
+run here (no Blender on this machine to export a model), only
+`GpuModelView` through the check tool and the headless app.
 
 ### Later, each on request
 

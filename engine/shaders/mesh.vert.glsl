@@ -7,8 +7,9 @@ layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec4 aColor; // sRGB
 
 // GpuInstance3D: the model matrix, the normals' (its cofactors: they turn
-// normals as the model turns the shape, scaled), and the colour (linear,
-// the material's times the tint, straight alpha).
+// normals as the model turns the shape, scaled; the first column's w holds
+// the copy's pick id, plus one, as bits), and the colour (linear, the
+// material's times the tint, straight alpha).
 struct Instance {
     mat4 model;
     vec4 normal0;
@@ -29,6 +30,7 @@ layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
+layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
 
 vec3 decode(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
@@ -44,4 +46,5 @@ void main() {
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal;
     vColor = instance.color * vec4(decode(aColor.rgb), aColor.a);
     vUV = aUV;
+    vId = floatBitsToUint(instance.normal0.w);
 }

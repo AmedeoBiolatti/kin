@@ -224,7 +224,7 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
               transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.frag
-              fullscreen.vert bloom.frag view_output.frag)
+              fullscreen.vert bloom.frag view_output.frag pick.frag)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.

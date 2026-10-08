@@ -61,18 +61,27 @@ Shapes made in code (`kin::meshes`): `box`, `plane`, `sphere`, `cylinder`,
 A `kin::Scene3D` is filled each frame and holds no GPU state: a camera, the
 lights, and draws.
 
-- `draw(mesh, transform, material, tint)`: one copy. Copies of the same mesh
-  and material one after another are drawn as one instanced draw.
-- `draw_instanced(mesh, instances, material)`: many, each a transform and a
-  tint.
+- `draw(mesh, transform, material, tint, id)`: one copy. Copies of the same
+  mesh and material one after another are drawn as one instanced draw. `id`
+  is what picking says is under a pixel showing it (see Views).
+- `draw_instanced(mesh, instances, material)`: many, each a transform, a
+  tint and an id.
 - `add_instances(mesh, count, material)`: room to fill in place (valid until
   the next draw is added).
 
 `kin::Material3D`: `color` (times the mesh's vertex colours and each
 instance's tint), `texture` (the base colour's, by the mesh's UVs),
 `emissive` (light of its own, a share of its colour), `unlit`, `double_sided`
-(back faces are culled otherwise), `blend` and `casts_shadow`. A transform
-that mirrors turns a mesh inside out: draw it double-sided.
+(back faces are culled otherwise), `blend`, `casts_shadow` and
+`receives_shadow`. A transform that mirrors turns a mesh inside out: draw it
+double-sided.
+
+`wireframe` draws only the mesh's triangles' edges, a pixel wide, unlit in
+the material's colour, just in front of faces in the same place (a little
+depth bias): a model's edges drawn over it, or lines on the ground made of
+degenerate triangles (`a, b, b`). Wireframes cast no shadow and are not
+picked. They need line fill, which desktop GPUs have; where the pipeline
+can't be made they are not drawn.
 
 `blend`: `Opaque` (the default), `Alpha` (over what is behind by its alpha;
 drawn after the opaque, furthest first) or `Additive` (adds light: sparks,
@@ -90,7 +99,10 @@ which then never sink into a wall. It is drawn in the same pass, in its own
 slice of the depth range.
 
 Lights: `scene.lights.sun` (`direction`, toward the light; `color`, linear,
-above 1 is brighter), `scene.lights.ambient`, and point lights
+above 1 is brighter), `scene.lights.fill` (a second sun that casts no
+shadow, black by default), `scene.lights.ambient` (with
+`ground_ambient`, the light from below where it differs: faces between take
+a mix by how far they face up), and point lights
 (`scene.add_light({position, color, radius})`, fading to nothing at the
 radius: muzzle flashes, explosions, lamps). At most 16 point lights light a
 frame: those whose reach is in view, the strongest and nearest first; point
@@ -158,9 +170,17 @@ health bars) and `camera.ray(point, rect)` (what a click points at;
 ## Views
 
 `Renderer3D::create_view(size, {.samples, .background, .hdr, .exposure,
-.bloom, .bloom_threshold})`: `samples` is MSAA (1, 2, 4 or 8, fewer where the
+.bloom, .bloom_threshold, .pick})`: `samples` is MSAA (1, 2, 4 or 8, fewer where the
 device has fewer); `background` shows where nothing is drawn (transparent lets
 the 2D under the view show).
+
+A view made with `pick` also keeps, a pixel each, the world point and the id
+of the scene's opaque or alpha mesh drawn there (not wireframes, additive
+glows or the overlay). `Renderer3D::pick(view, pixel)` reads one back: `hit`,
+`id`, `position`. It waits for the GPU: what the frame has recorded so far is
+submitted, and 2D drawn after it goes on in a new command buffer, as after a
+read-back. Ask once per pixel per picture (a studio keeps the answer under a
+still pointer), not every pixel every frame.
 
 `hdr` draws into a float picture that keeps light past white, then exposes
 and tonemaps it (ACES: brights roll off, the darkest tones darken a little)
@@ -185,5 +205,10 @@ instanced draw of 20,000 boxes takes about 0.2 ms of CPU in `render()` and
 written straight into the upload memory, on the renderer's job system above
 8,192 of them (`renderer.set_job_system`). Instance what repeats.
 
-Not yet: picking, wireframe, skinned meshes, PBR materials (see
-[the plan](3d_plan.md)).
+A mesh's vertices are written straight into the upload memory as they are
+converted, in 8 MB pieces (a 5-million-triangle model goes up without a
+staging buffer its size). kin-render-studio's kiln (5.15 million triangles)
+draws in 6-8 ms at 1280x800 with 4x MSAA, against 70 ms or more on the CPU
+(see the plan's M4).
+
+Not yet: skinned meshes, PBR materials (see [the plan](3d_plan.md)).

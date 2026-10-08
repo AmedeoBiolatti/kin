@@ -601,13 +601,15 @@ void GpuDevice::upload_buffer(GpuFrame& frame, GpuBuffer& buffer, const void* da
 }
 
 bool GpuDevice::read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba) {
-    if (!_device || !src.handle() || src.width() == 0 || src.height() == 0) {
+    return read_texture_region(src, 0, 0, src.width(), src.height(), 4, out_rgba);
+}
+
+bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out) {
+    if (!_device || !src.handle() || w == 0 || h == 0 || x + w > src.width() || y + h > src.height()) {
         return false;
     }
     flush_uploads();
-    const u32 w = src.width();
-    const u32 h = src.height();
-    const u32 bytes = w * h * 4;
+    const u32 bytes = w * h * texel_bytes;
 
     SDL_GPUTransferBufferCreateInfo tb_info{};
     tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
@@ -624,6 +626,8 @@ bool GpuDevice::read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rg
 
     SDL_GPUTextureRegion region{};
     region.texture = src.handle();
+    region.x = x;
+    region.y = y;
     region.w = w;
     region.h = h;
     region.d = 1;
@@ -644,8 +648,8 @@ bool GpuDevice::read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rg
 
     bool ok = false;
     if (void* mapped = SDL_MapGPUTransferBuffer(_device, tb, false)) {
-        out_rgba.resize(bytes);
-        std::memcpy(out_rgba.data(), mapped, bytes);
+        out.resize(bytes);
+        std::memcpy(out.data(), mapped, bytes);
         SDL_UnmapGPUTransferBuffer(_device, tb);
         ok = true;
     }

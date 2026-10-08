@@ -16,7 +16,10 @@ const int MAX_LIGHTS = 16;
 layout(set = 3, binding = 0) uniform Frame {
     vec4 sun_direction; // xyz: toward the sun, length 1
     vec4 sun_color;     // linear
-    vec4 ambient;       // linear
+    vec4 ambient;       // linear: from above
+    vec4 ground_ambient; // linear: from below (the same as ambient: even all round)
+    vec4 fill_direction; // a second sun, without shadows
+    vec4 fill_color;
     vec4 flags;         // x: encode to sRGB (a gamma target), y: decode the texture, z: shadows, w: point lights
     mat4 shadow_matrix; // world to the shadow map's clip space
     vec4 shadow;        // x: depth bias, y: normal offset (world units), z: a texel (uv)
@@ -24,7 +27,7 @@ layout(set = 3, binding = 0) uniform Frame {
 } frame;
 // The draw's.
 layout(set = 3, binding = 1) uniform Material {
-    vec4 params; // x: emissive, y: unlit
+    vec4 params; // x: emissive, y: unlit, z: receives the sun's shadow
 } material;
 
 layout(location = 0) out vec4 FragColor;
@@ -42,7 +45,7 @@ vec3 encode(vec3 c) {
 // from a point pushed a little off the surface (no self-shadowing acne).
 // Reverse Z: the map keeps the depth nearest the sun, the greatest.
 float sunlight(vec3 n) {
-    if (frame.flags.z < 0.5) {
+    if (frame.flags.z < 0.5 || material.params.z < 0.5) {
         return 1.0;
     }
     const vec4 clip = frame.shadow_matrix * vec4(vWorld + n * frame.shadow.y, 1.0);
@@ -75,7 +78,10 @@ void main() {
         // Seen from behind (double-sided), the face turns its normal round.
         const vec3 n = normalize(gl_FrontFacing ? vNormal : -vNormal);
         const float sun = max(dot(n, frame.sun_direction.xyz), 0.0);
-        light = frame.ambient.rgb + frame.sun_color.rgb * sun * (sun > 0.0 ? sunlight(n) : 1.0);
+        // Ambient from the sky above to the ground below, by which way the face looks.
+        light = mix(frame.ground_ambient.rgb, frame.ambient.rgb, n.y * 0.5 + 0.5);
+        light += frame.sun_color.rgb * sun * (sun > 0.0 ? sunlight(n) : 1.0);
+        light += frame.fill_color.rgb * max(dot(n, frame.fill_direction.xyz), 0.0);
         const int count = int(frame.flags.w);
         for (int i = 0; i < count; ++i) {
             const vec4 at = frame.lights[2 * i];

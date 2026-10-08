@@ -975,6 +975,212 @@ void test_gpu_linear_hdr() {
     });
 }
 
+// What is under a pixel: the id given with the draw and the point hit, in
+// the world; nothing over the background, the overlay or a wireframe. 2D
+// drawn after a pick (the frame submitted under it) still shows.
+void test_gpu_pick() {
+    with_gpu("test_gpu_pick", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.pick = true});
+        kin::View3D plain = r3d.create_view({160, 120});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.draw(box, Mat4f::translation({-1.5f, 0.0f, 0.0f}), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 7);
+        scene.draw(box, Mat4f::translation({1.5f, 0.0f, 0.0f}), {.color = Color::rgb(60, 200, 60)}, kin::colors::white, 0);
+        scene.draw(box, Mat4f::translation({0.0f, 2.0f, 0.0f}), {.color = Color::rgb(60, 60, 200), .wireframe = true},
+                   kin::colors::white, 3);
+        scene.overlay().camera = scene.camera;
+        scene.overlay().draw(box, Mat4f::translation({0.0f, -2.0f, 0.0f}), {.color = Color::rgb(200, 200, 60)},
+                             kin::colors::white, 5);
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, scene));
+        const auto pixel = [&](Vec3f w) {
+            const kin::Vec2f p = scene.camera.project(w, screen)->pos;
+            return kin::Vec2i{static_cast<int>(p.x), static_cast<int>(p.y)};
+        };
+        const kin::PickResult left = r3d.pick(view, pixel({-1.5f, 0.0f, 0.5f}));
+        assert(left.hit && left.id == 7);
+        assert(kin::length(left.position - Vec3f{-1.5f, 0.0f, 0.5f}) < 0.05f); // the front face
+        const kin::PickResult right = r3d.pick(view, pixel({1.3f, 0.2f, 0.5f}));
+        assert(right.hit && right.id == 0 && std::abs(right.position.z - 0.5f) < 0.02f);
+        assert(!r3d.pick(view, {2, 2}).hit);                          // background
+        assert(!r3d.pick(view, pixel({0.1f, 2.0f, 0.5f})).hit);       // a wireframe's face
+        assert(!r3d.pick(view, pixel({0.0f, -2.0f, 0.5f})).hit);      // the overlay
+        assert(!r3d.pick(view, {-1, 0}).hit && !r3d.pick(view, {160, 0}).hit);
+        // The frame goes on after the pick.
+        renderer.draw_texture(view.texture(), screen);
+        renderer.fill_rect({0.0f, 0.0f, 10.0f, 10.0f}, Color::rgb(10, 220, 240));
+        const Pixels p = read(renderer);
+        expect(p.at(5, 5), Color::rgb(10, 220, 240), "2D after a pick");
+        const kin::Vec2i box_pixel = pixel({-1.5f, 0.0f, 0.5f});
+        assert(p.at(box_pixel.x, box_pixel.y).r > 100);
+        renderer.present();
+
+        // A view made without picking has nothing to say.
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(plain, scene));
+        assert(!r3d.pick(plain, pixel({-1.5f, 0.0f, 0.5f})).hit);
+        renderer.present();
+    });
+}
+
+// A wireframe draws its triangles' edges, unlit, over faces in the same
+// place (a little depth bias); its triangles' insides show what is behind.
+// A degenerate triangle (a, b, b) is a line.
+void test_gpu_wireframe() {
+    with_gpu("test_gpu_wireframe", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({2.0f, 2.0f, 2.0f}));
+        MeshData line_data;
+        for (const Vec3f v : {Vec3f{-3.0f, -1.5f, 0.0f}, Vec3f{3.0f, -1.5f, 0.0f}}) {
+            line_data.vertices.push_back({.position = v, .normal = {0.0f, 0.0f, 1.0f}});
+        }
+        line_data.indices = {0, 1, 1};
+        const kin::Mesh line = r3d.create_mesh(line_data);
+        assert(line.valid());
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        const Color wire = Color::rgb(250, 40, 40);
+        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(90, 90, 90), .unlit = true});
+        scene.draw(box, Mat4f::identity(), {.color = wire, .wireframe = true});
+        scene.draw(line, Mat4f::identity(), {.color = Color::rgb(40, 250, 40), .wireframe = true});
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, scene));
+        renderer.draw_texture(view.texture(), screen);
+        const Pixels p = read(renderer);
+        const auto any_near = [&](Vec3f w, Color want) {
+            const kin::Vec2f c = scene.camera.project(w, screen)->pos;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (near(p.at(static_cast<int>(c.x) + dx, static_cast<int>(c.y) + dy), want, 4)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        // The front face's right edge, unlit, over the face; off the edges and
+        // its diagonal, the face.
+        assert(any_near({1.0f, 0.3f, 1.0f}, wire));
+        expect(p.at(scene.camera.project({0.6f, 0.0f, 1.0f}, screen)->pos), Color::rgb(90, 90, 90), "inside a triangle");
+        assert(any_near({0.0f, -1.5f, 0.0f}, Color::rgb(40, 250, 40)) || any_near({2.5f, -1.5f, 0.0f}, Color::rgb(40, 250, 40)));
+        expect(p.at(scene.camera.project({2.5f, -1.0f, 0.0f}, screen)->pos), kin::colors::black, "beside the line");
+        renderer.present();
+    });
+}
+
+// A fill light from a second direction (no shadow); the ambient from above
+// and from below differ; a material may take no shadow.
+void test_gpu_fill_and_ambient() {
+    with_gpu("test_gpu_fill_and_ambient", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        const auto shot = [&](Vec3f eye) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at(eye, {0.0f, 0.0f, 0.0f}, 50.0f);
+            scene.draw(box, Mat4f::identity(), {.color = kin::colors::white});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            const Color c = read(renderer).at(80, 60);
+            renderer.present();
+            return c;
+        };
+        // Fill from +z: the front face, in its colour.
+        scene.lights.fill = {.direction = {0.0f, 0.0f, 1.0f}, .color = {0.0f, 1.0f, 0.0f}};
+        const Color front = shot({0.0f, 0.0f, 5.0f});
+        assert(front.g > 240 && front.r < 5 && front.b < 5);
+        assert(brightness(shot({0.0f, 0.0f, -5.0f})) < 5); // the back: none
+        scene.lights.fill.color = {0.0f, 0.0f, 0.0f};
+
+        // Red from above, blue from below; the side half and half.
+        scene.lights.ambient = {0.6f, 0.0f, 0.0f};
+        scene.lights.ground_ambient = Vec3f{0.0f, 0.0f, 0.6f};
+        const Color top = shot({0.0f, 5.0f, 0.01f});
+        const Color bottom = shot({0.0f, -5.0f, 0.01f});
+        const Color side = shot({0.0f, 0.0f, 5.0f});
+        assert(top.r > 150 && top.b < 5);
+        assert(bottom.b > 150 && bottom.r < 5);
+        assert(side.r > 80 && side.b > 80 && side.r < top.r && side.b < bottom.b);
+        scene.lights.ground_ambient.reset();
+        expect(shot({0.0f, -5.0f, 0.01f}), top, "one ambient without a ground's");
+    });
+}
+
+// A floor that takes no shadow is as bright under the box as beside it.
+void test_gpu_receives_no_shadow() {
+    with_gpu("test_gpu_receives_no_shadow", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({1.5f, 1.5f, 1.5f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+        scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180), .receives_shadow = false});
+        scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, scene) && r3d.stats().shadow_draws == 2);
+        renderer.draw_texture(view.texture(), screen);
+        const Pixels p = read(renderer);
+        const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        expect(at({-2.5f, 0.0f, 0.0f}), at({3.0f, 0.0f, 0.0f}), "no shadow taken", 3);
+        renderer.present();
+    });
+}
+
+// A mesh bigger than one upload (it goes up in pieces): its last triangle,
+// in the last piece, drawn where it is; with indices too, the last of them
+// pointing past the first pieces.
+void test_gpu_large_mesh() {
+    with_gpu("test_gpu_large_mesh", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        MeshData data;
+        constexpr std::size_t hidden = 400'000; // triangles out of sight: 43 MB of vertices
+        data.vertices.reserve(hidden * 3 + 3);
+        for (std::size_t t = 0; t < hidden; ++t) {
+            const float x = 100.0f + static_cast<float>(t % 1000) * 0.01f;
+            for (const Vec3f v : {Vec3f{x, 0.0f, 0.0f}, Vec3f{x + 0.005f, 0.0f, 0.0f}, Vec3f{x, 0.005f, 0.0f}}) {
+                data.vertices.push_back({.position = v, .normal = {0.0f, 0.0f, 1.0f}, .color = Color::rgb(40, 200, 40)});
+            }
+        }
+        for (const Vec3f v : {Vec3f{-1.0f, -1.0f, 0.0f}, Vec3f{1.0f, -1.0f, 0.0f}, Vec3f{0.0f, 1.0f, 0.0f}}) {
+            data.vertices.push_back({.position = v, .normal = {0.0f, 0.0f, 1.0f}, .color = Color::rgb(220, 30, 30)});
+        }
+        const auto shows_last = [&](const MeshData& mesh_data, std::string_view what) {
+            const kin::Mesh mesh = r3d.create_mesh(mesh_data);
+            assert(mesh.valid());
+            scene.clear();
+            scene.draw(mesh, Mat4f::identity(), {.unlit = true});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            expect(read(renderer).at(scene.camera.project({0.0f, -0.3f, 0.0f}, screen)->pos), Color::rgb(220, 30, 30), what);
+            renderer.present();
+        };
+        shows_last(data, "the last triangle of a large mesh");
+        // Indexed: the triangles' order turned round (each wound as it was), the shown one first.
+        const auto triangles = static_cast<kin::u32>(data.vertices.size() / 3);
+        for (kin::u32 t = triangles; t-- > 0;) {
+            data.indices.insert(data.indices.end(), {3 * t, 3 * t + 1, 3 * t + 2});
+        }
+        shows_last(data, "a large mesh's indices");
+    });
+}
+
 } // namespace
 
 int main() {
@@ -1001,5 +1207,10 @@ int main() {
     test_gpu_interleaves_with_2d();
     test_gpu_linear_hdr();
     test_gpu_meshes_outlive_renderer();
+    test_gpu_pick();
+    test_gpu_wireframe();
+    test_gpu_fill_and_ambient();
+    test_gpu_receives_no_shadow();
+    test_gpu_large_mesh();
     return 0;
 }

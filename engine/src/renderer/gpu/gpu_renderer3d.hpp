@@ -73,6 +73,7 @@ private:
     GpuTexture _depth;
     GpuTexture _scene;             // HDR: the resolved float picture
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
+    GpuTexture _pick, _pick_depth; // with View3DOptions::pick: position and id a pixel
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
 };
 
@@ -89,13 +90,15 @@ public:
     std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) override;
     bool resize_view(IView3DBackend& view, Vec2i size) override;
     bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) override;
+    PickResult pick(IView3DBackend& view, Vec2i pixel) override;
 
     // The format of views' depth buffers: D32_FLOAT, else D24_UNORM, else
     // D16_UNORM, as the device has them.
     SDL_GPUTextureFormat depth_format() const { return _depth_format; }
 
 private:
-    enum class Pass : u8 { Opaque, Alpha, Additive, Shadow };
+    // In the order a scene's draws are made (shadow and pick are passes of their own).
+    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
@@ -118,6 +121,7 @@ private:
     GpuShader _fullscreen_shader; // fullscreen.vert
     GpuShader _bloom_shader;      // bloom.frag
     GpuShader _output_shader;     // view_output.frag
+    GpuShader _pick_shader;       // pick.frag
     SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;

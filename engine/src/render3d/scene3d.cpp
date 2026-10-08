@@ -20,8 +20,8 @@ std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t cou
     return {_instances.data() + first, count};
 }
 
-void Scene3D::draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material, Color tint) {
-    add_instances(mesh, 1, material)[0] = {transform, tint};
+void Scene3D::draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material, Color tint, u32 id) {
+    add_instances(mesh, 1, material)[0] = {transform, tint, id};
 }
 
 void Scene3D::draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material) {
@@ -38,7 +38,7 @@ void Scene3D::draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms
     }
     const std::span<MeshInstance> room = add_instances(mesh, transforms.size(), material);
     for (std::size_t i = 0; i < transforms.size(); ++i) {
-        room[i] = {transforms[i], colors::white};
+        room[i] = {transforms[i], colors::white, 0};
     }
 }
 

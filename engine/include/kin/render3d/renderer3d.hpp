@@ -86,6 +86,12 @@ public:
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     bool render(View3D& view, const Scene3D& scene);
+    // What `pixel` (the view's own pixels, from its top left) showed when
+    // `view` was last rendered: the copy there and the point of it. Needs a
+    // view made with View3DOptions::pick. It waits for the GPU to finish
+    // what is recorded so far (submitting it): ask when something calls for
+    // it (a click, the pointer moving), not every frame.
+    PickResult pick(View3D& view, Vec2i pixel);
     // What the last render() drew.
     const Render3DStats& stats() const { return _stats; }
 
