@@ -28,6 +28,10 @@ if(KIN_EXPERIMENTAL_3D)
     add_library(kin_breach STATIC breach.cpp breach_view.cpp)
     target_include_directories(kin_breach PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(kin_breach PUBLIC kin_example_workloads)
+    # The shield's shader, built into it. Without glslc it is not built, and the
+    # shield is not drawn.
+    kin_compile_glsl(_breach_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES shaders/shield.frag.glsl)
+    kin_embed_files(kin_breach NAME breach_shader FILES ${_breach_spv})
     kin_enable_release_optimizations(kin_breach)
     add_executable(signal_breach signal_breach/main.cpp)
     target_link_libraries(signal_breach PRIVATE kin_breach)

@@ -61,6 +61,11 @@ private:
     std::vector<MeshInstance> _tiles, _raised, _walls, _ramps;
     std::vector<Vec3f> _crates; // where crates stand
 
+    // Shields: shells that flash round an enemy where a shot hit it (shield.frag.glsl).
+    struct Shell { Vec3f pos{}; float life = 0; Color color{}; };
+    std::vector<Shell> _shells;
+    MaterialShader3D _shield;
+    Mesh _shell;
     struct Spark { Vec3f pos{}, velocity{}; float life = 0; Color color{}; };
     struct Flash { Vec3f pos{}; Vec3f color{}; float radius = 0, life = 0, length = 0, size = 0.3f; };
     std::vector<Flash> _flashes;

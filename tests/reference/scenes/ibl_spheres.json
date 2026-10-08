@@ -1,0 +1,63 @@
+{
+ "name": "ibl_spheres",
+ "purpose": "Image-based light (G1b): the material spheres lit only by Poly Haven's kloofendal_48d_partly_cloudy_puresky (CC0), 1k: metal reflects the sky, rough dielectrics take its light. No sun, no ambient; the view's background is a flat colour (kin does not draw the sky).",
+ "models": [
+  {
+   "file": "made/spheres.glb"
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   96,
+   120,
+   160
+  ]
+ },
+ "lights": {
+  "ambient": [
+   0,
+   0,
+   0
+  ],
+  "environment": {
+   "file": "hdri/kloofendal_48d_partly_cloudy_puresky_1k.hdr",
+   "intensity": 1.0,
+   "rotation": 0.0
+  }
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    2.6,
+    6.8
+   ],
+   "target": [
+    0.0,
+    0.3,
+    0.0
+   ],
+   "fov": 40
+  },
+  {
+   "name": "grazing",
+   "eye": [
+    -5.0,
+    0.8,
+    3.5
+   ],
+   "target": [
+    0.0,
+    0.4,
+    0.0
+   ],
+   "fov": 40
+  }
+ ],
+ "truth": {
+  "samples": 512,
+  "sun": false
+ }
+}

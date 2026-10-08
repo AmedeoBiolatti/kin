@@ -274,7 +274,20 @@ int main(int argc, char** argv) {
                                                              .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
                                                              .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
 
-        // The lights, the same every frame.
+        // The lights, the same every frame; an environment (an .hdr in the cache) loaded once.
+        kin::Environment3D environment;
+        if (const kin::JsonValue* l = doc.find("lights")) {
+            if (const kin::JsonValue* env = l->find("environment")) {
+                std::string error;
+                environment = r3d.load_environment(cache / env->string_at("file"), &error);
+                if (!environment) {
+                    std::fprintf(stderr, "  environment: %s\n", error.c_str());
+                    ++failures;
+                    continue;
+                }
+            }
+        }
+
         kin::Scene3D scene;
         const auto fill_scene = [&] {
             scene.clear();
@@ -289,6 +302,11 @@ int main(int argc, char** argv) {
                 scene.lights.fill = {.direction = vec3(fill->find("direction"), {0, 1, 0}), .color = vec3(fill->find("color"))};
             }
             scene.lights.ambient = vec3(lights.find("ambient"));
+            scene.lights.environment = environment;
+            if (const kin::JsonValue* env = lights.find("environment")) {
+                scene.lights.environment_intensity = static_cast<float>(env->number_at("intensity", 1.0));
+                scene.lights.environment_rotation = static_cast<float>(env->number_at("rotation", 0.0));
+            }
             if (const kin::JsonValue* ground = lights.find("ground_ambient")) {
                 scene.lights.ground_ambient = vec3(ground);
             }

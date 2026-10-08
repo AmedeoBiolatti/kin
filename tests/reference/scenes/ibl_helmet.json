@@ -1,0 +1,55 @@
+{
+ "name": "ibl_helmet",
+ "purpose": "Image-based light (G1b): the Flight Helmet lit only by the same sky as ibl_spheres.",
+ "models": [
+  {
+   "file": "flight_helmet/FlightHelmet.gltf"
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   60,
+   64,
+   72
+  ]
+ },
+ "lights": {
+  "ambient": [
+   0,
+   0,
+   0
+  ],
+  "environment": {
+   "file": "hdri/kloofendal_48d_partly_cloudy_puresky_1k.hdr",
+   "intensity": 1.0,
+   "rotation": 0.0
+  }
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "fit": {
+    "yaw": 20,
+    "pitch": 10,
+    "margin": 1.0
+   },
+   "fov": 35,
+   "near": 0.01
+  },
+  {
+   "name": "side",
+   "fit": {
+    "yaw": 100,
+    "pitch": 5,
+    "margin": 1.0
+   },
+   "fov": 35,
+   "near": 0.01
+  }
+ ],
+ "truth": {
+  "samples": 512,
+  "sun": false
+ }
+}

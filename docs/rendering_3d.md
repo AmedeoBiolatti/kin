@@ -108,6 +108,11 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   opaque (it writes depth), picked and shadowed as cut out (the shadow pass
   samples the base texture for these). A cut-out is opaque where it stays.
 
+- `wrap_u`, `wrap_v` (`Wrap3D::Clamp` by default, `Repeat`, `Mirror`): what
+  all of the material's textures do past 0..1. Models set them from the
+  glTF sampler (`REPEAT`, the glTF default, when it names none); samplers are
+  made by filter and wrap on first use.
+
 `wireframe` draws only the mesh's triangles' edges, a pixel wide, unlit in
 the material's colour, just in front of faces in the same place (a little
 depth bias): a model's edges drawn over it, or lines on the ground made of
@@ -150,6 +155,25 @@ frame: those whose reach is in view, the strongest and nearest first; point
 lights are cleared with the draws. Light is added in linear light; the result
 is stored as the 2D pipeline stores colour, or kept HDR (see Views).
 
+Image-based light: `scene.lights.environment` is an `Environment3D`, an
+equirectangular HDR picture of the sky or a room (`r3d.load_environment(
+"sky.hdr")` reads a Radiance `.hdr` through the content folder or pack;
+`r3d.create_environment(size, rgb_floats)` takes linear RGB floats, rows top to
+bottom, 2:1). With one set, surfaces take their ambient light from it instead
+of `ambient`/`ground_ambient` (which are then not used; the sun, fill and point
+lights go on): the diffuse from its irradiance by the normal, the specular
+from a mip a roughness (GGX-filtered) along the reflection, times the same
+split-sum fit as before. `environment_intensity` scales it,
+`environment_rotation` (degrees) turns it about +y. The picture's centre is
++x, its top +y, and going right from the centre turns toward +z (Blender's
+world texture in kin's axes). The filtered copies (a 7-level equirect chain up
+to 1024 x 512 for the specular, 64 x 32 for the irradiance, half floats) are
+made by compute shaders in the first render that uses the environment, once
+(`stats().environment_prefilters`); that render needs `compute` and a float
+format that storage textures can write, else the hemisphere stays. An
+environment is not drawn as a background (the view's `background` colour is),
+and in the overlay it is carried into the overlay's space.
+
 The sun casts shadows over `scene.lights.shadow_area`, a box round what
 casts and receives them (the level): one shadow map
 (`shadow_resolution`, 2048 texels by default) over that box, filtered over
@@ -163,6 +187,46 @@ closed mesh that is the same shadow as both sides for half the work, but a
 lone quad facing away from the sun (a ceiling seen from below) casts
 nothing. Make it `double_sided` to cast from both sides. `stats()` counts
 the shadow map's draw calls and the meshes drawn into it.
+
+## Custom shaders
+
+A material can have a fragment shader of its own (`Material3D::shader`,
+`shader_params`: four vec4s), in place of kin's, for a hologram, a force
+field, water. It is GLSL for Vulkan, compiled against kin's include, which
+declares the inputs and uniforms and has the lighting in it:
+
+```glsl
+#version 450 core
+#include "kin_material.inc.glsl"   // from engine/shaders (glslc -I)
+
+void main() {
+    vec4 base = kin_base_color();                 // linear colour, alpha
+    float rim = pow(1.0 - abs(dot(kin_normal(), kin_view())), 3.0);
+    FragColor = kin_output(base.rgb * rim * kin_param(0).x, rim * base.a);
+}
+```
+
+What it provides: `kin_base_color()` (vertex, instance and material colours
+times the base texture), `kin_normal()` (unit, on the viewer's side, bent by
+the normal map), `kin_view()`, `kin_position()`, `kin_uv()`,
+`kin_metallic_roughness()`, `kin_occlusion()`, `kin_emissive(base)`,
+`kin_lit(base, normal, metallic, roughness, occlusion)` (kin's lighting: sun
+with its shadow, fill, point lights, ambient or environment; call it for a
+lit surface, skip it for an unlit one), `kin_output(colour, alpha)` (encoded
+for the target, premultiplied: write `FragColor` with it), `kin_param(i)`, and
+the raw `frame`, `material` uniforms and samplers for anything else. It
+declares nothing else: samplers 0 to 7 and uniform buffers 0 to 2 are kin's.
+The blend mode, depth and culling are the material's, as ever; the shadow and
+pick passes draw the material as if it had no shader.
+
+`r3d.create_material_shader(spirv)` makes one from SPIR-V (build it with
+`kin_compile_glsl`, which adds the include path; `cmake/kin_spirv.cmake` does
+too, and skips `*.inc.glsl`; see `examples/CMakeLists.txt`);
+`r3d.compile_material_shader(path)` compiles GLSL at run time with glslc, for
+development. Unlike 2D shaders there is no hot reload or reflection yet.
+Signal Breach's hit shields (`examples/shaders/shield.frag.glsl`: Fresnel rim
+and climbing lines, additive) are one. Passes of your own on an HDR view are
+not offered: draw into the view's texture with the 2D renderer's shaders.
 
 ## Models
 

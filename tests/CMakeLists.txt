@@ -109,7 +109,8 @@ endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 if(KIN_EXPERIMENTAL_3D)
     kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
-        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
 endif()
 kin_add_test(kin_isometric_demo_tests kin-isometric-demo SOURCES isometric_demo_tests.cpp)
 kin_add_test(kin_tilemap_tests kin-tilemap SOURCES tilemap_tests.cpp)

@@ -24,6 +24,14 @@ ASSETS = {
     "flight_helmet": ("Models/FlightHelmet/glTF", "CC0 1.0 (Gary Hsu; Khronos glTF Sample Assets)"),
     "sponza": ("Models/Sponza/glTF", "Cryengine Limited License Agreement (Crytek; Khronos glTF Sample Assets): not redistributed"),
 }
+# Environment maps: name in the cache's hdri folder: (URL, SHA-256, licence).
+HDRIS = {
+    "kloofendal_48d_partly_cloudy_puresky_1k.hdr": (
+        "https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr",
+        "fd94c84997b8a3c353b62c2125a9b44e19509956986a126e472684432a02d798",
+        "CC0 1.0 (Greg Zaal, Poly Haven)",
+    ),
+}
 LOCK = os.path.join(HERE, "assets.lock.json")
 
 
@@ -78,6 +86,20 @@ def main():
         if write_lock:
             lock[name] = {"folder": folder, "licence": licence, "files": sums}
         print(f"{name}: {len(files)} files in {out}")
+    hdri_dir = os.path.join(root, "hdri")
+    os.makedirs(hdri_dir, exist_ok=True)
+    for name, (url, want, _licence) in HDRIS.items():
+        path = os.path.join(hdri_dir, name)
+        if not (os.path.isfile(path) and sha256(path) == want):
+            print(f"hdri: {name}", flush=True)
+            tmp = path + ".part"
+            with urllib.request.urlopen(url, timeout=300) as r, open(tmp, "wb") as f:
+                while block := r.read(1 << 20):
+                    f.write(block)
+            os.replace(tmp, path)
+        if sha256(path) != want:
+            sys.exit(f"hdri/{name}: SHA-256 {sha256(path)}, expected {want}")
+    print(f"hdri: {len(HDRIS)} files in {hdri_dir}")
     if write_lock:
         with open(LOCK, "w") as f:
             json.dump({"repository": REPO, "commit": COMMIT, "assets": lock}, f, indent=1, sort_keys=True)

@@ -12,6 +12,8 @@ the same eye, target and field of view). kin's lights become Blender's:
   surface facing it then shows albedo * c, as kin's does (Cycles' diffuse
   is albedo * irradiance / pi); `--calibrate` checks it on a white plane;
 - the fill a second Sun lamp that casts no shadow;
+- the environment (an equirectangular .hdr) the world, the same picture,
+  intensity and rotation;
 - the ambient the sky's colour (with `ground_ambient`, the sky's below):
   kin adds it unshadowed, Cycles lets the scene hide it;
 - point lights are not mapped (kin's fade to nothing at their radius;
@@ -124,6 +126,29 @@ def world(above, below=None):
     links.new(mix.outputs["Result"], background.inputs["Color"])
 
 
+def environment(path, intensity=1.0, rotation=0.0):
+    """kin's environment (render3d/environment.hpp) as the world: the same
+    equirectangular .hdr, Blender's own mapping of it (the centre is +x in
+    kin's axes too, the top +y, going right turns toward +z: the same as
+    kin's, checked by a mirror sphere), `intensity` times, turned about +y by
+    `rotation` degrees (the lookup is turned back by as much)."""
+    w = bpy.data.worlds.new("environment")
+    bpy.context.scene.world = w
+    w.use_nodes = True
+    nodes, links = w.node_tree.nodes, w.node_tree.links
+    background = nodes["Background"]
+    background.inputs["Strength"].default_value = intensity
+    coord = nodes.new("ShaderNodeTexCoord")
+    mapping = nodes.new("ShaderNodeMapping")
+    mapping.inputs["Rotation"].default_value = (0.0, 0.0, math.radians(-rotation))
+    texture = nodes.new("ShaderNodeTexEnvironment")
+    texture.image = bpy.data.images.load(path)
+    texture.interpolation = "Linear"
+    links.new(coord.outputs["Generated"], mapping.inputs["Vector"])
+    links.new(mapping.outputs["Vector"], texture.inputs["Vector"])
+    links.new(texture.outputs["Color"], background.inputs["Color"])
+
+
 def sun(name, toward, color, shadow=True):
     peak = max(color) if max(color) > 0 else 1.0
     data = bpy.data.lights.new(name, "SUN")
@@ -210,7 +235,10 @@ def main():
         holder.scale = (m.get("scale", 1.0),) * 3
 
     lights = doc.get("lights", {})
-    if "world" in truth:
+    if "environment" in lights:
+        env = lights["environment"]
+        environment(os.path.join(opts["cache"], env["file"]), env.get("intensity", 1.0), env.get("rotation", 0.0))
+    elif "world" in truth:
         world(tuple(truth["world"]))
     elif "ground_ambient" in lights:
         world(tuple(lights.get("ambient", (0, 0, 0))), tuple(lights["ground_ambient"]))

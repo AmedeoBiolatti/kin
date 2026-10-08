@@ -3,7 +3,9 @@
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -1469,6 +1471,7 @@ void test_gpu_model_materials() {
         assert(all.texture.valid() && all.metallic_roughness.valid() && all.normal.valid() && all.occlusion.valid() &&
                all.emissive_texture.valid());
         assert(!(all.metallic_roughness == all.texture) && all.double_sided);
+        assert(all.wrap_u == kin::Wrap3D::Repeat && all.wrap_v == kin::Wrap3D::Repeat); // glTF's default
         assert(part("plain").material.roughness == 1.0f && !part("plain").material.normal.valid());
 
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
@@ -1487,6 +1490,206 @@ void test_gpu_model_materials() {
         assert(brightness(without) > 300);
         expect(with_map, without, "a flat normal map, as none", 4);
         renderer.present();
+    });
+}
+
+// Wrap modes: a texture of two texels (red, green) over a quad whose u runs 0
+// to 2: clamped, the edge texel goes on; repeated, it tiles; mirrored, every
+// other copy is flipped.
+void test_gpu_wrap_modes() {
+    with_gpu("test_gpu_wrap_modes", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        MeshData wide;
+        wide.vertices = {{{-1, -1, 0}, {0, 0, 1}, {0, 1}}, {{1, -1, 0}, {0, 0, 1}, {2, 1}},
+                         {{1, 1, 0}, {0, 0, 1}, {2, 0}}, {{-1, 1, 0}, {0, 0, 1}, {0, 0}}};
+        wide.indices = {0, 1, 2, 0, 2, 3};
+        const kin::Mesh mesh = r3d.create_mesh(wide);
+        const kin::u8 texels[8] = {255, 0, 0, 255, 0, 255, 0, 255};
+        const kin::Texture texture = renderer.create_texture_from_rgba(texels, {2, 1});
+        renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const Color red = Color::rgb(255, 0, 0), green = Color::rgb(0, 255, 0);
+        const auto shoot = [&](kin::Wrap3D wrap) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+            scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture, .wrap_u = wrap, .wrap_v = wrap});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            const Pixels p = read(renderer);
+            renderer.present();
+            const auto at = [&](float x) { return p.at(scene.camera.project({x, 0.0f, 0.0f}, screen)->pos); };
+            return std::array<Color, 4>{at(-0.75f), at(-0.25f), at(0.25f), at(0.75f)};
+        };
+        const auto clamp = shoot(kin::Wrap3D::Clamp), repeat = shoot(kin::Wrap3D::Repeat), mirror = shoot(kin::Wrap3D::Mirror);
+        const std::array<Color, 4> want_clamp{red, green, green, green}, want_repeat{red, green, red, green},
+            want_mirror{red, green, green, red};
+        for (int i = 0; i < 4; ++i) {
+            expect(clamp[static_cast<std::size_t>(i)], want_clamp[static_cast<std::size_t>(i)], "clamped");
+            expect(repeat[static_cast<std::size_t>(i)], want_repeat[static_cast<std::size_t>(i)], "repeated");
+            expect(mirror[static_cast<std::size_t>(i)], want_mirror[static_cast<std::size_t>(i)], "mirrored");
+        }
+    });
+}
+
+// An environment of six colours (+z red, +x green, -x blue, -z yellow, up
+// white, down none), in the orientation environment.hpp says.
+std::vector<float> six_colour_sky(kin::Vec2i size) {
+    std::vector<float> rgb(static_cast<std::size_t>(size.x * size.y) * 3);
+    constexpr float pi = 3.14159265f;
+    for (int y = 0; y < size.y; ++y) {
+        for (int x = 0; x < size.x; ++x) {
+            const float phi = ((static_cast<float>(x) + 0.5f) / static_cast<float>(size.x) - 0.5f) * 2.0f * pi;
+            const float theta = (0.5f - (static_cast<float>(y) + 0.5f) / static_cast<float>(size.y)) * pi;
+            const Vec3f d{std::cos(phi) * std::cos(theta), std::sin(theta), std::sin(phi) * std::cos(theta)};
+            Vec3f c{};
+            if (d.y > 0.8f) c = {0.8f, 0.8f, 0.8f};
+            else if (d.z > 0.8f) c = {0.8f, 0.0f, 0.0f};
+            else if (d.x > 0.8f) c = {0.0f, 0.8f, 0.0f};
+            else if (d.x < -0.8f) c = {0.0f, 0.0f, 0.8f};
+            else if (d.z < -0.8f) c = {0.8f, 0.8f, 0.0f};
+            const std::size_t i = static_cast<std::size_t>(y * size.x + x) * 3;
+            rgb[i] = c.x;
+            rgb[i + 1] = c.y;
+            rgb[i + 2] = c.z;
+        }
+    }
+    return rgb;
+}
+
+// A polished metal sphere reflects the environment where it should (the
+// colours' directions: +z at its centre, -x 45 degrees to the left of it),
+// a rougher one blurs it, the diffuse side takes its light from it, and its
+// filtered copies are made once.
+void test_gpu_environment() {
+    with_gpu("test_gpu_environment", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Vec2i size{256, 128};
+        const std::vector<float> sky = six_colour_sky(size);
+        kin::Environment3D environment = r3d.create_environment(size, sky);
+        if (!environment.valid()) {
+            std::cerr << "no compute: environment not made\n";
+            assert(!r3d.available() || false);
+        }
+        assert(environment.size() == size);
+        const kin::Mesh sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {1.0f, 0.0f, 1.0f}; // not used with an environment
+        scene.lights.environment = environment;
+        const auto shoot = [&](const kin::Material3D& material) {
+            scene.clear();
+            scene.draw(sphere, Mat4f::identity(), material);
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto on_sphere = [&](const Pixels& p, Vec3f normal) { return p.at(scene.camera.project(normal, screen)->pos); };
+        const Vec3f left = normalize(Vec3f{-1.0f, 0.0f, 1.0f}), right = normalize(Vec3f{1.0f, 0.0f, 1.0f}), top = normalize(Vec3f{0.0f, 1.0f, 1.0f});
+        const kin::Material3D mirror{.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = 0.0f};
+        const Pixels sharp = shoot(mirror);
+        assert(r3d.stats().environment_prefilters == 1);
+        const auto channel = [](Color c) { return std::array<int, 3>{c.r, c.g, c.b}; };
+        // 0.8 linear is 231 stored.
+        const auto dominant = [&](Color c, int index) {
+            const auto v = channel(c);
+            return v[static_cast<std::size_t>(index)] > 200 && v[static_cast<std::size_t>((index + 1) % 3)] < 60 &&
+                   v[static_cast<std::size_t>((index + 2) % 3)] < 60;
+        };
+        assert(dominant(on_sphere(sharp, {0.0f, 0.0f, 1.0f}), 0));  // +z: red
+        assert(dominant(on_sphere(sharp, right), 1));               // +x: green
+        assert(dominant(on_sphere(sharp, left), 2));                // -x: blue
+        const Color up = on_sphere(sharp, top);                     // up: white
+        assert(up.r > 200 && up.g > 200 && up.b > 200);
+        // Filtered once: the next renders reuse it.
+        shoot(mirror);
+        assert(r3d.stats().environment_prefilters == 0);
+
+        // Rough: the sharp colours run into each other.
+        const Color blurred = on_sphere(shoot({.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = 0.7f}), {0.0f, 0.0f, 1.0f});
+        assert(blurred.r < sharp.at(80, 60).r && blurred.g > 40 && blurred.b > 40);
+        // A rough dielectric takes its diffuse light from all round: lit from above by the white cap, from below by the coloured sides only.
+        const Pixels plastic = shoot({.color = Color::rgb(200, 200, 200), .metallic = 0.0f, .roughness = 1.0f});
+        const Color lit = on_sphere(plastic, normalize(Vec3f{0.0f, 1.0f, 0.2f})), unlit = on_sphere(plastic, normalize(Vec3f{0.0f, -1.0f, 0.2f}));
+        assert(brightness(lit) > 1.5f * static_cast<float>(brightness(unlit)) && std::abs(int(lit.r) - int(lit.b)) < 25); // the cap is white
+        // Intensity scales it; rotation turns it (a quarter turn about +y takes the red to the right).
+        scene.lights.environment_rotation = 90.0f;
+        const Pixels turned = shoot(mirror);
+        assert(dominant(on_sphere(turned, right), 0) || dominant(on_sphere(turned, left), 0));
+        scene.lights.environment_rotation = 0.0f;
+        scene.lights.environment_intensity = 0.25f;
+        const float dim = linear_level(on_sphere(shoot(mirror), {0.0f, 0.0f, 1.0f})), full = linear_level(sharp.at(80, 60));
+        assert(dim > 0.2f * full && dim < 0.3f * full); // a quarter, in linear light
+    });
+}
+
+// A material's own fragment shader (tests/shaders, compiled by glslc now,
+// against kin_material.inc.glsl): one that calls kin's lighting by hand looks
+// as the built-in does; one that ignores it shows what it writes, from the
+// parameters and the world position; both change with the parameters, and a
+// shader that doesn't compile is refused.
+void test_gpu_material_shader() {
+    with_gpu("test_gpu_material_shader", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_material_shader", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+        std::string error;
+        const kin::MaterialShader3D lit = r3d.compile_material_shader(dir / "custom_lit.frag.glsl", &error);
+        if (!lit.valid()) {
+            std::cerr << error << '\n';
+            assert(false);
+        }
+        const kin::MaterialShader3D flat = r3d.compile_material_shader(dir / "custom_flat.frag.glsl", &error);
+        assert(flat.valid() && !(flat == lit));
+        const std::filesystem::path broken = std::filesystem::temp_directory_path() / "kin_broken_material.frag.glsl";
+        std::ofstream{broken} << "#version 450 core\n#include \"kin_material.inc.glsl\"\nvoid main() { nonsense; }\n";
+        assert(!r3d.compile_material_shader(broken, &error).valid() && !error.empty());
+        std::filesystem::remove(broken);
+
+        const kin::Mesh sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto shoot = [&](const kin::Material3D& material) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
+            scene.lights.ambient = {0.1f, 0.12f, 0.2f};
+            scene.add_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
+            scene.draw(sphere, Mat4f::identity(), material);
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const kin::Material3D plain{.color = Color::rgb(220, 120, 80), .metallic = 0.3f, .roughness = 0.4f};
+        kin::Material3D custom = plain;
+        custom.shader = lit;
+        custom.shader_params[0] = custom.shader_params[1] = custom.shader_params[2] = 1.0f;
+        const Pixels built_in = shoot(plain), by_hand = shoot(custom);
+        for (const kin::Vec2f at : {kin::Vec2f{80, 60}, kin::Vec2f{60, 45}, kin::Vec2f{95, 70}, kin::Vec2f{70, 80}}) {
+            expect(by_hand.at(at), built_in.at(at), "kin's lighting called from a shader", 2);
+        }
+        // Its parameters reach it: half the light.
+        custom.shader_params[0] = custom.shader_params[1] = custom.shader_params[2] = 0.5f;
+        assert(brightness(shoot(custom).at(80, 60)) < brightness(built_in.at(80, 60)) * 0.75);
+
+        // A shader that ignores the lights: its colour, by the world position.
+        kin::Material3D unlit{.shader = flat};
+        unlit.shader_params[4] = 0.0f;
+        unlit.shader_params[5] = 0.8f; // kin_param(1).rgb = (0, 0.8, 0.2)
+        unlit.shader_params[6] = 0.2f;
+        const Pixels flat_picture = shoot(unlit);
+        const Color left_side = flat_picture.at(70, 60), right_side = flat_picture.at(90, 60);
+        assert(left_side.g > 100 && left_side.r < 10 && right_side.g > left_side.g); // brighter toward +x
     });
 }
 
@@ -1526,5 +1729,8 @@ int main() {
     test_gpu_alpha_mask();
     test_gpu_inverse_square();
     test_gpu_model_materials();
+    test_gpu_wrap_modes();
+    test_gpu_environment();
+    test_gpu_material_shader();
     return 0;
 }

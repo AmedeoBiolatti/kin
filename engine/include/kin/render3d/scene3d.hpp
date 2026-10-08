@@ -11,10 +11,12 @@
 
 #include <kin/core/math3d.hpp>
 #include <kin/render3d/camera3d.hpp>
+#include <kin/render3d/environment.hpp>
 #include <kin/render3d/mesh.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <span>
@@ -33,6 +35,36 @@ enum class Blend3D : u8 {
     // not drawn where it falls short: leaves, fences, grates. Drawn with the
     // opaque, and casts the cut-out shadow.
     Mask,
+};
+
+// What a texture does past 0..1 (glTF's sampler wrap modes).
+enum class Wrap3D : u8 {
+    Clamp,  // the edge texel goes on
+    Repeat, // tiles
+    Mirror, // tiles, every other copy flipped
+};
+
+// The backend's copy of a material shader (Renderer3D::create_material_shader).
+class IMaterialShaderBackend {
+public:
+    virtual ~IMaterialShaderBackend() = default;
+};
+
+// A fragment shader of a material's own, made by Renderer3D::create_material_shader
+// or compile_material_shader; cheap to copy (copies share it).
+class MaterialShader3D {
+public:
+    MaterialShader3D() = default;
+    explicit MaterialShader3D(std::shared_ptr<IMaterialShaderBackend> backend) : _backend(std::move(backend)) {}
+
+    bool valid() const { return _backend != nullptr; }
+    explicit operator bool() const { return valid(); }
+    const std::shared_ptr<IMaterialShaderBackend>& backend() const { return _backend; }
+
+    friend bool operator==(const MaterialShader3D& a, const MaterialShader3D& b) { return a._backend == b._backend; }
+
+private:
+    std::shared_ptr<IMaterialShaderBackend> _backend;
 };
 
 struct Material3D {
@@ -79,6 +111,16 @@ struct Material3D {
     // Blend3D::Mask: below this alpha (the base colour's, times the mesh's,
     // the material's and the copy's) a pixel is not drawn.
     f32 alpha_cutoff = 0.5f;
+    // How all of its textures run past 0..1 along u and v (glTF's default,
+    // and what models set, is Repeat).
+    Wrap3D wrap_u = Wrap3D::Clamp;
+    Wrap3D wrap_v = Wrap3D::Clamp;
+    // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
+    // Custom shaders), which may light itself as kin's does or not. It reads
+    // `shader_params` (four vec4s) and all the material's fields above. The
+    // shadow and pick passes treat the material as they would without it.
+    MaterialShader3D shader{};
+    std::array<f32, 16> shader_params{};
 
     friend bool operator==(const Material3D&, const Material3D&) = default;
 };
@@ -121,6 +163,15 @@ struct Lights3D {
     // With it, ambient light comes from the sky above (`ambient`) to the
     // ground below (this), by which way a face looks; without, from all round.
     std::optional<Vec3f> ground_ambient{};
+    // Light from all round, from a picture (Renderer3D::load_environment):
+    // surfaces take their diffuse light from it by their normal and reflect
+    // it by roughness, in place of `ambient` (which is then not used; sun,
+    // fill and point lights go on). `environment_intensity` times its
+    // colours; `environment_rotation` turns it about +y, in degrees. None:
+    // the hemisphere above.
+    Environment3D environment{};
+    f32 environment_intensity = 1.0f;
+    f32 environment_rotation = 0.0f;
     // Where the sun casts shadows: a box round what casts and receives them
     // (the level, say). Empty: no shadows. Smaller is sharper.
     Bounds3 shadow_area{};

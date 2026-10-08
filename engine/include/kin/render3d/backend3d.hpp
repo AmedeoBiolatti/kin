@@ -11,6 +11,7 @@
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
+#include <span>
 
 namespace kin {
 
@@ -64,6 +65,7 @@ struct Render3DStats {
     u32 shadow_draws = 0; // draw calls into the shadow map
     u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view)
     u32 lights = 0;    // point lights used
+    u32 environment_prefilters = 0; // environments filtered by this render (once each)
     u64 triangles = 0;
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };
@@ -85,6 +87,12 @@ public:
     virtual Renderer3DCapabilities capabilities() const = 0;
     // Null when the data can't be uploaded (validated already).
     virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data) = 0;
+    // An equirectangular picture of `size` pixels, three floats (linear RGB)
+    // each, rows top to bottom; its filtered copies are made on the first
+    // render that uses it. Null when it can't be made (no compute).
+    virtual std::shared_ptr<IEnvironmentBackend> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
+    // Null when the SPIR-V can't be made into a fragment shader.
+    virtual std::shared_ptr<IMaterialShaderBackend> create_material_shader(std::span<const u8> spirv) = 0;
     virtual std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) = 0;
     virtual bool resize_view(IView3DBackend& view, Vec2i size) = 0;
     // Records `scene` into `view`, after the 2D draws so far and before those

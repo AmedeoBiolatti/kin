@@ -54,6 +54,10 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     options.args = {glslc_path().string(),
                     stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment",
                     "-o", out.string(), source.string()};
+#ifdef KIN_SHADER_INCLUDE_DIR
+    // `#include "kin_material.inc.glsl"` (3D material shaders) from the engine's own.
+    options.args.insert(options.args.begin() + 2, {"-I", KIN_SHADER_INCLUDE_DIR});
+#endif
     options.pipe_input = false;
     options.errors_to_output = true;
     if (!glslc.start(options)) {

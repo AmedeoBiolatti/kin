@@ -236,6 +236,19 @@ private:
                   : m->alpha_mode == cgltf_alpha_mode_mask ? Blend3D::Mask
                                                            : Blend3D::Opaque;
         out.alpha_cutoff = m->alpha_cutoff;
+        // One sampler's wrap modes for all its maps: the base colour's, else the first map's.
+        const cgltf_texture* first = m->has_pbr_metallic_roughness ? m->pbr_metallic_roughness.base_color_texture.texture : nullptr;
+        for (const cgltf_texture* t : {m->pbr_metallic_roughness.metallic_roughness_texture.texture, m->normal_texture.texture,
+                                       m->occlusion_texture.texture, m->emissive_texture.texture}) {
+            first = first ? first : t;
+        }
+        if (first) {
+            const auto wrap = [](cgltf_int mode) {
+                return mode == 33071 ? Wrap3D::Clamp : mode == 33648 ? Wrap3D::Mirror : Wrap3D::Repeat; // REPEAT (10497) the default
+            };
+            out.wrap_u = first->sampler ? wrap(first->sampler->wrap_s) : Wrap3D::Repeat;
+            out.wrap_v = first->sampler ? wrap(first->sampler->wrap_t) : Wrap3D::Repeat;
+        }
         return out;
     }
 

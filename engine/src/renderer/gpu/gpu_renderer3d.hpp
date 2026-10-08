@@ -13,6 +13,7 @@
 
 #include <array>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace kin {
@@ -55,6 +56,23 @@ public:
     u32 index_count = 0;
 };
 
+// An environment (render3d/environment.hpp): the picture with its mips, and
+// the copies filtered from it by the first render that uses it.
+class GpuEnvironment3D final : public IEnvironmentBackend {
+public:
+    GpuTexture source;     // the picture, mipmapped
+    GpuTexture specular;   // equirectangular, a level a roughness (0 to 1)
+    GpuTexture irradiance; // equirectangular, small: what a diffuse surface facing each way receives
+    u32 levels = 1;
+    bool filtered = false;
+};
+
+// A material's own fragment shader (Material3D::shader).
+class GpuMaterialShader3D final : public IMaterialShaderBackend {
+public:
+    GpuShader shader;
+};
+
 class GpuView3D final : public IView3DBackend {
 public:
     Texture texture() const override;
@@ -87,6 +105,8 @@ public:
 
     Renderer3DCapabilities capabilities() const override { return _capabilities; }
     std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data) override;
+    std::shared_ptr<IEnvironmentBackend> create_environment(Vec2i size, std::span<const f32> rgb) override;
+    std::shared_ptr<IMaterialShaderBackend> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) override;
     bool resize_view(IView3DBackend& view, Vec2i size) override;
     bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) override;
@@ -104,11 +124,14 @@ private:
     bool make_targets(GpuView3D& view);
     // `mask`: for a Blend3D::Mask material, in the shadow and pick passes (the
     // others discard in mesh.frag itself).
-    SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false) const;
+    SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
+                                         SDL_GPUShader* custom = nullptr) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution`, made or remade; false without one.
     bool ensure_shadow_map(u32 resolution);
+    // Records the compute passes that make `environment`'s filtered copies.
+    void filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment);
     // The view's HDR passes: bloom, then out to what 2D draws.
     void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view);
 
@@ -129,10 +152,16 @@ private:
     GpuShader _shadow_mask_vertex_shader; // shadow_mask.vert
     GpuShader _pick_mask_shader;          // pick_mask.frag
     SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's
+    SDL_GPUSampler* _environment_sampler = nullptr; // wraps round, clamps at the poles, mipmapped
+    SDL_GPUComputePipeline* _filter_pipeline = nullptr; // env_filter.comp
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;
     GpuTexture _no_shadow; // 1 x 1, all far: every comparison lit
     bool _no_shadow_cleared = false;
+    // Samplers for materials' textures by filter and wrap (made on first use).
+    SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v);
+    std::array<SDL_GPUSampler*, 27> _samplers{};
+    std::vector<std::shared_ptr<GpuMaterialShader3D>> _material_shaders;
     std::shared_ptr<GpuBuffer> _instances; // grows
     std::array<f32, 256> _srgb_to_linear{};
 

@@ -78,6 +78,16 @@ releases may change APIs.
   Breach's flashes and the Cornell reference scene's lamp are rescaled.
   Surfaces now have the specular of a rough dielectric by default
   (`roughness` 1, `metallic` 0): a little more light than before.
+- 3D, G1b: glTF sampler wrap modes (`Material3D::wrap_u`/`wrap_v`, read from
+  models: textures that tile no longer clamp); image-based light
+  (`Lights3D::environment`, `Renderer3D::load_environment` for Radiance `.hdr`,
+  `create_environment` for floats): diffuse irradiance and GGX-filtered
+  specular made once by compute shaders, in place of the hemisphere ambient;
+  custom material shaders (`Material3D::shader`, `shader_params`,
+  `Renderer3D::create_material_shader` and `compile_material_shader`) written
+  against `kin_material.inc.glsl`, which has kin's lighting as functions.
+  Shader building passes `-I` for the engine's includes. Reference scenes
+  `ibl_spheres` and `ibl_helmet` with Poly Haven's Kloofendal sky (CC0).
 
 ### Fixed
 

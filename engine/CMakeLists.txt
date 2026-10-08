@@ -174,7 +174,11 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE src/render3d/model.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp
+                                      src/render3d/environment.cpp src/render3d/hdr_decode.c
                                       src/renderer/gpu/gpu_renderer3d.cpp)
+    set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
+        "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
+    target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
 endif()
 if(KIN_SHIPPING)
@@ -224,7 +228,7 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
               transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag
-              fullscreen.vert bloom.frag view_output.frag pick.frag)
+              fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.
@@ -232,7 +236,7 @@ kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" S
 kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
 if(KIN_GLSLC AND NOT KIN_SHIPPING)
     # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
-    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
+    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
 endif()
 list(LENGTH _kin_gpu_shader_sources _kin_gpu_wanted)
 list(LENGTH _kin_gpu_spv _kin_gpu_built)

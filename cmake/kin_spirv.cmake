@@ -30,6 +30,9 @@ file(MAKE_DIRECTORY "${OUTPUT_DIR}")
 set(count 0)
 foreach(source IN LISTS sources)
     get_filename_component(name "${source}" NAME)
+    if(name MATCHES "\\.inc\\.glsl$")
+        continue() # included by shaders, not one itself
+    endif()
     if(name MATCHES "\\.vert\\.glsl$")
         set(stage vertex)
     elseif(name MATCHES "\\.frag\\.glsl$")
@@ -40,7 +43,7 @@ foreach(source IN LISTS sources)
         message(FATAL_ERROR "${name} is not .vert.glsl, .frag.glsl or .comp.glsl")
     endif()
     string(REGEX REPLACE "\\.glsl$" ".spv" spv_name "${name}")
-    execute_process(COMMAND "${GLSLC}" -fshader-stage=${stage} -o "${OUTPUT_DIR}/${spv_name}" "${source}"
+    execute_process(COMMAND "${GLSLC}" -fshader-stage=${stage} -I "${root}/engine/shaders" -o "${OUTPUT_DIR}/${spv_name}" "${source}"
                     RESULT_VARIABLE result)
     if(NOT result EQUAL 0)
         message(FATAL_ERROR "glslc failed on ${source}")

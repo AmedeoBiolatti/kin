@@ -1,4 +1,5 @@
 #include "breach_view.hpp"
+#include "breach_shader.hpp"
 
 #include <kin/assets/content.hpp>
 #include <kin/core/profile.hpp>
@@ -18,6 +19,7 @@ constexpr Color teal = Color::rgb(103, 226, 206);
 constexpr Color glass = Color::rgba(8, 14, 22, 205);
 constexpr Color rim = Color::rgba(90, 200, 190, 80);
 constexpr Color track = Color::rgba(30, 40, 50, 230);
+constexpr float shell_life = 0.35f; // seconds a shield shows
 constexpr std::array<Color, 3> enemy_colors{Color::rgb(241, 99, 103), Color::rgb(241, 182, 92), Color::rgb(161, 127, 237)};
 
 float rand(RngKey& key, float lo, float hi) {
@@ -52,6 +54,10 @@ void BreachView::init(Renderer2D& renderer, Breach& breach, const BreachViewOpti
     _spark = _r3d->create_mesh(meshes::box({0.05f, 0.05f, 0.05f}));
     _barrel = _r3d->create_mesh(make_gun());
     _flash = _r3d->create_mesh(meshes::sphere(1.0f, 10, 6));
+    _shell = _r3d->create_mesh(meshes::sphere(1.0f, 20, 12));
+    if (const auto spirv = breach_shader("shield.frag.spv"); !spirv.empty()) {
+        _shield = _r3d->create_material_shader(spirv);
+    }
     breach.use_enemy_meshes({_r3d->create_mesh(meshes::star_prism(5, 0.32f, 0.14f, 0.16f)),
                              _r3d->create_mesh(meshes::cylinder(0.4f, 0.16f, 6)),
                              _r3d->create_mesh(meshes::torus(0.26f, 0.07f, 20, 8))},
@@ -128,6 +134,9 @@ void BreachView::update(Breach& breach, float dt) {
                 _sparks.push_back({e.pos, {rand(_rng, -4, 4), rand(_rng, -1, 5), rand(_rng, -4, 4)}, rand(_rng, .2f, .5f), c});
             }
             _numbers.push_back({e.pos, 0.7f, kill});
+            if (!kill && _shield) {
+                _shells.push_back({e.pos, shell_life, c});
+            }
             if (kill) {
                 const LinearColor l = to_linear(c);
                 _flashes.push_back({e.pos, Vec3f{l.r, l.g, l.b} * 8.0f, 5.0f, 0.25f, 0.25f, 1.2f}); // a fireball
@@ -156,6 +165,8 @@ void BreachView::update(Breach& breach, float dt) {
     }
     for (Tracer& t : _tracers) t.life -= dt;
     for (Flash& f : _flashes) f.life -= dt;
+    for (Shell& s : _shells) s.life -= dt;
+    std::erase_if(_shells, [](const Shell& s) { return s.life <= 0; });
     std::erase_if(_flashes, [](const Flash& f) { return f.life <= 0; });
     for (Number& n : _numbers) {
         n.pos.y += 1.4f * dt;
@@ -222,6 +233,14 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     for (std::size_t i = 0; i < _sparks.size(); ++i) {
         const float size = std::clamp(_sparks[i].life * 4.0f, 0.3f, 1.0f);
         sparks[i] = {Mat4f::translation(_sparks[i].pos) * Mat4f::scaling({size, size, size}), _sparks[i].color};
+    }
+    // Shields: a hit enemy's shell, flashing and fading, its lines climbing.
+    for (const Shell& shell : _shells) {
+        const float strength = shell.life / shell_life;
+        Material3D material{.color = shell.color, .double_sided = true, .blend = Blend3D::Additive, .casts_shadow = false,
+                            .shader = _shield};
+        material.shader_params = {breach.elapsed, strength * strength, 6.0f, 0.8f};
+        _scene.draw(_shell, Mat4f::translation(shell.pos) * Mat4f::scaling({0.62f, 0.62f, 0.62f}), material);
     }
     // Tracers: thin boxes from the muzzle to where the shot hit, thinning out.
     auto tracers = _scene.add_instances(_box, _tracers.size(),

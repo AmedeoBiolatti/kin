@@ -739,7 +739,7 @@ spread (`compare.py` marks it `*`). On lavapipe every scene renders (the
 kiln at 4.4-7.7 s a frame) and its pictures are within 0.5 levels of the
 4080's (p99 at most 3).
 
-### G1 — Materials and custom shaders. G1a done.
+### G1 — Materials and custom shaders. G1a and G1b done.
 
 glTF's metallic-roughness materials with normal, occlusion and emissive
 maps; physical light falloff; image-based light (an HDR environment,
@@ -832,6 +832,68 @@ sampler wrap modes (repeat, mirrored) are not read, so the floor, the walls
 and the ceiling, whose UVs run past 1, clamp; that is for the next change in
 this stage. The Cornell lamp (an inverse-square point under the ceiling)
 lights the ceiling above it brightly, as a point does.
+
+#### G1b — results
+
+Built: glTF sampler wrap modes; image-based light; custom 3D material shaders.
+
+- **Wrap modes.** `Material3D::wrap_u/wrap_v` (Clamp by default for
+  hand-made materials, as before; models set them from the glTF sampler, Repeat
+  when none). Samplers are made on first use by filter x wrap and cached; a
+  clamped material still uses the 2D backend's, so nothing else moved. This was
+  Sponza's washed floor, walls and ceiling: they tile now. Against Cycles
+  Sponza's mean distance did not improve (49.4 to 50.1 levels on `nave`, 33.1
+  to 34.0 on `roof`; SSIM .472 to .501 and .631 to .641): what is left is its
+  light (kin's ambient reaches every room), not its textures.
+- **Image-based light.** `Lights3D::environment` (an `Environment3D` from
+  `Renderer3D::load_environment` for Radiance `.hdr`, decoded by stb_image's HDR
+  reader built as C with only that format, or `create_environment` from floats),
+  `environment_intensity`, `environment_rotation`. On the first render that uses
+  it, compute (`env_filter.comp`) makes: a specular equirect chain (up to 1024 x
+  512, 7 levels a roughness, 256 GGX importance samples each, read from the
+  picture's own mips by the sample's solid angle, so no speckle), and a 64 x 32
+  cosine-weighted irradiance map (512 samples); half floats. `mesh.frag` reads
+  them in place of the hemisphere (`ambient` is then unused), with the existing
+  analytic split-sum fit and multiple-scattering term. Equirect, not a cube:
+  seams are bilinear across u (repeat) and v clamps at the poles (a cube would
+  be exact there); SH9 was not used because the 64 x 32 irradiance map is as
+  cheap and keeps coloured sunsets. No background drawing (not done: the view's
+  colour shows). Orientation: the picture's centre is +x, the top +y, right turns
+  toward +z, the same as Blender's world texture in kin's axes (checked by a 32
+  sample Cycles render of `ibl_spheres` into `reference_out/truth_check`: the
+  highlights and the cloud reflections sit in the same places). Reference scenes
+  `ibl_spheres` and `ibl_helmet` (Poly Haven's
+  `kloofendal_48d_partly_cloudy_puresky_1k.hdr`, CC0, pinned by URL and SHA-256
+  in `fetch.py`), and `blender_truth.py` takes `lights.environment` as the world.
+  Against that quick truth_check, `ibl_spheres` is 9.5 and 10.8 mean levels
+  away (SSIM .94, p99 120-135): Cycles has shadows from the sky (kin's
+  environment light is unoccluded) and reflects the other spheres; the real
+  truth is pending a render at 512 samples.
+- **Custom shaders.** `Material3D::shader` (a `MaterialShader3D`, from
+  `create_material_shader(spirv)` or `compile_material_shader(glsl)`) and
+  `shader_params` (four vec4s as `kin_param(i)`). The 2D contract is followed
+  where it fits (SPIR-V blobs, a uniform block, the pipeline cache keyed on the
+  fragment shader); the difference is that a 3D shader brings the whole
+  fragment stage and `mesh.frag`'s code is now `kin_material.inc.glsl`, which
+  both it and custom shaders `#include` (glslc `-I`, added by `kin_compile_glsl`,
+  `kin_spirv.cmake` and the runtime compiler; `.inc.glsl` files are not shaders).
+  The built-in shader is the same code through the same functions: the 120-frame
+  reference renders without an environment are bit-identical to `g1a_final`
+  (helmet: 80-90 dB, from the wrap fix). Passes of one's own on an HDR view
+  were left out: nothing there is cheap (a view's targets are the backend's;
+  2D shaders can already process `view.texture()`). Example: Signal Breach's
+  hit shield (`examples/shaders/shield.frag.glsl`).
+
+Measured (RTX 4080, 1280 x 720, 4x MSAA, 120 frames, best of three runs of
+`g1b` against `g1a_final`, a busy machine: other sessions compiled while it
+ran, so the runs scatter 30-100%): cornell 0.078 to 0.077 ms; crowd 1.16, 0.59,
+1.35 to 1.10, 0.61, 1.37; helmet side 0.157 to 0.153; kiln 4.30, 4.69 to 4.20,
+4.58; spheres front 0.079 to 0.116, grazing 0.114 to 0.093; shadows within
+0.84-1.03; sponza 0.314, 0.289 to 0.367, 0.308 (+7 to 17%: tiling textures
+are read at more of their area, mips and all). Pictures of scenes without
+an environment: identical to `g1a_final`. The environment scenes cost a
+filter the first frame (not timed separately: a few compute dispatches of 256 to
+512 samples a texel over 1024 x 512 and smaller) and nothing after.
 
 ### G2 — Sharper, steadier pictures
 

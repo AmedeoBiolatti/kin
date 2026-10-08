@@ -1,5 +1,6 @@
 #include "gpu_renderer3d.hpp"
 
+#include "embedded_gpu_shader.hpp"
 #include "gpu_device.hpp"
 #include "gpu_renderer2d_backend.hpp"
 
@@ -86,9 +87,15 @@ struct FrameUniforms {
     f32 fill_color[4];
     f32 flags[4]; // encode to sRGB, decode textures, shadows, point lights
     f32 eye[4];   // the camera, in the scene's world space
+    f32 environment[4];         // intensity, the specular's last level, 0, 1 with an environment
+    f32 environment_matrix[16]; // the scene's space to the environment's
     f32 shadow_matrix[16];
     f32 shadow[4]; // depth bias, normal offset, a texel (uv)
     f32 lights[max_lights * 2 * 4];
+};
+// A custom material shader's: kin_param(0..3).
+struct CustomUniforms {
+    f32 values[16];
 };
 struct MaterialUniforms {
     f32 params[4]; // emissive, unlit, receives the sun's shadow, alpha cutoff (0: none)
@@ -226,7 +233,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh.vert.spv",
                                                   /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
         _fragment_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh.frag.spv",
-                                                    /*uniform_buffers=*/2, /*samplers=*/6);
+                                                    /*uniform_buffers=*/2, /*samplers=*/8);
         _shadow_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow.frag.spv");
         _shadow_mask_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow_mask.vert.spv",
                                                               /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
@@ -244,6 +251,35 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                                      /*uniform_buffers=*/1, /*samplers=*/1);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    {
+        // Image-based light: compute filters an environment into mips; sampled
+        // by direction, so u wraps and v stops at the poles.
+        SDL_GPUSamplerCreateInfo info{};
+        info.min_filter = SDL_GPU_FILTER_LINEAR;
+        info.mag_filter = SDL_GPU_FILTER_LINEAR;
+        info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+        info.max_lod = 1000.0f;
+        info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        _environment_sampler = SDL_CreateGPUSampler(handle, &info);
+        const std::span<const unsigned char> code = embedded_gpu_shader("env_filter.comp.spv");
+        if (!code.empty() && SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                                           SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
+            SDL_GPUComputePipelineCreateInfo pipeline{};
+            pipeline.code = code.data();
+            pipeline.code_size = code.size();
+            pipeline.entrypoint = "main";
+            pipeline.format = SDL_GPU_SHADERFORMAT_SPIRV;
+            pipeline.num_samplers = 1;
+            pipeline.num_readwrite_storage_textures = 1;
+            pipeline.num_uniform_buffers = 1;
+            pipeline.threadcount_x = 8;
+            pipeline.threadcount_y = 8;
+            pipeline.threadcount_z = 1;
+            _filter_pipeline = SDL_CreateGPUComputePipeline(handle, &pipeline);
+        }
     }
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
         // Bilinear comparisons: each tap is itself four, softening the edge.
@@ -270,6 +306,46 @@ GpuRenderer3D::~GpuRenderer3D() {
     if (_compare_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _compare_sampler);
     }
+    if (_environment_sampler) {
+        SDL_ReleaseGPUSampler(_device->handle(), _environment_sampler);
+    }
+    if (_filter_pipeline) {
+        SDL_ReleaseGPUComputePipeline(_device->handle(), _filter_pipeline);
+    }
+    for (SDL_GPUSampler* sampler : _samplers) {
+        if (sampler) {
+            SDL_ReleaseGPUSampler(_device->handle(), sampler);
+        }
+    }
+}
+
+SDL_GPUSampler* GpuRenderer3D::sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v) {
+    if (u == Wrap3D::Clamp && v == Wrap3D::Clamp) {
+        return _owner->sampler_for(texture); // as 2D draws it
+    }
+    const ScaleMode scale = texture.scale_mode() == ScaleMode::Mipmapped && !texture.mipmapped() ? ScaleMode::Linear : texture.scale_mode();
+    const std::size_t index = (static_cast<std::size_t>(scale) * 3 + static_cast<std::size_t>(u)) * 3 + static_cast<std::size_t>(v);
+    if (index < _samplers.size() && _samplers[index]) {
+        return _samplers[index];
+    }
+    const auto mode = [](Wrap3D wrap) {
+        return wrap == Wrap3D::Repeat ? SDL_GPU_SAMPLERADDRESSMODE_REPEAT
+             : wrap == Wrap3D::Mirror ? SDL_GPU_SAMPLERADDRESSMODE_MIRRORED_REPEAT
+                                      : SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    };
+    SDL_GPUSamplerCreateInfo info{};
+    info.address_mode_u = mode(u);
+    info.address_mode_v = mode(v);
+    info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    const bool nearest = scale == ScaleMode::Nearest;
+    info.min_filter = info.mag_filter = nearest ? SDL_GPU_FILTER_NEAREST : SDL_GPU_FILTER_LINEAR;
+    info.mipmap_mode = scale == ScaleMode::Mipmapped ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+    info.max_lod = scale == ScaleMode::Mipmapped ? 1000.0f : 0.0f;
+    SDL_GPUSampler* sampler = SDL_CreateGPUSampler(_device->handle(), &info);
+    if (index < _samplers.size()) {
+        _samplers[index] = sampler;
+    }
+    return sampler ? sampler : _owner->sampler_for(texture);
 }
 
 u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const {
@@ -282,7 +358,7 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
-SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask) const {
+SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask, SDL_GPUShader* custom) const {
     if (pass == Pass::Shadow) {
         // A closed mesh's back faces are behind its front ones from the sun
         // too: culled, the map is the same for half the triangles. Double-sided
@@ -314,7 +390,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                              : pass == Pass::Alpha                       ? GpuBlendMode::Premultiplied
                                                                          : GpuBlendMode::PremultipliedAdditive;
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
-                                                 .fragment = _fragment_shader.handle(),
+                                                 .fragment = custom ? custom : _fragment_shader.handle(),
                                                  .blend = blend,
                                                  .format = format,
                                                  .layout = GpuVertexLayout::MeshVertices,
@@ -401,6 +477,133 @@ std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = e.what()}}));
         return {};
     }
+}
+
+namespace {
+
+// An IEEE half of `x` (round to nearest, clamped to what a half holds).
+u16 to_half(f32 x) {
+    u32 bits;
+    std::memcpy(&bits, &x, sizeof(bits));
+    const u32 sign = (bits >> 16) & 0x8000u;
+    if (!(x == x)) {
+        return static_cast<u16>(sign | 0x7e00u);
+    }
+    x = std::clamp(std::abs(x), 0.0f, 65504.0f);
+    std::memcpy(&bits, &x, sizeof(bits));
+    const i32 exponent = static_cast<i32>((bits >> 23) & 0xffu) - 127 + 15;
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            return static_cast<u16>(sign);
+        }
+        const u32 mantissa = (bits & 0x7fffffu) | 0x800000u;
+        const u32 shift = static_cast<u32>(14 - exponent);
+        return static_cast<u16>(sign | ((mantissa + (1u << (shift - 1))) >> shift));
+    }
+    const u32 rounded = (bits & 0x7fffffu) + 0x1000u;
+    return static_cast<u16>(sign | (static_cast<u32>(exponent) << 10) + (rounded >> 13));
+}
+
+constexpr u32 environment_samples = 256;
+constexpr u32 irradiance_samples = 512;
+
+} // namespace
+
+std::shared_ptr<IMaterialShaderBackend> GpuRenderer3D::create_material_shader(std::span<const u8> spirv) {
+    try {
+        auto shader = std::make_shared<GpuMaterialShader3D>();
+        // As mesh.frag: the frame, the material and the custom parameters;
+        // the material's eight textures (kin_material.inc.glsl declares them all).
+        shader->shader = GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv,
+                                               /*uniform_buffers=*/3, /*samplers=*/8);
+        _material_shaders.push_back(shader); // kept: pipelines name it for good
+        return shader;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: material shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+std::shared_ptr<IEnvironmentBackend> GpuRenderer3D::create_environment(Vec2i size, std::span<const f32> rgb) {
+    constexpr SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    if (!_filter_pipeline || !_environment_sampler) {
+        return {};
+    }
+    try {
+        auto environment = std::make_shared<GpuEnvironment3D>();
+        const auto make = [&](u32 w, u32 h, u32 levels, SDL_GPUTextureUsageFlags usage) {
+            SDL_GPUTextureCreateInfo info{};
+            info.type = SDL_GPU_TEXTURETYPE_2D;
+            info.format = format;
+            info.usage = usage;
+            info.width = w;
+            info.height = h;
+            info.layer_count_or_depth = 1;
+            info.num_levels = levels;
+            info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+            SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device->handle(), &info);
+            if (!texture) {
+                throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
+            }
+            return GpuTexture{_device->shared(), texture, w, h, format};
+        };
+        const u32 w = static_cast<u32>(size.x), h = static_cast<u32>(size.y);
+        u32 source_levels = 1;
+        while ((std::max(w, h) >> source_levels) > 0) {
+            ++source_levels;
+        }
+        environment->source = make(w, h, source_levels, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
+        std::vector<u16> texels(static_cast<std::size_t>(w) * h * 4);
+        for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                texels[i * 4 + static_cast<std::size_t>(c)] = to_half(rgb[i * 3 + static_cast<std::size_t>(c)]);
+            }
+            texels[i * 4 + 3] = to_half(1.0f);
+        }
+        _device->update_texture(environment->source.handle(), 0, 0, w, h, reinterpret_cast<const u8*>(texels.data()), 8, true);
+        _device->generate_mipmaps(environment->source.handle());
+        // The mirror level as wide as the picture, up to 1024; a level more
+        // rough each, to the roughest at a sixteenth of that.
+        const u32 sw = std::clamp(w, 64u, 1024u);
+        u32 levels = 1;
+        while (levels < 7 && (sw >> levels) >= 16) {
+            ++levels;
+        }
+        environment->levels = levels;
+        environment->specular = make(sw, sw / 2, levels, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        environment->irradiance = make(64, 32, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        return environment;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: environment not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
+void GpuRenderer3D::filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment) {
+    // One compute pass a level: the picture's own, then each rougher, then the diffuse.
+    const auto filter = [&](const GpuTexture& target, u32 level, u32 mode, f32 roughness, u32 samples) {
+        const SDL_GPUStorageTextureReadWriteBinding output{.texture = target.handle(), .mip_level = level};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &output, 1, nullptr, 0);
+        if (!pass) {
+            return;
+        }
+        SDL_BindGPUComputePipeline(pass, _filter_pipeline);
+        const SDL_GPUTextureSamplerBinding source{environment.source.handle(), _environment_sampler};
+        SDL_BindGPUComputeSamplers(pass, 0, &source, 1);
+        const u32 w = std::max(1u, target.width() >> level), h = std::max(1u, target.height() >> level);
+        const f32 params[8] = {static_cast<f32>(w), static_cast<f32>(h), roughness, static_cast<f32>(mode),
+                               static_cast<f32>(environment.source.width()), static_cast<f32>(environment.source.height()),
+                               static_cast<f32>(samples), 0.0f};
+        SDL_PushGPUComputeUniformData(commands, 0, params, sizeof(params));
+        SDL_DispatchGPUCompute(pass, (w + 7) / 8, (h + 7) / 8, 1);
+        SDL_EndGPUComputePass(pass);
+    };
+    for (u32 level = 0; level < environment.levels; ++level) {
+        const f32 roughness = environment.levels > 1 ? static_cast<f32>(level) / static_cast<f32>(environment.levels - 1) : 0.0f;
+        filter(environment.specular, level, level == 0 ? 0u : 1u, roughness, environment_samples);
+    }
+    filter(environment.irradiance, 0, 2, 1.0f, irradiance_samples);
+    environment.filtered = true;
 }
 
 bool GpuRenderer3D::make_targets(GpuView3D& view) {
@@ -856,6 +1059,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     // The frame's uniforms, the scene's and the overlay's. The overlay's
     // space is its camera's: the scene's lights are carried into it (seen
     // from where the scene's camera is), without shadows.
+    auto* environment = dynamic_cast<GpuEnvironment3D*>(lights.environment.backend().get());
+    if (environment && (!_filter_pipeline || !environment->specular)) {
+        environment = nullptr;
+    }
     const bool encode = view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;     // a gamma target
     const bool decode = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
     const auto frame_uniforms = [&](u32 s) {
@@ -872,6 +1079,13 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
             static_cast<f32>(chosen.size()));
         put(f.eye, scenes[s]->camera.position, 1.0f);
+        if (environment) {
+            // The picture turned by the light's rotation; in the overlay's space the
+            // directions come back to the scene's first.
+            const Mat4f to_environment = Mat4f::rotation_y(-lights.environment_rotation) * (s == 0 ? Mat4f{} : to_space.inverse());
+            put(f.environment, {lights.environment_intensity, static_cast<f32>(environment->levels - 1), 0.0f}, 1.0f);
+            std::memcpy(f.environment_matrix, to_environment.m, sizeof(f.environment_matrix));
+        }
         std::memcpy(f.shadow_matrix, light_vp.m, sizeof(f.shadow_matrix));
         // A texel's worth of depth toward the sun, and one and a half off the surface.
         put(f.shadow, {texel_world / depth_range, texel_world * 1.5f, _shadow_size > 0 ? 1.0f / static_cast<f32>(_shadow_size) : 0.0f}, 0.0f);
@@ -890,6 +1104,12 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     const auto resume_2d = [&] { _owner->_batch.begin(_owner->current_target(), _owner->_clear_color, /*do_clear=*/false); };
     SDL_GPUBuffer* storage = _instances ? _instances->handle() : nullptr;
 
+    // An environment used for the first time: its filtered copies, once.
+    if (environment && !environment->filtered) {
+        filter_environment(commands, *environment);
+        ++stats.environment_prefilters;
+    }
+
     // Without shadows the shader still samples a map: one that is all far.
     if (!shadows && _no_shadow && !_no_shadow_cleared) {
         SDL_GPUDepthStencilTargetInfo clear{};
@@ -906,15 +1126,15 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     }
 
     // A material's texture as a binding: its own, or a white one without.
-    const auto binding_of = [&](const Texture& texture) {
+    const auto binding_of = [&](const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v) {
         const ITextureBackend* backend = texture.backend().get();
         const auto* gpu = backend && backend->kind() == ITextureBackend::Kind::Gpu ? static_cast<const GpuTextureBackend*>(backend) : nullptr;
-        return gpu && gpu->texture() ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), _owner->sampler_for(*gpu)}
+        return gpu && gpu->texture() ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), sampler_for(*gpu, wrap_u, wrap_v)}
                                      : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear};
     };
     // What a pass with cut-outs binds for one: the base colour's alpha, and the cutoff.
     const auto bind_cutout = [&](SDL_GPURenderPass* pass, const Material3D& material) {
-        const SDL_GPUTextureSamplerBinding base = binding_of(material.texture);
+        const SDL_GPUTextureSamplerBinding base = binding_of(material.texture, material.wrap_u, material.wrap_v);
         SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
         const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f}};
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
@@ -1030,6 +1250,11 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
 
     DrawUniforms draw_uniforms{};
     std::memcpy(draw_uniforms.view_projection, view_projections[0].m, sizeof(draw_uniforms.view_projection));
+    const SDL_GPUTextureSamplerBinding environment_bindings[2] = {
+        environment ? SDL_GPUTextureSamplerBinding{environment->specular.handle(), _environment_sampler}
+                    : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
+        environment ? SDL_GPUTextureSamplerBinding{environment->irradiance.handle(), _environment_sampler}
+                    : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear}};
     const SDL_GPUTextureSamplerBinding shadow_binding{shadows ? _shadow_map.handle() : _no_shadow.handle(), _compare_sampler};
     SDL_GPUGraphicsPipeline* bound = nullptr;
     const GpuMesh3D* bound_mesh = nullptr;
@@ -1038,6 +1263,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     Textures unbound;
     unbound.fill(reinterpret_cast<const ITextureBackend*>(1)); // none yet
     Textures bound_textures = unbound;
+    std::pair<Wrap3D, Wrap3D> bound_wrap{};
     u32 current_scene = 0;
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
@@ -1047,7 +1273,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             begin_scene(current_scene);
             std::memcpy(draw_uniforms.view_projection, view_projections[current_scene].m, sizeof(draw_uniforms.view_projection));
         }
-        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !material.double_sided, pass_of(material));
+        const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(material.shader.backend().get());
+        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !material.double_sided, pass_of(material), false,
+                                              custom ? custom->shader.handle() : nullptr);
         if (!p) {
             continue;
         }
@@ -1060,12 +1288,18 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             bound = p;
             bound_textures = unbound;
         }
-        if (textures != bound_textures) {
-            const std::array<SDL_GPUTextureSamplerBinding, 6> samplers{
-                binding_of(material.texture), shadow_binding, binding_of(material.metallic_roughness),
-                binding_of(material.normal), binding_of(material.occlusion), binding_of(material.emissive_texture)};
+        const std::pair<Wrap3D, Wrap3D> wrap{material.wrap_u, material.wrap_v};
+        if (textures != bound_textures || wrap != bound_wrap) {
+            const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
+                binding_of(material.texture, material.wrap_u, material.wrap_v), shadow_binding,
+                binding_of(material.metallic_roughness, material.wrap_u, material.wrap_v),
+                binding_of(material.normal, material.wrap_u, material.wrap_v),
+                binding_of(material.occlusion, material.wrap_u, material.wrap_v),
+                binding_of(material.emissive_texture, material.wrap_u, material.wrap_v), environment_bindings[0],
+                environment_bindings[1]};
             SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
             bound_textures = textures;
+            bound_wrap = wrap;
         }
         if (ref.mesh != bound_mesh) {
             const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
@@ -1082,6 +1316,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                                  {material.metallic, material.roughness, material.normal_scale, material.occlusion_strength},
                                  {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f, 0.0f, 0.0f}};
         SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
+        if (custom) {
+            SDL_PushGPUFragmentUniformData(commands, 2, material.shader_params.data(), sizeof(CustomUniforms));
+        }
         SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
         ++stats.draws;
         stats.instances += ref.out_count;
