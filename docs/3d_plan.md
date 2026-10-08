@@ -559,15 +559,19 @@ the machine was busier than at M0, so the raster is timed again beside it):
   answers for the sample right and below the middle, 97.9-99.5% on the
   model. Points: 0.8-6 mm apart on models 2-4 m across. `screen_of` agrees
   to a hundredth of a pixel.
-- **Loading**: the kiln's meshes take 0.63-0.80 s to build and upload once
-  (its 15.5 million vertices are 556 MB; page faults on new memory are most
-  of it); the plant 71 ms. On the UI thread for now.
+- **Loading**: the kiln's 15.5 million vertices (556 MB; page faults on
+  new memory are most of the cost) are made on a thread of their own and
+  uploaded in chunks of 65,536 triangles, 4 ms of them a frame: 0.7-0.9 s
+  to the first picture over about 220 frames, none of them longer than
+  13 ms except the one that first draws it (17-31 ms; 43-142 ms the first
+  time a process draws in 3D, its pipelines and targets made). Meanwhile
+  the model there before is drawn (a new export of the same asset), or a
+  busy state (another asset). The chunks add about 80 draws: the kiln
+  draws in 8.3 ms where it took 7.4.
 - lavapipe draws the same picture (arm_head: 0.29 levels mean, the same
   picks) at 35 ms.
 
-Left over: build the vertices on the studio's loading thread and spread the
-kiln's upload over frames (the load hitch); the studio's live 3D tab was not
-run here (no Blender on this machine to export a model), only
+Left over: the studio's live 3D tab was not run here (no Blender on this machine to export a model), only
 `GpuModelView` through the check tool and the headless app.
 
 ### Later, each on request
