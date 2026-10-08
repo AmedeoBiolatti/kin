@@ -49,6 +49,14 @@ Options parse(int argc, char** argv) {
         else if (arg == "--screenshot") o.screenshot = value(arg);
         else if (arg == "--vsync") o.vsync = true;
         else if (arg == "--mute") o.mute = true;
+        else if (arg == "--view" || arg.starts_with("--view=")) {
+            const std::string view = arg == "--view" ? value(arg) : std::string{arg.substr(7)};
+            if (view != "2d" && view != "3d") throw std::invalid_argument("--view must be 2d or 3d");
+#if !defined(KIN_EXPERIMENTAL_3D)
+            if (view == "3d") throw std::invalid_argument("--view 3d needs kin built with KIN_EXPERIMENTAL_3D");
+#endif
+            o.view_3d = view == "3d";
+        }
         else if (arg == "--help") o.help = true;
     }
     if (o.scenario != "idle" && o.scenario != "live" && o.scenario != "scroll" && o.scenario != "churn")
@@ -134,6 +142,7 @@ int run_example(int argc, char** argv, bool tracker, const ContentSearch& conten
                 "--scenario idle|live|scroll|churn --vsync --screenshot PATH --capture-frame N\n"
                 "--width 640..4096 --height 480..4096 --ui-scale 0.5..4 (default: automatic)\n"
                 "--power-grid (Signal Siege: start on the paused upgrade screen) --mute (Signal Siege: no sound)\n"
+                "--view 2d|3d (Signal Siege: the arena drawn in 2D, or in 3D from behind the player)\n"
                 "Standard Kin flags: --headless --frames N --seed N --report PATH --profile --profile-json PATH\n";
             return 0;
         }

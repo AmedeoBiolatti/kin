@@ -77,7 +77,7 @@ GpuPipelineCache::~GpuPipelineCache() {
 
 void GpuPipelineCache::forget(SDL_GPUShader* fragment) {
     std::erase_if(_entries, [&](const Entry& e) {
-        if (e.fragment != fragment) {
+        if (e.key.fragment != fragment) {
             return false;
         }
         if (_device && e.pipeline) {
@@ -98,19 +98,17 @@ void GpuPipelineCache::destroy() {
     _entries.clear();
 }
 
-SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUShader* fragment,
-                                               GpuBlendMode blend, SDL_GPUTextureFormat target_format,
-                                               GpuVertexLayout layout, SDL_GPUTextureFormat depth_stencil,
-                                               GpuStencilOp stencil) {
+SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     for (const Entry& e : _entries) {
-        if (e.vertex == vertex && e.fragment == fragment && e.blend == blend && e.format == target_format &&
-            e.layout == layout && e.depth_stencil == depth_stencil && e.stencil == stencil) {
+        if (e.key == key) {
             return e.pipeline;
         }
     }
-    if (!_device || !vertex || !fragment) {
+    if (!_device || !key.vertex || !key.fragment) {
         return nullptr;
     }
+    const GpuVertexLayout layout = key.layout;
+    const GpuStencilOp stencil = key.stencil;
 
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
@@ -138,6 +136,13 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSdfInstance, radius));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSdfInstance, fill_r));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSdfInstance, stroke_r));
+    } else if (layout == GpuVertexLayout::MeshVertices) {
+        vb.pitch = sizeof(GpuMeshVertex);
+        vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(GpuMeshVertex, x));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(GpuMeshVertex, nx));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuMeshVertex, u));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuMeshVertex, r));
     } else if (layout == GpuVertexLayout::ShapeVertices) {
         vb.pitch = sizeof(GpuShapeVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
@@ -166,7 +171,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
     vertex_input.vertex_attributes = attrs;
 
     SDL_GPUColorTargetBlendState blend_state{};
-    set_blend(blend_state, blend);
+    set_blend(blend_state, key.blend);
     const bool stencil_write = stencil == GpuStencilOp::Increment || stencil == GpuStencilOp::Decrement;
     if (stencil_write) {
         blend_state.color_write_mask = 0; // only the stencil changes
@@ -174,24 +179,32 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
     }
 
     SDL_GPUColorTargetDescription color_target{};
-    color_target.format = target_format;
+    color_target.format = key.format;
     color_target.blend_state = blend_state;
 
     SDL_GPUGraphicsPipelineTargetInfo target_info{};
     target_info.num_color_targets = 1;
     target_info.color_target_descriptions = &color_target;
-    target_info.has_depth_stencil_target = depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID;
-    target_info.depth_stencil_format = depth_stencil;
+    target_info.has_depth_stencil_target = key.depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID;
+    target_info.depth_stencil_format = key.depth_stencil;
 
     SDL_GPUGraphicsPipelineCreateInfo info{};
-    info.vertex_shader = vertex;
-    info.fragment_shader = fragment;
+    info.vertex_shader = key.vertex;
+    info.fragment_shader = key.fragment;
     info.vertex_input_state = vertex_input;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
-    info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
-    info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
-    info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    info.rasterizer_state.fill_mode = key.wireframe ? SDL_GPU_FILLMODE_LINE : SDL_GPU_FILLMODE_FILL;
+    info.rasterizer_state.cull_mode = key.cull == GpuCull::Back    ? SDL_GPU_CULLMODE_BACK
+                                      : key.cull == GpuCull::Front ? SDL_GPU_CULLMODE_FRONT
+                                                                   : SDL_GPU_CULLMODE_NONE;
+    info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+    info.multisample_state.sample_count = key.samples;
     info.target_info = target_info;
+    if (key.depth != GpuDepthTest::None && key.depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID) {
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = key.depth == GpuDepthTest::TestWrite;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL; // reverse Z
+    }
     if (stencil != GpuStencilOp::None) {
         // Where the stencil holds the reference: draw, or count one clip in or out there.
         SDL_GPUStencilOpState face{};
@@ -218,7 +231,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(SDL_GPUShader* vertex, SDL_GPUSha
     KIN_LOG_DEBUG_F("render", "pipeline created",
                     (LogFields{{.name = "ms", .value = std::to_string(static_cast<f64>(SDL_GetTicksNS() - start_ns) / 1e6)},
                                {.name = "pipelines", .value = std::to_string(_entries.size() + 1)}}));
-    _entries.push_back(Entry{vertex, fragment, blend, target_format, layout, depth_stencil, stencil, pipeline});
+    _entries.push_back(Entry{key, pipeline});
     return pipeline;
 }
 

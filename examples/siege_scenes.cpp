@@ -1,4 +1,5 @@
 #include <kin/core/profile.hpp>
+#include "arena_3d.hpp"
 #include "arena_art.hpp"
 #include "example_common.hpp"
 #include "siege_audio.hpp"
@@ -113,7 +114,13 @@ public:
         }
         if (_paused || _power_grid) return;
         const Vec2f mouse = ctx.renderer.window_to_logical(ctx.input.mouse_pos());
-        const Vec2f aim = _camera.screen_to_world(mouse);
+        Vec2f aim = _camera.screen_to_world(mouse);
+#if defined(KIN_EXPERIMENTAL_3D)
+        // In 3D the mouse aims where it points on the plane the ships fly in.
+        if (_siege->options.view_3d && _painter3d.ready()) {
+            aim = _painter3d.screen_to_world(mouse).value_or(_arena.player);
+        }
+#endif
         ArenaInput input{.move = {
             float(ctx.input.held("right")) - float(ctx.input.held("left")),
             float(ctx.input.held("down")) - float(ctx.input.held("up"))},
@@ -152,19 +159,33 @@ public:
             capture(ctx, _siege->options, ++_frames, _captured);
             return;
         }
-        if (!_painter.ready()) _painter.init(renderer, _arena);
         _painter.enable_post_process(renderer);
         _camera.viewport = {1280, 800};
         _camera.offset = {std::clamp(_arena.player.x - 640, 0.0f, 1792.0f), std::clamp(_arena.player.y - 400, 0.0f, 1248.0f)};
-        _painter.draw(renderer, _arena, _camera);
+        Vec2f ship = _camera.world_to_screen(_arena.player);
+#if defined(KIN_EXPERIMENTAL_3D)
+        if (_siege->options.view_3d) {
+            if (!_painter3d.ready()) _painter3d.init(renderer);
+            KIN_PROFILE_SCOPE("example.3d");
+            _painter3d.draw(renderer, _arena, {0, 0, 1280, 800});
+            ship = _painter3d.world_to_screen(_arena.player, .45f).value_or(ship);
+        } else
+#endif
+        {
+            if (!_painter.ready()) _painter.init(renderer, _arena);
+            _painter.draw(renderer, _arena, _camera);
+        }
         const auto mouse = renderer.window_to_logical(ctx.input.mouse_pos());
         if (!_autoplay) {
-            const auto p = _camera.world_to_screen(_arena.player);
-            renderer.draw_line(p, mouse, Color::rgba(88, 171, 169, 35));
+            renderer.draw_line(ship, mouse, Color::rgba(88, 171, 169, 35));
         }
         {
             KIN_PROFILE_SCOPE("example.hud"); // also where the frame's sprite batch is first flushed
-            _hud.render(_arena, renderer, ctx.input, {.paused = _paused, .autoplay = _autoplay, .commands = int(_painter.commands()),
+            int commands = int(_painter.commands());
+#if defined(KIN_EXPERIMENTAL_3D)
+            if (_siege->options.view_3d) commands = int(_painter3d.stats().draws); // the 3D view's draw calls
+#endif
+            _hud.render(_arena, renderer, ctx.input, {.paused = _paused, .autoplay = _autoplay, .commands = commands,
                 .display_scale = _display_scale, .reticle = !_autoplay, .aim = mouse}, ctx.dt);
         }
         capture(ctx, _siege->options, ++_frames, _captured);
@@ -177,12 +198,23 @@ public:
         json.field("sounds", _siege->audio.stats().played_requests);
         json.field("ui_scale", _display_scale);
         json.field("power_grid", _power_grid).field("available_cores", _arena.available_cores());
+        json.field("view", _siege->options.view_3d ? "3d" : "2d");
+#if defined(KIN_EXPERIMENTAL_3D)
+        if (_siege->options.view_3d) {
+            const Render3DStats& s = _painter3d.stats();
+            json.field("draws_3d", u64(s.draws)).field("instances_3d", u64(s.instances)).field("triangles_3d", s.triangles)
+                .field("drawn_3d", _painter3d.available());
+        }
+#endif
     }
 private:
     std::shared_ptr<Siege> _siege;
     Arena _arena;
     Camera2D _camera;
     ArenaPainter _painter;
+#if defined(KIN_EXPERIMENTAL_3D)
+    ArenaPainter3D _painter3d;
+#endif
     ArenaHud _hud;
     Vec2i _minimum_size{};
     float _display_scale = 1;

@@ -1,0 +1,384 @@
+# 3D Rendering — Experimental Plan
+
+> Branch `exp/3d-rendering`, from 0.2.6 (d307186). A proposal: nothing here is
+> built yet.
+
+## What this is, and what earns it
+
+The manifest says "2D first, 3D later" and "Kin earns its features". This
+branch is the "later", built against one game that needs it: **Signal
+Breach**, a first-person version of Signal Siege. Each 3D feature arrives
+when that game, or kin-render-studio's 3D view, asks for it.
+
+The renderer adds **3D drawn inside a 2D frame**. A 3D view is an offscreen
+colour + depth target that Renderer2D lays into the frame like any render
+target, with 2D drawing and ui2 under or over it. A full-screen shooter is
+that view at the screen's size with the HUD drawn on top; a model turning in
+a panel is the same view at 256².
+
+Kin's targets are turn-based, card and puzzle games. A shooter is the right
+stress test for a 3D renderer (speed, transparency, lights, latency), and
+the right experiment for this branch; keeping 3D on main because of it is a
+separate decision, which would change the manifest's target on purpose.
+
+### The game: Signal Breach
+
+Signal Siege seen from inside. You stand on the steel deck; star, plate and
+ring enemies fly and strafe round you in 3D; pink bullets stream at you.
+Signal Siege already has most of a shooter:
+
+- a deterministic simulation (seeded, a checksum in its report);
+- enemies that are abstract shapes, made in code: no Blender, no skinning;
+- an autopilot that plays it (`--benchmark`, headless runs, agents);
+- scale: up to 100,000 enemies and 8,192 shots.
+
+**The floor stays flat in the rules, as in Doom.** The level is a grid of
+cells, each with a floor height (ramps, platforms, a raised centre) and
+walls between some of them; the player moves and collides against that grid
+in the game's own code. Enemies fly in full 3D; shots are rays and moving
+spheres against enemy spheres. That is a real 3D shooter with no 3D physics
+engine, which is the dependency held back longest.
+
+### The second consumer: kin-render-studio
+
+Its 3D view (`app/src/model_view.*`) is a CPU rasterizer on its own thread:
+the kiln's 5.15 million triangles, flat shaded in a key and a fill light, a shadow
+on the ground, the map's hexes, 2x2 supersampling once still, the part and
+the point under the pointer. It needs what the shooter doesn't (picking,
+wireframe, a still picture kept), and it is the check that the renderer
+draws what Blender's export says: replace `ModelRaster`, get the same
+picture, faster.
+
+### Not in scope
+
+3D physics, navigation meshes, terrain, level of detail, a deferred
+renderer, skinned meshes, PBR, an editor. Each waits for a game that needs
+it.
+
+## Choices
+
+| Concern | Choice | Why |
+|---|---|---|
+| Graphics API | SDL_GPU (already on Vulkan) | The manifest planned "Vulkan" for 3D; kin already forces SDL_GPU's Vulkan driver. It has depth buffers, MSAA, instancing, storage buffers and compute: enough. Its limits (no timestamp queries, no host-visible vertex buffers) are known and already lived with. The manifest's table should say so. |
+| SDL_Renderer backend | No 3D (`capabilities().rendering_3d` stays false) | It has no depth buffer. A view there is cleared to its background and a warning logged once. |
+| Math | Kin's own header, `kin/core/math3d.hpp` | `Vec3f`, `Vec4f`, `Quatf`, `Mat4f`, projections: a few hundred lines in `Affine2`'s style. glm is large and would be the only foreign type in the public API. |
+| Conventions | Right-handed, +Y up, -Z forward, metres; column-major matrices as GLSL reads them | glTF's, so imported models need no conversion. The studio's Blender Z-up export is turned once at load. Signal Siege's 2D plane (x right, y down, pixels) maps to x, z at 1/64 m a pixel: a 64-pixel cell is a metre. |
+| Depth | Reverse Z, D32_FLOAT (D24 where unsupported) | Precision held out to the far plane, which a shooter's long sight lines need. Formats checked with `SDL_GPUTextureSupportsFormat`. |
+| Colour | Lighting in linear; HDR views in a linear HDR scene | Glowing shots need light above white for bloom. A view's target has the 2D renderer's render-target format, so it is laid in on the existing premultiplied path; in a Gamma scene the fragment shader encodes instead. |
+| Model files | glTF 2.0 (`.glb`, `.gltf`) through cgltf, from M3 | A single MIT header, like stb and dr_libs. Not needed until the gun and props; the enemies are made in code. |
+| API style | Immediate: a draw list filled each frame | As Renderer2D and RenderQueue are. Meshes and textures are made once and kept on the GPU; transforms and per-draw data are uploaded each frame, instances in storage buffers. |
+| Where | `engine/include/kin/render3d/`; the game in `examples/signal_breach` | Built behind `KIN_EXPERIMENTAL_3D` (on in this branch, off on main until it is decided). The docs say the API may change in any release. |
+
+## The API, as Signal Breach would use it
+
+```cpp
+#include <kin/render3d/renderer3d.hpp>
+
+kin::Renderer3D r3d{renderer};               // r3d.available(): false on SDL_Renderer
+kin::Mesh star = r3d.create_mesh(kin::meshes::star_prism(5, 0.4f, 0.2f, 0.15f));
+kin::Mesh shot = r3d.create_mesh(kin::meshes::sphere(0.08f, 8));
+kin::View3D view = r3d.create_view(renderer.output_size(), {.msaa = 4, .hdr = true});
+
+// each frame
+kin::Scene3D scene;
+scene.camera = kin::Camera3D::perspective(eye, yaw, pitch, /*fov*/ 90.0f, 0.05f, 200.0f);
+scene.lights.sun = {.direction = sun_dir, .color = {1.0f, 0.95f, 0.9f}, .shadows = true};
+scene.lights.ambient = {0.08f, 0.09f, 0.12f};
+scene.add_point_light({.position = muzzle, .color = {4, 3, 2}, .radius = 3});
+scene.draw_instanced(star, star_transforms, {.base_color = red, .emissive = 0.6f});
+scene.draw_instanced(shot, shot_transforms, {.base_color = pink, .emissive = 4.0f, .unlit = true});
+scene.draw_particles(sparks, {.blend = kin::BlendMode::Additive});  // depth tested, not written
+scene.overlay.camera = gun_camera;           // the gun: its own projection, depth cleared
+scene.overlay.draw(gun, gun_transform);
+r3d.render(view, scene);                     // recorded into the frame here, in order
+
+renderer.draw_texture(view.texture(), screen_rect);
+const kin::Vec2f bar = scene.camera.project(enemy_top, view, screen_rect); // 2D draw coordinates
+```
+
+`r3d.render` works as `dispatch_compute` already does: it flushes the 2D
+draws recorded so far, records its passes (shadow, scene, overlay, bloom)
+into the view's targets, and later 2D draws sample the result in the same
+command buffer. 3D and 2D come out in the order the calls are made, with no
+second frame loop. Bloom runs on the view's HDR texture with the existing
+`pp_bloom_*` shaders, before the HUD is drawn, so the HUD doesn't bloom.
+
+The seam is one virtual on the backend, `IRenderer2DBackend::renderer_3d()`,
+which returns an `IRenderer3DBackend*` (null by default). The SDL_GPU backend
+returns a `GpuRenderer3D` that shares its `GpuDevice` (uploads, staging,
+texture pool, retention until submit), its pipeline cache (with a key that
+grows depth test/write, cull mode and the mesh layouts) and its frame.
+
+## Milestones
+
+Each ends with something measured or shown. The game is built in the stages
+of M1-M3; the studio comes after.
+
+### M0 — Groundwork (nothing visible). Done.
+
+What was built: `kin/core/math3d.hpp` and its tests (`kin-math3d`); the
+pipeline cache keyed by a `GpuPipelineKey` with depth test, culling, sample
+count and wireframe (the 2D calls unchanged); `IRenderer2DBackend::renderer_3d()`
+and `kin::Renderer3D`, reporting the depth format and the most MSAA samples;
+the `KIN_EXPERIMENTAL_3D` option; `kin-render3d` tests, also on the lavapipe
+CI job. Nothing draws with depth until M1's mesh shader.
+
+What was measured (RTX 4080 Laptop, Linux, Vulkan, Release; 2026-10-08):
+
+- Devices: the RTX 4080 and lavapipe both give 32-bit float depth and 8
+  samples (8-bit and HDR colour).
+- 2D unchanged: `kin_draw_bench` against 0.2.6, six rounds each, interleaved,
+  and a build with the option off: all record times within about 3%
+  (draw_texture 0.52 / 0.48 / 0.51 ms min base / new / option off; fill_rect
+  0.39 / 0.40 / 0.40; draw_sprites 0.088 / 0.087 / 0.087; cached shapes
+  0.37 / 0.34 / 0.33); pipelines' first frames 0.44 / 0.44 / 0.46 ms.
+- **Signal Siege baseline** (`KIN_RENDER_BACKEND=gpu signal_siege --headless
+  --benchmark --seed=7 --mute --ui-scale 1 --width 1280 --height 800
+  --enemies N --profile --frames=1200`, four runs, the same with 0.2.6):
+
+  | Enemies | frame median / p99 | render.scene median | gpu.frame median | update median | checksum |
+  |---|---|---|---|---|---|
+  | 300 | 0.17 / 3.2 ms | 0.095 ms | 0.16 ms | 0.036 ms | 8268756481707919801 |
+  | 20,000 | 1.48-1.55 / 4.1-4.4 ms | 1.15 ms | 0.72 ms | 0.30 ms | 18442429486914611772 |
+
+- **Studio baseline**: `ModelRaster::draw` (16 threads), min / median of
+  five pictures turned 7° apart, after one to warm up:
+
+  | Model | Triangles | 1280x800 | 1280x800, 2x2 | 2560x1600 | 2560x1600, 2x2 |
+  |---|---|---|---|---|---|
+  | arm_head | 1,452 | 2.5 / 2.8 ms | 9.0 / 11.2 | 8.5 / 9.6 | 30.3 / 31.0 |
+  | plant | 244,628 | 13.2 / 15.0 | 26.6 / 27.7 | 31.0 / 32.1 | 69.5 / 77.5 |
+  | kiln | 5,150,778 | 68.2 / 70.6 | 96.8 / 106.0 | 98.5 / 107.5 | 178.3 / 185.0 |
+
+  The studio draws without supersampling while the model turns, so turning
+  the kiln shows about 14 pictures a second at 1280x800.
+
+The plan as it was:
+
+- `math3d.hpp` with tests: products, inverses, quaternions, `look_at`,
+  `perspective` (reverse Z, Vulkan clip space), `project`/`unproject`
+  round trips.
+- The pipeline cache key grows depth, cull and layout fields; the 2D
+  pipelines are unchanged (`kin_draw_bench` before and after, min/median).
+- The `renderer_3d()` seam, `rendering_3d` reported by SDL_GPU, the CMake
+  option.
+- **Baselines**: Signal Siege's `--benchmark --seed=7` frame times (median,
+  p99) at its default enemies and at 20,000; the studio's
+  `ModelRaster::draw` for the kiln at its usual sizes. Later milestones are
+  measured against these.
+
+### M1 — Signal Siege in 3D (stage A). Done.
+
+What was built (the API: [3D rendering](rendering_3d.md)):
+
+- `MeshData` (validated), `Mesh` (vertex and index buffers uploaded once, with
+  the texture uploads), `kin::meshes`: box, plane, sphere, cylinder, cone,
+  torus, star prism, octahedron; `MeshData::append` to build shapes from
+  shapes. No submeshes yet: a mesh is drawn with one material.
+- `View3D`: colour, depth (reverse Z), MSAA resolved into the texture 2D
+  draws sample, premultiplied; follows the 2D pipeline's colour format (gamma,
+  linear, linear HDR); resized in place. `Renderer3D::render` records the pass
+  between the 2D draws around it, as `dispatch_compute` does.
+- `Camera3D` (perspective, orthographic, `look_at`, `orbit`, `project`,
+  `ray`), `hit_plane_y`, `Quatf::look_rotation`.
+- `Scene3D`: draws merge into instanced draws when the mesh and material
+  repeat; `add_instances` for filling in place. Instances (128 bytes: matrix,
+  normals' matrix, linear colour) go straight into the upload memory, on the
+  job system's workers above 8,192 (small draws taken together in tasks of
+  about 4,096). One pipeline per colour format, sample count and culling.
+- `mesh.vert` / `mesh.frag`: Lambert from a sun and ambient light, emissive,
+  unlit, double-sided; colours decoded and lit in linear light.
+- Without SDL_GPU (SDL_Renderer, headless runs): meshes are empty, a view is a
+  render target showing its background, a warning is logged once.
+- Signal Siege: `--view 3d` (or `--view=3d`), `examples/arena_3d.*`: the deck
+  as 384 tiles and four walls, the three enemy kinds (a star prism, a
+  hexagonal plate, a ring), the ship, shots, cores, sparks and impacts; a chase
+  camera kept over the deck; the mouse aims through the camera at the plane
+  the ships fly in; the 2D post chain (bloom, vignette, grade) and the HUD on
+  top. The report gains `view`, `draws_3d`, `instances_3d`, `triangles_3d`.
+  The title screen still draws its arena in 2D.
+
+Found on the way: a 2D flush leaves the geometry batch without a target, so
+2D drawing must be resumed after a pass recorded in the middle of a frame
+(the first version lost every 2D draw after a 3D view); a mirroring transform
+turns a mesh inside out (its normals are kept facing out; its faces need
+double-sided); GPU buffers, unlike textures, held the raw device, so meshes
+now hold the device's shared handle and may outlive the renderer (Signal
+Siege's scenes do).
+
+What was measured (RTX 4080 Laptop, Linux, Vulkan, Release; 2026-10-08):
+
+- **Signal Siege, 2D and 3D from the same binary** (as M0's baseline command,
+  `--view 2d|3d`, four runs each, interleaved; checksums identical to M0's in
+  all of them):
+
+  | Enemies | 2D frame median / p99 | 3D frame median / p99 | 2D GPU | 3D GPU |
+  |---|---|---|---|---|
+  | 300 | 0.17 / 3.0-3.2 ms | 0.14-0.15 / 3.1-3.4 ms | 0.16 ms | 0.29 ms |
+  | 20,000 | 1.39-1.44 / 4.1-4.2 ms | 1.29-1.36 / 4.2-4.3 ms; 1.16 / 4.1 after the fix below (two runs) | 0.71 ms | 1.15 ms |
+
+  At 20,000 enemies the 3D view's CPU time is the game filling its scene
+  (0.53 ms; 0.78 before writing the enemies' matrices out instead of
+  composing them from quaternions) and `render()` (0.32 ms). Its GPU time is
+  4x MSAA over 1280x800 and every enemy drawn: no culling yet (M2).
+- **`kin_draw_bench 200 N meshes`**, 1280x720 view, 4x MSAA:
+
+  | N | Case | `render()` CPU, 1 thread / workers | GPU |
+  |---|---|---|---|
+  | 2,000 | boxes, one draw | 0.031 / 0.028 ms | 0.15 ms |
+  | 20,000 | boxes, one draw (240k triangles) | 0.23 / 0.15-0.16 ms | 0.32-0.47 ms |
+  | 20,000 | spheres, one draw (10.6M triangles) | 0.26 / 0.19-0.20 ms | 1.6-1.7 ms |
+  | 20,000 | separate draws | 1.73-1.76 / 1.74-1.78 ms (about 85 ns a draw) | 1.0 ms |
+
+- 2D unchanged against 0.2.6 (`kin_draw_bench`, four rounds interleaved):
+  within about 3% everywhere (draw_texture 0.540 / 0.547 ms min, fill_rect
+  0.398 / 0.407, draw_sprites 0.097 / 0.100, shapes immediate 2.16 / 2.15).
+- Tests: `kin-render3d` (meshes face out, validation, scenes, cameras, the
+  SDL fallback; on SDL_GPU: depth order with and without MSAA, lighting and
+  emissive light, instances and tints, instances filled on workers, culling,
+  2D before and after a view and a view rendered twice in a frame, linear HDR,
+  meshes outliving the renderer), passing on the RTX 4080 and lavapipe.
+  Signal Siege's own check (`kin-examples`: the ship where the camera puts it,
+  aiming round trips, the checksum untouched) runs where SDL_GPU is and skips
+  elsewhere: not on the lavapipe CI job, which builds without the examples
+  (adding them there is left for after the `ci/faster` branch reshapes the
+  jobs).
+
+The plan as it was:
+
+Signal Siege's simulation, unchanged, drawn in 3D from a chase camera behind
+and above the player: `signal_siege --view=3d`. No game design, a ready-made
+benchmark, and a screenshot test from the first week.
+
+- `MeshData` (positions, normals, UVs, colours, indices, submeshes)
+  validated; `Mesh`, static vertex and index buffers uploaded once.
+  `kin::meshes`: box, sphere, cylinder, torus, star prism, plane, made in
+  code.
+- `View3D`: colour + depth, MSAA 1/2/4 resolved into the sampled texture,
+  resized with the window; `render()` interleaved with 2D.
+- `Camera3D`: perspective and orthographic, `look_at`, `orbit`, `project`
+  to 2D coordinates, `ray` from a 2D point.
+- Materials: **unlit** and **lit** (Lambert from a sun and ambient, plus an
+  emissive term). Opaque only, sorted by pipeline then front to back.
+- **Instancing**: `draw_instanced(mesh, transforms)`, per-instance
+  transforms and colours in a storage buffer, filled on the job system for
+  large batches (as `draw_sprites` is).
+- The HUD and the reticle drawn over the view unchanged.
+- Acceptance: the same checksum with `--view=3d` as without (drawing doesn't
+  touch the simulation); frame times against the M0 baseline at both enemy
+  counts; on the lavapipe CI job, a shot test at a small enemy count (the
+  player where the camera puts it, the deck lit from the sun's side).
+- Bench: `kin_draw_bench ... meshes` (N instances of a mesh in a view).
+
+### M2 — First person (stage B)
+
+`examples/signal_breach`: a new simulation beside Signal Siege's (which
+stays as it is), sharing its enemies, spawning and scoring.
+
+- **Engine input**: relative mouse mode (the cursor captured, raw motion
+  read each frame, released on pause and focus loss), with a sensitivity
+  setting. Kin's input has only absolute mouse positions today.
+- The level: a cell grid with floor heights and walls, drawn as instanced
+  boxes and ramps; the player walks, jumps and collides against it.
+- Enemies fly in 3D (Signal Siege's patterns lifted off the floor); shots
+  are rays (the player's) and moving spheres (theirs).
+- **The gun**: an overlay pass in the same view, its own camera and field
+  of view, depth cleared, so it never clips into walls.
+- **Frustum culling** of instances and draws, on the job system.
+- Health bars and damage numbers placed with `Camera3D::project`.
+- **ECS**: `Transform3D`, `WorldTransform3D` (the flecs hierarchy, as 2D's)
+  and `MeshRenderer`, since enemies are entities already; shots and sparks
+  stay plain arrays, as in Signal Siege.
+- **Autopilot** aims in 3D, so headless runs, the benchmark and agents still
+  play whole matches.
+- Acceptance: a seeded headless match gives the same checksum run to run
+  and with one job worker; mouse to screen latency measured (input sampled
+  late, the frame cap, GPU wait) and written down; frame times at 2,000 and
+  20,000 enemies.
+
+### M3 — What makes it a shooter (stage C)
+
+- **Bloom** on the view's HDR texture: glowing shots and enemies.
+- **Point lights**: muzzle flashes and explosions, at most 16 a frame,
+  forward shaded, chosen by distance and strength; no clustering.
+- **Transparency**: sparks and explosion particles drawn additively, tested
+  against depth but not writing it; alpha-blended draws sorted back to
+  front. `render.overdraw` watched, since this is where it grows.
+- **Shadows**: one directional shadow map fitted to the level, PCF filtered.
+- **Positional audio**: the listener gets a facing direction and a height;
+  emitters pan and roll off in 3D.
+- **glTF** through cgltf, for the gun and the level's props, with
+  base-colour textures (mipmapped) and hot reload through the asset system.
+- Acceptance: frame times at both enemy counts against M2 with everything
+  on, and each feature's cost alone (a GPU scope per pass); shot tests for a
+  muzzle light on a wall and a shadow on the deck.
+
+### M4 — Studio parity
+
+- **Picking**: an optional R32_UINT id target written beside colour;
+  `view.pick(point)` returns the id and the 3D point (from depth), read back
+  only for the pixels asked.
+- **Wireframe** (line fill mode, where the device has it) and a highlight
+  tint per draw (the studio's glow on changed parts).
+- The ground with the map's grid lines; the studio's mesh export loaded into
+  `MeshData`; a view kept and not re-rendered while nothing changes.
+- Acceptance: kin-render-studio's 3D tab drawn by `View3D`; the kiln within
+  a few levels per channel of the CPU picture; picture time against the M0
+  baseline; picking returns the same part.
+
+### Later, each on request
+
+Gamepad aiming (unless kin's gamepad input lands first, then in M2);
+skinned meshes and glTF animation; metallic-roughness materials and an
+environment light; a 3D physics engine (Jolt), only if the cell grid stops
+being enough; agent interface additions (`render.3d` stats, `view.pick`
+over the server) once an agent needs them.
+
+## How it is tested
+
+- **State**: the simulation's checksum is the test surface, as Signal
+  Siege's is; seeded headless matches, run twice alike and once with one job
+  worker.
+- **Math and data**: ordinary unit tests, everywhere.
+- **Pixels**: GPU rasterization is not bit-identical across drivers. Shot
+  tests run on the lavapipe CI job at small enemy counts and 256² to 640x360
+  views, compare with a tolerance, and test what matters (where things are,
+  which side is lit, that a light reaches a wall), not exact images.
+  Locally, repeat a doubtful shot several times before blaming the code.
+- **Speed**: `signal_siege --benchmark --view=3d` and the Signal Breach
+  benchmark, A/B with separately built binaries, min/median. Check
+  `nvidia-smi` for other jobs on the GPU before trusting GPU timings.
+- **Headless runs**: 3D needs `KIN_RENDER_BACKEND=gpu` (which keeps a real
+  video driver headless). Without it the game still runs and its state is
+  still checked; views stay empty.
+
+## Risks
+
+- **Scope.** A shooter pulls hard toward a full 3D engine. The milestones
+  stop where the game is playable and looks like a shooter; anything past
+  M4 waits for a request, and nothing in 2D may get slower (bench before
+  merging anything back).
+- **Latency and pacing.** A shooter shows a dropped frame or a frame of
+  input lag that a card game hides. Measured in M2, not assumed.
+- **Many small draws.** The 2D work found per-call cost, not per-byte cost,
+  dominates. Everything repeated is instanced from the start; draws are
+  counted per frame and kept in the dozens, not thousands.
+- **Overdraw.** Particles, bloom and the gun overlay add full-screen work;
+  `render.overdraw` and GPU scopes per pass show where.
+- **Two coordinate systems.** 2D is Y-down in draw units, 3D Y-up in metres.
+  The bridge is explicit: `Camera3D::project`/`ray` take and return 2D draw
+  coordinates of the rectangle the view is laid into. The 2D transform stack
+  does not reach inside a view; it moves the laid-in texture.
+- **Device differences.** Depth formats, MSAA counts and line fill mode
+  vary; each is checked at start and degrades (D24, fewer samples, no
+  wireframe) with a log line, never a failure.
+- **Lavapipe speed.** CI shot tests stay small.
+
+## Decisions wanted
+
+1. **Stage A as a flag on Signal Siege** (`--view=3d`, recommended: same
+   binary, same benchmark, same checksum) or as the first build of Signal
+   Breach.
+2. **Gamepad**: wait for kin's own gamepad input, or add aiming with one in
+   M2.
+3. **Whether the studio's parity (M4) stays in this branch** or follows it.

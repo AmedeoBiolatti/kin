@@ -1,6 +1,10 @@
 // Times drawing many quads a frame on the SDL_GPU backend, three ways:
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
+#include <kin/core/jobs.hpp>
 #include <kin/platform/app.hpp>
+#if defined(KIN_EXPERIMENTAL_3D)
+#include <kin/render3d/renderer3d.hpp>
+#endif
 #include <kin/renderer/cached_target.hpp>
 #include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/render_view.hpp>
@@ -689,6 +693,100 @@ int cached(int frames) {
     return 0;
 }
 
+#if defined(KIN_EXPERIMENTAL_3D)
+// 3D views (kin/render3d): `count` lit meshes in a 1280 x 720 view with 4x
+// MSAA, laid over the frame. Boxes and spheres in one instanced draw each;
+// then `count` draws that can't merge (two meshes in turn). With and without
+// worker threads filling the instances.
+int meshes(int frames, int count) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "mesh-bench", .width = 1280, .height = 720, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    if (!backend || backend->name() != "SDL_GPU") {
+        std::fprintf(stderr, "SDL_GPU backend unavailable\n");
+        return 1;
+    }
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    kin::Renderer3D r3d{*renderer};
+    const kin::Mesh box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f}));
+    const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(0.35f, 24, 12));
+    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)});
+    kin::JobSystem jobs;
+    // A grid on the ground, square, seen from above at an angle.
+    const int side = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count)))));
+    const auto place = [&](int i, float turn) {
+        const float x = static_cast<float>(i % side) - side * 0.5f, z = static_cast<float>(i / side) - side * 0.5f;
+        return kin::Mat4f::translation({x, 0.0f, z}) * kin::Mat4f::rotation_y(turn + static_cast<float>(i));
+    };
+    kin::Scene3D scene;
+    scene.camera = kin::Camera3D::orbit({}, 30.0f, 45.0f, static_cast<float>(side) * 1.1f + 2.0f, 50.0f);
+    struct Case {
+        const char* name;
+        int kind; // 0 boxes, 1 balls, 2 separate draws
+    };
+    for (const Case c : {Case{"boxes, one draw", 0}, Case{"spheres, one draw", 1}, Case{"separate draws", 2}}) {
+        for (const bool threads : {false, true}) {
+            renderer->set_job_system(threads ? &jobs : nullptr);
+            std::vector<double> fill, render, gpu;
+            const auto frame = [&](int f) {
+                const auto t0 = clock::now();
+                scene.clear();
+                const float turn = static_cast<float>(f);
+                if (c.kind == 2) {
+                    for (int i = 0; i < count; ++i) {
+                        scene.draw(i % 2 == 0 ? box : ball, place(i, turn), {.color = kin::Color::rgb(200, 120, 80)});
+                    }
+                } else {
+                    const auto room = scene.add_instances(c.kind == 0 ? box : ball, static_cast<std::size_t>(count),
+                                                          {.color = kin::Color::rgb(200, 120, 80)});
+                    for (int i = 0; i < count; ++i) {
+                        room[static_cast<std::size_t>(i)] = {place(i, turn), kin::Color::rgb(255, 255, static_cast<kin::u8>(i % 256))};
+                    }
+                }
+                const auto t1 = clock::now();
+                renderer->clear(kin::Color::rgb(0, 0, 0));
+                r3d.render(view, scene);
+                renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
+                renderer->present();
+                fill.push_back(ms(t0, t1));
+                render.push_back(r3d.stats().cpu_ms);
+                gpu.push_back(renderer->backend_stats().last_gpu_frame_ms);
+            };
+            for (int f = 0; f < 10; ++f) {
+                frame(f);
+            }
+            fill.clear();
+            render.clear();
+            gpu.clear();
+            std::vector<kin::u8> one;
+            kin::Vec2i one_size{};
+            renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+            const auto t0 = clock::now();
+            for (int f = 0; f < frames; ++f) {
+                frame(f);
+            }
+            renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+            const double per_frame = ms(t0, clock::now()) / frames;
+            std::erase_if(gpu, [](double v) { return v <= 0.0; });
+            for (auto* v : {&fill, &render, &gpu}) {
+                std::ranges::sort(*v);
+            }
+            const auto median = [](const std::vector<double>& v) { return v.empty() ? 0.0 : v[v.size() / 2]; };
+            std::printf("%d meshes, %-17s %-10s: scene %6.3f ms, render() %6.3f ms (min %6.3f), frame %6.3f ms, GPU %6.3f ms, "
+                        "%u draws, %llu triangles\n",
+                        count, c.name, threads ? "(workers)" : "(1 thread)", median(fill), median(render),
+                        render.empty() ? 0.0 : render.front(), per_frame, median(gpu), r3d.stats().draws,
+                        static_cast<unsigned long long>(r3d.stats().triangles));
+        }
+    }
+    renderer->set_job_system(nullptr);
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     if (argc > 3 && std::string_view{argv[3]} == "cached") {
@@ -707,6 +805,11 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "shapes") {
         return shapes(frames, quads);
     }
+#if defined(KIN_EXPERIMENTAL_3D)
+    if (argc > 3 && std::string_view{argv[3]} == "meshes") {
+        return meshes(frames, quads);
+    }
+#endif
     kin::App app{};
     kin::Window& window = app.create_window({.title = "draw-bench", .width = 1280, .height = 720, .hidden = true});
     std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);

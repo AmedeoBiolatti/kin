@@ -13,6 +13,9 @@
 #include "gpu_frame_timer.hpp"
 #include "gpu_geometry_batch.hpp"
 #include "gpu_pipeline_cache.hpp"
+#if defined(KIN_EXPERIMENTAL_3D)
+#include "gpu_renderer3d.hpp"
+#endif
 #include "gpu_shader.hpp"
 #include "gpu_texture.hpp"
 
@@ -135,6 +138,9 @@ public:
         _jobs = jobs;
         _device.set_job_system(jobs);
     }
+#if defined(KIN_EXPERIMENTAL_3D)
+    IRenderer3DBackend* renderer_3d() override;
+#endif
 
     void fill_rect(Rectf rect, Color color) override;
     void draw_rect(Rectf rect, Color color) override;
@@ -201,6 +207,9 @@ public:
     void set_post_process(std::span<const PostProcessPass> passes) override;
 
 private:
+#if defined(KIN_EXPERIMENTAL_3D)
+    friend class gpu::GpuRenderer3D; // records views into this frame, with its device and pipelines
+#endif
     // The blend a draw uses: its own (`natural`) under BlendMode::Alpha, else
     // the one set with set_blend_mode.
     gpu::GpuBlendMode resolve_blend(gpu::GpuBlendMode natural) const;
@@ -407,6 +416,9 @@ private:
     Vec2i coordinate_extent() const; // the same, in whole units
     f32 coordinates_to_pixels() const; // the current target's pixels per draw unit
     std::vector<std::vector<SDL_Rect>> _saved_clip_stacks; // clip per pushed target
+#if defined(KIN_EXPERIMENTAL_3D)
+    std::unique_ptr<gpu::GpuRenderer3D> _renderer_3d; // made when a Renderer3D first asks
+#endif
     std::vector<gpu::GpuShader> _shaders;                // custom material fragment shaders (handle = index+1)
     Vec2f _view_offset{0.0f, 0.0f};                      // active viewport origin (coord space); added to all verts
     std::vector<Vec2f> _view_offset_stack;              // saved offsets for push/pop_viewport

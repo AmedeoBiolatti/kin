@@ -86,7 +86,15 @@ struct GpuSdfInstance {
     u8 stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 0;
 };
 
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances };
+// A 3D mesh's vertex (mesh.vert): 36 bytes.
+struct GpuMeshVertex {
+    f32 x = 0.0f, y = 0.0f, z = 0.0f;
+    f32 nx = 0.0f, ny = 1.0f, nz = 0.0f;
+    f32 u = 0.0f, v = 0.0f;
+    u8 r = 255, g = 255, b = 255, a = 255;
+};
+
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances, MeshVertices };
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {

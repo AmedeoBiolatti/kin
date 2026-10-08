@@ -1,6 +1,7 @@
 #include <kin/l10n/localization.hpp>
 
 #include <kin/assets/content.hpp>
+#include "arena_3d.hpp"
 #include "arena_art.hpp"
 #include "example_common.hpp"
 #include "siege_audio.hpp"
@@ -8,7 +9,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 #include <kin/platform/app.hpp>
 #include <iostream>
 #include <SDL3/SDL.h>
@@ -150,6 +153,51 @@ static void check_painter() {
     renderer.present();
 }
 
+#if defined(KIN_EXPERIMENTAL_3D)
+// Signal Siege in 3D (--view 3d), where SDL_GPU is (skipped elsewhere unless
+// KIN_REQUIRE_GPU_TESTS): the ship shows where the camera puts it, the mouse
+// aims where it points, and drawing leaves the simulation alone.
+static void check_painter_3d() {
+    using namespace examples;
+    const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
+    const bool require = required && required[0] != '\0' && std::string_view{required} != "0";
+    kin::App app;
+    auto& window = app.create_window({.title = "siege-3d", .width = 1280, .height = 800, .hidden = true});
+    auto backend = make_render_backend(window, false, true);
+    if (!backend || backend->name() != "SDL_GPU") {
+        if (require) throw std::runtime_error("check_painter_3d: SDL_GPU unavailable");
+        std::cerr << "[SKIP] check_painter_3d: SDL_GPU unavailable\n";
+        return;
+    }
+    Renderer2D renderer{std::move(backend)};
+    renderer.set_logical_size(1280, 800);
+    Arena arena(180, 42);
+    for (int i = 0; i < 240; ++i) arena.step(1.0f / 120, arena.autopilot(), true);
+    const u64 checksum = arena.checksum();
+    ArenaPainter3D painter;
+    painter.init(renderer);
+    assert(painter.available());
+    renderer.clear(Color::rgb(12, 20, 28));
+    painter.draw(renderer, arena, {0, 0, 1280, 800});
+    assert(arena.checksum() == checksum);
+    assert(painter.stats().draws >= 4 && painter.stats().instances >= u32(arena.enemy_count()));
+    // The ship, cyan, at its place on the screen.
+    const auto ship = painter.world_to_screen(arena.player, .45f);
+    assert(ship && ship->x > 0 && ship->x < 1280 && ship->y > 0 && ship->y < 800);
+    std::vector<u8> px;
+    Vec2i size{};
+    assert(renderer.read_rgba({ship->x - 1, ship->y - 1, 3, 3}, px, size) && !px.empty());
+    const std::size_t mid = (std::size_t(size.y / 2) * std::size_t(size.x) + std::size_t(size.x / 2)) * 4;
+    assert(px[mid + 2] > 120 && px[mid + 1] > 120 && px[mid] < px[mid + 1]);
+    // Aiming at the screen point under an arena point finds that point again.
+    const Vec2f spot{arena.player.x + 300, arena.player.y - 120};
+    const auto shown = painter.world_to_screen(spot, .45f);
+    const auto found = shown ? painter.screen_to_world(*shown) : std::nullopt;
+    assert(found && std::abs(found->x - spot.x) < 2 && std::abs(found->y - spot.y) < 2);
+    renderer.present();
+}
+#endif
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--native-game") {
         check_native_display(argc > 2 ? argv[2] : nullptr, true);
@@ -193,6 +241,9 @@ int main(int argc, char** argv) {
     first.step(1.0f / 120, {.move = {1, 0}, .fire = true, .dash = true});
     assert(first.player.x > start.x && first.dash_cooldown > 0 && !first.shots.empty());
     check_painter();
+#if defined(KIN_EXPERIMENTAL_3D)
+    check_painter_3d();
+#endif
     check_siege_flow();
 
     Tracker tracker(10000, 7), replay(10000, 7);

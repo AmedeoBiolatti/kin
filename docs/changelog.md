@@ -7,6 +7,22 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- Experimental 3D drawn inside the 2D frame (the `KIN_EXPERIMENTAL_3D` CMake
+  option, on in the `exp/3d-rendering` branch; see
+  [3D rendering](rendering_3d.md) and [the plan](3d_plan.md)):
+  `kin/core/math3d.hpp` (`Vec3f`, `Vec4f`, `Quatf`, `Mat4f`, reverse-Z
+  projections, `project`, `unproject`, `screen_ray`); meshes from data or made
+  in code (`kin::meshes`); views with depth and MSAA, laid in with
+  `draw_texture` and rendered between the 2D draws around them; scenes of
+  instanced draws, lit by a sun and ambient light, emissive, unlit or
+  double-sided; perspective and orthographic cameras that project to and
+  pick from 2D coordinates. SDL_GPU only: under SDL_Renderer a view shows its
+  background.
+- Signal Siege `--view 3d`: the same run drawn in 3D from behind the player,
+  with the same checksum.
+
 ## [0.2.6] — 2026-10-07
 
 A release for sound, other languages and shipping. Audio mixes on the

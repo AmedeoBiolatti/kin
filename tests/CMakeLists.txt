@@ -20,6 +20,7 @@ function(kin_add_test target test_name)
 endfunction()
 
 kin_add_test(kin_core_tests kin-core SOURCES core_tests.cpp)
+kin_add_test(kin_math3d_tests kin-math3d SOURCES math3d_tests.cpp)
 kin_add_test(kin_shape_tests kin-shapes SOURCES shape_tests.cpp)
 kin_add_test(kin_jobs_tests kin-jobs SOURCES jobs_tests.cpp)
 kin_add_test(kin_instrumentation_tests kin-instrumentation
@@ -106,6 +107,9 @@ if(KIN_GLSLC)
     add_dependencies(kin_renderer_tests kin_test_shaders)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
+if(KIN_EXPERIMENTAL_3D)
+    kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp)
+endif()
 kin_add_test(kin_isometric_demo_tests kin-isometric-demo SOURCES isometric_demo_tests.cpp)
 kin_add_test(kin_tilemap_tests kin-tilemap SOURCES tilemap_tests.cpp)
 

@@ -428,10 +428,23 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .materials_2d = true, // G3: real SPIR-V fragment-shader materials
         .gradients = true,
         .text = false,
+#if defined(KIN_EXPERIMENTAL_3D)
+        .rendering_3d = gpu::GpuRenderer3D::supported(_device.handle()),
+#else
         .rendering_3d = false,
+#endif
         .data_textures = _data_textures,
     };
 }
+
+#if defined(KIN_EXPERIMENTAL_3D)
+IRenderer3DBackend* GpuRenderer2DBackend::renderer_3d() {
+    if (!_renderer_3d && gpu::GpuRenderer3D::supported(_device.handle())) {
+        _renderer_3d = std::make_unique<gpu::GpuRenderer3D>(*this, _device);
+    }
+    return _renderer_3d.get();
+}
+#endif
 
 void GpuRenderer2DBackend::ensure_scene() {
     // Render at NATIVE resolution for crispness: under logical presentation the

@@ -1,0 +1,105 @@
+#pragma once
+
+// Meshes for kin's experimental 3D (docs/3d_plan.md): triangles as data
+// (MeshData), and the same kept on the GPU (Mesh, from Renderer3D::create_mesh).
+
+#include <kin/core/math3d.hpp>
+#include <kin/core/types.hpp>
+#include <kin/renderer/color.hpp>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace kin {
+
+struct MeshVertex {
+    Vec3f position{};
+    Vec3f normal{0.0f, 1.0f, 0.0f}; // length 1, away from the front face
+    Vec2f uv{};
+    Color color = colors::white; // times the draw's colour
+};
+
+// An axis-aligned box.
+struct Bounds3 {
+    Vec3f min{};
+    Vec3f max{};
+
+    Vec3f center() const { return (min + max) * 0.5f; }
+    Vec3f size() const { return max - min; }
+    // The radius of the sphere about center() that holds it.
+    f32 radius() const { return length(size()) * 0.5f; }
+};
+
+struct MeshData {
+    std::vector<MeshVertex> vertices;
+    // Three a triangle, counter-clockwise seen from its front (where its
+    // normals point). Empty: the vertices are the triangles, three by three.
+    std::vector<u32> indices;
+
+    std::size_t triangle_count() const { return (indices.empty() ? vertices.size() : indices.size()) / 3; }
+    // Whether it can be drawn: whole triangles, indices in range, finite
+    // positions. False, with why in `error`, when not.
+    bool validate(std::string* error = nullptr) const;
+    Bounds3 bounds() const;
+    // Appends `other`, moved by `transform` (normals turned with it). The
+    // result is indexed.
+    void append(const MeshData& other, const Mat4f& transform = Mat4f::identity());
+};
+
+// The backend's copy of a mesh (Renderer3D::create_mesh).
+class IMeshBackend {
+public:
+    virtual ~IMeshBackend() = default;
+};
+
+// A mesh on the GPU, made from MeshData; cheap to copy (copies share it).
+// Empty where 3D isn't available: drawing it then does nothing.
+class Mesh {
+public:
+    Mesh() = default;
+    Mesh(std::shared_ptr<IMeshBackend> backend, u32 vertex_count, u32 index_count, Bounds3 bounds)
+        : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds) {}
+
+    bool valid() const { return _backend != nullptr; }
+    explicit operator bool() const { return valid(); }
+    u32 vertex_count() const { return _vertex_count; }
+    u32 index_count() const { return _index_count; }
+    u32 triangle_count() const { return _index_count / 3; }
+    const Bounds3& bounds() const { return _bounds; }
+    const std::shared_ptr<IMeshBackend>& backend() const { return _backend; }
+
+    friend bool operator==(const Mesh& a, const Mesh& b) { return a._backend == b._backend; }
+
+private:
+    std::shared_ptr<IMeshBackend> _backend;
+    u32 _vertex_count = 0;
+    u32 _index_count = 0;
+    Bounds3 _bounds{};
+};
+
+// Shapes made in code, centred on the origin (a plane and a box's base on
+// it where said), with normals and UVs.
+namespace meshes {
+
+// `size` along X, Y and Z; flat faces.
+MeshData box(Vec3f size);
+// A flat square on the XZ plane, facing +Y, `cells` squares along each side.
+MeshData plane(Vec2f size, i32 cells = 1);
+// Smooth, `segments` round the Y axis, `rings` from pole to pole.
+MeshData sphere(f32 radius, i32 segments = 24, i32 rings = 12);
+// Along Y, `height` tall, its caps flat, its side smooth.
+MeshData cylinder(f32 radius, f32 height, i32 segments = 24);
+// A cone along Y, its point at the top.
+MeshData cone(f32 radius, f32 height, i32 segments = 24);
+// A ring round the Y axis: `radius` to the tube's centre, `tube` its radius.
+MeshData torus(f32 radius, f32 tube, i32 segments = 32, i32 sides = 12);
+// A star of `points` points in the XZ plane, `outer` and `inner` radii,
+// `height` thick along Y; flat faces.
+MeshData star_prism(i32 points, f32 outer, f32 inner, f32 height);
+// Eight faces, `radius` to each corner.
+MeshData octahedron(f32 radius);
+
+} // namespace meshes
+
+} // namespace kin

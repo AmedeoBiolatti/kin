@@ -158,6 +158,11 @@ endif()
 if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
+if(KIN_EXPERIMENTAL_3D)
+    target_sources(kin_engine PRIVATE src/render3d/camera3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
+                                      src/render3d/scene3d.cpp src/renderer/gpu/gpu_renderer3d.cpp)
+    target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
+endif()
 if(KIN_SHIPPING)
     target_compile_definitions(kin_engine PUBLIC KIN_SHIPPING)
 endif()
@@ -204,7 +209,7 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
               pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
-              transition_iris.frag transition_crossfade.frag)
+              transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.

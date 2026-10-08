@@ -54,6 +54,10 @@ public:
     GpuTexture create_render_texture(u32 width, u32 height,
                                      SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID);
     GpuTexture create_texture_from_rgba(const u8* pixels, u32 width, u32 height);
+    // A 2D texture of `format` for `usage`, `samples` a pixel (3D views'
+    // colour, depth and resolve targets).
+    GpuTexture create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
+                             SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1);
     // A depth-stencil target of depth_stencil_format() (stencil clips).
     GpuTexture create_depth_stencil(u32 width, u32 height);
     // The depth-stencil format this device draws into, INVALID if none.
@@ -111,6 +115,8 @@ public:
     u64 take_first_submit_ns() { return std::exchange(_first_submit_ns, 0); }
 
     SDL_GPUDevice* handle() const { return _device; }
+    // The handle as textures hold it: null once the device is gone.
+    const SharedDevice& shared() const { return _shared; }
     SDL_GPUTextureFormat swapchain_format() const { return _swapchain_format; }
     SDL_GPUPresentMode present_mode() const { return _present_mode; }
     const char* driver_name() const;

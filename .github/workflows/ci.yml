@@ -178,7 +178,7 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
 
       - name: Build
-        run: cmake --build build --parallel 4 --target kin_renderer_tests
+        run: cmake --build build --parallel 4 --target kin_renderer_tests kin_render3d_tests
 
       - name: Test
-        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-renderer$' --output-on-failure --timeout 300
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-(renderer|render3d)$' --output-on-failure --timeout 300
