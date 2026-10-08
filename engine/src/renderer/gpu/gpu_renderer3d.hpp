@@ -102,7 +102,9 @@ private:
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
-    SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass) const;
+    // `mask`: for a Blend3D::Mask material, in the shadow and pick passes (the
+    // others discard in mesh.frag itself).
+    SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution`, made or remade; false without one.
@@ -123,6 +125,9 @@ private:
     GpuShader _bloom_shader;      // bloom.frag
     GpuShader _output_shader;     // view_output.frag
     GpuShader _pick_shader;       // pick.frag
+    GpuShader _shadow_mask_shader;        // shadow_mask.frag
+    GpuShader _shadow_mask_vertex_shader; // shadow_mask.vert
+    GpuShader _pick_mask_shader;          // pick_mask.frag
     SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;

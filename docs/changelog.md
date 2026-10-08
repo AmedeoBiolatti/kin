@@ -65,6 +65,19 @@ releases may change APIs.
   double-sided), the shadow pass has its own vertex shader, and the map is
   no longer cycled. At 20,000 enemies Signal Breach's shadows take about a
   fifth of the GPU time they did. `Render3DStats::shadow_casters`.
+- 3D materials are glTF's metallic-roughness (G1a of the plan):
+  `Material3D::metallic`, `roughness`, `metallic_roughness`, `normal` (and
+  `normal_scale`), `occlusion` (and `occlusion_strength`) and
+  `emissive_texture`, lit with a Cook-Torrance specular (GGX, Smith, Schlick)
+  by the sun, fill and point lights, and reflecting the ambient light; normal
+  maps need no tangents. `Blend3D::Mask` with `alpha_cutoff`: cut-outs that
+  are drawn, picked and shadowed cut out. `Renderer3D::load_model` reads all
+  of it (data maps as linear data, not sRGB colour), and alpha `MASK`.
+  Point lights now fall off with the square of the distance, windowed to
+  nothing at `radius`: `PointLight::color` is the light a unit away. Signal
+  Breach's flashes and the Cornell reference scene's lamp are rescaled.
+  Surfaces now have the specular of a rough dielectric by default
+  (`roughness` 1, `metallic` 0): a little more light than before.
 
 ### Fixed
 

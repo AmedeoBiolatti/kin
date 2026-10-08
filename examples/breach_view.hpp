@@ -62,7 +62,7 @@ private:
     std::vector<Vec3f> _crates; // where crates stand
 
     struct Spark { Vec3f pos{}, velocity{}; float life = 0; Color color{}; };
-    struct Flash { Vec3f pos{}; Vec3f color{}; float radius = 0, life = 0, length = 0; };
+    struct Flash { Vec3f pos{}; Vec3f color{}; float radius = 0, life = 0, length = 0, size = 0.3f; };
     std::vector<Flash> _flashes;
     struct Tracer { Vec3f from{}, to{}; float life = 0; };
     struct Number { Vec3f pos{}; float life = 0; bool kill = false; };

@@ -1249,6 +1249,247 @@ void test_gpu_shadows_into_view() {
 
 } // namespace
 
+// --- Physically based materials (G1a) ---
+
+// A square in the xy plane facing +z, UV (0, 0) at its top left, `half` a side.
+MeshData uv_square(float half) {
+    MeshData square;
+    square.vertices = {{{-half, -half, 0}, {0, 0, 1}, {0, 1}}, {{half, -half, 0}, {0, 0, 1}, {1, 1}},
+                       {{half, half, 0}, {0, 0, 1}, {1, 0}}, {{-half, half, 0}, {0, 0, 1}, {0, 0}}};
+    square.indices = {0, 1, 2, 0, 2, 3};
+    return square;
+}
+
+float linear_level(Color c) { return kin::srgb_to_linear(static_cast<float>(c.r) / 255.0f); }
+
+// A metal has no diffuse light: away from the highlight it is dark where a
+// dielectric of the same colour is bright; at the highlight both shine (the
+// dielectric's 4% of a sharp lobe still reaches white); and roughness widens it.
+void test_gpu_metal_and_roughness() {
+    with_gpu("test_gpu_metal_and_roughness", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+        // The sun at the camera: the highlight is at the sphere's centre.
+        scene.lights.sun = {.direction = {0.0f, 0.0f, 1.0f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        const auto shoot = [&](const kin::Material3D& material) {
+            scene.clear();
+            scene.draw(sphere, Mat4f::identity(), material);
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const Color grey = Color::rgb(190, 190, 190);
+        const Pixels plastic = shoot({.color = grey, .metallic = 0.0f, .roughness = 0.3f});
+        const Pixels metal = shoot({.color = grey, .metallic = 1.0f, .roughness = 0.3f});
+        // Where the surface leans 45 degrees from the light: outside the lobe.
+        const auto lean = scene.camera.project({0.707f, 0.0f, 0.707f}, screen);
+        assert(lean);
+        const float diffuse = linear_level(plastic.at(lean->pos)), shine = linear_level(metal.at(lean->pos));
+        assert(diffuse > 0.2f && shine < 0.2f * diffuse);
+        // The centre: both bright; the metal's tinted by its colour, the plastic's white.
+        assert(plastic.at(80, 60).r > 230 && metal.at(80, 60).r > 230);
+
+        // The lobe's size: pixels over a quarter of the light, a metal smooth and rough.
+        const auto lobe = [&](float roughness) {
+            const Pixels p = shoot({.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
+            int count = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    count += linear_level(p.at(x, y)) > 0.25f ? 1 : 0;
+                }
+            }
+            return count;
+        };
+        const int sharp = lobe(0.2f), wide = lobe(0.6f);
+        assert(sharp > 0 && wide > 2 * sharp);
+
+        // A roughness floor: a mirror's lobe is still a patch, not lost between pixels.
+        assert(lobe(0.0f) > 0);
+    });
+}
+
+// A normal map tilts the shading: a pixel's normal leans where the map says,
+// +x along u and up (+y here) where green is high; a flat map changes nothing.
+void test_gpu_normal_map() {
+    with_gpu("test_gpu_normal_map", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh square = r3d.create_mesh(uv_square(0.9f));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto map = [&](kin::u8 r, kin::u8 g, kin::u8 b) {
+            const kin::u8 texel[4] = {r, g, b, 255};
+            const kin::Texture texture = renderer.create_texture({1, 1}, kin::TextureFormat::Rgba8, texel);
+            assert(texture.valid());
+            return texture;
+        };
+        const kin::Texture flat = map(128, 128, 255), toward_x = map(255, 128, 203), away_x = map(0, 128, 203),
+                           up = map(128, 255, 203), down = map(128, 0, 203);
+        // The light from up and the right, at 45 degrees to the quad's normal both ways.
+        const auto shoot = [&](const kin::Texture& normal, Vec3f sun, float scale = 1.0f) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+            scene.lights.sun = {.direction = sun, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.draw(square, Mat4f::identity(), {.color = Color::rgb(200, 200, 200), .normal = normal, .normal_scale = scale});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            const Pixels p = read(renderer);
+            renderer.present();
+            return linear_level(p.at(80, 60));
+        };
+        const Vec3f from_right{0.5f, 0.0f, 0.5f}, from_above{0.0f, 0.5f, 0.5f};
+        const float level = shoot(flat, from_right);
+        assert(level > 0.2f);
+        assert(shoot({}, from_right) > 0.95f * level && shoot({}, from_right) < 1.05f * level); // no map: the same as flat
+        // The normal leaned toward the light is brighter, away from it darker.
+        assert(shoot(toward_x, from_right) > 1.15f * level);
+        assert(shoot(away_x, from_right) < 0.4f * level);
+        // Green is up: along -v, which runs down the image.
+        assert(shoot(up, from_above) > 1.15f * shoot(flat, from_above));
+        assert(shoot(down, from_above) < 0.4f * shoot(flat, from_above));
+        // A scale of nothing is a flat map.
+        const float none = shoot(toward_x, from_right, 0.0f);
+        assert(none > 0.95f * level && none < 1.05f * level);
+    });
+}
+
+// Mask: a texture's transparent half is not drawn, casts no shadow and is not
+// picked, the opaque half does all three.
+void test_gpu_alpha_mask() {
+    with_gpu("test_gpu_alpha_mask", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        // A square lying flat (facing +y), a leaf: left half clear, right half green.
+        const kin::Mesh leaf_mesh = r3d.create_mesh(uv_square(1.5f));
+        const kin::u8 texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
+        const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {2, 1});
+        renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+        scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
+        const auto shoot = [&](kin::Blend3D blend) {
+            scene.clear();
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            scene.draw(leaf_mesh, Mat4f::translation({0.0f, 2.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
+                       {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = blend, .texture = leaf}, kin::colors::white, 9);
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto where = [&](const Pixels& p, Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        const auto pixel = [&](Vec3f w) {
+            const kin::Vec2f p = scene.camera.project(w, screen)->pos;
+            return kin::Vec2i{static_cast<int>(p.x), static_cast<int>(p.y)};
+        };
+        const Pixels cut = shoot(kin::Blend3D::Mask);
+        // Seen from above: the floor through the clear half, the leaf on the right.
+        const Color floor_colour = where(cut, {-0.75f, 2.5f, 0.0f});
+        const Color leaf_colour = where(cut, {0.75f, 2.5f, 0.0f});
+        assert(floor_colour.g < 200 && std::abs(int(floor_colour.r) - int(floor_colour.g)) < 12); // grey floor
+        assert(leaf_colour.g > leaf_colour.r + 50);                                                // green leaf
+        // The leaf's shadow, 2.5 m toward -x, falls from its right half only: it
+        // spans x -2.5 to -1 on the floor; the clear half's would be x -4 to -2.5.
+        const Color shadow = where(cut, {-1.75f, 0.0f, 0.0f}), lit = where(cut, {-3.25f, 0.0f, 0.0f});
+        assert(brightness(lit) > 2 * brightness(shadow) && brightness(shadow) > 0);
+        // Picked where drawn.
+        assert(r3d.pick(view, pixel({0.75f, 2.5f, 0.0f})).id == 9 && r3d.pick(view, pixel({0.75f, 2.5f, 0.0f})).hit);
+        const kin::PickResult through = r3d.pick(view, pixel({-0.75f, 2.5f, 0.0f}));
+        assert(!through.hit || through.id != 9);
+
+        // As Opaque the alpha is ignored by the depth tests: the whole square
+        // hides the floor and casts all its shadow.
+        const Pixels solid = shoot(kin::Blend3D::Opaque);
+        assert(brightness(where(solid, {-0.75f, 2.5f, 0.0f})) < 30);
+        assert(brightness(where(solid, {-3.25f, 0.0f, 0.0f})) < brightness(lit) / 2);
+    });
+}
+
+// A point light falls off with the square of the distance: twice as far, a
+// quarter of the light (on a rough surface facing it).
+void test_gpu_inverse_square() {
+    with_gpu("test_gpu_inverse_square", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh wall = r3d.create_mesh(kin::meshes::box({40.0f, 40.0f, 0.2f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto level = [&](float distance, float radius) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 30.0f}, {0.0f, 0.0f, 0.0f}, 20.0f);
+            scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(200, 200, 200)});
+            scene.add_light({.position = {0.0f, 0.0f, distance}, .color = {3.0f, 3.0f, 3.0f}, .radius = radius});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            const Pixels p = read(renderer);
+            renderer.present();
+            return linear_level(p.at(80, 60));
+        };
+        const float near_level = level(2.0f, 100.0f), far_level = level(4.0f, 100.0f), farther = level(8.0f, 100.0f);
+        assert(near_level > 0.3f && near_level < 1.0f);
+        assert(near_level / far_level > 3.6f && near_level / far_level < 4.4f);
+        assert(far_level / farther > 3.6f && far_level / farther < 4.4f);
+        // Windowed to nothing at the radius, and dimmer than the bare law inside it.
+        assert(level(4.0f, 4.0f) < 0.01f);
+        assert(level(2.0f, 8.0f) < near_level && level(2.0f, 8.0f) > 0.95f * near_level);
+    });
+}
+
+// A model's materials: every glTF metallic-roughness field read; its maps
+// of data are numbers, not colours (a flat normal map shades as none).
+void test_gpu_model_materials() {
+    with_gpu("test_gpu_model_materials", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        std::string error;
+        const kin::Model model = r3d.load_model(std::filesystem::path{KIN_TEST_MODELS} / "pbr.glb", &error);
+        assert(model.valid() && model.parts.size() == 3);
+        const auto part = [&](std::string_view name) -> const kin::ModelPart& {
+            for (const kin::ModelPart& p : model.parts) {
+                if (p.name == name) return p;
+            }
+            assert(false);
+            return model.parts.front();
+        };
+        const kin::Material3D& all = part("everything").material;
+        assert(all.metallic == 0.75f && all.roughness == 0.5f && all.normal_scale == 0.5f);
+        assert(all.occlusion_strength == 0.25f && all.alpha_cutoff == 0.375f && all.blend == kin::Blend3D::Mask);
+        assert(all.texture.valid() && all.metallic_roughness.valid() && all.normal.valid() && all.occlusion.valid() &&
+               all.emissive_texture.valid());
+        assert(!(all.metallic_roughness == all.texture) && all.double_sided);
+        assert(part("plain").material.roughness == 1.0f && !part("plain").material.normal.valid());
+
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+        scene.lights.sun = {.direction = {0.0f, 0.0f, 1.0f}, .color = {0.8f, 0.8f, 0.8f}};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        scene.draw(part("mapped").mesh, part("mapped").transform, part("mapped").material);
+        scene.draw(part("plain").mesh, part("plain").transform, part("plain").material);
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, scene));
+        renderer.draw_texture(view.texture(), screen);
+        const Pixels p = read(renderer);
+        const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        const Color with_map = at({-2.0f, 0.0f, 0.0f}), without = at({2.0f, 0.0f, 0.0f});
+        assert(brightness(without) > 300);
+        expect(with_map, without, "a flat normal map, as none", 4);
+        renderer.present();
+    });
+}
+
 int main() {
     test_meshes_face_out();
     test_mesh_validation_and_append();
@@ -1280,5 +1521,10 @@ int main() {
     test_gpu_large_mesh();
     test_gpu_shadow_faces();
     test_gpu_shadows_into_view();
+    test_gpu_metal_and_roughness();
+    test_gpu_normal_map();
+    test_gpu_alpha_mask();
+    test_gpu_inverse_square();
+    test_gpu_model_materials();
     return 0;
 }

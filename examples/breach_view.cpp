@@ -111,7 +111,10 @@ void BreachView::update(Breach& breach, float dt) {
             _tracers.push_back({e.pos, e.to, 0.07f});
             _flash_time = 0.05f;
             _recoil = 1.0f;
-            _flashes.push_back({e.pos, {5.0f, 3.5f, 1.6f}, 7.0f, 0.06f, 0.06f});
+            // A point light's colour is its intensity a unit away and falls with
+            // the square of the distance, no brighter than at its size: about
+            // what the flashes were before (brighter close by, dimmer far off).
+            _flashes.push_back({e.pos, {16.0f, 11.5f, 5.0f}, 7.0f, 0.06f, 0.06f, 0.8f});
             for (int i = 0; i < 3; ++i) {
                 _sparks.push_back({e.to, {rand(_rng, -2, 2), rand(_rng, 0, 3), rand(_rng, -2, 2)}, rand(_rng, .1f, .25f),
                                    Color::rgb(255, 220, 160)});
@@ -127,7 +130,7 @@ void BreachView::update(Breach& breach, float dt) {
             _numbers.push_back({e.pos, 0.7f, kill});
             if (kill) {
                 const LinearColor l = to_linear(c);
-                _flashes.push_back({e.pos, Vec3f{l.r, l.g, l.b} * 4.0f, 5.0f, 0.25f, 0.25f});
+                _flashes.push_back({e.pos, Vec3f{l.r, l.g, l.b} * 8.0f, 5.0f, 0.25f, 0.25f, 1.2f}); // a fireball
             }
             break;
         }
@@ -138,7 +141,7 @@ void BreachView::update(Breach& breach, float dt) {
             }
             break;
         case BreachEvent::Kind::EnemyFire:
-            _flashes.push_back({e.pos, {2.5f, 0.6f, 1.6f}, 3.0f, 0.08f, 0.08f});
+            _flashes.push_back({e.pos, {3.6f, 0.9f, 2.3f}, 3.0f, 0.08f, 0.08f});
             break;
         case BreachEvent::Kind::Hurt:
         case BreachEvent::Kind::Jump:
@@ -181,7 +184,7 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
                                                  : Bounds3{};
     if (_options.lights) {
         for (const Flash& f : _flashes) {
-            _scene.add_light({.position = f.pos, .color = f.color * (f.life / f.length), .radius = f.radius});
+            _scene.add_light({.position = f.pos, .color = f.color * (f.life / f.length), .radius = f.radius, .size = f.size});
         }
     }
 

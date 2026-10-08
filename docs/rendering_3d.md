@@ -76,6 +76,38 @@ instance's tint), `texture` (the base colour's, by the mesh's UVs),
 `receives_shadow`. A transform that mirrors turns a mesh inside out: draw it
 double-sided.
 
+Surfaces are glTF's metallic-roughness model, lit in linear light with a
+Lambert diffuse and a Cook-Torrance specular (GGX distribution, Smith
+visibility, Schlick Fresnel) for the sun, the fill light and point lights:
+
+- `metallic` (0 a dielectric, 1 a metal; default 0) and `roughness` (0 a
+  mirror, 1 chalk; default 1: rough plastic, as before). The colour is the
+  dielectric's diffuse colour, or the metal's reflection. Roughness is
+  floored at 0.045 (a mirror would be a pixel-wide highlight that shimmers).
+- `metallic_roughness`: a texture with roughness in G and metallic in B,
+  times the two factors. `normal` (with `normal_scale`): a tangent-space
+  normal map (green up, as glTF stores it); the tangent frame comes from the
+  UVs on the GPU, so meshes need no tangents. `occlusion` (R, with
+  `occlusion_strength`) dims the ambient light only. `emissive_texture`: a
+  colour times `emissive` (without it, `emissive` is a share of the base
+  colour as before).
+- Maps of data (`metallic_roughness`, `normal`, `occlusion`) are read as the
+  numbers they hold; colours (`texture`, `emissive_texture`) are sRGB, decoded
+  as they are sampled. A texture you make yourself for a data map: 
+  `renderer.create_texture(size, TextureFormat::Rgba8, pixels)` (linear);
+  `create_texture_from_rgba` makes colour.
+- Ambient light is the hemisphere's (`ambient` above to `ground_ambient`
+  below), seen in two ways: along the normal for the diffuse, and along the
+  reflection (turned toward the normal as the surface roughens) times the
+  surface's specular albedo, Karis' fit of the split-sum integral, for the
+  specular: a metal reflects the sky. What the specular takes the diffuse
+  does not. An environment map will replace the hemisphere (G1b of the plan).
+- `blend = Blend3D::Mask` with `alpha_cutoff` (0.5): opaque where the base
+  colour's alpha (times the mesh's, the material's and the copy's) reaches
+  the cutoff, not drawn below it: leaves, fences, grates. Drawn with the
+  opaque (it writes depth), picked and shadowed as cut out (the shadow pass
+  samples the base texture for these). A cut-out is opaque where it stays.
+
 `wireframe` draws only the mesh's triangles' edges, a pixel wide, unlit in
 the material's colour, just in front of faces in the same place (a little
 depth bias): a model's edges drawn over it, or lines on the ground made of
@@ -99,12 +131,21 @@ which then never sink into a wall. It is drawn in the same pass, in its own
 slice of the depth range.
 
 Lights: `scene.lights.sun` (`direction`, toward the light; `color`, linear,
-above 1 is brighter), `scene.lights.fill` (a second sun that casts no
+above 1 is brighter: what a white surface facing it shows, so a Lambert
+surface of albedo a shows a times `color`; a glossy surface adds its highlight), `scene.lights.fill` (a second sun that casts no
 shadow, black by default), `scene.lights.ambient` (with
 `ground_ambient`, the light from below where it differs: faces between take
 a mix by how far they face up), and point lights
-(`scene.add_light({position, color, radius})`, fading to nothing at the
-radius: muzzle flashes, explosions, lamps). At most 16 point lights light a
+(`scene.add_light({position, color, radius, size})`: muzzle flashes, explosions,
+lamps). A point light falls off with the square of the distance, as light
+does: its `color` is what a white surface facing it shows one unit away
+(twice as far, a quarter), and the light is windowed to nothing at `radius`
+(`(1 - (d/r)^4)^2`, as glTF's punctual lights). `size` is the light's own
+size (1 cm by default): nearer than that it is no brighter, as the light
+spreads over a body that big. Give flashes and fireballs theirs, or what
+stands in them blazes white. Before G1a the fall-off was `(1 - d^2/r^2)^2` without the inverse
+square: colours of those days are about the old colour times the square of the
+distance they were used at. At most 16 point lights light a
 frame: those whose reach is in view, the strongest and nearest first; point
 lights are cleared with the draws. Light is added in linear light; the result
 is stored as the 2D pipeline stores colour, or kept HDR (see Views).
@@ -129,11 +170,13 @@ the shadow map's draw calls and the meshes drawn into it.
 `.gltf` with its buffers and images beside it) through the content folder or
 pack: each primitive a mesh, placed by its node, with its material's base
 colour and texture (mipmapped; nearest when the file's sampler asks), emissive
-light, `BLEND` as alpha, double-sided and `KHR_materials_unlit`.
+light, `BLEND` as alpha, `MASK` as a cut-out (`alphaCutoff`), double-sided and
+`KHR_materials_unlit`, and its metallic and roughness factors and map, normal
+map (and its scale), occlusion map (and its strength) and emissive map.
 `scene.draw(model, transform)` draws its parts. A `kin::ModelFile` keeps one
 loaded and `poll()` loads it again when the file changes. Not read yet:
-skins, animations, morph targets, metal and roughness, normal maps, alpha
-`MASK` (drawn opaque).
+skins, animations, morph targets, texture transforms, second UV sets,
+`KHR_materials_*` other than unlit and emissive strength.
 
 ## Entities
 

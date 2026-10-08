@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <map>
+#include <tuple>
 #include <utility>
 
 namespace kin {
@@ -213,13 +214,16 @@ private:
         if (m->has_pbr_metallic_roughness) {
             const cgltf_pbr_metallic_roughness& pbr = m->pbr_metallic_roughness;
             out.color = to_color(pbr.base_color_factor);
-            if (const cgltf_texture* t = pbr.base_color_texture.texture) {
-                // Pixel art asks for its texels as they are (a NEAREST sampler);
-                // anything else is mipmapped.
-                const bool nearest = t->sampler && t->sampler->mag_filter == 9728;
-                out.texture = texture(t->image, nearest);
-            }
+            out.texture = texture(pbr.base_color_texture.texture, /*srgb=*/true);
+            out.metallic = pbr.metallic_factor;
+            out.roughness = pbr.roughness_factor;
+            out.metallic_roughness = texture(pbr.metallic_roughness_texture.texture, /*srgb=*/false);
         }
+        out.normal = texture(m->normal_texture.texture, /*srgb=*/false);
+        out.normal_scale = m->normal_texture.scale;
+        out.occlusion = texture(m->occlusion_texture.texture, /*srgb=*/false);
+        out.occlusion_strength = m->occlusion_texture.scale;
+        out.emissive_texture = texture(m->emissive_texture.texture, /*srgb=*/true);
         // Emissive light as a share of the base colour: the strongest channel.
         f32 emissive = std::max({m->emissive_factor[0], m->emissive_factor[1], m->emissive_factor[2]});
         if (m->has_emissive_strength) {
@@ -228,16 +232,30 @@ private:
         out.emissive = emissive;
         out.unlit = m->unlit;
         out.double_sided = m->double_sided;
-        // MASK is drawn opaque: there is no alpha test yet.
-        out.blend = m->alpha_mode == cgltf_alpha_mode_blend ? Blend3D::Alpha : Blend3D::Opaque;
+        out.blend = m->alpha_mode == cgltf_alpha_mode_blend  ? Blend3D::Alpha
+                  : m->alpha_mode == cgltf_alpha_mode_mask ? Blend3D::Mask
+                                                           : Blend3D::Opaque;
+        out.alpha_cutoff = m->alpha_cutoff;
         return out;
     }
 
-    Texture texture(const cgltf_image* image, bool nearest) {
+    // A material's texture: colours (`srgb`) are decoded to linear light as
+    // they are sampled; data (metallic-roughness, normals, occlusion) is
+    // the numbers it holds, which only a plain 8-bit format keeps.
+    Texture texture(const cgltf_texture* t, bool srgb) {
+        if (!t) {
+            return {};
+        }
+        // Pixel art asks for its texels as they are (a NEAREST sampler);
+        // anything else is mipmapped.
+        return texture(t->image, t->sampler && t->sampler->mag_filter == 9728, srgb);
+    }
+
+    Texture texture(const cgltf_image* image, bool nearest, bool srgb) {
         if (!image) {
             return {};
         }
-        const std::pair<const cgltf_image*, bool> key{image, nearest};
+        const Key key{image, nearest, srgb};
         if (const auto found = _textures.find(key); found != _textures.end()) {
             return found->second;
         }
@@ -255,7 +273,8 @@ private:
         }
         Texture texture;
         if (decoded.valid()) {
-            texture = _r3d.renderer().create_texture_from_rgba(decoded.rgba.data(), decoded.size);
+            texture = srgb ? _r3d.renderer().create_texture_from_rgba(decoded.rgba.data(), decoded.size)
+                           : _r3d.renderer().create_texture(decoded.size, TextureFormat::Rgba8, decoded.rgba.data());
             if (texture) _r3d.renderer().set_scale_mode(texture, nearest ? ScaleMode::Nearest : ScaleMode::Mipmapped);
         } else {
             KIN_LOG_WARN_F("render", "3D: a model's texture not read",
@@ -268,7 +287,8 @@ private:
     Renderer3D& _r3d;
     std::filesystem::path _path;
     const cgltf_data* _data = nullptr;
-    std::map<std::pair<const cgltf_image*, bool>, Texture> _textures;
+    using Key = std::tuple<const cgltf_image*, bool, bool>; // image, nearest, sRGB
+    std::map<Key, Texture> _textures;
 };
 
 } // namespace

@@ -739,7 +739,7 @@ spread (`compare.py` marks it `*`). On lavapipe every scene renders (the
 kiln at 4.4-7.7 s a frame) and its pictures are within 0.5 levels of the
 4080's (p99 at most 3).
 
-### G1 — Materials and custom shaders
+### G1 — Materials and custom shaders. G1a done.
 
 glTF's metallic-roughness materials with normal, occlusion and emissive
 maps; physical light falloff; image-based light (an HDR environment,
@@ -747,6 +747,91 @@ prefiltered in compute: diffuse and specular); custom 3D material shaders
 (a fragment shader with kin's lighting as an include) and passes of one's
 own on an HDR view. Checks: the white furnace, the sphere grid and the
 helmet against Cycles.
+
+#### G1a — results
+
+Physically based materials. Built: `Material3D` gains glTF's
+metallic-roughness (`metallic`, `roughness`, `metallic_roughness`, `normal`
+and `normal_scale`, `occlusion` and `occlusion_strength`, `emissive_texture`)
+and `Blend3D::Mask` with `alpha_cutoff`; the loader reads all of it. The
+data maps are made as plain RGBA8 (`Renderer2D::create_texture`), colours
+as before (sRGB, decoded in the sampler or the shader), so a data map is
+never gamma-decoded. `mesh.frag` is Lambert plus Cook-Torrance (GGX, Smith
+height-correlated visibility, Schlick), for the sun with its shadow, the fill
+and point lights; F0 = mix(0.04, base, metallic), the diffuse of a
+dielectric taking what its Fresnel leaves; roughness floored at 0.045.
+Ambient light (still the hemisphere: the environment map is G1b) is seen
+along the normal for the diffuse and along the reflection, turned toward the
+normal by the roughness, times Karis' fit of the split-sum integral for the
+specular, with Fdez-Aguera's multiple-scattering term (without it a rough
+white metal lost a third of its light in the furnace) and the same
+compensation on the direct specular. Normal maps take their tangent frame
+from the derivatives of world position and UV (no tangents in the vertex
+format); the frame turns with the face for back faces. Point lights are
+inverse-square, windowed `(1 - (d/r)^4)^2`, floored at 1 cm: `color` is the
+light at one unit. Masks discard in `mesh.frag`, and have their own pick
+and shadow fragment shaders (`pick_mask`, `shadow_mask` with a vertex shader
+that carries UV and alpha): other materials keep the depth-only shadow pass.
+Masks are drawn with the opaque.
+
+Layouts: `FrameUniforms` gains `eye` (the view vector); `MaterialUniforms`
+is three vec4: (emissive, unlit, receives shadow, cutoff), (metallic,
+roughness, normal scale, occlusion strength), (has normal map, has emissive
+map). The fragment shader has six samplers: base, shadow, metallic-roughness,
+normal, occlusion, emissive; a material without a map binds the 1 x 1 white
+texture (the factors are then the values; the two flags switch the normal
+and emissive maps off) and the five are bound again only when a draw's
+textures differ from the last's. Behaviour changed: every surface now has the
+specular of rough plastic (`roughness` 1: about 4% of the light, spread), so
+existing scenes got a little brighter and shinier; the existing tests'
+expectations held unchanged. Point-light colours are not what they were
+(Signal Breach's flashes were scaled up by 6.4, 4 and 1.4 times for
+their usual distances, the Cornell lamp down to 0.14 times; the flashes
+look as bright at about half their radius).
+
+Measured (RTX 4080, 1280 x 720, 4x MSAA, 120 frames, g0 the baseline above):
+
+| Scene / camera | GPU ms g0 | GPU ms g1a | against Cycles, mean levels, g0 | g1a | SSIM g0 | g1a |
+|---|---|---|---|---|---|---|
+| cornell/front | 0.059 | 0.078 | 10.2 | 10.2 | 0.879 | 0.887 |
+| furnace/front | 0.039 | 0.040 | 0.23 | 0.23 | 0.998 | 0.998 |
+| spheres/front | 0.074 | 0.116 | 5.7 | 3.6 | 0.967 | 0.980 |
+| spheres/grazing | 0.080 | 0.096 | 5.8 | 4.1 | 0.964 | 0.971 |
+| helmet/front | 0.113 | 0.15-0.31 | 2.1 | 0.66 | 0.973 | 0.989 |
+| helmet/side | 0.100 | 0.153 | 2.0 | 0.68 | 0.968 | 0.989 |
+| shadows/overview | 0.060 | 0.059 | 2.5 | 2.4 | 0.990 | 0.990 |
+| shadows/contact | 0.072 | 0.059-0.079 | 5.2 | 4.8 | 0.971 | 0.971 |
+| shadows/fence | 0.075 | 0.094 | 4.1 | 3.5 | 0.975 | 0.976 |
+| shadows/grazing | 0.059 | 0.092 | 6.7 | 6.9 | 0.990 | 0.990 |
+| sponza/nave | 0.196 | 0.325 | 43.4 | 49.4 | 0.492 | 0.472 |
+| sponza/roof | 0.172 | 0.275 | 28.9 | 33.1 | 0.652 | 0.631 |
+| kiln/game | 4.17 | 4.31 | 0.82 | 0.67 | 0.994 | 0.995 |
+| kiln/close | 4.65 | 4.65 | 2.5 | 1.55 | 0.981 | 0.987 |
+| crowd/first_person | 1.00 | 1.12 | | | | |
+| crowd/mid_deck | 0.52 | 0.56-0.59 | | | | |
+| crowd/above | 1.05 | 1.33 | | | | |
+
+The small scenes' GPU times scatter by 20-30% between identical runs (the
+same binary's repeat: helmet/front 0.31 then 0.42, sponza/nave 0.33 then
+0.75), so the table says: the shading costs about 0.03-0.1 ms on the
+scenes that fill the screen with materials (helmet, spheres, Sponza), 10-25%
+on the crowd, and nothing measurable on the kiln (vertex bound). The pictures
+of the same binary twice are identical but for a level on the kiln.
+
+Quality: the helmet moves from 2.0 to 0.7 mean levels from Cycles (SSIM .97
+to .99: its metal, leather and normal maps are now read), the spheres from
+5.7 to 3.6-4.1 (a metal reflects the sky, the highlight sharpens with
+roughness; what is left is the reflections of the other spheres and the
+floor, and the sun's disc), and the furnace stays within 0.23 level (with
+the multiple-scattering term: without it the rough metals lost 3.3 levels).
+Sponza got further from Cycles (43 to 49): its plants are now cut out
+rather than black, which is right, but more of its light is added to
+a scene whose truth is dark (kin's ambient reaches every room, Cycles' sky
+only the roof). Its textures still look washed: **found, not fixed**, glTF's
+sampler wrap modes (repeat, mirrored) are not read, so the floor, the walls
+and the ceiling, whose UVs run past 1, clamp; that is for the next change in
+this stage. The Cornell lamp (an inverse-square point under the ceiling)
+lights the ceiling above it brightly, as a point does.
 
 ### G2 — Sharper, steadier pictures
 

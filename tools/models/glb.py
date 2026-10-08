@@ -159,13 +159,26 @@ class Glb:
         return len(self.json["textures"]) - 1
 
     def material(self, name="", color=(1, 1, 1, 1), texture=None, emissive=(0, 0, 0), blend=False, double_sided=False,
-                 unlit=False, metallic=0.0, roughness=1.0, emissive_strength=None):
+                 unlit=False, metallic=0.0, roughness=1.0, emissive_strength=None, metallic_roughness_texture=None,
+                 normal_texture=None, normal_scale=1.0, occlusion_texture=None, occlusion_strength=1.0,
+                 emissive_texture=None, alpha_cutoff=None):
         pbr = {"baseColorFactor": list(color), "metallicFactor": metallic, "roughnessFactor": roughness}
         if texture is not None:
             pbr["baseColorTexture"] = {"index": texture}
+        if metallic_roughness_texture is not None:
+            pbr["metallicRoughnessTexture"] = {"index": metallic_roughness_texture}
         m = {"name": name, "pbrMetallicRoughness": pbr, "emissiveFactor": list(emissive), "doubleSided": double_sided}
+        if normal_texture is not None:
+            m["normalTexture"] = {"index": normal_texture, "scale": normal_scale}
+        if occlusion_texture is not None:
+            m["occlusionTexture"] = {"index": occlusion_texture, "strength": occlusion_strength}
+        if emissive_texture is not None:
+            m["emissiveTexture"] = {"index": emissive_texture}
         if blend:
             m["alphaMode"] = "BLEND"
+        elif alpha_cutoff is not None:
+            m["alphaMode"] = "MASK"
+            m["alphaCutoff"] = alpha_cutoff
         if unlit:
             m.setdefault("extensions", {})["KHR_materials_unlit"] = {}
             self.extensions.add("KHR_materials_unlit")

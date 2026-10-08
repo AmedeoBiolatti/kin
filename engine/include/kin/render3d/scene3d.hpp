@@ -29,6 +29,10 @@ enum class Blend3D : u8 {
     Opaque,   // replaces it, hides what is further
     Alpha,    // over it by its alpha (drawn after the opaque, furthest first)
     Additive, // adds light to it: sparks, glows, flashes (in any order)
+    // Opaque where the base colour's alpha reaches Material3D::alpha_cutoff,
+    // not drawn where it falls short: leaves, fences, grates. Drawn with the
+    // opaque, and casts the cut-out shadow.
+    Mask,
 };
 
 struct Material3D {
@@ -52,6 +56,30 @@ struct Material3D {
     // none: white.
     Texture texture{};
 
+    // glTF's metallic-roughness model. `color` is the base colour: a
+    // dielectric's diffuse colour (it reflects 4% as a mirror would), a
+    // metal's reflection. The defaults are rough plastic, as before.
+    f32 metallic = 0.0f;  // 0 dielectric, 1 metal
+    f32 roughness = 1.0f; // 0 a mirror, 1 chalk
+    // Times the two factors above: roughness in G, metallic in B (linear
+    // data, as glTF stores them); none: 1.
+    Texture metallic_roughness{};
+    // Tangent-space normals (linear data, green up, as glTF stores them),
+    // their slope times `normal_scale`; none: the mesh's normals. The tangents
+    // come from the UVs, so the mesh needs them.
+    Texture normal{};
+    f32 normal_scale = 1.0f;
+    // Ambient light let through, in R (linear data), by `occlusion_strength`
+    // (1: all the map says, 0: none); none: all.
+    Texture occlusion{};
+    f32 occlusion_strength = 1.0f;
+    // Light of its own, as a colour (sRGB, as the base colour's texture),
+    // times `emissive`; none: the base colour's share, as above.
+    Texture emissive_texture{};
+    // Blend3D::Mask: below this alpha (the base colour's, times the mesh's,
+    // the material's and the copy's) a pixel is not drawn.
+    f32 alpha_cutoff = 0.5f;
+
     friend bool operator==(const Material3D&, const Material3D&) = default;
 };
 
@@ -69,11 +97,20 @@ struct DirectionalLight {
     Vec3f color{1.0f, 1.0f, 1.0f};      // linear; above 1 is brighter
 };
 
-// Light from a point, fading to nothing at `radius`: a muzzle flash, a lamp.
+// Light from a point: a muzzle flash, a lamp. It falls off with the square of
+// the distance, as light does, and is faded to nothing at `radius` (smoothly,
+// over its outer part) so that few lights reach a pixel.
 struct PointLight {
     Vec3f position{};
-    Vec3f color{1.0f, 1.0f, 1.0f}; // linear; above 1 is brighter
+    // Linear; the light a white surface facing it shows, at one unit away.
+    // Twice as far is a quarter as bright: a flash a few units from the wall
+    // takes tens.
+    Vec3f color{1.0f, 1.0f, 1.0f};
     f32 radius = 5.0f;
+    // The light's own size (units): nearer than this it is no brighter, as
+    // the light spreads over a body that big (a flash, a fireball, a bulb).
+    // At least 0.01.
+    f32 size = 0.01f;
 };
 
 struct Lights3D {

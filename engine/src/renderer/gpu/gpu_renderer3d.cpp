@@ -85,12 +85,19 @@ struct FrameUniforms {
     f32 fill_direction[4];
     f32 fill_color[4];
     f32 flags[4]; // encode to sRGB, decode textures, shadows, point lights
+    f32 eye[4];   // the camera, in the scene's world space
     f32 shadow_matrix[16];
     f32 shadow[4]; // depth bias, normal offset, a texel (uv)
     f32 lights[max_lights * 2 * 4];
 };
 struct MaterialUniforms {
-    f32 params[4]; // emissive, unlit, receives the sun's shadow
+    f32 params[4]; // emissive, unlit, receives the sun's shadow, alpha cutoff (0: none)
+    f32 pbr[4];    // metallic, roughness, normal scale, occlusion strength
+    f32 maps[4];   // has a normal map, has an emissive map
+};
+// shadow_mask.frag's and pick_mask.frag's.
+struct CutoffUniforms {
+    f32 cutoff[4]; // the alpha below which nothing is drawn
 };
 
 // A view's six bounding planes from its view-projection matrix, reverse Z:
@@ -219,8 +226,12 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh.vert.spv",
                                                   /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
         _fragment_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh.frag.spv",
-                                                    /*uniform_buffers=*/2, /*samplers=*/2);
+                                                    /*uniform_buffers=*/2, /*samplers=*/6);
         _shadow_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow.frag.spv");
+        _shadow_mask_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow_mask.vert.spv",
+                                                              /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
+        _shadow_mask_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow_mask.frag.spv",
+                                                       /*uniform_buffers=*/1, /*samplers=*/1);
         _shadow_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow.vert.spv",
                                                          /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
         _fullscreen_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "fullscreen.vert.spv");
@@ -229,6 +240,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _output_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output.frag.spv",
                                                   /*uniform_buffers=*/1, /*samplers=*/2);
         _pick_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "pick.frag.spv");
+        _pick_mask_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "pick_mask.frag.spv",
+                                                     /*uniform_buffers=*/1, /*samplers=*/1);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
     }
@@ -269,14 +282,15 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
-SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass) const {
+SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask) const {
     if (pass == Pass::Shadow) {
         // A closed mesh's back faces are behind its front ones from the sun
         // too: culled, the map is the same for half the triangles. Double-sided
         // (thin, open) meshes cast with both. shadow.vert places the vertices
-        // and does nothing else.
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _shadow_vertex_shader.handle(),
-                                                     .fragment = _shadow_shader.handle(),
+        // and does nothing else; a cut-out's also carry its UV and alpha to the
+        // fragment shader that discards.
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
+                                                     .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
                                                      .blend = GpuBlendMode::Replace,
                                                      .layout = GpuVertexLayout::MeshVertices,
                                                      .depth_stencil = _shadow_format,
@@ -286,7 +300,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     }
     if (pass == Pass::Pick) {
         return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
-                                                     .fragment = _pick_shader.handle(),
+                                                     .fragment = (mask ? _pick_mask_shader : _pick_shader).handle(),
                                                      .blend = GpuBlendMode::Replace,
                                                      .format = pick_format,
                                                      .layout = GpuVertexLayout::MeshVertices,
@@ -615,8 +629,8 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 continue;
             }
             const Bounds3& b = draw.mesh.bounds();
-            const bool caster = shadows && s == 0 && draw.material.blend == Blend3D::Opaque && draw.material.casts_shadow &&
-                                !draw.material.wireframe;
+            const bool caster = shadows && s == 0 && (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask) &&
+                                draw.material.casts_shadow && !draw.material.wireframe;
             _refs.push_back({&draw, scenes[s]->instances().data() + draw.first, mesh, s,
                              scenes[s]->cull ? &frustums[s] : nullptr, caster, b.center(), b.radius(), 0, 0, 0});
         }
@@ -788,7 +802,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     // The draws in order: the scene, then the overlay; in each, opaque, then
     // alpha-blended (furthest first), then additive; then pipeline and mesh.
     const auto pass_of = [](const Material3D& m) {
-        return m.wireframe ? Pass::Wire : m.blend == Blend3D::Opaque ? Pass::Opaque : m.blend == Blend3D::Alpha ? Pass::Alpha : Pass::Additive;
+        return m.wireframe                ? Pass::Wire
+             : m.blend == Blend3D::Opaque || m.blend == Blend3D::Mask ? Pass::Opaque
+             : m.blend == Blend3D::Alpha  ? Pass::Alpha
+                                          : Pass::Additive;
     };
     _order.clear();
     for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
@@ -826,9 +843,11 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         if (light.radius <= 0 || !sphere_in(frustums[0], light.position, light.radius)) {
             continue;
         }
-        const f32 strength = std::max({light.color.x, light.color.y, light.color.z}) * light.radius;
-        const f32 distance = length(light.position - scene.camera.position);
-        chosen.push_back({strength / std::max(1.0f, distance - light.radius), &light});
+        // What it adds a unit from the camera's nearest surface it reaches:
+        // its intensity over the square of the distance, at least a unit.
+        const f32 strength = std::max({light.color.x, light.color.y, light.color.z});
+        const f32 distance = std::max(1.0f, length(light.position - scene.camera.position) - light.radius);
+        chosen.push_back({strength / (distance * distance), &light});
     }
     std::sort(chosen.begin(), chosen.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     chosen.resize(std::min<std::size_t>(chosen.size(), max_lights));
@@ -852,12 +871,14 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         const bool lit_by_sun_shadow = shadows && s == 0;
         put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
             static_cast<f32>(chosen.size()));
+        put(f.eye, scenes[s]->camera.position, 1.0f);
         std::memcpy(f.shadow_matrix, light_vp.m, sizeof(f.shadow_matrix));
         // A texel's worth of depth toward the sun, and one and a half off the surface.
         put(f.shadow, {texel_world / depth_range, texel_world * 1.5f, _shadow_size > 0 ? 1.0f / static_cast<f32>(_shadow_size) : 0.0f}, 0.0f);
         for (std::size_t i = 0; i < chosen.size(); ++i) {
             put(f.lights + i * 8, to_space.apply(chosen[i].second->position), chosen[i].second->radius);
-            put(f.lights + i * 8 + 4, chosen[i].second->color, 0.0f);
+            const f32 size = std::max(chosen[i].second->size, 0.01f);
+            put(f.lights + i * 8 + 4, chosen[i].second->color, size * size);
         }
         return f;
     };
@@ -883,6 +904,21 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             _no_shadow_cleared = true;
         }
     }
+
+    // A material's texture as a binding: its own, or a white one without.
+    const auto binding_of = [&](const Texture& texture) {
+        const ITextureBackend* backend = texture.backend().get();
+        const auto* gpu = backend && backend->kind() == ITextureBackend::Kind::Gpu ? static_cast<const GpuTextureBackend*>(backend) : nullptr;
+        return gpu && gpu->texture() ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), _owner->sampler_for(*gpu)}
+                                     : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear};
+    };
+    // What a pass with cut-outs binds for one: the base colour's alpha, and the cutoff.
+    const auto bind_cutout = [&](SDL_GPURenderPass* pass, const Material3D& material) {
+        const SDL_GPUTextureSamplerBinding base = binding_of(material.texture);
+        SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
+        const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f}};
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+    };
 
     // The shadow map: casters (seen or casting into view) from the sun.
     if (shadows) {
@@ -910,7 +946,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 if (!ref.caster || count == 0) {
                     continue;
                 }
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !ref.draw->material.double_sided, Pass::Shadow);
+                const Material3D& caster = ref.draw->material;
+                const bool cutout = caster.blend == Blend3D::Mask;
+                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout);
                 if (!p) {
                     continue;
                 }
@@ -925,6 +963,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                     const SDL_GPUBufferBinding indices{ref.mesh->indices, 0};
                     SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
                     bound_mesh = ref.mesh;
+                }
+                if (cutout) {
+                    bind_cutout(pass, caster);
                 }
                 u.first[0] = ref.out_first;
                 SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
@@ -992,7 +1033,11 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     const SDL_GPUTextureSamplerBinding shadow_binding{shadows ? _shadow_map.handle() : _no_shadow.handle(), _compare_sampler};
     SDL_GPUGraphicsPipeline* bound = nullptr;
     const GpuMesh3D* bound_mesh = nullptr;
-    const ITextureBackend* bound_texture = reinterpret_cast<const ITextureBackend*>(1); // none yet
+    // The textures bound (the material's five), to bind again only when they change.
+    using Textures = std::array<const ITextureBackend*, 5>;
+    Textures unbound;
+    unbound.fill(reinterpret_cast<const ITextureBackend*>(1)); // none yet
+    Textures bound_textures = unbound;
     u32 current_scene = 0;
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
@@ -1006,21 +1051,21 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         if (!p) {
             continue;
         }
-        const ITextureBackend* texture = material.texture.backend().get();
+        const Textures textures{material.texture.backend().get(), material.metallic_roughness.backend().get(),
+                                material.normal.backend().get(), material.occlusion.backend().get(),
+                                material.emissive_texture.backend().get()};
         if (p != bound) {
             SDL_BindGPUGraphicsPipeline(pass, p);
             SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
             bound = p;
-            bound_texture = reinterpret_cast<const ITextureBackend*>(1);
+            bound_textures = unbound;
         }
-        if (texture != bound_texture) {
-            const auto* gpu = texture && texture->kind() == ITextureBackend::Kind::Gpu ? static_cast<const GpuTextureBackend*>(texture) : nullptr;
-            const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
-                gpu && gpu->texture() ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), _owner->sampler_for(*gpu)}
-                                      : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
-                shadow_binding};
+        if (textures != bound_textures) {
+            const std::array<SDL_GPUTextureSamplerBinding, 6> samplers{
+                binding_of(material.texture), shadow_binding, binding_of(material.metallic_roughness),
+                binding_of(material.normal), binding_of(material.occlusion), binding_of(material.emissive_texture)};
             SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
-            bound_texture = texture;
+            bound_textures = textures;
         }
         if (ref.mesh != bound_mesh) {
             const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
@@ -1032,7 +1077,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         draw_uniforms.first[0] = ref.out_first;
         SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
         const MaterialUniforms m{{material.emissive, material.unlit || material.wireframe ? 1.0f : 0.0f,
-                                  material.receives_shadow ? 1.0f : 0.0f, 0.0f}};
+                                  material.receives_shadow ? 1.0f : 0.0f,
+                                  material.blend == Blend3D::Mask ? std::max(material.alpha_cutoff, 1e-6f) : 0.0f},
+                                 {material.metallic, material.roughness, material.normal_scale, material.occlusion_strength},
+                                 {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f, 0.0f, 0.0f}};
         SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
         SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
         ++stats.draws;
@@ -1071,7 +1119,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 if (ref.scene != 0 || (kind != Pass::Opaque && kind != Pass::Alpha)) {
                     continue;
                 }
-                SDL_GPUGraphicsPipeline* p = pipeline(pick_format, 1, !ref.draw->material.double_sided, Pass::Pick);
+                const Material3D& picked = ref.draw->material;
+                const bool cutout = picked.blend == Blend3D::Mask;
+                SDL_GPUGraphicsPipeline* p = pipeline(pick_format, 1, !picked.double_sided, Pass::Pick, cutout);
                 if (!p) {
                     continue;
                 }
@@ -1086,6 +1136,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                     const SDL_GPUBufferBinding indices{ref.mesh->indices, 0};
                     SDL_BindGPUIndexBuffer(picking, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
                     mesh_bound = ref.mesh;
+                }
+                if (cutout) {
+                    bind_cutout(picking, picked);
                 }
                 u.first[0] = ref.out_first;
                 SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
