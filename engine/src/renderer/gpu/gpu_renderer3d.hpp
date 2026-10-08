@@ -56,7 +56,15 @@ public:
     SharedDevice device;
     SDL_GPUBuffer* vertices = nullptr;
     SDL_GPUBuffer* indices = nullptr;
-    u32 index_count = 0;
+    u32 index_count = 0; // level 0's
+    // The levels of detail (render3d/mesh_lod.hpp): each a run of the one index buffer, over the one vertex
+    // buffer. At least one: level 0, the mesh itself.
+    struct Level {
+        u32 first_index = 0;
+        u32 index_count = 0;
+        f32 error = 0.0f;
+    };
+    std::vector<Level> levels;
 };
 
 // An environment (render3d/environment.hpp): the picture with its mips, and
@@ -143,7 +151,7 @@ public:
     static bool supported(SDL_GPUDevice* device);
 
     Renderer3DCapabilities capabilities() const override { return _capabilities; }
-    std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data) override;
+    std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain) override;
     std::shared_ptr<IEnvironmentBackend> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) override;
@@ -310,20 +318,29 @@ private:
         u32 out_extra = 0; // then those only the sun sees (casting into view)
         std::array<u32, max_shadow_cascades> cascade_first{}; // with cascades: each one's list of copies,
         std::array<u32, max_shadow_cascades> cascade_count{}; // in _caster_list
+        // With levels of detail (Scene3D::lod, a mesh with levels): the copies are grouped by the level each is
+        // drawn at, and within a level the seen ones come first, then the sun's. `levels` is 1 without, and then
+        // all of this is the run above (level_first[0] == out_first, level_seen[0] == out_count, ...).
+        u32 levels = 1;
+        std::array<u32, max_mesh_levels> level_first{}, level_seen{}, level_extra{};
+        // And each cascade's list is in runs by level.
+        std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> cascade_level_first{}, cascade_level_count{};
     };
     struct Piece {
         u32 ref = 0;
         u32 begin = 0, end = 0; // its copies, within the draw
         u32 flat = 0;           // the first's place among all the frame's copies
-        u32 seen = 0, extra = 0;
-        u32 out = 0, out_extra = 0;
-        std::array<u32, max_shadow_cascades> cascade{};     // copies casting into each cascade
-        std::array<u32, max_shadow_cascades> cascade_out{}; // where they go in its list
+        // By level of detail (index 0 alone without): the copies seen, and those only the sun sees; where they go.
+        std::array<u32, max_mesh_levels> seen{}, extra{};
+        std::array<u32, max_mesh_levels> out{}, out_extra{};
+        // Copies casting into each cascade, by level, and where they go in its list.
+        std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> cascade{}, cascade_out{};
     };
     std::vector<DrawRef> _refs;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start
     std::vector<u8> _visible;  // a copy: the bits of camera_bit, sun_bit and cascade_bit(k) (gpu_renderer3d.cpp)
+    std::vector<u8> _level_of; // a copy: its level of detail (only filled with Scene3D::lod, for the meshes that have levels)
     std::vector<u32> _caster_list; // the cascades' lists, uploaded
     std::vector<u32> _order;   // draws sorted
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first

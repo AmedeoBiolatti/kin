@@ -47,6 +47,45 @@ struct MeshData {
     void append(const MeshData& other, const Mat4f& transform = Mat4f::identity());
 };
 
+// The most levels of detail a mesh can have (level 0, the mesh itself, included).
+constexpr u32 max_mesh_levels = 8;
+
+// How Renderer3D::create_mesh builds a mesh's levels of detail (Scene3D::lod
+// chooses among them): a chain of simpler versions, each about `target_ratio`
+// of the triangles of the one before, made with meshoptimizer's simplifier.
+// Level 0 is always the mesh as given, to the bit. The levels share the
+// mesh's vertices (a level is only another list of triangles over them), so
+// the cost is a few more indices. See kin/render3d/mesh_lod.hpp.
+struct MeshOptions {
+    // How many levels to try for, level 0 included (1: just the mesh, as
+    // before; at most max_mesh_levels). Fewer are made where a level cannot get
+    // meaningfully simpler, or would be tiny.
+    u32 levels = 1;
+    // A level's triangles as a share of the previous level's (0.1 to 0.9).
+    f32 target_ratio = 0.5f;
+    // A level must have this many triangles fewer than the previous one (as a share of it), else the chain stops.
+    f32 min_reduction = 0.15f;
+    // Nor does the chain go below this many triangles.
+    u32 min_triangles = 16;
+    // A level lies no further from the one before than this share of the mesh's size (its largest extent): a mesh
+    // that cannot be simplified further without wrecking it ends the chain.
+    f32 max_error = 0.1f;
+    // How much the simplifier minds changes of the normals, the UVs and the vertex colours, against moving the surface.
+    f32 normal_weight = 0.5f;
+    f32 uv_weight = 0.5f;
+    f32 color_weight = 0.25f;
+    // Vertices on an open border of the mesh stay where they are, so that a
+    // border (a cut-open model, a mesh that meets another) does not shrink or tear.
+    bool lock_border = true;
+};
+
+// What Mesh tells of one of its levels.
+struct MeshLevelInfo {
+    u32 triangles = 0;
+    // An upper bound on how far (in the mesh's own units) the level's surface lies from level 0's; 0 for level 0.
+    f32 error = 0.0f;
+};
+
 // The backend's copy of a mesh (Renderer3D::create_mesh).
 class IMeshBackend {
 public:
@@ -58,14 +97,21 @@ public:
 class Mesh {
 public:
     Mesh() = default;
-    Mesh(std::shared_ptr<IMeshBackend> backend, u32 vertex_count, u32 index_count, Bounds3 bounds)
-        : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds) {}
+    Mesh(std::shared_ptr<IMeshBackend> backend, u32 vertex_count, u32 index_count, Bounds3 bounds,
+         std::shared_ptr<const std::vector<MeshLevelInfo>> levels = {})
+        : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds), _levels(std::move(levels)) {}
 
     bool valid() const { return _backend != nullptr; }
     explicit operator bool() const { return valid(); }
     u32 vertex_count() const { return _vertex_count; }
     u32 index_count() const { return _index_count; }
     u32 triangle_count() const { return _index_count / 3; }
+    // Levels of detail (MeshOptions::levels): level 0 is the mesh, the others
+    // simpler. A mesh made without them has one, and triangle_count() is its
+    // triangles; with them, level_triangles(0) is the same.
+    u32 level_count() const { return _levels ? static_cast<u32>(_levels->size()) : 1u; }
+    u32 level_triangles(u32 level) const { return _levels && level < _levels->size() ? (*_levels)[level].triangles : level == 0 ? triangle_count() : 0u; }
+    f32 level_error(u32 level) const { return _levels && level < _levels->size() ? (*_levels)[level].error : 0.0f; }
     const Bounds3& bounds() const { return _bounds; }
     const std::shared_ptr<IMeshBackend>& backend() const { return _backend; }
 
@@ -76,6 +122,7 @@ private:
     u32 _vertex_count = 0;
     u32 _index_count = 0;
     Bounds3 _bounds{};
+    std::shared_ptr<const std::vector<MeshLevelInfo>> _levels; // null: one level
 };
 
 // Shapes made in code, centred on the origin (a plane and a box's base on

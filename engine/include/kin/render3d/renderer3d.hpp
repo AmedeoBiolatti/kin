@@ -83,6 +83,11 @@ public:
     // `data` kept on the GPU. Empty when 3D isn't available or the data is
     // not valid (MeshData::validate, logged).
     Mesh create_mesh(const MeshData& data);
+    // The same with levels of detail (MeshOptions::levels): simpler versions of
+    // the mesh that Scene3D::lod draws copies far from the camera with. Level 0
+    // is `data` itself, so the picture without Scene3D::lod is the same. Takes
+    // time to build (about a second for a million triangles).
+    Mesh create_mesh(const MeshData& data, const MeshOptions& options);
     // A view `size` pixels (at least 1 x 1). Where 3D isn't available, a
     // render target that render() fills with the background.
     View3D create_view(Vec2i size, const View3DOptions& options = {});
@@ -90,6 +95,8 @@ public:
     // pack): its meshes, materials and textures (mipmapped). Empty, with why
     // in `error` (and logged), when it can't be read or 3D isn't available.
     Model load_model(const std::filesystem::path& path, std::string* error = nullptr);
+    // The same, each of its meshes made with `options` (levels of detail).
+    Model load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error = nullptr);
     // An environment (render3d/environment.hpp) from a picture: `size` pixels
     // of linear RGB floats, rows top to bottom, 2:1 equirectangular. Filtered
     // on the GPU (with compute) the first time a render uses it; empty where

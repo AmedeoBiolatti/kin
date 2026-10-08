@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -238,13 +239,63 @@ f32 to_leave(const Bounds3& box, Vec3f c, Vec3f down) {
     return std::max(t, 0.0f);
 }
 
-// A copy's bounding sphere: its mesh's, moved and scaled with it.
-void sphere_of(const Mat4f& t, Vec3f center, f32 radius, Vec3f& c, f32& r) {
+// A copy's bounding sphere: its mesh's, moved and scaled with it. Returns the scale (its largest axis').
+f32 sphere_of(const Mat4f& t, Vec3f center, f32 radius, Vec3f& c, f32& r) {
     c = t.apply(center);
     const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
     const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
     const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
-    r = radius * std::sqrt(std::max({sx, sy, sz}));
+    const f32 scale = std::sqrt(std::max({sx, sy, sz}));
+    r = radius * scale;
+    return scale;
+}
+
+// What picks a copy's level of detail (Scene3D::lod) for one scene's camera.
+struct LodView {
+    bool on = false;
+    i32 force = -1;
+    bool orthographic = false;
+    f32 pixels = 1.0f;     // the error allowed on the screen
+    f32 per_unit = 1.0f;   // pixels a world unit spans: at one unit's distance (perspective), or anywhere (orthographic)
+    Vec3f eye{}, forward{};
+};
+
+LodView lod_view_of(const Lod3D& lod, const Camera3D& camera, f32 viewport_height) {
+    LodView v;
+    v.on = lod.enabled;
+    v.force = lod.force_level;
+    v.orthographic = camera.projection == Projection3D::Orthographic;
+    v.pixels = std::max(lod.error_pixels, 0.0f) / std::max(lod.bias, 1e-3f);
+    v.per_unit = v.orthographic ? viewport_height / std::max(camera.height, 1e-6f)
+                                : 0.5f * viewport_height / std::tan(0.5f * camera.fov * (3.14159265358979f / 180.0f));
+    v.eye = camera.position;
+    v.forward = camera.forward();
+    return v;
+}
+
+// The coarsest of a mesh's `levels` whose error, `scale` times the mesh's own, spans no more than the allowed
+// pixels at the copy's bounding sphere (`c`, `r`): the sphere's nearest point to the camera, so a big mesh with a
+// part close to it is drawn finely whole. Levels' errors rise with the level.
+u32 lod_level(const LodView& v, const GpuMesh3D& mesh, u32 levels, Vec3f c, f32 r, f32 scale) {
+    if (v.force >= 0) {
+        return std::min<u32>(static_cast<u32>(v.force), levels - 1);
+    }
+    f32 distance = 1.0f;
+    if (!v.orthographic) {
+        const Vec3f to = c - v.eye;
+        const f32 depth = dot(to, v.forward);
+        // Wholly behind the camera (a shadow caster): its distance; astride its plane: as near as can be.
+        distance = depth > r ? depth - r : depth < -r ? std::max(length(to) - r, 0.0f) : 0.0f;
+    }
+    // pixels = error * scale * per_unit / distance, at most `v.pixels`.
+    const f32 reach = v.pixels * (v.orthographic ? 1.0f : distance);
+    const f32 k = scale * v.per_unit;
+    for (u32 l = levels - 1; l > 0; --l) {
+        if (mesh.levels[l].error * k <= reach) {
+            return l;
+        }
+    }
+    return 0;
 }
 
 // A compute pipeline of an embedded shader: `samplers` read textures, one
@@ -696,12 +747,28 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_
                                                  .layout = GpuVertexLayout::None});
 }
 
-std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
+std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data, const MeshLodChain* chain) {
     const std::size_t vertex_count = data.vertices.size();
-    const std::size_t index_count = data.indices.empty() ? vertex_count : data.indices.size();
+    const std::size_t level0_count = data.indices.empty() ? vertex_count : data.indices.size();
+    // The levels' indices follow level 0's in the one index buffer.
+    std::size_t index_count = level0_count;
+    if (chain) {
+        for (std::size_t l = 1; l < chain->levels.size(); ++l) {
+            index_count += chain->levels[l].indices.size();
+        }
+    }
+    const std::size_t extra_vertices = chain ? chain->extra_vertices.size() : 0;
+    if (vertex_count + extra_vertices > std::numeric_limits<u32>::max() / sizeof(GpuMeshVertex)) {
+        KIN_LOG_WARN("render", "3D: mesh not made: its levels are too big for one buffer");
+        return {};
+    }
+    if (index_count > std::numeric_limits<u32>::max() / sizeof(u32)) {
+        KIN_LOG_WARN("render", "3D: mesh not made: its levels are too big for one buffer");
+        return {};
+    }
     try {
         auto mesh = std::make_shared<GpuMesh3D>(_device->shared());
-        const u32 vertex_bytes = static_cast<u32>(vertex_count * sizeof(GpuMeshVertex));
+        const u32 vertex_bytes = static_cast<u32>((vertex_count + extra_vertices) * sizeof(GpuMeshVertex));
         const u32 index_bytes = static_cast<u32>(index_count * sizeof(u32));
         const SDL_GPUBufferCreateInfo vertex_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = vertex_bytes, .props = 0};
         const SDL_GPUBufferCreateInfo index_info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = index_bytes, .props = 0};
@@ -739,25 +806,46 @@ std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
                 _device->upload_storage_buffer(buffer, static_cast<u32>(first * size), static_cast<u32>(n * size), nullptr, false, &fill);
             }
         };
-        upload(mesh->vertices, vertex_count, sizeof(GpuMeshVertex), [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
+        upload(mesh->vertices, vertex_count + extra_vertices, sizeof(GpuMeshVertex), [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
             auto* to = reinterpret_cast<GpuMeshVertex*>(out);
             for (std::size_t i = begin; i < end; ++i) {
-                const MeshVertex& v = data.vertices[first + i];
+                const std::size_t g = first + i; // the mesh's vertices, then the levels' own
+                const MeshVertex& v = g < vertex_count ? data.vertices[g] : chain->extra_vertices[g - vertex_count];
                 to[i] = {v.position.x, v.position.y, v.position.z, v.normal.x, v.normal.y, v.normal.z, v.uv.x, v.uv.y,
                          v.color.r, v.color.g, v.color.b, v.color.a};
             }
         });
         upload(mesh->indices, index_count, sizeof(u32), [&](u8* out, std::size_t first, std::size_t begin, std::size_t end) {
             auto* to = reinterpret_cast<u32*>(out);
-            if (data.indices.empty()) {
-                for (std::size_t i = begin; i < end; ++i) {
-                    to[i] = static_cast<u32>(first + i); // in order: three vertices a triangle
+            // The slice [first + begin, first + end) of the buffer: level 0's indices, then each level's.
+            const std::size_t lo = first + begin, hi = first + end;
+            if (lo < level0_count) {
+                const std::size_t to_end = std::min(hi, level0_count);
+                if (data.indices.empty()) {
+                    for (std::size_t g = lo; g < to_end; ++g) {
+                        to[g - first] = static_cast<u32>(g); // in order: three vertices a triangle
+                    }
+                } else {
+                    std::memcpy(to + (lo - first), data.indices.data() + lo, (to_end - lo) * sizeof(u32));
                 }
-            } else {
-                std::memcpy(to + begin, data.indices.data() + first + begin, (end - begin) * sizeof(u32));
+            }
+            std::size_t level_start = level0_count;
+            for (std::size_t l = 1; chain && l < chain->levels.size(); ++l) {
+                const std::vector<u32>& indices = chain->levels[l].indices;
+                const std::size_t from = std::max(lo, level_start), to_end = std::min(hi, level_start + indices.size());
+                if (from < to_end) {
+                    std::memcpy(to + (from - first), indices.data() + (from - level_start), (to_end - from) * sizeof(u32));
+                }
+                level_start += indices.size();
             }
         });
-        mesh->index_count = static_cast<u32>(index_count);
+        mesh->index_count = static_cast<u32>(level0_count);
+        mesh->levels.push_back({0, static_cast<u32>(level0_count), 0.0f});
+        std::size_t level_start = level0_count;
+        for (std::size_t l = 1; chain && l < chain->levels.size(); ++l) {
+            mesh->levels.push_back({static_cast<u32>(level_start), static_cast<u32>(chain->levels[l].indices.size()), chain->levels[l].error});
+            level_start += chain->levels[l].indices.size();
+        }
         return mesh;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = e.what()}}));
@@ -1703,6 +1791,13 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     const Bounds3& area = lights.shadow_area;
     // The draws of both scenes, each with its instances where the scene keeps them.
     _refs.clear();
+    std::array<LodView, 2> lod{};
+    for (u32 s = 0; s < 2; ++s) {
+        if (ctx.scenes[s] && ctx.scenes[s]->lod.enabled) {
+            lod[s] = lod_view_of(ctx.scenes[s]->lod, ctx.scenes[s]->camera, static_cast<f32>(view->_size.y));
+        }
+    }
+    bool any_levels = false;
     for (u32 s = 0; s < 2; ++s) {
         if (!ctx.scenes[s]) {
             continue;
@@ -1717,6 +1812,12 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                                 draw.material.casts_shadow && !draw.material.wireframe;
             _refs.push_back({&draw, ctx.scenes[s]->instances().data() + draw.first, mesh, s,
                              ctx.scenes[s]->cull ? &ctx.frustums[s] : nullptr, caster, b.center(), b.radius(), 0, 0, 0});
+            // Levels of detail: only for a mesh that has them, drawn in an order that does not matter (blended
+            // copies are drawn furthest first, which a draw per level would break).
+            if (lod[s].on && mesh->levels.size() > 1 && draw.material.blend != Blend3D::Alpha) {
+                _refs.back().levels = static_cast<u32>(std::min<std::size_t>(mesh->levels.size(), max_mesh_levels));
+                any_levels = true;
+            }
         }
     }
 
@@ -1732,7 +1833,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         const u32 count = _refs[r].draw->count;
         for (u32 begin = 0; begin < count;) {
             const u32 end = std::min(count, begin + (chunk - in_task));
-            _pieces.push_back({r, begin, end, total + begin, 0, 0, 0, 0});
+            _pieces.push_back({r, begin, end, total + begin});
             in_task += end - begin;
             begin = end;
             if (in_task == chunk) {
@@ -1766,15 +1867,26 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     // reaching the camera's view): each copy's sphere against the planes.
     const Vec3f down = ctx.shadows ? normalize(lights.sun.direction) * -1.0f : Vec3f{};
     _visible.resize(total);
+    if (any_levels) {
+        _level_of.resize(total);
+    }
     each_task([&](Piece& piece) {
         const DrawRef& ref = _refs[piece.ref];
-        piece.seen = piece.extra = 0;
-        piece.cascade.fill(0);
+        piece.seen.fill(0);
+        piece.extra.fill(0);
+        for (auto& cascade : piece.cascade) {
+            cascade.fill(0);
+        }
         for (u32 i = piece.begin; i < piece.end; ++i) {
             Vec3f c{};
-            f32 r = 0.0f;
-            if (ref.frustum || ref.caster) {
-                sphere_of(ref.instances[i].transform, ref.center, ref.radius, c, r);
+            f32 r = 0.0f, scale = 1.0f;
+            if (ref.frustum || ref.caster || ref.levels > 1) {
+                scale = sphere_of(ref.instances[i].transform, ref.center, ref.radius, c, r);
+            }
+            u32 level = 0;
+            if (ref.levels > 1) {
+                level = lod_level(lod[ref.scene], *ref.mesh, ref.levels, c, r, scale);
+                _level_of[piece.flat + i - piece.begin] = static_cast<u8>(level);
             }
             const bool seen = !ref.frustum || sphere_in(*ref.frustum, c, r);
             // With cascades, each takes the casters whose shadow reaches its
@@ -1792,51 +1904,75 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                              (ctx.cascades > 1 ? members != 0
                                            : sphere_in(ctx.light_frustum, c, r) && shadow_in(*ref.frustum, c, r, down, to_leave(area, c, down) + r));
             _visible[piece.flat + i - piece.begin] = static_cast<u8>((seen ? camera_bit : sun ? sun_bit : 0) | members);
-            piece.seen += seen ? 1u : 0u;
-            piece.extra += sun ? 1u : 0u;
+            piece.seen[level] += seen ? 1u : 0u;
+            piece.extra[level] += sun ? 1u : 0u;
             for (u32 k = 0; k < ctx.cascades && ctx.cascades > 1; ++k) {
-                piece.cascade[k] += in_cascade(members, k) ? 1u : 0u;
+                piece.cascade[k][level] += in_cascade(members, k) ? 1u : 0u;
             }
         }
     });
-    // Each draw's copies: those seen, then those only the sun sees.
+    // Each draw's copies: by level, and in each those seen, then those only the sun sees.
     for (DrawRef& ref : _refs) {
         ref.out_count = ref.out_extra = 0;
         ref.cascade_count.fill(0);
+        ref.level_seen.fill(0);
+        ref.level_extra.fill(0);
+        for (u32 k = 0; k < max_shadow_cascades; ++k) {
+            ref.cascade_level_count[k].fill(0);
+        }
     }
     for (const Piece& piece : _pieces) {
-        _refs[piece.ref].out_count += piece.seen;
-        _refs[piece.ref].out_extra += piece.extra;
-        for (u32 k = 0; k < ctx.cascades; ++k) {
-            _refs[piece.ref].cascade_count[k] += piece.cascade[k];
+        DrawRef& ref = _refs[piece.ref];
+        for (u32 l = 0; l < ref.levels; ++l) {
+            ref.level_seen[l] += piece.seen[l];
+            ref.level_extra[l] += piece.extra[l];
+            for (u32 k = 0; k < ctx.cascades; ++k) {
+                ref.cascade_level_count[k][l] += piece.cascade[k][l];
+            }
         }
     }
     u32 written = 0, listed = 0;
     for (DrawRef& ref : _refs) {
         ref.out_first = written;
-        written += ref.out_count + ref.out_extra;
+        for (u32 l = 0; l < ref.levels; ++l) {
+            ref.level_first[l] = written;
+            written += ref.level_seen[l] + ref.level_extra[l];
+            ref.out_count += ref.level_seen[l];
+            ref.out_extra += ref.level_extra[l];
+            ctx.stats.lod_copies_by_level[l] += ref.level_seen[l];
+        }
         for (u32 k = 0; k < ctx.cascades && ctx.cascades > 1; ++k) {
             ref.cascade_first[k] = listed;
-            listed += ref.cascade_count[k];
+            for (u32 l = 0; l < ref.levels; ++l) {
+                ref.cascade_level_first[k][l] = listed;
+                listed += ref.cascade_level_count[k][l];
+                ref.cascade_count[k] += ref.cascade_level_count[k][l];
+            }
         }
     }
     {
-        u32 current = ~0u, seen = 0, extra = 0;
-        std::array<u32, max_shadow_cascades> in_list{};
+        u32 current = ~0u;
+        std::array<u32, max_mesh_levels> seen{}, extra{};
+        std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> in_list{};
         for (Piece& piece : _pieces) {
             if (piece.ref != current) {
                 current = piece.ref;
-                seen = extra = 0;
-                in_list.fill(0);
+                seen.fill(0);
+                extra.fill(0);
+                for (auto& list : in_list) {
+                    list.fill(0);
+                }
             }
             const DrawRef& ref = _refs[piece.ref];
-            piece.out = ref.out_first + seen;
-            piece.out_extra = ref.out_first + ref.out_count + extra;
-            seen += piece.seen;
-            extra += piece.extra;
-            for (u32 k = 0; k < ctx.cascades; ++k) {
-                piece.cascade_out[k] = ref.cascade_first[k] + in_list[k];
-                in_list[k] += piece.cascade[k];
+            for (u32 l = 0; l < ref.levels; ++l) {
+                piece.out[l] = ref.level_first[l] + seen[l];
+                piece.out_extra[l] = ref.level_first[l] + ref.level_seen[l] + extra[l];
+                seen[l] += piece.seen[l];
+                extra[l] += piece.extra[l];
+                for (u32 k = 0; k < ctx.cascades; ++k) {
+                    piece.cascade_out[k][l] = ref.cascade_level_first[k][l] + in_list[k][l];
+                    in_list[k][l] += piece.cascade[k][l];
+                }
             }
         }
     }
@@ -1887,11 +2023,12 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 if (ref.draw->material.blend == Blend3D::Alpha) {
                     return; // sorted below
                 }
-                u32 at = piece.out, at_extra = piece.out_extra;
+                std::array<u32, max_mesh_levels> at = piece.out, at_extra = piece.out_extra;
                 for (u32 i = piece.begin; i < piece.end; ++i) {
                     const u8 v = _visible[piece.flat + i - piece.begin];
                     if ((v & in_view_bits) != 0) {
-                        write(ref, ref.instances[i], out.data(), (v & camera_bit) ? at++ : at_extra++, piece.flat + i - piece.begin);
+                        const u32 level = ref.levels > 1 ? _level_of[piece.flat + i - piece.begin] : 0u;
+                        write(ref, ref.instances[i], out.data(), (v & camera_bit) ? at[level]++ : at_extra[level]++, piece.flat + i - piece.begin);
                     }
                 }
             });
@@ -1934,17 +2071,18 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 if (!ref.caster) {
                     return;
                 }
-                u32 at = piece.out, at_extra = piece.out_extra;
-                std::array<u32, max_shadow_cascades> to = piece.cascade_out;
+                std::array<u32, max_mesh_levels> at = piece.out, at_extra = piece.out_extra;
+                auto to = piece.cascade_out;
                 for (u32 i = piece.begin; i < piece.end; ++i) {
                     const u8 v = _visible[piece.flat + i - piece.begin];
                     if ((v & in_view_bits) == 0) {
                         continue;
                     }
-                    const u32 index = (v & camera_bit) ? at++ : at_extra++;
+                    const u32 level = ref.levels > 1 ? _level_of[piece.flat + i - piece.begin] : 0u;
+                    const u32 index = (v & camera_bit) ? at[level]++ : at_extra[level]++;
                     for (u32 k = 0; k < ctx.cascades; ++k) {
                         if (in_cascade(v, k)) {
-                            _caster_list[to[k]++] = index;
+                            _caster_list[to[k][level]++] = index;
                         }
                     }
                 }
@@ -2128,8 +2266,8 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
             std::memcpy(u.view_projection, (ctx.cascades > 1 ? ctx.plan.cascade[k].view_projection : ctx.light_vp).m, sizeof(u.view_projection));
             DrawBinder binder{pass};
             for (const DrawRef& ref : _refs) {
-                const u32 count = ctx.cascades > 1 ? ref.cascade_count[k] : ref.out_count + ref.out_extra;
-                if (!ref.caster || count == 0) {
+                const u32 total = ctx.cascades > 1 ? ref.cascade_count[k] : ref.out_count + ref.out_extra;
+                if (!ref.caster || total == 0) {
                     continue;
                 }
                 const Material3D& caster = ref.draw->material;
@@ -2143,13 +2281,20 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, pass, caster);
                 }
-                u.first[0] = ref.out_first;
-                u.first[1] = ctx.cascades > 1 ? ref.cascade_first[k] + 1 : 0; // the list, or the run from out_first
-                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, count, 0, 0, 0);
-                ++stats.shadow_draws;
-                stats.shadow_casters += count;
-                stats.cascade_casters[k] += count;
+                // A draw for each level of detail the casters are at (the one level, without).
+                for (u32 l = 0; l < ref.levels; ++l) {
+                    const u32 count = ctx.cascades > 1 ? ref.cascade_level_count[k][l] : ref.level_seen[l] + ref.level_extra[l];
+                    if (count == 0) {
+                        continue;
+                    }
+                    u.first[0] = ref.level_first[l];
+                    u.first[1] = ctx.cascades > 1 ? ref.cascade_level_first[k][l] + 1 : 0; // the list, or the run from level_first
+                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                    SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->levels[l].index_count, count, ref.mesh->levels[l].first_index, 0, 0);
+                    ++stats.shadow_draws;
+                    stats.shadow_casters += count;
+                    stats.cascade_casters[k] += count;
+                }
             }
             SDL_EndGPURenderPass(pass);
         }
@@ -2188,12 +2333,17 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         if (cutout) {
             bind_cutout(commands, target_pass, occluder);
         }
-        u.first[0] = ref.out_first;
-        SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-        SDL_DrawGPUIndexedPrimitives(target_pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
-        if (which == 0) {
-            ++stats.ao_draws;
-            stats.ao_instances += ref.out_count;
+        for (u32 l = 0; l < ref.levels; ++l) {
+            if (ref.level_seen[l] == 0) {
+                continue;
+            }
+            u.first[0] = ref.level_first[l];
+            SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+            SDL_DrawGPUIndexedPrimitives(target_pass, ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index, 0, 0);
+            if (which == 0) {
+                ++stats.ao_draws;
+                stats.ao_instances += ref.level_seen[l];
+            }
         }
     }
 }
@@ -2259,11 +2409,16 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, prepass, occluder);
                 }
-                u.first[0] = ref.out_first;
-                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                SDL_DrawGPUIndexedPrimitives(prepass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
-                ++stats.ao_draws;
-                stats.ao_instances += ref.out_count;
+                for (u32 l = 0; l < ref.levels; ++l) {
+                    if (ref.level_seen[l] == 0) {
+                        continue;
+                    }
+                    u.first[0] = ref.level_first[l];
+                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                    SDL_DrawGPUIndexedPrimitives(prepass, ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index, 0, 0);
+                    ++stats.ao_draws;
+                    stats.ao_instances += ref.level_seen[l];
+                }
             }
             SDL_EndGPURenderPass(prepass);
             if (!ctx.taa) {
@@ -2405,8 +2560,6 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             bound_wrap = wrap;
         }
         binder.bind_mesh(ref.mesh);
-        draw_uniforms.first[0] = ref.out_first;
-        SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
         const MaterialUniforms m{{material.emissive, material.unlit || material.wireframe ? 1.0f : 0.0f,
                                   material.receives_shadow ? 1.0f : 0.0f,
                                   material.blend == Blend3D::Mask ? std::max(material.alpha_cutoff, 1e-6f) : 0.0f},
@@ -2417,10 +2570,20 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         if (custom) {
             SDL_PushGPUFragmentUniformData(commands, 2, material.shader_params.data(), sizeof(CustomUniforms));
         }
-        SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
-        ++stats.draws;
-        stats.instances += ref.out_count;
-        stats.triangles += static_cast<u64>(ref.mesh->index_count / 3) * ref.out_count;
+        // A draw for each level of detail the copies are at (the one, without).
+        for (u32 l = 0; l < ref.levels; ++l) {
+            const u32 count = ref.level_seen[l];
+            if (count == 0) {
+                continue;
+            }
+            const GpuMesh3D::Level& level = ref.mesh->levels[l];
+            draw_uniforms.first[0] = ref.level_first[l];
+            SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
+            SDL_DrawGPUIndexedPrimitives(pass, level.index_count, count, level.first_index, 0, 0);
+            ++stats.draws;
+            stats.instances += count;
+            stats.triangles += static_cast<u64>(level.index_count / 3) * count;
+        }
     }
     SDL_EndGPURenderPass(pass);
     return true;
@@ -2492,9 +2655,14 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                 if (cutout) {
                     bind_cutout(commands, picking, picked);
                 }
-                u.first[0] = ref.out_first;
-                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                SDL_DrawGPUIndexedPrimitives(picking, ref.mesh->index_count, ref.out_count, 0, 0, 0);
+                for (u32 l = 0; l < ref.levels; ++l) {
+                    if (ref.level_seen[l] == 0) {
+                        continue;
+                    }
+                    u.first[0] = ref.level_first[l];
+                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                    SDL_DrawGPUIndexedPrimitives(picking, ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index, 0, 0);
+                }
             }
             SDL_EndGPURenderPass(picking);
         }

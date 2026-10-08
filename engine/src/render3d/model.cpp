@@ -65,7 +65,7 @@ Color to_color(const cgltf_float* rgba) {
 
 class Loader {
 public:
-    Loader(Renderer3D& r3d, std::filesystem::path path) : _r3d(r3d), _path(std::move(path)) {}
+    Loader(Renderer3D& r3d, std::filesystem::path path, const MeshOptions& options) : _r3d(r3d), _path(std::move(path)), _options(options) {}
 
     Model load(std::string& error) {
         const std::optional<std::string> bytes = read_content_file(_path);
@@ -136,7 +136,7 @@ private:
                 if (data.vertices.empty()) {
                     continue;
                 }
-                Mesh mesh = _r3d.create_mesh(data);
+                Mesh mesh = _r3d.create_mesh(data, _options);
                 if (!mesh.valid()) {
                     continue;
                 }
@@ -299,6 +299,7 @@ private:
 
     Renderer3D& _r3d;
     std::filesystem::path _path;
+    MeshOptions _options;
     const cgltf_data* _data = nullptr;
     using Key = std::tuple<const cgltf_image*, bool, bool>; // image, nearest, sRGB
     std::map<Key, Texture> _textures;
@@ -307,12 +308,16 @@ private:
 } // namespace
 
 Model Renderer3D::load_model(const std::filesystem::path& path, std::string* error) {
+    return load_model(path, MeshOptions{}, error);
+}
+
+Model Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error) {
     std::string why;
     Model model;
     if (!_backend) {
         why = "3D is not available";
     } else {
-        model = Loader{*this, path}.load(why);
+        model = Loader{*this, path, options}.load(why);
     }
     if (!model.valid()) {
         KIN_LOG_WARN_F("render", "3D: model not loaded", (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
@@ -329,7 +334,8 @@ void Scene3D::draw(const Model& model, const Mat4f& transform, Color tint) {
     }
 }
 
-ModelFile::ModelFile(Renderer3D& renderer, std::filesystem::path path) : _renderer(&renderer), _path(std::move(path)) {
+ModelFile::ModelFile(Renderer3D& renderer, std::filesystem::path path, const MeshOptions& options)
+    : _renderer(&renderer), _path(std::move(path)), _options(options) {
     load();
 }
 
@@ -337,7 +343,7 @@ bool ModelFile::load() {
     std::error_code ec;
     _time = std::filesystem::last_write_time(_path, ec);
     std::string error;
-    Model model = _renderer->load_model(_path, &error);
+    Model model = _renderer->load_model(_path, _options, &error);
     if (!model.valid()) {
         _error = error;
         return false;

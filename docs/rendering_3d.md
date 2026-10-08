@@ -338,6 +338,37 @@ draws one sample a pixel whatever `View3DOptions::samples` asks
   sharpening), `taa_reset`, `taa_jitter` and `samples`.
   See the plan's G2d results for numbers.
 
+### Levels of detail
+
+`r3d.create_mesh(data, {.levels = 4})` (or `load_model(path, {.levels = 4})`) builds, at load, up to
+`levels - 1` simpler versions of a mesh with meshoptimizer's simplifier (`MeshOptions`,
+`kin/render3d/mesh_lod.hpp`): each about half the triangles of the one before (`target_ratio`),
+normals, UVs and vertex colours weighed in, open borders locked, and the chain stopped where a level
+would gain under 15%, have under 16 triangles, or lie further than `max_error` (a tenth of the mesh's
+size) from the one before. **Level 0 is the mesh as given**, to the bit; the levels are only more index
+lists over the same vertices (a mesh costs a few more indices, not more vertices). `Mesh::level_count()`,
+`level_triangles(i)` and `level_error(i)` (an upper bound, in the mesh's units, on how far level i
+lies from level 0: meshoptimizer's error for each step, added up) read them back. A mesh without
+indices (a glTF with no normals is read as flat-shaded triangles) is welded by position, and each level gets
+vertices of its own with flat normals (kept after the mesh's; level 0 is untouched), which costs memory: the kiln's
+5 M triangles take 8 s and about 1.1 GB more at load for 4 levels.
+
+`scene.lod = {.enabled = true, .error_pixels = 1.0f, .bias = 1.0f, .force_level = -1}` (off by default;
+off, the picture, the statistics and the cost are those without it) draws each copy at the coarsest level
+whose error, times the copy's largest scale, spans no more than `error_pixels / bias` pixels at the
+nearest point of its bounding sphere (`distance` along the view, `0.5 * view height / tan(fov / 2)` pixels
+at a unit; orthographic cameras use the view's pixels a unit). A copy has one level a frame, in the
+camera's pass, the shadow passes (every cascade), the depth pre-pass, the velocity pass and picking, so
+a shadow is that of the surface drawn. Copies of a mesh and material at one level are one instanced
+draw, so a draw is up to `levels` draws; `stats().lod_copies_by_level` counts the copies the camera
+sees at each level and `stats().triangles` the triangles drawn. Limits: whole meshes only (a big mesh
+is drawn at one level whole: see the plan's G3b for clusters); no hysteresis (copies are not
+matched from frame to frame except for TAA, so a copy at the edge of a threshold can change level as
+the camera moves; what changes is under the error bound); alpha-blended meshes (drawn furthest first,
+which levels would break) and meshes without levels are drawn as before; the overlay has a setting of
+its own (`scene.overlay().lod`, off). The temporal history survives a copy changing level: copies are
+matched by mesh and place, not by level.
+
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
@@ -422,7 +453,7 @@ Agents send motion with the server's `input.mouse {dx, dy}`.
 
 [examples/sponza_walk](../examples/sponza_walk) flies a camera round Sponza
 (fetched by `tools/reference/fetch.py`) with every feature of the renderer on
-a switch: lights, shadows (cascades), occlusion, contact shadows, temporal anti-aliasing, MSAA, HDR and bloom, and each
+a switch: lights, shadows (cascades), occlusion, contact shadows, temporal anti-aliasing, levels of detail, MSAA, HDR and bloom, and each
 material feature (done to copies of the model's materials, so the model is
 kept). Its settings are one struct applied to a `Scene3D` each frame, so a new
 feature is a field and a row in its table of switches; `--set`, `--preset` and

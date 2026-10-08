@@ -35,6 +35,10 @@ Renderer3DCapabilities Renderer3D::capabilities() const {
 }
 
 Mesh Renderer3D::create_mesh(const MeshData& data) {
+    return create_mesh(data, MeshOptions{});
+}
+
+Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& options) {
     std::string error;
     if (!data.validate(&error)) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = error}}));
@@ -49,11 +53,23 @@ Mesh Renderer3D::create_mesh(const MeshData& data) {
     if (!_backend) {
         return {};
     }
-    std::shared_ptr<IMeshBackend> backend = _backend->create_mesh(data);
+    MeshLodChain chain;
+    if (options.levels > 1) {
+        chain = build_mesh_levels(data, options);
+    }
+    std::shared_ptr<IMeshBackend> backend = _backend->create_mesh(data, chain.count() > 1 ? &chain : nullptr);
     if (!backend) {
         return {};
     }
-    return Mesh{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds()};
+    std::shared_ptr<const std::vector<MeshLevelInfo>> levels;
+    if (chain.count() > 1) {
+        auto info = std::make_shared<std::vector<MeshLevelInfo>>();
+        for (const MeshLodLevel& level : chain.levels) {
+            info->push_back({level.triangles, level.error});
+        }
+        levels = std::move(info);
+    }
+    return Mesh{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(), std::move(levels)};
 }
 
 View3D Renderer3D::create_view(Vec2i size, const View3DOptions& options) {

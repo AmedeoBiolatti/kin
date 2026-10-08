@@ -248,6 +248,30 @@ struct TemporalAA3D {
     bool freeze_jitter = false; // debug: the same offset every frame, to see the history working without the jitter's crawl
 };
 
+// Levels of detail: each copy of a mesh made with levels (MeshOptions::levels)
+// is drawn with the simplest level whose error, projected onto the screen at
+// the copy's distance from the camera, is under `error_pixels` / `bias`. One
+// level a copy a frame, for every pass that draws it (the camera's, the sun's
+// shadow, the depth pre-pass, the velocity, picking), so that a shadow matches
+// the surface it falls from. Chosen on the CPU in the cull, from the copy's
+// bounding sphere (its nearest point to the camera) and its largest scale;
+// there is no hysteresis, so a copy at the edge of a threshold can change level
+// as the camera moves (the bound is on error, so what changes is small). Meshes
+// without levels, alpha-blended ones (drawn furthest first, which levels would
+// break up) and the overlay (which has its own setting) are drawn as before.
+// Off, the picture, the statistics and the cost are as without the feature.
+struct Lod3D {
+    bool enabled = false;
+    // The most a level may be wrong on the screen, in pixels (the sizes of the
+    // view the scene is drawn into).
+    f32 error_pixels = 1.0f;
+    // Quality multiplier: 2 holds the error to half of error_pixels, 0.5 allows twice.
+    f32 bias = 1.0f;
+    // Debug: -1 chooses by distance; 0 or more draws every copy at that level
+    // (or its coarsest, for a mesh with fewer).
+    i32 force_level = -1;
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -259,6 +283,7 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    Lod3D lod{};
     // Copies wholly outside the camera's view are skipped (each tested as the
     // sphere round its mesh's bounds, moved and scaled with it).
     bool cull = true;

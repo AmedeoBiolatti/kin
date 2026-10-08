@@ -6,6 +6,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/render3d/mesh.hpp>
+#include <kin/render3d/mesh_lod.hpp>
 #include <kin/render3d/scene3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 #include <kin/renderer/color.hpp>
@@ -84,7 +85,9 @@ struct Render3DStats {
     u32 samples = 0;        // samples a pixel of the scene took: the view's, or 1 with temporal anti-aliasing
     u32 lights = 0;    // point lights used
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
-    u64 triangles = 0;
+    u64 triangles = 0; // drawn by the main pass: at the level each copy is drawn at (Scene3D::lod)
+    // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is off).
+    std::array<u32, max_mesh_levels> lod_copies_by_level{};
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };
 
@@ -106,8 +109,9 @@ public:
     virtual ~IRenderer3DBackend() = default;
 
     virtual Renderer3DCapabilities capabilities() const = 0;
-    // Null when the data can't be uploaded (validated already).
-    virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data) = 0;
+    // Null when the data can't be uploaded (validated already). `chain`, when
+    // not null, holds the levels of detail to keep with it (level 0 of it is `data`).
+    virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain) = 0;
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).

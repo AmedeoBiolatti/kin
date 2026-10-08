@@ -171,7 +171,26 @@ if(KIN_EXPERIMENTAL_3D)
     endif()
     target_include_directories(kin_engine SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
-    target_sources(kin_engine PRIVATE src/render3d/model.cpp)
+    # Levels of detail (kin/render3d/mesh_lod.hpp): the simplifier and the vertex-cache optimiser of
+    # meshoptimizer (MIT), compiled into the engine; its other sources (codecs, meshlets) are not used yet.
+    FetchContent_Declare(meshoptimizer
+        URL https://github.com/zeux/meshoptimizer/archive/refs/tags/v0.25.tar.gz
+        URL_HASH SHA256=68b2fef4e4eaad98e00c657c1e7f8982a7176e61dd7efdeaec67a025b8519be9
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(meshoptimizer)
+    if(NOT meshoptimizer_POPULATED)
+        FetchContent_Populate(meshoptimizer)
+    endif()
+    set(_kin_meshopt_sources allocator indexgenerator simplifier vcacheoptimizer)
+    list(TRANSFORM _kin_meshopt_sources PREPEND "${meshoptimizer_SOURCE_DIR}/src/")
+    list(TRANSFORM _kin_meshopt_sources APPEND ".cpp")
+    target_sources(kin_engine PRIVATE ${_kin_meshopt_sources})
+    set_source_files_properties(${_kin_meshopt_sources} PROPERTIES COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
+    target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
+    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/mesh_lod.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/taa.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c

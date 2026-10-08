@@ -24,6 +24,7 @@ components with it. Each license is in the fetched source tree, under
 | [dr_libs](https://github.com/mackron/dr_libs) (dr_wav, dr_flac, dr_mp3) | commit dfe8377 (dr_wav 0.14.6, dr_flac 0.13.4, dr_mp3 0.7.4 pre-release) | Public domain (Unlicense) or MIT-0 | David Reid |
 | [stb_vorbis](https://github.com/nothings/stb) | 1.22 (commit 2c980bb) | Public domain (Unlicense) or MIT | Sean Barrett |
 | [cgltf](https://github.com/jkuhlmann/cgltf) (with `KIN_EXPERIMENTAL_3D`) | 1.14 | MIT | Johannes Kuhlmann |
+| [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`) | 0.25 | MIT | Arseny Kapoulkine |
 
 ## Libraries bundled by SDL_image and SDL_ttf
 

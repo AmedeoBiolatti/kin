@@ -10,6 +10,7 @@
 //                 [--contact-thickness T]
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
 //                 [--supersample N] [--samples N]
+//                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -35,6 +36,11 @@
 // `pan` is units a frame it has moved, arriving at its `eye` at the picture. --supersample N
 // writes <camera>_ss.png too (--samples N sets the view's MSAA for a whole run): the same picture drawn at N x the size with 4x MSAA, with TAA
 // off, and averaged down in linear light (the still picture to judge static parts by).
+// Levels of detail (G3a): a scene file may have `lod: {enabled, error_pixels, bias, force_level}` and a
+// model's entry `lod_levels: N` (a scene's own `lod_levels` is for its procedural meshes): meshes are then
+// made with N levels. --lod-levels N builds N levels for every mesh of a run, and --lod turns the selection
+// on for every scene (with --lod-error, --lod-bias and --lod-force), each a label of its own. The levels'
+// build time and memory are printed with the load.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -138,10 +144,10 @@ struct Crowd {
     std::vector<kin::MeshInstance> tiles;
     std::array<std::vector<kin::MeshInstance>, 3> enemies;
 
-    void make(kin::Renderer3D& r3d, int count) {
-        tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
-        enemy = {r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f)), r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6)),
-                 r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8))};
+    void make(kin::Renderer3D& r3d, int count, const kin::MeshOptions& options) {
+        tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}), options);
+        enemy = {r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f), options), r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6), options),
+                 r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8), options)};
         for (int z = 0; z < 32; ++z) {
             for (int x = 0; x < 48; ++x) {
                 tiles.push_back({Mat4f::translation({x + 0.5f, -0.5f, z + 0.5f}), kin::Color::rgb(90, 96, 110)});
@@ -174,17 +180,17 @@ struct Crowd {
 struct Motion {
     kin::Mesh floor, wall, post, rail, wire, pole, block, bar, cross_bar, ball;
 
-    void make(kin::Renderer3D& r3d) {
-        floor = r3d.create_mesh(kin::meshes::box({16.0f, 0.2f, 12.0f}));
-        wall = r3d.create_mesh(kin::meshes::box({16.0f, 4.0f, 0.2f}));
-        post = r3d.create_mesh(kin::meshes::box({0.035f, 1.2f, 0.035f}));
-        rail = r3d.create_mesh(kin::meshes::box({4.0f, 0.03f, 0.03f}));
-        wire = r3d.create_mesh(kin::meshes::box({6.0f, 0.012f, 0.012f}));
-        pole = r3d.create_mesh(kin::meshes::box({0.02f, 2.4f, 0.02f}));
-        block = r3d.create_mesh(kin::meshes::box({0.5f, 0.5f, 0.5f}));
-        bar = r3d.create_mesh(kin::meshes::box({0.9f, 0.05f, 0.05f}));
-        cross_bar = r3d.create_mesh(kin::meshes::box({1.0f, 0.03f, 0.03f}));
-        ball = r3d.create_mesh(kin::meshes::sphere(0.18f, 24, 12));
+    void make(kin::Renderer3D& r3d, const kin::MeshOptions& options) {
+        floor = r3d.create_mesh(kin::meshes::box({16.0f, 0.2f, 12.0f}), options);
+        wall = r3d.create_mesh(kin::meshes::box({16.0f, 4.0f, 0.2f}), options);
+        post = r3d.create_mesh(kin::meshes::box({0.035f, 1.2f, 0.035f}), options);
+        rail = r3d.create_mesh(kin::meshes::box({4.0f, 0.03f, 0.03f}), options);
+        wire = r3d.create_mesh(kin::meshes::box({6.0f, 0.012f, 0.012f}), options);
+        pole = r3d.create_mesh(kin::meshes::box({0.02f, 2.4f, 0.02f}), options);
+        block = r3d.create_mesh(kin::meshes::box({0.5f, 0.5f, 0.5f}), options);
+        bar = r3d.create_mesh(kin::meshes::box({0.9f, 0.05f, 0.05f}), options);
+        cross_bar = r3d.create_mesh(kin::meshes::box({1.0f, 0.03f, 0.03f}), options);
+        ball = r3d.create_mesh(kin::meshes::sphere(0.18f, 24, 12), options);
     }
 
     void draw(kin::Scene3D& scene, int t) const {
@@ -244,6 +250,10 @@ struct Overrides {
     int contact_steps = 0;
     bool taa = false;
     double taa_blend = 0.0, taa_sharpness = 0.0;
+    bool lod = false;
+    double lod_error = 0.0, lod_bias = 0.0;
+    int lod_force = -2; // -2: the scene's own
+    int lod_levels = 0; // 0: the scene's own (none)
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -305,6 +315,39 @@ void merge_taa(kin::TemporalAA3D& taa, const kin::JsonValue* doc, const Override
             taa.sharpness = static_cast<float>(over.taa_sharpness);
         }
     }
+}
+
+void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over) {
+    if (doc) {
+        lod.enabled = doc->bool_at("enabled", true);
+        lod.error_pixels = static_cast<float>(doc->number_at("error_pixels", lod.error_pixels));
+        lod.bias = static_cast<float>(doc->number_at("bias", lod.bias));
+        lod.force_level = static_cast<kin::i32>(doc->number_at("force_level", lod.force_level));
+    }
+    if (over.lod) {
+        lod.enabled = true;
+        if (over.lod_error > 0.0) {
+            lod.error_pixels = static_cast<float>(over.lod_error);
+        }
+        if (over.lod_bias > 0.0) {
+            lod.bias = static_cast<float>(over.lod_bias);
+        }
+    }
+    if (over.lod_force > -2) {
+        lod.force_level = over.lod_force;
+    }
+}
+
+// The process's resident memory, in MB (Linux; 0 elsewhere).
+double resident_mb() {
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.starts_with("VmRSS:")) {
+            return std::atof(line.c_str() + 6) / 1024.0;
+        }
+    }
+    return 0.0;
 }
 
 // The linear light of an 8-bit sRGB value, and back.
@@ -404,6 +447,19 @@ int main(int argc, char** argv) {
             over.taa_sharpness = std::atof(next().c_str());
         } else if (a == "--taa-frames") {
             taa_frames = std::max(1, std::atoi(next().c_str()));
+        } else if (a == "--lod") {
+            over.lod = true;
+        } else if (a == "--lod-error") {
+            over.lod = true;
+            over.lod_error = std::atof(next().c_str());
+        } else if (a == "--lod-bias") {
+            over.lod = true;
+            over.lod_bias = std::atof(next().c_str());
+        } else if (a == "--lod-force") {
+            over.lod = true;
+            over.lod_force = std::atoi(next().c_str());
+        } else if (a == "--lod-levels") {
+            over.lod_levels = std::clamp(std::atoi(next().c_str()), 1, static_cast<int>(kin::max_mesh_levels));
         } else if (a == "--samples") {
             samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
         } else if (a == "--supersample") {
@@ -465,6 +521,13 @@ int main(int argc, char** argv) {
 
         // Its models, loaded and timed.
         const auto load_start = std::chrono::steady_clock::now();
+        const double resident_before = resident_mb();
+        const auto levels_of = [&](const kin::JsonValue& entry) {
+            kin::MeshOptions options;
+            options.levels = over.lod_levels > 0 ? static_cast<kin::u32>(over.lod_levels)
+                                                 : static_cast<kin::u32>(std::clamp(entry.number_at("lod_levels", 1.0), 1.0, static_cast<double>(kin::max_mesh_levels)));
+            return options;
+        };
         std::vector<Placed> placed;
         bool missing = false;
         if (const kin::JsonValue* models = doc.find("models")) {
@@ -476,7 +539,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 std::string error;
-                kin::Model model = r3d.load_model(path, &error);
+                kin::Model model = r3d.load_model(path, levels_of(m), &error);
                 if (!model) {
                     std::fprintf(stderr, "  %s: %s\n", path.string().c_str(), error.c_str());
                     missing = true;
@@ -497,15 +560,32 @@ int main(int argc, char** argv) {
         Crowd crowd;
         const bool is_crowd = doc.string_at("procedural") == "crowd";
         if (is_crowd) {
-            crowd.make(r3d, static_cast<int>(doc.number_at("count", 20000)));
+            crowd.make(r3d, static_cast<int>(doc.number_at("count", 20000)), levels_of(doc));
         }
         Motion motion;
         const bool is_motion = doc.string_at("procedural") == "motion";
         if (is_motion) {
-            motion.make(r3d);
+            motion.make(r3d, levels_of(doc));
         }
         const bool animated = doc.bool_at("animated");
         const double load_ms = ms_since(load_start);
+        {
+            std::size_t meshes = 0, with_levels = 0, level_triangles = 0, base_triangles = 0;
+            for (const Placed& p : placed) {
+                for (const kin::ModelPart& part : p.model.parts) {
+                    ++meshes;
+                    with_levels += part.mesh.level_count() > 1 ? 1 : 0;
+                    base_triangles += part.mesh.level_triangles(0);
+                    for (kin::u32 l = 0; l < part.mesh.level_count(); ++l) {
+                        level_triangles += part.mesh.level_triangles(l);
+                    }
+                }
+            }
+            if (with_levels > 0 || over.lod_levels > 1) {
+                std::printf("  loaded in %.0f ms with levels of detail: %zu meshes, %zu with levels, %zu triangles (%zu with all their levels), +%.0f MB resident\n",
+                            load_ms, meshes, with_levels, base_triangles, level_triangles, resident_mb() - resident_before);
+            }
+        }
         const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
                                     : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
                                                 : bounds_of(placed);
@@ -579,6 +659,8 @@ int main(int argc, char** argv) {
             merge_contact_shadows(scene.contact_shadows, doc.find("contact_shadows"), over);
             scene.taa = {};
             merge_taa(scene.taa, doc.find("taa"), over);
+            scene.lod = {};
+            merge_lod(scene.lod, doc.find("lod"), over);
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
                     scene.add_light({.position = vec3(p.find("position")), .color = vec3(p.find("color")),
@@ -706,6 +788,15 @@ int main(int argc, char** argv) {
             std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
+            if (scene.lod.enabled) {
+                std::printf("                 lod copies by level:");
+                for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
+                    if (stats.lod_copies_by_level[l] > 0 || l == 0) {
+                        std::printf(" %u", stats.lod_copies_by_level[l]);
+                    }
+                }
+                std::printf("\n");
+            }
             if (!first_camera) {
                 report << ",";
             }
@@ -720,7 +811,15 @@ int main(int argc, char** argv) {
                    << ", \"cascade_casters\": " << json_list(stats.cascade_casters) << ", \"ao_draws\": " << stats.ao_draws
                    << ", \"ao_instances\": " << stats.ao_instances
                    << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
-                   << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights << "}";
+                   << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
+            if (scene.lod.enabled) {
+                report << ", \"lod_copies_by_level\": [";
+                for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
+                    report << (l ? ", " : "") << stats.lod_copies_by_level[l];
+                }
+                report << "]";
+            }
+            report << "}";
         }
         report << "]}";
     }

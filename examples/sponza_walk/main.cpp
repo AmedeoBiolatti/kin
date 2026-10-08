@@ -55,6 +55,7 @@ struct Options {
     bool skip_if_unavailable = false;
     bool help = false;
     int frames = 0;               // headless --frames
+    int lod_levels = 4;           // levels of detail built for every mesh at load (1: none)
 };
 
 // Named sets of `--set` values, for a run without a display to try a feature.
@@ -63,6 +64,7 @@ const std::map<std::string, std::string>& presets() {
         {"ao", "ao=on"},
         {"ao-half", "ao=on,ao_half=on"},
         {"contact", "contact=on"},
+        {"lod", "lod=on"},
         {"taa", "taa=on"},
         {"taa-sharp", "taa=on,taa_sharpness=0.4"},
         {"taa-frozen", "taa=on,taa_freeze=on"},
@@ -388,6 +390,13 @@ private:
         slider("contact_intensity", "Intensity", s.contact_intensity, 0.0f, 1.0f);
         islider("contact_steps", "Steps", s.contact_steps, 4, 64);
 
+        section("Levels of detail");
+        check("lod", "Levels of detail", s.lod);
+        slider("lod_error", "Error (pixels)", s.lod_error, 0.1f, 16.0f);
+        slider("lod_bias", "Bias (quality multiplier)", s.lod_bias, 0.25f, 8.0f);
+        islider("lod_force", "Force level (-1: by distance)", s.lod_force, -1, 7);
+        note("Levels are built at load: --lod-levels N (4; 1 builds none)");
+
         section("Temporal anti-aliasing");
         check("taa", "TAA (replaces MSAA)", s.taa);
         slider("taa_blend", "History kept", s.taa_blend, 0.0f, 0.98f);
@@ -601,13 +610,15 @@ private:
 
         std::string error;
         const auto start = Clock::now();
-        _model = _r3d->load_model(_model_path, &error);
+        MeshOptions mesh_options;
+        mesh_options.levels = static_cast<u32>(_options.lod_levels);
+        _model = _r3d->load_model(_model_path, mesh_options, &error);
         if (!_model) {
             fail(ctx, "could not load " + _model_path.string() + ": " + error);
             return false;
         }
-        std::printf("sponza_walk: %s, %zu parts, %.1f s\n", _model_path.string().c_str(), _model.parts.size(),
-                    std::chrono::duration<double>(Clock::now() - start).count());
+        std::printf("sponza_walk: %s, %zu parts, %.1f s (including %d levels of detail a mesh where they fit)\n", _model_path.string().c_str(),
+                    _model.parts.size(), std::chrono::duration<double>(Clock::now() - start).count(), _options.lod_levels);
         _marker = _r3d->create_mesh(meshes::sphere(1.0f, 14, 8));
         _wire_material.color = Color::rgb(20, 255, 120);
         _wire_material.unlit = true;
@@ -909,6 +920,10 @@ private:
                 << json_number(_s.contact_thickness) << ", \"intensity\": " << json_number(_s.contact_intensity)
                 << ", \"steps\": " << _s.contact_steps << "}";
         }
+        if (_s.lod) {
+            out << ",\n  \"lod\": {\"error_pixels\": " << json_number(_s.lod_error) << ", \"bias\": " << json_number(_s.lod_bias)
+                << ", \"force_level\": " << _s.lod_force << "}";
+        }
         if (_s.taa) {
             out << ",\n  \"taa\": {\"blend\": " << json_number(_s.taa_blend) << ", \"sharpness\": " << json_number(_s.taa_sharpness)
                 << ", \"jitter_scale\": " << json_number(_s.taa_jitter_scale) << ", \"jitter_samples\": " << _s.taa_jitter_samples
@@ -1065,6 +1080,11 @@ private:
             std::snprintf(line, sizeof line, "contact shadows: %u dispatches", st.contact_dispatches);
             lines.push_back(line);
         }
+        if (_s.lod) {
+            std::snprintf(line, sizeof line, "lod: copies by level %u %u %u %u %u", st.lod_copies_by_level[0], st.lod_copies_by_level[1],
+                          st.lod_copies_by_level[2], st.lod_copies_by_level[3], st.lod_copies_by_level[4]);
+            lines.push_back(line);
+        }
         if (_s.taa) {
             std::snprintf(line, sizeof line, st.taa_dispatches > 0 ? "taa: %u dispatches, jitter %+.2f %+.2f%s" : "taa: asked for, not available",
                           st.taa_dispatches, st.taa_jitter.x, st.taa_jitter.y, st.taa_reset ? ", history reset" : "");
@@ -1115,6 +1135,7 @@ void print_help() {
     std::cout << "sponza_walk: fly round Sponza on kin's experimental 3D renderer, every feature switchable.\n"
                  "  --model PATH          the glTF (else $KIN_REFERENCE_CACHE/sponza/Sponza.gltf, else ~/.cache/kin/reference/sponza/Sponza.gltf;\n"
                  "                        python3 tools/reference/fetch.py puts it there)\n"
+                 "  --lod-levels N        levels of detail built for each mesh at load (default 4; 1: none); --preset lod turns them on\n"
                  "  --set KEY=VALUE       a setting at start (on/off, a number or a choice's name); --list-settings lists them\n"
                  "  --preset NAME[,NAME]  a named set of --set values:";
     for (const auto& [name, sets] : presets()) std::cout << ' ' << name;
@@ -1141,7 +1162,7 @@ int run(int argc, char** argv) {
         for (int i = 0; i < argc; ++i) {
             const std::string_view a = argv[i];
             if (a == "--screenshot" || a == "--set" || a == "--preset" || a == "--camera" || a == "--eye" || a == "--target" ||
-                a == "--spin" || a == "--model") {
+                a == "--spin" || a == "--model" || a == "--lod-levels") {
                 ++i;
                 continue;
             }

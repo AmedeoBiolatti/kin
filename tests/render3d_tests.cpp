@@ -1,6 +1,7 @@
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/render3d/mesh_lod.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 #include <kin/render3d/taa.hpp>
@@ -3223,8 +3224,855 @@ void test_gpu_sun_off_no_shadow_pass() {
     });
 }
 
+// --- Levels of detail (G3a) ---
+
+// The distance from `p` to the triangle abc (Ericson, Real-Time Collision Detection).
+float distance_to_triangle(Vec3f p, Vec3f a, Vec3f b, Vec3f c) {
+    const Vec3f ab = b - a, ac = c - a, ap = p - a;
+    const float d1 = kin::dot(ab, ap), d2 = kin::dot(ac, ap);
+    Vec3f closest;
+    if (d1 <= 0.0f && d2 <= 0.0f) {
+        closest = a;
+    } else {
+        const Vec3f bp = p - b;
+        const float d3 = kin::dot(ab, bp), d4 = kin::dot(ac, bp);
+        const Vec3f cp = p - c;
+        const float d5 = kin::dot(ab, cp), d6 = kin::dot(ac, cp);
+        const float vc = d1 * d4 - d3 * d2, vb = d5 * d2 - d1 * d6, va = d3 * d6 - d5 * d4;
+        if (d3 >= 0.0f && d4 <= d3) {
+            closest = b;
+        } else if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+            closest = a + ab * (d1 / (d1 - d3));
+        } else if (d6 >= 0.0f && d5 <= d6) {
+            closest = c;
+        } else if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+            closest = a + ac * (d2 / (d2 - d6));
+        } else if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+            closest = b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+        } else {
+            const float denom = 1.0f / (va + vb + vc);
+            closest = a + ab * (vb * denom) + ac * (vc * denom);
+        }
+    }
+    return kin::length(p - closest);
+}
+
+// The most any point of level `l` (sampled on a grid in each of its triangles) lies from the surface of `fine`.
+float level_deviation(const MeshData& fine, const kin::MeshLodChain& chain, std::size_t l, std::size_t own_vertices = 0) {
+    if (own_vertices == 0) {
+        own_vertices = fine.vertices.size();
+    }
+    const std::vector<kin::u32>& coarse = chain.levels[l].indices;
+    float worst = 0.0f;
+    for (std::size_t t = 0; t < coarse.size() / 3; ++t) {
+        const auto at = [&](kin::u32 i) { return i < own_vertices ? fine.vertices[i].position : chain.extra_vertices[i - own_vertices].position; };
+        const Vec3f a = at(coarse[t * 3]), b = at(coarse[t * 3 + 1]), c = at(coarse[t * 3 + 2]);
+        for (int i = 0; i <= 4; ++i) {
+            for (int j = 0; j <= 4 - i; ++j) {
+                const Vec3f point = a + (b - a) * (static_cast<float>(i) / 4.0f) + (c - a) * (static_cast<float>(j) / 4.0f);
+                float nearest = 1e30f;
+                for (std::size_t u = 0; u < fine.triangle_count(); ++u) {
+                    nearest = std::min(nearest, distance_to_triangle(point, fine.vertices[fine.indices[u * 3]].position,
+                                                                     fine.vertices[fine.indices[u * 3 + 1]].position,
+                                                                     fine.vertices[fine.indices[u * 3 + 2]].position));
+                }
+                worst = std::max(worst, nearest);
+            }
+        }
+    }
+    return worst;
+}
+
+// What a chain must always be: level 0 the mesh, fewer triangles and larger errors down the levels, indices in range
+// and whole triangles.
+void check_chain(const MeshData& data, const kin::MeshLodChain& chain, std::string_view name) {
+    assert(chain.count() >= 1 && chain.levels[0].triangles == data.triangle_count() && chain.levels[0].error == 0.0f &&
+           chain.levels[0].indices.empty());
+    for (std::size_t l = 1; l < chain.count(); ++l) {
+        const kin::MeshLodLevel& level = chain.levels[l];
+        assert(level.indices.size() == static_cast<std::size_t>(level.triangles) * 3 && level.triangles > 0);
+        assert(level.triangles < chain.levels[l - 1].triangles);
+        assert(level.error >= chain.levels[l - 1].error);
+        for (const kin::u32 i : level.indices) {
+            assert(i < data.vertices.size() + chain.extra_vertices.size());
+        }
+    }
+    std::cerr << "lod: " << name << ": " << chain.count() << " levels:";
+    for (const kin::MeshLodLevel& level : chain.levels) {
+        std::cerr << ' ' << level.triangles << " (error " << level.error << ")";
+    }
+    std::cerr << '\n';
+}
+
+void test_mesh_lod_builder() {
+    kin::MeshOptions options;
+    options.levels = 4;
+
+    // A sphere: the levels halve the triangles, the errors rise, level 0 is the mesh and the input is left alone.
+    const MeshData sphere = kin::meshes::sphere(1.0f, 48, 24);
+    const MeshData sphere_before = sphere;
+    const kin::MeshLodChain chain = kin::build_mesh_levels(sphere, options);
+    check_chain(sphere, chain, "sphere");
+    assert(chain.count() == 4);
+    assert(sphere.vertices.size() == sphere_before.vertices.size() && sphere.indices == sphere_before.indices &&
+           std::memcmp(sphere.vertices.data(), sphere_before.vertices.data(), sphere.vertices.size() * sizeof(kin::MeshVertex)) == 0);
+    for (std::size_t l = 1; l < chain.count(); ++l) {
+        const double ratio = static_cast<double>(chain.levels[l].triangles) / chain.levels[l - 1].triangles;
+        assert(ratio > 0.35 && ratio < 0.7); // about half
+        assert(chain.levels[l].error > chain.levels[l - 1].error); // strictly, on a curved surface
+    }
+    // A mesh is chained alike twice.
+    const kin::MeshLodChain again = kin::build_mesh_levels(sphere, options);
+    for (std::size_t l = 1; l < chain.count(); ++l) {
+        assert(chain.levels[l].indices == again.levels[l].indices && chain.levels[l].error == again.levels[l].error);
+    }
+    // The error is a bound on how far the level lies from the mesh, and not a loose one.
+    for (std::size_t l = 1; l < chain.count(); ++l) {
+        const float deviation = level_deviation(sphere, chain, l);
+        std::cerr << "lod: sphere level " << l << ": recorded error " << chain.levels[l].error << ", measured deviation " << deviation << '\n';
+        assert(deviation <= chain.levels[l].error * 1.5f + 1e-3f);
+        assert(chain.levels[l].error <= std::max(deviation, 0.003f) * 8.0f);
+    }
+
+    // A torus.
+    const MeshData torus = kin::meshes::torus(1.0f, 0.3f, 48, 16);
+    const kin::MeshLodChain torus_chain = kin::build_mesh_levels(torus, options);
+    check_chain(torus, torus_chain, "torus");
+    assert(torus_chain.count() >= 3);
+    for (std::size_t l = 1; l < torus_chain.count(); ++l) {
+        const float deviation = level_deviation(torus, torus_chain, l);
+        std::cerr << "lod: torus level " << l << ": recorded error " << torus_chain.levels[l].error << ", measured deviation " << deviation << '\n';
+        assert(deviation <= torus_chain.levels[l].error * 1.5f + 1e-3f);
+        assert(torus_chain.levels[l].error <= std::max(deviation, 0.003f) * 8.0f);
+    }
+
+    // An open mesh keeps its border: a wavy patch, every vertex on its edge is still used by every level, and the
+    // inside is what is simplified.
+    MeshData patch = kin::meshes::plane({8.0f, 8.0f}, 32);
+    for (kin::MeshVertex& v : patch.vertices) {
+        v.position.y = 0.3f * std::sin(v.position.x * 1.3f) * std::cos(v.position.z * 1.1f);
+    }
+    const kin::MeshLodChain patch_chain = kin::build_mesh_levels(patch, options);
+    check_chain(patch, patch_chain, "wavy patch");
+    assert(patch_chain.count() >= 3);
+    for (std::size_t l = 1; l < patch_chain.count(); ++l) {
+        std::vector<char> used(patch.vertices.size(), 0);
+        for (const kin::u32 i : patch_chain.levels[l].indices) {
+            used[i] = 1;
+        }
+        int border = 0;
+        for (std::size_t i = 0; i < patch.vertices.size(); ++i) {
+            const Vec3f& p = patch.vertices[i].position;
+            if (std::abs(std::abs(p.x) - 4.0f) < 1e-4f || std::abs(std::abs(p.z) - 4.0f) < 1e-4f) {
+                ++border;
+                assert(used[i]);
+            }
+        }
+        assert(border == 4 * 32);
+    }
+    // Without the lock the same patch loses border vertices (so the test above is about the lock).
+    kin::MeshOptions unlocked = options;
+    unlocked.lock_border = false;
+    const kin::MeshLodChain loose_chain = kin::build_mesh_levels(patch, unlocked);
+    bool lost_one = false;
+    if (loose_chain.count() > 1) {
+        std::vector<char> used(patch.vertices.size(), 0);
+        for (const kin::u32 i : loose_chain.levels.back().indices) {
+            used[i] = 1;
+        }
+        for (std::size_t i = 0; i < patch.vertices.size(); ++i) {
+            const Vec3f& p = patch.vertices[i].position;
+            lost_one = lost_one || ((std::abs(std::abs(p.x) - 4.0f) < 1e-4f || std::abs(std::abs(p.z) - 4.0f) < 1e-4f) && !used[i]);
+        }
+    }
+    assert(lost_one);
+
+    // A mesh with no indices (its vertices are the triangles) is chained too, over its own vertices.
+    MeshData soup;
+    for (std::size_t i = 0; i < torus.indices.size(); ++i) {
+        soup.vertices.push_back(torus.vertices[torus.indices[i]]);
+    }
+    const kin::MeshLodChain soup_chain = kin::build_mesh_levels(soup, options);
+    check_chain(soup, soup_chain, "unindexed torus");
+    assert(soup_chain.count() >= 2);
+
+    // A flat-shaded mesh with no indices (a model with no normals) gets levels made of vertices of their own, with flat
+    // normals, and the mesh's vertices are left as they are.
+    MeshData flat;
+    for (std::size_t t = 0; t < torus.triangle_count(); ++t) {
+        const Vec3f n = kin::normalize(geometric_normal(torus, t));
+        for (int k = 0; k < 3; ++k) {
+            kin::MeshVertex v = torus.vertices[torus.indices[t * 3 + static_cast<std::size_t>(k)]];
+            v.normal = n;
+            flat.vertices.push_back(v);
+        }
+    }
+    const kin::MeshLodChain flat_chain = kin::build_mesh_levels(flat, options);
+    check_chain(flat, flat_chain, "flat torus");
+    assert(flat_chain.count() >= 3 && !flat_chain.extra_vertices.empty());
+    for (std::size_t l = 1; l < flat_chain.count(); ++l) {
+        const float deviation = level_deviation(torus, flat_chain, l, flat.vertices.size());
+        assert(deviation <= flat_chain.levels[l].error * 1.5f + 1e-3f);
+        for (const kin::u32 i : flat_chain.levels[l].indices) {
+            const kin::MeshVertex& v = flat_chain.extra_vertices[i - flat.vertices.size()];
+            assert(std::abs(kin::length(v.normal) - 1.0f) < 1e-3f);
+        }
+    }
+
+    // Tiny meshes, and a request for one level, give one.
+    assert(kin::build_mesh_levels(kin::meshes::box({1.0f, 1.0f, 1.0f}), options).count() == 1);
+    assert(kin::build_mesh_levels(kin::meshes::octahedron(1.0f), options).count() == 1);
+    MeshData triangle;
+    triangle.vertices.resize(3);
+    triangle.vertices[1].position = {1.0f, 0.0f, 0.0f};
+    triangle.vertices[2].position = {0.0f, 1.0f, 0.0f};
+    assert(kin::build_mesh_levels(triangle, options).count() == 1);
+    kin::MeshOptions one;
+    assert(kin::build_mesh_levels(sphere, one).count() == 1);
+    // A flat quad grid cannot be simplified without its border: it loses nothing from it.
+    // Levels stop where a level would be tiny: a mesh of 40 triangles has no level of under 16.
+    const MeshData small = kin::meshes::sphere(1.0f, 6, 4);
+    const kin::MeshLodChain small_chain = kin::build_mesh_levels(small, options);
+    for (const kin::MeshLodLevel& level : small_chain.levels) {
+        assert(level.triangles >= options.min_triangles);
+    }
+    // More levels than max_mesh_levels are not made.
+    kin::MeshOptions many = options;
+    many.levels = 100;
+    many.min_triangles = 1;
+    many.min_reduction = 0.01f;
+    assert(kin::build_mesh_levels(kin::meshes::sphere(1.0f, 128, 64), many).count() <= kin::max_mesh_levels);
+}
+
+// The mesh of one level of a chain, as a mesh of its own (the same vertices, that level's triangles): what a copy
+// drawn at that level should look like, shadows and all.
+MeshData level_as_mesh(const MeshData& data, const kin::MeshLodChain& chain, std::size_t level) {
+    MeshData out = data;
+    if (level > 0) {
+        out.indices = chain.levels[level].indices;
+    }
+    return out;
+}
+
+// The level Scene3D::lod should give a copy of `mesh` under the perspective camera `camera` over a view `height` pixels
+// tall: the coarsest whose error, scaled, spans no more than `pixels` at the copy's nearest point. Written out here from
+// the setting's description, not from the renderer's code.
+kin::u32 expected_level(const kin::Mesh& mesh, const kin::Camera3D& camera, float height, Vec3f at, float scale, float pixels) {
+    const float focal = 0.5f * height / std::tan(0.5f * camera.fov * 3.14159265f / 180.0f);
+    const float depth = kin::dot(at - camera.position, camera.forward());
+    const float nearest = depth - mesh.bounds().radius() * scale;
+    kin::u32 level = 0;
+    for (kin::u32 l = 1; l < mesh.level_count(); ++l) {
+        if (mesh.level_error(l) * scale * focal <= pixels * nearest) {
+            level = l;
+        }
+    }
+    return level;
+}
+
+// The one level a scene of one copy drew at (the copy counts per level are in the render's statistics).
+kin::u32 level_drawn(const kin::Render3DStats& stats) {
+    kin::u32 level = ~0u, total = 0;
+    for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
+        if (stats.lod_copies_by_level[l] > 0) {
+            level = l;
+            total += stats.lod_copies_by_level[l];
+        }
+    }
+    assert(total == 1);
+    return level;
+}
+
+// Mesh levels as the API reports them; the selection of a level: by distance, by the copy's scale, by the bias, by
+// force_level, for orthographic cameras; blended meshes and meshes without levels are not touched; the statistics
+// count what is drawn.
+void test_gpu_lod_selection() {
+    with_gpu("test_gpu_lod_selection", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        const MeshData data = kin::meshes::sphere(1.0f, 64, 32);
+        const kin::Mesh mesh = r3d.create_mesh(data, options);
+        const kin::Mesh plain = r3d.create_mesh(data);
+        assert(plain.level_count() == 1 && plain.level_triangles(0) == data.triangle_count() && plain.level_error(0) == 0.0f);
+        const kin::MeshLodChain chain = kin::build_mesh_levels(data, options);
+        assert(mesh.level_count() == chain.count() && mesh.level_count() == 4);
+        assert(mesh.triangle_count() == data.triangle_count() && mesh.index_count() == data.indices.size());
+        for (kin::u32 l = 0; l < mesh.level_count(); ++l) {
+            assert(mesh.level_triangles(l) == chain.levels[l].triangles && mesh.level_error(l) == chain.levels[l].error);
+            assert(l == 0 || (mesh.level_triangles(l) < mesh.level_triangles(l - 1) && mesh.level_error(l) > mesh.level_error(l - 1)));
+        }
+        // The same data with the options of one level is a mesh as before.
+        assert(r3d.create_mesh(data, kin::MeshOptions{}).level_count() == 1);
+
+        kin::View3D view = r3d.create_view({160, 120});
+        kin::Scene3D scene;
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {1.0f, 1.0f, 1.0f};
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
+        const auto shoot_one = [&](const kin::Mesh& m, Vec3f at, float copy_scale, const kin::Material3D& material = {}) {
+            scene.clear();
+            scene.draw(m, Mat4f::translation(at) * Mat4f::scaling({copy_scale, copy_scale, copy_scale}), material);
+            render_ok(r3d, view, scene);
+            renderer.present();
+        };
+
+        // Off: every copy is level 0 whatever its distance, and a mesh with levels has all the triangles.
+        scene.lod = {};
+        shoot_one(mesh, {0.0f, 0.0f, -500.0f}, 1.0f);
+        assert(r3d.stats().triangles == data.triangle_count() && r3d.stats().lod_copies_by_level[0] == 1);
+
+        // By distance: the level is the expected one at each, rises with the distance, and takes in the first and the last.
+        scene.lod = {.enabled = true};
+        bool seen[4] = {};
+        kin::u32 last = 0;
+        for (const float distance : {2.0f, 4.0f, 8.0f, 14.0f, 20.0f, 30.0f, 50.0f, 80.0f, 140.0f, 300.0f}) {
+            for (const float pixels : {0.25f, 1.0f, 4.0f}) {
+                scene.lod.error_pixels = pixels;
+                shoot_one(mesh, {0.0f, 0.0f, -distance}, 1.0f);
+                const kin::u32 got = level_drawn(r3d.stats());
+                const kin::u32 want = expected_level(mesh, scene.camera, 120.0f, {0.0f, 0.0f, -distance}, 1.0f, pixels);
+                if (got != want) {
+                    std::cerr << "lod: distance " << distance << ", " << pixels << " px: level " << got << ", want " << want << '\n';
+                }
+                assert(got == want);
+                assert(r3d.stats().triangles == mesh.level_triangles(got));
+                if (pixels == 1.0f) {
+                    assert(got >= last);
+                    last = got;
+                    seen[got] = true;
+                }
+            }
+        }
+        assert(seen[0] && seen[3]); // the distances reach from the finest level to the coarsest
+        scene.lod.error_pixels = 1.0f;
+
+        // The copy's scale: at the same distance, a copy four times as large takes a finer level (its error is four times
+        // as large) at some distance, and never a coarser one.
+        bool finer_somewhere = false;
+        for (const float distance : {10.0f, 14.0f, 17.0f, 20.0f, 25.0f, 30.0f, 40.0f, 60.0f}) {
+            shoot_one(mesh, {0.0f, 0.0f, -distance}, 1.0f);
+            const kin::u32 small = level_drawn(r3d.stats());
+            shoot_one(mesh, {0.0f, 0.0f, -distance}, 4.0f);
+            const kin::u32 large = level_drawn(r3d.stats());
+            assert(small == expected_level(mesh, scene.camera, 120.0f, {0.0f, 0.0f, -distance}, 1.0f, 1.0f));
+            assert(large == expected_level(mesh, scene.camera, 120.0f, {0.0f, 0.0f, -distance}, 4.0f, 1.0f));
+            assert(large <= small);
+            finer_somewhere = finer_somewhere || large < small;
+        }
+        assert(finer_somewhere);
+        const float stretched_distance = 30.0f;
+        shoot_one(mesh, {0.0f, 0.0f, -stretched_distance}, 4.0f);
+        const kin::u32 large = level_drawn(r3d.stats());
+        // A copy stretched along one axis only counts by its largest.
+        scene.clear();
+        scene.draw(mesh, Mat4f::translation({0.0f, 0.0f, -stretched_distance}) * Mat4f::scaling({1.0f, 1.0f, 4.0f}));
+        render_ok(r3d, view, scene);
+        assert(level_drawn(r3d.stats()) == large);
+
+        // The bias: twice the quality is the error bound halved, so no coarser.
+        scene.lod.bias = 4.0f;
+        shoot_one(mesh, {0.0f, 0.0f, -30.0f}, 1.0f);
+        assert(level_drawn(r3d.stats()) == expected_level(mesh, scene.camera, 120.0f, {0.0f, 0.0f, -30.0f}, 1.0f, 0.25f));
+        scene.lod.bias = 1.0f;
+
+        // Forced: that level for every copy, the coarsest for a level the mesh lacks; a mesh without levels is level 0.
+        for (const kin::i32 force : {0, 1, 2, 3, 9}) {
+            scene.lod.force_level = force;
+            shoot_one(mesh, {0.0f, 0.0f, -3.0f}, 1.0f);
+            assert(level_drawn(r3d.stats()) == std::min<kin::u32>(static_cast<kin::u32>(force), 3));
+            assert(r3d.stats().triangles == mesh.level_triangles(std::min<kin::u32>(static_cast<kin::u32>(force), 3)));
+            shoot_one(plain, {0.0f, 0.0f, -3.0f}, 1.0f);
+            assert(level_drawn(r3d.stats()) == 0 && r3d.stats().triangles == data.triangle_count());
+        }
+        scene.lod.force_level = -1;
+
+        // A mesh without levels, and a blended one (drawn furthest first, which levels would break up), stay as they are.
+        shoot_one(plain, {0.0f, 0.0f, -300.0f}, 1.0f);
+        assert(level_drawn(r3d.stats()) == 0);
+        shoot_one(mesh, {0.0f, 0.0f, -300.0f}, 1.0f, {.blend = kin::Blend3D::Alpha});
+        assert(level_drawn(r3d.stats()) == 0 && r3d.stats().triangles == data.triangle_count());
+
+        // Orthographic: how far it is does not matter, the scale of the view does.
+        kin::Camera3D ortho = scene.camera;
+        ortho.projection = kin::Projection3D::Orthographic;
+        ortho.z_far = 1000.0f;
+        kin::u32 distinct_levels = 0, last_orthographic = ~0u;
+        for (const float height : {80.0f, 40.0f, 10.0f, 3.0f, 1.0f, 0.5f}) {
+            ortho.height = height;
+            scene.camera = ortho;
+            const float px_per_unit = 120.0f / height;
+            kin::u32 want = 0;
+            for (kin::u32 l = 1; l < 4; ++l) {
+                if (mesh.level_error(l) * px_per_unit <= 1.0f) {
+                    want = l;
+                }
+            }
+            shoot_one(mesh, {0.0f, 0.0f, -10.0f}, 1.0f);
+            const kin::u32 near_level = level_drawn(r3d.stats());
+            shoot_one(mesh, {0.0f, 0.0f, -900.0f}, 1.0f);
+            std::cerr << "lod: orthographic, " << px_per_unit << " px a unit: level " << near_level << ", want " << want << '\n';
+            assert(near_level == want && level_drawn(r3d.stats()) == want);
+            distinct_levels += near_level != last_orthographic ? 1 : 0;
+            last_orthographic = near_level;
+        }
+        assert(distinct_levels >= 3);
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
+
+        // A scene of many copies: one draw a level in use, the copies counted by level, the triangles those drawn.
+        scene.clear();
+        std::vector<kin::MeshInstance> copies;
+        std::array<kin::u32, 4> by_level{};
+        for (int i = 0; i < 400; ++i) {
+            const float distance = 2.0f + static_cast<float>(i) * 0.75f;
+            copies.push_back({Mat4f::translation({std::sin(static_cast<float>(i)) * distance * 0.2f, 0.0f, -distance})});
+            ++by_level[expected_level(mesh, scene.camera, 120.0f, {0.0f, 0.0f, -distance}, 1.0f, 1.0f)];
+        }
+        scene.draw_instanced(mesh, copies);
+        render_ok(r3d, view, scene);
+        const kin::Render3DStats stats = r3d.stats();
+        kin::u64 triangles = 0;
+        kin::u32 levels_in_use = 0;
+        for (kin::u32 l = 0; l < 4; ++l) {
+            assert(stats.lod_copies_by_level[l] == by_level[l]);
+            triangles += static_cast<kin::u64>(by_level[l]) * mesh.level_triangles(l);
+            levels_in_use += by_level[l] > 0 ? 1 : 0;
+        }
+        std::cerr << "lod: 400 copies by level " << by_level[0] << " " << by_level[1] << " " << by_level[2] << " " << by_level[3]
+                  << ": " << stats.draws << " draws, " << stats.triangles << " triangles\n";
+        assert(levels_in_use >= 3 && stats.draws == levels_in_use && stats.triangles == triangles && stats.instances == 400);
+        renderer.present();
+    });
+}
+
+// Levels off, or on but not asked for, or a mesh without levels: the picture, the draws and the triangles are those of a
+// mesh as it always was, to the bit.
+void test_gpu_lod_off_is_unchanged() {
+    with_gpu("test_gpu_lod_off_is_unchanged", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        const MeshData data = kin::meshes::torus(1.0f, 0.35f, 40, 16);
+        const kin::Mesh with = r3d.create_mesh(data, options), without = r3d.create_mesh(data);
+        const kin::Mesh floor = make_box(r3d, {30.0f, 0.2f, 30.0f});
+        kin::View3D view = r3d.create_view({160, 120});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 18.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.shadow_area = {{-15.0f, -0.2f, -15.0f}, {15.0f, 6.0f, 15.0f}};
+        scene.lights.shadow_cascades = 3;
+        scene.ambient_occlusion.enabled = true;
+        const auto picture = [&](const kin::Mesh& m) {
+            scene.clear();
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            std::vector<kin::MeshInstance> copies;
+            for (int i = 0; i < 30; ++i) {
+                copies.push_back({Mat4f::translation({static_cast<float>(i % 6) * 4.0f - 10.0f, 1.5f, static_cast<float>(i / 6) * -5.0f + 6.0f}) *
+                                  Mat4f::rotation_y(static_cast<float>(i) * 20.0f)});
+            }
+            scene.draw_instanced(m, copies, {.color = Color::rgb(220, 120, 60)});
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels old_picture = picture(without);
+        const kin::Render3DStats old_stats = r3d.stats();
+        assert(old_stats.triangles > 0 && old_stats.draws == 2 && old_stats.lod_copies_by_level[0] == 31);
+        // A mesh with levels, the setting off (its other numbers set): the same.
+        scene.lod = {.enabled = false, .error_pixels = 8.0f, .bias = 0.1f, .force_level = 2};
+        const Pixels off_picture = picture(with);
+        assert(off_picture.rgba == old_picture.rgba);
+        assert(r3d.stats().triangles == old_stats.triangles && r3d.stats().draws == old_stats.draws &&
+               r3d.stats().shadow_draws == old_stats.shadow_draws && r3d.stats().shadow_casters == old_stats.shadow_casters &&
+               r3d.stats().ao_draws == old_stats.ao_draws && r3d.stats().instances == old_stats.instances);
+        // On, but with level 0 forced: the same again.
+        scene.lod = {.enabled = true, .force_level = 0};
+        assert(picture(with).rgba == old_picture.rgba && r3d.stats().triangles == old_stats.triangles);
+        // On, a mesh without levels: the same.
+        scene.lod = {.enabled = true, .error_pixels = 8.0f};
+        assert(picture(without).rgba == old_picture.rgba && r3d.stats().triangles == old_stats.triangles);
+        // And on, with an error bound that takes levels: fewer triangles, still a picture.
+        const Pixels lod_picture = picture(with);
+        assert(r3d.stats().triangles < old_stats.triangles && lod_picture.rgba != old_picture.rgba);
+    });
+}
+
+// A copy drawn at a level looks as a mesh made of that level does, to the bit: the colours and the depth pre-pass, the
+// shadows (one map and cascades) and the occlusion all use the one level, so the shadow matches the surface that casts it.
+void test_gpu_lod_same_level_everywhere() {
+    with_gpu("test_gpu_lod_same_level_everywhere", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        options.target_ratio = 0.3f; // coarse levels: the stand-ins differ clearly from the finest
+        const MeshData data = kin::meshes::sphere(1.0f, 48, 24);
+        const kin::MeshLodChain chain = kin::build_mesh_levels(data, options);
+        assert(chain.count() >= 3);
+        const kin::Mesh lod = r3d.create_mesh(data, options);
+        std::vector<kin::Mesh> stand_in;
+        for (std::size_t l = 0; l < chain.count(); ++l) {
+            stand_in.push_back(r3d.create_mesh(level_as_mesh(data, chain, l)));
+        }
+        const kin::Mesh floor = make_box(r3d, {60.0f, 0.2f, 60.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 5.0f, 24.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
+        scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
+        scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+        // Spheres at several distances, so that several levels are in use, over the floor.
+        const std::vector<Vec3f> spots{{-1.5f, 1.5f, 20.5f}, {-4.0f, 1.5f, 6.0f}, {5.0f, 1.5f, -14.0f}, {-8.0f, 1.5f, -30.0f}};
+        for (const kin::u32 cascades : {1u, 3u}) {
+            for (const bool occlusion : {false, true}) {
+                scene.lights.shadow_cascades = cascades;
+                scene.ambient_occlusion.enabled = occlusion;
+                scene.contact_shadows.enabled = occlusion;
+                scene.lod = {.enabled = true, .error_pixels = 0.5f};
+                scene.clear();
+                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                std::vector<kin::MeshInstance> copies;
+                for (const Vec3f& at : spots) {
+                    copies.push_back({Mat4f::translation(at)});
+                }
+                scene.draw_instanced(lod, copies, {.color = Color::rgb(220, 120, 60)});
+                const Pixels lod_picture = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                const kin::Render3DStats lod_stats = r3d.stats();
+                // The levels each copy should have, and a scene made with their stand-ins.
+                scene.lod = {};
+                scene.clear();
+                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                std::array<kin::u32, kin::max_mesh_levels> used{};
+                kin::u64 triangles = 0;
+                for (const Vec3f& at : spots) {
+                    const kin::u32 level = expected_level(lod, scene.camera, 120.0f, at, 1.0f, 0.5f);
+                    ++used[level];
+                    triangles += lod.level_triangles(level);
+                    scene.draw(stand_in[level], Mat4f::translation(at), {.color = Color::rgb(220, 120, 60)});
+                }
+                const Pixels reference = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                kin::u32 levels_in_use = 0;
+                for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
+                    const kin::u32 want = used[l] + (l == 0 ? 1 : 0); // the floor, a mesh without levels, is level 0
+                    if (lod_stats.lod_copies_by_level[l] != want) {
+                        std::cerr << "lod: level " << l << ": drawn " << lod_stats.lod_copies_by_level[l] << ", expected " << want << " (errors "
+                                  << lod.level_error(1) << " " << lod.level_error(2) << " " << lod.level_error(lod.level_count() - 1) << ")\n";
+                    }
+                    assert(lod_stats.lod_copies_by_level[l] == want);
+                    levels_in_use += used[l] > 0 ? 1 : 0;
+                }
+                std::cerr << "lod: " << cascades << " cascades" << (occlusion ? ", occlusion and contact shadows" : "") << ": levels in use " << levels_in_use
+                          << ", triangles " << lod_stats.triangles << " (full detail " << 4 * data.triangle_count() << ")\n";
+                assert(levels_in_use >= 3 && lod_stats.triangles == triangles + 12);
+                // The shadow casters: the same number as the stand-in scene's, so the same copies, and the picture is the same one.
+                assert(lod_stats.shadow_casters == r3d.stats().shadow_casters);
+                if (lod_picture.rgba != reference.rgba) {
+                    int different = 0, worst = 0;
+                    for (std::size_t i = 0; i < lod_picture.rgba.size(); ++i) {
+                        different += lod_picture.rgba[i] != reference.rgba[i] ? 1 : 0;
+                        worst = std::max(worst, std::abs(static_cast<int>(lod_picture.rgba[i]) - static_cast<int>(reference.rgba[i])));
+                    }
+                    std::cerr << "lod: the picture differs from the stand-ins' in " << different << " bytes, by up to " << worst << " levels\n";
+                }
+                assert(lod_picture.rgba == reference.rgba);
+            }
+        }
+    });
+}
+
+// With a level far from the finest, the picture is a small distance from the full-detail one (the levels' errors are
+// under the bound on the screen) while the triangles fall.
+void test_gpu_lod_picture_bound() {
+    with_gpu("test_gpu_lod_picture_bound", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        const MeshData data = kin::meshes::sphere(1.0f, 64, 32);
+        const kin::Mesh lod = r3d.create_mesh(data, options);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 16.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun.direction = {-0.5f, 0.8f, 0.6f};
+        const auto picture = [&](bool on) {
+            scene.lod = {.enabled = on};
+            scene.clear();
+            std::vector<kin::MeshInstance> copies;
+            for (int i = 0; i < 12; ++i) {
+                const float a = static_cast<float>(i) * 0.9f;
+                copies.push_back({Mat4f::translation({std::cos(a) * 2.5f * (1.0f + 0.1f * static_cast<float>(i)), std::sin(a * 1.3f) * 1.5f,
+                                                      static_cast<float>(i) * -6.0f}), Color::rgb(220, 120, 60)});
+            }
+            scene.draw_instanced(lod, copies);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels full = picture(false);
+        const kin::u64 full_triangles = r3d.stats().triangles;
+        const Pixels reduced = picture(true);
+        const kin::u64 reduced_triangles = r3d.stats().triangles;
+        double sum = 0.0;
+        int worst = 0, over_16 = 0;
+        for (std::size_t i = 0; i < full.rgba.size(); i += 4) {
+            int d = 0;
+            for (int c = 0; c < 3; ++c) {
+                d = std::max(d, std::abs(static_cast<int>(full.rgba[i + static_cast<std::size_t>(c)]) - reduced.rgba[i + static_cast<std::size_t>(c)]));
+            }
+            sum += d;
+            worst = std::max(worst, d);
+            over_16 += d > 16 ? 1 : 0;
+        }
+        const double mean = sum / (160.0 * 120.0);
+        std::cerr << "lod: far spheres at 1 px: triangles " << reduced_triangles << " of " << full_triangles << ", picture mean difference " << mean
+                  << " levels, worst " << worst << ", pixels over 16: " << over_16 << '\n';
+        assert(reduced_triangles * 100 < full_triangles * 60); // markedly fewer
+        assert(full.rgba != reduced.rgba);                     // it did change something
+        assert(mean < 0.35 && over_16 < 80);
+    });
+}
+
+// The pick pass draws the level the camera sees: the pixels just inside and just outside a coarse sphere's polygon
+// answer as they do for a mesh made of that level.
+void test_gpu_lod_pick() {
+    with_gpu("test_gpu_lod_pick", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        options.target_ratio = 0.25f;
+        const MeshData data = kin::meshes::sphere(1.0f, 32, 16);
+        const kin::MeshLodChain chain = kin::build_mesh_levels(data, options);
+        assert(chain.count() >= 3);
+        const kin::Mesh lod = r3d.create_mesh(data, options);
+        const kin::Mesh coarse = r3d.create_mesh(level_as_mesh(data, chain, chain.count() - 1));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
+        scene.lod = {.enabled = true, .force_level = static_cast<kin::i32>(chain.count() - 1)};
+        scene.draw(lod, Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
+        render_ok(r3d, view, scene);
+        scene.lod = {};
+        std::vector<bool> hits;
+        for (int step = 0; step < 72; ++step) {
+            const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
+            const kin::Vec2i pixel{80 + static_cast<int>(std::lround(std::cos(a) * 34.0f)), 60 + static_cast<int>(std::lround(std::sin(a) * 34.0f))};
+            hits.push_back(r3d.pick(view, pixel).hit);
+        }
+        // The same pixels against the stand-in, and against the finest level, which they must differ from somewhere on the ring.
+        scene.clear();
+        scene.draw(coarse, Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
+        render_ok(r3d, view, scene);
+        int different_from_stand_in = 0;
+        std::vector<bool> stand_in_hits;
+        for (int step = 0; step < 72; ++step) {
+            const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
+            const kin::Vec2i pixel{80 + static_cast<int>(std::lround(std::cos(a) * 34.0f)), 60 + static_cast<int>(std::lround(std::sin(a) * 34.0f))};
+            stand_in_hits.push_back(r3d.pick(view, pixel).hit);
+            different_from_stand_in += stand_in_hits.back() != hits[static_cast<std::size_t>(step)] ? 1 : 0;
+        }
+        scene.clear();
+        scene.draw(r3d.create_mesh(data), Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
+        render_ok(r3d, view, scene);
+        int different_from_finest = 0;
+        for (int step = 0; step < 72; ++step) {
+            const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
+            const kin::Vec2i pixel{80 + static_cast<int>(std::lround(std::cos(a) * 34.0f)), 60 + static_cast<int>(std::lround(std::sin(a) * 34.0f))};
+            different_from_finest += r3d.pick(view, pixel).hit != hits[static_cast<std::size_t>(step)] ? 1 : 0;
+        }
+        std::cerr << "lod: pick ring of 72 pixels: " << different_from_stand_in << " differ from the stand-in's level, " << different_from_finest
+                  << " from the finest\n";
+        assert(different_from_stand_in == 0 && different_from_finest > 0);
+        renderer.present();
+    });
+}
+
+// The cull and the fill on workers give the picture the serial ones do, with levels in use, shadows, cascades,
+// occlusion and contact shadows all on; and the level statistics agree.
+void test_gpu_lod_on_workers() {
+    with_gpu("test_gpu_lod_on_workers", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        const kin::Mesh ring = r3d.create_mesh(kin::meshes::torus(0.5f, 0.15f, 32, 12), options);
+        const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(0.5f, 32, 16), options);
+        const kin::Mesh floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 30.0f}, {0.0f, 0.0f, -40.0f}, 60.0f);
+        scene.lights.shadow_area = {{-200.0f, -0.2f, -200.0f}, {200.0f, 8.0f, 200.0f}};
+        scene.lights.shadow_cascades = 3;
+        scene.lights.shadow_distance = 150.0f;
+        scene.ambient_occlusion.enabled = true;
+        scene.contact_shadows.enabled = true;
+        scene.lod = {.enabled = true, .error_pixels = 0.4f};
+        const auto build = [&] {
+            scene.clear();
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            kin::u32 seed = 3;
+            const auto next = [&] {
+                seed = seed * 1664525u + 1013904223u;
+                return static_cast<float>(seed >> 8) / 16777216.0f;
+            };
+            // Two big draws, in a mix of distances (some behind the camera), and some small ones between.
+            auto rings = scene.add_instances(ring, 5000, {.color = Color::rgb(220, 120, 60)});
+            for (auto& r : rings) {
+                r = {Mat4f::translation({(next() - 0.5f) * 120.0f, 0.5f + next() * 2.0f, 25.0f - next() * 85.0f}), Color::rgb(255, 255, 255)};
+            }
+            for (int i = 0; i < 40; ++i) {
+                scene.draw(i % 2 ? ring : ball, Mat4f::translation({(next() - 0.5f) * 40.0f, 1.0f, 15.0f - next() * 40.0f}), {.color = Color::rgb(60, 160, 220)});
+            }
+            auto balls = scene.add_instances(ball, 3000, {.color = Color::rgb(100, 220, 100)});
+            for (auto& b : balls) {
+                b = {Mat4f::translation({(next() - 0.5f) * 120.0f, 0.5f, 25.0f - next() * 85.0f}) * Mat4f::scaling({1.0f + next(), 1.0f + next(), 1.0f + next()}),
+                     Color::rgb(255, 255, 255)};
+            }
+        };
+        build();
+        const Pixels serial = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const kin::Render3DStats serial_stats = r3d.stats();
+        kin::JobSystem jobs;
+        renderer.set_job_system(&jobs);
+        build();
+        const Pixels parallel = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const kin::Render3DStats parallel_stats = r3d.stats();
+        renderer.set_job_system(nullptr);
+        kin::u32 total = 0, levels_in_use = 0;
+        for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
+            assert(serial_stats.lod_copies_by_level[l] == parallel_stats.lod_copies_by_level[l]);
+            total += serial_stats.lod_copies_by_level[l];
+            levels_in_use += serial_stats.lod_copies_by_level[l] > 0 ? 1 : 0;
+        }
+        std::cerr << "lod on workers: " << total << " copies seen by level " << serial_stats.lod_copies_by_level[0] << " "
+                  << serial_stats.lod_copies_by_level[1] << " " << serial_stats.lod_copies_by_level[2] << " " << serial_stats.lod_copies_by_level[3]
+                  << ", " << serial_stats.draws << " draws, " << serial_stats.shadow_draws << " shadow draws\n";
+        assert(total == serial_stats.instances && levels_in_use >= 3);
+        assert(serial_stats.draws == parallel_stats.draws && serial_stats.triangles == parallel_stats.triangles &&
+               serial_stats.shadow_casters == parallel_stats.shadow_casters && serial_stats.shadow_draws == parallel_stats.shadow_draws &&
+               serial_stats.ao_draws == parallel_stats.ao_draws && serial_stats.culled == parallel_stats.culled);
+        assert(serial.rgba == parallel.rgba);
+    });
+}
+
+// Temporal anti-aliasing with a copy that changes level: copies are matched from one frame to the next by mesh and
+// place, not by level, so a copy that crosses a threshold (and moves to another draw's run, even another place in the
+// instance buffer) keeps its velocity and its history, and leaves no trail.
+void test_gpu_lod_taa() {
+    with_gpu("test_gpu_lod_taa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::MeshOptions options;
+        options.levels = 4;
+        const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16), options);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
+        scene.lod = {.enabled = true, .error_pixels = 0.5f};
+        // Textured with a checker (the world's pattern), so that a history laid on the wrong place smears the inside of a copy too.
+        const PatternSurface pattern = make_pattern_surface(r3d, renderer);
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true, .texture = pattern.texture, .wrap_u = kin::Wrap3D::Repeat,
+                                    .wrap_v = kin::Wrap3D::Repeat};
+        kin::View3D truth_view = r3d.create_view({160, 120}, {.samples = 8, .background = Color::rgb(0, 0, 0)});
+        double error_sum = 0.0;
+        int error_frames = 0;
+        const float focal = 0.5f * 120.0f / std::tan(30.0f * 3.14159265f / 180.0f);
+        // The first copy recedes from a distance where it is drawn coarsely to one where it is coarser (and crosses a threshold
+        // on the way), sliding across; the second, drawn after it, stays near, at the finest level, sliding the other way.
+        const float near_scale = 0.5f;
+        const auto pose = [&](int f, Vec3f& far_at, Vec3f& near_at) {
+            far_at = {-5.0f + 0.2f * static_cast<float>(f), 2.0f, -14.0f - 1.3f * static_cast<float>(f)};
+            near_at = {2.0f - 0.1f * static_cast<float>(f), -2.0f, -6.0f};
+        };
+        bool changed = false;
+        kin::u32 far_before = ~0u;
+        double worst_trail = 0.0;
+        int frames_with_history = 0, differing = 0;
+        for (int f = 0; f < 60; ++f) {
+            Vec3f far_at, near_at;
+            pose(f, far_at, near_at);
+            scene.clear();
+            scene.taa = {.enabled = true};
+            scene.draw(ball, Mat4f::translation(far_at), white);
+            scene.draw(ball, Mat4f::translation(near_at) * Mat4f::scaling({near_scale, near_scale, near_scale}), white);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+                return;
+            }
+            assert(r3d.stats().taa_dispatches > 0);
+            frames_with_history += r3d.stats().taa_reset ? 0 : 1;
+            const kin::u32 level_far = expected_level(ball, scene.camera, 120.0f, far_at, 1.0f, 0.5f);
+            const kin::u32 level_near = expected_level(ball, scene.camera, 120.0f, near_at, near_scale, 0.5f);
+            differing += level_far != level_near ? 1 : 0;
+            assert(r3d.stats().lod_copies_by_level[level_far] >= 1 && r3d.stats().lod_copies_by_level[level_near] >= 1);
+            if (far_before != ~0u && level_far != far_before) {
+                changed = true;
+                std::cerr << "lod taa: the far copy goes from level " << far_before << " to " << level_far << " at frame " << f << '\n';
+            }
+            far_before = level_far;
+            if (f >= 40) {
+                // Against the same frame drawn without temporal anti-aliasing at 8 samples a pixel.
+                const kin::Camera3D camera = scene.camera;
+                scene.taa = {};
+                const Pixels truth = shoot_view(renderer, r3d, truth_view, scene);
+                renderer.present();
+                double e = 0.0;
+                for (int i = 0; i < 160 * 120; ++i) {
+                    const double d = level(p.at(i % 160, i / 160)) - level(truth.at(i % 160, i / 160));
+                    e += d * d;
+                }
+                error_sum += e / (160.0 * 120.0);
+                ++error_frames;
+                scene.camera = camera;
+            }
+            // The trail: the pixels the far copy left behind it (in its row), a few pixels clear of its edge.
+            if (f >= 8) {
+                const auto screen_at = [&](Vec3f at) { return scene.camera.project(at, screen)->pos; };
+                const kin::Vec2f centre = screen_at(far_at);
+                const float radius_px = focal / -far_at.z;
+                double got = 0.0;
+                int count = 0;
+                for (int back = 6; back < 20; ++back) {
+                    const int x = static_cast<int>(centre.x - radius_px) - back; // it moves right
+                    if (x >= 0 && x < 160) {
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            got += level(p.at(x, static_cast<int>(centre.y) + dy));
+                            ++count;
+                        }
+                    }
+                }
+                if (count > 0) {
+                    worst_trail = std::max(worst_trail, got / count);
+                }
+                // And the near copy's, moving left.
+                const kin::Vec2f centre_near = screen_at(near_at);
+                const float radius_near = focal * near_scale / -near_at.z;
+                got = 0.0;
+                count = 0;
+                for (int back = 6; back < 20; ++back) {
+                    const int x = static_cast<int>(centre_near.x + radius_near) + back;
+                    if (x >= 0 && x < 160) {
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            got += level(p.at(x, static_cast<int>(centre_near.y) + dy));
+                            ++count;
+                        }
+                    }
+                }
+                if (count > 0) {
+                    worst_trail = std::max(worst_trail, got / count);
+                }
+            }
+        }
+        std::cerr << "lod taa: worst trail behind a moving copy " << worst_trail << " levels, " << frames_with_history << " frames with history\n";
+        std::cerr << "lod taa: mean square error against 8 samples over the last 20 frames " << error_sum / error_frames << '\n';
+        assert(error_sum / error_frames < 145.0);
+        assert(changed && differing >= 40); // the two copies are at different levels, and the far one changes its
+        assert(frames_with_history == 59);
+        assert(worst_trail < 10.0);
+    });
+}
+
 int main() {
     test_meshes_face_out();
+    test_mesh_lod_builder();
     test_mesh_validation_and_append();
     test_scene_merges_draws();
     test_cameras();
@@ -3271,6 +4119,13 @@ int main() {
     test_gpu_taa_ids_after_reset();
     test_gpu_taa_match_on_workers();
     test_gpu_sun_off_no_shadow_pass();
+    test_gpu_lod_selection();
+    test_gpu_lod_off_is_unchanged();
+    test_gpu_lod_same_level_everywhere();
+    test_gpu_lod_picture_bound();
+    test_gpu_lod_pick();
+    test_gpu_lod_on_workers();
+    test_gpu_lod_taa();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

@@ -105,6 +105,11 @@ struct Settings {
     float taa_jitter_scale = 1.0f;
     int taa_jitter_samples = 8;
     bool taa_freeze = false;
+    // Levels of detail (meshes are made with levels at load: --lod-levels)
+    bool lod = false;
+    float lod_error = 1.0f;     // pixels
+    float lod_bias = 1.0f;
+    int lod_force = -1;         // -1: by distance
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};
@@ -180,6 +185,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                  .jitter_scale = s.taa_jitter_scale,
                  .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, int(max_taa_jitter_samples))),
                  .freeze_jitter = s.taa_freeze};
+    scene.lod = {.enabled = s.lod, .error_pixels = s.lod_error, .bias = s.lod_bias, .force_level = s.lod_force};
     scene.cull = s.cull;
 }
 

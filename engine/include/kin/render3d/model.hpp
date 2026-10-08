@@ -43,7 +43,8 @@ public:
 // A model kept loaded from its file, loaded again when the file changes.
 class ModelFile {
 public:
-    ModelFile(Renderer3D& renderer, std::filesystem::path path);
+    // `options`: the levels of detail each mesh is made with (Renderer3D::create_mesh).
+    ModelFile(Renderer3D& renderer, std::filesystem::path path, const MeshOptions& options = {});
 
     const Model& model() const { return _model; }
     // Loads it again when the file changed since the last look; true when a
@@ -56,6 +57,7 @@ private:
 
     Renderer3D* _renderer = nullptr;
     std::filesystem::path _path;
+    MeshOptions _options;
     std::filesystem::file_time_type _time{};
     Model _model;
     std::string _error;

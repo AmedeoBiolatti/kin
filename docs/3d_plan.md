@@ -1539,7 +1539,7 @@ it the pictures are the same to the bit. A picture with levels is judged
 against the same scene at full detail (what the error costs) and against
 before (what it saves): the error is bounded in pixels (default 1).
 
-#### G3a — Levels of detail for meshes
+#### G3a — Levels of detail for meshes. Done.
 
 Adds meshoptimizer (MIT; FetchContent like cgltf; see Decisions wanted).
 `Renderer3D::create_mesh(data, {.levels = n})` builds, at load, a chain of
@@ -1557,6 +1557,123 @@ GPU work. Checks: crowd (triangles and GPU ms against before; the picture
 against full detail, which should differ by under a pixel's worth of edge),
 the kiln as one mesh (it will show the limit of whole-mesh levels: the near
 part cannot be coarse and the far part fine), build time at load.
+
+#### G3a — results
+
+Built: meshoptimizer 0.25 (MIT; `simplifier`, `vcacheoptimizer`, `indexgenerator`, `allocator` compiled into the
+engine under `KIN_EXPERIMENTAL_3D`; license in the third-party notices), `MeshOptions`
+(`Renderer3D::create_mesh(data, {.levels = n})`, `load_model(path, options)`), `Mesh::level_count()`,
+`level_triangles()`, `level_error()`, `Scene3D::lod {enabled, error_pixels, bias, force_level}`,
+`Render3DStats::lod_copies_by_level`, `kin_reference --lod --lod-error --lod-bias --lod-force --lod-levels` (and
+`lod` / `models[].lod_levels` / `lod_levels` in scene files), Sponza Walk's "Levels of detail" section and
+`--preset lod`, `--lod-levels N` (default 4). Selection is on the CPU in the parallel cull; every pass uses the
+copy's one level; a draw becomes up to `levels` draws over one index buffer (levels are runs of it, over the one
+vertex buffer); the instance buffer layout (`GpuInstance3D`) is unchanged, copies grouped by level then seen before
+sun-only. No hysteresis: copies are not matched across frames except for TAA, so there is nothing to keep a level
+in; popping is measured below instead. Alpha-blended draws are not levelled.
+
+Checks (RTX 4080 Laptop, 1280 x 720, 4x MSAA; "full" is the same meshes made with 4 levels and the selection
+off; the picture of "full" is byte-identical to meshes made without levels):
+
+- **Off path.** `g3a_before_def` / `_all` (crowd, shadows, sponza, helmet, motion, spheres, cornell; default, and
+  `--cascades 4 --ao --contact-shadows --taa`) rendered from the pre-change binary, again after: every PNG
+  byte-identical and every draws/triangles/casters line equal, except `crowd/above` in the `_all` run, which was
+  rendered while another test was running: the pre-change binary alone gives 07ea6cc4 under that load and 6ce1cac0
+  quiet, the new one 6ce1cac0 quiet, 3 runs each (a load-dependent TAA flip with 20,000 copies, as in the shot
+  nondeterminism notes; not this change). A Signal Breach frame (seed 7, 2,000 enemies, frame 1800) is byte-identical
+  between the pre-change and the new binary.
+- **Tests.** `kin_render3d_tests`: the builder (sphere, torus, a wavy open patch whose border vertices all stay,
+  without the lock some are lost, an unindexed mesh, a flat-shaded unindexed mesh, tiny meshes give one level, the
+  recorded errors bound the measured deviation to within x1.5 and are not looser than x8), selection against a formula
+  written in the test (distance, scale, bias, force, orthographic, mesh without levels, blended), off equals old to
+  the bit, a level-drawn copy equals a mesh made of that level to the bit with one map, cascades, occlusion and
+  contact shadows on (so colour, shadow and pre-pass agree), pick, workers equal serial with everything on, TAA with
+  a copy changing level. All pass on the RTX 4080 and on lavapipe; ctest 67/67 (3D) and 65/65 (3D off).
+  Mutations that each made a new test fail: scale ignored, finest instead of coarsest level, shadow draws level 0,
+  pre-pass draws level 0, pick draws level 0, TAA previous matrix by output place (this one only after the TAA
+  test was given a textured copy and a mean-square-error bound: the first version, a trail check, passed it),
+  cascade list ignoring the level, border lock off.
+
+**Full detail against levels (1 px, 4 levels), median of 3 interleaved pairs**; the picture columns are against full
+detail (mean in levels of 255, PSNR, SSIM, p99):
+
+| Scene | Triangles full / levels | GPU ms full / levels | CPU render() ms | Picture (mean, PSNR dB, SSIM, p99) |
+|---|---|---|---|---|
+| crowd first_person | 2.19 M / 1.59 M | 1.12 / 1.05 to 1.20 | 0.15-0.18 / 0.17-0.18 | 0.00, identical |
+| crowd mid_deck | 0.99 M / 0.88 M | 0.70 / 0.68 to 0.78 | 0.13-0.15 / 0.14-0.15 | 0.00, identical |
+| crowd above | 2.58 M / 1.51 M | 1.39 / 1.20 to 1.39 (`*` in 2 of 3) | 0.15 / 0.15 | 0.50, 38.2, 0.993, 14 |
+| kiln game | 5.15 M / 0.65 M | 4.3 / 0.79 `*` (x0.18) | 0.016 / 0.017-0.025 (no `*` in 2 of 3) | 0.09, 48.6, 0.998, 2 |
+| kiln close | 5.15 M / 0.66 M | 4.4-4.7 / 0.87 `*` (x0.19) | 0.016 / 0.018-0.032 (no `*`) | 0.18, 49.0, 0.995, 3 |
+| sponza nave | 260 k / 173 k | 0.32 / 0.29-0.31 (not `*`) | 0.10 / 0.10-0.14 | 0.05, 50.8, 0.999, 1 |
+| sponza roof | 185 k / 169 k | 0.28 / 0.27-0.31 (not `*`) | 0.07 / 0.07-0.09 | 0.02, 55.6, 1.000, 1 |
+| helmet | 94.7 k / 57.6 k | 0.13-0.17 / 0.12-0.18 (not `*`) | 0.014 / 0.015 | 0.05, 47.6, 0.999, 1 |
+| shadows (4 cameras) | 0.3-2.9 k / 0.3-1.7 k | 0.06-0.11 / same (not `*`) | +0 to +0.002 | 0.00-0.01, identical or 58 dB |
+
+The CPU cost of the selection is under the noise (a few hundredths of a ms at 22,000 copies); with the setting on
+`render()` is not measurably slower except where `*` is not shown at all, the kiln's apparent x1.5-1.9 is 0.01 ms noise
+on 13 copies. **Error bound** (levels 4; GPU ms; triangles; picture difference from full detail, mean levels / PSNR dB /
+p99):
+
+| Bound | Crowd above: triangles, GPU ms | Crowd above picture | Kiln game: triangles, GPU ms | Kiln game picture | Kiln close picture |
+|---|---|---|---|---|---|
+| full | 2.58 M, 1.48 | | 5.15 M, 4.32 | | |
+| 0.5 px | 2.34 M, 1.57 | 0.05 / 49.1 / 0 | 651 k, 0.73 | 0.06 / 51.6 / 2 | 0.15 / 50.9 / 3 |
+| 1 px | 1.51 M, 1.35 | 0.50 / 38.2 / 14 | 648 k, 0.75 | 0.09 / 48.6 / 2 | 0.18 / 49.0 / 3 |
+| 2 px | 1.10 M, 1.20 | 0.88 / 34.8 / 23 | 646 k, 0.71 | 0.15 / 43.2 / 3 | 0.29 / 45.4 / 5 |
+| 4 px | 1.10 M, 1.18 | 0.88 / 34.8 / 23 | 645 k, 0.70 | 0.22 / 39.9 / 4 | 0.50 / 37.3 / 8 |
+
+(GPU ms between pairs drift by about 5%.) Four levels end at an eighth of the kiln's triangles whatever the bound, so
+its floor is 0.65 M; with 6 levels (`--lod --lod-levels 6`, 1 px) the kiln is **167 k triangles, 0.31 ms (game) and
+192 k, 0.44 ms (close), against 4.3 and 4.4**, picture 0.11 / 47.7 dB and 0.18 / 49.2 dB, build 8.5 s. The crowd's
+enemy meshes are small (a 5-point star, a 6-sided cylinder, a 320-triangle torus): only the tori have levels worth
+taking, so the crowd saves 0.4 to 1.1 M of its 1.5 to 2.6 M triangles above and at the first-person view hardly
+anything is simplified at 1 px. **Recommended default: 1 px with `bias` 1** (below it nothing more is saved; above 2 the
+crowd's picture falls under 35 dB); the setting stays off by default and meshes keep one level unless asked
+(`--lod-levels`), 4 for Sponza Walk, 6 for a mesh as dense as the kiln.
+
+**With everything on** (`--cascades 4 --ao --contact-shadows --taa`, levels 4, 1 px): the kiln falls from 6.2-6.9 ms
+GPU to 1.18-1.52 (x0.19-0.22, pictures 0.09-0.17 levels, 50 dB). **The crowd gets slower**: GPU 2.07 / 2.33 / 1.79 ms
+to 2.24 / 2.52 / 1.99 (+8 to 11%, `*` on one) and CPU `render()` 0.39-0.47 to 0.53-0.59 (+25 to 33%; this scene's CPU
+time swings twofold, so treat as indicative): its tori are 320 triangles, so the saving is small and the pre-pass, the
+velocity pass, the shadow pass and the main pass each draw a run more per level in use (draws 4 to 5-6). A scene of
+small meshes should keep the setting off, or give levels only to meshes of a few thousand triangles.
+
+**Build time and memory.** The kiln (13 meshes, one of 4.96 M triangles in 14.9 M unindexed vertices, flat-shaded because
+the file has no normals): 8.0 to 8.2 s at load for 4 levels (the whole model load, levels included; the no-level load was not timed separately), 8.5 s for 6; the whole
+`kin_reference` run peaks at 2.74 GB (4 levels) and 2.85 GB (6) against **1.62 GB with no levels** (+1.1 GB, of which the
+levels' own vertices, 36 bytes a vertex of 12.8 M, are 0.45 GB and are also kept on the GPU: 9.7 M triangles with all levels
+against 5.15 M). A first version that simplified the 14.9 M vertices with all nine attributes peaked at 6.6 GB and was
+killed by the OOM killer: the simplifier's per-vertex state with attributes and `Permissive` was the cause. A flat
+unindexed mesh is now welded by position, simplified on positions alone (no attribute state), and each level gets vertices
+of its own with the triangle's flat normal and the UV and colour of the corner it replaces (`MeshLodChain::extra_vertices`);
+level 0's vertices and indices are untouched. Sponza (103 meshes, 79 with levels): 1.3 to 1.8 s load, peak 562 MB; helmet 1.3 s
+(load with levels), the crowd's four meshes 2 ms.
+
+**What the pictures show.** Kiln, game and close at 1 px and at 6 levels: no cracks or holes (the glTF's parts are
+separate meshes at their own levels, and the borders of a part are locked; I did not examine where the kiln's parts meet, nor
+build a model whose parts share an open border, so seams between parts at different levels are unproven, and one level for all parts of a model,
+chosen from the model's bounds, is the mitigation I would add). The difference image (x8) is a faint pitting on the
+dome and fine edges of the door: the flat shading's normals are regenerated per level, and the geometry differs by under a
+pixel. Crowd above at 1 and 4 px at 3x: indistinguishable to the eye in the dense heap. No silhouette shrink beyond the
+error (a simplified surface lies inside a convex one by about the error); textures: Sponza at 1 px shows no swimming in
+its pictures (mean 0.05 levels). **Popping**, from a 60-step dolly (kiln, margin 1.0 to 0.35; crowd, the `above` camera
+sinking), the part of each step's change that full detail does not have, mean over pixels: kiln 0.33 levels at 1 px and
+0.82 at 4 px (the picture itself differs from full by 0.16 and 0.41); crowd 1.33 at 1 px and 4.4 at 4 px (picture 0.49
+and 1.67): the crowd's changes are about 2.7 times its static error, small coloured edges changing as 20,000 tori swap
+levels; I looked at no frame sequence by eye (the numbers are all I have), and without hysteresis a still camera is steady while a
+moving one changes at the scale of the bound; 1 px is under what is visible in the two scenes, 4 px is where I would expect to see it.
+
+**Honest limits.** Whole-mesh levels: the kiln is one 5 M triangle mesh, so a close-up of it takes the finest level
+whole when any of its bounding sphere is near, and the 0.65 M floor of four levels shows that levels, not culling, set
+the cost; its win comes from the camera being far enough (a fit of its whole size) that even the finest level is under a
+pixel a triangle. A close-up of one corner is G3b's case (clusters). The recorded error is meshoptimizer's per-step
+error added up: against a measured deviation it was 0.72x the measured for the first level of a sphere (a bound within
+x1.5 in the tests, x1.0 to x1.4 measured, looser at coarse levels), so the 1 px bound is about 1 to 1.4 px.
+Not tested: the Sponza Walk panel click path (the settings and `--preset lod` are, through a headless run); shadows from a
+coarser level than the camera's (the plan's later option); LOD for the overlay and for blended meshes; hysteresis. A
+one-line enablement for Signal Breach (not made): `scene.lod.enabled = true;` in its view's scene fill, with the enemy
+meshes made with levels (`create_mesh(data, {.levels = 3})`); only the tori would gain and the all-features crowd
+numbers above say it would cost more than it saves there.
 
 #### G3b — Clusters
 

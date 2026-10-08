@@ -166,7 +166,8 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   the camera), shadows (map size, cascades, distance, area), ambient occlusion,
   contact shadows (distance, thickness, intensity, steps), temporal anti-aliasing
   (history kept, sharpen, jitter scale and samples, a freeze-jitter debug switch and a
-  reset-history button), MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
+  reset-history button), levels of detail (on, error in pixels, bias, force a level; the meshes' levels
+  are built at load, `--lod-levels N`, default 4, 1 builds none; `--preset lod`), MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
   and every material feature (textures, normal maps, metallic-roughness maps,
   emissive, cut-out, double-sided, shadows, unlit, roughness and metallic
   overrides). F3 shows the stats (frame, CPU and GPU time, draws, triangles,
