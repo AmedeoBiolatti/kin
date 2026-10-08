@@ -90,6 +90,12 @@ struct Settings {
     float ao_radius = 0.5f;
     float ao_intensity = 1.0f;
     bool ao_half = false;
+    // Contact shadows
+    bool contact = false;
+    float contact_distance = 0.5f;
+    float contact_thickness = 0.1f;
+    float contact_intensity = 1.0f;
+    int contact_steps = 20;
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};
@@ -154,6 +160,11 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         l.shadow_distance = s.shadow_distance;
     }
     scene.ambient_occlusion = {.enabled = s.ao, .radius = s.ao_radius, .intensity = s.ao_intensity, .half_resolution = s.ao_half};
+    scene.contact_shadows = {.enabled = s.contact,
+                             .distance = s.contact_distance,
+                             .thickness = s.contact_thickness,
+                             .intensity = s.contact_intensity,
+                             .steps = static_cast<u32>(std::clamp(s.contact_steps, 4, 64))};
     scene.cull = s.cull;
 }
 

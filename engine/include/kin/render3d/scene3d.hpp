@@ -206,6 +206,21 @@ struct AmbientOcclusion3D {
     bool half_resolution = false;
 };
 
+// Contact shadows: a short march through the depth buffer toward the sun,
+// for the small shadows the cascades are too coarse for (a foot, a pole, a
+// plate on the ground). Needs the depth pre-pass (shared with ambient
+// occlusion when both are on) and one compute dispatch and blur, so it is
+// off unless asked for; off, the picture and the cost are as without it. It
+// multiplies only the sun's light, after the shadow map's, and not the
+// overlay, blended, additive or wireframe meshes.
+struct ContactShadows3D {
+    bool enabled = false;
+    f32 distance = 0.5f;   // how far toward the sun a pixel looks for something in the way (units)
+    f32 thickness = 0.1f;  // how deep a thing is taken to be: what is further behind the ray than this lets it pass (units)
+    f32 intensity = 1.0f;  // 1: fully dark where blocked, less: lighter (0..1)
+    u32 steps = 20;        // samples along the march (4 to 64)
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -215,6 +230,7 @@ public:
     Camera3D camera{};
     Lights3D lights{};
     AmbientOcclusion3D ambient_occlusion{};
+    ContactShadows3D contact_shadows{};
     // Copies wholly outside the camera's view are skipped (each tested as the
     // sphere round its mesh's bounds, moved and scaled with it).
     bool cull = true;

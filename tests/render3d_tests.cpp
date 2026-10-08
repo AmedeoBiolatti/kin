@@ -1510,6 +1510,127 @@ void test_gpu_ambient_occlusion() {
     });
 }
 
+
+// Contact shadows (G2c): a thin pole on a floor under a low sun leaves a darker
+// patch at its foot that the shadow map is too coarse to give; the floor far
+// from it, the pole's top, an unlit face and a floor seen through a plate far
+// nearer the camera are not changed; off, no pre-pass and no compute run and
+// the picture is the old one; it works without ambient occlusion and shares
+// the pre-pass with it; the overlay is not shadowed.
+void test_gpu_contact_shadows() {
+    with_gpu("test_gpu_contact_shadows", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh pole = r3d.create_mesh(kin::meshes::box({0.2f, 1.0f, 0.2f}));
+        const kin::Mesh plate = r3d.create_mesh(kin::meshes::box({0.24f, 0.02f, 0.24f}));
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view_msaa = r3d.create_view({160, 120}, {.samples = 4});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({-2.0f, 4.0f, 5.0f}, {0.0f, 0.3f, 0.0f}, 40.0f);
+        // Low sun from the right and behind the pole: its shadow falls left and toward the camera.
+        scene.lights.sun = {.direction = {1.0f, 0.7f, -0.5f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.25f, 0.25f, 0.25f};
+        // The floor at `beside` is lit by the sun with nothing near; a small
+        // plate a metre and a half up hides, on the screen, where the march
+        // from there samples (a quarter of the way along), but is far nearer the camera.
+        const Vec3f beside{2.0f, 0.0f, 1.0f};
+        const Vec3f sun_dir = normalize(scene.lights.sun.direction);
+        Vec3f plate_at;
+        {
+            const Vec3f sample = beside + sun_dir * 0.25f, eye = scene.camera.position;
+            const float k = (eye.y - 1.5f) / (eye.y - sample.y); // along the line from the eye to the sample, at y = 1.5
+            plate_at = eye + (sample - eye) * k;
+        }
+        const auto render = [&](const kin::ContactShadows3D& contact, bool with_plate = false, bool gun = false, bool ao = false,
+                                kin::View3D* target = nullptr) {
+            scene.clear();
+            scene.contact_shadows = contact;
+            scene.ambient_occlusion = {.enabled = ao, .radius = 1.0f};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            scene.draw(pole, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            if (with_plate) {
+                scene.draw(plate, Mat4f::translation(plate_at), {.color = Color::rgb(200, 200, 200)});
+            }
+            if (gun) {
+                kin::Scene3D& hands = scene.overlay();
+                hands.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
+                hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
+            }
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(target ? *target : view, scene));
+            renderer.draw_texture((target ? *target : view).texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto at = [&](const Pixels& p, Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        const Vec3f patch{-0.17f, 0.0f, 0.085f}, far_floor{-2.0f, 0.0f, 1.0f}, top{0.0f, 1.0f, 0.0f}, unlit{0.0f, 0.5f, 0.1f};
+        const kin::ContactShadows3D on{.enabled = true, .distance = 0.5f, .thickness = 0.3f, .intensity = 1.0f, .steps = 20};
+
+        const Pixels off = render({.enabled = false, .distance = 2.0f});
+        assert(r3d.stats().ao_draws == 0 && r3d.stats().contact_dispatches == 0);
+        const Pixels plain = render({});
+        assert(plain.rgba == off.rgba); // off is off, whatever its other settings
+
+        const Pixels shadowed = render(on);
+        if (r3d.stats().contact_dispatches == 0) {
+            std::cerr << "contact shadows: not available on this device, skipped\n";
+            return;
+        }
+        // Without ambient occlusion: the pre-pass of both meshes, the march and two blurs.
+        assert(r3d.stats().ao_draws == 2 && r3d.stats().ao_instances == 2 && r3d.stats().ao_dispatches == 0 &&
+               r3d.stats().contact_dispatches == 3);
+        const int patch_off = brightness(at(off, patch)), patch_on = brightness(at(shadowed, patch));
+        std::cerr << "contact shadows: patch at the foot " << patch_off << " -> " << patch_on << ", far floor " << brightness(at(off, far_floor))
+                  << " -> " << brightness(at(shadowed, far_floor)) << ", top " << brightness(at(off, top)) << " -> "
+                  << brightness(at(shadowed, top)) << "\n";
+        assert(patch_on < patch_off * 75 / 100);
+        expect(at(shadowed, far_floor), at(off, far_floor), "floor far from the pole with contact shadows", 3);
+        expect(at(shadowed, top), at(off, top), "the pole's top with contact shadows", 3);
+        expect(at(shadowed, unlit), at(off, unlit), "a face turned from the sun with contact shadows", 3);
+        // The patch fades with distance from the pole, and with the intensity.
+        const int mid = brightness(at(shadowed, {-0.5f, 0.0f, 0.25f}));
+        assert(mid >= patch_on && mid <= brightness(at(off, {-0.5f, 0.0f, 0.25f})));
+        const int half = brightness(at(render({.enabled = true, .distance = 0.5f, .thickness = 0.15f, .intensity = 0.5f, .steps = 20}), patch));
+        assert(half > patch_on && half < patch_off);
+        // Nothing within reach, nothing shaded.
+        expect(at(render({.enabled = true, .distance = 0.02f, .thickness = 0.15f, .steps = 20}), patch), at(off, patch),
+               "a march too short to reach the pole", 3);
+
+        // A plate far in front of the floor, over the screen where the march
+        // would sample: further than the thickness, so it blocks nothing.
+        const Pixels plate_off = render({}, true), plate_on = render(on, true);
+        const auto here = scene.camera.project(beside, screen), there = scene.camera.project(plate_at, screen);
+        assert(here && there && std::hypot(here->pos.x - there->pos.x, here->pos.y - there->pos.y) > 5.0f); // the plate is not over the floor point itself
+        std::cerr << "contact shadows: plate " << std::hypot(here->pos.x - there->pos.x, here->pos.y - there->pos.y) << " px from the floor point: "
+                  << brightness(at(plate_off, beside)) << " -> " << brightness(at(plate_on, beside)) << "\n";
+        expect(at(plate_on, beside), at(plate_off, beside), "the floor beside a plate far in front, with contact shadows", 3);
+
+        // Shared pre-pass: both on draw it once; each is as when alone.
+        const Pixels ao_alone = render({}, false, false, true);
+        const kin::u32 ao_instances = r3d.stats().ao_instances;
+        const Pixels both = render(on, false, false, true);
+        assert(r3d.stats().ao_instances == ao_instances && r3d.stats().ao_dispatches == 3 && r3d.stats().contact_dispatches == 3);
+        assert(brightness(at(both, patch)) < brightness(at(ao_alone, patch)) * 80 / 100);
+
+        // Four-times multisampled too.
+        const Pixels ms_off = render({}, false, false, false, &view_msaa), ms_on = render(on, false, false, false, &view_msaa);
+        assert(brightness(at(ms_on, patch)) < brightness(at(ms_off, patch)) * 80 / 100);
+        expect(at(ms_on, far_floor), at(ms_off, far_floor), "far floor, multisampled, with contact shadows", 3);
+
+        // The overlay is not in the pre-pass and not shadowed.
+        const Pixels gun_off = render({}, false, true), gun_on = render(on, false, true);
+        const auto hands = scene.overlay().camera.project({0.5f, -0.3f, -1.5f}, screen);
+        assert(hands);
+        expect(gun_on.at(hands->pos), gun_off.at(hands->pos), "the overlay is not shadowed", 2);
+        // With no sun there is nothing to march toward: no passes.
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        render(on);
+        assert(r3d.stats().contact_dispatches == 0);
+    });
+}
+
 } // namespace
 
 // --- Physically based materials (G1a) ---
@@ -1989,6 +2110,7 @@ int main() {
     test_gpu_shadows_into_view();
     test_gpu_cascades();
     test_gpu_ambient_occlusion();
+    test_gpu_contact_shadows();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

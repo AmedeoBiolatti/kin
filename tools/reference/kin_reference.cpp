@@ -6,6 +6,8 @@
 //                 [--warmup N] [--repeat N] [--width W --height H]
 //                 [--cascades N] [--shadow-distance D]
 //                 [--ao] [--ao-radius R] [--ao-intensity I] [--ao-half]
+//                 [--contact-shadows] [--contact-distance D] [--contact-steps N]
+//                 [--contact-thickness T]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -18,7 +20,9 @@
 // its own, so the default pictures stay comparable). A scene file may have
 // `ambient_occlusion: {enabled, radius, intensity, half_resolution}`; --ao turns
 // it on for every scene (with --ao-radius, --ao-intensity and --ao-half to
-// set the rest), likewise a label of its own.
+// set the rest), likewise a label of its own. Likewise
+// `contact_shadows: {enabled, distance, thickness, intensity, steps}` and
+// --contact-shadows (with --contact-distance, --contact-steps, --contact-thickness).
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -169,6 +173,9 @@ int main(int argc, char** argv) {
     double distance_override = 0.0;
     bool ao_override = false, ao_half = false;
     double ao_radius = 0.0, ao_intensity = 0.0; // 0: the scene's
+    bool contact_override = false;
+    double contact_distance = 0.0, contact_thickness = 0.0; // 0: the scene's
+    int contact_steps = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -196,6 +203,17 @@ int main(int argc, char** argv) {
         } else if (a == "--ao-intensity") {
             ao_override = true;
             ao_intensity = std::atof(next().c_str());
+        } else if (a == "--contact-shadows") {
+            contact_override = true;
+        } else if (a == "--contact-distance") {
+            contact_override = true;
+            contact_distance = std::atof(next().c_str());
+        } else if (a == "--contact-thickness") {
+            contact_override = true;
+            contact_thickness = std::atof(next().c_str());
+        } else if (a == "--contact-steps") {
+            contact_override = true;
+            contact_steps = std::atoi(next().c_str());
         } else if (a == "--no-gpu-timing") {
             gpu_timing = false;
         } else if (a == "--width") {
@@ -368,6 +386,27 @@ int main(int argc, char** argv) {
                     scene.ambient_occlusion.intensity = static_cast<float>(ao_intensity);
                 }
             }
+            if (const kin::JsonValue* contact = doc.find("contact_shadows")) {
+                kin::ContactShadows3D& cs = scene.contact_shadows;
+                cs.enabled = contact->bool_at("enabled", true);
+                cs.distance = static_cast<float>(contact->number_at("distance", cs.distance));
+                cs.thickness = static_cast<float>(contact->number_at("thickness", cs.thickness));
+                cs.intensity = static_cast<float>(contact->number_at("intensity", cs.intensity));
+                cs.steps = static_cast<kin::u32>(contact->number_at("steps", cs.steps));
+            }
+            if (contact_override) {
+                kin::ContactShadows3D& cs = scene.contact_shadows;
+                cs.enabled = true;
+                if (contact_distance > 0.0) {
+                    cs.distance = static_cast<float>(contact_distance);
+                }
+                if (contact_thickness > 0.0) {
+                    cs.thickness = static_cast<float>(contact_thickness);
+                }
+                if (contact_steps > 0) {
+                    cs.steps = static_cast<kin::u32>(contact_steps);
+                }
+            }
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
                     scene.add_light({.position = vec3(p.find("position")), .color = vec3(p.find("color")),
@@ -468,7 +507,7 @@ int main(int argc, char** argv) {
                    << ", \"shadow_casters\": " << stats.shadow_casters << ", \"shadow_cascades\": " << stats.shadow_cascades
                    << ", \"cascade_casters\": [" << stats.cascade_casters[0] << ", " << stats.cascade_casters[1] << ", "
                    << stats.cascade_casters[2] << ", " << stats.cascade_casters[3] << "], \"ao_draws\": " << stats.ao_draws << ", \"ao_instances\": " << stats.ao_instances
-                   << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"lights\": " << stats.lights << "}";
+                   << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches << ", \"lights\": " << stats.lights << "}";
         }
         report << "]}";
     }

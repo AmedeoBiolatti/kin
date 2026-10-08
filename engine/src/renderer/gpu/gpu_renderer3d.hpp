@@ -96,6 +96,9 @@ private:
     // the pre-pass's depth and normals (one sample, whatever the view's), and
     // the occlusion (raw, blurred across, blurred down: R8, the view's size or half).
     GpuTexture _ao_depth, _ao_normals, _ao_raw, _ao_across, _ao;
+    // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
+    // normals are shared): the march, blurred across, blurred down; R8, the view's size.
+    GpuTexture _contact_raw, _contact_across, _contact;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
 };
 
@@ -140,10 +143,16 @@ private:
     void filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment);
     // Makes `view`'s ambient occlusion targets for its size (half of it when
     // `half`), or reports they can't be made.
-    bool ensure_ao_targets(GpuView3D& view, bool half);
+    // The pre-pass's depth and normals always; the occlusion's three targets
+    // with `want_ao`, the contact shadows' with `want_contact`.
+    bool ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, bool want_contact);
     // Records the compute passes that turn the view's pre-pass into its occlusion.
     void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
                            const AmbientOcclusion3D& ao, Render3DStats& stats);
+    // Records the compute passes that march the view's pre-pass toward the sun
+    // (`sun`: toward it in world space) and blur the result.
+    void compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, f32 aspect,
+                                 const ContactShadows3D& contact, const Vec3f& sun, Render3DStats& stats);
     // The view's HDR passes: bloom, then out to what 2D draws.
     void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view);
 
@@ -171,6 +180,8 @@ private:
     SDL_GPUTextureFormat _ao_depth_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
     bool _ao_available = false;
     bool _ao_warned = false;
+    bool _contact_warned = false;
+    SDL_GPUComputePipeline* _contact_pipeline = nullptr; // contact.comp
     SDL_GPUComputePipeline* _gtao_pipeline = nullptr;    // gtao.comp
     SDL_GPUComputePipeline* _ao_blur_pipeline = nullptr; // ao_blur.comp
     SDL_GPUSampler* _point_sampler = nullptr;            // texel by texel, for compute

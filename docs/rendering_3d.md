@@ -237,6 +237,36 @@ third of the cost; a little softer at depth edges). `stats()` has
 draw of every opaque copy and about 0.3 ms or more of compute at 1280 x 720:
 see the plan's G2b results.
 
+### Contact shadows
+
+`scene.contact_shadows = {.enabled = true, .distance = 0.5f, .thickness = 0.1f,
+.intensity = 1.0f, .steps = 20}` (off by default; off, the picture and the cost
+are those of a renderer without it). For the small shadows a shadow map is too
+coarse for: the foot of a pole, a plate on the ground. A compute pass marches
+from each pixel toward the sun through the pre-pass's depth (the same pre-pass
+and targets as ambient occlusion, drawn once when both are on, so it works with
+occlusion off), starting a different amount along the first step at each pixel;
+a sample counts as blocking when the depth there is nearer the camera than the
+ray, but by no more than `thickness` (a thing that is further in front is taken
+to be a thin occluder the ray passes behind, so a distant plate in front casts
+nothing). The result fades over the last 40% of `distance` and near the
+screen's edge, goes through the occlusion's depth-aware blur, and is read by
+`mesh.frag`, which multiplies **only the sun's term** by it, after the shadow
+map's: the fill, ambient light, environment and point lights are untouched.
+`distance` (units) is how far toward the sun to look; `thickness` (units) how
+deep an occluder is assumed to be (smaller: fewer false shadows from near
+things, thin shadows may thin out; larger: the reverse); `intensity` 0..1;
+`steps` 4..64. Surfaces turned from the sun, blended, additive and wireframe
+meshes, the first-person overlay and meshes that do not receive shadows read
+none. Marched in compute rather than in `mesh.frag`: the main pass shades
+every fragment of the overdraw and the march would run in each, where compute
+runs once a pixel and `mesh.frag` stays one texture read. Without a sampled
+depth, an RG16F colour target or R8 storage it is off with one line in the log;
+with no sun it does nothing. `stats()` has `contact_dispatches` (0 when off);
+the pre-pass shows in `ao_draws` and `ao_instances`. Custom shaders see a tenth
+sampler (`uContactShadow`) in kin's include; ones compiled before still work.
+Full size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
+
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
@@ -321,7 +351,7 @@ Agents send motion with the server's `input.mouse {dx, dy}`.
 
 [examples/sponza_walk](../examples/sponza_walk) flies a camera round Sponza
 (fetched by `tools/reference/fetch.py`) with every feature of the renderer on
-a switch: lights, shadows (cascades), occlusion, MSAA, HDR and bloom, and each
+a switch: lights, shadows (cascades), occlusion, contact shadows, MSAA, HDR and bloom, and each
 material feature (done to copies of the model's materials, so the model is
 kept). Its settings are one struct applied to a `Scene3D` each frame, so a new
 feature is a field and a row in its table of switches; `--set`, `--preset` and

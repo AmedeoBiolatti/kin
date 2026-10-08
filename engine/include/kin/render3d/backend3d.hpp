@@ -67,9 +67,10 @@ struct Render3DStats {
     u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view; all cascades)
     u32 shadow_cascades = 0; // maps drawn (0: no shadows)
     std::array<u32, 4> cascade_casters{}; // meshes drawn into each cascade
-    u32 ao_draws = 0;      // draw calls into the ambient occlusion pre-pass (0: no occlusion this render)
+    u32 ao_draws = 0;      // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither this render)
     u32 ao_instances = 0;  // meshes drawn into it
     u32 ao_dispatches = 0; // compute dispatches (the occlusion and its blur)
+    u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
     u32 lights = 0;    // point lights used
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
     u64 triangles = 0;

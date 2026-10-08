@@ -1209,12 +1209,146 @@ the sun's; blended meshes and the overlay are not in the pre-pass and the
 overlay's pixels are unchanged. No unit test of pure maths: the maths is in
 GLSL (the GPU test covers it); C++ only builds uniforms.
 
-#### G2c — Contact shadows
+#### G2c — Contact shadows. Done.
 
 A screen-space march toward the sun through the pre-pass depth (16 to 24
 steps, about half a metre, a thickness test, per-pixel noise), multiplying
 the sun term only. Fixes the contacts the cascades can't resolve. Check:
 `shadows` (poles, plates, objects on the ground).
+
+#### G2c — results
+
+Built: `Scene3D::contact_shadows` (`ContactShadows3D {enabled = false,
+distance = 0.5, thickness = 0.1, intensity = 1, steps = 20}`), `contact.comp`,
+a few lines in `kin_material.inc.glsl` and the renderer.
+
+- **Where it marches: compute into an R8 texture, not in `mesh.frag`.** The
+  main pass shades every fragment of the overdraw (Sponza, the crowd), and a
+  20-tap march in each would multiply by it; compute runs once a pixel, and
+  `mesh.frag` stays one texture read behind a flag. The cost is three
+  full-size R8 targets a view and three dispatches, made only when asked for.
+- **Shared pre-pass.** It is drawn when AO or contact shadows (or both) are on
+  and never twice; the depth and normal targets are the same. Contact shadows
+  work with AO off (a test: 2 pre-pass draws, 0 AO dispatches, 3 contact
+  dispatches). `Render3DStats::contact_dispatches` is new; `ao_draws` and
+  `ao_instances` are now the pre-pass's, whoever asked for it.
+- **The march.** From the pixel's view-space position, pushed off the surface
+  by a pixel or more (more where seen at a slant), toward the sun in view
+  space, `steps` samples over `distance`, the first one a different fraction
+  of a step in every pixel (interleaved gradient noise). A sample counts when the
+  depth there is nearer the camera than the ray by more than a tolerance of
+  about a pixel's worth of depth, and less than `thickness`, with the weight
+  falling off over the top quarter of the thickness, over the last 40% of the
+  march and over the outer 5% of the screen. Off the screen ends the march. The
+  result goes through `ao_blur.comp` twice (depth-aware, reused as it is). The
+  tolerance is in pixels, not units, so a test at 160 x 120 and a game at 4K
+  see the same march.
+- **Lighting.** `kin_lit` multiplies the sun's shadow-map term by it (only
+  there: fill, ambient, environment and point lights are as before); a surface
+  with `receives_shadow` off, a blended, additive or wireframe mesh and the
+  overlay read 1. The off path does not read the texture (it is white).
+  Custom shaders and `mesh.frag` have a tenth sampler; shaders compiled
+  against the old include (nine) still work.
+- **Degrading.** The same formats as AO (sampled depth, RG16F target, R8
+  storage); without them one WARN line when asked for and no shadows. With no
+  sun colour it does nothing. Lavapipe is checked.
+- **Reference tool.** `contact_shadows {enabled, distance, thickness,
+  intensity, steps}` in a scene file; `kin_reference --contact-shadows
+  [--contact-distance D --contact-steps N --contact-thickness T]`. Sponza Walk
+  has the section (enabled, distance, thickness, intensity, steps), the preset
+  `contact`, and the stats line.
+
+*Off against `g1b_final`* (`g2c`): every picture identical but `kiln/game`
+(90.5 dB, its own jitter, as in G2b). Signal Breach frame 1800 with it off is
+byte-identical to `g2b_breach_off.png`.
+
+*Distance to Cycles, mean levels (lower is better):*
+
+| Picture | off (`g2c`) | on (`g2c_cs`) | AO on | AO + contact | 4 cascades | 4 cascades + contact |
+|---|---|---|---|---|---|---|
+| shadows overview | 2.38 | 2.41 | 2.51 | 2.54 | 2.38 | 2.41 |
+| shadows contact | 4.75 | 4.75 | 5.10 | 5.12 | 4.70 | 4.71 |
+| shadows fence | 3.53 | 3.60 | 4.02 | 4.12 | 3.44 | 3.52 |
+| shadows grazing | 6.86 | 6.86 | 7.05 | 7.05 | 6.86 | 6.86 |
+| spheres front / grazing | 3.60 / 4.05 | 3.63 / 4.06 | | | | |
+| sponza nave / roof | 50.10 / 33.98 | 50.09 / 33.96 | 48.67 / 32.13 | 48.66 / 32.12 | 50.07 / 33.89 | 50.06 / 33.88 |
+| helmet front / side | 0.66 / 0.68 | 0.67 / 0.70 | | | | |
+| kiln close / game | 1.54 / 0.67 | 1.57 / 0.68 | | | | |
+| cornell | 10.20 | 10.20 | | | | |
+| ibl_spheres front / grazing | 9.49 / 10.81 | 9.49 / 10.81 | | | | |
+| furnace | 0.23 | 0.23 | | | | |
+
+Honest reading: **contact shadows do not bring kin nearer Cycles in any scene
+here.** The `shadows` scene's 2048 map (and 4 cascades even more) already
+resolves its poles and plates at 1280 x 720; what the screen-space march adds is
+a little darkening that Cycles does not have (below), so the numbers move by
+0.0 to 0.1 the wrong way. Cornell, `ibl_spheres` and furnace have no sun (a point
+light, or an environment only) and are bit-identical: the feature does nothing
+there, by design. The feature earns its place where a map is coarse (a big
+`shadow_area`, one cascade over a large scene), which these scenes are not;
+not measured on such a scene.
+
+*GPU cost, ms per render* (RTX 4080 Laptop, 1280 x 720, 4x MSAA, 120 frames;
+machine busy, tiny scenes scatter 20-30%; `*` where compare.py marks it):
+
+| Picture | off | contact | contact + AO against AO alone |
+|---|---|---|---|
+| shadows overview / contact | 0.058 / 0.095 | 0.28 * / 0.35 * | +0.24 / +0.29 (0.33 -> 0.57, 0.56 -> 0.85) * |
+| shadows fence / grazing | 0.098 / 0.114 | 0.38 * / 0.34 * | +0.27 / +0.21 * |
+| spheres front / grazing | 0.129 / 0.115 | 0.36 * / 0.33 * | |
+| helmet front / side | 0.154 / 0.172 | 0.20 / 0.25 * | |
+| sponza nave / roof | 0.327 / 0.324 | 0.60 * / 0.53 | +0.25 / +0.26 * |
+| kiln close / game | 4.63 / 4.20 | 6.73 * / 6.17 * | |
+| cornell / ibl_spheres / furnace | | no sun: no cost | |
+| crowd first_person / mid_deck / above (best of three, GPU) | 1.35 / 0.80 / 1.60 | 1.95 / 1.20 / 2.25 | with AO already on: 2.31 -> 2.67, 2.04 -> 2.20, 2.31 -> 2.62 |
+
+The cost is mostly fixed, not the march: on `shadows` overview and Sponza,
+8 / 16 / 24 steps were +0.15 / +0.17 / +0.21 and +0.15 / +0.20 / +0.22 ms
+over off (the pre-pass, the three dispatches' barriers and the two full-size
+blurs are the rest). With AO already on the pre-pass is shared and contact
+shadows add 0.2 to 0.3 ms in small scenes and 0.2 to 0.4 in the crowd; alone in
+the crowd they add 0.4 to 0.65 ms (the pre-pass of 18,671 copies is a third of
+it). Like AO, **not cheap enough for Signal Breach by default**: it stays off
+there (the game has no setting). Not done: a half-resolution march, one blur
+instead of two, writing the march into the AO's scratch targets.
+
+*Pictures looked at* (`reference_out/g2c*`, the Breach frames
+`g2c_breach_off.png`, `g2c_breach_cs_0.5.png`, `g2c_breach_cs_1.5.png`; the
+last two were made with a temporary environment override in the renderer,
+reverted and grepped for): shadows contact and fence (before, after, Cycles,
+the difference), Sponza nave, spheres front, a Breach frame. What it does: a
+darker, sharper line where a plate meets the floor and at the foot of the
+spheres (a thin arc at the contact), the foot of a wall in Breach a little
+darker; no change away from contacts (a test: the far floor is equal within 3
+levels). Pixel by pixel in Breach it only ever darkens (3,352 pixels at
+distance 0.5; none lighter). Seen and not good: (1) **false shadows from
+thin things beside the receiver**: on the fence the narrow lit side face of
+each post is darkened (a post's neighbour is within the thickness in screen
+space though not in the way in 3D; thickness 0.05 keeps most of the stripe; 0.08 and
+0.15 darken it as well, and 0.1, the default, was not looked at at that crop); (2) a plate floating above the floor
+extends its shadow strip a few pixels past where the map ends (the march passes
+under the plate in screen space, within the thickness); (3) at the sphere's
+foot the darkening is a thin arc of a pixel or two. Not seen: banding (the
+blur hides the jitter at 1280 x 720), visible noise, light leaking at
+contacts, and screen-edge artefacts (the fade stops them; a thin shadow's
+blocker just off screen is missed by construction, not looked at). Not
+tested: moving captures (the noise is fixed a pixel, so a still view does not
+shimmer; motion not checked), orthographic cameras (the shader has the
+branch), MSAA edges beyond the one test (a multisampled edge pixel reads its
+centre's factor), half-resolution views, the Sponza Walk panel's click path
+(headless only: `--preset contact`, `--set`, `--list-settings` and
+`--print-settings` were run).
+
+Tests: `test_gpu_contact_shadows` (RTX 4080 and lavapipe): off equals
+default with other settings changed and runs no pre-pass; a 0.2 m post's foot
+patch is darker (537 -> 372 summed levels, at 160 x 120) while the far floor,
+the post's top and a face turned from the sun are equal within 3; the patch
+fades with distance from the post and with intensity; a march too short to
+reach the post changes nothing; a plate a metre and a half up that covers the
+march's samples on the screen blocks nothing (checked by making the thickness
+50, which then darkens the floor); with AO on the pre-pass is drawn once and
+both run (3 and 3 dispatches); 4x MSAA; the overlay is unchanged; with no sun,
+no passes.
 
 #### G2d — Temporal anti-aliasing
 

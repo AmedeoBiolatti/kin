@@ -62,6 +62,7 @@ const std::map<std::string, std::string>& presets() {
     static const std::map<std::string, std::string> p{
         {"ao", "ao=on"},
         {"ao-half", "ao=on,ao_half=on"},
+        {"contact", "contact=on"},
         {"no-shadows", "shadows=off"},
         {"cascades1", "cascades=1"},
         {"cascades4", "cascades=4,shadow_distance=60"},
@@ -376,6 +377,13 @@ private:
         slider("ao_radius", "Radius", s.ao_radius, 0.05f, 3.0f);
         slider("ao_intensity", "Intensity", s.ao_intensity, 0.0f, 3.0f);
         check("ao_half", "Half resolution", s.ao_half);
+
+        section("Contact shadows");
+        check("contact", "Contact shadows", s.contact);
+        slider("contact_distance", "Distance", s.contact_distance, 0.05f, 3.0f);
+        slider("contact_thickness", "Thickness", s.contact_thickness, 0.02f, 1.0f);
+        slider("contact_intensity", "Intensity", s.contact_intensity, 0.0f, 1.0f);
+        islider("contact_steps", "Steps", s.contact_steps, 4, 64);
 
         section("View");
         std::vector<std::string> samples;
@@ -883,6 +891,11 @@ private:
             out << ",\n  \"ambient_occlusion\": {\"radius\": " << json_number(_s.ao_radius) << ", \"intensity\": " << json_number(_s.ao_intensity)
                 << ", \"half_resolution\": " << (_s.ao_half ? "true" : "false") << "}";
         }
+        if (_s.contact) {
+            out << ",\n  \"contact_shadows\": {\"distance\": " << json_number(_s.contact_distance) << ", \"thickness\": "
+                << json_number(_s.contact_thickness) << ", \"intensity\": " << json_number(_s.contact_intensity)
+                << ", \"steps\": " << _s.contact_steps << "}";
+        }
         out << "\n  camera: {\"eye\": " << json_vec(_pos) << ", \"target\": " << json_vec(_pos + f) << ", \"fov\": " << json_number(_s.fov) << "}\n";
         std::cout << out.str() << std::flush;
     }
@@ -1030,6 +1043,10 @@ private:
         lines.push_back(line);
         std::snprintf(line, sizeof line, "ao: %u draws, %u meshes, %u dispatches   lights %u", st.ao_draws, st.ao_instances, st.ao_dispatches, st.lights);
         lines.push_back(line);
+        if (_s.contact) {
+            std::snprintf(line, sizeof line, "contact shadows: %u dispatches", st.contact_dispatches);
+            lines.push_back(line);
+        }
         std::snprintf(line, sizeof line, "speed %.1f m/s   eye %.1f %.1f %.1f", _s.move_speed, _pos.x, _pos.y, _pos.z);
         lines.push_back(line);
         const ui2::TextStyle st_ink = text_style(u, ink, 11), st_dim = text_style(u, muted, 11);

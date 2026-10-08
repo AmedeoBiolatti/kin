@@ -22,6 +22,7 @@ layout(set = 2, binding = 5) uniform sampler2D uEmissive;     // any without (se
 layout(set = 2, binding = 6) uniform sampler2D uEnvSpecular;   // the environment's, a level a roughness (with frame.environment.w)
 layout(set = 2, binding = 7) uniform sampler2D uEnvIrradiance; // and what a diffuse surface facing each way receives, over pi
 layout(set = 2, binding = 8) uniform sampler2D uAmbientOcclusion; // R: the share of ambient light that reaches the view's pixels (white without)
+layout(set = 2, binding = 9) uniform sampler2D uContactShadow;    // R: the share of the sun that gets through a short march toward it (white without)
 
 const int MAX_LIGHTS = 16;
 const float PI = 3.14159265358979;
@@ -43,7 +44,7 @@ layout(set = 3, binding = 0) uniform Frame {
     vec4 cascade_end;   // the view depth where each cascade ends
     vec4 cascade_blend; // and where it starts to fade into the next
     vec4 cascade_forward; // xyz: the camera's forward, to measure view depth along
-    vec4 occlusion;     // x: 1 with ambient occlusion, zw: 1 / the view's size
+    vec4 occlusion;     // x: 1 with ambient occlusion, y: 1 with contact shadows, zw: 1 / the view's size
     vec4 lights[MAX_LIGHTS * 2]; // position.xyz and radius; colour.rgb (linear)
 } frame;
 // The draw's.
@@ -191,6 +192,16 @@ float screen_occlusion() {
     return texture(uAmbientOcclusion, gl_FragCoord.xy * frame.occlusion.zw).r;
 }
 
+// The share of the sun the contact shadows let through (1: all, or this
+// surface has none: as for the ambient occlusion, only what the pre-pass
+// drew, and only what receives shadows).
+float contact_shadow() {
+    if (frame.occlusion.y < 0.5 || material.maps.z < 0.5 || material.params.z < 0.5) {
+        return 1.0;
+    }
+    return textureLod(uContactShadow, gl_FragCoord.xy * frame.occlusion.zw, 0.0).r;
+}
+
 // What a surface of reflectance `f0` reflects of a white sky, a rough one's
 // second bounce included (Fdez-Aguera's multiple-scattering fit): a white
 // metal gives all of it back, as a furnace test wants.
@@ -309,7 +320,11 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     vec3 light = vec3(0.0);
     const float sun = dot(n, frame.sun_direction.xyz);
     if (sun > 0.0) {
-        light += shade(s, frame.sun_direction.xyz, frame.sun_color.rgb * sunlight(n));
+        float lit = sunlight(n);
+        if (frame.occlusion.y > 0.5) {
+            lit *= contact_shadow(); // on top of the shadow map's; only the sun's term
+        }
+        light += shade(s, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
     }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb);
