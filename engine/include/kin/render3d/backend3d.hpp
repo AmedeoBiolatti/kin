@@ -7,6 +7,7 @@
 #include <kin/core/types.hpp>
 #include <kin/render3d/mesh.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/shadow_cascades.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
 
@@ -72,7 +73,7 @@ struct Render3DStats {
     u32 shadow_draws = 0; // draw calls into the shadow map
     u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view; all cascades)
     u32 shadow_cascades = 0; // maps drawn (0: no shadows)
-    std::array<u32, 4> cascade_casters{}; // meshes drawn into each cascade
+    std::array<u32, max_shadow_cascades> cascade_casters{}; // meshes drawn into each cascade
     u32 ao_draws = 0;      // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither this render)
     u32 ao_instances = 0;  // meshes drawn into it
     u32 ao_dispatches = 0; // compute dispatches (the occlusion and its blur)

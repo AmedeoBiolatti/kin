@@ -4,6 +4,7 @@
 // and frame: a view is rendered in the frame's command buffer between the 2D
 // draws around it. Experimental: see docs/3d_plan.md.
 #include <kin/render3d/backend3d.hpp>
+#include <kin/render3d/shadow_cascades.hpp>
 
 #include "gpu_buffer.hpp"
 #include "gpu_shader.hpp"
@@ -155,7 +156,7 @@ public:
     SDL_GPUTextureFormat depth_format() const { return _depth_format; }
 
 private:
-    // In the order a scene's draws are made (shadow and pick are passes of their own).
+    // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
     enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
@@ -175,10 +176,9 @@ private:
     u32 ensure_shadow_map(u32 resolution, u32 layers);
     // Records the compute passes that make `environment`'s filtered copies.
     void filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment);
-    // Makes `view`'s ambient occlusion targets for its size (half of it when
-    // `half`), or reports they can't be made.
-    // The pre-pass's depth and normals always; the occlusion's three targets
-    // with `want_ao`, the contact shadows' with `want_contact`.
+    // Makes `view`'s pre-pass targets for its size, or reports they can't be made:
+    // the depth and normals always; the occlusion's three targets (half the size
+    // when `half`) with `want_ao`, the contact shadows' with `want_contact`.
     // With `velocity` the pre-pass's normals are four floats, the last two the velocity.
     bool ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, bool want_contact, bool velocity);
     // Records the compute passes that turn the view's pre-pass into its occlusion.
@@ -191,8 +191,8 @@ private:
                                  const ContactShadows3D& contact, const Vec3f& sun, Render3DStats& stats);
     // The view's passes after the picture is drawn: bloom (HDR), then out to what 2D draws.
     // `source` is the picture (the view's float scene, or the temporal resolve's);
-    // `plain` is an 8-bit view's resolved picture, which only needs encoding.
-    void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain);
+    // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
+    void finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain);
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
     void release_taa(GpuView3D& view);
@@ -202,6 +202,32 @@ private:
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input, const TemporalAA3D& taa,
                                   bool reset, Vec2f jitter, Render3DStats& stats);
+
+    // render()'s stages, in the order they run, over a FrameCtx (defined in the .cpp)
+    // that holds what they share. Each records into the frame's command buffer; any
+    // pass in the middle of the frame is followed by resume_2d().
+    struct FrameCtx;
+    void setup_frame(FrameCtx& ctx);          // cameras, temporal anti-aliasing and its jitter
+    void fit_sun_shadow(FrameCtx& ctx);       // the shadow map and its cascades or box
+    void cull_and_upload(FrameCtx& ctx);      // what is seen, and the instance buffers
+    void order_draws(FrameCtx& ctx);
+    void choose_point_lights(FrameCtx& ctx);
+    void begin_commands(FrameCtx& ctx);       // flushes 2D; environment and empty-shadow set-up
+    void shadow_pass(FrameCtx& ctx);
+    void prepass(FrameCtx& ctx);              // depth and normals (or velocity), then the occlusion and contact shadows
+    void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
+    void overlay_velocity(FrameCtx& ctx);
+    bool main_pass(FrameCtx& ctx);            // false: the pass could not begin (2D is resumed already)
+    void resolve_history(FrameCtx& ctx);      // the temporal resolve
+    void pick_pass(FrameCtx& ctx);
+    void push_frame_uniforms(const FrameCtx& ctx, u32 s);
+    void resume_2d();
+    // `buffer` as a storage buffer of at least `bytes` (grown to twice its size, and not under `minimum`).
+    void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum);
+    static Pass pass_of(const Material3D& material);
+    // A material's texture as a binding: its own, or a white one without.
+    SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v);
+    void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
 
     GpuRenderer2DBackend* _owner = nullptr;
     GpuDevice* _device = nullptr;
@@ -258,7 +284,7 @@ private:
     GpuTexture _shadow_map;
     u32 _shadow_size = 0;
     u32 _shadow_layers = 0;
-    u32 _shadow_layers_limit = 4; // lowered when the device would not make more
+    u32 _shadow_layers_limit = max_shadow_cascades; // lowered when the device would not make more
     GpuTexture _no_shadow; // 1 x 1, all far: every comparison lit
     bool _no_shadow_cleared = false;
     // Samplers for materials' textures by filter and wrap (made on first use).
@@ -282,8 +308,8 @@ private:
         u32 out_first = 0; // where its copies go in the instance buffer:
         u32 out_count = 0; // those the camera sees,
         u32 out_extra = 0; // then those only the sun sees (casting into view)
-        std::array<u32, 4> cascade_first{}; // with cascades: each one's list of copies,
-        std::array<u32, 4> cascade_count{}; // in _caster_list
+        std::array<u32, max_shadow_cascades> cascade_first{}; // with cascades: each one's list of copies,
+        std::array<u32, max_shadow_cascades> cascade_count{}; // in _caster_list
     };
     struct Piece {
         u32 ref = 0;
@@ -291,13 +317,13 @@ private:
         u32 flat = 0;           // the first's place among all the frame's copies
         u32 seen = 0, extra = 0;
         u32 out = 0, out_extra = 0;
-        std::array<u32, 4> cascade{};     // copies casting into each cascade
-        std::array<u32, 4> cascade_out{}; // where they go in its list
+        std::array<u32, max_shadow_cascades> cascade{};     // copies casting into each cascade
+        std::array<u32, max_shadow_cascades> cascade_out{}; // where they go in its list
     };
     std::vector<DrawRef> _refs;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start
-    std::vector<u8> _visible;  // a copy: bit 0 the camera sees it, bit 1 only the sun does, bit 2 + k it casts into cascade k
+    std::vector<u8> _visible;  // a copy: the bits of camera_bit, sun_bit and cascade_bit(k) (gpu_renderer3d.cpp)
     std::vector<u32> _caster_list; // the cascades' lists, uploaded
     std::vector<u32> _order;   // draws sorted
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first

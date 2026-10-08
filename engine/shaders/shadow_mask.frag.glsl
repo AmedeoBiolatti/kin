@@ -4,10 +4,7 @@
 layout(location = 0) in vec2 vUV;
 layout(location = 1) in float vAlpha;
 
-layout(set = 2, binding = 0) uniform sampler2D uBase;
-layout(set = 3, binding = 0) uniform Cutoff {
-    vec4 cutoff; // x: the alpha below which nothing is drawn
-} material;
+#include "kin_cutout.inc.glsl"
 
 void main() {
     if (vAlpha * texture(uBase, vUV).a < material.cutoff.x) {

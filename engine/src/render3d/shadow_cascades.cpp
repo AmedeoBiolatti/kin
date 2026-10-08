@@ -35,6 +35,25 @@ Camera3D slice_of(const Camera3D& camera, f32 near, f32 far) {
     return slice;
 }
 
+SunBox fit_sun_box(const Bounds3& area, Vec3f to_sun) {
+    SunBox box;
+    const Vec3f center = area.center();
+    const f32 radius = std::max(area.radius(), 0.01f);
+    const Vec3f up = std::abs(to_sun.y) > 0.99f ? Vec3f{0.0f, 0.0f, -1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
+    box.light_view = Mat4f::look_at(center + to_sun * (radius + 1.0f), center, up);
+    box.lo = {1e30f, 1e30f, 1e30f};
+    box.hi = {-1e30f, -1e30f, -1e30f};
+    for (int i = 0; i < 8; ++i) {
+        const Vec3f corner{(i & 1) ? area.max.x : area.min.x, (i & 2) ? area.max.y : area.min.y, (i & 4) ? area.max.z : area.min.z};
+        const Vec3f p = box.light_view.apply(corner);
+        box.lo = {std::min(box.lo.x, p.x), std::min(box.lo.y, p.y), std::min(box.lo.z, p.z)};
+        box.hi = {std::max(box.hi.x, p.x), std::max(box.hi.y, p.y), std::max(box.hi.z, p.z)};
+    }
+    box.z_near = std::max(0.01f, -box.hi.z - 0.5f);
+    box.z_far = -box.lo.z + 0.5f;
+    return box;
+}
+
 ShadowCascades fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_sun, const Bounds3& area, u32 cascades,
                                    f32 distance, u32 resolution) {
     ShadowCascades out;
@@ -50,21 +69,13 @@ ShadowCascades fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_
 
     // The sun's space is fixed by the area, not the camera: a texel grid in
     // it stays put in the world, which is what snapping needs.
-    const Vec3f center = area.center();
-    const f32 radius = std::max(area.radius(), 0.01f);
-    const Vec3f up = std::abs(to_sun.y) > 0.99f ? Vec3f{0.0f, 0.0f, -1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
-    const Mat4f light_view = Mat4f::look_at(center + to_sun * (radius + 1.0f), center, up);
-    Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
-    for (int i = 0; i < 8; ++i) {
-        const Vec3f corner{(i & 1) ? area.max.x : area.min.x, (i & 2) ? area.max.y : area.min.y, (i & 4) ? area.max.z : area.min.z};
-        const Vec3f p = light_view.apply(corner);
-        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
-        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
-    }
-    const f32 z_near = std::max(0.01f, -hi.z - 0.5f), z_far = -lo.z + 0.5f;
+    const SunBox sun = fit_sun_box(area, to_sun);
+    const Mat4f& light_view = sun.light_view;
+    const Vec3f lo = sun.lo, hi = sun.hi;
+    const f32 z_near = sun.z_near, z_far = sun.z_far;
 
     const bool ortho = camera.projection == Projection3D::Orthographic;
-    const f32 half_tan = std::tan(camera.fov * 0.5f * 3.14159265f / 180.0f);
+    const f32 half_tan = std::tan(math3d_detail::radians(camera.fov * 0.5f));
     // The half height and width of the view at depth `d`.
     const auto half_height = [&](f32 d) { return ortho ? camera.height * 0.5f : d * half_tan; };
 

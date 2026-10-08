@@ -206,6 +206,10 @@ struct AmbientOcclusion3D {
     bool half_resolution = false;
 };
 
+// The least and most samples a contact shadow's march takes (ContactShadows3D::steps is clamped to them).
+constexpr u32 min_contact_steps = 4;
+constexpr u32 max_contact_steps = 64;
+
 // Contact shadows: a short march through the depth buffer toward the sun,
 // for the small shadows the cascades are too coarse for (a foot, a pole, a
 // plate on the ground). Needs the depth pre-pass (shared with ambient
@@ -218,7 +222,7 @@ struct ContactShadows3D {
     f32 distance = 0.5f;   // how far toward the sun a pixel looks for something in the way (units)
     f32 thickness = 0.1f;  // how deep a thing is taken to be: what is further behind the ray than this lets it pass (units)
     f32 intensity = 1.0f;  // 1: fully dark where blocked, less: lighter (0..1)
-    u32 steps = 20;        // samples along the march (4 to 64)
+    u32 steps = 20;        // samples along the march (min_contact_steps to max_contact_steps)
 };
 
 // Temporal anti-aliasing: each frame is drawn a fraction of a pixel off (a

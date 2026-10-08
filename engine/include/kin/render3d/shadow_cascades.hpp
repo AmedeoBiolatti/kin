@@ -30,6 +30,18 @@ struct ShadowCascades {
     std::array<ShadowCascade, max_shadow_cascades> cascade{};
 };
 
+// The sun's view over `area` and what holds it, for a shadow map: the area's
+// corners in the view (lo, hi) and the depth range that spans them with a margin.
+struct SunBox {
+    Mat4f light_view{};
+    Vec3f lo{}, hi{};
+    f32 z_near = 0.01f, z_far = 1.0f;
+};
+
+// `to_sun`: unit, toward the sun. Both the single shadow map and the cascades
+// use it, so that their boxes are the same.
+SunBox fit_sun_box(const Bounds3& area, Vec3f to_sun);
+
 // The depths where `count` cascades end, between `near` and `far`: a blend
 // of the logarithmic split (a share of the view for each doubling of the
 // distance: the resolution a pixel needs) and the linear one (for when the

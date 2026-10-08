@@ -11,17 +11,7 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec4 aColor;
 
-// GpuInstance3D, as mesh.vert reads it.
-struct Instance {
-    mat4 model;
-    vec4 normal0;
-    vec4 normal1;
-    vec4 normal2;
-    vec4 color;
-};
-layout(std430, set = 0, binding = 0) readonly buffer Instances {
-    Instance instances[];
-};
+#include "kin_instance.inc.glsl"
 // Last frame's model matrix of the copy at the same place in Instances. Its
 // [0][3] (a zero in any placing) is 1 for a copy with no past: new, or
 // matched to nothing believable.

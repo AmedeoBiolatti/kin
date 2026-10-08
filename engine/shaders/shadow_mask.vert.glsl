@@ -5,17 +5,8 @@ layout(location = 0) in vec3 aPos;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec4 aColor;
 
-// GpuInstance3D, as mesh.vert reads it; the model matrix and colour are used here.
-struct Instance {
-    mat4 model;
-    vec4 normal0;
-    vec4 normal1;
-    vec4 normal2;
-    vec4 color;
-};
-layout(std430, set = 0, binding = 0) readonly buffer Instances {
-    Instance instances[];
-};
+// The model matrix and colour are used here.
+#include "kin_instance.inc.glsl"
 
 // With cascades, a cascade's copies are a list of indices into the instances
 // (the caster test is per cascade); without, they are one run from first.x.

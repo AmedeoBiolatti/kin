@@ -13,20 +13,8 @@ layout(location = 4) in vec3 vPrevious;
 layout(location = 5) flat in float vFresh;
 layout(location = 0) out vec4 FragNormalVelocity;
 
-vec2 octahedral(vec3 n) {
-    n /= abs(n.x) + abs(n.y) + abs(n.z);
-    const vec2 fold = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
-    return n.z >= 0.0 ? n.xy : fold;
-}
-
-vec2 velocity() {
-    if (vFresh > 0.5 || vPrevious.z <= 1e-5 || vCurrent.z <= 1e-5) {
-        return vec2(8.0);
-    }
-    // Clip space's +y is up and the picture's rows run down.
-    return (vCurrent.xy / vCurrent.z - vPrevious.xy / vPrevious.z) * vec2(0.5, -0.5);
-}
+#include "kin_prepass.inc.glsl"
 
 void main() {
-    FragNormalVelocity = vec4(octahedral(normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0)), velocity());
+    FragNormalVelocity = vec4(octahedral(normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0)), kin_velocity(vCurrent, vPrevious, vFresh));
 }

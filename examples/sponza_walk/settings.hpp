@@ -4,6 +4,8 @@
 // Scene3D each frame. A new renderer feature is a field here, a line in
 // apply() and one row in the controls table (main.cpp).
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/shadow_cascades.hpp>
+#include <kin/render3d/taa.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -163,7 +165,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                             : Bounds3{eye - Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent},
                                       eye + Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent}};
         l.shadow_resolution = shadow_resolutions[std::clamp(s.shadow_resolution, 0, 3)];
-        l.shadow_cascades = static_cast<u32>(std::clamp(s.shadow_cascades, 1, 4));
+        l.shadow_cascades = static_cast<u32>(std::clamp(s.shadow_cascades, 1, int(max_shadow_cascades)));
         l.shadow_distance = s.shadow_distance;
     }
     scene.ambient_occlusion = {.enabled = s.ao, .radius = s.ao_radius, .intensity = s.ao_intensity, .half_resolution = s.ao_half};
@@ -171,12 +173,12 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                              .distance = s.contact_distance,
                              .thickness = s.contact_thickness,
                              .intensity = s.contact_intensity,
-                             .steps = static_cast<u32>(std::clamp(s.contact_steps, 4, 64))};
+                             .steps = static_cast<u32>(std::clamp(s.contact_steps, int(min_contact_steps), int(max_contact_steps)))};
     scene.taa = {.enabled = s.taa,
                  .blend = s.taa_blend,
                  .sharpness = s.taa_sharpness,
                  .jitter_scale = s.taa_jitter_scale,
-                 .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, 16)),
+                 .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, int(max_taa_jitter_samples))),
                  .freeze_jitter = s.taa_freeze};
     scene.cull = s.cull;
 }

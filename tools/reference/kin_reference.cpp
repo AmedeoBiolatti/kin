@@ -104,6 +104,15 @@ std::string json_summary(const Summary& s) {
     return buffer;
 }
 
+// [a, b, c, d]
+std::string json_list(const std::array<kin::u32, kin::max_shadow_cascades>& values) {
+    std::string out = "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        out += (i ? ", " : "") + std::to_string(values[i]);
+    }
+    return out + "]";
+}
+
 std::string quoted(const std::string& s) {
     std::string out = "\"";
     for (const char c : s) {
@@ -225,6 +234,115 @@ kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
 
 } // namespace
 
+// The command line's settings that replace a scene's own: --ao, --contact-shadows and --taa turn the feature on for
+// every scene, and each number, when above 0, takes the place of the scene's.
+struct Overrides {
+    bool ao = false, ao_half = false;
+    double ao_radius = 0.0, ao_intensity = 0.0;
+    bool contact = false;
+    double contact_distance = 0.0, contact_thickness = 0.0;
+    int contact_steps = 0;
+    bool taa = false;
+    double taa_blend = 0.0, taa_sharpness = 0.0;
+};
+
+// Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
+void merge_ambient_occlusion(kin::AmbientOcclusion3D& ao, const kin::JsonValue* doc, const Overrides& over) {
+    if (doc) {
+        ao.enabled = doc->bool_at("enabled", true);
+        ao.radius = static_cast<float>(doc->number_at("radius", ao.radius));
+        ao.intensity = static_cast<float>(doc->number_at("intensity", ao.intensity));
+        ao.half_resolution = doc->bool_at("half_resolution", false);
+    }
+    if (over.ao) {
+        ao.enabled = true;
+        ao.half_resolution = ao.half_resolution || over.ao_half;
+        if (over.ao_radius > 0.0) {
+            ao.radius = static_cast<float>(over.ao_radius);
+        }
+        if (over.ao_intensity > 0.0) {
+            ao.intensity = static_cast<float>(over.ao_intensity);
+        }
+    }
+}
+
+void merge_contact_shadows(kin::ContactShadows3D& cs, const kin::JsonValue* doc, const Overrides& over) {
+    if (doc) {
+        cs.enabled = doc->bool_at("enabled", true);
+        cs.distance = static_cast<float>(doc->number_at("distance", cs.distance));
+        cs.thickness = static_cast<float>(doc->number_at("thickness", cs.thickness));
+        cs.intensity = static_cast<float>(doc->number_at("intensity", cs.intensity));
+        cs.steps = static_cast<kin::u32>(doc->number_at("steps", cs.steps));
+    }
+    if (over.contact) {
+        cs.enabled = true;
+        if (over.contact_distance > 0.0) {
+            cs.distance = static_cast<float>(over.contact_distance);
+        }
+        if (over.contact_thickness > 0.0) {
+            cs.thickness = static_cast<float>(over.contact_thickness);
+        }
+        if (over.contact_steps > 0) {
+            cs.steps = static_cast<kin::u32>(over.contact_steps);
+        }
+    }
+}
+
+void merge_taa(kin::TemporalAA3D& taa, const kin::JsonValue* doc, const Overrides& over) {
+    if (doc) {
+        taa.enabled = doc->bool_at("enabled", true);
+        taa.blend = static_cast<float>(doc->number_at("blend", taa.blend));
+        taa.sharpness = static_cast<float>(doc->number_at("sharpness", taa.sharpness));
+        taa.jitter_scale = static_cast<float>(doc->number_at("jitter_scale", taa.jitter_scale));
+        taa.jitter_samples = static_cast<kin::u32>(doc->number_at("jitter_samples", taa.jitter_samples));
+    }
+    if (over.taa) {
+        taa.enabled = true;
+        if (over.taa_blend > 0.0) {
+            taa.blend = static_cast<float>(over.taa_blend);
+        }
+        if (over.taa_sharpness > 0.0) {
+            taa.sharpness = static_cast<float>(over.taa_sharpness);
+        }
+    }
+}
+
+// The linear light of an 8-bit sRGB value, and back.
+float decode_srgb(kin::u8 v) {
+    return kin::srgb_to_linear(static_cast<float>(v) / 255.0f);
+}
+kin::u8 encode_srgb(float c) {
+    return static_cast<kin::u8>(std::lround(kin::linear_to_srgb(std::clamp(c, 0.0f, 1.0f)) * 255.0f));
+}
+
+// A picture of `size` / `supersample` pixels a side made from `large`, each pixel the average, in linear light,
+// of the supersample x supersample pixels it covers.
+kin::Image supersample_average(const kin::Image& large, kin::Vec2i size, int supersample) {
+    kin::Image small;
+    small.size = size;
+    small.rgba.assign(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 4, 0);
+    for (int y = 0; y < size.y; ++y) {
+        for (int x = 0; x < size.x; ++x) {
+            float sum[3] = {0, 0, 0};
+            for (int sy = 0; sy < supersample; ++sy) {
+                for (int sx = 0; sx < supersample; ++sx) {
+                    const std::size_t i = (static_cast<std::size_t>(y * supersample + sy) * static_cast<std::size_t>(large.size.x) +
+                                           static_cast<std::size_t>(x * supersample + sx)) * 4;
+                    for (int ch = 0; ch < 3; ++ch) {
+                        sum[ch] += decode_srgb(large.rgba[i + static_cast<std::size_t>(ch)]);
+                    }
+                }
+            }
+            const std::size_t o = (static_cast<std::size_t>(y) * static_cast<std::size_t>(size.x) + static_cast<std::size_t>(x)) * 4;
+            for (int ch = 0; ch < 3; ++ch) {
+                small.rgba[o + static_cast<std::size_t>(ch)] = encode_srgb(sum[ch] / static_cast<float>(supersample * supersample));
+            }
+            small.rgba[o + 3] = 255;
+        }
+    }
+    return small;
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IOLBF, 0); // a line at a time: what was done shows if it stops
     std::vector<fs::path> scenes;
@@ -236,13 +354,7 @@ int main(int argc, char** argv) {
     bool gpu_timing = true;
     int cascades_override = 0; // 0: the scene's own
     double distance_override = 0.0;
-    bool ao_override = false, ao_half = false;
-    double ao_radius = 0.0, ao_intensity = 0.0; // 0: the scene's
-    bool contact_override = false;
-    double contact_distance = 0.0, contact_thickness = 0.0; // 0: the scene's
-    int contact_steps = 0;
-    bool taa_override = false;
-    double taa_blend = 0.0, taa_sharpness = 0.0; // 0: the scene's (the default blend)
+    Overrides over;
     int taa_frames = 32, supersample = 1, samples_override = 0; // 0: the scene's
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -262,34 +374,34 @@ int main(int argc, char** argv) {
         } else if (a == "--shadow-distance") {
             distance_override = std::atof(next().c_str());
         } else if (a == "--ao") {
-            ao_override = true;
+            over.ao = true;
         } else if (a == "--ao-half") {
-            ao_override = ao_half = true;
+            over.ao = over.ao_half = true;
         } else if (a == "--ao-radius") {
-            ao_override = true;
-            ao_radius = std::atof(next().c_str());
+            over.ao = true;
+            over.ao_radius = std::atof(next().c_str());
         } else if (a == "--ao-intensity") {
-            ao_override = true;
-            ao_intensity = std::atof(next().c_str());
+            over.ao = true;
+            over.ao_intensity = std::atof(next().c_str());
         } else if (a == "--contact-shadows") {
-            contact_override = true;
+            over.contact = true;
         } else if (a == "--contact-distance") {
-            contact_override = true;
-            contact_distance = std::atof(next().c_str());
+            over.contact = true;
+            over.contact_distance = std::atof(next().c_str());
         } else if (a == "--contact-thickness") {
-            contact_override = true;
-            contact_thickness = std::atof(next().c_str());
+            over.contact = true;
+            over.contact_thickness = std::atof(next().c_str());
         } else if (a == "--contact-steps") {
-            contact_override = true;
-            contact_steps = std::atoi(next().c_str());
+            over.contact = true;
+            over.contact_steps = std::atoi(next().c_str());
         } else if (a == "--taa") {
-            taa_override = true;
+            over.taa = true;
         } else if (a == "--taa-blend") {
-            taa_override = true;
-            taa_blend = std::atof(next().c_str());
+            over.taa = true;
+            over.taa_blend = std::atof(next().c_str());
         } else if (a == "--taa-sharpness") {
-            taa_override = true;
-            taa_sharpness = std::atof(next().c_str());
+            over.taa = true;
+            over.taa_sharpness = std::atof(next().c_str());
         } else if (a == "--taa-frames") {
             taa_frames = std::max(1, std::atoi(next().c_str()));
         } else if (a == "--samples") {
@@ -402,11 +514,14 @@ int main(int argc, char** argv) {
         const kin::JsonValue* v = doc.find("view");
         const kin::JsonValue none{};
         const kin::JsonValue& view_doc = v ? *v : none;
-        kin::View3D view = r3d.create_view({width, height}, {.samples = static_cast<kin::u32>(samples_override > 0 ? samples_override : view_doc.number_at("samples", 4)),
-                                                             .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
-                                                             .hdr = view_doc.bool_at("hdr"),
-                                                             .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
-                                                             .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
+        const auto make_view = [&](kin::Vec2i size, kin::u32 samples) {
+            return r3d.create_view(size, {.samples = samples,
+                                          .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
+                                          .hdr = view_doc.bool_at("hdr"),
+                                          .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
+                                          .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
+        };
+        kin::View3D view = make_view({width, height}, static_cast<kin::u32>(samples_override > 0 ? samples_override : view_doc.number_at("samples", 4)));
 
         // The lights, the same every frame; an environment (an .hdr in the cache) loaded once.
         kin::Environment3D environment;
@@ -460,61 +575,10 @@ int main(int argc, char** argv) {
                     scene.lights.shadow_distance = static_cast<float>(distance_override);
                 }
             }
-            if (const kin::JsonValue* occlusion = doc.find("ambient_occlusion")) {
-                scene.ambient_occlusion.enabled = occlusion->bool_at("enabled", true);
-                scene.ambient_occlusion.radius = static_cast<float>(occlusion->number_at("radius", scene.ambient_occlusion.radius));
-                scene.ambient_occlusion.intensity = static_cast<float>(occlusion->number_at("intensity", scene.ambient_occlusion.intensity));
-                scene.ambient_occlusion.half_resolution = occlusion->bool_at("half_resolution", false);
-            }
-            if (ao_override) {
-                scene.ambient_occlusion.enabled = true;
-                scene.ambient_occlusion.half_resolution = scene.ambient_occlusion.half_resolution || ao_half;
-                if (ao_radius > 0.0) {
-                    scene.ambient_occlusion.radius = static_cast<float>(ao_radius);
-                }
-                if (ao_intensity > 0.0) {
-                    scene.ambient_occlusion.intensity = static_cast<float>(ao_intensity);
-                }
-            }
-            if (const kin::JsonValue* contact = doc.find("contact_shadows")) {
-                kin::ContactShadows3D& cs = scene.contact_shadows;
-                cs.enabled = contact->bool_at("enabled", true);
-                cs.distance = static_cast<float>(contact->number_at("distance", cs.distance));
-                cs.thickness = static_cast<float>(contact->number_at("thickness", cs.thickness));
-                cs.intensity = static_cast<float>(contact->number_at("intensity", cs.intensity));
-                cs.steps = static_cast<kin::u32>(contact->number_at("steps", cs.steps));
-            }
-            if (contact_override) {
-                kin::ContactShadows3D& cs = scene.contact_shadows;
-                cs.enabled = true;
-                if (contact_distance > 0.0) {
-                    cs.distance = static_cast<float>(contact_distance);
-                }
-                if (contact_thickness > 0.0) {
-                    cs.thickness = static_cast<float>(contact_thickness);
-                }
-                if (contact_steps > 0) {
-                    cs.steps = static_cast<kin::u32>(contact_steps);
-                }
-            }
+            merge_ambient_occlusion(scene.ambient_occlusion, doc.find("ambient_occlusion"), over);
+            merge_contact_shadows(scene.contact_shadows, doc.find("contact_shadows"), over);
             scene.taa = {};
-            if (const kin::JsonValue* t = doc.find("taa")) {
-                kin::TemporalAA3D& taa = scene.taa;
-                taa.enabled = t->bool_at("enabled", true);
-                taa.blend = static_cast<float>(t->number_at("blend", taa.blend));
-                taa.sharpness = static_cast<float>(t->number_at("sharpness", taa.sharpness));
-                taa.jitter_scale = static_cast<float>(t->number_at("jitter_scale", taa.jitter_scale));
-                taa.jitter_samples = static_cast<kin::u32>(t->number_at("jitter_samples", taa.jitter_samples));
-            }
-            if (taa_override) {
-                scene.taa.enabled = true;
-                if (taa_blend > 0.0) {
-                    scene.taa.blend = static_cast<float>(taa_blend);
-                }
-                if (taa_sharpness > 0.0) {
-                    scene.taa.sharpness = static_cast<float>(taa_sharpness);
-                }
-            }
+            merge_taa(scene.taa, doc.find("taa"), over);
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
                     scene.add_light({.position = vec3(p.find("position")), .color = vec3(p.find("color")),
@@ -616,11 +680,7 @@ int main(int argc, char** argv) {
             // The same moment drawn large and averaged down, with temporal anti-aliasing off.
             if (supersample > 1) {
                 const kin::Vec2i big_size{width * supersample, height * supersample};
-                kin::View3D big = r3d.create_view(big_size, {.samples = 4,
-                                                               .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
-                                                               .hdr = view_doc.bool_at("hdr"),
-                                                               .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
-                                                               .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
+                kin::View3D big = make_view(big_size, 4);
                 kin::RenderTarget target = renderer.create_render_target(big_size);
                 pose(0);
                 scene.taa.enabled = false;
@@ -636,34 +696,7 @@ int main(int argc, char** argv) {
                     renderer.present();
                 }
                 if (large.size.x == big_size.x && large.size.y == big_size.y) {
-                    kin::Image small = image;
-                    const auto decode = [](kin::u8 v) {
-                        const float c = static_cast<float>(v) / 255.0f;
-                        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-                    };
-                    const auto encode = [](float c) {
-                        c = std::clamp(c, 0.0f, 1.0f);
-                        return static_cast<kin::u8>(std::lround((c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f) * 255.0f));
-                    };
-                    for (int y = 0; y < height; ++y) {
-                        for (int x = 0; x < width; ++x) {
-                            float sum[3] = {0, 0, 0};
-                            for (int sy = 0; sy < supersample; ++sy) {
-                                for (int sx = 0; sx < supersample; ++sx) {
-                                    const std::size_t i = (static_cast<std::size_t>(y * supersample + sy) * static_cast<std::size_t>(big_size.x) +
-                                                           static_cast<std::size_t>(x * supersample + sx)) * 4;
-                                    for (int ch = 0; ch < 3; ++ch) {
-                                        sum[ch] += decode(large.rgba[i + static_cast<std::size_t>(ch)]);
-                                    }
-                                }
-                            }
-                            const std::size_t o = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x)) * 4;
-                            for (int ch = 0; ch < 3; ++ch) {
-                                small.rgba[o + static_cast<std::size_t>(ch)] = encode(sum[ch] / static_cast<float>(supersample * supersample));
-                            }
-                            small.rgba[o + 3] = 255;
-                        }
-                    }
+                    const kin::Image small = supersample_average(large, {width, height}, supersample);
                     kin::save_image(small, out / name / (camera_name + "_ss.png"));
                 } else {
                     std::fprintf(stderr, "  %s: could not draw the supersampled picture\n", camera_name.c_str());
@@ -684,8 +717,8 @@ int main(int argc, char** argv) {
                    << ", \"draws\": " << stats.draws << ", \"instances\": " << stats.instances << ", \"culled\": " << stats.culled
                    << ", \"triangles\": " << stats.triangles << ", \"shadow_draws\": " << stats.shadow_draws
                    << ", \"shadow_casters\": " << stats.shadow_casters << ", \"shadow_cascades\": " << stats.shadow_cascades
-                   << ", \"cascade_casters\": [" << stats.cascade_casters[0] << ", " << stats.cascade_casters[1] << ", "
-                   << stats.cascade_casters[2] << ", " << stats.cascade_casters[3] << "], \"ao_draws\": " << stats.ao_draws << ", \"ao_instances\": " << stats.ao_instances
+                   << ", \"cascade_casters\": " << json_list(stats.cascade_casters) << ", \"ao_draws\": " << stats.ao_draws
+                   << ", \"ao_instances\": " << stats.ao_instances
                    << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights << "}";
         }
