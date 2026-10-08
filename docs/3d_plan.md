@@ -571,8 +571,14 @@ the machine was busier than at M0, so the raster is timed again beside it):
 - lavapipe draws the same picture (arm_head: 0.29 levels mean, the same
   picks) at 35 ms.
 
-Left over: the studio's live 3D tab was not run here (no Blender on this machine to export a model), only
-`GpuModelView` through the check tool and the headless app.
+- **The studio itself**, driven through kin's agent server
+  (`KIN_RENDER_BACKEND=gpu kin_render_studio --server --render`) on a copy
+  of XC-121's project with its exports cached: the 3D tab draws arm_head
+  and the kiln on the GPU, a hover names the part under the pointer
+  (picked), Wire draws the edges. Selecting the kiln, fresh each time, gave
+  no frame over 100 ms in three runs (two on the GPU, one on the CPU
+  raster); a frame of the studio's UI takes about 13 ms in that mode,
+  whichever tab, the kept 3D picture adding nothing.
 
 ### Later, each on request
 
