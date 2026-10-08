@@ -62,6 +62,7 @@ struct Render3DStats {
     u32 instances = 0; // meshes drawn
     u32 culled = 0;    // meshes skipped, outside the view
     u32 shadow_draws = 0; // draw calls into the shadow map
+    u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view)
     u32 lights = 0;    // point lights used
     u64 triangles = 0;
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU

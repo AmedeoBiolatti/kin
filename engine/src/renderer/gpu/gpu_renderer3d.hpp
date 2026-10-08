@@ -118,6 +118,7 @@ private:
     GpuShader _vertex_shader;     // mesh.vert
     GpuShader _fragment_shader;   // mesh.frag
     GpuShader _shadow_shader;     // shadow.frag
+    GpuShader _shadow_vertex_shader; // shadow.vert
     GpuShader _fullscreen_shader; // fullscreen.vert
     GpuShader _bloom_shader;      // bloom.frag
     GpuShader _output_shader;     // view_output.frag

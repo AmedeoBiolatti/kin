@@ -223,7 +223,7 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
               pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
-              transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.frag
+              transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.vert shadow.frag
               fullscreen.vert bloom.frag view_output.frag pick.frag)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()

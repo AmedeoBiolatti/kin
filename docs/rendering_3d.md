@@ -113,8 +113,15 @@ The sun casts shadows over `scene.lights.shadow_area`, a box round what
 casts and receives them (the level): one shadow map
 (`shadow_resolution`, 2048 texels by default) over that box, filtered over
 3x3 taps. Opaque meshes cast (`casts_shadow`); copies culled from the
-camera still cast when the sun sees them. A smaller box is sharper. The
-overlay gets no shadows.
+camera still cast when their shadow may fall in view (the copy swept down
+the light, through the area, reaches the camera's view), and are left out
+otherwise. A smaller box is sharper. The overlay gets no shadows.
+
+A single-sided mesh casts with the faces it shows, toward the sun: for a
+closed mesh that is the same shadow as both sides for half the work, but a
+lone quad facing away from the sun (a ceiling seen from below) casts
+nothing. Make it `double_sided` to cast from both sides. `stats()` counts
+the shadow map's draw calls and the meshes drawn into it.
 
 ## Models
 
@@ -195,7 +202,7 @@ no rendering each frame. `resize(view, size)` gives it a new size and texture.
 
 `Renderer3D::capabilities()` says what the device has (depth bits, most
 samples); `stats()` what the last render drew (draw calls, instances, copies
-culled, shadow draws, point lights, triangles, CPU time).
+culled, shadow draws and casters, point lights, triangles, CPU time).
 
 ## Cost
 

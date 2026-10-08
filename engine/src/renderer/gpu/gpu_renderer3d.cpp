@@ -120,6 +120,35 @@ bool sphere_in(const GpuFrustum& f, Vec3f c, f32 r) {
     return true;
 }
 
+// Whether a sphere's shadow may fall in `f`: the sphere swept from `c` along
+// `down` (the way the sun's light goes) as far as `length`, a capsule, not
+// wholly outside any one plane.
+bool shadow_in(const GpuFrustum& f, Vec3f c, f32 r, Vec3f down, f32 length) {
+    const Vec3f e = c + down * length;
+    for (u32 k = 0; k < f.count; ++k) {
+        const Vec4f& p = f.planes[k];
+        if (p.x * c.x + p.y * c.y + p.z * c.z + p.w < -r && p.x * e.x + p.y * e.y + p.z * e.z + p.w < -r) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// How far from `c` along `down` until the box is left (0 outside it).
+f32 to_leave(const Bounds3& box, Vec3f c, Vec3f down) {
+    f32 t = 1e30f;
+    const f32 from[3] = {c.x, c.y, c.z}, d[3] = {down.x, down.y, down.z};
+    const f32 lo[3] = {box.min.x, box.min.y, box.min.z}, hi[3] = {box.max.x, box.max.y, box.max.z};
+    for (int k = 0; k < 3; ++k) {
+        if (d[k] > 1e-6f) {
+            t = std::min(t, (hi[k] - from[k]) / d[k]);
+        } else if (d[k] < -1e-6f) {
+            t = std::min(t, (lo[k] - from[k]) / d[k]);
+        }
+    }
+    return std::max(t, 0.0f);
+}
+
 // A copy's bounding sphere: its mesh's, moved and scaled with it.
 void sphere_of(const Mat4f& t, Vec3f center, f32 radius, Vec3f& c, f32& r) {
     c = t.apply(center);
@@ -192,6 +221,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _fragment_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh.frag.spv",
                                                     /*uniform_buffers=*/2, /*samplers=*/2);
         _shadow_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow.frag.spv");
+        _shadow_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow.vert.spv",
+                                                         /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
         _fullscreen_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "fullscreen.vert.spv");
         _bloom_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "bloom.frag.spv",
                                                  /*uniform_buffers=*/1, /*samplers=*/1);
@@ -240,13 +271,17 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass) const {
     if (pass == Pass::Shadow) {
-        // Both faces cast: thin and open meshes still shade.
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
+        // A closed mesh's back faces are behind its front ones from the sun
+        // too: culled, the map is the same for half the triangles. Double-sided
+        // (thin, open) meshes cast with both. shadow.vert places the vertices
+        // and does nothing else.
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _shadow_vertex_shader.handle(),
                                                      .fragment = _shadow_shader.handle(),
                                                      .blend = GpuBlendMode::Replace,
                                                      .layout = GpuVertexLayout::MeshVertices,
                                                      .depth_stencil = _shadow_format,
                                                      .depth = GpuDepthTest::TestWrite,
+                                                     .cull = cull ? GpuCull::Back : GpuCull::None,
                                                      .depth_only = true});
     }
     if (pass == Pass::Pick) {
@@ -440,7 +475,7 @@ bool GpuRenderer3D::resize_view(IView3DBackend& base, Vec2i size) {
 }
 
 bool GpuRenderer3D::ensure_shadow_map(u32 resolution) {
-    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || !_shadow_shader) {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || !_shadow_shader || !_shadow_vertex_shader) {
         return false;
     }
     resolution = std::clamp(resolution, 64u, 8192u);
@@ -626,8 +661,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         }
     };
 
-    // What the camera sees, and what only the sun does (it may cast a shadow
-    // into view): each copy's sphere against the planes.
+    // What the camera sees, and what only the sun does and may cast a shadow
+    // into view (its sphere swept down the light, through the shadow area,
+    // reaching the camera's view): each copy's sphere against the planes.
+    const Vec3f down = shadows ? normalize(lights.sun.direction) * -1.0f : Vec3f{};
     _visible.resize(total);
     each_task([&](Piece& piece) {
         const DrawRef& ref = _refs[piece.ref];
@@ -639,7 +676,8 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 sphere_of(ref.instances[i].transform, ref.center, ref.radius, c, r);
             }
             const bool seen = !ref.frustum || sphere_in(*ref.frustum, c, r);
-            const bool sun = !seen && ref.caster && sphere_in(light_frustum, c, r);
+            const bool sun = !seen && ref.caster && sphere_in(light_frustum, c, r) &&
+                             shadow_in(*ref.frustum, c, r, down, to_leave(area, c, down) + r);
             _visible[piece.flat + i - piece.begin] = seen ? 1 : sun ? 2 : 0;
             piece.seen += seen ? 1u : 0u;
             piece.extra += sun ? 1u : 0u;
@@ -855,21 +893,31 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         depth.store_op = SDL_GPU_STOREOP_STORE;
         depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
         depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-        depth.cycle = true;
+        // Not cycled: the frames before are done with it in queue order, and
+        // a frame rendering several views would otherwise be handed a new
+        // map for each (64 MB at 4096: 7 ms a render, measured, instead of 2).
+        depth.cycle = false;
         SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
-        SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, false, Pass::Shadow);
-        if (pass && p) {
+        if (pass) {
             const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(_shadow_size), static_cast<f32>(_shadow_size), 0.0f, 1.0f};
             SDL_SetGPUViewport(pass, &viewport);
-            SDL_BindGPUGraphicsPipeline(pass, p);
-            SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
             DrawUniforms u{};
             std::memcpy(u.view_projection, light_vp.m, sizeof(u.view_projection));
             const GpuMesh3D* bound_mesh = nullptr;
+            SDL_GPUGraphicsPipeline* bound = nullptr;
             for (const DrawRef& ref : _refs) {
                 const u32 count = ref.out_count + ref.out_extra;
                 if (!ref.caster || count == 0) {
                     continue;
+                }
+                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !ref.draw->material.double_sided, Pass::Shadow);
+                if (!p) {
+                    continue;
+                }
+                if (p != bound) {
+                    SDL_BindGPUGraphicsPipeline(pass, p);
+                    SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
+                    bound = p;
                 }
                 if (ref.mesh != bound_mesh) {
                     const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
@@ -882,6 +930,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
                 SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
                 SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, count, 0, 0, 0);
                 ++stats.shadow_draws;
+                stats.shadow_casters += count;
             }
         }
         if (pass) {

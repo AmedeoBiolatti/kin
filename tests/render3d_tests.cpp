@@ -1181,6 +1181,72 @@ void test_gpu_large_mesh() {
     });
 }
 
+// The shadow pass culls a single-sided mesh's back faces (a closed mesh's
+// map is the same): a plane facing the sun still casts, one facing away
+// does not (draw it double-sided to cast from both sides), a double-sided
+// one does either way.
+void test_gpu_shadow_faces() {
+    with_gpu("test_gpu_shadow_faces", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh plane = r3d.create_mesh(kin::meshes::plane({2.0f, 2.0f})); // faces +Y
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}}; // from up and +x
+        scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+        const auto shade_under = [&](const Mat4f& placed, bool double_sided) {
+            scene.clear();
+            scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            scene.draw(plane, placed, {.color = Color::rgb(180, 60, 60), .double_sided = double_sided, .receives_shadow = false});
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            renderer.draw_texture(view.texture(), screen);
+            const Pixels p = read(renderer);
+            const Color under = p.at(scene.camera.project({1.0f, 0.0f, 0.0f}, screen)->pos);
+            const Color open = p.at(scene.camera.project({-4.0f, 0.0f, 0.0f}, screen)->pos);
+            renderer.present();
+            return brightness(under) * 2 < brightness(open);
+        };
+        // The plane 3 m up at x = 4: its shadow at x = 1, on floor the camera sees past it.
+        const Mat4f up = Mat4f::translation({4.0f, 3.0f, 0.0f});
+        const Mat4f down = up * Mat4f::rotation_x(180.0f);
+        assert(shade_under(up, false));       // facing the sun: casts
+        assert(!shade_under(down, false));    // facing away, single-sided: does not
+        assert(shade_under(down, true));      // double-sided: casts
+    });
+}
+
+// A mesh out of the camera's view still casts when its shadow falls in view;
+// one whose shadow falls out of view too is left out of the shadow map.
+void test_gpu_shadows_into_view() {
+    with_gpu("test_gpu_shadows_into_view", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 30.0f); // the floor within about 4 m of the middle
+        scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}}; // from up and +x: shadows fall toward -x
+        scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+        scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+        scene.draw(box, Mat4f::translation({6.5f, 3.0f, 0.0f}), {.color = Color::rgb(180, 60, 60)});  // out of view, its shadow at x = 3.5: in it
+        scene.draw(box, Mat4f::translation({-7.0f, 2.0f, 0.0f}), {.color = Color::rgb(180, 60, 60)}); // its shadow at x = -9: out of view
+        scene.draw(box, Mat4f::translation({8.0f, 1.0f, 7.0f}), {.color = Color::rgb(180, 60, 60)});  // its shadow at (7, 0, 7): out of view
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, scene));
+        assert(r3d.stats().culled == 3);
+        assert(r3d.stats().shadow_casters == 2); // the floor, and the box casting into view
+        renderer.draw_texture(view.texture(), screen);
+        const Pixels p = read(renderer);
+        const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
+        assert(brightness(at({3.5f, 0.0f, 0.0f})) * 2 < brightness(at({-2.0f, 0.0f, 0.0f})));
+        renderer.present();
+    });
+}
+
 } // namespace
 
 int main() {
@@ -1212,5 +1278,7 @@ int main() {
     test_gpu_fill_and_ambient();
     test_gpu_receives_no_shadow();
     test_gpu_large_mesh();
+    test_gpu_shadow_faces();
+    test_gpu_shadows_into_view();
     return 0;
 }

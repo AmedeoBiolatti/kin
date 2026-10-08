@@ -453,8 +453,8 @@ of CPU, bloom about 0.10 ms of GPU, point lights 0.02-0.03 ms; at 20,000,
 shadows 0.7-0.8 ms of GPU and 0.33 ms of CPU (every enemy is in the sun's view
 of the deck, so every one casts, and the extra copies are tested and
 written), bloom 0.1-0.15 ms, lights 0.1-0.25 ms (more fragments to light).
-Shadows at many casters are the thing to look at next: casters whose shadow
-can't reach the view could be skipped, or the map limited to near the player.
+Shadows at many casters were the thing to look at next (done after M4,
+below).
 GPU scopes per pass were not used (they split submissions and change what
 they time); the cost of each pass is the difference with it off.
 
@@ -579,6 +579,47 @@ the machine was busier than at M0, so the raster is timed again beside it):
   no frame over 100 ms in three runs (two on the GPU, one on the CPU
   raster); a frame of the studio's UI takes about 13 ms in that mode,
   whichever tab, the kept 3D picture adding nothing.
+
+### After M4: shadow cost. Done.
+
+Measured first, with `kin_draw_bench 200 20000 shadows` (Signal Breach's
+deck, tiles and enemy meshes; first person from one end, from mid-deck, and
+from above; `KIN_BENCH_REPEAT=8` renders the view eight times a frame so the
+3D work outweighs the timer's noise). The map pass cost about as much as
+half the main pass: every caster again, both faces, through `mesh.vert`.
+Sampling it was not the cost (`KIN_BENCH_NO_RECEIVE`: the same), nor mostly
+its size (1024: 0.5 ms, 2048: 0.65) or the triangles (a torus a quarter as
+fine: 0.53): it is per copy.
+
+- **Back faces culled** in the shadow pass for single-sided materials: a
+  closed mesh's back faces are behind its front ones from the sun too, so
+  the map is the same for half the triangles. 0.84-1.0 ms became
+  0.57-0.70 (per render, from above). A lone single-sided quad facing away
+  from the sun no longer casts (`double_sided` casts both ways; a test
+  checks both).
+- **shadow.vert**: only the placing (no normals, colours or varyings). Within
+  the noise (0.03-0.05 ms): kept, as it costs nothing.
+- **Casters whose shadow can't reach the view are skipped**: a copy the
+  camera culls is drawn into the map only if its bounding sphere, swept
+  down the light to where it leaves the shadow area, reaches the camera's
+  frustum. From mid-deck 21,536 casters became 8,778 and the shadows'
+  GPU cost 0.85 ms became 0.25; fewer copies are written too.
+  `Render3DStats::shadow_casters` counts them.
+- **The map is not cycled**: a frame that renders several views was handed
+  a new map for each (7.3 ms a render at 4096 repeated, 2.2 without); at
+  one render a frame the same either way (an interleaved A/B, five runs).
+
+Signal Breach (`--headless --benchmark --seed=7 --frames=1200`, three runs
+each, the M3 binary and this one interleaved; the machine was slower than
+at M3, so each is compared with its own `--no-shadows`):
+
+| Enemies | Shadows' GPU cost, M3 / now | Shadows' render() CPU cost, M3 / now |
+|---|---|---|
+| 2,000 | 0.17-0.22 / 0.02-0.06 ms | 0.09-0.26 / 0.03-0.06 ms |
+| 20,000 | 0.78-0.86 / 0.07-0.26 ms | 0.58-0.88 / 0.28-0.48 ms |
+
+The pictures are the same to the bit (frames 600 and 1800 of the
+benchmark, both binaries).
 
 ### Later, each on request
 
