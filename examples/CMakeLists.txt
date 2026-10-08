@@ -36,6 +36,13 @@ if(KIN_EXPERIMENTAL_3D)
     add_executable(signal_breach signal_breach/main.cpp)
     target_link_libraries(signal_breach PRIVATE kin_breach)
     kin_game(signal_breach TITLE "Signal Breach" CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/content")
+
+    # Sponza Walk: a viewer for the 3D renderer, every feature switchable from
+    # a panel. Sponza is fetched into a cache (tools/reference/fetch.py), not
+    # kept here, so it has no content of its own.
+    add_executable(sponza_walk sponza_walk/main.cpp)
+    target_link_libraries(sponza_walk PRIVATE kin_example_workloads)
+    kin_game(sponza_walk TITLE "Sponza Walk" NO_CONTENT)
 endif()
 
 if(BUILD_TESTING)
@@ -60,6 +67,18 @@ if(BUILD_TESTING)
     add_test(NAME signal-siege-from-pack
         COMMAND signal_siege "--content=${_siege_pack}" --headless --frames=30 --seed=7 --locale=fr
                 --fail-on-missing-text --mute --report=-)
+    if(KIN_EXPERIMENTAL_3D)
+        # Sponza Walk renders a few frames headless and checks the picture is
+        # not blank. It skips (77) without Sponza in the reference cache or a
+        # GPU device (lavapipe is enough), and fails without one when
+        # KIN_REQUIRE_GPU_TESTS is set.
+        add_test(NAME sponza-walk-smoke
+            COMMAND sponza_walk --headless --frames 3 --width 480 --height 300
+                    "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/sponza_walk_smoke.png" --preset ao --skip-if-unavailable)
+        set_tests_properties(sponza-walk-smoke PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu" SKIP_RETURN_CODE 77
+            TIMEOUT 300 PASS_REGULAR_EXPRESSION "differ from the background")
+    endif()
+
     set_tests_properties(signal-siege-pack-create PROPERTIES FIXTURES_SETUP signal_siege_pack)
     set_tests_properties(signal-siege-pack-verify signal-siege-from-pack PROPERTIES FIXTURES_REQUIRED signal_siege_pack)
     set_tests_properties(signal-siege-from-pack PROPERTIES

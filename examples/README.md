@@ -148,6 +148,40 @@ Its gun and crates are glTF models in `content/models`, made by
 `tools/models/make_breach_models.py` (Python, no packages needed); run it
 again while the game runs and they load again.
 
+## Sponza Walk
+
+A viewer for the experimental 3D renderer (`-DKIN_EXPERIMENTAL_3D=ON`): fly a
+camera round Sponza (scale: metres) with every renderer feature switchable
+from a panel. Sponza is not in the repository (Crytek's licence): fetch it
+with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
+`~/.cache/kin/reference`, or pass `--model PATH`. It needs the SDL_GPU backend.
+
+- Click the picture to fly: WASD, mouse look, Shift fast, Q or Ctrl down, E or
+  Space up, wheel changes the speed. Esc (or Tab) lets the mouse go and shows
+  the panel; Esc again quits. 1 and 2 jump to the reference scene's `nave` and
+  `roof` cameras (it starts at `nave`).
+- The panel (scrolls with the wheel; sections fold) has a switch or slider for
+  the sun (angles, intensity, L animates it), fill light, hemisphere and ground
+  ambient, an environment (HDRIs from the cache), point lights (K drops one at
+  the camera), shadows (map size, cascades, distance, area), ambient occlusion,
+  MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
+  and every material feature (textures, normal maps, metallic-roughness maps,
+  emissive, cut-out, double-sided, shadows, unlit, roughness and metallic
+  overrides). F3 shows the stats (frame, CPU and GPU time, draws, triangles,
+  shadow casters per cascade, occlusion work), F12 or P saves a PNG of the
+  picture to the current directory, F2 prints the settings and a fragment for a
+  reference scene (`tests/reference/scenes/*.json`).
+- `--set key=value` and `--preset name[,name]` set the same switches at start
+  (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
+- Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8
+  --screenshot out.png --preset ao` renders from the start camera and writes the
+  picture (`--hud` puts the panel in it, `--spin DEG` turns the camera a frame,
+  `--print-settings` prints the settings). `ctest -R sponza-walk` does this and
+  checks the picture is not blank; it skips without Sponza or a GPU.
+- The code is `sponza_walk/settings.hpp` (all state, applied to the `Scene3D`
+  each frame) and `sponza_walk/main.cpp`; a new feature is a field and one row
+  in `Controls::build`.
+
 ## Run Observatory
 
 A simulated LLM training tracker. Search experiments by name, model, or status;
