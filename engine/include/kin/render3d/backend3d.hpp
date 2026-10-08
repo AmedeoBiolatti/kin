@@ -26,6 +26,12 @@ struct Renderer3DCapabilities {
     // colour and with HDR (16-bit float) colour.
     u32 max_samples = 1;
     u32 max_samples_hdr = 1;
+    // Whether Scene3D::ambient_occlusion, ::contact_shadows and ::taa can work
+    // here (the formats and compute they need); where not, they are off and a
+    // line in the log says so the first time one is asked for.
+    bool ambient_occlusion = false;
+    bool contact_shadows = false;
+    bool temporal_aa = false;
 };
 
 struct View3DOptions {

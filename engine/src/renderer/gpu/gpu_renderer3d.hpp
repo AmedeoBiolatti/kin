@@ -19,6 +19,7 @@
 
 namespace kin {
 class GpuRenderer2DBackend;
+class JobSystem;
 }
 
 namespace kin::gpu {
@@ -78,7 +79,11 @@ public:
 // the matrices of every copy of the scene, kept by group (a mesh in a scene), and
 // those with a MeshInstance::id by that id.
 struct GpuCopyHistory {
-    std::unordered_map<u64, std::pair<u32, u32>> groups; // a group's first matrix and how many
+    struct Span {
+        u64 key;
+        u32 first, count; // a group's first matrix and how many
+    };
+    std::vector<Span> groups; // by key
     std::unordered_map<u64, u32> ids;                    // a mesh's copy by id: its matrix
     std::vector<Mat4f> matrices;
 };
@@ -193,7 +198,7 @@ private:
     void release_taa(GpuView3D& view);
     // Where each copy of `_refs` was last frame, into _taa_prev (a matrix a copy, flat as _visible is) and the
     // view's record for the next.
-    void match_copies(GpuView3D& view, bool history_usable);
+    void match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs);
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input, const TemporalAA3D& taa,
                                   bool reset, Vec2f jitter, Render3DStats& stats);
@@ -224,10 +229,19 @@ private:
     // and a float storage texture; else it is off (said once, when asked for).
     bool _taa_available = false;
     bool _taa_warned = false;
+    bool _taa_prepass_warned = false;
     SDL_GPUComputePipeline* _taa_pipeline = nullptr; // taa.comp
     std::shared_ptr<GpuBuffer> _previous;            // last frame's matrix of each copy in _instances; grows
     std::vector<Mat4f> _taa_prev;                    // render()'s scratch: a matrix per copy of the scene
     std::vector<Mat4f> _taa_ordered;                 // and per copy in _instances
+    struct CopyRef {
+        u32 slot = 0; // a draw's first copy among its group's in the view's record,
+        u32 past = 0; // and where its place was last frame (~0: no same-sized group then)
+    };
+    std::vector<CopyRef> _taa_copy_refs;             // match_copies' scratch, kept between frames:
+    std::vector<std::pair<u64, u32>> _taa_keyed;     // draws by group key,
+    std::vector<u32> _taa_group_of;                  // their groups,
+    std::vector<u8> _taa_slow;                       // and a byte a copy: not settled by the fast path
     // Ambient occlusion needs these formats and two compute pipelines; where
     // the device lacks one it is off (a line in the log the first time it is asked for).
     SDL_GPUTextureFormat _ao_depth_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled

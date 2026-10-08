@@ -44,6 +44,22 @@ void skip_or_require_gpu_test(std::string_view test_name, const std::string& rea
               << " (set KIN_REQUIRE_GPU_TESTS=1 to require GPU coverage)\n";
 }
 
+// Renders and checks that it did, the call kept even if asserts are compiled out.
+void render_ok(kin::Renderer3D& r3d, kin::View3D& view, const kin::Scene3D& scene) {
+    const bool rendered = r3d.render(view, scene);
+    assert(rendered);
+    static_cast<void>(rendered);
+}
+
+// True where the device cannot do `what` (its capability is false: said, and the test is skipped). A device that
+// can, whose pass did not run, is a failure of the test's own asserts, never a skip.
+bool lacks(bool capable, const char* what) {
+    if (!capable) {
+        std::cerr << what << ": not available on this device, skipped\n";
+    }
+    return !capable;
+}
+
 std::unique_ptr<kin::Renderer2D> try_create_gpu_renderer(kin::Window& window, std::string& unavailable_reason) {
     try {
         std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
@@ -440,7 +456,8 @@ void test_sdl_renderer_has_no_3d() {
     kin::Scene3D scene;
     scene.draw(kin::Mesh{}, Mat4f::identity());
     renderer.clear(kin::colors::black);
-    assert(!r3d.render(view, scene)); // nothing drawn, but the background is there
+    const bool drew = r3d.render(view, scene);
+    assert(!drew); // nothing drawn, but the background is there
     renderer.draw_texture(view.texture(), {0.0f, 0.0f, 40.0f, 30.0f});
     std::vector<kin::u8> rgba;
     kin::Vec2i size{};
@@ -500,7 +517,7 @@ void test_gpu_depth_and_colour() {
                     add_red();
                 }
                 renderer.clear(kin::colors::black);
-                assert(r3d.render(view, scene));
+                render_ok(r3d, view, scene);
                 assert(r3d.stats().draws == 2 && r3d.stats().instances == 2 && r3d.stats().triangles == 24);
                 renderer.draw_texture(view.texture(), screen);
                 const Pixels p = read(renderer);
@@ -528,7 +545,7 @@ void test_gpu_lighting() {
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
         scene.draw(box, Mat4f::identity(), {.color = Color::rgb(180, 180, 180)});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         Pixels p = read(renderer);
         const auto lit = scene.camera.project({0.5f, 0.0f, 0.0f}, screen);
@@ -543,7 +560,7 @@ void test_gpu_lighting() {
         scene.lights.sun.direction = {-1.0f, 0.0f, 0.0f};
         scene.draw(box, Mat4f::identity(), {.color = Color::rgb(180, 180, 180), .emissive = 0.5f});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         p = read(renderer);
         const kin::u8 half = static_cast<kin::u8>(std::lround(255.0f * kin::linear_to_srgb(0.5f * kin::srgb_to_linear(180.0f / 255.0f))));
@@ -572,7 +589,7 @@ void test_gpu_instances() {
         balls[0] = {Mat4f::translation({-1.0f, -1.2f, 0.0f}), kin::colors::white};
         balls[1] = {Mat4f::translation({1.0f, -1.2f, 0.0f}) * Mat4f::scaling({1.4f, 1.4f, 1.4f}), Color::rgb(255, 128, 255)};
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         assert(r3d.stats().draws == 2 && r3d.stats().instances == 5);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
@@ -613,7 +630,7 @@ void test_gpu_instances_on_workers() {
         std::fill(balls.begin(), balls.end(), kin::MeshInstance{hidden, kin::colors::white});
         balls[4321] = {Mat4f::translation({1.5f, 0.0f, 0.0f}), kin::colors::white};
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         assert(r3d.stats().instances == 12300 && r3d.stats().draws == 302);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
@@ -651,7 +668,7 @@ void test_gpu_frustum_culling() {
             copies[17] = {Mat4f::translation({0.0f, -7.0f, 0.0f}) * Mat4f::scaling({12.0f, 12.0f, 1.0f}), Color::rgb(255, 255, 0)};
             scene.draw(box, Mat4f::translation({0.0f, 0.0f, 80.0f})); // a draw with nothing in view
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             assert(r3d.stats().instances == 4 && r3d.stats().culled == 11997 && r3d.stats().draws == 1);
             renderer.draw_texture(view.texture(), screen);
             const Pixels p = read(renderer);
@@ -670,7 +687,8 @@ void test_gpu_frustum_culling() {
         all.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f});
         all.draw(box, Mat4f::translation({0.0f, 0.0f, 30.0f}));
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, all) && r3d.stats().instances == 1 && r3d.stats().culled == 0);
+        render_ok(r3d, view, all);
+        assert(r3d.stats().instances == 1 && r3d.stats().culled == 0);
         renderer.present();
     });
 }
@@ -692,7 +710,7 @@ void test_gpu_overlay() {
         // Seen by its own camera, 3 m in front of it: further than the wall is from the scene's.
         gun.draw(box, Mat4f::translation({0.6f, -0.4f, -3.0f}), {.color = Color::rgb(250, 120, 20), .unlit = true});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         assert(r3d.stats().draws == 2 && r3d.stats().instances == 2);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
@@ -724,7 +742,8 @@ void test_gpu_point_lights() {
         scene.draw(wall, Mat4f::identity(), {.color = Color::rgb(200, 200, 200)});
         scene.add_light({.position = {-2.0f, 0.0f, 1.0f}, .color = {2.0f, 1.0f, 0.5f}, .radius = 3.0f});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene) && r3d.stats().lights == 1);
+        render_ok(r3d, view, scene);
+        assert(r3d.stats().lights == 1);
         renderer.draw_texture(view.texture(), screen);
         Pixels p = read(renderer);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -740,7 +759,8 @@ void test_gpu_point_lights() {
         }
         scene.add_light({.position = {0.0f, 0.0f, 40.0f}, .radius = 2.0f}); // behind the camera: none of the view
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene) && r3d.stats().lights == 16);
+        render_ok(r3d, view, scene);
+        assert(r3d.stats().lights == 16);
         renderer.present();
     });
 }
@@ -762,7 +782,7 @@ void test_gpu_shadows() {
             scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             return read(renderer);
         };
@@ -801,7 +821,7 @@ void test_gpu_blending() {
         scene.draw(quad, Mat4f::translation({0.0f, 2.0f, 1.0f}), veil);
         scene.draw(quad, Mat4f::translation({0.0f, -2.5f, -1.0f}) * Mat4f::scaling({2.0f, 1.0f, 1.0f}), veil);
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -826,7 +846,7 @@ void test_gpu_hdr_bloom() {
         const auto shot = [&](const kin::View3DOptions& options) {
             kin::View3D view = r3d.create_view({160, 120}, options);
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             return read(renderer);
         };
@@ -844,7 +864,7 @@ void test_gpu_hdr_bloom() {
         // the darkest tones a little), its hue kept.
         kin::View3D dark = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(18, 26, 36), .bloom = 1.0f});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(dark, scene));
+        render_ok(r3d, dark, scene);
         renderer.draw_texture(dark.texture(), screen);
         const Color background = read(renderer).at(4, 4);
         assert(background.r <= 18 && background.b <= 36 && background.b > background.g && background.g > background.r);
@@ -852,7 +872,7 @@ void test_gpu_hdr_bloom() {
         // Over a transparent background the glow still shows on what is under it.
         kin::View3D clear_view = r3d.create_view({160, 120}, {.samples = 1, .background = kin::colors::transparent, .bloom = 1.0f});
         renderer.clear(Color::rgb(0, 0, 120));
-        assert(r3d.render(clear_view, scene));
+        render_ok(r3d, clear_view, scene);
         renderer.draw_texture(clear_view.texture(), screen);
         const Color over_blue = read(renderer).at(side->pos);
         assert(over_blue.r > 30 && over_blue.b > 60);
@@ -877,7 +897,7 @@ void test_gpu_texture() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = checker});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -929,7 +949,7 @@ void test_gpu_model() {
         scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
         scene.draw(model, Mat4f::identity());
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -962,7 +982,7 @@ void test_gpu_culling() {
             scene.camera = kin::Camera3D::look_at({0.0f, -3.0f, 0.01f}, {0.0f, 0.0f, 0.0f}); // from below
             scene.draw(floor, Mat4f::identity(), {.color = Color::rgb(90, 200, 90), .unlit = true, .double_sided = double_sided});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             expect(read(renderer).at(80, 60), double_sided ? Color::rgb(90, 200, 90) : kin::colors::black,
                    double_sided ? "a double-sided plane from below" : "a plane from below");
@@ -983,11 +1003,11 @@ void test_gpu_interleaves_with_2d() {
         renderer.clear(kin::colors::black);
         renderer.fill_rect({0.0f, 0.0f, 160.0f, 120.0f}, Color::rgb(10, 20, 30)); // 2D first
         scene.draw(box, Mat4f::identity(), {.color = Color::rgb(220, 30, 30), .unlit = true});
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), {0.0f, 0.0f, 40.0f, 40.0f});
         scene.clear();
         scene.draw(box, Mat4f::identity(), {.color = Color::rgb(30, 220, 30), .unlit = true});
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), {60.0f, 0.0f, 40.0f, 40.0f});
         renderer.fill_rect({120.0f, 0.0f, 20.0f, 20.0f}, Color::rgb(250, 250, 250)); // 2D after
         const Pixels p = read(renderer);
@@ -1002,7 +1022,7 @@ void test_gpu_interleaves_with_2d() {
         renderer.clear(Color::rgb(70, 70, 70));
         scene.clear();
         scene.draw(box, Mat4f::translation({0.0f, 0.0f, -100.0f}), {.unlit = true}); // too small to cover it
-        assert(r3d.render(clear_view, scene));
+        render_ok(r3d, clear_view, scene);
         renderer.draw_texture(clear_view.texture(), {0.0f, 0.0f, 40.0f, 40.0f});
         expect(read(renderer).at(5, 5), Color::rgb(70, 70, 70), "under a transparent background");
         renderer.present();
@@ -1035,7 +1055,7 @@ void test_gpu_meshes_outlive_renderer() {
         kin::Scene3D scene;
         scene.draw(mesh, Mat4f::identity());
         renderer->clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer->draw_texture(view.texture(), {0.0f, 0.0f, 64.0f, 64.0f});
         renderer->present();
     }
@@ -1060,7 +1080,7 @@ void test_gpu_linear_hdr() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f});
         scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 40, 40), .unlit = true});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         expect(read(renderer).at(80, 60), Color::rgb(200, 40, 40), "a linear HDR scene", 4);
         renderer.present();
@@ -1086,7 +1106,7 @@ void test_gpu_pick() {
         scene.overlay().draw(box, Mat4f::translation({0.0f, -2.0f, 0.0f}), {.color = Color::rgb(200, 200, 60)},
                              kin::colors::white, 5);
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         const auto pixel = [&](Vec3f w) {
             const kin::Vec2f p = scene.camera.project(w, screen)->pos;
             return kin::Vec2i{static_cast<int>(p.x), static_cast<int>(p.y)};
@@ -1111,7 +1131,7 @@ void test_gpu_pick() {
 
         // A view made without picking has nothing to say.
         renderer.clear(kin::colors::black);
-        assert(r3d.render(plain, scene));
+        render_ok(r3d, plain, scene);
         assert(!r3d.pick(plain, pixel({-1.5f, 0.0f, 0.5f})).hit);
         renderer.present();
     });
@@ -1141,7 +1161,7 @@ void test_gpu_wireframe() {
         scene.draw(box, Mat4f::identity(), {.color = wire, .wireframe = true});
         scene.draw(line, Mat4f::identity(), {.color = Color::rgb(40, 250, 40), .wireframe = true});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
         const auto any_near = [&](Vec3f w, Color want) {
@@ -1180,7 +1200,7 @@ void test_gpu_fill_and_ambient() {
             scene.camera = kin::Camera3D::look_at(eye, {0.0f, 0.0f, 0.0f}, 50.0f);
             scene.draw(box, Mat4f::identity(), {.color = kin::colors::white});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             const Color c = read(renderer).at(80, 60);
             renderer.present();
@@ -1222,7 +1242,8 @@ void test_gpu_receives_no_shadow() {
         scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180), .receives_shadow = false});
         scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene) && r3d.stats().shadow_draws == 2);
+        render_ok(r3d, view, scene);
+        assert(r3d.stats().shadow_draws == 2);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -1258,7 +1279,7 @@ void test_gpu_large_mesh() {
             scene.clear();
             scene.draw(mesh, Mat4f::identity(), {.unlit = true});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             expect(read(renderer).at(scene.camera.project({0.0f, -0.3f, 0.0f}, screen)->pos), Color::rgb(220, 30, 30), what);
             renderer.present();
@@ -1293,7 +1314,7 @@ void test_gpu_shadow_faces() {
             scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             scene.draw(plane, placed, {.color = Color::rgb(180, 60, 60), .double_sided = double_sided, .receives_shadow = false});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             const Pixels p = read(renderer);
             const Color under = p.at(scene.camera.project({1.0f, 0.0f, 0.0f}, screen)->pos);
@@ -1328,7 +1349,7 @@ void test_gpu_shadows_into_view() {
         scene.draw(box, Mat4f::translation({-7.0f, 2.0f, 0.0f}), {.color = Color::rgb(180, 60, 60)}); // its shadow at x = -9: out of view
         scene.draw(box, Mat4f::translation({8.0f, 1.0f, 7.0f}), {.color = Color::rgb(180, 60, 60)});  // its shadow at (7, 0, 7): out of view
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         assert(r3d.stats().culled == 3);
         assert(r3d.stats().shadow_casters == 2); // the floor, and the box casting into view
         renderer.draw_texture(view.texture(), screen);
@@ -1365,7 +1386,7 @@ void test_gpu_cascades() {
             // Out of every cascade but the farthest: far to the side and behind.
             scene.draw(block, Mat4f::translation({-100.0f, 2.0f, -140.0f}), {.color = Color::rgb(180, 60, 60)});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -1440,7 +1461,7 @@ void test_gpu_ambient_occlusion() {
                 hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
             }
             renderer.clear(kin::colors::black);
-            assert(r3d.render(target ? *target : view, scene));
+            render_ok(r3d, target ? *target : view, scene);
             renderer.draw_texture((target ? *target : view).texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -1455,10 +1476,10 @@ void test_gpu_ambient_occlusion() {
         assert(plain.rgba == off.rgba); // off is off, whatever its other settings
 
         const Pixels on = render({.enabled = true, .radius = 3.0f});
-        if (r3d.stats().ao_dispatches == 0) {
-            std::cerr << "ambient occlusion: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
             return;
         }
+        assert(r3d.stats().ao_dispatches > 0);
         assert(r3d.stats().ao_draws == 2 && r3d.stats().ao_instances == 2 && r3d.stats().ao_dispatches == 3);
         // The crease: both sides of it darker; the open floor and the high wall, not.
         const int foot_off = brightness(at(off, foot)), foot_on = brightness(at(on, foot));
@@ -1559,7 +1580,7 @@ void test_gpu_contact_shadows() {
                 hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
             }
             renderer.clear(kin::colors::black);
-            assert(r3d.render(target ? *target : view, scene));
+            render_ok(r3d, target ? *target : view, scene);
             renderer.draw_texture((target ? *target : view).texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -1575,10 +1596,10 @@ void test_gpu_contact_shadows() {
         assert(plain.rgba == off.rgba); // off is off, whatever its other settings
 
         const Pixels shadowed = render(on);
-        if (r3d.stats().contact_dispatches == 0) {
-            std::cerr << "contact shadows: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().contact_shadows, "contact shadows")) {
             return;
         }
+        assert(r3d.stats().contact_dispatches > 0);
         // Without ambient occlusion: the pre-pass of both meshes, the march and two blurs.
         assert(r3d.stats().ao_draws == 2 && r3d.stats().ao_instances == 2 && r3d.stats().ao_dispatches == 0 &&
                r3d.stats().contact_dispatches == 3);
@@ -1664,7 +1685,7 @@ void test_gpu_metal_and_roughness() {
             scene.clear();
             scene.draw(sphere, Mat4f::identity(), material);
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -1723,7 +1744,7 @@ void test_gpu_normal_map() {
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
             scene.draw(square, Mat4f::identity(), {.color = Color::rgb(200, 200, 200), .normal = normal, .normal_scale = scale});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             const Pixels p = read(renderer);
             renderer.present();
@@ -1768,7 +1789,7 @@ void test_gpu_alpha_mask() {
             scene.draw(leaf_mesh, Mat4f::translation({0.0f, 2.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
                        {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = blend, .texture = leaf}, kin::colors::white, 9);
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -1817,7 +1838,7 @@ void test_gpu_inverse_square() {
             scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(200, 200, 200)});
             scene.add_light({.position = {0.0f, 0.0f, distance}, .color = {3.0f, 3.0f, 3.0f}, .radius = radius});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             const Pixels p = read(renderer);
             renderer.present();
@@ -1865,7 +1886,7 @@ void test_gpu_model_materials() {
         scene.draw(part("mapped").mesh, part("mapped").transform, part("mapped").material);
         scene.draw(part("plain").mesh, part("plain").transform, part("plain").material);
         renderer.clear(kin::colors::black);
-        assert(r3d.render(view, scene));
+        render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
         const Pixels p = read(renderer);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -1897,7 +1918,7 @@ void test_gpu_wrap_modes() {
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
             scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture, .wrap_u = wrap, .wrap_v = wrap});
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             const Pixels p = read(renderer);
             renderer.present();
@@ -1966,7 +1987,7 @@ void test_gpu_environment() {
             scene.clear();
             scene.draw(sphere, Mat4f::identity(), material);
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -2047,7 +2068,7 @@ void test_gpu_material_shader() {
             scene.add_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
             scene.draw(sphere, Mat4f::identity(), material);
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -2189,7 +2210,7 @@ void test_gpu_taa() {
         scene.camera = flat_camera();
         const auto shoot = [&](kin::View3D& target, const kin::Scene3D& s) {
             renderer.clear(kin::colors::black);
-            assert(r3d.render(target, s));
+            render_ok(r3d, target, s);
             renderer.draw_texture(target.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -2212,10 +2233,10 @@ void test_gpu_taa() {
         // On, still: the first frame resets, later ones do not; a dispatch each.
         scene.taa = {.enabled = true};
         const Pixels first = shoot(view, scene);
-        if (r3d.stats().taa_dispatches == 0) {
-            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
             return;
         }
+        assert(r3d.stats().taa_dispatches > 0);
         assert(r3d.stats().taa_dispatches == 1 && r3d.stats().taa_reset && r3d.stats().samples == 1);
         const kin::Vec2f jitter_one = r3d.stats().taa_jitter;
         assert(jitter_one.x == kin::taa_jitter(0).x && jitter_one.y == kin::taa_jitter(0).y);
@@ -2490,7 +2511,7 @@ void test_gpu_taa_over_detail() {
         }
         const auto shoot = [&](kin::View3D& target, const kin::Scene3D& s) {
             renderer.clear(kin::colors::black);
-            assert(r3d.render(target, s));
+            render_ok(r3d, target, s);
             renderer.draw_texture(target.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -2551,10 +2572,10 @@ void test_gpu_taa_over_detail() {
         scene.taa = {.enabled = true};
         checker(0.0f, false, false, 0.0f);
         shoot(view, scene);
-        if (r3d.stats().taa_dispatches == 0) {
-            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
             return;
         }
+        assert(r3d.stats().taa_dispatches > 0);
         const std::vector<int> reference = supersample(0.0f, false);
 
         // The block crosses, 3 pixels a frame. Where it has been, the picture is as bright as the checker alone
@@ -2648,7 +2669,7 @@ void test_gpu_taa_crowd() {
         const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
         const auto shoot = [&](kin::View3D& target) {
             renderer.clear(kin::colors::black);
-            assert(r3d.render(target, scene));
+            render_ok(r3d, target, scene);
             renderer.draw_texture(target.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -2665,10 +2686,10 @@ void test_gpu_taa_crowd() {
             draw_world();
             alone = shoot(alone_view);
         }
-        if (r3d.stats().taa_dispatches == 0) {
-            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
             return;
         }
+        assert(r3d.stats().taa_dispatches > 0);
         for (const bool churn : {false, true}) {
             view.reset_history();
             double worst = 0.0;
@@ -2774,7 +2795,7 @@ void test_gpu_taa_overlay() {
         };
         const auto shoot = [&](kin::View3D& target) {
             renderer.clear(kin::colors::black);
-            assert(r3d.render(target, scene));
+            render_ok(r3d, target, scene);
             renderer.draw_texture(target.texture(), screen);
             Pixels p = read(renderer);
             renderer.present();
@@ -2833,10 +2854,10 @@ void test_gpu_taa_overlay() {
                 scene.taa = {.enabled = true};
                 build(cam_x, gun_x, 0.0f, 0.0f);
                 const Pixels p = shoot(view);
-                if (r3d.stats().taa_dispatches == 0) {
-                    std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+                if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
                     return;
                 }
+                assert(r3d.stats().taa_dispatches > 0);
                 if (f >= 32) {
                     const std::vector<float> want = truth(cam_x, gun_x);
                     scene.taa = {};
@@ -2886,7 +2907,7 @@ void test_gpu_taa_with_occlusion() {
                 scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -2.1f}), {.color = Color::rgb(200, 200, 200)});
                 scene.draw(pole, Mat4f::translation({1.0f, 0.5f, 1.0f}), {.color = Color::rgb(200, 200, 200)});
                 renderer.clear(kin::colors::black);
-                assert(r3d.render(view, scene));
+                render_ok(r3d, view, scene);
                 renderer.draw_texture(view.texture(), screen);
                 last = std::move(p);
                 p = read(renderer);
@@ -2895,18 +2916,18 @@ void test_gpu_taa_with_occlusion() {
             return std::pair{p, last};
         };
         const auto [aoed, aoed_last] = render(false, true, true, 1);
-        if (r3d.stats().ao_dispatches == 0) {
-            std::cerr << "ambient occlusion: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
             return;
         }
+        assert(r3d.stats().ao_dispatches > 0);
         const auto at = [&](const Pixels& p, Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
         const Vec3f foot{0.0f, 0.0f, -1.8f}, open{-2.0f, 0.0f, 2.0f};
         const auto [off, off_last] = render(false, false, false, 1);
         const auto [on, on_last] = render(true, true, true, 30);
-        if (r3d.stats().taa_dispatches == 0) {
-            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
             return;
         }
+        assert(r3d.stats().taa_dispatches > 0);
         const kin::Render3DStats& stats = r3d.stats();
         std::cerr << "taa+ao+contact: pre-pass draws " << stats.ao_draws << ", ao " << stats.ao_dispatches << ", contact " << stats.contact_dispatches
                   << ", taa " << stats.taa_dispatches << "\n";
@@ -2952,12 +2973,12 @@ void test_gpu_taa_pick() {
                 scene.clear();
                 scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 4);
                 renderer.clear(kin::colors::black);
-                assert(r3d.render(view, scene));
+                render_ok(r3d, view, scene);
                 const kin::PickResult p = r3d.pick(view, pixel);
-                if (taa && r3d.stats().taa_dispatches == 0) {
-                    std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+                if (taa && lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
                     return;
                 }
+                assert(!taa || r3d.stats().taa_dispatches > 0);
                 if (f == 0 && !taa) {
                     reference = p;
                 }
@@ -2987,19 +3008,188 @@ void test_gpu_taa_hdr() {
         Pixels p;
         for (int f = 0; f < 12; ++f) {
             renderer.clear(kin::colors::black);
-            assert(r3d.render(view, scene));
+            render_ok(r3d, view, scene);
             renderer.draw_texture(view.texture(), screen);
             p = read(renderer);
             renderer.present();
             scene.taa.enabled = true;
         }
-        if (r3d.stats().taa_dispatches == 0) {
-            std::cerr << "temporal anti-aliasing: not available on this device, skipped\n";
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
             return;
         }
+        assert(r3d.stats().taa_dispatches > 0);
         assert(brightness(p.at(side->pos)) > 40); // the glow
         const Color middle = p.at(80, 60);
         assert(middle.r > 230 && middle.g > 150);
+    });
+}
+
+// Copies with a MeshInstance::id keep their history through a reset: the frame
+// after the reset frame blends with it, as the same copies without an id do
+// (before, the ids were not recorded on the reset frame, and the next frame took
+// every id'd copy for a new one: aliased edges for a frame). Two views driven
+// in step see the same jitter, so their pictures must be the same.
+void test_gpu_taa_ids_after_reset() {
+    with_gpu("test_gpu_taa_ids_after_reset", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({3.0f, 3.0f, 0.2f}));
+        std::array<kin::View3D, 2> views{r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}),
+                                         r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)})};
+        kin::Scene3D scene;
+        scene.camera = flat_camera();
+        scene.taa = {.enabled = true};
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
+        // Turned blocks, so that their edges cross pixels at every fraction.
+        const auto shoot = [&](bool with_ids) {
+            scene.clear();
+            const std::array<kin::MeshInstance, 2> copies{
+                kin::MeshInstance{Mat4f::translation({-3.0f, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f), kin::colors::white, with_ids ? 7u : 0u},
+                kin::MeshInstance{Mat4f::translation({3.0f, 0.5f, 0.0f}) * Mat4f::rotation_z(70.0f), kin::colors::white, with_ids ? 8u : 0u}};
+            scene.draw_instanced(block, copies, white);
+            renderer.clear(kin::colors::black);
+            render_ok(r3d, views[with_ids ? 0 : 1], scene);
+            renderer.draw_texture(views[with_ids ? 0 : 1].texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        const auto soft = [](const Pixels& p) {
+            int n = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const int v = static_cast<int>(p.at(x, y).r);
+                    n += (v > 20 && v < 235) ? 1 : 0;
+                }
+            }
+            return n;
+        };
+        for (int f = 0; f < 6; ++f) {
+            shoot(true);
+            shoot(false);
+        }
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        for (auto& v : views) {
+            v.reset_history();
+        }
+        for (int f = 0; f < 3; ++f) {
+            const Pixels with = shoot(true);
+            assert(r3d.stats().taa_dispatches > 0 && r3d.stats().taa_reset == (f == 0));
+            const Pixels without = shoot(false);
+            assert(r3d.stats().taa_reset == (f == 0));
+            if (f == 1) {
+                // The second frame has a history to blend (soft edges); the copies with ids found theirs.
+                std::cerr << "taa: ids after a reset: soft edge pixels " << soft(with) << " with ids, " << soft(without) << " without\n";
+                assert(soft(without) > 10);
+            }
+            assert(with.rgba == without.rgba);
+        }
+    });
+}
+
+// Matching copies to last frame's (the velocity of each) is the same on the
+// workers as on one thread: a scene of static, moving, id'd and new copies, two
+// draws of one mesh, with the id'd ones listed in another order now and then
+// and one id given twice. Compared by picture, frame by frame (a copy given
+// another's past would smear differently).
+void test_gpu_taa_match_on_workers() {
+    with_gpu("test_gpu_taa_match_on_workers", [](kin::Renderer2D& renderer) {
+        kin::JobSystem jobs;
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh block = r3d.create_mesh(kin::meshes::box({0.12f, 0.12f, 0.12f}));
+        const kin::Material3D plain{.unlit = true};
+        const kin::Material3D other{.color = Color::rgb(200, 120, 40), .unlit = true};
+        constexpr int frames = 14;
+        std::array<std::vector<Pixels>, 2> shots;
+        bool capable = true;
+        for (const bool workers : {false, true}) {
+            renderer.set_job_system(workers ? &jobs : nullptr);
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+            kin::Scene3D scene;
+            scene.cull = false;
+            scene.camera = flat_camera();
+            scene.taa = {.enabled = true};
+            for (int f = 0; f < frames; ++f) {
+                scene.clear();
+                std::vector<kin::MeshInstance> a, b;
+                for (int i = 0; i < 4096; ++i) {
+                    const float x = -6.3f + 0.2f * static_cast<float>(i % 64), y = -4.7f + 0.15f * static_cast<float>(i / 64);
+                    const kin::Color tint = Color::rgb(static_cast<kin::u8>(80 + i % 160), static_cast<kin::u8>(255 - i % 97), 255);
+                    switch (i % 4) {
+                    case 0: // still, no id
+                        a.push_back({Mat4f::translation({x, y, 0.0f}), tint});
+                        break;
+                    case 1: // moving, no id
+                        a.push_back({Mat4f::translation({x + 0.07f * static_cast<float>(f), y, 0.0f}), tint});
+                        break;
+                    case 2: // moving, with an id (a few share one)
+                        a.push_back({Mat4f::translation({x, y + 0.05f * static_cast<float>(f), 0.0f}), tint, i % 500 == 2 ? 999u : static_cast<kin::u32>(i + 1)});
+                        break;
+                    default: // the other draw: still
+                        b.push_back({Mat4f::translation({x, y, 0.0f}), tint});
+                        break;
+                    }
+                }
+                if (f % 3 == 0) {
+                    std::rotate(a.begin(), a.begin() + 5, a.end()); // the places change; the ids say who is who
+                }
+                for (int k = 0; k < 7 && f >= 6 && f < 10; ++k) { // new copies, and a count that changes
+                    b.push_back({Mat4f::translation({-5.0f + static_cast<float>(k), 5.5f, 0.0f}), kin::colors::white});
+                }
+                scene.draw_instanced(block, a, plain);
+                scene.draw_instanced(block, b, other);
+                renderer.clear(kin::colors::black);
+                render_ok(r3d, view, scene);
+                renderer.draw_texture(view.texture(), screen);
+                shots[workers ? 1 : 0].push_back(read(renderer));
+                renderer.present();
+                capable = capable && r3d.capabilities().temporal_aa;
+                assert(!capable || r3d.stats().taa_dispatches > 0);
+            }
+        }
+        renderer.set_job_system(nullptr);
+        if (lacks(capable, "temporal anti-aliasing")) {
+            return;
+        }
+        for (int f = 0; f < frames; ++f) {
+            assert(shots[0][static_cast<std::size_t>(f)].rgba == shots[1][static_cast<std::size_t>(f)].rgba);
+        }
+    });
+}
+
+// A sun with no colour casts no shadow: no shadow pass is run (the sun term is
+// multiplied by its colour, so the picture is the one without a shadow area).
+void test_gpu_sun_off_no_shadow_pass() {
+    with_gpu("test_gpu_sun_off_no_shadow_pass", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = r3d.create_mesh(kin::meshes::box({20.0f, 0.2f, 20.0f}));
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({1.5f, 1.5f, 1.5f}));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.ambient = {0.3f, 0.3f, 0.3f};
+        const auto draw = [&](bool area, kin::Vec3f sun, kin::u32 cascades) {
+            scene.clear();
+            scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = sun};
+            scene.lights.shadow_cascades = cascades;
+            scene.lights.shadow_area = area ? kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}} : kin::Bounds3{};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
+            renderer.clear(kin::colors::black);
+            render_ok(r3d, view, scene);
+            renderer.draw_texture(view.texture(), screen);
+            Pixels p = read(renderer);
+            renderer.present();
+            return p;
+        };
+        for (const kin::u32 cascades : {1u, 4u}) {
+            draw(true, {1.0f, 1.0f, 1.0f}, cascades);
+            assert(r3d.stats().shadow_draws > 0 && r3d.stats().shadow_cascades > 0);
+            const Pixels dark = draw(true, {0.0f, 0.0f, 0.0f}, cascades);
+            assert(r3d.stats().shadow_draws == 0 && r3d.stats().shadow_casters == 0 && r3d.stats().shadow_cascades == 0);
+            assert(dark.rgba == draw(false, {0.0f, 0.0f, 0.0f}, cascades).rgba);
+        }
     });
 }
 
@@ -3047,6 +3237,9 @@ int main() {
     test_gpu_taa_with_occlusion();
     test_gpu_taa_pick();
     test_gpu_taa_hdr();
+    test_gpu_taa_ids_after_reset();
+    test_gpu_taa_match_on_workers();
+    test_gpu_sun_off_no_shadow_pass();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

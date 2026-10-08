@@ -390,6 +390,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             KIN_LOG_INFO_F("render", "3D: temporal anti-aliasing not available", (LogFields{{.name = "reason", .value = e.what()}}));
         }
     }
+    _capabilities.ambient_occlusion = _capabilities.contact_shadows = _ao_available;
+    _capabilities.temporal_aa = _taa_available;
     {
         // Image-based light: compute filters an environment into mips; sampled
         // by direction, so u wraps and v stops at the poles.
@@ -1187,7 +1189,7 @@ u64 mix64(u64 x) {
 
 } // namespace
 
-void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
+void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs) {
     // A copy's past is looked for in the last frame's copies of the same mesh in the
     // same scene (the world or the overlay): by its MeshInstance::id when it has one
     // (a copy of that mesh with that id), else by its place in the mesh's copies in
@@ -1196,58 +1198,133 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
     // is: the nearest copy of the mesh last frame within twice its size (a crowd that
     // lost one in the middle of its list, or gained one, still matches). A copy none of
     // these find has no past: new. The camera's own motion is not part of any of this.
+    //
+    // Most copies need none of that: no id, and the same matrix in the same place as
+    // last frame (or no history to look in). Those are settled first, in pieces on the
+    // workers when there are many; the rest are marked and taken here in draw order, so
+    // that "the first copy with an id wins" holds however the pieces were run.
     GpuCopyHistory& now = view._taa_now;
     const GpuCopyHistory& last = view._taa_last;
     now.groups.clear();
     now.ids.clear();
     struct Group {
         u64 key;
-        u32 first, count, used;
+        u32 first, count, past_first, past_count;
         bool grid_made = false;
         f32 cell = 1.0f;
         std::unordered_multimap<u64, u32> grid; // last frame's copies' centres by cell (made only if needed)
     };
     std::vector<Group> groups;
-    std::vector<u32> group_of(_refs.size());
+    const u32 ref_count = static_cast<u32>(_refs.size());
+    const auto key_of_ref = [&](u32 r) { return mix64(reinterpret_cast<std::uintptr_t>(_refs[r].mesh) * 2 + _refs[r].scene); };
+    // Groups in order of first appearance. Found by sorting the keys, not by a map made anew each frame.
+    std::vector<u32>& group_of = _taa_group_of; // first the first draw of the same group, then its group
     {
-        std::unordered_map<u64, u32> index;
-        for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
-            const DrawRef& ref = _refs[r];
-            const u64 key = mix64(reinterpret_cast<std::uintptr_t>(ref.mesh) * 2 + ref.scene);
-            const auto [it, added] = index.try_emplace(key, static_cast<u32>(groups.size()));
-            if (added) {
-                groups.emplace_back(Group{key, 0, 0, 0});
+        _taa_keyed.resize(ref_count);
+        for (u32 r = 0; r < ref_count; ++r) {
+            _taa_keyed[r] = {key_of_ref(r), r};
+        }
+        std::sort(_taa_keyed.begin(), _taa_keyed.end());
+        group_of.resize(ref_count);
+        for (u32 i = 0; i < ref_count;) {
+            u32 j = i;
+            for (; j < ref_count && _taa_keyed[j].first == _taa_keyed[i].first; ++j) {
+                group_of[_taa_keyed[j].second] = _taa_keyed[i].second;
             }
-            group_of[r] = it->second;
-            groups[it->second].count += ref.draw->count;
+            i = j;
+        }
+        for (u32 r = 0; r < ref_count; ++r) {
+            if (group_of[r] == r) { // the first of its group (a later draw's first is before it)
+                const u32 id = static_cast<u32>(groups.size());
+                groups.emplace_back(Group{key_of_ref(r), 0, 0, 0, 0});
+                group_of[r] = id;
+            } else {
+                group_of[r] = group_of[group_of[r]];
+            }
+            groups[group_of[r]].count += _refs[r].draw->count;
         }
     }
     u32 total = 0;
     for (Group& g : groups) {
         g.first = total;
         total += g.count;
-        now.groups[g.key] = {g.first, g.count};
+        now.groups.push_back({g.key, g.first, g.count});
+        const auto past = std::lower_bound(last.groups.begin(), last.groups.end(), g.key,
+                                           [](const GpuCopyHistory::Span& s, u64 key) { return s.key < key; });
+        if (history_usable && past != last.groups.end() && past->key == g.key) {
+            g.past_first = past->first;
+            g.past_count = past->count;
+        } else {
+            g.past_first = g.past_count = ~0u;
+        }
     }
+    std::sort(now.groups.begin(), now.groups.end(), [](const GpuCopyHistory::Span& a, const GpuCopyHistory::Span& b) { return a.key < b.key; });
     now.matrices.resize(total);
     _taa_prev.resize(total);
+    _taa_slow.resize(total);
+    // Each draw's first slot among its group's, and where the same place was last frame.
+    _taa_copy_refs.resize(ref_count);
+    {
+        std::vector<u32> used(groups.size(), 0);
+        for (u32 r = 0; r < ref_count; ++r) {
+            const Group& g = groups[group_of[r]];
+            const bool same_count = g.past_count == g.count;
+            _taa_copy_refs[r] = {g.first + used[group_of[r]], same_count ? g.past_first + used[group_of[r]] : ~0u};
+            used[group_of[r]] += _refs[r].draw->count;
+        }
+    }
+    const auto settle = [&](const Piece& piece) {
+        const DrawRef& ref = _refs[piece.ref];
+        const CopyRef& place = _taa_copy_refs[piece.ref];
+        for (u32 i = piece.begin; i < piece.end; ++i) {
+            const MeshInstance& instance = ref.instances[i];
+            const u32 flat = piece.flat + (i - piece.begin);
+            now.matrices[place.slot + i] = instance.transform;
+            Mat4f before = instance.transform;
+            bool settled = instance.id == 0;
+            if (settled && history_usable) {
+                // Most copies have not moved at all: no need to measure how far.
+                settled = place.past != ~0u && (before = last.matrices[place.past + i],
+                                                std::memcmp(before.m, instance.transform.m, sizeof(before.m)) == 0);
+            }
+            _taa_slow[flat] = settled ? 0 : 1;
+            if (settled) {
+                before.m[3] = 0.0f;
+                _taa_prev[flat] = before;
+            }
+        }
+    };
+    if (jobs && _tasks.size() > 2) {
+        jobs->parallel_for(static_cast<i32>(_tasks.size() - 1), [&](i32 t) {
+            for (u32 p = _tasks[static_cast<u32>(t)]; p < _tasks[static_cast<u32>(t) + 1]; ++p) {
+                settle(_pieces[p]);
+            }
+        });
+    } else {
+        for (const Piece& piece : _pieces) {
+            settle(piece);
+        }
+    }
     u32 flat = 0;
-    for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+    for (u32 r = 0; r < ref_count; ++r) {
         const DrawRef& ref = _refs[r];
         Group& g = groups[group_of[r]];
-        const auto past = last.groups.find(g.key);
-        const bool known = history_usable && past != last.groups.end();
-        const bool same_count = known && past->second.second == g.count;
+        const bool known = g.past_first != ~0u;
+        const bool same_count = known && g.past_count == g.count;
         for (u32 i = 0; i < ref.draw->count; ++i, ++flat) {
+            if (!_taa_slow[flat]) {
+                continue;
+            }
             const MeshInstance& instance = ref.instances[i];
-            const u32 slot = g.first + g.used++;
-            now.matrices[slot] = instance.transform;
+            const u32 slot = _taa_copy_refs[r].slot + i;
             Mat4f before = instance.transform;
             bool fresh = false;
-            if (history_usable) {
+            {
                 bool by_id = false;
                 if (instance.id != 0) {
                     const u64 id_key = mix64(g.key ^ (static_cast<u64>(instance.id) * 0x9e3779b97f4a7c15ULL));
-                    if (now.ids.emplace(id_key, slot).second) { // a second copy with the id is matched by place
+                    // Recorded whether or not there is a past to look in: the next frame's would else find none.
+                    if (now.ids.emplace(id_key, slot).second && history_usable) { // a second copy with the id is matched by place
                         const auto it = last.ids.find(id_key);
                         if (it != last.ids.end()) {
                             before = last.matrices[it->second];
@@ -1257,11 +1334,10 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
                         by_id = true;
                     }
                 }
-                if (!by_id) {
+                if (!by_id && history_usable) {
                     bool matched = false;
                     if (same_count) {
-                        before = last.matrices[past->second.first + (slot - g.first)];
-                        // Most copies have not moved at all: no need to measure how far.
+                        before = last.matrices[g.past_first + (slot - g.first)];
                         matched = std::memcmp(before.m, instance.transform.m, sizeof(before.m)) == 0;
                     }
                     if (!matched && known) {
@@ -1284,8 +1360,8 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
                         if (!g.grid_made) {
                             g.grid_made = true;
                             g.cell = reach;
-                            for (u32 k = 0; k < past->second.second; ++k) {
-                                const Vec3f p = last.matrices[past->second.first + k].apply(ref.center);
+                            for (u32 k = 0; k < g.past_count; ++k) {
+                                const Vec3f p = last.matrices[g.past_first + k].apply(ref.center);
                                 g.grid.emplace(key_of(cell_of(p.x), cell_of(p.y), cell_of(p.z)), k);
                             }
                         }
@@ -1298,7 +1374,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
                                 for (i32 dx = -span; dx <= span; ++dx) {
                                     const auto [from, to] = g.grid.equal_range(key_of(cx + dx, cy + dy, cz + dz));
                                     for (auto it = from; it != to; ++it) {
-                                        const f32 d = length_squared(last.matrices[past->second.first + it->second].apply(ref.center) - c);
+                                        const f32 d = length_squared(last.matrices[g.past_first + it->second].apply(ref.center) - c);
                                         if (d < best) {
                                             best = d;
                                             found = it->second;
@@ -1309,7 +1385,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable) {
                         }
                         matched = found != ~0u;
                         if (matched) {
-                            before = last.matrices[past->second.first + found];
+                            before = last.matrices[g.past_first + found];
                         }
                     }
                     fresh = !matched;
@@ -1398,10 +1474,11 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         }
         taa = false;
     }
-    const f32 sun_strength = scene.lights.sun.color.x + scene.lights.sun.color.y + scene.lights.sun.color.z;
+    // A sun with no colour lights nothing and casts nothing: no shadow map, no contact shadows.
+    const bool sun_shines = scene.lights.sun.color.x + scene.lights.sun.color.y + scene.lights.sun.color.z > 0.0f;
     if (taa && !(ensure_taa_targets(*view, taa_settings.sharpness > 0.0f) &&
                  ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, scene.ambient_occlusion.enabled,
-                                   scene.contact_shadows.enabled && sun_strength > 0.0f, /*velocity=*/true))) {
+                                   scene.contact_shadows.enabled && sun_shines, /*velocity=*/true))) {
         taa = false;
     }
     if (!taa) {
@@ -1437,7 +1514,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     const Bounds3& area = lights.shadow_area;
     const Vec3f area_size = area.size();
     u32 cascades = 0; // the maps to draw: 1 over the whole area, or a slice of the view each
-    const bool shadows = area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 && length_squared(lights.sun.direction) > 0 &&
+    const bool shadows = sun_shines && area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 && length_squared(lights.sun.direction) > 0 &&
                          (cascades = ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades)) > 0;
     Mat4f light_vp{};
     GpuFrustum light_frustum{};
@@ -1494,7 +1571,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
 
     // Pieces of draws, and tasks of about `chunk` instances each (a big draw
     // split, small ones taken together), for the workers when there are many.
-    constexpr u32 chunk = 4096;
+    // Small tasks balance over many workers (22,000 copies in chunks of 4096 made six tasks on a 32-thread
+    // machine); the scene must be big enough for waking them to pay (measured: a loss at 1,500 copies, a gain from 2,500).
+    constexpr u32 chunk = 512, parallel_from = 2048;
     _pieces.clear();
     _tasks.assign(1, 0);
     u32 total = 0, in_task = 0;
@@ -1515,7 +1594,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     if (_tasks.back() != _pieces.size()) {
         _tasks.push_back(static_cast<u32>(_pieces.size()));
     }
-    JobSystem* jobs = _owner->_jobs && total >= 2 * chunk ? _owner->_jobs : nullptr;
+    JobSystem* jobs = _owner->_jobs && total >= parallel_from ? _owner->_jobs : nullptr;
     const auto each_task = [&](const std::function<void(Piece&)>& body) {
         const auto run = [&](u32 t) {
             for (u32 p = _tasks[t]; p < _tasks[t + 1]; ++p) {
@@ -1616,7 +1695,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     }
     stats.culled = total - visible_total;
     if (taa) {
-        match_copies(*view, !taa_reset);
+        match_copies(*view, !taa_reset, jobs);
     }
 
     // The copies, straight into the upload memory; alpha-blended ones furthest first.
@@ -1973,7 +2052,6 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         KIN_LOG_WARN("render", "3D: ambient occlusion asked for, but this device cannot do it: off");
     }
     const ContactShadows3D& contact = scene.contact_shadows;
-    const bool sun_shines = lights.sun.color.x + lights.sun.color.y + lights.sun.color.z > 0.0f;
     const bool want_contact = contact.enabled && sun_shines;
     if (want_contact && !_ao_available && !_contact_warned) {
         _contact_warned = true;
@@ -2029,6 +2107,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             }
         }
     };
+    bool velocity_drawn = false; // the pre-pass began, so _ao_normals holds this frame's velocity
     if ((ao.enabled || want_contact || taa) && _ao_available && (storage || taa) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, taa)) {
         SDL_GPUColorTargetInfo target{};
@@ -2046,6 +2125,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         prepass_depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
         prepass_depth.cycle = true;
         if (SDL_GPURenderPass* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth)) {
+            velocity_drawn = true;
             const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), 0.0f, 1.0f};
             SDL_SetGPUViewport(prepass, &viewport);
             DrawUniforms u{};
@@ -2265,15 +2345,24 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     // copies as they are now.
     const GpuTexture* shown = nullptr;
     if (taa) {
-        shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings, taa_reset, jitter, stats);
-        view->_taa_valid = true;
+        // Without this frame's velocity (the pre-pass would not begin) the resolve must not trust the texture, nor
+        // the next frame the history: it is a reset, and the stale velocity stays where it is.
+        if (!velocity_drawn && !_taa_prepass_warned) {
+            _taa_prepass_warned = true;
+            KIN_LOG_WARN("render", "3D: temporal anti-aliasing: the velocity pass could not begin, so this frame has no history");
+        }
+        shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings, taa_reset || !velocity_drawn, jitter,
+                            stats);
+        view->_taa_valid = velocity_drawn;
         for (u32 s = 0; s < 2; ++s) {
             if (scenes[s]) {
                 view->_taa_prior[s] = view_projections[s];
             }
         }
         std::swap(view->_taa_last, view->_taa_now);
-        std::swap(view->_ao_normals, view->_taa_motion); // this frame's velocity is the next one's past
+        if (velocity_drawn) {
+            std::swap(view->_ao_normals, view->_taa_motion); // this frame's velocity is the next one's past
+        }
     }
 
     // What is under each pixel: the scene's opaque and alpha meshes (not its
