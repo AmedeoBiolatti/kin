@@ -33,6 +33,7 @@ enum class GpuBlendMode {
     Multiply,      // dst * src; the destination's alpha is kept
     Max,           // max(dst, src) per channel
     Min,           // min(dst, src) per channel
+    PremultipliedAdditive, // dst + src, src premultiplied; the destination's alpha kept (3D glows)
 };
 
 // What a draw does with the stencil buffer (stencil clips). `Equal` draws
@@ -94,7 +95,8 @@ struct GpuMeshVertex {
     u8 r = 255, g = 255, b = 255, a = 255;
 };
 
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances, MeshVertices };
+// None: no vertex buffer (a fullscreen triangle made in the shader).
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances, MeshVertices, None };
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {

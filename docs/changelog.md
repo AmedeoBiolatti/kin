@@ -35,6 +35,19 @@ releases may change APIs.
   experimental 3D: a deck with ramps and ledges, enemies flying in 3D, an
   autopilot for benchmarks and agents, and `--latency-probe` to time mouse
   motion to the screen.
+- 3D: point lights (16 a frame, chosen by reach and strength), the sun's
+  shadow over an area (one shadow map, filtered), alpha-blended and additive
+  materials, textures on meshes, HDR views tonemapped on their way to 2D with
+  bloom of their own, and glTF 2.0 models (`Renderer3D::load_model`,
+  `ModelFile` for hot reload) read with cgltf (a new dependency, with
+  `KIN_EXPERIMENTAL_3D`).
+- `decode_image()`: an image from a file's bytes in memory.
+- 3D sound: `AudioEngine::set_listener_3d()`, `set_position_3d()` and
+  `AudioPlayRequest::position_3d`: pan by direction from where the listener
+  faces, fade by 3D distance; `calculate_spatial_audio_3d()`.
+- Signal Breach: shadows, muzzle-flash and explosion lights, glowing shots,
+  additive sparks and tracers, a glTF gun and crates, sound in 3D;
+  `--no-shadows`, `--no-bloom`, `--no-lights` to measure each.
 
 ## [0.2.6] — 2026-10-07
 

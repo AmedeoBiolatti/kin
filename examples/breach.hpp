@@ -37,7 +37,9 @@ public:
         Kind kind = Kind::Floor;
         float low = 0.0f, high = 0.0f; // a floor's height (both), a ramp's ends
         u8 axis = 0;                   // a ramp rises along: 0 +x, 1 -x, 2 +z, 3 -z
+        bool crate = false;            // a floor that is a crate (drawn as one)
     };
+    static constexpr float crate_height = 1.0f;
 
     BreachLevel();
     const Cell& at(int x, int z) const { return _cells[static_cast<std::size_t>(z * width + x)]; }

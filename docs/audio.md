@@ -56,6 +56,18 @@ kin::AudioHandle handle = audio.play(catalog, request);
 audio.stop(handle, 0.5f); // fade out over half a second
 ```
 
+In 3D (a first-person game), give the listener a facing and sounds a 3D
+place: they are panned by their direction from the listener (to its right is
+right), fade with their 3D distance between the cue's `min` and `max`, pan
+less close up so nothing jumps across the head, and are up to a fifth quieter
+behind. `set_listener(Vec2f)` goes back to 2D.
+
+```cpp
+audio.set_listener_3d({.position = eye, .forward = camera.forward()});
+audio.play(catalog, {.cue = "shot", .position_3d = muzzle, .has_position_3d = true});
+audio.set_position_3d(handle, drone_position); // a sound that moves
+```
+
 Call the engine from one thread. With a device, mixing happens on the device's
 audio thread, so a slow frame does not starve the sound card; `update(dt)` once
 a frame ages voices and picks up clips that finished loading. With the null

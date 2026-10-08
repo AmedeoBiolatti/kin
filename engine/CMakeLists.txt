@@ -159,6 +159,19 @@ if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
 if(KIN_EXPERIMENTAL_3D)
+    # glTF 2.0 models (kin/render3d/model.hpp). A single C header, MIT.
+    FetchContent_Declare(cgltf
+        URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.14.tar.gz
+        URL_HASH SHA256=2f3c97a6b989943f50e7d7f228688f6558fe37b1411c13a350e3560d061707d8
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(cgltf)
+    if(NOT cgltf_POPULATED)
+        FetchContent_Populate(cgltf)
+    endif()
+    target_include_directories(kin_engine SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
+    target_sources(kin_engine PRIVATE src/render3d/model.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp
                                       src/renderer/gpu/gpu_renderer3d.cpp)
@@ -210,7 +223,8 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
               pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
-              transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag)
+              transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.frag
+              fullscreen.vert bloom.frag view_output.frag)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.

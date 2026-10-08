@@ -24,9 +24,12 @@
 #include <kin/render3d/backend3d.hpp>
 #include <kin/render3d/camera3d.hpp>
 #include <kin/render3d/mesh.hpp>
+#include <kin/render3d/model.hpp>
 #include <kin/render3d/scene3d.hpp>
 
+#include <filesystem>
 #include <memory>
+#include <string>
 
 namespace kin {
 
@@ -74,6 +77,10 @@ public:
     // A view `size` pixels (at least 1 x 1). Where 3D isn't available, a
     // render target that render() fills with the background.
     View3D create_view(Vec2i size, const View3DOptions& options = {});
+    // A glTF 2.0 model (.glb or .gltf, read through the content folder or
+    // pack): its meshes, materials and textures (mipmapped). Empty, with why
+    // in `error` (and logged), when it can't be read or 3D isn't available.
+    Model load_model(const std::filesystem::path& path, std::string* error = nullptr);
     // Gives `view` a new size (its texture changes); false when it can't.
     bool resize(View3D& view, Vec2i size);
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and

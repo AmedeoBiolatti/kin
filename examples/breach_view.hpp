@@ -2,14 +2,21 @@
 
 #include "breach.hpp"
 
+#include <kin/render3d/model.hpp>
 #include <kin/render3d/renderer3d.hpp>
-#include <kin/renderer/post_process.hpp>
 #include <kin/ui2/context.hpp>
 
 #include <memory>
 #include <vector>
 
 namespace examples {
+
+// What the view draws (each can be left off, to measure what it costs).
+struct BreachViewOptions {
+    bool shadows = true; // the sun's, over the deck
+    bool bloom = true;   // an HDR view with glow round what is past white
+    bool lights = true;  // muzzle flashes and explosions as point lights
+};
 
 struct BreachHudState {
     bool paused = false, autoplay = false, captured = false;
@@ -24,13 +31,12 @@ struct BreachHudState {
 // only, as ArenaPainter does.
 class BreachView {
 public:
-    void init(Renderer2D& renderer, Breach& breach);
+    void init(Renderer2D& renderer, Breach& breach, const BreachViewOptions& options = {});
     bool ready() const { return _r3d != nullptr; }
     // Turns the simulation's events into effects and advances them (with the
     // simulation's dt, so they freeze with it).
     void update(Breach& breach, float dt);
     void draw(Renderer2D& renderer, Breach& breach, Input& input, const BreachHudState& state, float dt);
-    void enable_post_process(Renderer2D& renderer);
 
     const Render3DStats& stats() const;
     bool available() const { return _r3d && _r3d->available(); }
@@ -44,13 +50,20 @@ private:
     void draw_hud(Renderer2D& renderer, const Breach& breach, Input& input, const BreachHudState& state, float dt);
 
     std::unique_ptr<Renderer3D> _r3d;
+    BreachViewOptions _options;
     View3D _view;
     Scene3D _scene;
     Rectf _playfield{0, 0, 1280, 800};
     Mesh _box, _wedge, _shot, _core, _spark, _barrel, _flash;
+    // glTF models from the content folder, loaded again when they change
+    // (tools/models/make_breach_models.py); the shapes above stand in without them.
+    std::unique_ptr<ModelFile> _gun, _crate;
     std::vector<MeshInstance> _tiles, _raised, _walls, _ramps;
+    std::vector<Vec3f> _crates; // where crates stand
 
     struct Spark { Vec3f pos{}, velocity{}; float life = 0; Color color{}; };
+    struct Flash { Vec3f pos{}; Vec3f color{}; float radius = 0, life = 0, length = 0; };
+    std::vector<Flash> _flashes;
     struct Tracer { Vec3f from{}, to{}; float life = 0; };
     struct Number { Vec3f pos{}; float life = 0; bool kill = false; };
     std::vector<Spark> _sparks;
@@ -60,8 +73,6 @@ private:
     RngKey _rng = make_key(0xB4EAC4);
 
     ui2::Context _ui;
-    std::vector<PostProcessPass> _post;
-    Vec2i _post_size{};
 };
 
 } // namespace examples

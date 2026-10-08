@@ -3,6 +3,7 @@
 // around); Esc pauses and lets it go.
 #include "breach_view.hpp"
 #include "example_common.hpp"
+#include "siege_audio.hpp"
 
 #include <kin/assets/content.hpp>
 #include <kin/assets/file_watcher.hpp>
@@ -33,6 +34,7 @@ struct BreachOptions {
     // --latency-probe: mouse motion pushed as the OS would, at times unrelated
     // to the frames, timed until the camera turns and the frame is presented.
     bool latency_probe = false;
+    BreachViewOptions view{}; // --no-shadows, --no-bloom, --no-lights
 };
 
 BreachOptions parse(int argc, char** argv) {
@@ -64,6 +66,10 @@ BreachOptions parse(int argc, char** argv) {
         else if (arg == "--sensitivity") number(o.sensitivity, .001f, 2);
         else if (arg == "--vsync") o.common.vsync = true;
         else if (arg == "--latency-probe") o.latency_probe = true;
+        else if (arg == "--no-shadows") o.view.shadows = false;
+        else if (arg == "--no-bloom") o.view.bloom = false;
+        else if (arg == "--no-lights") o.view.lights = false;
+        else if (arg == "--mute") o.common.mute = true;
         else if (arg == "--help") o.common.help = true;
     }
     if (o.common.width < 640 || o.common.height < 480) throw std::invalid_argument("minimum size is 640x480");
@@ -73,7 +79,9 @@ BreachOptions parse(int argc, char** argv) {
 class BreachScene final : public Scene {
 public:
     BreachScene(BreachOptions options, bool tool_run)
-        : _options(std::move(options)), _breach(_options.common.enemies), _autoplay(tool_run) {
+        : _options(std::move(options)), _breach(_options.common.enemies),
+          // Signal Siege's sounds; its cues fade over a screen, here over about 27 m.
+          _audio(_options.common.mute || _options.common.benchmark || tool_run, 1.0f / 40.0f), _autoplay(tool_run) {
         if (_options.latency_probe) {
             // Motion every 23 ms (no common beat with the frames), stamped as SDL would.
             _probe_thread = std::thread([this] {
@@ -156,6 +164,7 @@ public:
             _yaw = _breach.yaw;
             _pitch = _breach.pitch;
         }
+        play_sounds();
         _view.update(_breach, ctx.dt);
     }
 
@@ -168,8 +177,7 @@ public:
             _logical = true;
         }
         renderer.clear(Color::rgb(12, 20, 28));
-        if (!_view.ready()) _view.init(renderer, _breach);
-        _view.enable_post_process(renderer);
+        if (!_view.ready()) _view.init(renderer, _breach, _options.view);
         // Mouse look, from this frame's motion: the camera turns now, the
         // simulation follows at its next step.
         const Vec2f motion = ctx.input.frame_mouse_motion();
@@ -216,6 +224,22 @@ public:
     }
 
 private:
+    // The step's events as sounds, heard from the player's eye.
+    void play_sounds() {
+        _audio.set_listener_3d({.position = _breach.eye_position(), .forward = _breach.view_direction()});
+        for (const BreachEvent& e : _breach.events) {
+            switch (e.kind) {
+            case BreachEvent::Kind::Fire: _audio.play_at("shot", e.pos); break;
+            case BreachEvent::Kind::EnemyFire: _audio.play_at("enemy_shot", e.pos); break;
+            case BreachEvent::Kind::Hit: _audio.play_at("hit", e.pos); break;
+            case BreachEvent::Kind::Kill: _audio.play_at("kill", e.pos); break;
+            case BreachEvent::Kind::Pickup: _audio.play_at("pickup", e.pos); break;
+            case BreachEvent::Kind::Hurt: _audio.play_at("hurt", e.pos); break;
+            case BreachEvent::Kind::Jump: break;
+            }
+        }
+        _audio.update(1.0f / 120.0f);
+    }
     static f64 stat(std::vector<f64> v, f64 share) {
         if (v.empty()) return 0.0;
         std::sort(v.begin(), v.end());
@@ -237,6 +261,7 @@ private:
 
     BreachOptions _options;
     Breach _breach;
+    SiegeAudio _audio;
     BreachView _view;
     Window* _window = nullptr;
     float _yaw = 0, _pitch = 0; // the player's look, turned each rendered frame
@@ -259,6 +284,7 @@ int run(int argc, char** argv) {
         if (options.common.help) {
             std::cout << "--benchmark (autoplay) --enemies 1..100000 --sensitivity DEG_PER_PIXEL (0.08)\n"
                          "--latency-probe (time pushed mouse motion until the camera turns and the frame is presented)\n"
+                         "--no-shadows --no-bloom --no-lights (leave a feature off) --mute\n"
                          "--width 640..4096 --height 480..4096 --ui-scale 0.5..4 --vsync --screenshot PATH --capture-frame N\n"
                          "Standard Kin flags: --headless --frames N --seed N --report PATH --profile --server\n";
             return 0;

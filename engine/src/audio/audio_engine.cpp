@@ -150,6 +150,8 @@ struct AudioEngine::State {
         f32 pan_strength = 1.0f;
         Vec2f position{};
         bool has_position = false;
+        Vec3f position_3d{}; // with is_3d: where it is in 3D
+        bool is_3d = false;
         bool paused = false;
         // Output frames to start and stop on (scheduled music and stingers):
         // start_at in the past means now; stop_at -1 means not scheduled.
@@ -195,6 +197,8 @@ struct AudioEngine::State {
     std::vector<AudioDuck> duck_source; // the catalog rules `ducks` was built from
     std::vector<Duck> ducks;
     Vec2f listener{};
+    AudioListener3D listener_3d{};
+    bool listener_is_3d = false; // set_listener_3d was the last
     AudioEngineStats stats;
     f32 limiter_env = 0.0f;
     f32 limiter_release = 0.0f;
@@ -447,19 +451,45 @@ struct AudioEngine::State {
         return 0;
     }
 
-    f32 distance_penalty(bool spatial, bool has_position, Vec2f position, f32 max_distance) const {
+    // How far a source is from the listener: in 3D with a 3D listener (2D
+    // positions at z = 0), else in the plane (3D ones by their x and y).
+    f32 listener_distance(bool is_3d, Vec2f position, Vec3f position_3d) const {
+        if (listener_is_3d) {
+            return length((is_3d ? position_3d : Vec3f{position.x, position.y, 0.0f}) - listener_3d.position);
+        }
+        const Vec2f p = is_3d ? Vec2f{position_3d.x, position_3d.y} : position;
+        const f32 dx = p.x - listener.x;
+        const f32 dy = p.y - listener.y;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+    SpatialAudioResult spatial_result(const Voice& voice) const {
+        const SpatialAudio spatial{
+            .min_distance = voice.min_distance,
+            .max_distance = voice.max_distance,
+            .pan_strength = voice.pan_strength,
+            .rolloff = voice.rolloff,
+            .rolloff_power = voice.rolloff_power,
+        };
+        if (listener_is_3d) {
+            return calculate_spatial_audio_3d(listener_3d,
+                                           voice.is_3d ? voice.position_3d : Vec3f{voice.position.x, voice.position.y, 0.0f}, spatial);
+        }
+        return calculate_spatial_audio(listener, voice.is_3d ? Vec2f{voice.position_3d.x, voice.position_3d.y} : voice.position,
+                                       spatial);
+    }
+
+    f32 distance_penalty(bool spatial, bool has_position, bool is_3d, Vec2f position, Vec3f position_3d, f32 max_distance) const {
         if (!spatial || !has_position) {
             return 0.0f;
         }
-        const f32 dx = position.x - listener.x;
-        const f32 dy = position.y - listener.y;
-        const f32 distance = std::sqrt(dx * dx + dy * dy);
+        const f32 distance = listener_distance(is_3d, position, position_3d);
         return distance <= max_distance ? distance * 0.25f : 5000.0f + (distance - max_distance);
     }
 
     f32 voice_score(const Voice& voice) const {
         return static_cast<f32>(voice.priority + category_bias(voice.category)) - voice.age * 2.0f
-            - distance_penalty(voice.spatial, voice.has_position, voice.position, voice.max_distance);
+            - distance_penalty(voice.spatial, voice.has_position, voice.is_3d, voice.position, voice.position_3d, voice.max_distance);
     }
 
     // Finds room for a new voice: true with `steal` = -1 when there is a free
@@ -467,7 +497,8 @@ struct AudioEngine::State {
     bool allocate_voice(const AudioCue& cue, const AudioPlayRequest& request, i32& steal) {
         steal = -1;
         const f32 request_score = static_cast<f32>(cue.priority + request.priority_boost + category_bias(cue.category))
-            - distance_penalty(cue.spatial, request.has_position, request.position, cue.max_distance);
+            - distance_penalty(cue.spatial, request.has_position || request.has_position_3d, request.has_position_3d,
+                               request.position, request.position_3d, cue.max_distance);
         if (request_score <= -1000.0f) {
             return false;
         }
@@ -784,13 +815,7 @@ struct AudioEngine::State {
             f32 gain = paused ? 0.0f : voice.volume;
             PanGains pan{};
             if (voice.spatial && voice.has_position) {
-                const SpatialAudioResult spatial = calculate_spatial_audio(listener, voice.position, {
-                    .min_distance = voice.min_distance,
-                    .max_distance = voice.max_distance,
-                    .pan_strength = voice.pan_strength,
-                    .rolloff = voice.rolloff,
-                    .rolloff_power = voice.rolloff_power,
-                });
+                const SpatialAudioResult spatial = spatial_result(voice);
                 gain *= spatial.gain;
                 pan = pan_gains(spatial.pan);
             }
@@ -1101,7 +1126,9 @@ struct AudioEngine::State {
             .rolloff_power = cue.rolloff_power,
             .pan_strength = cue.pan_strength,
             .position = request.position,
-            .has_position = request.has_position,
+            .has_position = request.has_position || request.has_position_3d,
+            .position_3d = request.position_3d,
+            .is_3d = request.has_position_3d,
             .start_at = start_at,
         };
         if (const AudioClipRef* ref = catalog.clip(part.clip_id)) {
@@ -1571,6 +1598,25 @@ void AudioEngine::set_bus_paused(std::string_view bus, bool paused) {
 void AudioEngine::set_listener(Vec2f position) {
     const std::scoped_lock lock{_state->mutex};
     _state->listener = position;
+    _state->listener_is_3d = false;
+}
+
+void AudioEngine::set_listener_3d(const AudioListener3D& listener) {
+    const std::scoped_lock lock{_state->mutex};
+    _state->listener_3d = listener;
+    _state->listener_is_3d = true;
+}
+
+void AudioEngine::set_position_3d(AudioHandle handle, Vec3f position) {
+    const std::scoped_lock lock{_state->mutex};
+    for (State::Voice& voice : _state->voices) {
+        if (voice.handle == handle) {
+            voice.position_3d = position;
+            voice.is_3d = true;
+            voice.has_position = true;
+            return;
+        }
+    }
 }
 
 void AudioEngine::set_position(AudioHandle handle, Vec2f position) {
@@ -1579,6 +1625,7 @@ void AudioEngine::set_position(AudioHandle handle, Vec2f position) {
         if (voice.handle == handle) {
             voice.position = position;
             voice.has_position = true;
+            voice.is_3d = false;
             return;
         }
     }

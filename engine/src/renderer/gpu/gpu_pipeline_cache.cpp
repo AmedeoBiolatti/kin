@@ -47,6 +47,15 @@ void set_blend(SDL_GPUColorTargetBlendState& blend, GpuBlendMode mode) {
         blend.alpha_blend_op = op;
         break;
     }
+    case GpuBlendMode::PremultipliedAdditive:
+        blend.enable_blend = true;
+        blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.color_blend_op = SDL_GPU_BLENDOP_ADD;
+        blend.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+        blend.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        blend.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        break;
     case GpuBlendMode::Premultiplied:
         blend.enable_blend = true;
         blend.src_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
@@ -156,7 +165,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuShaderVertex, u));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuShaderVertex, r));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuShaderVertex, custom));
-    } else {
+    } else if (layout != GpuVertexLayout::None) {
         vb.pitch = sizeof(GpuVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, offsetof(GpuVertex, x));
@@ -165,7 +174,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     }
 
     SDL_GPUVertexInputState vertex_input{};
-    vertex_input.num_vertex_buffers = 1;
+    vertex_input.num_vertex_buffers = layout == GpuVertexLayout::None ? 0 : 1;
     vertex_input.vertex_buffer_descriptions = &vb;
     vertex_input.num_vertex_attributes = attr_count;
     vertex_input.vertex_attributes = attrs;
@@ -183,7 +192,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     color_target.blend_state = blend_state;
 
     SDL_GPUGraphicsPipelineTargetInfo target_info{};
-    target_info.num_color_targets = 1;
+    target_info.num_color_targets = key.depth_only ? 0 : 1;
     target_info.color_target_descriptions = &color_target;
     target_info.has_depth_stencil_target = key.depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID;
     target_info.depth_stencil_format = key.depth_stencil;

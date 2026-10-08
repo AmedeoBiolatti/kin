@@ -27,6 +27,9 @@ struct AudioPlayRequest {
     std::string cue;
     Vec2f position{};
     bool has_position = false;
+    // A place in 3D (heard by set_listener_3d), over `position`.
+    Vec3f position_3d{};
+    bool has_position_3d = false;
     f32 volume = 1.0f;
     f32 pitch = 1.0f;
     i32 priority_boost = 0;
@@ -175,6 +178,11 @@ public:
     void set_bus_paused(std::string_view bus, bool paused);
     void set_listener(Vec2f position);
     void set_position(AudioHandle handle, Vec2f position);
+    // A listener in 3D: positioned sounds are then heard from it, panned by
+    // their direction and fading with their 3D distance (2D positions sit at
+    // z = 0). Back to 2D with set_listener(Vec2f).
+    void set_listener_3d(const AudioListener3D& listener);
+    void set_position_3d(AudioHandle handle, Vec3f position);
     // A voice's volume on top of its cue's, and its pitch on top of the cue's
     // (with the cue's variation kept).
     void set_volume(AudioHandle handle, f32 volume, f32 fade = 0.0f);

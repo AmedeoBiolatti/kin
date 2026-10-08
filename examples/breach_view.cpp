@@ -1,5 +1,6 @@
 #include "breach_view.hpp"
 
+#include <kin/assets/content.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/ui2/widgets.hpp>
@@ -37,8 +38,13 @@ MeshData make_gun() {
 
 } // namespace
 
-void BreachView::init(Renderer2D& renderer, Breach& breach) {
+void BreachView::init(Renderer2D& renderer, Breach& breach, const BreachViewOptions& options) {
+    _options = options;
     _r3d = std::make_unique<Renderer3D>(renderer);
+    if (_r3d->available() && !content_root().empty()) {
+        _gun = std::make_unique<ModelFile>(*_r3d, content_root() / "models" / "gun.glb");
+        _crate = std::make_unique<ModelFile>(*_r3d, content_root() / "models" / "crate.glb");
+    }
     _box = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
     _wedge = _r3d->create_mesh(meshes::wedge({1.0f, 1.0f, 1.0f}));
     _shot = _r3d->create_mesh(meshes::sphere(0.08f, 10, 6));
@@ -77,6 +83,8 @@ void BreachView::build_level(const BreachLevel& level) {
             if (c.kind == BreachLevel::Kind::Wall) {
                 _walls.push_back({Mat4f::translation({cx, c.low / 2, cz}) * Mat4f::scaling({1.0f, c.low, 1.0f}),
                                   (x + z) % 2 == 0 ? Color::rgb(96, 108, 126) : Color::rgb(88, 100, 118)});
+            } else if (c.crate) {
+                _crates.push_back({cx, 0.0f, cz});
             } else if (c.kind == BreachLevel::Kind::Floor && c.low > 0) {
                 const u8 g = static_cast<u8>(c.low > 1.2f ? 120 : 104);
                 _raised.push_back({Mat4f::translation({cx, c.low / 2, cz}) * Mat4f::scaling({0.97f, c.low, 0.97f}),
@@ -103,6 +111,7 @@ void BreachView::update(Breach& breach, float dt) {
             _tracers.push_back({e.pos, e.to, 0.07f});
             _flash_time = 0.05f;
             _recoil = 1.0f;
+            _flashes.push_back({e.pos, {5.0f, 3.5f, 1.6f}, 7.0f, 0.06f, 0.06f});
             for (int i = 0; i < 3; ++i) {
                 _sparks.push_back({e.to, {rand(_rng, -2, 2), rand(_rng, 0, 3), rand(_rng, -2, 2)}, rand(_rng, .1f, .25f),
                                    Color::rgb(255, 220, 160)});
@@ -116,6 +125,10 @@ void BreachView::update(Breach& breach, float dt) {
                 _sparks.push_back({e.pos, {rand(_rng, -4, 4), rand(_rng, -1, 5), rand(_rng, -4, 4)}, rand(_rng, .2f, .5f), c});
             }
             _numbers.push_back({e.pos, 0.7f, kill});
+            if (kill) {
+                const LinearColor l = to_linear(c);
+                _flashes.push_back({e.pos, Vec3f{l.r, l.g, l.b} * 4.0f, 5.0f, 0.25f, 0.25f});
+            }
             break;
         }
         case BreachEvent::Kind::Pickup:
@@ -124,8 +137,10 @@ void BreachView::update(Breach& breach, float dt) {
                                    Color::rgb(140, 255, 190)});
             }
             break;
-        case BreachEvent::Kind::Hurt:
         case BreachEvent::Kind::EnemyFire:
+            _flashes.push_back({e.pos, {2.5f, 0.6f, 1.6f}, 3.0f, 0.08f, 0.08f});
+            break;
+        case BreachEvent::Kind::Hurt:
         case BreachEvent::Kind::Jump:
             break;
         }
@@ -137,6 +152,8 @@ void BreachView::update(Breach& breach, float dt) {
         s.life -= dt;
     }
     for (Tracer& t : _tracers) t.life -= dt;
+    for (Flash& f : _flashes) f.life -= dt;
+    std::erase_if(_flashes, [](const Flash& f) { return f.life <= 0; });
     for (Number& n : _numbers) {
         n.pos.y += 1.4f * dt;
         n.life -= dt;
@@ -159,34 +176,53 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     camera.z_near = 0.05f;
     _scene.lights.sun = {.direction = {-0.4f, 1.0f, 0.25f}, .color = {1.0f, 0.97f, 0.92f}};
     _scene.lights.ambient = {0.25f, 0.28f, 0.35f};
+    // The sun's shadows over the whole deck, a little above the walls.
+    _scene.lights.shadow_area = _options.shadows ? Bounds3{{0.0f, -0.2f, 0.0f}, {float(BreachLevel::width), 4.0f, float(BreachLevel::depth)}}
+                                                 : Bounds3{};
+    if (_options.lights) {
+        for (const Flash& f : _flashes) {
+            _scene.add_light({.position = f.pos, .color = f.color * (f.life / f.length), .radius = f.radius});
+        }
+    }
 
     _scene.draw_instanced(_box, _tiles);
     _scene.draw_instanced(_box, _raised);
     _scene.draw_instanced(_box, _walls);
     _scene.draw_instanced(_wedge, _ramps);
+    for (const Vec3f& at : _crates) {
+        if (_crate && _crate->model()) {
+            _scene.draw(_crate->model(), Mat4f::translation(at));
+        } else {
+            _scene.draw(_box, Mat4f::translation(at + Vec3f{0.0f, BreachLevel::crate_height / 2, 0.0f}),
+                        {.color = Color::rgb(150, 110, 70)});
+        }
+    }
     {
         KIN_PROFILE_SCOPE("example.breach.ecs");
         breach.render_state().propagate_transforms();
         breach.render_state().collect(_scene);
     }
-    auto shots = _scene.add_instances(_shot, breach.shots.size(), {.color = Color::rgb(255, 110, 190), .emissive = 1.5f, .unlit = true});
+    auto shots = _scene.add_instances(_shot, breach.shots.size(),
+                                      {.color = Color::rgb(255, 110, 190), .emissive = 2.5f, .unlit = true, .casts_shadow = false});
     for (std::size_t i = 0; i < breach.shots.size(); ++i) {
         shots[i] = {Mat4f::translation(breach.shots[i].pos), kin::colors::white};
     }
     const float t = breach.elapsed;
-    auto cores = _scene.add_instances(_core, breach.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 0.8f});
+    auto cores = _scene.add_instances(_core, breach.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 1.2f});
     for (std::size_t i = 0; i < breach.pickups.size(); ++i) {
         cores[i] = {Mat4f::translation(breach.pickups[i].pos + Vec3f{0.0f, 0.1f * std::sin(t * 3 + float(i)), 0.0f}) *
                         Mat4f::rotation_y(t * 90.0f + float(i) * 40.0f),
                     kin::colors::white};
     }
-    auto sparks = _scene.add_instances(_spark, _sparks.size(), {.emissive = 1.2f, .unlit = true});
+    // Sparks and tracers add light: additive, in any order, never hiding anything.
+    auto sparks = _scene.add_instances(_spark, _sparks.size(), {.emissive = 2.0f, .unlit = true, .blend = Blend3D::Additive});
     for (std::size_t i = 0; i < _sparks.size(); ++i) {
         const float size = std::clamp(_sparks[i].life * 4.0f, 0.3f, 1.0f);
         sparks[i] = {Mat4f::translation(_sparks[i].pos) * Mat4f::scaling({size, size, size}), _sparks[i].color};
     }
     // Tracers: thin boxes from the muzzle to where the shot hit, thinning out.
-    auto tracers = _scene.add_instances(_box, _tracers.size(), {.color = Color::rgb(170, 250, 255), .emissive = 2.0f, .unlit = true});
+    auto tracers = _scene.add_instances(_box, _tracers.size(),
+                                        {.color = Color::rgb(170, 250, 255), .emissive = 3.0f, .unlit = true, .blend = Blend3D::Additive});
     for (std::size_t i = 0; i < _tracers.size(); ++i) {
         const Vec3f d = _tracers[i].to - _tracers[i].from;
         const float len = std::max(0.01f, length(d));
@@ -206,11 +242,15 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     const float bob = std::sin(_walked * 1.6f) * 0.012f;
     const Mat4f gun = Mat4f::translation({0.2f, -0.17f + bob - _recoil * 0.01f, -0.5f + _recoil * 0.05f}) *
                       Mat4f::rotation_x(_recoil * 6.0f) * Mat4f::rotation_y(3.0f) * Mat4f::scaling({0.6f, 0.6f, 0.6f});
-    overlay.draw(_barrel, gun, {.color = Color::rgb(70, 82, 96), .emissive = 0.05f});
+    if (_gun && _gun->model()) {
+        overlay.draw(_gun->model(), gun);
+    } else {
+        overlay.draw(_barrel, gun, {.color = Color::rgb(70, 82, 96), .emissive = 0.05f});
+    }
     if (_flash_time > 0) {
         const float s = 0.035f + 0.02f * (_flash_time / 0.05f);
         overlay.draw(_flash, gun * Mat4f::translation({0.0f, 0.02f, -0.5f}) * Mat4f::scaling({s, s, s * 1.6f}),
-                     {.color = Color::rgb(255, 230, 160), .emissive = 3.0f, .unlit = true});
+                     {.color = Color::rgb(255, 230, 160), .emissive = 6.0f, .unlit = true, .blend = Blend3D::Additive});
     }
 }
 
@@ -220,10 +260,14 @@ void BreachView::draw(Renderer2D& renderer, Breach& breach, Input& input, const 
     const Vec2i pixels{std::max(1, static_cast<int>(std::lround(_playfield.w * fit))),
                        std::max(1, static_cast<int>(std::lround(_playfield.h * fit)))};
     if (!_view.valid()) {
-        _view = _r3d->create_view(pixels, {.samples = 4, .background = Color::rgb(18, 26, 36)});
+        // HDR with bloom: shots, sparks and flashes past white glow.
+        _view = _r3d->create_view(pixels, {.samples = 4, .background = Color::rgb(18, 26, 36), .hdr = _options.bloom,
+                                           .bloom = _options.bloom ? 0.5f : 0.0f, .bloom_threshold = 1.0f});
     } else if (_view.size() != pixels) {
         _r3d->resize(_view, pixels);
     }
+    if (_gun) _gun->poll();
+    if (_crate) _crate->poll();
     {
         KIN_PROFILE_SCOPE("example.breach.scene");
         fill_scene(breach, state);
@@ -341,33 +385,6 @@ void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& inp
         centered(tr("breach.controls"), h - 52, 11, muted);
     }
     _ui.end();
-}
-
-void BreachView::enable_post_process(Renderer2D& renderer) {
-    const Vec2i size = renderer.output_size();
-    if (size == _post_size) return;
-    _post_size = size;
-    const ShaderHandle bright = renderer.builtin_shader(BuiltinShader::BloomBright);
-    const ShaderHandle blur = renderer.builtin_shader(BuiltinShader::BloomBlur);
-    const ShaderHandle combine = renderer.builtin_shader(BuiltinShader::BloomCombine);
-    const ShaderHandle vignette = renderer.builtin_shader(BuiltinShader::Vignette);
-    if (!bright || !blur || !combine || !vignette || size.x <= 0 || size.y <= 0) return;
-    const auto params = [](std::initializer_list<float> values) {
-        ShaderParams p;
-        std::copy(values.begin(), values.end(), p.uniforms.begin());
-        return p;
-    };
-    const float tx = 1.0f / float(size.x), ty = 1.0f / float(size.y);
-    _post = {
-        {.shader = bright, .params = params({.8f, 1.0f})},
-        {.shader = blur, .params = params({tx * 2, 0})},
-        {.shader = blur, .params = params({0, ty * 2})},
-        {.shader = blur, .params = params({tx * 5, 0})},
-        {.shader = blur, .params = params({0, ty * 5})},
-        {.shader = combine, .params = params({.6f}), .sample_original = true},
-        {.shader = vignette, .params = params({.45f, .85f, .6f})},
-    };
-    renderer.set_post_process(_post);
 }
 
 } // namespace examples

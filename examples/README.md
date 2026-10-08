@@ -141,6 +141,12 @@ Signal Siege itself draws in 3D with `signal_siege --view 3d`.
 - `--sensitivity DEG` (degrees a pixel, 0.08), `--enemies N`, `--benchmark`.
 - `--latency-probe`: times pushed mouse motion until the camera turns and the
   frame is presented (printed at exit).
+- `--no-shadows`, `--no-bloom`, `--no-lights`: leave a feature off (to measure
+  it); `--mute`.
+
+Its gun and crates are glTF models in `content/models`, made by
+`tools/models/make_breach_models.py` (Python, no packages needed); run it
+again while the game runs and they load again.
 
 ## Run Observatory
 

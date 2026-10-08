@@ -6,6 +6,10 @@
 
 namespace kin {
 
+namespace gpu {
+class GpuRenderer3D;
+}
+
 // Texel formats. Rgba8 is the only one every backend has and the only one that is
 // drawn as an image. The others hold data for material shaders (see
 // draw_shader_surface) on backends with capabilities().data_textures; shaders
@@ -58,6 +62,7 @@ private:
     friend class RenderQueue;
     friend class SdlRenderer2DBackend;
     friend class GpuRenderer2DBackend;
+    friend class gpu::GpuRenderer3D; // binds materials' textures
 
     const std::shared_ptr<ITextureBackend>& backend() const { return _backend; }
 

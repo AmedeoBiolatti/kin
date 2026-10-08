@@ -52,6 +52,7 @@ Scene3D& Scene3D::overlay() {
 void Scene3D::clear() {
     _draws.clear();
     _instances.clear();
+    lights.points.clear();
     if (_overlay) {
         _overlay->clear();
     }

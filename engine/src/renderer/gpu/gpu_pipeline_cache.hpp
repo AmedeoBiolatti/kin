@@ -34,6 +34,8 @@ struct GpuPipelineKey {
     SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1; // the pass's targets'
     // Triangles' edges only; drawn filled where the device has no line fill mode.
     bool wireframe = false;
+    // No colour target, depth only (a shadow map); `format` is ignored.
+    bool depth_only = false;
 
     friend bool operator==(const GpuPipelineKey&, const GpuPipelineKey&) = default;
 };

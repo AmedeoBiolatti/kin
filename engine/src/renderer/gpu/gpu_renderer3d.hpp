@@ -64,18 +64,22 @@ public:
 private:
     friend class GpuRenderer3D;
     Vec2i _size{};
-    u32 _wanted_samples = 4; // as asked (View3DOptions::samples)
-    u32 _samples = 1;        // as made: what the device has for the format
-    Color _background = colors::transparent;
-    SDL_GPUTextureFormat _format = SDL_GPU_TEXTUREFORMAT_INVALID; // the colour targets'
+    u32 _samples = 1; // as made: what the device has for the format
+    View3DOptions _options{};
+    bool _hdr = false; // drawn in float, then out through view_output
+    SDL_GPUTextureFormat _format = SDL_GPU_TEXTUREFORMAT_INVALID;        // the scene's colour (float when HDR)
+    SDL_GPUTextureFormat _output_format = SDL_GPU_TEXTUREFORMAT_INVALID; // the 2D pipeline's, followed
     GpuTexture _colour; // multisampled; empty with one sample (drawn into the resolved one)
     GpuTexture _depth;
+    GpuTexture _scene;             // HDR: the resolved float picture
+    GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
 };
 
 class GpuRenderer3D final : public IRenderer3DBackend {
 public:
     GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device);
+    ~GpuRenderer3D() override;
 
     // Whether `device` can draw 3D views (it has a depth format).
     static bool supported(SDL_GPUDevice* device);
@@ -91,21 +95,35 @@ public:
     SDL_GPUTextureFormat depth_format() const { return _depth_format; }
 
 private:
-    // (Re)makes `view`'s targets for its size and samples, in the colour
+    enum class Pass : u8 { Opaque, Alpha, Additive, Shadow };
+    // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
-    // The mesh pipeline for a pass of `format` and `samples`, culling back
-    // faces or not.
-    SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull) const;
+    SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass) const;
+    SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
+    // The shadow map at `resolution`, made or remade; false without one.
+    bool ensure_shadow_map(u32 resolution);
+    // The view's HDR passes: bloom, then out to what 2D draws.
+    void finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view);
 
     GpuRenderer2DBackend* _owner = nullptr;
     GpuDevice* _device = nullptr;
     SDL_GPUTextureFormat _depth_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+    SDL_GPUTextureFormat _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
     Renderer3DCapabilities _capabilities;
-    GpuShader _vertex_shader;   // mesh.vert
-    GpuShader _fragment_shader; // mesh.frag
-    std::shared_ptr<GpuBuffer> _instances; // grows; kept by the frame while it draws from it
+    GpuShader _vertex_shader;     // mesh.vert
+    GpuShader _fragment_shader;   // mesh.frag
+    GpuShader _shadow_shader;     // shadow.frag
+    GpuShader _fullscreen_shader; // fullscreen.vert
+    GpuShader _bloom_shader;      // bloom.frag
+    GpuShader _output_shader;     // view_output.frag
+    SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's
+    GpuTexture _shadow_map;
+    u32 _shadow_size = 0;
+    GpuTexture _no_shadow; // 1 x 1, all far: every comparison lit
+    bool _no_shadow_cleared = false;
+    std::shared_ptr<GpuBuffer> _instances; // grows
     std::array<f32, 256> _srgb_to_linear{};
 
     // render()'s scratch, kept between frames.
@@ -113,24 +131,28 @@ private:
         const Scene3D::Draw* draw = nullptr;
         const MeshInstance* instances = nullptr; // the draw's first
         const GpuMesh3D* mesh = nullptr;
-        u32 scene = 0;            // 0 the scene, 1 its overlay
+        u32 scene = 0;                       // 0 the scene, 1 its overlay
         const GpuFrustum* frustum = nullptr; // null: not culled
-        Vec3f center{};           // the mesh's bounding sphere
+        bool caster = false;                 // drawn into the shadow map
+        Vec3f center{};                      // the mesh's bounding sphere
         f32 radius = 0.0f;
-        u32 out_first = 0;        // where its visible copies go in the instance buffer
-        u32 out_count = 0;
+        u32 out_first = 0; // where its copies go in the instance buffer:
+        u32 out_count = 0; // those the camera sees,
+        u32 out_extra = 0; // then those only the sun sees (casting into view)
     };
     struct Piece {
         u32 ref = 0;
         u32 begin = 0, end = 0; // its copies, within the draw
         u32 flat = 0;           // the first's place among all the frame's copies
-        u32 out = 0;            // where its visible copies go
+        u32 seen = 0, extra = 0;
+        u32 out = 0, out_extra = 0;
     };
     std::vector<DrawRef> _refs;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start
-    std::vector<u8> _visible;  // a byte a copy
+    std::vector<u8> _visible;  // a copy: 1 the camera sees it, 2 only the sun does
     std::vector<u32> _order;   // draws sorted
+    std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first
 };
 
 } // namespace kin::gpu

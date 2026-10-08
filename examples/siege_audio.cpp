@@ -152,7 +152,7 @@ AudioEngine make_engine(bool muted) {
 
 } // namespace
 
-SiegeAudio::SiegeAudio(bool muted) : _engine(make_engine(muted)) {
+SiegeAudio::SiegeAudio(bool muted, float distance_scale) : _engine(make_engine(muted)) {
     const std::array<std::pair<const char*, std::vector<f32>>, 13> clips{{
         {"shot", shot()},
         {"enemy_shot", enemy_shot()},
@@ -180,7 +180,7 @@ SiegeAudio::SiegeAudio(bool muted) : _engine(make_engine(muted)) {
     const auto effect = [&](const char* id, float volume, int max, float pitch_variance, bool spatial, int priority) {
         _catalog.add_cue({.id = id, .clips = {id}, .category = AudioCategory::Effect, .bus = "sfx", .volume = volume,
                           .pitch_variance = pitch_variance, .priority = priority, .max_instances = max,
-                          .spatial = spatial, .min_distance = 160, .max_distance = 1100});
+                          .spatial = spatial, .min_distance = 160 * distance_scale, .max_distance = 1100 * distance_scale});
     };
     effect("shot", .28f, 3, .05f, false, 5);
     effect("enemy_shot", .35f, 4, .08f, true, 4);
@@ -215,6 +215,10 @@ void SiegeAudio::play_events(std::span<const ArenaEvent> events, Vec2f listener)
 
 void SiegeAudio::play(std::string_view cue) {
     _engine.play(_catalog, {.cue = std::string{cue}});
+}
+
+void SiegeAudio::play_at(std::string_view cue, Vec3f position) {
+    _engine.play(_catalog, {.cue = std::string{cue}, .position_3d = position, .has_position_3d = true});
 }
 
 void SiegeAudio::set_drone(bool playing) {

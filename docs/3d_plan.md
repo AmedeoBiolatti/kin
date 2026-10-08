@@ -383,7 +383,95 @@ stays as it is), sharing its enemies, spawning and scoring.
   late, the frame cap, GPU wait) and written down; frame times at 2,000 and
   20,000 enemies.
 
-### M3 — What makes it a shooter (stage C)
+### M3 — What makes it a shooter (stage C). Done.
+
+What was built:
+
+- **Lighting**: `mesh.frag` lights in linear light with a sun (through its
+  shadow map), ambient light and up to 16 point lights, plus emissive light;
+  frame-wide uniforms pushed once a pass, a small block a draw. Point lights
+  (`Scene3D::add_light`) are chosen each frame: those whose reach is in view,
+  by strength over distance.
+- **Shadows**: `Lights3D::shadow_area` (a box) and `shadow_resolution`: an
+  orthographic depth map from the sun over the box (reverse Z), drawn by
+  opaque casters (`Material3D::casts_shadow`); copies the camera culls but the
+  sun sees are written after the visible ones and drawn only into the map.
+  Receivers take 3x3 bilinear comparisons from a point pushed off the surface
+  along its normal (no acne without a depth-bias pass). A 1 x 1 "all lit" map
+  stands in when there are none.
+- **Transparency**: `Blend3D::Alpha` (premultiplied over, drawn after the
+  opaque, draws and copies furthest first) and `Additive` (premultiplied
+  add, any order); both depth-tested, not writing depth.
+- **HDR and bloom**: `View3DOptions::hdr`, `exposure`, `bloom`,
+  `bloom_threshold`: the scene into a float target, a bright pass at half
+  size, a 9-tap blur twice across and down (the second with taps twice as
+  far), then `view_output.frag` adds the glow, exposes, tonemaps (ACES) and
+  encodes into the 2D pipeline's format (linear for an HDR one). The glow is
+  the view's, so the HUD over it stays crisp; an HDR view clears in linear.
+- **Textures**: `Material3D::texture` (the base colour's), decoded in the
+  shader where textures are stored encoded.
+- **glTF**: cgltf 1.14 (MIT, a single header, fetched with
+  `KIN_EXPERIMENTAL_3D`; in the third-party notices and the shipped
+  licences). `Renderer3D::load_model` reads `.glb`/`.gltf` through the content
+  folder or pack: primitives as meshes placed by their nodes, base colour and
+  texture (mipmapped, or nearest when the sampler asks), emissive (and its
+  strength), `BLEND`, double-sided, unlit; flat normals when a primitive has
+  none. `ModelFile` reloads on change. `decode_image()` reads images from
+  memory. `tools/models/glb.py` writes small .glb files with the standard
+  library (the test model and Signal Breach's gun and crates are made by it).
+- **3D sound**: `AudioEngine::set_listener_3d()`, `set_position_3d()`,
+  `AudioPlayRequest::position_3d`, `calculate_spatial_audio_3d()`: pan by the
+  direction from where the listener faces, less pan close up, up to a fifth
+  quieter behind, rolloff by 3D distance. (New names rather than overloads:
+  overloads made `set_listener({x, y})` ambiguous.)
+- **Signal Breach**: sun shadows over the deck, muzzle-flash, explosion and
+  enemy-shot lights, bloom on the view (the 2D post chain is gone), additive
+  sparks and tracers, a glTF gun (brushed metal) and eight glTF crates (a
+  metre high, solid, climbable by jumping), sound in 3D with Signal Siege's
+  synthesized cues. `--no-shadows`, `--no-bloom`, `--no-lights`, `--mute`.
+  The crates change the level, so its checksums differ from M2's.
+
+What was measured (as M2; three runs each, medians; `signal_breach
+--headless --benchmark --seed=7 --enemies N --profile --profile-lines
+--frames=1200`, with each feature left off in turn):
+
+| Enemies | Features | frame | GPU | `render()` CPU |
+|---|---|---|---|---|
+| 2,000 | all | 0.41-0.42 ms | 0.45-0.46 ms | 0.116-0.118 ms |
+| 2,000 | no shadows | 0.36-0.37 | 0.34 | 0.071-0.078 |
+| 2,000 | no bloom | 0.39-0.40 | 0.35 | 0.106-0.108 |
+| 2,000 | no lights | 0.41-0.42 | 0.43 | 0.114-0.118 |
+| 2,000 | none (as M2) | 0.31-0.34 | 0.19-0.20 | 0.061-0.063 |
+| 20,000 | all | 1.82-2.03 | 1.13-1.28 | 0.74-0.83 |
+| 20,000 | no shadows | 1.48-1.60 | 0.44-0.47 | 0.41-0.44 |
+| 20,000 | no bloom | 1.84-1.94 | 1.04-1.13 | 0.74-0.78 |
+| 20,000 | no lights | 1.82-1.93 | 1.00-1.03 | 0.74-0.78 |
+| 20,000 | none (as M2) | 1.49-1.59 | 0.29 | 0.40-0.44 |
+
+What each costs: at 2,000 enemies shadows about 0.11 ms of GPU and 0.04 ms
+of CPU, bloom about 0.10 ms of GPU, point lights 0.02-0.03 ms; at 20,000,
+shadows 0.7-0.8 ms of GPU and 0.33 ms of CPU (every enemy is in the sun's view
+of the deck, so every one casts, and the extra copies are tested and
+written), bloom 0.1-0.15 ms, lights 0.1-0.25 ms (more fragments to light).
+Shadows at many casters are the thing to look at next: casters whose shadow
+can't reach the view could be skipped, or the map limited to near the player.
+GPU scopes per pass were not used (they split submissions and change what
+they time); the cost of each pass is the difference with it off.
+
+- Determinism, again: `--check-determinism` agrees at 300 enemies (1,200
+  frames) and 20,000 (600 frames), repeat and one worker.
+- Tests: `kin-render3d` (a point light on a wall and nothing past its
+  radius, 16 of 21 lights chosen; a box's shadow on the floor where the sun
+  puts it, none without an area; additive light adding up, alpha over a
+  wall, transparent copies behind a wall hidden; bloom round an emissive
+  cube and none without it, the HDR background not lifted, glow over a
+  transparent background; a texture's texels; the glTF test model's parts,
+  materials, node transforms, bounds, flat normals and texels, hot reload,
+  a missing file), `kin-audio` (3D pan by facing, behind quieter, height as
+  distance, close-up pan, the engine's channels, back to 2D). All pass on the
+  RTX 4080 and lavapipe; with 3D off, 65 tests pass.
+
+The plan as it was:
 
 - **Bloom** on the view's HDR texture: glowing shots and enemies.
 - **Point lights**: muzzle flashes and explosions, at most 16 a frame,

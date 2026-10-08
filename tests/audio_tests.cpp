@@ -526,6 +526,54 @@ void test_equal_power_pan() {
     assert(near(left * left + right * right, 2.0f * 0.25f, 1e-3f));
 }
 
+// In 3D the pan follows the direction the listener faces, not the world's x;
+// behind is a little quieter; height counts toward the distance.
+void test_spatial_audio_3d() {
+    const kin::SpatialAudio s{.min_distance = 2.0f, .max_distance = 40.0f};
+    const kin::AudioListener3D facing_north{.position = {0.0f, 1.5f, 0.0f}, .forward = {0.0f, 0.0f, -1.0f}};
+    const auto at = [&](const kin::AudioListener3D& l, kin::Vec3f p) { return kin::calculate_spatial_audio_3d(l, p, s); };
+    assert(at(facing_north, {10.0f, 1.5f, 0.0f}).pan > 0.9f);  // east, to the right
+    assert(at(facing_north, {-10.0f, 1.5f, 0.0f}).pan < -0.9f);
+    assert(std::abs(at(facing_north, {0.0f, 1.5f, -10.0f}).pan) < 1e-5f); // ahead: centred
+    // Turned to face east, east is ahead and north is to the left.
+    const kin::AudioListener3D facing_east{.position = {0.0f, 1.5f, 0.0f}, .forward = {1.0f, 0.0f, 0.0f}};
+    assert(std::abs(at(facing_east, {10.0f, 1.5f, 0.0f}).pan) < 1e-5f);
+    assert(at(facing_east, {0.0f, 1.5f, -10.0f}).pan < -0.9f);
+    // Behind is quieter than ahead at the same distance (a fifth at most).
+    const float ahead = at(facing_north, {0.0f, 1.5f, -10.0f}).gain, behind = at(facing_north, {0.0f, 1.5f, 10.0f}).gain;
+    assert(behind < ahead && behind > ahead * 0.79f);
+    // Above, ten metres up, is as far as ten metres ahead, and centred.
+    assert(near(at(facing_north, {0.0f, 11.5f, 0.0f}).gain, ahead, 0.25f) && std::abs(at(facing_north, {0.0f, 11.5f, 0.0f}).pan) < 1e-5f);
+    // Close by, the pan fades: nothing jumps across the head.
+    assert(std::abs(at(facing_north, {0.5f, 1.5f, 0.0f}).pan) < 0.3f);
+    assert(at(facing_north, {0.0f, 1.5f, -50.0f}).gain == 0.0f);
+
+    // The engine, with a 3D listener: a sound to the right is louder on the right,
+    // and turning round swaps the sides.
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    kin::AudioCatalog catalog;
+    catalog.add_cue({.id = "buzz", .clips = {"dc"}, .bus = "sfx", .loop = true, .spatial = true,
+                     .min_distance = 2.0f, .max_distance = 40.0f});
+    audio.set_listener_3d(facing_north);
+    const kin::AudioHandle buzz = audio.play(catalog, {.cue = "buzz", .position_3d = {5.0f, 1.5f, 0.0f}, .has_position_3d = true});
+    assert(buzz);
+    std::vector<kin::f32> out = render(audio, 4800);
+    assert(out[out.size() - 1] > out[out.size() - 2] * 2.0f); // right > left
+    audio.set_listener_3d({.position = {0.0f, 1.5f, 0.0f}, .forward = {0.0f, 0.0f, 1.0f}}); // turned round
+    out = render(audio, 4800);
+    assert(out[out.size() - 2] > out[out.size() - 1] * 2.0f);
+    // Moved far away: silent.
+    audio.set_position_3d(buzz, {0.0f, 1.5f, 100.0f});
+    out = render(audio, 4800);
+    assert(std::abs(out[out.size() - 1]) < 1e-4f && std::abs(out[out.size() - 2]) < 1e-4f);
+    // Back to a 2D listener: 2D positions as before.
+    audio.set_listener({0.0f, 0.0f});
+    audio.set_position(buzz, {3.0f, 0.0f});
+    out = render(audio, 4800);
+    assert(out[out.size() - 1] > out[out.size() - 2]);
+}
+
 // Mono output averages the two sides.
 void test_mono_output() {
     kin::AudioEngine audio = null_engine({.channels = 1});
@@ -1727,6 +1775,7 @@ int main() {
     test_variation_is_seeded();
     test_limiter();
     test_equal_power_pan();
+    test_spatial_audio_3d();
     test_mono_output();
     test_preload_async();
     test_device_thread_mixes();

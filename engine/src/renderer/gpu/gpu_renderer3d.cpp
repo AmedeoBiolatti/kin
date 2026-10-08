@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <functional>
 #include <stdexcept>
@@ -63,19 +64,73 @@ SDL_GPUSampleCount sample_count(u32 samples) {
                         : SDL_GPU_SAMPLECOUNT_1;
 }
 
+constexpr SDL_GPUTextureFormat hdr_format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+constexpr u32 max_lights = 16;
+// The overlay's slice of the depth range: reverse Z, so in front of the scene's.
+constexpr f32 overlay_split = 0.9f;
+
 // mesh.vert's uniforms, a draw.
 struct DrawUniforms {
     f32 view_projection[16];
     u32 first[4]; // x: the draw's first instance
 };
 
-// mesh.frag's.
-struct MaterialUniforms {
+// mesh.frag's: the frame's (slot 0) and the draw's (slot 1).
+struct FrameUniforms {
     f32 sun_direction[4];
     f32 sun_color[4];
     f32 ambient[4];
-    f32 params[4]; // emissive, unlit, encode to sRGB
+    f32 flags[4]; // encode to sRGB, decode textures, shadows, point lights
+    f32 shadow_matrix[16];
+    f32 shadow[4]; // depth bias, normal offset, a texel (uv)
+    f32 lights[max_lights * 2 * 4];
 };
+struct MaterialUniforms {
+    f32 params[4]; // emissive, unlit
+};
+
+// A view's six bounding planes from its view-projection matrix, reverse Z:
+// near at depth 1, far at 0. An infinite far plane has no normal.
+GpuFrustum frustum_of(const Mat4f& m) {
+    const auto row = [&](int r) { return Vec4f{m.at(r, 0), m.at(r, 1), m.at(r, 2), m.at(r, 3)}; };
+    const Vec4f r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    const auto add = [](Vec4f a, Vec4f b, f32 k) { return Vec4f{a.x + k * b.x, a.y + k * b.y, a.z + k * b.z, a.w + k * b.w}; };
+    GpuFrustum f;
+    for (const Vec4f p : {add(r3, r0, 1.0f), add(r3, r0, -1.0f), add(r3, r1, 1.0f), add(r3, r1, -1.0f),
+                          add(r3, r2, -1.0f), r2}) {
+        const f32 n = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        if (n > 1e-6f) {
+            f.planes[f.count++] = {p.x / n, p.y / n, p.z / n, p.w / n};
+        }
+    }
+    return f;
+}
+
+bool sphere_in(const GpuFrustum& f, Vec3f c, f32 r) {
+    for (u32 k = 0; k < f.count; ++k) {
+        const Vec4f& p = f.planes[k];
+        if (p.x * c.x + p.y * c.y + p.z * c.z + p.w < -r) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A copy's bounding sphere: its mesh's, moved and scaled with it.
+void sphere_of(const Mat4f& t, Vec3f center, f32 radius, Vec3f& c, f32& r) {
+    c = t.apply(center);
+    const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
+    const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
+    const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
+    r = radius * std::sqrt(std::max({sx, sy, sz}));
+}
+
+void put(f32* out, Vec3f v, f32 w) {
+    out[0] = v.x;
+    out[1] = v.y;
+    out[2] = v.z;
+    out[3] = w;
+}
 
 } // namespace
 
@@ -111,20 +166,60 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     _capabilities.depth_bits = depth->bits;
     _capabilities.depth_float = depth->floating;
     _capabilities.max_samples = max_samples(handle, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, _depth_format);
-    _capabilities.max_samples_hdr = max_samples(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, _depth_format);
+    _capabilities.max_samples_hdr = max_samples(handle, hdr_format, _depth_format);
+    // Shadow maps: a depth format that can also be sampled.
+    for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREFORMAT_D16_UNORM}) {
+        if (SDL_GPUTextureSupportsFormat(handle, format, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
+            _shadow_format = format;
+            break;
+        }
+    }
     const char* name = SDL_GetStringProperty(SDL_GetGPUDeviceProperties(handle), SDL_PROP_GPU_DEVICE_NAME_STRING, "");
     KIN_LOG_INFO_F("render", "3D views available",
                    (LogFields{{.name = "device", .value = name ? name : ""},
                               {.name = "depth_bits", .value = std::to_string(_capabilities.depth_bits)},
                               {.name = "max_samples", .value = std::to_string(_capabilities.max_samples)},
-                              {.name = "max_samples_hdr", .value = std::to_string(_capabilities.max_samples_hdr)}}));
+                              {.name = "max_samples_hdr", .value = std::to_string(_capabilities.max_samples_hdr)},
+                              {.name = "shadows", .value = _shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID ? "true" : "false"}}));
     try {
         _vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh.vert.spv",
                                                   /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/1);
         _fragment_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh.frag.spv",
-                                                    /*uniform_buffers=*/1, /*samplers=*/0);
+                                                    /*uniform_buffers=*/2, /*samplers=*/2);
+        _shadow_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "shadow.frag.spv");
+        _fullscreen_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "fullscreen.vert.spv");
+        _bloom_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "bloom.frag.spv",
+                                                 /*uniform_buffers=*/1, /*samplers=*/1);
+        _output_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output.frag.spv",
+                                                  /*uniform_buffers=*/1, /*samplers=*/2);
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
+        // Bilinear comparisons: each tap is itself four, softening the edge.
+        SDL_GPUSamplerCreateInfo info{};
+        info.min_filter = SDL_GPU_FILTER_LINEAR;
+        info.mag_filter = SDL_GPU_FILTER_LINEAR;
+        info.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        info.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        info.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        info.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        info.enable_compare = true;
+        info.compare_op = SDL_GPU_COMPAREOP_GREATER_OR_EQUAL; // reverse Z: lit where nothing nearer the sun
+        _compare_sampler = SDL_CreateGPUSampler(handle, &info);
+        try {
+            _no_shadow = device.create_target(1, 1, _shadow_format,
+                                              SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        } catch (const std::exception&) {
+            _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+        }
+    }
+}
+
+GpuRenderer3D::~GpuRenderer3D() {
+    if (_compare_sampler) {
+        SDL_ReleaseGPUSampler(_device->handle(), _compare_sampler);
     }
 }
 
@@ -138,17 +233,39 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
-SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull) const {
-    // Opaque: written over what is there (Replace), alpha and all.
+SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass) const {
+    if (pass == Pass::Shadow) {
+        // Both faces cast: thin and open meshes still shade.
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
+                                                     .fragment = _shadow_shader.handle(),
+                                                     .blend = GpuBlendMode::Replace,
+                                                     .layout = GpuVertexLayout::MeshVertices,
+                                                     .depth_stencil = _shadow_format,
+                                                     .depth = GpuDepthTest::TestWrite,
+                                                     .depth_only = true});
+    }
+    // Opaque: written over what is there, alpha and all; transparent: blended,
+    // tested against the depth but not writing it.
+    const GpuBlendMode blend = pass == Pass::Opaque ? GpuBlendMode::Replace
+                             : pass == Pass::Alpha  ? GpuBlendMode::Premultiplied
+                                                    : GpuBlendMode::PremultipliedAdditive;
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
                                                  .fragment = _fragment_shader.handle(),
-                                                 .blend = GpuBlendMode::Replace,
+                                                 .blend = blend,
                                                  .format = format,
                                                  .layout = GpuVertexLayout::MeshVertices,
                                                  .depth_stencil = _depth_format,
-                                                 .depth = GpuDepthTest::TestWrite,
+                                                 .depth = pass == Pass::Opaque ? GpuDepthTest::TestWrite : GpuDepthTest::Test,
                                                  .cull = cull ? GpuCull::Back : GpuCull::None,
                                                  .samples = sample_count(samples)});
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const {
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                 .fragment = fragment,
+                                                 .blend = GpuBlendMode::Replace,
+                                                 .format = format,
+                                                 .layout = GpuVertexLayout::None});
 }
 
 std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
@@ -188,39 +305,58 @@ std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data) {
 }
 
 bool GpuRenderer3D::make_targets(GpuView3D& view) {
-    const SDL_GPUTextureFormat format = _owner->_target_format;
-    const u32 samples = usable_samples(view._wanted_samples, format);
+    const SDL_GPUTextureFormat output = _owner->_target_format;
+    const bool want_hdr = view._options.hdr || view._options.bloom > 0.0f;
+    const bool hdr = want_hdr && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                                              SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    const SDL_GPUTextureFormat format = hdr ? hdr_format : output;
+    const u32 samples = usable_samples(std::max(1u, view._options.samples), format);
     const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
+    constexpr SDL_GPUTextureUsageFlags drawn = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
     try {
-        GpuTexture resolved = _device->create_target(w, h, format,
-                                                     SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
-        GpuTexture colour = samples > 1
-            ? _device->create_target(w, h, format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, sample_count(samples))
-            : GpuTexture{};
+        GpuTexture resolved = _device->create_target(w, h, output, drawn);
+        GpuTexture scene = hdr ? _device->create_target(w, h, hdr_format, drawn) : GpuTexture{};
+        GpuTexture colour = samples > 1 ? _device->create_target(w, h, format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, sample_count(samples))
+                                        : GpuTexture{};
         GpuTexture depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
                                                   sample_count(samples));
+        GpuTexture bloom_a, bloom_b;
+        if (hdr && view._options.bloom > 0.0f) {
+            bloom_a = _device->create_target(std::max(1u, w / 2), std::max(1u, h / 2), hdr_format, drawn);
+            bloom_b = _device->create_target(std::max(1u, w / 2), std::max(1u, h / 2), hdr_format, drawn);
+        }
         // Render targets' convention: premultiplied, sampled smoothly. SDL
         // frees the old targets once the GPU is done with them.
         view._resolved = std::make_shared<GpuTextureBackend>(std::move(resolved), /*premultiplied=*/true, ScaleMode::Linear);
+        view._scene = std::move(scene);
         view._colour = std::move(colour);
         view._depth = std::move(depth);
+        view._bloom_a = std::move(bloom_a);
+        view._bloom_b = std::move(bloom_b);
         view._samples = samples;
+        view._hdr = hdr;
         view._format = format;
+        view._output_format = output;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: view targets not made", (LogFields{{.name = "reason", .value = e.what()}}));
         return false;
     }
     // Made now rather than on the first draw: a cold driver cache takes tens of ms.
-    pipeline(format, samples, true);
-    pipeline(format, samples, false);
+    for (const Pass pass : {Pass::Opaque, Pass::Alpha, Pass::Additive}) {
+        pipeline(format, samples, true, pass);
+        pipeline(format, samples, false, pass);
+    }
+    if (hdr) {
+        fullscreen(_bloom_shader.handle(), hdr_format);
+        fullscreen(_output_shader.handle(), output);
+    }
     return true;
 }
 
 std::shared_ptr<IView3DBackend> GpuRenderer3D::create_view(Vec2i size, const View3DOptions& options) {
     auto view = std::make_shared<GpuView3D>();
     view->_size = size;
-    view->_wanted_samples = std::max(1u, options.samples);
-    view->_background = options.background;
+    view->_options = options;
     if (!make_targets(*view)) {
         return {};
     }
@@ -241,26 +377,84 @@ bool GpuRenderer3D::resize_view(IView3DBackend& base, Vec2i size) {
     return true;
 }
 
-namespace {
-
-// A view's six bounding planes from its view-projection matrix, reverse Z:
-// near at depth 1, far at 0. An infinite far plane has no normal.
-GpuFrustum frustum_of(const Mat4f& m) {
-    const auto row = [&](int r) { return Vec4f{m.at(r, 0), m.at(r, 1), m.at(r, 2), m.at(r, 3)}; };
-    const Vec4f r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
-    const auto add = [](Vec4f a, Vec4f b, f32 k) { return Vec4f{a.x + k * b.x, a.y + k * b.y, a.z + k * b.z, a.w + k * b.w}; };
-    GpuFrustum f;
-    for (const Vec4f p : {add(r3, r0, 1.0f), add(r3, r0, -1.0f), add(r3, r1, 1.0f), add(r3, r1, -1.0f),
-                          add(r3, r2, -1.0f), r2}) {
-        const f32 n = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-        if (n > 1e-6f) {
-            f.planes[f.count++] = {p.x / n, p.y / n, p.z / n, p.w / n};
-        }
+bool GpuRenderer3D::ensure_shadow_map(u32 resolution) {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || !_shadow_shader) {
+        return false;
     }
-    return f;
+    resolution = std::clamp(resolution, 64u, 8192u);
+    if (_shadow_map && _shadow_size == resolution) {
+        return true;
+    }
+    try {
+        _shadow_map = _device->create_target(resolution, resolution, _shadow_format,
+                                             SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _shadow_size = resolution;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: no shadow map", (LogFields{{.name = "reason", .value = e.what()}}));
+        _shadow_map = {};
+        _shadow_size = 0;
+        return false;
+    }
+    return true;
 }
 
-} // namespace
+void GpuRenderer3D::finish_hdr(SDL_GPUCommandBuffer* commands, GpuView3D& view) {
+    const auto pass_into = [&](const GpuTexture& target, SDL_GPUGraphicsPipeline* p, std::span<const SDL_GPUTexture* const> sources,
+                               const f32 (&params)[4]) {
+        if (!p) {
+            return;
+        }
+        SDL_GPUColorTargetInfo colour{};
+        colour.texture = target.handle();
+        colour.load_op = SDL_GPU_LOADOP_DONT_CARE; // all of it is written
+        colour.store_op = SDL_GPU_STOREOP_STORE;
+        colour.cycle = true;
+        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+        if (!pass) {
+            return;
+        }
+        const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(target.width()), static_cast<f32>(target.height()), 0.0f, 1.0f};
+        SDL_SetGPUViewport(pass, &viewport);
+        SDL_BindGPUGraphicsPipeline(pass, p);
+        std::array<SDL_GPUTextureSamplerBinding, 2> bindings{};
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            bindings[i] = {.texture = const_cast<SDL_GPUTexture*>(sources[i]), .sampler = _owner->_sampler_linear};
+        }
+        SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(sources.size()));
+        SDL_PushGPUFragmentUniformData(commands, 0, params, sizeof(params));
+        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(pass);
+    };
+    const bool bloom = view._options.bloom > 0.0f && view._bloom_a && view._bloom_b;
+    if (bloom) {
+        SDL_GPUGraphicsPipeline* p = fullscreen(_bloom_shader.handle(), hdr_format);
+        const SDL_GPUTexture* scene = view._scene.handle();
+        const SDL_GPUTexture* a = view._bloom_a.handle();
+        const SDL_GPUTexture* b = view._bloom_b.handle();
+        const f32 w = static_cast<f32>(view._bloom_a.width()), h = static_cast<f32>(view._bloom_a.height());
+        const f32 extract[4] = {0.0f, view._options.bloom_threshold, 1.0f / static_cast<f32>(view._size.x),
+                                1.0f / static_cast<f32>(view._size.y)};
+        pass_into(view._bloom_a, p, std::span{&scene, 1}, extract);
+        // Twice across and down, the second with taps twice as far apart: a
+        // wider, smoother glow for little more work.
+        for (int i = 0; i < 2; ++i) {
+            const f32 step = static_cast<f32>(i + 1);
+            const f32 across[4] = {1.0f, 0.0f, step / w, 0.0f};
+            const f32 down[4] = {1.0f, 0.0f, 0.0f, step / h};
+            pass_into(view._bloom_b, p, std::span{&a, 1}, across);
+            pass_into(view._bloom_a, p, std::span{&b, 1}, down);
+        }
+    }
+    // Out to the 2D pipeline's format: tonemapped and encoded for a gamma
+    // one, tonemapped for an sRGB-stored one, left HDR for a float one.
+    const SDL_GPUTextureFormat output = view._output_format;
+    const f32 mode = output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 0.0f
+                   : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.0f
+                                                                         : 2.0f;
+    const std::array<const SDL_GPUTexture*, 2> sources{view._scene.handle(), bloom ? view._bloom_a.handle() : view._scene.handle()};
+    const f32 params[4] = {bloom ? view._options.bloom : 0.0f, view._options.exposure, mode, 0.0f};
+    pass_into(view._resolved->texture(), fullscreen(_output_shader.handle(), output), sources, params);
+}
 
 bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DStats& stats) {
     auto* view = dynamic_cast<GpuView3D*>(&base);
@@ -268,7 +462,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         return false;
     }
     // The 2D pipeline's colour format changed (set_color_space): the view follows.
-    if (view->_format != _owner->_target_format && !make_targets(*view)) {
+    if (view->_output_format != _owner->_target_format && !make_targets(*view)) {
         return false;
     }
     const f32 aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(view->_size.y);
@@ -276,23 +470,57 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     const std::array<const Scene3D*, 2> scenes{&scene, overlay && !overlay->draws().empty() ? overlay : nullptr};
     std::array<Mat4f, 2> view_projections{};
     std::array<GpuFrustum, 2> frustums{};
+    for (u32 s = 0; s < 2; ++s) {
+        if (scenes[s]) {
+            view_projections[s] = scenes[s]->camera.view_projection(aspect);
+            frustums[s] = frustum_of(view_projections[s]);
+        }
+    }
 
-    // The draws of both, each with its instances where the scene keeps them.
+    // The sun's shadow: an orthographic view along its light over the area.
+    const Lights3D& lights = scene.lights;
+    const Bounds3& area = lights.shadow_area;
+    const Vec3f area_size = area.size();
+    bool shadows = area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 && length_squared(lights.sun.direction) > 0 &&
+                   ensure_shadow_map(lights.shadow_resolution);
+    Mat4f light_vp{};
+    GpuFrustum light_frustum{};
+    f32 texel_world = 0.0f, depth_range = 1.0f;
+    if (shadows) {
+        const Vec3f to_sun = normalize(lights.sun.direction);
+        const Vec3f center = area.center();
+        const f32 radius = std::max(area.radius(), 0.01f);
+        const Vec3f up = std::abs(to_sun.y) > 0.99f ? Vec3f{0.0f, 0.0f, -1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
+        const Mat4f light_view = Mat4f::look_at(center + to_sun * (radius + 1.0f), center, up);
+        Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (int i = 0; i < 8; ++i) {
+            const Vec3f corner{(i & 1) ? area.max.x : area.min.x, (i & 2) ? area.max.y : area.min.y, (i & 4) ? area.max.z : area.min.z};
+            const Vec3f p = light_view.apply(corner);
+            lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+            hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+        }
+        const f32 z_near = std::max(0.01f, -hi.z - 0.5f), z_far = -lo.z + 0.5f;
+        light_vp = Mat4f::orthographic(lo.x, hi.x, lo.y, hi.y, z_near, z_far) * light_view;
+        light_frustum = frustum_of(light_vp);
+        texel_world = std::max(hi.x - lo.x, hi.y - lo.y) / static_cast<f32>(_shadow_size);
+        depth_range = std::max(z_far - z_near, 0.01f);
+    }
+
+    // The draws of both scenes, each with its instances where the scene keeps them.
     _refs.clear();
     for (u32 s = 0; s < 2; ++s) {
         if (!scenes[s]) {
             continue;
         }
-        view_projections[s] = scenes[s]->camera.view_projection(aspect);
-        frustums[s] = frustum_of(view_projections[s]);
         for (const Scene3D::Draw& draw : scenes[s]->draws()) {
             const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
-            if (draw.count > 0 && mesh) {
-                const bool cull = scenes[s]->cull;
-                const Bounds3& b = draw.mesh.bounds();
-                _refs.push_back({&draw, scenes[s]->instances().data() + draw.first, mesh, s, cull ? &frustums[s] : nullptr,
-                                 b.center(), b.radius(), 0, 0});
+            if (draw.count == 0 || !mesh) {
+                continue;
             }
+            const Bounds3& b = draw.mesh.bounds();
+            const bool caster = shadows && s == 0 && draw.material.blend == Blend3D::Opaque && draw.material.casts_shadow;
+            _refs.push_back({&draw, scenes[s]->instances().data() + draw.first, mesh, s,
+                             scenes[s]->cull ? &frustums[s] : nullptr, caster, b.center(), b.radius(), 0, 0, 0});
         }
     }
 
@@ -306,7 +534,7 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         const u32 count = _refs[r].draw->count;
         for (u32 begin = 0; begin < count;) {
             const u32 end = std::min(count, begin + (chunk - in_task));
-            _pieces.push_back({r, begin, end, total + begin, 0});
+            _pieces.push_back({r, begin, end, total + begin, 0, 0, 0, 0});
             in_task += end - begin;
             begin = end;
             if (in_task == chunk) {
@@ -320,10 +548,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         _tasks.push_back(static_cast<u32>(_pieces.size()));
     }
     JobSystem* jobs = _owner->_jobs && total >= 2 * chunk ? _owner->_jobs : nullptr;
-    const auto each_task = [&](const std::function<void(const Piece&, u32)>& body) {
+    const auto each_task = [&](const std::function<void(Piece&)>& body) {
         const auto run = [&](u32 t) {
             for (u32 p = _tasks[t]; p < _tasks[t + 1]; ++p) {
-                body(_pieces[p], p);
+                body(_pieces[p]);
             }
         };
         if (jobs && _tasks.size() > 2) {
@@ -335,101 +563,152 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         }
     };
 
-    // What the cameras see: each copy's sphere (its mesh's, moved and scaled
-    // with it) against the planes. Then where each draw's visible copies go.
-    _visible.resize(_pieces.size() > 0 ? total : 0);
-    std::vector<u32> piece_visible(_pieces.size(), 0);
-    each_task([&](const Piece& piece, u32 index) {
+    // What the camera sees, and what only the sun does (it may cast a shadow
+    // into view): each copy's sphere against the planes.
+    _visible.resize(total);
+    each_task([&](Piece& piece) {
         const DrawRef& ref = _refs[piece.ref];
-        u32 seen = 0;
+        piece.seen = piece.extra = 0;
         for (u32 i = piece.begin; i < piece.end; ++i) {
-            bool in = true;
-            if (ref.frustum) {
-                const Mat4f& t = ref.instances[i].transform;
-                const Vec3f c = t.apply(ref.center);
-                const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
-                const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
-                const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
-                const f32 r = ref.radius * std::sqrt(std::max({sx, sy, sz}));
-                for (u32 k = 0; k < ref.frustum->count && in; ++k) {
-                    const Vec4f& p = ref.frustum->planes[k];
-                    in = p.x * c.x + p.y * c.y + p.z * c.z + p.w >= -r;
-                }
+            Vec3f c{};
+            f32 r = 0.0f;
+            if (ref.frustum || ref.caster) {
+                sphere_of(ref.instances[i].transform, ref.center, ref.radius, c, r);
             }
-            _visible[piece.flat + i - piece.begin] = in ? 1 : 0;
-            seen += in ? 1u : 0u;
+            const bool seen = !ref.frustum || sphere_in(*ref.frustum, c, r);
+            const bool sun = !seen && ref.caster && sphere_in(light_frustum, c, r);
+            _visible[piece.flat + i - piece.begin] = seen ? 1 : sun ? 2 : 0;
+            piece.seen += seen ? 1u : 0u;
+            piece.extra += sun ? 1u : 0u;
         }
-        piece_visible[index] = seen;
     });
-    u32 visible_total = 0;
-    for (u32 p = 0; p < static_cast<u32>(_pieces.size()); ++p) {
-        DrawRef& ref = _refs[_pieces[p].ref];
-        if (_pieces[p].begin == 0) {
-            ref.out_first = visible_total;
+    // Each draw's copies: those seen, then those only the sun sees.
+    for (DrawRef& ref : _refs) {
+        ref.out_count = ref.out_extra = 0;
+    }
+    for (const Piece& piece : _pieces) {
+        _refs[piece.ref].out_count += piece.seen;
+        _refs[piece.ref].out_extra += piece.extra;
+    }
+    u32 written = 0;
+    for (DrawRef& ref : _refs) {
+        ref.out_first = written;
+        written += ref.out_count + ref.out_extra;
+    }
+    {
+        u32 current = ~0u, seen = 0, extra = 0;
+        for (Piece& piece : _pieces) {
+            if (piece.ref != current) {
+                current = piece.ref;
+                seen = extra = 0;
+            }
+            const DrawRef& ref = _refs[piece.ref];
+            piece.out = ref.out_first + seen;
+            piece.out_extra = ref.out_first + ref.out_count + extra;
+            seen += piece.seen;
+            extra += piece.extra;
         }
-        _pieces[p].out = visible_total;
-        visible_total += piece_visible[p];
-        ref.out_count += piece_visible[p];
+    }
+    u32 visible_total = 0;
+    for (const DrawRef& ref : _refs) {
+        visible_total += ref.out_count;
     }
     stats.culled = total - visible_total;
 
-    // The visible copies, straight into the upload memory.
-    if (visible_total > 0) {
-        const u32 bytes = static_cast<u32>(visible_total * sizeof(GpuInstance3D));
+    // The copies, straight into the upload memory; alpha-blended ones furthest first.
+    if (written > 0) {
+        const u32 bytes = static_cast<u32>(written * sizeof(GpuInstance3D));
         if (!_instances || _instances->size() < bytes) {
             const u32 size = std::max({bytes, _instances ? _instances->size() * 2 : 0u, 64u * 1024u});
             _instances = std::make_shared<GpuBuffer>(
                 _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, size));
         }
+        const auto write = [&](const DrawRef& ref, const MeshInstance& instance, u8* out, u32 at) {
+            const Color m = ref.draw->material.color;
+            GpuInstance3D g;
+            std::memcpy(g.model, instance.transform.m, sizeof(g.model));
+            const Mat4f& t = instance.transform;
+            const Vec3f c0{t.m[0], t.m[1], t.m[2]}, c1{t.m[4], t.m[5], t.m[6]}, c2{t.m[8], t.m[9], t.m[10]};
+            // Cofactors: the inverse transpose times the determinant, made
+            // positive so a mirror doesn't turn normals in.
+            const Vec3f x = cross(c1, c2);
+            const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
+            const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
+            const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
+            std::memcpy(g.normal, normal, sizeof(g.normal));
+            const Color tint = instance.tint;
+            g.color[0] = _srgb_to_linear[m.r] * _srgb_to_linear[tint.r];
+            g.color[1] = _srgb_to_linear[m.g] * _srgb_to_linear[tint.g];
+            g.color[2] = _srgb_to_linear[m.b] * _srgb_to_linear[tint.b];
+            g.color[3] = static_cast<f32>(m.a) / 255.0f * static_cast<f32>(tint.a) / 255.0f;
+            std::memcpy(out + static_cast<std::size_t>(at) * sizeof(GpuInstance3D), &g, sizeof(g));
+        };
         const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
-            each_task([&](const Piece& piece, u32) {
+            each_task([&](Piece& piece) {
                 const DrawRef& ref = _refs[piece.ref];
-                const Color m = ref.draw->material.color;
-                const f32 mr = _srgb_to_linear[m.r], mg = _srgb_to_linear[m.g], mb = _srgb_to_linear[m.b];
-                const f32 ma = static_cast<f32>(m.a) / 255.0f;
-                u32 at = piece.out;
+                if (ref.draw->material.blend == Blend3D::Alpha) {
+                    return; // sorted below
+                }
+                u32 at = piece.out, at_extra = piece.out_extra;
                 for (u32 i = piece.begin; i < piece.end; ++i) {
-                    if (!_visible[piece.flat + i - piece.begin]) {
-                        continue;
+                    const u8 v = _visible[piece.flat + i - piece.begin];
+                    if (v != 0) {
+                        write(ref, ref.instances[i], out.data(), v == 1 ? at++ : at_extra++);
                     }
-                    const MeshInstance& instance = ref.instances[i];
-                    GpuInstance3D g;
-                    std::memcpy(g.model, instance.transform.m, sizeof(g.model));
-                    const Mat4f& t = instance.transform;
-                    const Vec3f c0{t.m[0], t.m[1], t.m[2]}, c1{t.m[4], t.m[5], t.m[6]}, c2{t.m[8], t.m[9], t.m[10]};
-                    // Cofactors: the inverse transpose times the determinant, made
-                    // positive so a mirror doesn't turn normals in.
-                    const Vec3f x = cross(c1, c2);
-                    const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
-                    const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
-                    const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
-                    std::memcpy(g.normal, normal, sizeof(g.normal));
-                    const Color tint = instance.tint;
-                    g.color[0] = mr * _srgb_to_linear[tint.r];
-                    g.color[1] = mg * _srgb_to_linear[tint.g];
-                    g.color[2] = mb * _srgb_to_linear[tint.b];
-                    g.color[3] = ma * static_cast<f32>(tint.a) / 255.0f;
-                    std::memcpy(out.data() + static_cast<std::size_t>(at++) * sizeof(GpuInstance3D), &g, sizeof(g));
                 }
             });
+            for (const Piece& first : _pieces) {
+                const DrawRef& ref = _refs[first.ref];
+                if (first.begin != 0 || ref.draw->material.blend != Blend3D::Alpha) {
+                    continue;
+                }
+                const Vec3f eye = scenes[ref.scene]->camera.position;
+                _sorted.clear();
+                const u32 flat = first.flat;
+                for (u32 i = 0; i < ref.draw->count; ++i) {
+                    if (_visible[flat + i] == 1) {
+                        const Mat4f& t = ref.instances[i].transform;
+                        _sorted.push_back({length_squared(Vec3f{t.m[12], t.m[13], t.m[14]} - eye), i});
+                    }
+                }
+                std::sort(_sorted.begin(), _sorted.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+                u32 at = ref.out_first;
+                for (const auto& [d, i] : _sorted) {
+                    write(ref, ref.instances[i], out.data(), at++);
+                }
+            }
         };
         // Cycled: a view rendered earlier this frame keeps the instances it drew.
         _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
     }
 
-    // The scene, then the overlay; within each, pipeline by pipeline and mesh
-    // by mesh: fewer binds.
+    // The draws in order: the scene, then the overlay; in each, opaque, then
+    // alpha-blended (furthest first), then additive; then pipeline and mesh.
+    const auto pass_of = [](const Material3D& m) {
+        return m.blend == Blend3D::Opaque ? Pass::Opaque : m.blend == Blend3D::Alpha ? Pass::Alpha : Pass::Additive;
+    };
     _order.clear();
     for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
         if (_refs[r].out_count > 0) {
             _order.push_back(r);
         }
     }
+    const auto draw_distance = [&](const DrawRef& ref) {
+        const Mat4f& t = ref.instances[0].transform;
+        return length_squared(Vec3f{t.m[12], t.m[13], t.m[14]} - scenes[ref.scene]->camera.position);
+    };
     std::stable_sort(_order.begin(), _order.end(), [&](u32 a, u32 b) {
         const DrawRef& x = _refs[a];
         const DrawRef& y = _refs[b];
         if (x.scene != y.scene) {
             return x.scene < y.scene;
+        }
+        const Pass px = pass_of(x.draw->material), py = pass_of(y.draw->material);
+        if (px != py) {
+            return px < py;
+        }
+        if (px == Pass::Alpha) {
+            return draw_distance(x) > draw_distance(y);
         }
         const bool culled_x = !x.draw->material.double_sided, culled_y = !y.draw->material.double_sided;
         if (culled_x != culled_y) {
@@ -438,14 +717,119 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         return x.mesh < y.mesh;
     });
 
-    // The 2D draws so far first; the pass records between them and the next.
+    // Point lights: those reaching the view, strongest and nearest first.
+    std::vector<std::pair<f32, const PointLight*>> chosen;
+    for (const PointLight& light : lights.points) {
+        if (light.radius <= 0 || !sphere_in(frustums[0], light.position, light.radius)) {
+            continue;
+        }
+        const f32 strength = std::max({light.color.x, light.color.y, light.color.z}) * light.radius;
+        const f32 distance = length(light.position - scene.camera.position);
+        chosen.push_back({strength / std::max(1.0f, distance - light.radius), &light});
+    }
+    std::sort(chosen.begin(), chosen.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    chosen.resize(std::min<std::size_t>(chosen.size(), max_lights));
+    stats.lights = static_cast<u32>(chosen.size());
+
+    // The frame's uniforms, the scene's and the overlay's. The overlay's
+    // space is its camera's: the scene's lights are carried into it (seen
+    // from where the scene's camera is), without shadows.
+    const bool encode = view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;     // a gamma target
+    const bool decode = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // textures stored encoded
+    const auto frame_uniforms = [&](u32 s) {
+        FrameUniforms f{};
+        const Mat4f to_space = s == 0 ? Mat4f{} : scenes[1]->camera.view().inverse() * scene.camera.view();
+        put(f.sun_direction, normalize(to_space.apply_vector(normalize(lights.sun.direction))), 0.0f);
+        put(f.sun_color, lights.sun.color, 0.0f);
+        put(f.ambient, lights.ambient, 0.0f);
+        const bool lit_by_sun_shadow = shadows && s == 0;
+        put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
+            static_cast<f32>(chosen.size()));
+        std::memcpy(f.shadow_matrix, light_vp.m, sizeof(f.shadow_matrix));
+        // A texel's worth of depth toward the sun, and one and a half off the surface.
+        put(f.shadow, {texel_world / depth_range, texel_world * 1.5f, _shadow_size > 0 ? 1.0f / static_cast<f32>(_shadow_size) : 0.0f}, 0.0f);
+        for (std::size_t i = 0; i < chosen.size(); ++i) {
+            put(f.lights + i * 8, to_space.apply(chosen[i].second->position), chosen[i].second->radius);
+            put(f.lights + i * 8 + 4, chosen[i].second->color, 0.0f);
+        }
+        return f;
+    };
+
+    // The 2D draws so far first; the passes record between them and the next.
     _owner->ensure_frame();
     _owner->flush_to_frame();
     SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+    const auto resume_2d = [&] { _owner->_batch.begin(_owner->current_target(), _owner->_clear_color, /*do_clear=*/false); };
+    SDL_GPUBuffer* storage = _instances ? _instances->handle() : nullptr;
 
-    SDL_FColor clear = _owner->stored_color(view->_background);
+    // Without shadows the shader still samples a map: one that is all far.
+    if (!shadows && _no_shadow && !_no_shadow_cleared) {
+        SDL_GPUDepthStencilTargetInfo clear{};
+        clear.texture = _no_shadow.handle();
+        clear.clear_depth = 0.0f;
+        clear.load_op = SDL_GPU_LOADOP_CLEAR;
+        clear.store_op = SDL_GPU_STOREOP_STORE;
+        clear.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        clear.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        if (SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &clear)) {
+            SDL_EndGPURenderPass(pass);
+            _no_shadow_cleared = true;
+        }
+    }
+
+    // The shadow map: casters (seen or casting into view) from the sun.
+    if (shadows) {
+        SDL_GPUDepthStencilTargetInfo depth{};
+        depth.texture = _shadow_map.handle();
+        depth.clear_depth = 0.0f; // reverse Z: nothing in the way
+        depth.load_op = SDL_GPU_LOADOP_CLEAR;
+        depth.store_op = SDL_GPU_STOREOP_STORE;
+        depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+        depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+        depth.cycle = true;
+        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+        SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, false, Pass::Shadow);
+        if (pass && p) {
+            const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(_shadow_size), static_cast<f32>(_shadow_size), 0.0f, 1.0f};
+            SDL_SetGPUViewport(pass, &viewport);
+            SDL_BindGPUGraphicsPipeline(pass, p);
+            SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
+            DrawUniforms u{};
+            std::memcpy(u.view_projection, light_vp.m, sizeof(u.view_projection));
+            const GpuMesh3D* bound_mesh = nullptr;
+            for (const DrawRef& ref : _refs) {
+                const u32 count = ref.out_count + ref.out_extra;
+                if (!ref.caster || count == 0) {
+                    continue;
+                }
+                if (ref.mesh != bound_mesh) {
+                    const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
+                    SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
+                    const SDL_GPUBufferBinding indices{ref.mesh->indices, 0};
+                    SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                    bound_mesh = ref.mesh;
+                }
+                u.first[0] = ref.out_first;
+                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, count, 0, 0, 0);
+                ++stats.shadow_draws;
+            }
+        }
+        if (pass) {
+            SDL_EndGPURenderPass(pass);
+        }
+    }
+
+    // The scene (and its overlay): into the multisampled colour, resolved into
+    // what 2D draws, or into the float scene when HDR.
+    // An HDR view holds linear light whatever the 2D pipeline stores.
+    SDL_FColor clear = _owner->stored_color(view->_options.background);
+    if (view->_hdr) {
+        const LinearColor l = to_linear(view->_options.background);
+        clear = {l.r, l.g, l.b, l.a};
+    }
     clear = {clear.r * clear.a, clear.g * clear.a, clear.b * clear.a, clear.a};
-    SDL_GPUTexture* resolved = view->_resolved->texture().handle();
+    SDL_GPUTexture* resolved = view->_hdr ? view->_scene.handle() : view->_resolved->texture().handle();
     SDL_GPUColorTargetInfo colour{};
     colour.clear_color = clear;
     colour.load_op = SDL_GPU_LOADOP_CLEAR;
@@ -467,8 +851,6 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth.cycle = true;
-    // 2D drawing resumes on its target after the pass (a flush leaves the batch without one).
-    const auto resume_2d = [&] { _owner->_batch.begin(_owner->current_target(), _owner->_clear_color, /*do_clear=*/false); };
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, &depth);
     if (!pass) {
         resume_2d();
@@ -478,44 +860,49 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     // [0.9, 1]: nearer (reverse Z) than all of the scene, yet depth-tested
     // against itself, in one pass.
     const bool overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
-    constexpr f32 split = 0.9f;
-    const auto set_viewport = [&](u32 s) {
-        const f32 lo = s == 0 ? 0.0f : split, hi = s == 0 && overlaid ? split : 1.0f;
+    const auto begin_scene = [&](u32 s) {
+        const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && overlaid ? overlay_split : 1.0f;
         const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), lo, hi};
         SDL_SetGPUViewport(pass, &viewport);
+        const FrameUniforms f = frame_uniforms(s);
+        SDL_PushGPUFragmentUniformData(commands, 0, &f, sizeof(f));
     };
-    set_viewport(0);
+    begin_scene(0);
 
     DrawUniforms draw_uniforms{};
-    const Vec3f sun = normalize(scene.lights.sun.direction);
-    const Vec3f sun_color = scene.lights.sun.color;
-    const Vec3f ambient = scene.lights.ambient;
-    const bool encode = view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; // a gamma scene
-    MaterialUniforms material{{sun.x, sun.y, sun.z, 0.0f},
-                              {sun_color.x, sun_color.y, sun_color.z, 0.0f},
-                              {ambient.x, ambient.y, ambient.z, 0.0f},
-                              {0.0f, 0.0f, encode ? 1.0f : 0.0f, 0.0f}};
-
-    SDL_GPUBuffer* storage = _instances ? _instances->handle() : nullptr;
+    std::memcpy(draw_uniforms.view_projection, view_projections[0].m, sizeof(draw_uniforms.view_projection));
+    const SDL_GPUTextureSamplerBinding shadow_binding{shadows ? _shadow_map.handle() : _no_shadow.handle(), _compare_sampler};
     SDL_GPUGraphicsPipeline* bound = nullptr;
     const GpuMesh3D* bound_mesh = nullptr;
+    const ITextureBackend* bound_texture = reinterpret_cast<const ITextureBackend*>(1); // none yet
     u32 current_scene = 0;
-    std::memcpy(draw_uniforms.view_projection, view_projections[0].m, sizeof(draw_uniforms.view_projection));
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
+        const Material3D& material = ref.draw->material;
         if (ref.scene != current_scene) {
             current_scene = ref.scene;
-            set_viewport(current_scene);
+            begin_scene(current_scene);
             std::memcpy(draw_uniforms.view_projection, view_projections[current_scene].m, sizeof(draw_uniforms.view_projection));
         }
-        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !ref.draw->material.double_sided);
+        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !material.double_sided, pass_of(material));
         if (!p) {
             continue;
         }
+        const ITextureBackend* texture = material.texture.backend().get();
         if (p != bound) {
             SDL_BindGPUGraphicsPipeline(pass, p);
             SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
             bound = p;
+            bound_texture = reinterpret_cast<const ITextureBackend*>(1);
+        }
+        if (texture != bound_texture) {
+            const auto* gpu = texture && texture->kind() == ITextureBackend::Kind::Gpu ? static_cast<const GpuTextureBackend*>(texture) : nullptr;
+            const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+                gpu && gpu->texture() ? SDL_GPUTextureSamplerBinding{gpu->texture().handle(), _owner->sampler_for(*gpu)}
+                                      : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
+                shadow_binding};
+            SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+            bound_texture = texture;
         }
         if (ref.mesh != bound_mesh) {
             const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
@@ -526,15 +913,17 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         }
         draw_uniforms.first[0] = ref.out_first;
         SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
-        material.params[0] = ref.draw->material.emissive;
-        material.params[1] = ref.draw->material.unlit ? 1.0f : 0.0f;
-        SDL_PushGPUFragmentUniformData(commands, 0, &material, sizeof(material));
+        const MaterialUniforms m{{material.emissive, material.unlit ? 1.0f : 0.0f, 0.0f, 0.0f}};
+        SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
         SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
         ++stats.draws;
         stats.instances += ref.out_count;
         stats.triangles += static_cast<u64>(ref.mesh->index_count / 3) * ref.out_count;
     }
     SDL_EndGPURenderPass(pass);
+    if (view->_hdr) {
+        finish_hdr(commands, *view);
+    }
     resume_2d();
     return true;
 }

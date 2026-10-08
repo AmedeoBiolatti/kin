@@ -33,6 +33,16 @@ struct View3DOptions {
     // What shows where nothing is drawn; transparent lets what is under the
     // view show through.
     Color background = colors::transparent;
+    // Light kept past white (a float picture), exposed and tonemapped (ACES:
+    // brights roll off, the darkest tones darken a little) on its way to the
+    // 2D frame; left linear for an HDR 2D pipeline, which tonemaps itself.
+    // On with bloom.
+    bool hdr = false;
+    f32 exposure = 1.0f;
+    // A glow round what is brighter than `bloom_threshold` (linear), this
+    // strong (0: none). Emissive materials past 1 glow.
+    f32 bloom = 0.0f;
+    f32 bloom_threshold = 1.0f;
 };
 
 // What the last render() drew.
@@ -40,6 +50,8 @@ struct Render3DStats {
     u32 draws = 0;     // draw calls
     u32 instances = 0; // meshes drawn
     u32 culled = 0;    // meshes skipped, outside the view
+    u32 shadow_draws = 0; // draw calls into the shadow map
+    u32 lights = 0;    // point lights used
     u64 triangles = 0;
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };

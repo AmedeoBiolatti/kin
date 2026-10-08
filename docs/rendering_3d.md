@@ -69,9 +69,15 @@ lights, and draws.
   the next draw is added).
 
 `kin::Material3D`: `color` (times the mesh's vertex colours and each
-instance's tint), `emissive` (light of its own, a share of its colour),
-`unlit`, `double_sided` (back faces are culled otherwise). A transform that
-mirrors turns a mesh inside out: draw it double-sided.
+instance's tint), `texture` (the base colour's, by the mesh's UVs),
+`emissive` (light of its own, a share of its colour), `unlit`, `double_sided`
+(back faces are culled otherwise), `blend` and `casts_shadow`. A transform
+that mirrors turns a mesh inside out: draw it double-sided.
+
+`blend`: `Opaque` (the default), `Alpha` (over what is behind by its alpha;
+drawn after the opaque, furthest first) or `Additive` (adds light: sparks,
+tracers, flashes, in any order). Transparent draws are depth-tested but don't
+hide what is behind them.
 
 Copies wholly outside the camera's view are skipped (`scene.cull`, on by
 default): each is tested as its mesh's bounding sphere, moved and scaled with
@@ -84,10 +90,31 @@ which then never sink into a wall. It is drawn in the same pass, in its own
 slice of the depth range.
 
 Lights: `scene.lights.sun` (`direction`, toward the light; `color`, linear,
-above 1 is brighter) and `scene.lights.ambient`. Light is added in linear
-light; the result is stored as the 2D pipeline stores colour (encoded in a
-gamma scene, linear in a linear one, above white in an HDR one, where bloom
-and tonemapping pick it up).
+above 1 is brighter), `scene.lights.ambient`, and point lights
+(`scene.add_light({position, color, radius})`, fading to nothing at the
+radius: muzzle flashes, explosions, lamps). At most 16 point lights light a
+frame: those whose reach is in view, the strongest and nearest first; point
+lights are cleared with the draws. Light is added in linear light; the result
+is stored as the 2D pipeline stores colour, or kept HDR (see Views).
+
+The sun casts shadows over `scene.lights.shadow_area`, a box round what
+casts and receives them (the level): one shadow map
+(`shadow_resolution`, 2048 texels by default) over that box, filtered over
+3x3 taps. Opaque meshes cast (`casts_shadow`); copies culled from the
+camera still cast when the sun sees them. A smaller box is sharper. The
+overlay gets no shadows.
+
+## Models
+
+`r3d.load_model("models/crate.glb")` reads a glTF 2.0 file (`.glb`, or
+`.gltf` with its buffers and images beside it) through the content folder or
+pack: each primitive a mesh, placed by its node, with its material's base
+colour and texture (mipmapped; nearest when the file's sampler asks), emissive
+light, `BLEND` as alpha, double-sided and `KHR_materials_unlit`.
+`scene.draw(model, transform)` draws its parts. A `kin::ModelFile` keeps one
+loaded and `poll()` loads it again when the file changes. Not read yet:
+skins, animations, morph targets, metal and roughness, normal maps, alpha
+`MASK` (drawn opaque).
 
 ## Entities
 
@@ -130,16 +157,25 @@ health bars) and `camera.ray(point, rect)` (what a click points at;
 
 ## Views
 
-`Renderer3D::create_view(size, {.samples, .background})`: `samples` is MSAA
-(1, 2, 4 or 8, fewer where the device has fewer); `background` shows where
-nothing is drawn (transparent lets the 2D under the view show). `render(view,
+`Renderer3D::create_view(size, {.samples, .background, .hdr, .exposure,
+.bloom, .bloom_threshold})`: `samples` is MSAA (1, 2, 4 or 8, fewer where the
+device has fewer); `background` shows where nothing is drawn (transparent lets
+the 2D under the view show).
+
+`hdr` draws into a float picture that keeps light past white, then exposes
+and tonemaps it (ACES: brights roll off, the darkest tones darken a little)
+on its way to the 2D frame; an HDR 2D pipeline gets it linear and tonemaps
+it with everything else. `bloom` (its strength; it turns `hdr` on) glows
+round what is brighter than `bloom_threshold`: emissive materials past 1,
+lit by strong lights. The glow belongs to the view, so 2D drawn over it
+(a HUD) stays crisp. `render(view,
 scene)` draws the scene into it, recorded between the 2D drawn before and
 after; a view keeps its picture until rendered again, so a still model needs
 no rendering each frame. `resize(view, size)` gives it a new size and texture.
 
 `Renderer3D::capabilities()` says what the device has (depth bits, most
-samples); `stats()` what the last render drew (draw calls, instances,
-triangles, CPU time).
+samples); `stats()` what the last render drew (draw calls, instances, copies
+culled, shadow draws, point lights, triangles, CPU time).
 
 ## Cost
 
@@ -149,5 +185,5 @@ instanced draw of 20,000 boxes takes about 0.2 ms of CPU in `render()` and
 written straight into the upload memory, on the renderer's job system above
 8,192 of them (`renderer.set_job_system`). Instance what repeats.
 
-Not yet: textures on meshes, shadows, transparency, point lights, picking,
-model files (see [the plan](3d_plan.md)).
+Not yet: picking, wireframe, skinned meshes, PBR materials (see
+[the plan](3d_plan.md)).

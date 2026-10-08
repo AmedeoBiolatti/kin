@@ -71,6 +71,10 @@ BreachLevel::BreachLevel() : _cells(static_cast<std::size_t>(width * depth)) {
     ramp(36, 4, 39, 7, 0.0f, 1.0f, 0);
     ramp(9, 25, 12, 28, 0.0f, 1.0f, 1);
     ramp(36, 25, 39, 28, 0.0f, 1.0f, 0);
+    // Crates, a metre high: in the way, or jumped onto.
+    for (const auto [x, z] : std::array<std::pair<int, int>, 8>{{{19, 5}, {20, 5}, {28, 26}, {29, 26}, {17, 22}, {31, 10}, {11, 17}, {36, 13}}}) {
+        _cells[static_cast<std::size_t>(z * width + x)] = {Kind::Floor, crate_height, crate_height, 0, true};
+    }
     // Pillars to take cover behind.
     for (const auto [x, z] : std::array<std::pair<int, int>, 6>{{{13, 5}, {33, 5}, {13, 25}, {33, 25}, {7, 15}, {39, 15}}}) {
         wall(x, z, x + 2, z + 2);
