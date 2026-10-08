@@ -1519,11 +1519,91 @@ and stability features (SSIM, edges, creases), and AO and cascades matter most i
 
 ### G3 — Adaptive meshes, GPU-driven drawing
 
-Culling in compute (frustum, and occlusion against the last frame's depth)
-into indirect draws; meshes split into clusters of about 128 triangles with
-simpler versions of each (meshoptimizer), chosen each frame by their error
-on screen, crack-free. Checks: the kiln and the crowd, against full detail
-and against before.
+Starting point (G2 done; the harness at 1280 x 720, 4x MSAA): the kiln is one
+5.15 M triangle model in 13 draws and costs 4.0-4.3 ms of GPU; the crowd (the
+Signal Breach deck and 20,000 enemies) is 1.0-2.6 M triangles in 4 instanced
+draws, 0.6-1.3 ms of GPU and 0.2 ms of CPU `render()` (after the G2 review the
+CPU culling and filling are parallel and cheap). So two different cases:
+one huge mesh whose triangles are mostly smaller than a pixel, and many
+copies of small meshes whose far copies need fewer triangles.
+
+SDL_GPU has what this needs, and has limits to design round: compute writing
+to storage buffers (used since G1b), indexed indirect draws with a count fixed
+at record time (no draw count read from the GPU, so culled draws are written
+with an instance count of 0, or the work is compacted into one draw),
+vertex pulling from storage buffers (instances already do). Nothing here uses
+mesh shaders, which SDL_GPU does not have.
+
+Every step is opt-in (a mesh built with levels, a scene setting), and without
+it the pictures are the same to the bit. A picture with levels is judged
+against the same scene at full detail (what the error costs) and against
+before (what it saves): the error is bounded in pixels (default 1).
+
+#### G3a — Levels of detail for meshes
+
+Adds meshoptimizer (MIT; FetchContent like cgltf; see Decisions wanted).
+`Renderer3D::create_mesh(data, {.levels = n})` builds, at load, a chain of
+simpler versions (`meshopt_simplify`, attribute-aware: normals and uvs keep
+their weight; borders locked where a material or a seam would show), each
+with the object-space error it introduces (`meshopt_simplifyScale`). Per copy,
+the renderer picks the level whose error projects to under the bound on
+screen (`error * scale / distance * focal`), with hysteresis to avoid
+popping, and with the copy's own scale; the shadow and pre-pass use the same
+level as the main pass (a coarser one for shadows is a later option). Copies
+of one mesh at one level are one instanced draw, so a draw becomes up to
+`levels` draws. First on the CPU in the parallel cull (the copies are already
+visited there), which makes the quality and the cost measurable before any
+GPU work. Checks: crowd (triangles and GPU ms against before; the picture
+against full detail, which should differ by under a pixel's worth of edge),
+the kiln as one mesh (it will show the limit of whole-mesh levels: the near
+part cannot be coarse and the far part fine), build time at load.
+
+#### G3b — Clusters
+
+For one big mesh the unit is a cluster: about 128 triangles
+(`meshopt_buildMeshlets`), with a bounding sphere and cone for culling.
+Clusters are grouped (4 or so), each group simplified with its border locked
+to the neighbours' (`meshopt_SimplifyLockBorder`), then re-split, up the
+levels into a hierarchy (a DAG, as Nanite's), so that every cut through it is
+crack-free: a cluster is drawn when its own error is under the bound on
+screen and its parent's is not, which needs no communication between
+neighbours. Stored as storage buffers (cluster table, a vertex and an index
+pool); built at load (the kiln's 5 M triangles take seconds: measure, and say
+whether a cache is needed). Checks: the hierarchy's invariants (every cut
+covers the surface once, errors grow up the levels, no cracks: a test draws a
+cut and counts open edges), and the build's time and memory.
+
+#### G3c — Culling and drawing on the GPU
+
+Compute selects, per frame, what is drawn: a pass over the copies (frustum
+and the level), then over the clusters of the surviving copies (the cut by
+error, the frustum, the cone), writing a list of visible clusters, then a
+second pass that compacts their triangles' indices into one buffer and
+writes the indirect arguments (one indirect draw a mesh and material, as
+a copy's own `GpuInstance3D` is already read from a storage buffer, vertices
+read through the compacted indices). The shadow passes (one a cascade) and
+the pre-pass select the same way against their own frusta, from the same
+cluster tables. The CPU culling stays for scenes that don't opt in, and for
+GPUs without storage-buffer compute. Checks: the kiln (the aim: GPU ms and
+triangles drawn against before, with the picture within the bound of full
+detail), the crowd (CPU `render()` ms should fall further, GPU stay level),
+`stats` (clusters tested, drawn, triangles).
+
+#### G3d — Occlusion culling
+
+A depth pyramid (Hi-Z) from the last frame's depth (reprojected by the
+camera's motion; a conservative bound, or two passes as the standard
+technique: draw what was visible, test the rest against the new depth,
+draw those that pass), tested in the same compute passes as G3c.
+Worth it only where much is hidden: the kiln's inside, Sponza's galleries,
+the deck seen from the side. Checks: those, with the picture the same to
+within a pixel of edge and no pop-in when the camera turns; the cost of the
+pyramid against what it culls. May be cut if it saves nothing measurable.
+
+Checks across G3: the kiln and the crowd against full detail and against
+before (the plan's own check), on the G0 harness with a new label a step;
+`truth` is not re-rendered (the pictures are judged against our own full
+detail, as the error is ours to bound).
 
 ### G4 — Ray tracing in compute
 
@@ -1589,3 +1669,7 @@ over the server) once an agent needs them.
 2. **Gamepad**: wait for kin's own gamepad input, or add aiming with one in
    M2.
 3. **Whether the studio's parity (M4) stays in this branch** or follows it.
+4. **meshoptimizer as a dependency** (G3): MIT, small, C++, fetched like
+   cgltf, used only by the experimental 3D option (levels, clusters). The
+   alternative is writing the simplifier and meshlet builder here, which is
+   weeks of work to match it.
