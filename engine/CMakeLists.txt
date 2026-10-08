@@ -159,8 +159,9 @@ if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
 if(KIN_EXPERIMENTAL_3D)
-    target_sources(kin_engine PRIVATE src/render3d/camera3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
-                                      src/render3d/scene3d.cpp src/renderer/gpu/gpu_renderer3d.cpp)
+    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
+                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp
+                                      src/renderer/gpu/gpu_renderer3d.cpp)
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
 endif()
 if(KIN_SHIPPING)

@@ -37,6 +37,11 @@
       "paused_hint": "P resume / R new run",
       "ended_hint": "R new run"
     },
+    "breach": {
+      "name": "SIGNAL BREACH",
+      "controls": "CLICK to play / WASD move / mouse look / LMB fire / SPACE jump / SHIFT dash / ESC pause / B autoplay",
+      "paused_hint": "CLICK resume / ESC quit / R new run"
+    },
     "results": {
       "secured": "SECTOR SECURED",
       "lost": "SIGNAL LOST",

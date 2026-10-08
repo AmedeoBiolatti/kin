@@ -54,7 +54,7 @@ a shape from shapes. `Renderer3D::create_mesh` keeps it on the GPU as a
 `kin::Mesh` (cheap to copy). Meshes may outlive the renderer.
 
 Shapes made in code (`kin::meshes`): `box`, `plane`, `sphere`, `cylinder`,
-`cone`, `torus`, `star_prism`, `octahedron`.
+`cone`, `torus`, `star_prism`, `octahedron`, `wedge` (a ramp).
 
 ## Scenes
 
@@ -73,11 +73,47 @@ instance's tint), `emissive` (light of its own, a share of its colour),
 `unlit`, `double_sided` (back faces are culled otherwise). A transform that
 mirrors turns a mesh inside out: draw it double-sided.
 
+Copies wholly outside the camera's view are skipped (`scene.cull`, on by
+default): each is tested as its mesh's bounding sphere, moved and scaled with
+it, and only the visible ones are sent to the GPU. `stats().culled` counts
+the rest.
+
+`scene.overlay()` is a scene drawn over this one, in front of everything in
+it, with its own camera and this scene's lights: a first-person gun or hands,
+which then never sink into a wall. It is drawn in the same pass, in its own
+slice of the depth range.
+
 Lights: `scene.lights.sun` (`direction`, toward the light; `color`, linear,
 above 1 is brighter) and `scene.lights.ambient`. Light is added in linear
 light; the result is stored as the 2D pipeline stores colour (encoded in a
 gamma scene, linear in a linear one, above white in an HDR one, where bloom
 and tonemapping pick it up).
+
+## Entities
+
+`kin/ecs/render3d.hpp` puts meshes on ECS entities: `Transform3D` (position,
+rotation, scale, relative to the flecs parent), `WorldTransform3D` (added with
+it, composed through the hierarchy) and `MeshRenderer` (mesh, material,
+tint). `WorldRenderState3D::propagate_transforms()` then `collect(scene)` turn
+them into one instanced draw a mesh and material.
+
+```cpp
+kin::WorldRenderState3D state{world};
+world.entity().set(kin::Transform3D{.position = {2, 0, 0}}).set(kin::MeshRenderer{.mesh = crate});
+// each frame
+state.propagate_transforms();
+state.collect(scene);
+```
+
+## First person
+
+`Window::set_relative_mouse(true)` captures the mouse: the pointer is hidden
+and held, and `Input::frame_mouse_motion()` reports how far it moved since
+the last rendered frame (window pixels). Turn the camera with it in
+`render()`, so the view answers within the frame; the simulation reads the
+look at its next step. `Input::mouse_motion()` is the same for `update()`.
+Agents send motion with the server's `input.mouse {dx, dy}`.
+[Signal Breach](../examples/signal_breach/main.cpp) does all of this.
 
 ## Cameras
 
@@ -113,5 +149,5 @@ instanced draw of 20,000 boxes takes about 0.2 ms of CPU in `render()` and
 written straight into the upload memory, on the renderer's job system above
 8,192 of them (`renderer.set_job_system`). Instance what repeats.
 
-Not yet: textures on meshes, shadows, culling, transparency, point lights,
-picking, model files (see [the plan](3d_plan.md)).
+Not yet: textures on meshes, shadows, transparency, point lights, picking,
+model files (see [the plan](3d_plan.md)).

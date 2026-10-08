@@ -316,6 +316,17 @@ MeshData star_prism(i32 points, f32 outer, f32 inner, f32 height) {
     return m;
 }
 
+MeshData wedge(Vec3f size) {
+    const Vec3f h = size * 0.5f;
+    MeshData m;
+    quad(m, {-h.x, -h.y, h.z}, {h.x, -h.y, h.z}, {h.x, h.y, -h.z}, {-h.x, h.y, -h.z});     // the slope
+    quad(m, {h.x, -h.y, -h.z}, {-h.x, -h.y, -h.z}, {-h.x, h.y, -h.z}, {h.x, h.y, -h.z});   // the back, -Z
+    quad(m, {-h.x, -h.y, -h.z}, {h.x, -h.y, -h.z}, {h.x, -h.y, h.z}, {-h.x, -h.y, h.z});   // the floor, -Y
+    triangle(m, {h.x, -h.y, h.z}, {h.x, -h.y, -h.z}, {h.x, h.y, -h.z});                    // +X side
+    triangle(m, {-h.x, -h.y, -h.z}, {-h.x, -h.y, h.z}, {-h.x, h.y, -h.z});                 // -X side
+    return m;
+}
+
 MeshData octahedron(f32 radius) {
     MeshData m;
     const Vec3f top{0.0f, radius, 0.0f}, bottom{0.0f, -radius, 0.0f};

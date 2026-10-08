@@ -22,9 +22,24 @@ endforeach()
 kin_game(signal_siege TITLE "Signal Siege")
 kin_game(run_observatory TITLE "Run Observatory" NO_CONTENT)
 
+# Signal Breach: Signal Siege first person, on the experimental 3D renderer
+# (docs/3d_plan.md); it shares Signal Siege's language files.
+if(KIN_EXPERIMENTAL_3D)
+    add_library(kin_breach STATIC breach.cpp breach_view.cpp)
+    target_include_directories(kin_breach PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(kin_breach PUBLIC kin_example_workloads)
+    kin_enable_release_optimizations(kin_breach)
+    add_executable(signal_breach signal_breach/main.cpp)
+    target_link_libraries(signal_breach PRIVATE kin_breach)
+    kin_game(signal_breach TITLE "Signal Breach" CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/content")
+endif()
+
 if(BUILD_TESTING)
     add_executable(kin_example_tests example_tests.cpp)
     target_link_libraries(kin_example_tests PRIVATE kin_example_workloads)
+    if(KIN_EXPERIMENTAL_3D)
+        target_link_libraries(kin_example_tests PRIVATE kin_breach)
+    endif()
     target_compile_definitions(kin_example_tests PRIVATE KIN_GAME_CONTENT_NAME="signal_siege"
         KIN_GAME_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/content")
     target_compile_options(kin_example_tests PRIVATE

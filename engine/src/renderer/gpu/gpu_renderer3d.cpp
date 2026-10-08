@@ -241,6 +241,27 @@ bool GpuRenderer3D::resize_view(IView3DBackend& base, Vec2i size) {
     return true;
 }
 
+namespace {
+
+// A view's six bounding planes from its view-projection matrix, reverse Z:
+// near at depth 1, far at 0. An infinite far plane has no normal.
+GpuFrustum frustum_of(const Mat4f& m) {
+    const auto row = [&](int r) { return Vec4f{m.at(r, 0), m.at(r, 1), m.at(r, 2), m.at(r, 3)}; };
+    const Vec4f r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
+    const auto add = [](Vec4f a, Vec4f b, f32 k) { return Vec4f{a.x + k * b.x, a.y + k * b.y, a.z + k * b.z, a.w + k * b.w}; };
+    GpuFrustum f;
+    for (const Vec4f p : {add(r3, r0, 1.0f), add(r3, r0, -1.0f), add(r3, r1, 1.0f), add(r3, r1, -1.0f),
+                          add(r3, r2, -1.0f), r2}) {
+        const f32 n = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        if (n > 1e-6f) {
+            f.planes[f.count++] = {p.x / n, p.y / n, p.z / n, p.w / n};
+        }
+    }
+    return f;
+}
+
+} // namespace
+
 bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DStats& stats) {
     auto* view = dynamic_cast<GpuView3D*>(&base);
     if (!view || !_vertex_shader || !_fragment_shader) {
@@ -250,99 +271,172 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     if (view->_format != _owner->_target_format && !make_targets(*view)) {
         return false;
     }
-    const std::span<const Scene3D::Draw> draws = scene.draws();
-    const std::span<const MeshInstance> instances = scene.instances();
+    const f32 aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(view->_size.y);
+    const Scene3D* overlay = scene.overlay_if_any();
+    const std::array<const Scene3D*, 2> scenes{&scene, overlay && !overlay->draws().empty() ? overlay : nullptr};
+    std::array<Mat4f, 2> view_projections{};
+    std::array<GpuFrustum, 2> frustums{};
 
-    // Pipeline by pipeline, mesh by mesh: fewer binds.
-    _order.clear();
-    for (u32 i = 0; i < static_cast<u32>(draws.size()); ++i) {
-        if (draws[i].count > 0 && dynamic_cast<const GpuMesh3D*>(draws[i].mesh.backend().get())) {
-            _order.push_back(i);
+    // The draws of both, each with its instances where the scene keeps them.
+    _refs.clear();
+    for (u32 s = 0; s < 2; ++s) {
+        if (!scenes[s]) {
+            continue;
+        }
+        view_projections[s] = scenes[s]->camera.view_projection(aspect);
+        frustums[s] = frustum_of(view_projections[s]);
+        for (const Scene3D::Draw& draw : scenes[s]->draws()) {
+            const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+            if (draw.count > 0 && mesh) {
+                const bool cull = scenes[s]->cull;
+                const Bounds3& b = draw.mesh.bounds();
+                _refs.push_back({&draw, scenes[s]->instances().data() + draw.first, mesh, s, cull ? &frustums[s] : nullptr,
+                                 b.center(), b.radius(), 0, 0});
+            }
         }
     }
-    std::stable_sort(_order.begin(), _order.end(), [&](u32 a, u32 b) {
-        const bool culled_a = !draws[a].material.double_sided, culled_b = !draws[b].material.double_sided;
-        if (culled_a != culled_b) {
-            return culled_a;
-        }
-        return draws[a].mesh.backend().get() < draws[b].mesh.backend().get();
-    });
 
-    // Every instance, straight into the upload memory; big scenes on the workers.
-    if (!_order.empty()) {
-        const u32 bytes = static_cast<u32>(instances.size() * sizeof(GpuInstance3D));
+    // Pieces of draws, and tasks of about `chunk` instances each (a big draw
+    // split, small ones taken together), for the workers when there are many.
+    constexpr u32 chunk = 4096;
+    _pieces.clear();
+    _tasks.assign(1, 0);
+    u32 total = 0, in_task = 0;
+    for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+        const u32 count = _refs[r].draw->count;
+        for (u32 begin = 0; begin < count;) {
+            const u32 end = std::min(count, begin + (chunk - in_task));
+            _pieces.push_back({r, begin, end, total + begin, 0});
+            in_task += end - begin;
+            begin = end;
+            if (in_task == chunk) {
+                _tasks.push_back(static_cast<u32>(_pieces.size()));
+                in_task = 0;
+            }
+        }
+        total += count;
+    }
+    if (_tasks.back() != _pieces.size()) {
+        _tasks.push_back(static_cast<u32>(_pieces.size()));
+    }
+    JobSystem* jobs = _owner->_jobs && total >= 2 * chunk ? _owner->_jobs : nullptr;
+    const auto each_task = [&](const std::function<void(const Piece&, u32)>& body) {
+        const auto run = [&](u32 t) {
+            for (u32 p = _tasks[t]; p < _tasks[t + 1]; ++p) {
+                body(_pieces[p], p);
+            }
+        };
+        if (jobs && _tasks.size() > 2) {
+            jobs->parallel_for(static_cast<i32>(_tasks.size() - 1), [&](i32 t) { run(static_cast<u32>(t)); });
+        } else {
+            for (u32 t = 0; t + 1 < _tasks.size(); ++t) {
+                run(t);
+            }
+        }
+    };
+
+    // What the cameras see: each copy's sphere (its mesh's, moved and scaled
+    // with it) against the planes. Then where each draw's visible copies go.
+    _visible.resize(_pieces.size() > 0 ? total : 0);
+    std::vector<u32> piece_visible(_pieces.size(), 0);
+    each_task([&](const Piece& piece, u32 index) {
+        const DrawRef& ref = _refs[piece.ref];
+        u32 seen = 0;
+        for (u32 i = piece.begin; i < piece.end; ++i) {
+            bool in = true;
+            if (ref.frustum) {
+                const Mat4f& t = ref.instances[i].transform;
+                const Vec3f c = t.apply(ref.center);
+                const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
+                const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
+                const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
+                const f32 r = ref.radius * std::sqrt(std::max({sx, sy, sz}));
+                for (u32 k = 0; k < ref.frustum->count && in; ++k) {
+                    const Vec4f& p = ref.frustum->planes[k];
+                    in = p.x * c.x + p.y * c.y + p.z * c.z + p.w >= -r;
+                }
+            }
+            _visible[piece.flat + i - piece.begin] = in ? 1 : 0;
+            seen += in ? 1u : 0u;
+        }
+        piece_visible[index] = seen;
+    });
+    u32 visible_total = 0;
+    for (u32 p = 0; p < static_cast<u32>(_pieces.size()); ++p) {
+        DrawRef& ref = _refs[_pieces[p].ref];
+        if (_pieces[p].begin == 0) {
+            ref.out_first = visible_total;
+        }
+        _pieces[p].out = visible_total;
+        visible_total += piece_visible[p];
+        ref.out_count += piece_visible[p];
+    }
+    stats.culled = total - visible_total;
+
+    // The visible copies, straight into the upload memory.
+    if (visible_total > 0) {
+        const u32 bytes = static_cast<u32>(visible_total * sizeof(GpuInstance3D));
         if (!_instances || _instances->size() < bytes) {
             const u32 size = std::max({bytes, _instances ? _instances->size() * 2 : 0u, 64u * 1024u});
             _instances = std::make_shared<GpuBuffer>(
                 _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, size));
         }
-        const auto convert = [&](const Scene3D::Draw& draw, u32 begin, u32 end, u8* out) {
-            const Color m = draw.material.color;
-            const f32 mr = _srgb_to_linear[m.r], mg = _srgb_to_linear[m.g], mb = _srgb_to_linear[m.b];
-            const f32 ma = static_cast<f32>(m.a) / 255.0f;
-            for (u32 i = begin; i < end; ++i) {
-                const MeshInstance& instance = instances[i];
-                GpuInstance3D g;
-                std::memcpy(g.model, instance.transform.m, sizeof(g.model));
-                const Mat4f& t = instance.transform;
-                const Vec3f c0{t.m[0], t.m[1], t.m[2]}, c1{t.m[4], t.m[5], t.m[6]}, c2{t.m[8], t.m[9], t.m[10]};
-                // Cofactors: the inverse transpose times the determinant, made
-                // positive so a mirror doesn't turn normals in.
-                const Vec3f x = cross(c1, c2);
-                const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
-                const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
-                const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
-                std::memcpy(g.normal, normal, sizeof(g.normal));
-                const Color tint = instance.tint;
-                g.color[0] = mr * _srgb_to_linear[tint.r];
-                g.color[1] = mg * _srgb_to_linear[tint.g];
-                g.color[2] = mb * _srgb_to_linear[tint.b];
-                g.color[3] = ma * static_cast<f32>(tint.a) / 255.0f;
-                std::memcpy(out + static_cast<std::size_t>(i) * sizeof(GpuInstance3D), &g, sizeof(g));
-            }
-        };
         const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
-            JobSystem* jobs = _owner->_jobs;
-            constexpr u32 chunk = 4096;
-            if (!jobs || instances.size() < 2 * chunk) {
-                for (const Scene3D::Draw& draw : draws) {
-                    convert(draw, draw.first, draw.first + draw.count, out.data());
-                }
-                return;
-            }
-            // Pieces of draws, and tasks of about `chunk` instances each: a big
-            // draw split, small ones taken together.
-            struct Piece {
-                u32 draw, begin, end;
-            };
-            std::vector<Piece> pieces;
-            std::vector<u32> tasks{0}; // where each task's pieces start
-            u32 in_task = 0;
-            for (u32 d = 0; d < static_cast<u32>(draws.size()); ++d) {
-                const u32 end = draws[d].first + draws[d].count;
-                for (u32 begin = draws[d].first; begin < end;) {
-                    const u32 piece_end = std::min(end, begin + (chunk - in_task));
-                    pieces.push_back({d, begin, piece_end});
-                    in_task += piece_end - begin;
-                    begin = piece_end;
-                    if (in_task == chunk) {
-                        tasks.push_back(static_cast<u32>(pieces.size()));
-                        in_task = 0;
+            each_task([&](const Piece& piece, u32) {
+                const DrawRef& ref = _refs[piece.ref];
+                const Color m = ref.draw->material.color;
+                const f32 mr = _srgb_to_linear[m.r], mg = _srgb_to_linear[m.g], mb = _srgb_to_linear[m.b];
+                const f32 ma = static_cast<f32>(m.a) / 255.0f;
+                u32 at = piece.out;
+                for (u32 i = piece.begin; i < piece.end; ++i) {
+                    if (!_visible[piece.flat + i - piece.begin]) {
+                        continue;
                     }
-                }
-            }
-            if (tasks.back() != pieces.size()) {
-                tasks.push_back(static_cast<u32>(pieces.size()));
-            }
-            jobs->parallel_for(static_cast<i32>(tasks.size() - 1), [&](i32 t) {
-                for (u32 p = tasks[static_cast<std::size_t>(t)]; p < tasks[static_cast<std::size_t>(t) + 1]; ++p) {
-                    convert(draws[pieces[p].draw], pieces[p].begin, pieces[p].end, out.data());
+                    const MeshInstance& instance = ref.instances[i];
+                    GpuInstance3D g;
+                    std::memcpy(g.model, instance.transform.m, sizeof(g.model));
+                    const Mat4f& t = instance.transform;
+                    const Vec3f c0{t.m[0], t.m[1], t.m[2]}, c1{t.m[4], t.m[5], t.m[6]}, c2{t.m[8], t.m[9], t.m[10]};
+                    // Cofactors: the inverse transpose times the determinant, made
+                    // positive so a mirror doesn't turn normals in.
+                    const Vec3f x = cross(c1, c2);
+                    const f32 sign = dot(c0, x) < 0.0f ? -1.0f : 1.0f;
+                    const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
+                    const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
+                    std::memcpy(g.normal, normal, sizeof(g.normal));
+                    const Color tint = instance.tint;
+                    g.color[0] = mr * _srgb_to_linear[tint.r];
+                    g.color[1] = mg * _srgb_to_linear[tint.g];
+                    g.color[2] = mb * _srgb_to_linear[tint.b];
+                    g.color[3] = ma * static_cast<f32>(tint.a) / 255.0f;
+                    std::memcpy(out.data() + static_cast<std::size_t>(at++) * sizeof(GpuInstance3D), &g, sizeof(g));
                 }
             });
         };
         // Cycled: a view rendered earlier this frame keeps the instances it drew.
         _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
     }
+
+    // The scene, then the overlay; within each, pipeline by pipeline and mesh
+    // by mesh: fewer binds.
+    _order.clear();
+    for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+        if (_refs[r].out_count > 0) {
+            _order.push_back(r);
+        }
+    }
+    std::stable_sort(_order.begin(), _order.end(), [&](u32 a, u32 b) {
+        const DrawRef& x = _refs[a];
+        const DrawRef& y = _refs[b];
+        if (x.scene != y.scene) {
+            return x.scene < y.scene;
+        }
+        const bool culled_x = !x.draw->material.double_sided, culled_y = !y.draw->material.double_sided;
+        if (culled_x != culled_y) {
+            return culled_x;
+        }
+        return x.mesh < y.mesh;
+    });
 
     // The 2D draws so far first; the pass records between them and the next.
     _owner->ensure_frame();
@@ -380,12 +474,19 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         resume_2d();
         return false;
     }
-    const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), 0.0f, 1.0f};
-    SDL_SetGPUViewport(pass, &viewport);
+    // With an overlay, the scene's depths go in [0, 0.9] and the overlay's in
+    // [0.9, 1]: nearer (reverse Z) than all of the scene, yet depth-tested
+    // against itself, in one pass.
+    const bool overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
+    constexpr f32 split = 0.9f;
+    const auto set_viewport = [&](u32 s) {
+        const f32 lo = s == 0 ? 0.0f : split, hi = s == 0 && overlaid ? split : 1.0f;
+        const SDL_GPUViewport viewport{0.0f, 0.0f, static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), lo, hi};
+        SDL_SetGPUViewport(pass, &viewport);
+    };
+    set_viewport(0);
 
     DrawUniforms draw_uniforms{};
-    const Mat4f view_projection = scene.camera.view_projection(static_cast<f32>(view->_size.x) / static_cast<f32>(view->_size.y));
-    std::memcpy(draw_uniforms.view_projection, view_projection.m, sizeof(draw_uniforms.view_projection));
     const Vec3f sun = normalize(scene.lights.sun.direction);
     const Vec3f sun_color = scene.lights.sun.color;
     const Vec3f ambient = scene.lights.ambient;
@@ -398,10 +499,16 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     SDL_GPUBuffer* storage = _instances ? _instances->handle() : nullptr;
     SDL_GPUGraphicsPipeline* bound = nullptr;
     const GpuMesh3D* bound_mesh = nullptr;
+    u32 current_scene = 0;
+    std::memcpy(draw_uniforms.view_projection, view_projections[0].m, sizeof(draw_uniforms.view_projection));
     for (const u32 index : _order) {
-        const Scene3D::Draw& draw = draws[index];
-        const auto* mesh = static_cast<const GpuMesh3D*>(draw.mesh.backend().get());
-        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !draw.material.double_sided);
+        const DrawRef& ref = _refs[index];
+        if (ref.scene != current_scene) {
+            current_scene = ref.scene;
+            set_viewport(current_scene);
+            std::memcpy(draw_uniforms.view_projection, view_projections[current_scene].m, sizeof(draw_uniforms.view_projection));
+        }
+        SDL_GPUGraphicsPipeline* p = pipeline(view->_format, view->_samples, !ref.draw->material.double_sided);
         if (!p) {
             continue;
         }
@@ -410,22 +517,22 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
             SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
             bound = p;
         }
-        if (mesh != bound_mesh) {
-            const SDL_GPUBufferBinding vertices{mesh->vertices, 0};
+        if (ref.mesh != bound_mesh) {
+            const SDL_GPUBufferBinding vertices{ref.mesh->vertices, 0};
             SDL_BindGPUVertexBuffers(pass, 0, &vertices, 1);
-            const SDL_GPUBufferBinding indices{mesh->indices, 0};
+            const SDL_GPUBufferBinding indices{ref.mesh->indices, 0};
             SDL_BindGPUIndexBuffer(pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-            bound_mesh = mesh;
+            bound_mesh = ref.mesh;
         }
-        draw_uniforms.first[0] = draw.first;
+        draw_uniforms.first[0] = ref.out_first;
         SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
-        material.params[0] = draw.material.emissive;
-        material.params[1] = draw.material.unlit ? 1.0f : 0.0f;
+        material.params[0] = ref.draw->material.emissive;
+        material.params[1] = ref.draw->material.unlit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &material, sizeof(material));
-        SDL_DrawGPUIndexedPrimitives(pass, mesh->index_count, draw.count, 0, 0, 0);
+        SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->index_count, ref.out_count, 0, 0, 0);
         ++stats.draws;
-        stats.instances += draw.count;
-        stats.triangles += static_cast<u64>(mesh->index_count / 3) * draw.count;
+        stats.instances += ref.out_count;
+        stats.triangles += static_cast<u64>(ref.mesh->index_count / 3) * ref.out_count;
     }
     SDL_EndGPURenderPass(pass);
     resume_2d();

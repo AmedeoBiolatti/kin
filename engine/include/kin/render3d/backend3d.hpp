@@ -39,6 +39,7 @@ struct View3DOptions {
 struct Render3DStats {
     u32 draws = 0;     // draw calls
     u32 instances = 0; // meshes drawn
+    u32 culled = 0;    // meshes skipped, outside the view
     u64 triangles = 0;
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };

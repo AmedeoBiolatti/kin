@@ -42,9 +42,19 @@ void Scene3D::draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms
     }
 }
 
+Scene3D& Scene3D::overlay() {
+    if (!_overlay) {
+        _overlay = std::make_unique<Scene3D>();
+    }
+    return *_overlay;
+}
+
 void Scene3D::clear() {
     _draws.clear();
     _instances.clear();
+    if (_overlay) {
+        _overlay->clear();
+    }
 }
 
 } // namespace kin

@@ -14,6 +14,7 @@
 #include <kin/render3d/mesh.hpp>
 #include <kin/renderer/color.hpp>
 
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -50,8 +51,22 @@ struct Lights3D {
 
 class Scene3D {
 public:
+    Scene3D() = default;
+    Scene3D(Scene3D&&) noexcept = default;
+    Scene3D& operator=(Scene3D&&) noexcept = default;
+
     Camera3D camera{};
     Lights3D lights{};
+    // Copies wholly outside the camera's view are skipped (each tested as the
+    // sphere round its mesh's bounds, moved and scaled with it).
+    bool cull = true;
+
+    // What is drawn over the scene, in front of everything in it, seen by its
+    // own camera and lit by this scene's lights: a first-person gun or hands,
+    // which then never sink into a wall. Made on first use; its own overlay
+    // is never drawn.
+    Scene3D& overlay();
+    const Scene3D* overlay_if_any() const { return _overlay.get(); }
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced).
@@ -63,7 +78,8 @@ public:
     // Room for `count` copies of `mesh`, for the caller to fill (from worker
     // threads, say). Valid until the next draw is added.
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material = {});
-    // Takes the draws away (camera and lights stay), keeping their room.
+    // Takes the draws away, the overlay's too (cameras and lights stay),
+    // keeping their room.
     void clear();
 
     struct Draw {
@@ -78,6 +94,7 @@ public:
 private:
     std::vector<Draw> _draws;
     std::vector<MeshInstance> _instances;
+    std::unique_ptr<Scene3D> _overlay;
 };
 
 } // namespace kin

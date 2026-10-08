@@ -127,6 +127,21 @@ scale with the HUD, while movement, aiming, and the visible playfield remain
 independent of UI scale. `--ui-scale 1.5` optionally overrides automatic scaling
 for this app too.
 
+## Signal Breach
+
+Signal Siege seen from inside, first person, on kin's experimental 3D
+renderer (built with `-DKIN_EXPERIMENTAL_3D=ON`; see
+[the plan](../docs/3d_plan.md)). The same three enemy kinds fly round a deck
+of floors, ramps, ledges and pillars; survive 90 seconds and collect cores.
+Signal Siege itself draws in 3D with `signal_siege --view 3d`.
+
+- Click to play: the mouse is captured and looks around.
+- WASD: move; left mouse: fire; Space: jump; Shift: dash.
+- Esc: pause and let the mouse go (again: quit); R: restart; B: autoplay.
+- `--sensitivity DEG` (degrees a pixel, 0.08), `--enemies N`, `--benchmark`.
+- `--latency-probe`: times pushed mouse motion until the camera turns and the
+  frame is presented (printed at exit).
+
 ## Run Observatory
 
 A simulated LLM training tracker. Search experiments by name, model, or status;

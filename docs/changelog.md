@@ -22,6 +22,19 @@ releases may change APIs.
   background.
 - Signal Siege `--view 3d`: the same run drawn in 3D from behind the player,
   with the same checksum.
+- 3D: the scene's overlay (a first-person gun, always in front), frustum
+  culling of every copy (on the job system for big scenes), ramps
+  (`meshes::wedge`), and entities (`Transform3D`, `WorldTransform3D` through
+  the flecs hierarchy, `MeshRenderer`, `WorldRenderState3D`).
+- Mouse look: `Input::mouse_motion()` and `frame_mouse_motion()` (relative
+  motion, whether or not the pointer moves), `Input::set_mouse_motion()`,
+  `Input::last_mouse_motion_event_time_ns()`, and
+  `Window::set_relative_mouse()`. The agent server's `input.mouse` takes
+  `dx`/`dy`. `Key::LeftShift`.
+- Signal Breach (`examples/signal_breach`): Signal Siege first person, on the
+  experimental 3D: a deck with ramps and ledges, enemies flying in 3D, an
+  autopilot for benchmarks and agents, and `--latency-probe` to time mouse
+  motion to the screen.
 
 ## [0.2.6] — 2026-10-07
 

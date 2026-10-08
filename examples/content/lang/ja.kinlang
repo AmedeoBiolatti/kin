@@ -37,6 +37,11 @@
       "paused_hint": "P 再開 / R 新しいラン",
       "ended_hint": "R 新しいラン"
     },
+    "breach": {
+      "name": "SIGNAL BREACH",
+      "controls": "クリック プレイ / WASD 移動 / マウス 視点 / 左ボタン 射撃 / SPACE ジャンプ / SHIFT ダッシュ / ESC 一時停止 / B オートプレイ",
+      "paused_hint": "クリック 再開 / ESC 終了 / R リスタート"
+    },
     "results": {
       "secured": "セクター確保",
       "lost": "シグナル消失",

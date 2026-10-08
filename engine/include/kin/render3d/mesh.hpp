@@ -99,6 +99,9 @@ MeshData torus(f32 radius, f32 tube, i32 segments = 32, i32 sides = 12);
 MeshData star_prism(i32 points, f32 outer, f32 inner, f32 height);
 // Eight faces, `radius` to each corner.
 MeshData octahedron(f32 radius);
+// A ramp in the box of `size`: its slope rising from the +Z edge (floor) to
+// the -Z edge (top); flat faces.
+MeshData wedge(Vec3f size);
 
 } // namespace meshes
 

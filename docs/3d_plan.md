@@ -270,7 +270,94 @@ benchmark, and a screenshot test from the first week.
   player where the camera puts it, the deck lit from the sun's side).
 - Bench: `kin_draw_bench ... meshes` (N instances of a mesh in a view).
 
-### M2 — First person (stage B)
+### M2 — First person (stage B). Done.
+
+What was built:
+
+- **Input**: `Input::mouse_motion()` (for `update()`, used up by a frame's
+  first step) and `frame_mouse_motion()` (for `render()`), as the wheel has;
+  `set_mouse_motion()`; `last_mouse_motion_event_time_ns()`;
+  `Window::set_relative_mouse()` (SDL lets the mouse go while the window is
+  out of focus). `Key::LeftShift`. The agent server's `input.mouse` takes
+  `dx`/`dy`.
+- **3D**: `Scene3D::overlay()`, drawn in the same pass with its own camera and
+  the slice [0.9, 1] of the depth range (reverse Z: in front of the scene's
+  [0, 0.9], depth-tested against itself) instead of a second pass;
+  frustum culling of every copy (its mesh's bounding sphere, moved and scaled
+  with it) in the pass that fills the instances, on the job system for big
+  scenes, then only the visible copies written (`Scene3D::cull`,
+  `Render3DStats::culled`); `meshes::wedge` for ramps; `kin/ecs/render3d.hpp`:
+  `Transform3D`, `WorldTransform3D` (composed through the flecs hierarchy as
+  2D's is), `MeshRenderer`, and `WorldRenderState3D` gathering them into
+  instanced draws.
+- **Signal Breach** (`examples/signal_breach`, `breach.*`, `breach_view.*`):
+  its own simulation, with Signal Siege's three enemy kinds, colours, cores
+  and 90-second run, and its HUD strings (a `breach` section added to the four
+  language files). A 48 x 32 m deck of one-metre cells: floors at 0, 1 and 1.5
+  m, walls 3 m, ramps between; the player walks, steps up to 0.45 m, jumps,
+  dashes (Shift), falls off ledges, and fires along the view (rays against
+  enemy spheres and the deck). Enemies are ECS entities (`Transform3D`,
+  `BreachEnemy`, a `MeshRenderer` given by the view); they fly in 3D over the
+  walls, not round them; plates and rings fire moving spheres when they see
+  the player. Movement splits across threads above 16,384 enemies, firing and
+  damage stay serial. The gun is the overlay (recoil, a bob, a muzzle flash);
+  health bars over damaged plates and damage numbers are placed with
+  `Camera3D::project`. Click captures the mouse; Esc pauses and lets it go,
+  again quits; R restarts, B autoplay. The autopilot aims at the nearest
+  enemy in sight (turning at most 360 degrees a second), walks a loop of
+  waypoints, jumps when stuck; `--benchmark`, headless runs and the server
+  use it.
+
+What was measured (RTX 4080 Laptop, Linux, Vulkan, Release, 1280x800 at 4x
+MSAA; 2026-10-08, with other sessions loading the machine, load average
+about 4):
+
+- **Determinism**: `--check-determinism` (baseline, repeat, one job worker)
+  agrees on every frame: 1,200 frames at 300 enemies (314 entities, 900
+  values a frame) and 600 frames at 20,000 (20,014 entities, the parallel
+  movement path).
+- **Frame times** (`signal_breach --headless --benchmark --seed=7 --enemies N
+  --profile --profile-lines --frames=1200`, three runs, medians):
+
+  | Enemies | frame / p99 | step | ECS gather | `render()` (culling incl.) | GPU | drawn / culled copies |
+  |---|---|---|---|---|---|---|
+  | 2,000 | 0.25 / 1.7-2.1 ms | 0.074 ms | 0.043 ms | 0.066 ms | 0.27-0.29 ms | 2,364 / 1,436 |
+  | 20,000 | 1.61-1.73 / 2.2-2.5 ms | 0.44-0.46 ms | 0.50-0.59 ms | 0.41-0.43 ms | 0.39-0.45 ms | 14,492 / 14,622 |
+
+  The ECS gather (propagating 20,000 transforms and copying them into the
+  scene twice: buckets, then the draw) is the largest part at 20,000 and the
+  first to look at.
+- **Mouse to screen** (`signal_breach --benchmark --latency-probe --enemies
+  2000`, windowed on a 240 Hz display; motion pushed as SDL events every 23
+  ms from another thread, its event timestamp to the frame that turns the
+  camera, and to the next frame's start, after `present`; the OS's input path
+  and the display's scanout are not included):
+
+  | | event to camera | event to presented | GPU frame |
+  |---|---|---|---|
+  | vsync off (frame 0.26 ms) | 0.3-1.2 ms (p95 1.3-1.6) | 1.6-2.6 ms (p95 2.6-3.1) | 0.30-0.40 ms |
+  | vsync on (240 Hz) | 2.1-3.6 ms (p95 4-19) | 6.3-7.3 ms (p95 8-22) | — |
+
+  Two of four vsync runs (and part of one without) stalled for seconds: with
+  the window not on screen the compositor holds its frames. The medians are
+  the useful numbers; the tails depend on the desktop.
+- Tests: `kin-platform` (motion reaches one step, frame motion one frame),
+  `kin-server` (`dx`/`dy`), `kin-render3d` (culling with and without workers,
+  the overlay in front of a nearer wall, ECS transforms and gathering, the
+  wedge faces out), `kin-examples` (Breach's deck heights, ramps, ledges,
+  pillars, jumping, firing, determinism by seed), all passing on the RTX
+  4080 and lavapipe.
+
+Not done, or done differently:
+
+- Signal Breach shares Signal Siege's design (kinds, colours, cores, run
+  length, HUD strings), not its code: the two simulations are separate.
+- Enemies fly through walls; only the player and shots collide with the deck.
+- No title or results screen (a run ends with a banner, R starts another),
+  no sound, no settings screen (`--sensitivity` sets the mouse).
+- Gamepad aiming waits for kin's gamepad input.
+
+The plan as it was:
 
 `examples/signal_breach`: a new simulation beside Signal Siege's (which
 stays as it is), sharing its enemies, spawning and scoring.

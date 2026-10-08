@@ -1,4 +1,5 @@
 #include <kin/core/jobs.hpp>
+#include <kin/ecs/render3d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -121,8 +122,8 @@ Vec3f centroid(const MeshData& m, std::size_t t) {
 }
 
 // Every triangle counter-clockwise from the side its normals point to, and
-// (for shapes round the origin) facing out.
-void check_winding(const MeshData& m, std::string_view name, bool outward) {
+// (for convex shapes) facing away from `inside`, a point within.
+void check_winding(const MeshData& m, std::string_view name, bool outward, Vec3f inside = {}) {
     std::string error;
     if (!m.validate(&error)) {
         std::cerr << name << ": " << error << '\n';
@@ -135,7 +136,7 @@ void check_winding(const MeshData& m, std::string_view name, bool outward) {
         }
         const Vec3f vn = m.vertices[m.indices[t * 3]].normal + m.vertices[m.indices[t * 3 + 1]].normal +
                          m.vertices[m.indices[t * 3 + 2]].normal;
-        if (kin::dot(n, vn) <= 0.0f || (outward && kin::dot(n, centroid(m, t)) <= 0.0f)) {
+        if (kin::dot(n, vn) <= 0.0f || (outward && kin::dot(n, centroid(m, t) - inside) <= 0.0f)) {
             std::cerr << name << ": triangle " << t << " faces the wrong way\n";
             assert(false);
         }
@@ -153,6 +154,10 @@ void test_meshes_face_out() {
     check_winding(kin::meshes::octahedron(1.0f), "octahedron", true);
     check_winding(kin::meshes::star_prism(5, 1.0f, 0.45f, 0.3f), "star", true);
     check_winding(kin::meshes::plane({4.0f, 2.0f}, 3), "plane", false);
+    check_winding(kin::meshes::wedge({2.0f, 1.0f, 3.0f}), "wedge", true, {0.0f, -0.25f, -0.75f});
+    // The ramp: its top along the -Z edge, the floor along +Z.
+    const kin::Bounds3 ramp = kin::meshes::wedge({2.0f, 1.0f, 3.0f}).bounds();
+    assert(ramp.min == (Vec3f{-1.0f, -0.5f, -1.5f}) && ramp.max == (Vec3f{1.0f, 0.5f, 1.5f}));
     // The torus faces away from its tube's centre line.
     const MeshData torus = kin::meshes::torus(2.0f, 0.5f);
     check_winding(torus, "torus", false);
@@ -269,6 +274,51 @@ void test_cameras() {
     assert(top && std::abs(top->pos.y) < 0.01f && std::abs(top->pos.x - 200.0f) < 0.01f);
     const auto right_edge = ortho.project({4.0f, 0.0f, 0.0f}, rect); // twice as wide as high
     assert(right_edge && std::abs(right_edge->pos.x - 400.0f) < 0.01f);
+}
+
+// Entities: transforms composed through the hierarchy, and meshes collected
+// into one instanced draw a mesh and material.
+void test_ecs_entities() {
+    kin::EcsWorld world;
+    kin::WorldRenderState3D state{world};
+    struct Fake final : kin::IMeshBackend {};
+    const kin::Mesh a{std::make_shared<Fake>(), 3, 3, {}};
+    const kin::Mesh b{std::make_shared<Fake>(), 3, 3, {}};
+    auto& w = world.raw();
+    const flecs::entity parent = w.entity().set(kin::Transform3D{.position = {10.0f, 0.0f, 0.0f},
+                                                                 .rotation = kin::Quatf::axis_angle({0, 1, 0}, 90.0f),
+                                                                 .scale = {2.0f, 2.0f, 2.0f}});
+    const flecs::entity child = w.entity().child_of(parent).set(kin::Transform3D{.position = {1.0f, 0.0f, 0.0f}})
+                                    .set(kin::MeshRenderer{.mesh = a});
+    const flecs::entity grandchild = w.entity().child_of(child).set(kin::Transform3D{.position = {0.0f, 1.0f, 0.0f}})
+                                         .set(kin::MeshRenderer{.mesh = a, .tint = Color::rgb(255, 0, 0)});
+    w.entity().set(kin::Transform3D{}).set(kin::MeshRenderer{.mesh = b});
+    w.entity().set(kin::Transform3D{}).set(kin::MeshRenderer{.mesh = a, .material = {.emissive = 1.0f}});
+    w.entity().set(kin::Transform3D{}).set(kin::MeshRenderer{.mesh = a, .visible = false});
+    state.propagate_transforms();
+    // The child: 1 along the parent's x, turned 90 degrees (to -z), twice as far.
+    const Vec3f child_at = child.get<kin::WorldTransform3D>()->position();
+    assert(kin::length(child_at - Vec3f{10.0f, 0.0f, -2.0f}) < 1e-4f);
+    const Vec3f grandchild_at = grandchild.get<kin::WorldTransform3D>()->position();
+    assert(kin::length(grandchild_at - Vec3f{10.0f, 2.0f, -2.0f}) < 1e-4f); // the parent scales it once
+
+    kin::Scene3D scene;
+    state.collect(scene);
+    assert(scene.draws().size() == 3 && scene.instances().size() == 4);
+    std::size_t with_a = 0;
+    for (const auto& draw : scene.draws()) {
+        if (draw.mesh == a && draw.material == kin::Material3D{}) {
+            with_a = draw.count;
+        }
+    }
+    assert(with_a == 2);
+    // Moved, then collected again: the new place, the same draws.
+    child.get_mut<kin::Transform3D>()->position = {0.0f, 0.0f, 0.0f};
+    state.propagate_transforms();
+    assert(kin::length(grandchild.get<kin::WorldTransform3D>()->position() - Vec3f{10.0f, 2.0f, 0.0f}) < 1e-4f);
+    scene.clear();
+    state.collect(scene);
+    assert(scene.draws().size() == 3 && scene.instances().size() == 4);
 }
 
 // --- Without SDL_GPU ---
@@ -454,6 +504,7 @@ void test_gpu_instances_on_workers() {
         const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(0.5f));
         kin::View3D view = r3d.create_view({160, 120});
         kin::Scene3D scene;
+        scene.cull = false; // all of them written (test_gpu_frustum_culling culls)
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         const Mat4f hidden = Mat4f::translation({0.0f, 0.0f, 50.0f}); // behind the camera
         // Small draws first (taken together), then two big ones (split).
@@ -476,6 +527,89 @@ void test_gpu_instances_on_workers() {
         expect(p.at(80, 60), kin::colors::black, "nothing else in view");
         renderer.present();
         renderer.set_job_system(nullptr);
+    });
+}
+
+// Copies outside the view are skipped; the rest still land where they should,
+// in their colours, however the work was split.
+void test_gpu_frustum_culling() {
+    with_gpu("test_gpu_frustum_culling", [](kin::Renderer2D& renderer) {
+        kin::JobSystem jobs;
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({0.8f, 0.8f, 0.8f}));
+        kin::View3D view = r3d.create_view({160, 120});
+        for (const bool workers : {false, true}) {
+            renderer.set_job_system(workers ? &jobs : nullptr);
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            // 12,000 copies: three in view, the rest off to the sides, behind, or
+            // too far up; a big one whose centre is out of view but whose edge is in.
+            auto copies = scene.add_instances(box, 12000, {.unlit = true});
+            for (std::size_t i = 0; i < copies.size(); ++i) {
+                const float side = (i % 3 == 0) ? -40.0f : (i % 3 == 1) ? 40.0f : 0.0f;
+                const float z = (i % 3 == 2) ? 30.0f : 0.0f; // behind the camera
+                copies[i] = {Mat4f::translation({side, 0.0f, z}), kin::colors::white};
+            }
+            copies[5000] = {Mat4f::translation({-2.0f, 0.0f, 0.0f}), Color::rgb(255, 0, 0)};
+            copies[9000] = {Mat4f::translation({2.0f, 0.0f, 0.0f}), Color::rgb(0, 0, 255)};
+            copies[11999] = {Mat4f::translation({0.0f, 1.5f, 0.0f}), Color::rgb(0, 255, 0)};
+            copies[17] = {Mat4f::translation({0.0f, -7.0f, 0.0f}) * Mat4f::scaling({12.0f, 12.0f, 1.0f}), Color::rgb(255, 255, 0)};
+            scene.draw(box, Mat4f::translation({0.0f, 0.0f, 80.0f})); // a draw with nothing in view
+            renderer.clear(kin::colors::black);
+            assert(r3d.render(view, scene));
+            assert(r3d.stats().instances == 4 && r3d.stats().culled == 11997 && r3d.stats().draws == 1);
+            renderer.draw_texture(view.texture(), screen);
+            const Pixels p = read(renderer);
+            const auto at = [&](Vec3f world) { return p.at(scene.camera.project(world, screen)->pos); };
+            expect(at({-2.0f, 0.0f, 0.4f}), Color::rgb(255, 0, 0), "a copy in view");
+            expect(at({2.0f, 0.0f, 0.4f}), Color::rgb(0, 0, 255), "another");
+            expect(at({0.0f, 1.5f, 0.4f}), Color::rgb(0, 255, 0), "the last");
+            expect(p.at(80, 118), Color::rgb(255, 255, 0), "the big one's edge");
+            renderer.present();
+        }
+        renderer.set_job_system(nullptr);
+
+        // Not culled when the scene says so: everything is drawn.
+        kin::Scene3D all;
+        all.cull = false;
+        all.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f});
+        all.draw(box, Mat4f::translation({0.0f, 0.0f, 30.0f}));
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, all) && r3d.stats().instances == 1 && r3d.stats().culled == 0);
+        renderer.present();
+    });
+}
+
+// The overlay (a first-person gun) shows in front of the scene, even of what
+// is nearer the camera than it, and is seen by its own camera.
+void test_gpu_overlay() {
+    with_gpu("test_gpu_overlay", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        kin::View3D view = r3d.create_view({160, 120});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        // A wall right in front of the camera, filling the view.
+        scene.draw(box, Mat4f::translation({0.0f, 0.0f, 5.5f}) * Mat4f::scaling({4.0f, 4.0f, 0.1f}),
+                   {.color = Color::rgb(90, 90, 90), .unlit = true});
+        kin::Scene3D& gun = scene.overlay();
+        gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
+        // Seen by its own camera, 3 m in front of it: further than the wall is from the scene's.
+        gun.draw(box, Mat4f::translation({0.6f, -0.4f, -3.0f}), {.color = Color::rgb(250, 120, 20), .unlit = true});
+        renderer.clear(kin::colors::black);
+        assert(r3d.render(view, scene));
+        assert(r3d.stats().draws == 2 && r3d.stats().instances == 2);
+        renderer.draw_texture(view.texture(), screen);
+        const Pixels p = read(renderer);
+        const auto spot = gun.camera.project({0.6f, -0.4f, -2.5f}, screen);
+        assert(spot);
+        expect(p.at(spot->pos), Color::rgb(250, 120, 20), "the overlay over the wall");
+        expect(p.at(20, 20), Color::rgb(90, 90, 90), "the wall round it");
+        renderer.present();
+
+        // Cleared with the scene.
+        scene.clear();
+        assert(scene.overlay().draws().empty());
     });
 }
 
@@ -602,12 +736,15 @@ int main() {
     test_mesh_validation_and_append();
     test_scene_merges_draws();
     test_cameras();
+    test_ecs_entities();
     test_sdl_renderer_has_no_3d();
     test_gpu_reports_3d();
     test_gpu_depth_and_colour();
     test_gpu_lighting();
     test_gpu_instances();
     test_gpu_instances_on_workers();
+    test_gpu_frustum_culling();
+    test_gpu_overlay();
     test_gpu_culling();
     test_gpu_interleaves_with_2d();
     test_gpu_linear_hdr();

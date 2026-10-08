@@ -112,6 +112,7 @@ public:
     void queue_mouse_button(std::string button, std::string mode);
     // Queue a mouse wheel delta for the next step.
     void queue_mouse_wheel(f32 delta);
+    void queue_mouse_motion(Vec2f delta); // relative, window pixels
     // Queue text input for the next step.
     void queue_text(std::string text);
     // Queue a key for the next step, with modifiers held alongside it. mode is
@@ -129,7 +130,7 @@ public:
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion };
         Kind kind;
         std::string text;  // action name / button name / text input
         std::string mode;  // press / hold / release

@@ -24,6 +24,13 @@ namespace kin::gpu {
 class GpuDevice;
 class GpuTextureBackend;
 
+// A view's bounding planes (xyz the normal, inward, length 1; w the offset),
+// from its view-projection matrix; an infinite far plane is left out.
+struct GpuFrustum {
+    std::array<Vec4f, 6> planes{};
+    u32 count = 0;
+};
+
 // One mesh instance as mesh.vert reads it (std430): 128 bytes.
 struct GpuInstance3D {
     f32 model[16];
@@ -100,7 +107,30 @@ private:
     GpuShader _fragment_shader; // mesh.frag
     std::shared_ptr<GpuBuffer> _instances; // grows; kept by the frame while it draws from it
     std::array<f32, 256> _srgb_to_linear{};
-    std::vector<u32> _order; // draws sorted, reused
+
+    // render()'s scratch, kept between frames.
+    struct DrawRef {
+        const Scene3D::Draw* draw = nullptr;
+        const MeshInstance* instances = nullptr; // the draw's first
+        const GpuMesh3D* mesh = nullptr;
+        u32 scene = 0;            // 0 the scene, 1 its overlay
+        const GpuFrustum* frustum = nullptr; // null: not culled
+        Vec3f center{};           // the mesh's bounding sphere
+        f32 radius = 0.0f;
+        u32 out_first = 0;        // where its visible copies go in the instance buffer
+        u32 out_count = 0;
+    };
+    struct Piece {
+        u32 ref = 0;
+        u32 begin = 0, end = 0; // its copies, within the draw
+        u32 flat = 0;           // the first's place among all the frame's copies
+        u32 out = 0;            // where its visible copies go
+    };
+    std::vector<DrawRef> _refs;
+    std::vector<Piece> _pieces;
+    std::vector<u32> _tasks;   // where each task's pieces start
+    std::vector<u8> _visible;  // a byte a copy
+    std::vector<u32> _order;   // draws sorted
 };
 
 } // namespace kin::gpu

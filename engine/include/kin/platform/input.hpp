@@ -98,10 +98,11 @@ enum class Key {
     F12,
     PageUp,
     PageDown,
+    LeftShift, // the left Shift key on its own (a first-person game's dash or sprint)
 };
 
 // The last Key: codes run from Key::Unknown to this.
-inline constexpr Key LastKey = Key::PageDown;
+inline constexpr Key LastKey = Key::LeftShift;
 
 enum class KeyModifiers : u8 {
     None = 0,
@@ -243,6 +244,9 @@ public:
     bool frame_repeated(Key key) const;
     bool modifier_held(KeyModifiers modifiers) const;
     u64 last_key_press_event_time_ns() const { return _last_key_press_event_time_ns; }
+    // When the OS reported the latest mouse motion (SDL_GetTicksNS clock): with
+    // the time a frame shows it, the delay between the hand and the screen.
+    u64 last_mouse_motion_event_time_ns() const { return _last_mouse_motion_event_time_ns; }
     u64 last_key_press_detected_time_ns() const { return _last_key_press_detected_time_ns; }
 
     Vec2f mouse_pos() const { return _mouse_pos; }
@@ -286,6 +290,18 @@ public:
     // A wheel turn of `value` notches this frame, as the OS would report it: it adds
     // to both mouse_wheel_y() and frame_mouse_wheel_y().
     void set_mouse_wheel_y(f32 value);
+    // How far the mouse moved, in window pixels (x right, y down), whether or not
+    // the pointer could follow: with the window's relative mouse mode on (a
+    // first-person camera; Window::set_relative_mouse) the pointer stays put and
+    // only this changes. Two readings, as for the wheel:
+    //   * mouse_motion(), for update(): since a fixed step last read it, used up
+    //     by the first step of a frame.
+    //   * frame_mouse_motion(), for render(): since the last rendered frame. Turn
+    //     a camera with this for the least delay between the hand and the screen.
+    Vec2f mouse_motion() const { return _mouse_motion; }
+    Vec2f frame_mouse_motion() const { return _frame_mouse_motion; }
+    // Motion of `delta` this frame, as the OS would report it: it adds to both.
+    void set_mouse_motion(Vec2f delta);
     void set_mouse_pos(Vec2f pos, WindowId window_id = 0);
     void set_mouse_held(MouseButton button, bool held);
     void set_mouse_pressed(MouseButton button);
@@ -375,7 +391,10 @@ private:
     WindowId _keyboard_window = 0;
     f32 _mouse_wheel_y = 0.0f;       // since a fixed step last read it
     f32 _frame_mouse_wheel_y = 0.0f; // since the last rendered frame
+    Vec2f _mouse_motion{};           // since a fixed step last read it
+    Vec2f _frame_mouse_motion{};     // since the last rendered frame
     u64 _last_key_press_event_time_ns = 0;
+    u64 _last_mouse_motion_event_time_ns = 0;
     u64 _last_key_press_detected_time_ns = 0;
     std::string _text_input;
     std::string _composition;

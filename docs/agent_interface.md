@@ -146,7 +146,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `sim.tick` | `{count?}` | Advance N fixed frames, default 1. Returns frame counter and failure flag. |
 | `sim.reset` | `{seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
-| `input.mouse` | `{x, y, button?, mode?, wheel?, space?}` | Move the pointer; optionally click or scroll. |
+| `input.mouse` | `{x, y, button?, mode?, wheel?, space?, dx?, dy?}` | Move the pointer; optionally click or scroll. `dx`/`dy` (without `x`/`y` if wanted) move the mouse by that many window pixels, as relative mouse mode reports it: a first-person camera turns. |
 | `input.text` | `{text}` | Deliver text input for the next tick. |
 | `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |

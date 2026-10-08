@@ -76,16 +76,20 @@ public:
         if (!typed.empty()) {
             _typed.assign(typed);
         }
+        _motion.x += ctx.input.mouse_motion().x;
+        _motion.y += ctx.input.mouse_motion().y;
     }
 
     void write_report(kin::JsonWriter& json) const override {
         json.field("clicks", _clicks);
         json.field("typed", std::string_view{_typed});
+        json.field("motion_x", static_cast<double>(_motion.x)).field("motion_y", static_cast<double>(_motion.y));
     }
 
 private:
     kin::i32 _clicks = 0;
     std::string _typed;
+    kin::Vec2f _motion{};
 };
 
 // A ui2 region at (10, 10, 40, 20) that counts clicks, and a count of the
@@ -528,7 +532,11 @@ void test_ui_snapshot_and_pointer_input() {
         R"({"id":6,"method":"input.text","params":{"text":"hello"}})" "\n"
         R"({"id":7,"method":"sim.tick","params":{"count":1}})" "\n"
         R"({"id":8,"method":"scene.current"})" "\n"
-        R"({"id":9,"method":"server.shutdown"})" "\n");
+        R"({"id":9,"method":"input.mouse","params":{"dx":12,"dy":-3}})" "\n"
+        R"({"id":10,"method":"sim.tick","params":{"count":2}})" "\n"
+        R"({"id":11,"method":"scene.current"})" "\n"
+        R"({"id":12,"method":"input.mouse","params":{"button":"left"}})" "\n"
+        R"({"id":13,"method":"server.shutdown"})" "\n");
 
     const int code = kin::run_scene_server({
         .window = {.title = "ui", .width = 64, .height = 64},
@@ -553,6 +561,13 @@ void test_ui_snapshot_and_pointer_input() {
     const kin::JsonValue* after_text = response_result(text, 8);
     assert(after_text != nullptr);
     assert(after_text->find("state")->string_at("typed") == "hello");
+
+    // Mouse motion (mouse look) reaches one step, without moving the pointer.
+    const kin::JsonValue* after_motion = response_result(text, 11);
+    assert(after_motion != nullptr);
+    assert(after_motion->find("state")->number_at("motion_x") == 12.0);
+    assert(after_motion->find("state")->number_at("motion_y") == -3.0);
+    assert(response_result(text, 12) == nullptr); // neither a place nor a motion
 }
 
 void test_press_completes_a_ui2_click_and_frame_timing() {

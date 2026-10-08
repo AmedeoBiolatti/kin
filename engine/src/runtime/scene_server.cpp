@@ -700,16 +700,26 @@ ServerResponse handle_ui_snapshot(ServerContext& ctx, const JsonValue& params) {
 ServerResponse handle_input_mouse(ServerContext& ctx, const JsonValue& params) {
     const JsonValue* x = params.find("x");
     const JsonValue* y = params.find("y");
-    if (!x || !y) {
-        return error_result("input.mouse requires numeric 'x' and 'y'");
+    const JsonValue* dx = params.find("dx");
+    const JsonValue* dy = params.find("dy");
+    if ((!x || !y) && !dx && !dy) {
+        return error_result("input.mouse requires numeric 'x' and 'y', or a motion 'dx' / 'dy'");
     }
-    Vec2f pos{static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
-    // Coordinates are logical UI space by default (matching ui.snapshot bounds);
-    // convert to window space for injection. "window" passes through unchanged.
-    if (params.string_at("space", "logical") != "window") {
-        pos = ctx.renderer().logical_to_window(pos);
+    // Motion in window pixels, as relative mouse mode reports it (mouse look).
+    const Vec2f motion{dx ? static_cast<f32>(dx->as_number()) : 0.0f, dy ? static_cast<f32>(dy->as_number()) : 0.0f};
+    if (dx || dy) {
+        ctx.queue_mouse_motion(motion);
     }
-    ctx.queue_mouse_move(pos);
+    Vec2f pos = ctx.app().input().mouse_pos();
+    if (x && y) {
+        pos = {static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
+        // Coordinates are logical UI space by default (matching ui.snapshot bounds);
+        // convert to window space for injection. "window" passes through unchanged.
+        if (params.string_at("space", "logical") != "window") {
+            pos = ctx.renderer().logical_to_window(pos);
+        }
+        ctx.queue_mouse_move(pos);
+    }
 
     if (const JsonValue* button = params.find("button")) {
         const std::string name = button->is_string() ? button->as_string() : "left";
@@ -731,6 +741,12 @@ ServerResponse handle_input_mouse(ServerContext& ctx, const JsonValue& params) {
     json.field("x", static_cast<f64>(pos.x));
     json.field("y", static_cast<f64>(pos.y));
     json.end_object();
+    if (dx || dy) {
+        json.key("motion").begin_object();
+        json.field("dx", static_cast<f64>(motion.x));
+        json.field("dy", static_cast<f64>(motion.y));
+        json.end_object();
+    }
     json.end_object();
     return ok_result(out.str());
 }
@@ -847,6 +863,10 @@ void ServerContext::queue_mouse_button(std::string button, std::string mode) {
     _pending.push_back({PendingInput::Kind::MouseButton, std::move(button), std::move(mode), {}, 0.0f});
 }
 
+void ServerContext::queue_mouse_motion(Vec2f delta) {
+    _pending.push_back({PendingInput::Kind::MouseMotion, {}, {}, delta, 0.0f});
+}
+
 void ServerContext::queue_mouse_wheel(f32 delta) {
     _pending.push_back({PendingInput::Kind::Wheel, {}, {}, {}, delta});
 }
@@ -908,6 +928,9 @@ void ServerContext::step() {
             break;
         case PendingInput::Kind::Wheel:
             input.set_mouse_wheel_y(in.value);
+            break;
+        case PendingInput::Kind::MouseMotion:
+            input.set_mouse_motion(in.pos);
             break;
         case PendingInput::Kind::Text:
             input.set_text_input(in.text);
