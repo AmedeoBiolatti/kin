@@ -119,6 +119,13 @@ public:
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     bool render(View3D& view, const Scene3D& scene);
+    // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines of its draws and of the
+    // passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion, contact shadows, temporal anti-aliasing,
+    // occlusion culling), and those features' targets for the view. For a loading screen, or the moment a game turns a feature on, so that
+    // the first frame with it does not hitch (pipeline creation is tens of milliseconds a pipeline on a cold driver cache; `stats().pipelines_made`
+    // is 0 for a render after it). Nothing is made at start-up: call it for the scenes and settings you will use. False where there is
+    // nothing to make (no 3D). Cost: the same as the first render's, in memory too, and the targets are given back after 120 unused renders as ever.
+    bool warm_up(View3D& view, const Scene3D& scene);
     // What `pixel` (the view's own pixels, from its top left) showed when
     // `view` was last rendered: the copy there and the point of it. Needs a
     // view made with View3DOptions::pick. It waits for the GPU to finish

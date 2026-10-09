@@ -146,6 +146,13 @@ bool Renderer3D::read_cluster_draws(View3D& view, std::vector<ClusterDraw>& out)
     return _backend->read_cluster_draws(*view.backend(), out);
 }
 
+bool Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
+    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        return false;
+    }
+    return _backend->warm_up(*view.backend(), scene);
+}
+
 bool Renderer3D::render(View3D& view, const Scene3D& scene) {
     _stats = {};
     if (!view.valid()) {

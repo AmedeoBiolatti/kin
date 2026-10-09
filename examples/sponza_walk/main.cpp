@@ -28,6 +28,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace sponza_walk {
@@ -384,6 +385,7 @@ private:
         slider("shadow_distance", "Cascade distance", s.shadow_distance, 5.0f, 200.0f);
         choice("shadow_area", "Area", s.shadow_area, {"auto", "camera"});
         slider("shadow_extent", "Camera area half-size", s.shadow_extent, 3.0f, 60.0f);
+        check("shadow_cache", "Keep the map while nothing moves", s.shadow_cache);
 
         section("Ambient occlusion");
         check("ao", "Occlusion (GTAO)", s.ao);
@@ -560,6 +562,7 @@ public:
         _backend_stats = renderer.backend_stats();
 
         fill_scene();
+        warm_up_features();
         _r3d->render(_view, _scene);
         renderer.clear(Color::rgb(0, 0, 0));
         renderer.draw_texture(_view.texture(), {0.0f, 0.0f, float(out.x), float(out.y)});
@@ -809,6 +812,30 @@ private:
             if (!_environments[i]) std::cerr << "sponza_walk: " << _hdri_files[i].string() << ": " << error << '\n';
         }
         return _environments[i];
+    }
+
+    // Pipelines and targets are made on a feature's first use (tens of milliseconds, hundreds for temporal anti-aliasing on a cold driver
+    // cache), which would show as a hitch the first time a switch on the panel is turned on. A viewer can afford to make them all once the
+    // model is loaded (the engine does nothing of the kind by itself): every switch that takes a new pipeline or target on, warmed up for. Then,
+    // whenever a switch that changes what a frame needs is turned (the shadow map's size, a view made again for MSAA or HDR), again for the scene as it is.
+    void warm_up_features() {
+        if (!_view.valid()) return;
+        const auto key = std::make_tuple(_s.ao, _s.ao_half, _s.contact, _s.taa, _s.taa_sharpness > 0.0f, _s.shadows, _s.shadow_resolution,
+                                         _s.shadow_cascades > 1, _s.lod, _s.lod_occlusion, _s.materials.blended, _s.materials.cutout, _s.wireframe,
+                                         _key.samples, _key.hdr, _key.size.x, _key.size.y);
+        if (!_warmed) {
+            _warmed = true;
+            _warmed_key = key;
+            // Everything on, for one call, then the scene as the settings have it.
+            _scene.ambient_occlusion.enabled = _scene.contact_shadows.enabled = _scene.taa.enabled = true;
+            _scene.lights.shadow_cascades = max_shadow_cascades;
+            if (_caps.clusters) _scene.lod.enabled = _scene.lod.occlusion.enabled = true;
+            _r3d->warm_up(_view, _scene);
+            fill_scene();
+        } else if (key != _warmed_key) {
+            _warmed_key = key;
+            _r3d->warm_up(_view, _scene);
+        }
     }
 
     void fill_scene() {
@@ -1097,14 +1124,20 @@ private:
                       double(st.triangles) / 1e6);
         lines.push_back(line);
         if (st.shadow_cascades > 0) {
-            std::snprintf(line, sizeof line, "shadows: %u draws, %u casters, %u maps [%u %u %u %u]", st.shadow_draws, st.shadow_casters,
-                          st.shadow_cascades, st.cascade_casters[0], st.cascade_casters[1], st.cascade_casters[2], st.cascade_casters[3]);
+            std::snprintf(line, sizeof line, "shadows: %u draws, %u casters, %u maps [%u %u %u %u]%s", st.shadow_draws, st.shadow_casters,
+                          st.shadow_cascades, st.cascade_casters[0], st.cascade_casters[1], st.cascade_casters[2], st.cascade_casters[3],
+                          st.shadow_cached ? "   KEPT from the render before" : "");
         } else {
             std::snprintf(line, sizeof line, "shadows: off");
         }
         lines.push_back(line);
         std::snprintf(line, sizeof line, "ao: %u draws, %u meshes, %u dispatches   lights %u", st.ao_draws, st.ao_instances, st.ao_dispatches, st.lights);
         lines.push_back(line);
+        if (st.feature_bytes > 0 || st.taa_main_velocity) {
+            std::snprintf(line, sizeof line, "feature targets %.1f MiB%s%s", double(st.feature_bytes) / 1048576.0,
+                          st.taa_main_velocity ? "   taa velocity from the main pass" : "", st.blur_merged ? "   one blur for ao and contact" : "");
+            lines.push_back(line);
+        }
         if (_s.contact) {
             std::snprintf(line, sizeof line, "contact shadows: %u dispatches", st.contact_dispatches);
             lines.push_back(line);
@@ -1181,6 +1214,8 @@ private:
     float _yaw = 0, _pitch = 0;
     float _frame_ms = 0, _scroll = 0, _content = 0;
     int _frames = 0;
+    bool _warmed = false;
+    std::tuple<bool, bool, bool, bool, bool, bool, int, bool, bool, bool, bool, bool, int, u32, bool, int, int> _warmed_key;
     bool _ready = false, _captured = false, _quit = false, _shot_requested = false, _shot_done = false;
     Clock::time_point _last = Clock::now();
 };

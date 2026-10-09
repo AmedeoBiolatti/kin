@@ -21,9 +21,9 @@ layout(std430, set = 0, binding = 1) readonly buffer Previous {
 
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
-    mat4 current;         // without the jitter, this frame's camera
-    mat4 prior;           // and the last frame's
     uvec4 first;          // x: this draw's first instance
+    mat4 current;         // without the jitter, this frame's camera
+    mat4 prior;           // and the last frame's (the order of mesh_velocity.vert's block)
 } draw;
 
 layout(location = 0) out vec3 vNormal;

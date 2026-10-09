@@ -9,6 +9,14 @@ releases may change APIs.
 
 ### Added
 
+- 3D, speed of the opt-in features (byte-identical pictures; see the plan's "Opt-in speedups, phase 1"): temporal anti-aliasing no longer draws a
+  velocity pre-pass when nothing else needs one (the main pass writes the velocity: the kiln's TAA cost fell by 2.2 ms), ambient occlusion and contact
+  shadows share one blur dispatch, and the shadow map is kept while nothing it depends on changes (`Lights3D::cache_shadows`,
+  `Render3DStats::shadow_cached`). Targets of ambient occlusion, contact shadows, the pre-pass, temporal anti-aliasing and occlusion culling are given
+  back after 120 renders unused (`Render3DStats::feature_bytes`, `targets_released`). `Renderer3D::warm_up(view, scene)` makes the pipelines and
+  targets a scene's first render would, so that turning a feature on does not hitch (`Render3DStats::pipelines_made`). `kin_reference` has
+  `--shadow-cache`, `--crowd-move`, `--hitch <feature>`, `--warm-up` and `--vram-cycle`; Sponza Walk has a "Keep the map while nothing moves" switch,
+  warms up at start and shows the new numbers in its stats.
 - Experimental 3D drawn inside the 2D frame (the `KIN_EXPERIMENTAL_3D` CMake
   option, on in the `exp/3d-rendering` branch; see
   [3D rendering](rendering_3d.md) and [the plan](3d_plan.md)):

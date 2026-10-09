@@ -185,6 +185,19 @@ struct Crowd {
             scene.draw_instanced(enemy[k], enemies[k], {.color = kin::Color::rgb(200, 120, 80)});
         }
     }
+    // The enemies drifting (`--crowd-move`): each a little from where it was, a pure function of `time` (frames), as a game's moves them.
+    void draw_moving(kin::Scene3D& scene, int time, std::array<std::vector<kin::MeshInstance>, 3>& moved) const {
+        scene.draw_instanced(tile, tiles);
+        for (std::size_t k = 0; k < 3; ++k) {
+            moved[k] = enemies[k];
+            for (std::size_t i = 0; i < moved[k].size(); ++i) {
+                const float phase = static_cast<float>(time) * 0.05f + static_cast<float>(i) * 0.37f;
+                moved[k][i].transform.m[12] += std::sin(phase) * 0.15f;
+                moved[k][i].transform.m[14] += std::cos(phase) * 0.15f;
+            }
+            scene.draw_instanced(enemy[k], moved[k], {.color = kin::Color::rgb(200, 120, 80)});
+        }
+    }
 };
 
 // A scene made for temporal anti-aliasing (`procedural: "motion"`): high-contrast thin things
@@ -323,6 +336,11 @@ struct Overrides {
     bool readback = false;
     long lod_room = 0;
     bool lod_occlusion = false;
+    std::string hitch; // --hitch <feature>: the first renders after switching it on at runtime, timed (then the process ends)
+    bool warm_up = false; // with --hitch: Renderer3D::warm_up before the feature goes on
+    bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on and after (see Render3DStats::feature_bytes)
+    bool crowd_move = false; // the crowd's enemies drift each frame (a game's crowd always moves): the scene is posed per frame
+    bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and the shadow pass would be timed once
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -423,6 +441,18 @@ void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over
 }
 
 // The process's resident memory, in MB (Linux; 0 elsewhere).
+// The GPU's memory in use (MiB), from nvidia-smi: the whole device, so only differences mean anything (this process is nearly alone on it); -1 without.
+double gpu_used_mb() {
+    FILE* pipe = popen("nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null", "r");
+    if (!pipe) {
+        return -1.0;
+    }
+    char line[64] = {};
+    const bool read = std::fgets(line, sizeof line, pipe) != nullptr;
+    pclose(pipe);
+    return read ? std::atof(line) : -1.0;
+}
+
 double resident_mb() {
     std::ifstream status("/proc/self/status");
     std::string line;
@@ -533,6 +563,16 @@ int main(int argc, char** argv) {
         } else if (a == "--contact-steps") {
             over.contact = true;
             over.contact_steps = std::atoi(next().c_str());
+        } else if (a == "--hitch") {
+            over.hitch = next();
+        } else if (a == "--warm-up") {
+            over.warm_up = true;
+        } else if (a == "--vram-cycle") {
+            over.vram_cycle = true;
+        } else if (a == "--crowd-move") {
+            over.crowd_move = true;
+        } else if (a == "--shadow-cache") {
+            over.shadow_cache = true;
         } else if (a == "--taa") {
             over.taa = true;
         } else if (a == "--taa-blend") {
@@ -685,7 +725,8 @@ int main(int argc, char** argv) {
         if (is_hidden) {
             hidden.make(r3d, model_options_of(doc), doc);
         }
-        const bool animated = doc.bool_at("animated");
+        const bool animated = doc.bool_at("animated") || (over.crowd_move && doc.string_at("procedural") == "crowd");
+        std::array<std::vector<kin::MeshInstance>, 3> crowd_moved;
         const double load_ms = ms_since(load_start);
         {
             std::size_t meshes = 0, with_levels = 0, level_triangles = 0, base_triangles = 0;
@@ -798,6 +839,7 @@ int main(int argc, char** argv) {
                     scene.lights.shadow_distance = static_cast<float>(distance_override);
                 }
             }
+            scene.lights.cache_shadows = over.shadow_cache;
             merge_ambient_occlusion(scene.ambient_occlusion, doc.find("ambient_occlusion"), over);
             merge_contact_shadows(scene.contact_shadows, doc.find("contact_shadows"), over);
             scene.taa = {};
@@ -814,7 +856,11 @@ int main(int argc, char** argv) {
                 scene.draw(p.model, p.transform);
             }
             if (is_crowd) {
-                crowd.draw(scene);
+                if (over.crowd_move) {
+                    crowd.draw_moving(scene, time, crowd_moved);
+                } else {
+                    crowd.draw(scene);
+                }
             }
             if (is_motion) {
                 motion.draw(scene, time);
@@ -856,6 +902,80 @@ int main(int argc, char** argv) {
                 scene.camera = kin::Camera3D::look_at(eye + moved, target + moved, fov);
                 scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
             };
+            if (!over.hitch.empty()) {
+                // The first renders after a feature goes on at runtime: pipelines and targets made on first use. Steady state first (the
+                // scene as it is, 40 renders), then the feature on, each of the next renders timed alone: wall time of render + draw + present
+                // on the CPU, render()'s own, and the time until the GPU has finished it. Then 40 more, the steady cost with it on.
+                const std::string& feature = over.hitch;
+                const auto apply = [&](bool on) {
+                    if (feature == "ao") {
+                        scene.ambient_occlusion.enabled = on;
+                    } else if (feature == "contact") {
+                        scene.contact_shadows.enabled = on;
+                    } else if (feature == "taa") {
+                        scene.taa.enabled = on;
+                    } else if (feature == "taa+ao") {
+                        scene.taa.enabled = on;
+                        scene.ambient_occlusion.enabled = on;
+                    } else if (feature == "cascades") {
+                        scene.lights.shadow_cascades = on ? 4u : 1u;
+                    } else if (feature == "lod") {
+                        scene.lod.enabled = on;
+                    } else if (feature == "lod-cpu") {
+                        scene.lod.enabled = on;
+                        scene.lod.gpu_culling = false;
+                    } else if (feature == "occlusion") {
+                        scene.lod.enabled = on;
+                        scene.lod.occlusion.enabled = on;
+                    } else if (feature == "all") {
+                        scene.ambient_occlusion.enabled = on;
+                        scene.contact_shadows.enabled = on;
+                        scene.taa.enabled = on;
+                        scene.lights.shadow_cascades = on ? 4u : 1u;
+                    }
+                };
+                kin::u32 made = 0;
+                const auto timed = [&](int index, bool on) {
+                    pose(index);
+                    apply(on);
+                    renderer.clear(kin::Color::rgb(0, 0, 0));
+                    const auto start = std::chrono::steady_clock::now();
+                    r3d.render(view, scene);
+                    renderer.draw_texture(view.texture(), full);
+                    renderer.present();
+                    const double cpu_wall = ms_since(start);
+                    wait_for_gpu();
+                    made += r3d.stats().pipelines_made;
+                    return std::array<double, 3>{cpu_wall, r3d.stats().cpu_ms, ms_since(start)};
+                };
+                if (over.warm_up) {
+                    pose(0);
+                    apply(true);
+                    r3d.warm_up(view, scene);
+                    pose(0);
+                    apply(false);
+                }
+                for (int f = 0; f < 40; ++f) {
+                    timed(f, false);
+                }
+                made = 0;
+                std::printf("  hitch %s %s: first renders with it on (ms: CPU wall of render+present, render(), until the GPU is done):", name.c_str(), feature.c_str());
+                for (int f = 0; f < 3; ++f) {
+                    const auto t = timed(40 + f, true);
+                    std::printf("  [%.2f %.2f %.2f]", t[0], t[1], t[2]);
+                }
+                std::printf("   (%u pipelines made by them)", made);
+                std::vector<double> wall, own, done;
+                for (int f = 0; f < 40; ++f) {
+                    const auto t = timed(43 + f, true);
+                    wall.push_back(t[0]);
+                    own.push_back(t[1]);
+                    done.push_back(t[2]);
+                }
+                std::printf("   steady with it on: median [%.2f %.2f %.2f]\n", summarize(wall).median, summarize(own).median,
+                            summarize(done).median);
+                std::exit(0);
+            }
             // A temporal history starts afresh at each camera, and runs long enough to settle.
             view.reset_history();
             pose(0); // for what the scene asks of temporal anti-aliasing
@@ -909,6 +1029,31 @@ int main(int argc, char** argv) {
             }
             const fs::path png = out / name / (camera_name + ".png");
             kin::save_image(image, png);
+            if (over.vram_cycle) {
+                const double on_mb = gpu_used_mb();
+                const double on_bytes = static_cast<double>(stats.feature_bytes);
+                pose(0);
+                scene.ambient_occlusion.enabled = false;
+                scene.contact_shadows.enabled = false;
+                scene.taa.enabled = false;
+                scene.lod.occlusion.enabled = false;
+                kin::u64 released = 0;
+                for (int f = 0; f < 130; ++f) {
+                    renderer.clear(kin::Color::rgb(0, 0, 0));
+                    r3d.render(view, scene);
+                    renderer.draw_texture(view.texture(), full);
+                    renderer.present();
+                    released += r3d.stats().targets_released;
+                }
+                wait_for_gpu();
+                std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
+                            name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
+                            static_cast<double>(r3d.stats().feature_bytes) / 1048576.0, static_cast<unsigned long long>(released));
+                pose(0);
+                renderer.clear(kin::Color::rgb(0, 0, 0));
+                r3d.render(view, scene);
+                renderer.present();
+            }
             // The same moment drawn large and averaged down, with temporal anti-aliasing off.
             if (supersample > 1) {
                 const kin::Vec2i big_size{width * supersample, height * supersample};

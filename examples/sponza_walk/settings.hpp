@@ -87,6 +87,7 @@ struct Settings {
     float shadow_distance = 100.0f;
     int shadow_area = 0;       // ShadowArea
     float shadow_extent = 12.0f; // half a side of the box round the camera
+    bool shadow_cache = false;   // Lights3D::cache_shadows: the map is kept while nothing it depends on moves (a hit shows in the stats)
     // Ambient occlusion
     bool ao = false;
     float ao_radius = 0.5f;
@@ -175,6 +176,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         l.shadow_resolution = shadow_resolutions[std::clamp(s.shadow_resolution, 0, 3)];
         l.shadow_cascades = static_cast<u32>(std::clamp(s.shadow_cascades, 1, int(max_shadow_cascades)));
         l.shadow_distance = s.shadow_distance;
+        l.cache_shadows = s.shadow_cache;
     }
     scene.ambient_occlusion = {.enabled = s.ao, .radius = s.ao_radius, .intensity = s.ao_intensity, .half_resolution = s.ao_half};
     scene.contact_shadows = {.enabled = s.contact,

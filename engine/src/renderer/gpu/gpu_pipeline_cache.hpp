@@ -39,6 +39,10 @@ struct GpuPipelineKey {
     // Pulled toward the camera (reverse Z), drawn over the faces it lies on:
     // wireframes, lines on the ground.
     bool depth_bias = false;
+    // A second colour target (3D: the velocity temporal anti-aliasing reads, written by the main pass). Never blended;
+    // `extra_write` false masks every channel, so a blended or wireframe draw leaves it as it is.
+    SDL_GPUTextureFormat extra_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+    bool extra_write = false;
 
     friend bool operator==(const GpuPipelineKey&, const GpuPipelineKey&) = default;
 };
@@ -66,6 +70,9 @@ public:
         return get(GpuPipelineKey{.vertex = vertex, .fragment = fragment, .blend = blend, .format = target_format,
                                   .layout = layout, .depth_stencil = depth_stencil, .stencil = stencil});
     }
+
+    // How many pipelines are made.
+    std::size_t size() const { return _entries.size(); }
 
     void destroy();
     // Releases the pipelines made with `fragment` (it is being replaced). SDL

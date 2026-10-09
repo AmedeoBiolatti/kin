@@ -163,7 +163,7 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
 - The panel (scrolls with the wheel; sections fold) has a switch or slider for
   the sun (angles, intensity, L animates it), fill light, hemisphere and ground
   ambient, an environment (HDRIs from the cache), point lights (K drops one at
-  the camera), shadows (map size, cascades, distance, area), ambient occlusion,
+  the camera), shadows (map size, cascades, distance, area, and a switch that keeps the map while nothing moves, `--set shadow_cache=on` to turn it on), ambient occlusion,
   contact shadows (distance, thickness, intensity, steps), temporal anti-aliasing
   (history kept, sharpen, jitter scale and samples, a freeze-jitter debug switch and a
   reset-history button), levels of detail (on, error in pixels, bias, force a level; the meshes' levels
@@ -171,7 +171,7 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   and every material feature (textures, normal maps, metallic-roughness maps,
   emissive, cut-out, double-sided, shadows, unlit, roughness and metallic
   overrides). F3 shows the stats (frame, CPU and GPU time, draws, triangles,
-  shadow casters per cascade, occlusion and contact-shadow work), F12 or P saves a PNG of the
+  shadow casters per cascade (or that the map was kept from the frame before), occlusion and contact-shadow work, the video memory of the opt-in features' targets), F12 or P saves a PNG of the
   picture to the current directory, F2 prints the settings and a fragment for a
   reference scene (`tests/reference/scenes/*.json`).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
@@ -181,6 +181,8 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   picture (`--hud` puts the panel in it, `--spin DEG` turns the camera a frame,
   `--print-settings` prints the settings). `ctest -R sponza-walk` does this and
   checks the picture is not blank; it skips without Sponza or a GPU.
+- It makes the pipelines and targets of every switch once when it starts (`Renderer3D::warm_up`), so that turning one on for the first time
+  does not hitch, and again when a switch that needs it (map size, MSAA, HDR) is turned; the engine does nothing of the kind by itself.
 - The code is `sponza_walk/settings.hpp` (all state, applied to the `Scene3D`
   each frame) and `sponza_walk/main.cpp`; a new feature is a field and one row
   in `Controls::build`.

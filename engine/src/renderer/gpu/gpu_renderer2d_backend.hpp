@@ -49,6 +49,7 @@ public:
     // the old for the caller to keep until the frame's draws are submitted.
     GpuTexture replace_texture(GpuTexture texture) const {
         _mipmapped = true;
+        ++_version;
         return std::exchange(_texture, std::move(texture));
     }
     bool mipmapped() const { return _mipmapped; }
@@ -59,6 +60,10 @@ public:
     // create_texture_from_rgba (crisp bitmap fonts / pixel art); render targets use
     // Linear (blur). Mutable so set_scale_mode works through a const Texture&.
     ScaleMode scale_mode() const { return _scale; }
+    // Bumped whenever the texels are replaced from outside (update_texture, write_texture, a new mip chain): the 3D shadow cache
+    // keys a cut-out's texture on it. A render target (premultiplied) is drawn into without a bump: such a texture is never cached on.
+    u64 version() const { return _version; }
+    void bump_version() const { ++_version; }
     void set_scale_mode(ScaleMode mode) const { _scale = mode; }
     // The backend's frame serial when a draw last used it (see retain()).
     u64 used_in_frame() const { return _used_in_frame; }
@@ -66,6 +71,7 @@ public:
 
 private:
     mutable GpuTexture _texture;
+    mutable u64 _version = 0;
     mutable bool _mipmapped = false;
     bool _premultiplied = false;
     mutable ScaleMode _scale = ScaleMode::Nearest;

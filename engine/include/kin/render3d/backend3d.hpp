@@ -99,14 +99,31 @@ struct Render3DStats {
     u32 shadow_draws = 0; // draw calls into the shadow map
     u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view; all cascades)
     u32 shadow_cascades = 0; // maps drawn (0: no shadows)
+    bool shadow_cached = false; // the maps are those of the render before (Lights3D::cache_shadows): nothing was drawn into them, so the shadow numbers above are 0
     std::array<u32, max_shadow_cascades> cascade_casters{}; // meshes drawn into each cascade
     u32 ao_draws = 0;      // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither this render)
     u32 ao_instances = 0;  // meshes drawn into it
     u32 ao_dispatches = 0; // compute dispatches (the occlusion and its blur)
     u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
+    // With both on at one size (the occlusion not at half resolution) the two blurs are one dispatch a direction; these
+    // count that dispatch in each of the two numbers above, and this says how many there were (2, else 0).
+    u32 blur_merged = 0;
     u32 taa_dispatches = 0; // compute dispatches of the temporal anti-aliasing (the resolve, and the sharpen): 0 when off
     bool taa_reset = false; // its history was not used this render: the first, after a resize or reset_history(), or the camera changed kind
     Vec2f taa_jitter{};     // this render's offset in pixels (0, 0 when off)
+    // With temporal anti-aliasing and nothing else that needs a pre-pass, the main pass writes the velocity itself (no
+    // geometry pass for it: ao_draws is 0); false with the pre-pass (ambient occlusion, contact shadows, occlusion culling, an opaque
+    // mesh with a custom shader) or without temporal anti-aliasing.
+    bool taa_main_velocity = false;
+    // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal anti-aliasing and
+    // occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered buffer too), in bytes, and how many
+    // feature groups of them this render gave back: a feature that has not been used for 120 renders (`View3D`'s own, so a view that is
+    // not drawn keeps them) releases its targets, and a feature on again makes them again.
+    u64 feature_bytes = 0;
+    u32 targets_released = 0;
+    // Graphics pipelines this render had to make (the first use of a kind of draw: tens of milliseconds on a cold driver cache). Renderer3D::warm_up
+    // makes the ones a scene will need beforehand, and the first render after it makes none.
+    u32 pipelines_made = 0;
     u32 samples = 0;        // samples a pixel of the scene took: the view's, or 1 with temporal anti-aliasing
     u32 lights = 0;    // point lights used
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
@@ -183,6 +200,8 @@ public:
     virtual bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) = 0;
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual PickResult pick(IView3DBackend& view, Vec2i pixel) = 0;
+    // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False where there is nothing to make.
+    virtual bool warm_up(IView3DBackend& view, const Scene3D& scene) { static_cast<void>(view); static_cast<void>(scene); return false; }
     // The clusters the last render's GPU cut chose, in every pass, for tests and tools; waits for the GPU. False when
     // that render cut on the CPU (or not at all).
     virtual bool read_cluster_picks(IView3DBackend&, std::vector<ClusterPick>&) { return false; }

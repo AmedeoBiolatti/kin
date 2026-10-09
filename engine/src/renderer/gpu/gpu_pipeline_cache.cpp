@@ -191,9 +191,22 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     color_target.format = key.format;
     color_target.blend_state = blend_state;
 
+    SDL_GPUColorTargetDescription color_targets[2]{color_target, {}};
+    u32 color_count = key.depth_only ? 0 : 1;
+    if (color_count && key.extra_format != SDL_GPU_TEXTUREFORMAT_INVALID) {
+        SDL_GPUColorTargetBlendState extra{};
+        set_blend(extra, GpuBlendMode::Replace);
+        if (!key.extra_write) {
+            extra.color_write_mask = 0;
+            extra.enable_color_write_mask = true;
+        }
+        color_targets[1].format = key.extra_format;
+        color_targets[1].blend_state = extra;
+        color_count = 2;
+    }
     SDL_GPUGraphicsPipelineTargetInfo target_info{};
-    target_info.num_color_targets = key.depth_only ? 0 : 1;
-    target_info.color_target_descriptions = &color_target;
+    target_info.num_color_targets = color_count;
+    target_info.color_target_descriptions = color_targets;
     target_info.has_depth_stencil_target = key.depth_stencil != SDL_GPU_TEXTUREFORMAT_INVALID;
     target_info.depth_stencil_format = key.depth_stencil;
 

@@ -1321,6 +1321,7 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                            static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
                            texture_format_bytes(backend->format()), may_cycle(*backend, at, size));
+    backend->bump_version();
     if (backend->mipmapped()) {
         _device.generate_mipmaps(backend->texture().handle());
     }
@@ -1336,6 +1337,7 @@ bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i
     _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                           static_cast<u32>(size.x), static_cast<u32>(size.y), texture_format_bytes(backend->format()),
                           may_cycle(*backend, at, size), fill);
+    backend->bump_version();
     if (backend->mipmapped()) {
         _device.generate_mipmaps(backend->texture().handle());
     }
@@ -2199,6 +2201,7 @@ bool GpuRenderer2DBackend::dispatch_compute(ComputeShaderHandle handle, Vec2i gr
             return false;
         }
         retain(output);
+        backend->bump_version(); // a cut-out's texture the 3D shadow cache has seen is no longer the same
         outputs.push_back(SDL_GPUStorageTextureReadWriteBinding{.texture = backend->texture().handle()});
     }
     std::vector<SDL_GPUStorageBufferReadWriteBinding> output_buffers;

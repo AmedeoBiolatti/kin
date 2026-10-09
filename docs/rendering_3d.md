@@ -212,6 +212,15 @@ casters of each cascade, a few more taps; use it where the area is
 much bigger than what the camera sees close up. `stats()` has
 `shadow_cascades` and the copies drawn into each (`cascade_casters`).
 
+**Kept while nothing moves.** `lights.cache_shadows` (off by default: a game that pauses or has photo mode turns it on) keeps the map(s) from one render to the next and does not draw them again
+when they would come out the same, to the byte: the sun, the area, the resolution, the **camera** (what casts into view, and the cascades' fit,
+depend on it), the levels of detail, and every caster's mesh, material and copies must all be as they were (a cut-out's texture too: written
+in place, it is seen; a render target as the texture is never cached). It pays for a paused game, a photo mode, a viewer at rest (the shadow pass
+is a quarter to a half of such a frame) and costs a moving scene nothing measurable (a key of a few hundred bytes and a sample of the copies; the
+copies are compared in full, stopping at the first difference, only once two renders agreed). `stats().shadow_cached` is true when it hit (the
+shadow draw counts are then 0). Turn it off for a benchmark that renders one scene many times; `KIN_SHADOW_CACHE=0` turns it off for the whole
+renderer. See the plan's "Opt-in speedups, phase 1".
+
 ### Ambient occlusion
 
 `scene.ambient_occlusion = {.enabled = true, .radius = 0.5f, .intensity = 1.0f,
@@ -236,6 +245,9 @@ third of the cost; a little softer at depth edges). `stats()` has
 `ao_draws`, `ao_instances` and `ao_dispatches` (0 when off). Costs a second
 draw of every opaque copy and about 0.3 ms or more of compute at 1280 x 720:
 see the plan's G2b results.
+With contact shadows also on (and `half_resolution` off) the two blurs are one dispatch a direction (`stats().blur_merged` is 2; the counts above
+still count each feature's own); the result is the same to the byte. The blur ends in the first target again (raw, across, raw), so a feature
+holds two R8 textures, not three.
 
 ### Contact shadows
 
@@ -289,11 +301,19 @@ draws one sample a pixel whatever `View3DOptions::samples` asks
   pass, the pre-pass, the occlusion and contact-shadow maths that unproject its
   depth, the overlay). The frustum culling, the shadow cascades' fit, the pick
   pass, `Camera3D::project` and `ray` use the exact matrices.
-- **Velocity** is written by the pre-pass (shared with ambient occlusion and
-  contact shadows, drawn once; it writes four floats, the normal and the
-  velocity, instead of two) from each copy's matrix of the frame before, kept in
+- **Velocity** is written, from each copy's matrix of the frame before, kept in
   a buffer of its own beside the instances (the 128 B instance is untouched) and
-  the view's last view-projection. The first-person overlay has its own pass
+  the view's last view-projection, **by the main pass** as a second colour
+  output when temporal anti-aliasing is all that needs a depth pre-pass (no
+  ambient occlusion, contact shadows or occlusion culling, and no opaque mesh
+  with a custom shader): there is then no second geometry pass for it
+  (`stats().taa_main_velocity`, `ao_draws` 0), which was the largest part of
+  TAA's cost in big scenes (the kiln's fell by 2.2 ms of 7.2). Opaque and
+  cut-out meshes write it; blended, additive and wireframe ones leave it as it
+  is. With any of those other features the pre-pass is drawn once and shared,
+  writing four floats (the normal and the velocity, instead of two). The
+  pictures of the two ways are identical to the byte; `KIN_TAA_PREPASS=1`
+  forces the pre-pass. The first-person overlay has its own pass
   and its own previous camera, so a gun is neither smeared by the world behind
   it nor trailed.
 - **Matching copies from frame to frame** (the scene is rebuilt, so nothing
@@ -457,7 +477,7 @@ a switch: lights, shadows (cascades), occlusion, contact shadows, temporal anti-
 material feature (done to copies of the model's materials, so the model is
 kept). Its settings are one struct applied to a `Scene3D` each frame, so a new
 feature is a field and a row in its table of switches; `--set`, `--preset` and
-`--headless --screenshot` use the same table. See the
+`--headless --screenshot` use the same table. It warms the renderer up once at start (`Renderer3D::warm_up`, below) and has a switch for the shadow cache. See the
 [examples README](../examples/README.md#sponza-walk).
 
 ## Cameras
@@ -503,6 +523,26 @@ no rendering each frame. `resize(view, size)` gives it a new size and texture.
 `Renderer3D::capabilities()` says what the device has (depth bits, most
 samples); `stats()` what the last render drew (draw calls, instances, copies
 culled, shadow draws and casters (and per cascade), point lights, triangles, CPU time).
+
+## Memory and warm-up
+
+**Targets of the opt-in features are given back.** Ambient occlusion's and contact shadows' textures, the pre-pass's depth and normals,
+temporal anti-aliasing's history and velocity, and occlusion culling's pyramid, history and occluder depth (with the renderer's second gathered
+buffer of cluster indices) belong to a view and are made by the first render that asks. A feature that has not been used for 120 renders of the
+view gives its targets back (they go to SDL_GPU's allocator, so they are reusable at once, though a driver may keep its blocks); a feature that is
+on again makes them again, and the pictures are those of a fresh view (the temporal history starts afresh, as after `reset_history()`). A
+feature toggled at least every 119 renders never lets go, so toggling does not thrash. `stats().feature_bytes` is the video memory those targets
+hold now (1280 x 720, everything on: Sponza 45.7 MiB, the kiln with occlusion culling 93.2 MiB; nothing when off) and `stats().targets_released`
+the groups given back this render. Nothing else is released (the shadow map, MSAA and HDR targets stay).
+
+**Warm-up.** Pipelines are made on first use, which is tens of milliseconds a pipeline on a driver with a cold shader cache (turning on temporal
+anti-aliasing for the first time took 390 ms, ambient occlusion 40 ms; a warm cache, 3 to 6 ms and 1.4 ms). `r3d.warm_up(view, scene)` makes, without
+drawing, the pipelines the scene's draws and its settings (shadow maps and cascades, ambient occlusion, contact shadows, temporal anti-aliasing,
+occlusion culling, custom shaders, the overlay, picking) would make on the first render, and the targets of those features for the view, so
+that the first frame with a feature is a steady one (`stats().pipelines_made` is 0 for it). Call it behind a loading screen with a scene that has
+the features on, or when a game turns one on. Nothing is warmed at start-up by itself. It does not make cluster cut buffers or occlusion culling's
+history: the first frame with levels or clusters on still takes about 2 ms, and with occlusion culling about 6 ms, for those buffers.
+Sponza Walk warms everything up once when it starts and again when a switch that needs it is turned.
 
 ## Cost
 

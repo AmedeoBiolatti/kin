@@ -1509,8 +1509,8 @@ lavapipe checked); the 3D-off build keeps building.
 |---|---|---|---|
 | G2a cascades | sharp shadows near the camera in a large `shadow_area` (3 px edge to 1 px at 60 m, test) | casters drawn again for each cascade; nothing in the small reference scenes (identical pictures) | 1 cascade (off) |
 | G2b pre-pass and GTAO | ambient and environment light shut off in creases: Sponza 50.1 to 48.7 (radius 0.5), further with a larger radius | +0.25 to 0.55 ms in small scenes, +0.9 to 1.0 ms in the crowd (not turned on in Signal Breach) | off |
-| G2c contact shadows | small contact shadows a coarse map misses | +0.15 to 0.3 ms (shared pre-pass with AO: +0.2 to 0.3 more); no gain on the reference scenes' distances | off |
-| G2d TAA | edges and fine detail as good as or better than MSAA 4x (SSIM) from one sample, steadier; works with the rest | +0.07 to 0.15 ms fixed, second geometry pass in big scenes (kiln +1.4, crowd +0.4); +0.09 to 0.15 over AO + contact; CPU +0.3 ms for 22,000 copies | off |
+| G2c contact shadows | small contact shadows a coarse map misses | +0.15 to 0.3 ms (shared pre-pass with AO: +0.2 to 0.3 more, less 0.03 to 0.15 since phase 1 shares one blur between them); no gain on the reference scenes' distances | off |
+| G2d TAA | edges and fine detail as good as or better than MSAA 4x (SSIM) from one sample, steadier; works with the rest | +0.07 to 0.15 ms fixed; the second geometry pass of the first version (kiln +1.4, crowd +0.4) is gone since phase 1 (the main pass writes the velocity: the kiln's TAA cost fell by 2.2 ms of 7.2, Sponza's by 0.18 of 0.7, the crowd's by 0.5 of 2.4); +0.09 to 0.15 over AO + contact; CPU +0.3 ms for 22,000 copies | off |
 
 Every feature is off by default and the picture and cost are then those of
 `g1b_final` (checked per step, byte for byte in Signal Breach). None of the four
@@ -2081,6 +2081,239 @@ Sponza 260 k triangles in 103 meshes; numbers from each step's results):
 | **G3b** clusters, CPU cut (`MeshOptions::clusters`) | 5 s and 1.5 GB at load for the kiln; the cut on the CPU 0.4 to 0.9 ms of `render()` | kiln 4.3 to 0.25 to 0.9 ms GPU: near parts fine, far parts coarse inside one mesh; no cracks | off | one huge mesh (hundreds of thousands to millions of triangles) seen near and far; not Sponza or a helmet |
 | **G3c** the cut in compute (`Lod3D::gpu_culling`) | 62 MB of indices and 7 MB of table for the kiln, the gathered buffer (48 MB), about 0.05 ms of GPU for six compute passes | `render()` 0.4 to 0.9 ms down to 0.03 to 0.08; GPU level with the CPU cut, cheaper with cascades; the picture is the CPU cut's byte for byte | on, wherever clusters and the selection are on and the device can | always with G3b |
 | **G3d** occlusion culling (`Lod3D::occlusion`) | 0.05 to 0.18 ms of GPU where little is hidden (0 to 0.07 with a pre-pass), 0.03 to 0.06 ms of CPU, +48 MB (the second gathered buffer) | 0.1 to 0.23 ms (12 to 19%) where a wall hides hundreds of heavy copies; the camera's triangles down 70 to 98% on the kiln and the dense scene; the picture is the one without it | off | hundreds of heavy clustered copies behind walls, with ambient occlusion or temporal anti-aliasing on; not the kiln, not Sponza |
+
+### Opt-in speedups, phase 1 — results
+
+Phase 1 of a speed-up pass over the opt-in features (TAA, AO, contact shadows, cascades, occlusion, clusters): changes that keep every picture **byte for byte**. Labels
+`sp1_before_*` (the tree at `b2b7359`: `def`, `all` = `--cascades 4 --ao --contact-shadows --taa`, `taa`, `ao`, `cs`, `c4` over crowd, shadows, sponza, helmet, motion, spheres, cornell;
+`cl` and `occ` = kiln_near and hidden_dense with `--lod --lod-clusters` (and `--lod-occlusion`); `cltaa` = the same with `--taa`), each picture compared with `cmp` after every item. Timing:
+interleaved pairs of runs of the old and the new binary (120 frames each, medians of the cameras' medians over 3 to 5 runs; a run waits for an idle CPU first, because other projects
+on this machine load it to a load average of 20 to 35 at times and that moves CPU numbers by 2x and GPU numbers by 10 to 20%); `render()` CPU ms in the second column group. Differences under
+about 0.05 ms GPU, or 0.01 ms CPU on the small scenes, are noise.
+
+Known flakes, seen in the **old** binary too and not caused by these changes: `crowd/above` under TAA flips between two pictures (1 of 2 full old-binary runs, 1 of 3 new-binary runs; crowd alone, 5 runs
+of each: never), and `kiln_near/grazing` flips between two pictures (old binary 2 of 6 runs, new 3 of 8; under `--taa` too, together with `kiln_near/far`). Every other picture of every configuration was identical in every run. (A first version of the
+shader split changed `mesh.vert`'s SPIR-V by hoisting a `const uint at` out of an expression, and `kiln_near/grazing` then differed twice in a row; with hindsight that may have been this flake
+or the rounding. The shaders were arranged so that `mesh.vert` and `mesh.frag` compile to the **same SPIR-V as before**, checked with `glslc` and `cmp`, and the velocity variants are separate files: keep it so.)
+
+#### 1. TAA velocity from the main pass
+
+With TAA on and nothing else that needs a pre-pass (no AO, no contact shadows, no occlusion culling, no opaque mesh with a custom shader), the main pass writes the velocity itself into a second
+colour target (`mesh_velocity.vert/.frag` = `mesh.vert/.frag` through `kin_mesh_vertex.inc.glsl` / `kin_mesh_fragment.inc.glsl` with `KIN_VELOCITY`), and the separate velocity pre-pass (a whole
+second geometry pass, with its own depth) is gone. `Render3DStats::ao_draws` is then 0 and `taa_main_velocity` is true.
+
+- *Same bits.* The velocity expression is `kin_velocity()` moved to `kin_velocity.inc.glsl`, which both the pre-pass and the main pass include; the vertex shader copies `prepass_velocity.vert`'s
+  four lines for `vCurrent`/`vPrevious`/`vFresh`. The target is the same RGBA16F texture the pre-pass wrote (`_ao_normals`; velocity in B and A, R and G are 0, nothing reads them in TAA-only), cleared
+  to 0 as before, so `taa.comp` is unchanged. Result: **every TAA picture is byte-identical** to the pre-pass's (below).
+- *Rules kept.* Opaque and cut-out (`Blend3D::Mask` discards in `mesh.frag` as before) write it; alpha, additive and wireframe pipelines have a colour write mask of 0 on the second target (a new
+  `extra_format`/`extra_write` in `GpuPipelineKey`), so they leave the velocity of the opaque mesh behind them, as before. The overlay draws in the same pass with its own cameras (`current`/`prior`
+  per scene in the draw block) and overwrites the world's velocity where it covers, as its separate pass did. Clustered draws (CPU and GPU cut), LOD levels and instanced runs go through the same
+  `draw_cluster_indirect`/`draw_cluster_copies` code with a longer uniform block (`VelocityUniforms` now starts with `DrawUniforms`' 80 bytes, so a pipeline with the plain `mesh.vert` reads it too).
+- *Custom shaders.* A mesh with a shader of its own (`Material3D::shader`) has no velocity output (its fragment shader comes from `kin_material.inc.glsl`, which declares `FragColor` only). A frame with an
+  **opaque** custom-shader mesh keeps the old pre-pass (decided per frame in `prepass()`); a **blended** custom shader draws in the main pass with the second target masked. Tested: both, against the
+  pre-pass, and a mutation that skips the fallback crashes the test (a pipeline with the wrong storage buffers). `KIN_TAA_PREPASS=1` forces the old path (read on each render: tests, A/B timing).
+- *Targets.* The pre-pass depth (D32, 3.7 MB at 1280 x 720) is no longer made for TAA alone; `_ao_normals` (RGBA16F, 7.4 MB) is.
+
+Byte comparison, new tree against `sp1_before_*`: see the table at the end of this section (all pictures of all eight configurations).
+
+GPU ms / CPU `render()` ms, TAA on, old binary then new (medians of interleaved pairs):
+
+| Scene | Old GPU | New GPU | Change | Old CPU | New CPU |
+|---|---|---|---|---|---|
+| crowd (20,000 copies; first_person / mid_deck / above) | 2.36 | 1.86 | **-0.50** (-0.62 / -0.36 / -0.51) | 0.385 | 0.376 |
+| sponza (nave / roof) | 0.72 | 0.54 | **-0.18** (-0.24 / -0.11) | 0.181 | 0.155 |
+| kiln, 5.15 M triangles, no LOD | 7.17 | 4.92 | **-2.25** | 0.039 | 0.033 |
+| kiln, clusters | 0.64 | 0.54 | -0.10 | 0.065 | 0.059 |
+| kiln_near, clusters | 0.50 | 0.42 | -0.08 | 0.064 | 0.058 |
+| hidden_dense, clusters | 0.84 | 0.71 | -0.13 | 0.090 | 0.083 |
+| small scenes (cornell, helmet, shadows, spheres; two earlier batches) | 0.17 to 0.30 | -0.01 to -0.02 | | 0.02 to 0.06 | 0.01 to 0.04 (-0.005 to -0.03) |
+
+Nothing got slower in either kind of scene; the gain is the whole second geometry pass (TAA's cost on the kiln was +1.4 ms in G2d with a single sample at that time, and here is more than 2 ms of 7).
+The CPU numbers on the crowd are dominated by the instance matching and the culling workers (unchanged); recording one geometry pass fewer saves 0.01 to 0.03 ms on Sponza.
+
+#### 2. One blur for ambient occlusion and contact shadows
+
+With both on and the occlusion not at half resolution, the two results have the same size and the same depth weights, so `ao_blur_both.comp` filters both inputs and writes both outputs in one dispatch a
+direction (2 dispatches where there were 4; `Render3DStats::blur_merged` = 2, and `ao_dispatches` and `contact_dispatches` still count the dispatches each feature is in, 3 each). The GTAO and
+the contact march run first, then the two blurs. Everything else keeps the separate path (half-resolution occlusion, one feature alone; `KIN_BLUR_SEPARATE=1`, read on each render, forces it, for the test and
+for timing). The weights are worked out once and applied to both sums, with the same operations in the same order as `ao_blur.comp`, and the results are **byte-identical** (every picture of
+`all`, `ao`, `cs` and the rest; and the new test compares the merged picture with `KIN_BLUR_SEPARATE=1`'s to the byte).
+
+Ping-pong: the blur goes raw, across, raw (the second dispatch writes over the raw result, which nothing reads again), so the third R8 texture of each feature is gone: `_ao` and `_contact` no longer
+exist and `_ao_raw` / `_contact_raw` hold the results (the main pass samples them). 0.9 MB less a feature at 1280 x 720, 8.3 MB less at 4K. Identical pictures.
+
+Timing: the same binary, merged against `KIN_BLUR_SEPARATE=1`, AO + contact shadows on, interleaved pairs (7 runs of the small scenes, 5 of the big ones; GPU ms, median of the cameras' medians, and in
+brackets the median of the runs' p10, which the GPU's clock drift disturbs less); CPU `render()` ms:
+
+| Scene | Separate | Merged | Change | CPU change |
+|---|---|---|---|---|
+| crowd | 3.07 | 2.93 | **-0.14** (p10 -0.30) | -0.002 |
+| sponza | 1.79 | 1.74 | -0.05 (p10 -0.10) | -0.001 |
+| shadows | 1.23 | 1.07 | -0.16 (p10 -0.15) | -0.001 |
+| helmet | 0.43 | 0.40 | -0.03 | -0.001 |
+| kiln_near, clusters | 0.68 | 0.65 | -0.02 (p10 -0.04) | -0.001 |
+| hidden_dense, clusters | 1.34 | 1.25 | -0.08 (p10 -0.10) | -0.001 |
+| kiln, clusters | 0.79 | 0.74 | -0.05 (p10 -0.03) | -0.002 |
+
+A change in every scene and every camera but one noisy cell (`sponza/roof` +0.065 in one batch, -0.13 in its p10): the saving is the two dispatches' fixed cost and one read of the depth, 0.03 to 0.15 ms.
+(The first timing against the old binary, with a machine loaded by another project, gave the same signs but with swings of +/-0.2 ms between cameras; the same-binary pairs above are the record.)
+
+#### 3. Adaptive gating of occlusion culling: measured, not built
+
+*Question.* G3d costs +0.08 to +0.18 ms where little is hidden (the extra depth pass, the second cut and multi-draw, the pyramid). Could a GPU-side signal (a counter of what was occluded last
+frame, and indirect dispatch/draw arguments written by a tiny compute pass, zero-sized when skipping) turn the second pass and the pyramid off, with no read-back (the fence rules forbid waiting; the 2D
+backend owns the frame fence)?
+
+*What can be skipped on the GPU.* Only compute work, through zero-sized indirect arguments: the **pyramid** (3 dispatches) and the **test** in the second cut. The expensive parts are not skippable that way:
+the depth pass of the opaque meshes and the first pass's clusters is a render pass of CPU-recorded draws (a gate that cannot reach the CPU cannot remove them; only their clusters' indirect draws could be
+zeroed); and if the second cut is skipped, the clusters that were not in last frame's history must still be drawn (every cluster the first pass did not draw is drawn by the second, untested), so the
+second cut and its multi-draw have to run anyway, or the first pass must be told to draw everything (history all ones, written by the same tiny pass), after which the second cut finds nothing new but still runs
+its six compute passes unless they too are indirect.
+
+*Measured* (a throwaway build with two switches, since removed: no pyramid and no test, which is what a perfect GPU-side gate recovers at most while keeping the picture right; occlusion culling off as the
+baseline; `Lod3D::occlusion` on with `--lod --lod-clusters`; interleaved pairs of runs of one binary, 5 runs; GPU ms, medians of the cameras' medians, CPU `render()` ms):
+
+| Scene / camera | On, GPU over off | Without pyramid and test, GPU over off | What a gate on the pyramid recovers |
+|---|---|---|---|
+| hidden open (nothing hidden by the wall) | +0.078 | +0.097 | none (noise) |
+| hidden_dense open | +0.145 | +0.116 | 0.03 of 0.145 (20%) |
+| hidden_dense occluded / peek (much hidden) | -0.137 / -0.134 | +0.228 / +0.200 (nothing culled, so no saving) | it would lose the whole saving |
+| sponza nave / roof, clusters | +0.124 / +0.100 | +0.077 / +0.040 | 0.05 to 0.06 (40 to 60%) |
+| kiln_near (3 cameras) | +0.036 | +0.036 | none |
+
+CPU `render()` is +0.02 to +0.06 ms with occlusion on in all of them (the second recording), which no GPU gate removes.
+
+*Verdict: dropped.* The part a GPU-side gate can reach (the pyramid and the test) is 0 to 0.05 ms of a 0.08 to 0.15 ms cost, 0 to 40% and not "most", and a gate must not hurt the best case: `hidden_dense`
+occluded and peek (-0.13 ms) need the pyramid, so the gate's decision would have to be right every frame, and the only signal for it is last frame's occluded count in a buffer the CPU cannot read without a
+fence. A CPU-side gate (skip the whole second pass and the occluder depth pass) would recover the rest, but needs that count a few frames late through a transfer buffer and a frame fence the 2D backend
+does not expose to 3D; building one means changing the 2D backend's fence ownership for 0.05 to 0.1 ms in a case the user asked for explicitly with `Lod3D::occlusion`. It stays an opt-in for scenes
+where much is hidden (the plan's verdict stands).
+
+#### 4. The shadow map kept when nothing changed
+
+`Lights3D::cache_shadows` (off by default, as every opt-in; the agent first built it on, and the default was turned off at commit; `Render3DStats::shadow_cached` says a render hit; `KIN_SHADOW_CACHE=0` turns it off for the whole renderer). The shadow pass (a single map or the cascades) is skipped when everything it
+is a function of is as it was when the map was last drawn: the map itself (a generation counter, so a remade map never matches), its size and layers, the cascades' views and the camera's and the
+sun's frusta (what casts into view, and the cascades' fit, follow the **camera**), the levels of detail (the settings and the view they were chosen for), and for every caster its mesh (a serial number, not a pointer),
+`double_sided`, blend, and for a cut-out its cutoff, wrap modes and texture (identity and a version bumped by `update_texture`, `write_texture`, a new mip chain and a compute dispatch that writes it; a
+texture that is a render target is drawn into without a trace, so a cut-out caster with one is never cached), and its copies' `MeshInstance`s. All of it except the copies is a `key` of bytes compared exactly. The
+copies are compared in full (`memcmp`, stopping at the first difference) against a snapshot taken only after two renders in a row agreed on the key **and** on a cheap sample of the copies (up to eight a draw, spread, and the last),
+so a scene that moves never copies anything, and one that moves a little (a sample agreeing, the copies not) makes the cache wait eight renders before it copies again. It cannot give a wrong picture short of a
+change it does not see: a texture written by a route that does not pass through the 2D backend (none exists in kin), or an `MeshInstance` that changes and changes back between two renders.
+
+*How often can it hit.* Only when the camera **and** everything in the shadow's reach are still: a paused game, a photo mode, a model viewer at rest, a level walked to a stop. Signal Breach (the crowd always moves) never hits;
+the Sponza Walk viewer hits whenever the user stops. It is not a general win, and nothing is lost where it misses (below).
+
+*Byte-identical.* Every picture of the eight configurations rendered with the cache on (`--shadow-cache`, 8 renders of a static scene a frame, so all but the first of a camera hit) equals the baseline's (0 differ except
+`kiln_near/grazing`, the known flake), and `test_gpu_shadow_cache` compares each hit with an uncached render to the byte.
+
+Cost, same binary with the cache on and off (`KIN_SHADOW_CACHE=0`), interleaved pairs; GPU ms, medians of the cameras' medians, in brackets the p10; CPU `render()` ms:
+
+| Scene | Stationary: GPU off / on | Stationary: CPU off / on | Moving: GPU off / on, CPU off / on |
+|---|---|---|---|
+| crowd, 22,000 copies | 1.37 / 0.90 (**-0.47**; p10 -0.44) | 0.155 / 0.219 (**+0.06**: the copies compared) | 1.084 / 1.085, 0.195 / 0.193 (**no change**, 9 runs, the crowd drifting each frame) |
+| crowd, 4 cascades | 1.44 / 0.87 (-0.57) | 0.37 / 0.55 (+0.19; noisy: +0.06 to +0.36 by camera) | |
+| sponza | 0.335 / 0.235 (-0.10; p10 -0.13) | 0.085 / 0.065 (-0.02) | |
+| sponza, 4 cascades | 0.52 / 0.30 (-0.22) | 0.127 / 0.163 (+0.04) | |
+| helmet | 0.165 / 0.104 (-0.06) | 0.015 / 0.012 | |
+| shadows | 0.120 / 0.099 (-0.02) | 0.028 / 0.022 | |
+| kiln (clusters) | 0.51 / 0.29 (-0.23) | 0.031 / 0.028 | |
+| kiln_near / hidden_dense (clusters) | 0.305 / 0.230 (-0.07), 0.58 / 0.49 (-0.09) | -0.003 / -0.001 | |
+
+A stationary hit saves the whole shadow pass (a quarter to a half of these frames) and costs a comparison of the casters' copies on the CPU, which is a small gain on a small scene (the recording of the pass is skipped) and a loss of 0.06 to 0.2 ms on
+22,000 copies (1.6 MB at memory speed): the GPU gain is five to ten times larger. A moving scene pays the key and the sample, which is within noise even for 22,000 copies. The harness and `kin_draw_bench` turn the cache off (`--shadow-cache` brings
+it back), because they render one scene many times and mean to time the pass.
+
+Tests (`test_gpu_shadow_cache`, 160 x 120, forty copies in a draw so that the sample cannot see them all): a still scene hits from the third render with 0 draws and the same picture; off (the scene's switch or `KIN_SHADOW_CACHE=0`) draws every time; and each of the sun,
+camera, resolution, area, cascades, a caster moved, **a copy the sample does not look at**, a caster added, a material changed, a mesh swapped, a caster that stops casting, levels of detail on and a **forced level**, the **cascades' reach**, the camera under cascades, and a cut-out's
+texture written in place, draws again and gives the picture of an uncached render, after which the cache hits again; a render target as a cut-out's texture is never cached; a resize misses; two views alternating each get the right picture. Mutations, each made, seen to fail and reverted:
+the full comparison removed (stale: the unsampled copy), the camera left out of the key, the texture version left out, the map's generation, size and layers left out, the double-sided flag, the mesh, the render-target rule (all failed), the levels of detail's
+settings and the cascades' plan left out of the key (these two survived the first version of the test, which only turned LOD and the cascades on and off, and a camera move that the key's other entries cover; the forced level and the cascades' reach were added to catch them, and then caught them). Two mutations that survive by design: leaving the sun's direction or the shadow area out of the
+key alone (the light's view-projection, which is in it, covers them).
+
+#### 5. Memory: the opt-in targets given back
+
+Each feature's targets belong to a view; a group is released when it has not been used for 120 renders of that view (`KIN_RELEASE_FRAMES=n` for tests, 0: never): ambient occlusion's two R8 textures, contact
+shadows', the pre-pass's depth, its normals (also the main pass's velocity), temporal anti-aliasing's (history, depth, float picture of an 8-bit view, sharpened picture, last velocity), occlusion culling's (pyramid, occluder depth, history)
+and, per renderer, its second gathered buffer of indices and job history (`GpuView3D::_idle_*`, `age_targets` at the end of `render()`). A group is "used" when its pass ran this render, so a feature toggled at
+least every 119 renders never lets go, and the targets are not made again. Temporal anti-aliasing used to release at once when it went off; it now drops its history at once (`suspend_taa`: valid = false, frame 0, the copy
+records cleared, so the next frames start afresh exactly as after a release or `reset_history()`) and releases the textures with the rest. The shadow map and the MSAA/HDR targets are untouched. `Render3DStats::feature_bytes` is what the groups hold
+and `targets_released` the groups given back that render.
+
+*Video memory, 1280 x 720, everything on, then 130 renders with it all off* (`kin_reference --vram-cycle`): by the renderer's own count (`feature_bytes`), **Sponza** (4 cascades, AO, contact shadows, TAA, 8-bit view) **45.7 MiB to 0**, **kiln_near** (the same with clusters and occlusion culling,
+second gathered buffer included) **93.2 MiB to 0** (5 and 7 groups released). By `nvidia-smi --query-gpu=memory.used` (the device is nearly alone on it): kiln_near 876 MiB with the features on to 796 off (-80), 860 to 796 (-64), 810 to 794 (-16 on
+the first camera, whose `on` figure was taken while the scene was still growing); **Sponza no visible change** (980 MiB both ways; the first camera 932 on, 980 off, which is an unrelated allocation). SDL_GPU's Vulkan allocator keeps its memory blocks and sub-allocates, so
+a release makes the memory reusable by this renderer at once but not always returned to the driver: the count above is exact, the `nvidia-smi` deltas are not. The numbers fall at 4K in proportion (the R8 textures of the blur's third copy alone were 8.3 MB each there).
+
+*Pictures.* After a release, a feature on again draws what a fresh view draws, to the byte: tested for AO + contact + TAA together, for TAA alone (the velocity-in-the-main-pass path), for features on their own clocks, and for occlusion culling.
+
+Tests: `test_gpu_feature_release` (160 x 120, `KIN_RELEASE_FRAMES=5`: held for four renders, gone at the fifth, `targets_released`; on again equals a fresh view over 8 TAA frames, also after a shorter pause;
+each feature on its own clock (AO alone holds exactly what a fresh AO-only view holds); toggled every render for 40, every four for 40: never released; every six: released each time; `KIN_RELEASE_FRAMES=0` keeps) and
+`test_gpu_occlusion_release` (the pyramid, depth, history and the renderer's second buffer). Mutations, each made, seen to fail and reverted: TAA's history not dropped when it goes off (caught by the old TAA test), releasing after one
+render (the thrash test), the second gathered buffer not released, the contact group watching the AO's flag, the velocity target counted as unused while TAA runs (caught only after a `targets_released == 0` check was added to the TAA loop). **Not caught:**
+clearing the occlusion layout and `_occ_reset` on release (a stale history can only cost speed, never a picture).
+
+#### 6. Pre-warming pipelines: `Renderer3D::warm_up(view, scene)`
+
+*The hitch, measured first* (`kin_reference --hitch <feature>`, a fresh process per feature: 40 renders of the scene with the feature off, then on; each of the first renders timed; Sponza for AO, contact shadows, TAA, TAA + AO, 4 cascades and all of them,
+`hidden_dense` with clusters for LOD, the CPU cut and occlusion; the first render's `render()` ms and CPU wall ms of render + present; steady with it on in brackets). Compute pipelines are all made when the renderer starts (the cost of start-up, not of first use); what
+is made on first use is graphics pipelines (4 for AO, 4 for contact shadows, 13 for TAA, 11 for TAA + AO, 11 for all, 0 for the cluster features) and targets.
+
+| Feature on at run time | Cold driver cache: first render, no warm-up | with `warm_up` | Warm cache: first render, no warm-up | with `warm_up` | Steady |
+|---|---|---|---|---|---|
+| ambient occlusion | 40.7 ms (wall 41.8) | 0.30 (1.07) | 1.4 (2.5) | 0.46 (1.46) | 0.3 (1.3) |
+| contact shadows | 47.4 (48.6) | 0.30 (1.09) | 1.4 (2.3) | 0.62 (1.67) | 0.3 (1.3) |
+| TAA | **387** (390) | 0.36 (1.18) | 3.6 (5.9) | 0.53 (1.57) | 0.3 (1.4) |
+| TAA + AO | **275** (283) | 0.7 (3.3, loaded machine) | 4.8 (7.9) | 0.40 (1.31) | 0.4 (1.4) |
+| 4 cascades | 4.1 (7.6) | 0.28 (3.4, loaded machine; 1.2 in the warm run) | 3.8 (7.2) | 0.31 (1.22) | 0.3 (1.4) |
+| AO + contact + TAA + 4 cascades | **208** (212) | 0.55 (1.43) | 18.6 (25.8, loaded) | 0.88 (2.0) | 0.5 (1.5) |
+| levels / clusters (GPU cut) | 1.9 (5.8) | 2.3 (8.7): **no change** | 1.7 (2.7) | 2.5 (3.7): no change | 0.1 to 0.2 |
+| clusters, CPU cut | 1.1 (2.6) | no change | 1.2 (2.9) | no change | 0.8 |
+| occlusion culling | 3.5 (5.5) | 3.9 (5.4): **no change** | 6.0 (8.3) | 6.0 (7.8): no change | 0.2 |
+
+("Cold" is `__GL_SHADER_DISK_CACHE=0`, a player's first run; "warm" the second run of the same process, the cache filled. The 4 cascades' 4 ms is the 4-layer shadow map (64 MB) being made, which `warm_up` also does.)
+
+*`warm_up`.* `Renderer3D::warm_up(view, scene)` (`IRenderer3DBackend::warm_up`) makes what `setup_frame`, `prepass` and the passes would ask for on a first render of the scene: the targets of AO, contact shadows and TAA (the velocity target alone, or the pre-pass's, as
+the frame will need), the shadow map at the scene's size and cascades, the pyramid and occluder depth of occlusion culling, and pipelines (`pipeline()` makes the missing and keeps them) for each of the scene's draws (the pass its blend and wireframe put it in, culling from `double_sided`, its custom shader,
+the velocity variant when the main pass will write it) and, by the scene's settings, the shadow, pick, occluder, and cut-out variants. It records nothing and draws nothing. Nothing is warmed at start-up by default; Sponza Walk warms up with every
+feature on once the model is loaded, and again when a switch that needs it is turned (the shadow map's size, MSAA or HDR, the features).
+After it the first render makes **0 pipelines** (`Render3DStats::pipelines_made`) and its `render()` is 0.3 to 0.9 ms against 1.4 to 4.8 (warm cache) or 40 to 390 (cold) without; the CPU wall time of the first frame is within about 0.3 ms of
+steady in the runs above (the rest is machine noise: the table's loaded-machine cells).
+
+*Not warmed* (and said so): the cluster cut's buffers and occlusion culling's second gathered buffer and history (sized by the scene's clusters, made by the first cut: the 2 ms and 6 ms above), environment filtering, a mesh's first upload, pipelines of draws the scene gets
+later. A scene with a different view format or sample count needs its own warm-up (the pipelines are for the view's).
+
+Tests: `test_gpu_warm_up`, each of eight configurations on a **fresh device** (so that nothing earlier made a pipeline): first without `warm_up`, where the first render makes pipelines (5, 6, 23, 18, 11, 8, 1 and 12: the control, so the test is not vacuous), then with it, where it makes **0**
+and the second render makes 0 (plain 4x MSAA with picking; cascades in an HDR view; TAA with custom shaders and the overlay (the pre-pass fallback); TAA without them (the main pass writes the velocity); TAA + AO + contact + cascades; AO + contact; occlusion culling; occlusion + AO + TAA; every kind of draw in each: opaque, double-sided,
+cut-out, alpha, additive, wireframe, custom shader opaque and blended, overlay). Mutations, each made, seen to fail and reverted: no shadow pipelines, no custom-shader pipelines, no pick pipelines, no velocity variant (only after the TAA configuration without custom shaders was added), occluder pipelines
+not made (**not caught**: with this device's formats the occluder pipeline is the shadow pipeline: the same key).
+
+#### Phase 1 in one table
+
+GPU ms / CPU `render()` ms, before to after (old binary against new, or the same binary with the switch off, interleaved pairs), the two kinds of scene:
+
+| Item | Big levels | The crowd (20,000 small meshes) | Pictures |
+|---|---|---|---|
+| 1 TAA velocity from the main pass (TAA on) | sponza **-0.18** / -0.03; kiln (no LOD) **-2.25** / -0.006; kiln_near -0.08, hidden_dense -0.13, kiln clusters -0.10 (CPU -0.006 to -0.007) | **-0.50** / -0.008 | identical (all TAA configurations) |
+| 2 one blur for AO and contact shadows | sponza -0.05 (p10 -0.10), kiln -0.05, hidden_dense -0.08, kiln_near -0.02 / CPU -0.001 to -0.002 | -0.14 (p10 -0.30) / -0.002 | identical |
+| 3 occlusion gating | dropped (see above) | | |
+| 4 shadow map kept (a still scene) | sponza -0.10 / -0.02; kiln -0.23; kiln_near -0.07, hidden_dense -0.09 / about 0 | -0.47 / **+0.06** (the copies compared; **moving crowd: 0 / 0**) | identical (and tested against uncached) |
+| 5 targets given back | 45.7 MiB (sponza) and 93.2 MiB (kiln_near) to 0 after 120 renders off | | identical after re-enabling |
+| 6 warm-up | first-use hitch of AO / contact / TAA / all: 40 / 47 / 387 / 208 ms (cold cache) to under 1.1 ms | | no picture involved |
+
+With every feature off (the default, the new binary against the old, interleaved pairs, `render()` CPU ms and GPU ms): crowd GPU +0.083, +0.036, +0.008, -0.029 over four batches of 7 to 9 runs (the same old binary against a copy of itself, which is the noise: +0.071, -0.006, -0.041; the
+per-camera swings of that scene are 0.1 to 0.15), CPU -0.001 to -0.007; Sponza GPU +0.009, CPU -0.008; helmet, shadows and cornell GPU within +/-0.006 and CPU within +/-0.001; kiln_near and hidden_dense with clusters GPU +0.012 and +0.014, CPU -0.001.
+Nothing slower than this machine's noise can show.
+
+**Picture identity at the end** (the final binary against `sp1_before_*`, every picture of the nine configurations `def`, `all` = 4 cascades + AO + contact shadows + TAA, `taa`, `ao`, `cs`, `c4`, `cl`, `occ` and `cltaa`, once with the shadow cache off as the harness runs it and once with it on, `--shadow-cache`):
+**0 pictures differ, except** `crowd/above` under `--taa` (the old binary's own flake) and `kiln_near/far` under `--lod --lod-clusters --taa` (it flips between two pictures in the old binary too: 1 of 3 runs of the old binary, 2 of 3 of the new; both runs of the final binary agree with each other)
+and `kiln_near/grazing` under `--lod --lod-clusters` in the shadow-cache run (the known kiln flake: old 2 of 6 runs, new 3 of 8).
+
+**Not done or not tested.** Sponza Walk's panel click path (the new "Keep the map while nothing moves" row, the warm-up on a toggle) cannot be clicked here; its `--headless --preset taa` run and the `--set shadow_cache=off` run were made and give the same picture byte for byte. Device loss and a changed colour space:
+the shadow cache lives in the renderer, which a lost device replaces, and a changed 2D target format remakes the view's targets (the cache's key holds the map's generation, which a remake of the map changes, and the view's size), but neither was provoked. D3D12 and Metal untested (Vulkan on NVIDIA and lavapipe only). Occlusion gating (item 3) was measured and dropped. The first
+frame with levels, clusters or occlusion culling still allocates its buffers (2 and 6 ms), which `warm_up` does not make. `nvidia-smi` does not show a release reliably (item 5).
+
+**Tools added** to `kin_reference` (nothing else of the harness changed): `--shadow-cache` (the harness turns `Lights3D::cache_shadows` off by default: it renders a static scene many times a frame), `--crowd-move` (the crowd drifts every frame, posed per frame: 22,000 moving copies),
+`--hitch <feature>` (+ `--warm-up`), `--vram-cycle`; `kin_draw_bench` turns the cache off. Switches read on every render for tests and A/B timing: `KIN_TAA_PREPASS=1`, `KIN_BLUR_SEPARATE=1`, `KIN_SHADOW_CACHE=0`, `KIN_RELEASE_FRAMES=n`.
 
 ### G4 — Ray tracing in compute
 

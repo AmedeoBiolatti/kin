@@ -1726,6 +1726,15 @@ void test_gpu_contact_shadows() {
         const Pixels both = render(on, false, false, true);
         assert(r3d.stats().ao_instances == ao_instances && r3d.stats().ao_dispatches == 3 && r3d.stats().contact_dispatches == 3);
         assert(brightness(at(both, patch)) < brightness(at(ao_alone, patch)) * 80 / 100);
+        // The two blurs are one dispatch a direction (the counts above are still each feature's own), and the picture is the one
+        // with two (KIN_BLUR_SEPARATE=1): to the byte.
+        assert(r3d.stats().blur_merged == 2);
+        setenv("KIN_BLUR_SEPARATE", "1", 1);
+        const Pixels both_separate = render(on, false, false, true);
+        unsetenv("KIN_BLUR_SEPARATE");
+        assert(r3d.stats().blur_merged == 0 && r3d.stats().ao_dispatches == 3 && r3d.stats().contact_dispatches == 3);
+        assert(both.rgba == both_separate.rgba);
+        assert(ao_alone.rgba != both.rgba && (render({}, false, false, true), r3d.stats().blur_merged == 0));
 
         // Four-times multisampled too.
         const Pixels ms_off = render({}, false, false, false, &view_msaa), ms_on = render(on, false, false, false, &view_msaa);
@@ -2934,6 +2943,313 @@ void test_gpu_taa_overlay() {
     });
 }
 
+// Temporal anti-aliasing with nothing else that needs a pre-pass: the main pass writes the velocity itself (one geometry pass fewer).
+// The pictures must be those of the pre-pass (KIN_TAA_PREPASS=1 brings it back), frame by frame, with every kind of draw the velocity
+// has a rule for: opaque, an instanced run, a cut-out, a blend that must leave the velocity of what is behind, an additive one, a
+// wireframe, the overlay; and a custom shader on an opaque mesh (no velocity output: the frame keeps the pre-pass) or on a blended one.
+void test_gpu_taa_main_velocity() {
+    with_gpu("test_gpu_taa_main_velocity", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const PatternSurface world = make_pattern_surface(r3d, renderer);
+        const kin::Mesh box = make_box(r3d, {1.5f, 1.5f, 0.5f});
+        const kin::Mesh leaf_mesh = r3d.create_mesh(uv_square(1.2f));
+        const kin::u8 texels[16] = {20, 200, 20, 0, 20, 200, 20, 255, 200, 20, 20, 255, 20, 20, 200, 0};
+        const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {4, 1});
+        renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
+        const kin::Mesh gun = make_box(r3d, {2.0f, 1.0f, 0.5f});
+        kin::MaterialShader3D flat;
+        std::string error;
+        if (kin::shader_compiler_available()) {
+            flat = r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl", &error);
+            assert(flat.valid());
+        }
+        kin::View3D with_main = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 10, 20)});
+        kin::View3D with_pre = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 10, 20)});
+        enum class Extra { None, CustomOpaque, CustomBlended, Occlusion };
+        const auto build = [&](kin::Scene3D& scene, int f, Extra extra) {
+            const float t = static_cast<float>(f);
+            scene.clear();
+            scene.taa = {.enabled = true};
+            scene.camera = kin::Camera3D::look_at({-3.0f + 0.21f * t, 0.6f, 9.0f}, {0.4f * t * 0.1f, 0.0f, 0.0f}, 40.0f);
+            scene.lights.sun = {.direction = {0.4f, 0.8f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.25f};
+            scene.draw(world.mesh, Mat4f::identity(), {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
+            // An instanced run (three copies of one mesh and material one after another), each moving its own way.
+            for (int i = 0; i < 3; ++i) {
+                scene.draw(box, Mat4f::translation({-4.0f + 1.8f * static_cast<float>(i), -1.5f + 0.1f * t * static_cast<float>(i - 1), 1.0f}) *
+                                    Mat4f::rotation_y(7.0f * t),
+                           {.color = Color::rgb(230, 170, 90), .metallic = 0.2f, .roughness = 0.5f});
+            }
+            scene.draw(leaf_mesh, Mat4f::translation({1.0f - 0.08f * t, 0.5f, 2.0f}) * Mat4f::rotation_x(90.0f),
+                       {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf});
+            // In front of the cut-out and the run, moving the other way: what they leave behind is the velocity of what is behind.
+            scene.draw(box, Mat4f::translation({3.0f - 0.2f * t, -0.8f, 3.0f}), {.color = Color::rgba(60, 200, 255, 140), .unlit = true, .blend = kin::Blend3D::Alpha});
+            scene.draw(box, Mat4f::translation({0.5f + 0.15f * t, 1.8f, 3.5f}), {.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive});
+            scene.draw(box, Mat4f::translation({-1.0f, 2.2f, 2.0f}) * Mat4f::rotation_y(5.0f * t), {.color = Color::rgb(80, 255, 80), .wireframe = true});
+            if (extra == Extra::CustomOpaque) {
+                kin::Material3D custom{.shader = flat};
+                custom.shader_params[4] = 0.9f;
+                scene.draw(box, Mat4f::translation({2.5f + 0.1f * t, 1.0f, 1.5f}), custom);
+            } else if (extra == Extra::CustomBlended) {
+                kin::Material3D custom{.blend = kin::Blend3D::Alpha, .shader = flat};
+                custom.shader_params[4] = 0.9f;
+                scene.draw(box, Mat4f::translation({2.5f - 0.1f * t, 1.0f, 3.2f}), custom);
+            } else if (extra == Extra::Occlusion) {
+                scene.ambient_occlusion = {.enabled = true};
+            }
+            kin::Scene3D& overlay = scene.overlay();
+            overlay.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+            overlay.draw(gun, Mat4f::translation({2.2f - 0.05f * t, -1.8f, 0.0f}), {.color = Color::rgb(200, 40, 40)});
+        };
+        const auto shoot = [&](kin::View3D& view, const kin::Scene3D& scene, bool pre_pass) {
+            if (pre_pass) {
+                setenv("KIN_TAA_PREPASS", "1", 1);
+            } else {
+                unsetenv("KIN_TAA_PREPASS");
+            }
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            unsetenv("KIN_TAA_PREPASS");
+            return p;
+        };
+        // Every kind of frame, over a run of frames (the history is what shows a wrong velocity).
+        for (const Extra extra : {Extra::None, Extra::CustomOpaque, Extra::CustomBlended, Extra::Occlusion}) {
+            if (extra != Extra::None && !flat.valid() && extra != Extra::Occlusion) {
+                continue;
+            }
+            with_main.reset_history();
+            with_pre.reset_history();
+            for (int f = 0; f < 14; ++f) {
+                kin::Scene3D scene;
+                build(scene, f, extra);
+                const Pixels a = shoot(with_main, scene, false);
+                const bool wrote = r3d.stats().taa_main_velocity;
+                const kin::u32 pre_draws = r3d.stats().ao_draws;
+                const Pixels b = shoot(with_pre, scene, true);
+                assert(!r3d.stats().taa_main_velocity && r3d.stats().ao_draws > 0);
+                // Only a frame with nothing else to need a pre-pass draws the velocity in the main pass.
+                const bool expect_main = extra == Extra::None || extra == Extra::CustomBlended;
+                assert(wrote == expect_main && (wrote ? pre_draws == 0 : pre_draws > 0));
+                if (a.rgba != b.rgba) {
+                    std::size_t differing = 0;
+                    for (std::size_t i = 0; i < a.rgba.size(); ++i) {
+                        differing += a.rgba[i] != b.rgba[i] ? 1 : 0;
+                    }
+                    std::cerr << "taa main velocity: extra " << static_cast<int>(extra) << " frame " << f << ": " << differing << " bytes differ\n";
+                }
+                assert(a.rgba == b.rgba);
+            }
+        }
+        // And the picture is a real one: the run's last frame has the box where the cut-out leaves its clear half.
+        kin::Scene3D scene;
+        build(scene, 13, Extra::None);
+        const Pixels last = shoot(with_main, scene, false);
+        assert(brightness(last.at(80, 60)) > 0.0);
+    });
+}
+
+// The shadow cache (Lights3D::cache_shadows): the shadow pass is skipped when the sun, the area, the resolution, the camera, the cascades' fit,
+// every caster (mesh, material, copies) and the levels of detail are as they were, and the picture is the one drawn again, to the byte. Any
+// change of any of them draws again, and the picture then is that of an uncached render of the same scene. A change in a copy the cache's
+// cheap sample does not look at is still seen (the full comparison), a cut-out's texture changed in place is seen, a render target is never cached.
+void test_gpu_shadow_cache() {
+    with_gpu("test_gpu_shadow_cache", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh other = make_box(r3d, {1.2f, 1.2f, 1.2f});
+        kin::MeshOptions levels;
+        levels.levels = 3;
+        const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16), levels);
+        const kin::Mesh leaf_mesh = r3d.create_mesh(uv_square(1.5f));
+        const kin::u8 leaf_texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
+        const kin::Texture leaf = renderer.create_texture_from_rgba(leaf_texels, {2, 1});
+        renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        enum class What { Plain, Sun, Camera, Resolution, Area, Cascades, Moved, MovedUnsampled, Added, Material, Mesh, NoCast, Lod, Leaf };
+        struct Setup {
+            float sun_x = 1.0f;
+            float camera_x = 0.0f;
+            kin::u32 resolution = 1024, cascades = 1;
+            float area_top = 4.0f;
+            float box_x = 0.0f, many_x = 0.0f;
+            bool extra = false, double_sided = false, other_mesh = false, no_cast = false, lod = false;
+            int lod_force = -1;
+            float distance = 100.0f;
+            kin::Texture leaf_texture;
+        } setup;
+        setup.leaf_texture = leaf;
+        const auto build = [&](bool cache) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({setup.camera_x, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            scene.lights.sun = {.direction = {setup.sun_x, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+            scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, setup.area_top, 10.0f}};
+            scene.lights.shadow_resolution = setup.resolution;
+            scene.lights.shadow_cascades = setup.cascades;
+            scene.lights.cache_shadows = cache;
+            scene.lights.shadow_distance = setup.distance;
+            scene.lod = {.enabled = setup.lod, .error_pixels = 0.5f, .force_level = setup.lod_force};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            scene.draw(setup.other_mesh ? other : box, Mat4f::translation({setup.box_x, 2.5f, 0.0f}),
+                       {.color = Color::rgb(180, 60, 60), .double_sided = setup.double_sided, .casts_shadow = !setup.no_cast});
+            // Forty copies of one mesh in one draw: the cache's sample looks at the first, the last and every fifth.
+            std::vector<kin::MeshInstance> copies;
+            for (int i = 0; i < 40; ++i) {
+                copies.push_back({.transform = Mat4f::translation({-8.0f + 0.4f * static_cast<float>(i), 1.0f + (i == 7 ? setup.many_x : 0.0f), -6.0f})});
+            }
+            scene.draw_instanced(box, copies, {.color = Color::rgb(60, 60, 180)});
+            scene.draw(ball, Mat4f::translation({4.0f, 2.0f, 3.0f}), {.color = Color::rgb(60, 180, 60)});
+            scene.draw(leaf_mesh, Mat4f::translation({-4.0f, 2.5f, 3.0f}) * Mat4f::rotation_x(-90.0f),
+                       {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = setup.leaf_texture});
+            if (setup.extra) {
+                scene.draw(box, Mat4f::translation({2.0f, 1.0f, -2.0f}), {.color = Color::rgb(200, 200, 60)});
+            }
+        };
+        const auto shoot = [&](kin::View3D& target, bool cache) {
+            build(cache);
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        // What an uncached render of the same setup gives.
+        const auto truth = [&]() { return shoot(reference_view, false); };
+
+        // Still: the first two render (the second copies what it drew from), then it hits; the picture is the same, to the byte.
+        const Pixels first = shoot(view, true);
+        if (r3d.stats().shadow_cascades == 0) {
+            std::cerr << "shadows: not available on this device, skipped\n";
+            return;
+        }
+        assert(!r3d.stats().shadow_cached && r3d.stats().shadow_draws > 0);
+        const kin::u32 draws_when_drawn = r3d.stats().shadow_draws;
+        assert(shoot(view, true).rgba == first.rgba && !r3d.stats().shadow_cached && r3d.stats().shadow_draws == draws_when_drawn);
+        for (int f = 0; f < 4; ++f) {
+            const Pixels p = shoot(view, true);
+            assert(r3d.stats().shadow_cached && r3d.stats().shadow_draws == 0 && r3d.stats().shadow_casters == 0 && r3d.stats().shadow_cascades == 1);
+            assert(p.rgba == first.rgba);
+        }
+        assert(first.rgba == truth().rgba);
+        // Off for the scene, or for the renderer: drawn every time.
+        shoot(view, false);
+        assert(!r3d.stats().shadow_cached && r3d.stats().shadow_draws == draws_when_drawn);
+        shoot(view, true);
+        shoot(view, true);
+        assert(shoot(view, true).rgba == first.rgba && r3d.stats().shadow_cached);
+        setenv("KIN_SHADOW_CACHE", "0", 1);
+        shoot(view, true);
+        assert(!r3d.stats().shadow_cached);
+        unsetenv("KIN_SHADOW_CACHE");
+
+        // Each change draws again, and gives what an uncached render gives; then the cache is armed again after two stills.
+        // (A change in a copy the sample does not see makes the cache wait a few renders before it copies again: `patience`.)
+        const auto settle = [&](int patience) {
+            // From the state the last change was restored to, which has not been rendered yet.
+            for (int f = 0; f < patience; ++f) {
+                shoot(view, true);
+            }
+            assert(r3d.stats().shadow_cached);
+        };
+        const auto changes = [&](const char* name, const std::function<void()>& change, const std::function<void()>& restore, int patience = 3) {
+            std::cerr << "shadow cache: step " << name << "\n";
+            settle(patience);
+            change();
+            const Pixels changed = shoot(view, true);
+            const bool drawn_again = !r3d.stats().shadow_cached;
+            const Pixels want = truth();
+            if (!drawn_again || changed.rgba != want.rgba) {
+                std::cerr << "shadow cache: " << name << ": " << (drawn_again ? "drawn" : "STALE") << ", "
+                          << (changed.rgba == want.rgba ? "same" : "DIFFERENT") << " picture as uncached\n";
+            }
+            assert(drawn_again && changed.rgba == want.rgba);
+            for (int f = 0; f < patience; ++f) {
+                const Pixels again = shoot(view, true);
+                assert(again.rgba == want.rgba);
+            }
+            assert(r3d.stats().shadow_cached);
+            restore();
+            // Putting a copy the sample does not see back is such a change too: the cache waits again before it copies.
+            for (int f = 0; f < patience; ++f) {
+                shoot(view, true);
+            }
+        };
+        changes("sun", [&] { setup.sun_x = 0.6f; }, [&] { setup.sun_x = 1.0f; });
+        changes("camera", [&] { setup.camera_x = 0.5f; }, [&] { setup.camera_x = 0.0f; });
+        changes("resolution", [&] { setup.resolution = 512; }, [&] { setup.resolution = 1024; });
+        changes("area", [&] { setup.area_top = 2.0f; }, [&] { setup.area_top = 4.0f; });
+        changes("cascades", [&] { setup.cascades = 3; }, [&] { setup.cascades = 1; });
+        changes("a caster moved", [&] { setup.box_x = 0.7f; }, [&] { setup.box_x = 0.0f; });
+        // One of forty copies, not among those the sample looks at: the full comparison finds it.
+        changes("a copy the sample does not look at", [&] { setup.many_x = 1.5f; }, [&] { setup.many_x = 0.0f; }, 14);
+        changes("a caster added", [&] { setup.extra = true; }, [&] { setup.extra = false; });
+        changes("a caster's material", [&] { setup.double_sided = true; }, [&] { setup.double_sided = false; });
+        changes("a caster's mesh", [&] { setup.other_mesh = true; }, [&] { setup.other_mesh = false; });
+        changes("a caster that stops casting", [&] { setup.no_cast = true; }, [&] { setup.no_cast = false; });
+        changes("levels of detail", [&] { setup.lod = true; }, [&] { setup.lod = false; });
+        // The same under the rest: the levels chosen another way (the camera and the meshes the same), and the cascades' fit from another reach.
+        setup.lod = true;
+        changes("a forced level of detail", [&] { setup.lod_force = 2; }, [&] { setup.lod_force = -1; });
+        setup.lod = false;
+        setup.cascades = 3;
+        changes("the cascades' reach", [&] { setup.distance = 12.0f; }, [&] { setup.distance = 100.0f; });
+        changes("the camera with cascades", [&] { setup.camera_x = 0.4f; }, [&] { setup.camera_x = 0.0f; });
+        setup.cascades = 1;
+        // A cut-out's texture changed in place: its shadow changes.
+        const kin::u8 clear_texels[8] = {20, 200, 20, 255, 20, 200, 20, 0};
+        changes("a cut-out's texture written", [&] { renderer.update_texture(leaf, {0, 0}, {2, 1}, clear_texels); },
+                [&] { renderer.update_texture(leaf, {0, 0}, {2, 1}, leaf_texels); });
+
+        // A cut-out whose texture is a render target is drawn into without a trace: never cached.
+        {
+            kin::RenderTarget target = renderer.create_render_target({16, 16});
+            if (target.valid()) {
+                renderer.push_render_target(target);
+                renderer.clear(Color::rgb(20, 200, 20));
+                renderer.pop_render_target();
+                setup.leaf_texture = target.texture();
+                for (int f = 0; f < 5; ++f) {
+                    shoot(view, true);
+                    assert(!r3d.stats().shadow_cached);
+                }
+                setup.leaf_texture = leaf;
+            }
+        }
+
+        // A resize draws again (the view's size is in the key, and the camera's aspect with it).
+        for (int f = 0; f < 3; ++f) {
+            shoot(view, true);
+        }
+        assert(r3d.stats().shadow_cached);
+        r3d.resize(view, {200, 150});
+        {
+            build(true);
+            renderer.clear(kin::colors::black);
+            render_ok(r3d, view, scene);
+            renderer.present();
+            assert(!r3d.stats().shadow_cached);
+        }
+        r3d.resize(view, {160, 120});
+
+        // Two views of two scenes alternating: each render is right (the map is shared, so each draws it again).
+        for (int f = 0; f < 6; ++f) {
+            setup.sun_x = 1.0f;
+            const Pixels a = shoot(view, true);
+            const Pixels a_want = truth();
+            setup.sun_x = 0.5f;
+            const Pixels b = shoot(reference_view, true);
+            const Pixels b_want = shoot(view, false);
+            assert(a.rgba == a_want.rgba);
+            assert(b.rgba == b_want.rgba);
+        }
+        setup.sun_x = 1.0f;
+    });
+}
+
 // Ambient occlusion and contact shadows with temporal anti-aliasing: the
 // pre-pass is drawn once and shared (jittered like the main pass), each
 // effect runs, the foot of the wall is dark and the picture settles.
@@ -2992,9 +3308,10 @@ void test_gpu_taa_with_occlusion() {
         assert(static_cast<double>(diff) / static_cast<double>(on.rgba.size()) < 0.5);
         // Close to the plain picture where nothing is at an edge.
         expect(at(on, open), at(off, open), "the open floor, with and without temporal anti-aliasing", 6);
-        // And TAA alone shares the pre-pass without occlusion.
+        // And TAA alone needs no pre-pass: the main pass writes the velocity (test_gpu_taa_main_velocity has the details).
         render(true, false, false, 2);
-        assert(stats.ao_draws == 3 && stats.ao_dispatches == 0 && stats.contact_dispatches == 0 && stats.taa_dispatches == 1);
+        assert(stats.ao_draws == 0 && stats.taa_main_velocity && stats.ao_dispatches == 0 && stats.contact_dispatches == 0 && stats.taa_dispatches == 1);
+        assert(!(render(true, true, false, 2), stats.taa_main_velocity)); // with occlusion it shares the pre-pass
         render(false, false, false, 1);
         assert(stats.ao_draws == 0 && stats.taa_dispatches == 0);
     });
@@ -5814,6 +6131,290 @@ void test_gpu_occlusion_with_overflow() {
     });
 }
 
+// The targets of the opt-in features (ambient occlusion, contact shadows, the pre-pass, temporal anti-aliasing, occlusion culling) are given back
+// when a feature has not been used for a number of renders (120; KIN_RELEASE_FRAMES here makes it 5) and made again when it is on: the video memory
+// (`Render3DStats::feature_bytes`) falls to nothing, a feature toggled faster than that never lets go, and what is drawn after a release is what a
+// fresh view draws, to the byte (temporal anti-aliasing included: its history starts afresh as after reset_history()).
+void test_gpu_feature_release() {
+    with_gpu("test_gpu_feature_release", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const AoRoom room{r3d};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        setenv("KIN_RELEASE_FRAMES", "5", 1);
+        const auto make_view = [&] { return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}); };
+        kin::View3D view = make_view();
+        kin::Scene3D scene;
+        const auto render = [&](kin::View3D& target, bool ao, bool contact, bool taa, int frame) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0.0f + 0.05f * static_cast<float>(frame), 2.0f, 6.0f}, {0.0f, 0.5f, -2.0f}, 60.0f);
+            scene.lights.sun = {.direction = {-1.0f, 0.4f, 0.1f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.4f, 0.4f, 0.45f};
+            scene.lights.shadow_area = {{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
+            scene.ambient_occlusion = {.enabled = ao, .radius = 2.0f};
+            scene.contact_shadows = {.enabled = contact};
+            scene.taa = {.enabled = taa};
+            room.draw_floor(scene);
+            room.draw_wall(scene);
+            room.draw_pole(scene, -0.5f, -1.0f);
+            scene.draw(box, Mat4f::translation({1.0f + 0.1f * static_cast<float>(frame), 0.5f, 0.0f}), {.color = Color::rgb(200, 80, 80)});
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        render(view, false, false, false, 0);
+        if (lacks(r3d.capabilities().ambient_occlusion && r3d.capabilities().temporal_aa, "ambient occlusion and temporal anti-aliasing")) {
+            unsetenv("KIN_RELEASE_FRAMES");
+            return;
+        }
+        assert(r3d.stats().feature_bytes == 0);
+        // Everything on: targets are made.
+        for (int f = 0; f < 3; ++f) {
+            render(view, true, true, true, f);
+        }
+        const kin::u64 held = r3d.stats().feature_bytes;
+        std::cerr << "release: all on holds " << held << " bytes at 160 x 120\n";
+        assert(held > 160 * 120 * 4 * 6);
+        // Off: kept for four renders, given back by the fifth.
+        for (int f = 0; f < 4; ++f) {
+            render(view, false, false, false, f);
+            assert(r3d.stats().feature_bytes == held && r3d.stats().targets_released == 0);
+        }
+        render(view, false, false, false, 4);
+        assert(r3d.stats().feature_bytes == 0 && r3d.stats().targets_released >= 4);
+        render(view, false, false, false, 5);
+        assert(r3d.stats().targets_released == 0 && r3d.stats().feature_bytes == 0);
+
+        // On again: what a fresh view draws, frame by frame (the history starts afresh).
+        kin::View3D fresh = make_view();
+        for (int f = 0; f < 8; ++f) {
+            const Pixels after = render(view, true, true, true, f);
+            const Pixels truth = render(fresh, true, true, true, f);
+            assert(after.rgba == truth.rgba);
+        }
+        assert(r3d.stats().feature_bytes == held);
+        // Off for fewer renders than the limit and back on: the history was dropped the moment it was not used, so it too is a fresh start.
+        for (int f = 0; f < 3; ++f) {
+            render(view, false, false, false, f);
+        }
+        fresh = make_view();
+        for (int f = 0; f < 8; ++f) {
+            const Pixels after = render(view, true, true, true, f);
+            const Pixels truth = render(fresh, true, true, true, f);
+            assert(after.rgba == truth.rgba);
+        }
+        // Temporal anti-aliasing alone, off and on again over a release (the velocity target is the pre-pass's normals).
+        for (int f = 0; f < 6; ++f) {
+            render(view, false, false, false, f);
+        }
+        assert(r3d.stats().feature_bytes == 0);
+        fresh = make_view();
+        for (int f = 0; f < 8; ++f) {
+            const Pixels after = render(view, false, false, true, f);
+            const Pixels truth = render(fresh, false, false, true, f);
+            assert(after.rgba == truth.rgba && r3d.stats().taa_main_velocity);
+            assert(r3d.stats().targets_released == 0); // a feature in use is not given back, past the limit too
+        }
+
+        // Each feature on its own clock: with only the occlusion running, the contact shadows' targets go (and the temporal anti-aliasing's) while the
+        // occlusion's stay; the bytes held are those of a fresh view that has only ever run the occlusion.
+        {
+            kin::View3D only_ao = make_view();
+            render(only_ao, true, false, false, 0);
+            const kin::u64 want = r3d.stats().feature_bytes;
+            for (int f = 0; f < 3; ++f) {
+                render(view, true, true, true, f);
+            }
+            assert(r3d.stats().feature_bytes > want);
+            for (int f = 0; f < 8; ++f) {
+                render(view, true, false, false, f);
+            }
+            assert(r3d.stats().feature_bytes == want);
+            // And contact shadows back on: a fresh view's picture.
+            kin::View3D twin = make_view();
+            render(twin, true, false, false, 0);
+            assert(render(view, true, true, false, 9).rgba == render(twin, true, true, false, 9).rgba);
+        }
+        // Toggled faster than the limit: never given back (and no new target is made once they exist).
+        kin::u64 released = 0;
+        for (int f = 0; f < 40; ++f) {
+            const bool on = f % 2 == 0;
+            render(view, on, on, on, f);
+            released += r3d.stats().targets_released;
+        }
+        assert(released == 0 && r3d.stats().feature_bytes > 0);
+        // Toggled every four renders (limit five): still never.
+        for (int f = 0; f < 40; ++f) {
+            const bool on = (f / 4) % 2 == 0;
+            render(view, on, on, on, f);
+            released += r3d.stats().targets_released;
+        }
+        assert(released == 0);
+        // Toggled every six: given back each time (and made again each time, with the same pictures).
+        kin::u64 gave_back = 0;
+        for (int f = 0; f < 36; ++f) {
+            const bool on = (f / 6) % 2 == 0;
+            render(view, on, on, on, f);
+            gave_back += r3d.stats().targets_released > 0 ? 1 : 0;
+        }
+        assert(gave_back >= 2);
+        // Never (KIN_RELEASE_FRAMES=0): kept.
+        setenv("KIN_RELEASE_FRAMES", "0", 1);
+        render(view, true, true, true, 0);
+        const kin::u64 kept = r3d.stats().feature_bytes;
+        for (int f = 0; f < 20; ++f) {
+            render(view, false, false, false, f);
+        }
+        assert(r3d.stats().feature_bytes == kept && kept > 0);
+        unsetenv("KIN_RELEASE_FRAMES");
+    });
+}
+
+// Occlusion culling's targets and the renderer's second gathered buffer go the same way, and the picture after is the one of a fresh view.
+void test_gpu_occlusion_release() {
+    with_gpu("test_gpu_occlusion_release", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        setenv("KIN_RELEASE_FRAMES", "5", 1);
+        const auto make_view = [&] { return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}); };
+        kin::View3D view = make_view();
+        kin::Scene3D scene;
+        const auto render = [&](kin::View3D& target, bool occlusion) {
+            room.fill(scene, hidden_balls);
+            scene.camera = room_camera();
+            scene.lod = {.enabled = true, .error_pixels = 0.1f};
+            scene.lod.occlusion.enabled = occlusion;
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        render(view, false);
+        const kin::u64 plain = r3d.stats().feature_bytes;
+        for (int f = 0; f < 3; ++f) {
+            render(view, true);
+        }
+        const kin::u64 held = r3d.stats().feature_bytes;
+        std::cerr << "release: occlusion holds " << (held - plain) / 1024 << " KiB more than without\n";
+        assert(r3d.stats().occlusion && held > plain + 256u * 1024);
+        for (int f = 0; f < 4; ++f) {
+            render(view, false);
+            assert(r3d.stats().feature_bytes == held);
+        }
+        render(view, false);
+        assert(r3d.stats().feature_bytes == plain && r3d.stats().targets_released >= 2);
+        kin::View3D fresh = make_view();
+        for (int f = 0; f < 4; ++f) {
+            assert(render(view, true).rgba == render(fresh, true).rgba);
+        }
+        assert(r3d.stats().occlusion && r3d.stats().feature_bytes == held);
+        // Toggled every other render: kept.
+        kin::u64 released = 0;
+        for (int f = 0; f < 30; ++f) {
+            render(view, f % 2 == 0);
+            released += r3d.stats().targets_released;
+        }
+        assert(released == 0);
+        unsetenv("KIN_RELEASE_FRAMES");
+    });
+}
+
+// Renderer3D::warm_up makes the pipelines (and the targets) a scene's first render would make, without drawing: the first render after it makes none
+// (`Render3DStats::pipelines_made`), for every kind of draw and every opt-in pass, while without it the same render makes some (the control: a
+// fresh device for each, so that no earlier test has made them).
+void test_gpu_warm_up() {
+    struct Config {
+        const char* name;
+        kin::u32 samples;
+        bool hdr, pick, cascades, ao, contact, taa, custom, overlay, occlusion;
+    };
+    const std::vector<Config> configs{
+        {"plain", 4, false, true, false, false, false, false, false, false, false},
+        {"cascades, hdr", 1, true, false, true, false, false, false, true, true, false},
+        {"taa", 1, false, false, false, false, false, true, true, true, false},
+        {"taa, no custom shaders (the main pass writes the velocity)", 1, false, true, false, false, false, true, false, true, false},
+        {"taa + ao + contact + cascades", 1, true, true, true, true, true, true, true, true, false},
+        {"ao + contact", 4, false, false, false, true, true, false, false, true, false},
+        {"occlusion", 1, false, false, false, false, false, false, false, false, true},
+        {"occlusion + ao + taa", 1, false, false, true, true, false, true, false, false, true},
+    };
+    for (const Config& config : configs) {
+        kin::u32 made[2] = {0, 0};
+        for (const bool warm : {false, true}) {
+            with_gpu("test_gpu_warm_up", [&](kin::Renderer2D& renderer) {
+                kin::Renderer3D r3d{renderer};
+                if (config.occlusion && !occlusion_capable(r3d)) {
+                    made[warm] = warm ? 0 : 1;
+                    return;
+                }
+                if ((config.taa && !r3d.capabilities().temporal_aa) || ((config.ao || config.contact) && !r3d.capabilities().ambient_occlusion)) {
+                    made[warm] = warm ? 0 : 1;
+                    return;
+                }
+                kin::MaterialShader3D flat;
+                if (config.custom && kin::shader_compiler_available()) {
+                    flat = r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl");
+                }
+                const AoRoom room{r3d};
+                const OcclusionRoom clustered{r3d};
+                const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+                const kin::Mesh leaf_mesh = r3d.create_mesh(uv_square(1.0f));
+                const kin::u8 texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
+                const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {2, 1});
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = config.samples, .hdr = config.hdr, .pick = config.pick});
+                kin::Scene3D scene;
+                if (config.occlusion) {
+                    clustered.fill(scene, hidden_balls);
+                    scene.camera = room_camera();
+                    scene.lod = {.enabled = true, .error_pixels = 0.1f};
+                    scene.lod.occlusion.enabled = true;
+                } else {
+                    scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 0.5f, -2.0f}, 60.0f);
+                    room.draw_floor(scene);
+                    room.draw_wall(scene);
+                    scene.draw(box, Mat4f::translation({1.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 80, 80), .double_sided = true});
+                    scene.draw(leaf_mesh, Mat4f::translation({-1.0f, 1.0f, 0.5f}), {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf});
+                    scene.draw(box, Mat4f::translation({0.0f, 1.0f, 1.0f}), {.color = Color::rgba(60, 200, 255, 140), .unlit = true, .blend = kin::Blend3D::Alpha});
+                    scene.draw(box, Mat4f::translation({2.0f, 1.5f, 1.0f}), {.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive});
+                    scene.draw(box, Mat4f::translation({-2.0f, 0.5f, 0.0f}), {.color = Color::rgb(80, 255, 80), .wireframe = true});
+                    if (flat.valid()) {
+                        kin::Material3D opaque_custom{.shader = flat};
+                        scene.draw(box, Mat4f::translation({3.0f, 0.5f, 0.0f}), opaque_custom);
+                        kin::Material3D blended_custom{.blend = kin::Blend3D::Alpha, .shader = flat};
+                        scene.draw(box, Mat4f::translation({-3.0f, 0.5f, 1.0f}), blended_custom);
+                    }
+                    if (config.overlay) {
+                        scene.overlay().camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+                        scene.overlay().draw(box, Mat4f::translation({1.5f, -1.5f, 0.0f}), {.color = Color::rgb(200, 40, 40)});
+                    }
+                }
+                scene.lights.sun = {.direction = {-1.0f, 0.5f, 0.1f}, .color = {1.0f, 1.0f, 1.0f}};
+                scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+                scene.lights.shadow_cascades = config.cascades ? 3 : 1;
+                scene.ambient_occlusion = {.enabled = config.ao};
+                scene.contact_shadows = {.enabled = config.contact};
+                scene.taa = {.enabled = config.taa, .sharpness = 0.5f};
+                if (warm) {
+                    assert(r3d.warm_up(view, scene));
+                    // Nothing was drawn by it.
+                    assert(r3d.stats().draws == 0);
+                }
+                renderer.clear(kin::colors::black);
+                render_ok(r3d, view, scene);
+                renderer.present();
+                made[warm] = r3d.stats().pipelines_made;
+                // And the second render makes none either way.
+                render_ok(r3d, view, scene);
+                renderer.present();
+                assert(r3d.stats().pipelines_made == 0);
+            });
+        }
+        std::cerr << "warm_up, " << config.name << ": first render makes " << made[0] << " pipelines without, " << made[1] << " after\n";
+        assert(made[0] > 0 && made[1] == 0);
+    }
+}
+
 int main() {
     test_meshes_face_out();
     test_mesh_lod_builder();
@@ -5857,6 +6458,8 @@ int main() {
     test_gpu_taa_over_detail();
     test_gpu_taa_crowd();
     test_gpu_taa_overlay();
+    test_gpu_taa_main_velocity();
+    test_gpu_shadow_cache();
     test_gpu_taa_with_occlusion();
     test_gpu_taa_pick();
     test_gpu_taa_hdr();
@@ -5904,6 +6507,9 @@ int main() {
     test_gpu_occlusion_keeps_shadows();
     test_gpu_occlusion_is_ignored();
     test_gpu_occlusion_with_overflow();
+    test_gpu_feature_release();
+    test_gpu_occlusion_release();
+    test_gpu_warm_up();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

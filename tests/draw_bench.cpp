@@ -856,6 +856,7 @@ int shadows(int frames, int count) {
             scene.clear();
             scene.lights.sun = {.direction = {-0.4f, 1.0f, 0.25f}, .color = {1.0f, 0.97f, 0.92f}};
             scene.lights.ambient = {0.25f, 0.28f, 0.35f};
+            scene.lights.cache_shadows = false; // a bench renders one scene many times and means to time the shadow pass
             scene.lights.shadow_area = c.shadows ? kin::Bounds3{{0.0f, -0.2f, 0.0f}, {float(width), 4.0f, float(depth)}} : kin::Bounds3{};
             if (const char* res = std::getenv("KIN_BENCH_SHADOW_RES")) {
                 scene.lights.shadow_resolution = static_cast<kin::u32>(std::atoi(res));

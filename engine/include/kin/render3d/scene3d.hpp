@@ -185,6 +185,15 @@ struct Lights3D {
     // With cascades: how far from the camera they reach (units; past it the
     // sun is not shadowed; never beyond the camera's far plane).
     f32 shadow_distance = 100.0f;
+    // The shadow map is kept from one render to the next, and not drawn again when it would come out the same: the sun,
+    // the area and the resolution, the camera (what casts into view, and the cascades' fit, depend on it), every caster's
+    // mesh, material and copies, and the levels of detail all as they were. Exact (the picture is the one drawn again, to
+    // the byte), and a scene that moves pays only a comparison that stops at the first difference; it hits only
+    // when nothing in the shadow's reach moved: a paused game, a photo mode, a viewer at rest. A cut-out caster's texture
+    // that is drawn into or written to (a render target) is never cached. Off unless asked for, like the other
+    // opt-ins (a benchmark that renders one scene many times and means to time the shadows leaves it off). `Render3DStats::shadow_cached`
+    // says when it hit.
+    bool cache_shadows = false;
     // At most 16 light a frame: those that reach the view, the strongest
     // and nearest first. Cleared with the draws.
     std::vector<PointLight> points;
