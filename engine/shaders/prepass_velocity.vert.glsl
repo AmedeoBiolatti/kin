@@ -32,6 +32,7 @@ layout(location = 2) out float vAlpha;
 layout(location = 3) out vec3 vCurrent;  // clip x, y, w this frame
 layout(location = 4) out vec3 vPrevious; // and the last
 layout(location = 5) flat out float vFresh;
+layout(location = 6) out vec3 vWorld;
 
 void main() {
     const uint at = draw.first.x + uint(gl_InstanceIndex);
@@ -40,6 +41,7 @@ void main() {
     vFresh = before[0][3];
     before[0][3] = 0.0;
     const vec4 world = instance.model * vec4(aPos, 1.0);
+    vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
     vCurrent = (draw.current * world).xyw;
     vPrevious = (draw.prior * (before * vec4(aPos, 1.0))).xyw;

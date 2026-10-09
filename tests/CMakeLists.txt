@@ -108,6 +108,7 @@ if(KIN_GLSLC)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 if(KIN_EXPERIMENTAL_3D)
+    kin_add_test(kin_mesh_cluster_tests kin-mesh-clusters SOURCES mesh_cluster_tests.cpp)
     kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")

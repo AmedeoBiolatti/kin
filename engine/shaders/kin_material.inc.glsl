@@ -251,9 +251,24 @@ vec4 kin_base_color() {
     return vec4(vColor.rgb * tex.rgb, vColor.a * tex.a);
 }
 
+// The unit normal of a flat face from the derivatives of its world position along the screen's x and y. SDL_GPU's
+// framebuffer rows run down while its clip space goes up, so their cross product points away from the viewer:
+// turned round here. (Calibrated on Vulkan; SDL_GPU gives the other backends the same convention.)
+vec3 kin_screen_normal(vec3 dp1, vec3 dp2) {
+    const vec3 n = cross(dp1, dp2);
+    const float l = length(n);
+    return l > 0.0 ? n * (-1.0 / l) : vec3(0.0, 1.0, 0.0);
+}
+
 // The unit normal on the side the viewer sees (a double-sided face turns it
 // round from behind), bent by the material's normal map when it has one.
 vec3 kin_normal() {
+    // A flat-shaded mesh with clusters has no normal in its vertices (they are zero): the face's comes from how the
+    // world position changes across the screen, on the side the viewer sees (so no `front`, and no normal map).
+    const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
+    if (dot(vNormal, vNormal) < 1e-20) {
+        return kin_screen_normal(dp1, dp2);
+    }
     const float front = gl_FrontFacing ? 1.0 : -1.0;
     const vec3 n = normalize(vNormal) * front;
     return material.maps.x > 0.5 ? mapped_normal(n, front) : n;

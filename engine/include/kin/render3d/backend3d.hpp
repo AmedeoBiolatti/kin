@@ -6,6 +6,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/render3d/mesh.hpp>
+#include <kin/render3d/mesh_clusters.hpp>
 #include <kin/render3d/mesh_lod.hpp>
 #include <kin/render3d/scene3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
@@ -88,6 +89,16 @@ struct Render3DStats {
     u64 triangles = 0; // drawn by the main pass: at the level each copy is drawn at (Scene3D::lod)
     // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is off).
     std::array<u32, max_mesh_levels> lod_copies_by_level{};
+    // With Scene3D::lod and a mesh with clusters (MeshOptions::clusters): the copies cut through their hierarchy this
+    // render (those the camera or a shadow map sees), the clusters the cuts looked at, the clusters of the camera's
+    // cut that are in view (`triangles` counts what they draw), the bytes of the compacted indices uploaded (all
+    // passes), and the CPU time of the cuts (choosing, compacting, handing over the upload).
+    u32 cluster_copies = 0;
+    u64 clusters_tested = 0;
+    u32 clusters_drawn = 0;
+    u32 cluster_upload_bytes = 0;
+    f64 cluster_ms = 0.0;
+    f64 cluster_upload_ms = 0.0; // of which the compaction and handing over the upload (the rest is choosing)
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };
 
@@ -111,7 +122,10 @@ public:
     virtual Renderer3DCapabilities capabilities() const = 0;
     // Null when the data can't be uploaded (validated already). `chain`, when
     // not null, holds the levels of detail to keep with it (level 0 of it is `data`).
-    virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain) = 0;
+    // `clusters`, when not null, is the mesh's cluster hierarchy (MeshOptions::clusters): the mesh is then
+    // kept as its welded vertices and leaf clusters, and `data` is not used, nor `chain` (null then).
+    virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain,
+                                                      std::shared_ptr<const MeshClusters> clusters) = 0;
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).

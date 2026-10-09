@@ -1,5 +1,6 @@
 #include <kin/render3d/renderer3d.hpp>
 
+#include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
@@ -54,10 +55,25 @@ Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& options) {
         return {};
     }
     MeshLodChain chain;
-    if (options.levels > 1) {
+    std::shared_ptr<const MeshClusters> clusters;
+    if (options.clusters) {
+        // A cluster hierarchy replaces the levels (which are then not built).
+        JobSystem* jobs = _renderer->job_system();
+        ClusterParallelFor parallel;
+        if (jobs && jobs->worker_count() > 1) {
+            parallel = [jobs](u32 count, const std::function<void(u32)>& body) {
+                jobs->parallel_for(static_cast<i32>(count), [&](i32 i) { body(static_cast<u32>(i)); });
+            };
+        }
+        clusters = std::make_shared<const MeshClusters>(build_mesh_clusters(data, options, parallel));
+        if (clusters->leaf_count == 0) {
+            KIN_LOG_WARN("render", "3D: mesh not made: no triangles");
+            return {};
+        }
+    } else if (options.levels > 1) {
         chain = build_mesh_levels(data, options);
     }
-    std::shared_ptr<IMeshBackend> backend = _backend->create_mesh(data, chain.count() > 1 ? &chain : nullptr);
+    std::shared_ptr<IMeshBackend> backend = _backend->create_mesh(data, chain.count() > 1 ? &chain : nullptr, clusters);
     if (!backend) {
         return {};
     }
@@ -69,7 +85,11 @@ Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& options) {
         }
         levels = std::move(info);
     }
-    return Mesh{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(), std::move(levels)};
+    std::shared_ptr<const MeshClusterInfo> cluster_info;
+    if (clusters) {
+        cluster_info = std::make_shared<const MeshClusterInfo>(clusters->info());
+    }
+    return Mesh{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(), std::move(levels), std::move(cluster_info)};
 }
 
 View3D Renderer3D::create_view(Vec2i size, const View3DOptions& options) {

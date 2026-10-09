@@ -519,3 +519,25 @@ draws in 6-8 ms at 1280x800 with 4x MSAA, against 70 ms or more on the CPU
 (see the plan's M4).
 
 Not yet: skinned meshes, PBR materials (see [the plan](3d_plan.md)).
+
+
+### Clusters
+
+`r3d.create_mesh(data, {.clusters = true})` (or `load_model(path, {.clusters = true})`) builds for one huge mesh a hierarchy of
+clusters of at most 128 triangles (`kin/render3d/mesh_clusters.hpp`; `levels` is then ignored): leaves cut from the mesh, then
+rounds of grouping about 4 neighbouring clusters, simplifying the group to half with its outer border locked, and splitting the
+result, up to one cluster (open meshes stop at a few roots). The mesh is welded to share its vertices (by every attribute; a
+flat-shaded one, as a model with no normals, by position, UV and colour, and its normals are then made in the shader from the screen-space
+derivatives of the position: a normal map has no effect on it). `Mesh::cluster_count()`, `cluster_levels()`, `cluster_roots()`,
+`leaf_triangles()`, `cluster_triangles()` read it back. The kiln (5.15 M triangles) takes 5 s at load and 1.5 GB for the process, less than
+with no hierarchy, since the welded vertices replace the unindexed ones on the GPU.
+
+With `scene.lod.enabled` each copy is cut through its hierarchy every frame (on the CPU): a cluster is drawn when its own error spans at
+most `error_pixels / bias` pixels at the nearest point of its bounding sphere and its parent's does not, so near parts stay fine
+and far parts are coarse inside one mesh, with no cracks (the borders between groups were locked in every simplification above them) and every
+surface covered once. `force_level = N` draws the cut at hierarchy depth N (0: the leaves). The same triangles are drawn by every pass for a copy
+(colour, pre-pass, velocity, pick, each shadow map; casters outside the view that cast into it are cut for the shadow only). The indices
+of what is drawn are compacted into one buffer a frame; one draw per copy per pass. `stats()` has `cluster_copies`, `clusters_tested`,
+`clusters_drawn`, `cluster_upload_bytes`, `cluster_ms`. Off (the default) a mesh with clusters is drawn whole and the picture is that of the mesh
+without; alpha-blended copies are never cut. Clusters pay for one huge mesh seen near and far (the kiln close up: 0.4 against 2.3 ms of GPU for whole-mesh levels, 4.4 at
+full detail); not for many copies of small meshes, nor mid-size ones (the CPU cut costs 0.4 to 1.5 ms on the kiln until G3c moves it to the GPU).

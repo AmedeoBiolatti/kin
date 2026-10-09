@@ -1675,7 +1675,7 @@ one-line enablement for Signal Breach (not made): `scene.lod.enabled = true;` in
 meshes made with levels (`create_mesh(data, {.levels = 3})`); only the tori would gain and the all-features crowd
 numbers above say it would cost more than it saves there.
 
-#### G3b — Clusters
+#### G3b — Clusters. Done.
 
 For one big mesh the unit is a cluster: about 128 triangles
 (`meshopt_buildMeshlets`), with a bounding sphere and cone for culling.
@@ -1689,6 +1689,125 @@ pool); built at load (the kiln's 5 M triangles take seconds: measure, and say
 whether a cache is needed). Checks: the hierarchy's invariants (every cut
 covers the surface once, errors grow up the levels, no cracks: a test draws a
 cut and counts open edges), and the build's time and memory.
+
+#### G3b — results
+
+Done, with the limits below. One huge mesh is cut per frame through a cluster hierarchy, on the CPU; G3c moves the cut to the GPU.
+
+**Built.** `engine/include/kin/render3d/mesh_clusters.hpp`, `engine/src/render3d/mesh_clusters.cpp`: `build_mesh_clusters` (pure CPU;
+meshoptimizer 0.25's `meshopt_buildMeshletsSpatial` for leaves of at most 128 triangles, `meshopt_partitionClusters` for groups of
+about 4, `meshopt_simplify` with `LockBorder | ErrorAbsolute` on each group, run on local vertex numbers so that it works on a few
+hundred vertices and not the mesh's millions; groups run on the job system; the sources `clusterizer` and `partition` were added),
+`select_clusters` (the cut: a template over a cull object, so the tests and the renderer run the same code), `ClusterCutTest`,
+`MeshOptions::clusters` (`levels` is then ignored for that mesh), `Mesh::cluster_count()` / `cluster_levels()` / `cluster_roots()` /
+`leaf_triangles()` / `cluster_triangles()` / `flat_shaded()`. The hierarchy is a DAG as Nanite's: a group of clusters is merged,
+simplified to half with its outer border (and the mesh's open borders) locked, split into new clusters; a group's error is the largest
+input error plus the simplification's, its sphere holds its inputs' spheres, and all its outputs take its (error, sphere) as their own.
+A cluster is drawn when its own error projects to at most `error_pixels / bias` pixels at the nearest point of its sphere and its
+parent's does not (roots: always); distance as in G3a (along the view, minimum the near plane; orthographic: the view's pixels a unit),
+scaled by the copy's largest scale. Error and sphere only grow up a chain, so the projected error is monotonic and exactly one cluster of
+each chain from a leaf to a root is drawn. `force_level N` is the cut at hierarchy depth N (0: the leaves). A group that cannot be
+simplified by 15% waits and is grouped again next round; if a round gets nowhere the remaining clusters are roots (open meshes and
+tori end with 2 or 3 roots, closed spheres with 1; the kiln: see below). Flaps (two triangles on the same vertices, one turned over) that
+the simplifier leaves are removed per group; across two groups a few remain (a sliver on a shared border from each side, nothing showing).
+
+**Normals.** A mesh whose every corner normal is its face's (within 0.25 degrees; 99% of triangles) is flat: it is welded by position,
+UV and colour (not normal), its vertices carry a zero normal, and the shader makes the normal from `dFdx/dFdy` of the world position
+(`kin_material.inc.glsl`, `kin_prepass.inc.glsl`; the pre-pass shaders got a `vWorld` varying), turned to face the viewer (SDL_GPU's rows run down:
+the sign was calibrated on Vulkan, on NVIDIA and lavapipe; D3D12 and Metal untested, the same convention by SDL_GPU's design). Cost
+in picture: forced to the leaves the kiln equals the unclustered mesh at **89.7 dB (mean 0.00)**; a flat plane and a smooth torus are equal to the
+bit. A normal map or tangents have no effect on a flat mesh (out of scope); smooth meshes keep their normals, welded by every attribute
+(indexed ones as given). A cheaper way would be quantised per-cluster normals, which are wrong for any non-planar cluster; derivatives were exact here.
+
+**Drawing the cut (CPU, `GpuRenderer3D::cut_clusters`).** After the copies are placed, each clustered copy is cut: one top-down traversal
+per copy (serial below 24 copies: on the kiln's 13, one of them 96% of the clusters, workers took 1.1 ms against 0.8 serial; from 24 copies,
+`parallel_for`, results by copy so the order is fixed), with the sphere tests of its clusters against the camera frustum and the
+shadow views (each cascade's frustum and slice, as the copy-level tests; the one map's light frustum and what can shadow the view): a subtree no view reaches is
+skipped. The cut itself uses the camera's distance for every pass, as G3a. One compacted `u32` index buffer is built per frame (a
+transient INDEX buffer, grown geometrically, cycled, uploaded as the instance buffer is, written on the workers) holding for each copy one
+run for the camera's passes (main, pre-pass, velocity, pick: the same clusters) and one run per shadow view, a run equal to an earlier one
+being that run. I chose per-view runs over reusing the main cut for all passes because casters outside the camera's frustum that
+shadow the view need clusters the camera run lacks, and because a cascade needs only its own; the price is upload bytes with shadows on
+(the kiln's cut 1.9 MB at game, 3.5 at close with one shadow map). Draws: one indexed draw per copy per pass (`first[0]` the instance slot, the shadow
+lists as before); `GpuInstance3D` and the TAA matching (by mesh) are untouched. Statistics: `cluster_copies`, `clusters_tested`,
+`clusters_drawn`, `cluster_upload_bytes`, `cluster_ms`, `cluster_upload_ms`; `triangles` counts the camera's cut. Not cut: alpha-blended
+copies, meshes without clusters, and anything with `lod` off (drawn whole from a persistent index buffer of the leaves, 62 MB of VRAM
+for the kiln against 536 MB of vertices before: the welded array is 2.5 M vertices).
+
+**Tests.** New `kin_mesh_cluster_tests` (no GPU): leaves cover each triangle exactly once; at most 128 triangles and 255 vertices a cluster;
+error and sphere monotonic, groups consistent; 150 random cuts of each of an icosphere, a soup of the same, a torus, an open tube, a wavy
+patch, the patch as a flat soup, a plane and a half-flat half-rough patch (random copy scale, turn, eye near, far or inside,
+orthographic sometimes, error 0.25 to 6 px) and forced depths 0 to past the last: the traversal equals the definition, every chain
+from a leaf to a root has exactly one chosen cluster, and the open edges of the chosen triangles (welded by position) equal the mesh's (0 for the closed ones, 128 for the
+tube); the formula written out in the test with scales; culled cuts; tiny meshes (one cluster); the parallel builder equals the serial. In
+`kin_render3d_tests`: off equals the old picture and counts (to the bit; flat plane too), forced leaves equal full detail, the cut's triangles equal the CPU's for 4 bounds
+and 4 forced depths and the scale counts, near clusters finer than far in one mesh, picture within a bound, **the picture equals a plain mesh made of the cut, to the bit, with 1 and 3
+cascades, occlusion and contact shadows on or off, copy culling on or off** (so colour, pre-pass and every shadow map draw the cut), pick, workers equal serial
+(picture byte-identical, same statistics), TAA (still frames equal the stand-in's, moving camera against 8 samples). 68/68 ctest (3D), 65/65 (3D off), the 3D tests pass on the RTX 4080
+and lavapipe, `kin_example_tests` pass. Mutations that made a test fail: unlocked borders (open edges), wrong parent in the cut, scale ignored (CPU formula, and in the renderer the transform
+dropped), a parent error that is not the largest child's (only after adding the half-flat half-rough patch: on smooth meshes the simplification errors grow by themselves, so the first version of the test passed it), a union sphere
+that does not contain its children, a cascade drawing another's run, pick binding the mesh's own indices. Not caught: a shadow pass using the camera's run (the runs are equal in those scenes, so it
+is equivalent there).
+
+**Off path.** `g3b_before_def` / `_all` (crowd, shadows, sponza, helmet, motion, spheres, cornell; default and `--cascades 4 --ao --contact-shadows --taa`) from the G3a binary, again after: every PNG
+byte-identical and every draws/triangles/casters line equal, except `crowd/above` in the `_all` run, rendered under machine load: quiet, the G3a and the new binary give the same
+picture (6ce1cac0) 3 runs each (the known load-dependent TAA flip). The shaders changed (a branch on a zero normal), results did not.
+
+**Clusters against full detail and G3a's 6 levels** (1 px; 1280 x 720, 4x MSAA; medians of 3 interleaved runs; picture against full detail: mean levels / PSNR dB / SSIM):
+
+| Scene | Triangles full / levels 6 / clusters | GPU ms full / levels / clusters | CPU render() ms full / levels / clusters | Picture levels | Picture clusters |
+|---|---|---|---|---|---|
+| kiln_near dome_close | 5.15 M / 2.67 M / **134 k** | 4.37 / 2.32 / **0.39** | 0.02 / 0.04 / 0.70 | identical (no whole level fits) | 0.25 / 50.5 / 0.996 |
+| kiln_near grazing | 5.15 M / 2.60 M / **87 k** | 4.20 / 2.12 / **0.29** | 0.04 / 0.04 / 0.51 | 0.21 / 49.9 / 0.996 | 0.17 / 51.6 / 0.997 |
+| kiln_near far | 5.15 M / 166 k / 134 k | 4.29 / 0.27 / 0.31 | 0.05 / 0.02 / 0.53 | 0.09 / 46.0 / 0.998 | 0.08 / 47.0 / 0.998 |
+| kiln game | 5.15 M / 168 k / 169 k | 4.27 / 0.31 / 0.38 | 0.02 / 0.04 / 0.75 | 0.11 / 47.7 / 0.997 | 0.10 / 48.3 / 0.998 |
+| kiln close | 5.15 M / 192 k / 308 k | 4.68 / 0.52 / 1.16 | 0.03 / 0.02 / 1.47 | 0.18 / 49.2 / 0.996 | 0.18 / 48.5 / 0.995 |
+| sponza nave | 260 k / 173 k / 146 k | 0.35 / 0.33 / 0.46 | 0.14 / 0.14 / 0.33 | 0.05 / 50.8 / 0.999 | 0.09 / 49.8 / 0.998 |
+| sponza roof | 185 k / 169 k / 63 k | 0.33 / 0.31 / 0.33 | 0.09 / 0.15 / 0.24 | 0.02 / 55.6 / 1.000 | 0.26 / 41.3 / 0.994 |
+| helmet | 94.7 k / 57.6 k / 67 k | 0.17 / 0.15 / 0.22 | 0.014 / 0.02 / 0.14 | 0.05 / 48 / 0.999 | 0.02 / 53 / 1.000 |
+
+**With everything on** (`--cascades 4 --ao --contact-shadows --taa`), GPU ms full / levels 6 / clusters: kiln_near dome_close 6.45 / 3.85 / **1.06**, grazing 6.13 / 3.46 / **0.82**, far 6.08 / 0.51 / 0.55;
+kiln game 6.09 / 0.62 / 0.63, close 6.78 / 0.98 / 1.14; sponza 1.20 / 1.18 / 1.31 and 1.12 / 1.13 / 1.14; helmet 0.41 / 0.40 / 0.46. Pictures against full: 0.00 to 0.24 mean, 47 to 56 dB (Sponza roof 42 dB).
+
+**Error bound** (kiln_near, clusters; triangles, GPU ms, picture mean / PSNR dB / SSIM against full detail):
+
+| Bound | dome_close | grazing | far |
+|---|---|---|---|
+| 0.5 px | 191 k, 0.45, 0.21 / 51.9 / 0.997 | 119 k, 0.29, 0.12 / 54.0 / 0.998 | 241 k, 0.48, 0.04 / 52.7 / 0.999 |
+| 1 px | 134 k, 0.49, 0.25 / 50.5 / 0.996 | 87 k, 0.31, 0.17 / 51.6 / 0.997 | 134 k, 0.31, 0.08 / 47.0 / 0.998 |
+| 2 px | 91 k, 0.38, 0.44 / 47.0 / 0.992 | 60 k, 0.25, 0.26 / 49.0 / 0.996 | 67 k, 0.21, 0.11 / 45.0 / 0.997 |
+| 4 px | 61 k, 0.33, 0.53 / 45.0 / 0.990 | 43 k, 0.23, 0.39 / 44.7 / 0.993 | 32 k, 0.17, 0.17 / 41.9 / 0.995 |
+
+(Full detail 4.1 to 5.1 ms. The GPU time has a floor near 0.2 ms: the shadow pass and fixed costs.)
+
+**The CPU cut.** Kiln, 1 px, 13 copies: cut 0.35 to 0.7 ms at kiln_near, 0.45 (game) and 0.8 to 1.1 ms (close) a frame, of which compacting and handing over the upload 0.08 to 0.45 ms
+(1.0 to 3.5 MB: 0.2 ms a MB incl. staging); the rest is the traversal, 3 to 7 thousand clusters tested of 91 thousand, about 60 ns a cluster (cache misses: a cluster is 96 bytes in creation order).
+That is 30 to 70 times `render()`'s 0.02 ms without clusters: it is the price of this step, and what G3c removes. Forced to the leaves (an unrealistic cut) it uploads 59 MB and costs 11 ms.
+
+**Build time and memory.** Kiln (13 meshes, one of 4.96 M triangles in 14.9 M unindexed vertices; flat): **whole model load 4.7 to 5.2 s with workers (the glTF read included), 91,307 clusters,
+17 levels deep, 10.3 M triangles in all levels (2.0x the leaves)**; the `kin_reference` run peaks at **1.52 to 1.56 GB, against 1.62 GB with no hierarchy and 2.74 GB with G3a's 4 levels**
+(the extra for the cluster build over the same run without it is negative: the GPU path no longer holds the 14.9 M-vertex soup, only the 2.5 M welded vertices; the CPU hierarchy is about 0.4 GB resident: indices
+as local bytes and vertex lists, 96-byte cluster records). The 4-scene runs peak at 1.67 GB (full), 1.91 (clusters) and 3.10 GB (6 levels). Sponza: 1.4 s, 103 meshes, 4,742 clusters, peak 625 MB (G3a: 562 MB);
+helmet 1.1 s, 1,780 clusters. No cache is needed for the kiln (5 s); it would help a bigger asset.
+
+**What the pictures show.** kiln_near at 1 px and at 4 px, crops at 3x with a x8 difference image: no cracks or holes at any boundary I could find, including the ring at the dome's base and the
+chimney collar; at 4 px the difference is faint facet shading (flat triangles merged into larger ones) and a dotted line of single pixels along a silhouette and a seam, which is the edge moving by a pixel, not a hole.
+No shading step at cluster borders that I could see (the normals are per face, so a merged facet is what changes). Popping, 60-step dolly toward the dome (margin 1.0 to 0.12), the part of each step's change that full detail does not have, mean
+over pixels: clusters **0.29 levels (worst step 0.46)** at 1 px and 0.70 (1.06) at 4 px, G3a's 6 levels 0.27 (0.54) and 0.65 (0.93); the static error 0.18 / 0.43 against 0.17 / 0.40; full detail itself
+changes by 3.7 per step. So clusters pop as much as levels, no more; I have not looked at a frame sequence by eye.
+
+**Where clusters beat levels, and where not.** They win by 6 to 7 times in GPU time (and 20 to 30 times in triangles) where one mesh spans near and far, as kiln_near dome_close and grazing:
+whole-mesh levels must keep level 0 because part of the mesh is close. They tie when the whole mesh is far (kiln_near far, kiln game). They lose where the cut is not much finer than a whole level would be: kiln close
+(308 k against 192 k triangles, 1.16 against 0.52 ms: locked group borders and a sphere-based distance keep more triangles at a given error), Sponza (small textured meshes: 0.46 against 0.33 ms, the CPU cut 0.2 ms, a draw
+a copy a pass; and thin features move by the error: Sponza roof 42 dB) and the helmet. **Recommendation:** clusters for single meshes of hundreds of thousands of triangles or more that are seen from near and far
+(terrain, a kiln, a scanned statue); levels for many copies and mid-size meshes; neither for the crowd. Default stays off; 1 px with `bias` 1, as for levels. The crowd with `--lod --lod-clusters`: its meshes are procedural and
+unclustered, and pictures, triangles and draws are identical to without (GPU 1.15 / 0.73 / 1.42 ms against 1.15 / 0.71 / 1.48; CPU the same).
+
+**Honest limits and not tested.** The cut is on the CPU (0.4 to 1.5 ms on the kiln; G3c). No hysteresis. Open meshes and tori do not reach one root (the border stays locked: 2 or 3 roots; the kiln's
+parts have a few), so their coarsest cut is a few clusters. Error is meshoptimizer's quadric error added up the hierarchy (a bound on position, not on attributes: UV stretch and normal change on smooth textured meshes
+are not bounded, only weighed). Alpha-blended copies are not cut; normal maps do nothing on flat meshes. Seams between clusters of different levels are crack-free by construction and by the open-edge test on closed and open test meshes and by eye on the kiln; I built no model whose parts share an open border (seams between *parts*
+at different levels, as in G3a, are unproven). D3D12 and Metal untested for the derivative sign. Sponza Walk's panel click path is not tested (the `--lod-clusters` option, `--preset clusters`, the stats line and the section
+text were run headless). Peak memory of the kiln run is the harness's, not a game's.
 
 #### G3c — Culling and drawing on the GPU
 

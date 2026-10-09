@@ -65,6 +65,8 @@ public:
         f32 error = 0.0f;
     };
     std::vector<Level> levels;
+    // With MeshOptions::clusters: the hierarchy (on the CPU), whose leaves are `levels[0]`.
+    std::shared_ptr<const MeshClusters> clusters;
 };
 
 // An environment (render3d/environment.hpp): the picture with its mips, and
@@ -151,7 +153,7 @@ public:
     static bool supported(SDL_GPUDevice* device);
 
     Renderer3DCapabilities capabilities() const override { return _capabilities; }
-    std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain) override;
+    std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain, std::shared_ptr<const MeshClusters> clusters) override;
     std::shared_ptr<IEnvironmentBackend> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) override;
@@ -231,7 +233,7 @@ private:
     void push_frame_uniforms(const FrameCtx& ctx, u32 s);
     void resume_2d();
     // `buffer` as a storage buffer of at least `bytes` (grown to twice its size, and not under `minimum`).
-    void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum);
+    void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum, SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     static Pass pass_of(const Material3D& material);
     // A material's texture as a binding: its own, or a white one without.
     SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v);
@@ -325,6 +327,9 @@ private:
         std::array<u32, max_mesh_levels> level_first{}, level_seen{}, level_extra{};
         // And each cascade's list is in runs by level.
         std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> cascade_level_first{}, cascade_level_count{};
+        // A mesh with clusters, cut by Scene3D::lod this render: its copies are drawn one by one from the frame's
+        // compacted indices (`levels` is 1: the copies keep to the seen-then-sun order).
+        bool clustered = false;
     };
     struct Piece {
         u32 ref = 0;
@@ -336,6 +341,30 @@ private:
         // Copies casting into each cascade, by level, and where they go in its list.
         std::array<std::array<u32, max_mesh_levels>, max_shadow_cascades> cascade{}, cascade_out{};
     };
+    // The cut through each cluster mesh's hierarchy, per copy (render3d/mesh_clusters.hpp): the clusters chosen, as
+    // runs in one index buffer made for the frame. A copy has a run for the camera's passes (main, pre-pass, velocity,
+    // pick: the clusters in the camera's view) and one for each shadow map (a cascade, or the one map): those in its
+    // view; a run equal to an earlier one is that run.
+    static constexpr u32 cluster_views = 1 + max_shadow_cascades;
+    struct ClusterRun {
+        u32 first = 0, count = 0; // in indices
+    };
+    struct ClusterJob {
+        u32 ref = 0, copy = 0; // the draw, and the copy within it
+        u32 slot = 0;          // its place in the instance buffer
+        u8 visible = 0;        // _visible's bits
+        u32 tested = 0;
+        std::vector<SelectedCluster> picks;
+        std::array<ClusterRun, cluster_views> runs{};
+        std::array<u8, cluster_views> same_as{}; // 1 + the view this one repeats, 0 if none
+    };
+    std::vector<ClusterJob> _cluster_jobs;
+    template <typename Uniforms>
+    void draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, Render3DStats* stats) const;
+    std::vector<std::array<ClusterRun, cluster_views>> _cluster_runs; // by instance slot (the clustered copies')
+    std::shared_ptr<GpuBuffer> _cluster_indices;                      // the frame's compacted indices (an index buffer); grows
+    // Cuts every clustered copy this render sees and uploads the compacted indices (after cull_and_upload has placed the copies).
+    void cut_clusters(FrameCtx& ctx, JobSystem* jobs);
     std::vector<DrawRef> _refs;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start

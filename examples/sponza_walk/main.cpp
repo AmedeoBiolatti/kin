@@ -56,6 +56,7 @@ struct Options {
     bool help = false;
     int frames = 0;               // headless --frames
     int lod_levels = 4;           // levels of detail built for every mesh at load (1: none)
+    bool lod_clusters = false;    // clusters (a hierarchy a mesh, cut by the error bound) instead of levels
 };
 
 // Named sets of `--set` values, for a run without a display to try a feature.
@@ -65,6 +66,7 @@ const std::map<std::string, std::string>& presets() {
         {"ao-half", "ao=on,ao_half=on"},
         {"contact", "contact=on"},
         {"lod", "lod=on"},
+        {"clusters", "lod=on"}, // also builds clusters at load (as --lod-clusters)
         {"taa", "taa=on"},
         {"taa-sharp", "taa=on,taa_sharpness=0.4"},
         {"taa-frozen", "taa=on,taa_freeze=on"},
@@ -154,6 +156,7 @@ Options parse(int argc, char** argv) {
                 const auto it = presets().find(name);
                 if (it == presets().end()) throw std::invalid_argument("no preset named " + name + " (--help lists them)");
                 for (const std::string& set : split(it->second, ',')) o.sets.push_back(set);
+                if (name == "clusters") o.lod_clusters = true;
             }
         } else if (arg == "--camera") {
             o.camera = value();
@@ -168,6 +171,7 @@ Options parse(int argc, char** argv) {
         else if (arg == "--height") integer(o.height, 200, 4096);
         else if (arg == "--sensitivity") number(o.sensitivity, 0.005f, 2);
         else if (arg == "--ui-scale") number(o.ui_scale, 0.5f, 4);
+        else if (arg == "--lod-clusters") o.lod_clusters = true;
         else if (arg == "--hud") o.hud = true;
         else if (arg == "--vsync") o.vsync = true;
         else if (arg == "--list-settings") o.list_settings = true;
@@ -201,6 +205,7 @@ struct Hooks {
 struct Caps {
     std::vector<unsigned> samples{1, 2, 4, 8};
     std::vector<std::string> hdris; // file stems
+    bool clusters = false;          // the meshes were built with clusters (--lod-clusters), not levels
 };
 
 // The table of switches. Adding a feature is adding its row here.
@@ -391,11 +396,13 @@ private:
         islider("contact_steps", "Steps", s.contact_steps, 4, 64);
 
         section("Levels of detail");
-        check("lod", "Levels of detail", s.lod);
+        check("lod", caps.clusters ? "Clusters (cut by error)" : "Levels of detail", s.lod);
         slider("lod_error", "Error (pixels)", s.lod_error, 0.1f, 16.0f);
         slider("lod_bias", "Bias (quality multiplier)", s.lod_bias, 0.25f, 8.0f);
-        islider("lod_force", "Force level (-1: by distance)", s.lod_force, -1, 7);
-        note("Levels are built at load: --lod-levels N (4; 1 builds none)");
+        islider("lod_force", caps.clusters ? "Force cut depth (-1: by error, 0: leaves)" : "Force level (-1: by distance)", s.lod_force, -1,
+                caps.clusters ? 20 : 7);
+        note(caps.clusters ? "Mode: clusters, built at load (--lod-clusters); off and levels are the other modes"
+                                   : "Mode: levels, built at load: --lod-levels N (4; 1 builds none); --lod-clusters builds clusters instead");
 
         section("Temporal anti-aliasing");
         check("taa", "TAA (replaces MSAA)", s.taa);
@@ -569,6 +576,7 @@ private:
             fail(ctx, "this renderer cannot draw 3D: it needs SDL_GPU (KIN_RENDER_BACKEND=gpu, a Vulkan/Metal/D3D12 device)");
             return false;
         }
+        _caps.clusters = _options.lod_clusters;
         const auto sample_cap = _r3d->capabilities().max_samples;
         _caps.samples.clear();
         for (unsigned n : {1u, 2u, 4u, 8u}) {
@@ -612,13 +620,24 @@ private:
         const auto start = Clock::now();
         MeshOptions mesh_options;
         mesh_options.levels = static_cast<u32>(_options.lod_levels);
+        mesh_options.clusters = _options.lod_clusters;
         _model = _r3d->load_model(_model_path, mesh_options, &error);
         if (!_model) {
             fail(ctx, "could not load " + _model_path.string() + ": " + error);
             return false;
         }
-        std::printf("sponza_walk: %s, %zu parts, %.1f s (including %d levels of detail a mesh where they fit)\n", _model_path.string().c_str(),
-                    _model.parts.size(), std::chrono::duration<double>(Clock::now() - start).count(), _options.lod_levels);
+        if (_options.lod_clusters) {
+            std::size_t with_clusters = 0, clusters = 0;
+            for (const ModelPart& part : _model.parts) {
+                with_clusters += part.mesh.has_clusters() ? 1 : 0;
+                clusters += part.mesh.cluster_count();
+            }
+            std::printf("sponza_walk: %s, %zu parts, %.1f s (including clusters: %zu meshes, %zu clusters)\n", _model_path.string().c_str(),
+                        _model.parts.size(), std::chrono::duration<double>(Clock::now() - start).count(), with_clusters, clusters);
+        } else {
+            std::printf("sponza_walk: %s, %zu parts, %.1f s (including %d levels of detail a mesh where they fit)\n", _model_path.string().c_str(),
+                        _model.parts.size(), std::chrono::duration<double>(Clock::now() - start).count(), _options.lod_levels);
+        }
         _marker = _r3d->create_mesh(meshes::sphere(1.0f, 14, 8));
         _wire_material.color = Color::rgb(20, 255, 120);
         _wire_material.unlit = true;
@@ -923,6 +942,7 @@ private:
         if (_s.lod) {
             out << ",\n  \"lod\": {\"error_pixels\": " << json_number(_s.lod_error) << ", \"bias\": " << json_number(_s.lod_bias)
                 << ", \"force_level\": " << _s.lod_force << "}";
+            if (_options.lod_clusters) out << ",\n  \"lod_clusters\": true";
         }
         if (_s.taa) {
             out << ",\n  \"taa\": {\"blend\": " << json_number(_s.taa_blend) << ", \"sharpness\": " << json_number(_s.taa_sharpness)
@@ -1080,7 +1100,12 @@ private:
             std::snprintf(line, sizeof line, "contact shadows: %u dispatches", st.contact_dispatches);
             lines.push_back(line);
         }
-        if (_s.lod) {
+        if (_s.lod && _options.lod_clusters) {
+            std::snprintf(line, sizeof line, "clusters: %u copies cut, %llu tested, %u drawn, %.1f KB indices, cut %.2f ms", st.cluster_copies,
+                          static_cast<unsigned long long>(st.clusters_tested), st.clusters_drawn, static_cast<double>(st.cluster_upload_bytes) / 1024.0,
+                          st.cluster_ms);
+            lines.push_back(line);
+        } else if (_s.lod) {
             std::snprintf(line, sizeof line, "lod: copies by level %u %u %u %u %u", st.lod_copies_by_level[0], st.lod_copies_by_level[1],
                           st.lod_copies_by_level[2], st.lod_copies_by_level[3], st.lod_copies_by_level[4]);
             lines.push_back(line);
@@ -1136,6 +1161,7 @@ void print_help() {
                  "  --model PATH          the glTF (else $KIN_REFERENCE_CACHE/sponza/Sponza.gltf, else ~/.cache/kin/reference/sponza/Sponza.gltf;\n"
                  "                        python3 tools/reference/fetch.py puts it there)\n"
                  "  --lod-levels N        levels of detail built for each mesh at load (default 4; 1: none); --preset lod turns them on\n"
+                 "  --lod-clusters        clusters instead of levels (a hierarchy a mesh, cut by the error bound); --preset clusters is this and the setting on\n"
                  "  --set KEY=VALUE       a setting at start (on/off, a number or a choice's name); --list-settings lists them\n"
                  "  --preset NAME[,NAME]  a named set of --set values:";
     for (const auto& [name, sets] : presets()) std::cout << ' ' << name;

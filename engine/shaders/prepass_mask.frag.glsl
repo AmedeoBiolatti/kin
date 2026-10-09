@@ -4,6 +4,7 @@
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec2 vUV;
 layout(location = 2) in float vAlpha;
+layout(location = 3) in vec3 vWorld;
 layout(location = 0) out vec2 FragNormal;
 
 #include "kin_cutout.inc.glsl"
@@ -13,5 +14,5 @@ void main() {
     if (vAlpha * texture(uBase, vUV).a < material.cutoff.x) {
         discard;
     }
-    FragNormal = octahedral(normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0));
+    FragNormal = octahedral(kin_prepass_normal());
 }

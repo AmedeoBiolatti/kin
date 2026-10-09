@@ -1,0 +1,19 @@
+{
+ "name": "kiln_near",
+ "purpose": "One huge mesh seen from near and far at once (G3b, clusters): the kiln of kiln.json, with a camera a few centimetres off the dome, so that its near triangles are many pixels across while the far end of the same mesh is under a pixel a triangle; a grazing view along it; and one from far away. No Cycles truth: pictures are judged against the same scene at full detail. Local only (see kiln.json).",
+ "optional": true,
+ "models": [{"file": "local/kiln.glb"}],
+ "view": {"samples": 4, "background": [58, 64, 74]},
+ "lights": {
+  "sun": {"direction": [-0.4364, 0.788, -0.4364], "color": [1.15, 1.09, 1.01]},
+  "fill": {"direction": [0.1424, 0.5736, 0.8067], "color": [0.22, 0.22, 0.22]},
+  "ambient": [0.42, 0.42, 0.42],
+  "ground_ambient": [0.18, 0.18, 0.18],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {"name": "dome_close", "eye": [0.42, 0.78, 0.78], "target": [0.0, 0.55, 0.0], "fov": 35, "near": 0.01},
+  {"name": "grazing", "eye": [0.95, 0.55, 0.55], "target": [-0.3, 0.52, -0.9], "fov": 35, "near": 0.01},
+  {"name": "far", "fit": {"yaw": 25, "pitch": 35, "margin": 1.4}, "fov": 35, "near": 0.01}
+ ]
+}

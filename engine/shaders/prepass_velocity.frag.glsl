@@ -11,10 +11,11 @@ layout(location = 2) in float vAlpha;
 layout(location = 3) in vec3 vCurrent;
 layout(location = 4) in vec3 vPrevious;
 layout(location = 5) flat in float vFresh;
+layout(location = 6) in vec3 vWorld;
 layout(location = 0) out vec4 FragNormalVelocity;
 
 #include "kin_prepass.inc.glsl"
 
 void main() {
-    FragNormalVelocity = vec4(octahedral(normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0)), kin_velocity(vCurrent, vPrevious, vFresh));
+    FragNormalVelocity = vec4(octahedral(kin_prepass_normal()), kin_velocity(vCurrent, vPrevious, vFresh));
 }

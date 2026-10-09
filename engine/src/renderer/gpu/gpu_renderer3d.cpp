@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -400,21 +402,26 @@ public:
         return true;
     }
 
-    void bind_mesh(const GpuMesh3D* mesh) {
-        if (mesh == _mesh) {
+    // The mesh's vertices and, unless `indices` is given (a clustered mesh's compacted ones), its own indices.
+    void bind_mesh(const GpuMesh3D* mesh, SDL_GPUBuffer* indices = nullptr) {
+        if (mesh == _mesh && indices == _indices) {
             return;
         }
-        const SDL_GPUBufferBinding vertices{mesh->vertices, 0};
-        SDL_BindGPUVertexBuffers(_pass, 0, &vertices, 1);
-        const SDL_GPUBufferBinding indices{mesh->indices, 0};
-        SDL_BindGPUIndexBuffer(_pass, &indices, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        if (mesh != _mesh) {
+            const SDL_GPUBufferBinding vertices{mesh->vertices, 0};
+            SDL_BindGPUVertexBuffers(_pass, 0, &vertices, 1);
+        }
+        const SDL_GPUBufferBinding index_binding{indices ? indices : mesh->indices, 0};
+        SDL_BindGPUIndexBuffer(_pass, &index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
         _mesh = mesh;
+        _indices = indices;
     }
 
 private:
     SDL_GPURenderPass* _pass;
     SDL_GPUGraphicsPipeline* _pipeline = nullptr;
     const GpuMesh3D* _mesh = nullptr;
+    SDL_GPUBuffer* _indices = nullptr;
 };
 
 } // namespace
@@ -747,7 +754,19 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_
                                                  .layout = GpuVertexLayout::None});
 }
 
-std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data, const MeshLodChain* chain) {
+std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& source, const MeshLodChain* chain, std::shared_ptr<const MeshClusters> clusters) {
+    // With clusters the mesh is the hierarchy's welded vertices and its leaves' triangles (full detail, for the draws
+    // that do not cut); the hierarchy itself stays on the CPU, for the cut.
+    std::vector<u32> leaf_indices;
+    if (clusters) {
+        leaf_indices = clusters->leaf_indices();
+        chain = nullptr;
+    }
+    struct Source {
+        const std::vector<MeshVertex>& vertices;
+        const std::vector<u32>& indices;
+    };
+    const Source data{clusters ? clusters->vertices : source.vertices, clusters ? leaf_indices : source.indices};
     const std::size_t vertex_count = data.vertices.size();
     const std::size_t level0_count = data.indices.empty() ? vertex_count : data.indices.size();
     // The levels' indices follow level 0's in the one index buffer.
@@ -839,6 +858,7 @@ std::shared_ptr<IMeshBackend> GpuRenderer3D::create_mesh(const MeshData& data, c
                 level_start += indices.size();
             }
         });
+        mesh->clusters = std::move(clusters);
         mesh->index_count = static_cast<u32>(level0_count);
         mesh->levels.push_back({0, static_cast<u32>(level0_count), 0.0f});
         std::size_t level_start = level0_count;
@@ -1660,12 +1680,13 @@ struct GpuRenderer3D::FrameCtx {
     bool contacted = false;                    // and contact shadows
     bool velocity_drawn = false;               // the pre-pass began, so _ao_normals holds this frame's velocity
     const GpuTexture* shown = nullptr;         // the picture after the temporal resolve
+    std::array<LodView, 2> lod{};              // Scene3D::lod's choosing, for the scene and the overlay
 };
 
-void GpuRenderer3D::ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum) {
+void GpuRenderer3D::ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum, SDL_GPUBufferUsageFlags usage) {
     if (!buffer || buffer->size() < bytes) {
         const u32 size = std::max({bytes, buffer ? buffer->size() * 2 : 0u, minimum});
-        buffer = std::make_shared<GpuBuffer>(_device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, size));
+        buffer = std::make_shared<GpuBuffer>(_device->create_buffer(usage, nullptr, size));
     }
 }
 
@@ -1791,13 +1812,13 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     const Bounds3& area = lights.shadow_area;
     // The draws of both scenes, each with its instances where the scene keeps them.
     _refs.clear();
-    std::array<LodView, 2> lod{};
+    std::array<LodView, 2>& lod = ctx.lod;
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s] && ctx.scenes[s]->lod.enabled) {
             lod[s] = lod_view_of(ctx.scenes[s]->lod, ctx.scenes[s]->camera, static_cast<f32>(view->_size.y));
         }
     }
-    bool any_levels = false;
+    bool any_levels = false, any_clusters = false;
     for (u32 s = 0; s < 2; ++s) {
         if (!ctx.scenes[s]) {
             continue;
@@ -1817,6 +1838,11 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             if (lod[s].on && mesh->levels.size() > 1 && draw.material.blend != Blend3D::Alpha) {
                 _refs.back().levels = static_cast<u32>(std::min<std::size_t>(mesh->levels.size(), max_mesh_levels));
                 any_levels = true;
+            }
+            // A mesh with clusters is cut instead (its copies stay in the one run, seen first, then the sun's).
+            if (lod[s].on && mesh->clusters && draw.material.blend != Blend3D::Alpha) {
+                _refs.back().clustered = true;
+                any_clusters = true;
             }
         }
     }
@@ -1984,6 +2010,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     if (ctx.taa) {
         match_copies(*view, !ctx.taa_reset, jobs);
     }
+    if (any_clusters) {
+        cut_clusters(ctx, _owner->_jobs);
+    }
 
     // The copies, straight into the upload memory; alpha-blended ones furthest first.
     if (written > 0) {
@@ -2092,6 +2121,201 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             _device->upload_storage_buffer(_caster_lists->handle(), 0, list_bytes, _caster_list.data(), /*cycle=*/true);
         }
     }
+}
+
+namespace {
+
+// What a cluster of a clustered copy needs to be drawn into: the views (bit 0 the camera's, bit 1 + k the shadow
+// map's or cascade k's) whose frustum its sphere touches, as the copy as a whole is tested in cull_and_upload.
+struct ClusterViews {
+    const GpuFrustum* camera; // null: the camera sees everything of a copy it sees
+    bool caster;
+    bool seen; // the copy is in the camera's view (else only the sun's)
+    u8 visible;
+    Vec3f down;
+    const Bounds3* area;
+    const GpuFrustum* cascade_frustums;
+    const GpuFrustum* slice_frustums;
+    const GpuFrustum* light_frustum;
+    u32 cascades;
+
+    u32 views(Vec3f c, f32 r) const {
+        u32 mask = 0;
+        if (seen && (!camera || sphere_in(*camera, c, r))) {
+            mask |= 1u;
+        }
+        if (caster) {
+            if (cascades > 1) {
+                const f32 leave = to_leave(*area, c, down) + r;
+                for (u32 k = 0; k < cascades; ++k) {
+                    if (in_cascade(visible, k) && sphere_in(cascade_frustums[k], c, r) && shadow_in(slice_frustums[k], c, r, down, leave)) {
+                        mask |= 2u << k;
+                    }
+                }
+            } else if (sphere_in(*light_frustum, c, r) && (!camera || shadow_in(*camera, c, r, down, to_leave(*area, c, down) + r))) {
+                mask |= 2u;
+            }
+        }
+        return mask;
+    }
+    bool reaches(Vec3f c, f32 r) const { return views(c, r) != 0; }
+};
+
+} // namespace
+
+void GpuRenderer3D::cut_clusters(FrameCtx& ctx, JobSystem* jobs) {
+    const auto started = std::chrono::steady_clock::now();
+    Render3DStats& stats = ctx.stats;
+    const Lights3D& lights = ctx.scene.lights;
+    // The copies to cut, and where they stand in the instance buffer (counted as the fill below does).
+    std::size_t count = 0;
+    for (const Piece& piece : _pieces) {
+        const DrawRef& ref = _refs[piece.ref];
+        if (!ref.clustered) {
+            continue;
+        }
+        u32 at = piece.out[0], at_extra = piece.out_extra[0];
+        for (u32 i = piece.begin; i < piece.end; ++i) {
+            const u8 v = _visible[piece.flat + i - piece.begin];
+            if ((v & in_view_bits) == 0) {
+                continue;
+            }
+            if (count == _cluster_jobs.size()) {
+                _cluster_jobs.emplace_back();
+            }
+            ClusterJob& job = _cluster_jobs[count++];
+            job.ref = piece.ref;
+            job.copy = i;
+            job.visible = v;
+            job.slot = (v & camera_bit) ? at++ : at_extra++;
+        }
+    }
+    _cluster_jobs.resize(std::max(count, _cluster_jobs.size()));
+    if (count == 0) {
+        return;
+    }
+    const Vec3f down = ctx.shadows ? normalize(lights.sun.direction) * -1.0f : Vec3f{};
+    const auto cut = [&](u32 j) {
+        ClusterJob& job = _cluster_jobs[j];
+        const DrawRef& ref = _refs[job.ref];
+        const LodView& lod = ctx.lod[ref.scene];
+        const Camera3D& camera = ctx.scenes[ref.scene]->camera;
+        ClusterCutView view;
+        view.transform = ref.instances[job.copy].transform;
+        view.eye = lod.eye;
+        view.forward = lod.forward;
+        view.orthographic = lod.orthographic;
+        view.per_unit = lod.per_unit;
+        view.pixels = lod.pixels;
+        view.nearest = camera.z_near;
+        view.force_depth = lod.force;
+        const ClusterViews cull{ref.frustum, ref.caster, (job.visible & camera_bit) != 0, job.visible, down, &lights.shadow_area,
+                                ctx.cascade_frustums.data(), ctx.slice_frustums.data(), &ctx.light_frustum, ctx.cascades};
+        thread_local std::vector<u8> seen;
+        thread_local std::vector<u32> stack;
+        select_clusters(*ref.mesh->clusters, view, cull, job.picks, seen, stack, &job.tested);
+    };
+    // Measured on the kiln (13 copies, one of them nearly all of the clusters): on workers the cut took 1.1 ms against
+    // 0.8 serial, the dispatch costing more than the little work that can be shared; from a couple of dozen copies it pays.
+    constexpr std::size_t parallel_from_copies = 24;
+    const bool parallel = jobs && count >= parallel_from_copies;
+    if (parallel) {
+        jobs->parallel_for(static_cast<i32>(count), [&](i32 j) { cut(static_cast<u32>(j)); });
+    } else {
+        for (u32 j = 0; j < count; ++j) {
+            cut(j);
+        }
+    }
+
+    // Runs: for each copy and view, the clusters whose view bit is set, one after another; a view that has the
+    // clusters of an earlier one is that run (one cascade's casters are often the camera's).
+    const u32 views = ctx.shadows ? 1 + std::max(ctx.cascades > 1 ? ctx.cascades : 1u, 1u) : 1;
+    u64 total = 0;
+    for (u32 j = 0; j < count; ++j) {
+        ClusterJob& job = _cluster_jobs[j];
+        const MeshClusters& hierarchy = *_refs[job.ref].mesh->clusters;
+        std::array<u32, cluster_views> triangles{}, clusters{};
+        for (const SelectedCluster& pick : job.picks) {
+            for (u32 v = 0; v < views; ++v) {
+                if (pick.views & (1u << v)) {
+                    triangles[v] += hierarchy.clusters[pick.cluster].triangle_count;
+                    ++clusters[v];
+                }
+            }
+        }
+        job.same_as.fill(0);
+        for (u32 v = 0; v < views; ++v) {
+            job.runs[v] = {0, triangles[v] * 3};
+            for (u32 u = 0; u < v && triangles[v] > 0; ++u) {
+                if (clusters[u] != clusters[v] || triangles[u] != triangles[v]) {
+                    continue;
+                }
+                // Equal in number: the same clusters if every one with a bit has the other's too.
+                bool same = true;
+                for (const SelectedCluster& pick : job.picks) {
+                    same = same && ((pick.views >> u) & 1u) == ((pick.views >> v) & 1u);
+                }
+                if (same) {
+                    job.same_as[v] = static_cast<u8>(u + 1);
+                    break;
+                }
+            }
+            if (job.same_as[v]) {
+                job.runs[v] = job.runs[job.same_as[v] - 1];
+            } else if (triangles[v] > 0) {
+                job.runs[v].first = static_cast<u32>(total);
+                total += triangles[v] * 3ull;
+            }
+        }
+        stats.clusters_tested += job.tested;
+        stats.clusters_drawn += clusters[0];
+        ++stats.cluster_copies;
+    }
+    u32 slots = 0;
+    for (u32 j = 0; j < count; ++j) {
+        slots = std::max(slots, _cluster_jobs[j].slot + 1);
+    }
+    _cluster_runs.resize(slots);
+    for (u32 j = 0; j < count; ++j) {
+        const ClusterJob& job = _cluster_jobs[j];
+        _cluster_runs[job.slot] = job.runs;
+    }
+    const auto compacting = std::chrono::steady_clock::now();
+    if (total > 0 && total * sizeof(u32) <= std::numeric_limits<u32>::max() / 2) {
+        const u32 bytes = static_cast<u32>(total * sizeof(u32));
+        ensure_buffer(_cluster_indices, bytes, 256 * 1024, SDL_GPU_BUFFERUSAGE_INDEX);
+        const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+            auto* indices = reinterpret_cast<u32*>(out.data());
+            const auto write = [&](u32 j) {
+                const ClusterJob& job = _cluster_jobs[j];
+                const MeshClusters& hierarchy = *_refs[job.ref].mesh->clusters;
+                std::array<u32, cluster_views> at{};
+                for (u32 v = 0; v < views; ++v) {
+                    at[v] = job.runs[v].first;
+                }
+                for (const SelectedCluster& pick : job.picks) {
+                    for (u32 v = 0; v < views; ++v) {
+                        if ((pick.views & (1u << v)) && !job.same_as[v]) {
+                            hierarchy.append_indices(pick.cluster, indices + at[v]);
+                            at[v] += hierarchy.clusters[pick.cluster].triangle_count * 3u;
+                        }
+                    }
+                }
+            };
+            if (parallel) {
+                jobs->parallel_for(static_cast<i32>(count), [&](i32 j) { write(static_cast<u32>(j)); });
+            } else {
+                for (u32 j = 0; j < count; ++j) {
+                    write(j);
+                }
+            }
+        };
+        _device->upload_storage_buffer(_cluster_indices->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
+        stats.cluster_upload_bytes = bytes;
+    }
+    const auto finished = std::chrono::steady_clock::now();
+    stats.cluster_ms = std::chrono::duration<f64, std::milli>(finished - started).count();
+    stats.cluster_upload_ms = std::chrono::duration<f64, std::milli>(finished - compacting).count();
 }
 
 void GpuRenderer3D::order_draws(FrameCtx& ctx) {
@@ -2254,6 +2478,7 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     // pass to each cascade's layer.
     stats.shadow_cascades = ctx.shadows ? ctx.cascades : 0;
     SDL_GPUBuffer* shadow_storage[2] = {storage, _caster_lists && ctx.cascades > 1 ? _caster_lists->handle() : storage};
+    SDL_GPUBuffer* cluster_index = _cluster_indices ? _cluster_indices->handle() : nullptr;
     for (u32 k = 0; ctx.shadows && k < ctx.cascades; ++k) {
         // Not cycled: the frames before are done with it in queue order, and
         // a frame rendering several views would otherwise be handed a new
@@ -2277,9 +2502,32 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                     continue;
                 }
                 binder.bind_pipeline(p, shadow_storage, 2);
-                binder.bind_mesh(ref.mesh);
+                if (ref.clustered && !cluster_index) {
+                    continue;
+                }
+                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
                 if (cutout) {
                     bind_cutout(commands, pass, caster);
+                }
+                // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices (this map's).
+                if (ref.clustered) {
+                    const u32 view = ctx.cascades > 1 ? 1 + k : 1;
+                    for (u32 n = 0; n < total; ++n) {
+                        const u32 position = ctx.cascades > 1 ? ref.cascade_level_first[k][0] + n : 0;
+                        const u32 slot = ctx.cascades > 1 ? _caster_list[position] : ref.level_first[0] + n;
+                        const ClusterRun run = _cluster_runs[slot][view];
+                        if (run.count == 0) {
+                            continue;
+                        }
+                        u.first[0] = ctx.cascades > 1 ? 0 : slot;
+                        u.first[1] = ctx.cascades > 1 ? position + 1 : 0;
+                        SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                        SDL_DrawGPUIndexedPrimitives(pass, run.count, 1, run.first, 0, 0);
+                        ++stats.shadow_draws;
+                        ++stats.shadow_casters;
+                        ++stats.cascade_casters[k];
+                    }
+                    continue;
                 }
                 // A draw for each level of detail the casters are at (the one level, without).
                 for (u32 l = 0; l < ref.levels; ++l) {
@@ -2301,6 +2549,27 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     }
 }
 
+// A clustered mesh's copies the camera sees, one draw each over its run of the frame's compacted indices (the
+// camera's view); `stats`, when given, counts them as the pre-pass's.
+template <typename Uniforms>
+void GpuRenderer3D::draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u,
+                                        Render3DStats* stats) const {
+    for (u32 n = 0; n < ref.level_seen[0]; ++n) {
+        const u32 slot = ref.level_first[0] + n;
+        const ClusterRun run = _cluster_runs[slot][0];
+        if (run.count == 0) {
+            continue;
+        }
+        u.first[0] = slot;
+        SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+        SDL_DrawGPUIndexedPrimitives(pass, run.count, 1, run.first, 0, 0);
+        if (stats) {
+            ++stats->ao_draws;
+            ++stats->ao_instances;
+        }
+    }
+}
+
 // The velocity pre-pass's draws of one scene's opaque meshes (the world's with the pre-pass, the overlay's alone).
 void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass, u32 which, SDL_GPUTextureFormat depth_format) {
     Render3DStats& stats = ctx.stats;
@@ -2316,6 +2585,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
     std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
     const std::array<SDL_GPUBuffer*, 2> buffers{storage, previous_storage};
+    SDL_GPUBuffer* cluster_index = _cluster_indices ? _cluster_indices->handle() : nullptr;
     DrawBinder binder{target_pass};
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
@@ -2329,9 +2599,16 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
             continue;
         }
         binder.bind_pipeline(p, buffers.data(), 2);
-        binder.bind_mesh(ref.mesh);
+        if (ref.clustered && !cluster_index) {
+            continue;
+        }
+        binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
         if (cutout) {
             bind_cutout(commands, target_pass, occluder);
+        }
+        if (ref.clustered) {
+            draw_cluster_copies(ref, commands, target_pass, u, which == 0 ? &stats : nullptr);
+            continue;
         }
         for (u32 l = 0; l < ref.levels; ++l) {
             if (ref.level_seen[l] == 0) {
@@ -2389,6 +2666,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             set_viewport(prepass, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+            SDL_GPUBuffer* cluster_index = _cluster_indices ? _cluster_indices->handle() : nullptr;
             DrawBinder binder{prepass};
             if (ctx.taa) {
                 draw_velocity(ctx, prepass, 0, _ao_depth_format);
@@ -2405,9 +2683,16 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                     continue;
                 }
                 binder.bind_pipeline(p, &storage, 1);
-                binder.bind_mesh(ref.mesh);
+                if (ref.clustered && !cluster_index) {
+                    continue;
+                }
+                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
                 if (cutout) {
                     bind_cutout(commands, prepass, occluder);
+                }
+                if (ref.clustered) {
+                    draw_cluster_copies(ref, commands, prepass, u, &stats);
+                    continue;
                 }
                 for (u32 l = 0; l < ref.levels; ++l) {
                     if (ref.level_seen[l] == 0) {
@@ -2518,6 +2803,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const SDL_GPUTextureSamplerBinding occlusion_binding{ctx.occluded ? view->_ao.handle() : _owner->_white.handle(), _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding contact_binding{ctx.contacted ? view->_contact.handle() : _owner->_white.handle(), _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding shadow_binding{ctx.shadows ? _shadow_map.handle() : _no_shadow.handle(), _compare_sampler};
+    SDL_GPUBuffer* cluster_index = _cluster_indices ? _cluster_indices->handle() : nullptr;
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
     using Textures = std::array<const ITextureBackend*, 5>;
@@ -2559,7 +2845,10 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             bound_textures = textures;
             bound_wrap = wrap;
         }
-        binder.bind_mesh(ref.mesh);
+        if (ref.clustered && !cluster_index) {
+            continue;
+        }
+        binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
         const MaterialUniforms m{{material.emissive, material.unlit || material.wireframe ? 1.0f : 0.0f,
                                   material.receives_shadow ? 1.0f : 0.0f,
                                   material.blend == Blend3D::Mask ? std::max(material.alpha_cutoff, 1e-6f) : 0.0f},
@@ -2569,6 +2858,23 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
         if (custom) {
             SDL_PushGPUFragmentUniformData(commands, 2, material.shader_params.data(), sizeof(CustomUniforms));
+        }
+        // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices.
+        if (ref.clustered) {
+            for (u32 n = 0; n < ref.level_seen[0]; ++n) {
+                const u32 slot = ref.level_first[0] + n;
+                const ClusterRun run = _cluster_runs[slot][0];
+                if (run.count == 0) {
+                    continue;
+                }
+                draw_uniforms.first[0] = slot;
+                SDL_PushGPUVertexUniformData(commands, 0, &draw_uniforms, sizeof(draw_uniforms));
+                SDL_DrawGPUIndexedPrimitives(pass, run.count, 1, run.first, 0, 0);
+                ++stats.draws;
+                ++stats.instances;
+                stats.triangles += run.count / 3;
+            }
+            continue;
         }
         // A draw for each level of detail the copies are at (the one, without).
         for (u32 l = 0; l < ref.levels; ++l) {
@@ -2637,6 +2943,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             set_viewport(picking, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+            SDL_GPUBuffer* cluster_index = _cluster_indices ? _cluster_indices->handle() : nullptr;
             DrawBinder binder{picking};
             for (const u32 index : _order) {
                 const DrawRef& ref = _refs[index];
@@ -2651,9 +2958,16 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                     continue;
                 }
                 binder.bind_pipeline(p, &storage, 1);
-                binder.bind_mesh(ref.mesh);
+                if (ref.clustered && !cluster_index) {
+                    continue;
+                }
+                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
                 if (cutout) {
                     bind_cutout(commands, picking, picked);
+                }
+                if (ref.clustered) {
+                    draw_cluster_copies(ref, commands, picking, u, nullptr);
+                    continue;
                 }
                 for (u32 l = 0; l < ref.levels; ++l) {
                     if (ref.level_seen[l] == 0) {

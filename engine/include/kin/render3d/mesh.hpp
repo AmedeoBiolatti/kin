@@ -77,6 +77,24 @@ struct MeshOptions {
     // Vertices on an open border of the mesh stay where they are, so that a
     // border (a cut-open model, a mesh that meets another) does not shrink or tear.
     bool lock_border = true;
+    // A hierarchy of clusters of about 128 triangles instead of whole-mesh levels (kin/render3d/mesh_clusters.hpp):
+    // Scene3D::lod then chooses, for each copy, a cut through the hierarchy, so that the part of one huge mesh near
+    // the camera stays fine while the far part is coarse. `levels` is ignored for such a mesh. Built at load, over the
+    // mesh welded (by position, UV and colour where it is flat-shaded: its normals are then made in the shader from
+    // the screen-space derivatives of the position, so a normal map has no effect on it). A bound on the number of
+    // triangles in a cluster (at most 128).
+    bool clusters = false;
+    u32 cluster_triangles = 128;
+};
+
+// What Mesh tells of its cluster hierarchy.
+struct MeshClusterInfo {
+    u32 clusters = 0;         // all of them, every level
+    u32 levels = 0;           // rounds of grouping and simplifying, leaves included (1: the leaves only)
+    u32 roots = 0;            // clusters with no parent (1 when the hierarchy reached a single cluster)
+    u32 leaf_triangles = 0;   // the mesh's own
+    u64 total_triangles = 0;  // all clusters' (the cost of keeping the hierarchy)
+    bool flat = false;        // the normals are made in the shader
 };
 
 // What Mesh tells of one of its levels.
@@ -98,8 +116,9 @@ class Mesh {
 public:
     Mesh() = default;
     Mesh(std::shared_ptr<IMeshBackend> backend, u32 vertex_count, u32 index_count, Bounds3 bounds,
-         std::shared_ptr<const std::vector<MeshLevelInfo>> levels = {})
-        : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds), _levels(std::move(levels)) {}
+         std::shared_ptr<const std::vector<MeshLevelInfo>> levels = {}, std::shared_ptr<const MeshClusterInfo> clusters = {})
+        : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds), _levels(std::move(levels)),
+          _clusters(std::move(clusters)) {}
 
     bool valid() const { return _backend != nullptr; }
     explicit operator bool() const { return valid(); }
@@ -112,6 +131,14 @@ public:
     u32 level_count() const { return _levels ? static_cast<u32>(_levels->size()) : 1u; }
     u32 level_triangles(u32 level) const { return _levels && level < _levels->size() ? (*_levels)[level].triangles : level == 0 ? triangle_count() : 0u; }
     f32 level_error(u32 level) const { return _levels && level < _levels->size() ? (*_levels)[level].error : 0.0f; }
+    // The cluster hierarchy (MeshOptions::clusters): none for a mesh made without. Read-only.
+    bool has_clusters() const { return _clusters != nullptr; }
+    u32 cluster_count() const { return _clusters ? _clusters->clusters : 0u; }
+    u32 cluster_levels() const { return _clusters ? _clusters->levels : 0u; }
+    u32 cluster_roots() const { return _clusters ? _clusters->roots : 0u; }
+    u32 leaf_triangles() const { return _clusters ? _clusters->leaf_triangles : triangle_count(); }
+    u64 cluster_triangles() const { return _clusters ? _clusters->total_triangles : 0u; }
+    bool flat_shaded() const { return _clusters && _clusters->flat; }
     const Bounds3& bounds() const { return _bounds; }
     const std::shared_ptr<IMeshBackend>& backend() const { return _backend; }
 
@@ -123,6 +150,7 @@ private:
     u32 _index_count = 0;
     Bounds3 _bounds{};
     std::shared_ptr<const std::vector<MeshLevelInfo>> _levels; // null: one level
+    std::shared_ptr<const MeshClusterInfo> _clusters;          // null: no clusters
 };
 
 // Shapes made in code, centred on the origin (a plane and a box's base on

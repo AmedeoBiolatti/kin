@@ -10,7 +10,7 @@
 //                 [--contact-thickness T]
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
 //                 [--supersample N] [--samples N]
-//                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N]
+//                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -41,6 +41,11 @@
 // made with N levels. --lod-levels N builds N levels for every mesh of a run, and --lod turns the selection
 // on for every scene (with --lod-error, --lod-bias and --lod-force), each a label of its own. The levels'
 // build time and memory are printed with the load.
+// Clusters (G3b): a model's entry `clusters: true`, or --lod-clusters for every model of a run (not the
+// procedural meshes), builds a hierarchy of clusters of about 128 triangles for each of its meshes (which then
+// take no levels); with the selection on, each copy is cut through its hierarchy by the error bound
+// (--lod-force N is then the depth of the cut, 0 the leaves). The hierarchy's build time, the process's peak
+// resident memory so far, and each camera's cut (copies, clusters tested and drawn, bytes uploaded, CPU time) are printed.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -254,6 +259,7 @@ struct Overrides {
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
     int lod_levels = 0; // 0: the scene's own (none)
+    bool lod_clusters = false;
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -344,6 +350,18 @@ double resident_mb() {
     std::string line;
     while (std::getline(status, line)) {
         if (line.starts_with("VmRSS:")) {
+            return std::atof(line.c_str() + 6) / 1024.0;
+        }
+    }
+    return 0.0;
+}
+
+// The most resident memory the process has had, in MB (Linux; 0 elsewhere).
+double peak_mb() {
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.starts_with("VmHWM:")) {
             return std::atof(line.c_str() + 6) / 1024.0;
         }
     }
@@ -460,6 +478,8 @@ int main(int argc, char** argv) {
             over.lod_force = std::atoi(next().c_str());
         } else if (a == "--lod-levels") {
             over.lod_levels = std::clamp(std::atoi(next().c_str()), 1, static_cast<int>(kin::max_mesh_levels));
+        } else if (a == "--lod-clusters") {
+            over.lod_clusters = true;
         } else if (a == "--samples") {
             samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
         } else if (a == "--supersample") {
@@ -528,6 +548,11 @@ int main(int argc, char** argv) {
                                                  : static_cast<kin::u32>(std::clamp(entry.number_at("lod_levels", 1.0), 1.0, static_cast<double>(kin::max_mesh_levels)));
             return options;
         };
+        const auto model_options_of = [&](const kin::JsonValue& entry) {
+            kin::MeshOptions options = levels_of(entry);
+            options.clusters = over.lod_clusters || entry.bool_at("clusters");
+            return options;
+        };
         std::vector<Placed> placed;
         bool missing = false;
         if (const kin::JsonValue* models = doc.find("models")) {
@@ -539,7 +564,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 std::string error;
-                kin::Model model = r3d.load_model(path, levels_of(m), &error);
+                kin::Model model = r3d.load_model(path, model_options_of(m), &error);
                 if (!model) {
                     std::fprintf(stderr, "  %s: %s\n", path.string().c_str(), error.c_str());
                     missing = true;
@@ -580,6 +605,23 @@ int main(int argc, char** argv) {
                         level_triangles += part.mesh.level_triangles(l);
                     }
                 }
+            }
+            std::size_t with_clusters = 0, clusters = 0, leaf_triangles = 0;
+            std::uint64_t cluster_triangles = 0;
+            kin::u32 deepest = 0;
+            for (const Placed& p : placed) {
+                for (const kin::ModelPart& part : p.model.parts) {
+                    with_clusters += part.mesh.has_clusters() ? 1 : 0;
+                    clusters += part.mesh.cluster_count();
+                    leaf_triangles += part.mesh.has_clusters() ? part.mesh.leaf_triangles() : 0;
+                    cluster_triangles += part.mesh.cluster_triangles();
+                    deepest = std::max(deepest, part.mesh.cluster_levels());
+                }
+            }
+            if (with_clusters > 0) {
+                std::printf("  loaded in %.0f ms with clusters: %zu meshes, %zu with clusters (%zu clusters, up to %u levels deep, %zu leaf triangles, %llu in all), +%.0f MB resident, peak %.0f MB\n",
+                            load_ms, meshes, with_clusters, clusters, deepest, leaf_triangles, static_cast<unsigned long long>(cluster_triangles),
+                            resident_mb() - resident_before, peak_mb());
             }
             if (with_levels > 0 || over.lod_levels > 1) {
                 std::printf("  loaded in %.0f ms with levels of detail: %zu meshes, %zu with levels, %zu triangles (%zu with all their levels), +%.0f MB resident\n",
@@ -683,7 +725,7 @@ int main(int argc, char** argv) {
             report << ",";
         }
         first_scene = false;
-        report << "\n  {\"name\": " << quoted(name) << ", \"load_ms\": " << load_ms << ", \"bounds\": [[" << bounds.min.x << ", "
+        report << "\n  {\"name\": " << quoted(name) << ", \"load_ms\": " << load_ms << ", \"peak_mb\": " << peak_mb() << ", \"bounds\": [[" << bounds.min.x << ", "
                << bounds.min.y << ", " << bounds.min.z << "], [" << bounds.max.x << ", " << bounds.max.y << ", " << bounds.max.z
                << "]], \"cameras\": [";
         bool first_camera = true;
@@ -726,7 +768,7 @@ int main(int argc, char** argv) {
             const double first_ms = ms_since(first_start);
             renderer.present();
 
-            std::vector<double> cpu, gpu;
+            std::vector<double> cpu, gpu, cut_ms, cut_upload_ms;
             for (int f = 0; f < run; ++f) {
                 pose(f - run);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
@@ -737,6 +779,8 @@ int main(int argc, char** argv) {
                 renderer.present();
                 if (f >= run - frames) {
                     cpu.push_back(r3d.stats().cpu_ms);
+                    cut_ms.push_back(r3d.stats().cluster_ms);
+                    cut_upload_ms.push_back(r3d.stats().cluster_upload_ms);
                     gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
                 }
             }
@@ -788,7 +832,12 @@ int main(int argc, char** argv) {
             std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
-            if (scene.lod.enabled) {
+            if (stats.cluster_copies > 0) {
+                const Summary cut_s = summarize(cut_ms);
+                std::printf("                 clusters: %u copies cut, %llu tested, %u drawn, %.2f MB of indices uploaded, cut %.3f ms (of which compacting and uploading %.3f; render() %.3f)\n",
+                            stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested), stats.clusters_drawn,
+                            static_cast<double>(stats.cluster_upload_bytes) / 1048576.0, cut_s.median, summarize(cut_upload_ms).median, cpu_s.median);
+            } else if (scene.lod.enabled) {
                 std::printf("                 lod copies by level:");
                 for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
                     if (stats.lod_copies_by_level[l] > 0 || l == 0) {
@@ -812,6 +861,12 @@ int main(int argc, char** argv) {
                    << ", \"ao_instances\": " << stats.ao_instances
                    << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
+            if (stats.cluster_copies > 0) {
+                report << ", \"cluster_copies\": " << stats.cluster_copies << ", \"clusters_tested\": " << stats.clusters_tested
+                       << ", \"clusters_drawn\": " << stats.clusters_drawn << ", \"cluster_upload_bytes\": " << stats.cluster_upload_bytes
+                       << ", \"cluster_ms\": " << json_summary(summarize(cut_ms))
+                       << ", \"cluster_upload_ms\": " << json_summary(summarize(cut_upload_ms));
+            }
             if (scene.lod.enabled) {
                 report << ", \"lod_copies_by_level\": [";
                 for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
