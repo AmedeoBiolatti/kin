@@ -675,6 +675,44 @@ bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, 
     return ok;
 }
 
+bool GpuDevice::read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vector<u8>& out) {
+    if (!_device || !src || bytes == 0) {
+        return false;
+    }
+    flush_uploads();
+    SDL_GPUTransferBufferCreateInfo tb_info{};
+    tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tb_info.size = bytes;
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(_device, &tb_info);
+    if (!tb) {
+        return false;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(_device);
+    if (!cmd) {
+        SDL_ReleaseGPUTransferBuffer(_device, tb);
+        return false;
+    }
+    const SDL_GPUBufferRegion region{src, offset, bytes};
+    const SDL_GPUTransferBufferLocation location{tb, 0};
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_DownloadFromGPUBuffer(copy, &region, &location);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    if (fence) {
+        SDL_WaitForGPUFences(_device, true, &fence, 1);
+        SDL_ReleaseGPUFence(_device, fence);
+    }
+    bool ok = false;
+    if (void* mapped = SDL_MapGPUTransferBuffer(_device, tb, false)) {
+        out.resize(bytes);
+        std::memcpy(out.data(), mapped, bytes);
+        SDL_UnmapGPUTransferBuffer(_device, tb);
+        ok = fence != nullptr;
+    }
+    SDL_ReleaseGPUTransferBuffer(_device, tb);
+    return ok;
+}
+
 GpuDevice::UploadSlice GpuDevice::stage_upload_data(const void* data, u32 size, u32 alignment) {
     if (!data || size == 0) {
         throw std::runtime_error("stage_upload_data failed: invalid arguments");

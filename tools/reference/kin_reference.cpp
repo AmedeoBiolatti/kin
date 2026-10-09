@@ -11,6 +11,7 @@
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
+//                 [--lod-gpu | --lod-cpu] [--readback] [--lod-room TRIANGLES]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -46,6 +47,10 @@
 // take no levels); with the selection on, each copy is cut through its hierarchy by the error bound
 // (--lod-force N is then the depth of the cut, 0 the leaves). The hierarchy's build time, the process's peak
 // resident memory so far, and each camera's cut (copies, clusters tested and drawn, bytes uploaded, CPU time) are printed.
+// The cut on the GPU (G3c): the default where the device can (Lod3D::gpu_culling); --lod-cpu cuts on the CPU, --lod-gpu on the GPU (a
+// device that cannot falls back, and the run says which cut it made). --readback reads the GPU cut's counts back for the picture's render
+// (clusters drawn, triangles, clusters dropped) -- never in the timed frames, which would wait for the GPU. --lod-room N sets
+// Lod3D::max_cluster_triangles.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -260,6 +265,9 @@ struct Overrides {
     int lod_force = -2; // -2: the scene's own
     int lod_levels = 0; // 0: the scene's own (none)
     bool lod_clusters = false;
+    int lod_gpu = -1; // -1: the scene's (on); 0 the CPU cuts; 1 the GPU
+    bool readback = false;
+    long lod_room = 0;
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -341,6 +349,12 @@ void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over
     }
     if (over.lod_force > -2) {
         lod.force_level = over.lod_force;
+    }
+    if (over.lod_gpu >= 0) {
+        lod.gpu_culling = over.lod_gpu > 0;
+    }
+    if (over.lod_room > 0) {
+        lod.max_cluster_triangles = static_cast<kin::u32>(over.lod_room);
     }
 }
 
@@ -480,6 +494,14 @@ int main(int argc, char** argv) {
             over.lod_levels = std::clamp(std::atoi(next().c_str()), 1, static_cast<int>(kin::max_mesh_levels));
         } else if (a == "--lod-clusters") {
             over.lod_clusters = true;
+        } else if (a == "--lod-gpu") {
+            over.lod_gpu = 1;
+        } else if (a == "--lod-cpu") {
+            over.lod_gpu = 0;
+        } else if (a == "--readback") {
+            over.readback = true;
+        } else if (a == "--lod-room") {
+            over.lod_room = std::atol(next().c_str());
         } else if (a == "--samples") {
             samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
         } else if (a == "--supersample") {
@@ -622,6 +644,13 @@ int main(int argc, char** argv) {
                 std::printf("  loaded in %.0f ms with clusters: %zu meshes, %zu with clusters (%zu clusters, up to %u levels deep, %zu leaf triangles, %llu in all), +%.0f MB resident, peak %.0f MB\n",
                             load_ms, meshes, with_clusters, clusters, deepest, leaf_triangles, static_cast<unsigned long long>(cluster_triangles),
                             resident_mb() - resident_before, peak_mb());
+                if (r3d.capabilities().gpu_driven_clusters) {
+                    // The video memory the hierarchy takes for the cut in compute: the cluster table (80 bytes a cluster) and every cluster's indices.
+                    std::printf("  GPU hierarchy: %.1f MB (%.1f MB of indices for all levels, %.1f MB table), against %.1f MB of leaf indices before G3c\n",
+                                (static_cast<double>(clusters) * 80.0 + static_cast<double>(cluster_triangles) * 12.0) / 1048576.0,
+                                static_cast<double>(cluster_triangles) * 12.0 / 1048576.0, static_cast<double>(clusters) * 80.0 / 1048576.0,
+                                static_cast<double>(leaf_triangles) * 12.0 / 1048576.0);
+                }
             }
             if (with_levels > 0 || over.lod_levels > 1) {
                 std::printf("  loaded in %.0f ms with levels of detail: %zu meshes, %zu with levels, %zu triangles (%zu with all their levels), +%.0f MB resident\n",
@@ -789,7 +818,9 @@ int main(int argc, char** argv) {
             // The picture.
             pose(0);
             renderer.clear(kin::Color::rgb(0, 0, 0));
+            scene.lod.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
             r3d.render(view, scene);
+            scene.lod.stats_readback = false;
             const kin::Render3DStats stats = r3d.stats();
             renderer.draw_texture(view.texture(), full);
             kin::Image image;
@@ -832,7 +863,18 @@ int main(int argc, char** argv) {
             std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
-            if (stats.cluster_copies > 0) {
+            if (stats.cluster_copies > 0 && stats.cluster_gpu) {
+                const Summary cut_s = summarize(cut_ms);
+                std::printf("                 clusters (GPU cut): %u copies, %llu clusters tested, %u compute dispatches, %.3f MB handed over, CPU set-up %.3f ms (render() %.3f)",
+                            stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested), stats.cluster_dispatches,
+                            static_cast<double>(stats.cluster_upload_bytes) / 1048576.0, cut_s.median, cpu_s.median);
+                if (over.readback) {
+                    std::printf("; read back: %u clusters drawn, %llu triangles in the camera's cut, %llu gathered for all passes, %u clusters dropped",
+                                stats.clusters_drawn, static_cast<unsigned long long>(stats.triangles),
+                                static_cast<unsigned long long>(stats.cluster_triangles_all), stats.cluster_overflow);
+                }
+                std::printf("\n");
+            } else if (stats.cluster_copies > 0) {
                 const Summary cut_s = summarize(cut_ms);
                 std::printf("                 clusters: %u copies cut, %llu tested, %u drawn, %.2f MB of indices uploaded, cut %.3f ms (of which compacting and uploading %.3f; render() %.3f)\n",
                             stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested), stats.clusters_drawn,
@@ -862,7 +904,8 @@ int main(int argc, char** argv) {
                    << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
             if (stats.cluster_copies > 0) {
-                report << ", \"cluster_copies\": " << stats.cluster_copies << ", \"clusters_tested\": " << stats.clusters_tested
+                report << ", \"cluster_gpu\": " << (stats.cluster_gpu ? "true" : "false") << ", \"cluster_dispatches\": " << stats.cluster_dispatches
+                       << ", \"cluster_overflow\": " << stats.cluster_overflow << ", \"cluster_copies\": " << stats.cluster_copies << ", \"clusters_tested\": " << stats.clusters_tested
                        << ", \"clusters_drawn\": " << stats.clusters_drawn << ", \"cluster_upload_bytes\": " << stats.cluster_upload_bytes
                        << ", \"cluster_ms\": " << json_summary(summarize(cut_ms))
                        << ", \"cluster_upload_ms\": " << json_summary(summarize(cut_upload_ms));

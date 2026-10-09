@@ -1809,7 +1809,7 @@ are not bounded, only weighed). Alpha-blended copies are not cut; normal maps do
 at different levels, as in G3a, are unproven). D3D12 and Metal untested for the derivative sign. Sponza Walk's panel click path is not tested (the `--lod-clusters` option, `--preset clusters`, the stats line and the section
 text were run headless). Peak memory of the kiln run is the harness's, not a game's.
 
-#### G3c — Culling and drawing on the GPU
+#### G3c — Culling and drawing on the GPU. Done.
 
 Compute selects, per frame, what is drawn: a pass over the copies (frustum
 and the level), then over the clusters of the surviving copies (the cut by
@@ -1824,6 +1824,100 @@ GPUs without storage-buffer compute. Checks: the kiln (the aim: GPU ms and
 triangles drawn against before, with the picture within the bound of full
 detail), the crowd (CPU `render()` ms should fall further, GPU stay level),
 `stats` (clusters tested, drawn, triangles).
+
+#### G3c — results
+
+Done, with the limits below. Clustered meshes are cut, culled and compacted in compute and drawn with indirect draws; the picture is the CPU cut's.
+
+**Design, as built.** `engine/shaders/cluster_{cull,scan,args,gather}.comp.glsl`, `GpuRenderer3D::cut_clusters_gpu` / `cluster_pass_gpu`.
+`Scene3D::lod` gained `gpu_culling` (default on; the CPU cut of G3b is the fallback and the A/B), `max_cluster_triangles` (default 4 M triangles,
+48 MB of video memory) and `stats_readback`; `Renderer3DCapabilities::gpu_driven_clusters`.
+
+- *No traversal.* The cut test of a cluster is local (own error within the bound, parent's not), so one thread tests one (copy, cluster):
+  91 k clusters of the kiln in a dispatch a mesh. The test is the CPU's `ClusterCutTest` / `ClusterViews` written again in GLSL, same
+  expressions in the same order with `precise` (no fused multiply-add), the copy's scale taken from the CPU as a float so that it is the
+  same bits. The frustum tests are the renderer's own (camera, each cascade and its slice, the single map; the cut's distance is the camera's).
+- *Mesh data in video memory, in shared chunks*: a table of 80 bytes a cluster (spheres, errors, depth, first index) and every cluster's indices as `u32`
+  after the leaves' in the mesh's index range; the index buffer is also a storage buffer (so the leaves are not stored twice): kiln
+  **+62 MB of indices for the upper levels and 7.3 MB of table** (the hierarchy takes 134 MB of video memory in all). Meshes are put in
+  *chunks* (`GpuClusterChunk`: 16 MB of indices and a table of 16 thousand clusters, or a chunk of the size a bigger mesh needs; the mesh's draws bind the chunk's buffer
+  and use `first_index`), and the cut is one dispatch a chunk, not a mesh. The first version bound each mesh's own buffers: on the kiln
+  (13 meshes) it cost 0.06 ms, on Sponza (103 meshes) **1.05 ms**, because SDL_GPU puts a pipeline barrier round every storage buffer it
+  binds and unbinds (`VULKAN_BindComputeStorageBuffers` moves each to compute usage and back). With chunks Sponza's cut costs less than the CPU's.
+  A mesh's range in a chunk is not given back when the mesh goes (the chunk is, with its last mesh).
+- *Compaction without atomics in the order*: the cull writes each (view, cluster)'s triangle count into one array (a row a view, all
+  copies' clusters in a row), a three-dispatch exclusive scan (block sums, scan of the blocks, scan in place) turns it into positions, and a
+  gather copies the chosen clusters' indices to `scan * 3`. Chosen clusters are queued for the gather with an atomic counter, but the
+  order of the queue shows nowhere: positions are the scan's, so the gathered indices are the clusters' own order every run (tested byte
+  for byte). One indexed *indirect* draw per (view, copy), and one `SDL_DrawGPUIndexedPrimitivesIndirect` multi-draw per draw of the
+  scene and pass; its `first_instance` is the copy's slot in `GpuInstance3D`'s buffer, which stays as it was and is read by the compute
+  from where it is (no re-upload). An empty run is a count of 0.
+- *Capacity: one global buffer, not a region a (pass, copy)*. Per-region worst cases would be (views x copies x the mesh's triangles):
+  13 copies x 5 views x 5 M would be 3 GB. The scan already gives every run its place in one array, so the room is one number
+  (`max_cluster_triangles`, clamped to at most the sum of the leaf triangles of the copies times the views, and to 100 M); a run
+  that passes it is cut short at the room exactly (the draw's count is clamped; the gather writes no more than the room),
+  the clusters cut short or dropped are counted (`Render3DStats::cluster_overflow`, with `stats_readback`) and said once in the log.
+  I did not take vertex pulling with a packed copy id: it would need new vertex shader variants for four passes and custom material
+  shaders, and gives up the hardware vertex cache's index reuse for nothing the scan does not already give.
+- *Which passes*: main, pre-pass, velocity and pick share view 0 (the camera's); each cascade (or the single map) is a view of its own with its frustum
+  and slice tests as the CPU's (`ClusterViews::views`); a copy only a shadow map sees is cut for that map alone.
+- *Read-back*: `Lod3D::stats_readback` and `Renderer3D::read_cluster_picks` submit the frame so far (as `pick` does) and read the counters / the scan
+  with a separate command buffer and a fence of its own, released after it signals (`GpuDevice::read_buffer`). The frame fences and the
+  GPU timer are not touched. It is synchronous: there is no read-back one frame late (it would need a fence for the frame's command buffer, which the 2D
+  backend owns), so it is for tools and tests. Normal frames have none.
+- *Fallback*: without compute storage buffers and index / indirect buffers that compute writes (checked by creating them; `KIN_GPU_CLUSTERS=0` turns it off), or when the
+  scene has more than 60 M cluster x view elements, or a buffer cannot be made, the CPU cut of G3b runs (one line in the log).
+
+
+**Tests** (`kin_render3d_tests`, NVIDIA RTX 4080 and lavapipe; 68/68 ctest, 65/65 without 3D, `kin_example_tests`). The G3b tests run on both cuts
+(GPU with the read-back). New: `test_gpu_cut_equals_cpu_selection` (240 copies' cuts over a smooth hill, a flat sphere, a torus and a flat plane, perspective, orthographic,
+near, far, inside, scaled and turned, forced depths: **8,304 clusters compared, 0 differ**, and the open edges of every chosen set equal the mesh's own; the rounding of a `sqrt`
+or a divide could flip a borderline cluster, none did in these); `test_gpu_cut_picture_equals_cpu` (byte-identical pictures with 1, 3 and 4 cascades, occlusion and contact shadows
+on or off, copy culling on or off; pick on a grid; 14 frames of a walking camera with temporal anti-aliasing; 62 copies, serial and on workers); `_is_deterministic` (6 renders in
+two renderers byte-identical); `_culls_by_pass` (a copy off to the left draws nothing for the camera, its shadow still falls into view; the indirect arguments of empty runs are 0);
+`_overflow_clamps` (rooms of half the cut, 600, 100, 1 triangles: clusters dropped and counted, nothing past the room, the picture degrades, with room of one triangle it equals the scene without the mesh, and
+with room again equals the first picture); `_falls_back` (`KIN_GPU_CLUSTERS=0`: capability false, the CPU cut, the same picture); `_many_copies` (64 copies of 99,904 triangles: the CPU cut's counts and picture,
+`render()` 0.07 ms); `_chunks` (12 meshes in two chunks, copies drawn A, B, A: CPU cut's picture, 8 dispatches).
+**Mutations**, each made, seen to fail and reverted: parent tested at the cluster's own sphere (cut test), the run start one triangle off (cascade frame equality), indirect count not written for empty runs
+(`_culls_by_pass`, only after adding the read of the arguments: the stale draw lies outside the view, so no picture shows it), a cascade tested against the camera's frustum (walking camera with cascades), scale ignored (two-scale test), run end not held to the room (room of one triangle),
+camera frustum not tested (counts), indices placed in queue order instead of the scan's (forced leaves), wrong view bit for the single map (shadow equality), forced depth ignoring the parent, a mesh's range in its chunk ignored,
+the gather's copy found by the wrong base. All 12 caught. Not caught by design: nothing writes out of bounds in the tests I can see (the room clamp is checked by counters and pictures, not by a GPU validation layer).
+
+**Off path.** `g3c_before_def` / `_all` / `_cl` from the G3b binary, again after: every PNG byte-identical and every draws/triangles/casters line equal, except `crowd/above` under `_all`
+(quiet, three runs of each binary: the old one flipped once in three, the new one never; the known TAA flip). The CPU cut (`--lod-cpu`) and the GPU cut give the same kiln_near pictures as before G3c (one pixel of kiln jitter at `grazing`).
+
+**Kiln, 1 px, 1280 x 720, medians of 3 runs** (GPU ms / CPU `render()` ms; triangles; picture against full detail is as in G3b, identical for the CPU and GPU cut: dome_close 0.25 mean levels / 50.5 dB):
+
+| Scene | Full | Levels 6 | CPU cut (G3b) | **GPU cut** |
+|---|---|---|---|---|
+| kiln_near dome_close | 5.15 M, 4.37 / 0.016 | 2.67 M, 2.42 / 0.015 | 134 k, 0.38 / 0.540 | **134 k, 0.42 / 0.031** |
+| kiln_near grazing | 5.15 M, 4.30 / 0.014 | 2.60 M, 2.17 / 0.012 | 87 k, 0.25 / 0.424 | **87 k, 0.29 / 0.032** |
+| kiln_near far | 5.15 M, 4.33 / 0.029 | 166 k, 0.27 / 0.011 | 134 k, 0.29 / 0.395 | **134 k, 0.27 / 0.032** |
+| kiln game | 5.15 M, 4.28 / 0.016 | 168 k, 0.31 / 0.014 | 169 k, 0.37 / 0.473 | **169 k, 0.35 / 0.030** |
+| kiln close | 5.15 M, 4.42 / 0.027 | 192 k, 0.48 / 0.016 | 308 k, 0.88 / 0.865 | **308 k, 0.58 / 0.032** |
+
+Everything on (`--cascades 4 --ao --contact-shadows --taa`): dome_close 6.80 / 4.07 / 1.28 / **1.02** GPU ms (full / levels / CPU cut / GPU cut), grazing 6.53 / 3.64 / 0.89 / **0.78**, far 6.23 / 0.65 / 0.65 / **0.50**,
+game 6.21 / 0.69 / 0.69 / **0.60**, close 6.83 / 1.08 / 1.19 / **1.03**; CPU `render()` 0.044 to 0.048 ms against 0.42 to 0.95 for the CPU cut. With one shadow map the GPU cut costs 0 to 0.05 ms of GPU more than the
+CPU cut (the compute: cull, three scan dispatches, arguments, gather; measured first by skipping passes: cull + scan about 0.07 ms, the gather's first version 0.14 ms before I queued the chosen clusters instead
+of launching a workgroup for every (view, cluster)); with cascades it is cheaper than the CPU cut (4 cascades with a draw a copy there, one indirect multi-draw here). Frame GPU time is that of the whole frame, so these are on/off deltas, not scopes.
+**Sponza and others** (GPU ms / CPU ms; cut CPU / GPU): nave 0.52 / 0.456 against **0.38 / 0.125** (no clusters: 0.36 / 0.112); roof 0.39 / 0.332 against **0.33 / 0.085** (0.29 / 0.073); helmet front 0.24 / 0.238 against
+**0.19 / 0.031** (0.17 / 0.017); everything on, nave 1.94 / 0.52 against **1.43 / 0.26**. Crowd unchanged (its meshes have no clusters: 0.19 to 0.27 CPU, 1.24 / 0.72 / 2.0 GPU with or without). Before chunking Sponza's GPU cut cost
+1.57 ms (see Design).
+**Memory.** Kiln hierarchy in video memory **124.8 MB** (117.9 MB of indices for all levels, 7.0 MB of table) against 58.9 MB of leaf indices before; the gathered indices 48 MB at the default room (4 M triangles, sized down to the scene when the scene's own bound is smaller;
+the kiln's worst, 5 views of 300 k, uses a tenth). Peak RSS of `kin_reference` on kiln_near: **1,559 MB with the GPU cut, 1,559 MB with the CPU cut** (1,557 before G3c): no host cost (the upper levels' indices are written into the upload
+memory in 8 MB pieces). Sponza 607 MB (CPU cut 600, full 583). Load is the same as G3b's (5 to 7 s; the table and indices are written during the same pass).
+
+**What I looked at.** kiln_near dome_close, the GPU cut against full detail and the x8 difference: the dome's curvature and shading read the same, the difference is a faint speckle of facet shading over the dome (max 65 levels in a few hundred pixels,
+679 pixels over 8) and a lighter line along the ring and the dome's silhouette, no cracks or holes at any cluster border; the GPU cut's picture is the CPU cut's byte for byte, so what G3b saw of seams applies. I did not re-run a 60-step dolly (popping is a property of the cut, which is
+the same), look at a camera inside the model, or look at a Sponza-with-clusters frame.
+
+**Where it loses, and defaults.** The GPU cut is the default where the device can; it costs video memory (the hierarchy is twice the leaves' indices, plus the gathered buffer) and one more
+thing to go wrong on a driver (lavapipe passes). It loses on nothing I measured once meshes share chunks; a scene with a handful of clustered copies of one tiny mesh pays 6 compute passes (about 0.05 ms) for what the CPU would do in microseconds, and the cluster
+cut itself still loses where it did in G3b (Sponza, helmet: small meshes) -- clusters stay off by default, the recommendation of G3b stands: single meshes of hundreds of thousands of triangles seen near and far.
+
+**Honest limits and not tested.** No read-back one frame late (synchronous only, for tools and tests); `draws` and `shadow_draws` count multi-draws, and `clusters_drawn`, `triangles`, `cluster_overflow` are 0 without `stats_readback`; overflow is only logged with it. The default room
+(4 M triangles) is not clamped to the device's memory; a scene whose passes together choose more is cut short. A mesh's range in a chunk is never reused. No normal-cone test, no per-pass level-of-detail distance. Without the read-back an overflow is silent. D3D12 and Metal untested (indirect first-instance, storage buffers that are also index buffers);
+Vulkan on NVIDIA and lavapipe only. Sponza Walk's panel and `--preset clusters-gpu` compile and the help lists them, but I did not see them run (a headless run printed nothing I could check), so the click path and the stats lines are untested.
 
 #### G3d — Occlusion culling
 

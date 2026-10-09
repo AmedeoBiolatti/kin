@@ -167,7 +167,7 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   contact shadows (distance, thickness, intensity, steps), temporal anti-aliasing
   (history kept, sharpen, jitter scale and samples, a freeze-jitter debug switch and a
   reset-history button), levels of detail (on, error in pixels, bias, force a level; the meshes' levels
-  are built at load, `--lod-levels N`, default 4, 1 builds none; `--preset lod`; `--lod-clusters` builds clusters instead, cut by the same error bound, `--preset clusters`), MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
+  are built at load, `--lod-levels N`, default 4, 1 builds none; `--preset lod`; `--lod-clusters` builds clusters instead, cut by the same error bound, `--preset clusters`; the cut runs in compute where the device can, with a switch and a read-back of its counts in the panel, `--preset clusters-gpu`), MSAA, background, culling, wireframe, field of view, HDR, exposure, bloom,
   and every material feature (textures, normal maps, metallic-roughness maps,
   emissive, cut-out, double-sided, shadows, unlit, roughness and metallic
   overrides). F3 shows the stats (frame, CPU and GPU time, draws, triangles,

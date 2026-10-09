@@ -43,6 +43,25 @@ struct GpuInstance3D {
 };
 static_assert(sizeof(GpuInstance3D) == 128);
 
+// Meshes the GPU cuts (MeshOptions::clusters, on a device that can) share big buffers, so that one dispatch of the cut
+// covers many meshes (a barrier for every buffer bound is what a dispatch a mesh costs: Sponza's hundred meshes took a
+// millisecond of it): a chunk is an index buffer holding each of its meshes' indices (the leaves', then every other
+// cluster's) and the table of their clusters. Meshes are put in the first chunk with room; a mesh too big for a chunk
+// has one of its own. Ranges are not given back when a mesh goes; the chunk is, with its last mesh.
+struct GpuClusterChunk {
+    explicit GpuClusterChunk(SharedDevice device) : device(std::move(device)) {}
+    ~GpuClusterChunk();
+    GpuClusterChunk(const GpuClusterChunk&) = delete;
+    GpuClusterChunk& operator=(const GpuClusterChunk&) = delete;
+
+    SharedDevice device;
+    SDL_GPUBuffer* indices = nullptr; // INDEX, and storage the cut reads
+    SDL_GPUBuffer* table = nullptr;   // GpuCluster each
+    u32 index_capacity = 0, index_used = 0;  // in indices
+    u32 table_capacity = 0, table_used = 0;  // in clusters
+    u32 id = 0;                              // among the renderer's chunks, for ordering a render's copies
+};
+
 // A mesh's buffers. Games may keep meshes past the renderer (in scenes that
 // outlive it): like textures they hold the device's shared handle, and skip
 // the release once it is gone.
@@ -55,7 +74,7 @@ public:
 
     SharedDevice device;
     SDL_GPUBuffer* vertices = nullptr;
-    SDL_GPUBuffer* indices = nullptr;
+    SDL_GPUBuffer* indices = nullptr; // the chunk's, when `chunk` is set (then levels[].first_index counts from the mesh's range in it)
     u32 index_count = 0; // level 0's
     // The levels of detail (render3d/mesh_lod.hpp): each a run of the one index buffer, over the one vertex
     // buffer. At least one: level 0, the mesh itself.
@@ -67,7 +86,22 @@ public:
     std::vector<Level> levels;
     // With MeshOptions::clusters: the hierarchy (on the CPU), whose leaves are `levels[0]`.
     std::shared_ptr<const MeshClusters> clusters;
+    // And, where the device can cut in compute (Renderer3DCapabilities::gpu_driven_clusters): the chunk holding its
+    // indices (the leaves', then those of every other cluster, in cluster order, so that every cluster's triangles
+    // are at its GpuCluster::first_index) and its clusters' table from `table_first`.
+    std::shared_ptr<GpuClusterChunk> chunk;
+    u32 table_first = 0;
 };
+
+// A cluster as the GPU cut reads it (cluster_cull.comp's Cluster, std430): 80 bytes.
+struct GpuCluster {
+    f32 center[3], radius;
+    f32 parent_center[3], parent_radius;
+    f32 cull_center[3], cull_radius;
+    f32 error, parent_error, unused0, unused1;
+    u32 first_index, triangle_count, depth, parent_depth;
+};
+static_assert(sizeof(GpuCluster) == 80);
 
 // An environment (render3d/environment.hpp): the picture with its mips, and
 // the copies filtered from it by the first render that uses it.
@@ -330,6 +364,7 @@ private:
         // A mesh with clusters, cut by Scene3D::lod this render: its copies are drawn one by one from the frame's
         // compacted indices (`levels` is 1: the copies keep to the seen-then-sun order).
         bool clustered = false;
+        u32 job_first = 0, job_count = 0; // the GPU cut's copies of it: a run of the job table
     };
     struct Piece {
         u32 ref = 0;
@@ -354,6 +389,7 @@ private:
         u32 slot = 0;          // its place in the instance buffer
         u8 visible = 0;        // _visible's bits
         u32 tested = 0;
+        u32 scene_draw = 0; // the draw's index in its scene's draws()
         std::vector<SelectedCluster> picks;
         std::array<ClusterRun, cluster_views> runs{};
         std::array<u8, cluster_views> same_as{}; // 1 + the view this one repeats, 0 if none
@@ -364,7 +400,60 @@ private:
     std::vector<std::array<ClusterRun, cluster_views>> _cluster_runs; // by instance slot (the clustered copies')
     std::shared_ptr<GpuBuffer> _cluster_indices;                      // the frame's compacted indices (an index buffer); grows
     // Cuts every clustered copy this render sees and uploads the compacted indices (after cull_and_upload has placed the copies).
+    // With the GPU cut (ctx.gpu_clusters) it only lists the copies and uploads the list; cluster_pass_gpu records the compute.
     void cut_clusters(FrameCtx& ctx, JobSystem* jobs);
+    void cut_clusters_gpu(FrameCtx& ctx, std::size_t count);
+    // The GPU cut's compute passes (before the passes that draw): cull, scan, arguments, gather.
+    void cluster_pass_gpu(FrameCtx& ctx);
+    // The index buffer clustered meshes draw from this render: the GPU cut's, or the CPU cut's.
+    SDL_GPUBuffer* cluster_index_buffer() const;
+    // Draws `ref`'s copies in view `view` (0 the camera's, 1 + k the cascade k's, 1 the single map) with indirect draws.
+    template <typename Uniforms>
+    void draw_cluster_indirect(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, u32 view) const;
+    // Waits for the GPU and reads the cut's statistics (Lod3D::stats_readback), or, for `picks`, which clusters it chose.
+    void read_cluster_stats(FrameCtx& ctx);
+    bool read_cluster_picks(IView3DBackend& view, std::vector<ClusterPick>& out) override;
+    bool read_cluster_draws(IView3DBackend& view, std::vector<ClusterDraw>& out) override;
+    // The GPU cut. `_gc_*` are its compute pipelines and buffers; `_gc` what this render set up (valid while `active`).
+    bool _gpu_clusters = false; // the device can (capabilities)
+    SDL_GPUComputePipeline* _gc_cull = nullptr;    // cluster_cull.comp
+    SDL_GPUComputePipeline* _gc_scan = nullptr;    // cluster_scan.comp
+    SDL_GPUComputePipeline* _gc_args = nullptr;    // cluster_args.comp
+    SDL_GPUComputePipeline* _gc_gather = nullptr;  // cluster_gather.comp
+    std::shared_ptr<GpuBuffer> _gc_jobs;    // a copy each: slot, scene, bits, scale, first cluster
+    std::shared_ptr<GpuBuffer> _gc_scan_data;  // the counts, then their scan: a row of all clusters a view
+    std::shared_ptr<GpuBuffer> _gc_blocks;  // the scan's block sums
+    std::shared_ptr<GpuBuffer> _gc_args_buffer; // indirect draws, a (view, copy) each
+    std::shared_ptr<GpuBuffer> _gc_list;    // the chosen elements, a queue a mesh
+    std::shared_ptr<GpuBuffer> _gc_counts;  // statistics, then each queue's length
+    std::shared_ptr<GpuBuffer> _gc_indices; // the gathered indices
+    struct GcDispatch {
+        const GpuClusterChunk* chunk = nullptr;
+        u32 first_job = 0, jobs = 0;
+        u32 threads = 0;       // the clusters of its copies, all
+        u32 first_cluster = 0; // its first copy's first cluster among all
+        u32 queue = 0;         // where its queue starts in _gc_list
+        u32 queue_size = 0;    // and how many (view, cluster)s it has room for
+    };
+    std::vector<std::shared_ptr<GpuClusterChunk>> _chunks;
+    u32 _next_chunk_id = 0;
+    // Room in a chunk for a mesh of `indices` indices and `clusters` clusters (a chunk made if none has): the chunk, and
+    // where its ranges start.
+    std::shared_ptr<GpuClusterChunk> allocate_cluster_range(u32 indices, u32 clusters, u32& index_first, u32& table_first);
+    struct GcFrame {
+        bool active = false;
+        u32 jobs = 0, views = 0, clusters = 0; // copies, passes' views, clusters in all copies
+        u32 room = 0;                          // triangles the gathered buffer holds
+        u32 table_bytes = 0;
+        std::vector<GcDispatch> dispatches;
+        std::vector<u8> job_data;              // the job table, uploaded
+        std::vector<u32> bases;                // each copy's first cluster among all
+        std::vector<u8> zeros;
+        // The cull's uniform block (cluster_cull.comp's Params), but for the range it is dispatched over.
+        std::vector<f32> params;
+        bool overflow_warned = false;
+    } _gc;
+    bool _gc_overflow_warned = false;
     std::vector<DrawRef> _refs;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start

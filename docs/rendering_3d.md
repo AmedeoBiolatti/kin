@@ -532,7 +532,7 @@ derivatives of the position: a normal map has no effect on it). `Mesh::cluster_c
 `leaf_triangles()`, `cluster_triangles()` read it back. The kiln (5.15 M triangles) takes 5 s at load and 1.5 GB for the process, less than
 with no hierarchy, since the welded vertices replace the unindexed ones on the GPU.
 
-With `scene.lod.enabled` each copy is cut through its hierarchy every frame (on the CPU): a cluster is drawn when its own error spans at
+With `scene.lod.enabled` each copy is cut through its hierarchy every frame (in compute on the GPU where the device can, else on the CPU: see below): a cluster is drawn when its own error spans at
 most `error_pixels / bias` pixels at the nearest point of its bounding sphere and its parent's does not, so near parts stay fine
 and far parts are coarse inside one mesh, with no cracks (the borders between groups were locked in every simplification above them) and every
 surface covered once. `force_level = N` draws the cut at hierarchy depth N (0: the leaves). The same triangles are drawn by every pass for a copy
@@ -540,4 +540,18 @@ surface covered once. `force_level = N` draws the cut at hierarchy depth N (0: t
 of what is drawn are compacted into one buffer a frame; one draw per copy per pass. `stats()` has `cluster_copies`, `clusters_tested`,
 `clusters_drawn`, `cluster_upload_bytes`, `cluster_ms`. Off (the default) a mesh with clusters is drawn whole and the picture is that of the mesh
 without; alpha-blended copies are never cut. Clusters pay for one huge mesh seen near and far (the kiln close up: 0.4 against 2.3 ms of GPU for whole-mesh levels, 4.4 at
-full detail); not for many copies of small meshes, nor mid-size ones (the CPU cut costs 0.4 to 1.5 ms on the kiln until G3c moves it to the GPU).
+full detail); not for many copies of small meshes, nor mid-size ones.
+
+**The cut on the GPU** (`scene.lod.gpu_culling`, default on; `Renderer3DCapabilities::gpu_driven_clusters`). A cluster's test needs no neighbour, so
+four compute passes test every cluster of every copy at once: the cut and the frustum tests of each pass (the camera's, each cascade's or the one
+shadow map's: the same expressions as the CPU's, in the same order), a prefix sum of the chosen clusters' triangle counts, and a gather of their
+indices into one index buffer in the clusters' own order (so a picture is the same every run), which indirect draws read: one multi-draw a draw and pass,
+the copy's slot in the instance buffer as the first instance. The CPU only lists the copies (0.03 to 0.08 ms of `render()` on the kiln,
+against 0.4 to 0.9 for the CPU cut). The picture is the CPU cut's, byte for byte (tested with 1, 3 and 4 cascades, occlusion, contact shadows, temporal
+anti-aliasing, picking). It costs video memory: the table of clusters (80 bytes each) and every level's indices (the kiln: 62 MB more than the leaves
+alone, 7 MB of table), and the gathered indices (`scene.lod.max_cluster_triangles`, default 4 million triangles, 12 bytes each, shared by all
+passes and copies; a cut that passes it is cut short, never written out of bounds). The counts of what it drew are on the GPU:
+`scene.lod.stats_readback` reads them back at the end of `render()` (waiting for the GPU, as `pick` does: for tools and tests) into `stats()`
+(`clusters_drawn`, `triangles`, `cluster_overflow`, `cluster_triangles_all`); without it those are 0 and `draws`, `shadow_draws` count the multi-draws.
+`Renderer3D::read_cluster_picks` lists the clusters it chose. `stats().cluster_gpu` says which cut a render made.
+`KIN_GPU_CLUSTERS=0` forces the CPU cut. Alpha-blended copies are never cut.

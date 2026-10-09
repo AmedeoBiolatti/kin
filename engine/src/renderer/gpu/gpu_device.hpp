@@ -110,6 +110,8 @@ public:
     bool read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba);
     // A region of `src` (`texel_bytes` a texel), tightly packed (waits for the GPU).
     bool read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out);
+    // `bytes` of `src` from `offset` (waits for the GPU, on a fence of its own that it releases once signalled).
+    bool read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vector<u8>& out);
 
     GpuFrame begin_frame(bool acquire_swapchain = false);
     void clear_render_target(GpuFrame& frame, const GpuTexture& target, ClearColor color);

@@ -270,6 +270,19 @@ struct Lod3D {
     // Debug: -1 chooses by distance; 0 or more draws every copy at that level
     // (or its coarsest, for a mesh with fewer).
     i32 force_level = -1;
+    // Meshes made with clusters (MeshOptions::clusters) are cut through their hierarchy every render. With this on
+    // (and a device that has compute with storage buffers and indirect draws: Renderer3DCapabilities::gpu_driven_clusters)
+    // the cut, the frustum tests and the gathering of the chosen triangles into one index buffer run in compute and are
+    // drawn with indirect draws, so the CPU does not look at a cluster; off, or without that, the cut runs on the CPU
+    // (the picture is the same). Not a quality setting: it is for comparing the two and for tests.
+    bool gpu_culling = true;
+    // The most triangles the GPU's gathered index buffer holds, all passes and copies together (12 bytes a triangle of
+    // video memory). Clusters that do not fit are not drawn (the picture degrades, nothing is written out of bounds),
+    // counted in Render3DStats::cluster_overflow and said once in the log when stats_readback is on.
+    u32 max_cluster_triangles = 4'000'000;
+    // Debug: reads the GPU cut's counts back at the end of every render() (Render3DStats::clusters_drawn, triangles,
+    // cluster_overflow). It waits for the GPU, as Renderer3D::pick does: for tools and tests, not for a game's frames.
+    bool stats_readback = false;
 };
 
 class Scene3D {

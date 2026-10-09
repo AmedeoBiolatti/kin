@@ -67,6 +67,7 @@ const std::map<std::string, std::string>& presets() {
         {"contact", "contact=on"},
         {"lod", "lod=on"},
         {"clusters", "lod=on"}, // also builds clusters at load (as --lod-clusters)
+        {"clusters-gpu", "lod=on,lod_gpu=on,lod_readback=on"}, // the same, cut in compute, with the counts read back
         {"taa", "taa=on"},
         {"taa-sharp", "taa=on,taa_sharpness=0.4"},
         {"taa-frozen", "taa=on,taa_freeze=on"},
@@ -156,7 +157,7 @@ Options parse(int argc, char** argv) {
                 const auto it = presets().find(name);
                 if (it == presets().end()) throw std::invalid_argument("no preset named " + name + " (--help lists them)");
                 for (const std::string& set : split(it->second, ',')) o.sets.push_back(set);
-                if (name == "clusters") o.lod_clusters = true;
+                if (name == "clusters" || name == "clusters-gpu") o.lod_clusters = true;
             }
         } else if (arg == "--camera") {
             o.camera = value();
@@ -206,6 +207,7 @@ struct Caps {
     std::vector<unsigned> samples{1, 2, 4, 8};
     std::vector<std::string> hdris; // file stems
     bool clusters = false;          // the meshes were built with clusters (--lod-clusters), not levels
+    bool gpu_clusters = false;      // the device can cut them in compute
 };
 
 // The table of switches. Adding a feature is adding its row here.
@@ -401,6 +403,10 @@ private:
         slider("lod_bias", "Bias (quality multiplier)", s.lod_bias, 0.25f, 8.0f);
         islider("lod_force", caps.clusters ? "Force cut depth (-1: by error, 0: leaves)" : "Force level (-1: by distance)", s.lod_force, -1,
                 caps.clusters ? 20 : 7);
+        if (caps.clusters) {
+            check("lod_gpu", caps.gpu_clusters ? "Cut on the GPU (compute)" : "Cut on the GPU (this device cannot: the CPU cuts)", s.lod_gpu);
+            check("lod_readback", "Read the GPU cut's counts back (waits for the GPU)", s.lod_readback);
+        }
         note(caps.clusters ? "Mode: clusters, built at load (--lod-clusters); off and levels are the other modes"
                                    : "Mode: levels, built at load: --lod-levels N (4; 1 builds none); --lod-clusters builds clusters instead");
 
@@ -577,6 +583,7 @@ private:
             return false;
         }
         _caps.clusters = _options.lod_clusters;
+        _caps.gpu_clusters = _r3d->capabilities().gpu_driven_clusters;
         const auto sample_cap = _r3d->capabilities().max_samples;
         _caps.samples.clear();
         for (unsigned n : {1u, 2u, 4u, 8u}) {
@@ -942,7 +949,7 @@ private:
         if (_s.lod) {
             out << ",\n  \"lod\": {\"error_pixels\": " << json_number(_s.lod_error) << ", \"bias\": " << json_number(_s.lod_bias)
                 << ", \"force_level\": " << _s.lod_force << "}";
-            if (_options.lod_clusters) out << ",\n  \"lod_clusters\": true";
+            if (_options.lod_clusters) out << ",\n  \"lod_clusters\": true, \"lod_gpu\": " << (_s.lod_gpu ? "true" : "false");
         }
         if (_s.taa) {
             out << ",\n  \"taa\": {\"blend\": " << json_number(_s.taa_blend) << ", \"sharpness\": " << json_number(_s.taa_sharpness)
@@ -1100,7 +1107,16 @@ private:
             std::snprintf(line, sizeof line, "contact shadows: %u dispatches", st.contact_dispatches);
             lines.push_back(line);
         }
-        if (_s.lod && _options.lod_clusters) {
+        if (_s.lod && _options.lod_clusters && st.cluster_gpu) {
+            std::snprintf(line, sizeof line, "clusters (GPU cut): %u copies, %llu tested, %u dispatches, CPU %.2f ms", st.cluster_copies,
+                          static_cast<unsigned long long>(st.clusters_tested), st.cluster_dispatches, st.cluster_ms);
+            lines.push_back(line);
+            if (_s.lod_readback) {
+                std::snprintf(line, sizeof line, "  read back: %u clusters, %llu triangles drawn, %u dropped", st.clusters_drawn,
+                              static_cast<unsigned long long>(st.triangles), st.cluster_overflow);
+                lines.push_back(line);
+            }
+        } else if (_s.lod && _options.lod_clusters) {
             std::snprintf(line, sizeof line, "clusters: %u copies cut, %llu tested, %u drawn, %.1f KB indices, cut %.2f ms", st.cluster_copies,
                           static_cast<unsigned long long>(st.clusters_tested), st.clusters_drawn, static_cast<double>(st.cluster_upload_bytes) / 1024.0,
                           st.cluster_ms);
@@ -1161,7 +1177,8 @@ void print_help() {
                  "  --model PATH          the glTF (else $KIN_REFERENCE_CACHE/sponza/Sponza.gltf, else ~/.cache/kin/reference/sponza/Sponza.gltf;\n"
                  "                        python3 tools/reference/fetch.py puts it there)\n"
                  "  --lod-levels N        levels of detail built for each mesh at load (default 4; 1: none); --preset lod turns them on\n"
-                 "  --lod-clusters        clusters instead of levels (a hierarchy a mesh, cut by the error bound); --preset clusters is this and the setting on\n"
+                 "  --lod-clusters        clusters instead of levels (a hierarchy a mesh, cut by the error bound); --preset clusters is this and the setting on;\n"
+                 "                        --preset clusters-gpu adds the cut in compute (the default where the device can) with its counts read back\n"
                  "  --set KEY=VALUE       a setting at start (on/off, a number or a choice's name); --list-settings lists them\n"
                  "  --preset NAME[,NAME]  a named set of --set values:";
     for (const auto& [name, sets] : presets()) std::cout << ' ' << name;

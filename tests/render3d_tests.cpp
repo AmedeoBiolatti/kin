@@ -20,6 +20,8 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
+#include <bit>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -4075,6 +4077,14 @@ void test_gpu_lod_taa() {
 
 // --- Clusters (G3b) ---
 
+// The cut of clustered meshes on the GPU (with its counts read back, which waits for the GPU) or on the CPU: the tests
+// of G3b run on both, and must find the same.
+kin::Lod3D cut_on(bool gpu, kin::Lod3D lod) {
+    lod.gpu_culling = gpu;
+    lod.stats_readback = gpu;
+    return lod;
+}
+
 // How the renderer reads Scene3D::lod for a perspective camera over a view `height` pixels tall, as a cut of `copy`'s
 // hierarchy (a copy placed by `transform`): the setting's description, written out here.
 kin::ClusterCutView cluster_cut_view(const kin::Camera3D& camera, float height, const Mat4f& transform, float pixels, int force = -1) {
@@ -4153,8 +4163,8 @@ Difference difference_of(const Pixels& a, const Pixels& b) {
 // drawn whole, as the same picture and counts as the mesh made without clusters (a smooth one to the bit: it keeps its
 // normals; a flat one makes them in the shader, which differs from the true flat normal by float rounding only); the
 // cut forced to depth 0 is the whole mesh again, drawn through the compacted indices.
-void test_gpu_clusters_off_is_unchanged() {
-    with_gpu("test_gpu_clusters_off_is_unchanged", [](kin::Renderer2D& renderer) {
+void test_gpu_clusters_off_is_unchanged(bool gpu) {
+    with_gpu(gpu ? "test_gpu_clusters_off_is_unchanged (GPU cut)" : "test_gpu_clusters_off_is_unchanged (CPU cut)", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions options;
         options.clusters = true;
@@ -4191,7 +4201,7 @@ void test_gpu_clusters_off_is_unchanged() {
             };
             const Pixels old_picture = picture(plain);
             const kin::Render3DStats old_stats = r3d.stats();
-            scene.lod = {.enabled = false, .error_pixels = 8.0f, .force_level = 2};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = false, .error_pixels = 8.0f, .force_level = 2});
             const Pixels off_picture = picture(clustered);
             const Difference off = difference_of(off_picture, old_picture);
             std::cerr << "clusters off, " << (flat ? "flat" : "smooth") << ": " << off.bytes << " bytes differ, by up to " << off.worst << ", mean " << off.mean << "\n";
@@ -4206,18 +4216,18 @@ void test_gpu_clusters_off_is_unchanged() {
                    off_stats.instances == old_stats.instances);
             assert(off_stats.cluster_copies == 0 && off_stats.cluster_upload_bytes == 0 && off_stats.clusters_tested == 0);
             // On, forced to the leaves: the same triangles, the same picture (to the flat normal), through the compacted indices.
-            scene.lod = {.enabled = true, .force_level = 0};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .force_level = 0});
             const Pixels leaf_picture = picture(clustered);
             const Difference leaves = difference_of(leaf_picture, old_picture);
             std::cerr << "clusters forced to the leaves: " << leaves.bytes << " bytes differ, by up to " << leaves.worst << ", mean " << leaves.mean << "\n";
             assert(leaves.mean < 0.05 && leaves.worst <= (flat ? 24 : 0));
             assert(r3d.stats().triangles == old_stats.triangles && r3d.stats().cluster_copies == 1);
-            assert(r3d.stats().cluster_upload_bytes >= data.triangle_count() * 12);
+            assert(gpu || r3d.stats().cluster_upload_bytes >= data.triangle_count() * 12);
             // A mesh without clusters, the selection on: as before.
-            scene.lod = {.enabled = true, .error_pixels = 4.0f};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 4.0f});
             assert(picture(plain).rgba == old_picture.rgba && r3d.stats().triangles == old_stats.triangles && r3d.stats().cluster_copies == 0);
             // An alpha-blended copy is not cut.
-            scene.lod = {.enabled = true, .error_pixels = 30.0f};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 30.0f});
             scene.clear();
             scene.draw(clustered, Mat4f::translation({0.0f, 1.0f, 0.0f}), {.color = Color::rgba(220, 120, 60, 120), .blend = kin::Blend3D::Alpha});
             render_ok(r3d, view, scene);
@@ -4231,8 +4241,8 @@ void test_gpu_clusters_off_is_unchanged() {
 // the triangles drawn are those of the cut the same camera makes of the same hierarchy on the CPU (copy culling off, so that
 // nothing else removes any); the picture is a small distance from full detail while the triangles fall; forcing a depth
 // draws that depth's cut; a copy's scale counts.
-void test_gpu_clusters_cut() {
-    with_gpu("test_gpu_clusters_cut", [](kin::Renderer2D& renderer) {
+void test_gpu_clusters_cut(bool gpu) {
+    with_gpu(gpu ? "test_gpu_clusters_cut (GPU cut)" : "test_gpu_clusters_cut (CPU cut)", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions options;
         options.clusters = true;
@@ -4254,11 +4264,11 @@ void test_gpu_clusters_cut() {
             renderer.present();
             return p;
         };
-        scene.lod = {};
+        scene.lod = cut_on(gpu, kin::Lod3D{});
         const Pixels full = draw(plain);
         assert(r3d.stats().triangles == data.triangle_count());
         for (const float pixels : {0.5f, 1.0f, 2.0f, 4.0f}) {
-            scene.lod = {.enabled = true, .error_pixels = pixels};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = pixels});
             const Pixels cut_picture = draw(hill);
             const kin::Render3DStats stats = r3d.stats();
             const std::vector<kin::SelectedCluster> expected = kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 240.0f, at, pixels), kin::NoClusterCull{});
@@ -4266,8 +4276,9 @@ void test_gpu_clusters_cut() {
             std::cerr << "clusters " << pixels << " px: " << stats.triangles << " triangles of " << data.triangle_count() << " (" << expected.size() << " clusters, "
                       << stats.clusters_tested << " tested), picture " << d.mean << " mean, up to " << d.worst << "\n";
             assert(stats.triangles == cut_triangles(hierarchy, expected) && stats.clusters_drawn == expected.size() && stats.cluster_copies == 1);
-            assert(stats.cluster_upload_bytes >= stats.triangles * 12 && stats.draws == 1 && stats.instances == 1);
-            assert(stats.clusters_tested >= expected.size() && stats.clusters_tested < hierarchy.clusters.size());
+            assert((gpu || stats.cluster_upload_bytes >= stats.triangles * 12) && stats.draws == 1 && stats.instances == 1);
+            assert(gpu ? stats.cluster_gpu && stats.clusters_tested == hierarchy.clusters.size()
+                       : !stats.cluster_gpu && stats.clusters_tested >= expected.size() && stats.clusters_tested < hierarchy.clusters.size());
             assert(stats.triangles < data.triangle_count() / 2);
             assert(d.mean < 1.5 + pixels);
             if (pixels == 1.0f) {
@@ -4293,7 +4304,7 @@ void test_gpu_clusters_cut() {
         }
         // A forced depth draws that depth's cut.
         for (const int depth : {0, 1, 3, 5}) {
-            scene.lod = {.enabled = true, .force_level = depth};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .force_level = depth});
             draw(hill);
             const std::vector<kin::SelectedCluster> expected = kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 240.0f, at, 1.0f, depth), kin::NoClusterCull{});
             std::cerr << "clusters forced to depth " << depth << ": " << r3d.stats().triangles << " triangles\n";
@@ -4301,7 +4312,7 @@ void test_gpu_clusters_cut() {
             assert(depth > 0 || r3d.stats().triangles == data.triangle_count());
         }
         // The copy's scale counts: twice as large, the same camera, and the error is twice as many pixels.
-        scene.lod = {.enabled = true, .error_pixels = 1.0f};
+        scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f});
         scene.clear();
         scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}));
         render_ok(r3d, view, scene);
@@ -4314,7 +4325,7 @@ void test_gpu_clusters_cut() {
         const kin::Mat4f small = Mat4f::translation({0.0f, 0.0f, 120.0f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f});
         const kin::u64 expected_two = cut_triangles(hierarchy, kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 240.0f, big, 1.0f), kin::NoClusterCull{})) +
                                       cut_triangles(hierarchy, kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 240.0f, small, 1.0f), kin::NoClusterCull{}));
-        assert(r3d.stats().triangles == expected_two && r3d.stats().cluster_copies == 2 && r3d.stats().draws == 2);
+        assert(r3d.stats().triangles == expected_two && r3d.stats().cluster_copies == 2 && r3d.stats().draws == (gpu ? 1u : 2u));
         assert(unit_triangles > 0);
         renderer.present();
     });
@@ -4323,8 +4334,8 @@ void test_gpu_clusters_cut() {
 // A copy drawn from the cut looks as a mesh made of that cut does, to the bit, whatever the pass: the colour, the
 // pre-pass (occlusion, contact shadows), the shadow map (one, or cascades), culling of the copies on or off. The
 // copies include a smooth and a flat-shaded mesh, and a scaled one.
-void test_gpu_clusters_same_cut_everywhere() {
-    with_gpu("test_gpu_clusters_same_cut_everywhere", [](kin::Renderer2D& renderer) {
+void test_gpu_clusters_same_cut_everywhere(bool gpu) {
+    with_gpu(gpu ? "test_gpu_clusters_same_cut_everywhere (GPU cut)" : "test_gpu_clusters_same_cut_everywhere (CPU cut)", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions options;
         options.clusters = true;
@@ -4360,7 +4371,7 @@ void test_gpu_clusters_same_cut_everywhere() {
                     scene.ambient_occlusion.enabled = passes;
                     scene.contact_shadows.enabled = passes;
                     scene.cull = cull;
-                    scene.lod = {.enabled = true, .error_pixels = 0.7f};
+                    scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.7f});
                     scene.clear();
                     scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
                     for (const Copy& c : copies) {
@@ -4370,7 +4381,7 @@ void test_gpu_clusters_same_cut_everywhere() {
                     renderer.present();
                     const kin::Render3DStats stats = r3d.stats();
                     // The same scene from the meshes the cuts are.
-                    scene.lod = {};
+                    scene.lod = cut_on(gpu, kin::Lod3D{});
                     scene.clear();
                     scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
                     kin::u64 triangles = 0;
@@ -4404,8 +4415,8 @@ void test_gpu_clusters_same_cut_everywhere() {
 
 // Pick sees the cut the pass draws: a ring of pixels over a copy forced to a coarse depth hits as the stand-in does,
 // and differs from the full detail somewhere; ids and positions of what is hit match.
-void test_gpu_clusters_pick() {
-    with_gpu("test_gpu_clusters_pick", [](kin::Renderer2D& renderer) {
+void test_gpu_clusters_pick(bool gpu) {
+    with_gpu(gpu ? "test_gpu_clusters_pick (GPU cut)" : "test_gpu_clusters_pick (CPU cut)", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions options;
         options.clusters = true;
@@ -4431,10 +4442,10 @@ void test_gpu_clusters_pick() {
             }
             return results;
         };
-        scene.lod = {.enabled = true, .force_level = depth};
+        scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .force_level = depth});
         const auto cut_hits = ring([&] { scene.draw(clustered, place, {}, kin::colors::white, 7); });
         assert(r3d.stats().cluster_copies == 1);
-        scene.lod = {};
+        scene.lod = cut_on(gpu, kin::Lod3D{});
         const auto cut = kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 120.0f, place, 1.0f, depth), kin::NoClusterCull{});
         const kin::Mesh stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut));
         const auto stand_in_hits = ring([&] { scene.draw(stand_in, place, {}, kin::colors::white, 7); });
@@ -4456,8 +4467,8 @@ void test_gpu_clusters_pick() {
 }
 
 // The cut and the compaction on workers give the picture and the numbers the serial ones do, with everything on.
-void test_gpu_clusters_on_workers() {
-    with_gpu("test_gpu_clusters_on_workers", [](kin::Renderer2D& renderer) {
+void test_gpu_clusters_on_workers(bool gpu) {
+    with_gpu(gpu ? "test_gpu_clusters_on_workers (GPU cut)" : "test_gpu_clusters_on_workers (CPU cut)", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions options;
         options.clusters = true;
@@ -4473,7 +4484,7 @@ void test_gpu_clusters_on_workers() {
         scene.lights.shadow_distance = 120.0f;
         scene.ambient_occlusion.enabled = true;
         scene.contact_shadows.enabled = true;
-        scene.lod = {.enabled = true, .error_pixels = 0.5f};
+        scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.5f});
         const auto build = [&] {
             scene.clear();
             scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
@@ -4512,8 +4523,8 @@ void test_gpu_clusters_on_workers() {
 // Temporal anti-aliasing with clusters: the same pictures, frame after frame, as a scene drawn from stand-in meshes of
 // the cuts; with a camera that moves (so that cuts change from frame to frame) it keeps working, close to the picture drawn
 // at 8 samples a pixel without it.
-void test_gpu_clusters_taa() {
-    with_gpu("test_gpu_clusters_taa", [](kin::Renderer2D& renderer) {
+void test_gpu_clusters_taa(bool gpu) {
+    with_gpu(gpu ? "test_gpu_clusters_taa (GPU cut)" : "test_gpu_clusters_taa (CPU cut)", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions options;
         options.clusters = true;
@@ -4535,7 +4546,7 @@ void test_gpu_clusters_taa() {
             const float z = f < 12 ? 70.0f : 70.0f - 1.2f * static_cast<float>(f - 12);
             scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, z}, {0.0f, 2.0f, z - 60.0f}, 60.0f);
             scene.taa = {.enabled = true};
-            scene.lod = {.enabled = true, .error_pixels = 0.7f};
+            scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.7f});
             scene.clear();
             scene.draw(hill, place, {.color = Color::rgb(150, 190, 120)});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -4555,7 +4566,7 @@ void test_gpu_clusters_taa() {
                     const auto cut = kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 120.0f, place, 0.7f), kin::NoClusterCull{});
                     stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut));
                 }
-                scene.lod = {};
+                scene.lod = cut_on(gpu, kin::Lod3D{});
                 scene.clear();
                 scene.draw(stand_in, place, {.color = Color::rgb(150, 190, 120)});
                 const Pixels stand = shoot_view(renderer, r3d, stand_view, scene);
@@ -4564,7 +4575,7 @@ void test_gpu_clusters_taa() {
             }
             if (f >= 24) {
                 scene.taa = {};
-                scene.lod = {.enabled = true, .error_pixels = 0.7f};
+                scene.lod = cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.7f});
                 const Pixels truth = shoot_view(renderer, r3d, truth_view, scene);
                 renderer.present();
                 double e = 0.0;
@@ -4580,6 +4591,643 @@ void test_gpu_clusters_taa() {
                   << ", mean square error against 8 samples " << error_sum / error_frames << "\n";
         assert(frames_with_history == 39 && equal_frames == 12 && smallest < largest);
         assert(error_sum / error_frames < 145.0);
+    });
+}
+
+
+// --- Clusters cut on the GPU (G3c) ---
+
+// The cut as the renderer's own camera sees it, orthographic or not, for a view `height` pixels tall.
+kin::ClusterCutView cut_view_of(const kin::Camera3D& camera, float height, const Mat4f& transform, float pixels, int force = -1) {
+    kin::ClusterCutView v = cluster_cut_view(camera, height, transform, pixels, force);
+    if (camera.projection == kin::Projection3D::Orthographic) {
+        v.orthographic = true;
+        v.per_unit = height / camera.height;
+    }
+    return v;
+}
+
+struct Lcg {
+    kin::u32 state = 12345;
+    float next() {
+        state = state * 1664525u + 1013904223u;
+        return static_cast<float>(state >> 8) / 16777216.0f;
+    }
+    float range(float lo, float hi) { return lo + (hi - lo) * next(); }
+};
+
+// Edges used once, by position (the hierarchy is welded, so exact float bits do): the open ones of a set of triangles.
+std::size_t open_edges_of(const kin::MeshClusters& hierarchy, const std::vector<kin::u32>& clusters) {
+    using Key = std::array<kin::u32, 6>;
+    std::map<Key, int> uses;
+    std::vector<kin::u32> indices;
+    const auto bits = [&](kin::u32 v) {
+        const Vec3f p = hierarchy.vertices[v].position;
+        return std::array<kin::u32, 3>{std::bit_cast<kin::u32>(p.x), std::bit_cast<kin::u32>(p.y), std::bit_cast<kin::u32>(p.z)};
+    };
+    for (const kin::u32 c : clusters) {
+        indices.resize(static_cast<std::size_t>(hierarchy.clusters[c].triangle_count) * 3);
+        hierarchy.append_indices(c, indices.data());
+        for (std::size_t t = 0; t + 2 < indices.size(); t += 3) {
+            for (int e = 0; e < 3; ++e) {
+                auto a = bits(indices[t + static_cast<std::size_t>(e)]), b = bits(indices[t + static_cast<std::size_t>((e + 1) % 3)]);
+                if (b < a) {
+                    std::swap(a, b);
+                }
+                ++uses[{a[0], a[1], a[2], b[0], b[1], b[2]}];
+            }
+        }
+    }
+    std::size_t open = 0;
+    for (const auto& [key, n] : uses) {
+        open += n == 1 ? 1u : 0u;
+    }
+    return open;
+}
+
+// The GPU's chosen clusters for the camera's passes, by copy (the scene's instance index), from the read-back.
+std::map<kin::u32, std::set<kin::u32>> camera_picks(kin::Renderer3D& r3d, kin::View3D& view, const kin::Scene3D& scene, std::size_t* shadow_picks = nullptr,
+                                                    bool may_be_none = false) {
+    std::vector<kin::ClusterPick> picks;
+    const bool ok = r3d.read_cluster_picks(view, picks);
+    assert(ok || may_be_none); // false: no copy was cut at all
+    static_cast<void>(ok);
+    std::map<kin::u32, std::set<kin::u32>> by_copy;
+    if (shadow_picks) {
+        *shadow_picks = 0;
+    }
+    for (const kin::ClusterPick& p : picks) {
+        assert(p.scene == 0);
+        if (p.view == 0) {
+            by_copy[scene.draws()[p.draw].first + p.copy].insert(p.cluster);
+        } else if (shadow_picks) {
+            ++*shadow_picks;
+        }
+    }
+    return by_copy;
+}
+
+// The GPU's cut chooses the clusters the CPU's select_clusters does, for many cameras (perspective and orthographic,
+// near, far and inside the mesh), bounds, transforms (scaled, turned) and forced depths, over a smooth mesh, a flat one,
+// a torus and a soup. The two compute the same float expressions in the same order; they differ only where an expression
+// lands within a rounding of its bound, which the count below measures. And whatever it chooses covers the surface
+// once with no crack: the open edges are the mesh's own.
+void test_gpu_cut_equals_cpu_selection() {
+    with_gpu("test_gpu_cut_equals_cpu_selection", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+            return;
+        }
+        kin::MeshOptions options;
+        options.clusters = true;
+        struct Subject {
+            const char* name;
+            MeshData data;
+        };
+        std::vector<Subject> subjects;
+        subjects.push_back({"smooth hill", big_hill(160)});
+        subjects.push_back({"flat sphere", kin::meshes::sphere(1.0f, 160, 80)});
+        subjects.push_back({"torus", kin::meshes::torus(1.0f, 0.3f, 140, 60)});
+        subjects.push_back({"flat plane", kin::meshes::plane({20.0f, 20.0f}, 150)});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        Lcg rng;
+        std::size_t checked = 0, clusters_compared = 0, different = 0, worst_case = 0;
+        for (const Subject& subject : subjects) {
+            const kin::Mesh mesh = r3d.create_mesh(subject.data, options);
+            const kin::MeshClusters hierarchy = kin::build_mesh_clusters(subject.data, options);
+            const std::size_t own_open = open_edges_of(hierarchy, [&] {
+                std::vector<kin::u32> leaves;
+                for (kin::u32 c = 0; c < hierarchy.leaf_count; ++c) {
+                    leaves.push_back(c);
+                }
+                return leaves;
+            }());
+            const float size = kin::length(subject.data.bounds().max - subject.data.bounds().min);
+            for (int round = 0; round < 30; ++round) {
+                kin::Scene3D scene;
+                scene.cull = false;
+                const Vec3f target{rng.range(-0.3f, 0.3f) * size, 0.0f, rng.range(-0.3f, 0.3f) * size};
+                const float distance = size * (round % 5 == 0 ? rng.range(0.02f, 0.2f) : round % 5 == 1 ? rng.range(3.0f, 12.0f) : rng.range(0.4f, 2.5f));
+                const float yaw = rng.range(0.0f, 6.28f), pitch = rng.range(-0.6f, 1.2f);
+                const Vec3f eye = target + Vec3f{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * distance;
+                scene.camera = kin::Camera3D::look_at(eye, target, rng.range(30.0f, 90.0f));
+                if (round % 6 == 5) {
+                    scene.camera.projection = kin::Projection3D::Orthographic;
+                    scene.camera.height = size * rng.range(0.3f, 3.0f);
+                }
+                const float pixels = rng.range(0.25f, 6.0f);
+                const int force = round % 7 == 6 ? static_cast<int>(rng.range(0.0f, static_cast<float>(hierarchy.levels) + 1.0f)) : -1;
+                scene.lod = {.enabled = true, .error_pixels = pixels, .force_level = force, .stats_readback = true};
+                const int copies = 1 + round % 3;
+                for (int c = 0; c < copies; ++c) {
+                    const float scale = rng.range(0.3f, 3.0f);
+                    scene.draw(mesh, Mat4f::translation({rng.range(-0.5f, 0.5f) * size, rng.range(-0.2f, 0.2f) * size, rng.range(-0.5f, 0.5f) * size}) *
+                                   Mat4f::rotation_y(rng.range(0.0f, 360.0f)) * Mat4f::rotation_x(rng.range(-40.0f, 40.0f)) *
+                                   Mat4f::scaling({scale, scale * rng.range(0.8f, 1.2f), scale}),
+                               {.color = Color::rgb(150, 190, 120)}, kin::colors::white, static_cast<kin::u32>(c));
+                }
+                render_ok(r3d, view, scene);
+                const auto picks = camera_picks(r3d, view, scene);
+                const kin::Render3DStats stats = r3d.stats();
+                assert(stats.cluster_gpu && stats.cluster_copies == scene.instances().size());
+                kin::u64 got_clusters = 0;
+                for (std::size_t i = 0; i < scene.instances().size(); ++i) {
+                    const auto expected = kin::select_clusters(hierarchy, cut_view_of(scene.camera, 240.0f, scene.instances()[i].transform, pixels, force), kin::NoClusterCull{});
+                    std::set<kin::u32> want;
+                    for (const kin::SelectedCluster& e : expected) {
+                        want.insert(e.cluster);
+                    }
+                    const auto it = picks.find(static_cast<kin::u32>(i));
+                    const std::set<kin::u32> got = it == picks.end() ? std::set<kin::u32>{} : it->second;
+                    std::size_t only_gpu = 0, only_cpu = 0;
+                    for (const kin::u32 c : got) {
+                        only_gpu += want.count(c) ? 0u : 1u;
+                    }
+                    for (const kin::u32 c : want) {
+                        only_cpu += got.count(c) ? 0u : 1u;
+                    }
+                    clusters_compared += want.size();
+                    different += only_gpu + only_cpu;
+                    worst_case = std::max(worst_case, only_gpu + only_cpu);
+                    got_clusters += got.size();
+                    ++checked;
+                    if (only_gpu + only_cpu > 0) {
+                        std::cerr << "  " << subject.name << " round " << round << " copy " << i << ": " << only_gpu << " only on the GPU, " << only_cpu << " only on the CPU (of " << want.size() << ")\n";
+                    }
+                    // No crack, whatever was chosen.
+                    const std::vector<kin::u32> chosen(got.begin(), got.end());
+                    assert(open_edges_of(hierarchy, chosen) == own_open);
+                }
+                assert(stats.clusters_drawn == got_clusters); // the counters and the read-back of the scan agree
+            }
+        }
+        std::cerr << "gpu cut: " << checked << " copies' cuts compared (" << clusters_compared << " clusters), " << different << " clusters differ, worst copy " << worst_case << "\n";
+        assert(checked > 150);
+        // Borderline rounding only: a handful in tens of thousands; the open-edge assertion above holds for every one.
+        assert(different * 2000 <= clusters_compared);
+        renderer.present();
+    });
+}
+
+// The picture the GPU's cut draws is the CPU cut's, to the bit, whatever the pass: with one, three and four cascades,
+// occlusion and contact shadows on or off, culling of the copies on or off; and so are the counts, pick, and (with
+// temporal anti-aliasing and a moving camera) every frame; and the serial and parallel set-ups of the scene agree.
+void test_gpu_cut_picture_equals_cpu() {
+    with_gpu("test_gpu_cut_picture_equals_cpu", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+            return;
+        }
+        kin::MeshOptions options;
+        options.clusters = true;
+        const kin::Mesh hill = r3d.create_mesh(big_hill(80), options), ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options),
+                        slab = r3d.create_mesh(kin::meshes::plane({30.0f, 30.0f}, 50), options);
+        const kin::Mesh floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
+        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1, .pick = true});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 40.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
+        scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
+        scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
+        scene.lights.shadow_distance = 100.0f;
+        const auto build = [&] {
+            scene.clear();
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, -10.0f}), {.color = Color::rgb(150, 190, 120)});
+            scene.draw(ball, Mat4f::translation({-3.0f, 2.0f, 26.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}), {.color = Color::rgb(220, 120, 60)});
+            scene.draw(ball, Mat4f::translation({5.0f, 1.5f, 8.0f}), {.color = Color::rgb(60, 130, 220)});
+            scene.draw(ball, Mat4f::translation({-60.0f, 1.5f, 8.0f}), {.color = Color::rgb(60, 130, 220)}); // outside the view, its shadow too far
+            scene.draw(slab, Mat4f::translation({-12.0f, 3.0f, 12.0f}) * Mat4f::rotation_x(-20.0f), {.color = Color::rgb(200, 200, 90)});
+        };
+        for (const kin::u32 cascades : {1u, 3u, 4u}) {
+            for (const bool passes : {false, true}) {
+                for (const bool cull : {false, true}) {
+                    scene.lights.shadow_cascades = cascades;
+                    scene.ambient_occlusion.enabled = passes;
+                    scene.contact_shadows.enabled = passes;
+                    scene.cull = cull;
+                    build();
+                    scene.lod = cut_on(false, {.enabled = true, .error_pixels = 0.7f});
+                    const Pixels cpu = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                    const kin::Render3DStats on_cpu = r3d.stats();
+                    scene.lod = cut_on(true, {.enabled = true, .error_pixels = 0.7f});
+                    const Pixels gpu = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                    const kin::Render3DStats on_gpu = r3d.stats();
+                    const Difference d = difference_of(gpu, cpu);
+                    std::cerr << "gpu cut: " << cascades << " cascades" << (passes ? ", occlusion and contact shadows" : "") << (cull ? "" : ", no copy culling") << ": "
+                              << d.bytes << " bytes differ from the CPU's cut (up to " << d.worst << "), " << on_gpu.triangles << " / " << on_cpu.triangles << " triangles, "
+                              << on_gpu.clusters_drawn << " / " << on_cpu.clusters_drawn << " clusters\n";
+                    assert(on_gpu.cluster_gpu && !on_cpu.cluster_gpu && d.bytes == 0);
+                    assert(on_gpu.triangles == on_cpu.triangles && on_gpu.clusters_drawn == on_cpu.clusters_drawn && on_gpu.cluster_copies == on_cpu.cluster_copies);
+                    assert(on_gpu.cluster_overflow == 0);
+                }
+            }
+        }
+        // Pick: the ids and the points on a grid of pixels.
+        scene.lights.shadow_cascades = 1;
+        scene.ambient_occlusion.enabled = scene.contact_shadows.enabled = false;
+        scene.cull = true;
+        build();
+        std::vector<kin::PickResult> hits[2];
+        for (const bool on_gpu : {false, true}) {
+            scene.lod = cut_on(on_gpu, {.enabled = true, .error_pixels = 0.7f});
+            render_ok(r3d, view, scene);
+            for (int y = 5; y < 150; y += 9) {
+                for (int x = 5; x < 200; x += 9) {
+                    hits[on_gpu].push_back(r3d.pick(view, {x, y}));
+                }
+            }
+        }
+        int hit = 0;
+        for (std::size_t i = 0; i < hits[0].size(); ++i) {
+            assert(hits[0][i].hit == hits[1][i].hit && hits[0][i].id == hits[1][i].id && kin::length(hits[0][i].position - hits[1][i].position) < 1e-5f);
+            hit += hits[1][i].hit ? 1 : 0;
+        }
+        std::cerr << "gpu cut: pick on a grid of " << hits[0].size() << " pixels (" << hit << " hit) equal\n";
+        assert(hit > 50);
+
+        // Temporal anti-aliasing with a camera that walks: each frame equal.
+        if (!lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            kin::View3D taa_cpu = r3d.create_view({200, 150}, {.samples = 1}), taa_gpu = r3d.create_view({200, 150}, {.samples = 1});
+            int equal = 0;
+            for (int f = 0; f < 14; ++f) {
+                scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 40.0f - 1.5f * static_cast<float>(f)}, {0.0f, 1.0f, -30.0f}, 60.0f);
+                scene.taa = {.enabled = true};
+                scene.lights.shadow_cascades = 3;
+                scene.ambient_occlusion.enabled = true;
+                build();
+                scene.lod = cut_on(false, {.enabled = true, .error_pixels = 0.7f});
+                const Pixels a = shoot_view(renderer, r3d, taa_cpu, scene);
+                renderer.present();
+                scene.lod = cut_on(true, {.enabled = true, .error_pixels = 0.7f});
+                const Pixels b = shoot_view(renderer, r3d, taa_gpu, scene);
+                renderer.present();
+                equal += a.rgba == b.rgba ? 1 : 0;
+            }
+            std::cerr << "gpu cut: " << equal << " of 14 frames with temporal anti-aliasing equal the CPU's\n";
+            assert(equal == 14);
+            scene.taa = {};
+        }
+
+        // Many copies, so that the scene's set-up runs on workers: the same picture and counts as serial.
+        {
+            scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 40.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
+            scene.lights.shadow_cascades = 3;
+            scene.ambient_occlusion.enabled = false;
+            const auto crowd = [&] {
+                build();
+                Lcg rng;
+                for (int i = 0; i < 60; ++i) {
+                    scene.draw(i % 3 ? ball : slab, Mat4f::translation({rng.range(-30.0f, 30.0f), 1.0f + rng.next(), 30.0f - rng.next() * 70.0f}) * Mat4f::rotation_y(rng.next() * 360.0f) *
+                               Mat4f::scaling(Vec3f{0.5f + rng.next() * 1.5f, 0.5f + rng.next() * 1.5f, 0.5f + rng.next() * 1.5f}), {.color = Color::rgb(60, 160, 220)});
+                }
+            };
+            crowd();
+            scene.lod = cut_on(true, {.enabled = true, .error_pixels = 0.7f});
+            const Pixels serial = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats a = r3d.stats();
+            kin::JobSystem jobs;
+            renderer.set_job_system(&jobs);
+            crowd();
+            const Pixels parallel = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats b = r3d.stats();
+            renderer.set_job_system(nullptr);
+            scene.lod = cut_on(false, {.enabled = true, .error_pixels = 0.7f});
+            const Pixels cpu = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            std::cerr << "gpu cut: " << a.cluster_copies << " copies, serial and workers equal: " << (serial.rgba == parallel.rgba) << ", equal to the CPU's: " << (serial.rgba == cpu.rgba) << "\n";
+            assert(a.cluster_copies > 40 && serial.rgba == parallel.rgba && serial.rgba == cpu.rgba);
+            assert(a.triangles == b.triangles && a.clusters_drawn == b.clusters_drawn && a.draws == b.draws && a.shadow_draws == b.shadow_draws && a.ao_draws == b.ao_draws);
+        }
+    });
+}
+
+// Run to run the picture is the same bit for bit, in one renderer and across two (the gathered indices are in their
+// clusters' order, not in the order the GPU's threads finished).
+void test_gpu_cut_is_deterministic() {
+    static std::vector<kin::u8> first_run;
+    for (int run = 0; run < 2; ++run) {
+        with_gpu("test_gpu_cut_is_deterministic", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+                return;
+            }
+            kin::MeshOptions options;
+            options.clusters = true;
+            const kin::Mesh hill = r3d.create_mesh(big_hill(100), options);
+            const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options);
+            kin::View3D view = r3d.create_view({200, 150}, {.samples = 4});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 60.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
+            scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
+            scene.lights.shadow_cascades = 3;
+            scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
+            scene.lights.shadow_distance = 100.0f;
+            scene.lod = cut_on(false, {.enabled = true, .error_pixels = 1.5f});
+            scene.lod.gpu_culling = true;
+            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
+            scene.draw(ball, Mat4f::translation({0.0f, 2.0f, 30.0f}) * Mat4f::scaling({3.0f, 3.0f, 3.0f}), {.color = Color::rgb(220, 120, 60)});
+            for (int i = 0; i < 6; ++i) {
+                const Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                assert(r3d.stats().cluster_gpu);
+                if (first_run.empty()) {
+                    first_run = p.rgba;
+                }
+                assert(p.rgba == first_run);
+            }
+            std::cerr << "gpu cut: 6 renders in run " << run << " byte-identical to the first\n";
+        });
+    }
+}
+
+// A copy outside the camera's view draws nothing in the camera's passes, and its shadow still falls into the view; a
+// copy wholly outside the view and its shadows' reach is cut nowhere.
+void test_gpu_cut_culls_by_pass() {
+    with_gpu("test_gpu_cut_culls_by_pass", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+            return;
+        }
+        kin::MeshOptions options;
+        options.clusters = true;
+        const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options);
+        const kin::Mesh floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
+        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 20.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        // The sun is low, to the left: a ball left of the view throws its shadow toward the view.
+        scene.lights.sun.direction = {-1.0f, 0.3f, 0.0f};
+        scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
+        scene.lights.shadow_distance = 100.0f;
+        scene.lod = cut_on(true, {.enabled = true, .error_pixels = 0.7f});
+        for (const kin::u32 cascades : {1u, 3u}) {
+            scene.lights.shadow_cascades = cascades;
+            const auto render = [&](float ball_x, float ball_y) {
+                scene.clear();
+                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                scene.draw(ball, Mat4f::translation({ball_x, ball_y, 0.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}), {.color = Color::rgb(220, 120, 60)});
+                const Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            // The indirect draws are what the cut chose and nothing else: every run's triangles add up to the gathered ones, the
+            // empty runs have a count of 0 (not what an earlier render left), and each run is where its copy's slot is.
+            const auto check_draws = [&] {
+                std::vector<kin::ClusterDraw> draws;
+                const bool ok = r3d.read_cluster_draws(view, draws);
+                assert(ok);
+                static_cast<void>(ok);
+                kin::u64 triangles = 0;
+                for (const kin::ClusterDraw& d : draws) {
+                    assert(d.index_count % 3 == 0);
+                    triangles += d.index_count / 3;
+                }
+                assert(triangles == r3d.stats().cluster_triangles_all);
+            };
+            // In view: the camera's cut has clusters.
+            render(0.0f, 2.0f);
+            check_draws();
+            std::size_t shadow = 0;
+            auto camera = camera_picks(r3d, view, scene, &shadow);
+            assert(!camera.empty() && camera.begin()->second.size() > 3 && shadow > 0);
+            // Left of the view: the camera cuts none (and the stats say 0), the shadow maps do cut it.
+            const Pixels with_ball = render(-18.0f, 2.0f);
+            check_draws();
+            camera = camera_picks(r3d, view, scene, &shadow);
+            const kin::Render3DStats stats = r3d.stats();
+            std::cerr << "gpu cut: " << cascades << " cascades, ball off to the left: " << stats.clusters_drawn << " clusters in the camera's cut, " << shadow << " in the shadow maps\n";
+            assert(camera.empty() && stats.clusters_drawn == 0 && stats.triangles == 12 && shadow > 3);
+            // Its shadow is on the floor: the picture is not the one without the ball.
+            scene.clear();
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            const Pixels without = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            assert(difference_of(with_ball, without).bytes > 100);
+            // Far away on the other side: nowhere.
+            render(300.0f, 2.0f);
+            camera = camera_picks(r3d, view, scene, &shadow, /*may_be_none=*/true);
+            assert(camera.empty() && shadow == 0);
+        }
+    });
+}
+
+// A room too small for the cut: the clusters that do not fit are not drawn (counted), nothing is written past the buffer,
+// and the picture is a poorer one of the same scene.
+void test_gpu_cut_overflow_clamps() {
+    with_gpu("test_gpu_cut_overflow_clamps", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+            return;
+        }
+        kin::MeshOptions options;
+        options.clusters = true;
+        const kin::Mesh hill = r3d.create_mesh(big_hill(100), options);
+        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 60.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
+        scene.lights.shadow_cascades = 3;
+        scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
+        scene.lights.shadow_distance = 100.0f;
+        scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
+        scene.lod = cut_on(true, {.enabled = true, .error_pixels = 1.0f});
+        const Pixels whole = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const kin::Render3DStats ample = r3d.stats();
+        assert(ample.cluster_overflow == 0 && ample.cluster_triangles_all > 1000);
+        for (const kin::u32 room : {static_cast<kin::u32>(ample.cluster_triangles_all / 2), 600u, 100u, 1u}) {
+            scene.lod.max_cluster_triangles = room;
+            const Pixels short_of_room = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats stats = r3d.stats();
+            std::cerr << "gpu cut: room for " << room << " triangles: " << stats.cluster_overflow << " clusters dropped, " << stats.cluster_triangles_all << " gathered, " << stats.triangles
+                      << " drawn by the camera, picture " << difference_of(short_of_room, whole).mean << " mean from the whole\n";
+            assert(stats.cluster_overflow > 0 && stats.cluster_triangles_all <= room && stats.triangles <= room);
+            assert(room < 1000 ? stats.triangles < ample.triangles : true);
+        }
+        // Room for one triangle: next to nothing of the mesh is drawn (never what the buffer held before), so the picture is
+        // that of the scene without it.
+        {
+            scene.lod.max_cluster_triangles = 1;
+            const Pixels one = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            kin::Scene3D empty;
+            empty.camera = scene.camera;
+            empty.lights = scene.lights;
+            const Pixels none = shoot_view(renderer, r3d, view, empty);
+            renderer.present();
+            const Difference d = difference_of(one, none);
+            std::cerr << "gpu cut: room for one triangle: picture " << d.mean << " mean from the scene without the mesh\n";
+            assert(d.mean < 1.0);
+        }
+        // And back: with room again the whole cut is drawn, the picture the first one's.
+        scene.lod.max_cluster_triangles = 4'000'000;
+        const Pixels again = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(again.rgba == whole.rgba && r3d.stats().cluster_overflow == 0);
+    });
+}
+
+// A device without the cut in compute (here: KIN_GPU_CLUSTERS=0) says so and cuts on the CPU, with the picture the
+// GPU cut makes.
+void test_gpu_cut_falls_back() {
+    std::vector<kin::u8> gpu_picture;
+    for (const bool disabled : {false, true}) {
+        if (disabled) {
+            setenv("KIN_GPU_CLUSTERS", "0", 1);
+        }
+        with_gpu("test_gpu_cut_falls_back", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            if (!disabled && lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+                return;
+            }
+            assert(r3d.capabilities().gpu_driven_clusters == !disabled);
+            kin::MeshOptions options;
+            options.clusters = true;
+            const kin::Mesh hill = r3d.create_mesh(big_hill(80), options);
+            kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 60.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
+            scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
+            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
+            scene.lod = {.enabled = true, .error_pixels = 1.0f}; // gpu_culling left on
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats stats = r3d.stats();
+            assert(stats.cluster_gpu == !disabled && stats.cluster_copies == 1);
+            assert(disabled ? stats.cluster_upload_bytes > 1000 && stats.clusters_drawn > 0 && stats.triangles > 0 : stats.clusters_drawn == 0);
+            if (!disabled) {
+                gpu_picture = p.rgba;
+            } else {
+                assert(p.rgba == gpu_picture);
+                std::cerr << "gpu cut: capability off, the CPU cut (" << stats.triangles << " triangles) draws the GPU cut's picture\n";
+            }
+        });
+        if (disabled) {
+            unsetenv("KIN_GPU_CLUSTERS");
+        }
+    }
+}
+
+// 64 copies of a mesh of 100 thousand triangles, spread out: the GPU cut gives the CPU cut's counts and picture, and
+// the CPU's part of render() stays small however many clusters there are.
+void test_gpu_cut_many_copies() {
+    with_gpu("test_gpu_cut_many_copies", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+            return;
+        }
+        kin::MeshOptions options;
+        options.clusters = true;
+        const MeshData data = kin::meshes::sphere(1.0f, 224, 224);
+        const kin::Mesh ball = r3d.create_mesh(data, options);
+        const kin::Mesh floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 14.0f, 50.0f}, {0.0f, 0.0f, -20.0f}, 60.0f);
+        scene.lights.shadow_cascades = 3;
+        scene.lights.shadow_area = {{-100.0f, -0.2f, -100.0f}, {100.0f, 12.0f, 100.0f}};
+        scene.lights.shadow_distance = 150.0f;
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+        for (int i = 0; i < 64; ++i) {
+            const float x = static_cast<float>(i % 8) * 14.0f - 49.0f, z = 40.0f - static_cast<float>(i / 8) * 20.0f;
+            scene.draw(ball, Mat4f::translation({x, 2.5f, z}) * Mat4f::scaling({2.5f, 2.5f, 2.5f}), {.color = Color::rgb(60 + static_cast<kin::u8>(i * 3), 130, 200)});
+        }
+        double cpu_ms[2] = {1e9, 1e9};
+        kin::Render3DStats stats[2];
+        Pixels pictures[2];
+        for (const bool gpu : {false, true}) {
+            scene.lod = cut_on(gpu, {.enabled = true, .error_pixels = 1.0f});
+            for (int f = 0; f < 5; ++f) {
+                pictures[gpu] = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                cpu_ms[gpu] = std::min(cpu_ms[gpu], r3d.stats().cpu_ms);
+            }
+            stats[gpu] = r3d.stats();
+        }
+        std::cerr << "gpu cut: 64 copies of " << data.triangle_count() << " triangles: " << stats[1].triangles << " drawn (CPU cut " << stats[0].triangles << "), render() "
+                  << cpu_ms[1] << " ms against the CPU cut's " << cpu_ms[0] << " ms (readback on)\n";
+        assert(stats[1].cluster_copies > 40 && stats[1].cluster_copies == stats[0].cluster_copies && stats[1].triangles == stats[0].triangles && stats[1].clusters_drawn == stats[0].clusters_drawn);
+        assert(pictures[0].rgba == pictures[1].rgba && stats[1].cluster_overflow == 0 && stats[1].triangles > 0);
+        // Without the read-back (the way a game runs it) the CPU does almost nothing for the cut.
+        scene.lod = {.enabled = true, .error_pixels = 1.0f};
+        double lean = 1e9;
+        for (int f = 0; f < 8; ++f) {
+            render_ok(r3d, view, scene);
+            renderer.present();
+            lean = std::min(lean, r3d.stats().cpu_ms);
+        }
+        std::cerr << "gpu cut: render() " << lean << " ms with the cut in compute and no read-back (cut set-up " << r3d.stats().cluster_ms << " ms)\n";
+        assert(lean < cpu_ms[0]);
+    });
+}
+
+// Meshes fill the cut's shared buffers chunk by chunk (16 MB of indices a chunk): twelve meshes of 60 thousand triangles need two,
+// and copies of one mesh drawn apart (A, B, A, ...) are cut together; the picture and the counts are the CPU cut's, and the compute
+// is one dispatch a chunk, not a mesh.
+void test_gpu_cut_chunks() {
+    with_gpu("test_gpu_cut_chunks", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().gpu_driven_clusters, "the cluster cut in compute")) {
+            return;
+        }
+        kin::MeshOptions options;
+        options.clusters = true;
+        std::vector<kin::Mesh> meshes;
+        for (int i = 0; i < 12; ++i) {
+            meshes.push_back(r3d.create_mesh(kin::meshes::sphere(1.0f, 173 + i, 173), options)); // about 60 thousand triangles
+        }
+        kin::View3D view = r3d.create_view({240, 180}, {.samples = 1, .pick = true});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 9.0f, 30.0f}, {0.0f, 0.0f, -10.0f}, 60.0f);
+        scene.lights.shadow_cascades = 3;
+        scene.lights.shadow_area = {{-60.0f, -0.2f, -60.0f}, {60.0f, 12.0f, 60.0f}};
+        scene.lights.shadow_distance = 90.0f;
+        const kin::Mesh floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+        for (int i = 0; i < 30; ++i) {
+            const float x = static_cast<float>(i % 6) * 8.0f - 20.0f, z = 12.0f - static_cast<float>(i / 6) * 9.0f, scale = 1.5f + static_cast<float>(i % 3);
+            scene.draw(meshes[static_cast<std::size_t>((i * 5) % 12)], Mat4f::translation({x, scale, z}) * Mat4f::scaling({scale, scale, scale}),
+                       {.color = Color::rgb(static_cast<kin::u8>(60 + i * 6), 150, static_cast<kin::u8>(220 - i * 5))}, kin::colors::white, static_cast<kin::u32>(i));
+        }
+        scene.lod = cut_on(false, {.enabled = true, .error_pixels = 1.0f});
+        const Pixels cpu = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const kin::Render3DStats on_cpu = r3d.stats();
+        scene.lod = cut_on(true, {.enabled = true, .error_pixels = 1.0f});
+        const Pixels gpu = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const kin::Render3DStats on_gpu = r3d.stats();
+        std::cerr << "gpu cut: 12 meshes in chunks, " << on_gpu.cluster_copies << " copies, " << on_gpu.cluster_dispatches << " dispatches, " << on_gpu.triangles << " triangles (CPU cut "
+                  << on_cpu.triangles << "), " << difference_of(gpu, cpu).bytes << " bytes differ\n";
+        assert(on_gpu.cluster_copies == 30 && on_gpu.cluster_copies == on_cpu.cluster_copies);
+        assert(on_gpu.triangles == on_cpu.triangles && on_gpu.clusters_drawn == on_cpu.clusters_drawn && gpu.rgba == cpu.rgba);
+        assert(on_gpu.cluster_dispatches == 8); // two chunks: a cull and a gather dispatch each, the three scans and the arguments
+        // The same through the pick pass.
+        scene.lod = cut_on(false, {.enabled = true, .error_pixels = 1.0f});
+        render_ok(r3d, view, scene);
+        std::vector<kin::PickResult> a, b;
+        for (int y = 5; y < 180; y += 11) {
+            for (int x = 5; x < 240; x += 11) {
+                a.push_back(r3d.pick(view, {x, y}));
+            }
+        }
+        scene.lod = cut_on(true, {.enabled = true, .error_pixels = 1.0f});
+        render_ok(r3d, view, scene);
+        for (int y = 5; y < 180; y += 11) {
+            for (int x = 5; x < 240; x += 11) {
+                b.push_back(r3d.pick(view, {x, y}));
+            }
+        }
+        int hits = 0;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            assert(a[i].hit == b[i].hit && a[i].id == b[i].id);
+            hits += b[i].hit ? 1 : 0;
+        }
+        assert(hits > 30);
     });
 }
 
@@ -4639,12 +5287,32 @@ int main() {
     test_gpu_lod_pick();
     test_gpu_lod_on_workers();
     test_gpu_lod_taa();
-    test_gpu_clusters_off_is_unchanged();
-    test_gpu_clusters_cut();
-    test_gpu_clusters_same_cut_everywhere();
-    test_gpu_clusters_pick();
-    test_gpu_clusters_on_workers();
-    test_gpu_clusters_taa();
+    for (const bool gpu : {false, true}) {
+        test_gpu_clusters_off_is_unchanged(gpu);
+    }
+    for (const bool gpu : {false, true}) {
+        test_gpu_clusters_cut(gpu);
+    }
+    for (const bool gpu : {false, true}) {
+        test_gpu_clusters_same_cut_everywhere(gpu);
+    }
+    for (const bool gpu : {false, true}) {
+        test_gpu_clusters_pick(gpu);
+    }
+    for (const bool gpu : {false, true}) {
+        test_gpu_clusters_on_workers(gpu);
+    }
+    for (const bool gpu : {false, true}) {
+        test_gpu_clusters_taa(gpu);
+    }
+    test_gpu_cut_equals_cpu_selection();
+    test_gpu_cut_picture_equals_cpu();
+    test_gpu_cut_is_deterministic();
+    test_gpu_cut_culls_by_pass();
+    test_gpu_cut_overflow_clamps();
+    test_gpu_cut_falls_back();
+    test_gpu_cut_many_copies();
+    test_gpu_cut_chunks();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();

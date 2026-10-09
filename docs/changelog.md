@@ -44,7 +44,10 @@ releases may change APIs.
 - 3D (experimental): levels of detail for meshes (`create_mesh(data, {.levels = n})`, `Scene3D::lod`), built with
   meshoptimizer (a new dependency, with `KIN_EXPERIMENTAL_3D`); off by default.
 - 3D (experimental): cluster hierarchies for huge meshes (`create_mesh(data, {.clusters = true})`), cut per frame by
-  `Scene3D::lod` so that near parts stay fine and far parts are coarse inside one mesh; off by default.
+  `Scene3D::lod` so that near parts stay fine and far parts are coarse inside one mesh; off by default. The cut, the
+  frustum culling and the gathering of the chosen triangles run in compute where the device can
+  (`Lod3D::gpu_culling`), with the picture the CPU cut makes and indirect draws: `render()` of the kiln costs 0.05 ms
+  instead of 0.4 to 0.9.
 - `decode_image()`: an image from a file's bytes in memory.
 - 3D sound: `AudioEngine::set_listener_3d()`, `set_position_3d()` and
   `AudioPlayRequest::position_3d`: pan by direction from where the listener

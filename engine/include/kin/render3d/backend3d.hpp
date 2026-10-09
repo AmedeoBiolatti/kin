@@ -16,6 +16,7 @@
 #include <array>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace kin {
 
@@ -35,6 +36,9 @@ struct Renderer3DCapabilities {
     bool ambient_occlusion = false;
     bool contact_shadows = false;
     bool temporal_aa = false;
+    // Whether Scene3D::lod's cluster cut can run in compute (Lod3D::gpu_culling): compute with storage buffers read and
+    // written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
+    bool gpu_driven_clusters = false;
 };
 
 struct View3DOptions {
@@ -65,6 +69,24 @@ struct PickResult {
     bool hit = false; // false: nothing but background there
     u32 id = 0;
     Vec3f position{};
+};
+
+// One cluster the GPU's cut chose, for tests and tools (IRenderer3DBackend::read_cluster_picks).
+struct ClusterPick {
+    u32 scene = 0; // 0 the scene, 1 its overlay
+    u32 draw = 0;  // index in Scene3D::draws()
+    u32 copy = 0;  // the copy within the draw
+    u32 view = 0;  // 0 the camera's passes; 1 the shadow map, or 1 + k the cascade k's
+    u32 cluster = 0;
+};
+
+// One indirect draw of the GPU cut, as the GPU holds it (IRenderer3DBackend::read_cluster_draws).
+struct ClusterDraw {
+    u32 view = 0;        // as ClusterPick::view
+    u32 job = 0;         // the copy's place among those cut this render
+    u32 index_count = 0; // 0: nothing is drawn
+    u32 first_index = 0;
+    u32 first_instance = 0; // the copy's slot in the instance buffer
 };
 
 // What the last render() drew.
@@ -99,6 +121,16 @@ struct Render3DStats {
     u32 cluster_upload_bytes = 0;
     f64 cluster_ms = 0.0;
     f64 cluster_upload_ms = 0.0; // of which the compaction and handing over the upload (the rest is choosing)
+    // When the cut ran in compute (Lod3D::gpu_culling): `cluster_gpu` is true, `cluster_copies` the copies it covers,
+    // `cluster_upload_bytes` the bytes handed over (its table of copies), `cluster_ms` the CPU time of setting it up
+    // and recording it, `cluster_dispatches` its compute dispatches. The counts below need Lod3D::stats_readback (0
+    // without): `clusters_tested` the clusters looked at (all of every copy's), `clusters_drawn` and `triangles` the
+    // camera's cut, `cluster_overflow` the clusters dropped for lack of room in Lod3D::max_cluster_triangles, in all
+    // passes, `cluster_triangles_all` the triangles gathered for all passes.
+    bool cluster_gpu = false;
+    u32 cluster_dispatches = 0;
+    u32 cluster_overflow = 0;
+    u64 cluster_triangles_all = 0;
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };
 
@@ -139,6 +171,11 @@ public:
     virtual bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) = 0;
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual PickResult pick(IView3DBackend& view, Vec2i pixel) = 0;
+    // The clusters the last render's GPU cut chose, in every pass, for tests and tools; waits for the GPU. False when
+    // that render cut on the CPU (or not at all).
+    virtual bool read_cluster_picks(IView3DBackend&, std::vector<ClusterPick>&) { return false; }
+    // The indirect draws of the last render's GPU cut, a (view, copy) each; waits for the GPU.
+    virtual bool read_cluster_draws(IView3DBackend&, std::vector<ClusterDraw>&) { return false; }
 };
 
 } // namespace kin

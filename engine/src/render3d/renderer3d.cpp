@@ -130,6 +130,22 @@ PickResult Renderer3D::pick(View3D& view, Vec2i pixel) {
     return _backend->pick(*view.backend(), pixel);
 }
 
+bool Renderer3D::read_cluster_picks(View3D& view, std::vector<ClusterPick>& out) {
+    out.clear();
+    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        return false;
+    }
+    return _backend->read_cluster_picks(*view.backend(), out);
+}
+
+bool Renderer3D::read_cluster_draws(View3D& view, std::vector<ClusterDraw>& out) {
+    out.clear();
+    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        return false;
+    }
+    return _backend->read_cluster_draws(*view.backend(), out);
+}
+
 bool Renderer3D::render(View3D& view, const Scene3D& scene) {
     _stats = {};
     if (!view.valid()) {
