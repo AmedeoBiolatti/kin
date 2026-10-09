@@ -336,6 +336,8 @@ struct Overrides {
     bool readback = false;
     long lod_room = 0;
     bool lod_occlusion = false;
+    int flicker = 0; // --flicker N: after each camera's picture, N more frames read back, the largest and mean frame-to-frame difference printed (temporal shimmer)
+    std::string ab; // --ab NAME: the timed frames in blocks of eight with the environment variable NAME at 0 and at 1 in turn (the renderer reads its switches on each render), A and B timed apart in one run
     std::string hitch; // --hitch <feature>: the first renders after switching it on at runtime, timed (then the process ends)
     bool warm_up = false; // with --hitch: Renderer3D::warm_up before the feature goes on
     bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on and after (see Render3DStats::feature_bytes)
@@ -563,6 +565,10 @@ int main(int argc, char** argv) {
         } else if (a == "--contact-steps") {
             over.contact = true;
             over.contact_steps = std::atoi(next().c_str());
+        } else if (a == "--flicker") {
+            over.flicker = std::max(2, std::atoi(next().c_str()));
+        } else if (a == "--ab") {
+            over.ab = next();
         } else if (a == "--hitch") {
             over.hitch = next();
         } else if (a == "--warm-up") {
@@ -992,8 +998,19 @@ int main(int argc, char** argv) {
             const double first_ms = ms_since(first_start);
             renderer.present();
 
-            std::vector<double> cpu, gpu, cut_ms, cut_upload_ms;
+            std::vector<double> cpu, gpu, cut_ms, cut_upload_ms, ab_gpu[2], ab_cpu[2];
+            // --ab NAME or NAME:A:B (the values of the variable in the even and odd blocks; 0 and 1 by default)
+            std::string ab_name = over.ab, ab_a = "0", ab_b = "1";
+            if (const std::size_t c1 = over.ab.find(':'); c1 != std::string::npos) {
+                const std::size_t c2 = over.ab.find(':', c1 + 1);
+                ab_name = over.ab.substr(0, c1);
+                ab_a = over.ab.substr(c1 + 1, c2 - c1 - 1);
+                ab_b = c2 == std::string::npos ? "1" : over.ab.substr(c2 + 1);
+            }
             for (int f = 0; f < run; ++f) {
+                if (!over.ab.empty()) {
+                    setenv(ab_name.c_str(), ((f / 8) & 1) ? ab_b.c_str() : ab_a.c_str(), 1);
+                }
                 pose(f - run);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 for (int k = 0; k < each; ++k) {
@@ -1006,9 +1023,20 @@ int main(int argc, char** argv) {
                     cut_ms.push_back(r3d.stats().cluster_ms);
                     cut_upload_ms.push_back(r3d.stats().cluster_upload_ms);
                     gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
+                    if (!over.ab.empty() && (f % 8) >= 3) { // the GPU time arrives a frame or two late: the block's first three are not counted
+                        ab_gpu[(f / 8) & 1].push_back(gpu.back());
+                        ab_cpu[(f / 8) & 1].push_back(cpu.back());
+                    }
                 }
             }
             wait_for_gpu();
+            if (!over.ab.empty()) {
+                setenv(ab_name.c_str(), ab_a.c_str(), 1);
+                const Summary a = summarize(ab_gpu[0]), b = summarize(ab_gpu[1]);
+                const Summary ca = summarize(ab_cpu[0]), cb = summarize(ab_cpu[1]);
+                std::printf("AB %s/%s %s=A gpu %.4f (p10 %.4f) cpu %.4f  %s=B gpu %.4f (p10 %.4f) cpu %.4f\n", name.c_str(), camera_name.c_str(), ab_name.c_str(),
+                            a.median, a.p10, ca.median, ab_name.c_str(), b.median, b.p10, cb.median);
+            }
 
             // The picture.
             pose(0);
@@ -1029,6 +1057,37 @@ int main(int argc, char** argv) {
             }
             const fs::path png = out / name / (camera_name + ".png");
             kin::save_image(image, png);
+            if (over.flicker > 0) {
+                // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change from one to the next?
+                std::vector<kin::u8> previous = image.rgba;
+                double sum_mean = 0, worst = 0, over8 = 0;
+                for (int k = 1; k <= over.flicker; ++k) {
+                    pose(k);
+                    renderer.clear(kin::Color::rgb(0, 0, 0));
+                    r3d.render(view, scene);
+                    renderer.draw_texture(view.texture(), full);
+                    kin::Image next_image;
+                    renderer.read_rgba(full, next_image.rgba, next_image.size);
+                    renderer.present();
+                    if (k > 1) {
+                        double sum = 0;
+                        std::size_t count = 0, big = 0;
+                        for (std::size_t i = 0; i < next_image.rgba.size(); i += 4) {
+                            for (std::size_t c = 0; c < 3; ++c) {
+                                const int d = std::abs(int(next_image.rgba[i + c]) - int(previous[i + c]));
+                                sum += d;
+                                worst = std::max(worst, double(d));
+                                big += d > 8;
+                                ++count;
+                            }
+                        }
+                        sum_mean += sum / double(count);
+                        over8 += 100.0 * double(big) / double(count);
+                    }
+                    previous = next_image.rgba;
+                }
+                std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(), sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
+            }
             if (over.vram_cycle) {
                 const double on_mb = gpu_used_mb();
                 const double on_bytes = static_cast<double>(stats.feature_bytes);

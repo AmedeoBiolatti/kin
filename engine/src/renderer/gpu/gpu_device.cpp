@@ -231,7 +231,7 @@ GpuTexture GpuDevice::create_render_texture(u32 width, u32 height, SDL_GPUTextur
 }
 
 GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
-                                     SDL_GPUSampleCount samples) {
+                                     SDL_GPUSampleCount samples, u32 levels) {
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = format;
@@ -239,7 +239,7 @@ GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat 
     info.width = width;
     info.height = height;
     info.layer_count_or_depth = 1;
-    info.num_levels = 1;
+    info.num_levels = levels;
     info.sample_count = samples;
     SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
     if (!texture) {

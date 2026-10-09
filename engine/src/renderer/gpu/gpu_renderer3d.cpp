@@ -77,6 +77,8 @@ constexpr SDL_GPUTextureFormat pick_format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_
 // Ambient occlusion: the pre-pass's world normals (octahedral, two floats), and the result.
 constexpr SDL_GPUTextureFormat ao_normal_format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
 constexpr SDL_GPUTextureFormat ao_format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+constexpr u64 ao_chain_min_pixels = 1'500'000; // the linear depth chain pays from about 1080p up (1280 x 720 is 0.92 M, 1920 x 1080 2.07 M)
+constexpr u32 ao_chain_levels = 5; // the occlusion's linear depth chain
 constexpr SDL_GPUTextureFormat hiz_format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT; // the depth pyramid (Lod3D::occlusion)
 constexpr u32 max_lights = 16;
 // Storage buffers' smallest sizes, so that the first frames of a growing scene don't each remake them.
@@ -149,6 +151,13 @@ struct OcclusionUniforms {
 };
 static_assert(sizeof(OcclusionUniforms) == 128);
 // ao_blur.comp's.
+// ao_depth_chain.comp's.
+struct OcclusionChainUniforms {
+    f32 unproject_zw[4];
+    f32 weights[4]; // x, y: a texel's weight is clamp((farthest - its distance) * x + y, 0, 1)
+    u32 sizes[12];  // the levels' sizes (x, y), then padding to 3 vec4
+};
+static_assert(sizeof(OcclusionChainUniforms) == 80);
 struct OcclusionBlurUniforms {
     f32 sizes[4];
     f32 step[4];
@@ -610,6 +619,13 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _ao_blur_pipeline = make_compute(handle, "ao_blur.comp.spv", 2);
         _ao_blur_both_pipeline = make_compute(handle, "ao_blur_both.comp.spv", 3, 2); // optional: two dispatches without
         _contact_pipeline = make_compute(handle, "contact.comp.spv", 2);
+        // The occlusion over a linear depth chain; without these (or R32F storage) the first one is used.
+        if (SDL_GPUTextureSupportsFormat(handle, hiz_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
+            _gtao_chain_pipeline = make_compute(handle, "gtao_chain.comp.spv", 2);
+            _ao_blur_chain_pipeline = make_compute(handle, "ao_blur_chain.comp.spv", 2);
+            _ao_blur_both_chain_pipeline = make_compute(handle, "ao_blur_both_chain.comp.spv", 3, 2);
+            _ao_chain_pipeline = make_mixed_compute(handle, "ao_depth_chain.comp.spv", 1, 0, 0, ao_chain_levels, 16, 16);
+        }
         if (!_point_sampler || !_gtao_pipeline || !_ao_blur_pipeline || !_contact_pipeline) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
         }
@@ -753,7 +769,7 @@ GpuRenderer3D::~GpuRenderer3D() {
     if (_environment_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _environment_sampler);
     }
-    for (SDL_GPUComputePipeline* compute : {_filter_pipeline, _gtao_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _contact_pipeline, _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline, _hiz_reduce_pipeline}) {
+    for (SDL_GPUComputePipeline* compute : {_filter_pipeline, _ao_blur_chain_pipeline, _ao_blur_both_chain_pipeline, _gtao_pipeline, _gtao_chain_pipeline, _ao_chain_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _contact_pipeline, _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline, _hiz_reduce_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
@@ -1397,7 +1413,7 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
         }
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: ambient occlusion targets not made", (LogFields{{.name = "reason", .value = e.what()}}));
-        for (GpuTexture* texture : {&view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across,
+        for (GpuTexture* texture : {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across,
                                     &view._contact_raw, &view._contact_across}) {
             *texture = {};
         }
@@ -1439,12 +1455,60 @@ bool GpuRenderer3D::ensure_velocity_target(GpuView3D& view) {
     return true;
 }
 
+// The linear depth chain of the pre-pass's depth (ao_depth_chain.comp): made with the first use and when the view's size changes.
+// False when it cannot be made or built: the caller then reads the depth itself.
+bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, f32 radius) {
+    if (!_gtao_chain_pipeline || !_ao_chain_pipeline) {
+        return false;
+    }
+    const u32 w = view._ao_depth.width(), h = view._ao_depth.height();
+    if (!view._ao_chain || view._ao_chain.width() != w || view._ao_chain.height() != h) {
+        try {
+            view._ao_chain = _device->create_target(w, h, hiz_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE,
+                                                    SDL_GPU_SAMPLECOUNT_1, ao_chain_levels);
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: the occlusion's depth chain not made", (LogFields{{.name = "reason", .value = e.what()}}));
+            view._ao_chain = {};
+            return false;
+        }
+    }
+    const Unprojection unproject = unproject_coefficients(projection);
+    OcclusionChainUniforms u{};
+    std::memcpy(u.unproject_zw, unproject.zw, sizeof(unproject.zw));
+    // The weights of a texel in the average (the falloff of gtao_chain.comp, over XeGTAO's 0.75 of the radius): a texel nearer than
+    // the farthest of its four by the range counts for nothing.
+    const f32 effect = 0.75f * radius;
+    const f32 range = 0.615f * effect;
+    u.weights[0] = -1.0f / range;
+    u.weights[1] = (effect - range) / range + 1.0f;
+    for (u32 level = 0; level < ao_chain_levels; ++level) {
+        u.sizes[2 * level] = std::max(1u, w >> level);
+        u.sizes[2 * level + 1] = std::max(1u, h >> level);
+    }
+    SDL_GPUStorageTextureReadWriteBinding out[ao_chain_levels];
+    for (u32 level = 0; level < ao_chain_levels; ++level) {
+        out[level] = {view._ao_chain.handle(), level, 0, false};
+    }
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, out, ao_chain_levels, nullptr, 0);
+    if (!pass) {
+        return false;
+    }
+    const SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
+    SDL_BindGPUComputePipeline(pass, _ao_chain_pipeline);
+    SDL_BindGPUComputeSamplers(pass, 0, &depth, 1);
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (w + 15) / 16, (h + 15) / 16, 1);
+    SDL_EndGPUComputePass(pass);
+    return true;
+}
+
 void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                                       const AmbientOcclusion3D& ao, Render3DStats& stats, bool blur_too) {
     const Unprojection unproject = unproject_coefficients(projection);
     const f32 w = static_cast<f32>(view._ao_raw.width()), h = static_cast<f32>(view._ao_raw.height());
     const f32 depth_w = static_cast<f32>(view._ao_depth.width()), depth_h = static_cast<f32>(view._ao_depth.height());
-    const SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
+    _chain_ready = false;
+    SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
     const auto dispatch = [&](SDL_GPUComputePipeline* pipeline, const GpuTexture& target, const GpuTexture& second, const void* uniforms, u32 bytes) {
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{depth, SDL_GPUTextureSamplerBinding{second.handle(), _point_sampler}};
         if (compute_pass(commands, pipeline, target, inputs, uniforms, bytes)) {
@@ -1461,7 +1525,23 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     const f32 shape[4] = {std::max(ao.radius, 0.001f), std::max(ao.intensity, 0.0f), projection.at(1, 1) * 0.5f * depth_h,
                           camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f};
     std::memcpy(u.shape, shape, sizeof(shape));
-    dispatch(_gtao_pipeline, view._ao_raw, view._ao_normals, &u, sizeof(u));
+    const bool use_chain = _ao_chain_mode == 2 || (_ao_chain_mode == 0 && static_cast<u64>(depth_w) * static_cast<u64>(depth_h) >= ao_chain_min_pixels);
+    if (use_chain && build_ao_chain(commands, view, projection, u.shape[0])) {
+        // The chain stands in for the depth as the first input.
+        const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{SDL_GPUTextureSamplerBinding{view._ao_chain.handle(), _point_sampler},
+                                                                 SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler}};
+        if (compute_pass(commands, _gtao_chain_pipeline, view._ao_raw, inputs, &u, sizeof(u))) {
+            ++stats.ao_dispatches;
+            stats.ao_chain_built = 1;
+            // The blurs (this one's, the contact shadows', the merged) read the chain's first level instead of the depth.
+            _chain_ready = _ao_blur_chain_pipeline && _ao_blur_both_chain_pipeline;
+            if (_chain_ready) {
+                depth = inputs[0];
+            }
+        }
+    } else {
+        dispatch(_gtao_pipeline, view._ao_raw, view._ao_normals, &u, sizeof(u));
+    }
     if (!blur_too) {
         return;
     }
@@ -1470,17 +1550,18 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     std::memcpy(blur.sizes, sizes, sizeof(sizes));
     std::memcpy(blur.depth, unproject.zw, sizeof(unproject.zw));
     blur.step[0] = 1.0f;
-    dispatch(_ao_blur_pipeline, view._ao_across, view._ao_raw, &blur, sizeof(blur));
+    SDL_GPUComputePipeline* const blur_pipeline = _chain_ready ? _ao_blur_chain_pipeline : _ao_blur_pipeline;
+    dispatch(blur_pipeline, view._ao_across, view._ao_raw, &blur, sizeof(blur));
     blur.step[0] = 0.0f;
     blur.step[1] = 1.0f;
-    dispatch(_ao_blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
+    dispatch(blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
 }
 
 void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                                             const ContactShadows3D& contact, const Vec3f& sun, Render3DStats& stats, bool blur_too) {
     const Unprojection unproject = unproject_coefficients(projection);
     const f32 w = static_cast<f32>(view._contact_raw.width()), h = static_cast<f32>(view._contact_raw.height());
-    const SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler};
+    SDL_GPUTextureSamplerBinding depth{view._ao_depth.handle(), _point_sampler}; // (the march reads the depth; its blur the chain, when there is one)
     const auto dispatch = [&](SDL_GPUComputePipeline* pipeline, const GpuTexture& target, const GpuTexture& second, const void* uniforms, u32 bytes) {
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{depth, SDL_GPUTextureSamplerBinding{second.handle(), _point_sampler}};
         if (compute_pass(commands, pipeline, target, inputs, uniforms, bytes)) {
@@ -1510,10 +1591,19 @@ void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuV
     std::memcpy(blur.sizes, sizes, sizeof(sizes));
     std::memcpy(blur.depth, unproject.zw, sizeof(unproject.zw));
     blur.step[0] = 1.0f;
-    dispatch(_ao_blur_pipeline, view._contact_across, view._contact_raw, &blur, sizeof(blur));
+    SDL_GPUComputePipeline* const blur_pipeline = _chain_ready ? _ao_blur_chain_pipeline : _ao_blur_pipeline;
+    depth.texture = _chain_ready ? view._ao_chain.handle() : view._ao_depth.handle();
+    dispatch(blur_pipeline, view._contact_across, view._contact_raw, &blur, sizeof(blur));
     blur.step[0] = 0.0f;
     blur.step[1] = 1.0f;
-    dispatch(_ao_blur_pipeline, view._contact_raw, view._contact_across, &blur, sizeof(blur));
+    if (!_contact_classic) {
+        // One pass (contact shadows alone; with the occlusion the merged blur does both of its passes for both, sharing the weights, and
+        // costs no more): the second pass (down) changed the pictures by under 0.3 levels (measured). The result is in _contact_across,
+        // and the two textures change places.
+        std::swap(view._contact_raw, view._contact_across);
+        return;
+    }
+    dispatch(blur_pipeline, view._contact_raw, view._contact_across, &blur, sizeof(blur));
 }
 
 void GpuRenderer3D::blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, Render3DStats& stats) {
@@ -1526,10 +1616,10 @@ void GpuRenderer3D::blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuVi
     std::memcpy(blur.sizes, sizes, sizeof(sizes));
     std::memcpy(blur.depth, unproject.zw, sizeof(unproject.zw));
     const auto dispatch = [&](const GpuTexture& ao_into, const GpuTexture& ao_from, const GpuTexture& contact_into, const GpuTexture& contact_from) {
-        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{SDL_GPUTextureSamplerBinding{_chain_ready ? view._ao_chain.handle() : view._ao_depth.handle(), _point_sampler},
                                                                  SDL_GPUTextureSamplerBinding{ao_from.handle(), _point_sampler},
                                                                  SDL_GPUTextureSamplerBinding{contact_from.handle(), _point_sampler}};
-        if (compute_pass_two(commands, _ao_blur_both_pipeline, ao_into, contact_into, inputs, &blur, sizeof(blur))) {
+        if (compute_pass_two(commands, _chain_ready ? _ao_blur_both_chain_pipeline : _ao_blur_both_pipeline, ao_into, contact_into, inputs, &blur, sizeof(blur))) {
             ++stats.ao_dispatches;
             ++stats.contact_dispatches;
             ++stats.blur_merged;
@@ -1620,7 +1710,7 @@ u64 texture_bytes(const GpuTexture& t) {
 
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
-    for (const GpuTexture* t : {&view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw, &view._contact_across,
+    for (const GpuTexture* t : {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw, &view._contact_across,
                                 &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion, &view._taa_history[0], &view._taa_history[1],
                                 &view._occ_depth}) {
         bytes += texture_bytes(*t);
@@ -2037,7 +2127,10 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
         v._contact_raw = {};
         v._contact_across = {};
     });
-    age(v._idle_depth, ctx.prepass_ran, static_cast<bool>(v._ao_depth), [&] { v._ao_depth = {}; });
+    age(v._idle_depth, ctx.prepass_ran, static_cast<bool>(v._ao_depth), [&] {
+        v._ao_depth = {};
+        v._ao_chain = {};
+    });
     // The normals are also the main pass's velocity, and the TAA's last velocity swaps with them while it runs.
     age(v._idle_normals, ctx.prepass_ran || ctx.main_velocity, static_cast<bool>(v._ao_normals), [&] { v._ao_normals = {}; });
     age(v._idle_taa, ctx.taa, v._taa_depth || v._taa_history[0] || v._taa_history[1] || v._taa_in || v._taa_sharp || v._taa_motion,
@@ -4021,6 +4114,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             // Both of them, at one size (the occlusion not at half): one blur serves both.
             const bool merge = ao.enabled && want_contact && _ao_blur_both_pipeline && _merge_blurs &&
                                view->_ao_raw.width() == view->_contact_raw.width() && view->_ao_raw.height() == view->_contact_raw.height();
+            _chain_ready = false;
             if (ao.enabled) {
                 compute_occlusion(commands, *view, scene.camera, ctx.main_projection, ao, stats, !merge);
             }
@@ -4390,6 +4484,13 @@ void GpuRenderer3D::read_switches() {
         _release_after = release ? static_cast<u32>(std::max(0, std::atoi(release))) : 120u;
         const char* no_cache = std::getenv("KIN_SHADOW_CACHE");
         _shadow_cache_allowed = !(no_cache && no_cache[0] == '0');
+        // The occlusion over the linear depth chain: by default only where the view is big enough for the chain to pay (its reads
+        // miss the cache far more at 1080p and up); KIN_AO_CLASSIC=1 never uses it, KIN_AO_CHAIN=1 always does.
+        const char* classic = std::getenv("KIN_AO_CLASSIC");
+        const char* chain = std::getenv("KIN_AO_CHAIN");
+        const char* contact_classic = std::getenv("KIN_CONTACT_CLASSIC");
+        _contact_classic = contact_classic && contact_classic[0] == '1';
+        _ao_chain_mode = classic && classic[0] == '1' ? 1 : chain && chain[0] == '1' ? 2 : 0;
         const char* separate = std::getenv("KIN_BLUR_SEPARATE");
         _merge_blurs = !(separate && separate[0] == '1');
         const char* prepass = std::getenv("KIN_TAA_PREPASS");

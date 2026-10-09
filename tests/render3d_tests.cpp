@@ -507,6 +507,33 @@ Pixels shoot_view(kin::Renderer2D& renderer, kin::Renderer3D& r3d, kin::View3D& 
     return read(renderer);
 }
 
+// A view larger than the 160 x 120 window, rendered once and read back tile by tile at 1:1 (`stride` 1 reads every tile, 3 every third in
+// each direction; the tiles not read stay zero, in every picture alike).
+Pixels shoot_large(kin::Renderer2D& renderer, kin::Renderer3D& r3d, kin::View3D& view, const kin::Scene3D& scene, int stride = 1) {
+    renderer.clear(kin::colors::black);
+    render_ok(r3d, view, scene);
+    Pixels out;
+    out.size = view.size();
+    out.rgba.assign(static_cast<std::size_t>(out.size.x) * static_cast<std::size_t>(out.size.y) * 4u, 0);
+    for (int ty = 0; ty * 120 < out.size.y; ty += stride) {
+        for (int tx = 0; tx * 160 < out.size.x; tx += stride) {
+            const int w = std::min(160, out.size.x - tx * 160), h = std::min(120, out.size.y - ty * 120);
+            renderer.clear(kin::colors::black);
+            renderer.draw_texture(view.texture(), {static_cast<float>(tx * 160), static_cast<float>(ty * 120), static_cast<float>(w), static_cast<float>(h)},
+                                  {0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)});
+            std::vector<kin::u8> tile;
+            kin::Vec2i tile_size{};
+            const bool ok = renderer.read_rgba({0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)}, tile, tile_size);
+            assert(ok && tile_size.x == w && tile_size.y == h);
+            for (int y = 0; y < h; ++y) {
+                std::memcpy(&out.rgba[(static_cast<std::size_t>(ty * 120 + y) * static_cast<std::size_t>(out.size.x) + static_cast<std::size_t>(tx * 160)) * 4u],
+                            &tile[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) * 4u], static_cast<std::size_t>(w) * 4u);
+            }
+        }
+    }
+    return out;
+}
+
 // SDL_GPU reports 3D views, with a depth buffer and the samples it has.
 void test_gpu_reports_3d() {
     with_gpu("test_gpu_reports_3d", [](kin::Renderer2D& renderer) {
@@ -1691,9 +1718,9 @@ void test_gpu_contact_shadows() {
             return;
         }
         assert(r3d.stats().contact_dispatches > 0);
-        // Without ambient occlusion: the pre-pass of both meshes, the march and two blurs.
+        // Without ambient occlusion: the pre-pass of both meshes, the march and one blur (two with KIN_CONTACT_CLASSIC=1).
         assert(r3d.stats().ao_draws == 2 && r3d.stats().ao_instances == 2 && r3d.stats().ao_dispatches == 0 &&
-               r3d.stats().contact_dispatches == 3);
+               r3d.stats().contact_dispatches == 2);
         const int patch_off = brightness(at(off, patch)), patch_on = brightness(at(shadowed, patch));
         std::cerr << "contact shadows: patch at the foot " << patch_off << " -> " << patch_on << ", far floor " << brightness(at(off, far_floor))
                   << " -> " << brightness(at(shadowed, far_floor)) << ", top " << brightness(at(off, top)) << " -> "
@@ -1729,11 +1756,19 @@ void test_gpu_contact_shadows() {
         // The two blurs are one dispatch a direction (the counts above are still each feature's own), and the picture is the one
         // with two (KIN_BLUR_SEPARATE=1): to the byte.
         assert(r3d.stats().blur_merged == 2);
+        // (The contact shadows blurred alone have one pass, so the separate path is compared with KIN_CONTACT_CLASSIC=1, which has two, as the
+        // merged blur does.)
         setenv("KIN_BLUR_SEPARATE", "1", 1);
+        setenv("KIN_CONTACT_CLASSIC", "1", 1);
         const Pixels both_separate = render(on, false, false, true);
-        unsetenv("KIN_BLUR_SEPARATE");
+        unsetenv("KIN_CONTACT_CLASSIC");
         assert(r3d.stats().blur_merged == 0 && r3d.stats().ao_dispatches == 3 && r3d.stats().contact_dispatches == 3);
         assert(both.rgba == both_separate.rgba);
+        // Without that, the separate path blurs the contact shadows once: two dispatches, and a picture a hair different.
+        const Pixels both_one_blur = render(on, false, false, true);
+        unsetenv("KIN_BLUR_SEPARATE");
+        assert(r3d.stats().blur_merged == 0 && r3d.stats().ao_dispatches == 3 && r3d.stats().contact_dispatches == 2);
+        assert(both_one_blur.rgba != both.rgba);
         assert(ao_alone.rgba != both.rgba && (render({}, false, false, true), r3d.stats().blur_merged == 0));
 
         // Four-times multisampled too.
@@ -1750,6 +1785,256 @@ void test_gpu_contact_shadows() {
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
         render(on);
         assert(r3d.stats().contact_dispatches == 0);
+    });
+}
+
+
+// The speed-ups of ambient occlusion and contact shadows (opt-in speedups, phase 2): the linear depth chain the occlusion reads in big
+// views (KIN_AO_CHAIN=1 forces it, KIN_AO_CLASSIC=1 forbids it; by default it is used from 1.5 million pixels up) and the contact
+// shadows' single blur (KIN_CONTACT_CLASSIC=1 blurs twice). Each must give the picture of the classic path within a bound measured on
+// these scenes (with margin), on a plane (a ramp of depth: no occlusion anywhere, so a wrong level, a wrong texel or a stale chain
+// shows at once), in an orthographic view, at half resolution and under TAA's jitter, and after a resize and a release.
+struct Delta {
+    double mean = 0;
+    int p99 = 0, worst = 0;
+};
+
+Delta delta(const Pixels& a, const Pixels& b) {
+    assert(a.rgba.size() == b.rgba.size());
+    std::vector<int> hist(256, 0);
+    double sum = 0;
+    std::size_t n = 0;
+    int worst = 0;
+    for (std::size_t i = 0; i < a.rgba.size(); i += 4) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            const int d = std::abs(int(a.rgba[i + c]) - int(b.rgba[i + c]));
+            sum += d;
+            ++hist[static_cast<std::size_t>(d)];
+            worst = std::max(worst, d);
+            ++n;
+        }
+    }
+    std::size_t seen = 0;
+    int p99 = 0;
+    for (int d = 0; d < 256; ++d) {
+        seen += static_cast<std::size_t>(hist[static_cast<std::size_t>(d)]);
+        if (seen * 100 >= n * 99) {
+            p99 = d;
+            break;
+        }
+    }
+    return {sum / static_cast<double>(n), p99, worst};
+}
+
+void test_gpu_occlusion_speedups() {
+    with_gpu("test_gpu_occlusion_speedups", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const AoRoom room{r3d};
+        if (lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
+            return;
+        }
+        const kin::Mesh block = make_box(r3d, {0.3f, 1.0f, 0.1f});
+        const auto chain = [] { setenv("KIN_AO_CHAIN", "1", 1); unsetenv("KIN_AO_CLASSIC"); };
+        const auto classic = [] { unsetenv("KIN_AO_CHAIN"); setenv("KIN_AO_CLASSIC", "1", 1); };
+        const auto by_default = [] { unsetenv("KIN_AO_CHAIN"); unsetenv("KIN_AO_CLASSIC"); };
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+        const kin::Camera3D perspective = kin::Camera3D::look_at({0.0f, 3.0f, 6.0f}, {0.0f, 0.3f, -2.0f}, 50.0f);
+        kin::Camera3D ortho_camera = kin::Camera3D::look_at({0.0f, 6.0f, 6.0f}, {0.0f, 0.0f, -2.0f});
+        ortho_camera.projection = kin::Projection3D::Orthographic;
+        ortho_camera.height = 8.0f;
+        const kin::Camera3D ortho = ortho_camera;
+        enum class Draw { Room, Plane, Blocks };
+        const auto render = [&](const kin::Camera3D& camera, const kin::AmbientOcclusion3D& ao, Draw what = Draw::Room, kin::View3D* target = nullptr,
+                                bool taa = false, int stride = 1) {
+            scene.clear();
+            scene.camera = camera;
+            scene.ambient_occlusion = ao;
+            scene.taa = {.enabled = taa};
+            room.draw_floor(scene);
+            if (what == Draw::Room) {
+                room.draw_wall(scene);
+                room.draw_pole(scene, 1.0f, -0.5f);
+            }
+            if (what == Draw::Blocks) {
+                // Thin things at several distances: where a coarse level of the chain is most likely to be wrong.
+                for (int i = 0; i < 6; ++i) {
+                    scene.draw(block, Mat4f::translation({-2.5f + static_cast<float>(i), 0.5f, -1.5f + 0.7f * static_cast<float>(i)}),
+                               {.color = Color::rgb(200, 120, 60)});
+                }
+            }
+            Pixels p = shoot_large(renderer, r3d, target ? *target : view, scene, stride);
+            renderer.present();
+            return p;
+        };
+        const kin::AmbientOcclusion3D ao{.enabled = true, .radius = 3.0f};
+
+        // Which path ran: forced classic, forced chain, and by the size of the view (this one is 0.31 million pixels: classic).
+        classic();
+        const Pixels reference = render(perspective, ao);
+        assert(r3d.stats().ao_chain_built == 0 && r3d.stats().ao_dispatches == 3);
+        by_default();
+        const Pixels small = render(perspective, ao);
+        assert(r3d.stats().ao_chain_built == 0);
+        assert(small.rgba == reference.rgba); // below the size where the chain pays, the picture is the old one, to the byte
+        chain();
+        const Pixels chained = render(perspective, ao);
+        assert(r3d.stats().ao_chain_built == 1 && r3d.stats().ao_dispatches == 3); // the chain's own dispatch is not counted
+        setenv("KIN_AO_CLASSIC", "1", 1);
+        render(perspective, ao);
+        assert(r3d.stats().ao_chain_built == 0); // classic wins over a forced chain
+        chain();
+        const Delta room_delta = delta(chained, reference);
+        std::cerr << "ao chain: room mean " << room_delta.mean << " p99 " << room_delta.p99 << " worst " << room_delta.worst << "\n";
+        assert(room_delta.mean <= 0.3 && room_delta.p99 <= 6 && room_delta.worst <= 40);
+        assert(chained.rgba != reference.rgba); // a different (and not worse) filter: the test must be able to tell
+
+        // A plane, which a chain with a wrong level, a wrong texel or a wrong position bends into creases: no occlusion anywhere.
+        // Perspective and orthographic, a depth ramp each way (away from the camera, and across the screen).
+        for (const kin::Camera3D* camera : {&perspective, &ortho}) {
+            const Pixels flat_off = render(*camera, {}, Draw::Plane);
+            classic();
+            const Pixels flat_classic = render(*camera, ao, Draw::Plane);
+            chain();
+            const Pixels flat_chain = render(*camera, ao, Draw::Plane);
+            // Away from the horizon (rows near it are a grazing sliver, where either path may darken a little).
+            const Delta on_plane = delta(flat_chain, flat_classic);
+            int darkest = 0, darkest_classic = 0;
+            for (int y = 150; y < 470; y += 7) {
+                for (int x = 20; x < 620; x += 7) {
+                    darkest = std::max(darkest, brightness(flat_off.at(x, y)) - brightness(flat_chain.at(x, y)));
+                    darkest_classic = std::max(darkest_classic, brightness(flat_off.at(x, y)) - brightness(flat_classic.at(x, y)));
+                }
+            }
+            std::cerr << "ao chain: plane (" << (camera == &ortho ? "orthographic" : "perspective") << ") mean " << on_plane.mean << " p99 "
+                      << on_plane.p99 << " worst " << on_plane.worst << ", darkest sample " << darkest << " (classic " << darkest_classic
+                      << ") summed levels below unoccluded\n";
+            assert(on_plane.mean <= 0.03 && on_plane.worst <= 8); // a plane: the two paths agree to a few thousandths of a level (measured 0.002, 0)
+            assert(darkest <= darkest_classic + 3); // never creased more than the classic path's own noise
+        }
+
+        // Thin things at several distances, perspective and orthographic: within the bound of the classic path.
+        for (const kin::Camera3D* camera : {&perspective, &ortho}) {
+            classic();
+            const Pixels thin_classic = render(*camera, ao, Draw::Blocks);
+            chain();
+            const Pixels thin_chain = render(*camera, ao, Draw::Blocks);
+            const Delta d = delta(thin_chain, thin_classic);
+            std::cerr << "ao chain: thin blocks (" << (camera == &ortho ? "orthographic" : "perspective") << ") mean " << d.mean << " p99 "
+                      << d.p99 << " worst " << d.worst << "\n";
+            assert(d.mean <= 0.3 && d.p99 <= 6 && d.worst <= 40);
+        }
+
+        // Half resolution.
+        const kin::AmbientOcclusion3D half{.enabled = true, .radius = 3.0f, .half_resolution = true};
+        classic();
+        const Pixels half_classic = render(perspective, half);
+        chain();
+        const Pixels half_chain = render(perspective, half);
+        assert(r3d.stats().ao_chain_built == 1);
+        const Delta half_delta = delta(half_chain, half_classic);
+        std::cerr << "ao chain: half resolution mean " << half_delta.mean << " p99 " << half_delta.p99 << " worst " << half_delta.worst << "\n";
+        assert(half_delta.mean <= 0.3 && half_delta.p99 <= 6 && half_delta.worst <= 40);
+
+        // Under temporal anti-aliasing of a still camera (the projection is jittered a little each frame: the chain unprojects with it): after 12
+        // frames of each path, and frame to frame, the chain's pictures are as steady as the classic's.
+        if (r3d.capabilities().temporal_aa) {
+            const auto run = [&](bool use_chain) {
+                if (use_chain) {
+                    chain();
+                } else {
+                    classic();
+                }
+                view.reset_history();
+                std::vector<Pixels> frames;
+                for (int f = 0; f < 12; ++f) {
+                    frames.push_back(render(perspective, ao, Draw::Blocks, nullptr, /*taa=*/true));
+                }
+                return frames;
+            };
+            const std::vector<Pixels> with_classic = run(false), with_chain = run(true);
+            const Delta last = delta(with_chain.back(), with_classic.back());
+            const Delta step_classic = delta(with_classic[10], with_classic[11]), step_chain = delta(with_chain[10], with_chain[11]);
+            std::cerr << "ao chain under taa: last frame mean " << last.mean << " p99 " << last.p99 << " worst " << last.worst
+                      << "; frame to frame classic worst " << step_classic.worst << " mean " << step_classic.mean << ", chain worst "
+                      << step_chain.worst << " mean " << step_chain.mean << "\n";
+            assert(last.mean <= 0.3 && last.p99 <= 6);
+            assert(step_chain.mean <= step_classic.mean * 1.1 + 0.02 && step_chain.worst <= step_classic.worst + 6);
+        }
+
+        // A resize: the chain is made again at the new size (a stale one is too small after growing, and read at the wrong size after
+        // shrinking): up, then down, each picture the one a fresh view of that size draws.
+        chain();
+        kin::View3D other = r3d.create_view({512, 384}, {.samples = 1});
+        render(perspective, ao, Draw::Room, &other);
+        assert(r3d.resize(other, {640, 480}));
+        assert(render(perspective, ao, Draw::Room, &other).rgba == chained.rgba);
+        assert(r3d.resize(other, {512, 384}));
+        const Pixels resized = render(perspective, ao, Draw::Room, &other);
+        kin::View3D fresh = r3d.create_view({512, 384}, {.samples = 1});
+        assert(resized.rgba == render(perspective, ao, Draw::Room, &fresh).rgba);
+
+        // Given back after a pause and made again: the chain goes with the pre-pass's depth.
+        setenv("KIN_RELEASE_FRAMES", "3", 1);
+        kin::View3D released = r3d.create_view({640, 480}, {.samples = 1});
+        render(perspective, ao, Draw::Room, &released);
+        const kin::u64 held = r3d.stats().feature_bytes;
+        for (int f = 0; f < 4; ++f) {
+            render(perspective, {}, Draw::Room, &released);
+        }
+        assert(r3d.stats().feature_bytes == 0 && held > 0);
+        assert(render(perspective, ao, Draw::Room, &released).rgba == chained.rgba);
+        unsetenv("KIN_RELEASE_FRAMES");
+
+        // By default the chain is used from 1.5 million pixels (1600 x 1000 here), and gives the picture it gives when forced.
+        by_default();
+        kin::View3D large = r3d.create_view({1600, 1000}, {.samples = 1});
+        const Pixels large_default = render(perspective, ao, Draw::Room, &large, false, 3);
+        assert(r3d.stats().ao_chain_built == 1);
+        chain();
+        assert(render(perspective, ao, Draw::Room, &large, false, 3).rgba == large_default.rgba);
+        classic();
+        const Delta large_delta = delta(large_default, render(perspective, ao, Draw::Room, &large, false, 3));
+        assert(r3d.stats().ao_chain_built == 0);
+        std::cerr << "ao chain: 1600 x 1000 room mean " << large_delta.mean << " p99 " << large_delta.p99 << " worst " << large_delta.worst << "\n";
+        assert(large_delta.mean <= 0.3 && large_delta.p99 <= 6 && large_delta.worst <= 40);
+        by_default();
+
+        // With contact shadows alone, one blur (the second pass changed the pictures by under 0.3 levels); KIN_CONTACT_CLASSIC=1 blurs twice.
+        if (r3d.capabilities().contact_shadows) {
+            const kin::Mesh pole = make_box(r3d, {0.2f, 1.0f, 0.2f});
+            const auto shoot_contact = [&] {
+                scene.clear();
+                scene.camera = kin::Camera3D::look_at({-2.0f, 4.0f, 5.0f}, {0.0f, 0.3f, 0.0f}, 40.0f);
+                scene.lights.sun = {.direction = {1.0f, 0.7f, -0.5f}, .color = {1.0f, 1.0f, 1.0f}};
+                scene.lights.ambient = {0.25f, 0.25f, 0.25f};
+                scene.ambient_occlusion = {};
+                scene.contact_shadows = {.enabled = true, .distance = 0.5f, .thickness = 0.3f, .steps = 20};
+                room.draw_floor(scene);
+                scene.draw(pole, Mat4f::translation({0.0f, 0.5f, 0.0f}), room.grey);
+                scene.draw(pole, Mat4f::translation({1.2f, 0.5f, -1.0f}), room.grey);
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            unsetenv("KIN_CONTACT_CLASSIC");
+            const Pixels one = shoot_contact();
+            assert(r3d.stats().contact_dispatches == 2); // the march and one blur
+            setenv("KIN_CONTACT_CLASSIC", "1", 1);
+            const Pixels two = shoot_contact();
+            assert(r3d.stats().contact_dispatches == 3);
+            unsetenv("KIN_CONTACT_CLASSIC");
+            const Delta cd = delta(one, two);
+            std::cerr << "contact shadows: one blur against two: mean " << cd.mean << " p99 " << cd.p99 << " worst " << cd.worst << "\n";
+            assert(cd.mean <= 0.3 && cd.p99 <= 6 && cd.worst <= 60);
+            assert(one.rgba != two.rgba);
+            // The shadow is there either way (the pole's foot).
+            const auto foot = scene.camera.project({-0.17f, 0.0f, 0.085f}, screen);
+            assert(foot && brightness(one.at(foot->pos)) < brightness(two.at(foot->pos)) * 11 / 10);
+        }
+        by_default();
     });
 }
 
@@ -6453,6 +6738,7 @@ int main() {
     test_gpu_cascade_casters();
     test_gpu_ambient_occlusion();
     test_gpu_contact_shadows();
+    test_gpu_occlusion_speedups();
     test_taa_jitter();
     test_gpu_taa();
     test_gpu_taa_over_detail();

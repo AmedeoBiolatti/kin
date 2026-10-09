@@ -9,6 +9,12 @@ releases may change APIs.
 
 ### Added
 
+- 3D, speed of the opt-in features, phase 2 (small picture changes within stated bounds; see the plan's "Opt-in speedups, phase 2"): in views of 1.5 million pixels
+  or more, ambient occlusion reads a linear depth chain (one dispatch, five R32F levels) and costs 15 to 30% less (1080p: 0.2 to 0.5 ms, 4K: 2 to 4.6 ms);
+  contact shadows blurred on their own get one blur pass (-0.03 ms at 720p). Everything else (and every view under 1.5 million pixels) is as before.
+  `KIN_AO_CLASSIC=1` / `KIN_AO_CHAIN=1` / `KIN_CONTACT_CLASSIC=1` pick the old or new path (read on each render), `Render3DStats::ao_chain_built` says which ran;
+  `kin_reference` has `--ab NAME[:A:B]` (A and B timed in blocks of frames of one run, drift-proof) and `--flicker N` (frame-to-frame change under TAA). The
+  plan also records what was tried and dropped (a checkerboard, one slice, a cheaper contact march, half-resolution contact shadows).
 - 3D, speed of the opt-in features (byte-identical pictures; see the plan's "Opt-in speedups, phase 1"): temporal anti-aliasing no longer draws a
   velocity pre-pass when nothing else needs one (the main pass writes the velocity: the kiln's TAA cost fell by 2.2 ms), ambient occlusion and contact
   shadows share one blur dispatch, and the shadow map is kept while nothing it depends on changes (`Lights3D::cache_shadows`,

@@ -56,8 +56,9 @@ public:
     GpuTexture create_texture_from_rgba(const u8* pixels, u32 width, u32 height);
     // A 2D texture of `format` for `usage`, `samples` a pixel (3D views'
     // colour, depth and resolve targets).
+    // `levels` > 1 makes a mip chain (written level by level through storage bindings, read with texelFetch).
     GpuTexture create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
-                             SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1);
+                             SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1, u32 levels = 1);
     // As create_target, but a 2D array of `layers` (one pass renders into a
     // layer; a shader samples the array): cascaded shadow maps.
     GpuTexture create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,

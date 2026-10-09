@@ -181,6 +181,9 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   picture (`--hud` puts the panel in it, `--spin DEG` turns the camera a frame,
   `--print-settings` prints the settings). `ctest -R sponza-walk` does this and
   checks the picture is not blank; it skips without Sponza or a GPU.
+- Ambient occlusion in a window of 1.5 million pixels or more (1920 x 1080 and up) runs over a linear depth chain (cheaper there, the same picture to
+  0.2 levels); the stats line (F3) says "(depth chain)" when it did. `KIN_AO_CLASSIC=1` runs the old path, `KIN_AO_CHAIN=1` forces the new one, `KIN_CONTACT_CLASSIC=1`
+  blurs the contact shadows twice. (Not tried with the panel's controls here: the click path cannot be exercised without a display.)
 - It makes the pipelines and targets of every switch once when it starts (`Renderer3D::warm_up`), so that turning one on for the first time
   does not hitch, and again when a switch that needs it (map size, MSAA, HDR) is turned; the engine does nothing of the kind by itself.
 - The code is `sponza_walk/settings.hpp` (all state, applied to the `Scene3D`

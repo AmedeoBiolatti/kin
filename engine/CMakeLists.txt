@@ -249,7 +249,7 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
               transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag
               fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp
-              prepass.vert prepass.frag prepass_mask.frag gtao.comp ao_blur.comp ao_blur_both.comp contact.comp
+              prepass.vert prepass.frag prepass_mask.frag gtao.comp gtao_chain.comp ao_depth_chain.comp ao_blur.comp ao_blur_chain.comp ao_blur_both.comp ao_blur_both_chain.comp contact.comp
               prepass_velocity.vert prepass_velocity.frag prepass_velocity_mask.frag taa.comp mesh_velocity.vert mesh_velocity.frag
               cluster_cull.comp cluster_cull_occ.comp cluster_scan.comp cluster_args.comp cluster_gather.comp
               hiz_depth.comp hiz_reduce.comp)

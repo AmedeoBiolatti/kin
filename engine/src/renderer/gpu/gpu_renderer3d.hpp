@@ -160,6 +160,7 @@ private:
     // With Scene3D::ambient_occlusion, made by the first render that asks:
     // the pre-pass's depth and normals (one sample, whatever the view's), and
     // the occlusion (raw, blurred across, blurred down: R8, the view's size or half).
+    GpuTexture _ao_chain; // the linear depth chain of the occlusion (R32F, 5 levels), rebuilt each render that uses it; goes with _ao_depth
     GpuTexture _ao_depth, _ao_normals, _ao_raw, _ao_across; // the occlusion's result is in _ao_raw (the blur ends back in it)
     // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
     // normals are shared): the march, blurred across, blurred down; R8, the view's size.
@@ -259,6 +260,7 @@ private:
     // Records the compute passes that turn the view's pre-pass into its occlusion.
     // `projection` is the one the main pass draws with (jittered, with temporal anti-aliasing).
     // With `blur_too` false only the first dispatch (the blur is then someone else's: blur_screen_space_both).
+    bool build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, f32 radius);
     void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
                            const AmbientOcclusion3D& ao, Render3DStats& stats, bool blur_too = true);
     // The blur of both, in one dispatch a direction (the two results at one size).
@@ -374,6 +376,10 @@ private:
     bool _contact_warned = false;
     SDL_GPUComputePipeline* _contact_pipeline = nullptr; // contact.comp
     SDL_GPUComputePipeline* _gtao_pipeline = nullptr;    // gtao.comp
+    SDL_GPUComputePipeline* _gtao_chain_pipeline = nullptr; // gtao_chain.comp (optional: gtao.comp without)
+    SDL_GPUComputePipeline* _ao_chain_pipeline = nullptr;   // ao_depth_chain.comp
+    SDL_GPUComputePipeline* _ao_blur_chain_pipeline = nullptr; // ao_blur_chain.comp (optional)
+    SDL_GPUComputePipeline* _ao_blur_both_chain_pipeline = nullptr; // ao_blur_both_chain.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_pipeline = nullptr; // ao_blur.comp
     SDL_GPUComputePipeline* _ao_blur_both_pipeline = nullptr; // ao_blur_both.comp: both features' blur in one dispatch (optional)
     // The shadow map's cache (Lights3D::cache_shadows): what the map was last drawn from, so that the pass is skipped when this
@@ -394,6 +400,9 @@ private:
     bool _shadow_cache_allowed = true; // KIN_SHADOW_CACHE=0 turns it off; read each render
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
+    bool _contact_classic = false; // KIN_CONTACT_CLASSIC=1 blurs the contact shadows twice (across and down), as before; read each render
+    bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it
+    u32 _ao_chain_mode = 0; // 0: by the view's size, 1: KIN_AO_CLASSIC=1 (gtao.comp, reading the depth itself), 2: KIN_AO_CHAIN=1; read each render
     bool _merge_blurs = true; // KIN_BLUR_SEPARATE=1 turns it off (to compare, and to test the separate path); read each render
     SDL_GPUSampler* _point_sampler = nullptr;            // texel by texel, for compute
     SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's

@@ -1131,7 +1131,8 @@ private:
             std::snprintf(line, sizeof line, "shadows: off");
         }
         lines.push_back(line);
-        std::snprintf(line, sizeof line, "ao: %u draws, %u meshes, %u dispatches   lights %u", st.ao_draws, st.ao_instances, st.ao_dispatches, st.lights);
+        std::snprintf(line, sizeof line, "ao: %u draws, %u meshes, %u dispatches%s   lights %u", st.ao_draws, st.ao_instances, st.ao_dispatches,
+                      st.ao_chain_built ? " (depth chain)" : "", st.lights);
         lines.push_back(line);
         if (st.feature_bytes > 0 || st.taa_main_velocity) {
             std::snprintf(line, sizeof line, "feature targets %.1f MiB%s%s", double(st.feature_bytes) / 1048576.0,

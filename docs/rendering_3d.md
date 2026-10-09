@@ -248,6 +248,17 @@ see the plan's G2b results.
 With contact shadows also on (and `half_resolution` off) the two blurs are one dispatch a direction (`stats().blur_merged` is 2; the counts above
 still count each feature's own); the result is the same to the byte. The blur ends in the first target again (raw, across, raw), so a feature
 holds two R8 textures, not three.
+In views of 1.5 million pixels or more (about 1440 x 1040; 1920 x 1080 and up) the occlusion reads a **linear depth chain** instead of the depth: one
+compute dispatch writes the distance in front of the camera of every pre-pass pixel and four coarser levels (R32F, a weighted average of four texels
+that leans to the farthest, after XeGTAO), a tap picks its level by its distance from the pixel (the first level from 20 pixels, the next from 40, and
+so on) and the blurs read level 0, so the far taps of a wide search miss the cache far less and no tap divides to find its position. It gives the
+pictures of the old path to within 0.2 levels on the reference scenes (`stats().ao_chain_built` is 1; the chain's own dispatch is not in
+`ao_dispatches`) and saves 0.2 to 0.5 ms of the 1.3 to 2 of the occlusion at 1080p and 25 to 30% of it at 4K, but costs a little more where the occlusion's
+reach is a few pixels (far views, the kiln at 1080p: +0.2 of 8 ms): the plan's "Opt-in speedups, phase 2". Below that size the old path runs and the
+picture is the old one to the byte. `KIN_AO_CLASSIC=1` never uses the chain and `KIN_AO_CHAIN=1` always does (read on each render: tests, A/B timing).
+Contact shadows blurred on their own (no occlusion in the same view, or the occlusion at half resolution) get one blur pass, not two (-0.03 ms at 1280 x 720,
+-0.1 at 1080p; the pictures differ by under 0.3 levels on average): `stats().contact_dispatches` is then 2 (the march and the blur);
+`KIN_CONTACT_CLASSIC=1` blurs twice.
 
 ### Contact shadows
 

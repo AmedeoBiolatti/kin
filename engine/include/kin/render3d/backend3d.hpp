@@ -108,6 +108,7 @@ struct Render3DStats {
     // With both on at one size (the occlusion not at half resolution) the two blurs are one dispatch a direction; these
     // count that dispatch in each of the two numbers above, and this says how many there were (2, else 0).
     u32 blur_merged = 0;
+    u32 ao_chain_built = 0; // 1 when the occlusion read the linear depth chain this render (the chain's own dispatch is not in ao_dispatches), else 0
     u32 taa_dispatches = 0; // compute dispatches of the temporal anti-aliasing (the resolve, and the sharpen): 0 when off
     bool taa_reset = false; // its history was not used this render: the first, after a resize or reset_history(), or the camera changed kind
     Vec2f taa_jitter{};     // this render's offset in pixels (0, 0 when off)

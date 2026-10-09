@@ -1508,8 +1508,8 @@ lavapipe checked); the 3D-off build keeps building.
 | Step | Gains | Costs (RTX 4080 Laptop, 1280 x 720) | Default |
 |---|---|---|---|
 | G2a cascades | sharp shadows near the camera in a large `shadow_area` (3 px edge to 1 px at 60 m, test) | casters drawn again for each cascade; nothing in the small reference scenes (identical pictures) | 1 cascade (off) |
-| G2b pre-pass and GTAO | ambient and environment light shut off in creases: Sponza 50.1 to 48.7 (radius 0.5), further with a larger radius | +0.25 to 0.55 ms in small scenes, +0.9 to 1.0 ms in the crowd (not turned on in Signal Breach) | off |
-| G2c contact shadows | small contact shadows a coarse map misses | +0.15 to 0.3 ms (shared pre-pass with AO: +0.2 to 0.3 more, less 0.03 to 0.15 since phase 1 shares one blur between them); no gain on the reference scenes' distances | off |
+| G2b pre-pass and GTAO | ambient and environment light shut off in creases: Sponza 50.1 to 48.7 (radius 0.5), further with a larger radius | +0.25 to 0.55 ms in small scenes, +0.9 to 1.0 ms in the crowd (not turned on in Signal Breach); measured again in phase 2: +0.3 to +0.6 ms at 1280 x 720, +1.0 to 1.6 at 1080p (-0.2 to -0.65 since phase 2's depth chain), several ms at 4K (frames of 7 to 20 ms with it; -25 to -35% since phase 2) | off |
+| G2c contact shadows | small contact shadows a coarse map misses | +0.15 to 0.3 ms (shared pre-pass with AO: +0.2 to 0.3 more, less 0.03 to 0.15 since phase 1 shares one blur between them); alone, 0.03 to 0.07 ms less since phase 2 (one blur pass: 0.16 of which the march 0.08, at 720p; 0.39 at 1080p); no gain on the reference scenes' distances | off |
 | G2d TAA | edges and fine detail as good as or better than MSAA 4x (SSIM) from one sample, steadier; works with the rest | +0.07 to 0.15 ms fixed; the second geometry pass of the first version (kiln +1.4, crowd +0.4) is gone since phase 1 (the main pass writes the velocity: the kiln's TAA cost fell by 2.2 ms of 7.2, Sponza's by 0.18 of 0.7, the crowd's by 0.5 of 2.4); +0.09 to 0.15 over AO + contact; CPU +0.3 ms for 22,000 copies | off |
 
 Every feature is off by default and the picture and cost are then those of
@@ -2314,6 +2314,142 @@ frame with levels, clusters or occlusion culling still allocates its buffers (2 
 
 **Tools added** to `kin_reference` (nothing else of the harness changed): `--shadow-cache` (the harness turns `Lights3D::cache_shadows` off by default: it renders a static scene many times a frame), `--crowd-move` (the crowd drifts every frame, posed per frame: 22,000 moving copies),
 `--hitch <feature>` (+ `--warm-up`), `--vram-cycle`; `kin_draw_bench` turns the cache off. Switches read on every render for tests and A/B timing: `KIN_TAA_PREPASS=1`, `KIN_BLUR_SEPARATE=1`, `KIN_SHADOW_CACHE=0`, `KIN_RELEASE_FRAMES=n`.
+
+### Opt-in speedups, phase 2 — results
+
+Phase 2 asks for cheaper ambient occlusion and contact shadows at the price of **small picture changes**, accepted only inside a contract measured against the code as it was at `a5c4ea8`:
+(a) new against current, for every scene with the feature on, mean <= 0.3 levels, p99 <= 6, SSIM >= 0.998 and nothing visible in 3x crops and x8 difference images; (b) distance to the Cycles `truth` not worse by more than 0.05 levels on any
+picture and not worse on average; (c) a change that costs more than it saves anywhere, or fails (a) or (b), is dropped or gated; (d) no new shimmer under TAA. Baselines (old binary, kept in `reference_out/tmp_sp2/old/`, removed at the end): labels
+`sp2_before_{def,ao,ao_half,cs,both,all,taa,c4}` over the 11 scenes (cornell, crowd, furnace, helmet, ibl_helmet, ibl_spheres, kiln, shadows, spheres, sponza, motion: 24 pictures) and `sp2_before_{cl,big,big_ao,big_cs,big_taa}`
+over kiln_near and hidden_dense with `--lod --lod-clusters`; 1080p labels `sp2_b1080_*` for the chain.
+
+**Method for timing.** Interleaved pairs of whole runs of two binaries proved too noisy on this laptop (GPU clocks drift 10 to 40% inside a session; the same pair gave +0.04 ms and -0.25 ms in two batches). The decisive tool is new: **`kin_reference --ab NAME[:A:B]`** sets an environment variable that
+the renderer reads on each render to A in one block of 8 frames and to B in the next, throughout one run, and times the two apart (the first three frames of a block, whose GPU time arrives late, are not counted). One process, one clock state, A and B alternating every 8 frames:
+the figures below are `A - B` from it, GPU ms, medians over 80 to 400 frames per camera, means over the cameras of the scene group named. (The CPU `render()` ms are in the columns of the tables only where they changed.) A second new tool, **`--flicker N`**, reads back N consecutive frames after a camera's picture and
+prints the mean and the largest frame-to-frame change (item (d)). Both are in `kin_reference`; the library has no code for either.
+
+Switches read on each render: `KIN_AO_CLASSIC=1` (the occlusion as before, never over the chain), `KIN_AO_CHAIN=1` (always over the chain), `KIN_CONTACT_CLASSIC=1` (contact shadows blurred twice, as before). With none of them, pictures **under 1.5 million pixels** (every reference picture at 1280 x 720) are the old ones to the byte
+except the contact shadows' (below).
+
+**Where the occlusion's time goes (1280 x 720, Sponza and the shadows scene, a throwaway build that skipped one stage at a time).** On/off of the whole occlusion: Sponza nave 0.40 to 0.98 ms, roof 0.33 to 0.85, shadows 0.09 to 0.39 (overview) and 0.10 to 0.70 (contact), the crowd 1.4 to 2.2 / 0.8 to 1.6 / 1.7 to 2.7.
+Of that, the pre-pass (the geometry again) is 0.04 on the small scenes and most of the crowd's +0.8; the two blur dispatches about 0.10; the new chain 0.03; the GTAO shader the rest, about 0.4 ms, of which setup and integration (no taps) 0.07, taps 0.35 (their reads about half, their arithmetic the other half: a variant with no arithmetic in the taps was 0.18 ms cheaper, one with every tap at level 0 of the chain 0.09 dearer than with levels).
+The depth chain only addresses the reads, and at 720p they hit the cache well enough that the chain's own cost cancels what it saves.
+
+#### 1. The linear depth chain (XeGTAO's mip chain), used from 1.5 million pixels up
+
+*Built.* `ao_depth_chain.comp`: one dispatch of 16 x 16 tiles reads the pre-pass depth and writes the distance in front of the camera (R32F; 0 for the sky) into level 0 and, through groupshared memory, four coarser levels of one mip-mapped texture (`GpuDevice::create_target` has a `levels`
+argument now), each texel a weighted average of its four children that leans to the farthest (XeGTAO's filter: a child more than the falloff nearer than the farthest counts for less, so a thin near thing does not drag a far wall toward the camera and a silhouette grows no halo). `gtao_chain.comp` is `gtao.comp` with the same slices, steps, thickness
+heuristic, falloff, noise and integration, reading the chain: a tap's level follows its distance from the pixel (level 1 from 20 pixels, then 40, 80, 160), the view-space position is rebuilt from the distance without a divide (`kin_chain.inc.glsl`; for a perspective projection, whose inverse's z is f / w, x and y over w follow from the distance; an orthographic one needs none), and the tap
+position is the centre of the texel it fell in. `ao_blur_chain.comp` and `ao_blur_both_chain.comp` read level 0 (no view-space divide a tap, one reciprocal a pixel instead of one a tap). `stats().ao_chain_built` says it ran; the chain's own dispatch is not counted in `ao_dispatches` (it would break every count). The chain goes with the pre-pass's depth
+(made on first use, remade when the view's size changes, released with the depth after 120 idle renders, counted in `feature_bytes`).
+
+*What it costs and saves.* The chain's build alone (the dispatch, A/B against none): **+0.027 ms at 1280 x 720, +0.057 at 1920 x 1080, +0.20 at 3840 x 2160**. The occlusion over the chain against the old shader (A/B in one process; GPU ms, means over the cameras, new minus old; negative is faster):
+
+| View | Group of scenes | New minus old | Notes |
+|---|---|---|---|
+| 1280 x 720 (forced) | Sponza, shadows, helmet, crowd | **+0.037** (Sponza +0.08, crowd first_person/mid_deck -0.03, crowd above +0.07) | does not pay: dropped below 1.5 M pixels |
+| 1280 x 720, half resolution | the same | +0.019 | |
+| 1920 x 1080 | Sponza nave / roof | **-0.28 / -0.24** of 2.2 / 2.0 | |
+| | shadows contact / fence / grazing | -0.42 / -0.44 / -0.32 of 1.7 / 1.9 / 1.7 | |
+| | crowd first_person / mid_deck | **-0.51 / -0.64** of 3.6 / 3.4 | |
+| | kiln_near dome_close / grazing, hidden_dense occluded / peek / open (clusters) | -0.34 / -0.14, -0.21 / -0.46 / -0.11 | |
+| | **loses**: shadows overview (+0.22), helmet (+0.03), crowd above (+0.12), kiln/game (+0.46 of 7.0), kiln_near far (+0.04) | | few pixels with a reach of 20 pixels or more |
+| 1920 x 1080 with contact shadows (merged blur) | Sponza, shadows, crowd | -0.55 to -0.97 (the blurs read the chain too) | same losers |
+| 1920 x 1080, half resolution | | -0.04 mean | smaller: half the pixels |
+| 3840 x 2160 | Sponza nave / roof | **-5.15 / -4.17** of 19.7 / 15.3 | |
+| | shadows contact / fence / grazing, crowd first_person / mid_deck | -4.1 / -4.2 / -4.3, -4.8 / -4.3 | -25 to -35% of the occlusion |
+| | kiln_near, hidden_dense (clusters) | -2.0 to -3.6 | |
+| | **loses**: crowd above +0.49, kiln_near far +0.08 | | |
+| 3840 x 2160, half resolution | | -0.57 mean | |
+
+*Verdict: gated, not dropped.* The chain wins where the view is big and the search wide (the cache misses it removes grow with the pixels a tap is away: its saving per frame grows faster than its cost) and loses a little where almost every pixel's reach is a few pixels (a far view, a small object, the kiln at 1080p: 0.03 to 0.5 ms on frames of 1 to 7 ms). The only gate the CPU has without a GPU read-back
+is the size of the view, so the chain is used when the depth has **1.5 million pixels or more** (1440 x 1040: 1280 x 720 stays on the old path to the byte, 1920 x 1080 and up take the chain). Where it loses it loses by under 0.5 ms (2% of the kiln frame, up to 15% of a frame with little occlusion work, the crowd's 'above' camera); where it wins it wins 10 to 35%. An honest summary: **a clear gain from 1080p up on typical scenes, 0 at 720p**.
+What did *not* help (all throwaway builds, same A/B): arranging all of a slice's depth reads before their arithmetic so the GPU has them in flight together (no change: -0.00 at 1080p within noise, so the taps are not latency-bound in the way assumed), one division less a tap by `inversesqrt` (inside noise), a lower first-level distance (XeGTAO's 2^3.3 = 9.85 pixels instead of 2^4.3 = 19.7: 0.03 ms faster at 1080p, but **the fence in `motion` darkens differently, mean 0.41 and p99 8 at 1080p: fails (a)**; so 19.7), a higher one (39 pixels: 0.13 ms slower than 9.85 at 1080p).
+
+*Pictures against the old occlusion* (worst camera of each scene; mean levels / p99 / SSIM; the chain forced at 1280 x 720, which is where every label of the reference harness is made, and by default at 1920 x 1080; contact shadows alone, and the old half resolution against the chain's):
+
+| Scene | AO 720p (forced) | AO 1080p (default) | AO half 720p (forced) | Contact shadows alone, 720p (one blur) |
+|---|---|---|---|---|
+| cornell | 0.00 / 0 / 1.0000 | 0.00 / 0 / 1.0000 | 0.00 / 0 / 1.0000 | 0.00 / 0 / 1.0000 |
+| crowd | 0.09 / 1 / 0.9995 | 0.10 / 2 / 0.9995 | 0.09 / 1 / 0.9996 | **0.29 / 6 / 0.9987** |
+| furnace | 0.01 / 0 / 0.9999 | 0.01 / 0 / 0.9999 | 0.00 / 0 / 0.9999 | 0.00 / 0 / 1.0000 |
+| helmet | 0.01 / 0 / 0.9999 | 0.01 / 0 / 0.9999 | 0.01 / 0 / 1.0000 | 0.01 / 0 / 0.9999 |
+| ibl_helmet | 0.02 / 1 / 0.9999 | 0.02 / 1 / 0.9999 | 0.01 / 1 / 0.9999 | 0.00 / 0 / 1.0000 |
+| ibl_spheres | 0.03 / 1 / 0.9998 | 0.04 / 1 / 0.9998 | 0.03 / 1 / 0.9999 | 0.00 / 0 / 1.0000 |
+| kiln | 0.01 / 1 / 0.9999 | 0.02 / 1 / 0.9999 | 0.01 / 1 / 0.9999 | 0.01 / 0 / 0.9997 |
+| motion (TAA, thin fence) | 0.15 / 3 / 0.9999 | 0.19 / 4 / 0.9997 | 0.09 / 2 / 0.9999 | 0.02 / 0 / 0.9999 |
+| shadows | 0.04 / 1 / 0.9999 | 0.05 / 1 / 0.9999 | 0.04 / 1 / 0.9999 | 0.07 / 2 / 0.9993 |
+| spheres | 0.01 / 1 / 0.9999 | 0.01 / 1 / 0.9999 | 0.01 / 1 / 0.9999 | 0.03 / 0 / 0.9997 |
+| sponza | 0.02 / 1 / 0.9999 | 0.03 / 1 / 0.9999 | 0.02 / 1 / 0.9999 | 0.01 / 0 / 0.9999 |
+| kiln_near, hidden_dense (clusters, `--ao --contact-shadows`, 720p forced) | 0.01 / 0 / 1.0000 | | | 0.01 / 0 / 0.9999 |
+
+All inside (a) (the AO columns with a factor of 2 or more to spare; contact shadows' crowd inside it by 0.01). With AO **and** contact shadows (`both`, chain forced) the worst is 0.15 / 3 / 0.9995 (motion, crowd), with the full set of `--cascades 4 --ao --contact-shadows --taa` 0.16 / 3 / 0.9995. **Distance to Cycles** (`truth`, 18 pictures of 9 scenes, mean levels, new minus old): the chain's AO
+**worst +0.014** (sponza roof), mean -0.0008, the largest gain -0.035 (shadows fence); the half-resolution chain worst +0.013; contact shadows alone worst +0.007, mean -0.0007; both together worst +0.014. (b) holds with a factor of 3 to spare. Looked at, 3x crops with the x8 difference beside them: Sponza nave (a lion's head, the banners and the floor: the difference image is black, 1 level at most) and roof (sky edge, lattice, 1 to 2 levels),
+ibl_spheres front (the spheres' contact with the floor: nothing), the shadows' fence (the fence's feet and the bars: faint vertical threads at the edges of two bars, 1 to 2 levels) and `motion/close` (the pickets, the worst picture: faint vertical threads along the edges of some pickets, 1 to 3 levels, no halo, no banding, no leak), the kiln's close view (nothing),
+and contact shadows' shadows/contact (the end of one contact shadow differs by a pixel or two at its tip, up to 30 levels over 0.5% of the pixels) and the crowd (scattered speckles at x8 that cannot be seen at 1x). I did not look at a Signal Breach frame: the game has no switch to force the occlusion on (the crowd scene is its enemy deck).
+
+*(d) Shimmer under TAA* (`--flicker 30`, 30 consecutive frames after the 32 that settle the history): 1280 x 720 with the chain forced and 1920 x 1080 by default, still camera (sponza, shadows, helmet) and the `motion` scene's moving things and 30-frame pan, `--taa --ao [--contact-shadows]`, classic against chain: the mean frame-to-frame change is the same to 0.001 level everywhere (sponza nave 0.1025 against 0.1024, shadows fence
+0.0727 against 0.0723, motion/pan 7.868 against 7.867) and the largest change within 1 level of the old (sponza nave 81 against 81: TAA's own edge jitter; shadows contact 14 and 14). `test_gpu_occlusion_speedups` repeats it on a still scene under TAA.
+
+#### 2. Contact shadows
+
+*Cost.* Contact shadows alone, 1280 x 720: the march 0.07 to 0.09 ms, its two blurs 0.07 to 0.09, together +0.16 beyond the pre-pass (A/B with each stage skipped, Sponza, shadows, helmet, crowd); at 1920 x 1080 0.39 (march 0.20, blurs 0.20), at 3840 x 2160 2.4 (1.0 to 1.4 each).
+**Built: one blur pass instead of two when the contact shadows are blurred on their own** (the second pass, down, is gone; the result of the first stays in the second texture and the two change places). With the occlusion also on and at full size the two features' blurs are already one dispatch a direction (phase 1) with the weights shared, and dropping the contact half of the second pass there saved nothing measurable
+(+/-0.003 at 720p, -0.02 at 1080p, with a noise of 0.03), so that path is unchanged (and its contact shadows are blurred twice: with occlusion on or off the contact shadows differ by a hair, by design; the test checks the separate path against `KIN_CONTACT_CLASSIC=1` to the byte). GPU, A = one blur, B = two (`KIN_CONTACT_CLASSIC=1`), means of the group:
+1280 x 720: Sponza -0.067 / -0.059 (nave / roof), shadows -0.034 to -0.071, helmet -0.018, crowd -0.02 to -0.05, kiln_near / hidden_dense (clusters) -0.02 to -0.05; 1920 x 1080: Sponza -0.14 / -0.15, shadows -0.11 to -0.14, crowd -0.05 to -0.13; 3840 x 2160: Sponza -0.65 / -0.27, shadows -0.34 to -0.42, crowd -0.17 to -0.59. That is 15 to 20% of the contact shadows' own cost (4 to 7% of a Sponza
+frame at 720p). CPU `render()`: unchanged (-0.006 to +0.004, noise).
+Contract: the table above (contact shadows alone, all 11 scenes + clusters): worst mean 0.29 (crowd above), p99 6, SSIM 0.9987: **inside, with a margin of 0.01 on the mean and none on the p99**: it is the tightest change of the phase and the crowd's noise-heavy small meshes are why; distance to truth worst +0.007, mean -0.0007; flicker under TAA unchanged to 0.001 mean (sponza 0.1035 / 0.1037, shadows/fence 0.0703 / 0.0712, motion 7.858 / 7.857); looked at: the end of a contact shadow differs by a pixel (above) and the crowd shows scattered speckles at x8.
+It is kept because it passes every check, saves 0.03 to 0.15 ms where contact shadows run alone and costs nothing elsewhere; flagged as the change to remove first if the crowd's margin matters.
+
+*Not built, with what bounds it.* **Half-resolution march with a depth-aware upsample**: the march is at most 0.09 ms at 720p (0.20 at 1080p); a half-resolution march saves at most three quarters of that and the upsample (a second dispatch, 4 depth-weighted taps) costs part of it back, so under 0.05 ms at 720p, and it breaks the merged blur (different sizes) that saves 0.03 to 0.15 ms by itself. Not worth building. **A cheaper march by arithmetic**: the 4 x 4
+multiplication a step replaced by interpolating the clip-space ends of the ray (exact: a projection is linear), built and measured, A/B in one process: **-0.004 ms** (noise; Sponza -0.008 to -0.003, shadows -0.014 to -0.006): the march is bound by its reads, not its arithmetic; removed. **Fewer steps**: `steps` is the user's setting; not changed.
+
+#### 3. Sharing the chain between the two, and fixed costs
+
+With the occlusion on at 1080p and up the contact shadows' blur reads the chain already (0.4 to 0.97 ms saved together in the table above). The contact **march** could read level 0 of the chain (the linear depth, no divide), but its arithmetic was shown above not to matter (a march with its per-step multiplication gone was 0.004 ms faster) and its thickness test is in pixels of a surface: a coarse level would change what a thin
+pole shades; not done. The pre-pass's fixed costs (the clears, the transitions, the R8 formats): a skipped-stage build puts the pre-pass at +0.04 ms on the small scenes at 720p and the rest of the crowd's cost is the second draw of 20,000 copies; the R8 targets are already two a feature since phase 1; the chain (R32F, 5 levels, 4/3 of 3.7 MB at 720p, 11 MB at 1080p, 44 MB at 4K) is the only new memory and goes with the depth.
+Nothing else was found that can go without changing a picture.
+
+#### 4. What was tried and dropped (each against the contract)
+
+| Idea | Result | Verdict |
+|---|---|---|
+| **One slice a pixel** instead of two (half the taps; the angle noise spread over the whole half circle) | -0.09 ms (of 0.56) but pictures **fail (a)**: mean 3.7 levels (ibl_spheres), p99 13, SSIM 0.992 | dropped |
+| **Checkerboard** GTAO: a thread does one pixel of two (half the dispatch), the first blur pass fills the others from their valid neighbours | -0.08 ms mean (-0.1 to -0.17 on the shadows, none on the helmet); pictures: crowd mean 0.31 and SSIM 0.996, ibl_spheres grazing SSIM 0.9974, motion/close mean 0.33 / p99 6 (**fails (a)**), and a **diagonal hatch** visible in the crowd's floor at 1x (the two kinds of pixel are blurred with different kernels) | dropped |
+| **Fewer steps** (8 to 6 / 5 / 4), the chain path | -0.00 / -0.06 / -0.09 ms of 0.6 (noise at 6); not run against the contract: a quarter of the taps for a sixth of the cost | dropped (not worth the look change) |
+| Old **half resolution** as the default (existing `half_resolution`) | -45 to -60% of the occlusion at 720p; against full: crowd first_person SSIM 0.9962, mid_deck 0.9972, motion/close mean 0.44 p99 9: **fails (a) on three pictures**, ok on the rest (sponza roof 0.21 / 2 / 0.9982) | stays an explicit option; no default change, no new API (a depth-aware upsample might pass; not tried) |
+| Reads before arithmetic in the taps; `inversesqrt` | no change | dropped |
+| Contact march by interpolated clip positions | -0.004 ms | dropped |
+| Contact half resolution | bound under 0.05 ms | not built |
+
+#### Tests
+
+`test_gpu_occlusion_speedups` (new, 640 x 480 views read back in 160 x 120 tiles, and one 1600 x 1000; NVIDIA and lavapipe give the same numbers to 3 digits): which path ran (`ao_chain_built` 0 for classic, 1 for forced, 0 by default at 640 x 480 with the picture the classic one's to the byte, classic wins over a forced chain, 1 by default at 1600 x 1000 with the picture the forced chain's);
+agreement of the chain with the classic path inside the contract on the room (mean 0.022 against a bound of 0.3), thin blocks at several distances in perspective (0.052) and orthographic (0.033), half resolution (0.022), 1600 x 1000 (0.004), and under TAA of a still camera (last frame mean 0.157 / p99 2 against 0.3 / 6; frame to frame as steady as the classic: mean 0.0233 against 0.0241);
+**a plane** (a depth ramp: no occluder, so a wrong level, texel or position shows at once) in perspective and orthographic: the two paths agree to 0.002 / 0.000 mean and the chain is never darker than the classic's own noise (+3 levels); resize up then down (each picture the fresh view's, to the byte); release after a pause and made again; and contact shadows' one blur against two (2 against 3 dispatches, mean 0.020 / p99 0 / worst 25, the shadow still there).
+`test_gpu_contact_shadows`: the count of contact dispatches for contact shadows alone is **2, not 3** (the march and one blur); the merged-blur comparison "merged equals separate to the byte" now runs the separate path with `KIN_CONTACT_CLASSIC=1` (which still has two passes, as the merged blur does) and adds the one-blur separate path (2 contact dispatches, a different picture); nothing else of the test moved (the crease, the open floor, the sun side, the far plate, intensity, MSAA, the overlay, no sun: all as before).
+`test_gpu_ambient_occlusion` is unchanged and passes (small view: the classic path). **Mutations**, each made, seen to fail and reverted: first-level distance 2.5 instead of 19.7 (**caught** by the plane: mean 0.089 against 0.03; an earlier bound of 0.3 would not have: tightened), a texel too far (+1.5) (caught: room mean 0.73), the wrong level fetched (+1) (caught: room mean 2.6), the chain not remade after a resize (**not caught** by shrinking, which a stale bigger chain survives; **caught** after the test grew a view from 512 to 640), the chain built only once (caught: plane mean 4.6), orthographic treated as perspective (caught: plane mean 3.0), the chain not released with the depth (caught: `feature_bytes`), no gating by size (caught), contact blurred twice again (caught: dispatch count).
+
+#### Verification at the end
+
+`ninja -C build -j8`, `ninja -C build-no3d -j8` (after `cmake .` for the new shaders); `ctest` in `build` 68 of 68, in `build-no3d` 65 of 65; `kin_render3d_tests` with `KIN_REQUIRE_GPU_TESTS=1` on the NVIDIA RTX 4080 Laptop (device 0) and on lavapipe (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`: the new shaders compile and give the numbers above); `kin_example_tests`; `KIN_RENDER_BACKEND=gpu sponza_walk --headless --screenshot out.png --preset ao` runs (1280 x 800: the old path; with `KIN_AO_CHAIN=1` the chain's picture differs by mean 0.015, at most 4 levels).
+**Byte identity with everything off** (the new binary against `sp2_before_*`, 11 scenes): `def` 24 of 24, `cl` (clusters) 6 of 6; `taa` and `c4` (4 cascades): all but `kiln/close` and `kiln/game` (first run), and in a second `--taa` run `ibl_spheres/front` and `grazing` and the kiln's two. Those pictures are **not stable in the old binary either**, and that is a finding of its own:
+four more 11-scene `--taa` runs of each binary (no occlusion, no contact shadows, 1280 x 720) gave `ibl_spheres` with its **spheres drawn green** (the green channel saturated: 9.5% of the picture's pixels at 255 against 0.1%) in 3 of 4 runs of the old binary and 4 of 4 of the new, and the kiln's two pictures differing in 1 and 3 of 4 (old) and 3 of 4 (new): the same process rendered the scene alone, three times each, gave the
+baseline's pictures every time. The old binary also drew the green spheres in the 1920 x 1080 `--ao` baseline (after the other scenes of the process; alone it did not), which is why that scene's 1080p baseline was re-rendered alone. Something in the environment lighting (the filtered environment of `ibl_spheres`, which the kiln shares?) reads memory that was not written, depending on what ran before it in the process: it is
+in neither the occlusion nor this work (the pictures of the first baseline were green-free by luck of the allocation). The new binary's rate is not distinguishable from the old one's at four runs each. **Not investigated: worth a ticket**; and any A/B of these two scenes should be taken alone, or repeated.
+
+#### Phase 2 in one table
+
+| Item | 1280 x 720 | 1920 x 1080 | 3840 x 2160 | Pictures |
+|---|---|---|---|---|
+| 1 depth chain for the occlusion (from 1.5 M pixels) | not used (0 change, byte identical) | **-0.2 to -0.65 ms** of 1.2 to 3.6 (Sponza -0.28, crowd -0.5 to -0.64, kiln_near -0.14 to -0.34); loses +0.03 to +0.46 in far views | **-2 to -5 ms** of 8 to 20 (25 to 35%); crowd above +0.49 | mean <= 0.19, p99 <= 4, SSIM >= 0.9995 |
+| 2 one blur for contact shadows alone | **-0.02 to -0.07** | -0.05 to -0.15 | -0.17 to -0.65 | mean <= 0.29, p99 <= 6, SSIM >= 0.9987 |
+| 3 sharing the chain with the contact march | not worth it (the march is bound by reads, its arithmetic does not matter) | | | |
+| 4 quality presets | none added: the cheaper options all fail the contract or save under 0.1 ms | | | |
+
+**Not done or not tested.** Sponza Walk's panel (the click path, and the stats line's new "(depth chain)" note on screen) cannot be exercised here; the Signal Breach game itself (no switch forces the occlusion on); D3D12 and Metal (Vulkan on NVIDIA and lavapipe only); a display scaled by the desktop; devices without R32F storage (the chain pipelines are then not made and the old path runs: not provoked); timing on any GPU but this laptop's RTX 4080 (the gate's 1.5 M pixels is
+this one's break-even: a device with a bigger cache or fewer cores would put it elsewhere).
+**Tools added** to `kin_reference`: `--ab NAME[:A:B]`, `--flicker N`. The harness otherwise unchanged.
 
 ### G4 — Ray tracing in compute
 
