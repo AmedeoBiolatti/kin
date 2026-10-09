@@ -1919,7 +1919,7 @@ cut itself still loses where it did in G3b (Sponza, helmet: small meshes) -- clu
 (4 M triangles) is not clamped to the device's memory; a scene whose passes together choose more is cut short. A mesh's range in a chunk is never reused. No normal-cone test, no per-pass level-of-detail distance. Without the read-back an overflow is silent. D3D12 and Metal untested (indirect first-instance, storage buffers that are also index buffers);
 Vulkan on NVIDIA and lavapipe only. Sponza Walk's panel and `--preset clusters-gpu` compile and the help lists them, but I did not see them run (a headless run printed nothing I could check), so the click path and the stats lines are untested.
 
-#### G3d — Occlusion culling
+#### G3d — Occlusion culling. Done (opt-in, off by default: it pays only where much is hidden).
 
 A depth pyramid (Hi-Z) from the last frame's depth (reprojected by the
 camera's motion; a conservative bound, or two passes as the standard
@@ -1930,10 +1930,157 @@ the deck seen from the side. Checks: those, with the picture the same to
 within a pixel of edge and no pop-in when the camera turns; the cost of the
 pyramid against what it culls. May be cut if it saves nothing measurable.
 
+#### G3d — results
+
+Built, tested on the RTX 4080 and on lavapipe, and **measured not to pay except where a great deal is hidden**: kept as an opt-in (`Lod3D::occlusion`, off by default), not cut,
+because it does pay where the content is dense and hidden (a wall hiding 256 heavy copies: 12 to 19% of the frame) and never changes a picture; on the kiln and Sponza,
+the scenes the plan named, it only costs. The verdict and where it pays are at the end of this section.
+
+**Design, as built.** `Lod3D::occlusion {enabled, depth_margin, pixel_margin}` (off by default; needs `lod.enabled`, `gpu_culling`, a clustered mesh and
+`Renderer3DCapabilities::occlusion_culling`, else ignored with one line in the log). The standard two-pass method, with the first pass's depth made for it:
+
+- *Which depth, and why.* Last frame's depth reprojected (a) was rejected before any code: a cluster that was hidden last frame and shows now (a door opening, the
+  camera coming round a wall, a moving copy) would be culled for a frame, and an occluder that moved away would hide what it no longer hides. A coarse
+  occluder-only pass (c) has the same flaw as (a) for the occluders left out. The two-pass method (b) tests every cluster against **this frame's own**
+  depth, so it never culls what shows, whatever the history holds. The history (one word a cluster of each copy of each clustered draw, kept in two buffers
+  swapped each render, per view) only decides which clusters are drawn *before* the pyramid is built: the ones that showed last frame. A history that is wrong
+  (a camera cut without `reset_history()`, a changed scene) costs speed, never a picture. A new layout of the scene's clustered draws, `reset_history()` and a
+  resize start it empty: the first pass then draws nothing and the second tests everything against the frame's plain meshes.
+- *The frame.* `cluster_cull_occ.comp` (the same source as `cluster_cull.comp`, built twice: `cluster_cull.inc.glsl` with and without `KIN_OCCLUSION`) cuts
+  and frustum-tests as before. **Pass 1** (all views; the camera's view only for clusters in the history) gathers into set 0 of the cut's buffers, which the
+  shadow passes read as before (shadows are **not** occlusion culled: a caster hidden from the camera still shadows what shows). Then the depth: with a
+  pre-pass (ambient occlusion, contact shadows or temporal anti-aliasing on) the pre-pass is made in two halves, the opaque meshes and the first pass's clusters,
+  then (the pyramid built, pass 2 recorded) the second pass's clusters, loading the first half's depth and normals: no geometry is drawn twice. Without a pre-pass a
+  depth-only pass of the same (the shadow shaders, a cut-out's discard included, into a single-sample depth) is the price, because the multisampled main depth
+  cannot be sampled. **The pyramid**: `hiz_depth.comp` (4 x 4 pixels a texel, the farthest depth, which in reverse Z is the smallest; R32F) and
+  `hiz_reduce.comp` (four levels a pass through shared memory) down to 2 x 2: three compute passes at 1280 x 720 (9 levels). **Pass 2** (set 1, the camera's view
+  alone) re-cuts every cluster, and for those in the cut and the frustum projects the cube round its bounding sphere (the 8 corners; a corner at or behind the camera
+  plane says "not hidden"), takes the nearest corner depth against the farthest depth of the pyramid's texels under the rectangle (the rectangle widened by
+  `pixel_margin`, the level chosen so that it covers at most 2 x 2 texels), and keeps the cluster unless it is behind by `depth_margin`; the kept ones not
+  drawn in pass 1 are gathered; the history for the next frame is written (kept or not, for all). The main pass, the pre-pass's second half, the velocity
+  pre-pass and the pick pass draw both sets (so a copy hidden by the wall is no pick result); the overlay is whole in pass 1 and never tested.
+  With the jittered projection of temporal anti-aliasing both the depth and the test use it. A mesh with a shader of its own may discard where the
+  pyramid would count it solid: it is no occluder (drawn after the pyramid).
+- *Cost model.* Fixed: 3 pyramid passes, a second cut (cull, 3 scan, arguments, gather: 6 compute passes), the occluder render pass without a pre-pass (which
+  draws what showed last frame again), a second multi-draw a draw. Saved: the raster of what the wall hides. Not done: a test of whole copies (the second pass tests
+  clusters; a copy-level test would save the cut's work for hidden copies, not their raster), occlusion culling of the shadow maps (they would need the light's
+  own pyramid), per-copy GPU culling of copies drawn from CPU instance lists (the crowd: each copy would need its own test, a different design).
+
+**Scenes.** New in `tests/reference/scenes`: `hidden.json` (`procedural: "hidden"`: a floor, a wall 20 m wide and 8 high, 8 tori in front and 64 behind it, 8 x 8, each torus 100,352 triangles in a
+clustered mesh; cameras `occluded` (all 64 behind the wall: the best case), `peek` (from beside the wall's end: some show), `open` (from behind the grid: nothing hidden by the wall, the cost of the
+test alone)), `hidden_dense.json` (the same with 16 x 16 = 256 copies), `kiln_inside.json` (local: the kiln with cameras inside the dome and behind it); `kin_reference --lod-occlusion`
+(and `lod: {occlusion: true}` in a scene file; `--readback` prints the clusters of the first pass, occluded, and drawn for nothing), Sponza Walk's "Occlusion culling" switch, stats lines and
+`--preset occlusion`. The existing scenes are untouched.
+
+**Clusters and triangles** (the camera's cut, read back; clusters / triangles, off then on; 1280 x 720):
+
+| Scene / camera | Off | On | Occluded |
+|---|---|---|---|
+| hidden occluded | 3,135 / 300,033 | 257 / 24,691 | 2,878 clusters, 275,342 triangles (92%) |
+| hidden peek | 2,976 / 285,337 | 423 / 41,561 | 2,553 (85%) |
+| hidden open | 3,126 / 299,119 | 2,773 / 265,352 | 353 (11%: the tori's own far sides) |
+| hidden_dense occluded | 10,921 / 1,044,291 | 257 / 24,691 | 10,664 (98%) |
+| hidden_dense peek | 9,314 / 890,968 | 68 / 6,672 | 9,246 (99%) |
+| hidden_dense open | 7,096 / 679,654 | 6,435 / 619,669 | 661 (9%) |
+| kiln_near dome_close | 1,312 / 134,453 | 363 / 37,955 | 949 (72%) |
+| kiln_near grazing | 850 / 87,334 | 275 / 29,085 | 575 (68%) |
+| kiln_near far | 1,395 / 134,382 | 805 / 77,238 | 590 (42%) |
+| kiln_inside inside_low | 628 / 63,068 | 447 / 45,886 | 181 (29%) |
+| kiln_inside inside_up | 207 / 22,197 | 199 / 21,357 | 8 (4%) |
+| kiln_inside behind | 2,671 / 262,654 | 780 / 76,872 | 1,891 (71%) |
+| sponza nave (clusters) | 1,365 / 146,213 | 1,192 / 127,234 | 173 (13%) |
+| sponza roof (clusters) | 581 / 62,924 | 572 / 62,106 | 9 (2%) |
+
+"Drawn for nothing" (drawn in the first pass, hidden this frame) is 0 in every static view. The identity `clusters_drawn + clusters_occluded` = the cut's clusters in view holds exactly.
+
+**GPU ms of the frame, off / on** (medians of 4 interleaved pairs of runs of 120 frames; `*`: the ranges of the two do not overlap; the other GPU users on this machine drifted the
+runs by up to 10%, so differences under about 0.05 ms are noise, and the `best` column of the log, minimum against minimum, agrees with these to 0.03 ms; CPU `render()` ms in brackets):
+
+| Scene / camera | Plain (MSAA only) | AO on (a pre-pass exists) | Everything on (4 cascades, AO, contact, TAA) |
+|---|---|---|---|
+| hidden occluded | 0.29 / 0.31 (+0.02) [0.08 / 0.14] | 0.75 / 0.74 (-0.01 `*`) | 1.19 / 1.22 (+0.03) |
+| hidden peek | 0.27 / 0.35 (+0.09 `*`; +0.03 in an earlier run) | 0.77 / 0.75 (-0.02) | 1.26 / 1.23 (-0.03) |
+| hidden open | 0.39 / 0.53 (**+0.14 `*`**) | 0.92 / 0.88 (-0.04, noisy; `best` +0.05) | 1.18 / 1.25 (+0.07) |
+| hidden_dense occluded | 0.67 / 0.56 (**-0.11 `*`**) [0.12 / 0.17] | 1.19 / 0.97 (**-0.22 `*`**) | 1.80 / 1.58 (-0.23) |
+| hidden_dense peek | 0.59 / 0.50 (-0.09 `*`) | 1.14 / 0.98 (-0.15 `*`) | 1.72 / 1.51 (-0.21 `*`) |
+| hidden_dense open | 0.69 / 0.87 (**+0.18 `*`**) | 1.39 / 1.40 (+0.00) | 1.68 / 1.75 (+0.07) |
+| hidden_dense at 1920 x 1080, occluded / peek / open | 0.84 / 0.74 (-0.10 `*`), 0.75 / 0.64 (-0.11 `*`), 1.05 / 1.21 (+0.16 `*`) | | |
+| sponza nave, clusters | 0.38 / 0.47 (**+0.08 `*`**) [0.11 / 0.16] | | 1.22 / 1.18 (-0.03) |
+| sponza roof, clusters | 0.29 / 0.39 (+0.10 `*`) | | 1.04 / 1.07 (+0.03 `*`) |
+| kiln_near dome_close / grazing / far | 0.40 / 0.44, 0.28 / 0.31 `*`, 0.27 / 0.31 `*` (+0.04, +0.04, +0.04) [0.03 / 0.06] | | 1.00 / 1.12, 0.74 / 0.88, 0.50 / 0.59 (+0.12, +0.14, +0.09) |
+| kiln game / close | 0.35 / 0.39 `*` (+0.04), 0.55 / 0.52 (-0.04) | | 0.61 / 0.62, 1.13 / 1.10 |
+| kiln_inside inside_low / inside_up / behind | 0.27 / 0.35 `*`, 0.17 / 0.25 `*`, 0.42 / 0.43 (+0.08, +0.08, +0.01) | | 1.20 / 1.29, 1.01 / 1.10, 0.90 / 0.92 |
+
+**The cost, taken apart** (hidden_dense `open`, nothing to cull, 1280 x 720, no pre-pass, +0.11 in that run; by skipping a stage at a time, which makes the picture wrong, the pyramid's share from the smaller scene): the extra render pass of the first pass's clusters and the frame's
+opaque meshes **0.05 ms** (the main pass's own raster, drawn a second time, because the multisampled main depth cannot be sampled), the second cut (cull, three scan passes, arguments, gather) and the
+second multi-draw **about 0.04**, the three pyramid passes **0.015**. CPU `render()` +0.03 to 0.06 ms for the extra recording. With a pre-pass the first item is gone (the pre-pass is the
+depth), and the worst case falls to +0.00 to +0.07. The saving, taken apart (hidden `occluded`, 275 k triangles of the camera's cut hidden): the camera's raster of them is about 0.07 ms of a frame that is 0.26 ms; the shadow pass still draws
+every caster the sun sees, hidden from the camera or not (the 64 tori's shadows fall into view), so what is left of `hidden_dense occluded` after culling 1 M triangles of the camera's cut is
+the shadow map's million.
+
+**Memory.** Video memory: the second pass's gathered indices (12 bytes a triangle of `max_cluster_triangles`: 48 MB at the default 4 M triangles, as the first set's), the pyramid 0.4 MB at 1280 x 720, the history
+8 bytes a cluster of every copy (kiln 0.7 MB, `hidden_dense` 3.6 MB), the occluder depth without a pre-pass 3.7 MB; none of it is made until a render asks for occlusion. Peak resident set of `kin_reference`
+over `kiln_inside` and `kiln_near` with clusters: 1,861 MB off, 1,866 MB on (the history and the second set are on the GPU).
+
+**Off path.** `g3d_before_def` / `_all` / `_cl` from the G3c binary, again after (the new binary, `Lod3D::occlusion` off): every PNG byte-identical and every draws / triangles / casters / cut line equal, except
+`crowd/above` under `_all`, which flipped under the other sessions' load in both directions (the old binary's 07ea6cc4, the new one's 1d993af4 in that batch) and which is 6ce1cac0 in all six quiet runs, three of each binary: the known TAA flip with 20,000 copies, not this
+change. Nothing of the occlusion path is made or run with the setting off (no pyramid, history, pipelines' use, second buffers or passes); `cluster_cull.comp` now includes `cluster_cull.inc.glsl` and
+compiles to the same code.
+
+**Tests** (`kin_render3d_tests`: 8 new, NVIDIA RTX 4080 and lavapipe; ctest 68/68 and 65/65 without 3D). Occlusion on against off, picture and picks byte for byte: 1 and 4 samples, 3 cascades, AO and contact shadows,
+temporal anti-aliasing, all of them together (6 configurations x 3 to 8 frames, pick grid of 234 pixels); a camera strafing past the wall's end in 60 steps (the balls behind it come into view from step
+29: **0 bytes differ in every frame**), another turning on the spot in 60 steps (0 bytes), a ball moving out from behind the wall and back (0 bytes); a slit in the wall of 0.9, 0.45, 0.25, 0.12 m
+(8 to 1 pixels: 0 bytes, with 1 and 4 samples) and of 0.06 and 0.02 m (0.5 and 0.17 pixels: 0 bytes with 1 sample; **78 bytes of 57,600 with 4 samples at 0.5 pixel**, a sliver the multisampled picture
+sees through and the single-sample depth does not, which is why it is measured and not asserted); balls at the wall's edge, at the screen's edge, half through the floor and the wall, the overlay;
+the shadows of balls hidden from the camera still fall into view (1 and 3 cascades); the history empty after `reset_history()`, after a resize and after a change of the scene's draws, and a camera cut without a reset giving the
+right picture; 20 frames twice from fresh views identical; ignored (with its one line) with `KIN_GPU_CLUSTERS=0`, with the selection off, with `gpu_culling` off, and with no clustered mesh;
+a room too small for the gathered indices degrades as G3c's does, counted. Counts: clusters occluded > 40 behind the wall, **0 on a gently wavy sheet seen from above** (a closed ball hides its own far
+side: 6 of 145 in the open), `clusters_drawn + clusters_occluded` equal to the clusters the cut puts in view without occlusion, in every configuration. Mutations, each made, seen to fail and reverted:
+the pyramid built with the nearest depth instead of the farthest (strafing: 32 bytes), only 2 x 2 texels read at a level too fine (66 bytes), the rectangle's rows flipped (the first scene), pass 2 drawing nothing (9,309 bytes),
+the shadow views following the camera's history (5,713 bytes), the history kept across a resize (the history test), the pick pass drawing only the first set (40 picks), the nearest depth taken from one corner of the cube
+(only after adding the balls through the floor and the wall: 520 bytes; the first set of tests passed it, so the tests were not good enough), a level too coarse (safe, so no picture changes; caught only by the counts,
+49 to 30 clusters occluded). **Not caught: the margins** (`depth_margin` and `pixel_margin` set to 0): they guard rounding that none of these scenes produce; I could not construct a case, because any geometry inside
+the cube's bounding box is behind its nearest corner by at least the cube's size.
+
+**What I looked at.** `hidden` occluded, peek and open with and without occlusion at 1280 x 720: identical (the difference is zero); the three views read as a floor with shadows and tori in front of the wall, the wall's
+edge with the hidden tori's tips showing past it from the side, and the grid of tori from behind. The strafe's frames around the reveal (frames 24 to 33 of the test at 160 x 120, off, on and the difference x8): a blue ball appears at the wall's
+edge in the same frame in both, the difference is black in every frame; likewise 5 frames of the turn. A Sponza Walk headless run (`--preset occlusion`, nave, 20 frames) draws its stats lines (9 pyramid levels,
+3 dispatches, 1,207 clusters in the first pass, 202 occluded) and the same picture byte for byte as `--preset clusters-gpu`. I did not look at frames of the kiln's inside by eye (the numbers say 29% of its camera clusters are hidden
+there and the frame gets 0.08 ms slower).
+
+**Verdict.**
+- *Where it pays:* a scene where a large share of the cut's triangles are hidden and the cut itself is big: `hidden_dense` (a wall hiding 256 copies of a 100 thousand triangle mesh; 1 M triangles in the camera's cut, 25 thousand left): **-0.09 to -0.11 ms of 0.6 to 0.8 (12 to 16%)**
+  at 1280 x 720 and 1920 x 1080, **-0.15 to -0.23 ms (12 to 19%)** with a pre-pass. Even there the shadow maps still draw it all, which caps the saving.
+- *Where it costs:* where little is hidden: `hidden` open **+0.14**, `hidden_dense` open **+0.18** (with a pre-pass: -0.04 to +0.07); and where much *is* hidden but the cut is already small: the **kiln** (-42% to -72% of the camera's triangles,
+  yet +0.04 to +0.08 ms, with everything on +0.09 to +0.14) and **Sponza with clusters** (+0.08 to +0.10; 13% of the camera's clusters hidden in the nave: its galleries hide too little). The crowd has no clustered meshes: unchanged.
+- *Why:* the clusters' cut already holds the raster to about a triangle a pixel, so what a wall can hide is bounded by the screen (a few hundred thousand triangles, 0.05 to 0.1 ms); the method's fixed work is 0.05 to 0.1 ms
+  (a second cut, a pyramid, the depth of the first set drawn again where no pre-pass makes it). It wins only where the hidden content is many times the screen's worth of triangles in the *cut* (hundreds of copies of heavy meshes, a city or
+  a mine behind its walls), which the clusters' cut makes rare.
+- *Keep or cut:* kept, **off by default**, for scenes of that kind and views with a pre-pass; it is correct everywhere it was tried (no picture ever differs, no popping), and costs nothing when off. If the plan wants fewer moving
+  parts, it is the first thing to cut: the three things that would change its balance are a pyramid for the shadow maps (they are what remain), a test of whole copies before their clusters (the second cut's cost grows with the copies' clusters),
+  and, for views with one sample, drawing the first set into the main target instead of a depth of its own.
+
+**Honest limits and not tested.** Not done: occlusion of the shadow maps (hidden casters still draw and shadow), a test of whole copies, occlusion of copies drawn from CPU instance lists (`draw_instanced` of meshes
+without clusters, the crowd: each copy would need its own test on the GPU, a different design), a first pass without the duplicate depth for views with one sample. The pictures are not exact for a slit narrower than a
+pixel seen with MSAA. A mesh with a shader of its own is never an occluder (its clusters are drawn after the pyramid). Depth formats: the pyramid reads the pre-pass's D32F (or D24, quantised; the margin
+covers it at ordinary distances, untested). D3D12 and Metal untested; Vulkan on NVIDIA and lavapipe only. Sponza Walk's panel click path cannot be tested here; its `--preset occlusion` and stats lines were run headless. A history is per view and kept across frames; two views of one scene each have their own.
+
 Checks across G3: the kiln and the crowd against full detail and against
 before (the plan's own check), on the G0 harness with a new label a step;
 `truth` is not re-rendered (the pictures are judged against our own full
 detail, as the error is ours to bound).
+
+#### G3 summary
+
+What each step costs, what it gains, its default, and when to use which (RTX 4080 Laptop, 1280 x 720, 4x MSAA; the kiln is one 5.15 M triangle mesh, the crowd 20,000 small meshes,
+Sponza 260 k triangles in 103 meshes; numbers from each step's results):
+
+| Step | Costs | Gains | Default | Use it for |
+|---|---|---|---|---|
+| **G3a** levels of detail (`MeshOptions::levels`, `Lod3D`) | build time (kiln 8 s for 4 levels) and memory (+1.1 GB resident, all levels' triangles on the GPU); a draw a level; the crowd with everything on is 8 to 11% slower | kiln 4.3 to 0.3 (6 levels) or 0.8 ms (4); the crowd 0.4 to 1.1 M of 1.5 to 2.6 M triangles, GPU level; picture within 0.1 to 0.2 mean levels | off; meshes keep one level unless asked | a big mesh seen from far (whole-mesh levels), many copies of meshes of thousands of triangles; not small meshes |
+| **G3b** clusters, CPU cut (`MeshOptions::clusters`) | 5 s and 1.5 GB at load for the kiln; the cut on the CPU 0.4 to 0.9 ms of `render()` | kiln 4.3 to 0.25 to 0.9 ms GPU: near parts fine, far parts coarse inside one mesh; no cracks | off | one huge mesh (hundreds of thousands to millions of triangles) seen near and far; not Sponza or a helmet |
+| **G3c** the cut in compute (`Lod3D::gpu_culling`) | 62 MB of indices and 7 MB of table for the kiln, the gathered buffer (48 MB), about 0.05 ms of GPU for six compute passes | `render()` 0.4 to 0.9 ms down to 0.03 to 0.08; GPU level with the CPU cut, cheaper with cascades; the picture is the CPU cut's byte for byte | on, wherever clusters and the selection are on and the device can | always with G3b |
+| **G3d** occlusion culling (`Lod3D::occlusion`) | 0.05 to 0.18 ms of GPU where little is hidden (0 to 0.07 with a pre-pass), 0.03 to 0.06 ms of CPU, +48 MB (the second gathered buffer) | 0.1 to 0.23 ms (12 to 19%) where a wall hides hundreds of heavy copies; the camera's triangles down 70 to 98% on the kiln and the dense scene; the picture is the one without it | off | hundreds of heavy clustered copies behind walls, with ambient occlusion or temporal anti-aliasing on; not the kiln, not Sponza |
 
 ### G4 — Ray tracing in compute
 

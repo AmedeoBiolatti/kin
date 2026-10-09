@@ -260,6 +260,17 @@ struct TemporalAA3D {
 // without levels, alpha-blended ones (drawn furthest first, which levels would
 // break up) and the overlay (which has its own setting) are drawn as before.
 // Off, the picture, the statistics and the cost are as without the feature.
+// Occlusion culling of clustered meshes (Lod3D::occlusion): clusters hidden behind other geometry are not drawn.
+struct Occlusion3D {
+    bool enabled = false;
+    // The two-pass method never culls what shows (a cluster is tested against this frame's own depth), so these only
+    // trade a little culling for safety against rounding. `depth_margin` is relative (a cluster must be behind the
+    // pyramid by this fraction of its depth to be culled); `pixel_margin` widens the cluster's screen rectangle
+    // by this many pixels each side.
+    f32 depth_margin = 0.001f;
+    u32 pixel_margin = 1;
+};
+
 struct Lod3D {
     bool enabled = false;
     // The most a level may be wrong on the screen, in pixels (the sizes of the
@@ -283,6 +294,11 @@ struct Lod3D {
     // Debug: reads the GPU cut's counts back at the end of every render() (Render3DStats::clusters_drawn, triangles,
     // cluster_overflow). It waits for the GPU, as Renderer3D::pick does: for tools and tests, not for a game's frames.
     bool stats_readback = false;
+    // Clusters hidden behind others are not drawn (G3d). Needs `enabled` and `gpu_culling` (else ignored, with a line in
+    // the log) and a device with the GPU cut and ambient occlusion's formats (Renderer3DCapabilities::occlusion_culling).
+    // The picture is the one without it; what changes is the work. Off by default: it adds a first draw of last
+    // frame's visible clusters and a depth pyramid, which pay only where much of the scene is hidden.
+    Occlusion3D occlusion{};
 };
 
 class Scene3D {

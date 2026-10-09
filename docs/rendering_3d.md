@@ -555,3 +555,20 @@ passes and copies; a cut that passes it is cut short, never written out of bound
 (`clusters_drawn`, `triangles`, `cluster_overflow`, `cluster_triangles_all`); without it those are 0 and `draws`, `shadow_draws` count the multi-draws.
 `Renderer3D::read_cluster_picks` lists the clusters it chose. `stats().cluster_gpu` says which cut a render made.
 `KIN_GPU_CLUSTERS=0` forces the CPU cut. Alpha-blended copies are never cut.
+
+**Occlusion culling** (`scene.lod.occlusion = {.enabled = true}`; off by default; `Renderer3DCapabilities::occlusion_culling`). Clusters hidden
+behind other geometry are not drawn. It needs the selection, the GPU cut and clustered meshes (else it is ignored, with one line in the log), and the picture
+is the one without it, to the byte in every test (a slit narrower than a pixel between two pieces of wall can be seen through by a multisampled picture, and
+not by the depth the test reads: 78 bytes of a 160 x 120 picture in the one case measured). It is the standard two-pass method: the clusters
+that showed last frame (a history of one word a cluster, per view) are drawn first, with the frame's opaque meshes, into a depth; a pyramid of its farthest
+depths (three compute passes) is built; every other cluster is tested against it, this frame's own depth, so that what comes into view
+(a turn, a door, a moving copy) is never culled; the rest is drawn. A wrong history only costs speed: `View3D::reset_history()`, a resize and
+a change of the scene's clustered draws start it empty. With a pre-pass (ambient occlusion, contact shadows or temporal anti-aliasing on) the pre-pass is made in
+two halves and nothing is drawn twice; without one a depth-only pass of the first set is the price, because the multisampled main depth cannot be
+sampled. The shadow maps are not culled (a caster hidden from the camera still shadows what shows), nor the overlay, and meshes with a shader of their own are no occluders.
+`depth_margin` (relative, 0.001) and `pixel_margin` (1) widen the test a little. `stats()` has `occlusion`, `occlusion_levels`, `occlusion_dispatches`
+and, with `stats_readback`, `clusters_first_pass`, `clusters_occluded`, `triangles_occluded`, `clusters_wasted` (drawn first, found hidden after all);
+`clusters_drawn + clusters_occluded` is the cut's clusters in view. It adds fixed work (the pyramid, a second cut, a second multi-draw a draw) and wins only
+where much more is hidden than that costs: see the plan's G3d for the numbers (a wall hiding 256 copies of a 100 thousand triangle clustered mesh:
+12 to 19% of the GPU time saved; the kiln and Sponza: nothing to save, 0.03 to 0.12 ms spent). Copies drawn from CPU instance lists
+(`draw_instanced` of meshes without clusters, the crowd) are not tested.

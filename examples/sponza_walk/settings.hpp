@@ -112,6 +112,7 @@ struct Settings {
     int lod_force = -1;         // -1: by distance
     bool lod_gpu = true;        // clusters: cut in compute where the device can
     bool lod_readback = false;  // read the GPU cut's counts back each frame (waits for the GPU)
+    bool lod_occlusion = false; // clusters: those behind others are not drawn (Lod3D::occlusion; needs the GPU cut)
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};
@@ -188,7 +189,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                  .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, int(max_taa_jitter_samples))),
                  .freeze_jitter = s.taa_freeze};
     scene.lod = {.enabled = s.lod, .error_pixels = s.lod_error, .bias = s.lod_bias, .force_level = s.lod_force, .gpu_culling = s.lod_gpu,
-                 .stats_readback = s.lod && s.lod_readback};
+                 .stats_readback = s.lod && s.lod_readback, .occlusion = {.enabled = s.lod && s.lod_occlusion}};
     scene.cull = s.cull;
 }
 

@@ -76,6 +76,7 @@ constexpr SDL_GPUTextureFormat pick_format = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_
 // Ambient occlusion: the pre-pass's world normals (octahedral, two floats), and the result.
 constexpr SDL_GPUTextureFormat ao_normal_format = SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
 constexpr SDL_GPUTextureFormat ao_format = SDL_GPU_TEXTUREFORMAT_R8_UNORM;
+constexpr SDL_GPUTextureFormat hiz_format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT; // the depth pyramid (Lod3D::occlusion)
 constexpr u32 max_lights = 16;
 // Storage buffers' smallest sizes, so that the first frames of a growing scene don't each remake them.
 constexpr u32 min_instance_buffer = 64 * 1024;
@@ -338,6 +339,29 @@ SDL_GPUComputePipeline* make_buffer_compute(SDL_GPUDevice* device, std::string_v
     info.num_uniform_buffers = 1;
     info.threadcount_x = threads;
     info.threadcount_y = 1;
+    info.threadcount_z = 1;
+    return SDL_CreateGPUComputePipeline(device, &info);
+}
+
+// A compute pipeline of an embedded shader with any mix of resources (Lod3D::occlusion's).
+SDL_GPUComputePipeline* make_mixed_compute(SDL_GPUDevice* device, std::string_view file, u32 samplers, u32 readonly_buffers, u32 readwrite_buffers,
+                                           u32 readwrite_textures, u32 threads_x, u32 threads_y) {
+    const std::span<const unsigned char> code = embedded_gpu_shader(file);
+    if (code.empty()) {
+        return nullptr;
+    }
+    SDL_GPUComputePipelineCreateInfo info{};
+    info.code = code.data();
+    info.code_size = code.size();
+    info.entrypoint = "main";
+    info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    info.num_samplers = samplers;
+    info.num_readonly_storage_buffers = readonly_buffers;
+    info.num_readwrite_storage_buffers = readwrite_buffers;
+    info.num_readwrite_storage_textures = readwrite_textures;
+    info.num_uniform_buffers = 1;
+    info.threadcount_x = threads_x;
+    info.threadcount_y = threads_y;
     info.threadcount_z = 1;
     return SDL_CreateGPUComputePipeline(device, &info);
 }
@@ -625,6 +649,24 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _gpu_clusters = usable;
         }
         _capabilities.gpu_driven_clusters = _gpu_clusters;
+        // Occlusion culling (Lod3D::occlusion): the cut's second build, and the depth pyramid's two compute shaders over
+        // R32F storage textures; it also uses the pre-pass's sampled depth and the point sampler.
+        if (_gpu_clusters && _ao_available &&
+            SDL_GPUTextureSupportsFormat(handle, hiz_format, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
+            _gc_cull_occ = make_mixed_compute(handle, "cluster_cull_occ.comp.spv", 12, 5, 4, 0, 64, 1);
+            _hiz_depth_pipeline = make_mixed_compute(handle, "hiz_depth.comp.spv", 1, 0, 0, 1, 8, 8);
+            _hiz_reduce_pipeline = make_mixed_compute(handle, "hiz_reduce.comp.spv", 1, 0, 0, 4, 16, 16);
+            try {
+                if (_gc_cull_occ && _hiz_depth_pipeline && _hiz_reduce_pipeline) {
+                    for (GpuTexture& spare : _hiz_spare) {
+                        spare = device.create_target(1, 1, hiz_format, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+                    }
+                    _occlusion_available = true;
+                }
+            } catch (const std::exception&) {
+            }
+        }
+        _capabilities.occlusion_culling = _occlusion_available;
         if (!_gpu_clusters) {
             KIN_LOG_INFO("render", allowed ? "3D: cluster cut in compute not available on this device: the CPU cuts" : "3D: cluster cut in compute turned off (KIN_GPU_CLUSTERS=0): the CPU cuts");
         }
@@ -686,7 +728,7 @@ GpuRenderer3D::~GpuRenderer3D() {
     if (_environment_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _environment_sampler);
     }
-    for (SDL_GPUComputePipeline* compute : {_filter_pipeline, _gtao_pipeline, _ao_blur_pipeline, _contact_pipeline, _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather}) {
+    for (SDL_GPUComputePipeline* compute : {_filter_pipeline, _gtao_pipeline, _ao_blur_pipeline, _contact_pipeline, _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline, _hiz_reduce_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
@@ -752,6 +794,18 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                                      .blend = GpuBlendMode::Replace,
                                                      .layout = GpuVertexLayout::MeshVertices,
                                                      .depth_stencil = _shadow_format,
+                                                     .depth = GpuDepthTest::TestWrite,
+                                                     .cull = cull ? GpuCull::Back : GpuCull::None,
+                                                     .depth_only = true});
+    }
+    if (pass == Pass::Occluder) {
+        // Lod3D::occlusion's depth of the frame's opaque meshes, when no pre-pass draws one: the shadow pass's shaders (a
+        // cut-out's discard included) into the single-sample depth the pyramid is built from.
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
+                                                     .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+                                                     .blend = GpuBlendMode::Replace,
+                                                     .layout = GpuVertexLayout::MeshVertices,
+                                                     .depth_stencil = _ao_depth_format,
                                                      .depth = GpuDepthTest::TestWrite,
                                                      .cull = cull ? GpuCull::Back : GpuCull::None,
                                                      .depth_only = true});
@@ -1186,6 +1240,10 @@ bool GpuRenderer3D::make_targets(GpuView3D& view) {
         view._pick = std::move(pick);
         view._pick_depth = std::move(pick_depth);
         release_taa(view); // sized for the old targets
+        view._hiz = {};    // Lod3D::occlusion's pyramid and depth are sized for them too, and the history of clusters is of no use
+        view._hiz_levels = 0;
+        view._occ_depth = {};
+        view._occ_reset = true;
         view._samples = samples;
         view._hdr = hdr;
         view._format = format;
@@ -1830,6 +1888,9 @@ struct GpuRenderer3D::FrameCtx {
     const GpuTexture* shown = nullptr;         // the picture after the temporal resolve
     std::array<LodView, 2> lod{};              // Scene3D::lod's choosing, for the scene and the overlay
     bool gpu_clusters = false;                 // clustered meshes are cut in compute this render
+    bool occlusion = false;                    // Lod3D::occlusion: the cut runs in two passes (the first drawn before the pyramid is built)
+    bool occlusion_second = false;             // and the second is recorded
+    bool occlusion_tests = false;              // the second pass tests against a pyramid (else it keeps every cluster the first pass did not draw)
 };
 
 void GpuRenderer3D::ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum, SDL_GPUBufferUsageFlags usage) {
@@ -2162,7 +2223,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     }
     if (any_clusters) {
         ctx.gpu_clusters = _gpu_clusters && ctx.scene.lod.gpu_culling;
+        ctx.occlusion = ctx.gpu_clusters && ctx.scene.lod.occlusion.enabled && _occlusion_available;
         cut_clusters(ctx, _owner->_jobs);
+        if (!ctx.gpu_clusters) {
+            ctx.occlusion = false;
+        }
+    }
+    if (ctx.scene.lod.occlusion.enabled && !ctx.occlusion) {
+        warn_once(_occlusion_warned, "3D: occlusion culling asked for, but it needs Lod3D::enabled and gpu_culling, clustered meshes, and a device that can: off");
     }
 
     // The copies, straight into the upload memory; alpha-blended ones furthest first.
@@ -2497,6 +2565,12 @@ struct CullParams {
     u32 range[4];
     u32 sizes[4];
 };
+// ... and cluster_cull_occ.comp's, which adds the pyramid's view-projection, its size and levels, and the pass.
+struct CullParamsOcc : CullParams {
+    f32 view_projection[16];
+    f32 screen[4]; // x, y the pyramid's base size, z its levels, w the relative depth margin
+    u32 occ[4];    // x the pass (1, 2), y where the statistics start in the counts, z the test is on, w the pixel margin
+};
 struct GcJob {
     u32 slot, scene_caster, visible, first_cluster;
     f32 scale;
@@ -2524,8 +2598,8 @@ void dispatch_rows(SDL_GPUComputePass* pass, u64 groups, u32& row) {
 
 } // namespace
 
-SDL_GPUBuffer* GpuRenderer3D::cluster_index_buffer() const {
-    return _gc.active && _gc_indices ? _gc_indices->handle() : _cluster_indices ? _cluster_indices->handle() : nullptr;
+SDL_GPUBuffer* GpuRenderer3D::cluster_index_buffer(u32 set) const {
+    return _gc.active && _gcb[set].indices ? _gcb[set].indices->handle() : _cluster_indices ? _cluster_indices->handle() : nullptr;
 }
 
 // The GPU cut's set-up on the CPU: the copies to cut as a table, the sizes of the buffers; the compute is recorded by
@@ -2592,17 +2666,89 @@ void GpuRenderer3D::cut_clusters_gpu(FrameCtx& ctx, std::size_t count) {
         _device->upload_storage_buffer(_gc_jobs->handle(), 0, job_bytes, gc.job_data.data(), /*cycle=*/true);
         const u64 elements = clusters * views + 1;
         constexpr SDL_GPUBufferUsageFlags read_write = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
-        ensure_buffer(_gc_scan_data, static_cast<u32>(elements * 4), 64 * 1024, read_write);
-        ensure_buffer(_gc_blocks, static_cast<u32>(((elements + 1023) / 1024) * 4), 4096, read_write);
-        ensure_buffer(_gc_args_buffer, static_cast<u32>(views * count * 20), 4096, SDL_GPU_BUFFERUSAGE_INDIRECT | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
-        ensure_buffer(_gc_list, static_cast<u32>(queued * 4), 64 * 1024, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+        ensure_buffer(_gcb[0].scan, static_cast<u32>(elements * 4), 64 * 1024, read_write);
+        ensure_buffer(_gcb[0].blocks, static_cast<u32>(((elements + 1023) / 1024) * 4), 4096, read_write);
+        ensure_buffer(_gcb[0].args, static_cast<u32>(views * count * 20), 4096, SDL_GPU_BUFFERUSAGE_INDIRECT | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+        ensure_buffer(_gcb[0].list, static_cast<u32>(queued * 4), 64 * 1024, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
         // The counters (eight statistics, then a queue's length each), zeroed by the upload.
         const u32 counts_bytes = static_cast<u32>((8 + gc.dispatches.size()) * 4);
-        ensure_buffer(_gc_counts, counts_bytes, 1024, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+        ensure_buffer(_gcb[0].counts, counts_bytes, 1024, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
         gc.zeros.assign(counts_bytes, 0);
-        _device->upload_storage_buffer(_gc_counts->handle(), 0, counts_bytes, gc.zeros.data(), /*cycle=*/true);
-        ensure_buffer(_gc_indices, static_cast<u32>(room * 12), 1024 * 1024, SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+        _device->upload_storage_buffer(_gcb[0].counts->handle(), 0, counts_bytes, gc.zeros.data(), /*cycle=*/true);
+        ensure_buffer(_gcb[0].indices, static_cast<u32>(room * 12), 1024 * 1024, SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
         gc.table_bytes = job_bytes;
+        gc.occlusion = false;
+        if (ctx.occlusion) {
+            // Lod3D::occlusion (G3d). The history of which clusters showed last frame has a word for each cluster of each copy of
+            // each clustered draw of the scene, in the order of the draws; a draw that comes or goes (or a mesh or a count that
+            // changes) makes a new layout, and a new layout starts from nothing showing (the first pass then draws nothing and the
+            // second tests everything, as in a first frame). A stale history costs speed, never a wrong picture.
+            GpuView3D& view = *ctx.view;
+            std::vector<GpuView3D::OccRegion> layout;
+            u64 words = 0;
+            for (DrawRef& ref : _refs) {
+                if (!ref.clustered || ref.scene != 0) {
+                    continue;
+                }
+                const u32 per_copy = static_cast<u32>(ref.mesh->clusters->clusters.size());
+                layout.push_back({0, static_cast<u32>(ref.draw - ctx.scenes[0]->draws().data()), ref.mesh, ref.draw->count, per_copy});
+                ref.hist_first = static_cast<u32>(std::min<u64>(words, ~0u));
+                words += static_cast<u64>(ref.draw->count) * per_copy;
+            }
+            constexpr u64 max_history_words = 32'000'000;
+            if (words == 0 || words > max_history_words) {
+                KIN_LOG_WARN("render", "3D: occlusion culling: too many clusters in the scene's copies for the history (32 M): off");
+                ctx.occlusion = false;
+            } else {
+                const u32 history_bytes = static_cast<u32>(words * 4);
+                const bool same = layout == view._occ_layout && !view._occ_reset && view._occ_history[0] && view._occ_history[1] &&
+                                  view._occ_words == words;
+                if (!same) {
+                    constexpr SDL_GPUBufferUsageFlags read_write = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
+                    for (std::shared_ptr<GpuBuffer>& h : view._occ_history) {
+                        if (!h || h->size() < history_bytes) {
+                            h = std::make_shared<GpuBuffer>(_device->create_buffer(read_write, nullptr, std::max(history_bytes, 1024u)));
+                        }
+                        _device->upload_storage_buffer(h->handle(), 0, history_bytes, nullptr, /*cycle=*/false);
+                    }
+                    view._occ_layout = std::move(layout);
+                    view._occ_words = static_cast<u32>(words);
+                    view._occ_reset = false;
+                    view._occ_read = 0;
+                }
+                gc.job_history.resize(count);
+                for (std::size_t j = 0; j < count; ++j) {
+                    const ClusterJob& job = _cluster_jobs[j];
+                    const DrawRef& ref = _refs[job.ref];
+                    gc.job_history[j] = ref.hist_first + job.copy * static_cast<u32>(ref.mesh->clusters->clusters.size());
+                }
+                ensure_buffer(_gc_job_history, static_cast<u32>(count * 4), 4096, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+                _device->upload_storage_buffer(_gc_job_history->handle(), 0, static_cast<u32>(count * 4), gc.job_history.data(), /*cycle=*/true);
+                // The second pass: the camera's view alone, so queues and rooms for one view.
+                gc.dispatches_second = gc.dispatches;
+                u64 queued_second = 0;
+                for (GcDispatch& d : gc.dispatches_second) {
+                    d.queue = static_cast<u32>(queued_second);
+                    d.queue_size = d.threads;
+                    queued_second += d.queue_size;
+                }
+                const u64 room_second = std::clamp<u64>(std::min<u64>(ctx.scene.lod.max_cluster_triangles, bound), 1, 100'000'000);
+                constexpr SDL_GPUBufferUsageFlags read_write = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
+                GcBuffers& second = _gcb[1];
+                ensure_buffer(second.scan, static_cast<u32>((clusters + 1) * 4), 64 * 1024, read_write);
+                ensure_buffer(second.blocks, static_cast<u32>(((clusters + 1 + 1023) / 1024) * 4), 4096, read_write);
+                ensure_buffer(second.args, static_cast<u32>(count * 20), 4096, SDL_GPU_BUFFERUSAGE_INDIRECT | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+                ensure_buffer(second.list, static_cast<u32>(queued_second * 4), 64 * 1024, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+                // The counters, and after the queues' lengths four statistics (clusters and triangles occluded, then wasted).
+                const u32 second_counts = static_cast<u32>((8 + gc.dispatches_second.size() + 4) * 4);
+                ensure_buffer(second.counts, second_counts, 1024, read_write);
+                gc.zeros.assign(second_counts, 0);
+                _device->upload_storage_buffer(second.counts->handle(), 0, second_counts, gc.zeros.data(), /*cycle=*/true);
+                ensure_buffer(second.indices, static_cast<u32>(room_second * 12), 1024 * 1024, SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+                gc.room_second = static_cast<u32>(room_second);
+                gc.occlusion = true;
+            }
+        }
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: the cluster cut in compute could not allocate: the CPU cuts", (LogFields{{.name = "reason", .value = e.what()}}));
         ctx.gpu_clusters = false;
@@ -2620,7 +2766,142 @@ void GpuRenderer3D::cut_clusters_gpu(FrameCtx& ctx, std::size_t count) {
     stats.cluster_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
-void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
+// The depth pyramid of Lod3D::occlusion from a single-sample depth (the pre-pass's, or the occluder pass's): a first level a
+// quarter of the depth's size (4 x 4 pixels a texel), then each half the one before until a level is at most 2 x 2, the
+// farthest depth (reverse Z: the smallest) of what it covers. A pass makes the first level and a pass each four more.
+bool GpuRenderer3D::build_depth_pyramid(FrameCtx& ctx, const GpuTexture& depth) {
+    GpuView3D& view = *ctx.view;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    ctx.occlusion_tests = false;
+    const u32 w = depth.width(), h = depth.height();
+    std::array<std::pair<u32, u32>, GpuView3D::max_hiz_levels> size{};
+    u32 levels = 0;
+    for (u32 lw = (w + 3) / 4, lh = (h + 3) / 4;; lw = (lw + 1) / 2, lh = (lh + 1) / 2) {
+        size[levels++] = {lw, lh};
+        if ((lw <= 2 && lh <= 2) || levels == GpuView3D::max_hiz_levels) {
+            break;
+        }
+    }
+    if (view._hiz_levels != levels || !view._hiz[0] || view._hiz[0].width() != size[0].first || view._hiz[0].height() != size[0].second) {
+        try {
+            view._hiz = {};
+            for (u32 i = 0; i < levels; ++i) {
+                view._hiz[i] = _device->create_target(size[i].first, size[i].second, hiz_format,
+                                                      SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+            }
+            view._hiz_levels = levels;
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: occlusion culling: the depth pyramid could not be made", (LogFields{{.name = "reason", .value = e.what()}}));
+            view._hiz = {};
+            view._hiz_levels = 0;
+            return false;
+        }
+    }
+    u32 dispatches = 0;
+    const SDL_GPUTextureSamplerBinding source{depth.handle(), _point_sampler};
+    const u32 first[4] = {w, h, size[0].first, size[0].second};
+    if (!compute_pass(commands, _hiz_depth_pipeline, view._hiz[0], std::span<const SDL_GPUTextureSamplerBinding>{&source, 1}, first, sizeof(first))) {
+        return false;
+    }
+    ++dispatches;
+    for (u32 base = 0; base + 1 < levels; base += 4) {
+        SDL_GPUStorageTextureReadWriteBinding out[4];
+        u32 sizes[20] = {};
+        sizes[0] = size[base].first;
+        sizes[1] = size[base].second;
+        for (u32 k = 0; k < 4; ++k) {
+            const u32 i = base + 1 + k;
+            const bool real = i < levels;
+            out[k] = {real ? view._hiz[i].handle() : _hiz_spare[k].handle(), 0, 0, false};
+            sizes[4 * (k + 1)] = real ? size[i].first : 0;
+            sizes[4 * (k + 1) + 1] = real ? size[i].second : 0;
+        }
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, out, 4, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        const SDL_GPUTextureSamplerBinding level{view._hiz[base].handle(), _point_sampler};
+        SDL_BindGPUComputePipeline(pass, _hiz_reduce_pipeline);
+        SDL_BindGPUComputeSamplers(pass, 0, &level, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, sizes, sizeof(sizes));
+        SDL_DispatchGPUCompute(pass, (size[base].first + 15) / 16, (size[base].second + 15) / 16, 1);
+        SDL_EndGPUComputePass(pass);
+        ++dispatches;
+    }
+    ctx.stats.occlusion_dispatches += dispatches;
+    ctx.stats.occlusion_levels = levels;
+    ctx.occlusion_tests = true;
+    return true;
+}
+
+// Lod3D::occlusion without a pre-pass: the frame's opaque meshes (and the first pass's clusters) into a depth of their own,
+// the pyramid from it, and the second pass of the cut. With a pre-pass, prepass() does this between its two halves.
+void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    SDL_GPUBuffer* storage = ctx.storage;
+    bool drawn = false;
+    const u32 w = static_cast<u32>(view->_size.x), h = static_cast<u32>(view->_size.y);
+    if (!view->_occ_depth || view->_occ_depth.width() != w || view->_occ_depth.height() != h) {
+        try {
+            view->_occ_depth = _device->create_target(w, h, _ao_depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: occlusion culling: the occluder depth could not be made", (LogFields{{.name = "reason", .value = e.what()}}));
+            view->_occ_depth = {};
+        }
+    }
+    if (view->_occ_depth) {
+        const SDL_GPUDepthStencilTargetInfo depth = depth_target(view->_occ_depth.handle(), SDL_GPU_STOREOP_STORE, /*cycle=*/true);
+        if (SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth)) {
+            drawn = true;
+            set_viewport(pass, view->_size.x, view->_size.y);
+            DrawUniforms u{};
+            std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+            const std::array<SDL_GPUBuffer*, 2> buffers{storage, storage}; // the shadow vertex shaders' second buffer is a list this does not use
+            DrawBinder binder{pass};
+            for (const u32 index : _order) {
+                const DrawRef& ref = _refs[index];
+                if (ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || dynamic_cast<const GpuMaterialShader3D*>(ref.draw->material.shader.backend().get())) {
+                    continue; // a shader of its own may discard where the pyramid would take the mesh for solid
+                }
+                const Material3D& occluder = ref.draw->material;
+                const bool cutout = occluder.blend == Blend3D::Mask;
+                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided, Pass::Occluder, cutout);
+                if (!p) {
+                    continue;
+                }
+                binder.bind_pipeline(p, buffers.data(), 2);
+                if (ref.clustered && !cluster_index_buffer(0)) {
+                    continue;
+                }
+                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index_buffer(0) : nullptr);
+                if (cutout) {
+                    bind_cutout(commands, pass, occluder);
+                }
+                if (ref.clustered) {
+                    draw_cluster_indirect(ref, commands, pass, u, 0, 0); // the first pass's clusters
+                    continue;
+                }
+                for (u32 l = 0; l < ref.levels; ++l) {
+                    if (ref.level_seen[l] == 0) {
+                        continue;
+                    }
+                    u.first[0] = ref.level_first[l];
+                    u.first[1] = 0;
+                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                    SDL_DrawGPUIndexedPrimitives(pass, ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index, 0, 0);
+                }
+            }
+            SDL_EndGPURenderPass(pass);
+        }
+    }
+    if (drawn) {
+        build_depth_pyramid(ctx, view->_occ_depth);
+    }
+    cluster_pass_gpu(ctx, 2);
+}
+
+void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx, u32 phase) {
     GcFrame& gc = _gc;
     if (!ctx.gpu_clusters || !gc.active || !ctx.storage) {
         return;
@@ -2628,7 +2909,16 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
     const auto started = std::chrono::steady_clock::now();
     SDL_GPUCommandBuffer* commands = ctx.commands;
     const Lights3D& lights = ctx.scene.lights;
-    CullParams p{};
+    GpuView3D& view = *ctx.view;
+    const bool occ = phase != 0;
+    // Set 0 is the whole cut (all views); with occlusion, phase 1 makes it (its camera view the first pass's: what showed
+    // last frame) and phase 2 makes set 1: the camera's view alone, the rest tested against the pyramid.
+    const u32 set = phase == 2 ? 1u : 0u;
+    GcBuffers& buf = _gcb[set];
+    const std::vector<GcDispatch>& plan = phase == 2 ? gc.dispatches_second : gc.dispatches;
+    const u32 views = phase == 2 ? 1u : gc.views;
+    const u32 room = phase == 2 ? gc.room_second : gc.room;
+    CullParamsOcc p{};
     for (u32 s = 0; s < 2; ++s) {
         if (!ctx.scenes[s]) {
             continue;
@@ -2671,20 +2961,46 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
     std::memcpy(p.area_hi, hi, sizeof(hi));
     p.shadow[0] = ctx.cascades;
     p.shadow[1] = ctx.shadows ? 1u : 0u;
-    const u32 views = gc.views, jobs = gc.jobs, total = gc.clusters;
+    const Occlusion3D& setting = ctx.scene.lod.occlusion;
+    if (occ) {
+        std::memcpy(p.view_projection, ctx.drawn[0].m, sizeof(p.view_projection));
+        const f32 screen[4] = {static_cast<f32>(view._size.x), static_cast<f32>(view._size.y), static_cast<f32>(view._hiz_levels),
+                               std::clamp(setting.depth_margin, 0.0f, 0.5f)};
+        std::memcpy(p.screen, screen, sizeof(screen));
+        p.occ[0] = phase;
+        p.occ[1] = 8 + static_cast<u32>(plan.size());
+        p.occ[2] = phase == 2 && ctx.occlusion_tests ? 1u : 0u;
+        p.occ[3] = std::min(setting.pixel_margin, 64u);
+    }
+    const u32 jobs = gc.jobs, total = gc.clusters;
     const u64 elements = static_cast<u64>(total) * views;
     u32 dispatches = 0;
     u32 row = 0;
 
     // The cull: a count of triangles a (view, cluster), 0 where not drawn.
     {
-        const SDL_GPUStorageBufferReadWriteBinding rw[3] = {{_gc_scan_data->handle(), /*cycle=*/true}, {_gc_list->handle(), true}, {_gc_counts->handle(), false}};
-        if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, rw, 3)) {
-            SDL_BindGPUComputePipeline(pass, _gc_cull);
+        SDL_GPUStorageBufferReadWriteBinding rw[4] = {{buf.scan->handle(), /*cycle=*/true}, {buf.list->handle(), true}, {buf.counts->handle(), false}, {}};
+        u32 rw_count = 3;
+        if (occ) {
+            rw[3] = {view._occ_history[view._occ_read ^ 1]->handle(), false};
+            rw_count = 4;
+        }
+        if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, rw, rw_count)) {
+            SDL_BindGPUComputePipeline(pass, occ ? _gc_cull_occ : _gc_cull);
+            if (occ) {
+                // The pyramid's levels (all of them dummies in the first pass, which does not look at it).
+                SDL_GPUTextureSamplerBinding levels[GpuView3D::max_hiz_levels];
+                for (u32 i = 0; i < GpuView3D::max_hiz_levels; ++i) {
+                    const bool have = phase == 2 && ctx.occlusion_tests && i < view._hiz_levels;
+                    levels[i] = {have ? view._hiz[i].handle() : _owner->_white.handle(), have ? _point_sampler : _owner->_sampler_linear};
+                }
+                SDL_BindGPUComputeSamplers(pass, 0, levels, GpuView3D::max_hiz_levels);
+            }
             u32 number = 0;
-            for (const GcDispatch& d : gc.dispatches) {
-                SDL_GPUBuffer* ro[3] = {d.chunk->table, _gc_jobs->handle(), ctx.storage};
-                SDL_BindGPUComputeStorageBuffers(pass, 0, ro, 3);
+            for (const GcDispatch& d : plan) {
+                SDL_GPUBuffer* ro[5] = {d.chunk->table, _gc_jobs->handle(), ctx.storage, occ ? _gc_job_history->handle() : nullptr,
+                                        occ ? view._occ_history[view._occ_read]->handle() : nullptr};
+                SDL_BindGPUComputeStorageBuffers(pass, 0, ro, occ ? 5 : 3);
                 const u64 threads = d.threads;
                 p.range[0] = d.first_job;
                 p.range[1] = 0;
@@ -2695,7 +3011,7 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
                 p.sizes[2] = gc_row;
                 p.sizes[3] = number++;
                 p.shadow[2] = d.queue;
-                SDL_PushGPUComputeUniformData(commands, 0, &p, sizeof(p));
+                SDL_PushGPUComputeUniformData(commands, 0, &p, occ ? sizeof(CullParamsOcc) : sizeof(CullParams));
                 dispatch_rows(pass, (threads + gc_threads - 1) / gc_threads, row);
                 ++dispatches;
             }
@@ -2705,7 +3021,7 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
     // The scan: block sums, their scan, the blocks scanned and offset.
     const u32 blocks = static_cast<u32>((elements + 1 + 1023) / 1024);
     for (u32 mode = 0; mode < 3; ++mode) {
-        const SDL_GPUStorageBufferReadWriteBinding rw[2] = {{_gc_scan_data->handle(), false}, {_gc_blocks->handle(), mode == 0}};
+        const SDL_GPUStorageBufferReadWriteBinding rw[2] = {{buf.scan->handle(), false}, {buf.blocks->handle(), mode == 0}};
         if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, rw, 2)) {
             SDL_BindGPUComputePipeline(pass, _gc_scan);
             const u32 u[4] = {mode, static_cast<u32>(elements), blocks, 0};
@@ -2717,12 +3033,12 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
     }
     // The indirect arguments: each (view, copy)'s run of the gathered indices.
     {
-        const SDL_GPUStorageBufferReadWriteBinding rw{_gc_args_buffer->handle(), true};
+        const SDL_GPUStorageBufferReadWriteBinding rw{buf.args->handle(), true};
         if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &rw, 1)) {
             SDL_BindGPUComputePipeline(pass, _gc_args);
-            SDL_GPUBuffer* ro[2] = {_gc_jobs->handle(), _gc_scan_data->handle()};
+            SDL_GPUBuffer* ro[2] = {_gc_jobs->handle(), buf.scan->handle()};
             SDL_BindGPUComputeStorageBuffers(pass, 0, ro, 2);
-            const u32 u[8] = {jobs, views, total, gc.room, gc_row, 0, 0, 0};
+            const u32 u[8] = {jobs, views, total, room, gc_row, 0, 0, 0};
             SDL_PushGPUComputeUniformData(commands, 0, u, sizeof(u));
             dispatch_rows(pass, (static_cast<u64>(jobs) * views + gc_threads - 1) / gc_threads, row);
             SDL_EndGPUComputePass(pass);
@@ -2731,15 +3047,15 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
     }
     // The gather: each chosen cluster's indices to their place.
     {
-        const SDL_GPUStorageBufferReadWriteBinding rw[2] = {{_gc_indices->handle(), true}, {_gc_counts->handle(), false}};
+        const SDL_GPUStorageBufferReadWriteBinding rw[2] = {{buf.indices->handle(), true}, {buf.counts->handle(), false}};
         if (SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, rw, 2)) {
             SDL_BindGPUComputePipeline(pass, _gc_gather);
             u32 number = 0;
-            for (const GcDispatch& d : gc.dispatches) {
-                SDL_GPUBuffer* ro[5] = {d.chunk->table, d.chunk->indices, _gc_scan_data->handle(), _gc_list->handle(), _gc_jobs->handle()};
+            for (const GcDispatch& d : plan) {
+                SDL_GPUBuffer* ro[5] = {d.chunk->table, d.chunk->indices, buf.scan->handle(), buf.list->handle(), _gc_jobs->handle()};
                 SDL_BindGPUComputeStorageBuffers(pass, 0, ro, 5);
                 const u32 groups = std::min(gather_groups, d.queue_size);
-                const u32 u[8] = {number++, d.queue, jobs, gc.room, total, 0, groups, 0};
+                const u32 u[8] = {number++, d.queue, jobs, room, total, 0, groups, 0};
                 SDL_PushGPUComputeUniformData(commands, 0, u, sizeof(u));
                 SDL_DispatchGPUCompute(pass, groups, 1, 1);
                 ++dispatches;
@@ -2747,26 +3063,29 @@ void GpuRenderer3D::cluster_pass_gpu(FrameCtx& ctx) {
             SDL_EndGPUComputePass(pass);
         }
     }
-    ctx.stats.cluster_dispatches = dispatches;
+    ctx.stats.cluster_dispatches += dispatches;
     ctx.stats.cluster_ms += std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count();
+    if (phase == 2) {
+        ctx.occlusion_second = true;
+    }
 }
 
 // The indirect draws of `ref`'s copies in view `view` of the GPU cut: one multi-draw over its run of arguments; a copy
 // that nothing draws there has a count of 0. The copy's slot is the argument's first instance.
 template <typename Uniforms>
-void GpuRenderer3D::draw_cluster_indirect(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, u32 view) const {
+void GpuRenderer3D::draw_cluster_indirect(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, u32 view, u32 set) const {
     if (ref.job_count == 0) {
         return;
     }
     u.first[0] = 0;
     u.first[1] = 0;
     SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-    SDL_DrawGPUIndexedPrimitivesIndirect(pass, _gc_args_buffer->handle(), (view * _gc.jobs + ref.job_first) * 20u, ref.job_count);
+    SDL_DrawGPUIndexedPrimitivesIndirect(pass, _gcb[set].args->handle(), (view * _gc.jobs + ref.job_first) * 20u, ref.job_count);
 }
 
 // Waits for the GPU (as pick does) and reads the cut's counters.
 void GpuRenderer3D::read_cluster_stats(FrameCtx& ctx) {
-    if (!_gc.active || !_gc_counts) {
+    if (!_gc.active || !_gcb[0].counts) {
         return;
     }
     if (_owner->_frame) {
@@ -2775,7 +3094,7 @@ void GpuRenderer3D::read_cluster_stats(FrameCtx& ctx) {
         _owner->end_frame();
     }
     std::vector<u8> bytes;
-    if (!_device->read_buffer(_gc_counts->handle(), 0, 24, bytes) || bytes.size() < 24) {
+    if (!_device->read_buffer(_gcb[0].counts->handle(), 0, 24, bytes) || bytes.size() < 24) {
         return;
     }
     u32 v[6];
@@ -2785,7 +3104,26 @@ void GpuRenderer3D::read_cluster_stats(FrameCtx& ctx) {
     stats.triangles += v[1]; // the main pass counted the meshes that are not cut
     stats.cluster_overflow = v[2];
     stats.cluster_triangles_all = v[5];
-    if (v[2] > 0 && !_gc_overflow_warned) {
+    if (ctx.occlusion && ctx.occlusion_second) {
+        // The second pass's clusters (set 1) add to the camera's; its four statistics follow the queues' lengths.
+        const u32 words = 8 + static_cast<u32>(_gc.dispatches_second.size()) + 4;
+        std::vector<u8> second;
+        if (_device->read_buffer(_gcb[1].counts->handle(), 0, words * 4, second) && second.size() >= words * 4u) {
+            std::vector<u32> w(words);
+            std::memcpy(w.data(), second.data(), words * 4);
+            stats.clusters_first_pass = v[0];
+            stats.clusters_drawn += w[0];
+            stats.triangles += w[1];
+            stats.cluster_overflow += w[2];
+            stats.cluster_triangles_all += w[5];
+            const u32 at = 8 + static_cast<u32>(_gc.dispatches_second.size());
+            stats.clusters_occluded = w[at];
+            stats.triangles_occluded = w[at + 1];
+            stats.clusters_wasted = w[at + 2];
+            stats.triangles_wasted = w[at + 3];
+        }
+    }
+    if (stats.cluster_overflow > 0 && !_gc_overflow_warned) {
         _gc_overflow_warned = true;
         KIN_LOG_WARN_F("render", "3D: the cluster cut passed Lod3D::max_cluster_triangles: some clusters are not drawn",
                        (LogFields{{.name = "dropped_clusters", .value = std::to_string(v[2])},
@@ -2796,7 +3134,7 @@ void GpuRenderer3D::read_cluster_stats(FrameCtx& ctx) {
 
 bool GpuRenderer3D::read_cluster_draws(IView3DBackend&, std::vector<ClusterDraw>& out) {
     out.clear();
-    if (!_gc.active || !_gc_args_buffer) {
+    if (!_gc.active || !_gcb[0].args) {
         return false;
     }
     if (_owner->_frame) {
@@ -2804,22 +3142,26 @@ bool GpuRenderer3D::read_cluster_draws(IView3DBackend&, std::vector<ClusterDraw>
         _owner->_frame->submit();
         _owner->end_frame();
     }
-    const u32 count = _gc.views * _gc.jobs;
-    std::vector<u8> bytes;
-    if (!_device->read_buffer(_gc_args_buffer->handle(), 0, count * 20, bytes) || bytes.size() < count * 20u) {
-        return false;
-    }
-    for (u32 i = 0; i < count; ++i) {
-        u32 a[5];
-        std::memcpy(a, bytes.data() + i * 20u, sizeof(a));
-        out.push_back({i / _gc.jobs, i % _gc.jobs, a[0], a[2], a[4]});
+    // With Lod3D::occlusion the second pass's draws (the camera's view, view 0) follow the first set's.
+    for (u32 set = 0; set < (_gc.occlusion ? 2u : 1u); ++set) {
+        const u32 views = set == 0 ? _gc.views : 1u;
+        const u32 count = views * _gc.jobs;
+        std::vector<u8> bytes;
+        if (!_device->read_buffer(_gcb[set].args->handle(), 0, count * 20, bytes) || bytes.size() < count * 20u) {
+            return false;
+        }
+        for (u32 i = 0; i < count; ++i) {
+            u32 a[5];
+            std::memcpy(a, bytes.data() + i * 20u, sizeof(a));
+            out.push_back({i / _gc.jobs, i % _gc.jobs, a[0], a[2], a[4]});
+        }
     }
     return true;
 }
 
 bool GpuRenderer3D::read_cluster_picks(IView3DBackend&, std::vector<ClusterPick>& out) {
     out.clear();
-    if (!_gc.active || !_gc_scan_data) {
+    if (!_gc.active || !_gcb[0].scan) {
         return false;
     }
     if (_owner->_frame) {
@@ -2827,28 +3169,33 @@ bool GpuRenderer3D::read_cluster_picks(IView3DBackend&, std::vector<ClusterPick>
         _owner->_frame->submit();
         _owner->end_frame();
     }
-    const u64 elements = static_cast<u64>(_gc.clusters) * _gc.views;
-    std::vector<u8> bytes;
-    if (!_device->read_buffer(_gc_scan_data->handle(), 0, static_cast<u32>((elements + 1) * 4), bytes) || bytes.size() < (elements + 1) * 4) {
-        return false;
-    }
-    std::vector<u32> scan(elements + 1);
-    std::memcpy(scan.data(), bytes.data(), scan.size() * 4);
-    u32 job = 0;
-    for (u64 e = 0; e < elements; ++e) {
-        const u32 n = scan[e + 1] - scan[e];
-        if (n == 0 || static_cast<u64>(scan[e]) + n > _gc.room) {
-            continue;
+    // With Lod3D::occlusion the second pass's clusters (set 1, the camera's view) are read too.
+    for (u32 set = 0; set < (_gc.occlusion ? 2u : 1u); ++set) {
+        const u32 views = set == 0 ? _gc.views : 1u;
+        const u32 room = set == 0 ? _gc.room : _gc.room_second;
+        const u64 elements = static_cast<u64>(_gc.clusters) * views;
+        std::vector<u8> bytes;
+        if (!_device->read_buffer(_gcb[set].scan->handle(), 0, static_cast<u32>((elements + 1) * 4), bytes) || bytes.size() < (elements + 1) * 4) {
+            return false;
         }
-        const u32 view = static_cast<u32>(e / _gc.clusters), g = static_cast<u32>(e % _gc.clusters);
-        while (job + 1 < _gc.jobs && _gc.bases[job + 1] <= g) {
-            ++job;
+        std::vector<u32> scan(elements + 1);
+        std::memcpy(scan.data(), bytes.data(), scan.size() * 4);
+        u32 job = 0;
+        for (u64 e = 0; e < elements; ++e) {
+            const u32 n = scan[e + 1] - scan[e];
+            if (n == 0 || static_cast<u64>(scan[e]) + n > room) {
+                continue;
+            }
+            const u32 view = static_cast<u32>(e / _gc.clusters), g = static_cast<u32>(e % _gc.clusters);
+            while (job + 1 < _gc.jobs && _gc.bases[job + 1] <= g) {
+                ++job;
+            }
+            while (job > 0 && _gc.bases[job] > g) {
+                --job;
+            }
+            const ClusterJob& j = _cluster_jobs[job];
+            out.push_back({_refs[j.ref].scene, j.scene_draw, j.copy, view, g - _gc.bases[job]});
         }
-        while (job > 0 && _gc.bases[job] > g) {
-            --job;
-        }
-        const ClusterJob& j = _cluster_jobs[job];
-        out.push_back({_refs[j.ref].scene, j.scene_draw, j.copy, view, g - _gc.bases[job]});
     }
     return true;
 }
@@ -3091,16 +3438,39 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     }
 }
 
+bool GpuRenderer3D::phase_skips(const DrawRef& ref) const {
+    if (_phase == Phase::All) {
+        return false;
+    }
+    const bool occluder = !dynamic_cast<const GpuMaterialShader3D*>(ref.draw->material.shader.backend().get());
+    return _phase == Phase::First ? !occluder : occluder && !ref.clustered;
+}
+
+u32 GpuRenderer3D::phase_parts(const DrawRef& ref) const {
+    if (_phase == Phase::All) {
+        return cluster_both;
+    }
+    const bool occluder = !dynamic_cast<const GpuMaterialShader3D*>(ref.draw->material.shader.backend().get());
+    return _phase == Phase::First ? cluster_first : occluder ? cluster_second : cluster_both;
+}
+
 // A clustered mesh's copies the camera sees, one draw each over its run of the frame's compacted indices (the
-// camera's view); `stats`, when given, counts them as the pre-pass's.
-template <typename Uniforms>
-void GpuRenderer3D::draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u,
+// camera's view); `stats`, when given, counts them as the pre-pass's. With Lod3D::occlusion the camera's clusters are in two
+// index buffers (the first pass's and the second's): `phase_parts` says which this pass draws.
+template <typename Binder, typename Uniforms>
+void GpuRenderer3D::draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Binder& binder, Uniforms& u,
                                         Render3DStats* stats) const {
     if (_gc.active) {
-        draw_cluster_indirect(ref, commands, pass, u, 0);
-        if (stats) {
-            ++stats->ao_draws;
-            stats->ao_instances += ref.level_seen[0];
+        for (u32 set = 0; set < (_gc.occlusion ? 2u : 1u); ++set) {
+            if ((phase_parts(ref) & (1u << set)) == 0) {
+                continue;
+            }
+            binder.bind_mesh(ref.mesh, cluster_index_buffer(set));
+            draw_cluster_indirect(ref, commands, pass, u, 0, set);
+            if (stats) {
+                ++stats->ao_draws;
+                stats->ao_instances += ref.level_seen[0];
+            }
         }
         return;
     }
@@ -3139,7 +3509,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     DrawBinder binder{target_pass};
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
-        if (ref.scene != which || pass_of(ref.draw->material) != Pass::Opaque) {
+        if (ref.scene != which || pass_of(ref.draw->material) != Pass::Opaque || (which == 0 && phase_skips(ref))) {
             continue;
         }
         const Material3D& occluder = ref.draw->material;
@@ -3157,7 +3527,7 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
             bind_cutout(commands, target_pass, occluder);
         }
         if (ref.clustered) {
-            draw_cluster_copies(ref, commands, target_pass, u, which == 0 ? &stats : nullptr);
+            draw_cluster_copies(ref, commands, target_pass, binder, u, which == 0 ? &stats : nullptr);
             continue;
         }
         for (u32 l = 0; l < ref.levels; ++l) {
@@ -3211,19 +3581,21 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
         target.cycle = true;
         // Reverse Z: the far plane, which the compute reads as sky.
         const SDL_GPUDepthStencilTargetInfo prepass_depth = depth_target(view->_ao_depth.handle(), SDL_GPU_STOREOP_STORE, /*cycle=*/true);
-        if (SDL_GPURenderPass* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth)) {
-            ctx.velocity_drawn = true;
+        // With Lod3D::occlusion the pre-pass is two passes: the opaque meshes and the first pass's clusters, then (once the
+        // depth pyramid is built from that and the second pass has tested the rest against it) the second pass's clusters.
+        const auto draw_all = [&](SDL_GPURenderPass* prepass, bool second) {
             set_viewport(prepass, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
             SDL_GPUBuffer* cluster_index = cluster_index_buffer();
             DrawBinder binder{prepass};
+            _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
             if (ctx.taa) {
                 draw_velocity(ctx, prepass, 0, _ao_depth_format);
             }
             for (const u32 index : _order) {
                 const DrawRef& ref = _refs[index];
-                if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque) {
+                if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
                     continue;
                 }
                 const Material3D& occluder = ref.draw->material;
@@ -3241,7 +3613,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                     bind_cutout(commands, prepass, occluder);
                 }
                 if (ref.clustered) {
-                    draw_cluster_copies(ref, commands, prepass, u, &stats);
+                    draw_cluster_copies(ref, commands, prepass, binder, u, &stats);
                     continue;
                 }
                 for (u32 l = 0; l < ref.levels; ++l) {
@@ -3255,7 +3627,26 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                     stats.ao_instances += ref.level_seen[l];
                 }
             }
+            _phase = Phase::All;
+        };
+        if (SDL_GPURenderPass* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth)) {
+            ctx.velocity_drawn = true;
+            draw_all(prepass, /*second=*/false);
             SDL_EndGPURenderPass(prepass);
+            if (ctx.occlusion) {
+                build_depth_pyramid(ctx, view->_ao_depth);
+                cluster_pass_gpu(ctx, 2);
+                SDL_GPUColorTargetInfo keep = target;
+                keep.load_op = SDL_GPU_LOADOP_LOAD;
+                keep.cycle = false;
+                SDL_GPUDepthStencilTargetInfo keep_depth = prepass_depth;
+                keep_depth.load_op = SDL_GPU_LOADOP_LOAD;
+                keep_depth.cycle = false;
+                if (SDL_GPURenderPass* rest = SDL_BeginGPURenderPass(commands, &keep, 1, &keep_depth)) {
+                    draw_all(rest, /*second=*/true);
+                    SDL_EndGPURenderPass(rest);
+                }
+            }
             if (!ctx.taa) {
                 ctx.main_projection = scene.camera.projection_matrix(ctx.aspect);
             }
@@ -3411,8 +3802,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         }
         // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices.
         if (ref.clustered && _gc.active) {
-            draw_cluster_indirect(ref, commands, pass, draw_uniforms, 0);
-            ++stats.draws;
+            // With Lod3D::occlusion the camera's clusters are in two index buffers: those drawn before the pyramid, and the rest.
+            for (u32 set = 0; set < (_gc.occlusion ? 2u : 1u); ++set) {
+                binder.bind_mesh(ref.mesh, cluster_index_buffer(set));
+                draw_cluster_indirect(ref, commands, pass, draw_uniforms, 0, set);
+                ++stats.draws;
+            }
             stats.instances += ref.level_seen[0];
             continue;
         }
@@ -3522,7 +3917,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                     bind_cutout(commands, picking, picked);
                 }
                 if (ref.clustered) {
-                    draw_cluster_copies(ref, commands, picking, u, nullptr);
+                    draw_cluster_copies(ref, commands, picking, binder, u, nullptr);
                     continue;
                 }
                 for (u32 l = 0; l < ref.levels; ++l) {
@@ -3555,9 +3950,12 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     order_draws(ctx);
     choose_point_lights(ctx);
     begin_commands(ctx);
-    cluster_pass_gpu(ctx);
+    cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
     shadow_pass(ctx);
     prepass(ctx);
+    if (ctx.occlusion && !ctx.occlusion_second) {
+        occluder_pass(ctx); // no pre-pass made the depth: a pass of its own
+    }
     overlay_velocity(ctx);
     if (!main_pass(ctx)) {
         return false;
@@ -3570,6 +3968,10 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
         finish_view(ctx.commands, *view, view->_scene, /*plain=*/false);
     }
     resume_2d();
+    if (ctx.occlusion && ctx.occlusion_second) {
+        view->_occ_read ^= 1; // what the second pass wrote is what the next render's first pass reads
+        stats.occlusion = true;
+    }
     if (ctx.gpu_clusters && scene.lod.stats_readback) {
         read_cluster_stats(ctx);
     }

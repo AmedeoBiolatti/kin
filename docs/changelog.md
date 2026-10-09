@@ -48,6 +48,9 @@ releases may change APIs.
   frustum culling and the gathering of the chosen triangles run in compute where the device can
   (`Lod3D::gpu_culling`), with the picture the CPU cut makes and indirect draws: `render()` of the kiln costs 0.05 ms
   instead of 0.4 to 0.9.
+- 3D (experimental): occlusion culling for clustered meshes (`Lod3D::occlusion`), a two-pass test against a depth pyramid built from this frame's
+  own depth, so the picture is the one without it; off by default, since it pays only where much more is hidden than its fixed work costs (a wall hiding
+  hundreds of heavy copies); a `hidden` reference scene and Sponza Walk's `--preset occlusion`.
 - `decode_image()`: an image from a file's bytes in memory.
 - 3D sound: `AudioEngine::set_listener_3d()`, `set_position_3d()` and
   `AudioPlayRequest::position_3d`: pan by direction from where the listener

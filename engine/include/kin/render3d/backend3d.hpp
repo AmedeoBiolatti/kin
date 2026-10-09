@@ -39,6 +39,8 @@ struct Renderer3DCapabilities {
     // Whether Scene3D::lod's cluster cut can run in compute (Lod3D::gpu_culling): compute with storage buffers read and
     // written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
     bool gpu_driven_clusters = false;
+    // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
+    bool occlusion_culling = false;
 };
 
 struct View3DOptions {
@@ -131,6 +133,16 @@ struct Render3DStats {
     u32 cluster_dispatches = 0;
     u32 cluster_overflow = 0;
     u64 cluster_triangles_all = 0;
+    // With Lod3D::occlusion (and the GPU cut): `occlusion` is true when it ran this render; `occlusion_levels` the depth
+    // pyramid's levels; `occlusion_dispatches` the compute dispatches that built it. With stats_readback: the clusters
+    // that were in the cut and in view but behind this frame's depth (`clusters_occluded`, `triangles_occluded`: not
+    // drawn), the clusters drawn in the first pass because they showed last frame and were hidden after all
+    // (`clusters_wasted`, `triangles_wasted`), and the clusters of the first pass (`clusters_first_pass`).
+    bool occlusion = false;
+    u32 occlusion_levels = 0;
+    u32 occlusion_dispatches = 0;
+    u32 clusters_occluded = 0, clusters_wasted = 0, clusters_first_pass = 0;
+    u64 triangles_occluded = 0, triangles_wasted = 0;
     f64 cpu_ms = 0.0;  // render()'s own time on the CPU
 };
 

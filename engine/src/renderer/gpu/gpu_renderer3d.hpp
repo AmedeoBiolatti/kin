@@ -138,7 +138,10 @@ public:
     Texture texture() const override;
     Vec2i size() const override { return _size; }
     u32 samples() const override { return _samples; }
-    void reset_history() override { _taa_reset_asked = true; }
+    void reset_history() override {
+        _taa_reset_asked = true;
+        _occ_reset = true;
+    }
 
 private:
     friend class GpuRenderer3D;
@@ -176,6 +179,25 @@ private:
     std::array<Mat4f, 2> _taa_prior{}; // the scene's and the overlay's view-projections last frame (no jitter)
     GpuCopyHistory _taa_last, _taa_now;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
+    // With Lod3D::occlusion (made by the first render that asks): the depth pyramid (level 0 a quarter of the view's
+    // size, each next half of the one before; `_hiz_levels` of them), the depth it is built from when no pre-pass makes
+    // one, and the history of which clusters showed last frame (a word each, in two buffers swapped each render; the
+    // draws' places in it are `_occ_layout`).
+    static constexpr u32 max_hiz_levels = 12;
+    std::array<GpuTexture, max_hiz_levels> _hiz;
+    u32 _hiz_levels = 0;
+    GpuTexture _occ_depth;
+    struct OccRegion {
+        u32 scene = 0, draw = 0;
+        const void* mesh = nullptr;
+        u32 copies = 0, per_copy = 0;
+        bool operator==(const OccRegion&) const = default;
+    };
+    std::array<std::shared_ptr<GpuBuffer>, 2> _occ_history;
+    u32 _occ_read = 0;
+    u32 _occ_words = 0; // clusters the history covers
+    std::vector<OccRegion> _occ_layout;
+    bool _occ_reset = true; // View3D::reset_history(), a resize: the history is dropped
 };
 
 class GpuRenderer3D final : public IRenderer3DBackend {
@@ -201,7 +223,7 @@ public:
 
 private:
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass };
+    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
@@ -365,6 +387,7 @@ private:
         // compacted indices (`levels` is 1: the copies keep to the seen-then-sun order).
         bool clustered = false;
         u32 job_first = 0, job_count = 0; // the GPU cut's copies of it: a run of the job table
+        u32 hist_first = 0;               // with Lod3D::occlusion: where its copies' clusters start in the view's history
     };
     struct Piece {
         u32 ref = 0;
@@ -395,8 +418,18 @@ private:
         std::array<u8, cluster_views> same_as{}; // 1 + the view this one repeats, 0 if none
     };
     std::vector<ClusterJob> _cluster_jobs;
-    template <typename Uniforms>
-    void draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, Render3DStats* stats) const;
+    // The camera's view of `ref`'s clustered copies, from the passes `phase_parts` says (all, but in the pre-pass of Lod3D::occlusion);
+    // `stats`, when given, counts them as the pre-pass's.
+    template <typename Binder, typename Uniforms>
+    void draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Binder& binder, Uniforms& u,
+                             Render3DStats* stats) const;
+    // Lod3D::occlusion splits the pre-pass in two: `First` draws the opaque meshes and the first pass's clusters, from which the
+    // pyramid is built; `Second` the second pass's. A mesh with a shader of its own (which may discard what the pyramid
+    // would count as covered) is no occluder: it waits for `Second`, all of its clusters. `All` is every other draw.
+    enum class Phase : u8 { All, First, Second };
+    Phase _phase = Phase::All;
+    bool phase_skips(const DrawRef& ref) const;
+    u32 phase_parts(const DrawRef& ref) const;
     std::vector<std::array<ClusterRun, cluster_views>> _cluster_runs; // by instance slot (the clustered copies')
     std::shared_ptr<GpuBuffer> _cluster_indices;                      // the frame's compacted indices (an index buffer); grows
     // Cuts every clustered copy this render sees and uploads the compacted indices (after cull_and_upload has placed the copies).
@@ -404,29 +437,49 @@ private:
     void cut_clusters(FrameCtx& ctx, JobSystem* jobs);
     void cut_clusters_gpu(FrameCtx& ctx, std::size_t count);
     // The GPU cut's compute passes (before the passes that draw): cull, scan, arguments, gather.
-    void cluster_pass_gpu(FrameCtx& ctx);
+    // `phase` 0: the whole cut; with occlusion 1: the first pass (set 0), 2: the second (set 1, after the pyramid is built).
+    void cluster_pass_gpu(FrameCtx& ctx, u32 phase = 0);
+    // Lod3D::occlusion: the depth pyramid from `depth` (a pass's single-sample depth), and the pass that draws the
+    // frame's opaque meshes into a depth of their own when no pre-pass does. Both record into the frame; false when
+    // the pyramid could not be built (the second pass then tests nothing).
+    bool build_depth_pyramid(FrameCtx& ctx, const GpuTexture& depth);
+    void occluder_pass(FrameCtx& ctx);
+    // Which clustered draws a pass draws: the first pass's and the second's (set 0's camera view and set 1's).
+    enum : u32 { cluster_first = 1, cluster_second = 2, cluster_both = 3 };
     // The index buffer clustered meshes draw from this render: the GPU cut's, or the CPU cut's.
-    SDL_GPUBuffer* cluster_index_buffer() const;
+    SDL_GPUBuffer* cluster_index_buffer(u32 set = 0) const;
     // Draws `ref`'s copies in view `view` (0 the camera's, 1 + k the cascade k's, 1 the single map) with indirect draws.
     template <typename Uniforms>
-    void draw_cluster_indirect(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, u32 view) const;
+    void draw_cluster_indirect(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Uniforms& u, u32 view, u32 set = 0) const;
     // Waits for the GPU and reads the cut's statistics (Lod3D::stats_readback), or, for `picks`, which clusters it chose.
     void read_cluster_stats(FrameCtx& ctx);
     bool read_cluster_picks(IView3DBackend& view, std::vector<ClusterPick>& out) override;
     bool read_cluster_draws(IView3DBackend& view, std::vector<ClusterDraw>& out) override;
     // The GPU cut. `_gc_*` are its compute pipelines and buffers; `_gc` what this render set up (valid while `active`).
     bool _gpu_clusters = false; // the device can (capabilities)
+    bool _occlusion_available = false; // and can build a depth pyramid (Renderer3DCapabilities::occlusion_culling)
+    bool _occlusion_warned = false;
+    SDL_GPUComputePipeline* _gc_cull_occ = nullptr;      // cluster_cull_occ.comp
+    SDL_GPUComputePipeline* _hiz_depth_pipeline = nullptr;  // hiz_depth.comp
+    SDL_GPUComputePipeline* _hiz_reduce_pipeline = nullptr; // hiz_reduce.comp
+    std::array<GpuTexture, 4> _hiz_spare;                // 1 x 1, written by no one: bound where a pass has fewer levels to make
     SDL_GPUComputePipeline* _gc_cull = nullptr;    // cluster_cull.comp
     SDL_GPUComputePipeline* _gc_scan = nullptr;    // cluster_scan.comp
     SDL_GPUComputePipeline* _gc_args = nullptr;    // cluster_args.comp
     SDL_GPUComputePipeline* _gc_gather = nullptr;  // cluster_gather.comp
     std::shared_ptr<GpuBuffer> _gc_jobs;    // a copy each: slot, scene, bits, scale, first cluster
-    std::shared_ptr<GpuBuffer> _gc_scan_data;  // the counts, then their scan: a row of all clusters a view
-    std::shared_ptr<GpuBuffer> _gc_blocks;  // the scan's block sums
-    std::shared_ptr<GpuBuffer> _gc_args_buffer; // indirect draws, a (view, copy) each
-    std::shared_ptr<GpuBuffer> _gc_list;    // the chosen elements, a queue a mesh
-    std::shared_ptr<GpuBuffer> _gc_counts;  // statistics, then each queue's length
-    std::shared_ptr<GpuBuffer> _gc_indices; // the gathered indices
+    // The cut's outputs. Set 0 is the cut's (all views); with Lod3D::occlusion, set 1 holds the second pass's clusters
+    // (the camera's view alone) and set 0's camera view the first pass's.
+    struct GcBuffers {
+        std::shared_ptr<GpuBuffer> scan;    // the counts, then their scan: a row of all clusters a view
+        std::shared_ptr<GpuBuffer> blocks;  // the scan's block sums
+        std::shared_ptr<GpuBuffer> args;    // indirect draws, a (view, copy) each
+        std::shared_ptr<GpuBuffer> list;    // the chosen elements, a queue a mesh
+        std::shared_ptr<GpuBuffer> counts;  // statistics, then each queue's length (then, in set 1, the occlusion's)
+        std::shared_ptr<GpuBuffer> indices; // the gathered indices
+    };
+    std::array<GcBuffers, 2> _gcb;
+    std::shared_ptr<GpuBuffer> _gc_job_history; // a word a copy: where its clusters start in the view's history
     struct GcDispatch {
         const GpuClusterChunk* chunk = nullptr;
         u32 first_job = 0, jobs = 0;
@@ -446,6 +499,10 @@ private:
         u32 room = 0;                          // triangles the gathered buffer holds
         u32 table_bytes = 0;
         std::vector<GcDispatch> dispatches;
+        std::vector<GcDispatch> dispatches_second; // with occlusion: the same copies' queues for the second pass (one view)
+        bool occlusion = false;                    // both passes are recorded
+        u32 room_second = 0;
+        std::vector<u32> job_history;
         std::vector<u8> job_data;              // the job table, uploaded
         std::vector<u32> bases;                // each copy's first cluster among all
         std::vector<u8> zeros;

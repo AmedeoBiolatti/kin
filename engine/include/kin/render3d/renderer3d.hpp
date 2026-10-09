@@ -126,9 +126,11 @@ public:
     // it (a click, the pointer moving), not every frame.
     PickResult pick(View3D& view, Vec2i pixel);
     // The clusters the last render's GPU cut chose (Scene3D::lod, Lod3D::gpu_culling), for tests and tools; waits for
-    // the GPU like pick(). False when that render cut on the CPU or drew no clusters.
+    // the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion the second pass's
+    // clusters (view 0, the camera's) follow the first pass's.
     bool read_cluster_picks(View3D& view, std::vector<ClusterPick>& out);
-    // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU.
+    // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the second
+    // pass's (the camera's view only) follow.
     bool read_cluster_draws(View3D& view, std::vector<ClusterDraw>& out);
     // What the last render() drew.
     const Render3DStats& stats() const { return _stats; }

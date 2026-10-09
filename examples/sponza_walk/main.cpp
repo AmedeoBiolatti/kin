@@ -68,6 +68,7 @@ const std::map<std::string, std::string>& presets() {
         {"lod", "lod=on"},
         {"clusters", "lod=on"}, // also builds clusters at load (as --lod-clusters)
         {"clusters-gpu", "lod=on,lod_gpu=on,lod_readback=on"}, // the same, cut in compute, with the counts read back
+        {"occlusion", "lod=on,lod_gpu=on,lod_readback=on,lod_occlusion=on"}, // the same, with clusters behind others not drawn (G3d)
         {"taa", "taa=on"},
         {"taa-sharp", "taa=on,taa_sharpness=0.4"},
         {"taa-frozen", "taa=on,taa_freeze=on"},
@@ -157,7 +158,7 @@ Options parse(int argc, char** argv) {
                 const auto it = presets().find(name);
                 if (it == presets().end()) throw std::invalid_argument("no preset named " + name + " (--help lists them)");
                 for (const std::string& set : split(it->second, ',')) o.sets.push_back(set);
-                if (name == "clusters" || name == "clusters-gpu") o.lod_clusters = true;
+                if (name == "clusters" || name == "clusters-gpu" || name == "occlusion") o.lod_clusters = true;
             }
         } else if (arg == "--camera") {
             o.camera = value();
@@ -406,6 +407,7 @@ private:
         if (caps.clusters) {
             check("lod_gpu", caps.gpu_clusters ? "Cut on the GPU (compute)" : "Cut on the GPU (this device cannot: the CPU cuts)", s.lod_gpu);
             check("lod_readback", "Read the GPU cut's counts back (waits for the GPU)", s.lod_readback);
+            check("lod_occlusion", "Occlusion culling (needs the GPU cut; costs where little is hidden)", s.lod_occlusion);
         }
         note(caps.clusters ? "Mode: clusters, built at load (--lod-clusters); off and levels are the other modes"
                                    : "Mode: levels, built at load: --lod-levels N (4; 1 builds none); --lod-clusters builds clusters instead");
@@ -949,7 +951,7 @@ private:
         if (_s.lod) {
             out << ",\n  \"lod\": {\"error_pixels\": " << json_number(_s.lod_error) << ", \"bias\": " << json_number(_s.lod_bias)
                 << ", \"force_level\": " << _s.lod_force << "}";
-            if (_options.lod_clusters) out << ",\n  \"lod_clusters\": true, \"lod_gpu\": " << (_s.lod_gpu ? "true" : "false");
+            if (_options.lod_clusters) out << ",\n  \"lod_clusters\": true, \"lod_gpu\": " << (_s.lod_gpu ? "true" : "false") << ", \"lod_occlusion\": " << (_s.lod_occlusion ? "true" : "false");
         }
         if (_s.taa) {
             out << ",\n  \"taa\": {\"blend\": " << json_number(_s.taa_blend) << ", \"sharpness\": " << json_number(_s.taa_sharpness)
@@ -1116,6 +1118,17 @@ private:
                               static_cast<unsigned long long>(st.triangles), st.cluster_overflow);
                 lines.push_back(line);
             }
+            if (st.occlusion) {
+                std::snprintf(line, sizeof line, "occlusion: %u pyramid levels, %u dispatches", st.occlusion_levels, st.occlusion_dispatches);
+                lines.push_back(line);
+                if (_s.lod_readback) {
+                    std::snprintf(line, sizeof line, "  %u clusters in the first pass, %u occluded (%llu triangles), %u drawn for nothing", st.clusters_first_pass,
+                                  st.clusters_occluded, static_cast<unsigned long long>(st.triangles_occluded), st.clusters_wasted);
+                    lines.push_back(line);
+                }
+            } else if (_s.lod_occlusion) {
+                lines.push_back("occlusion: asked for, not running (needs the GPU cut and clusters)");
+            }
         } else if (_s.lod && _options.lod_clusters) {
             std::snprintf(line, sizeof line, "clusters: %u copies cut, %llu tested, %u drawn, %.1f KB indices, cut %.2f ms", st.cluster_copies,
                           static_cast<unsigned long long>(st.clusters_tested), st.clusters_drawn, static_cast<double>(st.cluster_upload_bytes) / 1024.0,
@@ -1178,7 +1191,8 @@ void print_help() {
                  "                        python3 tools/reference/fetch.py puts it there)\n"
                  "  --lod-levels N        levels of detail built for each mesh at load (default 4; 1: none); --preset lod turns them on\n"
                  "  --lod-clusters        clusters instead of levels (a hierarchy a mesh, cut by the error bound); --preset clusters is this and the setting on;\n"
-                 "                        --preset clusters-gpu adds the cut in compute (the default where the device can) with its counts read back\n"
+                 "                        --preset clusters-gpu adds the cut in compute (the default where the device can) with its counts read back;\n"
+                 "                        --preset occlusion adds occlusion culling (clusters behind others are not drawn) to that\n"
                  "  --set KEY=VALUE       a setting at start (on/off, a number or a choice's name); --list-settings lists them\n"
                  "  --preset NAME[,NAME]  a named set of --set values:";
     for (const auto& [name, sets] : presets()) std::cout << ' ' << name;

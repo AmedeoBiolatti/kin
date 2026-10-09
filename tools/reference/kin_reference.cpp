@@ -11,7 +11,7 @@
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
-//                 [--lod-gpu | --lod-cpu] [--readback] [--lod-room TRIANGLES]
+//                 [--lod-gpu | --lod-cpu] [--readback] [--lod-room TRIANGLES] [--lod-occlusion]
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -51,6 +51,10 @@
 // device that cannot falls back, and the run says which cut it made). --readback reads the GPU cut's counts back for the picture's render
 // (clusters drawn, triangles, clusters dropped) -- never in the timed frames, which would wait for the GPU. --lod-room N sets
 // Lod3D::max_cluster_triangles.
+// Occlusion culling (G3d): a scene's `lod: {occlusion: true}` (or `{enabled, depth_margin, pixel_margin}`), or --lod-occlusion
+// for every scene (it turns the selection on too): clusters behind others are not drawn. With --readback each camera also prints
+// the clusters of the first pass, those occluded and those drawn for nothing. `procedural: "hidden"` builds a wall, a floor, a
+// few objects in front of it and 64 copies of a 100,000-triangle torus (`clusters: true`) behind it, the scene it is judged on.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -235,6 +239,56 @@ struct Motion {
     }
 };
 
+// Occlusion culling's scene (`procedural: "hidden"`): a floor, a wall 20 m wide and 8 high across the way, 8 tori in front
+// of it, and behind it 64 more (8 x 8, turned every which way), each of 100,352 triangles, made with clusters when the
+// scene says `clusters: true` (G3d). Seen from in front of the wall, the 64 are hidden; from the side, some show past its
+// end; from behind the grid, nothing is hidden by the wall.
+struct Hidden {
+    kin::Mesh floor, wall, torus;
+    std::vector<kin::MeshInstance> behind, front;
+    Vec3f extent{12.0f, 8.0f, 21.0f}; // the scene's bounds: +-x, up to y, to z
+
+    // `doc` may set `grid: [nx, nz]` (8 x 8), `spacing: [dx, dz]` (3, 2.4) and `segments` (224: 100,352 triangles a torus).
+    void make(kin::Renderer3D& r3d, kin::MeshOptions options, const kin::JsonValue& doc) {
+        int nx = 8, nz = 8;
+        float dx = 3.0f, dz = 2.4f;
+        if (const kin::JsonValue* grid = doc.find("grid"); grid && grid->items().size() == 2) {
+            nx = static_cast<int>(grid->items()[0].as_number());
+            nz = static_cast<int>(grid->items()[1].as_number());
+        }
+        if (const kin::JsonValue* spacing = doc.find("spacing"); spacing && spacing->items().size() == 2) {
+            dx = static_cast<float>(spacing->items()[0].as_number());
+            dz = static_cast<float>(spacing->items()[1].as_number());
+        }
+        const int segments = static_cast<int>(doc.number_at("segments", 224));
+        const float half = dx * static_cast<float>(nx) * 0.5f;
+        const float wall_width = std::max(20.0f, 2.0f * half);
+        extent = {wall_width * 0.6f + 2.0f, 8.0f, 3.5f + dz * static_cast<float>(nz) + 2.0f};
+        floor = r3d.create_mesh(kin::meshes::box({extent.x * 2.0f + 40.0f, 0.2f, extent.z + 60.0f}), kin::MeshOptions{.levels = options.levels});
+        wall = r3d.create_mesh(kin::meshes::box({wall_width, 8.0f, 0.4f}), kin::MeshOptions{.levels = options.levels});
+        torus = r3d.create_mesh(kin::meshes::torus(0.8f, 0.3f, segments, segments), options);
+        for (int j = 0; j < nz; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                const Vec3f at{-half + 0.5f * dx + dx * static_cast<float>(i), 1.1f, 3.5f + dz * static_cast<float>(j)};
+                behind.push_back({Mat4f::translation(at) * Mat4f::rotation_y(static_cast<float>(i * 8 + j) * 29.0f) * Mat4f::rotation_x(static_cast<float>(i + 3 * j) * 17.0f),
+                                  kin::Color::rgb(static_cast<kin::u8>(120 + 16 * (i % 8)), static_cast<kin::u8>(200 - 12 * j), 150)});
+            }
+        }
+        for (int i = 0; i < 8; ++i) {
+            front.push_back({Mat4f::translation({-9.1f + 2.6f * static_cast<float>(i), 1.1f, -4.0f - 1.2f * static_cast<float>(i % 3)}) *
+                                 Mat4f::rotation_y(static_cast<float>(i) * 41.0f),
+                             kin::Color::rgb(230, 170, static_cast<kin::u8>(60 + 15 * i))});
+        }
+    }
+
+    void draw(kin::Scene3D& scene) const {
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = kin::Color::rgb(96, 100, 108), .roughness = 0.9f});
+        scene.draw(wall, Mat4f::translation({0.0f, 4.0f, 0.0f}), {.color = kin::Color::rgb(190, 186, 176), .roughness = 0.8f});
+        scene.draw_instanced(torus, behind, {.roughness = 0.45f});
+        scene.draw_instanced(torus, front, {.roughness = 0.45f});
+    }
+};
+
 kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Placed& p : placed) {
@@ -268,6 +322,7 @@ struct Overrides {
     int lod_gpu = -1; // -1: the scene's (on); 0 the CPU cuts; 1 the GPU
     bool readback = false;
     long lod_room = 0;
+    bool lod_occlusion = false;
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -337,6 +392,15 @@ void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over
         lod.error_pixels = static_cast<float>(doc->number_at("error_pixels", lod.error_pixels));
         lod.bias = static_cast<float>(doc->number_at("bias", lod.bias));
         lod.force_level = static_cast<kin::i32>(doc->number_at("force_level", lod.force_level));
+        if (const kin::JsonValue* occlusion = doc->find("occlusion")) {
+            lod.occlusion.enabled = occlusion->is_bool() ? occlusion->as_bool() : occlusion->bool_at("enabled", true);
+            lod.occlusion.depth_margin = static_cast<float>(occlusion->number_at("depth_margin", lod.occlusion.depth_margin));
+            lod.occlusion.pixel_margin = static_cast<kin::u32>(occlusion->number_at("pixel_margin", lod.occlusion.pixel_margin));
+        }
+    }
+    if (over.lod_occlusion) {
+        lod.enabled = true;
+        lod.occlusion.enabled = true;
     }
     if (over.lod) {
         lod.enabled = true;
@@ -498,6 +562,8 @@ int main(int argc, char** argv) {
             over.lod_gpu = 1;
         } else if (a == "--lod-cpu") {
             over.lod_gpu = 0;
+        } else if (a == "--lod-occlusion") {
+            over.lod_occlusion = true;
         } else if (a == "--readback") {
             over.readback = true;
         } else if (a == "--lod-room") {
@@ -614,6 +680,11 @@ int main(int argc, char** argv) {
         if (is_motion) {
             motion.make(r3d, levels_of(doc));
         }
+        Hidden hidden;
+        const bool is_hidden = doc.string_at("procedural") == "hidden";
+        if (is_hidden) {
+            hidden.make(r3d, model_options_of(doc), doc);
+        }
         const bool animated = doc.bool_at("animated");
         const double load_ms = ms_since(load_start);
         {
@@ -659,6 +730,7 @@ int main(int argc, char** argv) {
         }
         const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
                                     : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
+                                    : is_hidden ? kin::Bounds3{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
                                                 : bounds_of(placed);
 
         // The view.
@@ -746,6 +818,9 @@ int main(int argc, char** argv) {
             }
             if (is_motion) {
                 motion.draw(scene, time);
+            }
+            if (is_hidden) {
+                hidden.draw(scene);
             }
         };
 
@@ -872,6 +947,14 @@ int main(int argc, char** argv) {
                     std::printf("; read back: %u clusters drawn, %llu triangles in the camera's cut, %llu gathered for all passes, %u clusters dropped",
                                 stats.clusters_drawn, static_cast<unsigned long long>(stats.triangles),
                                 static_cast<unsigned long long>(stats.cluster_triangles_all), stats.cluster_overflow);
+                    if (stats.occlusion) {
+                        std::printf("; occlusion: %u clusters in the first pass, %u occluded (%llu triangles), %u drawn for nothing (%llu triangles)",
+                                    stats.clusters_first_pass, stats.clusters_occluded, static_cast<unsigned long long>(stats.triangles_occluded),
+                                    stats.clusters_wasted, static_cast<unsigned long long>(stats.triangles_wasted));
+                    }
+                }
+                if (stats.occlusion) {
+                    std::printf("; occlusion on (%u pyramid levels, %u dispatches to build it)", stats.occlusion_levels, stats.occlusion_dispatches);
                 }
                 std::printf("\n");
             } else if (stats.cluster_copies > 0) {
@@ -909,6 +992,11 @@ int main(int argc, char** argv) {
                        << ", \"clusters_drawn\": " << stats.clusters_drawn << ", \"cluster_upload_bytes\": " << stats.cluster_upload_bytes
                        << ", \"cluster_ms\": " << json_summary(summarize(cut_ms))
                        << ", \"cluster_upload_ms\": " << json_summary(summarize(cut_upload_ms));
+                if (stats.occlusion) {
+                    report << ", \"occlusion\": true, \"clusters_first_pass\": " << stats.clusters_first_pass << ", \"clusters_occluded\": " << stats.clusters_occluded
+                           << ", \"triangles_occluded\": " << stats.triangles_occluded << ", \"clusters_wasted\": " << stats.clusters_wasted
+                           << ", \"triangles_wasted\": " << stats.triangles_wasted;
+                }
             }
             if (scene.lod.enabled) {
                 report << ", \"lod_copies_by_level\": [";

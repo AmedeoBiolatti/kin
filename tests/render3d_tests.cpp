@@ -5231,6 +5231,589 @@ void test_gpu_cut_chunks() {
     });
 }
 
+// --- Occlusion culling (G3d) ---
+
+// A room for hiding things: a floor, a wall 8 m wide and 3 high across the way at z = 0 (in two halves round a slit when
+// asked), and balls of clustered meshes (18 thousand triangles each) in front of it and behind. The camera stands at z = 12.
+struct OcclusionRoom {
+    explicit OcclusionRoom(kin::Renderer3D& r3d) {
+        kin::MeshOptions options;
+        options.clusters = true;
+        floor = make_box(r3d, {60.0f, 0.2f, 60.0f});
+        unit = make_box(r3d, {1.0f, 3.0f, 0.4f});
+        ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 96, 96), options);
+    }
+
+    // `gap`: a slit of that width in the middle of the wall (0: none); `wall_x` moves the wall sideways. Balls at `at`, ids from 1.
+    void fill(kin::Scene3D& scene, const std::vector<Vec3f>& at, float gap = 0.0f, float scale = 1.0f, float wall_x = 0.0f) const {
+        scene.clear();
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(150, 150, 150)});
+        const kin::Material3D plaster{.color = Color::rgb(200, 190, 170)};
+        if (gap <= 0.0f) {
+            scene.draw(unit, Mat4f::translation({wall_x, 1.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 1.0f}), plaster);
+        } else {
+            const float side = 4.0f - gap * 0.5f;
+            scene.draw(unit, Mat4f::translation({wall_x - (gap * 0.5f + side * 0.5f), 1.5f, 0.0f}) * Mat4f::scaling({side, 1.0f, 1.0f}), plaster);
+            scene.draw(unit, Mat4f::translation({wall_x + gap * 0.5f + side * 0.5f, 1.5f, 0.0f}) * Mat4f::scaling({side, 1.0f, 1.0f}), plaster);
+        }
+        kin::u32 id = 1;
+        for (const Vec3f& v : at) {
+            scene.draw(ball, Mat4f::translation(v) * Mat4f::scaling({scale, scale, scale}),
+                       {.color = Color::rgb(70, static_cast<kin::u8>(120 + 14 * (id % 7)), 210), .roughness = 0.5f}, kin::colors::white, id);
+            ++id;
+        }
+    }
+
+    kin::Mesh floor, unit, ball;
+};
+
+// Balls wholly behind the wall from the camera (0, 1.7, 12), and some in front.
+const std::vector<Vec3f> hidden_balls{{-1.5f, 1.0f, -5.0f}, {1.5f, 1.0f, -7.0f}, {0.0f, 1.0f, -9.0f}};
+const std::vector<Vec3f> open_balls{{-5.5f, 1.0f, 5.0f}, {5.5f, 1.0f, 3.0f}, {0.0f, 1.0f, 8.0f}};
+
+kin::Camera3D room_camera(float x = 0.0f) {
+    return kin::Camera3D::look_at({x, 1.7f, 12.0f}, {x, 1.3f, -4.0f}, 60.0f);
+}
+
+// Two views of one renderer drawn from the same scenes, one with Lod3D::occlusion and one without: occlusion culling must never
+// change what the view shows (the second pass tests every cluster against this frame's own depth), so every frame of the one
+// is the other's, to the byte.
+struct Twin {
+    Twin(kin::Renderer2D& r, kin::Renderer3D& r3, kin::u32 samples) : renderer(r), r3d(r3), off(r3.create_view({160, 120}, {.samples = samples, .background = Color::rgb(20, 24, 30), .pick = true})),
+                                                                       on(r3.create_view({160, 120}, {.samples = samples, .background = Color::rgb(20, 24, 30), .pick = true})) {}
+
+    // Renders `scene` into both. Returns the bytes that differ.
+    int frame(kin::Scene3D& scene) {
+        scene.lod.enabled = true;
+        scene.lod.error_pixels = 0.1f; // finer than the default: the balls are far, and few clusters would show
+        scene.lod.stats_readback = true;
+        scene.lod.occlusion.enabled = false;
+        off_picture = shoot_view(renderer, r3d, off, scene);
+        renderer.present();
+        off_stats = r3d.stats();
+        scene.lod.occlusion.enabled = true;
+        on_picture = shoot_view(renderer, r3d, on, scene);
+        renderer.present();
+        on_stats = r3d.stats();
+        scene.lod.occlusion.enabled = false;
+        ++frames;
+        return difference_of(off_picture, on_picture).bytes;
+    }
+
+    // The ids under a grid of pixels in the two views' last frames: how many differ.
+    int pick_differences() {
+        int different = 0;
+        for (int y = 3; y < 120; y += 9) {
+            for (int x = 3; x < 160; x += 9) {
+                const kin::PickResult a = r3d.pick(off, {x, y}), b = r3d.pick(on, {x, y});
+                different += a.hit != b.hit || a.id != b.id ? 1 : 0;
+            }
+        }
+        return different;
+    }
+
+    kin::Renderer2D& renderer;
+    kin::Renderer3D& r3d;
+    kin::View3D off, on;
+    Pixels off_picture, on_picture;
+    kin::Render3DStats off_stats, on_stats;
+    int frames = 0;
+};
+
+// With KIN_OCCLUSION_DUMP=<directory> a sequence writes its frames there (<name>_<frame>_off|on|diff.ppm, the difference times eight), to look at.
+void dump_frames(const Twin& twin, const char* name, int frame) {
+    const char* dir = std::getenv("KIN_OCCLUSION_DUMP");
+    if (!dir || !dir[0]) {
+        return;
+    }
+    const auto write = [&](const char* suffix, const std::vector<kin::u8>& rgba) {
+        std::ofstream out(std::string(dir) + "/" + name + "_" + std::to_string(frame) + "_" + suffix + ".ppm", std::ios::binary);
+        out << "P6\n160 120\n255\n";
+        for (std::size_t i = 0; i < rgba.size(); i += 4) {
+            out.write(reinterpret_cast<const char*>(&rgba[i]), 3);
+        }
+    };
+    write("off", twin.off_picture.rgba);
+    write("on", twin.on_picture.rgba);
+    std::vector<kin::u8> diff(twin.off_picture.rgba.size(), 255);
+    for (std::size_t i = 0; i < diff.size(); ++i) {
+        if (i % 4 != 3) {
+            diff[i] = static_cast<kin::u8>(std::min(255, 8 * std::abs(static_cast<int>(twin.off_picture.rgba[i]) - static_cast<int>(twin.on_picture.rgba[i]))));
+        }
+    }
+    write("diff", diff);
+}
+
+// Whether a scene with the clustered meshes runs the two passes: the capability, Lod3D::occlusion with the selection and the GPU cut.
+bool occlusion_capable(kin::Renderer3D& r3d) {
+    return !lacks(r3d.capabilities().occlusion_culling && r3d.capabilities().gpu_driven_clusters, "occlusion culling");
+}
+
+// What is off is as before (the pyramid and its passes are not made; the cut's dispatches, draws and counts are G3c's), and what is on
+// never changes the picture: static views, with and without MSAA, one shadow map or three, occlusion and contact shadows, temporal
+// anti-aliasing; clusters occluded behind the wall and none in the open; the pick pass finds the same copies.
+void test_gpu_occlusion_picture_and_stats() {
+    with_gpu("test_gpu_occlusion_picture_and_stats", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        struct Config {
+            const char* name;
+            kin::u32 samples, cascades;
+            bool passes, taa;
+        };
+        const std::vector<Config> configs{{"1 sample", 1, 1, false, false},     {"4 samples", 4, 1, false, false}, {"3 cascades", 4, 3, false, false},
+                                          {"ambient occlusion + contact", 4, 1, true, false}, {"taa", 1, 1, false, true}, {"taa, cascades, passes", 1, 3, true, true}};
+        for (const Config& config : configs) {
+            if (config.taa && lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+                continue;
+            }
+            Twin twin{renderer, r3d, config.samples};
+            kin::Scene3D scene;
+            scene.camera = room_camera();
+            scene.lights.sun.direction = {-0.85f, 0.5f, 0.1f};
+            scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+            scene.lights.shadow_cascades = config.cascades;
+            scene.lights.shadow_distance = 60.0f;
+            if (config.passes) {
+                scene.ambient_occlusion = {.enabled = true};
+                scene.contact_shadows = {.enabled = true};
+            }
+            scene.taa = {.enabled = config.taa};
+            std::vector<Vec3f> balls = hidden_balls;
+            balls.insert(balls.end(), open_balls.begin(), open_balls.end());
+            int worst = 0, picks = 0;
+            for (int f = 0; f < (config.taa ? 8 : 3); ++f) {
+                room.fill(scene, balls);
+                worst = std::max(worst, twin.frame(scene));
+                picks += twin.pick_differences();
+            }
+            const kin::Render3DStats& on = twin.on_stats;
+            const kin::Render3DStats& off = twin.off_stats;
+            std::cerr << "occlusion, " << config.name << ": " << worst << " bytes differ, " << picks << " picks differ; " << on.clusters_drawn << " clusters drawn of "
+                      << off.clusters_drawn << ", " << on.clusters_first_pass << " in the first pass, " << on.clusters_occluded << " occluded (" << on.triangles_occluded << " triangles), "
+                      << on.clusters_wasted << " drawn for nothing; " << on.triangles << " triangles against " << off.triangles << "\n";
+            assert(worst == 0 && picks == 0);
+            assert(!off.occlusion && off.occlusion_dispatches == 0 && off.clusters_occluded == 0 && off.clusters_first_pass == 0);
+            assert(on.occlusion && on.occlusion_levels >= 5 && on.occlusion_dispatches >= 3 && on.cluster_dispatches == 2 * off.cluster_dispatches);
+            assert(on.clusters_occluded > 40 && on.triangles_occluded > 4000 && on.triangles < off.triangles && on.clusters_drawn < off.clusters_drawn);
+            assert(on.clusters_drawn + on.clusters_occluded == off.clusters_drawn); // nothing in the cut is lost: drawn or occluded
+        }
+        // In the open the balls hide only their own far sides (a closed mesh's back clusters lie behind its front ones), and what is
+        // not hidden is drawn: the clusters of the cut are those drawn and those occluded, to the cluster, whatever the history.
+        {
+            Twin twin{renderer, r3d, 4};
+            kin::Scene3D scene;
+            scene.camera = room_camera();
+            for (int f = 0; f < 3; ++f) {
+                room.fill(scene, open_balls);
+                assert(twin.frame(scene) == 0);
+            }
+            std::cerr << "occlusion, in the open: " << twin.on_stats.clusters_drawn << " clusters drawn of " << twin.off_stats.clusters_drawn << ", occluded " << twin.on_stats.clusters_occluded
+                      << " (the balls' far sides), " << twin.on_stats.clusters_wasted << " drawn for nothing\n";
+            assert(twin.on_stats.clusters_drawn + twin.on_stats.clusters_occluded == twin.off_stats.clusters_drawn);
+            assert(twin.on_stats.clusters_occluded * 10 < twin.off_stats.clusters_drawn && twin.on_stats.clusters_wasted == 0);
+            assert(twin.on_stats.clusters_first_pass == twin.on_stats.clusters_drawn); // the history held all the visible ones after the first frame
+        }
+        // A surface that cannot hide itself, seen from above: nothing is occluded at all.
+        {
+            Twin twin{renderer, r3d, 4};
+            kin::MeshOptions options;
+            options.clusters = true;
+            const kin::Mesh sheet = r3d.create_mesh(big_hill(120), options); // gently wavy: its slopes are under 0.25
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 40.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            for (int f = 0; f < 3; ++f) {
+                scene.clear();
+                scene.draw(sheet, Mat4f::identity(), {.color = Color::rgb(120, 180, 120)});
+                assert(twin.frame(scene) == 0);
+            }
+            std::cerr << "occlusion, a flat sheet: " << twin.on_stats.clusters_drawn << " clusters drawn of " << twin.off_stats.clusters_drawn << ", occluded " << twin.on_stats.clusters_occluded << "\n";
+            assert(twin.on_stats.clusters_occluded == 0 && twin.on_stats.clusters_drawn == twin.off_stats.clusters_drawn && twin.on_stats.clusters_drawn > 40);
+        }
+        // The overlay (a clustered mesh in the gun's place) is drawn whole by the first pass and never tested, whatever the world does.
+        {
+            Twin twin{renderer, r3d, 4};
+            kin::Scene3D scene;
+            scene.camera = room_camera();
+            int worst = 0;
+            kin::u32 occluded = 0;
+            for (int f = 0; f < 4; ++f) {
+                room.fill(scene, hidden_balls);
+                kin::Scene3D& gun = scene.overlay();
+                gun.clear();
+                gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 50.0f);
+                gun.lod = {.enabled = true, .error_pixels = 0.1f};
+                gun.draw(room.ball, Mat4f::translation({0.35f, -0.25f, -1.2f}) * Mat4f::scaling({0.3f, 0.3f, 0.3f}), {.color = Color::rgb(230, 90, 60)});
+                worst = std::max(worst, twin.frame(scene));
+                occluded = twin.on_stats.clusters_occluded;
+            }
+            std::cerr << "occlusion, with an overlay: " << worst << " bytes differ, " << occluded << " clusters occluded, " << twin.on_stats.clusters_drawn << " drawn of " << twin.off_stats.clusters_drawn << "\n";
+            assert(worst == 0 && occluded > 20 && twin.on_stats.clusters_drawn + occluded == twin.off_stats.clusters_drawn);
+        }
+        // The first frame, with no history: the first pass draws nothing, the second tests everything against the wall alone.
+        {
+            Twin twin{renderer, r3d, 4};
+            kin::Scene3D scene;
+            scene.camera = room_camera();
+            room.fill(scene, hidden_balls);
+            assert(twin.frame(scene) == 0);
+            assert(twin.on_stats.clusters_first_pass == 0 && twin.on_stats.clusters_occluded > 40);
+        }
+    });
+}
+
+// A camera that strafes past the wall's end across 60 frames, so that balls behind it come into view a frame at a time; another that
+// turns on the spot toward them; and a ball that moves out from behind the wall. Every frame is the other view's, to the byte: nothing
+// pops, because a cluster hidden last frame is tested against this frame's own depth.
+void test_gpu_occlusion_moving() {
+    with_gpu("test_gpu_occlusion_moving", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        kin::Scene3D scene;
+        scene.lights.sun.direction = {-0.85f, 0.5f, 0.1f};
+        scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+        scene.lights.shadow_cascades = 3;
+        scene.lights.shadow_distance = 60.0f;
+        // 1. The camera strafes from x = 0 to 14 in 60 steps: the balls behind the wall are revealed.
+        {
+            Twin twin{renderer, r3d, 4};
+            int worst = 0, revealed_at = -1;
+            kin::u32 occluded_first = 0, occluded_last = 0;
+            for (int f = 0; f < 60; ++f) {
+                scene.camera = room_camera(0.24f * static_cast<float>(f));
+                room.fill(scene, hidden_balls);
+                worst = std::max(worst, twin.frame(scene));
+                dump_frames(twin, "strafe", f);
+                if (f == 0) {
+                    occluded_first = twin.on_stats.clusters_occluded;
+                }
+                if (revealed_at < 0 && twin.on_stats.clusters_occluded < occluded_first / 2) {
+                    revealed_at = f;
+                }
+                occluded_last = twin.on_stats.clusters_occluded;
+            }
+            std::cerr << "occlusion, strafing: " << worst << " bytes differ at worst in 60 frames; occluded " << occluded_first << " at the start, " << occluded_last << " at the end, revealed from frame "
+                      << revealed_at << "\n";
+            assert(worst == 0 && occluded_first > 40 && occluded_last < occluded_first / 4 && revealed_at > 5);
+        }
+        // 2. The camera turns on the spot, from looking away to the wall and the balls behind it, and on past it.
+        {
+            Twin twin{renderer, r3d, 4};
+            int worst = 0;
+            kin::u32 most = 0, least = ~0u;
+            for (int f = 0; f < 60; ++f) {
+                const float yaw = (-20.0f + 2.9f * static_cast<float>(f)) * 3.14159265f / 180.0f;
+                scene.camera = kin::Camera3D::look_at({5.0f, 1.7f, 4.0f}, {5.0f + std::cos(yaw) * 10.0f, 1.4f, 4.0f - std::sin(yaw) * 10.0f}, 60.0f);
+                room.fill(scene, hidden_balls);
+                worst = std::max(worst, twin.frame(scene));
+                dump_frames(twin, "turn", f);
+                most = std::max(most, twin.on_stats.clusters_occluded);
+                least = std::min(least, twin.on_stats.clusters_occluded);
+            }
+            std::cerr << "occlusion, turning: " << worst << " bytes differ at worst in 60 frames; clusters occluded " << least << " to " << most << "\n";
+            assert(worst == 0 && most > 40);
+        }
+        // 3. A ball goes from behind the wall to the open, and back.
+        {
+            Twin twin{renderer, r3d, 4};
+            int worst = 0;
+            kin::u32 hidden_at_start = 0, drawn_in_the_open = 0;
+            scene.camera = room_camera();
+            for (int f = 0; f < 60; ++f) {
+                const float x = f < 30 ? 0.3f * static_cast<float>(f) : 9.0f - 0.3f * static_cast<float>(f - 30);
+                room.fill(scene, {{x, 1.0f, -3.0f}, {-3.0f, 1.0f, -6.0f}});
+                worst = std::max(worst, twin.frame(scene));
+                if (f == 0) {
+                    hidden_at_start = twin.on_stats.clusters_occluded;
+                }
+                if (f == 29) {
+                    drawn_in_the_open = twin.on_stats.clusters_drawn;
+                }
+            }
+            std::cerr << "occlusion, a ball out from behind the wall and back: " << worst << " bytes differ at worst; " << hidden_at_start << " clusters occluded at the start, "
+                      << drawn_in_the_open << " drawn with the ball in the open\n";
+            assert(worst == 0 && hidden_at_start > 40 && drawn_in_the_open > hidden_at_start / 4);
+        }
+    });
+}
+
+// A slit in the wall with a ball behind it, and a ball partly off the screen: not culled, as pictures show. Slits of a pixel and more
+// are never taken for solid; one narrower than a pixel can fall between the single-sample depth's pixel centres, which a multisampled
+// picture can see through: its difference is measured and said, not asserted.
+void test_gpu_occlusion_gaps_and_edges() {
+    with_gpu("test_gpu_occlusion_gaps_and_edges", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        kin::Scene3D scene;
+        scene.camera = room_camera();
+        // A pixel is about 0.115 m across at the wall (12 m away, a 60 degree view of 120 rows).
+        for (const float gap : {0.9f, 0.45f, 0.25f, 0.12f, 0.06f, 0.02f}) {
+            for (const kin::u32 samples : {1u, 4u}) {
+                Twin twin{renderer, r3d, samples};
+                int worst = 0;
+                for (int f = 0; f < 3; ++f) {
+                    room.fill(scene, {{0.0f, 1.0f, -4.0f}}, gap);
+                    worst = std::max(worst, twin.frame(scene));
+                }
+                const double pixels = static_cast<double>(gap) / 0.115;
+                std::cerr << "occlusion, slit of " << gap << " m (" << pixels << " pixels), " << samples << " samples: " << worst << " bytes differ; " << twin.on_stats.clusters_occluded
+                          << " clusters occluded of " << twin.off_stats.clusters_drawn << "\n";
+                if (pixels >= 1.0) {
+                    assert(worst == 0);
+                }
+                // Even where nothing is wrong, the ball behind a wide slit is drawn.
+                if (pixels >= 3.0) {
+                    assert(twin.on_stats.clusters_drawn > 0 && twin.on_stats.clusters_occluded < twin.off_stats.clusters_drawn);
+                }
+            }
+        }
+        // Partly behind the wall's edge, partly at the screen's edge, partly under the floor's horizon.
+        for (const float x : {4.1f, 4.5f, 5.2f}) {
+            Twin twin{renderer, r3d, 4};
+            int worst = 0;
+            for (int f = 0; f < 3; ++f) {
+                room.fill(scene, {{x, 1.0f, -3.0f}, {-x, 1.0f, -3.0f}});
+                worst = std::max(worst, twin.frame(scene));
+            }
+            std::cerr << "occlusion, ball at the wall's edge x = " << x << ": " << worst << " bytes differ, " << twin.on_stats.clusters_drawn << " drawn of " << twin.off_stats.clusters_drawn << "\n";
+            assert(worst == 0 && twin.on_stats.clusters_drawn > 0);
+        }
+        // Balls half sunk into the floor and half through the wall: the nearest point of each lies in front of the surface that covers its centre.
+        {
+            Twin twin{renderer, r3d, 4};
+            int worst = 0;
+            scene.camera = room_camera();
+            for (int f = 0; f < 3; ++f) {
+                room.fill(scene, {{-2.0f, 0.0f, 3.0f}, {1.5f, 1.0f, -0.1f}, {3.0f, 0.2f, 6.0f}});
+                worst = std::max(worst, twin.frame(scene));
+            }
+            std::cerr << "occlusion, balls through the floor and the wall: " << worst << " bytes differ, " << twin.on_stats.clusters_drawn << " drawn of " << twin.off_stats.clusters_drawn << "\n";
+            assert(worst == 0 && twin.on_stats.clusters_drawn > 40);
+        }
+        {
+            Twin twin{renderer, r3d, 4};
+            int worst = 0;
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.7f, 12.0f}, {-3.0f, 1.3f, 0.0f}, 60.0f);
+            for (int f = 0; f < 3; ++f) {
+                room.fill(scene, {{-9.0f, 1.0f, 2.0f}, {-7.0f, 1.0f, 6.0f}, {0.0f, 1.0f, -5.0f}});
+                worst = std::max(worst, twin.frame(scene));
+            }
+            std::cerr << "occlusion, balls at the screen's edge: " << worst << " bytes differ\n";
+            assert(worst == 0);
+        }
+    });
+}
+
+// Resizing the view or View3D::reset_history() drops the history: the next frame's first pass draws nothing (and the picture is still the
+// same). The history only ever costs or saves work; a camera cut without a reset is just as right a picture.
+void test_gpu_occlusion_history() {
+    with_gpu("test_gpu_occlusion_history", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        Twin twin{renderer, r3d, 4};
+        kin::Scene3D scene;
+        scene.camera = room_camera();
+        std::vector<Vec3f> balls = hidden_balls;
+        balls.insert(balls.end(), open_balls.begin(), open_balls.end());
+        for (int f = 0; f < 3; ++f) {
+            room.fill(scene, balls);
+            assert(twin.frame(scene) == 0);
+        }
+        const kin::u32 held = twin.on_stats.clusters_first_pass;
+        assert(held > 40);
+        // A camera cut without a reset: wrong history, right picture.
+        scene.camera = kin::Camera3D::look_at({0.0f, 4.0f, -14.0f}, {0.0f, 1.0f, 3.0f}, 60.0f);
+        room.fill(scene, balls);
+        assert(twin.frame(scene) == 0);
+        std::cerr << "occlusion, a camera cut without a reset: the picture is right; " << twin.on_stats.clusters_first_pass << " clusters in the first pass, " << twin.on_stats.clusters_wasted
+                  << " of them drawn for nothing\n";
+        // A reset.
+        scene.camera = room_camera();
+        twin.on.reset_history();
+        room.fill(scene, balls);
+        assert(twin.frame(scene) == 0);
+        std::cerr << "occlusion, after reset_history: " << twin.on_stats.clusters_first_pass << " clusters in the first pass (" << held << " before)\n";
+        assert(twin.on_stats.clusters_first_pass == 0 && twin.on_stats.clusters_occluded > 40);
+        room.fill(scene, balls);
+        assert(twin.frame(scene) == 0 && twin.on_stats.clusters_first_pass > 40);
+        // A resize.
+        assert(r3d.resize(twin.on, {120, 90}) && r3d.resize(twin.off, {120, 90}));
+        room.fill(scene, balls);
+        assert(twin.frame(scene) == 0);
+        assert(twin.on_stats.clusters_first_pass == 0 && twin.on_stats.clusters_occluded > 20);
+        room.fill(scene, balls);
+        assert(twin.frame(scene) == 0 && twin.on_stats.clusters_first_pass > 20);
+        // And a change of the scene's draws (a ball less): a new layout, history from nothing, the same picture.
+        balls.pop_back();
+        room.fill(scene, balls);
+        assert(twin.frame(scene) == 0 && twin.on_stats.clusters_first_pass == 0);
+    });
+}
+
+// Two runs alike: the same frames and counts, byte for byte, from fresh views.
+void test_gpu_occlusion_is_deterministic() {
+    with_gpu("test_gpu_occlusion_is_deterministic", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        std::vector<std::vector<kin::u8>> frames[2];
+        std::vector<kin::u32> counts[2];
+        for (int run = 0; run < 2; ++run) {
+            Twin twin{renderer, r3d, 4};
+            kin::Scene3D scene;
+            scene.lights.sun.direction = {-0.85f, 0.5f, 0.1f};
+            scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+            for (int f = 0; f < 20; ++f) {
+                scene.camera = room_camera(0.7f * static_cast<float>(f));
+                room.fill(scene, hidden_balls);
+                twin.frame(scene);
+                frames[run].push_back(twin.on_picture.rgba);
+                counts[run].push_back(twin.on_stats.clusters_drawn * 1000003u + twin.on_stats.clusters_occluded * 101u + twin.on_stats.clusters_wasted);
+            }
+        }
+        assert(frames[0] == frames[1] && counts[0] == counts[1]);
+        std::cerr << "occlusion: 20 frames twice from fresh views, identical\n";
+    });
+}
+
+// The shadow of a ball hidden from the camera still falls into view: the shadow maps are not culled with the camera's pyramid.
+void test_gpu_occlusion_keeps_shadows() {
+    with_gpu("test_gpu_occlusion_keeps_shadows", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        for (const kin::u32 cascades : {1u, 3u}) {
+            Twin twin{renderer, r3d, 4};
+            kin::Scene3D scene;
+            scene.camera = room_camera(6.0f);
+            scene.lights.sun.direction = {-0.94f, 0.34f, 0.05f}; // low, from the left: the shadows run right, past the wall's end
+            scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+            scene.lights.shadow_cascades = cascades;
+            scene.lights.shadow_distance = 60.0f;
+            int worst = 0;
+            for (int f = 0; f < 3; ++f) {
+                room.fill(scene, {{1.0f, 1.0f, -1.5f}, {2.5f, 1.0f, -1.0f}});
+                worst = std::max(worst, twin.frame(scene));
+            }
+            // Without the balls the floor right of the wall is lit; with them (hidden from this camera) their shadows darken it.
+            room.fill(scene, {});
+            scene.lod.enabled = true;
+            const Pixels without = shoot_view(renderer, r3d, twin.off, scene);
+            renderer.present();
+            const Difference shadow = difference_of(without, twin.on_picture);
+            std::cerr << "occlusion, shadows of hidden balls, " << cascades << " cascades: " << worst << " bytes differ with and without occlusion; the balls' shadows change " << shadow.bytes
+                      << " bytes of the picture; " << twin.on_stats.clusters_occluded << " clusters occluded\n";
+            assert(worst == 0 && shadow.bytes > 50 && twin.on_stats.clusters_occluded > 20);
+        }
+    });
+}
+
+// Not capable, or not asked in full: ignored, and the picture is the same. KIN_GPU_CLUSTERS=0 takes the GPU cut away (the CPU cuts,
+// there is nothing to test against); the selection off, or Lod3D::gpu_culling off, likewise; a scene with no clustered mesh has nothing to cull.
+void test_gpu_occlusion_is_ignored() {
+    for (const bool disabled : {false, true}) {
+        if (disabled) {
+            setenv("KIN_GPU_CLUSTERS", "0", 1);
+        }
+        with_gpu(disabled ? "test_gpu_occlusion_is_ignored (no GPU cut)" : "test_gpu_occlusion_is_ignored", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            kin::Renderer3D& r = r3d;
+            if (!disabled && !occlusion_capable(r)) {
+                return;
+            }
+            assert(r3d.capabilities().occlusion_culling == (!disabled && r3d.capabilities().gpu_driven_clusters));
+            const OcclusionRoom room{r3d};
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            kin::Scene3D scene;
+            scene.camera = room_camera();
+            room.fill(scene, hidden_balls);
+            scene.lod = {.enabled = true, .stats_readback = true};
+            const Pixels plain = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            for (int variant = 0; variant < 3; ++variant) {
+                scene.lod = {.enabled = variant != 0, .gpu_culling = variant != 1, .stats_readback = true, .occlusion = {.enabled = true}};
+                const Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                const kin::Render3DStats stats = r3d.stats();
+                // Only the third (the selection, the GPU cut and Lod3D::occlusion all on) culls, where the device can.
+                assert(stats.occlusion == (variant == 2 && !disabled));
+                if (variant == 0) {
+                    assert(stats.cluster_copies == 0); // no selection: the whole mesh
+                } else {
+                    assert(p.rgba == plain.rgba);
+                }
+            }
+            // Only plain meshes: nothing to cull, and the one line about it.
+            kin::Scene3D bare;
+            bare.camera = room_camera();
+            bare.lod = {.enabled = true, .occlusion = {.enabled = true}};
+            const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+            bare.draw(box, Mat4f::translation({0.0f, 1.0f, 0.0f}));
+            render_ok(r3d, view, bare);
+            assert(!r3d.stats().occlusion && r3d.stats().cluster_copies == 0);
+        });
+        if (disabled) {
+            unsetenv("KIN_GPU_CLUSTERS");
+        }
+    }
+}
+
+// The room for the cut's gathered indices runs out while occlusion is on: the picture degrades as G3c's does, nothing is written past
+// the end, the dropped clusters are counted; with room again it is the full picture.
+void test_gpu_occlusion_with_overflow() {
+    with_gpu("test_gpu_occlusion_with_overflow", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+        kin::Scene3D scene;
+        scene.camera = room_camera();
+        std::vector<Vec3f> balls = hidden_balls;
+        balls.insert(balls.end(), open_balls.begin(), open_balls.end());
+        room.fill(scene, balls);
+        scene.lod = {.enabled = true, .stats_readback = true, .occlusion = {.enabled = true}};
+        Pixels full;
+        for (int f = 0; f < 3; ++f) {
+            full = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+        }
+        const kin::u64 fine = r3d.stats().triangles;
+        for (const kin::u32 room_triangles : {2000u, 100u, 1u}) {
+            scene.lod.max_cluster_triangles = room_triangles;
+            Pixels small;
+            for (int f = 0; f < 3; ++f) {
+                small = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+            }
+            const kin::Render3DStats stats = r3d.stats();
+            std::cerr << "occlusion, room of " << room_triangles << " triangles: " << stats.triangles << " drawn (" << fine << " with room), " << stats.cluster_overflow << " clusters dropped\n";
+            assert(stats.triangles <= static_cast<kin::u64>(room_triangles) * 2 + 24 && stats.cluster_overflow > 0 && stats.triangles < fine);
+        }
+        scene.lod.max_cluster_triangles = 4'000'000;
+        const Pixels again = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(again.rgba == full.rgba && r3d.stats().cluster_overflow == 0);
+    });
+}
+
 int main() {
     test_meshes_face_out();
     test_mesh_lod_builder();
@@ -5313,6 +5896,14 @@ int main() {
     test_gpu_cut_falls_back();
     test_gpu_cut_many_copies();
     test_gpu_cut_chunks();
+    test_gpu_occlusion_picture_and_stats();
+    test_gpu_occlusion_moving();
+    test_gpu_occlusion_gaps_and_edges();
+    test_gpu_occlusion_history();
+    test_gpu_occlusion_is_deterministic();
+    test_gpu_occlusion_keeps_shadows();
+    test_gpu_occlusion_is_ignored();
+    test_gpu_occlusion_with_overflow();
     test_gpu_metal_and_roughness();
     test_gpu_normal_map();
     test_gpu_alpha_mask();
