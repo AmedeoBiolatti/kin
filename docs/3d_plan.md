@@ -2091,7 +2091,7 @@ interleaved pairs of runs of the old and the new binary (120 frames each, median
 on this machine load it to a load average of 20 to 35 at times and that moves CPU numbers by 2x and GPU numbers by 10 to 20%); `render()` CPU ms in the second column group. Differences under
 about 0.05 ms GPU, or 0.01 ms CPU on the small scenes, are noise.
 
-Known flakes, seen in the **old** binary too and not caused by these changes: `crowd/above` under TAA flips between two pictures (1 of 2 full old-binary runs, 1 of 3 new-binary runs; crowd alone, 5 runs
+**Superseded: these flakes were found and fixed afterwards (a draw sorted by heap address; an environment mip level nothing wrote), see "The intermittent green pixels — investigation"; every other mention of the "known flake", "the kiln jitter" or "the TAA flip" in this plan is the same pair.** Known flakes, seen in the **old** binary too and not caused by these changes: `crowd/above` under TAA flips between two pictures (1 of 2 full old-binary runs, 1 of 3 new-binary runs; crowd alone, 5 runs
 of each: never), and `kiln_near/grazing` flips between two pictures (old binary 2 of 6 runs, new 3 of 8; under `--taa` too, together with `kiln_near/far`). Every other picture of every configuration was identical in every run. (A first version of the
 shader split changed `mesh.vert`'s SPIR-V by hoisting a `const uint at` out of an expression, and `kiln_near/grazing` then differed twice in a row; with hindsight that may have been this flake
 or the rounding. The shaders were arranged so that `mesh.vert` and `mesh.frag` compile to the **same SPIR-V as before**, checked with `glslc` and `cmp`, and the velocity variants are separate files: keep it so.)
@@ -2466,6 +2466,113 @@ skinned meshes and glTF animation; metallic-roughness materials and an
 environment light; a 3D physics engine (Jolt), only if the cell grid stops
 being enough; agent interface additions (`render.3d` stats, `view.pick`
 over the server) once an agent needs them.
+
+### The intermittent green pixels — investigation
+
+(Written as the work went; the last lines are the conclusion.)
+
+Symptom: `run.py render <label> --frames 120 --taa` (all reference scenes in one process) sometimes draws
+`ibl_spheres` with a share of pure-green pixels (g >= 250, r and b < 120): 0.30% of `ibl_spheres/front` and 3.42% of
+`grazing` in one run of three; the other runs clean. Without `--taa` never. Check script: share of such pixels (Pillow).
+
+- Log (head 8890300, `--frames 120 --taa`, one process at a time, 1280x720):
+  - 7 full runs (all 15 scenes): `ibl_spheres` clean in every one. A smaller set did not show it either at first.
+  - **Reproduced**: the scene list `cornell,crowd,furnace,helmet,hidden,hidden_dense,ibl_helmet,ibl_spheres,sponza`
+    (the full list minus the kiln scenes, motion, shadows, spheres; `ibl_spheres` is not even the last) gives the green
+    in about 3 runs of 8 (the rate moves with time: 0 of 6, then 1 of 8 in later batches). The green pictures are
+    **byte-identical to each other** (0.30% of `front`, 3.42% of `grazing`, the coordinator's numbers to the digit), so the
+    wrong state is a deterministic wrong picture, reached at random, not random garbage.
+  - What the green is: against a clean picture of the same run configuration, R and B are *exactly* equal in every
+    pixel and only G is raised (by up to 200 levels), on the metallic spheres, growing toward the rim: a G-only error in
+    the specular term.
+  - **It is not TAA's history**: with `taa.blend = 0` (no history weight) the same frame is just as green
+    (`KIN_REF_TAA_PROBE`, a temporary probe in kin_reference, removed again), so the wrong state is in the shaded frame and
+    persists from one frame to the next, i.e. in a texture or buffer the shading reads (environment textures first).
+- **Root cause found** (environment dumps, `source_L10` and `specular_L1` read back from a green run and from clean runs):
+  1. The green run's *specular level 1* (the 512 x 256 level, roughness 1/6) is the clean one plus a constant 17.115 in G
+     only, for every texel, bit-identical between green runs; levels 0 and 2 to 6, the irradiance and the source's levels 0 to 9
+     are identical to a clean run.
+  2. The environment's source picture (1024 x 512, 11 levels by `max(w, h)`) has a **last level (1 x 1) that nothing wrote**:
+     green runs read (-0.00017, NaN, -0.00011, NaN) there, a clean run (12.86, 0.95, 11.44, 0.95), i.e. whatever the
+     memory held (the two states are the old pictures' "A" and "B": the +-2 level differences between runs of
+     `ibl_spheres` that every earlier agent saw were the same bug at a mild value).
+  3. Why nothing wrote it: `SDL_GenerateMipmapsForGPUTexture` (Vulkan: `VULKAN_GenerateMipmaps`) blits each level into the
+     next with `dstOffsets[1] = {width >> level, height >> level}`, no `max(1, ..)`: on a 2:1 picture the last level is
+     1 x 0 and the blit is empty (so is every level after the shorter side reaches 1). kin counted levels by the *longer* side.
+  4. Why it shows only in G, and only as one constant: the GGX filter of level 1 (256 importance samples, each read from
+     the mip whose texels match the sample's solid angle) reads the 1 x 1 mip for exactly one sample (the grazing-most one,
+     n.l = 0.434, 0.434 / 253.7 of the weight); `radiance()` clamps with `min(texel, 1e4)`, and GLSL's `min(NaN, x)` is `x`, so
+     the NaN G becomes 1e4 and adds 1e4 * 0.434 / 253.7 = 17.1 to G (R and B, small and negative, add nothing). Every texel
+     has the same sample set rotated to its normal, so the offset is the same for every texel and every green run is the same picture.
+     With stale values (12.86, ., 11.44) the same sample adds +0.022 to R and B instead: the mild +-2 flip.
+  5. The same applies to any non-square mipmapped texture made by `GpuDevice::make_mipmapped` (model textures, 2D textures set to
+     `ScaleMode::Mipmapped`): the levels after the shorter side reaches 1 are never written; they are read only when a
+     texture is minified very far.
+  Why TAA and the other scenes: TAA was a coincidence of memory layout (it allocates targets before the environment). The
+  poison switch did not catch it at first because `update_texture(..., whole = true)` cycles the texture (fresh,
+  unpoisoned memory) after the poison upload.
+- **A second, separate cause: the kiln flake** (`kiln/close`, `kiln/game`, `kiln_near/grazing`: a few pixels, up to 5 to
+  18 levels, e.g. one pixel row of six, an MSAA edge). It is not the environment (no environment, no textures involved) and not
+  memory: `kiln` alone is identical in 4 of 4 runs, also with `KIN_POISON_TEXTURES=2 KIN_POISON_BUFFERS=1`; in a process
+  that rendered other scenes first it differed in 3 of 3 (after the mip fix too). `order_draws` ended its sort with
+  `return x.mesh < y.mesh;`: a **heap address**. Two draws whose surfaces tie in depth (the kiln has overlapping geometry)
+  are drawn in the order of their meshes' addresses, which changes with whatever the process allocated before. Sorting by
+  `GpuMesh3D::serial` (the order the meshes were made, which an address usually follows when nothing was freed) instead:
+  `crowd,ibl_helmet,ibl_spheres,kiln,kiln_near` identical in 4 of 4 runs, kiln included (3 of 3 differed before).
+- Tool added while looking: `KIN_POISON_TEXTURES=1|2` and `KIN_POISON_BUFFERS=1` (see "Poison switch" below). With it on
+  the clean-run pictures did not turn into poison: no texture the 3D renderer makes is read *before it is written* in the
+  frames of these runs (so the cause is not a plain read of never-written memory).
+
+**The fix** (two changes, the second a separate bug):
+
+1. `GpuDevice::complete_mip_levels(w, h)` (levels down to where the *shorter* side is 1; a 1024 x 512 picture: 10, the last 2 x 1)
+   is the level count of every mip chain SDL generates: `make_mipmapped` (model textures and 2D textures set to
+   `ScaleMode::Mipmapped`) and the environment's source picture. Levels 0 to 9 are the bytes they always were. The 1 x 1 level
+   an environment used to have (never written) is gone: the sampler clamps to the 2 x 1 level. A mipmapped texture 1 pixel wide or
+   tall now has no mips (SDL's chain was empty for it anyway). `make_mipmapped` no longer calls the generator for a one-level texture.
+2. `order_draws` breaks ties by `GpuMesh3D::serial` (the order the meshes were made) instead of the mesh's pointer.
+
+**Poison switch** (kept; no cost when unset beyond one `getenv` per texture or buffer creation, none per frame):
+`KIN_POISON_TEXTURES=1` fills every texture made by `GpuDevice::create_target`, `create_target_array`, `create_depth_stencil`, the environment's three
+textures and the levels `make_mipmapped` is to generate, before its first use, through the upload command buffer: NaN in float texels, white
+(0xFF) in 8-bit ones, depth 0.37 and stencil 0x5A; `=2` uses 3e4 instead of NaN. `KIN_POISON_BUFFERS=1` fills buffers made by `create_buffer` with no
+data and the cluster chunks with 0xFF bytes. Read at each creation, so a test can set it around one call. Limits: a texture that is cycled afterwards
+(an upload or a pass with `cycle = true` while it is still in use) gets fresh memory and loses the poison, which is why the environment source and
+`make_mipmapped` poison their levels again after level 0's upload, and why the poison alone did not show this bug at first.
+
+**Tests** (both fail with the fix reverted, to the same message each time, and pass with it, on NVIDIA and lavapipe):
+`test_gpu_environment_levels_written` (render3d_tests: a flat 0.25 environment of 512 x 256 made with `KIN_POISON_TEXTURES=1`; a white mirror-ish sphere must
+not exceed 0.30 linear (with the bug: 1.0), must not be black in the middle, and must be byte-identical to the same render with no poison, at roughness 1/6, 0.5 and 1) and
+`test_gpu_mipmaps_not_square` (renderer_tests: red textures of 256 x 64, 64 x 256, 256 x 16 and 100 x 36 made mipmapped with and without the poison, drawn into a single
+pixel: red, not white; with the bug the 256 x 64 one draws (255, 255, 255)).
+
+**Measured after the fix** (the old binary is this tree with `complete_mip_levels` counting by the longer side and the sort by pointer again; both
+binaries built from one tree; one process at a time, interleaved old/new, 1280 x 720, `--frames 120`, all 15 scenes, the kiln scenes included; "differ" is
+byte comparison against the commonest picture of that binary's runs):
+
+| 10 runs each | old binary | new binary |
+|---|---|---|
+| default: green `ibl_spheres` | 1 of 10 | 0 |
+| default: pictures that differ between runs | `ibl_spheres/front` and `grazing` (3 versions, 4 of 10 runs), `kiln/close` (4 versions, 7 of 10), `kiln/game` (6 versions, 6 of 10), `kiln_inside/behind` (5 of 10), `kiln_near/far` (5 of 10), `kiln_near/grazing` (5 of 10) | **none: all 36 pictures identical in 10 of 10 runs** |
+| `--taa`: green `ibl_spheres` | 1 of 10 | 0 |
+| `--taa`: pictures that differ | `crowd/above` (2 of 10), `ibl_spheres` (3 versions, 5 of 10), `kiln/close` (4 versions, 5 of 10), `kiln/game` (2 of 10), `kiln_near/far` (5 of 10), `kiln_near/grazing` (4 of 10) | **none: identical in 10 of 10** |
+| `kiln_near --lod --lod-clusters --taa` | `far` (3 versions, 6 of 10), `grazing` (4 of 10) | **none: identical in 10 of 10** |
+
+Every "known flake" of the earlier notes (the kiln between 72 and 90 dB, `kiln_near/grazing`, `kiln_near/far`, `crowd/above` under TAA) is gone
+and none was load-dependent: they were the pointer sort (all but `ibl_spheres`) and the unwritten mip level (`ibl_spheres`, and `ibl_helmet` at
+a lower amplitude). Ten runs of each is evidence, not proof: the old green appeared in 1 run of 10 in these batches and in 3 of 8 or 1 of 3 in others, so a
+cause that fired once in 20 runs would not necessarily show; the two causes found are each reproduced, switched off and re-tested, and nothing remains unexplained.
+`crowd/above` under all-on settled in the picture the notes called the quiet one (6ce1cac0); the kiln's pictures settled in one of their old states.
+
+**What the fix changes in a picture**: the ibl pictures only, and by one level or less in a few thousand pixels (the 1 x 1 level they read was stale memory; now it
+is the 2 x 1 level): `ibl_spheres` default 3,162 and 10,045 pixels of `front` and `grazing`, `ibl_helmet` 1,852 and 399, max 1 level (all-on settings: max 2 to 4);
+every other picture of the 11 scenes of `sp2_before_def` and `sp2_before_all` is byte-identical (24 of 24 except those four and `kiln/close`, `kiln/game`, which were flaky
+before: they now come out the same in every run).
+
+**Not found, not tested**: D3D12 and Metal (the trimmed chains are right for any backend; whether SDL's other backends have the same empty blit was not looked at); the
+Sponza Walk panel click path; a NaN scrub in the TAA resolve was *not* added: `taa.comp`'s `history_at` ends with `max(sum / total, vec4(0))`, which turns a NaN in the
+history into 0 on NVIDIA before the shader's own `isnan(history)` test can see it (so that test is dead), and `env_filter.comp`'s `min(texel, 1e4)` turns a NaN
+texel into 1e4. Neither caused the green (the NaN came from the unwritten level, not from TAA), and neither is changed here.
 
 ## How it is tested
 

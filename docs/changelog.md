@@ -115,6 +115,16 @@ releases may change APIs.
 
 ### Fixed
 
+- SDL_GPU: mip chains of textures that are not square had levels nobody wrote. SDL's mip generation stops at the level where the shorter side
+  is 1, but kin counted levels by the longer side, so a mipmapped 1024 x 512 texture had a last 1 x 1 level holding whatever its memory held,
+  read when the texture is drawn very small. Mipmapped textures (`ScaleMode::Mipmapped`) and 3D environments now have only the levels that
+  are written (`GpuDevice::complete_mip_levels`); in 3D this was the intermittent green metal spheres with image-based light (the NaN in that level
+  went into the environment's filtered copies), and the cause of 1 to 2 level differences between runs of the same picture.
+- 3D: draws were ordered by their mesh's heap address, so two surfaces tied in depth (the kiln, the crowd under TAA) came out in a different order from
+  one process to the next; the order is now the order the meshes were made. The reference scenes' "flaky" pictures are identical in every run.
+- Debug: `KIN_POISON_TEXTURES=1|2` and `KIN_POISON_BUFFERS=1` fill new targets, environment textures, the levels of a mip chain to be generated and cluster
+  buffers with NaN (or 3e4, or 0xFF bytes) before first use, so a read of unwritten memory shows every time; unset, they cost nothing per frame.
+
 - SDL_GPU: a hidden or minimized window let the CPU run frames ahead of
   the GPU without bound (no swapchain texture, so nothing waited): GPU
   memory grew until the device was lost. Such frames now wait for the

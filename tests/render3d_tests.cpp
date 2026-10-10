@@ -2396,6 +2396,65 @@ void test_gpu_environment() {
     });
 }
 
+// The green sky. An environment's picture is 2:1, and the GPU's mip chain (SDL's blits) never wrote its
+// last, 1 x 1 level, which the filter's widest lobes read, so the specular levels held whatever that
+// memory did (stale numbers, now and then a NaN, which the filter's `min(sample, 1e4)` turns into 1e4:
+// the metal spheres of ibl_spheres drew green in some runs). KIN_POISON_TEXTURES fills the levels to be
+// generated with NaN first, so a level nothing writes shows every time. A flat environment of 0.25 lit
+// by nothing else: a white mirror-ish sphere can't be brighter than 0.25 linear anywhere, and the picture
+// is the same with and without the poison.
+void test_gpu_environment_levels_written() {
+    with_gpu("test_gpu_environment_levels_written", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Vec2i size{512, 256}; // wide enough for the widest lobes to reach the last level
+        const std::vector<float> flat(static_cast<std::size_t>(size.x * size.y) * 3, 0.25f);
+        const kin::Mesh sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
+        const auto picture = [&](bool poisoned, float roughness) {
+            if (poisoned) {
+                setenv("KIN_POISON_TEXTURES", "1", 1);
+            }
+            kin::Environment3D environment = r3d.create_environment(size, flat);
+            unsetenv("KIN_POISON_TEXTURES");
+            assert(environment.valid());
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.lights.environment = environment;
+            scene.draw(sphere, Mat4f::identity(), {.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        // Roughness 1/6 is the filter's level 1, whose widest lobe samples reach the last source level; 0.5 and 1 are the levels after.
+        for (const float roughness : {1.0f / 6.0f, 0.5f, 1.0f}) {
+            const Pixels clean = picture(false, roughness), poisoned = picture(true, roughness);
+            float brightest = 0.0f, dimmest = 1.0f;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const Color c = poisoned.at(x, y);
+                    const float v = linear_level(Color::rgb(std::max({c.r, c.g, c.b}), 0, 0)); // the brightest channel, linear
+                    brightest = std::max(brightest, v);
+                    if (x >= 72 && x < 88 && y >= 54 && y < 66) {
+                        dimmest = std::min(dimmest, v); // the middle of the sphere
+                    }
+                }
+            }
+            if (brightest > 0.3f || dimmest < 0.05f) {
+                std::cerr << "roughness " << roughness << ": brightest channel " << brightest << " (at most 0.25 is lit), sphere's middle " << dimmest << "\n";
+                assert(false && "the environment's mip levels were not all written");
+            }
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const Color a = clean.at(x, y), b = poisoned.at(x, y);
+                    assert(a.r == b.r && a.g == b.g && a.b == b.b && "the picture does not depend on what an unwritten level held");
+                }
+            }
+        }
+    });
+}
+
 // A material's own fragment shader (tests/shaders, compiled by glslc now,
 // against kin_material.inc.glsl): one that calls kin's lighting by hand looks
 // as the built-in does; one that ignores it shows what it writes, from the
@@ -6803,6 +6862,7 @@ int main() {
     test_gpu_model_materials();
     test_gpu_wrap_modes();
     test_gpu_environment();
+    test_gpu_environment_levels_written();
     test_gpu_material_shader();
     return 0;
 }

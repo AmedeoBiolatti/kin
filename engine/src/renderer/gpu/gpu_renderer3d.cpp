@@ -942,6 +942,8 @@ std::shared_ptr<GpuClusterChunk> GpuRenderer3D::allocate_cluster_range(u32 indic
     if (!chunk->indices || !chunk->table) {
         throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
     }
+    _device->poison_buffer(chunk->indices, index_info.size); // KIN_POISON_BUFFERS: a debug aid
+    _device->poison_buffer(chunk->table, table_info.size);
     index_first = 0;
     table_first = 0;
     chunk->index_used = indices;
@@ -1188,14 +1190,16 @@ std::shared_ptr<IEnvironmentBackend> GpuRenderer3D::create_environment(Vec2i siz
             if (!texture) {
                 throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
             }
+            _device->poison_texture(texture, format, w, h, 1, levels, usage); // KIN_POISON_TEXTURES: a debug aid, nothing when unset
             return GpuTexture{_device->shared(), texture, w, h, format};
         };
         const u32 w = static_cast<u32>(size.x), h = static_cast<u32>(size.y);
-        u32 source_levels = 1;
-        while ((std::max(w, h) >> source_levels) > 0) {
-            ++source_levels;
-        }
-        environment->source = make(w, h, source_levels, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
+        // The levels the GPU can fill: by the shorter side, not the longer. A 2:1 picture's 1 x 1 level was
+        // never written (SDL's blit chain stops at an empty extent), and the filter's widest lobes read it:
+        // whatever its memory held went into the specular levels (stale values, now and then a NaN: a green sky).
+        const u32 source_levels = GpuDevice::complete_mip_levels(w, h);
+        constexpr SDL_GPUTextureUsageFlags source_usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        environment->source = make(w, h, source_levels, source_usage);
         std::vector<u16> texels(static_cast<std::size_t>(w) * h * 4);
         for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
             for (int c = 0; c < 3; ++c) {
@@ -1204,6 +1208,8 @@ std::shared_ptr<IEnvironmentBackend> GpuRenderer3D::create_environment(Vec2i siz
             texels[i * 4 + 3] = to_half(1.0f);
         }
         _device->update_texture(environment->source.handle(), 0, 0, w, h, reinterpret_cast<const u8*>(texels.data()), 8, true);
+        // KIN_POISON_TEXTURES: the levels to be generated, filled with the poison after level 0's (cycling) upload.
+        _device->poison_texture(environment->source.handle(), format, w, h, 1, source_levels, source_usage, SDL_GPU_SAMPLECOUNT_1, /*first_level=*/1);
         _device->generate_mipmaps(environment->source.handle());
         // The mirror level as wide as the picture, up to 1024; a level more
         // rough each, to the roughest at a sixteenth of that.
@@ -3518,7 +3524,7 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
         if (culled_x != culled_y) {
             return culled_x;
         }
-        return x.mesh < y.mesh;
+        return x.mesh->serial < y.mesh->serial; // not the pointer: a tie in depth between two draws would flip with the heap
     });
     // The overlay in front of the world, seen by its own camera, and the velocity pass for it.
     ctx.overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });

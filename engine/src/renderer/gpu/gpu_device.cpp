@@ -6,6 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
+#include <limits>
+#include <vector>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -245,6 +248,7 @@ GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat 
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture (target) failed");
     }
+    poison_texture(texture, format, width, height, 1, levels, usage, samples);
     return GpuTexture{_shared, texture, width, height, format};
 }
 
@@ -263,6 +267,7 @@ GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture (target array) failed");
     }
+    poison_texture(texture, format, width, height, layers, 1, usage);
     return GpuTexture{_shared, texture, width, height, format};
 }
 
@@ -290,6 +295,7 @@ GpuTexture GpuDevice::create_depth_stencil(u32 width, u32 height) {
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture (depth-stencil) failed");
     }
+    poison_texture(texture, info.format, width, height, 1, 1, info.usage);
     return GpuTexture{_shared, texture, width, height, info.format};
 }
 
@@ -498,10 +504,7 @@ void GpuDevice::end_upload_pass() {
 
 GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
     const u32 w = source.width(), h = source.height();
-    u32 levels = 1;
-    while ((std::max(w, h) >> levels) > 0) {
-        ++levels;
-    }
+    const u32 levels = complete_mip_levels(w, h); // not by the longer side: see the header
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = source.format();
@@ -515,6 +518,7 @@ GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
+    poison_texture(texture, info.format, w, h, 1, levels, info.usage, SDL_GPU_SAMPLECOUNT_1, /*first_level=*/1); // KIN_POISON_TEXTURES: before level 0 is copied
     refuse_upload_inside_fill();
     const std::lock_guard lock{_uploads_mutex};
     begin_upload_commands();
@@ -524,7 +528,9 @@ GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
     const SDL_GPUTextureLocation to{.texture = texture};
     SDL_CopyGPUTextureToTexture(pass, &from, &to, w, h, 1, false);
     SDL_EndGPUCopyPass(pass);
-    SDL_GenerateMipmapsForGPUTexture(_upload_commands, texture);
+    if (levels > 1) {
+        SDL_GenerateMipmapsForGPUTexture(_upload_commands, texture);
+    }
     return GpuTexture{_shared, texture, w, h, source.format()}; // not pooled: a kind of its own
 }
 
@@ -534,6 +540,136 @@ void GpuDevice::generate_mipmaps(SDL_GPUTexture* texture) {
     begin_upload_commands();
     end_upload_pass();
     SDL_GenerateMipmapsForGPUTexture(_upload_commands, texture);
+}
+
+u32 GpuDevice::complete_mip_levels(u32 width, u32 height) {
+    u32 levels = 1;
+    while ((std::min(width, height) >> levels) > 0) {
+        ++levels;
+    }
+    return levels;
+}
+
+void GpuDevice::poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat format, u32 width, u32 height, u32 layers, u32 levels,
+                               SDL_GPUTextureUsageFlags usage, SDL_GPUSampleCount samples, u32 first_level) {
+    const char* env = std::getenv("KIN_POISON_TEXTURES");
+    const int mode = env ? std::atoi(env) : 0;
+    if (mode <= 0 || !texture) {
+        return;
+    }
+    const bool large = mode >= 2;
+    refuse_upload_inside_fill();
+    const std::lock_guard lock{_uploads_mutex};
+    begin_upload_commands();
+    end_upload_pass();
+    if (usage & SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET) {
+        for (u32 layer = 0; layer < layers; ++layer) {
+            SDL_GPUDepthStencilTargetInfo target{};
+            target.texture = texture;
+            target.clear_depth = 0.37f;
+            target.load_op = SDL_GPU_LOADOP_CLEAR;
+            target.store_op = SDL_GPU_STOREOP_STORE;
+            target.stencil_load_op = SDL_GPU_LOADOP_CLEAR;
+            target.stencil_store_op = SDL_GPU_STOREOP_STORE;
+            target.clear_stencil = 0x5A;
+            target.layer = static_cast<Uint8>(layer);
+            if (SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(_upload_commands, nullptr, 0, &target)) {
+                SDL_EndGPURenderPass(pass);
+            }
+        }
+        return;
+    }
+    // Bytes of one texel and the pattern that fills it.
+    u32 texel = 0;
+    u16 half = large ? 0x7BFF : 0x7E00; // 65504 or NaN
+    u32 single = large ? 0x46EA6000u : 0x7FC00000u; // 3e4 or NaN
+    bool is_half = false, is_single = false;
+    switch (format) {
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT: texel = 8; is_half = true; break;
+    case SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT: texel = 4; is_half = true; break;
+    case SDL_GPU_TEXTUREFORMAT_R16_FLOAT: texel = 2; is_half = true; break;
+    case SDL_GPU_TEXTUREFORMAT_R32_FLOAT: texel = 4; is_single = true; break;
+    case SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT: texel = 8; is_single = true; break;
+    case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT: texel = 16; is_single = true; break;
+    case SDL_GPU_TEXTUREFORMAT_R8_UNORM: texel = 1; break;
+    case SDL_GPU_TEXTUREFORMAT_R8G8_UNORM: texel = 2; break;
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB:
+    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM:
+    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB: texel = 4; break;
+    default: return; // not a format the renderer makes
+    }
+    if (samples != SDL_GPU_SAMPLECOUNT_1) {
+        // A multisampled target cannot be uploaded to: cleared (a render pass), to NaN or white/large.
+        if (usage & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) {
+            const float v = is_half || is_single ? (large ? 3.0e4f : std::numeric_limits<float>::quiet_NaN()) : 1.0f;
+            SDL_GPUColorTargetInfo target{};
+            target.texture = texture;
+            target.load_op = SDL_GPU_LOADOP_CLEAR;
+            target.store_op = SDL_GPU_STOREOP_STORE;
+            target.clear_color = {v, v, v, v};
+            if (SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(_upload_commands, &target, 1, nullptr)) {
+                SDL_EndGPURenderPass(pass);
+            }
+        }
+        return;
+    }
+    std::vector<u8> bytes;
+    for (u32 layer = 0; layer < layers; ++layer) {
+        for (u32 level = first_level; level < levels; ++level) {
+            const u32 w = std::max(1u, width >> level), h = std::max(1u, height >> level);
+            const u64 total = static_cast<u64>(w) * h * texel;
+            bytes.resize(static_cast<std::size_t>(total));
+            if (is_half) {
+                for (std::size_t i = 0; i + 1 < bytes.size(); i += 2) {
+                    std::memcpy(&bytes[i], &half, 2);
+                }
+            } else if (is_single) {
+                for (std::size_t i = 0; i + 3 < bytes.size(); i += 4) {
+                    std::memcpy(&bytes[i], &single, 4);
+                }
+            } else {
+                std::fill(bytes.begin(), bytes.end(), u8{0xFF});
+            }
+            // Staged like any upload, but to one mip level and layer of the texture.
+            SDL_GPUTransferBufferCreateInfo info{};
+            info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+            info.size = static_cast<u32>(total);
+            SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(_device, &info);
+            if (!transfer) {
+                return;
+            }
+            if (auto* mapped = static_cast<u8*>(SDL_MapGPUTransferBuffer(_device, transfer, false))) {
+                std::memcpy(mapped, bytes.data(), bytes.size());
+                SDL_UnmapGPUTransferBuffer(_device, transfer);
+                if (!_upload_pass) {
+                    _upload_pass = SDL_BeginGPUCopyPass(_upload_commands);
+                }
+                SDL_GPUTextureTransferInfo source{};
+                source.transfer_buffer = transfer;
+                source.pixels_per_row = w;
+                source.rows_per_layer = h;
+                SDL_GPUTextureRegion destination{};
+                destination.texture = texture;
+                destination.mip_level = level;
+                destination.layer = layer;
+                destination.w = w;
+                destination.h = h;
+                destination.d = 1;
+                SDL_UploadToGPUTexture(_upload_pass, &source, &destination, false);
+            }
+            SDL_ReleaseGPUTransferBuffer(_device, transfer); // freed once the copy is done
+        }
+    }
+}
+
+void GpuDevice::poison_buffer(SDL_GPUBuffer* buffer, u32 bytes) {
+    const char* env = std::getenv("KIN_POISON_BUFFERS");
+    if (!env || std::atoi(env) <= 0 || !buffer || bytes == 0) {
+        return;
+    }
+    std::vector<u8> fill(bytes, u8{0xFF});
+    upload_storage_buffer(buffer, 0, bytes, fill.data(), false);
 }
 
 void GpuDevice::clear_texture(SDL_GPUTexture* texture, bool cycle) {
@@ -604,6 +740,8 @@ GpuBuffer GpuDevice::create_buffer(SDL_GPUBufferUsageFlags usage, const void* da
     GpuBuffer buffer{_device, raw_buffer, size};
     if (data) {
         upload_buffer(buffer, data, size);
+    } else {
+        poison_buffer(raw_buffer, size);
     }
     return buffer;
 }

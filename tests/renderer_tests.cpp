@@ -2171,6 +2171,63 @@ void test_gpu_mipmaps() {
     }
 }
 
+// A texture that is not square, mipmapped: every level it samples holds something. SDL's chain of blits
+// writes nothing once the shorter side's extent reaches 0, so the levels beyond that (the 1 x 1 end of a
+// 4:1 texture, made by the longer side) kept whatever their memory held and showed it when the texture
+// was drawn very small. KIN_POISON_TEXTURES fills the levels to be generated with white first, which
+// makes the unwritten ones certain to show (a texture of red, drawn into a single pixel, is white then).
+void test_gpu_mipmaps_not_square() {
+    constexpr std::string_view test_name = "test_gpu_mipmaps_not_square";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-mipmap-not-square-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        for (const kin::Vec2i size : {kin::Vec2i{256, 64}, kin::Vec2i{64, 256}, kin::Vec2i{256, 16}, kin::Vec2i{100, 36}}) {
+            for (const bool poisoned : {true, false}) {
+                std::vector<kin::u8> red(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 4);
+                for (std::size_t i = 0; i < red.size(); i += 4) {
+                    red[i] = 255;
+                    red[i + 3] = 255;
+                }
+                if (poisoned) {
+                    SDL_setenv_unsafe("KIN_POISON_TEXTURES", "1", 1);
+                }
+                const kin::Texture texture = renderer->create_texture_from_rgba(red.data(), size);
+                renderer->set_scale_mode(texture, kin::ScaleMode::Mipmapped); // the levels are made here
+                SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
+                std::vector<kin::u8> px;
+                kin::Vec2i read_size{};
+                {
+                    const auto bind = renderer->scoped_render_target(target);
+                    renderer->clear(kin::Color::rgb(0, 0, 0));
+                    renderer->draw_texture(texture, kin::Rectf{4.0f, 4.0f, 1.0f, 1.0f}); // far off: the last level it has
+                    assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, read_size));
+                }
+                const kin::Color got = kin::Color::rgba(px[(4 * 16 + 4) * 4], px[(4 * 16 + 4) * 4 + 1], px[(4 * 16 + 4) * 4 + 2], 255);
+                if (!color_near(got, kin::Color::rgb(255, 0, 0), 3)) {
+                    throw std::runtime_error(std::string(test_name) + ": " + std::to_string(size.x) + " x " + std::to_string(size.y) +
+                                             (poisoned ? " (poisoned)" : "") + " drawn small is (" + std::to_string(got.r) + ", " +
+                                             std::to_string(got.g) + ", " + std::to_string(got.b) + "), not red: a level nobody wrote");
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // Overdraw: the area a frame's draws cover over the screen's.
 void test_gpu_overdraw() {
     constexpr std::string_view test_name = "test_gpu_overdraw";
@@ -3879,6 +3936,7 @@ int main() {
     test_gpu_compute();
     test_gpu_shader_hot_reload();
     test_gpu_mipmaps();
+    test_gpu_mipmaps_not_square();
     test_gpu_overdraw();
     test_gpu_layers();
     test_layers_on_software_backend();

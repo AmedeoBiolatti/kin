@@ -92,11 +92,32 @@ public:
     // frame sees them. Recording at once keeps the order of uploads and draws:
     // a draw recorded before a cycled upload reads the old texels.
     void flush_uploads();
-    // A copy of `source` (RGBA8) with a full mip chain, made on the GPU with the
-    // uploads (the copies before the frame that draws it).
+    // A copy of `source` (RGBA8) with a mip chain of complete_mip_levels() levels, made on the GPU
+    // with the uploads (the copies before the frame that draws it).
     GpuTexture make_mipmapped(const GpuTexture& source);
-    // Remakes a mipmapped texture's smaller levels from level 0, with the uploads.
+    // Remakes a mipmapped texture's smaller levels from level 0, with the uploads. The texture must
+    // have complete_mip_levels() levels or fewer: see there.
     void generate_mipmaps(SDL_GPUTexture* texture);
+    // How many levels (level 0 included) of a width x height texture generate_mipmaps and
+    // make_mipmapped can fill: down to the level where the shorter side is 1 (a 1024 x 512 picture:
+    // 10 levels, the last 2 x 1). SDL_GenerateMipmapsForGPUTexture blits each level into the next with
+    // an extent of `size >> level`, which is 0 for the shorter side one level past that, so an empty
+    // blit: a longer chain (the 1 x 1 level of a 2:1 picture, as `max(width, height)` counts) would
+    // keep whatever its memory held, and sampling it, as far-off or very blurred reads do, would
+    // show that. Never make a mipmapped texture with more levels than this.
+    static u32 complete_mip_levels(u32 width, u32 height);
+    // Debug tool for reads of unwritten memory: with KIN_POISON_TEXTURES set (1: NaN in float
+    // texels, white in 8-bit ones; 2: the largest finite half / 3e4 in floats), every texture
+    // made by create_target, create_target_array and create_depth_stencil, and the 3D
+    // renderer's own (environment) ones, is filled with that before its first use, through the
+    // upload command buffer, so a texel read before anything wrote it shows up the same in
+    // every run instead of whatever the memory held. KIN_POISON_BUFFERS=1 does the same (0xFF
+    // bytes) for the buffers made by create_buffer with no data. Read on each call; unset, they cost one getenv.
+    // `first_level`: skip the levels before it (a mip chain whose level 0 is about to be uploaded: the
+    // upload cycles the texture, to fresh memory, so poison put there first would be lost).
+    void poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat format, u32 width, u32 height, u32 layers, u32 levels,
+                        SDL_GPUTextureUsageFlags usage, SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1, u32 first_level = 0);
+    void poison_buffer(SDL_GPUBuffer* buffer, u32 bytes);
     // Big uploads copy their texels on these workers too (null: none).
     void set_job_system(JobSystem* jobs) { _jobs = jobs; }
     // Texture uploads recorded and command buffers submitted for them so far.
