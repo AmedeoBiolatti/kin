@@ -339,6 +339,19 @@ public:
               Color tint = colors::white, u32 id = 0);
     // Each part of `model` (model.hpp), placed by `transform`.
     void draw(const Model& model, const Mat4f& transform, Color tint = colors::white);
+    // A skinned mesh (made from MeshData with a skin) in a pose: `joint_matrices` are the matrices of
+    // compute_joint_matrices (kin/render3d/skeleton.hpp), at least Mesh::skin_joint_count() of them, copied into the scene
+    // (they need not outlive the call; clear() takes them away). `transform` places the posed mesh: the matrices are in
+    // the mesh's own space, so it is the model's placing without the glTF node's. Each call is one copy with its own
+    // pose; copies of one mesh and material one after another are drawn as one. Drawn in the main pass and the sun's
+    // shadow; not yet in the depth pre-pass (ambient occlusion, contact shadows), the temporal anti-aliasing's velocity or
+    // pick (the next step): a frame with such a copy and one of those features says so once in the log. A mesh without a
+    // skin is drawn as by draw(); too few matrices draw nothing (and say so once).
+    void draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform, const Material3D& material = {},
+                      Color tint = colors::white, u32 id = 0);
+    // Every part of `model`: its skinned parts in the pose `joint_matrices` (of Model::skeletons[0]) placed by `transform`
+    // alone, the others (not skinned) by `transform` times their node's placing, as draw(model, ...) does.
+    void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint = colors::white);
     // Many copies of `mesh`, in one draw.
     void draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material = {});
     void draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
@@ -355,13 +368,24 @@ public:
         Material3D material;
         u32 first = 0; // into instances()
         u32 count = 0;
+        // draw_skinned(): the copies are skinned; copy i's joint matrices start at joint_matrices()[skin_offsets()[skin_first + i]].
+        bool skinned = false;
+        u32 skin_first = 0;
     };
     std::span<const Draw> draws() const { return _draws; }
     std::span<const MeshInstance> instances() const { return _instances; }
+    // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned draw).
+    std::span<const Mat4f> joint_matrices() const { return _joints; }
+    std::span<const u32> skin_offsets() const { return _skin_offsets; }
 
 private:
+    std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material, bool skinned, u32 skin_first);
+
     std::vector<Draw> _draws;
     std::vector<MeshInstance> _instances;
+    std::vector<Mat4f> _joints;
+    std::vector<u32> _skin_offsets;
+    bool _warned_skin = false;
     std::unique_ptr<Scene3D> _overlay;
 };
 

@@ -2629,6 +2629,118 @@ after the clip; the hand-to-hold use is what climbing needs.
 *P1c, a viewer.* An example (or a Sponza Walk section) with a skinned character, a clip
 list, blend sliders and the IK target, as the means to look at it and to test headless.
 
+#### P1a — skinned meshes and clips, part 1 — results
+
+Done 2026-10-10 on `exp/3d-rendering` (head 1576a73 plus the working tree). Part 2 (velocity for TAA, the pre-pass and
+ambient occlusion, pick, the ECS `Animator3D`) is not started; the design below is what it plugs into.
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| `Skeleton`, `Pose`, `JointPose`, `PoseMask`, `compute_joint_matrices`, `skin_mesh` (CPU skinning reference), per-joint bounds (`compute_skin_bounds`, `skin_sphere`) | `kin/render3d/skeleton.hpp`, `src/render3d/skeleton.cpp` | CPU only. Parents come first (validated); at most 256 joints. |
+| `AnimClip3D`, `Track3D`, `sample_clip`, `blend_poses`, `blend_masked`, `apply_additive`, `extract_root_motion`, `remove_root_motion`, `AnimationPlayer3D` | `kin/render3d/animation3d.hpp`, `src/render3d/animation3d.cpp` | glTF's step / linear / cubic-spline exactly; slerp for rotations; the player has a base layer with crossfade, layers with masks and weights, additive layers and root motion. Does not touch `kin/anim`. |
+| glTF skins, `JOINTS_0` / `WEIGHTS_0`, animations | `src/render3d/model.cpp` (`GltfReader`), `Model::skeletons`, `Model::clips`, `ModelPart::skin`, `read_model_data` | Joints reordered parents-first with the vertices' indices remapped; weights renormalised; a mesh on a node under a joint becomes a rigid skinned part; morph channels and animations of non-joint nodes are logged and ignored; skins over 256 joints are rejected and their meshes drawn static. |
+| `MeshData::skin`, `Mesh::skinned()`, `Mesh::skin_joint_count()` | `mesh.hpp` | A parallel stream of 4 joints and 4 weights; `validate`/`append` know it; levels and clusters refused for a skinned mesh (logged). |
+| `Scene3D::draw_skinned` (mesh and model), `joint_matrices()`, `skin_offsets()` | `scene3d.hpp` | Matrices copied into the scene; copies of one mesh and material one after another are one draw. |
+| GPU skinning, main and shadow passes | `gpu_renderer3d.cpp`; `mesh_skinned.vert`, `mesh_skinned_velocity.vert`, `shadow_skinned.vert`, `shadow_mask_skinned.vert`, `kin_skin.inc.glsl`; `GpuVertexLayout::SkinnedMeshVertices` | A second vertex buffer (8 B a vertex: 4 joint bytes, 4 unorm weight bytes summing to 255); the frame's matrices in one storage buffer, each copy's first matrix a `u32` in a buffer of its own, in the places the instances are (`GpuInstance3D` is still 128 B). |
+| Harness | `kin_reference`: `models[].animation {clip, time, loop, speed, root_motion}`, `grid {count, columns, spacing, time_step}`; `make_scenes.py`: `skinned_bend.glb`, `skinned_dense.glb`, `floor20.glb`; `fetch.py`: `cesium_man`, `fox`, `brainstem` (single `.glb`, pinned, locked; `--lock NAME` locks only the new ones) | Scenes `skinned_bend`, `skinned_cesium`, `skinned_fox` (these two `optional`), `skinned_crowd` (speed). |
+| Tests | `tests/skeleton_tests.cpp` (new target `kin-skeleton`, CPU only, 16 tests), `tests/skin_fixtures.hpp` (a tube on three joints; a glTF made in code), 10 GPU tests in `tests/render3d_tests.cpp` (`kin_render3d_tests skinned` runs just them) | None needs a download. |
+
+**Where the vertex shader differs.** `skin = sum_i w_i M[joint_i]` (a weighted sum of the matrices); position `model * (skin * p)`; normal
+`normalize(mat3(skin) * n)`, then the copy's normal matrix as before. Valid for rigid and uniformly scaled joints; a non-uniform scale in a joint is
+approximated (the exact matrix is the inverse transpose of the sum): said in the shader and the docs.
+
+**Culling.** Each joint has a sphere round the vertices that pull on it at all (weight above 0), centred on their box, made at `create_mesh`. A copy's
+bound is the sphere round those spheres moved by its joint matrices (each radius times the matrix's stretch, bounded by Gershgorin on `A^T A`:
+exact for rotations, conservative for anything else). A posed vertex is a convex mix of the places its joints would put it, and each of those lies in
+its joint's moved sphere, so no vertex leaves the bound; it is the one used for the camera frustum test, the sun-only casters and the cascades. The
+unit test throws 500 random poses (some with non-uniform scale) at a tube and asserts every posed vertex is inside; the GPU culling test has a copy
+whose rest bound is above the view and whose pose swings it in.
+
+**Results.**
+
+| Check | Result |
+|---|---|
+| `ninja -C build -j8`, `ninja -C build-no3d -j8` | build; 3D-off still builds (new sources are only under the option) |
+| `ctest` in `build` with `KIN_REQUIRE_GPU_TESTS=1` | 69 of 69 (68 + `kin-skeleton`), NVIDIA RTX 4080 |
+| `ctest` in `build-no3d` | 65 of 65 |
+| `kin_render3d_tests` full | passes on NVIDIA (VK_ICD_FILENAMES unset) and on lavapipe |
+| Compiled SPIR-V of every existing shader | 64 of 64 byte-identical (`cmp` before and after; the four skinned shaders are new files) |
+| Off-path pictures (default, and `--cascades 4 --ao --contact-shadows --taa` over crowd, shadows, sponza, helmet, motion, spheres, cornell; kiln_near with `--lod --lod-clusters`) | 37 of 37 byte-identical to the labels rendered from the tree before the change; a second render of the baseline matched itself |
+| Skinned copy vs the same mesh skinned on the CPU and drawn plain (perspective and orthographic, 1 and 3 cascades; lit, normals skinned, shadowed) | 0 of 19,200 pixels differ by more than 4 levels in each of the four pictures |
+| Shadow of a posed copy the camera does not see vs the CPU-skinned mesh's (1 and 3 cascades), cut-out shadow, five poses of one mesh in a frame with a plain mesh between, scene and overlay | 0 pixels differ in each |
+| Workers vs serial, 2,600 / 40 / 3,000 / 1 copies in different poses (joint buffer growing and shrinking) | byte-identical |
+
+**Mutation checks** (each: break one thing, see a test fail, revert):
+
+| Break | Caught by |
+|---|---|
+| wrong joint order in the shader (joint 0 and 1 swapped) | `test_gpu_skinned_matches_cpu` (395 pixels differ) |
+| inverse bind matrix not applied in `compute_joint_matrices` | `test_joint_matrices` (rest matrices not the identity) |
+| weights not renormalised in the loader | `test_loader_skins_and_clips` |
+| wrong offset in the side buffer (every copy reads copy 0's matrices) | `test_gpu_skinned_poses_and_mix` (934 pixels) |
+| normals not skinned | `test_gpu_skinned_matches_cpu` (331 pixels) |
+| cull bound ignoring the pose | `test_gpu_skinned_culling` (the arm that swings in is culled) |
+| shadow pass using the rest pose | `test_gpu_skinned_shadow_out_of_view` (72 pixels) |
+| cut-out shadow variant using the rest pose | `test_gpu_skinned_cutout_shadow` (138 pixels) |
+| joint bound ignoring a matrix's stretch | `test_skin_bounds_hold_the_posed_vertices` |
+| bound from only each vertex's strongest joint | `test_skin_bounds_count_every_influence` (added after this one slipped through the first version of the tests: the sphere's slack hid it) |
+
+All ten were caught. One real bug was found by the tests while writing them (the draw's first side-buffer entry was off by one; the
+GPU picture was empty), which is why `test_gpu_skinned_off_path` also asserts the scene's own `skin_offsets()`.
+
+**Cost.**
+
+| Measure | Value |
+|---|---|
+| Existing paths, crowd scene, before (tree before the change, built beside) and after, 6 rounds alternating order, median | first_person CPU 0.300 / 0.291 ms, GPU 1.647 / 1.645; mid_deck 0.232 / 0.233, 1.179 / 1.156; above 0.239 / 0.239, 2.338 / 2.132: unchanged within noise (the GPU clock drifts 30% over a session; pairs alternate for it) |
+| 200 skinned copies of a 4,096-triangle mesh (3 joints, 819,212 triangles drawn, 1280 x 720, 4x MSAA), GPU, no shadows | 0.25 to 0.27 ms (the same triangles as plain instances: 0.21 ms, so skinning adds 0.04 to 0.06 ms) |
+| ... with the sun's shadow | 0.39 to 0.42 ms (plain instances: 0.35 ms) |
+| `render()` CPU, harness, with workers | 0.08 to 0.15 ms (plain instances 0.04 to 0.05 ms); 0.036 to 0.040 ms for a 2,832-triangle mesh in the test, serial (0.18 to 0.20 on lavapipe) |
+| CPU animation a character a frame, 24 joints, 3 tracks of 30 keys: `sample_clip` | 1.6 us; joint matrices 0.86 us; `AnimationPlayer3D::update` + matrices 2.4 us; with a crossfade 4.4 us |
+| ... the real Fox (24 joints) | 1.8 us; Walk-to-Run crossfade 4.6 us |
+| 1,000 such characters a frame | about 2.4 to 4.6 ms of one core; per character it is far below a frame's budget |
+
+200 skinned characters of a few thousand triangles cost under 1 ms of GPU (0.4 ms with the shadow): the spec's goal is met.
+
+**What I looked at** (`kin_reference` scenes; no Cycles truth, which would show only that skinning is skinning: they are judged against the CPU skinning
+reference above and by eye).
+- *skinned_bend*: four tubes at four moments of the `bend` clip, a fifth with `wave`. Smooth normals follow the bend; shadows follow the pose. At the
+  elbow of a hard bend (70 and -55 degrees) the tube pinches: the volume loss of linear blend skinning ("candy wrapper" in the extreme, here
+  mild). It is the technique, not a bug; dual quaternions or corrective joints are the answer if a game needs them.
+- *skinned_cesium*: CesiumMan walking, three moments: legs and arms swing, no stretched triangles, no popping. The disc on its head is the model's own
+  texture (a placeholder image icon), not a fault.
+- *skinned_fox*: Survey, Walk and Run, 24 joints: a quadruped with a tail; clean in all three, no cracks at the joints; the flat-shaded low poly look
+  is the model's.
+- *BrainStem* (59 skinned parts, 18 joints; not committed as a scene: it loads, assembles into the robot and animates; its animation also targets
+  nodes that are not joints, which are ignored and logged).
+- *skinned_crowd*: 200 copies in different poses, as measured above.
+
+**Honest limits (part 2 must do these).**
+1. **Velocity.** A skinned copy under TAA has the camera's velocity only (`mesh_skinned_velocity.vert` takes the copy as not having moved), so a
+   moving pose ghosts slightly and a still pose under a moving camera is right. Part 2: keep last frame's joint matrices (a second buffer, matched by
+   `MeshInstance::id` or draw order as the copies' previous transforms are) and read them in a skinned `prepass_velocity.vert` and in the main-pass
+   velocity variant. When ambient occlusion or contact shadows are on (the velocity is then written by the pre-pass, which has no skinned
+   variant) a skinned pixel keeps the pre-pass's clear value, no motion at all, so it ghosts under camera motion as well.
+2. **Pre-pass, AO, contact shadows, occlusion culling's occluder depth.** Skinned copies are skipped there (they are not in AO, they do not
+   shade or occlude it). Part 2: `prepass_skinned.vert` and `prepass_velocity_skinned.vert` from the same include, and the shadow variants for the occluder pass.
+3. **Pick.** `pick.frag`'s vertex stage is `mesh.vert`; a skinned variant is the same include. Until then a skinned copy is invisible to `pick`.
+4. **The shadow cache** (`cache_shadows`) is switched off for any frame with a skinned caster: a pose is not in the copies it compares. Part 2: hash the
+   copy's matrices into the key.
+5. **Non-uniform scale** in a joint skins normals approximately.
+6. **A warn-once line** says all of the above when a frame has a skinned copy and one of those features.
+7. **Joint matrices of a copy are copied per call** (`draw_skinned` copies `skin_joint_count()` matrices into the scene): a model of 59 parts (BrainStem)
+   copies the pose 59 times, 18 matrices each; a per-model pose shared by its parts would save it.
+8. **Not tested:** D3D12 and Metal (Vulkan on NVIDIA and lavapipe only; a second vertex buffer and four storage buffers in a vertex shader are
+   ordinary there); skins of more than 4 influences (the strongest four of `JOINTS_0` are used, `JOINTS_1` is ignored with a log line); sparse accessors in
+   skinned primitives; morph targets; several skeletons in one model drawn with one call (`draw_skinned(model, ...)` poses skeleton 0 only;
+   parts bound to another skeleton are skipped, draw those with the mesh overload).
+9. **Fit and bounds.** `Model::bounds` is the rest pose's; a character far from it needs its own bound for a fitted camera.
+10. **Where this slots in part 2.** `AnimationPlayer3D` is a plain object; an ECS `Animator3D` component owns one (or a clip index and time) and a
+    system calls `update`, `joint_matrices(span)` into the frame's scratch, and `draw_skinned`. `kin/anim` state machines choose the clips
+    and weights: a parameter-driven 1D blend by speed can be a `crossfade_to` or two layers with weights.
+
 ### P2 — 3D physics with Jolt, and a character
 
 Jolt behind `kin/physics3d` (the Box2D module stays as it is): bodies (static, kinematic,

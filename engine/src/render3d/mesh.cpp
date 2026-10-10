@@ -111,7 +111,62 @@ bool MeshData::validate(std::string* error) const {
             return fail("vertex " + std::to_string(i) + " is not finite");
         }
     }
+    if (!skin.empty()) {
+        if (skin.size() != vertices.size()) {
+            return fail("the skin has " + std::to_string(skin.size()) + " entries for " + std::to_string(vertices.size()) + " vertices");
+        }
+        for (std::size_t i = 0; i < skin.size(); ++i) {
+            f32 sum = 0.0f;
+            for (const f32 w : skin[i].weights) {
+                if (!std::isfinite(w) || w < 0.0f) {
+                    return fail("vertex " + std::to_string(i) + " has a weight that is negative or not finite");
+                }
+                sum += w;
+            }
+            if (!(sum > 0.0f)) {
+                return fail("vertex " + std::to_string(i) + " has weights that sum to zero");
+            }
+        }
+    }
     return true;
+}
+
+u32 MeshData::skin_joint_count() const {
+    if (skin.empty()) {
+        return 0;
+    }
+    u32 count = 1;
+    for (const MeshSkinVertex& v : skin) {
+        for (int k = 0; k < 4; ++k) {
+            if (v.weights[static_cast<std::size_t>(k)] > 0.0f) {
+                count = std::max(count, static_cast<u32>(v.joints[static_cast<std::size_t>(k)]) + 1u);
+            }
+        }
+    }
+    return count;
+}
+
+std::array<u8, 4> quantise_skin_weights(const std::array<f32, 4>& weights) {
+    f32 sum = 0.0f;
+    for (const f32 w : weights) {
+        sum += w > 0.0f ? w : 0.0f;
+    }
+    if (!(sum > 0.0f)) {
+        return {255, 0, 0, 0};
+    }
+    std::array<u8, 4> out{};
+    int total = 0, largest = 0;
+    for (std::size_t k = 0; k < 4; ++k) {
+        const f32 w = weights[k] > 0.0f ? weights[k] / sum : 0.0f;
+        out[k] = static_cast<u8>(std::clamp(static_cast<int>(std::lround(w * 255.0f)), 0, 255));
+        total += out[k];
+        if (weights[k] > weights[static_cast<std::size_t>(largest)]) {
+            largest = static_cast<int>(k);
+        }
+    }
+    // The largest takes what rounding left over, so the four always sum to 255.
+    out[static_cast<std::size_t>(largest)] = static_cast<u8>(std::clamp(static_cast<int>(out[static_cast<std::size_t>(largest)]) + 255 - total, 0, 255));
+    return out;
 }
 
 Bounds3 MeshData::bounds() const {
@@ -134,6 +189,15 @@ void MeshData::append(const MeshData& other, const Mat4f& transform) {
         }
     }
     const u32 base = static_cast<u32>(vertices.size());
+    if (!skin.empty() || !other.skin.empty()) {
+        // One entry for each vertex: those of a mesh without a skin are bound to joint 0.
+        skin.resize(vertices.size());
+        if (other.skin.empty()) {
+            skin.resize(vertices.size() + other.vertices.size());
+        } else {
+            skin.insert(skin.end(), other.skin.begin(), other.skin.end());
+        }
+    }
     const Mat4f normals = normal_matrix(transform);
     // A mirroring transform turns the triangles over: keep them counter-clockwise.
     const bool mirrored = transform.determinant() < 0.0f;

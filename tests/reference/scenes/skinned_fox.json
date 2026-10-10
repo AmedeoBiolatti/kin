@@ -1,0 +1,123 @@
+{
+ "name": "skinned_fox",
+ "purpose": "Fox (Khronos glTF Sample Assets, CC0 and CC BY 4.0) in its Survey, Walk and Run clips: a quadruped, 24 joints, three clips; judged by eye and against the CPU skinning reference.",
+ "models": [
+  {
+   "file": "made/floor20.glb"
+  },
+  {
+   "file": "fox/Fox.glb",
+   "position": [
+    -2.5,
+    0,
+    0
+   ],
+   "scale": 0.02,
+   "rotation_y": 20,
+   "animation": {
+    "clip": "Survey",
+    "time": 0.5
+   }
+  },
+  {
+   "file": "fox/Fox.glb",
+   "position": [
+    0.0,
+    0,
+    0
+   ],
+   "scale": 0.02,
+   "rotation_y": 20,
+   "animation": {
+    "clip": "Walk",
+    "time": 0.3
+   }
+  },
+  {
+   "file": "fox/Fox.glb",
+   "position": [
+    2.5,
+    0,
+    0
+   ],
+   "scale": 0.02,
+   "rotation_y": 20,
+   "animation": {
+    "clip": "Run",
+    "time": 0.2
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -6,
+    -0.3,
+    -6
+   ],
+   [
+    6,
+    5,
+    6
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0,
+    1.6,
+    8.0
+   ],
+   "target": [
+    0,
+    0.8,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "side",
+   "eye": [
+    7.0,
+    2.0,
+    4.0
+   ],
+   "target": [
+    0,
+    0.7,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  }
+ ],
+ "optional": true
+}

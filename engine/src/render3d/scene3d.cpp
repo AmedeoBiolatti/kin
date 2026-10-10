@@ -1,23 +1,69 @@
 #include <kin/render3d/scene3d.hpp>
 
+#include <kin/platform/log.hpp>
+#include <kin/render3d/model.hpp>
+
 #include <algorithm>
 
 namespace kin {
 
 std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t count, const Material3D& material) {
+    return add_instances(mesh, count, material, false, 0);
+}
+
+std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t count, const Material3D& material, bool skinned, u32 skin_first) {
     if (count == 0) {
         return {};
     }
     const u32 first = static_cast<u32>(_instances.size());
     _instances.resize(_instances.size() + count);
-    // Straight after a draw of the same mesh and material: one draw.
+    // Straight after a draw of the same mesh and material: one draw (skinned copies only with skinned ones: the pose of
+    // each is its own, and a plain copy of the mesh has none).
     if (!_draws.empty() && _draws.back().mesh == mesh && _draws.back().material == material &&
-        _draws.back().first + _draws.back().count == first) {
+        _draws.back().first + _draws.back().count == first && _draws.back().skinned == skinned) {
         _draws.back().count += static_cast<u32>(count);
     } else {
-        _draws.push_back({mesh, material, first, static_cast<u32>(count)});
+        Draw draw{mesh, material, first, static_cast<u32>(count)};
+        draw.skinned = skinned;
+        draw.skin_first = skin_first;
+        _draws.push_back(std::move(draw));
     }
     return {_instances.data() + first, count};
+}
+
+void Scene3D::draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform, const Material3D& material,
+                           Color tint, u32 id) {
+    if (!mesh.skinned()) {
+        draw(mesh, transform, material, tint, id);
+        return;
+    }
+    if (joint_matrices.size() < mesh.skin_joint_count()) {
+        if (!_warned_skin) {
+            _warned_skin = true;
+            KIN_LOG_WARN_F("render", "3D: draw_skinned with too few joint matrices: not drawn",
+                           (LogFields{{.name = "given", .value = std::to_string(joint_matrices.size())},
+                                      {.name = "needed", .value = std::to_string(mesh.skin_joint_count())}}));
+        }
+        return;
+    }
+    // Only the joints the mesh uses are kept: a skeleton may have more joints than the mesh (it is the mesh's, as the skin).
+    const std::size_t keep = mesh.skin_joint_count();
+    const u32 first_copy = static_cast<u32>(_skin_offsets.size()); // a draw of its own starts here
+    _skin_offsets.push_back(static_cast<u32>(_joints.size()));
+    _joints.insert(_joints.end(), joint_matrices.begin(), joint_matrices.begin() + static_cast<std::ptrdiff_t>(keep));
+    add_instances(mesh, 1, material, true, first_copy)[0] = {transform, tint, id};
+}
+
+void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint) {
+    for (const ModelPart& part : model.parts) {
+        if (part.mesh.skinned()) {
+            if (part.skin <= 0) { // the first skeleton's: the pose given is for it
+                draw_skinned(part.mesh, joint_matrices, transform, part.material, tint);
+            }
+        } else {
+            draw(part.mesh, transform * part.transform, part.material, tint);
+        }
+    }
 }
 
 void Scene3D::draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material, Color tint, u32 id) {
@@ -52,6 +98,8 @@ Scene3D& Scene3D::overlay() {
 void Scene3D::clear() {
     _draws.clear();
     _instances.clear();
+    _joints.clear();
+    _skin_offsets.clear();
     lights.points.clear();
     if (_overlay) {
         _overlay->clear();

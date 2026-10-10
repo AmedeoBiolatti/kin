@@ -450,9 +450,97 @@ light, `BLEND` as alpha, `MASK` as a cut-out (`alphaCutoff`), double-sided and
 `KHR_materials_unlit`, and its metallic and roughness factors and map, normal
 map (and its scale), occlusion map (and its strength) and emissive map.
 `scene.draw(model, transform)` draws its parts. A `kin::ModelFile` keeps one
-loaded and `poll()` loads it again when the file changes. Not read yet:
-skins, animations, morph targets, texture transforms, second UV sets,
-`KHR_materials_*` other than unlit and emissive strength.
+loaded and `poll()` loads it again when the file changes. Skins and animations
+are read too (see Skinned meshes below). Not read yet: morph targets (their
+animation channels are ignored, with a line in the log), texture transforms,
+second UV sets, `KHR_materials_*` other than unlit and emissive strength.
+
+## Skinned meshes
+
+A character is a mesh whose vertices follow a skeleton. kin keeps the three
+things apart: the **skeleton** and its **clips** (plain data and maths on the
+CPU, `kin/render3d/skeleton.hpp` and `animation3d.hpp`), the **pose** they make
+each frame (one matrix a joint), and the **skinned mesh** that the GPU poses by
+those matrices (`Scene3D::draw_skinned`). It is not `kin/anim` (the engine's
+animation of registered properties): that one's state machines can choose the
+clips and weights fed to this.
+
+```cpp
+kin::Model hero = r3d.load_model("models/hero.glb");          // skeletons, clips, skinned parts
+kin::AnimationPlayer3D player{&hero.skeletons[0]};
+player.play(hero.find_clip("Walk"));
+std::vector<kin::Mat4f> joints;
+
+// each frame
+player.update(dt);                                             // clips sampled, blended, layered
+player.joint_matrices(joints);                                 // world pose times inverse bind, one a joint
+scene.draw_skinned(hero, joints, kin::Mat4f::translation(position));
+```
+
+**Data.** `Skeleton`: joint `names`, `parents` (always lower than the joint, so a
+pose turns to matrices in one pass), the `rest` pose (local translation,
+rotation, scale), `inverse_bind` matrices and a `root_transform` (the file's nodes
+above the roots). At most `max_skin_joints` (256: a joint index is a byte on the
+GPU). `Pose` is the local `JointPose` of every joint. `AnimClip3D` holds, per joint,
+`Track3D`s of translation, rotation and scale keyframes with `Step`, `Linear` or
+`CubicSpline` interpolation exactly as glTF specifies (rotations slerped; a cubic
+spline's tangents scaled by the time between keys). A joint with no track keeps its rest value.
+
+**Maths.** `sample_clip(clip, skeleton, time, loop, pose)`; `blend_poses(a, b, w)`;
+`PoseMask::subtree(skeleton, joint)`, `::joints(skeleton, names)` and `blend_masked`
+for an upper-body layer over locomotion; `apply_additive(base, additive, reference,
+mask, weight)` for additive clips (hit reactions, breathing); `extract_root_motion`
+and `remove_root_motion` for clips whose root joint carries the character's travel
+(you get the delta between two times, wrapping at a loop's end, and the pose with the root held at rest);
+`compute_joint_matrices(skeleton, pose, out)`.
+
+**Player.** `AnimationPlayer3D` plays a clip (`play`), fades to another
+(`crossfade_to(clip, seconds)`; a fade begun during a fade fades from the picture of
+that moment, held, so nothing jumps), and has layers (`layer(i)`: clip, weight, mask,
+additive, loop, speed). `set_root_motion(true)` holds the base layer's root and reports the motion
+of the last `update` as `root_motion()`. The pointers to the skeleton and clips are
+not owned: a `Model`'s stay put as long as the `Model` is not copied or changed.
+Measured: about 2 us for a 24-joint character's `update` and matrices, 4.5 us with a crossfade.
+
+**Loading.** The glTF reader takes skins (joints, `inverseBindMatrices`) and
+animations (translation, rotation, scale channels; `weights` channels are ignored), and
+`JOINTS_0` (u8 or u16) and `WEIGHTS_0` (float, normalised u8 or u16): four influences a
+vertex, the weights renormalised to sum 1 (a vertex with none is bound to joint 0, an
+influence naming a joint past the skin is dropped; both are logged). Joints are put parents-first
+whatever order the file listed them in, and the vertices' indices follow. A skin with more
+than 256 joints is not used (logged): its meshes are drawn as static meshes. A skinned
+mesh's node placing is ignored (as glTF says); the joint matrices place it, and the transform you pass
+to `draw_skinned` is the model's. A mesh on a node under a joint (a sword in a hand) with no skin of its
+own is bound to that joint with all its weight, so it follows. `Model::skeletons`, `Model::clips`
+(an animation of two skins is two clips of one name), `ModelPart::skin`, `Model::find_clip`; or read
+the same without a GPU with `read_model_data` (for tools and tests).
+
+**Meshes.** `MeshData::skin` is a parallel stream (four joint indices and four
+weights a vertex), empty for a mesh that is not skinned; `validate`, `append` and `bounds`
+know it. On the GPU it is a second vertex buffer (8 bytes a vertex: four joint bytes and four unorm
+weight bytes that sum to exactly 255), so a mesh without a skin has the vertex buffer and pipelines it
+always had. A skinned mesh cannot have levels of detail or clusters (`MeshOptions::levels`,
+`clusters` are ignored, with a line in the log).
+
+**Drawing.** `scene.draw_skinned(mesh, joint_matrices, transform, material, tint, id)`:
+the matrices (at least `Mesh::skin_joint_count()`) are copied into the scene; each call is one copy with its
+own pose, and copies of one mesh and material one after another are drawn as one instanced draw. The
+renderer puts the frame's matrices in one storage buffer and each copy's first one in a buffer of its
+own (the 128-byte instance is unchanged); the vertex shader moves each vertex by the weighted sum
+of its joints' matrices and turns its normal by their linear part (right for rigid and uniformly scaled
+joints; a non-uniform scale in a joint is approximated). `draw_skinned(model, joints, transform)`
+draws all of a model's parts (skinned ones in the pose, the others as `draw` does).
+`Renderer3DCapabilities::skinning`; `Render3DStats::skinned_copies`, `skin_matrices`, `skinned_draws`.
+
+**What it does and does not do yet** (P1a part 1; part 2 is in the plan). A skinned copy is drawn by the
+main pass and casts the sun's shadow (one map or any cascades, cut-out materials too), and is culled by
+its pose: its bounding sphere is made each frame from where its joints put the spheres each of
+them pulls on (never smaller than the posed mesh, so an arm that swings into view is not culled). It is
+**not** in the depth and normal pre-pass (so not in ambient occlusion or contact shadows, nor in
+occlusion culling's depth), has **no velocity of its own** under temporal anti-aliasing (the camera's
+motion is right on it; its own motion ghosts), and is **not picked**. A frame with such a copy and one
+of those features says so once in the log. The shadow cache (`cache_shadows`) is off for a frame with a
+skinned caster (a pose is not in the copies it compares).
 
 ## Entities
 

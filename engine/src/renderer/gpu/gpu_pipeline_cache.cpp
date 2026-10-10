@@ -121,11 +121,13 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
 
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
-    SDL_GPUVertexAttribute attrs[5]{}; // at most five, whichever layout
+    SDL_GPUVertexBufferDescription vbs[2]{};
+    SDL_GPUVertexAttribute attrs[7]{}; // at most five in the first buffer, whichever layout, and the skin's two in a second
     u32 attr_count = 0;
+    u32 slot = 0;
     const auto attribute = [&](SDL_GPUVertexElementFormat format, u32 offset) {
         attrs[attr_count].location = attr_count;
-        attrs[attr_count].buffer_slot = 0;
+        attrs[attr_count].buffer_slot = slot;
         attrs[attr_count].format = format;
         attrs[attr_count].offset = offset;
         ++attr_count;
@@ -145,7 +147,7 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, offsetof(GpuSdfInstance, radius));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSdfInstance, fill_r));
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSdfInstance, stroke_r));
-    } else if (layout == GpuVertexLayout::MeshVertices) {
+    } else if (layout == GpuVertexLayout::MeshVertices || layout == GpuVertexLayout::SkinnedMeshVertices) {
         vb.pitch = sizeof(GpuMeshVertex);
         vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, offsetof(GpuMeshVertex, x));
@@ -173,9 +175,21 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
         attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuVertex, r));
     }
 
+    vbs[0] = vb;
+    u32 buffer_count = layout == GpuVertexLayout::None ? 0 : 1;
+    if (layout == GpuVertexLayout::SkinnedMeshVertices) {
+        // The joints (read as unsigned integers) and weights (as fractions) of the second buffer, at locations 4 and 5.
+        vbs[1].slot = 1;
+        vbs[1].pitch = sizeof(GpuSkinVertex);
+        vbs[1].input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        slot = 1;
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4, offsetof(GpuSkinVertex, j0));
+        attribute(SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM, offsetof(GpuSkinVertex, w0));
+        buffer_count = 2;
+    }
     SDL_GPUVertexInputState vertex_input{};
-    vertex_input.num_vertex_buffers = layout == GpuVertexLayout::None ? 0 : 1;
-    vertex_input.vertex_buffer_descriptions = &vb;
+    vertex_input.num_vertex_buffers = buffer_count;
+    vertex_input.vertex_buffer_descriptions = vbs;
     vertex_input.num_vertex_attributes = attr_count;
     vertex_input.vertex_attributes = attrs;
 

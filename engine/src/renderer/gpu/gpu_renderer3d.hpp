@@ -4,6 +4,7 @@
 // and frame: a view is rendered in the frame's command buffer between the 2D
 // draws around it. Experimental: see docs/3d_plan.md.
 #include <kin/render3d/backend3d.hpp>
+#include <kin/render3d/skeleton.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 
 #include "gpu_buffer.hpp"
@@ -74,6 +75,10 @@ public:
 
     SharedDevice device;
     SDL_GPUBuffer* vertices = nullptr;
+    // With a skin (MeshData::skin; never together with levels or clusters): the second vertex buffer (GpuSkinVertex), and the
+    // sphere each joint's vertices stay within, for the culling of posed copies (render3d/skeleton.hpp).
+    SDL_GPUBuffer* skin = nullptr;
+    std::vector<SkinBound> skin_bounds;
     SDL_GPUBuffer* indices = nullptr; // the chunk's, when `chunk` is set (then levels[].first_index counts from the mesh's range in it)
     u32 index_count = 0; // level 0's
     // The levels of detail (render3d/mesh_lod.hpp): each a run of the one index buffer, over the one vertex
@@ -237,8 +242,10 @@ private:
     // (the others discard in mesh.frag itself).
     // `velocity`: the main pass of a frame with temporal anti-aliasing and no pre-pass: mesh_velocity's shaders and a
     // second colour target, written by opaque meshes and masked for the rest.
+    // `skinned`: for a skinned copy's draws (the main pass and the shadow pass only): the skinning vertex shaders and the
+    // layout with the second vertex buffer.
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
-                                         SDL_GPUShader* custom = nullptr, bool velocity = false) const;
+                                         SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
@@ -348,6 +355,18 @@ private:
     GpuShader _prepass_velocity_mask_shader;   // prepass_velocity_mask.frag
     GpuShader _mesh_velocity_vertex_shader;    // mesh_velocity.vert
     GpuShader _mesh_velocity_shader;           // mesh_velocity.frag
+    // Skinned copies (Scene3D::draw_skinned): the vertex shaders that pose the vertex by its joints, with the same varyings.
+    // Absent (and skinned copies not drawn, said once) if they cannot be made.
+    GpuShader _mesh_skinned_vertex_shader;          // mesh_skinned.vert
+    GpuShader _mesh_skinned_velocity_vertex_shader; // mesh_skinned_velocity.vert
+    GpuShader _shadow_skinned_vertex_shader;        // shadow_skinned.vert
+    GpuShader _shadow_mask_skinned_vertex_shader;   // shadow_mask_skinned.vert
+    bool _skinning_available = false;
+    bool _skin_warned = false;      // skinned copies cannot be drawn
+    bool _skin_features_warned = false; // skinned copies with a feature that needs part 2 (velocity, ambient occlusion, pick)
+    std::shared_ptr<GpuBuffer> _joints;        // the frame's joint matrices (scene, then overlay); grows
+    std::shared_ptr<GpuBuffer> _joint_offsets; // each copy's first matrix, a u32 in the places _instances has its copies; grows
+    std::vector<u32> _skin_ordered;            // render()'s scratch: the offsets in the instances' order
     // Temporal anti-aliasing needs the pre-pass and four-float colour targets,
     // and a float storage texture; else it is off (said once, when asked for).
     bool _taa_available = false;
@@ -449,6 +468,13 @@ private:
         bool clustered = false;
         u32 job_first = 0, job_count = 0; // the GPU cut's copies of it: a run of the job table
         u32 hist_first = 0;               // with Lod3D::occlusion: where its copies' clusters start in the view's history
+        // Skinned copies (Scene3D::draw_skinned): each copy's first matrix in the scene's joints (indexed as `instances`),
+        // the scene's matrices, and where the scene's start in the frame's joint buffer. `center` and `radius` are then
+        // only a start: a copy's own bound comes from its pose.
+        bool skinned = false;
+        const u32* skin_first = nullptr;
+        const Mat4f* joints = nullptr;
+        u32 joint_base = 0;
     };
     struct Piece {
         u32 ref = 0;

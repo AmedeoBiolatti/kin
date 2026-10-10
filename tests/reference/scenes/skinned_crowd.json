@@ -1,0 +1,83 @@
+{
+ "name": "skinned_crowd",
+ "purpose": "Cost of 200 skinned copies of a 4,096-triangle mesh, each in its own pose (P1a): CPU render() and GPU time with the sun's shadow. Speed only.",
+ "models": [
+  {
+   "file": "made/floor20.glb",
+   "scale": 4.0
+  },
+  {
+   "file": "made/skinned_dense.glb",
+   "scale": 0.7,
+   "animation": {
+    "clip": "bend",
+    "time": 0.0
+   },
+   "grid": {
+    "count": 200,
+    "columns": 20,
+    "spacing": [
+     2.2,
+     2.6
+    ],
+    "time_step": 0.173
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -30,
+    -0.3,
+    -20
+   ],
+   [
+    30,
+    5,
+    20
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "overview",
+   "eye": [
+    0,
+    24,
+    34
+   ],
+   "target": [
+    0,
+    0.5,
+    0
+   ],
+   "fov": 50,
+   "near": 0.1
+  }
+ ]
+}

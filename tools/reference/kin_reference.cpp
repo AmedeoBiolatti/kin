@@ -148,6 +148,17 @@ std::string quoted(const std::string& s) {
 struct Placed {
     kin::Model model;
     Mat4f transform = Mat4f::identity();
+    // A skinned model's pose (the model's entry `animation: {clip, time, loop, speed}`; docs/rendering_3d.md, Skinned meshes): the
+    // clip (a name or an index, the first by default) sampled at `time` seconds when that is given, else at the frame's time
+    // (frame N at N / 60 s, 0 at the picture) times `speed`; `loop` (on by default) wraps, else it holds the last key.
+    // `root_motion: "remove"` holds the root joint at rest, so the character animates in place.
+    bool animated = false;
+    std::size_t clip = 0;
+    bool fixed_time = false;
+    double time = 0.0;
+    bool loop = true;
+    double speed = 1.0;
+    bool remove_root_motion = false;
 };
 
 // Signal Breach's deck (48 x 32 tiles) and `count` enemies over it, three
@@ -708,6 +719,57 @@ int main(int argc, char** argv) {
                 placed.push_back({std::move(model), Mat4f::translation(vec3(m.find("position"))) *
                                                         Mat4f::rotation_y(static_cast<float>(m.number_at("rotation_y", 0.0))) *
                                                         Mat4f::scaling({scale, scale, scale})});
+                // `grid: {count, columns, spacing: [x, z], time_step}`: the model placed `count` times in rows, each
+                // copy's animation `time_step` seconds on from the one before (the meshes are shared).
+                const kin::JsonValue* grid = m.find("grid");
+                const std::size_t base_index = placed.size() - 1;
+                if (const kin::JsonValue* a = m.find("animation")) {
+                    Placed& back = placed.back();
+                    if (back.model.skeletons.empty() || back.model.clips.empty()) {
+                        std::fprintf(stderr, "  %s: has an animation entry but no skeleton or clips\n", path.string().c_str());
+                    } else {
+                        back.animated = true;
+                        const std::string wanted = a->string_at("clip");
+                        if (!wanted.empty()) {
+                            const kin::AnimClip3D* found = back.model.find_clip(wanted);
+                            if (!found) {
+                                std::string names;
+                                for (const kin::AnimClip3D& c : back.model.clips) names += " " + c.name;
+                                std::fprintf(stderr, "  %s: no clip called %s (it has:%s)\n", path.string().c_str(), wanted.c_str(), names.c_str());
+                                return 1;
+                            }
+                            back.clip = static_cast<std::size_t>(found - back.model.clips.data());
+                        } else {
+                            back.clip = std::min<std::size_t>(static_cast<std::size_t>(a->number_at("index", 0.0)), back.model.clips.size() - 1);
+                        }
+                        back.fixed_time = a->find("time") != nullptr;
+                        back.time = a->number_at("time", 0.0);
+                        back.loop = a->find("loop") ? a->bool_at("loop") : true;
+                        back.speed = a->number_at("speed", 1.0);
+                        back.remove_root_motion = a->string_at("root_motion") == "remove";
+                        const kin::AnimClip3D& clip = back.model.clips[back.clip];
+                        std::printf("  animation: %s, %.2f s, %zu clips, %u joints\n", clip.name.c_str(), static_cast<double>(clip.duration),
+                                    back.model.clips.size(), back.model.skeletons[0].joint_count());
+                    }
+                }
+                if (grid) {
+                    const int count = std::max(1, static_cast<int>(grid->number_at("count", 1.0)));
+                    const int columns = std::max(1, static_cast<int>(grid->number_at("columns", 10.0)));
+                    const float sx = static_cast<float>(grid->find("spacing") ? grid->find("spacing")->items()[0].as_number(2.0) : 2.0);
+                    const float sz = static_cast<float>(grid->find("spacing") ? grid->find("spacing")->items()[1].as_number(2.0) : 2.0);
+                    const double time_step = grid->number_at("time_step", 0.0);
+                    const Placed first = placed[base_index];
+                    placed.pop_back();
+                    for (int i = 0; i < count; ++i) {
+                        Placed copy = first;
+                        const float x = (static_cast<float>(i % columns) - static_cast<float>(columns - 1) * 0.5f) * sx;
+                        const float z = (static_cast<float>(i / columns) - static_cast<float>((count - 1) / columns) * 0.5f) * sz;
+                        copy.transform = Mat4f::translation({x, 0.0f, z}) * first.transform;
+                        copy.time += time_step * i;
+                        placed.push_back(std::move(copy));
+                    }
+                    std::printf("  grid: %d copies\n", count);
+                }
             }
         }
         if (missing) {
@@ -859,7 +921,20 @@ int main(int argc, char** argv) {
                 }
             }
             for (const Placed& p : placed) {
-                scene.draw(p.model, p.transform);
+                if (p.animated) {
+                    const kin::Skeleton& skeleton = p.model.skeletons[0];
+                    const double seconds = p.fixed_time ? p.time : static_cast<double>(time) / 60.0 * p.speed + p.time;
+                    kin::Pose pose;
+                    kin::sample_clip(p.model.clips[p.clip], skeleton, static_cast<float>(seconds), p.loop, pose);
+                    if (p.remove_root_motion) {
+                        kin::remove_root_motion(pose, skeleton, {.x = true, .y = false, .z = true, .rotation = false});
+                    }
+                    std::vector<Mat4f> matrices;
+                    kin::compute_joint_matrices(skeleton, pose, matrices);
+                    scene.draw_skinned(p.model, matrices, p.transform);
+                } else {
+                    scene.draw(p.model, p.transform);
+                }
             }
             if (is_crowd) {
                 if (over.crowd_move) {
@@ -1142,6 +1217,10 @@ int main(int argc, char** argv) {
             std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
+            if (stats.skinned_copies > 0) {
+                std::printf("                 skinned: %u copies seen in %u draws, %u joint matrices uploaded, %u copies culled\n", stats.skinned_copies,
+                            stats.skinned_draws, stats.skin_matrices, stats.culled);
+            }
             if (stats.cluster_copies > 0 && stats.cluster_gpu) {
                 const Summary cut_s = summarize(cut_ms);
                 std::printf("                 clusters (GPU cut): %u copies, %llu clusters tested, %u compute dispatches, %.3f MB handed over, CPU set-up %.3f ms (render() %.3f)",

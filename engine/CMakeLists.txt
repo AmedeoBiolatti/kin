@@ -191,7 +191,8 @@ if(KIN_EXPERIMENTAL_3D)
         "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
-    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp)
+    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
+                                      src/render3d/skeleton.cpp src/render3d/animation3d.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/taa.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
@@ -252,7 +253,8 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               prepass.vert prepass.frag prepass_mask.frag gtao.comp gtao_chain.comp ao_depth_chain.comp ao_blur.comp ao_blur_chain.comp ao_blur_both.comp ao_blur_both_chain.comp contact.comp
               prepass_velocity.vert prepass_velocity.frag prepass_velocity_mask.frag taa.comp mesh_velocity.vert mesh_velocity.frag
               cluster_cull.comp cluster_cull_occ.comp cluster_scan.comp cluster_args.comp cluster_gather.comp
-              hiz_depth.comp hiz_reduce.comp)
+              hiz_depth.comp hiz_reduce.comp
+              mesh_skinned.vert mesh_skinned_velocity.vert shadow_skinned.vert shadow_mask_skinned.vert)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.

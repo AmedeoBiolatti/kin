@@ -39,7 +39,14 @@ Mesh Renderer3D::create_mesh(const MeshData& data) {
     return create_mesh(data, MeshOptions{});
 }
 
-Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& options) {
+Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& requested) {
+    MeshOptions options = requested;
+    if (data.skinned() && (options.clusters || options.levels > 1)) {
+        // A skinned mesh moves with its joints: levels and clusters are built from the mesh at rest and would not follow.
+        KIN_LOG_WARN("render", "3D: a skinned mesh cannot have levels of detail or clusters: made without them");
+        options.clusters = false;
+        options.levels = 1;
+    }
     std::string error;
     if (!data.validate(&error)) {
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = error}}));
@@ -89,7 +96,8 @@ Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& options) {
     if (clusters) {
         cluster_info = std::make_shared<const MeshClusterInfo>(clusters->info());
     }
-    return Mesh{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(), std::move(levels), std::move(cluster_info)};
+    return Mesh{std::move(backend), static_cast<u32>(vertices), static_cast<u32>(indices), data.bounds(), std::move(levels), std::move(cluster_info),
+                data.skin_joint_count()};
 }
 
 View3D Renderer3D::create_view(Vec2i size, const View3DOptions& options) {

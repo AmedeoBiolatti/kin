@@ -41,6 +41,8 @@ struct Renderer3DCapabilities {
     bool gpu_driven_clusters = false;
     // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
     bool occlusion_culling = false;
+    // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not drawn.
+    bool skinning = false;
 };
 
 struct View3DOptions {
@@ -96,6 +98,12 @@ struct Render3DStats {
     u32 draws = 0;     // draw calls
     u32 instances = 0; // meshes drawn
     u32 culled = 0;    // meshes skipped, outside the view
+    // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed to the
+    // GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one mesh is one).
+    // Also counted in draws, instances and triangles above. 0 for a frame without any.
+    u32 skinned_copies = 0;
+    u32 skin_matrices = 0;
+    u32 skinned_draws = 0;
     u32 shadow_draws = 0; // draw calls into the shadow map
     u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view; all cascades)
     u32 shadow_cascades = 0; // maps drawn (0: no shadows)

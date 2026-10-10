@@ -7,6 +7,7 @@
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,19 +32,42 @@ struct Bounds3 {
     f32 radius() const { return length(size()) * 0.5f; }
 };
 
+// The most joints a skin (a skeleton a mesh is bound to) can have: a joint index is one byte on the GPU.
+constexpr u32 max_skin_joints = 256;
+
+// What binds one vertex to a skeleton (docs/rendering_3d.md, Skinned meshes): up to four joints and how much each pulls
+// the vertex, kept apart from MeshVertex so that a mesh without it is untouched. The weights should sum to 1 (the loader
+// makes them; `validate` only asks for finite, non-negative weights with a sum above zero).
+struct MeshSkinVertex {
+    std::array<u8, 4> joints{};
+    std::array<f32, 4> weights{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
+// A weight set as the GPU holds it: four unsigned normalised bytes that sum to exactly 255 (the largest takes the
+// rounding), so a vertex bound to one joint is moved exactly as that joint moves. Weights that sum to zero give 255 to the
+// first.
+std::array<u8, 4> quantise_skin_weights(const std::array<f32, 4>& weights);
+
 struct MeshData {
     std::vector<MeshVertex> vertices;
     // Three a triangle, counter-clockwise seen from its front (where its
     // normals point). Empty: the vertices are the triangles, three by three.
     std::vector<u32> indices;
+    // Optional: one entry for each vertex, or none (a mesh that is not skinned). A skinned mesh is drawn with
+    // Scene3D::draw_skinned and the joint matrices of its pose; it cannot have levels of detail or clusters.
+    std::vector<MeshSkinVertex> skin;
 
+    bool skinned() const { return !skin.empty(); }
+    // The joints the skin uses: one more than the highest index with a weight above zero (0 for an unskinned mesh).
+    u32 skin_joint_count() const;
     std::size_t triangle_count() const { return (indices.empty() ? vertices.size() : indices.size()) / 3; }
     // Whether it can be drawn: whole triangles, indices in range, finite
     // positions. False, with why in `error`, when not.
     bool validate(std::string* error = nullptr) const;
     Bounds3 bounds() const;
     // Appends `other`, moved by `transform` (normals turned with it). The
-    // result is indexed.
+    // result is indexed. If either has a skin, the result has one: vertices of a mesh without it are bound to
+    // joint 0 (the joints themselves are kept as they are, not renumbered).
     void append(const MeshData& other, const Mat4f& transform = Mat4f::identity());
 };
 
@@ -116,9 +140,10 @@ class Mesh {
 public:
     Mesh() = default;
     Mesh(std::shared_ptr<IMeshBackend> backend, u32 vertex_count, u32 index_count, Bounds3 bounds,
-         std::shared_ptr<const std::vector<MeshLevelInfo>> levels = {}, std::shared_ptr<const MeshClusterInfo> clusters = {})
+         std::shared_ptr<const std::vector<MeshLevelInfo>> levels = {}, std::shared_ptr<const MeshClusterInfo> clusters = {},
+         u32 skin_joints = 0)
         : _backend(std::move(backend)), _vertex_count(vertex_count), _index_count(index_count), _bounds(bounds), _levels(std::move(levels)),
-          _clusters(std::move(clusters)) {}
+          _clusters(std::move(clusters)), _skin_joints(skin_joints) {}
 
     bool valid() const { return _backend != nullptr; }
     explicit operator bool() const { return valid(); }
@@ -139,6 +164,10 @@ public:
     u32 leaf_triangles() const { return _clusters ? _clusters->leaf_triangles : triangle_count(); }
     u64 cluster_triangles() const { return _clusters ? _clusters->total_triangles : 0u; }
     bool flat_shaded() const { return _clusters && _clusters->flat; }
+    // A mesh made from MeshData with a skin: the joints it needs matrices for (Scene3D::draw_skinned wants at least that
+    // many), and whether it has them. `bounds()` is the mesh at rest.
+    bool skinned() const { return _skin_joints > 0; }
+    u32 skin_joint_count() const { return _skin_joints; }
     const Bounds3& bounds() const { return _bounds; }
     const std::shared_ptr<IMeshBackend>& backend() const { return _backend; }
 
@@ -151,6 +180,7 @@ private:
     Bounds3 _bounds{};
     std::shared_ptr<const std::vector<MeshLevelInfo>> _levels; // null: one level
     std::shared_ptr<const MeshClusterInfo> _clusters;          // null: no clusters
+    u32 _skin_joints = 0;                                      // 0: not skinned
 };
 
 // Shapes made in code, centred on the origin (a plane and a box's base on

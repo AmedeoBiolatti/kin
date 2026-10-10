@@ -8,14 +8,23 @@ layout(location = 3) in vec4 aColor; // sRGB
 
 #include "kin_instance.inc.glsl"
 
+#ifdef KIN_SKIN
+// The skinned variants (mesh_skinned.vert, mesh_skinned_velocity.vert): the joints' matrices and each copy's first one
+// follow the instances (binding 1 and 2; the velocity variant has no Previous buffer, see below).
+#define KIN_SKIN_BINDING 1
+#include "kin_skin.inc.glsl"
+#endif
+
 #ifdef KIN_VELOCITY
 // The velocity variant (mesh_velocity.vert): the same block with the two camera matrices after it, so a draw that
 // pushes the longer block to a pipeline with the plain mesh.vert (a custom shader's) is read right by both.
 // Each copy's matrix of the frame before is in a buffer of its own, indexed as the instances are; its [0][3]
 // (a zero in any placing) is 1 for a copy with no past: new, or matched to nothing believable.
+#ifndef KIN_SKIN
 layout(std430, set = 0, binding = 1) readonly buffer Previous {
     mat4 previous[];
 };
+#endif
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
     uvec4 first;          // x: this draw's first instance
@@ -51,19 +60,36 @@ void main() {
 #else
     Instance instance = instances[draw.first.x + uint(gl_InstanceIndex)];
 #endif
+#ifdef KIN_SKIN
+    // The vertex posed by its joints, in the model's space; the copy's transform places that.
+    const mat4 skin = skin_matrix(draw.first.x + uint(gl_InstanceIndex));
+    const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
+#else
     const vec4 world = instance.model * vec4(aPos, 1.0);
+#endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
+#ifdef KIN_SKIN
+    vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
+#else
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal;
+#endif
     vColor = instance.color * vec4(decode(aColor.rgb), aColor.a);
     vUV = aUV;
     vId = floatBitsToUint(instance.normal0.w);
 #ifdef KIN_VELOCITY
+#ifdef KIN_SKIN
+    // No past pose is kept for a skinned copy (part 2 of P1a): it is taken as not having moved, so only the camera's motion shows.
+    vFresh = 0.0;
+    vCurrent = (draw.current * world).xyw;
+    vPrevious = (draw.prior * world).xyw;
+#else
     // The same expressions as prepass_velocity.vert's, so the velocity is the pre-pass's to the last bit.
     mat4 before = previous[at];
     vFresh = before[0][3];
     before[0][3] = 0.0;
     vCurrent = (draw.current * world).xyw;
     vPrevious = (draw.prior * (before * vec4(aPos, 1.0))).xyw;
+#endif
 #endif
 }

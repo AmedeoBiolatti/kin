@@ -1,0 +1,114 @@
+{
+ "name": "skinned_cesium",
+ "purpose": "CesiumMan (Khronos glTF Sample Assets, CC BY 4.0) walking, at three moments of its clip: the skin of a real character; judged by eye and against the CPU skinning reference.",
+ "models": [
+  {
+   "file": "made/floor20.glb"
+  },
+  {
+   "file": "cesium_man/CesiumMan.glb",
+   "position": [
+    -2.0,
+    0,
+    0
+   ],
+   "animation": {
+    "time": 0.0
+   }
+  },
+  {
+   "file": "cesium_man/CesiumMan.glb",
+   "position": [
+    0.0,
+    0,
+    0
+   ],
+   "animation": {
+    "time": 0.7
+   }
+  },
+  {
+   "file": "cesium_man/CesiumMan.glb",
+   "position": [
+    2.0,
+    0,
+    0
+   ],
+   "animation": {
+    "time": 1.4
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -6,
+    -0.3,
+    -6
+   ],
+   [
+    6,
+    5,
+    6
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0,
+    1.4,
+    7.0
+   ],
+   "target": [
+    0,
+    0.9,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "side",
+   "eye": [
+    6.0,
+    1.6,
+    3.5
+   ],
+   "target": [
+    0,
+    0.9,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  }
+ ],
+ "optional": true
+}

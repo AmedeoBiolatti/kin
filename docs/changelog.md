@@ -9,6 +9,14 @@ releases may change APIs.
 
 ### Added
 
+- 3D, skinned meshes and clips, part 1 (experimental; see [3D rendering](rendering_3d.md) "Skinned meshes" and the plan's "P1a"):
+  `Skeleton`, `Pose`, `PoseMask`, `AnimClip3D` (step, linear and cubic-spline keyframes as glTF has them), `AnimationPlayer3D`
+  (crossfades, masked and additive layers, root motion), `compute_joint_matrices`; the glTF reader takes skins, `JOINTS_0` and
+  `WEIGHTS_0`, and animations (`Model::skeletons`, `Model::clips`); `MeshData::skin`; `Scene3D::draw_skinned`; GPU skinning in the main and
+  shadow passes (new vertex shader variants; a mesh with no skin and a scene with no skinned copy are byte for byte, and cost the same, as before).
+  Not yet: ambient occlusion, contact shadows, the temporal velocity of a moving pose, and pick for skinned copies. `kin_reference` scenes
+  `skinned_bend`, `skinned_cesium`, `skinned_fox` (the last two fetch CesiumMan and Fox) and `skinned_crowd`; `fetch.py --lock NAME` locks new
+  assets alone.
 - 3D, speed of the opt-in features, phase 2 (small picture changes within stated bounds; see the plan's "Opt-in speedups, phase 2"): in views of 1.5 million pixels
   or more, ambient occlusion reads a linear depth chain (one dispatch, five R32F levels) and costs 15 to 30% less (1080p: 0.2 to 0.5 ms, 4K: 2 to 4.6 ms);
   contact shadows blurred on their own get one blur pass (-0.03 ms at 720p). Everything else (and every view under 1.5 million pixels) is as before.

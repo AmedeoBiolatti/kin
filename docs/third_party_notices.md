@@ -43,3 +43,17 @@ are compiled in as well:
 The FreeType License asks that documentation for binary distributions credit it,
 for example: "Portions of this software are copyright © 2026 The FreeType
 Project (https://freetype.org). All rights reserved."
+
+## Reference assets (fetched, never distributed)
+
+`tools/reference/fetch.py` downloads sample models into a developer's cache for the 3D reference scenes and tests; none of them is
+committed, packed or shipped with kin. They come from the
+[Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), pinned to one commit and checked against
+`tools/reference/assets.lock.json`:
+
+| Asset | Used for | License |
+|---|---|---|
+| CesiumMan | the `skinned_cesium` scene | CC BY 4.0 (Cesium); the Cesium logo and trademarks are excluded |
+| Fox | the `skinned_fox` scene and the animation timing | CC0 1.0 (PixelMannen, the model) and CC BY 4.0 (tomkranis, rigging and animation) |
+| BrainStem | locked and downloaded; not yet in a scene | Poser EULA (Keith Hunter): not redistributed |
+| Flight Helmet, Sponza | the `helmet` and `sponza` scenes | CC0 1.0; Cryengine Limited License Agreement (Crytek) |
