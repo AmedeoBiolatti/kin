@@ -2574,6 +2574,127 @@ Sponza Walk panel click path; a NaN scrub in the TAA resolve was *not* added: `t
 history into 0 on NVIDIA before the shader's own `isnan(history)` test can see it (so that test is dead), and `env_filter.comp`'s `min(texel, 1e4)` turns a NaN
 texel into 1e4. Neither caused the green (the NaN came from the unwritten level, not from TAA), and neither is changed here.
 
+## A full 3D game: a Peak-like game (stage P)
+
+The user's direction (2026-10-10): stop at what G2 and G3 gave the renderer, park ray
+tracing (G4), and build what a whole 3D game needs, aimed first at a game like *Peak*
+(a co-op climbing game: a stylised animated character that grabs and climbs mountain
+segments, stamina and status effects, weather, ropes and items). An Astroneer-like game
+(voxel planets the player digs, base building, vehicles) is a separate, later track that
+needs a terrain system on top of everything here (see the end of the section).
+
+Decisions taken: **Peak-like first**; **one player first, netcode-ready** (the simulation
+kept apart from rendering and input, fixed step, input as commands, state hashed as
+`kin/runtime/state_hash.hpp` already does, so that co-op can be added by a later step
+without a rewrite); **Jolt Physics approved** as a dependency (MIT, fetched like
+meshoptimizer, built only with `KIN_EXPERIMENTAL_3D`).
+
+What exists (so what the steps build on): the renderer (materials, shadows, lights, detail
+reduction for big scenes, pick, custom shaders), the ECS with `Transform3D` and
+`MeshRenderer` (`kin/ecs/render3d.hpp`), a deterministic fixed-timestep core, `kin/anim`
+(clips and state machines over registered properties: not skeletal), `kin/audio` with
+spatial sound, `kin/particles` (2D), ui2, scripting, saves, prefabs. What does not: skinned
+meshes (the glTF loader reads nodes and meshes, not skins or animations; `MeshVertex` has
+no joints), 3D physics (`kin/physics` is Box2D), gamepad input in `platform`, a sky,
+fog, spot lights, 3D particles and decals, a baked asset cache, and any networking
+(the only server in the engine is the agent interface).
+
+### P1 — Skeletal animation (the biggest gap)
+
+*P1a, skinned meshes and clips.* The loader reads skins (joints, inverse bind matrices) and
+animations (translation, rotation, scale channels; step, linear, cubic spline) and the
+`JOINTS_0` / `WEIGHTS_0` attributes; a `Model` gains a `Skeleton` and its clips. Skin
+data is a separate vertex stream (four joint indices, four weights), so a mesh without it
+is untouched and every existing picture stays byte for byte. At run time: a `Pose` (local
+translation, rotation, scale per joint), a player that samples a clip and blends two, with
+layers and masks (an upper-body layer over locomotion), additive clips, and root motion
+taken out; the joint matrices (world pose times inverse bind) are written per frame into a
+storage buffer and a copy's offset into it is a small per-copy value in a buffer of its own
+(like TAA's previous transforms: `GpuInstance3D` stays 128 B). GPU skinning in every pass
+that draws meshes (main, shadow cascades, pre-pass, TAA velocity from the previous
+frame's joint matrices, pick); bounds for culling from the skeleton or a per-clip bound;
+skinned meshes are excluded from levels and clusters (G3), and say so.
+API: `Scene3D::draw_skinned(...)`, ECS `SkinnedMeshRenderer` and `Animator3D`; the existing
+state machines choose clips and blend weights (a 1D blend by speed first).
+Checks: the glTF sample models (CesiumMan, Fox, BrainStem: fetched, not committed) load; the
+skinned picture equals a CPU skinning reference to a tolerance; blends, masks, additive
+and root motion by unit tests on poses; shadows, velocity (no ghosting on a running
+character under TAA), pick and culling by pixel tests; 200 skinned characters of a few
+thousand triangles cost under 1 ms of GPU (measure and record); mutation checks on each.
+
+*P1b, inverse kinematics.* A two-bone solver (an arm reaching a hold, a leg to the ground),
+look-at, and a foot-placement helper, as pure maths with unit tests, applied to a pose
+after the clip; the hand-to-hold use is what climbing needs.
+
+*P1c, a viewer.* An example (or a Sponza Walk section) with a skinned character, a clip
+list, blend sliders and the IK target, as the means to look at it and to test headless.
+
+### P2 — 3D physics with Jolt, and a character
+
+Jolt behind `kin/physics3d` (the Box2D module stays as it is): bodies (static, kinematic,
+dynamic), shapes (box, sphere, capsule, convex hull, static mesh, height field), raycasts,
+shape casts and overlaps, contact events, constraints (fixed, distance, hinge, cone),
+stepped by the engine's fixed step and built for cross-platform determinism
+(`JPH_CROSS_PLATFORM_DETERMINISTIC`, so a netcode step can rely on it), debug drawing as
+wireframe lines in the 3D view, ECS components (`RigidBody3D`, `Collider3D`) and a
+system that writes `Transform3D`. On it: a capsule **character controller** (slopes,
+steps, moving platforms, gravity direction as a parameter so a planet can come later),
+the **grab and climb** mechanic for the slice (raycast for a hold, attach a hand with a
+constraint or a kinematic move, stamina drain; the IK of P1b places the hand), a
+**ragdoll** built from a skeleton (capsules per bone from the bind pose) blended with a
+clip, and **ropes** (chains of capsules with constraints). Checks: determinism (the engine's
+`--check-determinism`: three lockstep runs agree, with physics on), unit tests per feature,
+a scripted-input run of the climbing test level, the physics step's cost with 500 bodies.
+Risk to watch: Jolt is large to compile; this machine has 14 GB of RAM and a nearly full
+disk (see HANDOFF.md): build with `-j8`, check the disk first.
+
+### P3 — A whole scene: sky, fog, spot lights, weather
+
+A sky as the background (a procedural gradient and sun disc first, a cubemap later), height
+and distance fog that agree with it, spot lights (cone, falloff, a shadow for a few), more
+than one shadow-casting light, a day-night parameter, and 3D particles (billboards, soft
+particles, wind) for snow and rain; transparency ordering for them. Opt-in like the rest,
+byte-identical when off. Checks: the harness scenes plus new ones (a mountain with fog, a
+night scene with spot lights), cost per feature.
+
+### P4 — The vertical slice, "Summit" (a one-player Peak-like)
+
+A new example (`examples/summit`): a small mountain of hand-assembled rock segments with
+collision, the animated character, climbing with stamina, falling and respawn, a few status
+effects, rope and food items, a weather change, a ui2 HUD, audio (footsteps, wind), all from
+a seed and a scripted input run that can be checked headless. It is where the missing things
+show up; each finding becomes a step. Gamepad input (aiming and moving; kin has none in
+`platform`) lands here if the slice needs it, along with camera controllers and rebinding.
+
+### P5 — Netcode-ready, then co-op
+
+*P5a (inside P4):* keep the rules honest: a fixed-step simulation reading input commands, no
+rendering or wall-clock in it, its state hashed every frame, a replay of recorded inputs
+reproducing it. *P5b (a plan of its own after the slice):* host-and-join over a transport
+(a library to be chosen), replication of characters and objects, prediction for the
+local character, then voice and a store backend.
+
+### P6 — Content pipeline and platforms
+
+A baked cache for levels of detail and clusters (the kiln takes 5 to 8 s and 1.1 to 1.5 GB at
+load), compressed textures, glTF in the asset manifest and `.kinpak`, a level format with 3D
+ECS components in prefabs; Direct3D 12 and Metal checks (everything so far ran on Vulkan on one
+NVIDIA GPU and on lavapipe) and a weaker-GPU budget; a lavapipe CI job that builds the
+examples; the merge to main.
+
+### The Astroneer-like track (after the slice)
+
+Voxel terrain (a signed distance field in chunks, surface nets or marching cubes meshed in
+compute with the G3 machinery, chunk streaming, levels of detail with seams handled), editing
+with a tool, collision against changing meshes, gravity toward a planet's centre (the
+character controller's gravity parameter), base building by attach points, vehicles on Jolt
+bodies, tethers and resources, replication of terrain edits. Its own plan, after P4.
+
+Order: P1, P2, P3 (independent of P2: may run beside it), P4, P5a throughout, then P5b and P6.
+Each step is planned with the user before it starts, implemented by a Sonnet 5.5 subagent
+with the usual checks (opt-in, byte-identical when off, mutation-checked tests, the memory
+rules in HANDOFF.md), and verified by the coordinator.
+
 ## How it is tested
 
 - **State**: the simulation's checksum is the test surface, as Signal
@@ -2626,3 +2747,9 @@ texel into 1e4. Neither caused the green (the NaN came from the unwritten level,
    cgltf, used only by the experimental 3D option (levels, clusters). The
    alternative is writing the simplifier and meshlet builder here, which is
    weeks of work to match it.
+   *Decided: yes (2026-10-08).*
+5. **The game to aim at** (stage P): a Peak-like first, an Astroneer-like track after
+   it. *Decided 2026-10-10.*
+6. **Multiplayer in the first slice**: one player, netcode-ready. *Decided 2026-10-10.*
+7. **Jolt Physics as a dependency** (stage P, P2): MIT, fetched like meshoptimizer, only
+   with the experimental 3D option. *Decided: yes (2026-10-10).*
