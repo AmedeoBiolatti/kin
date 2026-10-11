@@ -33,6 +33,25 @@ private:
     Layer3DMask _mask;
 };
 
+// What a character's own movement never meets: its own body and every body of its group (a ragdoll bound to it).
+class OwnBodyFilter final : public JPH::BodyFilter {
+public:
+    template <typename Env>
+    OwnBodyFilter(JPH::BodyID self, const Env& env) : _self(self), _group(env.group_of ? env.group_of(self) : 0u), _group_of(&env.group_of) {}
+    bool ShouldCollide(const JPH::BodyID& id) const override {
+        if (id == _self) {
+            return false;
+        }
+        return _group == 0 || !*_group_of || (*_group_of)(id) != _group;
+    }
+    bool ShouldCollideLocked(const JPH::Body&) const override { return true; }
+
+private:
+    JPH::BodyID _self;
+    u32 _group;
+    const std::function<u32(const JPH::BodyID&)>* _group_of;
+};
+
 // What the set needs of the world around it.
 struct CharacterEnv {
     // The world the set is in: grab and climb asks it the public questions (rays, sweeps, a body's place and velocity) and
@@ -43,6 +62,8 @@ struct CharacterEnv {
     const std::array<u32, 32>* table = nullptr;
     // The world's gravity vector as it is now.
     std::function<Vec3f()> gravity;
+    // The collision group of a Jolt body (0: none): a character skips the bodies of its own group (its ragdoll's).
+    std::function<u32(const JPH::BodyID&)> group_of;
     // The kin body a Jolt body is (invalid for none), and its user id.
     std::function<Body3D(const JPH::BodyID&)> body_of;
     std::function<u64(Body3D)> user_id_of;
@@ -77,6 +98,9 @@ public:
     TraversalInput3D traversal_input(Character3D c) const;
     TraversalState3D traversal(Character3D c) const;
     void set_traversal_resource(Character3D c, f32 value);
+    // A disabled character is skipped by update() and its body collides with nothing (a ragdoll has taken its place).
+    void set_enabled(Character3D c, bool enabled);
+    bool enabled(Character3D c) const;
 
     // Advances every character by dt, in ascending number, before the world's step.
     void update(f32 dt);
@@ -115,6 +139,7 @@ public:
             bool touching_ceiling = false;
             std::vector<std::pair<u32, bool>> touched;
             TravData trav;
+            bool disabled = false;
         };
         std::vector<One> slots;
     };
@@ -132,6 +157,8 @@ private:
         JPH::RefConst<JPH::Shape> stand, crouch;
         u32 generation = 0;
         bool alive = false;
+        // Handed over to a ragdoll: not updated, collides with nothing (saved in the alive byte).
+        bool disabled = false;
         CharacterDesc3D desc;
         CharacterInput3D input;
         Body3D inner{};

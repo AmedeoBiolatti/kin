@@ -388,6 +388,165 @@ point, not "the best hold": reach and the command are the game's. No feet on the
 P1b's foot placement is not active while it hangs. Two grips on one hold are allowed more than 0.2 m apart. Ropes, ladders as a mode of
 their own, and a mantle that is interrupted are not built. The keyboard and mouse path of the viewer is not exercised by any test.
 
+## Ragdolls
+
+`kin/physics3d/ragdoll3d.hpp`, `World3D::create_ragdoll`, `start_ragdoll`, `blend_ragdoll`, `ragdoll_get_up`, `ragdoll_pose`,
+`ragdoll_get_up_place`, ECS `Ragdoll3D`: a body per bone of a skinned character, joined by constraints, that takes the pose over from a
+clip and gives it back. PASSIVE: nothing drives the bodies (no motors); the pose is what physics makes of them, and a "get up" is a
+blend back to a clip (which clip, and when, is the game's). Everything is ordinary bodies and constraints (made through the world's
+public calls, in bone order), so queries, events, grips and the debug lines already see them.
+
+```cpp
+kin::RagdollDesc desc = kin::auto_ragdoll_desc(skeleton, skeleton.rest_pose());   // capsules from the bind pose
+const kin::RagdollHandle3D r = world.create_ragdoll(desc, bone_world_matrices);    // starts Animated: kinematic bodies at the pose
+...each fixed step:
+world.set_ragdoll_targets(r, clip_pose_in_the_world);   // what the kinematic bodies follow
+world.step(dt);
+world.start_ragdoll(r, {.blend_seconds = 0.15f, .set_velocity = true, .velocity = v, .impulse_bone = chest, .impulse = hit});
+world.ragdoll_pose(r, bones);                           // per bone: share, place (what a pose writer takes)
+const kin::RagdollPlace3D at = world.ragdoll_get_up_place(r);   // the ground under the pelvis, its facing, lying face up or down
+world.ragdoll_get_up(r, 0.8f);                          // blend back to the clip over 0.8 s
+```
+
+* **Building.** `RagdollDesc` is per bone (shape capsule, box or sphere; radius, half height, offset and rotation in the BONE'S frame;
+  mass or density; friction, damping; the joint to the parent: swing-twist with a swing half angle and twist range, a hinge with limits
+  in degrees from the pose it was made in, or fixed; the share `weight`) and for the ragdoll (layer, `self_collision`, `continuous`,
+  `animated_bodies`, settle thresholds, `freeze_on_settle`, solver iterations, the root bone and the way it faces). The body of a bone
+  is at its joint with the joint's rotation, so that the bone's pose is the body's pose exactly. `auto_ragdoll_desc(skeleton, pose,
+  options)` makes the capsules: from a joint to its main child (the one that continues the parent's direction; the longest for the
+  root), a short capsule for a leaf (a foot that points down is laid forward along the ground), radius a share of the bone's length
+  (`radius_ratio` 0.22, kept between 2.5 and 12 cm), the mass of the whole (70 kg) shared by volume, swing-twist joints with default
+  limits and hinges where a name matches the override table (knee, elbow: for a character facing +Z in a T pose; another rig brings
+  its own), bones shorter than 2 cm and named ones skipped (a bone's parent is the nearest one with a body), from the joint called
+  `pelvis` down. Neighbours never collide with each other (joined: `collide_connected` false); all the bones of one ragdoll are in a
+  collision group and skip each other too unless `self_collision` is set (then only neighbours skip).
+* **States.** `Animated`: kinematic bodies that follow the targets (so characters and projectiles can hit them; `animated_bodies`
+  false parks them: no collisions, asleep, until the ragdoll starts). `Ragdoll`: dynamic, the pose is the bodies', blending in over
+  `blend_seconds` (smoothstep). `Blend`: dynamic, a held share (`blend_ragdoll(alpha, seconds)`; 0 reached means Animated again).
+  `GetUp`: the bodies are back to kinematic on the clip at once and the POSE blends from where the bodies lay (a snapshot) to the clip
+  over `seconds`, then Animated and a `Recovered` event: nothing fights the character's capsule or the floor while it stands up. A
+  per-bone weight (`set_ragdoll_bone_weights`) multiplies the share; weight 0 keeps a bone kinematic in every state, and
+  `set_ragdoll_subtree(bone)` makes a PARTIAL ragdoll (an arm, a tail): the rest stays animated, bit for bit.
+* **Settling and cost.** Dynamic bodies sleep. `Settled` is reported once a start, when every dynamic body is asleep or slower than
+  `settle_speed` / `settle_angular_speed` for `settle_seconds`; `freeze_on_settle` then makes them kinematic and puts them to sleep:
+  hittable, free, until the ragdoll is started, blended or told to get up. 17 bodies a person: see "Cost" below.
+* **Events** (`ragdoll_events()`, `drain_ragdoll_events()`; user id = the entity's id from the ECS): `Started`, `Settled`, `Recovered`
+  and, from the ECS helper, `Blocked`; each step's batch is sorted by (ragdoll, kind).
+* **State.** The mode, blend (from, to, time, length), settle timer, flags, per-bone weights, targets and the get-up snapshot are in
+  `state_hash()`, `save_state()` and `restore_state()` (bodies and joints are in them already); a restore puts the bodies' motion
+  types back before Jolt restores their places. With no ragdoll nothing of it is in the hash.
+
+### Entities and the pose
+
+An entity with `Transform3D`, `SkinnedMeshRenderer` and `Ragdoll3D` gets a ragdoll, made at the next sync after the bodies and the
+characters in ascending entity id order, from the model's skeleton at its rest pose (`Ragdoll3D::desc` with bones is used as given,
+`auto_options` otherwise), at the entity's place and scale; an `Animator3D` is added if there is none. Each step the system sets the
+targets from the animator's clip pose (IK is the renderer's, solved at draw time, and is not followed by the kinematic bodies), steps,
+and writes the bodies' pose into `Animator3D::pose_override` (`PoseOverride3D`: per joint a share and a world place). With every
+share 0 the override is cleared: an animator is exactly what it was. `WorldPhysicsState3D::interpolate(alpha)` interpolates the
+override between the last two steps. Commands: `start_ragdoll`, `blend_ragdoll`, `ragdoll_get_up`, `animate_ragdoll`,
+`set_ragdoll_subtree(entity, joint_name)`.
+
+**Where the pose is written.** In `WorldRenderState3D` (`collect()` and `apply_ik()`), AFTER the clips, the layers and the IK
+constraints, in this order, and BEFORE the joint matrices: ragdolled bones take the body's ROTATION (the world rotation turned into
+the parent's space through the parent's final matrix) and a joint at the top of the ragdolled part (its parent has less share)
+also its place; every other ragdolled joint keeps the bind pose's translation, so bone lengths and scale are exactly the bind
+pose's (the physics joints open a little under a hard hit: the pose does not follow that). A share between 0 and 1 is a slerp and
+a lerp from the pose the clips and IK made. Drawing, the TAA velocity (the renderer keeps the previous frame's matrices by the
+entity's id), the shadow pass and the shadow cache all read the joint matrices, so they need nothing of their own. IK that
+should hold on a ragdolled limb is overridden by it (physics wins); IK on a limb that is not ragdolled is exactly what it was.
+
+**From controller to ragdoll and back** (`hand_over_to_ragdoll`, `recover_from_ragdoll`). A hand-over disables the character's
+capsule (`World3D::set_character_enabled(false)`: it is not updated, collides with nothing, and the system teleports it to the
+pelvis's ground point each step, so that the entity's `Transform3D` follows the ragdoll), gives every body the character's
+velocity and starts the ragdoll (an impulse at a bone on request). A recovery finds the ground under the pelvis (along the
+character's up, within `max_ground_distance`), checks that the STANDING capsule fits there (an overlap that is not the ragdoll's own
+bodies; `allowed_penetration` 1 cm), and then enables the character at that point facing as the pelvis says (`facing`), and
+starts the get-up. No ground or no room: nothing changes, a `Blocked` event, `blocked` in the result. A character that has a
+ragdoll shares its collision group with it, so neither its own movement nor its queries (grip probes, the foot placer's rays)
+meet its own bones.
+
+### Limits
+
+Passive only: no motors, no active ragdoll (a character that keeps its balance or holds on by its muscles). The animated bodies
+follow the CLIP's pose, not the IK's (a hand moved by IK is not where its body is). The joint limits are hard but a violent start
+(tens of m/s) overshoots them for a few steps; a hit of 200 N s at a chest opens joints by several centimetres. A pose is rigid: the
+joints' opening does not show. The auto desc is for a biped with the knees and elbows of the default table (another rig brings
+the table and may need a different `root_name`); capsules from the bind pose do not know a belly. The get-up place is a place
+and a facing: choosing the clip (face up or face down), pose matching and the character's move there are the game's.
+
+## Ropes
+
+`kin/physics3d/rope3d.hpp`, `World3D::create_rope`, `rope_points`, `rope_closest_point`, `rope_tension`, `reel_rope`, ECS `Rope3D`,
+`WorldPhysicsState3D::collect_ropes`: a chain of capsule segments joined by ball joints (point constraints), between two anchors or
+hanging from one. A rope is ordinary bodies and constraints (in the rope's collision group: its segments never meet each other
+unless `self_collision`), so grips, loads, queries and events already see it.
+
+```cpp
+kin::RopeDesc3D desc;
+desc.start = kin::RopeAnchor3D::at({0, 6, 0});                 // a point of the world; ::on(body, offset) in that body's space; ::free()
+desc.end = kin::RopeAnchor3D::on(crate, {0, 0.3f, 0});
+desc.length = 4.0f;                                            // 0: the distance between two anchors (taut); longer sags
+desc.mass_per_metre = 1.0f; desc.radius = 0.04f;
+const kin::RopeHandle3D rope = world.create_rope(desc);
+world.reel_rope(rope, 2.0f, 0.5f);                             // to 2 m at 0.5 m/s
+world.rope_points(rope); world.rope_tension(rope, kin::RopeEnd3D::Start);
+```
+
+* **Why ball joints.** Point constraints between capsules are the most stable arrangement for the mass ratios of a climber on a
+  rope (80 kg on 0.25 kg segments); swing-twist or hinge limits would add bend stiffness at a cost of iterations and cannot be
+  re-anchored in place, which pay-out and reel need. A rope has therefore no bend or TWIST stiffness: a box lying across one rope
+  rolls it like a roller and walks off it in time (a bridge is two or three ropes between low walls, or boards).
+* **Solver iterations are what holds the length.** Jolt's iterations are per island; the rope's constraints ask for more
+  (`velocity_steps` 128, `position_steps` 32 by default). Stretch of a 4 m rope of 16 segments under a load (last 4 s of 10 s, this
+  machine): 10 kg 1 %; 50 kg 3 %; 150 kg 9 % at the defaults. For an 80 kg load: world default (10, 2) a quarter and more, 24 and 4
+  a sixth (final 17 %, worst 26 %), 64 and 16 5 % (worst 9.5 %), 96 and 24 3 %, 128 and 32 2.4 % (worst 4.6 %), 24 and 4 with
+  the world sub-stepped 4 times 0.8 %. Fewer, longer segments help the same way (8 segments at 64 and 16: 1 %). A rope that carries
+  nothing is fine with 16 and 4. The cost is in "Cost".
+* **Creation.** Anchored ends need a length (or two anchors for a taut rope); a free end hangs along gravity (or
+  `hang_direction`), a rope longer than the gap sags as a parabola of that length (`sag_direction`); the segments are cut at equal
+  arclength; `segments` or `segment_length`; `collide_world` false lets it through static bodies; `break_tension` makes every
+  joint and anchor breakable at that force.
+* **Length.** A rope has a fixed number of segments; `set_rope_length` or `reel_rope(target, speed)` stretches them all alike (their
+  capsules and the joints' anchors in place; the chain is re-laid along its own polyline, bodies teleported, velocities kept).
+  Paying out is smooth. REELING IN a body anchored at the moving end is done by carrying it: a chain of light segments cannot
+  lift a heavy load by constraint correction (the solver moves the light segments and not it: a 40 kg crate rose a third of
+  the way in 5 s, a crate on the floor not at all), so while the rope is reeled in the anchored body is KINEMATIC and put
+  where the chain's end is each step, and dynamic again (at rest) when the length is reached, the reel is stopped or it turns
+  to pay out; the state (hoisting) is in the hash and the saved state. A body that was kinematic already is left alone.
+  Mass per metre is for the length the rope was made at.
+* **Tension.** `rope_anchor_force` / `rope_tension(end)`: the anchor constraint's impulse of the last collision step over its length,
+  smoothed over a quarter of a second (a single step's reading wanders by a tenth: the solver's residual and a load's bounce),
+  positive when the rope pulls its anchor toward itself. A rope that is asleep keeps its last reading. At rest it reads the weight
+  within about 10 %.
+* **Sampling.** `rope_points` (segments + 1 joints with the direction there), `rope_segments`, `rope_closest_point(world point)`
+  (segment, `t` along it, `along` the whole rope, point, tangent, distance), `rope_point_at`, `rope_segment_of(body)`.
+* **Grips.** `GripKind3D::Rope`: a hand finds a rope within its reach (the closest point of the reach to the rope, within the hand's
+  tolerance and the fan), up to three candidates a rope (the closest, one hand's width up it, one down it) so that two hands take two
+  places. The anchor is a segment's body and a SHARE of the segment's length from its middle, so that it keeps its place along a
+  rope that changes length. Climbing moves every hand along the rope at `climb_speed` (its direction is the move command's along
+  the rope; a hand stops at the end), onto the next segment's body as it passes. While hanging the character's feet are driven
+  from the hands as at a wall, with a quick critically damped spring (no pendulum of its own: the rope swings) and a rope's radius
+  further out; `jump_off` leaves with the speed it has (the swing) and the up kick, away from nothing; letting go is letting go.
+  **The weight is on the rope.** A rope is light, so a force alone would not make it swing: the character's mass is ADDED to the two
+  segments nearest the hand (by distance along them) for the step (`World3D::set_added_mass`), gravity then does the rest, the
+  rope's own period is the pendulum's, and tension is the weight. Taking hold in the air gives the rope the momentum of the
+  character (an impulse of its mass times the speed difference). A rope with someone on it does not go to sleep.
+* **Entities.** `Rope3D` on an entity (`start`, `end` as `RopeAttach3D::at(point)`, `on(entity, offset)` or `free(offset)`; the fields
+  of the desc; `target_length` and `reel_speed` each step; `render`), made after the ragdolls in ascending entity id order (an
+  anchor entity without a body yet makes it wait); `points()`, `closest_point`, `tension(end)`, `state` written back; `RopeEvents3D`.
+  `collect_ropes(renderer, scene)` draws every rope with `render` as a round tube (`sides` 3 to 16, `render_radius`, a material
+  and a tint; one mesh a material, made again each call): no new shader or pass, so it is lit, shadowed and TAA'd as any mesh, and
+  off it draws and costs nothing.
+
+### Limits
+
+No bend or twist stiffness (above). A long rope under a heavy load stretches and reels in slowly (the numbers above); a rope can
+be pulled through a thin static body at speed (no continuous collision unless `continuous`); a character's capsule that hangs
+beside a rope collides with its segments if it is pushed against them. Soft bodies were not used: Jolt's soft bodies were not
+tested for determinism here, and a rope of them would not be bodies that grips, loads and events already understand.
+Tension on a sleeping rope is its last reading. The viewer's keys (G, H, Q, E) are not exercised by any test (no display).
+
 ## Cost
 
 `kin_physics3d_bench` (built with the benchmarks): 500 boxes in a pile step in 1 to 4 ms, 2000 in
@@ -407,9 +566,12 @@ Queries cost 1 to 8 microseconds against a 2000 body pile and 1 to 7 against a 1
 a 500 body step (persist events 6 %); the entity system adds 0.2 to 0.3 ms a step for 500 bodies. Table in the plan ("P2b").
 A character costs about 2 to 5 microseconds a step in the test level (100 of them 0.2 ms alone, 0.7 ms beside a heap of 500 boxes
 they wake); `kin_physics3d_bench characters`, table in the plan ("P2c"). A grip probe is about 14 to 16 microseconds, a hanging
-character 4 to 5 microseconds a step; `kin_physics3d_bench climbing`, table in the plan ("P2d").
+character 4 to 5 microseconds a step; `kin_physics3d_bench climbing`, table in the plan ("P2d"). A ragdoll of 17 bodies costs about 0.01
+ms a step animated (kinematic bodies following the clip), about 0.1 ms while it falls and lands (0.03 to 0.05 ms with 4 workers),
+and 0.004 ms asleep; a rope of 20 segments costs about 0.22 ms a step awake at the default iterations (0.04 at 16 and 4), nothing asleep;
+`kin_physics3d_bench ragdolls` and `ropes`, tables in the plan ("P2e").
 
 ## Not yet
 
-Ragdoll; ropes (the grip providers' interface is ready for one); soft bodies; per-contact material callbacks; continuous collision
+Active (motor-driven) ragdolls; soft bodies; ropes with twist stiffness; per-contact material callbacks; continuous collision
 between dynamic bodies beyond Jolt's linear cast; scaled or mutable shapes (swap with `set_shape`).

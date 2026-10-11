@@ -154,7 +154,6 @@ TraversalState3D CharacterSet::traversal(Character3D c) const {
 }
 
 bool CharacterSet::anchor_world(const Slot& s, const GripData& g, bool predicted, f32 dt, Vec3f& point, Vec3f& normal) const {
-    (void)s;
     const World3D& world = *_env.world;
     if (!g.body.valid() || !world.contains(g.body)) {
         return false;
@@ -163,6 +162,18 @@ bool CharacterSet::anchor_world(const Slot& s, const GripData& g, bool predicted
     const Quatf rotation = world.rotation(g.body);
     point = position + rotation.rotate(g.local_point);
     normal = rotation.rotate(g.local_normal);
+    if (g.kind == GripKind3D::Rope) {
+        // A rope's anchor is a share of a segment's length from its middle (so that it keeps its place along a rope that
+        // changes length), and a rope has no face: the hand is on the side the character faces it from.
+        Vec3f tangent{};
+        const auto ref = world.rope_segment_of(g.body);
+        if (!ref || !world.rope_point_at(ref->rope, ref->segment, g.local_point.y, point, tangent)) {
+            return false;
+        }
+        if (s.trav.facing != Vec3f{}) {
+            normal = -s.trav.facing;
+        }
+    }
     if (predicted) {
         // Where the body's velocity (a platform's, a crate's) takes the point over this step.
         const Vec3f arm = point - world.centre_of_mass_position(g.body);
@@ -240,8 +251,7 @@ namespace {
 // Drives the character to `target` (feet) this step, by the swept move of Jolt's own Update so that it does not pass
 // through what is in the way. Returns the place it got to.
 Vec3f move_to(JPH::CharacterVirtual& ch, JPH::PhysicsSystem& system, u8 layer, const MaskFilter& layer_filter,
-              JPH::TempAllocator& temp, Vec3f target, f32 dt) {
-    const JPH::IgnoreSingleBodyFilter body_filter(ch.GetInnerBodyID());
+              const JPH::BodyFilter& body_filter, JPH::TempAllocator& temp, Vec3f target, f32 dt) {
     const Vec3f from = from_jolt(ch.GetPosition());
     ch.SetLinearVelocity(to_jolt((target - from) / dt));
     ch.Update(dt, JPH::Vec3::sZero(), system.GetDefaultBroadPhaseLayerFilter(layer), layer_filter, body_filter,
@@ -263,6 +273,8 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
     const TraversalInput3D& in = t.input;
     const ResourceConfig3D& rc = td.resource;
     const Vec3f feet = from_jolt(ch.GetPosition());
+    // What it was doing when the step began (the hanging move changes `s.velocity` below).
+    const Vec3f velocity_in = s.velocity;
 
     // The commands' edges and the latches (a limb the character let go of waits for its command to be given up).
     const bool pull_edge = in.pull_up && !t.prev_pull;
@@ -413,6 +425,7 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
         }
     }
     // --- what is the character doing now
+    bool just_hung = false;
     const auto walking_tick = [&] {
         // The resource on the ground: sprinting spends it, otherwise it comes back after its delay.
         const bool sprinting = s.input.sprint && s.input.move.x * s.input.move.x + s.input.move.y * s.input.move.y > 0.01f && !s.crouching &&
@@ -430,6 +443,7 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
             return false;
         }
         // The first hold: it hangs. A grab in the air keeps some of the speed as the start of the swing.
+        just_hung = true;
         t.mode = TraversalMode3D::Hanging;
         t.has_hang_place = false;
         t.hang_time = 0.0f;
@@ -471,14 +485,21 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
         }
         Vec3f carried{};
         u32 n = 0;
+        bool on_rope = false;
         for (u32 h = 0; h < limbs; ++h) {
             if (holding(t.grips[h]) && world.contains(t.grips[h].body)) {
                 carried += world.linear_velocity(t.grips[h].body);
+                on_rope = on_rope || t.grips[h].kind == GripKind3D::Rope;
                 ++n;
             }
         }
         if (n > 0) {
             carried = carried / static_cast<f32>(n);
+        }
+        if (on_rope) {
+            // Off a rope it goes with the speed it has (the swing), not away from a face it has none of.
+            carried = velocity_in;
+            away = {};
         }
         for (u32 h = 0; h < limbs; ++h) {
             release(h, GripRelease3D::JumpOff);
@@ -606,6 +627,7 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
                 for (u32 h = 0; h < limbs; ++h) {
                     GripData& g = t.grips[h];
                     if (holding(g)) {
+                        g.body = next[h].body; // a rope's hand goes on to the next segment's body
                         g.local_point = next[h].local_point;
                         g.local_normal = next[h].local_normal;
                         g.kind = next[h].kind;
@@ -643,6 +665,7 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
             release(h, GripRelease3D::Slipped);
             continue;
         }
+        g.body = a.body;
         g.local_point = a.local_point;
         g.local_normal = a.local_normal;
         g.slip_time += dt;
@@ -765,7 +788,19 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
     }
     lateral /= static_cast<f32>(anchors);
     const Vec3f side = normalize(cross(t.facing != Vec3f{} ? t.facing : facing, up));
-    const Vec3f below = -up * drop + out * (d.radius + td.wall_gap) - side * lateral;
+    // A rope is a thin thing hung by its middle: the capsule hangs its own radius further out, and the arms are stiff (the
+    // rope itself is what swings, with the character's mass on it).
+    bool rope_hold = false;
+    f32 rope_radius = 0.0f;
+    for (u32 h = 0; h < limbs; ++h) {
+        if (holding(t.grips[h]) && t.grips[h].kind == GripKind3D::Rope) {
+            rope_hold = true;
+            if (const auto ref = world.rope_segment_of(t.grips[h].body)) {
+                rope_radius = std::max(rope_radius, world.rope_radius(ref->rope));
+            }
+        }
+    }
+    const Vec3f below = -up * drop + out * (d.radius + td.wall_gap + rope_radius) - side * lateral;
     // The place as the anchors are now (what the swing is measured from) and where they will be by the end of this step (what
     // it is driven to): a platform that moves is carried with no lag, the swing is only what the character does about it.
     const Vec3f place_now = centre_now + below;
@@ -773,8 +808,14 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
 
     // --- the swing: a damped spring about the place (from where it is now, so that a hand let go of or a platform that
     // moved is a continuous motion), its velocity read back from what the move achieved (no wind-up against the floor)
-    const f32 omega = two_pi * std::max(td.swing_frequency, 0.0f);
-    const f32 omega_up = two_pi * std::max(td.swing_vertical_frequency, 0.0f);
+    f32 omega = two_pi * std::max(td.swing_frequency, 0.0f);
+    f32 omega_up = two_pi * std::max(td.swing_vertical_frequency, 0.0f);
+    f32 damping_side = td.swing_damping, damping_up = td.swing_vertical_damping;
+    if (rope_hold) {
+        // Quick and critically damped both ways: the hands arrive at the rope, then it carries them.
+        omega = omega_up = two_pi * 4.0f;
+        damping_side = damping_up = 1.0f;
+    }
     Vec3f offset = feet - place_now;
     const f32 offset_length = length(offset);
     if (offset_length > td.max_swing && offset_length > 0.0f) {
@@ -784,14 +825,15 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
         // A pendulum across `up`, stiff arms along it.
         const Vec3f offset_up = up * dot(offset, up), velocity_up = up * dot(t.swing_velocity, up);
         const Vec3f offset_side = offset - offset_up, velocity_side = t.swing_velocity - velocity_up;
-        const Vec3f acceleration = -offset_side * (omega * omega) - velocity_side * (2.0f * td.swing_damping * omega) -
-                                   offset_up * (omega_up * omega_up) - velocity_up * (2.0f * td.swing_vertical_damping * omega_up);
+        const Vec3f acceleration = -offset_side * (omega * omega) - velocity_side * (2.0f * damping_side * omega) -
+                                   offset_up * (omega_up * omega_up) - velocity_up * (2.0f * damping_up * omega_up);
         t.swing_velocity += acceleration * dt;
     }
     const Vec3f wanted = place + offset + t.swing_velocity * dt;
 
     const MaskFilter layer_filter(own_mask);
-    const Vec3f arrived = move_to(ch, *_env.system, d.layer, layer_filter, *_env.temp, wanted, dt);
+    const OwnBodyFilter body_filter(ch.GetInnerBodyID(), _env);
+    const Vec3f arrived = move_to(ch, *_env.system, d.layer, layer_filter, body_filter, *_env.temp, wanted, dt);
     // Read back: the offset's own rate as the move achieved it (no wind-up against a floor that is in the way).
     t.swing_velocity = ((arrived - place) - offset) / dt;
     t.swing = arrived - place;
@@ -817,7 +859,34 @@ bool CharacterSet::update_traversal(u32 index, Slot& s, f32 dt) {
             const GripData& g = t.grips[h];
             Vec3f p{}, n{};
             if (holding(g) && anchor_world(s, g, false, 0.0f, p, n) && world.motion(g.body) == Body3DMotion::Dynamic) {
-                world.add_force_at(g.body, -up * (weight / static_cast<f32>(held)), p);
+                if (g.kind == GripKind3D::Rope) {
+                    // A rope is made of light segments: the climber's mass is added to the two segments nearest the hand
+                    // (by distance along them), so that the rope carries and swings with it, and a grab in the air gives
+                    // the rope its share of the momentum.
+                    const auto ref = world.rope_segment_of(g.body);
+                    if (!ref) {
+                        continue;
+                    }
+                    const f32 share = d.mass / static_cast<f32>(held);
+                    const f32 centre = static_cast<f32>(ref->segment) + g.local_point.y; // segment centres are whole numbers
+                    const i32 lower = std::clamp<i32>(static_cast<i32>(std::floor(centre)), 0, static_cast<i32>(ref->segments) - 1);
+                    const i32 upper = std::min<i32>(lower + 1, static_cast<i32>(ref->segments) - 1);
+                    const f32 w = upper == lower ? 0.0f : std::clamp(centre - static_cast<f32>(lower), 0.0f, 1.0f);
+                    for (const auto& [index, amount] : {std::pair<i32, f32>{lower, share * (1.0f - w)}, std::pair<i32, f32>{upper, share * w}}) {
+                        const Body3D body = world.rope_segment_body(ref->rope, static_cast<u32>(index));
+                        if (body.valid() && amount > 0.0f) {
+                            world.set_added_mass(body, world.added_mass(body) + amount);
+                            // A rope with someone on it does not go to sleep (the weight is on it though it is still).
+                            world.activate(body);
+                        }
+                    }
+                    if (just_hung) {
+                        // The momentum it had (the speed of its feet) shared with the rope where it took hold.
+                        world.add_impulse_at(g.body, (velocity_in - world.linear_velocity(g.body)) * share, p);
+                    }
+                } else {
+                    world.add_force_at(g.body, -up * (weight / static_cast<f32>(held)), p);
+                }
             }
         }
     }
@@ -859,7 +928,8 @@ bool CharacterSet::mantle_step(u32 index, Slot& s, f32 dt) {
     target += (world.linear_velocity(t.mantle_body) + cross(world.angular_velocity(t.mantle_body), arm)) * dt;
 
     const MaskFilter layer_filter(mask_of(s));
-    const Vec3f arrived = move_to(ch, *_env.system, d.layer, layer_filter, *_env.temp, target, dt);
+    const OwnBodyFilter body_filter(ch.GetInnerBodyID(), _env);
+    const Vec3f arrived = move_to(ch, *_env.system, d.layer, layer_filter, body_filter, *_env.temp, target, dt);
     s.velocity = (arrived - feet) / dt;
     s.control = s.velocity;
     s.vertical = dot(s.velocity, up);
@@ -882,7 +952,7 @@ bool CharacterSet::mantle_step(u32 index, Slot& s, f32 dt) {
         s.control = {};
         s.vertical = vertical_keep;
         const MaskFilter filter(mask_of(s));
-        const JPH::IgnoreSingleBodyFilter body_filter(ch.GetInnerBodyID());
+        const OwnBodyFilter body_filter(ch.GetInnerBodyID(), _env);
         ch.RefreshContacts(_env.system->GetDefaultBroadPhaseLayerFilter(d.layer), filter, body_filter, JPH::ShapeFilter(),
                            *_env.temp);
         // It stands: the stand was found with a floor under it, a few millimetres down (no landing event for those).

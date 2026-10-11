@@ -331,7 +331,7 @@ Character3D CharacterSet::create(const CharacterDesc3D& d) {
     ++_live;
     // Where it is: the ground under it, so that the first step starts supported.
     const MaskFilter layer_filter(mask_of(s));
-    const JPH::IgnoreSingleBodyFilter body_filter(s.ch->GetInnerBodyID());
+    const OwnBodyFilter body_filter(s.ch->GetInnerBodyID(), _env);
     s.ch->RefreshContacts(_env.system->GetDefaultBroadPhaseLayerFilter(d.layer), layer_filter, body_filter,
                           JPH::ShapeFilter(), *_env.temp);
     return {index, s.generation};
@@ -440,7 +440,7 @@ void CharacterSet::teleport(Character3D c, Vec3f feet) {
         s->trav.prev_jump_off = input.jump_off;
     }
     const MaskFilter layer_filter(mask_of(*s));
-    const JPH::IgnoreSingleBodyFilter body_filter(s->ch->GetInnerBodyID());
+    const OwnBodyFilter body_filter(s->ch->GetInnerBodyID(), _env);
     s->ch->RefreshContacts(_env.system->GetDefaultBroadPhaseLayerFilter(s->desc.layer), layer_filter, body_filter,
                            JPH::ShapeFilter(), *_env.temp);
     // Where it is now is where it was: no Begin or End for what the move changed, no landing.
@@ -486,7 +486,7 @@ bool CharacterSet::set_crouch(Character3D c, bool crouch) {
         return true;
     }
     const MaskFilter layer_filter(mask_of(*s));
-    const JPH::IgnoreSingleBodyFilter body_filter(s->ch->GetInnerBodyID());
+    const OwnBodyFilter body_filter(s->ch->GetInnerBodyID(), _env);
     // Crouching always fits; standing is tried with a clearance check (a little penetration is accepted, as the
     // character's padding is).
     const f32 allowed = crouch ? FLT_MAX : 1.5f * s->ch->GetCharacterPadding();
@@ -559,10 +559,39 @@ void CharacterSet::update(f32 dt) {
         return;
     }
     for (u32 i = 0; i < _slots.size(); ++i) {
-        if (_slots[i].alive) {
+        if (_slots[i].alive && !_slots[i].disabled) {
             update_one(i, _slots[i], dt);
         }
     }
+}
+
+void CharacterSet::set_enabled(Character3D c, bool enabled) {
+    Slot* s = find(c);
+    if (s == nullptr || s->disabled == !enabled) {
+        return;
+    }
+    s->disabled = !enabled;
+    _env.world->set_no_collisions(s->inner, s->disabled);
+    // Whatever it was doing is over: no speed, nothing held, no ground, until it is moved and updated again.
+    s->velocity = {};
+    s->control = {};
+    s->vertical = 0.0f;
+    s->relative = {};
+    s->air_time = 0.0f;
+    s->jumped = false;
+    s->ground = CharacterGround3D::InAir;
+    s->trav.mode = TraversalMode3D::Walking;
+    s->trav.swing = {};
+    s->trav.swing_velocity = {};
+    s->trav.has_hang_place = false;
+    for (GripData& g : s->trav.grips) {
+        g = GripData{};
+    }
+}
+
+bool CharacterSet::enabled(Character3D c) const {
+    const Slot* s = find(c);
+    return s != nullptr && !s->disabled;
 }
 
 void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
@@ -602,7 +631,7 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
 
     // The filters: what it collides with, never its own body.
     const MaskFilter layer_filter(mask_of(s));
-    const JPH::IgnoreSingleBodyFilter body_filter(ch.GetInnerBodyID());
+    const OwnBodyFilter body_filter(ch.GetInnerBodyID(), _env);
     const JPH::BroadPhaseLayerFilter& bp_filter_ref = _env.system->GetDefaultBroadPhaseLayerFilter(d.layer);
 
     // --- grab and climb: the grips, the resource and, while it hangs or mantles, the move itself
@@ -940,7 +969,8 @@ void CharacterSet::save_header(std::vector<u8>& bytes) const {
     out.u32v(static_cast<u32>(_slots.size()));
     for (const Slot& s : _slots) {
         out.u32v(s.generation);
-        out.b(s.alive);
+        // 0 free slot, 1 a character, 2 a character handed over to a ragdoll (a world with none hashes as before).
+        out.bytes.push_back(s.alive ? (s.disabled ? 2 : 1) : 0);
         if (!s.alive) {
             continue;
         }
@@ -999,7 +1029,14 @@ std::unique_ptr<CharacterSet::Parsed> CharacterSet::parse_header(const u8*& curs
     for (u32 i = 0; i < count; ++i) {
         Parsed::One& o = parsed->slots[i];
         o.generation = in.u32v();
-        o.alive = in.b();
+        if (end - in.p < 1) {
+            return nullptr;
+        }
+        {
+            const u8 flag = *in.p++;
+            o.alive = flag != 0;
+            o.disabled = flag == 2;
+        }
         if (in.failed || o.generation != _slots[i].generation || o.alive != _slots[i].alive) {
             return nullptr;
         }
@@ -1102,6 +1139,10 @@ bool CharacterSet::restore(Parsed& parsed, JPH::StateRecorder& in) {
         const Parsed::One& o = parsed.slots[i];
         if (!s.alive) {
             continue;
+        }
+        if (s.disabled != o.disabled) {
+            s.disabled = o.disabled;
+            _env.world->set_no_collisions(s.inner, s.disabled);
         }
         s.input = o.input;
         s.prev_jump = o.prev_jump;

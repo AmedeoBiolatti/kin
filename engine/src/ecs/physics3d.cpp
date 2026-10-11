@@ -3,6 +3,7 @@
 #include <kin/platform/log.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/skeleton.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -157,6 +158,8 @@ WorldPhysicsState3D::WorldPhysicsState3D(flecs::world& world, World3D& physics, 
     , _config(config)
     , _query(world.query_builder<const Transform3D, const Collider3D, const RigidBody3D*>().build())
     , _character_query(world.query_builder<const Transform3D, const CharacterController3D>().build())
+    , _ragdoll_query(world.query_builder<const Transform3D, const SkinnedMeshRenderer, const Ragdoll3D>().build())
+    , _rope_query(world.query_builder<const Rope3D>().build())
     , _debug(config.debug) {}
 
 void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out) {
@@ -272,6 +275,8 @@ void WorldPhysicsState3D::sync_bodies() {
         }
     }
     sync_characters();
+    sync_ragdolls();
+    sync_ropes();
 }
 
 void WorldPhysicsState3D::sync_characters() {
@@ -461,6 +466,8 @@ void WorldPhysicsState3D::step(f32 dt) {
     }
     _events.clear();
     _character_events.clear();
+    _ragdoll_events.clear();
+    _rope_events.clear();
     sync_bodies();
 
     // Entities to bodies.
@@ -491,6 +498,8 @@ void WorldPhysicsState3D::step(f32 dt) {
         }
     }
 
+    ragdolls_to_world();
+    ropes_to_world();
     characters_to_world(dt);
     _physics.step(dt);
 
@@ -509,6 +518,9 @@ void WorldPhysicsState3D::step(f32 dt) {
         write_back(b, b.position, b.rotation);
     }
 
+    // Ragdolls before the characters: a character handed over follows its pelvis, and the entity's Transform3D follows that.
+    ragdolls_from_world();
+    ropes_from_world();
     characters_from_world();
 
     // Events: out of the world, in its order.
@@ -520,6 +532,22 @@ void WorldPhysicsState3D::step(f32 dt) {
     _ecs.set<PhysicsContacts3D>(std::move(contacts));
     for (const CharacterEvent3D& e : _physics.drain_character_events()) {
         _character_events.push_back(e);
+    }
+    for (const RagdollEvent3D& e : _physics.drain_ragdoll_events()) {
+        _ragdoll_events.push_back(e);
+    }
+    if (!_ragdolls.empty() || !_ragdoll_events.empty()) {
+        RagdollEvents3D events;
+        events.events = _ragdoll_events;
+        _ecs.set<RagdollEvents3D>(std::move(events));
+    }
+    for (const RopeEvent3D& e : _physics.drain_rope_events()) {
+        _rope_events.push_back(e);
+    }
+    if (!_ropes.empty() || !_rope_events.empty()) {
+        RopeEvents3D events;
+        events.events = _rope_events;
+        _ecs.set<RopeEvents3D>(std::move(events));
     }
     if (!_characters.empty() || !_character_events.empty()) {
         CharacterEvents3D events;
@@ -573,6 +601,9 @@ void WorldPhysicsState3D::interpolate(f32 alpha) {
     for (BoundCharacter& c : _characters) {
         write_character(c, lerp(c.previous_position, c.position, alpha));
     }
+    for (BoundRagdoll& r : _ragdolls) {
+        write_pose_override(r, alpha);
+    }
 }
 
 void WorldPhysicsState3D::rebuild(flecs::entity entity) {
@@ -583,6 +614,13 @@ void WorldPhysicsState3D::rebuild(flecs::entity entity) {
     const auto character = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
     if (character != _characters.end() && character->entity == entity.id()) {
         character->rebuild = true;
+    }
+    if (BoundRagdoll* r = bound_ragdoll(entity)) {
+        r->rebuild = true;
+    }
+    const auto rope = std::ranges::lower_bound(_ropes, entity.id(), {}, &BoundRope::entity);
+    if (rope != _ropes.end() && rope->entity == entity.id()) {
+        rope->rebuild = true;
     }
 }
 
@@ -614,6 +652,606 @@ void WorldPhysicsState3D::collect_debug(Renderer3D& renderer, Scene3D& scene) {
     }
     _debug_mesh = draw_debug_lines(renderer, scene, d.lines());
     d.clear();
+}
+
+// --- ragdolls ----------------------------------------------------------------------------------------------------------------
+
+WorldPhysicsState3D::BoundRagdoll* WorldPhysicsState3D::bound_ragdoll(flecs::entity entity) {
+    const auto found = std::ranges::lower_bound(_ragdolls, entity.id(), {}, &BoundRagdoll::entity);
+    return found != _ragdolls.end() && found->entity == entity.id() ? &*found : nullptr;
+}
+
+const WorldPhysicsState3D::BoundRagdoll* WorldPhysicsState3D::bound_ragdoll(flecs::entity entity) const {
+    return const_cast<WorldPhysicsState3D*>(this)->bound_ragdoll(entity);
+}
+
+RagdollHandle3D WorldPhysicsState3D::ragdoll_of(flecs::entity entity) const {
+    const BoundRagdoll* r = bound_ragdoll(entity);
+    return r != nullptr ? r->ragdoll : RagdollHandle3D{};
+}
+
+void WorldPhysicsState3D::sync_ragdolls() {
+    std::vector<flecs::entity> wanted;
+    _ragdoll_query.each([&](flecs::entity e, const Transform3D&, const SkinnedMeshRenderer& renderer, const Ragdoll3D&) {
+        if (renderer.model && !renderer.model->skeletons.empty()) {
+            wanted.push_back(e);
+        }
+    });
+    std::ranges::sort(wanted, [](flecs::entity a, flecs::entity b) { return a.id() < b.id(); });
+
+    std::vector<BoundRagdoll> kept;
+    kept.reserve(_ragdolls.size());
+    std::vector<flecs::entity> to_create;
+    std::size_t i = 0, j = 0;
+    while (i < _ragdolls.size() || j < wanted.size()) {
+        const bool have_bound = i < _ragdolls.size();
+        const bool have_wanted = j < wanted.size();
+        if (have_bound && (!have_wanted || _ragdolls[i].entity < wanted[j].id())) {
+            // The entity (or its component) is gone: its character, if it was handed over, gets its place back as it is.
+            _physics.destroy_ragdoll(_ragdolls[i].ragdoll);
+            ++i;
+        } else if (have_wanted && (!have_bound || wanted[j].id() < _ragdolls[i].entity)) {
+            to_create.push_back(wanted[j]);
+            ++j;
+        } else {
+            if (_ragdolls[i].rebuild || !_physics.contains(_ragdolls[i].ragdoll)) {
+                _physics.destroy_ragdoll(_ragdolls[i].ragdoll);
+                to_create.push_back(wanted[j]);
+            } else {
+                kept.push_back(_ragdolls[i]);
+            }
+            ++i;
+            ++j;
+        }
+    }
+    for (const flecs::entity e : to_create) {
+        const Ragdoll3D& component = *e.get<Ragdoll3D>();
+        const Model& model = *e.get<SkinnedMeshRenderer>()->model;
+        const Skeleton& skeleton = model.skeletons[0];
+        const Mat4f entity_matrix = world_matrix(e);
+        const Placed placed = decompose(entity_matrix);
+        const Pose rest = skeleton.rest_pose();
+        RagdollDesc desc = component.desc;
+        if (desc.bones.empty()) {
+            desc = auto_ragdoll_desc(skeleton, rest, component.auto_options);
+        }
+        desc.user_id = e.id();
+        std::vector<Mat4f> model_world;
+        compute_world_matrices(skeleton, rest, model_world);
+        std::vector<Mat4f> bone_world(desc.bones.size());
+        BoundRagdoll b;
+        b.entity = e.id();
+        b.joints = skeleton.joint_count();
+        b.joint.resize(desc.bones.size(), -1);
+        bool ok = !desc.bones.empty();
+        for (std::size_t k = 0; k < desc.bones.size() && ok; ++k) {
+            const i32 joint = desc.bones[k].joint;
+            if (joint < 0 || static_cast<u32>(joint) >= skeleton.joint_count()) {
+                ok = false;
+                break;
+            }
+            b.joint[k] = joint;
+            bone_world[k] = entity_matrix * model_world[static_cast<std::size_t>(joint)];
+        }
+        if (ok) {
+            const f32 scale = std::max({placed.scale.x, placed.scale.y, placed.scale.z});
+            b.ragdoll = _physics.create_ragdoll(desc, bone_world, scale);
+        }
+        if (!b.ragdoll.valid()) {
+            KIN_LOG_WARN_F("physics3d", "entity has no valid ragdoll (skeleton or desc refused)",
+                           (LogFields{{.name = "entity", .value = std::to_string(e.id())}}));
+        } else {
+            // A character on the same entity does not meet its own bones: its movement and queries skip the ragdoll's group.
+            if (const PhysicsCharacter3D* pc = e.get<PhysicsCharacter3D>(); pc != nullptr && _physics.contains(pc->character)) {
+                const std::vector<Body3D> bodies = _physics.ragdoll_bodies(b.ragdoll);
+                if (!bodies.empty() && bodies[0].valid()) {
+                    _physics.set_group(_physics.character(pc->character).body, _physics.group(bodies[0]));
+                }
+            }
+            // The pose is written into the animator: an entity with a ragdoll has one.
+            if (e.get<Animator3D>() == nullptr) {
+                Animator3D made;
+                e.set<Animator3D>(std::move(made));
+            }
+            b.previous.resize(desc.bones.size());
+            b.current.resize(desc.bones.size());
+            _physics.ragdoll_pose(b.ragdoll, b.current);
+            b.previous = b.current;
+        }
+        kept.push_back(std::move(b));
+    }
+    std::ranges::sort(kept, [](const BoundRagdoll& a, const BoundRagdoll& b) { return a.entity < b.entity; });
+    std::erase_if(kept, [](const BoundRagdoll& r) { return !r.ragdoll.valid(); });
+    _ragdolls = std::move(kept);
+    for (const flecs::entity e : to_create) {
+        if (const BoundRagdoll* r = bound_ragdoll(e)) {
+            e.set<PhysicsRagdoll3D>({r->ragdoll});
+        }
+    }
+}
+
+void WorldPhysicsState3D::ragdolls_to_world() {
+    for (BoundRagdoll& r : _ragdolls) {
+        flecs::entity e(_ecs, r.entity);
+        if (!e.is_alive() || !_physics.contains(r.ragdoll)) {
+            continue;
+        }
+        const SkinnedMeshRenderer* renderer = e.get<SkinnedMeshRenderer>();
+        if (renderer == nullptr || !renderer->model || renderer->model->skeletons.empty()) {
+            continue;
+        }
+        const Skeleton& skeleton = renderer->model->skeletons[0];
+        const Animator3D* animator = e.get<Animator3D>();
+        // Where the clip puts the bones now, in the world: what the kinematic bodies follow. (The clip's pose: constraints
+        // are solved at draw time and are the renderer's.)
+        const bool bound = animator != nullptr && animator->bound == renderer->model.get() && animator->player.skeleton() == &skeleton;
+        if (bound) {
+            compute_world_matrices(skeleton, animator->player.pose(), _pose_scratch);
+        } else {
+            compute_world_matrices(skeleton, skeleton.rest_pose(), _pose_scratch);
+        }
+        const Mat4f entity_matrix = world_matrix(e);
+        std::vector<Mat4f> bone_world(r.joint.size());
+        for (std::size_t k = 0; k < r.joint.size(); ++k) {
+            bone_world[k] = entity_matrix * _pose_scratch[static_cast<std::size_t>(r.joint[k])];
+        }
+        _physics.set_ragdoll_targets(r.ragdoll, bone_world);
+    }
+}
+
+void WorldPhysicsState3D::write_pose_override(BoundRagdoll& r, f32 alpha) {
+    flecs::entity e(_ecs, r.entity);
+    if (!e.is_alive()) {
+        return;
+    }
+    Animator3D* animator = e.get_mut<Animator3D>();
+    if (animator == nullptr) {
+        return;
+    }
+    PoseOverride3D& o = animator->pose_override;
+    bool any = false;
+    for (const RagdollBonePose3D& b : r.current) {
+        any = any || b.weight > 0.0f;
+    }
+    if (!any) {
+        // All clip: the animator is exactly what it is without a ragdoll.
+        if (!o.empty()) {
+            o.clear();
+        }
+        return;
+    }
+    o.weights.assign(r.joints, 0.0f);
+    o.position.assign(r.joints, Vec3f{});
+    o.rotation.assign(r.joints, Quatf{});
+    for (std::size_t k = 0; k < r.joint.size(); ++k) {
+        const std::size_t j = static_cast<std::size_t>(r.joint[k]);
+        const RagdollBonePose3D& now = r.current[k];
+        const RagdollBonePose3D& before = r.previous[k];
+        o.weights[j] = now.weight;
+        o.position[j] = alpha >= 1.0f ? now.position : lerp(before.position, now.position, alpha);
+        o.rotation[j] = alpha >= 1.0f ? now.rotation : slerp(before.rotation, now.rotation, alpha);
+    }
+}
+
+void WorldPhysicsState3D::ragdolls_from_world() {
+    for (BoundRagdoll& r : _ragdolls) {
+        flecs::entity e(_ecs, r.entity);
+        if (!e.is_alive() || !_physics.contains(r.ragdoll)) {
+            continue;
+        }
+        r.previous = r.current;
+        _physics.ragdoll_pose(r.ragdoll, r.current);
+        write_pose_override(r, 1.0f);
+        if (Ragdoll3D* component = e.get_mut<Ragdoll3D>()) {
+            component->state = _physics.ragdoll_state(r.ragdoll);
+        }
+        // A character handed over follows the pelvis's ground point.
+        if (r.handed_over) {
+            const PhysicsCharacter3D* pc = e.get<PhysicsCharacter3D>();
+            if (pc != nullptr && _physics.contains(pc->character) && !_physics.character_enabled(pc->character)) {
+                const CharacterState3D state = _physics.character(pc->character);
+                const RagdollPlace3D place = _physics.ragdoll_get_up_place(r.ragdoll, state.up, all_layers3d, 4.0f);
+                if (place.found) {
+                    _physics.teleport_character(pc->character, place.position);
+                }
+            }
+        }
+    }
+}
+
+bool WorldPhysicsState3D::start_ragdoll(flecs::entity entity, const RagdollStart3D& start) {
+    const BoundRagdoll* r = bound_ragdoll(entity);
+    if (r == nullptr) {
+        return false;
+    }
+    _physics.start_ragdoll(r->ragdoll, start);
+    return true;
+}
+
+bool WorldPhysicsState3D::blend_ragdoll(flecs::entity entity, f32 alpha, f32 seconds) {
+    const BoundRagdoll* r = bound_ragdoll(entity);
+    if (r == nullptr) {
+        return false;
+    }
+    _physics.blend_ragdoll(r->ragdoll, alpha, seconds);
+    return true;
+}
+
+bool WorldPhysicsState3D::ragdoll_get_up(flecs::entity entity, f32 seconds) {
+    const BoundRagdoll* r = bound_ragdoll(entity);
+    if (r == nullptr) {
+        return false;
+    }
+    _physics.ragdoll_get_up(r->ragdoll, seconds);
+    return true;
+}
+
+bool WorldPhysicsState3D::animate_ragdoll(flecs::entity entity) {
+    BoundRagdoll* r = bound_ragdoll(entity);
+    if (r == nullptr) {
+        return false;
+    }
+    _physics.animate_ragdoll(r->ragdoll);
+    r->handed_over = false;
+    return true;
+}
+
+bool WorldPhysicsState3D::set_ragdoll_subtree(flecs::entity entity, std::string_view joint_name, f32 weight) {
+    const BoundRagdoll* r = bound_ragdoll(entity);
+    const SkinnedMeshRenderer* renderer = entity.get<SkinnedMeshRenderer>();
+    if (r == nullptr || renderer == nullptr || !renderer->model || renderer->model->skeletons.empty()) {
+        return false;
+    }
+    const i32 joint = renderer->model->skeletons[0].find(joint_name);
+    for (std::size_t k = 0; k < r->joint.size(); ++k) {
+        if (r->joint[k] == joint) {
+            _physics.set_ragdoll_subtree(r->ragdoll, static_cast<i32>(k), weight);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool WorldPhysicsState3D::hand_over_to_ragdoll(flecs::entity entity, const RagdollHandOver3D& options) {
+    BoundRagdoll* r = bound_ragdoll(entity);
+    const Character3D c = character_of(entity);
+    if (r == nullptr) {
+        return false;
+    }
+    RagdollStart3D start;
+    start.blend_seconds = options.blend_seconds;
+    start.impulse_bone = options.impulse_bone;
+    start.impulse = options.impulse;
+    start.impulse_point = options.impulse_point;
+    start.point_given = options.point_given;
+    if (c.valid() && _physics.contains(c)) {
+        if (options.inherit_velocity) {
+            start.set_velocity = true;
+            start.velocity = _physics.character(c).velocity;
+        }
+        // The capsule gives its place up (it follows the pelvis's ground point from now on).
+        _physics.set_character_enabled(c, false);
+        r->handed_over = true;
+    }
+    _physics.start_ragdoll(r->ragdoll, start);
+    return true;
+}
+
+RagdollRecoverResult3D WorldPhysicsState3D::recover_from_ragdoll(flecs::entity entity, const RagdollRecover3D& options) {
+    RagdollRecoverResult3D out;
+    BoundRagdoll* r = bound_ragdoll(entity);
+    const Character3D c = character_of(entity);
+    if (r == nullptr) {
+        return out;
+    }
+    const auto blocked = [&] {
+        out.blocked = true;
+        RagdollEvent3D e;
+        e.ragdoll = r->ragdoll;
+        e.user_id = entity.id();
+        e.kind = RagdollEventKind3D::Blocked;
+        _ragdoll_events.push_back(e);
+        return out;
+    };
+    Vec3f up{0.0f, 1.0f, 0.0f};
+    f32 radius = 0.3f, height = 1.8f;
+    if (c.valid() && _physics.contains(c)) {
+        const CharacterState3D state = _physics.character(c);
+        up = state.up;
+        const CharacterController3D* controller = entity.get<CharacterController3D>();
+        if (controller != nullptr) {
+            radius = controller->desc.radius;
+            height = controller->desc.height;
+        }
+    } else if (length(_physics.gravity()) > 0.0f) {
+        up = normalize(-_physics.gravity());
+    }
+    out.place = _physics.ragdoll_get_up_place(r->ragdoll, up, options.mask, options.max_ground_distance);
+    if (!out.place.found) {
+        return blocked();
+    }
+    // The standing capsule over the place, against what is not the ragdoll's own (nor the character's own capsule).
+    const std::vector<Body3D> own = _physics.ragdoll_bodies(r->ragdoll);
+    QueryFilter3D filter;
+    filter.mask = options.mask;
+    if (c.valid() && _physics.contains(c)) {
+        filter.ignore = _physics.character(c).body;
+    }
+    const Shape3D capsule = Shape3D::capsule(std::max(0.5f * (height - 2.0f * radius), 0.01f), radius);
+    // A capsule's own axis is +Y: turn it to `up`.
+    const Quatf turn = up.y < -0.999999f ? Quatf{1.0f, 0.0f, 0.0f, 0.0f} : Quatf{up.z, 0.0f, -up.x, 1.0f + up.y}.normalized();
+    const std::vector<OverlapHit3D> overlaps =
+        _physics.overlap(capsule, out.place.position + up * (0.5f * height + 0.01f), turn, filter);
+    for (const OverlapHit3D& o : overlaps) {
+        if (std::find(own.begin(), own.end(), o.body) != own.end()) {
+            continue;
+        }
+        if (o.penetration > options.allowed_penetration) {
+            return blocked();
+        }
+    }
+    if (c.valid() && _physics.contains(c)) {
+        _physics.teleport_character(c, out.place.position);
+        _physics.set_character_enabled(c, true);
+        if (CharacterController3D* controller = entity.get_mut<CharacterController3D>()) {
+            controller->facing = out.place.rotation;
+        }
+    }
+    r->handed_over = false;
+    _physics.ragdoll_get_up(r->ragdoll, options.get_up_seconds);
+    out.recovered = true;
+    return out;
+}
+
+// --- ropes -------------------------------------------------------------------------------------------------------------------
+
+RopeHandle3D WorldPhysicsState3D::rope_of(flecs::entity entity) const {
+    const auto found = std::ranges::lower_bound(_ropes, entity.id(), {}, &BoundRope::entity);
+    return found != _ropes.end() && found->entity == entity.id() ? found->rope : RopeHandle3D{};
+}
+
+std::optional<RopeClosest3D> Rope3D::closest_point(Vec3f point) const {
+    if (sampled.size() < 2) {
+        return std::nullopt;
+    }
+    RopeClosest3D best;
+    f32 best_d2 = 3.0e38f;
+    const u32 n = static_cast<u32>(sampled.size() - 1);
+    for (u32 k = 0; k < n; ++k) {
+        const Vec3f a = sampled[k].position, b = sampled[k + 1].position;
+        const Vec3f ab = b - a;
+        const f32 len2 = dot(ab, ab);
+        const f32 t = len2 > 1.0e-12f ? std::clamp(dot(point - a, ab) / len2, 0.0f, 1.0f) : 0.0f;
+        const Vec3f q = a + ab * t;
+        const f32 d2 = length_squared(point - q);
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best.segment = k;
+            best.t = t;
+            best.point = q;
+            best.tangent = len2 > 1.0e-12f ? ab / std::sqrt(len2) : Vec3f{0.0f, -1.0f, 0.0f};
+        }
+    }
+    best.distance = std::sqrt(best_d2);
+    best.along = (static_cast<f32>(best.segment) + best.t) / static_cast<f32>(n);
+    return best;
+}
+
+void WorldPhysicsState3D::sync_ropes() {
+    std::vector<flecs::entity> wanted;
+    _rope_query.each([&](flecs::entity e, const Rope3D&) { wanted.push_back(e); });
+    std::ranges::sort(wanted, [](flecs::entity a, flecs::entity b) { return a.id() < b.id(); });
+
+    std::vector<BoundRope> kept;
+    kept.reserve(_ropes.size());
+    std::vector<flecs::entity> to_create;
+    std::size_t i = 0, j = 0;
+    while (i < _ropes.size() || j < wanted.size()) {
+        const bool have_bound = i < _ropes.size();
+        const bool have_wanted = j < wanted.size();
+        if (have_bound && (!have_wanted || _ropes[i].entity < wanted[j].id())) {
+            _physics.destroy_rope(_ropes[i].rope);
+            ++i;
+        } else if (have_wanted && (!have_bound || wanted[j].id() < _ropes[i].entity)) {
+            to_create.push_back(wanted[j]);
+            ++j;
+        } else {
+            if (_ropes[i].rebuild || !_physics.contains(_ropes[i].rope)) {
+                _physics.destroy_rope(_ropes[i].rope);
+                to_create.push_back(wanted[j]);
+            } else {
+                kept.push_back(_ropes[i]);
+            }
+            ++i;
+            ++j;
+        }
+    }
+    for (const flecs::entity e : to_create) {
+        const Rope3D& c = *e.get<Rope3D>();
+        const Mat4f entity_matrix = world_matrix(e);
+        const auto anchor = [&](const RopeAttach3D& a, RopeAnchor3D& out) {
+            switch (a.kind) {
+            case RopeAttach3D::Kind::Free:
+                out = RopeAnchor3D::free(entity_matrix.apply(a.point));
+                return true;
+            case RopeAttach3D::Kind::World:
+                out = RopeAnchor3D::at(a.point);
+                return true;
+            case RopeAttach3D::Kind::Entity: {
+                const flecs::entity target(_ecs, a.entity);
+                const Body3D body = target.is_alive() ? body_of(target) : Body3D{};
+                if (!body.valid()) {
+                    return false; // not made yet: tried again at the next sync
+                }
+                out = RopeAnchor3D::on(body, a.point);
+                return true;
+            }
+            }
+            return false;
+        };
+        RopeDesc3D desc;
+        if (!anchor(c.start, desc.start) || !anchor(c.end, desc.end)) {
+            continue;
+        }
+        desc.length = c.length;
+        desc.segments = c.segments;
+        desc.segment_length = c.segment_length;
+        desc.radius = c.radius;
+        desc.mass_per_metre = c.mass_per_metre;
+        desc.friction = c.friction;
+        desc.linear_damping = c.linear_damping;
+        desc.angular_damping = c.angular_damping;
+        desc.sag_direction = c.sag_direction;
+        desc.hang_direction = c.hang_direction;
+        desc.layer = c.layer;
+        desc.collide_world = c.collide_world;
+        desc.self_collision = c.self_collision;
+        desc.continuous = c.continuous;
+        desc.velocity_steps = c.velocity_steps;
+        desc.position_steps = c.position_steps;
+        desc.break_tension = c.break_tension;
+        desc.user_id = e.id();
+        BoundRope b;
+        b.entity = e.id();
+        b.rope = _physics.create_rope(desc);
+        if (!b.rope.valid()) {
+            KIN_LOG_WARN_F("physics3d", "entity has no valid rope (anchors, length or descriptor refused)",
+                           (LogFields{{.name = "entity", .value = std::to_string(e.id())}}));
+            continue;
+        }
+        kept.push_back(b);
+    }
+    std::ranges::sort(kept, [](const BoundRope& a, const BoundRope& b) { return a.entity < b.entity; });
+    _ropes = std::move(kept);
+    for (const flecs::entity e : to_create) {
+        const RopeHandle3D h = rope_of(e);
+        if (h.valid()) {
+            e.set<PhysicsRope3D>({h});
+        }
+    }
+}
+
+void WorldPhysicsState3D::ropes_to_world() {
+    for (BoundRope& r : _ropes) {
+        flecs::entity e(_ecs, r.entity);
+        if (!e.is_alive() || !_physics.contains(r.rope)) {
+            continue;
+        }
+        const Rope3D* c = e.get<Rope3D>();
+        if (c == nullptr) {
+            continue;
+        }
+        if (c->target_length >= 0.0f && (c->target_length != r.applied_target || c->reel_speed != r.applied_speed)) {
+            _physics.reel_rope(r.rope, c->target_length, c->reel_speed);
+            r.applied_target = c->target_length;
+            r.applied_speed = c->reel_speed;
+        }
+    }
+}
+
+void WorldPhysicsState3D::ropes_from_world() {
+    for (BoundRope& r : _ropes) {
+        flecs::entity e(_ecs, r.entity);
+        if (!e.is_alive() || !_physics.contains(r.rope)) {
+            continue;
+        }
+        Rope3D* c = e.get_mut<Rope3D>();
+        if (c == nullptr) {
+            continue;
+        }
+        c->state = _physics.rope_state(r.rope);
+        c->sampled = _physics.rope_points(r.rope);
+        c->tension_start = _physics.rope_tension(r.rope, RopeEnd3D::Start);
+        c->tension_end = _physics.rope_tension(r.rope, RopeEnd3D::End);
+    }
+}
+
+void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
+    _rope_meshes.clear();
+    struct Group {
+        Material3D material;
+        Color tint;
+        MeshData data;
+    };
+    std::vector<Group> groups;
+    for (const BoundRope& r : _ropes) {
+        flecs::entity e(_ecs, r.entity);
+        if (!e.is_alive()) {
+            continue;
+        }
+        const Rope3D* c = e.get<Rope3D>();
+        if (c == nullptr || !c->render || c->sampled.size() < 2) {
+            continue;
+        }
+        Group* group = nullptr;
+        for (Group& g : groups) {
+            if (g.material == c->material && g.tint == c->tint) {
+                group = &g;
+                break;
+            }
+        }
+        if (group == nullptr) {
+            groups.push_back({c->material, c->tint, {}});
+            group = &groups.back();
+        }
+        MeshData& data = group->data;
+        const u32 sides = std::clamp<u32>(c->sides, 3u, 16u);
+        const f32 radius = c->render_radius > 0.0f ? c->render_radius : c->radius;
+        const std::vector<RopePoint3D>& pts = c->sampled;
+        // Rings along the points, the frame carried from one to the next (no twist about the rope).
+        const u32 first = static_cast<u32>(data.vertices.size());
+        Vec3f normal{};
+        f32 along = 0.0f;
+        for (std::size_t k = 0; k < pts.size(); ++k) {
+            const Vec3f t = pts[k].tangent;
+            if (k == 0) {
+                normal = cross(t, std::fabs(t.y) < 0.9f ? Vec3f{0.0f, 1.0f, 0.0f} : Vec3f{1.0f, 0.0f, 0.0f});
+            } else {
+                normal = normal - t * dot(normal, t);
+                along += length(pts[k].position - pts[k - 1].position);
+            }
+            normal = length(normal) > 1.0e-6f ? normalize(normal) : Vec3f{1.0f, 0.0f, 0.0f};
+            const Vec3f binormal = cross(t, normal);
+            for (u32 s = 0; s < sides; ++s) {
+                const f32 a = 6.2831853f * static_cast<f32>(s) / static_cast<f32>(sides);
+                const Vec3f out = normal * std::cos(a) + binormal * std::sin(a);
+                MeshVertex v;
+                v.position = pts[k].position + out * radius;
+                v.normal = out;
+                v.uv = {static_cast<f32>(s) / static_cast<f32>(sides), along / std::max(6.2831853f * radius, 1.0e-3f)};
+                v.color = group->tint;
+                data.vertices.push_back(v);
+            }
+        }
+        // Winding from the first quad: whichever way makes the face normal agree with the vertex normal.
+        const auto idx = [&](std::size_t ring, u32 s) { return first + static_cast<u32>(ring) * sides + (s % sides); };
+        bool flip = false;
+        {
+            const Vec3f p0 = data.vertices[idx(0, 0)].position, p1 = data.vertices[idx(1, 0)].position,
+                        p2 = data.vertices[idx(1, 1)].position;
+            flip = dot(cross(p1 - p0, p2 - p0), data.vertices[idx(0, 0)].normal) < 0.0f;
+        }
+        for (std::size_t k = 0; k + 1 < pts.size(); ++k) {
+            for (u32 s = 0; s < sides; ++s) {
+                const u32 a = idx(k, s), b = idx(k + 1, s), c2 = idx(k + 1, s + 1), d = idx(k, s + 1);
+                if (!flip) {
+                    data.indices.insert(data.indices.end(), {a, b, c2, a, c2, d});
+                } else {
+                    data.indices.insert(data.indices.end(), {a, c2, b, a, d, c2});
+                }
+            }
+        }
+    }
+    for (Group& g : groups) {
+        if (g.data.vertices.empty()) {
+            continue;
+        }
+        Mesh mesh = renderer.create_mesh(g.data);
+        if (mesh.valid()) {
+            scene.draw(mesh, Mat4f{}, g.material);
+            _rope_meshes.push_back(std::move(mesh));
+        }
+    }
 }
 
 Animator3D locomotion_animator(const LocomotionClips3D& clips) {

@@ -12,6 +12,11 @@
 // to grab and finds nothing (two probes a step, per character), and 1, 10 and 100 characters hanging by both hands from a long wall
 // and shimmying along it, with and without the 500 boxes.
 //
+// With the argument `ragdolls`: the cost of P2e's ragdolls: 1, 10 and 50 bipeds (17 bodies and 16 joints each, made by
+// auto_ragdoll_desc) animated (kinematic bodies following a clip's pose, set each step), falling and landing, and settled (asleep),
+// alone and with 500 dynamic boxes in the same world, with no workers and with 4. With `ropes`: 1, 10 and 50 ropes of 20 segments,
+// swinging with a load, and at rest (asleep); and one climbing character on a rope.
+//
 // With the argument `characters`: the cost of P2c: the controller's step in the test level (tests/character_level.hpp), 0, 1, 10
 // and 100 characters walking about it, with and without 500 dynamic boxes round them (a heap they walk through), world steps on the
 // calling thread and with 4 workers.
@@ -23,12 +28,14 @@
 
 #include "character_level.hpp"
 #include "climb_level.hpp"
+#include "skin_fixtures.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <string>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 using namespace kin;
@@ -473,6 +480,206 @@ int climbing() {
     return 0;
 }
 
+
+struct RagdollRig {
+    Skeleton skeleton = skin_fixtures::make_biped();
+    RagdollDesc desc;
+    std::vector<Mat4f> model_world;
+    RagdollRig() {
+        desc = auto_ragdoll_desc(skeleton, skeleton.rest_pose());
+        compute_world_matrices(skeleton, skeleton.rest_pose(), model_world);
+    }
+    std::vector<Mat4f> bone_world(Vec3f at) const {
+        std::vector<Mat4f> out;
+        for (const RagdollBoneDesc3D& b : desc.bones) {
+            out.push_back(Mat4f::translation(at) * model_world[static_cast<std::size_t>(b.joint)]);
+        }
+        return out;
+    }
+};
+
+int ragdolls() {
+    const RagdollRig rig;
+    std::printf("%-8s %6s %9s | %-26s | %-26s | %-26s | %s\n", "workers", "boxes", "ragdolls", "animated (kinematic) ms", "falling steps 0-120 ms",
+                "settled steps 240-360 ms", "per ragdoll (settled / falling, over none)");
+    for (const int workers : {-1, 4}) {
+        for (const int boxes : {0, 500}) {
+            double base_fall = 0.0, base_settled = 0.0;
+            for (const int count : {0, 1, 10, 50}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                const auto build = [&](World3D& world, std::vector<RagdollHandle3D>& made) {
+                    world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static,
+                                       .position = {0, -0.5f, 0}, .friction = 0.6f});
+                    if (boxes > 0) {
+                        Lcg r;
+                        const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+                        for (int i = 0; i < boxes; ++i) {
+                            world.create_body({.shape = box, .position = {-20.0f + 40.0f * r.next(), 0.35f + 4.0f * r.next(), 14.0f + 8.0f * r.next()},
+                                               .rotation = Quatf::axis_angle({r.next() + 0.1f, r.next(), r.next()}, 360.0f * r.next()),
+                                               .friction = 0.5f});
+                        }
+                    }
+                    for (int i = 0; i < count; ++i) {
+                        // A grid, 2.4 m by 2.6 m apart (arms out are 1.9 m across), 2 m up.
+                        const Vec3f at{-28.0f + 2.4f * static_cast<f32>(i % 10), 2.0f, -3.0f - 2.6f * static_cast<f32>(i / 10)};
+                        made.push_back(world.create_ragdoll(rig.desc, rig.bone_world(at)));
+                    }
+                    world.optimize_broad_phase();
+                };
+                // Animated: the clip's pose (the rest pose, moving 1 m/s along X) set each step, bodies kinematic.
+                double animated = 0.0;
+                {
+                    World3D world(cfg);
+                    std::vector<RagdollHandle3D> made;
+                    build(world, made);
+                    for (int step = 0; step < 90; ++step) {
+                        const f32 x = static_cast<f32>(step) / 60.0f;
+                        for (std::size_t i = 0; i < made.size(); ++i) {
+                            world.set_ragdoll_targets(made[i], rig.bone_world({-28.0f + 2.4f * static_cast<f32>(i % 10) + x, 0.0f, -3.0f - 2.6f * static_cast<f32>(i / 10)}));
+                        }
+                        const auto t0 = std::chrono::steady_clock::now();
+                        world.step(1.0f / 60.0f);
+                        if (step >= 30) {
+                            animated += since_ms(t0) / 60.0;
+                        }
+                    }
+                }
+                World3D world(cfg);
+                std::vector<RagdollHandle3D> made;
+                build(world, made);
+                for (const RagdollHandle3D r : made) {
+                    world.start_ragdoll(r, {});
+                }
+                const Window fall = time_steps(world, 120);
+                time_steps(world, 120);
+                const Window settled = time_steps(world, 120);
+                if (count == 0) {
+                    base_fall = fall.mean;
+                    base_settled = settled.mean;
+                }
+                std::printf("%-8s %6d %9d | %-26.3f | %8.3f / %-15.3f | %8.3f / %-15.3f | %.4f / %.4f ms   (awake %d)\n",
+                            workers < 0 ? "none" : std::to_string(workers).c_str(), boxes, count, animated, fall.mean, fall.worst, settled.mean,
+                            settled.worst, count > 0 ? (settled.mean - base_settled) / count : 0.0, count > 0 ? (fall.mean - base_fall) / count : 0.0,
+                            world.active_body_count());
+            }
+        }
+    }
+    return 0;
+}
+
+int ropes() {
+    std::printf("%-8s %6s %7s | %-26s | %-26s | %s\n", "workers", "boxes", "ropes", "swinging with a load ms", "at rest steps 300-420 ms",
+                "per rope (swinging / at rest)");
+    for (const int workers : {-1, 4}) {
+        for (const int boxes : {0, 500}) {
+            double base_swing = 0.0, base_rest = 0.0;
+            for (const int count : {0, 1, 10, 50}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                World3D world(cfg);
+                world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}, .friction = 0.6f});
+                if (boxes > 0) {
+                    Lcg r;
+                    const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+                    for (int i = 0; i < boxes; ++i) {
+                        world.create_body({.shape = box, .position = {-20.0f + 40.0f * r.next(), 0.35f + 4.0f * r.next(), 14.0f + 8.0f * r.next()},
+                                           .rotation = Quatf::axis_angle({r.next() + 0.1f, r.next(), r.next()}, 360.0f * r.next()), .friction = 0.5f});
+                    }
+                }
+                std::vector<Body3D> crates;
+                for (int i = 0; i < count; ++i) {
+                    const f32 x = -28.0f + 2.4f * static_cast<f32>(i % 10);
+                    const f32 z = -3.0f - 2.6f * static_cast<f32>(i / 10);
+                    const Body3D crate = world.create_body({.shape = Shape3D::box({0.2f, 0.2f, 0.2f}), .motion = Body3DMotion::Dynamic,
+                                                            .position = {x, 1.5f, z}, .mass = 20.0f});
+                    RopeDesc3D d;
+                    d.start = RopeAnchor3D::at({x, 6.0f, z});
+                    d.end = RopeAnchor3D::on(crate, {0.0f, 0.2f, 0.0f});
+                    d.segments = 20;
+                    if (const char* v = std::getenv("ROPE_V")) {
+                        d.velocity_steps = static_cast<u32>(std::atoi(v));
+                        d.position_steps = static_cast<u32>(std::atoi(std::getenv("ROPE_P")));
+                    }
+                    world.create_rope(d);
+                    crates.push_back(crate);
+                }
+                world.optimize_broad_phase();
+                // Swung: each crate is shoved.
+                for (const Body3D crate : crates) {
+                    world.add_impulse(crate, {60.0f, 0.0f, 0.0f});
+                }
+                Window swing = time_steps(world, 120);
+                // Rest: no shove again; it dies down and falls asleep.
+                time_steps(world, 180);
+                const Window rest = time_steps(world, 120);
+                if (count == 0) {
+                    base_swing = swing.mean;
+                    base_rest = rest.mean;
+                }
+                std::printf("%-8s %6d %7d | %8.3f / %-15.3f | %8.3f / %-15.3f | %.4f / %.4f ms   (awake %d)\n",
+                            workers < 0 ? "none" : std::to_string(workers).c_str(), boxes, count, swing.mean, swing.worst, rest.mean, rest.worst,
+                            count > 0 ? (swing.mean - base_swing) / count : 0.0, count > 0 ? (rest.mean - base_rest) / count : 0.0,
+                            world.active_body_count());
+            }
+        }
+    }
+    // One climbing character on a rope.
+    {
+        World3DConfig cfg;
+        cfg.single_threaded = true;
+        World3D world(cfg);
+        world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
+        RopeDesc3D d;
+        d.start = RopeAnchor3D::at({0.0f, 12.0f, 0.0f});
+        d.end = RopeAnchor3D::free();
+        d.length = 8.0f;
+        world.create_rope(d);
+        CharacterDesc3D cd;
+        cd.traversal.enabled = true;
+        cd.traversal.resource.max = 1.0e6f;
+        cd.position = {0.0f, 2.4f, 0.7f};
+        const Character3D hero = world.create_character(cd);
+        double idle_ms = 0.0, climb_ms = 0.0;
+        for (int step = 0; step < 420; ++step) {
+            CharacterInput3D in;
+            in.forward = {0.0f, 0.0f, -1.0f};
+            if (step > 150) {
+                in.move = {0.0f, 1.0f};
+            }
+            TraversalInput3D t;
+            t.grab = {true, true};
+            t.reach = {0.0f, 0.5f, -1.0f};
+            world.set_character_input(hero, in);
+            world.set_traversal_input(hero, t);
+            const auto t0 = std::chrono::steady_clock::now();
+            world.step(1.0f / 60.0f);
+            const double ms = since_ms(t0);
+            if (step >= 90 && step < 150) {
+                idle_ms += ms / 60.0;
+            } else if (step >= 180 && step < 420) {
+                climb_ms += ms / 240.0;
+            }
+        }
+        std::printf("\none character (70 kg) on an 8 m rope of 32 segments: hanging %.3f ms a step, climbing %.3f ms\n", idle_ms, climb_ms);
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -484,6 +691,12 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && std::string(argv[1]) == "climbing") {
         return climbing();
+    }
+    if (argc > 1 && std::string(argv[1]) == "ragdolls") {
+        return ragdolls();
+    }
+    if (argc > 1 && std::string(argv[1]) == "ropes") {
+        return ropes();
     }
     std::printf("%-8s %6s %8s | %-24s | %-24s | %s\n", "scene", "boxes", "workers", "steps 0-120 mean/worst ms",
                 "steps 120-360 mean/worst", "awake at end");

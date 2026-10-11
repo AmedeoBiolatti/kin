@@ -2,6 +2,8 @@
 
 #include "character3d_impl.hpp"
 #include "jolt_runtime.hpp"
+#include "ragdoll3d_impl.hpp"
+#include "rope3d_impl.hpp"
 
 #include <Jolt/Core/FixedSizeFreeList.h>
 #include <Jolt/Core/JobSystemSingleThreaded.h>
@@ -281,17 +283,37 @@ struct RawContact {
     }
 };
 
+// Which bodies never collide with which, beyond the layer table: per slot (Body3DDesc::group, ignore_static, ignore_all).
+struct CollisionRule {
+    u32 group = 0;
+    u8 flags = 0; // 1: not with static bodies, 2: with nothing, 4: collides within its group
+};
+
 // Collects Jolt's contact callbacks into a vector under a lock; nothing else happens on Jolt's threads.
 class ContactCollector final : public JPH::ContactListener {
 public:
     const std::vector<BodyEntry>* entries = nullptr;
     // Pairs that must not collide (bodies joined by a constraint that says so): read only while a step runs.
     const std::unordered_map<u64, i32>* no_collide = nullptr;
+    // Groups and flags by slot, and how many slots have any (read only while a step runs).
+    const std::vector<CollisionRule>* rules = nullptr;
+    const u32* rules_active = nullptr;
     bool persist = false;
     bool events = true;
 
     JPH::ValidateResult OnContactValidate(const JPH::Body& b1, const JPH::Body& b2, JPH::RVec3Arg,
                                           const JPH::CollideShapeResult&) override {
+        if (rules != nullptr && rules_active != nullptr && *rules_active > 0) {
+            const u32 r1 = slot_of(b1.GetID()), r2 = slot_of(b2.GetID());
+            if (r1 < rules->size() && r2 < rules->size()) {
+                const CollisionRule& a = (*rules)[r1];
+                const CollisionRule& b = (*rules)[r2];
+                if (((a.flags | b.flags) & 2u) != 0 || (a.group != 0 && a.group == b.group && ((a.flags & b.flags & 4u) == 0)) ||
+                    ((a.flags & 1u) != 0 && b2.IsStatic()) || ((b.flags & 1u) != 0 && b1.IsStatic())) {
+                    return JPH::ValidateResult::RejectAllContactsForThisBodyPair;
+                }
+            }
+        }
         if (no_collide != nullptr && !no_collide->empty()) {
             u32 s1 = slot_of(b1.GetID()), s2 = slot_of(b2.GetID());
             if (s1 > s2) {
@@ -400,15 +422,33 @@ private:
     Layer3DMask _mask;
 };
 
+// A query's own filter: the body it ignores, and with it every body of that body's group (a character's own ragdoll), unless
+// the group is 0; and sensors only when asked for.
 class QueryBodyFilter final : public JPH::BodyFilter {
 public:
-    QueryBodyFilter(JPH::BodyID ignore, bool sensors) : _ignore(ignore), _sensors(sensors) {}
-    bool ShouldCollide(const JPH::BodyID& id) const override { return id != _ignore; }
+    QueryBodyFilter(JPH::BodyID ignore, bool sensors, u32 group = 0, const std::vector<CollisionRule>* rules = nullptr,
+                    const std::vector<BodyEntry>* entries = nullptr)
+        : _ignore(ignore), _sensors(sensors), _group(group), _rules(rules), _entries(entries) {}
+    bool ShouldCollide(const JPH::BodyID& id) const override {
+        if (id == _ignore) {
+            return false;
+        }
+        if (_group != 0 && _rules != nullptr && _entries != nullptr && id.GetIndex() < _entries->size()) {
+            const BodyEntry& e = (*_entries)[id.GetIndex()];
+            if (e.id == id && e.slot < _rules->size() && (*_rules)[e.slot].group == _group) {
+                return false;
+            }
+        }
+        return true;
+    }
     bool ShouldCollideLocked(const JPH::Body& body) const override { return _sensors || !body.IsSensor(); }
 
 private:
     JPH::BodyID _ignore;
     bool _sensors;
+    u32 _group;
+    const std::vector<CollisionRule>* _rules;
+    const std::vector<BodyEntry>* _entries;
 };
 
 constexpr u32 state_magic = 0x33444B32u; // "1K D3"-ish tag; the content is what is checked
@@ -428,6 +468,8 @@ struct World3D::Impl {
         SurfaceMaterial3D material{};
         bool is_hold = false;
         HoldDesc3D hold{};
+        // Added mass for the next step (cleared by the step).
+        f32 extra_mass = 0.0f;
     };
 
     // A constraint. The anchors and axis are kept in the bodies' own frames (origin and rotation) so that
@@ -462,6 +504,8 @@ struct World3D::Impl {
         system.SetGravity(to_jolt(cfg.gravity));
         collector.entries = &entries;
         collector.no_collide = &no_collide;
+        collector.rules = &rules;
+        collector.rules_active = &rules_active;
         collector.persist = cfg.persist_events;
         collector.events = cfg.contact_events;
         system.SetContactListener(&collector);
@@ -535,6 +579,13 @@ struct World3D::Impl {
         const Slot* s = find(body);
         return s != nullptr ? s->id : JPH::BodyID();
     }
+    // The body filter of a query: its `ignore` body and that body's group.
+    QueryBodyFilter query_filter(const QueryFilter3D& filter) const {
+        const Slot* s = find(filter.ignore);
+        const u32 slot = s != nullptr ? static_cast<u32>(s - slots.data()) : UINT32_MAX;
+        const u32 group = slot < rules.size() ? rules[slot].group : 0u;
+        return QueryBodyFilter(s != nullptr ? s->id : JPH::BodyID(), filter.sensors, group, &rules, &entries);
+    }
 
     // Turns the callbacks of the step just done into events, in a fixed order, and updates which pairs touch.
     void collect_events();
@@ -560,6 +611,8 @@ struct World3D::Impl {
 
     World3D* self = nullptr;
     std::unique_ptr<physics3d_detail::CharacterSet> characters;
+    std::unique_ptr<physics3d_detail::RagdollSet> ragdolls;
+    std::unique_ptr<physics3d_detail::RopeSet> ropes;
 
     World3DConfig config;
     std::array<u32, 32> table{};
@@ -585,6 +638,20 @@ struct World3D::Impl {
     std::map<u64, u8> dormant;
     // Pairs a constraint says must not collide, with how many constraints say it.
     std::unordered_map<u64, i32> no_collide;
+    // Groups and flags by slot, and how many slots have any.
+    std::vector<CollisionRule> rules;
+    u32 rules_active = 0;
+    // Slots that have an added mass to clear after the step.
+    std::vector<u32> added;
+    void set_rule(u32 slot, CollisionRule rule) {
+        if (rules.size() <= slot) {
+            rules.resize(slot + 1);
+        }
+        const bool was = rules[slot].group != 0 || rules[slot].flags != 0;
+        const bool now = rule.group != 0 || rule.flags != 0;
+        rules[slot] = rule;
+        rules_active += (now ? 1u : 0u) - (was ? 1u : 0u);
+    }
     std::vector<ContactEvent3D> events;    // since the last drain
     std::vector<ContactEvent3D> queued;    // from destroyed bodies, joined to the next step's batch
     u64 dropped = 0;
@@ -616,6 +683,8 @@ Body3D World3D::Impl::register_body(const JPH::BodyID& id, u64 user_id) {
     slot.material = {};
     slot.is_hold = false;
     slot.hold = {};
+    slot.extra_mass = 0.0f;
+    set_rule(index, {});
     ++live;
     return {index, slot.generation};
 }
@@ -642,9 +711,15 @@ World3D::World3D(World3DConfig config)
     env.body_of_slot = [impl](u32 slot) {
         return slot < impl->slots.size() && impl->slots[slot].alive ? impl->handle(slot) : Body3D{};
     };
+    env.group_of = [impl](const JPH::BodyID& id) {
+        const u32 slot = impl->slot_index(id);
+        return slot < impl->rules.size() ? impl->rules[slot].group : 0u;
+    };
     env.register_inner = [impl](const JPH::BodyID& id, u64 user_id) { return impl->register_body(id, user_id); };
     env.unregister_inner = [impl](Body3D b) { impl->retire_body(b, false); };
     m.characters = std::make_unique<physics3d_detail::CharacterSet>(std::move(env));
+    m.ragdolls = std::make_unique<physics3d_detail::RagdollSet>(*this);
+    m.ropes = std::make_unique<physics3d_detail::RopeSet>(*this);
 }
 
 World3D::~World3D() = default;
@@ -675,18 +750,48 @@ void World3D::step(f32 dt) {
     Impl& m = *_impl;
     const i32 collision_steps = std::max(1, m.config.collision_steps);
     m.collector.clear();
-    // Characters first, in number order (see character3d.hpp): they move through the world as the last step left it,
+    // Ropes (their length moves toward its target) and ragdolls (blends advance, kinematic bodies follow the clip) first, as
+    // they are things the characters then meet.
+    if (m.ropes->count() > 0) {
+        m.ropes->pre_step(dt);
+    }
+    if (m.ragdolls->count() > 0) {
+        m.ragdolls->pre_step(dt);
+    }
+    // Characters next, in number order (see character3d.hpp): they move through the world as the last step left it,
     // push what they meet by impulses, and the step below then integrates all of it.
     if (m.characters->count() > 0) {
         m.characters->update(dt);
         m.characters->cap_events(m.config.max_events);
     }
     m.system.Update(dt, collision_steps, &m.temp, m.job_system);
+    // Added masses last one step.
+    for (const u32 slot : m.added) {
+        Impl::Slot& s = m.slots[slot];
+        if (s.alive && s.extra_mass != 0.0f) {
+            s.extra_mass = 0.0f;
+            if (JPH::Body* b = m.body_of(s); b != nullptr && b->IsDynamic() && s.mass > 0.0f) {
+                JPH::MassProperties mp = b->GetShape()->GetMassProperties();
+                mp.ScaleToMass(s.mass);
+                b->GetMotionProperties()->SetMassProperties(JPH::EAllowedDOFs::All, mp);
+            }
+        }
+    }
+    m.added.clear();
     if (m.config.contact_events) {
         m.collect_events();
     }
+    const std::size_t events_before = m.constraint_events.size();
     if (m.constraints_live > 0) {
         m.check_breaks(dt / static_cast<f32>(collision_steps));
+    }
+    if (m.ropes->count() > 0) {
+        m.ropes->post_step(dt / static_cast<f32>(collision_steps),
+                           std::span<const ConstraintEvent3D>(m.constraint_events).subspan(events_before));
+    }
+    if (m.ragdolls->count() > 0) {
+        m.ragdolls->post_step(dt);
+        m.ragdolls->cap_events(m.config.max_events);
     }
 }
 
@@ -940,6 +1045,19 @@ Body3D World3D::create_body(const Body3DDesc& d) {
     slot.material = {};
     slot.is_hold = false;
     slot.hold = {};
+    slot.extra_mass = 0.0f;
+    m.set_rule(index, {d.group, static_cast<u8>((d.ignore_static ? 1u : 0u) | (d.ignore_all ? 2u : 0u) |
+                                                (d.group_self_collision ? 4u : 0u))});
+    if (d.velocity_steps > 0 || d.position_steps > 0) {
+        if (JPH::MotionProperties* mp = body->GetMotionProperties()) {
+            if (d.velocity_steps > 0) {
+                mp->SetNumVelocityStepsOverride(d.velocity_steps);
+            }
+            if (d.position_steps > 0) {
+                mp->SetNumPositionStepsOverride(d.position_steps);
+            }
+        }
+    }
     const bool wake = d.start_active && d.motion != Body3DMotion::Static;
     m.bi().AddBody(slot.id, wake ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
     ++m.live;
@@ -1027,6 +1145,7 @@ void World3D::Impl::retire_body(Body3D body, bool jolt) {
         }
     }
     m.entries[slot->id.GetIndex()] = {};
+    m.set_rule(body.index, {});
     if (jolt) {
         m.bi().RemoveBody(slot->id);
         m.bi().DestroyBody(slot->id);
@@ -1371,7 +1490,7 @@ std::optional<RayHit3D> World3D::raycast(Vec3f from, Vec3f to, const QueryFilter
     settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces; // meshes are double sided
     JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CastRay(ray, settings, collector, {}, MaskLayerFilter(filter.mask),
-                                                 QueryBodyFilter(m.id_of(filter.ignore), filter.sensors));
+                                                 m.query_filter(filter));
     if (!collector.HadHit()) {
         return std::nullopt;
     }
@@ -1405,7 +1524,7 @@ std::vector<RayHit3D> World3D::raycast_all(Vec3f from, Vec3f to, const QueryFilt
     settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
     JPH::AllHitCollisionCollector<JPH::CastRayCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CastRay(ray, settings, collector, {}, MaskLayerFilter(filter.mask),
-                                                 QueryBodyFilter(m.id_of(filter.ignore), filter.sensors));
+                                                 m.query_filter(filter));
     struct Keyed {
         RayHit3D hit;
         u32 raw_sub;
@@ -1461,7 +1580,7 @@ std::optional<ShapeHit3D> World3D::shape_cast(const Shape3D& shape, Vec3f positi
     JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CastShape(cast, settings, JPH::RVec3::sZero(), collector, {},
                                                    MaskLayerFilter(filter.mask),
-                                                   QueryBodyFilter(m.id_of(filter.ignore), filter.sensors));
+                                                   m.query_filter(filter));
     if (!collector.HadHit()) {
         return std::nullopt;
     }
@@ -1497,7 +1616,7 @@ std::vector<OverlapHit3D> World3D::overlap(const Shape3D& shape, Vec3f position,
     JPH::AllHitCollisionCollector<JPH::CollideShapeCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CollideShape(jolt, JPH::Vec3::sReplicate(1.0f), transform, settings,
                                                       JPH::RVec3::sZero(), collector, {}, MaskLayerFilter(filter.mask),
-                                                      QueryBodyFilter(m.id_of(filter.ignore), filter.sensors));
+                                                      m.query_filter(filter));
     // One entry for each body: the deepest of its contacts (ties: the lower sub shape id).
     struct Deepest {
         OverlapHit3D hit;
@@ -1536,7 +1655,7 @@ std::vector<Body3D> World3D::point_inside(Vec3f point, const QueryFilter3D& filt
     }
     JPH::AllHitCollisionCollector<JPH::CollidePointCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CollidePoint(to_jolt(point), collector, {}, MaskLayerFilter(filter.mask),
-                                                      QueryBodyFilter(m.id_of(filter.ignore), filter.sensors));
+                                                      m.query_filter(filter));
     for (const JPH::CollidePointResult& r : collector.mHits) {
         if (const u32 slot = m.slot_index(r.mBodyID); slot != UINT32_MAX) {
             out.push_back(m.handle(slot));
@@ -1563,7 +1682,7 @@ std::optional<ClosestPoint3D> World3D::closest_point(Vec3f point, f32 max_distan
     m.system.GetNarrowPhaseQueryNoLock().CollideShape(&sphere, JPH::Vec3::sReplicate(1.0f),
                                                       JPH::RMat44::sTranslation(to_jolt(point)), settings,
                                                       JPH::RVec3::sZero(), collector, {}, MaskLayerFilter(filter.mask),
-                                                      QueryBodyFilter(m.id_of(filter.ignore), filter.sensors));
+                                                      m.query_filter(filter));
     std::optional<ClosestPoint3D> best;
     u32 best_sub = 0;
     for (const JPH::CollideShapeResult& r : collector.mHits) {
@@ -1724,6 +1843,8 @@ Constraint3D World3D::create_constraint(const Constraint3DDesc& d) {
     if (made == nullptr) {
         return {};
     }
+    made->SetNumVelocityStepsOverride(std::min<u32>(d.velocity_steps, 255));
+    made->SetNumPositionStepsOverride(std::min<u32>(d.position_steps, 255));
     u32 index;
     if (!m.free_constraint_slots.empty()) {
         index = m.free_constraint_slots.back();
@@ -1918,6 +2039,8 @@ void World3D::teleport_character(Character3D c, Vec3f feet) { _impl->characters-
 void World3D::set_character_up(Character3D c, Vec3f up, bool instant) { _impl->characters->set_up(c, up, instant); }
 bool World3D::set_character_crouch(Character3D c, bool crouch) { return _impl->characters->set_crouch(c, crouch); }
 void World3D::set_character_desc(Character3D c, const CharacterDesc3D& desc) { _impl->characters->set_desc(c, desc); }
+void World3D::set_character_enabled(Character3D c, bool enabled) { _impl->characters->set_enabled(c, enabled); }
+bool World3D::character_enabled(Character3D c) const { return _impl->characters->enabled(c); }
 void World3D::set_traversal_input(Character3D c, const TraversalInput3D& input) { _impl->characters->set_traversal_input(c, input); }
 TraversalInput3D World3D::traversal_input(Character3D c) const { return _impl->characters->traversal_input(c); }
 TraversalState3D World3D::traversal(Character3D c) const { return _impl->characters->traversal(c); }
@@ -1969,6 +2092,168 @@ HoldDesc3D World3D::hold(Body3D body) const {
 
 std::span<const CharacterEvent3D> World3D::character_events() const { return _impl->characters->events(); }
 std::vector<CharacterEvent3D> World3D::drain_character_events() { return _impl->characters->drain_events(); }
+
+
+// --- motion, added mass, groups, anchors ---
+
+bool World3D::set_motion(Body3D body, Body3DMotion motion) {
+    Impl& m = *_impl;
+    const auto* s = m.find_free(body);
+    if (s == nullptr || motion == Body3DMotion::Static) {
+        return false;
+    }
+    const JPH::EMotionType now = m.bi().GetMotionType(s->id);
+    if (now == JPH::EMotionType::Static) {
+        return false;
+    }
+    const JPH::EMotionType want = motion == Body3DMotion::Kinematic ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic;
+    if (now == want) {
+        return true;
+    }
+    if (want == JPH::EMotionType::Dynamic && !(s->mass > 0.0f)) {
+        // Made kinematic: it has no mass of its own to be dynamic with.
+        return false;
+    }
+    const bool active = m.bi().IsActive(s->id);
+    m.bi().SetMotionType(s->id, want, active ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
+    return true;
+}
+
+void World3D::set_added_mass(Body3D body, f32 extra) {
+    Impl& m = *_impl;
+    auto* s = m.find_free(body);
+    if (s == nullptr || !std::isfinite(extra) || extra < 0.0f || !(s->mass > 0.0f)) {
+        return;
+    }
+    JPH::Body* b = m.body_of(*s);
+    if (b == nullptr || !b->IsDynamic()) {
+        return;
+    }
+    if (s->extra_mass == 0.0f && extra > 0.0f) {
+        m.added.push_back(static_cast<u32>(s - m.slots.data()));
+    }
+    s->extra_mass = extra;
+    JPH::MassProperties mp = b->GetShape()->GetMassProperties();
+    mp.ScaleToMass(s->mass + extra);
+    b->GetMotionProperties()->SetMassProperties(JPH::EAllowedDOFs::All, mp);
+}
+
+f32 World3D::added_mass(Body3D body) const {
+    const auto* s = _impl->find_free(body);
+    return s != nullptr ? s->extra_mass : 0.0f;
+}
+
+void World3D::set_group(Body3D body, u32 group) {
+    Impl& m = *_impl;
+    if (const auto* s = m.find(body)) {
+        const u32 slot = static_cast<u32>(s - m.slots.data());
+        CollisionRule rule = slot < m.rules.size() ? m.rules[slot] : CollisionRule{};
+        rule.group = group;
+        m.set_rule(slot, rule);
+    }
+}
+
+u32 World3D::group(Body3D body) const {
+    const Impl& m = *_impl;
+    if (const auto* s = m.find(body)) {
+        const u32 slot = static_cast<u32>(s - m.slots.data());
+        return slot < m.rules.size() ? m.rules[slot].group : 0u;
+    }
+    return 0;
+}
+
+void World3D::set_no_collisions(Body3D body, bool no_collisions) {
+    Impl& m = *_impl;
+    if (const auto* s = m.find(body)) {
+        const u32 slot = static_cast<u32>(s - m.slots.data());
+        CollisionRule rule = slot < m.rules.size() ? m.rules[slot] : CollisionRule{};
+        rule.flags = static_cast<u8>(no_collisions ? (rule.flags | 2u) : (rule.flags & ~2u));
+        m.set_rule(slot, rule);
+    }
+}
+
+bool World3D::set_constraint_anchor(Constraint3D constraint, i32 side, Vec3f local_point) {
+    Impl& m = *_impl;
+    Impl::ConstraintSlot* c = m.find(constraint);
+    if (c == nullptr || c->kind != Constraint3DKind::Point || (side != 0 && side != 1) || !finite(local_point)) {
+        return false;
+    }
+    auto* point = static_cast<JPH::PointConstraint*>(c->constraint.GetPtr());
+    const Body3D which = side == 0 ? c->a : c->b;
+    JPH::Vec3 local_com = to_jolt(local_point);
+    if (which.valid()) {
+        const auto* s = m.find(which);
+        if (s == nullptr) {
+            return false;
+        }
+        // The constraint holds its anchor relative to the body's centre of mass.
+        local_com -= m.bi().GetShape(s->id)->GetCenterOfMass();
+    }
+    // A side fixed to the world has the world's own frame: the point is the world point.
+    if (side == 0) {
+        point->SetPoint1(JPH::EConstraintSpace::LocalToBodyCOM, JPH::RVec3(local_com));
+        c->local_a = local_point;
+    } else {
+        point->SetPoint2(JPH::EConstraintSpace::LocalToBodyCOM, JPH::RVec3(local_com));
+        c->local_b = local_point;
+    }
+    return true;
+}
+
+Vec3f World3D::constraint_impulse(Constraint3D constraint) const {
+    const Impl::ConstraintSlot* c = _impl->find(constraint);
+    if (c == nullptr || c->kind != Constraint3DKind::Point || c->broken) {
+        return {};
+    }
+    return from_jolt(static_cast<const JPH::PointConstraint*>(c->constraint.GetPtr())->GetTotalLambdaPosition());
+}
+
+// --- ragdolls and ropes (the sets are in ragdoll3d.cpp and rope3d.cpp) ---
+
+RagdollHandle3D World3D::create_ragdoll(const RagdollDesc& desc, std::span<const Mat4f> bone_world, f32 scale) {
+    return _impl->ragdolls->create(desc, bone_world, scale);
+}
+void World3D::destroy_ragdoll(RagdollHandle3D r) { _impl->ragdolls->destroy(r); }
+bool World3D::contains(RagdollHandle3D r) const { return _impl->ragdolls->contains(r); }
+i32 World3D::ragdoll_count() const { return _impl->ragdolls->count(); }
+std::vector<RagdollHandle3D> World3D::ragdolls() const { return _impl->ragdolls->list(); }
+std::vector<Body3D> World3D::ragdoll_bodies(RagdollHandle3D r) const { return _impl->ragdolls->bodies(r); }
+const RagdollDesc* World3D::ragdoll_desc(RagdollHandle3D r) const { return _impl->ragdolls->desc(r); }
+void World3D::set_ragdoll_targets(RagdollHandle3D r, std::span<const Mat4f> bone_world) { _impl->ragdolls->set_targets(r, bone_world); }
+void World3D::start_ragdoll(RagdollHandle3D r, const RagdollStart3D& start) { _impl->ragdolls->start(r, start); }
+void World3D::blend_ragdoll(RagdollHandle3D r, f32 alpha, f32 seconds) { _impl->ragdolls->blend(r, alpha, seconds); }
+void World3D::ragdoll_get_up(RagdollHandle3D r, f32 seconds) { _impl->ragdolls->get_up(r, seconds); }
+void World3D::animate_ragdoll(RagdollHandle3D r) { _impl->ragdolls->animate(r); }
+void World3D::set_ragdoll_bone_weights(RagdollHandle3D r, std::span<const f32> weights) { _impl->ragdolls->set_weights(r, weights); }
+void World3D::set_ragdoll_subtree(RagdollHandle3D r, i32 bone, f32 weight) { _impl->ragdolls->set_subtree(r, bone, weight); }
+RagdollState3D World3D::ragdoll_state(RagdollHandle3D r) const { return _impl->ragdolls->state(r); }
+void World3D::ragdoll_pose(RagdollHandle3D r, std::vector<RagdollBonePose3D>& out) const { _impl->ragdolls->pose(r, out); }
+RagdollPlace3D World3D::ragdoll_get_up_place(RagdollHandle3D r, Vec3f up, Layer3DMask mask, f32 max_distance) const {
+    return _impl->ragdolls->place(r, up, mask, max_distance);
+}
+std::span<const RagdollEvent3D> World3D::ragdoll_events() const { return _impl->ragdolls->events(); }
+std::vector<RagdollEvent3D> World3D::drain_ragdoll_events() { return _impl->ragdolls->drain_events(); }
+
+RopeHandle3D World3D::create_rope(const RopeDesc3D& desc) { return _impl->ropes->create(desc); }
+void World3D::destroy_rope(RopeHandle3D r) { _impl->ropes->destroy(r); }
+bool World3D::contains(RopeHandle3D r) const { return _impl->ropes->contains(r); }
+i32 World3D::rope_count() const { return _impl->ropes->count(); }
+std::vector<RopeHandle3D> World3D::ropes() const { return _impl->ropes->list(); }
+std::vector<RopePoint3D> World3D::rope_points(RopeHandle3D r) const { return _impl->ropes->points(r); }
+std::vector<RopeSegment3D> World3D::rope_segments(RopeHandle3D r) const { return _impl->ropes->segments(r); }
+RopeState3D World3D::rope_state(RopeHandle3D r) const { return _impl->ropes->state(r); }
+std::optional<RopeClosest3D> World3D::rope_closest_point(RopeHandle3D r, Vec3f point) const { return _impl->ropes->closest(r, point); }
+bool World3D::rope_point_at(RopeHandle3D r, u32 segment, f32 fraction, Vec3f& point, Vec3f& tangent) const {
+    return _impl->ropes->point_at(r, segment, fraction, point, tangent);
+}
+std::optional<RopeSegmentRef3D> World3D::rope_segment_of(Body3D body) const { return _impl->ropes->segment_of(body); }
+Body3D World3D::rope_segment_body(RopeHandle3D r, u32 segment) const { return _impl->ropes->segment_body(r, segment); }
+f32 World3D::rope_radius(RopeHandle3D r) const { return _impl->ropes->radius(r); }
+Vec3f World3D::rope_anchor_force(RopeHandle3D r, RopeEnd3D end) const { return _impl->ropes->anchor_force(r, end); }
+f32 World3D::rope_tension(RopeHandle3D r, RopeEnd3D end) const { return _impl->ropes->tension(r, end); }
+void World3D::set_rope_length(RopeHandle3D r, f32 length) { _impl->ropes->set_length(r, length); }
+void World3D::reel_rope(RopeHandle3D r, f32 target, f32 speed) { _impl->ropes->reel(r, target, speed); }
+std::vector<RopeEvent3D> World3D::drain_rope_events() { return _impl->ropes->drain_events(); }
 
 u64 World3D::state_hash() const {
     const Impl& m = *_impl;
@@ -2023,6 +2308,15 @@ u64 World3D::state_hash() const {
             h.byte(b);
         }
     }
+    // Ragdolls and ropes, only when there are some: their blends, modes and lengths (the bodies and joints are above).
+    if (m.ragdolls->count() > 0 || m.ropes->count() > 0) {
+        std::vector<u8> bytes;
+        m.ragdolls->save_header(bytes);
+        m.ropes->save_header(bytes);
+        for (const u8 b : bytes) {
+            h.byte(b);
+        }
+    }
     return h.value();
 }
 
@@ -2065,6 +2359,8 @@ std::vector<u8> World3D::save_state() const {
     }
     // The characters' own state, then Jolt's after the physics system's.
     m.characters->save_header(out.bytes());
+    m.ragdolls->save_header(out.bytes());
+    m.ropes->save_header(out.bytes());
     m.system.SaveState(out);
     m.characters->save_jolt(out);
     return std::move(out.bytes());
@@ -2143,6 +2439,22 @@ bool World3D::restore_state(std::span<const u8> state) {
         return false;
     }
     in.skip(static_cast<std::size_t>(cursor - (in.bytes().data() + in.read_position())));
+    // Ragdolls and ropes: the same sets, their state, which must be in place (shapes, anchors, motion types) before Jolt
+    // puts the bodies back.
+    const u8* cursor2 = in.bytes().data() + in.read_position();
+    std::unique_ptr<physics3d_detail::RagdollSet::Parsed> ragdolls = m.ragdolls->parse_header(cursor2, end);
+    if (ragdolls == nullptr) {
+        return false;
+    }
+    in.skip(static_cast<std::size_t>(cursor2 - (in.bytes().data() + in.read_position())));
+    const u8* cursor3 = in.bytes().data() + in.read_position();
+    std::unique_ptr<physics3d_detail::RopeSet::Parsed> ropes = m.ropes->parse_header(cursor3, end);
+    if (ropes == nullptr) {
+        return false;
+    }
+    in.skip(static_cast<std::size_t>(cursor3 - (in.bytes().data() + in.read_position())));
+    m.ropes->apply(*ropes);
+    m.ragdolls->apply(*ragdolls);
     m.characters->prepare_restore(*characters);
     if (!m.system.RestoreState(in) || !m.characters->restore(*characters, in)) {
         return false;
@@ -2159,6 +2471,8 @@ bool World3D::restore_state(std::span<const u8> state) {
     m.events.clear();
     m.constraint_events.clear();
     m.characters->clear_events();
+    m.ragdolls->clear_events();
+    m.ropes->clear_events();
     m.collector.clear();
     return true;
 }

@@ -209,6 +209,26 @@ struct IKConstraint {
     const Skeleton* resolved_for = nullptr;
 };
 
+// A pose that something else writes over the clips' and the constraints' (ragdoll physics: kin/physics3d/ragdoll3d.hpp): per
+// joint a share (0 leaves the joint as the clips and IK made it, 1 takes the physics body's place) and that place in the WORLD.
+// It is applied after the clips, layers and IK constraints and before the joint matrices, so that the skinned draw, the TAA
+// velocity, the shadow pass and the shadow cache all see it. The rotation is taken from the body for every joint with a
+// share; the translation too for the joints at the top of the shared part (their parent has less share), so that bone
+// lengths and scale stay those of the pose. Empty (the default) changes nothing. WorldPhysicsState3D fills it for an entity
+// with a Ragdoll3D; a game may fill it itself (a puppet).
+struct PoseOverride3D {
+    std::vector<f32> weights;   // by joint (the skeleton's joint count; any other size is ignored)
+    std::vector<Vec3f> position; // world
+    std::vector<Quatf> rotation;
+
+    bool empty() const { return weights.empty(); }
+    void clear() {
+        weights.clear();
+        position.clear();
+        rotation.clear();
+    }
+};
+
 // What plays on a skinned entity, as data: a clip by name, or a state machine (kin/anim's AnimationStateMachine, driven by
 // `params`) that chooses it, with crossfades and 1D blends by a parameter; layers over it with masks. WorldRenderState3D::animate
 // steps it. A state `s` plays the blend space `blend_spaces[s]` if there is one, else the clip `machine->states[s]` (the
@@ -287,6 +307,10 @@ struct Animator3D {
         return ik_constraints.emplace_back(std::move(made));
     }
 
+    // Physics (or any puppeteer) writing over the pose: see PoseOverride3D. The constraints' result and `ik_pose` / `ik_world` below
+    // include it when it is set.
+    PoseOverride3D pose_override;
+
     // After collect() (or apply_ik()) with constraints: the pose they made (the clips' pose with the IK on it), and the world
     // matrices of its joints in the model's space, for gameplay that wants to know where the hand is. Empty without constraints.
     Pose ik_pose;
@@ -324,6 +348,9 @@ private:
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
     static void solve_ik(Animator3D& animator, const Skeleton& skeleton, const Pose& base, const Mat4f& world, const flecs::world& ecs,
                          u64 epoch);
+    // The clips' pose with the constraints solved and the override applied, in animator.ik_pose / ik_world.
+    static void solve_pose(Animator3D& animator, const Skeleton& skeleton, const Pose& base, const Mat4f& world,
+                           const flecs::world& ecs, u64 epoch);
     flecs::observer _transform_observer;
     flecs::query<WorldTransform3D, const Transform3D, const WorldTransform3D> _transforms;
     flecs::query<const WorldTransform3D, const MeshRenderer> _meshes;

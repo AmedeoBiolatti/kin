@@ -9,6 +9,22 @@ releases may change APIs.
 
 ### Added
 
+- 3D physics, ragdolls and ropes (experimental; see [3D physics](physics_3d.md) "Ragdolls" and "Ropes" and the plan's "P2e"):
+  `kin/physics3d/ragdoll3d.hpp`, `rope3d.hpp`; `World3D::create_ragdoll`, `start_ragdoll`, `blend_ragdoll`, `ragdoll_get_up`,
+  `set_ragdoll_subtree`, `ragdoll_pose`, `ragdoll_get_up_place`, `create_rope`, `rope_points`, `rope_closest_point`, `rope_tension`,
+  `reel_rope`, `set_character_enabled`, `set_motion`, `set_added_mass`, `set_group`, `Body3DDesc::group`. A PASSIVE ragdoll built from a
+  skeleton (`auto_ragdoll_desc`: capsules per bone from the bind pose, swing-twist joints, hinges by name) with states Animated
+  (kinematic bodies on the clip, hittable), Ragdoll, Blend (with per-bone weights, a partial ragdoll for an arm or a tail) and GetUp
+  (the pose blends from the lying snapshot to the clip; a place and a facing to stand at); the pose is written into
+  `Animator3D::pose_override` and applied by `WorldRenderState3D` after the clips and IK and before the joint matrices, so the draw, the
+  TAA velocity and the shadows use it unchanged. Hand-over from a character controller and recovery with a clearance check. Ropes: chains
+  of capsules with ball joints between world or body anchors (or free), sagging, with a rest length that reels and pays out, a
+  tension reading, breaking, a polyline and a closest point, drawn as a tube; a rope grip provider so that a hand takes hold anywhere
+  on one, the character's weight is on the rope (it swings with the pendulum's period), climbs, jumps off. ECS: `Ragdoll3D`,
+  `Rope3D`, `RagdollEvents3D`, `RopeEvents3D`. A pure function of state, commands and dt, in the hash and the saved state, the same bits on
+  every worker count. Harness: `kin_reference` scenes `physics_ragdoll` and `physics_rope`; Sponza Walk "Ragdoll and rope" section,
+  `--preset ragdoll`, `--preset rope`; `kin_physics3d_bench ragdolls` and `ropes`. Off unless used: with no ragdoll or rope in a world
+  nothing of them is in its hash, and every existing picture is unchanged.
 - 3D physics, grab and climb (experimental; see [3D physics](physics_3d.md) "Grab and climb" and the plan's "P2d"):
   `kin/physics3d/traversal3d.hpp`, `CharacterDesc3D::traversal`, `World3D::probe_grips`, `set_traversal_input`, `traversal`,
   `set_traversal_resource`, `set_surface_material`, `set_hold`: a general capability on top of the controller, two hands by default

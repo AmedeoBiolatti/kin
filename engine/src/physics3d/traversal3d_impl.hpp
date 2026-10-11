@@ -83,6 +83,10 @@ LedgeInfo find_ledge(const World3D& world, Body3D body, Vec3f point, Vec3f norma
 void ledge_room(const World3D& world, LedgeInfo& ledge, Vec3f up, f32 radius, f32 height, f32 inset, Layer3DMask mask,
                 Body3D ignore);
 
+// The provider of rope grips (rope3d.cpp): a candidate is a point of a rope near the reach, found from the world's ropes
+// rather than from the casts' hits.
+const GripProvider3D& rope_grip_provider();
+
 // The rotation that takes +Y to the unit vector `up` (a capsule's own axis is +Y).
 Quatf capsule_rotation(Vec3f up);
 

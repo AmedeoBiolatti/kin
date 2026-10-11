@@ -30,6 +30,8 @@
 #include <kin/core/types.hpp>
 #include <kin/physics3d/character3d.hpp>
 #include <kin/physics3d/handles3d.hpp>
+#include <kin/physics3d/ragdoll3d.hpp>
+#include <kin/physics3d/rope3d.hpp>
 #include <kin/physics3d/shape3d.hpp>
 
 #include <memory>
@@ -193,6 +195,12 @@ struct Constraint3DDesc {
     f32 break_force = 0.0f;
     f32 break_torque = 0.0f;
 
+    // Solver iterations for the island this constraint is in (0: the world's 10 velocity and 2 position steps; the island
+    // runs the most any of its constraints asks for). A chain of very different masses (a rope with a climber on it) needs
+    // many.
+    u32 velocity_steps = 0;
+    u32 position_steps = 0;
+
     // Whether the two bodies it joins still collide with each other. Off by default (a door and its post, the links
     // of a chain, a limb on its trunk: they would fight the joint), which also saves their contact work.
     // Needs contact events on in the World3DConfig (the filter runs in the contact callback).
@@ -255,6 +263,17 @@ struct Body3DDesc {
     bool continuous = false;
     // Starts awake (dynamic and kinematic bodies).
     bool start_active = true;
+    // Bodies that share a non-zero group never collide with each other (the bones of a ragdoll, the segments of a rope), unless
+    // both have `group_self_collision`. Queries that ignore a body also ignore the bodies of its group, and so does a
+    // character's own movement (set_group on its body).
+    u32 group = 0;
+    bool group_self_collision = false;
+    // Never collides with static bodies (a rope that passes through the level) / with anything (a marker that only follows).
+    bool ignore_static = false;
+    bool ignore_all = false;
+    // Solver iterations for this body's island (0: the world's): a chain of very different masses wants more.
+    u8 velocity_steps = 0;
+    u8 position_steps = 0;
     // Yours: not read by the engine; hashed into state_hash().
     u64 user_id = 0;
 };
@@ -374,6 +393,24 @@ public:
     bool set_shape(Body3D body, const Shape3D& shape);
     // The live bodies, by body number.
     std::vector<Body3D> bodies() const;
+    // A dynamic body becomes kinematic (a ragdoll animated by a clip: the body follows and pushes) or the other way round.
+    // Velocities are kept. Returns false for a static body or a motion that is not one of the two.
+    bool set_motion(Body3D body, Body3DMotion motion);
+    // A mass (kg) added to a dynamic body at its centre for the next step only, like a force (set it every step it should
+    // count; the step clears it): the inertia of something that hangs from the body (a climber on a rope; the weight comes
+    // with gravity acting on the whole). The body's own mass is what it was made with. 0 takes it off.
+    void set_added_mass(Body3D body, f32 extra);
+    f32 added_mass(Body3D body) const;
+    // Bodies of one non-zero group do not collide with each other; 0 clears it. Also for a character's own body (it then
+    // passes through, and its queries ignore, that group's bodies: its ragdoll).
+    void set_group(Body3D body, u32 group);
+    u32 group(Body3D body) const;
+    // The body collides with nothing while set (a character that gave its place to a ragdoll).
+    void set_no_collisions(Body3D body, bool no_collisions);
+    // Moves a Point constraint's anchor on one side (0: body a, 1: body b) to `local_point`, in that body's own frame (origin and
+    // rotation; the world's for a side that is fixed to the world), without making a new constraint: a rope that changes length.
+    // False for another kind of constraint, a stale handle or a side that is not 0 or 1.
+    bool set_constraint_anchor(Constraint3D constraint, i32 side, Vec3f local_point);
 
     // --- queries ---
     // The first body along the segment from `from` to `to`.
@@ -414,6 +451,9 @@ public:
     bool contains(Constraint3D constraint) const;
     i32 constraint_count() const;
     Constraint3DInfo constraint_info(Constraint3D constraint) const;
+    // The linear impulse (N s) a Point constraint applied to its second body (b) in the last collision step: divide by the
+    // collision step's length (step dt / collision_steps) for a force. Zero for other kinds.
+    Vec3f constraint_impulse(Constraint3D constraint) const;
     // Hinge (target in degrees or degrees a second; max_force a torque in N m) and slider (metres, m/s, N).
     // `max_force` must be above 0 for a mode but Off.
     void set_constraint_motor(Constraint3D constraint, Motor3DMode mode, f32 target, f32 max_force);
@@ -449,6 +489,11 @@ public:
     // Crouches or stands at once. Standing is refused (false, and it stays crouched) when the standing capsule
     // would hit something above. The next step's input.crouch decides again.
     bool set_character_crouch(Character3D character, bool crouch);
+    // Hands the place over to something else (a ragdoll): a disabled character is not updated (no input, no events), its
+    // body collides with nothing, and anything it held is let go. Re-enable it with teleport_character first or after: it
+    // starts from rest, in the air, at the place it was left. A handle that is not a character does nothing.
+    void set_character_enabled(Character3D character, bool enabled);
+    bool character_enabled(Character3D character) const;
     // Changes how it is simulated while it lives: the numbers of the descriptor but the shape, layer and position
     // (radius, heights, layer and mask are fixed at creation).
     void set_character_desc(Character3D character, const CharacterDesc3D& desc);
@@ -481,6 +526,80 @@ public:
     // Sets the resource's value (clamped to 0..max; an item that gives stamina, a respawn). 0 counts as exhausted; the
     // recovery rule is the resource's own.
     void set_traversal_resource(Character3D character, f32 value);
+
+    // --- ragdolls (ragdoll3d.hpp) ---
+    // A body for each bone of `desc` placed at the matrix of `bone_world[i]` (translation and rotation; the scale is left out and
+    // `scale` multiplies the shapes' sizes and offsets), joined as the desc says. Starts Animated: kinematic bodies at that pose.
+    // An invalid handle for a bad desc (no bones, a parent not lower, a shape that cannot be made) or a matrix count that is
+    // not the bone count.
+    RagdollHandle3D create_ragdoll(const RagdollDesc& desc, std::span<const Mat4f> bone_world, f32 scale = 1.0f);
+    // Destroys its bodies and joints.
+    void destroy_ragdoll(RagdollHandle3D ragdoll);
+    bool contains(RagdollHandle3D ragdoll) const;
+    i32 ragdoll_count() const;
+    std::vector<RagdollHandle3D> ragdolls() const;
+    // The bodies, by bone (invalid for a bone that was left out).
+    std::vector<Body3D> ragdoll_bodies(RagdollHandle3D ragdoll) const;
+    const RagdollDesc* ragdoll_desc(RagdollHandle3D ragdoll) const;
+    // Where the clip puts the bones, in the world (a matrix a bone): what the kinematic bodies follow in the next step.
+    void set_ragdoll_targets(RagdollHandle3D ragdoll, std::span<const Mat4f> bone_world);
+    // The bodies take over: dynamic, blending in over `blend_seconds`. Starting again while a get-up runs turns it round.
+    void start_ragdoll(RagdollHandle3D ragdoll, const RagdollStart3D& start = {});
+    // Holds `alpha` (0..1) of the pose from the bodies, reaching it over `seconds`: dynamic bodies while above 0.
+    void blend_ragdoll(RagdollHandle3D ragdoll, f32 alpha, f32 seconds);
+    // The pose blends from where the bodies lie now to the clip over `seconds` (the share goes to 0, Recovered at the end).
+    // The bodies themselves are kinematic on the clip from the first step, so the character's own capsule and anything near
+    // it are not in a fight with a lying body. The game has the clip playing and the character put where
+    // ragdoll_get_up_place says.
+    void ragdoll_get_up(RagdollHandle3D ragdoll, f32 seconds);
+    // Back to Animated at once: kinematic bodies at the targets with no velocity.
+    void animate_ragdoll(RagdollHandle3D ragdoll);
+    // Per bone: 0 keeps it animated (kinematic) whatever the mode, 1 is the whole ragdoll's share. Missing entries are 1.
+    void set_ragdoll_bone_weights(RagdollHandle3D ragdoll, std::span<const f32> weights);
+    // `bone` and the bones below it at `weight`, every other bone at 0: a partial ragdoll (an arm, a tail).
+    void set_ragdoll_subtree(RagdollHandle3D ragdoll, i32 bone, f32 weight = 1.0f);
+    RagdollState3D ragdoll_state(RagdollHandle3D ragdoll) const;
+    // The pose writer's input (`out` gets one entry a bone).
+    void ragdoll_pose(RagdollHandle3D ragdoll, std::vector<RagdollBonePose3D>& out) const;
+    // Where to stand a character that gets up: the ground under the root bone along `up` (within `max_distance`), against
+    // the layers in `mask`, ignoring the ragdoll's own bodies; and the way it faces.
+    RagdollPlace3D ragdoll_get_up_place(RagdollHandle3D ragdoll, Vec3f up = {0.0f, 1.0f, 0.0f},
+                                        Layer3DMask mask = all_layers3d, f32 max_distance = 3.0f) const;
+    // The ragdoll events since the last drain, each step's batch sorted by (ragdoll, kind).
+    std::span<const RagdollEvent3D> ragdoll_events() const;
+    std::vector<RagdollEvent3D> drain_ragdoll_events();
+
+    // --- ropes (rope3d.hpp) ---
+    // A chain of capsules between the anchors. An invalid handle for a non-finite number, no length where one is needed, a
+    // body anchor that is not a body, or a world out of room.
+    RopeHandle3D create_rope(const RopeDesc3D& desc);
+    // Destroys its bodies and joints.
+    void destroy_rope(RopeHandle3D rope);
+    bool contains(RopeHandle3D rope) const;
+    i32 rope_count() const;
+    std::vector<RopeHandle3D> ropes() const;
+    // The polyline: segments + 1 joints with the direction there.
+    std::vector<RopePoint3D> rope_points(RopeHandle3D rope) const;
+    std::vector<RopeSegment3D> rope_segments(RopeHandle3D rope) const;
+    RopeState3D rope_state(RopeHandle3D rope) const;
+    // The closest point of the rope to `point`, by segment and parameter.
+    std::optional<RopeClosest3D> rope_closest_point(RopeHandle3D rope, Vec3f point) const;
+    // The point at `fraction` (-0.5 to 0.5 of the segment's length from its middle) of a segment, and the segment's direction.
+    bool rope_point_at(RopeHandle3D rope, u32 segment, f32 fraction, Vec3f& point, Vec3f& tangent) const;
+    // Which rope and segment a body is.
+    std::optional<RopeSegmentRef3D> rope_segment_of(Body3D body) const;
+    // The body of segment `segment` (invalid when out of range) and the rope's radius.
+    Body3D rope_segment_body(RopeHandle3D rope, u32 segment) const;
+    f32 rope_radius(RopeHandle3D rope) const;
+    // The force the rope puts on its anchor (N, in the world; zero for a free end), and its size along the rope: positive
+    // when it pulls the anchor toward the rope. Of the last step.
+    Vec3f rope_anchor_force(RopeHandle3D rope, RopeEnd3D end) const;
+    f32 rope_tension(RopeHandle3D rope, RopeEnd3D end) const;
+    // Rest length at once (the chain is re-laid along itself), or moved toward `target` at `speed` m/s by the steps.
+    void set_rope_length(RopeHandle3D rope, f32 length);
+    void reel_rope(RopeHandle3D rope, f32 target, f32 speed);
+    // Ropes that broke, by step then rope then joint.
+    std::vector<RopeEvent3D> drain_rope_events();
 
     // Sleeping. activate() wakes a body (its island with it, at the next step);
     // deactivate() puts it to sleep at once.

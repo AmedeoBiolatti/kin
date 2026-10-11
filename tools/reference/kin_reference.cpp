@@ -1032,6 +1032,416 @@ struct PhysicsClimb {
     }
 };
 
+// `procedural: "physics_ragdoll"` (docs/physics_3d.md, "Ragdolls"): five skinned people (`made/skinned_biped_walk.glb`) made
+// ragdolls by the ECS system (Ragdoll3D from their skeleton, `auto_ragdoll_desc`), on a recipe of the scene's own: one dropped 4 m
+// onto a ramp, one standing whose left arm only is a ragdoll and is knocked, one that blends into a ragdoll when struck, lies, and
+// gets up again (placed where the pelvis lies, the clip blended back), one thrown at a wall, and one struck by a ball (the contact
+// event starts its ragdoll with the impulse at the bone that was hit). The pose is written into each Animator3D after the clips
+// and before the joint matrices, so that the skinned draw is the bodies'. The picture of frame f is the world `lead + f` fixed
+// steps in; a frame asked for out of order starts the world again, so every frame is the same whatever order the run takes them
+// in. The debug lines show the bodies (the capsules of the bones) in the colours of awake and sleeping.
+struct PhysicsRagdoll {
+    struct Block {
+        Vec3f centre, half;
+        kin::Quatf rotation;
+        kin::Color colour;
+    };
+    kin::Mesh box_mesh, ball_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model> person;
+    std::unique_ptr<kin::World3D> world;
+    std::unique_ptr<kin::EcsWorld> ecs;
+    std::unique_ptr<kin::WorldPhysicsState3D> bodies;
+    std::unique_ptr<kin::WorldRenderState3D> render;
+    std::vector<Block> blocks;
+    // 0 the faller, 1 the arm, 2 the one that gets up, 3 the thrown, 4 the one hit by the ball.
+    std::array<flecs::entity, 5> actors{};
+    kin::Body3D ball{};
+    bool ball_hit = false;
+    int lead = 0;
+    int stepped = 0;
+    bool debug = true;
+    bool loaded = false;
+
+    int bone_of(flecs::entity e, const char* joint) const {
+        const kin::RagdollHandle3D r = bodies->ragdoll_of(e);
+        const kin::RagdollDesc* d = world->ragdoll_desc(r);
+        const kin::SkinnedMeshRenderer* sk = e.get<kin::SkinnedMeshRenderer>();
+        if (d == nullptr || sk == nullptr) {
+            return -1;
+        }
+        const kin::i32 j = sk->model->skeletons[0].find(joint);
+        for (std::size_t i = 0; i < d->bones.size(); ++i) {
+            if (d->bones[i].joint == j) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    void reset() {
+        render.reset();
+        bodies.reset();
+        actors = {};
+        ecs.reset();
+        world.reset();
+        kin::World3DConfig cfg;
+        cfg.single_threaded = true; // one thread: the picture does not depend on a pool
+        world = std::make_unique<kin::World3D>(cfg);
+        ecs = std::make_unique<kin::EcsWorld>();
+        blocks.clear();
+        const auto add = [&](Vec3f centre, Vec3f half, kin::Quatf rotation, kin::Color colour) {
+            blocks.push_back({centre, half, rotation, colour});
+            world->create_body({.shape = kin::Shape3D::box(half), .motion = kin::Body3DMotion::Static, .position = centre,
+                                .rotation = rotation, .friction = 0.7f});
+        };
+        add({0.0f, -0.5f, 0.0f}, {14.0f, 0.5f, 8.0f}, {}, kin::Color::rgb(118, 124, 112));
+        add({-4.0f, 1.2f, 0.0f}, {2.0f, 0.15f, 2.5f}, kin::Quatf::axis_angle({0, 0, 1}, 22.0f), kin::Color::rgb(214, 150, 80));
+        add({6.4f, 1.5f, 0.0f}, {0.2f, 1.5f, 3.5f}, {}, kin::Color::rgb(170, 120, 120));
+        bodies = std::make_unique<kin::WorldPhysicsState3D>(*ecs, *world);
+        render = std::make_unique<kin::WorldRenderState3D>(*ecs);
+        const Vec3f at[5] = {{-4.2f, 4.0f, 0.0f}, {-1.4f, 0.0f, 0.0f}, {1.6f, 0.0f, 0.0f}, {4.0f, 1.0f, 1.5f}, {-8.0f, 0.0f, 2.5f}};
+        const float yaw[5] = {0.0f, 0.0f, 25.0f, 90.0f, 90.0f};
+        for (int i = 0; i < 5; ++i) {
+            kin::Animator3D animator;
+            animator.clip = "idle";
+            animator.loop = true;
+            actors[static_cast<std::size_t>(i)] = ecs->raw().entity()
+                .set(kin::Transform3D{.position = at[i], .rotation = kin::Quatf::axis_angle({0, 1, 0}, yaw[i])})
+                .set(kin::SkinnedMeshRenderer{.model = person})
+                .set(static_cast<const kin::Animator3D&>(animator))
+                .set(kin::Ragdoll3D{});
+        }
+        bodies->sync_bodies();
+        ball = {};
+        ball_hit = false;
+        stepped = 0;
+    }
+
+    void make(kin::Renderer3D& r3d, const kin::JsonValue& doc, const fs::path& cache) {
+        debug = doc.find("debug") == nullptr || doc.bool_at("debug");
+        lead = static_cast<int>(doc.number_at("lead", 0));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12));
+        std::string error;
+        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        if (!model) {
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            return;
+        }
+        person = std::make_shared<const kin::Model>(std::move(model));
+        loaded = true;
+        reset();
+    }
+
+    void step_once() {
+        const int n = stepped;
+        const auto fall = [&](int i) { return actors[static_cast<std::size_t>(i)]; };
+        if (n == 0) {
+            // The arm alone is the ragdoll's; the faller lets go at once.
+            bodies->set_ragdoll_subtree(fall(1), "shoulder_L", 1.0f);
+            bodies->start_ragdoll(fall(0), {.set_velocity = true, .velocity = {1.2f, 0.0f, 0.0f}});
+        }
+        if (n == 30) {
+            bodies->start_ragdoll(fall(1), {.impulse_bone = bone_of(fall(1), "hand_L"), .impulse = {0.0f, 55.0f, 40.0f}});
+        }
+        if (n == 20) {
+            bodies->start_ragdoll(fall(3), {.blend_seconds = 0.1f, .set_velocity = true, .velocity = {7.0f, 2.5f, 0.0f}});
+        }
+        if (n == 60) {
+            bodies->start_ragdoll(fall(2), {.blend_seconds = 0.4f, .impulse_bone = bone_of(fall(2), "chest"), .impulse = {70.0f, 10.0f, -40.0f}});
+        }
+        if (n == 90) {
+            ball = world->create_body({.shape = kin::Shape3D::sphere(0.2f), .motion = kin::Body3DMotion::Dynamic,
+                                       .position = {-12.0f, 1.3f, 2.5f}, .linear_velocity = {16.0f, 0.5f, 0.0f}, .mass = 6.0f,
+                                       .friction = 0.5f, .gravity_factor = 0.3f, .continuous = true});
+        }
+        if (n == 330) {
+            // Gets up where it lies: the character is put at the pelvis's ground point, facing by it, and the clip is blended in.
+            const kin::RagdollPlace3D place = world->ragdoll_get_up_place(bodies->ragdoll_of(fall(2)));
+            if (place.found) {
+                kin::Transform3D* t = fall(2).get_mut<kin::Transform3D>();
+                t->position = place.position;
+                t->rotation = place.rotation;
+            }
+            bodies->ragdoll_get_up(fall(2), 1.0f);
+        }
+        bodies->step(1.0f / 60.0f);
+        // The ball's first contact with the person it was fired at: that ragdoll starts, with the ball's momentum at the bone.
+        if (ball.valid() && !ball_hit) {
+            const std::vector<kin::Body3D> mine = world->ragdoll_bodies(bodies->ragdoll_of(fall(4)));
+            for (const kin::ContactEvent3D& e : bodies->events()) {
+                const kin::Body3D other = e.a == ball ? e.b : (e.b == ball ? e.a : kin::Body3D{});
+                if (other.valid() && std::find(mine.begin(), mine.end(), other) != mine.end() && e.kind == kin::ContactKind3D::Begin) {
+                    const std::size_t bone = static_cast<std::size_t>(std::find(mine.begin(), mine.end(), other) - mine.begin());
+                    bodies->start_ragdoll(fall(4), {.blend_seconds = 0.05f, .impulse_bone = static_cast<int>(bone),
+                                                    .impulse = world->linear_velocity(ball) * 2.5f, .impulse_point = e.point, .point_given = true});
+                    ball_hit = true;
+                    break;
+                }
+            }
+        }
+        render->animate(1.0f / 60.0f);
+        ++stepped;
+    }
+
+    void advance_to(int steps) {
+        if (steps < stepped) {
+            reset();
+        }
+        while (stepped < steps) {
+            step_once();
+        }
+    }
+
+    void draw(kin::Renderer3D& r3d, kin::Scene3D& scene, int base, int time) {
+        if (!loaded) {
+            return;
+        }
+        advance_to(base + std::max(0, time));
+        for (const Block& b : blocks) {
+            scene.draw(box_mesh, Mat4f::trs(b.centre, b.rotation, b.half * 2.0f), {.color = b.colour, .roughness = 0.85f});
+        }
+        if (ball.valid()) {
+            scene.draw(ball_mesh, Mat4f::trs(world->position(ball), world->rotation(ball), {0.2f, 0.2f, 0.2f}),
+                       {.color = kin::Color::rgb(230, 80, 60), .roughness = 0.4f});
+        }
+        render->propagate_transforms();
+        render->collect(scene);
+        if (debug) {
+            kin::DebugDraw3DOptions look;
+            look.point_size = 0.05f;
+            kin::DebugDraw3D lines{look};
+            lines.world(*world);
+            debug_mesh = kin::draw_debug_lines(r3d, scene, lines.lines());
+        }
+    }
+};
+
+
+// `procedural: "physics_rope"` (docs/physics_3d.md, "Ropes"): chains of capsules with ball joints (Rope3D, drawn as tubes by
+// WorldPhysicsState3D::collect_ropes): a hanging rope from a beam; a bridge of three ropes between two posts with a box on it
+// (between low walls); a rope that swings with the skinned person on it (made out from the vertical, the person takes hold with
+// both hands, climbs, and lets go: through the ECS system, CharacterController3D with traversal on, the hands' IK on the
+// anchors); and a rope that a winch reels in with a crate on its end. The picture of frame f is the world `lead + f` fixed
+// steps in (a frame asked for out of order starts the world again).
+struct PhysicsRope {
+    struct Block {
+        Vec3f centre, half;
+        kin::Color colour;
+        flecs::entity entity; // a dynamic one is drawn where its entity is
+    };
+    kin::Mesh box_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model> person;
+    std::unique_ptr<kin::World3D> world;
+    std::unique_ptr<kin::EcsWorld> ecs;
+    std::unique_ptr<kin::WorldPhysicsState3D> bodies;
+    std::unique_ptr<kin::WorldRenderState3D> render;
+    std::vector<Block> blocks;
+    flecs::entity hero, crate, bridge_box, winch_rope, swing_rope;
+    std::vector<flecs::entity> crates;
+    int lead = 0;
+    int stepped = 0;
+    bool debug = true;
+    bool loaded = false;
+
+    Vec3f feet() const {
+        const kin::Transform3D* t = hero.is_valid() ? hero.get<kin::Transform3D>() : nullptr;
+        return t != nullptr ? t->position : Vec3f{};
+    }
+
+    void reset() {
+        render.reset();
+        bodies.reset();
+        hero = crate = bridge_box = winch_rope = swing_rope = {};
+        crates.clear();
+        ecs.reset();
+        world.reset();
+        kin::World3DConfig cfg;
+        cfg.single_threaded = true;
+        world = std::make_unique<kin::World3D>(cfg);
+        ecs = std::make_unique<kin::EcsWorld>();
+        blocks.clear();
+        bodies = std::make_unique<kin::WorldPhysicsState3D>(*ecs, *world);
+        render = std::make_unique<kin::WorldRenderState3D>(*ecs);
+        flecs::world& w = ecs->raw();
+        const auto block = [&](Vec3f centre, Vec3f half, kin::Color colour, bool dynamic = false, float mass = 0.0f) {
+            kin::Collider3D c;
+            c.kind = kin::Collider3D::Kind::Box;
+            c.half_extents = half;
+            flecs::entity e = w.entity().set(kin::Transform3D{.position = centre}).set(c);
+            if (dynamic) {
+                e.set(kin::RigidBody3D{.mass = mass, .friction = 0.5f});
+            }
+            blocks.push_back({centre, half, colour, dynamic ? e : flecs::entity{}});
+            return e;
+        };
+        block({10.0f, -0.5f, 0.0f}, {22.0f, 0.5f, 10.0f}, kin::Color::rgb(118, 124, 112));
+        // The hanging rope's beam, and a rope from it with a ball of weight at its end (a free rope with nothing on it).
+        block({0.0f, 6.1f, 0.0f}, {0.4f, 0.1f, 0.4f}, kin::Color::rgb(120, 100, 80));
+        // The bridge: two posts and low walls beside it, three ropes between, a box.
+        block({-5.0f, 2.0f, 0.0f}, {0.25f, 2.0f, 1.2f}, kin::Color::rgb(130, 110, 90));
+        block({1.0f, 2.0f, 0.0f}, {0.25f, 2.0f, 1.2f}, kin::Color::rgb(130, 110, 90));
+        for (const float z : {-1.0f, 1.0f}) {
+            block({-2.0f, 3.2f, z}, {3.0f, 0.6f, 0.05f}, kin::Color::rgb(150, 130, 100));
+        }
+        for (int k = 0; k < 3; ++k) {
+            kin::Rope3D rope;
+            const float z = 0.5f * static_cast<float>(k - 1);
+            // From the posts' inner faces (an anchor inside a solid is pushed out of it, and kicks the rope).
+            rope.start = kin::RopeAttach3D::at({-4.75f, 3.8f, z});
+            rope.end = kin::RopeAttach3D::at({0.75f, 3.8f, z});
+            rope.length = 5.9f;
+            rope.radius = 0.05f;
+            rope.mass_per_metre = 2.0f;
+            rope.render = true;
+            rope.render_radius = 0.06f;
+            w.entity().set(kin::Transform3D{}).set(rope);
+        }
+        bridge_box = block({-2.0f, 3.3f, 0.0f}, {0.35f, 0.12f, 0.8f}, kin::Color::rgb(220, 190, 90), true, 30.0f);
+        // The swing: a rope from a beam 9 m up made 25 degrees out, the person under its end.
+        block({8.0f, 9.1f, 0.0f}, {0.4f, 0.1f, 0.4f}, kin::Color::rgb(120, 100, 80));
+        {
+            kin::Rope3D rope;
+            rope.start = kin::RopeAttach3D::at({8.0f, 9.0f, 0.0f});
+            rope.end = kin::RopeAttach3D::free();
+            rope.length = 6.0f;
+            const float a = 25.0f * 3.14159265f / 180.0f;
+            rope.hang_direction = {std::sin(a), -std::cos(a), 0.0f};
+            rope.render = true;
+            rope.linear_damping = 0.0f;
+            rope.angular_damping = 0.1f;
+            swing_rope = w.entity().set(kin::Transform3D{}).set(rope);
+        }
+        // The winch: a rope from a gantry 6 m up to a 15 kg crate on the floor; reeled in from frame 120.
+        block({16.0f, 6.1f, 0.0f}, {0.4f, 0.1f, 0.4f}, kin::Color::rgb(120, 100, 80));
+        crate = block({16.0f, 0.35f, 0.0f}, {0.35f, 0.35f, 0.35f}, kin::Color::rgb(180, 120, 70), true, 15.0f);
+        {
+            kin::Rope3D rope;
+            rope.start = kin::RopeAttach3D::at({16.0f, 6.0f, 0.0f});
+            rope.end = kin::RopeAttach3D::on(crate, {0.0f, 0.35f, 0.0f});
+            rope.linear_damping = 0.5f;
+            rope.render = true;
+            winch_rope = w.entity().set(kin::Transform3D{}).set(rope);
+        }
+        // The person on the swing: the character (traversal on, stamina to spare), the locomotion animator, hands on the anchors.
+        bodies->sync_bodies();
+        const kin::Rope3D* sr = swing_rope.get<kin::Rope3D>();
+        (void)sr;
+        kin::CharacterController3D controller;
+        controller.desc.traversal.enabled = true;
+        controller.desc.traversal.resource.max = 1000.0f;
+        controller.input.forward = {0.0f, 0.0f, -1.0f};
+        controller.facing = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 180.0f);
+        kin::LocomotionClips3D clips;
+        kin::Animator3D animator = kin::locomotion_animator(clips);
+        for (const char* side : {"L", "R"}) {
+            kin::IKConstraint hand;
+            hand.name = std::string("hand_") + side;
+            hand.kind = kin::IKKind::TwoBone;
+            hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
+            hand.weight = 0.0f;
+            hand.fade_seconds = 0.12f;
+            hand.pole = kin::IKConstraint::Pole::ModelDirection;
+            hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
+            hand.two_bone.max_stretch = 1.05f;
+            animator.add_ik(hand);
+        }
+        kin::CharacterAnimationLink3D link;
+        link.hands = {"hand_L", "hand_R"};
+        link.hand_clearance = 0.05f;
+        // Under the swing rope's end (x = 8 + 6 sin 25), 1.5 below it, a hand's width in front.
+        const float a = 25.0f * 3.14159265f / 180.0f;
+        const Vec3f end{8.0f + 6.0f * std::sin(a), 9.0f - 6.0f * std::cos(a), 0.0f};
+        hero = w.entity()
+                   .set(kin::Transform3D{.position = end + Vec3f{0.0f, -1.5f, 0.45f}})
+                   .set(controller)
+                   .set(kin::SkinnedMeshRenderer{.model = person})
+                   .set(static_cast<const kin::Animator3D&>(animator))
+                   .set(link);
+        stepped = 0;
+    }
+
+    void make(kin::Renderer3D& r3d, const kin::JsonValue& doc, const fs::path& cache) {
+        debug = doc.find("debug") != nullptr && doc.bool_at("debug");
+        lead = static_cast<int>(doc.number_at("lead", 0));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        std::string error;
+        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        if (!model) {
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            return;
+        }
+        person = std::make_shared<const kin::Model>(std::move(model));
+        loaded = true;
+        reset();
+    }
+
+    void step_once() {
+        const int n = stepped;
+        kin::CharacterController3D* c = hero.get_mut<kin::CharacterController3D>();
+        if (n == 10) {
+            c->traversal.grab = {true, true};
+            c->traversal.reach = {0.0f, 0.5f, -1.0f};
+        }
+        if (n == 240) {
+            c->input.move = {0.0f, 1.0f}; // up the rope
+        }
+        if (n == 420) {
+            c->input.move = {0.0f, 0.0f};
+        }
+        if (n == 560) {
+            c->traversal.jump_off = true;
+        }
+        if (n == 562) {
+            c->traversal.jump_off = false;
+            c->traversal.grab = {false, false};
+        }
+        if (n == 120) {
+            kin::Rope3D* r = winch_rope.get_mut<kin::Rope3D>();
+            r->target_length = 2.2f;
+            r->reel_speed = 0.8f;
+        }
+        bodies->step(1.0f / 60.0f);
+        render->animate(1.0f / 60.0f);
+        ++stepped;
+    }
+
+    void advance_to(int steps) {
+        if (steps < stepped) {
+            reset();
+        }
+        while (stepped < steps) {
+            step_once();
+        }
+    }
+
+    void draw(kin::Renderer3D& r3d, kin::Scene3D& scene, int base, int time) {
+        if (!loaded) {
+            return;
+        }
+        advance_to(base + std::max(0, time));
+        for (const Block& b : blocks) {
+            // Dynamic ones are drawn where the world has them (their entity's transform).
+            Mat4f m = Mat4f::translation(b.centre);
+            if (b.entity.is_valid()) {
+                const kin::Transform3D* t = b.entity.get<kin::Transform3D>();
+                m = Mat4f::trs(t->position, t->rotation);
+            }
+            scene.draw(box_mesh, m * Mat4f::scaling(b.half * 2.0f), {.color = b.colour, .roughness = 0.85f});
+        }
+        render->propagate_transforms();
+        render->collect(scene);
+        bodies->collect_ropes(r3d, scene);
+        if (debug) {
+            kin::DebugDraw3DOptions look;
+            look.point_size = 0.05f;
+            kin::DebugDraw3D lines{look};
+            lines.world(*world);
+            debug_mesh = kin::draw_debug_lines(r3d, scene, lines.lines());
+        }
+    }
+};
+
 kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Placed& p : placed) {
@@ -1597,6 +2007,25 @@ int main(int argc, char** argv) {
                 continue;
             }
         }
+        PhysicsRagdoll ragdolls;
+        PhysicsRope ropes;
+        int physics_frame = 0; // the frame the current camera shows, for the ragdoll and rope scenes
+        const bool is_ragdoll = doc.string_at("procedural") == "physics_ragdoll";
+        const bool is_ropes = doc.string_at("procedural") == "physics_rope";
+        if (is_ragdoll) {
+            ragdolls.make(r3d, doc, cache);
+            if (!ragdolls.loaded) {
+                ++failures;
+                continue;
+            }
+        }
+        if (is_ropes) {
+            ropes.make(r3d, doc, cache);
+            if (!ropes.loaded) {
+                ++failures;
+                continue;
+            }
+        }
         const bool animated = doc.bool_at("animated") || (over.crowd_move && doc.string_at("procedural") == "crowd");
         std::array<std::vector<kin::MeshInstance>, 3> crowd_moved;
         const double load_ms = ms_since(load_start);
@@ -1647,6 +2076,8 @@ int main(int argc, char** argv) {
                                     : is_pile   ? kin::Bounds3{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
                                     : is_walker ? kin::Bounds3{{-2.0f, -0.5f, -30.0f}, {70.0f, 5.0f, 30.0f}}
                                     : is_climber ? kin::Bounds3{{-4.0f, -0.5f, -2.0f}, {64.0f, 7.0f, 6.0f}}
+                                    : is_ragdoll ? kin::Bounds3{{-14.0f, -0.5f, -8.0f}, {14.0f, 5.0f, 8.0f}}
+                                    : is_ropes   ? kin::Bounds3{{-6.0f, -0.5f, -4.0f}, {18.0f, 10.0f, 4.0f}}
                                                 : bounds_of(placed);
 
         // The view.
@@ -1800,6 +2231,12 @@ int main(int argc, char** argv) {
             if (is_climber) {
                 climber.draw(r3d, scene, climber_frame, time);
             }
+            if (is_ragdoll) {
+                ragdolls.draw(r3d, scene, physics_frame, time);
+            }
+            if (is_ropes) {
+                ropes.draw(r3d, scene, physics_frame, time);
+            }
             if (is_hidden) {
                 hidden.draw(scene);
             }
@@ -1836,6 +2273,9 @@ int main(int argc, char** argv) {
             }
             if (is_climber) {
                 climber_frame = static_cast<int>(c.number_at("frame", climber.lead));
+            }
+            if (is_ragdoll || is_ropes) {
+                physics_frame = static_cast<int>(c.number_at("frame", is_ragdoll ? ragdolls.lead : ropes.lead));
             }
             const auto pose = [&](int time) {
                 fill_scene(time);

@@ -210,6 +210,16 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   that is asked to hold and holds nothing can see. `--preset climb` plays a scripted climb of the first wall (both hands, 4 m up, a
   pull-up over the ledge) through the same command structs, which is what a headless run does (`--frames 420`); the keyboard and mouse
   path itself is not exercised by any test here (no display). It replaces the controller's level when both are on.
+- The "Ragdoll and rope (kin/physics3d, P2e)" section: `rag` puts a row of people (`rag_count`, each an entity with a `Ragdoll3D` made
+  from its skeleton at its rest pose) in front of the camera on the physics floor with the Sway clip. G knocks them down (the ragdolls
+  start, blending in over `rag_blend`, an impulse of `rag_hit` at the chest) and, the next time, gets them up (each is put where its pelvis
+  lies and the clip is blended back over a second); H throws a ball along the view, and what it touches starts that person's ragdoll with
+  the ball's momentum at the bone. The debug lines are the bones' capsules (green awake, blue asleep). `rope` hangs a rope from a beam
+  (`rope_length`) made 25 degrees out from the vertical, drawn as a tube, with a person under its end: Q and E (or the mouse buttons)
+  take hold with the left and the right hand, W and S climb, Space jumps off; stamina is a slider. `--preset ragdoll` and `--preset rope`
+  play both on a clock (the keys are not pressed by a headless run: `--frames 270` shows people lying, `--frames 420` the rope with the
+  person on it); the keyboard path itself is not exercised by any test here (no display), and the rope is thin to see at the viewer's
+  scale (the picture is of a person on a swing in Sponza's nave).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8

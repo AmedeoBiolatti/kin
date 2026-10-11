@@ -9016,6 +9016,331 @@ void test_gpu_physics_debug_lines() {
     });
 }
 
+// A ragdoll's pose reaches the render: the biped (the IK fixture, a red cube on the left hand) falls as a ragdoll in the physics
+// world and lies; the cube's centre in the picture is where the CPU's pose (the animator's world matrix of the hand joint) projects,
+// within a pixel and a half, at several moments of the fall, with the entity moved, turned and scaled; and with the share of
+// the ragdoll at 0 the picture is the clip's, byte for byte.
+void test_gpu_ragdoll_pose_reaches_render() {
+    with_gpu("test_gpu_ragdoll_pose_reaches_render", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+        struct Case {
+            const char* what;
+            kin::Transform3D transform;
+        };
+        const std::vector<Case> cases = {
+            {"upright start", {.position = {0.0f, 1.2f, 0.0f}}},
+            {"entity turned and scaled", {.position = {-0.3f, 1.0f, 0.0f}, .rotation = kin::Quatf::axis_angle({0, 1, 0}, 40.0f), .scale = {1.2f, 1.2f, 1.2f}}},
+        };
+        for (const Case& c : cases) {
+            kin::EcsWorld ecs;
+            kin::World3DConfig cfg;
+            cfg.single_threaded = true;
+            kin::World3D physics(cfg);
+            kin::WorldPhysicsState3D bodies{ecs, physics};
+            kin::WorldRenderState3D state{ecs};
+            ecs.raw().entity().set(kin::Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(kin::Collider3D{.kind = kin::Collider3D::Kind::Box, .half_extents = {6.0f, 0.5f, 6.0f}});
+            kin::Animator3D animator;
+            const flecs::entity e = ecs.raw().entity().set(c.transform).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator).set(kin::Ragdoll3D{});
+            const auto shoot = [&]() {
+                kin::Scene3D scene;
+                scene.camera = ik_scene::camera();
+                skin_lights(scene, 1);
+                state.propagate_transforms();
+                state.collect(scene);
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            bodies.sync_bodies();
+            // Animated: nothing of the ragdoll in the picture.
+            bodies.step(1.0f / 60.0f);
+            state.animate(1.0f / 60.0f);
+            const Pixels clip_pose = shoot();
+            assert(e.get<kin::Animator3D>()->pose_override.empty());
+            bodies.start_ragdoll(e, {.set_velocity = true, .velocity = {1.5f, 0.0f, 0.0f}});
+            float worst = 0.0f;
+            int moments = 0;
+            for (int i = 1; i <= 90; ++i) {
+                bodies.step(1.0f / 60.0f);
+                state.animate(1.0f / 60.0f);
+                if (i % 15 != 0) {
+                    continue;
+                }
+                const Pixels p = shoot();
+                const kin::Animator3D& a = *e.get<kin::Animator3D>();
+                assert(!a.pose_override.empty() && a.ik_world.size() == 18);
+                const Mat4f m = e.get<kin::Transform3D>()->matrix() * a.ik_world[static_cast<std::size_t>(skin_fixtures::biped::hand_l)];
+                const Vec3f hand{m.m[12], m.m[13], m.m[14]};
+                // The cube marker is centred a little off the joint (a cube round it): the centre of mass of its red pixels is the
+                // projection of the joint's place; where the marker is out of the view or hidden by the body, the moment is skipped.
+                const auto where = ik_scene::camera().project(hand, screen);
+                const ik_scene::Blob blob = ik_scene::red_blob(p);
+                if (!where || blob.count < 20) {
+                    continue;
+                }
+                const float error = std::hypot(blob.x - where->pos.x, blob.y - where->pos.y);
+                worst = std::max(worst, error);
+                ++moments;
+                if (i == 45) {
+                    dump(p, std::string{"ragdoll_pose_"} + std::to_string(&c - cases.data()));
+                }
+            }
+            std::cerr << "ragdoll pose, " << c.what << ": " << moments << " moments with the marker in view, the worst marker error " << worst << " px\n";
+            assert(moments >= 2 && worst < 1.5f);
+            (void)clip_pose;
+        }
+        // Blend 0: the picture is the clip's.
+        {
+            kin::EcsWorld ecs;
+            kin::World3DConfig cfg;
+            cfg.single_threaded = true;
+            kin::World3D physics(cfg);
+            kin::WorldPhysicsState3D bodies{ecs, physics};
+            kin::WorldRenderState3D state{ecs};
+            kin::Animator3D animator;
+            const flecs::entity with = ecs.raw().entity().set(kin::Transform3D{.position = {0.0f, 1.2f, 0.0f}}).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator).set(kin::Ragdoll3D{});
+            kin::EcsWorld plain_ecs;
+            kin::WorldRenderState3D plain_state{plain_ecs};
+            kin::Animator3D animator2;
+            plain_ecs.raw().entity().set(kin::Transform3D{.position = {0.0f, 1.2f, 0.0f}}).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator2);
+            bodies.sync_bodies();
+            bodies.step(1.0f / 60.0f);
+            state.animate(1.0f / 60.0f);
+            plain_state.animate(1.0f / 60.0f);
+            const auto shoot_of = [&](kin::WorldRenderState3D& st) {
+                kin::Scene3D scene;
+                scene.camera = ik_scene::camera();
+                skin_lights(scene, 1);
+                st.propagate_transforms();
+                st.collect(scene);
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            const Pixels a = shoot_of(state);
+            const Pixels b = shoot_of(plain_state);
+            assert(a.rgba == b.rgba);
+            // And with the whole share at 1, held with no physics at all (alpha 1 at once), the bodies' pose is drawn: it differs.
+            bodies.start_ragdoll(with, {});
+            for (int i = 0; i < 20; ++i) {
+                bodies.step(1.0f / 60.0f);
+                state.animate(1.0f / 60.0f);
+            }
+            const Pixels c = shoot_of(state);
+            assert(c.rgba != b.rgba);
+            // A blend 0 again (the share falls to 0): the clip's picture, byte for byte.
+            bodies.animate_ragdoll(with);
+            bodies.step(1.0f / 60.0f);
+            state.animate(1.0f / 60.0f);
+            plain_state.animate(1.0f / 60.0f);
+            const Pixels d = shoot_of(state);
+            const Pixels f = shoot_of(plain_state);
+            assert(d.rgba == f.rgba);
+            std::cerr << "ragdoll blend 0: the picture is the clip's byte for byte; the ragdoll's differs\n";
+        }
+    });
+}
+
+// The previous joint matrices include the ragdoll's pose: a ragdoll's fall under TAA gives, frame by frame, the picture of the same poses
+// played from a clip (baked from the ragdoll's own poses), whose history is the same as any skinned animation's.
+void test_gpu_ragdoll_taa_matches_clip() {
+    with_gpu("test_gpu_ragdoll_taa_matches_clip", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        const kin::Mesh floor = make_box(r3d, {8.0f, 0.2f, 8.0f});
+        const int steps = 16;
+        const float dt = 1.0f / 30.0f;
+        std::vector<kin::Pose> poses;
+        std::vector<Pixels> from_ragdoll, from_clip;
+        const auto draw = [&](kin::WorldRenderState3D& state, kin::View3D& view) {
+            kin::Scene3D scene;
+            scene.camera = ik_scene::camera();
+            skin_lights(scene, 1);
+            scene.taa = {.enabled = true};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+            state.propagate_transforms();
+            state.collect(scene);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::EcsWorld ecs;
+            kin::World3DConfig cfg;
+            cfg.single_threaded = true;
+            kin::World3D physics(cfg);
+            kin::WorldPhysicsState3D bodies{ecs, physics};
+            kin::WorldRenderState3D state{ecs};
+            kin::Animator3D animator;
+            const flecs::entity e = ecs.raw().entity().set(kin::Transform3D{.position = {0.0f, 0.9f, 0.0f}}).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator).set(kin::Ragdoll3D{});
+            bodies.sync_bodies();
+            bodies.start_ragdoll(e, {.set_velocity = true, .velocity = {0.8f, 0.0f, 0.0f}});
+            for (int i = 0; i < steps; ++i) {
+                bodies.step(dt);
+                state.animate(dt);
+                state.propagate_transforms();
+                state.apply_ik();
+                poses.push_back(e.get<kin::Animator3D>()->ik_pose);
+                from_ragdoll.push_back(draw(state, view));
+                assert(r3d.stats().skinned_copies == 2);
+            }
+        }
+        auto model = std::make_shared<kin::Model>(*biped.model);
+        {
+            const kin::Skeleton& sk = model->skeletons[0];
+            kin::AnimClip3D clip;
+            clip.name = "baked";
+            clip.duration = static_cast<float>(steps + 1) * dt;
+            clip.channels.resize(sk.joint_count());
+            for (std::size_t j = 0; j < sk.joint_count(); ++j) {
+                kin::JointChannels& ch = clip.channels[j];
+                for (int k = 0; k <= steps; ++k) {
+                    const kin::JointPose& jp = poses[static_cast<std::size_t>(std::max(k - 1, 0))].joints[j];
+                    const float t = static_cast<float>(k) * dt;
+                    ch.translation.times.push_back(t);
+                    ch.translation.values.push_back(jp.translation);
+                    ch.rotation.times.push_back(t);
+                    ch.rotation.values.push_back(jp.rotation);
+                    ch.scale.times.push_back(t);
+                    ch.scale.values.push_back(jp.scale);
+                }
+            }
+            model->clips.push_back(std::move(clip));
+        }
+        {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::EcsWorld ecs;
+            kin::WorldRenderState3D state{ecs};
+            // The entity at the same place: the poses are model-space, so the entity's transform is the ragdoll entity's.
+            ecs.raw().entity().set(kin::Transform3D{.position = {0.0f, 0.9f, 0.0f}}).set(kin::SkinnedMeshRenderer{.model = model}).set(kin::Animator3D{.clip = "baked"});
+            for (int i = 0; i < steps; ++i) {
+                state.animate(dt);
+                from_clip.push_back(draw(state, view));
+            }
+        }
+        int worst = 0;
+        for (int i = 0; i < steps; ++i) {
+            worst = std::max(worst, pixels_differing(from_ragdoll[static_cast<std::size_t>(i)], from_clip[static_cast<std::size_t>(i)], 4));
+        }
+        std::cerr << "ragdoll under taa: the ragdoll run and the baked clip differ in at most " << worst << " of 19200 pixels by more than 4 levels\n";
+        assert(worst <= 10);
+        dump(from_ragdoll.back(), "ragdoll_taa_last");
+    });
+}
+
+// A rope drawn as a tube: where its points project the pixels are the rope's (an unlit colour, a sliver of tube), nowhere else; off, the
+// picture is the one without the rope, byte for byte; on and lit, the rope casts a shadow on the floor.
+void test_gpu_rope_tube() {
+    with_gpu("test_gpu_rope_tube", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh floor = make_box(r3d, {8.0f, 0.2f, 8.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 12, 16)});
+        kin::EcsWorld ecs;
+        kin::World3DConfig cfg;
+        cfg.single_threaded = true;
+        kin::World3D physics(cfg);
+        kin::WorldPhysicsState3D bodies{ecs, physics};
+        kin::Rope3D rope;
+        rope.start = kin::RopeAttach3D::at({-1.5f, 2.5f, 0.0f});
+        rope.end = kin::RopeAttach3D::at({1.5f, 2.5f, 0.0f});
+        rope.length = 3.4f;
+        rope.radius = 0.06f;
+        rope.render = false;
+        rope.material = {.color = Color::rgb(255, 0, 255), .unlit = true};
+        const flecs::entity holder = ecs.raw().entity().set(kin::Transform3D{}).set(rope);
+        bodies.sync_bodies();
+        for (int i = 0; i < 120; ++i) {
+            bodies.step(1.0f / 60.0f);
+        }
+        const auto camera = kin::Camera3D::look_at({0.0f, 1.5f, 7.0f}, {0.0f, 1.8f, 0.0f}, 45.0f);
+        const auto shoot = [&](bool with_ropes, bool floor_too) {
+            kin::Scene3D scene;
+            scene.camera = camera;
+            scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            if (floor_too) {
+                scene.draw(floor, Mat4f::translation({0.0f, -0.2f, 0.0f}), {.color = Color::rgb(60, 60, 60), .unlit = true});
+            }
+            if (with_ropes) {
+                bodies.collect_ropes(r3d, scene);
+            }
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const auto magenta = [](const Pixels& p) {
+            int n = 0;
+            for (int y = 0; y < p.size.y; ++y) {
+                for (int x = 0; x < p.size.x; ++x) {
+                    const Color c = p.at(x, y);
+                    n += c.r > 200 && c.g < 80 && c.b > 200 ? 1 : 0;
+                }
+            }
+            return n;
+        };
+        // Off by default: nothing drawn, the picture is the empty one.
+        const Pixels none = shoot(false, true);
+        const Pixels off = shoot(true, true);
+        assert(none.rgba == off.rgba && magenta(off) == 0);
+        // On: the tube is where the points are.
+        holder.get_mut<kin::Rope3D>()->render = true;
+        bodies.step(1.0f / 60.0f);
+        const Pixels on = shoot(true, false);
+        const int count = magenta(on);
+        const std::vector<kin::RopePoint3D>& pts = holder.get<kin::Rope3D>()->points();
+        assert(pts.size() > 10);
+        int hit = 0;
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            const auto where = camera.project(pts[i].position, screen);
+            assert(where.has_value());
+            bool found = false;
+            for (int dy = -2; dy <= 2 && !found; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    const int x = static_cast<int>(where->pos.x) + dx, y = static_cast<int>(where->pos.y) + dy;
+                    if (x >= 0 && y >= 0 && x < on.size.x && y < on.size.y) {
+                        const Color c = on.at(x, y);
+                        found = found || (c.r > 200 && c.g < 80 && c.b > 200);
+                    }
+                }
+            }
+            hit += found ? 1 : 0;
+        }
+        std::cerr << "rope tube: " << count << " magenta pixels, " << hit << " of " << pts.size() << " joints have the tube at their projection\n";
+        assert(count > 120 && hit == static_cast<int>(pts.size()));
+        dump(on, "rope_tube");
+        // Lit, with the sun: it casts a shadow on the floor under it (its own pixels differ with and without `casts_shadow`).
+        const auto lit = [&](bool casts) {
+            holder.get_mut<kin::Rope3D>()->material = {.color = Color::rgb(200, 160, 100), .casts_shadow = casts};
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 45.0f);
+            scene.lights.sun = {.direction = {0.1f, 1.0f, 0.2f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+            scene.lights.shadow_area = kin::Bounds3{{-6, -1, -6}, {6, 4, 6}};
+            scene.lights.shadow_resolution = 1024;
+            scene.draw(floor, Mat4f::translation({0.0f, -0.2f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            bodies.collect_ropes(r3d, scene);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels shadowed = lit(true);
+        const Pixels unshadowed = lit(false);
+        const int differing = pixels_differing(shadowed, unshadowed, 8);
+        std::cerr << "rope shadow: " << differing << " pixels differ with the rope's shadow on or off\n";
+        assert(differing > 40);
+        dump(shadowed, "rope_shadow");
+    });
+}
+
 const char* test_filter = nullptr;
 bool selected(const char* name) { return !test_filter || std::strstr(name, test_filter) != nullptr; }
 #define RUN(test) \
@@ -9155,5 +9480,8 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ik_limits_fabrik_locking_toes());
     RUN(test_gpu_skinned_everything());
     RUN(test_gpu_physics_debug_lines());
+    RUN(test_gpu_ragdoll_pose_reaches_render());
+    RUN(test_gpu_ragdoll_taa_matches_clip());
+    RUN(test_gpu_rope_tube());
     return 0;
 }

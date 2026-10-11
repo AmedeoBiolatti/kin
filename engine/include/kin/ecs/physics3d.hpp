@@ -41,6 +41,15 @@
 //    MantleStarted, MantleFinished, MantleBlocked, Fell) come with the character events, with entity ids in `user_id` and
 //    `body_user_id`. With a CharacterAnimationLink3D that names hand constraints, the hands of the model are put on the
 //    anchors by IK (weight fades while they reach, hold and let go) and the character faces what it hangs from.
+//  * Ragdolls (kin/physics3d/ragdoll3d.hpp): an entity with Transform3D, SkinnedMeshRenderer and Ragdoll3D gets a ragdoll,
+//    made after the characters in ascending entity id order, from the model's skeleton (auto_ragdoll_desc) at its rest pose
+//    placed by the entity. Its bodies are kinematic and follow the animator's clip pose until `start_ragdoll`; the
+//    pose of the bodies is then written into the Animator3D's `pose_override` after each step (and by `interpolate`), which
+//    WorldRenderState3D applies after the clips and IK and before the joint matrices. `hand_over_to_ragdoll` takes a
+//    character from controller to ragdoll (its capsule is disabled and follows the pelvis's ground point) and
+//    `recover_from_ragdoll` back (a clearance check; refused with a Blocked event when there is no room).
+//  * Ropes (kin/physics3d/rope3d.hpp): an entity with Rope3D gets a rope, made after the ragdolls. `Rope3D::points()`,
+//    `closest_point` and `tension` read what the last step left; `render` draws it as a tube (collect_ropes).
 
 #if !defined(KIN_EXPERIMENTAL_3D)
 #error "kin's 3D physics is experimental: configure kin with -DKIN_EXPERIMENTAL_3D=ON"
@@ -55,6 +64,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace kin {
@@ -181,6 +191,126 @@ struct CharacterAnimationLink3D {
     Layer3DMask ground_mask = all_layers3d & ~layer_bit(layers3d::Character) & ~layer_bit(layers3d::Sensor);
 };
 
+// A ragdoll on a skinned entity (see the rules at the top). `desc` is read when the ragdoll is made; with no bones it is made
+// from the model's skeleton at its rest pose by auto_ragdoll_desc with `auto_options`. Commands go through
+// WorldPhysicsState3D (start_ragdoll, ragdoll_get_up, ...); `state` is what the last step left.
+struct Ragdoll3D {
+    RagdollDesc desc;
+    AutoRagdollOptions auto_options;
+    // Written by the system.
+    RagdollState3D state;
+};
+
+// The ragdoll made for an entity (set by the system, as PhysicsBody3D is).
+struct PhysicsRagdoll3D {
+    RagdollHandle3D ragdoll{};
+};
+
+// The ragdoll events of the last step (and of calls since), on the ECS world as a singleton too (user ids are entity ids).
+struct RagdollEvents3D {
+    std::vector<RagdollEvent3D> events;
+};
+
+// What hand_over_to_ragdoll does: the character's velocity becomes every body's, plus an optional impulse at a bone.
+struct RagdollHandOver3D {
+    f32 blend_seconds = 0.1f;
+    bool inherit_velocity = true;
+    i32 impulse_bone = -1;
+    Vec3f impulse{};
+    Vec3f impulse_point{};
+    bool point_given = false;
+};
+
+// What recover_from_ragdoll needs: how long the blend back to the clip takes, how far below the pelvis to look for ground, the
+// layers that are ground and obstacles, and how much of the capsule's volume may overlap something (a hair).
+struct RagdollRecover3D {
+    f32 get_up_seconds = 0.8f;
+    f32 max_ground_distance = 3.0f;
+    Layer3DMask mask = all_layers3d & ~layer_bit(layers3d::Character) & ~layer_bit(layers3d::Sensor);
+    f32 allowed_penetration = 0.01f;
+};
+
+struct RagdollRecoverResult3D {
+    bool recovered = false;
+    // Refused: no ground was found under the pelvis, or the standing capsule does not fit there.
+    bool blocked = false;
+    RagdollPlace3D place{};
+};
+
+// What one end of a rope is fixed to (the entity form of RopeAnchor3D).
+struct RopeAttach3D {
+    enum class Kind : u8 {
+        Free,   // nothing; where it starts (the first end) is `point` in the rope entity's space
+        World,  // a point of the world
+        Entity, // a point of another entity's body, in that body's own space (the entity needs a Collider3D)
+    };
+    Kind kind = Kind::Free;
+    Vec3f point{};
+    flecs::entity_t entity = 0;
+
+    static RopeAttach3D free(Vec3f offset = {}) { return {Kind::Free, offset, 0}; }
+    static RopeAttach3D at(Vec3f world_point) { return {Kind::World, world_point, 0}; }
+    static RopeAttach3D on(flecs::entity e, Vec3f offset = {}) { return {Kind::Entity, offset, e.id()}; }
+};
+
+// A rope on an entity (the rules are at the top; the fields are RopeDesc3D's). Read when the rope is made (`rebuild(entity)`
+// makes it again), except `target_length` and `reel_speed`, which are read each step.
+struct Rope3D {
+    RopeAttach3D start{};
+    RopeAttach3D end{};
+    f32 length = 0.0f;
+    u32 segments = 0;
+    f32 segment_length = 0.25f;
+    f32 radius = 0.04f;
+    f32 mass_per_metre = 1.0f;
+    f32 friction = 0.6f;
+    f32 linear_damping = 0.02f;
+    f32 angular_damping = 0.6f;
+    Vec3f sag_direction{};
+    Vec3f hang_direction{};
+    u8 layer = layers3d::Dynamic;
+    bool collide_world = true;
+    bool self_collision = false;
+    bool continuous = false;
+    u32 velocity_steps = 0;
+    u32 position_steps = 0;
+    f32 break_tension = 0.0f;
+
+    // Each step: a length at or above 0 is moved toward at `reel_speed` m/s (0: at once). A winch sets these.
+    f32 target_length = -1.0f;
+    f32 reel_speed = 0.0f;
+
+    // Drawing (collect_ropes): a round tube of `sides` sides along the points, `render_radius` thick (0: the rope's own).
+    bool render = false;
+    Material3D material{.color = Color::rgb(150, 112, 70), .roughness = 0.9f};
+    Color tint = colors::white;
+    f32 render_radius = 0.0f;
+    u32 sides = 6;
+
+    // Written by the system, as the last step left it.
+    RopeState3D state;
+    f32 tension_start = 0.0f;
+    f32 tension_end = 0.0f;
+    std::vector<RopePoint3D> sampled;
+
+    // The polyline: state.segments + 1 joints with the direction at each.
+    const std::vector<RopePoint3D>& points() const { return sampled; }
+    // The closest point of the polyline to `point`: segment, parameter along it, distance.
+    std::optional<RopeClosest3D> closest_point(Vec3f point) const;
+    // The force on an anchor along the rope (N, positive when it pulls the anchor toward the rope).
+    f32 tension(RopeEnd3D end) const { return end == RopeEnd3D::Start ? tension_start : tension_end; }
+};
+
+// The rope made for an entity (set by the system).
+struct PhysicsRope3D {
+    RopeHandle3D rope{};
+};
+
+// The rope events of the last step (a joint broke), on the ECS world as a singleton too (user ids are entity ids).
+struct RopeEvents3D {
+    std::vector<RopeEvent3D> events;
+};
+
 struct WorldPhysicsState3DConfig {
     // advance() steps in whole multiples of this, the way the engine's fixed step does.
     f32 fixed_dt = 1.0f / 60.0f;
@@ -232,6 +362,32 @@ public:
     std::size_t character_count() const { return _characters.size(); }
     // The limbs and resource of an entity's character as the last step left them (a default state for none).
     TraversalState3D traversal_of(flecs::entity entity) const;
+    // --- ragdolls (the entity needs Ragdoll3D, a SkinnedMeshRenderer with a model and Transform3D; these return false for
+    // an entity that has no ragdoll yet: step() or sync_bodies() makes it)
+    RagdollHandle3D ragdoll_of(flecs::entity entity) const;
+    bool start_ragdoll(flecs::entity entity, const RagdollStart3D& start = {});
+    bool blend_ragdoll(flecs::entity entity, f32 alpha, f32 seconds);
+    bool ragdoll_get_up(flecs::entity entity, f32 seconds);
+    bool animate_ragdoll(flecs::entity entity);
+    // The bone of the joint called `joint_name` and the bones below it get `weight`, the others 0: a partial ragdoll.
+    bool set_ragdoll_subtree(flecs::entity entity, std::string_view joint_name, f32 weight = 1.0f);
+    // From controller to ragdoll: the character's capsule is disabled (it collides with nothing and follows the pelvis's
+    // ground point each step, so that the entity's Transform3D does too), the bodies take its velocity and the ragdoll starts.
+    bool hand_over_to_ragdoll(flecs::entity entity, const RagdollHandOver3D& options = {});
+    // Back: finds the ground under the pelvis and checks that the standing capsule fits there. When it does, the character is
+    // enabled there facing the way the pelvis says (`facing` is set), the ragdoll blends back to the clip and the result is
+    // `recovered`. When it does not, nothing changes, a Blocked event is made and the result is `blocked`.
+    RagdollRecoverResult3D recover_from_ragdoll(flecs::entity entity, const RagdollRecover3D& options = {});
+    // The ragdoll events of the last step and of the calls since (entity ids in `user_id`).
+    std::span<const RagdollEvent3D> ragdoll_events() const { return _ragdoll_events; }
+
+    // --- ropes
+    RopeHandle3D rope_of(flecs::entity entity) const;
+    // Draws every rope with `render` set as a tube of its own material (one mesh a material, remade each call and kept until the
+    // next, so that the GPU is done with it). Call it with the frame's scene after step() or advance().
+    void collect_ropes(Renderer3D& renderer, Scene3D& scene);
+    std::span<const RopeEvent3D> rope_events() const { return _rope_events; }
+
     // The entity a user id of an event is (invalid when it is gone).
     flecs::entity entity_of(u64 user_id) const;
     // The body of an entity (invalid when it has none yet).
@@ -280,15 +436,51 @@ private:
     void characters_from_world();
     void write_character(BoundCharacter& c, Vec3f feet);
 
+    struct BoundRagdoll {
+        flecs::entity_t entity = 0;
+        RagdollHandle3D ragdoll{};
+        // The joint of each desc bone, the skeleton's joint count, and the bodies' poses of the last two steps.
+        std::vector<i32> joint;
+        u32 joints = 0;
+        std::vector<RagdollBonePose3D> previous, current;
+        bool handed_over = false;
+        bool rebuild = false;
+    };
+    void sync_ragdolls();
+    void ragdolls_to_world();
+    void ragdolls_from_world();
+    void write_pose_override(BoundRagdoll& r, f32 alpha);
+    BoundRagdoll* bound_ragdoll(flecs::entity entity);
+    const BoundRagdoll* bound_ragdoll(flecs::entity entity) const;
+
+    struct BoundRope {
+        flecs::entity_t entity = 0;
+        RopeHandle3D rope{};
+        f32 applied_target = -1.0f;
+        f32 applied_speed = 0.0f;
+        bool rebuild = false;
+    };
+    void sync_ropes();
+    void ropes_to_world();
+    void ropes_from_world();
+
     flecs::world _ecs;
     World3D& _physics;
     WorldPhysicsState3DConfig _config;
     flecs::query<const Transform3D, const Collider3D, const RigidBody3D*> _query;
     flecs::query<const Transform3D, const CharacterController3D> _character_query;
+    flecs::query<const Transform3D, const SkinnedMeshRenderer, const Ragdoll3D> _ragdoll_query;
+    flecs::query<const Rope3D> _rope_query;
     std::vector<Bound> _bound; // ascending entity id
     std::vector<BoundCharacter> _characters; // ascending entity id
     std::vector<ContactEvent3D> _events;
     std::vector<CharacterEvent3D> _character_events;
+    std::vector<BoundRagdoll> _ragdolls; // ascending entity id
+    std::vector<BoundRope> _ropes;       // ascending entity id
+    std::vector<RagdollEvent3D> _ragdoll_events;
+    std::vector<RopeEvent3D> _rope_events;
+    std::vector<Mesh> _rope_meshes;      // the tubes of the last collect_ropes
+    std::vector<Mat4f> _pose_scratch;
     f32 _accumulator = 0.0f;
     DebugDraw3D _debug;
     Mesh _debug_mesh; // the lines of the last collect_debug, kept so the GPU is done with them before they go

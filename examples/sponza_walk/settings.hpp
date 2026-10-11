@@ -175,6 +175,24 @@ struct Settings {
     float climb_reach = 0.95f;  // the arm's reach, m
     float climb_stamina = 100.0f; // the resource's size: it drains by the mode (hanging 7 or 12 a second, sprinting 20)
     float climb_distance = 4.0f;  // the camera behind it, m
+    // Ragdolls (kin/physics3d, P2e): `rag_count` people stand in a row in front of the camera on the physics floor, each with a
+    // Ragdoll3D made from its skeleton. G knocks them down (their ragdolls start, blending in over `rag_blend`) and gets them up
+    // (the clip blended back, put where the pelvis lies); H throws a ball along the view (what it hits starts its ragdoll).
+    // `rag_demo` plays that by itself (a headless run).
+    bool rag = false;
+    bool rag_debug = true;      // the bones' capsules and the contacts as lines
+    bool rag_demo = false;
+    int rag_count = 3;
+    float rag_blend = 0.15f;    // seconds the pose takes to go from the clip to the bodies
+    float rag_hit = 60.0f;      // N s at a knocked-down person's chest (G)
+    // Rope (kin/physics3d, P2e): a rope hung from a beam 25 degrees out from the vertical, drawn as a tube, with a person under
+    // its end that takes hold with both hands (Q and E or the mouse buttons, as the climb), climbs (W, S), swings and jumps
+    // off (Space). `rope_demo` plays a scripted climb and jump off, over and over.
+    bool rope = false;
+    bool rope_debug = false;    // the segments' capsules
+    bool rope_demo = false;
+    float rope_length = 6.0f;
+    float rope_stamina = 400.0f;
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

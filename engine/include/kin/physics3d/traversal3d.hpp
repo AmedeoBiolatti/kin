@@ -53,6 +53,7 @@ enum class GripKind3D : u8 {
     Surface, // any grippable collider, where the hand met it
     Ledge,   // the top edge of a body, found by a ray down past it, with room above for the capsule when `clear`
     Hold,    // a body marked with HoldDesc3D: its own quality, and a fixed grip point when it says so
+    Rope,    // a point of a rope (rope3d.hpp): the anchor is a segment's body and a place along it, as a share of its length
 };
 
 enum class GripPhase3D : u8 {

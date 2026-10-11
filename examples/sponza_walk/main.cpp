@@ -108,6 +108,8 @@ const std::map<std::string, std::string>& presets() {
         {"physics", "physics=on,phys_debug=on,phys_count=30"}, // Jolt boxes on a floor, thrown once when it goes on, with debug lines (P2b)
         {"controller", "ctrl=on,ctrl_demo=on,ctrl_debug=on"}, // a person walks the test level by a scripted route, camera behind (P2c)
         {"climb", "climb=on,climb_demo=on,climb_debug=on"}, // a person climbs a wall and pulls up over its ledge (P2d)
+        {"ragdoll", "rag=on,rag_demo=on,rag_debug=on,rag_count=4"}, // people knocked down, lying, getting up, a ball thrown (P2e)
+        {"rope", "rope=on,rope_demo=on"},                          // a person takes hold of a rope, climbs, swings, lets go (P2e)
         {"ik-all", "character=on,char_count=3,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
     };
     return p;
@@ -538,6 +540,21 @@ private:
         button("climb_respawn", "Back to the start", _h.respawn);
         note("Mouse buttons (or Q, E): left, right hand. Aim with the view");
         note("WASD walk; hanging: along and up. Space jump / jump off, F pull up, X let go");
+
+        section("Ragdoll and rope (kin/physics3d, P2e)");
+        check("rag", "Ragdolls on (people in a row in front of you)", s.rag);
+        check("rag_debug", "Debug lines (the bones' capsules, contacts)", s.rag_debug);
+        check("rag_demo", "Scripted (knocked down, up again, a ball)", s.rag_demo);
+        islider("rag_count", "People", s.rag_count, 1, 6);
+        slider("rag_blend", "Blend into the ragdoll (s)", s.rag_blend, 0.0f, 1.0f);
+        slider("rag_hit", "Push at the chest (N s)", s.rag_hit, 0.0f, 200.0f);
+        note("G: knock down / get up. H: throw a ball along the view");
+        check("rope", "Rope on (a swing, a person under it)", s.rope);
+        check("rope_debug", "Debug lines (the segments)", s.rope_debug);
+        check("rope_demo", "Scripted (take hold, climb, jump off)", s.rope_demo);
+        slider("rope_length", "Rope length (m)", s.rope_length, 3.0f, 9.0f);
+        slider("rope_stamina", "Stamina (units)", s.rope_stamina, 10.0f, 1000.0f);
+        note("Q, E (or the mouse buttons): left, right hand. W, S climb; Space jumps off");
 
         section("Debug", true);
         check("stats", "Stats (F3)", s.stats);
@@ -1080,13 +1097,23 @@ private:
         if (_s.climb && _s.ctrl) _s.ctrl = false; // (the two levels would stand on each other)
         if (!_s.ctrl && _ctrl_hero.is_valid()) remove_controller();
         if (!_s.climb && _climb_hero.is_valid()) remove_climb();
+        if (!_s.rag && !_rag_people.empty()) remove_ragdolls();
+        if (!_s.rope && _rope_hero.is_valid()) remove_rope();
         if (!_s.physics) {
             if (!_boxes.empty()) clear_boxes();
         }
-        if (!_s.physics && !_s.ctrl && !_s.climb) {
+        if (!_s.physics && !_s.ctrl && !_s.climb && !_s.rag && !_s.rope) {
             return;
         }
         ensure_physics();
+        if (_s.rag) {
+            ensure_ragdolls();
+            drive_ragdolls(dt);
+        }
+        if (_s.rope) {
+            ensure_rope();
+            drive_rope(dt);
+        }
         if (_s.physics && !_physics_started) { // the first volley when the switch goes on (so a headless run has something to show)
             _physics_started = true;
             throw_boxes();
@@ -1126,6 +1153,246 @@ private:
             follow_climb(dt);
             if (!_s.character) _ecs_state->animate(dt);
         }
+        if (_s.rope && _rope_hero.is_valid()) {
+            follow_rope(dt);
+        }
+        if ((_s.rag || _s.rope) && !_s.character && !(_s.ctrl && _ctrl_hero.is_valid()) && !(_s.climb && _climb_hero.is_valid())) {
+            _ecs_state->animate(dt);
+        }
+    }
+
+    // --- ragdolls and a rope (P2e) ------------------------------------------------------------------------------------------
+    // People (entities with a Ragdoll3D, made from the skeleton at its rest pose) stand in a row in front of the camera on the
+    // physics floor with the Sway clip playing; G starts their ragdolls (an impulse at the chest) and, the next time, gets them up
+    // (each is put where its pelvis lies and the clip is blended back); H throws a ball along the view. A headless run cannot
+    // press anything: `rag_demo` plays the same calls on a clock. The rope hangs from a beam, made 25 degrees out from the
+    // vertical, drawn as a tube; the person under its end uses the climb's commands.
+    void ensure_ragdolls() {
+        if (!_r3d->capabilities().skinning || !_rag_people.empty()) return;
+        if (!_person_model) _person_model = make_person(*_r3d);
+        if (!_ball_mesh) _ball_mesh = _r3d->create_mesh(meshes::sphere(1.0f, 32, 16));
+        const int n = std::clamp(_s.rag_count, 1, 6);
+        const Vec3f origin{_pos.x, 0.0f, _pos.z - 3.5f};
+        for (int i = 0; i < n; ++i) {
+            Animator3D animator;
+            animator.clip = "Sway";
+            const Vec3f at = origin + Vec3f{2.4f * (float(i) - 0.5f * float(n - 1)), 0.0f, 0.0f};
+            _rag_people.push_back(_ecs->raw().entity()
+                                      .set(Transform3D{.position = at, .rotation = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 180.0f)})
+                                      .set(SkinnedMeshRenderer{.model = _person_model})
+                                      .set(static_cast<const Animator3D&>(animator))
+                                      .set(Ragdoll3D{}));
+        }
+        _rag_time = 0.0f;
+        _rag_down = false;
+        _yaw = 0.0f;
+        _pitch = -10.0f;
+    }
+
+    void remove_ragdolls() {
+        for (flecs::entity e : _rag_people) {
+            if (e.is_valid() && e.is_alive()) e.destruct();
+        }
+        _rag_people.clear();
+        if (_rag_ball.valid() && _physics) _physics->destroy_body(_rag_ball);
+        _rag_ball = {};
+    }
+
+    void rag_knock_down() {
+        const float chest = _s.rag_hit;
+        for (flecs::entity e : _rag_people) {
+            const RagdollHandle3D r = _bodies->ragdoll_of(e);
+            const RagdollDesc* d = _physics->ragdoll_desc(r);
+            int bone = 0;
+            if (d != nullptr) {
+                const SkinnedMeshRenderer* sk = e.get<SkinnedMeshRenderer>();
+                const i32 j = sk != nullptr ? sk->model->skeletons[0].find("chest") : -1;
+                for (std::size_t b = 0; b < d->bones.size(); ++b) {
+                    if (d->bones[b].joint == j) bone = static_cast<int>(b);
+                }
+            }
+            _bodies->start_ragdoll(e, {.blend_seconds = _s.rag_blend, .impulse_bone = bone, .impulse = {chest * 0.6f, chest * 0.2f, -chest}});
+        }
+        _rag_down = true;
+    }
+
+    void rag_get_up() {
+        for (flecs::entity e : _rag_people) {
+            // Where it lies: put at the pelvis's ground point, facing by it, then the clip is blended in over a second.
+            const RagdollPlace3D place = _physics->ragdoll_get_up_place(_bodies->ragdoll_of(e));
+            if (place.found) {
+                Transform3D* t = e.get_mut<Transform3D>();
+                t->position = place.position;
+                t->rotation = place.rotation;
+            }
+            _bodies->ragdoll_get_up(e, 1.0f);
+        }
+        _rag_down = false;
+    }
+
+    void throw_ball() {
+        if (!_physics) return;
+        if (_rag_ball.valid()) _physics->destroy_body(_rag_ball);
+        const Camera3D c = camera();
+        _rag_ball = _physics->create_body({.shape = Shape3D::sphere(0.2f), .motion = Body3DMotion::Dynamic, .position = c.position + c.forward() * 1.0f,
+                                           .linear_velocity = c.forward() * 16.0f, .mass = 6.0f, .friction = 0.5f, .gravity_factor = 0.4f,
+                                           .continuous = true});
+    }
+
+    void drive_ragdolls(float dt) {
+        if (_rag_people.empty()) return;
+        _rag_time += dt;
+        if (_s.rag_demo) {
+            // 12 s: standing, a ball at 1.5 s, knocked down at 3 s, up at 8 s.
+            const float s = std::fmod(_rag_time, 12.0f);
+            if (s < dt) {
+                if (_rag_down) rag_get_up();
+            }
+            if (std::fabs(s - 1.5f) < dt * 0.5f) throw_ball_at_row();
+            if (std::fabs(s - 3.0f) < dt * 0.5f && !_rag_down) rag_knock_down();
+            if (std::fabs(s - 8.0f) < dt * 0.5f && _rag_down) rag_get_up();
+        } else if (_input != nullptr && _captured) {
+            if (_input->frame_pressed(Key::G)) {
+                if (_rag_down) rag_get_up();
+                else rag_knock_down();
+            }
+            if (_input->frame_pressed(Key::H)) throw_ball();
+        }
+        // A ball's first touch of a person starts that person's ragdoll, the momentum at the bone it hit.
+        if (_rag_ball.valid() && _bodies) {
+            for (const ContactEvent3D& e : _bodies->events()) {
+                if (e.kind != ContactKind3D::Begin) continue;
+                const Body3D other = e.a == _rag_ball ? e.b : (e.b == _rag_ball ? e.a : Body3D{});
+                if (!other.valid()) continue;
+                for (flecs::entity person : _rag_people) {
+                    const std::vector<Body3D> bs = _physics->ragdoll_bodies(_bodies->ragdoll_of(person));
+                    const auto found = std::find(bs.begin(), bs.end(), other);
+                    if (found == bs.end() || _physics->ragdoll_state(_bodies->ragdoll_of(person)).mode != RagdollMode3D::Animated) continue;
+                    _bodies->start_ragdoll(person, {.blend_seconds = 0.05f, .impulse_bone = static_cast<int>(found - bs.begin()),
+                                                    .impulse = _physics->linear_velocity(_rag_ball) * 2.5f, .impulse_point = e.point,
+                                                    .point_given = true});
+                }
+            }
+        }
+    }
+
+    // The demo's ball: from the left of the row, along it, at chest height.
+    void throw_ball_at_row() {
+        if (!_physics || _rag_people.empty()) return;
+        if (_rag_ball.valid()) _physics->destroy_body(_rag_ball);
+        const Transform3D* first = _rag_people.front().get<Transform3D>();
+        const Transform3D* last = _rag_people.back().get<Transform3D>();
+        const float left = std::min(first->position.x, last->position.x) - 6.0f;
+        const float z = first->position.z;
+        _rag_ball = _physics->create_body({.shape = Shape3D::sphere(0.2f), .motion = Body3DMotion::Dynamic, .position = {left, 1.3f, z},
+                                           .linear_velocity = {16.0f, 0.5f, 0.0f}, .mass = 6.0f, .friction = 0.5f, .gravity_factor = 0.3f,
+                                           .continuous = true});
+    }
+
+    void ensure_rope() {
+        if (!_r3d->capabilities().skinning || _rope_hero.is_valid()) return;
+        if (!_person_model) _person_model = make_person(*_r3d);
+        if (!_box_mesh) _box_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
+        const Vec3f beam{_pos.x + 1.0f, 0.0f, _pos.z - 3.5f};
+        const float a = 25.0f * pi / 180.0f;
+        const float length = _s.rope_length;
+        const float top = length * std::cos(a) + 2.5f; // the end 2.5 m up
+        _rope_beam = Vec3f{beam.x, top, beam.z};
+        Rope3D rope;
+        rope.start = RopeAttach3D::at(_rope_beam);
+        rope.end = RopeAttach3D::free();
+        rope.length = length;
+        rope.hang_direction = {std::sin(a), -std::cos(a), 0.0f};
+        rope.linear_damping = 0.0f;
+        rope.angular_damping = 0.1f;
+        rope.render = true;
+        rope.render_radius = 0.045f;
+        _rope_entity = _ecs->raw().entity().set(Transform3D{}).set(rope);
+        // The person under the end of it (a hand's width in front, the hands at the rope).
+        const Vec3f end = _rope_beam + Vec3f{length * std::sin(a), -length * std::cos(a), 0.0f};
+        Animator3D animator = locomotion_animator({.idle = "Sway", .walk = "Walk", .run = "Run", .fall = "Fall"});
+        for (const char* side : {"L", "R"}) {
+            IKConstraint hand;
+            hand.name = std::string("hand_") + side;
+            hand.kind = IKKind::TwoBone;
+            hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
+            hand.weight = 0.0f;
+            hand.fade_seconds = 0.12f;
+            hand.pole = IKConstraint::Pole::ModelDirection;
+            hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
+            hand.two_bone.max_stretch = 1.05f;
+            animator.add_ik(hand);
+        }
+        CharacterController3D controller;
+        controller.desc.traversal.enabled = true;
+        controller.desc.traversal.resource.max = _s.rope_stamina;
+        controller.input.forward = {0.0f, 0.0f, -1.0f};
+        controller.facing = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 180.0f);
+        CharacterAnimationLink3D link;
+        link.hands = {"hand_L", "hand_R"};
+        link.hand_clearance = 0.05f;
+        _rope_start = end + Vec3f{0.0f, -1.5f, 0.45f};
+        _rope_hero = _ecs->raw().entity()
+                         .set(Transform3D{.position = _rope_start})
+                         .set(controller)
+                         .set(SkinnedMeshRenderer{.model = _person_model})
+                         .set(static_cast<const Animator3D&>(animator))
+                         .set(link);
+        _rope_time = 0.0f;
+        _yaw = 0.0f;
+        _pitch = 0.0f;
+    }
+
+    void remove_rope() {
+        if (_rope_hero.is_valid() && _rope_hero.is_alive()) _rope_hero.destruct();
+        if (_rope_entity.is_valid() && _rope_entity.is_alive()) _rope_entity.destruct();
+        _rope_hero = {};
+        _rope_entity = {};
+    }
+
+    void drive_rope(float dt) {
+        if (!_rope_hero.is_valid() || !_rope_hero.is_alive()) return;
+        CharacterController3D* c = _rope_hero.get_mut<CharacterController3D>();
+        _rope_time += dt;
+        CharacterInput3D in;
+        TraversalInput3D t;
+        in.forward = camera().forward();
+        t.reach = camera().forward();
+        if (_s.rope_demo) {
+            // 16 s: take hold at 0.3, climb from 4 to 8, hang, jump off at 13, and again (it is put back at the start).
+            const float s = std::fmod(_rope_time, 16.0f);
+            in.forward = {0.0f, 0.0f, -1.0f};
+            t.reach = {0.0f, 0.5f, -1.0f};
+            t.grab = {s > 0.3f && s < 13.2f, s > 0.3f && s < 13.2f};
+            in.move = {0.0f, s > 4.0f && s < 8.0f ? 1.0f : 0.0f};
+            t.jump_off = s > 13.0f && s < 13.1f;
+            if (s < dt && _rope_time > 1.0f) {
+                _rope_hero.get_mut<Transform3D>()->position = _rope_start; // a move by game code is a teleport
+                _physics->set_traversal_resource(_bodies->character_of(_rope_hero), _s.rope_stamina);
+            }
+        } else if (_input != nullptr && _captured) {
+            const Input& k = *_input;
+            in.move = {float(k.held(Key::D)) - float(k.held(Key::A)), float(k.held(Key::W)) - float(k.held(Key::S))};
+            in.jump = k.held(Key::Space);
+            t.jump_off = k.held(Key::Space);
+            t.grab = {k.mouse_held(MouseButton::Left) || k.held(Key::Q), k.mouse_held(MouseButton::Right) || k.held(Key::E)};
+        }
+        c->input = in;
+        c->traversal = t;
+        if (c->state.traversal_mode == TraversalMode3D::Walking) {
+            const Vec3f fwd = normalize(Vec3f{in.forward.x, 0.0f, in.forward.z});
+            const Vec3f right{-fwd.z, 0.0f, fwd.x};
+            const Vec3f dir = right * -in.move.x + fwd * in.move.y;
+            if (length(dir) > 0.1f) c->facing = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, std::atan2(dir.x, dir.z) * 180.0f / pi);
+        }
+    }
+
+    void follow_rope(float) {
+        const Transform3D* t = _rope_hero.get<Transform3D>();
+        if (t == nullptr) return;
+        const Vec3f target = t->position + Vec3f{0.0f, 1.3f, 0.0f};
+        _pos = target - camera().forward() * 5.0f;
+        _velocity = {};
     }
 
     // --- the character controller (P2c) ----------------------------------------------------------------------------------
@@ -1468,11 +1735,13 @@ private:
         _scene.clear();
         _scene.camera = camera();
         apply(_s, _scene, environment(), _model.bounds, _pos);
-        if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid() || _climb_hero.is_valid())) {
+        if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid() || _climb_hero.is_valid() ||
+                           !_rag_people.empty() || _rope_hero.is_valid())) {
             _ecs_state->propagate_transforms();
             _ecs_state->collect(_scene);
             if (_bodies) {
-                _bodies->config().debug_draw = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug) || (_s.climb && _s.climb_debug);
+                _bodies->config().debug_draw = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug) || (_s.climb && _s.climb_debug) ||
+                                               (_s.rag && _s.rag_debug) || (_s.rope && _s.rope_debug);
                 if (_s.climb && _s.climb_debug) climb_candidates_lines();
                 if (_s.ctrl && _s.ctrl_debug && _ctrl_hero.is_valid()) {
                     // What the character touches: a cross at each contact and its normal (green: it can stand on it).
@@ -1486,6 +1755,11 @@ private:
             }
             draw_controller_level();
             draw_climb_level();
+            if (_s.rope && _bodies) _bodies->collect_ropes(*_r3d, _scene);
+            if (_rag_ball.valid() && _physics && _ball_mesh) {
+                _scene.draw(_ball_mesh, Mat4f::trs(_physics->position(_rag_ball), _physics->rotation(_rag_ball), {0.2f, 0.2f, 0.2f}),
+                            Material3D{.color = Color::rgb(230, 80, 60), .roughness = 0.4f});
+            }
             if (_s.ik && _characters_are_people) {
                 // The hand's target (a small red ball), the tail's (a green one) and the step, in each person's own space as it was
                 // placed (they stay put while the person walks).
@@ -1907,6 +2181,14 @@ private:
     Vec3f _climb_origin{};
     float _climb_time = 0.0f;
     int _climb_steps = 0;
+    // The ragdoll and rope section.
+    std::vector<flecs::entity> _rag_people;
+    Body3D _rag_ball{};
+    bool _rag_down = false;
+    float _rag_time = 0.0f;
+    flecs::entity _rope_hero, _rope_entity;
+    Vec3f _rope_beam{}, _rope_start{};
+    float _rope_time = 0.0f;
     const Input* _input = nullptr;
     Model _model;
     Mesh _marker;

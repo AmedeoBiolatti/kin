@@ -351,15 +351,50 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
     a.ik_dt = 0.0f;
 }
 
+void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton& sk, const Pose& base, const Mat4f& entity_matrix,
+                                    const flecs::world& ecs, u64 epoch) {
+    if (!a.ik_constraints.empty()) {
+        solve_ik(a, sk, base, entity_matrix, ecs, epoch);
+    } else {
+        a.ik_pose = base;
+        compute_world_matrices(sk, a.ik_pose, a.ik_world);
+    }
+    const PoseOverride3D& o = a.pose_override;
+    const u32 n = sk.joint_count();
+    if (o.weights.size() != n || o.position.size() != n || o.rotation.size() != n) {
+        return;
+    }
+    const Mat4f to_model = entity_matrix.inverse();
+    // Parent first. A joint with a share takes the body's rotation (more or less of it), and the body's place when its parent
+    // has less share than it does: the top of the ragdolled part. The rest of the part keeps the pose's bone lengths.
+    for (u32 j = 0; j < n; ++j) {
+        const i32 parent = sk.parents[j];
+        const Mat4f parent_world = parent >= 0 ? a.ik_world[static_cast<std::size_t>(parent)] : sk.root_transform;
+        const f32 w = std::clamp(o.weights[j], 0.0f, 1.0f);
+        JointPose& jp = a.ik_pose.joints[j];
+        if (w > 0.0f) {
+            const Mat4f body = to_model * Mat4f::trs(o.position[j], o.rotation[j]);
+            const Mat4f local = parent_world.inverse() * body;
+            const Quatf target = rotation_of(local);
+            const f32 parent_w = parent >= 0 ? std::clamp(o.weights[static_cast<std::size_t>(parent)], 0.0f, 1.0f) : 0.0f;
+            if (parent_w < w) {
+                jp.translation = lerp(jp.translation, Vec3f{local.m[12], local.m[13], local.m[14]}, w - parent_w);
+            }
+            jp.rotation = w >= 1.0f ? target : slerp(jp.rotation, target, w);
+        }
+        a.ik_world[j] = parent_world * jp.matrix();
+    }
+}
+
 void WorldRenderState3D::apply_ik() {
     _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator) {
         const Model* model = renderer.model.get();
-        if (!animator || animator->ik_constraints.empty() || !model || model->skeletons.empty()) {
+        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || model->skeletons.empty()) {
             return;
         }
         const Skeleton& skeleton = model->skeletons[0];
         if (animator->bound == model && animator->player.skeleton() == &skeleton) {
-            solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
+            solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
         }
     });
 }
@@ -428,15 +463,16 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         const Skeleton& skeleton = model->skeletons[0];
         _pose_scratch.resize(skeleton.joint_count());
         if (animator && animator->bound == model && animator->player.skeleton() == &skeleton) {
-            if (animator->ik_constraints.empty()) {
+            if (animator->ik_constraints.empty() && animator->pose_override.empty()) {
                 animator->player.joint_matrices(_pose_scratch);
                 if (!animator->ik_world.empty()) {
                     animator->ik_world.clear();
                     animator->ik_pose.joints.clear();
                 }
             } else {
-                // The clips' pose with the constraints solved on it, in this frame's place of the entity.
-                solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
+                // The clips' pose with the constraints solved on it (and the physics override over that), in this frame's place
+                // of the entity.
+                solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
                 world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
             }
         } else {

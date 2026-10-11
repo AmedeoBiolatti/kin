@@ -497,6 +497,7 @@ const GripProvider3D& grip_provider(GripKind3D kind) {
     switch (kind) {
     case GripKind3D::Hold: return hold;
     case GripKind3D::Ledge: return ledge;
+    case GripKind3D::Rope: return physics3d_detail::rope_grip_provider();
     case GripKind3D::Surface: break;
     }
     return surface;
@@ -518,7 +519,7 @@ std::vector<GripCandidate3D> World3D::probe_grips(const GripProbeDesc3D& p) cons
     probe.up = up;
     std::vector<RawGripHit3D> hits = physics3d_detail::cast_fan(*this, probe, dir);
     // Providers in priority order: a hit becomes one candidate.
-    for (const GripKind3D kind : {GripKind3D::Hold, GripKind3D::Ledge, GripKind3D::Surface}) {
+    for (const GripKind3D kind : {GripKind3D::Hold, GripKind3D::Ledge, GripKind3D::Surface, GripKind3D::Rope}) {
         grip_provider(kind).probe(*this, probe, hits, out);
     }
     for (GripCandidate3D& c : out) {

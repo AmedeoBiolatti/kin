@@ -1,0 +1,28 @@
+{
+ "name": "physics_ragdoll",
+ "purpose": "kin/physics3d's ragdolls (P2e): five skinned people (skinned_biped_walk.glb) made ragdolls from their skeletons by the ECS system and driven by a recipe in tools/reference/kin_reference.cpp (PhysicsRagdoll): one dropped 4 m onto a ramp and let go; one standing whose left arm alone is a ragdoll, knocked at frame 30; one that blends into a ragdoll when struck (frame 60), lies, and gets up again at frame 330 (placed where its pelvis lies, the clip blended back over a second); one thrown at a wall; and one struck by a ball (the contact event starts its ragdoll with the impulse at the bone that was hit). The pose of the bodies is written into each Animator3D after the clips and before the joint matrices; the debug lines show the bones' capsules. Fixed seed, fixed step: no Cycles truth, the check is that two runs give the same picture byte for byte.",
+ "procedural": "physics_ragdoll",
+ "debug": true,
+ "lead": 0,
+ "view": {"samples": 4, "background": [128, 150, 178]},
+ "lights": {
+  "sun": {"direction": [-0.45, 0.8, -0.4], "color": [1.15, 1.09, 1.0]},
+  "fill": {"direction": [0.2, 0.5, 0.8], "color": [0.22, 0.22, 0.24]},
+  "ambient": [0.42, 0.43, 0.46],
+  "ground_ambient": [0.2, 0.2, 0.18],
+  "shadow_area": [[-14, -0.6, -8], [14, 6, 8]],
+  "shadow_resolution": 4096,
+  "shadow_cascades": 3,
+  "shadow_distance": 60
+ },
+ "cameras": [
+  {"name": "start", "eye": [0, 4.5, 14], "target": [-1.5, 1.2, 0], "fov": 50, "near": 0.1, "frame": 0},
+  {"name": "fall", "eye": [-4, 3.0, 8.5], "target": [-4, 1.5, 0], "fov": 50, "near": 0.1, "frame": 40},
+  {"name": "arm", "eye": [-1.4, 1.6, 4.6], "target": [-1.4, 1.1, 0], "fov": 45, "near": 0.1, "frame": 70},
+  {"name": "getup_down", "eye": [3.0, 2.5, 6.0], "target": [1.6, 0.4, 0], "fov": 45, "near": 0.1, "frame": 300},
+  {"name": "getup_up", "eye": [3.0, 2.5, 6.0], "target": [1.6, 0.8, 0], "fov": 45, "near": 0.1, "frame": 375},
+  {"name": "ball", "eye": [-8, 2.2, 7.0], "target": [-8, 0.8, 2.5], "fov": 50, "near": 0.1, "frame": 120},
+  {"name": "wall", "eye": [4.5, 2.8, 7.0], "target": [5.5, 0.8, 0.5], "fov": 50, "near": 0.1, "frame": 70},
+  {"name": "end", "eye": [0, 5.0, 14], "target": [-0.5, 0.8, 0], "fov": 52, "near": 0.1, "frame": 560}
+ ]
+}
