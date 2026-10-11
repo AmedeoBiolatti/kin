@@ -4,6 +4,8 @@
 
 #include "skin_fixtures.hpp"
 
+#include <kin/ecs/render3d.hpp>
+#include <kin/ecs/world.hpp>
 #include <kin/render3d/animation3d.hpp>
 #include <kin/render3d/model.hpp>
 #include <kin/render3d/skeleton.hpp>
@@ -901,6 +903,453 @@ void bench_animation() {
               << " us, Walk to Run crossfade " << fox_fade << " us [" << sink << "]\n";
 }
 
+// --- P1a part 2: 1D blends in the player, a shared pose in the scene, the ECS animator ----------------------------------------
+
+// A clip that swings `joint` about Z by `degrees` and back over `duration` seconds.
+AnimClip3D swing_clip(const Skeleton& sk, const char* name, float duration, float degrees, u32 joint = 1) {
+    AnimClip3D clip;
+    clip.name = name;
+    clip.duration = duration;
+    clip.channels.resize(sk.joint_count());
+    Track3D<Quatf>& r = clip.channels[joint].rotation;
+    r.interpolation = Interpolation3D::Linear;
+    r.times = {0.0f, duration * 0.5f, duration};
+    r.values = {rz(0), rz(degrees), rz(0)};
+    return clip;
+}
+
+float max_difference(std::span<const Mat4f> a, std::span<const Mat4f> b) {
+    assert(a.size() == b.size());
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        for (int k = 0; k < 16; ++k) {
+            worst = std::max(worst, std::fabs(a[i].m[k] - b[i].m[k]));
+        }
+    }
+    return worst;
+}
+
+float max_difference(const Pose& a, const Pose& b) {
+    assert(a.joints.size() == b.joints.size());
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < a.joints.size(); ++i) {
+        const Vec3f t = a.joints[i].translation - b.joints[i].translation, s = a.joints[i].scale - b.joints[i].scale;
+        worst = std::max({worst, std::fabs(t.x), std::fabs(t.y), std::fabs(t.z), std::fabs(s.x), std::fabs(s.y), std::fabs(s.z)});
+        const Quatf q = a.joints[i].rotation, p = b.joints[i].rotation;
+        const float d = std::fabs(q.x * p.x + q.y * p.y + q.z * p.z + q.w * p.w);
+        worst = std::max(worst, 1.0f - std::min(d, 1.0f));
+    }
+    return worst;
+}
+
+// A one-dimensional blend in the player: the clips of the two points either side of the parameter, each at the same phase of its own
+// length, blended by how far the parameter is between them; the phase advances by the time over the duration blended at the parameter
+// now (so a change of the parameter never jumps the phase); a parameter outside the points is held at the end; a fade to and from a blend.
+void test_player_blend_1d() {
+    const auto tube = skin_fixtures::make_tube();
+    const Skeleton& sk = tube.skeleton;
+    const AnimClip3D walk = swing_clip(sk, "walk", 1.0f, 40.0f, 1), run = swing_clip(sk, "run", 0.6f, -70.0f, 2), jog = swing_clip(sk, "jog", 0.8f, 20.0f, 1);
+    // Out of order on purpose (sorted by position), and a null clip, which is dropped.
+    const BlendPoint3D points[] = {{&run, 4.5f}, {nullptr, 3.0f}, {&walk, 1.5f}, {&jog, 3.0f}};
+    AnimationPlayer3D player{&sk};
+    player.play_blend(points, 3.0f);
+    assert(player.blending() && player.clip() == nullptr && close(player.time(), 0.0f));
+    // At 3.0 exactly: the jog alone (weight 1 on the point), at phase 0.
+    player.update(0.0f);
+    Pose expected;
+    sample_clip(jog, sk, 0.0f, true, expected);
+    assert(max_difference(player.pose(), expected) < 1e-6f);
+    // Between walk (1.5) and jog (3.0): parameter 2.1 is 0.4 of the way; durations 1.0 and 0.8 give 0.92 s.
+    player.set_blend_parameter(2.1f);
+    float phase = 0.0f;
+    for (int i = 0; i < 25; ++i) {
+        const float duration = 1.0f + (0.8f - 1.0f) * 0.4f;
+        phase += 0.02f / duration;
+        phase -= std::floor(phase);
+        player.update(0.02f);
+        Pose a, b;
+        sample_clip(walk, sk, phase * 1.0f, true, a);
+        sample_clip(jog, sk, phase * 0.8f, true, b);
+        expected = blend_poses(a, b, 0.4f);
+        assert(max_difference(player.pose(), expected) < 1e-4f);
+        assert(close(player.time(), phase, 1e-4f));
+    }
+    // The parameter moves while it plays: the phase carries on from where it is (it advances at the speed of the new duration).
+    const float before = player.time();
+    player.set_blend_parameter(4.0f); // between jog (3.0) and run (4.5): 2/3 of the way; durations 0.8 and 0.6
+    player.update(0.05f);
+    const float duration = 0.8f + (0.6f - 0.8f) * (1.0f / 1.5f);
+    assert(close(player.time(), before + 0.05f / duration - std::floor(before + 0.05f / duration), 1e-4f));
+    // Held at the ends: below the first point the first clip, above the last the last.
+    player.set_blend_parameter(-5.0f);
+    player.update(0.0f);
+    sample_clip(walk, sk, player.time() * 1.0f, true, expected);
+    assert(max_difference(player.pose(), expected) < 1e-5f);
+    player.set_blend_parameter(99.0f);
+    player.update(0.0f);
+    sample_clip(run, sk, player.time() * 0.6f, true, expected);
+    assert(max_difference(player.pose(), expected) < 1e-5f);
+    // A fade from a plain clip to a blend, and from the blend to a clip, is the blend of the two pictures at the fade's progress.
+    AnimationPlayer3D fade{&sk};
+    fade.play(&walk);
+    fade.update(0.1f);
+    const BlendPoint3D two[] = {{&walk, 0.0f}, {&run, 1.0f}};
+    fade.crossfade_to_blend(two, 0.25f, 0.5f);
+    fade.update(0.1f); // alpha 0.2
+    {
+        Pose from, a, b;
+        sample_clip(walk, sk, 0.2f, true, from);
+        const float d = 1.0f + (0.6f - 1.0f) * 0.25f;
+        const float ph = 0.1f / d;
+        sample_clip(walk, sk, ph, true, a);
+        sample_clip(run, sk, ph * 0.6f, true, b);
+        expected = blend_poses(from, blend_poses(a, b, 0.25f), 0.2f);
+        assert(max_difference(fade.pose(), expected) < 1e-4f);
+    }
+    assert(fade.blending() && fade.fading_from() == &walk); // the plain clip fades out
+}
+
+// Scene3D::draw_skinned(model): one range of matrices for all the skinned parts, each copy's offset the same; plain parts are drawn as before.
+void test_scene_shared_pose() {
+    const auto tube = skin_fixtures::make_tube();
+    struct FakeMesh final : IMeshBackend {};
+    Model model;
+    model.skeletons.push_back(tube.skeleton);
+    for (int i = 0; i < 4; ++i) {
+        ModelPart part;
+        part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, i == 3 ? 2u : 3u}; // the last uses two joints only
+        part.skin = i == 2 ? -1 : 0;                                                       // and one is not skinned (a rigid prop)
+        if (i == 2) {
+            part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
+        }
+        model.parts.push_back(part);
+    }
+    std::vector<Mat4f> pose;
+    compute_joint_matrices(tube.skeleton, tube.skeleton.rest_pose(), pose);
+    Scene3D scene;
+    scene.draw_skinned(model, pose, Mat4f::identity(), colors::white, 17);
+    // Three skinned copies (0, 1, 3), one plain (2); the pose held once, of the most any part uses (3 joints).
+    assert(scene.draws().size() == 4 && scene.instances().size() == 4);
+    assert(scene.joint_matrices().size() == 3 && scene.skin_offsets().size() == 3);
+    assert(scene.skin_offsets()[0] == 0 && scene.skin_offsets()[1] == 0 && scene.skin_offsets()[2] == 0);
+    assert(scene.instances()[0].id == 17 && scene.instances()[2].id == 17);
+    // A second character after it: its own range.
+    scene.draw_skinned(model, pose, Mat4f::translation({1, 0, 0}));
+    assert(scene.joint_matrices().size() == 6 && scene.skin_offsets().size() == 6 && scene.skin_offsets()[3] == 3 && scene.skin_offsets()[5] == 3);
+    // Too few matrices: nothing skinned drawn (and the plain part is).
+    Scene3D few;
+    few.draw_skinned(model, std::span<const Mat4f>{pose}.first(2), Mat4f::identity());
+    assert(few.instances().size() == 1 && few.joint_matrices().empty());
+}
+
+// --- the ECS animator ---
+
+struct Character {
+    std::shared_ptr<const Model> model;
+    const Skeleton* skeleton = nullptr;
+    const AnimClip3D* clip(const char* name) const { return model->find_clip(name); }
+};
+
+Character make_character() {
+    const auto tube = skin_fixtures::make_tube();
+    struct FakeMesh final : IMeshBackend {};
+    auto model = std::make_shared<Model>();
+    model->skeletons.push_back(tube.skeleton);
+    const Skeleton& sk = model->skeletons[0];
+    model->clips.push_back(swing_clip(sk, "idle", 1.0f, 10.0f, 1));
+    model->clips.push_back(swing_clip(sk, "walk", 1.0f, 40.0f, 1));
+    model->clips.push_back(swing_clip(sk, "run", 0.6f, -70.0f, 2));
+    model->clips.push_back(swing_clip(sk, "jump", 0.5f, 80.0f, 2));
+    model->clips.push_back(swing_clip(sk, "wave", 0.7f, 60.0f, 2));
+    AnimClip3D root_walk;
+    root_walk.name = "root_walk";
+    root_walk.duration = 1.0f;
+    root_walk.channels.resize(sk.joint_count());
+    root_walk.channels[0].translation.times = {0.0f, 1.0f};
+    root_walk.channels[0].translation.values = {{0, 0, 0}, {2, 0, 0}};
+    model->clips.push_back(root_walk);
+    ModelPart part;
+    part.name = "tube";
+    part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, 3};
+    part.skin = 0;
+    model->parts.push_back(part);
+    Character c;
+    c.model = model;
+    c.skeleton = &c.model->skeletons[0];
+    return c;
+}
+
+std::vector<Mat4f> matrices_of(const Pose& pose, const Skeleton& sk) {
+    std::vector<Mat4f> m;
+    compute_joint_matrices(sk, pose, m);
+    return m;
+}
+
+std::vector<Mat4f> collected_matrices(WorldRenderState3D& state) {
+    Scene3D scene;
+    state.propagate_transforms();
+    state.collect(scene);
+    return {scene.joint_matrices().begin(), scene.joint_matrices().end()};
+}
+
+u64 hash_bytes(u64 h, const void* data, std::size_t bytes) {
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+        h = (h ^ p[i]) * 1099511628211ull;
+    }
+    return h;
+}
+
+// An entity with Animator3D plays its clip by name: the joint matrices at every step are those of the CPU maths (the clip sampled at the
+// accumulated time, at the speed given), the draw is the model in that pose with the entity's id, and two runs agree to the byte.
+void test_ecs_animator_clip() {
+    const Character hero = make_character();
+    const float dt = 1.0f / 60.0f;
+    const AnimClip3D& walk = *hero.clip("walk");
+    const auto run = [&](std::vector<u64>* hashes, bool check) {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        auto& w = world.raw();
+        const flecs::entity e = w.entity().set(Transform3D{.position = {1, 2, 3}}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "walk", .speed = 1.5f});
+        float t = 0.0f;
+        u64 h = 1469598103934665603ull;
+        for (int step = 0; step < 90; ++step) {
+            state.animate(dt);
+            t = clip_time(walk, t + dt * 1.5f, true);
+            std::vector<Mat4f> got;
+            {
+                Scene3D scene;
+                state.propagate_transforms();
+                state.collect(scene);
+                assert(scene.draws().size() == 1 && scene.draws()[0].skinned && scene.instances().size() == 1);
+                assert(scene.instances()[0].id == static_cast<u32>(e.id() & 0xffffffffu) && scene.instances()[0].id != 0);
+                const Vec3f at{scene.instances()[0].transform.m[12], scene.instances()[0].transform.m[13], scene.instances()[0].transform.m[14]};
+                assert(close(at, {1, 2, 3}));
+                got.assign(scene.joint_matrices().begin(), scene.joint_matrices().end());
+            }
+            if (check) {
+                Pose pose;
+                sample_clip(walk, *hero.skeleton, t, true, pose);
+                assert(max_difference(got, matrices_of(pose, *hero.skeleton)) < 1e-5f);
+            }
+            h = hash_bytes(h, got.data(), got.size() * sizeof(Mat4f));
+            if (hashes) {
+                hashes->push_back(h);
+            }
+        }
+        // Nothing dangling: the entity gone, the model is held by the test alone, and a collect after it is fine.
+        assert(hero.model.use_count() >= 2);
+        e.destruct();
+        Scene3D scene;
+        state.propagate_transforms();
+        state.collect(scene);
+        assert(scene.draws().empty());
+    };
+    std::vector<u64> first, second;
+    run(&first, true);
+    run(&second, false);
+    assert(first == second);
+    assert(hero.model.use_count() == 1);
+    // Not playing: held.
+    kin::EcsWorld world;
+    WorldRenderState3D state{world};
+    world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "walk"});
+    state.animate(0.25f);
+    const std::vector<Mat4f> at_quarter = collected_matrices(state);
+    world.raw().query<Animator3D>().each([](Animator3D& a) { a.playing = false; });
+    state.animate(0.25f);
+    assert(max_difference(collected_matrices(state), at_quarter) == 0.0f);
+    // Before its first animate(): the rest pose, drawn.
+    kin::EcsWorld fresh;
+    WorldRenderState3D fresh_state{fresh};
+    fresh.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "walk"});
+    assert(max_difference(collected_matrices(fresh_state), matrices_of(hero.skeleton->rest_pose(), *hero.skeleton)) < 1e-6f);
+    // A renderer with no animator is drawn at rest, and an invisible one is not drawn.
+    kin::EcsWorld bare;
+    WorldRenderState3D bare_state{bare};
+    bare.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model});
+    bare.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model, .visible = false});
+    assert(collected_matrices(bare_state).size() == 3);
+}
+
+// A state machine (kin/anim's) drives the animator: parameters choose the state, a transition crossfades over the length the animator has for
+// it, a state with a blend space plays the 1D blend by its parameter, a trigger is consumed by the transition that takes it. The pose
+// in the middle of a fade is the blend of the two pictures at its progress, to float rounding, as the CPU maths gives it.
+void test_ecs_animator_state_machine() {
+    const Character hero = make_character();
+    const Skeleton& sk = *hero.skeleton;
+    const float dt = 1.0f / 60.0f;
+    auto machine = std::make_shared<AnimationStateMachine>();
+    machine->initial = "idle";
+    machine->states = {{"idle", "idle"}, {"locomotion", "walk"}, {"jump", "jump"}};
+    machine->transitions = {
+        {"", "jump", {{.param = "jump", .op = CondOp::TriggerSet}}},
+        {"idle", "locomotion", {{.param = "speed", .op = CondOp::Greater, .threshold = 0.1f}}},
+        {"locomotion", "idle", {{.param = "speed", .op = CondOp::Less, .threshold = 0.05f}}},
+        {"jump", "idle", {{.param = "grounded", .op = CondOp::IsTrue}}},
+    };
+    Animator3D animator;
+    animator.machine = machine;
+    animator.fade_seconds = 0.3f;
+    animator.fades = {{"idle", "locomotion", 0.25f}, {"", "jump", 0.1f}};
+    animator.blend_spaces["locomotion"] = {"speed", {{"walk", 1.5f}, {"run", 4.5f}}};
+    animator.params.set_bool("grounded", true);
+    kin::EcsWorld world;
+    WorldRenderState3D state{world};
+    world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(static_cast<const Animator3D&>(animator));
+    const auto animator_of = [&]() -> Animator3D& {
+        static thread_local Animator3D* found = nullptr;
+        world.raw().query<Animator3D>().each([&](Animator3D& a) { found = &a; });
+        return *found;
+    };
+    const AnimClip3D& idle = *hero.clip("idle");
+    const AnimClip3D& walk = *hero.clip("walk");
+    const AnimClip3D& run = *hero.clip("run");
+    const AnimClip3D& jump = *hero.clip("jump");
+    // Idle for 10 steps: the idle clip, no fade.
+    float idle_t = 0.0f;
+    for (int i = 0; i < 10; ++i) {
+        state.animate(dt);
+        idle_t = clip_time(idle, idle_t + dt, true);
+    }
+    {
+        Pose p;
+        sample_clip(idle, sk, idle_t, true, p);
+        assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
+        assert(animator_of().state == "idle" && animator_of().player.fading_from() == nullptr);
+    }
+    // Speed 3.0: to locomotion at this step (the fade is 0.25 s); the blend is walk at 1.5 and run at 4.5, w = 0.5, duration 0.8.
+    animator_of().params.set_float("speed", 3.0f);
+    float phase = 0.0f;
+    for (int k = 1; k <= 8; ++k) {
+        state.animate(dt);
+        idle_t = clip_time(idle, idle_t + dt, true);
+        phase += dt / 0.8f;
+        phase -= std::floor(phase);
+        assert(animator_of().state == "locomotion");
+        const float alpha = std::min(1.0f, static_cast<float>(k) * dt / 0.25f);
+        Pose from, a, b;
+        sample_clip(idle, sk, idle_t, true, from);
+        sample_clip(walk, sk, phase * 1.0f, true, a);
+        sample_clip(run, sk, phase * 0.6f, true, b);
+        const Pose expected = blend_poses(from, blend_poses(a, b, 0.5f), alpha);
+        assert(max_difference(collected_matrices(state), matrices_of(expected, sk)) < 2e-4f);
+    }
+    // The fade is over at 0.25 s (15 steps): from then on it is the blend alone, following the parameter.
+    for (int k = 9; k <= 20; ++k) {
+        state.animate(dt);
+        phase += dt / 0.8f;
+        phase -= std::floor(phase);
+    }
+    assert(animator_of().player.fading_from() == nullptr);
+    {
+        Pose a, b;
+        sample_clip(walk, sk, phase * 1.0f, true, a);
+        sample_clip(run, sk, phase * 0.6f, true, b);
+        assert(max_difference(collected_matrices(state), matrices_of(blend_poses(a, b, 0.5f), sk)) < 3e-4f);
+    }
+    // The speed sweeps: the pose follows the weight (a at 1.5 is walk alone, at 4.5 run alone).
+    animator_of().params.set_float("speed", 1.5f);
+    state.animate(0.0f);
+    {
+        Pose p;
+        sample_clip(walk, sk, animator_of().player.time() * 1.0f, true, p);
+        assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
+    }
+    animator_of().params.set_float("speed", 4.5f);
+    state.animate(0.0f);
+    {
+        Pose p;
+        sample_clip(run, sk, animator_of().player.time() * 0.6f, true, p);
+        assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
+    }
+    // A trigger: to jump from anywhere at once (0.1 s fade), consumed; another transition does not fire in the same step.
+    animator_of().params.set_bool("grounded", false);
+    animator_of().params.set_trigger("jump");
+    state.animate(dt);
+    assert(animator_of().state == "jump" && !animator_of().params.triggers.contains("jump"));
+    assert(animator_of().player.fading_from() == nullptr); // the fade is from a blend (fading_from names a plain clip, or none)
+    assert(close(animator_of().player.fade_progress(), dt / 0.1f, 1e-4f));
+    for (int i = 0; i < 8; ++i) {
+        state.animate(dt); // 9 steps of 1/60 s: past the fade
+    }
+    assert(close(animator_of().player.fade_progress(), 1.0f));
+    {
+        Pose p;
+        sample_clip(jump, sk, animator_of().player.time(), true, p);
+        assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
+    }
+    // Landing: grounded again, back to idle at the default fade (0.3 s).
+    animator_of().params.set_bool("grounded", true);
+    state.animate(dt);
+    assert(animator_of().state == "idle" && close(animator_of().player.fade_progress(), dt / 0.3f, 1e-4f));
+    // Two runs of the same inputs agree to the byte.
+    const auto replay = [&] {
+        kin::EcsWorld w;
+        WorldRenderState3D s{w};
+        w.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(static_cast<const Animator3D&>(animator));
+        u64 h = 1469598103934665603ull;
+        for (int step = 0; step < 200; ++step) {
+            w.raw().query<Animator3D>().each([&](Animator3D& a) {
+                a.params.set_float("speed", 0.2f + 4.5f * std::fabs(std::sin(static_cast<float>(step) * 0.05f)));
+                a.params.set_bool("grounded", step % 70 > 20);
+                if (step % 97 == 40) {
+                    a.params.set_trigger("jump");
+                }
+            });
+            s.animate(dt);
+            const std::vector<Mat4f> m = collected_matrices(s);
+            h = hash_bytes(h, m.data(), m.size() * sizeof(Mat4f));
+        }
+        return h;
+    };
+    assert(replay() == replay());
+}
+
+// Layers as data (a clip on a joint's subtree over the base, by weight), additive layers and root motion moved onto the entity.
+void test_ecs_animator_layers_and_root_motion() {
+    const Character hero = make_character();
+    const Skeleton& sk = *hero.skeleton;
+    const float dt = 1.0f / 60.0f;
+    {
+        Animator3D a;
+        a.clip = "walk";
+        a.layers = {{.clip = "wave", .mask_joint = "middle", .include_root = true, .weight = 0.75f}};
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(a);
+        float t_base = 0.0f, t_layer = 0.0f;
+        for (int i = 0; i < 20; ++i) {
+            state.animate(dt);
+            t_base = clip_time(*hero.clip("walk"), t_base + dt, true);
+            t_layer = clip_time(*hero.clip("wave"), t_layer + dt, true);
+        }
+        Pose base, layer;
+        sample_clip(*hero.clip("walk"), sk, t_base, true, base);
+        sample_clip(*hero.clip("wave"), sk, t_layer, true, layer);
+        blend_masked(base, layer, PoseMask::subtree(sk, sk.find("middle"), 1.0f, true), 0.75f);
+        assert(max_difference(collected_matrices(state), matrices_of(base, sk)) < 1e-5f);
+    }
+    {
+        // Root motion: 2 m a second along the entity's own x; the entity turned a quarter about Y goes along -z. The root joint stays at rest.
+        Animator3D a;
+        a.clip = "root_walk";
+        a.apply_root_motion = true;
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const flecs::entity e = world.raw().entity().set(Transform3D{.position = {5, 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 90.0f)})
+                                    .set(SkinnedMeshRenderer{.model = hero.model}).set(a);
+        for (int i = 0; i < 30; ++i) {
+            state.animate(dt);
+        }
+        const Transform3D* t = e.get<Transform3D>();
+        assert(close(t->position, {5.0f, 0.0f, -1.0f}, 1e-3f));
+        Pose p;
+        p = e.get<Animator3D>()->player.pose();
+        assert(close(p.joints[0].translation.x, 0.0f, 1e-6f)); // held at rest in x
+    }
+}
+
 } // namespace
 
 int main() {
@@ -914,6 +1363,11 @@ int main() {
     test_root_motion();
     test_player_crossfade();
     test_player_layers_and_root_motion();
+    test_player_blend_1d();
+    test_scene_shared_pose();
+    test_ecs_animator_clip();
+    test_ecs_animator_state_machine();
+    test_ecs_animator_layers_and_root_motion();
     test_skin_bounds_hold_the_posed_vertices();
     test_skin_bounds_count_every_influence();
     test_cpu_skinning();

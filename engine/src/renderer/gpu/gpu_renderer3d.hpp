@@ -137,6 +137,10 @@ struct GpuCopyHistory {
     std::vector<Span> groups; // by key
     std::unordered_map<u64, u32> ids;                    // a mesh's copy by id: its matrix
     std::vector<Mat4f> matrices;
+    // Skinned copies: the frame's joint matrices (the scene's, then the overlay's) and, by the same place as `matrices`, where each
+    // copy's start in them (~0 for a copy that is not skinned). Empty in a frame with no skinned copy.
+    std::vector<Mat4f> joints;
+    std::vector<u32> joint_first;
 };
 
 class GpuView3D final : public IView3DBackend {
@@ -242,14 +246,13 @@ private:
     // (the others discard in mesh.frag itself).
     // `velocity`: the main pass of a frame with temporal anti-aliasing and no pre-pass: mesh_velocity's shaders and a
     // second colour target, written by opaque meshes and masked for the rest.
-    // `skinned`: for a skinned copy's draws (the main pass and the shadow pass only): the skinning vertex shaders and the
-    // layout with the second vertex buffer.
+    // `skinned`: for a skinned copy's draws (every pass): the skinning vertex shaders and the layout with the second vertex buffer.
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                          SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
-    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask) const;
+    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned = false) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -297,7 +300,9 @@ private:
     u32 _idle_occlusion_renders = 0; // renders since any view used occlusion culling: the renderer's second gathered buffer goes at _release_after
     // Where each copy of `_refs` was last frame, into _taa_prev (a matrix a copy, flat as _visible is) and the
     // view's record for the next.
-    void match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs);
+    // With `skinned` (some copy is) it also settles, for each copy, where its joint matrices of last frame start in the
+    // view's last joints (_taa_prev_joint, ~0: none, so it is posed as now).
+    void match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs, bool skinned);
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input, const TemporalAA3D& taa,
                                   bool reset, Vec2f jitter, Render3DStats& stats);
@@ -361,12 +366,19 @@ private:
     GpuShader _mesh_skinned_velocity_vertex_shader; // mesh_skinned_velocity.vert
     GpuShader _shadow_skinned_vertex_shader;        // shadow_skinned.vert
     GpuShader _shadow_mask_skinned_vertex_shader;   // shadow_mask_skinned.vert
+    GpuShader _prepass_skinned_vertex_shader;          // prepass_skinned.vert
+    GpuShader _prepass_velocity_skinned_vertex_shader; // prepass_velocity_skinned.vert
     bool _skinning_available = false;
     bool _skin_warned = false;      // skinned copies cannot be drawn
-    bool _skin_features_warned = false; // skinned copies with a feature that needs part 2 (velocity, ambient occlusion, pick)
     std::shared_ptr<GpuBuffer> _joints;        // the frame's joint matrices (scene, then overlay); grows
     std::shared_ptr<GpuBuffer> _joint_offsets; // each copy's first matrix, a u32 in the places _instances has its copies; grows
     std::vector<u32> _skin_ordered;            // render()'s scratch: the offsets in the instances' order
+    // Temporal anti-aliasing with skinned copies: last frame's joint matrices (the view's record, uploaded whole) and where each
+    // copy's own start there, in the places _instances has the copies (~0: none).
+    std::shared_ptr<GpuBuffer> _previous_joints, _previous_joint_offsets;
+    std::vector<u32> _taa_prev_joint;    // match_copies' answer a copy (flat, as _taa_prev)
+    std::vector<u32> _taa_past;          // and the copy's place in last frame's record (~0: none)
+    std::vector<u32> _skin_prev_ordered; // render()'s scratch: the same in the instances' order
     // Temporal anti-aliasing needs the pre-pass and four-float colour targets,
     // and a float storage texture; else it is off (said once, when asked for).
     bool _taa_available = false;

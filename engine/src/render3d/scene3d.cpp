@@ -31,6 +31,12 @@ std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t cou
     return {_instances.data() + first, count};
 }
 
+void Scene3D::add_skinned_copy(const Mesh& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material, Color tint, u32 id) {
+    const u32 first_copy = static_cast<u32>(_skin_offsets.size()); // a draw of its own starts here
+    _skin_offsets.push_back(first_joint);
+    add_instances(mesh, 1, material, true, first_copy)[0] = {transform, tint, id};
+}
+
 void Scene3D::draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform, const Material3D& material,
                            Color tint, u32 id) {
     if (!mesh.skinned()) {
@@ -48,20 +54,44 @@ void Scene3D::draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matric
     }
     // Only the joints the mesh uses are kept: a skeleton may have more joints than the mesh (it is the mesh's, as the skin).
     const std::size_t keep = mesh.skin_joint_count();
-    const u32 first_copy = static_cast<u32>(_skin_offsets.size()); // a draw of its own starts here
-    _skin_offsets.push_back(static_cast<u32>(_joints.size()));
+    const u32 first_joint = static_cast<u32>(_joints.size());
     _joints.insert(_joints.end(), joint_matrices.begin(), joint_matrices.begin() + static_cast<std::ptrdiff_t>(keep));
-    add_instances(mesh, 1, material, true, first_copy)[0] = {transform, tint, id};
+    add_skinned_copy(mesh, first_joint, transform, material, tint, id);
 }
 
-void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint) {
+void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint, u32 id) {
+    // One range for the pose, as many matrices as the most any part uses (a part uses the first of them: its joints are the
+    // skeleton's, in the skeleton's order).
+    std::size_t need = 0;
+    for (const ModelPart& part : model.parts) {
+        if (part.mesh.skinned() && part.skin <= 0) { // the first skeleton's: the pose given is for it
+            need = std::max<std::size_t>(need, part.mesh.skin_joint_count());
+        }
+    }
+    u32 first_joint = 0;
+    bool copied = false;
     for (const ModelPart& part : model.parts) {
         if (part.mesh.skinned()) {
-            if (part.skin <= 0) { // the first skeleton's: the pose given is for it
-                draw_skinned(part.mesh, joint_matrices, transform, part.material, tint);
+            if (part.skin > 0) {
+                continue;
             }
+            if (joint_matrices.size() < need) {
+                if (!_warned_skin) {
+                    _warned_skin = true;
+                    KIN_LOG_WARN_F("render", "3D: draw_skinned with too few joint matrices: not drawn",
+                                   (LogFields{{.name = "given", .value = std::to_string(joint_matrices.size())},
+                                              {.name = "needed", .value = std::to_string(need)}}));
+                }
+                continue;
+            }
+            if (!copied) {
+                copied = true;
+                first_joint = static_cast<u32>(_joints.size());
+                _joints.insert(_joints.end(), joint_matrices.begin(), joint_matrices.begin() + static_cast<std::ptrdiff_t>(need));
+            }
+            add_skinned_copy(part.mesh, first_joint, transform, part.material, tint, id);
         } else {
-            draw(part.mesh, transform * part.transform, part.material, tint);
+            draw(part.mesh, transform * part.transform, part.material, tint, id);
         }
     }
 }

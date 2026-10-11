@@ -59,6 +59,8 @@
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/core/jobs.hpp>
+#include <kin/ecs/render3d.hpp>
+#include <kin/ecs/world.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/taa.hpp>
@@ -159,6 +161,24 @@ struct Placed {
     bool loop = true;
     double speed = 1.0;
     bool remove_root_motion = false;
+    // A 1D blend in place of the one clip (`animation: {blend: {parameter, parameter_to, parameter_seconds, points: [{clip, position}]}}`):
+    // the clips of the points (indices into the model's) blended by the parameter, which runs from `parameter` to `parameter_to` over
+    // `parameter_seconds` of the frames (a constant without `parameter_to`).
+    struct BlendPoint {
+        std::size_t clip = 0;
+        float position = 0.0f;
+    };
+    std::vector<BlendPoint> blend;
+    double parameter = 0.0, parameter_to = 0.0, parameter_seconds = 2.0;
+    bool ramp = false;
+    // `animation: {ecs: true}`: the model is an entity with SkinnedMeshRenderer and Animator3D, stepped by WorldRenderState3D::animate
+    // at 60 steps a second (250 of them before the picture, the frame's index after), and drawn by its collect(): what a game does.
+    bool ecs = false;
+    Vec3f position{};
+    float rotation_y = 0.0f, uniform_scale = 1.0f;
+    std::shared_ptr<const kin::Model> shared;
+    flecs::entity entity;
+    kin::Animator3D animator; // the entity's at the start
 };
 
 // Signal Breach's deck (48 x 32 tiles) and `count` enemies over it, three
@@ -719,6 +739,9 @@ int main(int argc, char** argv) {
                 placed.push_back({std::move(model), Mat4f::translation(vec3(m.find("position"))) *
                                                         Mat4f::rotation_y(static_cast<float>(m.number_at("rotation_y", 0.0))) *
                                                         Mat4f::scaling({scale, scale, scale})});
+                placed.back().position = vec3(m.find("position"));
+                placed.back().rotation_y = static_cast<float>(m.number_at("rotation_y", 0.0));
+                placed.back().uniform_scale = scale;
                 // `grid: {count, columns, spacing: [x, z], time_step}`: the model placed `count` times in rows, each
                 // copy's animation `time_step` seconds on from the one before (the meshes are shared).
                 const kin::JsonValue* grid = m.find("grid");
@@ -747,6 +770,23 @@ int main(int argc, char** argv) {
                         back.loop = a->find("loop") ? a->bool_at("loop") : true;
                         back.speed = a->number_at("speed", 1.0);
                         back.remove_root_motion = a->string_at("root_motion") == "remove";
+                        back.ecs = a->bool_at("ecs");
+                        if (const kin::JsonValue* blend = a->find("blend")) {
+                            if (const kin::JsonValue* points = blend->find("points")) {
+                                for (const kin::JsonValue& point : points->items()) {
+                                    const kin::AnimClip3D* found = back.model.find_clip(point.string_at("clip"));
+                                    if (!found) {
+                                        std::fprintf(stderr, "  %s: blend point: no clip called %s\n", path.string().c_str(), point.string_at("clip").c_str());
+                                        return 1;
+                                    }
+                                    back.blend.push_back({static_cast<std::size_t>(found - back.model.clips.data()), static_cast<float>(point.number_at("position", 0.0))});
+                                }
+                            }
+                            back.parameter = blend->number_at("parameter", 0.0);
+                            back.ramp = blend->find("parameter_to") != nullptr;
+                            back.parameter_to = blend->number_at("parameter_to", back.parameter);
+                            back.parameter_seconds = blend->number_at("parameter_seconds", 2.0);
+                        }
                         const kin::AnimClip3D& clip = back.model.clips[back.clip];
                         std::printf("  animation: %s, %.2f s, %zu clips, %u joints\n", clip.name.c_str(), static_cast<double>(clip.duration),
                                     back.model.clips.size(), back.model.skeletons[0].joint_count());
@@ -765,6 +805,7 @@ int main(int argc, char** argv) {
                         const float x = (static_cast<float>(i % columns) - static_cast<float>(columns - 1) * 0.5f) * sx;
                         const float z = (static_cast<float>(i / columns) - static_cast<float>((count - 1) / columns) * 0.5f) * sz;
                         copy.transform = Mat4f::translation({x, 0.0f, z}) * first.transform;
+                        copy.position = first.position + Vec3f{x, 0.0f, z};
                         copy.time += time_step * i;
                         placed.push_back(std::move(copy));
                     }
@@ -777,6 +818,42 @@ int main(int argc, char** argv) {
                 ++failures;
             }
             continue;
+        }
+        // `animation: {ecs: true}` models: an entity each, in a world of its own. The picture (frame 0) is 250 steps (4.17 s) in.
+        constexpr int ecs_lead = 250;
+        kin::EcsWorld ecs_world;
+        kin::WorldRenderState3D ecs_state{ecs_world};
+        bool any_ecs = false;
+        for (Placed& p : placed) {
+            if (!p.ecs || !p.animated) {
+                continue;
+            }
+            any_ecs = true;
+            p.shared = std::make_shared<const kin::Model>(p.model);
+            kin::Animator3D& a = p.animator;
+            if (!p.blend.empty()) {
+                auto machine = std::make_shared<kin::AnimationStateMachine>();
+                machine->initial = "move";
+                machine->states = {{"move", "move"}};
+                a.machine = machine;
+                kin::Animator3D::BlendSpace space;
+                space.parameter = "speed";
+                for (const Placed::BlendPoint& point : p.blend) {
+                    space.entries.push_back({p.model.clips[point.clip].name, point.position});
+                }
+                a.blend_spaces["move"] = space;
+                a.params.set_float("speed", static_cast<float>(p.parameter));
+            } else {
+                a.clip = p.model.clips[p.clip].name;
+            }
+            a.speed = static_cast<float>(p.speed);
+            a.loop = p.loop;
+            a.remove_root_motion = p.remove_root_motion;
+            p.entity = ecs_world.raw().entity()
+                           .set(kin::Transform3D{.position = p.position, .rotation = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, p.rotation_y),
+                                                 .scale = {p.uniform_scale, p.uniform_scale, p.uniform_scale}})
+                           .set(kin::SkinnedMeshRenderer{.model = p.shared})
+                           .set(static_cast<const kin::Animator3D&>(a)); // const: flecs moves from a non-const lvalue
         }
         Crowd crowd;
         const bool is_crowd = doc.string_at("procedural") == "crowd";
@@ -920,12 +997,50 @@ int main(int argc, char** argv) {
                                      .radius = static_cast<float>(p.number_at("radius", 1.0))});
                 }
             }
+            if (any_ecs) {
+                // The entities start again and take the steps the frame's index stands for (60 a second, 240 before the picture, which
+                // is the frame 0, `ecs_lead` steps in): every frame is the same whatever order the run asks for them in.
+                const int steps = std::max(0, time + ecs_lead);
+                for (Placed& p : placed) {
+                    if (p.entity) {
+                        const kin::Animator3D& start = p.animator; // const: flecs's set() moves from a non-const lvalue
+                        p.entity.set(start);
+                    }
+                }
+                for (int i = 0; i < steps; ++i) {
+                    for (Placed& p : placed) {
+                        if (p.entity && p.ramp) {
+                            const double t = std::min(1.0, static_cast<double>(i) / 60.0 / std::max(p.parameter_seconds, 1e-6));
+                            p.entity.get_mut<kin::Animator3D>()->params.set_float("speed", static_cast<float>(p.parameter + (p.parameter_to - p.parameter) * t));
+                        }
+                    }
+                    ecs_state.animate(1.0f / 60.0f);
+                }
+                ecs_state.propagate_transforms();
+                ecs_state.collect(scene);
+            }
             for (const Placed& p : placed) {
+                if (p.ecs && p.animated) {
+                    continue; // an entity: collected above
+                }
                 if (p.animated) {
                     const kin::Skeleton& skeleton = p.model.skeletons[0];
                     const double seconds = p.fixed_time ? p.time : static_cast<double>(time) / 60.0 * p.speed + p.time;
                     kin::Pose pose;
-                    kin::sample_clip(p.model.clips[p.clip], skeleton, static_cast<float>(seconds), p.loop, pose);
+                    if (!p.blend.empty()) {
+                        // A 1D blend: a player at the parameter's value for the frame, run for the seconds (its phase wraps).
+                        std::vector<kin::BlendPoint3D> points;
+                        for (const Placed::BlendPoint& point : p.blend) {
+                            points.push_back({&p.model.clips[point.clip], point.position});
+                        }
+                        const double ramp = p.ramp ? std::clamp((static_cast<double>(time) + ecs_lead) / 60.0 / std::max(p.parameter_seconds, 1e-6), 0.0, 1.0) : 0.0;
+                        kin::AnimationPlayer3D player{&skeleton};
+                        player.play_blend(points, static_cast<float>(p.parameter + (p.parameter_to - p.parameter) * ramp), p.loop);
+                        player.update(static_cast<float>(seconds));
+                        pose = player.pose();
+                    } else {
+                        kin::sample_clip(p.model.clips[p.clip], skeleton, static_cast<float>(seconds), p.loop, pose);
+                    }
                     if (p.remove_root_motion) {
                         kin::remove_root_motion(pose, skeleton, {.x = true, .y = false, .z = true, .rotation = false});
                     }

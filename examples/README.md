@@ -174,6 +174,10 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   shadow casters per cascade (or that the map was kept from the frame before), occlusion and contact-shadow work, the video memory of the opt-in features' targets), F12 or P saves a PNG of the
   picture to the current directory, F2 prints the settings and a fragment for a
   reference scene (`tests/reference/scenes/*.json`).
+- The "Character (skinned)" section spawns a procedural skinned character (three joints; clips Sway, Bend, Wave and a 1D blend of Sway
+  and Wave by a slider) as ECS entities (`SkinnedMeshRenderer`, `Animator3D`) in a row in front of the camera (1 to 64), with speed and size;
+  changing the clip is a state change, which crossfades. The stats show skinned copies, draws and joint matrices. `--preset character` and
+  `--preset character-all` (with occlusion, contact shadows, TAA and four cascades). The panel's click path is untested here (no display).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8

@@ -112,6 +112,13 @@ void remove_root_motion(Pose& pose, const Skeleton& skeleton, const RootMotionAx
 
 // --- the player -------------------------------------------------------------------------------------------------------
 
+// A point of a one-dimensional blend (a walk at speed 1, a run at speed 4): `clip` plays when the blend's parameter is at
+// `position`, and between two neighbouring points their two clips are blended by how far the parameter is between them.
+struct BlendPoint3D {
+    const AnimClip3D* clip = nullptr;
+    f32 position = 0.0f;
+};
+
 // A small animation player: a base layer with a clip and a crossfade to the next, and layers above it. Pointers to the
 // skeleton and clips are not owned: they must outlive the player (a Model's, usually; its vectors do not move unless the
 // Model is copied or changed).
@@ -128,16 +135,28 @@ public:
     // Fades to `clip` over `seconds` (the old one keeps playing as it fades out; a fade begun in the middle of another
     // fades from the picture of the last update, held still, so a quick sequence of fades does not jump). Zero seconds: play().
     void crossfade_to(const AnimClip3D* clip, f32 seconds, bool loop = true, f32 time = 0.0f);
+    // A one-dimensional blend as the base: the clips of `points` (sorted by position here; a null clip is dropped) blended by
+    // `parameter` (clamped to the first and last position), the two clips either side of it. Their phases are kept together:
+    // the base's time() is then a phase from 0 to 1, advanced by speed / (the blended duration), so a walk and a run step
+    // in time whatever their lengths. `phase` is where it starts (a foot-matched start: the phase of the clip it follows).
+    void play_blend(std::span<const BlendPoint3D> points, f32 parameter, bool loop = true, f32 phase = 0.0f);
+    // The same as a fade from what plays now (a clip, a blend, or a fade in progress), as crossfade_to is.
+    void crossfade_to_blend(std::span<const BlendPoint3D> points, f32 parameter, f32 seconds, bool loop = true, f32 phase = 0.0f);
+    // Moves the base blend's parameter (the speed of a character): takes effect at the next update. Nothing for a plain clip.
+    void set_blend_parameter(f32 parameter);
+    f32 blend_parameter() const { return _base.parameter; }
+    bool blending() const { return !_base.blend.empty(); }
     void set_speed(f32 speed) { _base.speed = speed; }
     f32 speed() const { return _base.speed; }
-    // The base clip's time and the clip (null: none), and the one it is fading from (null when not fading).
+    // The base clip's time (a blend's: its phase, 0 to 1) and the clip (null: none, or a blend), and the one it is fading from
+    // (null when not fading, or when that is a blend).
     f32 time() const { return _base.time; }
     void set_time(f32 time) { _base.time = time; }
     const AnimClip3D* clip() const { return _base.clip; }
     const AnimClip3D* fading_from() const { return _fading ? _from.clip : nullptr; }
     // The fade's progress, 0 to 1 (1 when not fading).
     f32 fade_progress() const { return _fading ? (_fade_seconds > 0.0f ? _fade_elapsed / _fade_seconds : 1.0f) : 1.0f; }
-    bool finished() const; // the base clip does not loop and its time has reached its end
+    bool finished() const; // the base clip (or blend) does not loop and its time has reached its end
 
     // --- layers above the base, in order (index 0 first)
     // A layer plays `clip` over the pose below it, joint by joint by `mask` times `weight`; additive layers add the clip's
@@ -177,12 +196,15 @@ public:
 private:
     struct Playing {
         const AnimClip3D* clip = nullptr;
-        f32 time = 0.0f;
+        f32 time = 0.0f; // seconds; for a blend its phase (0 to 1)
         f32 speed = 1.0f;
         bool loop = true;
+        std::vector<BlendPoint3D> blend; // a 1D blend (then `clip` is null), sorted by position
+        f32 parameter = 0.0f;
     };
     static void advance(Playing& p, f32 dt);
     void sample(const Playing& p, Pose& out) const;
+    static void set_blend(Playing& p, std::span<const BlendPoint3D> points, f32 parameter);
 
     const Skeleton* _skeleton = nullptr;
     Playing _base;

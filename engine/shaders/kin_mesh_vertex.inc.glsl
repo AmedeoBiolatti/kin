@@ -10,8 +10,14 @@ layout(location = 3) in vec4 aColor; // sRGB
 
 #ifdef KIN_SKIN
 // The skinned variants (mesh_skinned.vert, mesh_skinned_velocity.vert): the joints' matrices and each copy's first one
-// follow the instances (binding 1 and 2; the velocity variant has no Previous buffer, see below).
+// follow the instances (binding 1 and 2). The velocity variant also has the Previous buffer at 1, so they start at 2, and
+// the joints of the frame before and where each copy's start in them follow (4 and 5).
+#ifdef KIN_VELOCITY
+#define KIN_SKIN_BINDING 2
+#define KIN_SKIN_PREVIOUS
+#else
 #define KIN_SKIN_BINDING 1
+#endif
 #include "kin_skin.inc.glsl"
 #endif
 
@@ -20,11 +26,9 @@ layout(location = 3) in vec4 aColor; // sRGB
 // pushes the longer block to a pipeline with the plain mesh.vert (a custom shader's) is read right by both.
 // Each copy's matrix of the frame before is in a buffer of its own, indexed as the instances are; its [0][3]
 // (a zero in any placing) is 1 for a copy with no past: new, or matched to nothing believable.
-#ifndef KIN_SKIN
 layout(std430, set = 0, binding = 1) readonly buffer Previous {
     mat4 previous[];
 };
-#endif
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection; // jittered: where the pixel is drawn
     uvec4 first;          // x: this draw's first instance
@@ -79,10 +83,14 @@ void main() {
     vId = floatBitsToUint(instance.normal0.w);
 #ifdef KIN_VELOCITY
 #ifdef KIN_SKIN
-    // No past pose is kept for a skinned copy (part 2 of P1a): it is taken as not having moved, so only the camera's motion shows.
-    vFresh = 0.0;
+    // The copy's model matrix of the frame before times its pose of the frame before (the same expressions as
+    // prepass_velocity_skinned.vert's). A copy with no past pose is posed as now (camera-only motion); one with no past at all
+    // is fresh, as a plain copy is.
+    mat4 before = previous[at];
+    vFresh = before[0][3];
+    before[0][3] = 0.0;
     vCurrent = (draw.current * world).xyw;
-    vPrevious = (draw.prior * world).xyw;
+    vPrevious = (draw.prior * (before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0)))).xyw;
 #else
     // The same expressions as prepass_velocity.vert's, so the velocity is the pre-pass's to the last bit.
     mat4 before = previous[at];

@@ -7,9 +7,12 @@
 // the Scene3D every frame. The panel, `--set key=value`, `--preset` and the
 // printed settings all read one table of rows (SponzaScene::build_controls):
 // a new feature (contact shadows, TAA) is a field and a row there.
+#include "character.hpp"
 #include "settings.hpp"
 
 #include <kin/core/json.hpp>
+#include <kin/ecs/render3d.hpp>
+#include <kin/ecs/world.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
@@ -92,6 +95,8 @@ const std::map<std::string, std::string>& presets() {
         {"msaa1", "msaa=1"},
         {"msaa8", "msaa=8"},
         {"point-lights", "drop_light=1,light_r=14,light_g=9,light_b=4"},
+        {"character", "character=on,char_clip=blend,char_count=5"}, // skinned entities with an animator (P1a part 2)
+        {"character-all", "character=on,char_count=5,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
     };
     return p;
 }
@@ -458,6 +463,14 @@ private:
         check("receives_shadow", "Parts receive shadows", m.receives_shadow);
         check("unlit", "Force unlit", m.force_unlit);
 
+        section("Character (skinned)");
+        check("character", "Character (entities with Animator3D)", s.character);
+        choice("char_clip", "Clip", s.char_clip, {"Sway", "Bend", "Wave", "Blend Sway-Wave"});
+        slider("char_blend", "Blend parameter", s.char_blend, 0.0f, 1.0f);
+        slider("char_speed", "Speed", s.char_speed, 0.0f, 3.0f);
+        islider("char_count", "Count (a row)", s.char_count, 1, 64);
+        slider("char_scale", "Size", s.char_scale, 0.5f, 3.0f);
+
         section("Debug", true);
         check("stats", "Stats (F3)", s.stats);
         check("gpu_timing", "GPU timing", s.gpu_timing);
@@ -561,6 +574,7 @@ public:
         renderer.set_gpu_timing_enabled(_s.gpu_timing);
         _backend_stats = renderer.backend_stats();
 
+        update_characters(dt);
         fill_scene();
         warm_up_features();
         _r3d->render(_view, _scene);
@@ -838,10 +852,64 @@ private:
         }
     }
 
+    // The characters: entities with a SkinnedMeshRenderer and an Animator3D (a state machine with one state, a blend space over
+    // `speed` for the blend, a clip name else), a row in front of the camera where the switch was turned on or the count changed.
+    void update_characters(float dt) {
+        if (!_s.character || !_r3d->capabilities().skinning) {
+            if (!_characters.empty()) {
+                for (flecs::entity e : _characters) e.destruct();
+                _characters.clear();
+            }
+            return;
+        }
+        if (!_character_model) _character_model = make_character(*_r3d);
+        const int count = std::clamp(_s.char_count, 1, 64);
+        if (!_ecs) {
+            _ecs = std::make_unique<::kin::EcsWorld>();
+            _ecs_state = std::make_unique<WorldRenderState3D>(*_ecs);
+        }
+        if (int(_characters.size()) != count) {
+            for (flecs::entity e : _characters) e.destruct();
+            _characters.clear();
+            const Vec3f forward{-std::sin(_yaw * pi / 180.0f), 0.0f, -std::cos(_yaw * pi / 180.0f)};
+            const Vec3f right{-forward.z, 0.0f, forward.x};
+            auto machine = std::make_shared<AnimationStateMachine>();
+            machine->initial = "Blend";
+            machine->states = {{"Sway", "Sway"}, {"Bend", "Bend"}, {"Wave", "Wave"}, {"Blend", ""}};
+            for (int i = 0; i < count; ++i) {
+                Animator3D a;
+                a.machine = machine;
+                a.blend_spaces["Blend"] = {"blend", {{"Sway", 0.0f}, {"Wave", 1.0f}}};
+                a.fade_seconds = 0.3f;
+                const float offset = (float(i) - float(count - 1) * 0.5f) * 0.8f;
+                const Vec3f at = _pos + forward * 3.0f + right * offset - Vec3f{0.0f, 1.5f, 0.0f};
+                _characters.push_back(_ecs->raw().entity()
+                                          .set(Transform3D{.position = at})
+                                          .set(SkinnedMeshRenderer{.model = _character_model})
+                                          .set(static_cast<const Animator3D&>(a)));
+            }
+        }
+        for (flecs::entity e : _characters) {
+            Animator3D* a = e.get_mut<Animator3D>();
+            a->speed = _s.char_speed;
+            a->params.set_float("blend", _s.char_blend);
+            Transform3D* t = e.get_mut<Transform3D>();
+            t->scale = {_s.char_scale, _s.char_scale, _s.char_scale};
+            // Changing the clip is a change of state: the animator crossfades over fade_seconds.
+            static const char* states[] = {"Sway", "Bend", "Wave", "Blend"};
+            a->state = states[std::clamp(_s.char_clip, 0, 3)];
+        }
+        _ecs_state->animate(dt);
+    }
+
     void fill_scene() {
         _scene.clear();
         _scene.camera = camera();
         apply(_s, _scene, environment(), _model.bounds, _pos);
+        if (_ecs_state && !_characters.empty()) {
+            _ecs_state->propagate_transforms();
+            _ecs_state->collect(_scene);
+        }
         // The materials, made again only when a setting that changes them did.
         if (_materials.size() != _model.parts.size() || _material_key != _s.materials) {
             _material_key = _s.materials;
@@ -1123,6 +1191,10 @@ private:
         std::snprintf(line, sizeof line, "draws %u   meshes %u   culled %u   tris %.2fM", st.draws, st.instances, st.culled,
                       double(st.triangles) / 1e6);
         lines.push_back(line);
+        if (st.skinned_copies > 0) {
+            std::snprintf(line, sizeof line, "skinned: %u copies in %u draws, %u joint matrices", st.skinned_copies, st.skinned_draws, st.skin_matrices);
+            lines.push_back(line);
+        }
         if (st.shadow_cascades > 0) {
             std::snprintf(line, sizeof line, "shadows: %u draws, %u casters, %u maps [%u %u %u %u]%s", st.shadow_draws, st.shadow_casters,
                           st.shadow_cascades, st.cascade_casters[0], st.cascade_casters[1], st.cascade_casters[2], st.cascade_casters[3],
@@ -1200,6 +1272,10 @@ private:
     View3D _view;
     ViewKey _key;
     Scene3D _scene;
+    std::shared_ptr<const Model> _character_model;
+    std::unique_ptr<::kin::EcsWorld> _ecs;
+    std::unique_ptr<WorldRenderState3D> _ecs_state;
+    std::vector<flecs::entity> _characters;
     Model _model;
     Mesh _marker;
     Material3D _wire_material;

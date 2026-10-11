@@ -6803,8 +6803,8 @@ void dump(const Pixels& p, const std::string& name) {
 
 // The bent tube of skin_fixtures as a skinned mesh, and the same posed on the CPU as a plain one.
 struct SkinRig {
-    explicit SkinRig(kin::Renderer3D& r3d, int rings = 25, int segments = 12, float length = 3.0f)
-        : tube(skin_fixtures::make_tube(rings, segments, length)), mesh(r3d.create_mesh(tube.mesh)) {
+    explicit SkinRig(kin::Renderer3D& r3d, int rings = 25, int segments = 12, float length = 3.0f, float radius = 0.35f)
+        : tube(skin_fixtures::make_tube(rings, segments, length, radius)), mesh(r3d.create_mesh(tube.mesh)) {
         assert(mesh.valid() && mesh.skinned() && mesh.skin_joint_count() == 3);
     }
 
@@ -7282,8 +7282,9 @@ void test_gpu_skinned_on_workers() {
     });
 }
 
-// What cannot yet be done with skinned copies is declined without harm: with ambient occlusion, contact shadows, temporal anti-aliasing or
-// pick on, they are drawn by the main pass (and cast shadows), left out of the pre-pass and pick, and the frame is whole.
+// A skinned copy with ambient occlusion, contact shadows, temporal anti-aliasing and pick on is in every pass (the pre-pass, the velocity,
+// the pick pass): counted in the pre-pass's instances, named by pick, and the frames are whole. (The pictures' details are in the
+// P1a part 2 tests below.)
 void test_gpu_skinned_with_features() {
     with_gpu("test_gpu_skinned_with_features", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -7309,9 +7310,9 @@ void test_gpu_skinned_with_features() {
             const kin::Vec2f p = scene.camera.project(w, screen)->pos;
             return kin::Vec2i{static_cast<int>(p.x), static_cast<int>(p.y)};
         };
-        // Pick: the floor shows through where the copy is (it is not in the pick pass); the tube's own pixel names the floor or nothing.
-        const kin::PickResult over = r3d.pick(view, pixel({0.0f, 2.0f, 0.0f}));
-        assert(!over.hit || over.id != 8);
+        // Pick: the tube's own pixel names the tube.
+        const kin::PickResult over = r3d.pick(view, kin::Vec2i{80, 60});
+        assert(over.hit && over.id == 8);
         if (r3d.capabilities().ambient_occlusion) {
             scene.ambient_occlusion.enabled = true;
             scene.contact_shadows.enabled = true;
@@ -7319,7 +7320,7 @@ void test_gpu_skinned_with_features() {
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             const kin::Render3DStats stats = r3d.stats();
             renderer.present();
-            assert(stats.skinned_copies == 1 && stats.ao_instances == 1); // the floor alone is in the pre-pass
+            assert(stats.skinned_copies == 1 && stats.ao_instances == 2); // the floor and the tube are in the pre-pass
             assert(pixels_differing(p, plain, 30) < 3000 && pixels_lit(p) > 3000);
             // The tube is drawn all the same.
             scene.clear();
@@ -7451,6 +7452,825 @@ void test_gpu_skinned_many_copies() {
 }
 
 // With an argument, only the tests whose names contain it run (e.g. `kin_render3d_tests skinned`).
+// --- Skinned meshes (P1a, part 2): velocity, the pre-pass, pick, the shadow cache, shared ranges, the ECS animator ---
+
+// A 4 x 4 texture of one-texel checks, bright and dark, drawn with repeat: where a wrong velocity shows (a history read at the wrong
+// place lands on the other colour, and the clip against the neighbourhood lets it through).
+kin::Texture checker_texture(kin::Renderer2D& renderer) {
+    kin::u8 texels[4 * 4 * 4];
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 4; ++x) {
+            const bool bright = (x + y) % 2 == 0;
+            kin::u8* t = texels + (y * 4 + x) * 4;
+            t[0] = bright ? 235 : 25;
+            t[1] = bright ? 235 : 25;
+            t[2] = bright ? 225 : 35;
+            t[3] = 255;
+        }
+    }
+    kin::Texture texture = renderer.create_texture_from_rgba(texels, {4, 4});
+    renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
+    return texture;
+}
+
+// Left half transparent (alpha 0), right half opaque: a cut-out tube.
+kin::Texture half_cut_texture(kin::Renderer2D& renderer) {
+    const kin::u8 texels[8] = {20, 200, 20, 0, 230, 90, 60, 255};
+    kin::Texture texture = renderer.create_texture_from_rgba(texels, {2, 1});
+    renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
+    return texture;
+}
+
+// The lower half transparent along v (the tube's length: its foot is a hole), the upper half opaque.
+kin::Texture lower_cut_texture(kin::Renderer2D& renderer) {
+    const kin::u8 texels[8] = {20, 200, 20, 0, 230, 90, 60, 255};
+    kin::Texture texture = renderer.create_texture_from_rgba(texels, {1, 2});
+    renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
+    return texture;
+}
+
+// The tube skinned, and the same tube skinned on the CPU and drawn as a plain mesh, in two views with histories of their own, moved
+// the same rigid way over frames (a translation, a rotation, split between the pose and the placing, or nothing but the camera): under
+// temporal anti-aliasing every frame of the one is the other's, to a few pixels, whichever route writes the velocity (the main pass, or
+// the pre-pass when ambient occlusion is on), whether the copies are matched by id or by order, and in the overlay. A velocity that is
+// the camera's alone (the part 1 behaviour) reads the history of the wrong place and ghosts the checks.
+void test_gpu_skinned_velocity() {
+    with_gpu("test_gpu_skinned_velocity", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
+        SkinRig rig{r3d};
+        const kin::Texture checks = checker_texture(renderer);
+        const kin::Texture cut = half_cut_texture(renderer);
+        const std::vector<Mat4f> rest = rig.matrices(60.0f, -40.0f);
+        const kin::Mesh baked = rig.baked(r3d, rest);
+        enum class Motion { Pose, Split, Rotate, Camera };
+        struct Case {
+            const char* name;
+            bool ao;
+            kin::u32 id;
+            Motion motion;
+            bool overlay;
+            bool cutout;
+        };
+        const std::vector<Case> cases{
+            {"taa alone (main pass velocity), translating in the pose, by order", false, 0, Motion::Pose, false, false},
+            {"taa alone, translating half in the pose and half in the placing, by id", false, 7, Motion::Split, false, false},
+            {"taa alone, rotating, by id", false, 7, Motion::Rotate, false, false},
+            {"taa alone, still pose under a moving camera", false, 0, Motion::Camera, false, false},
+            {"taa + ao (pre-pass velocity), translating, by order", true, 0, Motion::Pose, false, false},
+            {"taa + ao, rotating, by id", true, 9, Motion::Rotate, false, false},
+            {"taa + ao, still pose under a moving camera", true, 0, Motion::Camera, false, false},
+            {"taa alone, the overlay, rotating", false, 0, Motion::Rotate, true, false},
+            {"taa + ao, the overlay, translating", true, 0, Motion::Pose, true, false},
+            {"taa + ao, cut-out, translating", true, 0, Motion::Pose, false, true},
+            {"taa alone, cut-out, rotating, by id", false, 5, Motion::Rotate, false, true},
+        };
+        int worst_of_all = 0;
+        for (const Case& c : cases) {
+            kin::View3D view_skinned = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            const kin::Material3D material = c.cutout ? kin::Material3D{.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = cut}
+                                                      : kin::Material3D{.color = Color::rgb(235, 235, 235), .texture = checks, .wrap_u = kin::Wrap3D::Repeat, .wrap_v = kin::Wrap3D::Repeat};
+            int worst = 0;
+            bool route_ok = true;
+            for (int f = 0; f < 14; ++f) {
+                const float x = -0.8f + 0.12f * static_cast<float>(f);
+                Mat4f motion = Mat4f::identity();
+                Mat4f place = Mat4f::translation({0.0f, 0.0f, 0.0f});
+                Mat4f plain_place = place;
+                std::vector<Mat4f> matrices = rest;
+                float camera_x = 0.0f;
+                switch (c.motion) {
+                case Motion::Pose:
+                    motion = Mat4f::translation({x, 0.0f, 0.0f});
+                    plain_place = place * motion;
+                    break;
+                case Motion::Split:
+                    motion = Mat4f::translation({x * 0.5f, 0.0f, 0.0f});
+                    place = Mat4f::translation({x * 0.5f, 0.0f, 0.0f});
+                    plain_place = Mat4f::translation({x, 0.0f, 0.0f});
+                    break;
+                case Motion::Rotate:
+                    motion = Mat4f::rotation_y(7.0f * static_cast<float>(f));
+                    plain_place = place * motion;
+                    break;
+                case Motion::Camera:
+                    camera_x = 0.12f * static_cast<float>(f);
+                    plain_place = place;
+                    break;
+                }
+                for (Mat4f& m : matrices) {
+                    m = motion * m;
+                }
+                const auto build = [&](kin::Scene3D& scene, bool skinned) {
+                    scene.clear();
+                    scene.camera = skin_camera(false);
+                    scene.camera.position.x += camera_x;
+                    skin_lights(scene, 1);
+                    scene.taa = {.enabled = true};
+                    scene.ambient_occlusion = {.enabled = c.ao};
+                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+                    kin::Scene3D& target = c.overlay ? scene.overlay() : scene;
+                    if (c.overlay) {
+                        target.camera = scene.camera;
+                    }
+                    if (skinned) {
+                        target.draw_skinned(rig.mesh, matrices, place, material, kin::colors::white, c.id);
+                    } else {
+                        target.draw(baked, plain_place, material, kin::colors::white, c.id);
+                    }
+                };
+                kin::Scene3D scene_skinned, scene_plain;
+                build(scene_skinned, true);
+                build(scene_plain, false);
+                const Pixels a = shoot_view(renderer, r3d, view_skinned, scene_skinned);
+                const kin::Render3DStats stats = r3d.stats();
+                renderer.present();
+                const Pixels b = shoot_view(renderer, r3d, view_plain, scene_plain);
+                renderer.present();
+                route_ok = route_ok && stats.skinned_copies == 1 && stats.taa_main_velocity == !c.ao;
+                if (f >= 1) {
+                    worst = std::max(worst, pixels_differing(a, b, 8));
+                }
+                if (f == 13) {
+                    dump(a, std::string{"skinned_velocity_"} + std::to_string(&c - cases.data()) + "_skinned");
+                    dump(b, std::string{"skinned_velocity_"} + std::to_string(&c - cases.data()) + "_plain");
+                    assert(pixels_lit(a) > 3000);
+                }
+            }
+            std::cerr << "skinned velocity, " << c.name << ": worst frame " << worst << " of 19200 pixels differ from the CPU-skinned mesh by more than 8 levels\n";
+            assert(route_ok);
+            assert(worst <= 40);
+            worst_of_all = std::max(worst_of_all, worst);
+        }
+        std::cerr << "skinned velocity: at most " << worst_of_all << " pixels differ\n";
+    });
+}
+
+// A copy that appears has no history (its velocity is far off the screen, as a plain copy's is), whether it joins the draw of copies already
+// there or comes with another mesh; and copies matched by id keep their own histories when the order of the draws changes between frames.
+void test_gpu_skinned_velocity_new_and_reordered() {
+    with_gpu("test_gpu_skinned_velocity_new_and_reordered", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
+        SkinRig rig{r3d};
+        const kin::Texture checks = checker_texture(renderer);
+        const kin::Material3D material{.color = Color::rgb(235, 235, 235), .texture = checks, .wrap_u = kin::Wrap3D::Repeat, .wrap_v = kin::Wrap3D::Repeat};
+        const std::vector<Mat4f> rest = rig.matrices(50.0f, -30.0f);
+        const kin::Mesh baked = rig.baked(r3d, rest);
+        for (const bool reorder : {false, true}) {
+            kin::View3D view_skinned = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            int worst = 0, new_frame = 0;
+            for (int f = 0; f < 16; ++f) {
+                // Two characters, passing each other; a third from frame 8 on.
+                struct Who {
+                    kin::u32 id;
+                    Vec3f at;
+                };
+                std::vector<Who> who{{1, {-1.5f + 0.1f * static_cast<float>(f), 0.0f, 0.0f}}, {2, {1.5f - 0.1f * static_cast<float>(f), 0.0f, 0.5f}}};
+                if (reorder && f >= 6) {
+                    std::swap(who[0], who[1]); // the same ids, drawn in the other order
+                }
+                if (f >= 8) {
+                    who.push_back({3, {0.0f, 0.0f, -1.5f}});
+                }
+                const auto build = [&](kin::Scene3D& scene, bool skinned) {
+                    scene.clear();
+                    scene.camera = skin_camera(false);
+                    skin_lights(scene, 1);
+                    scene.taa = {.enabled = true};
+                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+                    for (const Who& w : who) {
+                        std::vector<Mat4f> m = rest;
+                        for (Mat4f& x : m) {
+                            x = Mat4f::translation(w.at) * x;
+                        }
+                        if (skinned) {
+                            scene.draw_skinned(rig.mesh, m, Mat4f::identity(), material, kin::colors::white, w.id);
+                        } else {
+                            scene.draw(baked, Mat4f::translation(w.at), material, kin::colors::white, w.id);
+                        }
+                    }
+                };
+                kin::Scene3D scene_skinned, scene_plain;
+                build(scene_skinned, true);
+                build(scene_plain, false);
+                const Pixels a = shoot_view(renderer, r3d, view_skinned, scene_skinned);
+                renderer.present();
+                const Pixels b = shoot_view(renderer, r3d, view_plain, scene_plain);
+                renderer.present();
+                if (f >= 1) {
+                    const int differing = pixels_differing(a, b, 8);
+                    worst = std::max(worst, differing);
+                    if (f == 8 || f == 9) {
+                        new_frame = std::max(new_frame, differing);
+                    }
+                }
+            }
+            std::cerr << "skinned velocity, " << (reorder ? "reordered by id" : "a copy appearing") << ": worst frame " << worst << " pixels differ, " << new_frame
+                      << " when the new copy appears\n";
+            assert(worst <= 40);
+        }
+    });
+}
+
+// Ambient occlusion and contact shadows with a skinned copy are the same scene's with the copy skinned on the CPU and drawn as a plain mesh,
+// opaque and cut-out; and they show (the picture with them differs from the one without by hundreds of pixels at the creases).
+void test_gpu_skinned_prepass_features() {
+    with_gpu("test_gpu_skinned_prepass_features", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
+        const kin::Mesh wall = make_box(r3d, {0.3f, 3.0f, 6.0f});
+        SkinRig rig{r3d};
+        const kin::Texture cut = half_cut_texture(renderer);
+        const std::vector<Mat4f> pose = rig.matrices(50.0f, -35.0f, {0.0f, 0.0f, 0.0f});
+        const kin::Mesh baked = rig.baked(r3d, pose);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+        int worst = 0, shown = 1 << 30;
+        for (const bool cutout : {false, true}) {
+            for (const kin::u32 cascades : {1u, 3u}) {
+                const kin::Material3D material = cutout ? kin::Material3D{.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = cut}
+                                                        : kin::Material3D{.color = Color::rgb(210, 70, 60)};
+                kin::Scene3D scene;
+                const auto shoot = [&](bool skinned, bool features) {
+                    scene.clear();
+                    scene.camera = skin_camera(false);
+                    skin_lights(scene, cascades);
+                    scene.lights.ambient = {0.7f, 0.7f, 0.75f}; // a bright sky, so that the occlusion of it shows
+                    scene.ambient_occlusion = {.enabled = features, .radius = 1.0f, .intensity = 2.0f};
+                    scene.contact_shadows = {.enabled = features, .distance = 1.0f};
+                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                    scene.draw(wall, Mat4f::translation({-1.0f, 1.5f, -0.5f}), {.color = Color::rgb(200, 190, 170)});
+                    const Mat4f place = Mat4f::translation({0.1f, 0.0f, 0.2f}) * Mat4f::rotation_y(20.0f);
+                    if (skinned) {
+                        scene.draw_skinned(rig.mesh, pose, place, material);
+                    } else {
+                        scene.draw(baked, place, material);
+                    }
+                    Pixels p = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                    return p;
+                };
+                const Pixels skinned = shoot(true, true);
+                const kin::Render3DStats stats = r3d.stats();
+                const Pixels plain = shoot(false, true);
+                const Pixels without = shoot(true, false);
+                const int differing = pixels_differing(skinned, plain);
+                assert(differing <= 20);
+                assert(stats.skinned_copies == 1 && stats.ao_instances == 3 && stats.ao_dispatches > 0 && stats.contact_dispatches > 0);
+                const int visible = pixels_differing(skinned, without, 3);
+                worst = std::max(worst, differing);
+                shown = std::min(shown, visible);
+                dump(skinned, std::string{"skinned_ao_"} + (cutout ? "cutout_" : "opaque_") + "c" + std::to_string(cascades));
+                std::cerr << "skinned ao + contact, " << (cutout ? "cut-out" : "opaque") << ", " << cascades << " cascades: " << differing
+                          << " pixels differ from the CPU-skinned mesh; the features change " << visible << " pixels\n";
+                assert(differing <= 20);
+                assert(visible > 150);
+            }
+        }
+        std::cerr << "skinned ao + contact: at most " << worst << " pixels differ, the features show in at least " << shown << "\n";
+    });
+}
+
+// A skinned wall is an occluder: the clusters of the balls behind it are culled as behind a plain wall (the same numbers), the picture is
+// the one without occlusion culling to the byte, and the cut-out variant of the occluder pass (a wall of a masked material) does the same.
+void test_gpu_skinned_occluder() {
+    with_gpu("test_gpu_skinned_occluder", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || !occlusion_capable(r3d)) {
+            return;
+        }
+        const OcclusionRoom room{r3d};
+        // The wall as a skinned mesh of one joint (weight 1): the box 1 x 3 x 0.4 of the room, scaled 8 times along x.
+        kin::MeshData wall_data = kin::meshes::box({1.0f, 3.0f, 0.4f});
+        wall_data.skin.assign(wall_data.vertices.size(), kin::MeshSkinVertex{{0, 0, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
+        const kin::Mesh wall = r3d.create_mesh(wall_data);
+        assert(wall.skinned() && wall.skin_joint_count() == 1);
+        const kin::u8 solid[4] = {200, 190, 170, 255};
+        const kin::Texture solid_texture = renderer.create_texture_from_rgba(solid, {1, 1});
+        const std::vector<Mat4f> one{Mat4f::identity()};
+        struct Config {
+            const char* name;
+            bool skinned, cutout, passes, taa;
+        };
+        const std::vector<Config> configs{
+            {"plain wall", false, false, false, false},
+            {"skinned wall", true, false, false, false},
+            {"skinned cut-out wall", true, true, false, false},
+            {"skinned wall, ambient occlusion and contact shadows", true, false, true, false},
+            {"skinned wall, taa", true, false, false, true},
+        };
+        kin::u32 reference_occluded = 0, reference_drawn = 0;
+        for (const Config& config : configs) {
+            if (config.taa && lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+                continue;
+            }
+            Twin twin{renderer, r3d, config.taa ? 1u : 4u};
+            kin::Scene3D scene;
+            int worst = 0;
+            for (int f = 0; f < (config.taa ? 6 : 3); ++f) {
+                scene.clear();
+                scene.camera = room_camera(0.05f * static_cast<float>(f));
+                scene.lights.sun.direction = {-0.85f, 0.5f, 0.1f};
+                scene.lights.shadow_area = {{-30.0f, -0.2f, -30.0f}, {30.0f, 8.0f, 30.0f}};
+                if (config.passes) {
+                    scene.ambient_occlusion = {.enabled = true};
+                    scene.contact_shadows = {.enabled = true};
+                }
+                scene.taa = {.enabled = config.taa};
+                scene.draw(room.floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(150, 150, 150)});
+                const Mat4f place = Mat4f::translation({0.0f, 1.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 1.0f});
+                kin::Material3D plaster{.color = Color::rgb(200, 190, 170)};
+                if (config.cutout) {
+                    plaster = {.color = Color::rgb(255, 255, 255), .blend = kin::Blend3D::Mask, .texture = solid_texture};
+                }
+                if (config.skinned) {
+                    scene.draw_skinned(wall, one, place, plaster);
+                } else {
+                    scene.draw(room.unit, place, plaster);
+                }
+                kin::u32 id = 1;
+                for (const Vec3f& v : hidden_balls) {
+                    scene.draw(room.ball, Mat4f::translation(v), {.color = Color::rgb(70, 140, 210), .roughness = 0.5f}, kin::colors::white, id++);
+                }
+                worst = std::max(worst, twin.frame(scene));
+            }
+            const kin::Render3DStats& on = twin.on_stats;
+            const kin::Render3DStats& off = twin.off_stats;
+            std::cerr << "skinned occluder, " << config.name << ": " << worst << " bytes differ with and without culling; " << on.clusters_occluded
+                      << " clusters occluded of " << off.clusters_drawn << "\n";
+            assert(worst == 0);
+            assert(on.clusters_occluded > 40 && on.clusters_drawn + on.clusters_occluded == off.clusters_drawn);
+            if (!config.skinned) {
+                reference_occluded = on.clusters_occluded;
+                reference_drawn = on.clusters_drawn;
+            } else if (!config.passes && !config.taa) {
+                // The same wall, the same clusters: the skinned one hides what the plain one does.
+                assert(on.clusters_occluded == reference_occluded && on.clusters_drawn == reference_drawn);
+            }
+        }
+    });
+}
+
+// Pick finds skinned copies where their posed triangles are: the same ids over a grid of pixels as the CPU-skinned meshes drawn plain with the
+// same ids; the pixels of a posed vertex name the copy, an empty one nothing, a cut-out's hole the floor behind it.
+void test_gpu_skinned_pick() {
+    with_gpu("test_gpu_skinned_pick", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {6.0f, 0.2f, 6.0f});
+        SkinRig rig{r3d};
+        const kin::Texture cut = lower_cut_texture(renderer);
+        struct Pose {
+            float a, b;
+            Vec3f at;
+            kin::u32 id;
+        };
+        const std::vector<Pose> poses{{0.0f, 0.0f, {-2.2f, 0.0f, 0.0f}, 11}, {70.0f, -50.0f, {0.0f, 0.0f, 0.0f}, 12}, {-45.0f, 60.0f, {2.2f, 0.0f, 0.0f}, 13}};
+        int opaque_floor = 0;
+        for (const bool cutout : {false, true}) {
+            const kin::Material3D material = cutout ? kin::Material3D{.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = cut}
+                                                    : kin::Material3D{.color = Color::rgb(210, 70, 60)};
+            kin::View3D view_skinned = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            kin::Scene3D scene_skinned, scene_plain;
+            std::vector<kin::MeshData> posed;
+            for (kin::Scene3D* scene : {&scene_skinned, &scene_plain}) {
+                scene->camera = kin::Camera3D::look_at({0.0f, 2.2f, 9.0f}, {0.0f, 1.2f, 0.0f}, 50.0f);
+                skin_lights(*scene, 1);
+                scene->draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)}, kin::colors::white, 3);
+            }
+            for (const Pose& p : poses) {
+                const std::vector<Mat4f> m = rig.matrices(p.a, p.b);
+                scene_skinned.draw_skinned(rig.mesh, m, Mat4f::translation(p.at), material, kin::colors::white, p.id);
+                const kin::Mesh baked = rig.baked(r3d, m);
+                scene_plain.draw(baked, Mat4f::translation(p.at), material, kin::colors::white, p.id);
+                posed.push_back(kin::skin_mesh(rig.tube.mesh, m));
+            }
+            shoot_view(renderer, r3d, view_skinned, scene_skinned);
+            assert(r3d.stats().skinned_copies == 3);
+            renderer.present();
+            shoot_view(renderer, r3d, view_plain, scene_plain);
+            renderer.present();
+            int compared = 0, differ = 0;
+            std::array<int, 3> hits{};
+            int floors = 0, empty = 0;
+            for (int y = 3; y < 120; y += 6) {
+                for (int x = 3; x < 160; x += 6) {
+                    const kin::PickResult a = r3d.pick(view_skinned, {x, y}), b = r3d.pick(view_plain, {x, y});
+                    ++compared;
+                    differ += (a.hit != b.hit || (a.hit && a.id != b.id)) ? 1 : 0;
+                    if (a.hit) {
+                        for (std::size_t k = 0; k < poses.size(); ++k) {
+                            hits[k] += a.id == poses[k].id ? 1 : 0;
+                        }
+                        floors += a.id == 3 ? 1 : 0;
+                    } else {
+                        ++empty;
+                    }
+                }
+            }
+            std::cerr << "skinned pick, " << (cutout ? "cut-out" : "opaque") << ": " << differ << " of " << compared << " pixels differ from the plain meshes; ids "
+                      << hits[0] << "/" << hits[1] << "/" << hits[2] << ", floor " << floors << ", nothing " << empty << "\n";
+            assert(differ == 0);
+            assert(hits[0] > 5 && hits[1] > 5 && hits[2] > 5 && floors > 20 && empty > 100);
+            if (!cutout) {
+                opaque_floor = floors;
+            } else {
+                assert(floors > opaque_floor); // the feet are holes: the floor shows through where they are
+            }
+            // A posed vertex's pixel names its copy (the CPU's posed positions, projected).
+            if (!cutout) {
+                int checked = 0, right = 0;
+                for (std::size_t k = 0; k < poses.size(); ++k) {
+                        // The centre of each ring of the tube (its axis), well inside the silhouette.
+                    const std::size_t row = 13; // SkinRig: 12 segments, 13 vertices a ring (the last repeats the first)
+                    for (std::size_t v = 0; v + row <= posed[k].vertices.size(); v += row) {
+                        Vec3f centre{};
+                        for (std::size_t i = 0; i + 1 < row; ++i) {
+                            centre = centre + posed[k].vertices[v + i].position;
+                        }
+                        const Vec3f world = centre * (1.0f / static_cast<float>(row - 1)) + poses[k].at;
+                        const auto screen_point = scene_skinned.camera.project(world, screen);
+                        if (!screen_point || screen_point->pos.x < 1 || screen_point->pos.y < 1 || screen_point->pos.x > 158 || screen_point->pos.y > 118) {
+                            continue;
+                        }
+                        const kin::PickResult r = r3d.pick(view_skinned, {static_cast<int>(screen_point->pos.x), static_cast<int>(screen_point->pos.y)});
+                        ++checked;
+                        right += r.hit && r.id == poses[k].id ? 1 : 0;
+                    }
+                }
+                std::cerr << "skinned pick: " << right << " of " << checked << " posed vertices' pixels name their copy\n";
+                assert(checked > 30 && right * 10 >= checked * 9);
+            }
+        }
+        // Without a pick pass nothing is made (the view has none): pick answers nothing.
+        kin::View3D no_pick = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = skin_camera(false);
+        scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), Mat4f::identity(), {}, kin::colors::white, 5);
+        shoot_view(renderer, r3d, no_pick, scene);
+        renderer.present();
+        assert(!r3d.pick(no_pick, {80, 60}).hit);
+    });
+}
+
+// The shadow cache with skinned casters: a still pose hits, a changed pose (any copy of forty, in a way the cheap sample need not see) draws
+// again, a different skeleton draws again, and what the cache serves is always what an uncached render of the same scene shows.
+void test_gpu_skinned_shadow_cache() {
+    with_gpu("test_gpu_skinned_shadow_cache", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
+        SkinRig rig{r3d};
+        SkinRig other{r3d, 25, 12, 2.0f};
+        SkinRig fat{r3d, 25, 12, 3.0f, 0.7f}; // the same skeleton and so the same matrices, another mesh
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        struct Setup {
+            float a = 40.0f, b = -30.0f;
+            float one_copy = 0.0f; // copy 7's bend, in a draw of forty
+            bool other_skeleton = false;
+            bool fat = false;
+            bool cascades = false;
+        } setup;
+        kin::Scene3D scene;
+        const auto build = [&](bool cache) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0.0f, 14.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+            scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 6.0f, 10.0f}};
+            scene.lights.shadow_resolution = 1024;
+            scene.lights.shadow_cascades = setup.cascades ? 3 : 1;
+            scene.lights.cache_shadows = cache;
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            const SkinRig& mesh = setup.other_skeleton ? other : setup.fat ? fat : rig;
+            scene.draw_skinned(mesh.mesh, mesh.matrices(setup.a, setup.b), Mat4f::translation({-3.0f, 0.0f, 0.0f}), {.color = Color::rgb(200, 60, 60)});
+            for (int i = 0; i < 40; ++i) {
+                scene.draw_skinned(rig.mesh, rig.matrices(20.0f + (i == 7 ? setup.one_copy : 0.0f), -20.0f),
+                                   Mat4f::translation({-8.0f + 0.4f * static_cast<float>(i), 0.0f, -6.0f}) * Mat4f::scaling({0.2f, 0.2f, 0.2f}),
+                                   {.color = Color::rgb(60, 60, 200)});
+            }
+        };
+        const auto shoot = [&](kin::View3D& target, bool cache) {
+            build(cache);
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        const auto truth = [&] { return shoot(reference_view, false); };
+
+        const Pixels first = shoot(view, true);
+        if (r3d.stats().shadow_cascades == 0) {
+            std::cerr << "shadows: not available on this device, skipped\n";
+            return;
+        }
+        assert(!r3d.stats().shadow_cached && r3d.stats().shadow_draws > 0 && r3d.stats().skinned_copies == 41);
+        shoot(view, true);
+        for (int f = 0; f < 3; ++f) {
+            const Pixels p = shoot(view, true);
+            assert(r3d.stats().shadow_cached && r3d.stats().shadow_draws == 0 && p.rgba == first.rgba);
+        }
+        assert(first.rgba == truth().rgba);
+        std::cerr << "skinned shadow cache: still poses hit\n";
+
+        // The settle: renders until the cache is armed again (a change makes it wait a few renders before it copies).
+        const auto settle = [&] {
+            for (int i = 0; i < 14; ++i) {
+                shoot(view, true);
+                if (r3d.stats().shadow_cached) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        // A posed copy that moves invalidates it, and the picture is the uncached one's; still again, it hits again.
+        const auto change = [&](const char* what, const std::function<void()>& apply) {
+            apply();
+            const Pixels moved = shoot(view, true);
+            assert(!r3d.stats().shadow_cached && r3d.stats().shadow_draws > 0);
+            assert(moved.rgba == truth().rgba);
+            assert(settle());
+            assert(shoot(view, true).rgba == moved.rgba && r3d.stats().shadow_cached);
+            std::cerr << "skinned shadow cache: " << what << ": drawn again, then hit\n";
+            return moved;
+        };
+        const Pixels before = first;
+        const Pixels after_bend = change("one posed copy bends", [&] { setup.a = 55.0f; });
+        assert(pixels_differing(after_bend, before, 3) > 0);
+        change("copy 7 of forty bends (a copy the sample does not look at)", [&] { setup.one_copy = 25.0f; });
+        change("another mesh with the same skeleton and the same pose", [&] { setup.fat = true; });
+        change("a different skeleton in the same place", [&] {
+            setup.fat = false;
+            setup.other_skeleton = true;
+        });
+        change("the pose goes back", [&] {
+            setup.fat = false;
+            setup.other_skeleton = false;
+            setup.a = 40.0f;
+            setup.one_copy = 0.0f;
+        });
+        // The same with cascades (lists of copies a cascade).
+        change("cascades on", [&] { setup.cascades = true; });
+        change("a posed copy bends, with cascades", [&] { setup.b = 10.0f; });
+    });
+}
+
+// One range of matrices for all of a model's parts: the same picture as a call for each part with the pose, and a third the matrices.
+void test_gpu_skinned_shared_range() {
+    with_gpu("test_gpu_skinned_shared_range", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
+        SkinRig rig{r3d};
+        // A model of three parts on the one skeleton (three materials of the one mesh, as a character of three materials has).
+        kin::Model model;
+        model.skeletons.push_back(rig.tube.skeleton);
+        const Color colours[3] = {Color::rgb(210, 70, 60), Color::rgb(70, 190, 90), Color::rgb(70, 90, 210)};
+        for (int i = 0; i < 3; ++i) {
+            kin::ModelPart part;
+            part.name = "part" + std::to_string(i);
+            part.mesh = rig.mesh;
+            part.material = {.color = colours[i], .double_sided = i == 1};
+            part.skin = 0;
+            model.parts.push_back(part);
+        }
+        const std::vector<Mat4f> pose = rig.matrices(60.0f, -45.0f);
+        for (const bool features : {false, true}) {
+            if (features && lacks(r3d.capabilities().ambient_occlusion && r3d.capabilities().temporal_aa, "ambient occlusion and temporal anti-aliasing")) {
+                continue;
+            }
+            Pixels shared, separate;
+            kin::u32 shared_matrices = 0, separate_matrices = 0;
+            for (const bool use_model : {true, false}) {
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 4}); // a view each: the jitter's sequence starts alike
+                for (int frame = 0; frame < (features ? 4 : 1); ++frame) {
+                    kin::Scene3D scene;
+                    scene.camera = skin_camera(false);
+                    skin_lights(scene, 2);
+                    scene.ambient_occlusion = {.enabled = features};
+                    scene.taa = {.enabled = features};
+                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                    const Mat4f place = Mat4f::translation({0.0f, 0.0f, 0.2f});
+                    if (use_model) {
+                        scene.draw_skinned(model, pose, place, kin::colors::white, 4);
+                        assert(scene.joint_matrices().size() == 3 && scene.skin_offsets().size() == 3);
+                        assert(scene.skin_offsets()[0] == scene.skin_offsets()[1] && scene.skin_offsets()[1] == scene.skin_offsets()[2]);
+                    } else {
+                        for (const kin::ModelPart& part : model.parts) {
+                            scene.draw_skinned(part.mesh, pose, place, part.material, kin::colors::white, 4);
+                        }
+                        assert(scene.joint_matrices().size() == 9);
+                    }
+                    Pixels p = shoot_view(renderer, r3d, view, scene);
+                    const kin::Render3DStats stats = r3d.stats();
+                    renderer.present();
+                    assert(stats.skinned_copies == 3);
+                    (use_model ? shared : separate) = p;
+                    (use_model ? shared_matrices : separate_matrices) = stats.skin_matrices;
+                }
+            }
+            std::cerr << "skinned shared range" << (features ? " (ao + taa)" : "") << ": " << shared_matrices << " matrices against " << separate_matrices << "; "
+                      << pixels_differing(shared, separate, 0) << " pixels differ\n";
+            assert(shared_matrices == 3 && separate_matrices == 9);
+            assert(shared.rgba == separate.rgba);
+            assert(pixels_lit(shared) > 3000);
+        }
+    });
+}
+
+// A character as an entity: Transform3D, SkinnedMeshRenderer and Animator3D, stepped by animate() over fixed steps and drawn by collect().
+// The pictures of two runs are the same to the byte, and with a job system of one worker and one of many (2,200 characters: past the size at
+// which render() uses its workers) they are as serial; characters destroyed take their copies with them.
+void test_gpu_ecs_character() {
+    with_gpu("test_gpu_ecs_character", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        SkinRig rig{r3d, 9, 8};
+        auto model = std::make_shared<kin::Model>();
+        model->skeletons.push_back(rig.tube.skeleton);
+        {
+            kin::AnimClip3D sway;
+            sway.name = "sway";
+            sway.duration = 1.0f;
+            sway.channels.resize(3);
+            kin::Track3D<kin::Quatf>& r = sway.channels[1].rotation;
+            r.times = {0.0f, 0.5f, 1.0f};
+            r.values = {kin::Quatf::axis_angle({0, 0, 1}, -40.0f), kin::Quatf::axis_angle({0, 0, 1}, 60.0f), kin::Quatf::axis_angle({0, 0, 1}, -40.0f)};
+            model->clips.push_back(sway);
+            kin::AnimClip3D stand;
+            stand.name = "stand";
+            stand.duration = 1.0f;
+            stand.channels.resize(3);
+            model->clips.push_back(stand);
+        }
+        kin::ModelPart part;
+        part.name = "tube";
+        part.mesh = rig.mesh;
+        part.material = {.color = Color::rgb(210, 90, 70)};
+        part.skin = 0;
+        model->parts.push_back(part);
+        const kin::Mesh floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
+        kin::JobSystem one{{.workers = 1}};
+        kin::JobSystem many;
+        const kin::Texture unused;
+        static_cast<void>(unused);
+        const auto run = [&](int count, kin::JobSystem* jobs, int steps, std::vector<Pixels>* frames, kin::u32* skinned_seen) {
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            auto& w = world.raw();
+            const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(count))));
+            std::vector<flecs::entity> entities;
+            for (int i = 0; i < count; ++i) {
+                const float x = (static_cast<float>(i % side) - static_cast<float>(side) * 0.5f) * (60.0f / static_cast<float>(side));
+                const float z = (static_cast<float>(i / side) - static_cast<float>(side) * 0.5f) * (60.0f / static_cast<float>(side));
+                kin::Animator3D a;
+                a.clip = "sway";
+                a.speed = 0.5f + 0.2f * static_cast<float>(i % 7);
+                entities.push_back(w.entity().set(kin::Transform3D{.position = {x, 0.0f, z}, .scale = {0.4f, 0.4f, 0.4f}})
+                                       .set(kin::SkinnedMeshRenderer{.model = model}).set(a));
+            }
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+            renderer.set_job_system(jobs);
+            kin::Scene3D scene;
+            for (int step = 0; step < steps; ++step) {
+                state.animate(1.0f / 60.0f);
+                if (step % 5 == 4) {
+                    scene.clear();
+                    scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+                    skin_lights(scene, 1);
+                    scene.lights.shadow_area = kin::Bounds3{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}};
+                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                    state.propagate_transforms();
+                    state.collect(scene);
+                    Pixels p = shoot_view(renderer, r3d, view, scene);
+                    if (skinned_seen) {
+                        *skinned_seen = r3d.stats().skinned_copies;
+                    }
+                    renderer.present();
+                    if (frames) {
+                        frames->push_back(std::move(p));
+                    }
+                }
+            }
+            // The characters destroyed take their copies with them (and nothing dangles: the next frame is fine).
+            for (std::size_t i = 0; i < entities.size(); i += 2) {
+                entities[i].destruct();
+            }
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            state.propagate_transforms();
+            state.collect(scene);
+            std::size_t drawn = 0;
+            for (const kin::Scene3D::Draw& d : scene.draws()) {
+                drawn += d.skinned ? d.count : 0u;
+            }
+            assert(drawn == static_cast<std::size_t>(count) / 2u);
+            shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            renderer.set_job_system(nullptr);
+        };
+        std::vector<Pixels> a, b, c, d;
+        kin::u32 seen = 0;
+        run(30, nullptr, 40, &a, &seen);
+        std::cerr << "ecs characters: " << seen << " of 30 in view\n";
+        assert(seen > 10 && seen <= 30);
+        run(30, nullptr, 40, &b, nullptr);
+        run(30, &one, 40, &c, nullptr);
+        assert(a.size() == 8 && a.size() == b.size() && a.size() == c.size());
+        bool moved = false;
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            assert(a[i].rgba == b[i].rgba && a[i].rgba == c[i].rgba);
+            moved = moved || (i > 0 && a[i].rgba != a[i - 1].rgba);
+        }
+        assert(moved && pixels_lit(a.back()) > 2000);
+        dump(a.back(), "ecs_characters");
+        // 2,200 characters: render() on its workers is the serial render's picture.
+        run(2200, nullptr, 10, &c, nullptr);
+        run(2200, &many, 10, &d, nullptr);
+        assert(d.size() == 2 && d.back().rgba == c.back().rgba);
+        std::cerr << "ecs characters: 40 fixed steps, two runs, one worker and 2,200 on workers: the same pictures\n";
+    });
+}
+
+// Everything on with skinned copies: cascades 4, ambient occlusion, contact shadows, temporal anti-aliasing, with a job system and without,
+// over several frames of moving poses: a picture, the same one both ways, with every pass counted.
+void test_gpu_skinned_everything() {
+    with_gpu("test_gpu_skinned_everything", [](kin::Renderer2D& renderer) {
+        kin::JobSystem jobs;
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || lacks(r3d.capabilities().temporal_aa && r3d.capabilities().ambient_occlusion, "taa and ao")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
+        SkinRig rig{r3d, 9, 8};
+        kin::View3D serial_view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::View3D worker_view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        for (const int count : {400, 2600}) {
+            serial_view.reset_history();
+            worker_view.reset_history();
+            Pixels last;
+            for (int f = 0; f < 4; ++f) {
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+                skin_lights(scene, 4);
+                scene.lights.shadow_area = kin::Bounds3{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}};
+                scene.lights.shadow_distance = 80.0f;
+                scene.ambient_occlusion = {.enabled = true};
+                scene.contact_shadows = {.enabled = true};
+                scene.taa = {.enabled = true};
+                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(count))));
+                for (int i = 0; i < count; ++i) {
+                    const float a = static_cast<float>((i * 37 + f * 11) % 160) - 80.0f, b = static_cast<float>((i * 91 + f * 7) % 160) - 80.0f;
+                    const float x = (static_cast<float>(i % side) - static_cast<float>(side) * 0.5f) * (60.0f / static_cast<float>(side));
+                    const float z = (static_cast<float>(i / side) - static_cast<float>(side) * 0.5f) * (60.0f / static_cast<float>(side));
+                    scene.draw_skinned(rig.mesh, rig.matrices(a, b), Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}), {.color = Color::rgb(200, 90, 70)},
+                                       kin::colors::white, static_cast<kin::u32>(i + 1));
+                }
+                renderer.set_job_system(nullptr);
+                const Pixels serial = shoot_view(renderer, r3d, serial_view, scene);
+                const kin::Render3DStats s1 = r3d.stats();
+                renderer.present();
+                renderer.set_job_system(&jobs);
+                const Pixels parallel = shoot_view(renderer, r3d, worker_view, scene);
+                const kin::Render3DStats s2 = r3d.stats();
+                renderer.present();
+                renderer.set_job_system(nullptr);
+                assert(serial.rgba == parallel.rgba);
+                assert(s1.skinned_copies == s2.skinned_copies && s1.skinned_copies > 0 && s1.shadow_cascades == 4 && s1.ao_dispatches > 0 && s1.taa_dispatches > 0);
+                assert(s1.contact_dispatches > 0 && s1.ao_instances == s1.skinned_copies + 1);
+                last = serial;
+            }
+            assert(pixels_lit(last) > 2000);
+            dump(last, "skinned_everything_" + std::to_string(count));
+            // A copy's pixel names its id.
+            const kin::PickResult r = r3d.pick(worker_view, {80, 60});
+            assert(r.hit);
+        }
+        std::cerr << "skinned everything (cascades 4, ao, contact, taa): serial and workers agree at 400 and 2,600 copies\n";
+    });
+}
+
 const char* test_filter = nullptr;
 bool selected(const char* name) { return !test_filter || std::strstr(name, test_filter) != nullptr; }
 #define RUN(test) \
@@ -7574,5 +8394,14 @@ int main(int argc, char** argv) {
     RUN(test_gpu_skinned_overlay());
     RUN(test_gpu_skinned_with_features());
     RUN(test_gpu_skinned_many_copies());
+    RUN(test_gpu_skinned_velocity());
+    RUN(test_gpu_skinned_velocity_new_and_reordered());
+    RUN(test_gpu_skinned_prepass_features());
+    RUN(test_gpu_skinned_occluder());
+    RUN(test_gpu_skinned_pick());
+    RUN(test_gpu_skinned_shadow_cache());
+    RUN(test_gpu_skinned_shared_range());
+    RUN(test_gpu_ecs_character());
+    RUN(test_gpu_skinned_everything());
     return 0;
 }

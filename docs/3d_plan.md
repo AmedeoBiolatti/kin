@@ -2632,7 +2632,7 @@ list, blend sliders and the IK target, as the means to look at it and to test he
 #### P1a — skinned meshes and clips, part 1 — results
 
 Done 2026-10-10 on `exp/3d-rendering` (head 1576a73 plus the working tree). Part 2 (velocity for TAA, the pre-pass and
-ambient occlusion, pick, the ECS `Animator3D`) is not started; the design below is what it plugs into.
+ambient occlusion, pick, the ECS `Animator3D`) is below, "P1a part 2 - results".
 
 **What was built.**
 
@@ -2740,6 +2740,102 @@ reference above and by eye).
 10. **Where this slots in part 2.** `AnimationPlayer3D` is a plain object; an ECS `Animator3D` component owns one (or a clip index and time) and a
     system calls `update`, `joint_matrices(span)` into the frame's scratch, and `draw_skinned`. `kin/anim` state machines choose the clips
     and weights: a parameter-driven 1D blend by speed can be a `crossfade_to` or two layers with weights.
+
+#### P1a — skinned meshes and clips, part 2 — results
+
+Done 2026-10-10/11 on `exp/3d-rendering` (head a4599e5 plus the working tree; not committed). Everything is opt-in: scenes with no skinned copy
+are byte for byte as before, in pictures and in the compiled SPIR-V of every earlier shader. (The first session ended in a reboot; the tree was intact
+and the checks below were re-run after it.)
+
+**What was built (the spec's items).**
+
+| # | Piece | Where | Notes |
+|---|---|---|---|
+| 1 | Previous-frame joint matrices and velocity | `gpu_renderer3d.cpp` (`match_copies`, `cull_and_upload`); `kin_skin.inc.glsl` (`KIN_SKIN_PREVIOUS`), `kin_mesh_vertex.inc.glsl`, `mesh_skinned_velocity.vert`, new `prepass_velocity_skinned.vert` | The view's record keeps the frame's whole joint array and each copy's range in it; `match_copies` now also returns each copy's place in last frame's record (by id, by order, by nearest) and the skinned shaders read last frame's array and the per-copy start in it. No past pose (history unusable): posed as now, camera-only velocity; no past copy: the `fresh` flag, velocity far off screen as for a plain copy. Both routes (main-pass velocity, and the pre-pass's with AO/contact/occlusion) and the overlay. |
+| 2 | Pre-pass, AO, contact shadows, occluder depth, cut-outs | new `prepass_skinned.vert`; `Pass::Prepass`/`Occluder`/`velocity_pipeline` take `skinned`; the occluder pass uses the existing `shadow_skinned.vert` / `shadow_mask_skinned.vert` | The part-1 warn-once is gone (nothing is left that it said). |
+| 3 | Pick | `mesh_skinned.vert` as the pick vertex stage (it writes the `vWorld` and `vId` that `pick.frag` / `pick_mask.frag` read) | No new shader file was needed. |
+| 4 | Shadow cache | `shadow_unchanged` / `shadow_drawn` | A copy's matrices are in the sample (cheap key) and in the snapshot compared byte for byte; the mesh's serial (its skeleton) was already in the key. |
+| 5 | Shared joint range | `Scene3D::draw_skinned(model, ..., id)` | One range for all parts; BrainStem: 18 matrices uploaded (was 59 x 18 = 1,062). |
+| 6 | ECS | `kin/ecs/render3d.hpp`, `src/ecs/render3d.cpp` | `SkinnedMeshRenderer` (its own component, not an extension of `MeshRenderer`: mesh renderers merge into one instanced draw of one mesh, a character is several parts with its own pose and skeleton), `Animator3D`, `WorldRenderState3D::animate(dt)`. The state machine is `kin/anim`'s `AnimationStateMachine` and `AnimationParams`, run with its own `evaluate()`: no change to `kin/anim`, no adapter beyond the component. 1D blends and crossfades: `AnimationPlayer3D::play_blend`, `crossfade_to_blend`, `set_blend_parameter` (a blend's time is a phase 0 to 1 advanced by the blended duration; root motion of a blend is the mix of its clips'). |
+| 7 | Harness and viewer | `kin_reference`: `models[].animation.blend {parameter, parameter_to, parameter_seconds, points[{clip, position}]}` and `animation.ecs`; scenes `skinned_blend` and `skinned_ecs`; Sponza Walk "Character (skinned)" section (`examples/sponza_walk/character.hpp`, a procedural 3-joint character with clips Sway, Bend, Wave and the blend), presets `character`, `character-all`, a skinned line in the stats | The panel's click path is untested (no display). |
+
+**Results.**
+
+| Check | Result |
+|---|---|
+| `ninja -C build -j8`, `ninja -C build-no3d -j8` | build |
+| `ctest` in `build`, `KIN_REQUIRE_GPU_TESTS=1` | 69 of 69 |
+| `ctest` in `build-no3d` | 65 of 65 |
+| `kin_render3d_tests` | passes on NVIDIA (VK_ICD_FILENAMES unset) and lavapipe; `kin_example_tests`, `kin_skeleton_tests` pass |
+| SPIR-V of the 62 earlier non-skinned shaders, built from HEAD's sources with glslc and compared with the build's | 62 of 62 byte-identical; of the part-1 skinned ones `mesh_skinned_velocity.vert.spv` changed (it now has the previous joints), two new files |
+| Off-path pictures: default and `--cascades 4 --ao --contact-shadows --taa` over crowd, shadows, sponza, helmet, motion, spheres, cornell; kiln_near with `--lod --lod-clusters` | 37 of 37 byte-identical to `p1a_base_*` |
+| Velocity: skinned vs the CPU-skinned plain mesh moved the same rigid way (translation in the pose, half in pose and half in placing, rotation, camera moving over a still pose; by order and by id; main-pass and pre-pass routes; overlay; cut-out), 14 frames under TAA, a checker texture so that a wrong history shows | 0 of 19,200 pixels differ by more than 8 levels in every frame of all 11 cases |
+| A copy that appears; two characters that swap draw order, matched by id | 0 pixels differ |
+| AO + contact shadows, skinned vs CPU-skinned (opaque and cut-out, 1 and 3 cascades) | 0 pixels differ; the features change about 910 pixels, so they are on the skinned copy |
+| Occlusion culling with a skinned wall (opaque, cut-out, with AO + contact, with TAA) | 69 clusters occluded of 69, as a plain wall; picture with and without culling byte-identical |
+| Pick: 540 pixels, three posed copies, opaque and a cut-out with a hole | identical ids to the plain meshes; 74 of 75 posed-axis points name their copy; empty space none |
+| Shadow cache: still pose hits; one copy bends, copy 7 of forty bends, another mesh on the same skeleton and pose, another skeleton, cascades | each misses, the picture is the uncached render's, and it arms again |
+| Shared range vs a call a part (also with AO + TAA) | 3 matrices against 9; 0 pixels differ |
+| ECS: 30 characters, 40 fixed steps, two runs, one worker; 2,200 characters serial vs workers; destruction | same pictures; copies of destroyed entities gone |
+| Everything (cascades 4, AO, contact, TAA, pick) at 400 and 2,600 skinned copies, serial vs workers | byte-identical |
+| CPU tests (`kin-skeleton`): blend maths, shared pose, animator clip, state machine + fades + blend space + trigger, layers, root motion, determinism | pass |
+
+**Mutation checks** (each: break one thing, see a test fail, revert; the tree was compared with copies afterwards).
+
+| Break | Caught by |
+|---|---|
+| main-pass velocity uses the current pose as the past | `test_gpu_skinned_velocity` (424 pixels) |
+| pre-pass velocity uses the current pose | same (426) |
+| the velocity pre-pass skips skinned copies | same (426) |
+| the plain pre-pass skips skinned copies | `test_gpu_skinned_prepass_features` |
+| the occluder pass skips skinned copies | `test_gpu_skinned_occluder` (0 occluded of 69) |
+| the pick pass skips skinned copies | `test_gpu_skinned_pick` (38 pixels, ids 0) |
+| shadow cache ignores poses (key and compare) / only the full compare | `test_gpu_skinned_shadow_cache` (the second step; the "copy 7" step) |
+| the mesh serial left out of the key | same (after a step was added: the first version changed the pose too and hid it) |
+| past joints matched by place while the model matrix is matched by id | `test_gpu_skinned_velocity_new_and_reordered` (172 pixels) |
+| a new skinned copy loses its fresh flag | same (153 pixels) |
+| a part reads another matrix of the shared range | `test_gpu_skinned_shared_range` |
+| the animator ignores the fade table / the blend parameter | `test_ecs_animator_state_machine` |
+| a blend's phase advances by the first clip's duration | `test_player_blend_1d` |
+
+Two test-design lessons: `flecs::entity::set(lvalue)` moves from a non-const lvalue (the animator was emptied; the tests and the harness
+set from a const reference now: said in the docs), and a replay test that reused such an animator passed vacuously until that was found.
+
+**Cost** (NVIDIA RTX 4080 Laptop, 1280 x 720, medians of two runs, GPU clock drifts, so deltas are indicative).
+
+| Measure | Value |
+|---|---|
+| crowd (existing path), CPU / GPU first_person, mid_deck, above | 0.23 / 1.22, 0.21 / 0.67, 0.22 / 1.36 ms (three runs). Part 1 recorded 0.29 / 1.65, 0.23 / 1.16, 0.24 / 2.1 on another day: no "before" binary was built beside this time (the disk), so this is not an interleaved A/B; the pictures and SPIR-V are identical, which is the stronger evidence |
+| 200 skinned copies, 819,212 triangles, 4x MSAA, sun shadow | GPU 0.31 ms, CPU render() 0.09 ms |
+| ... + TAA (main-pass velocity) | 0.40 ms (+0.09), CPU 0.11 |
+| ... + ambient occlusion | 0.65 ms (+0.34), CPU 0.10 |
+| ... + contact shadows | 0.56 ms (+0.25), CPU 0.10 |
+| ... all (4 cascades, AO, contact, TAA) | 0.94 ms, CPU 0.15 |
+| BrainStem (59 parts, 18 joints) | 18 matrices uploaded a frame; render() 0.10 ms |
+| Joint history | the frame's array is copied into the view's record and uploaded again: 2 x 64 B per joint per frame (a thousand 24-joint characters: 1.5 MB twice) |
+
+**What I looked at.** `skinned_blend` and `skinned_ecs` (four tubes at blend 0, 0.33, 0.66 and a ramp; the ECS picture equals the direct one on the
+three constant ones to sub-pixel float accumulation of 250 steps, and the ramped one differs on purpose: the entity integrates the phase while the
+parameter moves, the direct sampler applies the frame's value to the whole history); the velocity test pictures (a rotating checkered tube
+under TAA: skinned and plain frames indistinguishable); AO creases and the contact shadow at the foot of a skinned tube by a wall; Sponza Walk
+with five characters, AO, contact shadows, TAA and four cascades (the stats line shows the skinned copies).
+
+**Honest limits.**
+1. The velocity tests compare rigid moves of the pose (translation, rotation): they exercise the whole previous-joint plumbing and matching, but a
+   bending pose's velocity is not compared with an independent reference (there is none: a CPU-skinned plain mesh has no per-vertex past). The shader
+   uses the same expressions for both.
+2. No interleaved before/after of the crowd (see Cost); the off path is argued by identical pictures and SPIR-V.
+3. A copy matched by order when the count of its mesh changes is a guess (the nearest within twice its size, else new): give moving characters an
+   id. The ECS gives the entity's id.
+4. A custom material shader on a skinned copy works (the stock skinned vertex shader) but with a custom opaque shader TAA keeps the pre-pass, as for plain meshes.
+5. No prefab or component-schema support: Transform3D and MeshRenderer have none either (the 3D components are not registered anywhere), so "prefab round trip" is not applicable.
+6. `kin/anim` events and registered-property tracks are not bridged to skeletal clips; `Animator3D` copies in a Sponza Walk row play in step (no time offset field).
+7. Non-uniform scale in a joint skins normals approximately; D3D12 and Metal untested; a skin of more than 4 influences is cut to 4.
+8. Sponza Walk's panel clicks were not exercised (no display); the section was run headless through `--preset`.
+
+**What P1b and P1c still need.** P1b (IK) works on a `Pose` after the player: `Animator3D` exposes `player.pose()` but has no hook between the clips and the
+matrices; it needs one (a callback or a list of IK targets by joint name, applied before `compute_joint_matrices`). P1c wants a time offset and a start
+phase on the animator, event keys on skeletal clips (footsteps) and the real model path in Sponza Walk (the viewer's character is procedural).
 
 ### P2 — 3D physics with Jolt, and a character
 

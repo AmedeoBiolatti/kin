@@ -114,6 +114,13 @@ struct Settings {
     bool lod_gpu = true;        // clusters: cut in compute where the device can
     bool lod_readback = false;  // read the GPU cut's counts back each frame (waits for the GPU)
     bool lod_occlusion = false; // clusters: those behind others are not drawn (Lod3D::occlusion; needs the GPU cut)
+    // A skinned character (procedural: three joints, clips Sway, Bend and Wave), as entities with Animator3D (P1a part 2)
+    bool character = false;
+    int char_clip = 3;          // 0..2 a clip, 3 a 1D blend of Sway and Wave by char_blend
+    float char_blend = 0.5f;    // the blend's parameter, 0 (Sway) to 1 (Wave)
+    float char_speed = 1.0f;
+    int char_count = 1;         // a row of up to 64 (their poses are in step)
+    float char_scale = 1.0f;
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

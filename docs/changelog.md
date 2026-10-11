@@ -9,6 +9,14 @@ releases may change APIs.
 
 ### Added
 
+- 3D, skinned meshes and clips, part 2 (experimental; see [3D rendering](rendering_3d.md) "Skinned meshes" and the plan's "P1a part 2"): a skinned
+  copy is now in every pass: the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's occluders), the temporal velocity of a
+  moving pose (last frame's joint matrices matched to the copy by `MeshInstance::id` or order), cut-outs, and pick; the shadow cache keeps the
+  map for a still pose and redraws for a moved one; `draw_skinned(model, ...)` shares one range of matrices among a model's parts and takes an
+  `id`. `AnimationPlayer3D::play_blend` / `crossfade_to_blend` / `set_blend_parameter` (1D blends by phase). ECS: `SkinnedMeshRenderer`,
+  `Animator3D` (clip by name, a `kin/anim` state machine with blend spaces, fades, masked and additive layers as data, root motion) and
+  `WorldRenderState3D::animate`. `kin_reference` scenes `skinned_blend` and `skinned_ecs` (`models[].animation.blend` / `.ecs`); Sponza
+  Walk has a "Character (skinned)" section (`--preset character`). Scenes without skinned copies are byte for byte, and cost the same, as before.
 - 3D, skinned meshes and clips, part 1 (experimental; see [3D rendering](rendering_3d.md) "Skinned meshes" and the plan's "P1a"):
   `Skeleton`, `Pose`, `PoseMask`, `AnimClip3D` (step, linear and cubic-spline keyframes as glTF has them), `AnimationPlayer3D`
   (crossfades, masked and additive layers, root motion), `compute_joint_matrices`; the glTF reader takes skins, `JOINTS_0` and

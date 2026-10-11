@@ -532,15 +532,37 @@ joints; a non-uniform scale in a joint is approximated). `draw_skinned(model, jo
 draws all of a model's parts (skinned ones in the pose, the others as `draw` does).
 `Renderer3DCapabilities::skinning`; `Render3DStats::skinned_copies`, `skin_matrices`, `skinned_draws`.
 
-**What it does and does not do yet** (P1a part 1; part 2 is in the plan). A skinned copy is drawn by the
-main pass and casts the sun's shadow (one map or any cascades, cut-out materials too), and is culled by
-its pose: its bounding sphere is made each frame from where its joints put the spheres each of
-them pulls on (never smaller than the posed mesh, so an arm that swings into view is not culled). It is
-**not** in the depth and normal pre-pass (so not in ambient occlusion or contact shadows, nor in
-occlusion culling's depth), has **no velocity of its own** under temporal anti-aliasing (the camera's
-motion is right on it; its own motion ghosts), and is **not picked**. A frame with such a copy and one
-of those features says so once in the log. The shadow cache (`cache_shadows`) is off for a frame with a
-skinned caster (a pose is not in the copies it compares).
+**Every pass** (P1a part 2). A skinned copy is drawn by the main pass, casts the sun's shadow (one map or any
+cascades, cut-out materials too), is in the depth and normal pre-pass (ambient occlusion, contact shadows, the
+occluder depth of occlusion culling, cut-outs included), has its own velocity under temporal anti-aliasing, and is
+picked (`View3D::pick` names its `id`). It is culled by its pose: its bounding sphere is made each frame from where its joints
+put the spheres each of them pulls on (never smaller than the posed mesh, so an arm that swings into view is not culled).
+
+*Velocity.* The renderer keeps last frame's joint matrices of each view (the whole array, uploaded again as the "previous" joints)
+and matches each copy to last frame's the way it matches the model matrix: by `MeshInstance::id` when non-zero, else by its place
+among the copies of its mesh when the count agrees, else the nearest, else it is new (no history: velocity far off screen, so TAA
+gives it no history weight). The skinned vertex shaders place the vertex with this frame's joints and this frame's model matrix,
+and again with last frame's of both, so a moving pose has its own velocity (main-pass velocity when TAA is alone, the pre-pass's
+when ambient occlusion or contact shadows are on, and the overlay's). Give moving characters an `id`: by order a copy that
+leaves the list shifts its neighbours' histories (`draw_skinned(model, ..., id)` and the ECS renderer do; the ECS id is the entity's).
+
+*Shadow cache.* Each posed copy's matrices are in the cache's comparison (a sample of them in the cheap key, all of them in the
+full comparison against the snapshot), and the mesh (its skeleton) in the key: a character standing still keeps the map, one that
+moves redraws it, and the cache never serves a stale pose.
+
+*Shared pose.* `draw_skinned(model, ...)` copies the pose into the scene once and every skinned part points at that range (BrainStem:
+18 matrices, not 59 times 18).
+
+*Entities.* `SkinnedMeshRenderer` (a shared `Model`, tint, `visible`, `id`) and `Animator3D` (see Entities below).
+
+Limits: a skinned mesh has no levels or clusters; a non-uniform scale in a joint skins normals approximately; the velocity of a
+copy matched by order with a changed count is a guess (give it an id); D3D12 and Metal are untested.
+
+**One-dimensional blends.** `player.play_blend(points, parameter)` / `crossfade_to_blend(points, parameter, seconds)` and
+`set_blend_parameter(p)`: the clips of `BlendPoint3D{clip, position}` blended by the parameter (the two points either side of it;
+held at the ends), each clip at the same phase of its own length. The base's `time()` is then a phase (0 to 1) that advances by
+`dt * speed / (the duration blended at the parameter now)`, so a walk and a run step in time and a changing parameter never jumps.
+Fades, root motion and layers work as for a clip.
 
 ## Entities
 
@@ -557,6 +579,37 @@ world.entity().set(kin::Transform3D{.position = {2, 0, 0}}).set(kin::MeshRendere
 state.propagate_transforms();
 state.collect(scene);
 ```
+
+**Characters.** `SkinnedMeshRenderer{.model}` (a `std::shared_ptr<const Model>`: its parts, skeleton and clips) draws the model at the
+entity's `WorldTransform3D`, in the pose of the entity's `Animator3D`. It is its own component, not `MeshRenderer`: a mesh renderer's
+entities merge into one instanced draw of one mesh, and a character is several parts with a skeleton and a pose of its own.
+`WorldRenderState3D::animate(dt)` (once per fixed step or frame) steps every animator; `collect` draws them.
+
+```cpp
+auto hero = std::make_shared<const kin::Model>(r3d.load_model("models/hero.glb"));
+auto machine = std::make_shared<kin::AnimationStateMachine>();              // kin/anim's, unchanged
+machine->initial = "idle";
+machine->states = {{"idle", "Idle"}, {"move", ""}, {"jump", "Jump"}};      // state -> clip name
+machine->transitions = {{"", "jump", {{.param = "jump", .op = kin::CondOp::TriggerSet}}},
+                        {"idle", "move", {{.param = "speed", .op = kin::CondOp::Greater, .threshold = 0.1f}}},
+                        {"move", "idle", {{.param = "speed", .op = kin::CondOp::Less, .threshold = 0.05f}}}};
+kin::Animator3D a;
+a.machine = machine;
+a.blend_spaces["move"] = {"speed", {{"Walk", 1.5f}, {"Run", 4.5f}}};         // 1D blend by the float `speed`
+a.fades = {{"idle", "move", 0.25f}, {"", "jump", 0.1f}};  a.fade_seconds = 0.3f;
+a.layers = {{.clip = "Wave", .mask_joint = "UpperArm.R", .weight = 1.0f}};   // data: clip and mask by name
+world.entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = hero})
+              .set(static_cast<const kin::Animator3D&>(a));   // a const lvalue: flecs's set() moves from a non-const one
+// each fixed step: set parameters from game code, then
+animator->params.set_float("speed", velocity);  animator->params.set_trigger("jump");
+state.animate(dt);
+```
+
+Without a machine, `Animator3D::clip` names the base clip (changing it crossfades over `fade_seconds`). The state machine is
+`kin/anim`'s `AnimationStateMachine` and `AnimationParams`, evaluated with its own `evaluate()` (one transition a step, triggers
+consumed); no change to `kin/anim`. What is not bridged: `kin/anim` events and registered-property tracks (a skeletal clip is not
+one). `apply_root_motion` moves the entity's `Transform3D` by the base layer's root motion; `remove_root_motion` only holds the root
+(in place). Not yet serialised: the 3D components have no component schema or prefab support (neither does `Transform3D`).
 
 ## First person
 

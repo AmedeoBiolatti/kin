@@ -343,15 +343,18 @@ public:
     // compute_joint_matrices (kin/render3d/skeleton.hpp), at least Mesh::skin_joint_count() of them, copied into the scene
     // (they need not outlive the call; clear() takes them away). `transform` places the posed mesh: the matrices are in
     // the mesh's own space, so it is the model's placing without the glTF node's. Each call is one copy with its own
-    // pose; copies of one mesh and material one after another are drawn as one. Drawn in the main pass and the sun's
-    // shadow; not yet in the depth pre-pass (ambient occlusion, contact shadows), the temporal anti-aliasing's velocity or
-    // pick (the next step): a frame with such a copy and one of those features says so once in the log. A mesh without a
-    // skin is drawn as by draw(); too few matrices draw nothing (and say so once).
+    // pose; copies of one mesh and material one after another are drawn as one. Drawn in every pass: the main pass, the
+    // sun's shadow, the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's occluders), the temporal
+    // anti-aliasing's velocity (from last frame's matrices of the same copy, matched as its model matrix is: by `id`, else
+    // by order) and pick. A mesh without a skin is drawn as by draw(); too few matrices draw nothing (and say so once).
     void draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform, const Material3D& material = {},
                       Color tint = colors::white, u32 id = 0);
     // Every part of `model`: its skinned parts in the pose `joint_matrices` (of Model::skeletons[0]) placed by `transform`
-    // alone, the others (not skinned) by `transform` times their node's placing, as draw(model, ...) does.
-    void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint = colors::white);
+    // alone, the others (not skinned) by `transform` times their node's placing, as draw(model, ...) does. The pose is copied
+    // into the scene once and every skinned part points at that range (BrainStem's 59 parts keep one set of 18 matrices, not
+    // 59). `id` is what pick says of each part; it is also how a copy is matched across frames for the velocity.
+    void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint = colors::white,
+                      u32 id = 0);
     // Many copies of `mesh`, in one draw.
     void draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material = {});
     void draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
@@ -380,6 +383,8 @@ public:
 
 private:
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material, bool skinned, u32 skin_first);
+    // One skinned copy whose matrices start at `first_joint` of _joints (already there).
+    void add_skinned_copy(const Mesh& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material, Color tint, u32 id);
 
     std::vector<Draw> _draws;
     std::vector<MeshInstance> _instances;

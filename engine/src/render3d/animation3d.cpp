@@ -272,14 +272,72 @@ void AnimationPlayer3D::set_skeleton(const Skeleton* skeleton) {
     _pose = skeleton ? skeleton->rest_pose() : Pose{};
 }
 
+namespace {
+
+// A blend's two clips either side of the parameter, how far toward the second, and the duration blended between theirs (the
+// speed of its phase). Both clips are the same one at either end of the points and for a single point.
+struct BlendPair {
+    const AnimClip3D* a = nullptr;
+    const AnimClip3D* b = nullptr;
+    f32 weight = 0.0f;
+    f32 duration = 0.0f;
+};
+
+template <typename Points>
+BlendPair blend_pair(const Points& points, f32 parameter) {
+    BlendPair pair;
+    if (points.empty()) {
+        return pair;
+    }
+    if (parameter <= points.front().position || points.size() == 1) {
+        pair.a = pair.b = points.front().clip;
+    } else if (parameter >= points.back().position) {
+        pair.a = pair.b = points.back().clip;
+    } else {
+        std::size_t hi = 1;
+        while (hi + 1 < points.size() && points[hi].position < parameter) {
+            ++hi;
+        }
+        const auto& lo = points[hi - 1];
+        const auto& up = points[hi];
+        pair.a = lo.clip;
+        pair.b = up.clip;
+        const f32 span = up.position - lo.position;
+        pair.weight = span > 0.0f ? std::clamp((parameter - lo.position) / span, 0.0f, 1.0f) : 0.0f;
+    }
+    pair.duration = pair.a->duration + (pair.b->duration - pair.a->duration) * pair.weight;
+    return pair;
+}
+
+} // namespace
+
+void AnimationPlayer3D::set_blend(Playing& p, std::span<const BlendPoint3D> points, f32 parameter) {
+    p.clip = nullptr;
+    p.blend.clear();
+    for (const BlendPoint3D& point : points) {
+        if (point.clip) {
+            p.blend.push_back(point);
+        }
+    }
+    std::stable_sort(p.blend.begin(), p.blend.end(), [](const BlendPoint3D& x, const BlendPoint3D& y) { return x.position < y.position; });
+    p.parameter = parameter;
+}
+
 void AnimationPlayer3D::play(const AnimClip3D* clip, bool loop, f32 time) {
-    _base = Playing{clip, time, _base.speed, loop};
+    _base = Playing{clip, time, _base.speed, loop, {}, 0.0f};
+    _fading = false;
+    _from_frozen = false;
+}
+
+void AnimationPlayer3D::play_blend(std::span<const BlendPoint3D> points, f32 parameter, bool loop, f32 phase) {
+    _base = Playing{nullptr, phase, _base.speed, loop, {}, 0.0f};
+    set_blend(_base, points, parameter);
     _fading = false;
     _from_frozen = false;
 }
 
 void AnimationPlayer3D::crossfade_to(const AnimClip3D* clip, f32 seconds, bool loop, f32 time) {
-    if (!(seconds > 0.0f) || (!_base.clip && !_fading)) {
+    if (!(seconds > 0.0f) || ((!_base.clip && _base.blend.empty()) && !_fading)) {
         play(clip, loop, time);
         return;
     }
@@ -291,13 +349,41 @@ void AnimationPlayer3D::crossfade_to(const AnimClip3D* clip, f32 seconds, bool l
         _from = _base;
         _from_frozen = false;
     }
-    _base = Playing{clip, time, _base.speed, loop};
+    _base = Playing{clip, time, _base.speed, loop, {}, 0.0f};
     _fading = true;
     _fade_elapsed = 0.0f;
     _fade_seconds = seconds;
 }
 
+void AnimationPlayer3D::crossfade_to_blend(std::span<const BlendPoint3D> points, f32 parameter, f32 seconds, bool loop, f32 phase) {
+    if (!(seconds > 0.0f) || ((!_base.clip && _base.blend.empty()) && !_fading)) {
+        play_blend(points, parameter, loop, phase);
+        return;
+    }
+    if (_fading) {
+        _frozen = _pose;
+        _from_frozen = true;
+    } else {
+        _from = _base;
+        _from_frozen = false;
+    }
+    _base = Playing{nullptr, phase, _base.speed, loop, {}, 0.0f};
+    set_blend(_base, points, parameter);
+    _fading = true;
+    _fade_elapsed = 0.0f;
+    _fade_seconds = seconds;
+}
+
+void AnimationPlayer3D::set_blend_parameter(f32 parameter) {
+    if (!_base.blend.empty()) {
+        _base.parameter = parameter;
+    }
+}
+
 bool AnimationPlayer3D::finished() const {
+    if (!_base.blend.empty()) {
+        return !_base.loop && _base.time >= 1.0f;
+    }
     return _base.clip && !_base.loop && _base.time >= _base.clip->duration;
 }
 
@@ -309,6 +395,17 @@ AnimationPlayer3D::Layer& AnimationPlayer3D::layer(u32 index) {
 }
 
 void AnimationPlayer3D::advance(Playing& p, f32 dt) {
+    if (!p.blend.empty()) {
+        // A blend's time is a phase: it advances by the time over the duration blended at the parameter now.
+        const BlendPair pair = blend_pair(p.blend, p.parameter);
+        if (pair.duration > 0.0f) {
+            p.time += dt * p.speed / pair.duration;
+            p.time = p.loop ? p.time - std::floor(p.time) : std::clamp(p.time, 0.0f, 1.0f);
+        } else {
+            p.time = 0.0f;
+        }
+        return;
+    }
     if (!p.clip) {
         return;
     }
@@ -325,7 +422,16 @@ void AnimationPlayer3D::advance(Playing& p, f32 dt) {
 }
 
 void AnimationPlayer3D::sample(const Playing& p, Pose& out) const {
-    if (p.clip) {
+    if (!p.blend.empty()) {
+        const BlendPair pair = blend_pair(p.blend, p.parameter);
+        // Each clip at the same phase of its own length; (for a looped phase of exactly 1 the clip's end, as the wrap leaves 0).
+        sample_clip(*pair.a, *_skeleton, p.time * pair.a->duration, p.loop, out);
+        if (pair.b != pair.a && pair.weight > 0.0f) {
+            Pose second;
+            sample_clip(*pair.b, *_skeleton, p.time * pair.b->duration, p.loop, second);
+            out = blend_poses(out, second, pair.weight);
+        }
+    } else if (p.clip) {
         sample_clip(*p.clip, *_skeleton, p.time, p.loop, out);
     } else {
         out = _skeleton->rest_pose();
@@ -347,7 +453,20 @@ void AnimationPlayer3D::update(f32 dt) {
     // Root motion of the base layer: the clip's own motion between the times, faded like the pictures are.
     const auto motion_of = [&](const Playing& before, const Playing& after) {
         RootMotion m;
-        if (before.clip) {
+        if (!before.blend.empty()) {
+            // A blend: each of its two clips' motion over the same span of phase, mixed as the pictures are.
+            const BlendPair pair = blend_pair(before.blend, before.parameter);
+            const f32 end = before.loop ? before.time + (pair.duration > 0.0f ? dt * before.speed / pair.duration : 0.0f) : after.time;
+            const auto of = [&](const AnimClip3D* clip) {
+                return extract_root_motion(*clip, *_skeleton, before.time * clip->duration, end * clip->duration, before.loop, _axes);
+            };
+            m = of(pair.a);
+            if (pair.b != pair.a && pair.weight > 0.0f) {
+                const RootMotion other = of(pair.b);
+                m.translation = mix(m.translation, other.translation, pair.weight);
+                m.rotation = nlerp(m.rotation, other.rotation, pair.weight);
+            }
+        } else if (before.clip) {
             // A clip that did not wrap or stop at its end moved from `before` to `after`; one that wrapped carries on past
             // the end (extract_root_motion wraps when `to` is earlier and the clip loops).
             const f32 span = dt * before.speed;
@@ -387,7 +506,7 @@ void AnimationPlayer3D::update(f32 dt) {
         if (!layer.clip) {
             continue;
         }
-        Playing p{layer.clip, layer.time, layer.speed, layer.loop};
+        Playing p{layer.clip, layer.time, layer.speed, layer.loop, {}, 0.0f};
         advance(p, dt);
         layer.time = p.time;
         sample(p, _scratch);

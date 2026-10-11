@@ -600,8 +600,14 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     try {
         _mesh_skinned_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh_skinned.vert.spv",
                                                                /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/3);
+        // The velocity variants also read the copies' matrices of the frame before, and the joints of the frame before with where
+        // each copy's start there.
         _mesh_skinned_velocity_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "mesh_skinned_velocity.vert.spv",
-                                                                        /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/3);
+                                                                        /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/6);
+        _prepass_skinned_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_skinned.vert.spv",
+                                                                  /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/3);
+        _prepass_velocity_skinned_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "prepass_velocity_skinned.vert.spv",
+                                                                           /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/6);
         _shadow_skinned_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow_skinned.vert.spv",
                                                                  /*uniform_buffers=*/1, /*samplers=*/0, /*storage_buffers=*/4);
         _shadow_mask_skinned_vertex_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "shadow_mask_skinned.vert.spv",
@@ -877,10 +883,11 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     if (pass == Pass::Occluder) {
         // Lod3D::occlusion's depth of the frame's opaque meshes, when no pre-pass draws one: the shadow pass's shaders (a
         // cut-out's discard included) into the single-sample depth the pyramid is built from.
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
+                                                                       : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
                                                      .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
                                                      .blend = GpuBlendMode::Replace,
-                                                     .layout = GpuVertexLayout::MeshVertices,
+                                                     .layout = layout,
                                                      .depth_stencil = _ao_depth_format,
                                                      .depth = GpuDepthTest::TestWrite,
                                                      .cull = cull ? GpuCull::Back : GpuCull::None,
@@ -888,21 +895,22 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     }
     if (pass == Pass::Prepass) {
         // Depth and the world normal, one sample, in the occlusion's own targets.
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _prepass_vertex_shader.handle(),
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (skinned ? _prepass_skinned_vertex_shader : _prepass_vertex_shader).handle(),
                                                      .fragment = (mask ? _prepass_mask_shader : _prepass_shader).handle(),
                                                      .blend = GpuBlendMode::Replace,
                                                      .format = ao_normal_format,
-                                                     .layout = GpuVertexLayout::MeshVertices,
+                                                     .layout = layout,
                                                      .depth_stencil = _ao_depth_format,
                                                      .depth = GpuDepthTest::TestWrite,
                                                      .cull = cull ? GpuCull::Back : GpuCull::None});
     }
     if (pass == Pass::Pick) {
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = _vertex_shader.handle(),
+        // The pick fragment shaders read vWorld and vId, which mesh.vert and mesh_skinned.vert both write.
+        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (skinned ? _mesh_skinned_vertex_shader : _vertex_shader).handle(),
                                                      .fragment = (mask ? _pick_mask_shader : _pick_shader).handle(),
                                                      .blend = GpuBlendMode::Replace,
                                                      .format = pick_format,
-                                                     .layout = GpuVertexLayout::MeshVertices,
+                                                     .layout = layout,
                                                      .depth_stencil = _depth_format,
                                                      .depth = GpuDepthTest::TestWrite,
                                                      .cull = cull ? GpuCull::Back : GpuCull::None});
@@ -931,13 +939,16 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                                  .extra_write = velocity && pass == Pass::Opaque && !custom});
 }
 
-SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask) const {
+SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned) const {
+    if (skinned && !_skinning_available) {
+        return nullptr;
+    }
     // The pre-pass with velocity: one sample, the normal and the velocity in four floats.
-    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _prepass_velocity_vertex_shader.handle(),
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = (skinned ? _prepass_velocity_skinned_vertex_shader : _prepass_velocity_vertex_shader).handle(),
                                                  .fragment = (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
                                                  .blend = GpuBlendMode::Replace,
                                                  .format = hdr_format,
-                                                 .layout = GpuVertexLayout::MeshVertices,
+                                                 .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
                                                  .depth_stencil = depth,
                                                  .depth = GpuDepthTest::TestWrite,
                                                  .cull = cull ? GpuCull::Back : GpuCull::None});
@@ -1872,7 +1883,7 @@ u64 mix64(u64 x) {
 
 } // namespace
 
-void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs) {
+void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs, bool skinned) {
     // A copy's past is looked for in the last frame's copies of the same mesh in the
     // same scene (the world or the overlay): by its MeshInstance::id when it has one
     // (a copy of that mesh with that id), else by its place in the mesh's copies in
@@ -1945,6 +1956,13 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
     now.matrices.resize(total);
     _taa_prev.resize(total);
     _taa_slow.resize(total);
+    // Skinned copies: each copy's joints in the frame's (a place in `now.joints`), and where its past is, for the joints of last
+    // frame to be found by the same match as its model matrix.
+    now.joint_first.resize(skinned ? total : 0);
+    if (skinned) {
+        _taa_past.resize(total);
+        _taa_prev_joint.resize(total);
+    }
     // Each draw's first slot among its group's, and where the same place was last frame.
     _taa_copy_refs.resize(ref_count);
     {
@@ -1963,6 +1981,9 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             const MeshInstance& instance = ref.instances[i];
             const u32 flat = piece.flat + (i - piece.begin);
             now.matrices[place.slot + i] = instance.transform;
+            if (skinned) {
+                now.joint_first[place.slot + i] = ref.skinned ? ref.joint_base + ref.skin_first[i] : ~0u;
+            }
             Mat4f before = instance.transform;
             bool settled = instance.id == 0;
             if (settled && history_usable) {
@@ -1974,6 +1995,10 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             if (settled) {
                 before.m[3] = 0.0f;
                 _taa_prev[flat] = before;
+                if (skinned) {
+                    // Not moved at all (or no history to look in: nothing to compare with, posed as now).
+                    _taa_past[flat] = history_usable && place.past != ~0u ? place.past + i : ~0u;
+                }
             }
         }
     };
@@ -2002,6 +2027,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             const u32 slot = _taa_copy_refs[r].slot + i;
             Mat4f before = instance.transform;
             bool fresh = false;
+            u32 past_slot = ~0u; // where the copy was last frame (its record's place)
             {
                 bool by_id = false;
                 if (instance.id != 0) {
@@ -2011,6 +2037,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
                         const auto it = last.ids.find(id_key);
                         if (it != last.ids.end()) {
                             before = last.matrices[it->second];
+                            past_slot = it->second;
                         } else {
                             fresh = true;
                         }
@@ -2023,11 +2050,17 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
                         before = last.matrices[g.past_first + (slot - g.first)];
                         matched = std::memcmp(before.m, instance.transform.m, sizeof(before.m)) == 0;
                     }
+                    if (matched) {
+                        past_slot = g.past_first + (slot - g.first);
+                    }
                     if (!matched && known) {
                         Vec3f c;
                         f32 radius = 0.0f;
                         sphere_of(instance.transform, ref.center, ref.radius, c, radius);
                         matched = same_count && length_squared(c - before.apply(ref.center)) <= match_by_place_move * match_by_place_move * radius * radius + 1e-6f;
+                        if (matched) {
+                            past_slot = g.past_first + (slot - g.first);
+                        }
                     }
                     if (!matched && known) {
                         Vec3f c;
@@ -2069,6 +2102,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
                         matched = found != ~0u;
                         if (matched) {
                             before = last.matrices[g.past_first + found];
+                            past_slot = g.past_first + found;
                         }
                     }
                     fresh = !matched;
@@ -2076,9 +2110,20 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             }
             if (fresh) {
                 before = instance.transform;
+                past_slot = ~0u;
             }
             before.m[3] = fresh ? 1.0f : 0.0f; // a zero in any placing: free to say "no past"
             _taa_prev[flat] = before;
+            if (skinned) {
+                _taa_past[flat] = past_slot;
+            }
+        }
+    }
+    if (skinned) {
+        // The joints of the copy's past: where that copy's range started in last frame's, if it was a skinned copy then.
+        for (u32 f = 0; f < total; ++f) {
+            const u32 past = _taa_past[f];
+            _taa_prev_joint[f] = past != ~0u && past < last.joint_first.size() ? last.joint_first[past] : ~0u;
         }
     }
 }
@@ -2153,6 +2198,8 @@ struct GpuRenderer3D::FrameCtx {
     SDL_GPUBuffer* previous_storage = nullptr; // last frame's matrices (temporal anti-aliasing)
     SDL_GPUBuffer* joints = nullptr;           // skinned copies: the joint matrices,
     SDL_GPUBuffer* joint_offsets = nullptr;    // and each copy's first
+    SDL_GPUBuffer* previous_joints = nullptr;        // with temporal anti-aliasing: last frame's joint matrices
+    SDL_GPUBuffer* previous_joint_offsets = nullptr; // and where each copy's start in them
     bool overlaid = false;                     // the overlay has draws in view
     bool occluded = false;                     // the world has ambient occlusion this render (set before it is drawn)
     bool contacted = false;                    // and contact shadows
@@ -2578,15 +2625,21 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     stats.culled = total - visible_total;
     if (any_skinned) {
         stats.skin_matrices = joint_total;
-        // Part 1 of P1a draws skinned copies in the main and shadow passes only.
-        if (scene.ambient_occlusion.enabled || scene.contact_shadows.enabled || scene.lod.occlusion.enabled || ctx.taa || view->_pick) {
-            warn_once(_skin_features_warned,
-                      "3D: skinned meshes are drawn in the main and shadow passes only for now: not in ambient occlusion, contact shadows, "
-                      "occlusion culling or pick, and temporal anti-aliasing sees only the camera's motion on them (the next step adds them)");
-        }
     }
     if (ctx.taa) {
-        match_copies(*view, !ctx.taa_reset, jobs);
+        // This frame's joints are the next frame's past (the record is swapped in resolve_history); the matrices are kept whole,
+        // so that a copy's range there needs no copying of its own and copies sharing one range share it there too.
+        GpuCopyHistory& record = view->_taa_now;
+        record.joints.clear();
+        if (any_skinned) {
+            record.joints.reserve(joint_total);
+            for (u32 s = 0; s < 2; ++s) {
+                if (ctx.scenes[s]) {
+                    record.joints.insert(record.joints.end(), ctx.scenes[s]->joint_matrices().begin(), ctx.scenes[s]->joint_matrices().end());
+                }
+            }
+        }
+        match_copies(*view, !ctx.taa_reset, jobs, any_skinned);
     }
     if (any_clusters) {
         ctx.gpu_clusters = _gpu_clusters && ctx.scene.lod.gpu_culling;
@@ -2610,6 +2663,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         }
         if (any_skinned) {
             _skin_ordered.resize(written);
+            if (ctx.taa) {
+                _skin_prev_ordered.resize(written);
+            }
         }
         const auto write = [&](const DrawRef& ref, const MeshInstance& instance, u8* out, u32 at, u32 flat) {
             if (ctx.taa) {
@@ -2618,6 +2674,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             if (any_skinned) {
                 // The copy's first joint matrix in the frame's buffer (0 for a copy that has none), in its place among the instances.
                 _skin_ordered[at] = ref.skinned ? ref.joint_base + ref.skin_first[&instance - ref.instances] : 0u;
+                if (ctx.taa) {
+                    _skin_prev_ordered[at] = ref.skinned ? _taa_prev_joint[flat] : ~0u;
+                }
             }
             const Color m = ref.draw->material.color;
             GpuInstance3D g;
@@ -2696,6 +2755,16 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             const u32 offset_bytes = written * static_cast<u32>(sizeof(u32));
             ensure_buffer(_joint_offsets, offset_bytes, min_caster_list_buffer);
             _device->upload_storage_buffer(_joint_offsets->handle(), 0, offset_bytes, _skin_ordered.data(), /*cycle=*/true);
+            if (ctx.taa) {
+                // Last frame's matrices, as the record holds them (whole), and where each copy's own start in them.
+                const std::vector<Mat4f>& past = view->_taa_last.joints;
+                const Mat4f none{};
+                const u32 past_bytes = static_cast<u32>(std::max<std::size_t>(past.size(), 1) * sizeof(Mat4f));
+                ensure_buffer(_previous_joints, past_bytes, min_joint_buffer);
+                _device->upload_storage_buffer(_previous_joints->handle(), 0, past_bytes, past.empty() ? &none : past.data(), /*cycle=*/true);
+                ensure_buffer(_previous_joint_offsets, offset_bytes, min_caster_list_buffer);
+                _device->upload_storage_buffer(_previous_joint_offsets->handle(), 0, offset_bytes, _skin_prev_ordered.data(), /*cycle=*/true);
+            }
         }
 
         // Temporal anti-aliasing: each copy's matrix of the frame before, in the same places (the velocity pre-pass reads it).
@@ -3262,24 +3331,31 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
             set_viewport(pass, view->_size.x, view->_size.y);
             DrawUniforms u{};
             std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
-            const std::array<SDL_GPUBuffer*, 2> buffers{storage, storage}; // the shadow vertex shaders' second buffer is a list this does not use
+            // the shadow vertex shaders' second buffer is a list this does not use; a skinned copy's also read the joints
+            const std::array<SDL_GPUBuffer*, 4> buffers{storage, storage, ctx.joints, ctx.joint_offsets};
             DrawBinder binder{pass};
             for (const u32 index : _order) {
                 const DrawRef& ref = _refs[index];
-                if (ref.skinned || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || dynamic_cast<const GpuMaterialShader3D*>(ref.draw->material.shader.backend().get())) {
-                    continue; // a skinned copy is not in this pass yet; a shader of its own may discard where the pyramid would take the mesh for solid
+                if (ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || dynamic_cast<const GpuMaterialShader3D*>(ref.draw->material.shader.backend().get())) {
+                    continue; // a shader of its own may discard where the pyramid would take the mesh for solid
+                }
+                if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
+                    continue;
                 }
                 const Material3D& occluder = ref.draw->material;
                 const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided, Pass::Occluder, cutout);
+                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided, Pass::Occluder, cutout, nullptr, false, ref.skinned);
                 if (!p) {
                     continue;
                 }
-                binder.bind_pipeline(p, buffers.data(), 2);
+                binder.bind_pipeline(p, buffers.data(), ref.skinned ? 4 : 2);
                 if (ref.clustered && !cluster_index_buffer(0)) {
                     continue;
                 }
                 binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index_buffer(0) : nullptr);
+                if (ref.skinned) {
+                    binder.bind_skin(ref.mesh);
+                }
                 if (cutout) {
                     bind_cutout(commands, pass, occluder);
                 }
@@ -3872,14 +3948,6 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
         c.prev_key.clear();
         return false;
     }
-    // A pose is not in MeshInstance: the cache could not tell a moved arm from a still one.
-    for (const DrawRef& ref : _refs) {
-        if (ref.skinned && ref.caster) {
-            c.valid = false;
-            c.prev_key.clear();
-            return false;
-        }
-    }
     std::vector<u8>& key = c.scratch;
     key.clear();
     const auto put = [&](const void* data, std::size_t bytes) {
@@ -3942,10 +4010,12 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
             c.prev_key.clear();
             return false;
         }
-        value(ref.mesh->serial);
+        value(ref.mesh->serial); // a skinned mesh's skeleton is the mesh's (its skin, and so its joint count), so this is its identity
         value(ref.draw->count);
         value(ref.levels);
         value(ref.clustered);
+        value(ref.skinned);
+        value(ref.skinned ? ref.mesh->skin_bounds.size() : std::size_t{0});
         value(m.double_sided);
         value(m.blend);
         if (m.blend == Blend3D::Mask) {
@@ -3965,10 +4035,26 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
                 mix(word);
             }
         };
+        // A posed copy's pose is in the sample as well (the matrices are what moves the shadow, the copy's own placing is the same).
+        const auto mix_pose = [&](u32 i) {
+            if (!ref.skinned) {
+                return;
+            }
+            const std::span<const Mat4f> pose{ref.joints + ref.skin_first[i], ref.mesh->skin_bounds.size()};
+            for (const Mat4f& m : pose) {
+                for (std::size_t w = 0; w < sizeof(Mat4f) / 8; ++w) {
+                    u64 word;
+                    std::memcpy(&word, reinterpret_cast<const u8*>(&m) + w * 8, 8);
+                    mix(word);
+                }
+            }
+        };
         for (u32 i = 0; i < n; i += step) {
             mix_instance(ref.instances[i]);
+            mix_pose(i);
         }
         mix_instance(ref.instances[n - 1]);
+        mix_pose(n - 1);
     }
     static_assert(sizeof(MeshInstance) % 8 == 0, "the sample reads whole words of a MeshInstance");
     for (std::size_t i = 0; i + 8 <= key.size(); i += 8) {
@@ -3993,6 +4079,19 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
                 break;
             }
             at += bytes;
+            // And each posed copy's matrices, in full: a pose that is not what the map was drawn from is a different shadow.
+            if (ref.skinned) {
+                const std::size_t pose_bytes = ref.mesh->skin_bounds.size() * sizeof(Mat4f);
+                for (u32 i = 0; i < ref.draw->count && same; ++i) {
+                    if (at + pose_bytes > c.copies.size() || std::memcmp(ref.joints + ref.skin_first[i], c.copies.data() + at, pose_bytes) != 0) {
+                        same = false;
+                    }
+                    at += pose_bytes;
+                }
+                if (!same) {
+                    break;
+                }
+            }
         }
         if (same && at == c.copies.size()) {
             return true;
@@ -4019,6 +4118,13 @@ void GpuRenderer3D::shadow_drawn(FrameCtx& ctx, bool complete) {
             if (ref.caster) {
                 const auto* bytes = reinterpret_cast<const u8*>(ref.instances);
                 c.copies.insert(c.copies.end(), bytes, bytes + static_cast<std::size_t>(ref.draw->count) * sizeof(MeshInstance));
+                if (ref.skinned) {
+                    const std::size_t pose_bytes = ref.mesh->skin_bounds.size() * sizeof(Mat4f);
+                    for (u32 i = 0; i < ref.draw->count; ++i) {
+                        const auto* pose = reinterpret_cast<const u8*>(ref.joints + ref.skin_first[i]);
+                        c.copies.insert(c.copies.end(), pose, pose + pose_bytes);
+                    }
+                }
             }
         }
         c.key = c.scratch;
@@ -4098,25 +4204,33 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     std::memcpy(u.view_projection, ctx.drawn[which].m, sizeof(u.view_projection));
     std::memcpy(u.current, ctx.view_projections[which].m, sizeof(u.current));
     std::memcpy(u.prior, (ctx.taa_reset ? ctx.view_projections : view->_taa_prior)[which].m, sizeof(u.prior));
-    const std::array<SDL_GPUBuffer*, 2> buffers{storage, previous_storage};
+    // A skinned copy's shader also reads the joints (the frame's, each copy's first), and those of the frame before (and where each
+    // copy's own start in them).
+    const std::array<SDL_GPUBuffer*, 6> buffers{storage, previous_storage, ctx.joints, ctx.joint_offsets, ctx.previous_joints, ctx.previous_joint_offsets};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{target_pass};
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
-        if (ref.skinned || ref.scene != which || pass_of(ref.draw->material) != Pass::Opaque || (which == 0 && phase_skips(ref))) {
+        if (ref.scene != which || pass_of(ref.draw->material) != Pass::Opaque || (which == 0 && phase_skips(ref))) {
+            continue;
+        }
+        if (ref.skinned && !(ctx.joints && ctx.joint_offsets && ctx.previous_joints && ctx.previous_joint_offsets)) {
             continue;
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
-        SDL_GPUGraphicsPipeline* p = velocity_pipeline(depth_format, !occluder.double_sided, cutout);
+        SDL_GPUGraphicsPipeline* p = velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned);
         if (!p) {
             continue;
         }
-        binder.bind_pipeline(p, buffers.data(), 2);
+        binder.bind_pipeline(p, buffers.data(), ref.skinned ? 6 : 2);
         if (ref.clustered && !cluster_index) {
             continue;
         }
         binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+        if (ref.skinned) {
+            binder.bind_skin(ref.mesh);
+        }
         if (cutout) {
             bind_cutout(commands, target_pass, occluder);
         }
@@ -4164,6 +4278,8 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
         warn_once(_contact_warned, "3D: contact shadows asked for, but this device cannot do it: off");
     }
     ctx.previous_storage = ctx.taa && _previous ? _previous->handle() : nullptr;
+    ctx.previous_joints = ctx.taa && _previous_joints ? _previous_joints->handle() : nullptr;
+    ctx.previous_joint_offsets = ctx.taa && _previous_joint_offsets ? _previous_joint_offsets->handle() : nullptr;
     ctx.velocity_drawn = false; // the pre-pass began, so _ao_normals holds this frame's velocity
     // Temporal anti-aliasing alone: the main pass writes the velocity, one geometry pass fewer. A custom shader's opaque
     // mesh can't (it has no velocity output), so a frame with one keeps the pre-pass.
@@ -4196,20 +4312,27 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             }
             for (const u32 index : _order) {
                 const DrawRef& ref = _refs[index];
-                if (ref.skinned || ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
+                if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
+                    continue;
+                }
+                if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
                     continue;
                 }
                 const Material3D& occluder = ref.draw->material;
                 const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p = pipeline(ao_normal_format, 1, !occluder.double_sided, Pass::Prepass, cutout);
+                SDL_GPUGraphicsPipeline* p = pipeline(ao_normal_format, 1, !occluder.double_sided, Pass::Prepass, cutout, nullptr, false, ref.skinned);
                 if (!p) {
                     continue;
                 }
-                binder.bind_pipeline(p, &storage, 1);
+                const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+                binder.bind_pipeline(p, ref.skinned ? skinned_buffers.data() : &storage, ref.skinned ? 3 : 1);
                 if (ref.clustered && !cluster_index) {
                     continue;
                 }
                 binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+                if (ref.skinned) {
+                    binder.bind_skin(ref.mesh);
+                }
                 if (cutout) {
                     bind_cutout(commands, prepass, occluder);
                 }
@@ -4399,11 +4522,19 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         if (!p) {
             continue;
         }
-        const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+        // The velocity variant also has last frame's matrices, and the joints of the frame before with where each copy's start.
+        const bool skinned_velocity = ref.skinned && ctx.main_velocity && !custom;
+        if (skinned_velocity && !(ctx.previous_joints && ctx.previous_joint_offsets)) {
+            continue;
+        }
+        const std::array<SDL_GPUBuffer*, 6> skinned_buffers{storage, ctx.joints, ctx.joint_offsets, nullptr, nullptr, nullptr};
+        const std::array<SDL_GPUBuffer*, 6> skinned_velocity_buffers{storage, ctx.previous_storage, ctx.joints, ctx.joint_offsets,
+                                                                     ctx.previous_joints, ctx.previous_joint_offsets};
         const Textures textures{material.texture.backend().get(), material.metallic_roughness.backend().get(),
                                 material.normal.backend().get(), material.occlusion.backend().get(),
                                 material.emissive_texture.backend().get()};
-        if (binder.bind_pipeline(p, ref.skinned ? skinned_buffers.data() : buffers.data(), ref.skinned ? 3 : ctx.main_velocity && !custom ? 2 : 1)) {
+        if (binder.bind_pipeline(p, skinned_velocity ? skinned_velocity_buffers.data() : ref.skinned ? skinned_buffers.data() : buffers.data(),
+                                 skinned_velocity ? 6 : ref.skinned ? 3 : ctx.main_velocity && !custom ? 2 : 1)) {
             bound_textures = unbound;
         }
         const std::pair<Wrap3D, Wrap3D> wrap{material.wrap_u, material.wrap_v};
@@ -4544,20 +4675,27 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             for (const u32 index : _order) {
                 const DrawRef& ref = _refs[index];
                 const Pass kind = pass_of(ref.draw->material);
-                if (ref.skinned || ref.scene != 0 || (kind != Pass::Opaque && kind != Pass::Alpha)) {
-                    continue; // skinned copies are not in the pick pass yet
+                if (ref.scene != 0 || (kind != Pass::Opaque && kind != Pass::Alpha)) {
+                    continue;
+                }
+                if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
+                    continue;
                 }
                 const Material3D& picked = ref.draw->material;
                 const bool cutout = picked.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p = pipeline(pick_format, 1, !picked.double_sided, Pass::Pick, cutout);
+                SDL_GPUGraphicsPipeline* p = pipeline(pick_format, 1, !picked.double_sided, Pass::Pick, cutout, nullptr, false, ref.skinned);
                 if (!p) {
                     continue;
                 }
-                binder.bind_pipeline(p, &storage, 1);
+                const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+                binder.bind_pipeline(p, ref.skinned ? skinned_buffers.data() : &storage, ref.skinned ? 3 : 1);
                 if (ref.clustered && !cluster_index) {
                     continue;
                 }
                 binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+                if (ref.skinned) {
+                    binder.bind_skin(ref.mesh);
+                }
                 if (cutout) {
                     bind_cutout(commands, picking, picked);
                 }
@@ -4701,6 +4839,16 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
                 pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, cull, Pass::Occluder, mask);
             }
         }
+        for (const Scene3D* s : scenes) {
+            if (s && std::any_of(s->draws().begin(), s->draws().end(), [](const Scene3D::Draw& d) { return d.skinned; })) {
+                for (const bool cull : {true, false}) {
+                    for (const bool mask : {false, true}) {
+                        pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, cull, Pass::Occluder, mask, nullptr, false, true);
+                    }
+                }
+                break;
+            }
+        }
     }
     // The draws' own pipelines, for each kind of draw the scene has.
     const SDL_GPUTextureFormat format = taa ? hdr_format : view->_format;
@@ -4721,8 +4869,21 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
             if (index == 0 && shadows && opaque && m.casts_shadow) {
                 pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, cutout, nullptr, false, draw.skinned);
             }
-            if (index == 0 && view->_pick && !draw.skinned && (opaque || m.blend == Blend3D::Alpha)) {
-                pipeline(pick_format, 1, !m.double_sided, Pass::Pick, cutout);
+            if (index == 0 && view->_pick && (opaque || m.blend == Blend3D::Alpha)) {
+                pipeline(pick_format, 1, !m.double_sided, Pass::Pick, cutout, nullptr, false, draw.skinned);
+            }
+            if (draw.skinned && opaque && !custom && (ao || contact || taa) && _ao_available) {
+                // The pre-pass's skinned variants: with the velocity when temporal anti-aliasing has a pre-pass, plain else.
+                if (taa) {
+                    if (!main_velocity) {
+                        velocity_pipeline(_ao_depth_format, !m.double_sided, cutout, true);
+                        if (index == 1) {
+                            velocity_pipeline(_depth_format, !m.double_sided, cutout, true);
+                        }
+                    }
+                } else if (index == 0) {
+                    pipeline(ao_normal_format, 1, !m.double_sided, Pass::Prepass, cutout, nullptr, false, true);
+                }
             }
         }
     }
