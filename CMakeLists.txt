@@ -51,6 +51,10 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
+# 3D views drawn inside the 2D frame (kin/render3d, SDL_GPU only). Experimental:
+# the API may change in any release (docs/3d_plan.md). Declared before the
+# dependencies, which fetch Jolt Physics (kin/physics3d) only when it is on.
+option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" ON)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(dependencies)
 include(kin_embed)
@@ -76,9 +80,6 @@ option(KIN_PACK_CONTENT "Pack each game's content into a .kinpak when it is inst
 # KIN_SPIRV_DIR), rather than build a GPU backend without them (games then
 # fall back to SDL_Renderer).
 option(KIN_REQUIRE_GPU_SHADERS "Require glslc for the GPU backend's shaders" ${KIN_SHIPPING})
-# 3D views drawn inside the 2D frame (kin/render3d, SDL_GPU only). Experimental:
-# the API may change in any release (docs/3d_plan.md).
-option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" ON)
 
 add_subdirectory(engine)
 add_subdirectory(tools)

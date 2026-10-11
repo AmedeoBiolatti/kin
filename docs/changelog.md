@@ -9,6 +9,14 @@ releases may change APIs.
 
 ### Added
 
+- 3D physics, the Jolt core (experimental; see [3D physics](physics_3d.md) and the plan's "P2a"): `kin/physics3d`: `World3D` (gravity as a
+  vector, a fixed `step(dt)` with a set number of collision steps, bodies by descriptor: static, kinematic and dynamic, mass or density,
+  friction, restitution, damping, layer, sensor flag, user id; transforms, velocities, forces, impulses, activation) and `Shape3D`
+  (box, sphere, capsule, cylinder, convex hull, triangle mesh, height field, compound), 32 collision layers with a pair table and
+  32-bit masks, `state_hash()` and `save_state()` / `restore_state()`. Jolt Physics 5.5.0 (MIT) is fetched only with
+  `KIN_EXPERIMENTAL_3D` and built for cross-platform determinism; steps run on `kin::JobSystem` with the same bits for any number of
+  workers. No header of Jolt is included by kin's. New: `kin-physics3d` test, `kin_physics3d_bench`. Not in this step: queries, events,
+  debug draw, ECS components, character, ragdoll, ropes. The no-3D build and all existing pictures are unchanged.
 - 3D, inverse kinematics, the known limits fixed (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b follow-up"):
   joint limits for `solve_two_bone` (`max_bend_degrees`, `hinge` / `hinge_axis`, `max_twist_degrees`: a knee that bends one way about its own
   axis and whose hip turns no more than a limit, with no flip as the pole goes round behind); FABRIK as an ECS constraint kind

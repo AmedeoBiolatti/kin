@@ -201,6 +201,24 @@ if(KIN_EXPERIMENTAL_3D)
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
+    # kin/physics3d: Jolt Physics behind kin's own types (docs/physics_3d.md). Its sources are compiled apart
+    # from the engine's, as an object library: Jolt's PUBLIC compile options (-mavx2, -mpopcnt, ...) and
+    # definitions would otherwise reach every engine source and change what the rest of kin compiles to. Only
+    # these files see Jolt's headers; no kin header includes them. -ffp-contract=off keeps the compiler from
+    # fusing multiply-adds in the glue (determinism); -fno-rtti is Jolt's own build setting, which its classes
+    # that these sources derive from need.
+    add_library(kin_physics3d_objects OBJECT
+        src/physics3d/shape3d.cpp
+        src/physics3d/world3d.cpp
+    )
+    target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
+    target_include_directories(kin_physics3d_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(kin_physics3d_objects PRIVATE Jolt)
+    target_compile_options(kin_physics3d_objects PRIVATE
+        "$<$<CXX_COMPILER_ID:GNU,Clang>:-fno-rtti;-ffp-contract=off>")
+    kin_enable_release_optimizations(kin_physics3d_objects)
+    target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_physics3d_objects>)
+    target_link_libraries(kin_engine PRIVATE $<LINK_ONLY:Jolt>)
 endif()
 if(KIN_SHIPPING)
     target_compile_definitions(kin_engine PUBLIC KIN_SHIPPING)

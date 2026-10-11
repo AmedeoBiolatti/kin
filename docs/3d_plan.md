@@ -3127,6 +3127,144 @@ a scripted-input run of the climbing test level, the physics step's cost with 50
 Risk to watch: Jolt is large to compile; this machine has 14 GB of RAM and a nearly full
 disk (see HANDOFF.md): build with `-j8`, check the disk first.
 
+#### P2a — Jolt core — results
+
+Done 2026-10-11 on `exp/3d-rendering` (head 4d3ae05 plus the working tree). The rest of P2 (queries, events, debug draw, ECS
+components, character controller, grab and climb, ragdoll, ropes) is not started; the API is shaped for them (see the end).
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| Dependency | `cmake/dependencies.cmake`, `engine/CMakeLists.txt` | Jolt v5.5.0 by FetchContent, only with `KIN_EXPERIMENTAL_3D` (the option is now declared before `include(dependencies)`); `FETCHCONTENT_SOURCE_DIR_JOLTPHYSICS` reuses a clone (`~/.cache/kin/deps/JoltPhysics` here); licence in the package list |
+| Build settings | same | static, `CROSS_PLATFORM_DETERMINISTIC` on, single precision, no samples / tests / viewer / debug renderer / profiler / object stream / asserts / install / debug symbols / LTO / `-Werror` |
+| Shapes | `kin/physics3d/shape3d.hpp` | box, sphere, capsule, cylinder, convex hull, triangle mesh, height field, compound; shareable handles; volume, centre of mass, bounds; invalid input gives an invalid handle |
+| World | `kin/physics3d/world3d.hpp` | `World3D`: gravity as a vector, `step(dt)` with `collision_steps`, bodies by descriptor, the setters, forces and impulses, getters, activation, 32 layers with a pair table and a 32-bit mask type for P2b |
+| Determinism | same | `state_hash()` (FNV-1a 64 over fixed-width little-endian fields, bit-exact floats, creation-number order), `save_state` / `restore_state` (Jolt's StateRecorder: cheap, done) |
+| Jobs | `engine/src/physics3d/world3d.cpp` | a Jolt `JobSystemWithBarrier` over `kin::JobSystem` (`World3DConfig::jobs`, default `default_job_system()`), or all on the calling thread |
+| Tests, bench | `tests/physics3d_tests.cpp` (ctest `kin-physics3d`), `tests/physics3d_bench.cpp` (`kin_physics3d_bench`) | 16 test functions, 152 check expressions, 1.7 s |
+| Docs | `docs/physics_3d.md`, changelog, third-party notices, README | |
+
+**Decisions where the plan was open.**
+1. *Jolt is compiled into `kin_engine` through an object library of its own* (`kin_physics3d_objects`, two glue sources), not as a PRIVATE
+   dependency of the engine: Jolt's PUBLIC compile options (`-mavx2 -mbmi -mpopcnt -mlzcnt -mf16c`) would otherwise reach every engine source
+   and could change what the renderer's CPU code compiles to. The glue gets `-fno-rtti` (Jolt's own setting: kin classes derive from Jolt's)
+   and `-ffp-contract=off`. The engine links `$<LINK_ONLY:Jolt>`. The identity check below confirms nothing else moved.
+2. *Instruction sets*: Jolt's defaults (SSE4.1/4.2, AVX, AVX2, LZCNT, TZCNT, F16C; FMA is off by Jolt itself under cross-platform
+   determinism). Results are the same bits with or without them by Jolt's design; a machine without AVX2 would need those options off
+   (`USE_AVX2` etc. in the dependency block), not tested here.
+3. *Own handles*: `Body3D {index, generation}` over a slot table with a last-in-first-out free list, not Jolt's `BodyID` (whose reuse and
+   sequence numbers are Jolt's business); the slot index goes in the hash, which is why the hash order is stable.
+4. *Layers*: 32 layers (layer 0 = static, its own broad phase tree; 1 dynamic, 2 kinematic, 3 character, 4 sensor, 5 to 31 free), a
+   symmetric 32 x 32 table (`set_layers_collide`), `u32` masks (`layer_bit`, `collision_mask`) for queries; the object layer is the layer
+   number, so Jolt's `ObjectLayer` stays 16 bits.
+5. *Mass*: a body's `mass` (kg) if above zero, else `density * shape.volume()`; inertia always from the shape, scaled to the mass.
+6. *Damping defaults 0* (as the Box2D module; Jolt's own default is 0.05).
+7. *`destroy_body` wakes what overlaps the body's box grown by 10 cm*, in body-number order: Jolt does not, and a sleeping tower whose
+   bottom box is removed stayed in the air (found by the test "destroy while stacked").
+8. *One `step(dt)`* of `collision_steps` collision steps (default 1); the caller owns the fixed step. Not thread safe: one thread at a time.
+9. *Temp memory*: 16 MB block with a heap fallback (Jolt's own allocator aborts when it runs out).
+
+**Numbers.**
+
+*Build cost* (this machine: 32 hardware threads, GCC 15, Release, `-j8`):
+
+| What | Cost |
+|---|---|
+| Jolt, 128 translation units, from nothing | 17.6 s wall, 85 s of CPU |
+| `libJolt.a` | 3.8 MB (no debug symbols) |
+| Jolt's objects in the build directory | 98 MB |
+| The two glue sources | a few seconds each |
+| `kin_engine` library | 22.8 MB (all of it, with the glue) |
+| Test and bench executables | 2.1 MB each |
+| The worktree's `build` directory | 803 MB before, 911 MB after the first full build with Jolt (includes the new test, bench and rebuilt objects) |
+| Peak RSS while compiling | not measured exactly; the machine's available memory never fell under 4 GB at `-j8` |
+| Source clone | 52 MB (`~/.cache/kin/deps/JoltPhysics`, on the home drive) |
+| `/mnt/windows` free before and after | 1.5 GB and 1.4 GB |
+
+*Step cost*, `kin_physics3d_bench`, 60 Hz steps, boxes of about 0.8 x 0.6 x 0.7 m in a walled yard (the machine had other load: the
+numbers are indicative). Milliseconds a step, mean over the first 120 steps (falling, landing) and over steps 120 to 360 (settling):
+
+| Scene | Workers | Steps 0-120 mean (worst) | Steps 120-360 mean (worst) | Awake at 360 |
+|---|---|---|---|---|
+| pile 500 | none (calling thread) | 4.13 (5.33) | 1.63 (4.02) | 0 |
+| pile 500 | 1 | 3.06 (3.91) | 1.51 (4.14) | 0 |
+| pile 500 | 4 | 2.11 (2.71) | 1.04 (2.64) | 0 |
+| pile 500 | 8 | 2.05 (2.51) | 1.11 (2.69) | 0 |
+| pile 2000 | none | 10.96 (26.6) | 20.46 (25.5) | 1985 |
+| pile 2000 | 1 | 7.31 (17.1) | 15.03 (17.1) | 1985 |
+| pile 2000 | 4 | 4.26 (10.6) | 9.33 (11.0) | 1985 |
+| pile 2000 | 8 | 3.64 (8.42) | 8.62 (10.5) | 1985 |
+| stacks 500 (columns of 10) | none | 1.77 (2.24) | 1.24 (1.64) | 280 |
+| stacks 500 | 4 | 0.90 (1.31) | 0.61 (1.22) | 280 |
+| stacks 2000 | none | 7.35 (9.27) | 5.45 (6.41) | 1190 |
+| stacks 2000 | 1 | 5.05 (8.31) | 3.78 (4.50) | 1190 |
+| stacks 2000 | 4 | 2.87 (4.03) | 2.12 (2.67) | 1190 |
+| stacks 2000 | 8 | 2.57 (3.62) | 1.97 (2.70) | 1190 |
+
+So 500 bodies cost 1 to 4 ms (the plan's question: well inside 16.7 ms even with no workers), and 2000 stay under 11 ms with 4 workers.
+A 2000 box pile in a narrow yard stays awake and jittery for a long time (1985 of 2000 awake after 6 s): that is a scene property, not
+a cost per body (the 500 pile sleeps by step 360). "1 worker" beats "none" because the worker and the stepping thread work together.
+
+**Tests** (`kin-physics3d`, no GPU): rest height and sleep; free fall against the discrete law g dt^2 n(n+1)/2 and a 0.5 s step;
+sideways gravity, a gravity change at run time, gravity factor; a sphere rolling down a triangle mesh (stays on the plane, spin = speed /
+radius); a restitution bounce to 0.64 of the drop height within 0.15 m, and restitution 0 not bouncing; capsule, cylinder, convex hull
+and height field at rest, a slope of a height field; compound volume, centre of mass, bounds, impulse through and off the centre; a
+kinematic body pushing a crate; handles, generations, user ids, refused descriptors; mass by density and by value, impulse, force,
+torque, damping; layers (defaults, a layer that falls through the floor, two dynamic layers that pass or stack, a sensor); a tower
+with its bottom removed; a 500 body pile for 300 steps (none escape); hash sensitivity per field and to last-place bits, to swapped
+bodies and reused numbers; determinism: the same pile twice, with no workers, 1 and 4 (identical hash every one of 120 steps),
+`collision_steps` 2 repeatable and different from 1; save, run, restore, run again, identical hashes; restore refused after a body was
+created.
+
+**Mutation checks** (each: break the source on purpose, build, run, restore; the sources compared with copies afterwards, identical):
+
+| Mutation | Result |
+|---|---|
+| step uses 2 x dt | caught (12 checks) |
+| `set_gravity` negates the vector | caught (the run-time gravity check) |
+| hash ignores rotation | caught (hash sensitivity) |
+| hash ignores velocities | caught (3 checks) |
+| hash drops the body number and generation (order-insensitive) | caught (reused-number check) |
+| layer pair table ignored | caught (stacked / pass-through test) |
+| user id stored off by one | caught (3 checks) |
+| restitution ignored | caught (bounce test) |
+| density ignored in mass | caught (5 checks) |
+| generation not bumped on destroy | caught (6 checks) |
+| `restore_state` does not restore | caught (3 checks) |
+| kinematic move with a wrong dt | caught (position check) |
+| destroy does not wake neighbours | caught (stacked test) |
+| capsule half height halved | caught (rest height) |
+| compound child offsets dropped | caught (5 checks) |
+| Jolt built without `CROSS_PLATFORM_DETERMINISTIC` | caught (`World3D::cross_platform_deterministic()`; Jolt rebuilt, then restored) |
+| `GetMaxConcurrency()` returns 64 instead of workers + 1 | **survived, as it should**: an equivalent mutant (the number of jobs Jolt cuts a step into does not change the bits); it is the evidence for "the result does not depend on the thread count" |
+
+**Checks run.** `ninja -C build -j8` and `ninja -C build-no3d -j8`: no warnings from the new code. `build`: `KIN_REQUIRE_GPU_TESTS=1 ctest
+-j4 --timeout 600`: 70 of 70 (69 before and the new one). `build-no3d`: 65 of 65, and its `build.ninja` has no Jolt in it. Identity: `render
+def` and `render all` (--cascades 4 --ao --contact-shadows --taa) of crowd, sponza, helmet and cornell at 120 frames against
+`reference_out/p1a_base_def` and `p1a_base_all`: all 16 pictures byte for byte equal.
+
+**Limits and not done.**
+- No queries, shape casts, overlaps, contact events or sensors reporting (a sensor flag and a layer exist; P2b), no constraints, no debug
+  draw (Jolt's debug renderer is compiled out; the draw can come from shape triangle data without it, or the option be turned on), no ECS
+  components, no character controller, no ragdoll, no ropes, no soft bodies, no scaled or mutable shapes, no per-contact material
+  callbacks.
+- Cross-platform determinism is built in but only one platform was run: the claim "the same bits on Windows, macOS and ARM" is Jolt's,
+  not tested here. Hash NaN-canonicalisation is in the code but no API path can make a NaN (non-finite input is refused), so it has no test.
+- `save_state` / `restore_state` need the same set of bodies (Jolt's rule); a rollback that spawns bodies needs a body list of its own
+  on top, which is netcode's step.
+- The `World3D` is not thread safe, and the `JobSystem` it was given must outlive it.
+- Jolt's default allocator and Factory are registered once and never released (shapes may outlive worlds).
+- A height field is stored in 8 bits a sample relative to its block, so its surface is within about a 256th of a block's height range.
+- Windows (MSVC) and the other compilers: the CMake follows how the other dependencies are handled (static runtime on, no `-Werror`)
+  but was not built here; the glue's `-fno-rtti` is written for GCC and Clang only (MSVC's Jolt build turns RTTI off through `/GR-`
+  in Jolt's own directory, so the glue may need the same there).
+
+**What P2b needs from this.** Queries take a `Layer3DMask`; the body slot's user data is already the way back from a Jolt body to a
+`Body3D` (Jolt body user data is unused: set it to `(generation << 32) | index` when the contact listener is added); `World3D::Impl` holds
+the `PhysicsSystem`, so a `ContactListener` and `BroadPhaseQuery` / `NarrowPhaseQuery` calls are additions inside `world3d.cpp`; the
+ground query of P1b is `raycast(from, to, mask)`.
+
 ### P3 — A whole scene: sky, fog, spot lights, weather
 
 A sky as the background (a procedural gradient and sun disc first, a cubemap later), height

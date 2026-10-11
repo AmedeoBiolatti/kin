@@ -110,6 +110,7 @@ kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 if(KIN_EXPERIMENTAL_3D)
     kin_add_test(kin_mesh_cluster_tests kin-mesh-clusters SOURCES mesh_cluster_tests.cpp)
     kin_add_test(kin_skeleton_tests kin-skeleton SOURCES skeleton_tests.cpp)
+    kin_add_test(kin_physics3d_tests kin-physics3d SOURCES physics3d_tests.cpp)
     kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
@@ -142,6 +143,9 @@ if(KIN_BUILD_BENCHMARKS)
     if(KIN_EXPERIMENTAL_3D)
         add_executable(kin_reference ${PROJECT_SOURCE_DIR}/tools/reference/kin_reference.cpp)
         target_link_libraries(kin_reference PRIVATE kin::engine)
+        # kin/physics3d step times: piles and stacks of boxes, 1 to 8 workers (docs/physics_3d.md).
+        add_executable(kin_physics3d_bench physics3d_bench.cpp)
+        target_link_libraries(kin_physics3d_bench PRIVATE kin::engine)
     endif()
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)

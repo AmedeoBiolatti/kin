@@ -25,6 +25,7 @@ components with it. Each license is in the fetched source tree, under
 | [stb_vorbis](https://github.com/nothings/stb) | 1.22 (commit 2c980bb) | Public domain (Unlicense) or MIT | Sean Barrett |
 | [cgltf](https://github.com/jkuhlmann/cgltf) (with `KIN_EXPERIMENTAL_3D`) | 1.14 | MIT | Johannes Kuhlmann |
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`; simplifier, meshlet builder, cluster partitioner, index and vertex-cache tools) | 0.25 | MIT | Arseny Kapoulkine |
+| [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (with `KIN_EXPERIMENTAL_3D`; the rigid body engine behind `kin/physics3d`) | 5.5.0 | MIT | Jorrit Rouwe |
 
 ## Libraries bundled by SDL_image and SDL_ttf
 

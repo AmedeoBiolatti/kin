@@ -63,7 +63,8 @@ CI. Other platforms SDL3 supports may work but are untested.
 
 Requirements: CMake 3.22+, a C++23 compiler, Git, and network access on the
 first configure — CMake fetches SDL3, SDL3_image, SDL3_ttf, flecs, Box2D, Lua and
-sol2 with `FetchContent`.
+sol2 with `FetchContent` (and, with the experimental `KIN_EXPERIMENTAL_3D`, cgltf, meshoptimizer and
+Jolt Physics; `-DFETCHCONTENT_SOURCE_DIR_JOLTPHYSICS=<clone>` reuses a local clone).
 
 On Linux, SDL3 also needs the windowing and audio development packages. On
 Debian/Ubuntu:

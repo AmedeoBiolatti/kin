@@ -246,3 +246,37 @@ foreach(_kin_license IN LISTS KIN_THIRD_PARTY_LICENSES)
                             "in cmake/dependencies.cmake to match the dependency)")
     endif()
 endforeach()
+
+# Jolt Physics (kin/physics3d, docs/physics_3d.md), only with the experimental 3D
+# option: a rigid body engine, MIT. Built as a static library without its
+# samples, tests, viewer, debug renderer, profiler or object stream, in single
+# precision and with CROSS_PLATFORM_DETERMINISTIC on, so that a lockstep step
+# gives the same bits on every machine. A local clone can stand in for the
+# download: -DFETCHCONTENT_SOURCE_DIR_JOLTPHYSICS=<path to the JoltPhysics clone>.
+if(KIN_EXPERIMENTAL_3D)
+    set(CROSS_PLATFORM_DETERMINISTIC ON CACHE BOOL "" FORCE)
+    set(DOUBLE_PRECISION OFF CACHE BOOL "" FORCE)
+    set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)         # -Werror on a compiler Jolt was not tried with
+    set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE) # kin's own targets are not built with LTO
+    set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+    set(ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(USE_ASSERTS OFF CACHE BOOL "" FORCE)
+    set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+    set(DEBUG_RENDERER_IN_DISTRIBUTION OFF CACHE BOOL "" FORCE)
+    set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+    set(PROFILER_IN_DISTRIBUTION OFF CACHE BOOL "" FORCE)
+    set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
+    # Matches kin's own MSVC runtime choice (static) above.
+    set(USE_STATIC_MSVC_RUNTIME_LIBRARY ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(JoltPhysics
+        GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+        GIT_TAG v5.5.0
+        GIT_SHALLOW TRUE
+        SOURCE_SUBDIR Build
+    )
+    FetchContent_MakeAvailable(JoltPhysics)
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};JoltPhysics.txt|${joltphysics_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
+    if(NOT EXISTS "${joltphysics_SOURCE_DIR}/LICENSE")
+        message(FATAL_ERROR "License text not found: ${joltphysics_SOURCE_DIR}/LICENSE")
+    endif()
+endif()
