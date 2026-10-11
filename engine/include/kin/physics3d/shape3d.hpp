@@ -86,6 +86,7 @@ public:
 
 private:
     friend class World3D;
+    friend class DebugDraw3D;
     std::shared_ptr<const physics3d_detail::ShapeData> _data;
 };
 

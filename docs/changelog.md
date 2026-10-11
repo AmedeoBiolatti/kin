@@ -9,6 +9,19 @@ releases may change APIs.
 
 ### Added
 
+- 3D physics, queries, events, constraints, debug draw and entities (experimental; see [3D physics](physics_3d.md) and the plan's "P2b"):
+  `World3D::raycast`, `raycast_all`, `shape_cast`, `overlap`, `point_inside`, `closest_point` (a layer mask, an ignored body, sensors
+  in or out; values in a fixed order, no callbacks); contact events per body pair (Begin, Persist, End; sensors; user ids, point,
+  normal, closing speed), sorted and the same on every worker count, read with `events()` / `drain_events()`, a pair that sleeps
+  together is not reported as ended; constraints (fixed, distance with a range and a spring, point, hinge with limits and a motor,
+  cone, slider; breakable; connected bodies do not collide by default; in the state hash and the saved state); `teleport`,
+  `follow_transform`, `set_layer`, `set_sensor`, `set_shape`; `DebugDraw3D` (shapes, sleeping and awake, contacts, constraints, query
+  results as line lists, no Jolt debug renderer); ECS `Collider3D`, `RigidBody3D` and `WorldPhysicsState3D` (bodies made in entity id
+  order, kinematic bodies from Transform3D, dynamic ones written back, events on the world, opt-in debug lines and interpolation),
+  `ground_query_from_world` for the foot placement of P1b, `collider_from_mesh`. `kin_reference` scene `physics_pile`; Sponza Walk
+  "Physics" section, `--preset physics`, key B; `kin_physics3d_bench queries`; new tests `kin-physics3d-ecs` and
+  `test_gpu_physics_debug_lines`. Off unless used; the no-3D build and every existing picture are unchanged. Not in this step: the
+  character controller, grab and climb, ragdoll, ropes.
 - 3D physics, the Jolt core (experimental; see [3D physics](physics_3d.md) and the plan's "P2a"): `kin/physics3d`: `World3D` (gravity as a
   vector, a fixed `step(dt)` with a set number of collision steps, bodies by descriptor: static, kinematic and dynamic, mass or density,
   friction, restitution, damping, layer, sensor flag, user id; transforms, velocities, forces, impulses, activation) and `Shape3D`

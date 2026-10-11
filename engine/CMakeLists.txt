@@ -193,7 +193,7 @@ if(KIN_EXPERIMENTAL_3D)
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
-    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
+    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/physics3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/taa.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
                                       src/renderer/gpu/gpu_renderer3d.cpp)
@@ -210,6 +210,7 @@ if(KIN_EXPERIMENTAL_3D)
     add_library(kin_physics3d_objects OBJECT
         src/physics3d/shape3d.cpp
         src/physics3d/world3d.cpp
+        src/physics3d/debug_draw3d.cpp
     )
     target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
     target_include_directories(kin_physics3d_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")

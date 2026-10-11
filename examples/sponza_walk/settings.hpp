@@ -146,6 +146,13 @@ struct Settings {
     bool ik_lock = false;       // planted feet stay where they were put while the person moves
     bool ik_toes = false;       // toes lie on the ground under them
     bool ik_walk = false;       // the person drifts from side to side
+    // Physics (kin/physics3d, P2b): a floor at y = 0 and boxes thrown from the camera (B, or the button), stepped at 60 Hz by
+    // WorldPhysicsState3D over the viewer's ECS world, with the debug lines (the shapes, awake or asleep, and the contacts).
+    bool physics = false;
+    bool phys_debug = true;
+    int phys_count = 10;        // boxes a throw
+    float phys_size = 0.4f;     // metres a side
+    float phys_speed = 8.0f;    // m/s along the view
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

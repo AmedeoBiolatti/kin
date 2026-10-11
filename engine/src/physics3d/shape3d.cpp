@@ -181,11 +181,13 @@ Shape3D Shape3D::compound(std::span<const ShapeChild3D> children) {
     }
     physics3d_detail::ensure_jolt_runtime();
     JPH::StaticCompoundShapeSettings settings;
+    // The child's index goes in as its user data: it is what a ray or shape hit reports as the sub shape.
+    JPH::uint32 index = 0;
     for (const ShapeChild3D& child : children) {
         if (!child.shape.valid() || !finite(child.position)) {
             return out;
         }
-        settings.AddShape(to_jolt(child.position), to_jolt(child.rotation.normalized()), child.shape._data->shape);
+        settings.AddShape(to_jolt(child.position), to_jolt(child.rotation.normalized()), child.shape._data->shape, index++);
     }
     out._data = make_data(settings.Create(), Shape3DKind::Compound);
     return out;

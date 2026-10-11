@@ -1,4 +1,5 @@
 #include <kin/core/jobs.hpp>
+#include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/render3d/ik.hpp>
 #include <kin/platform/app.hpp>
@@ -8918,6 +8919,103 @@ void test_gpu_skinned_everything() {
     });
 }
 
+
+// --- Physics debug lines (P2b): opt-in, off is the picture without them ---
+
+// Debug lines of a World3D drawn as an unlit wireframe: with the switch off the picture is the one without the physics
+// state at all, to the byte; on, the awake body's edges are in its colour and (once it sleeps) in the sleeping colour.
+void test_gpu_physics_debug_lines() {
+    with_gpu("test_gpu_physics_debug_lines", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh slab = make_box(r3d, {6.0f, 0.2f, 6.0f});
+        const kin::Mesh crate = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::EcsWorld ecs;
+        flecs::world& world = ecs.raw();
+        kin::World3DConfig cfg;
+        cfg.single_threaded = true;
+        kin::World3D physics(cfg);
+        kin::WorldPhysicsState3D bodies{ecs, physics};
+        kin::WorldRenderState3D state{ecs};
+        kin::Collider3D floor_shape;
+        floor_shape.half_extents = {3.0f, 0.1f, 3.0f};
+        world.entity().set(kin::Transform3D{.position = {0, -0.1f, 0}}).set(kin::MeshRenderer{.mesh = slab, .material = {.color = Color::rgb(60, 60, 60), .unlit = true}}).set(floor_shape);
+        const flecs::entity box = world.entity()
+                                      .set(kin::Transform3D{.position = {0, 1.0f, 0}})
+                                      .set(kin::MeshRenderer{.mesh = crate, .material = {.color = Color::rgb(200, 120, 40), .unlit = true}})
+                                      .set(kin::Collider3D{.kind = kin::Collider3D::Kind::Box, .half_extents = {0.5f, 0.5f, 0.5f}})
+                                      .set(kin::RigidBody3D{});
+        const auto camera = kin::Camera3D::look_at({0.0f, 2.5f, 6.5f}, {0.0f, 0.5f, 0.0f}, 45.0f);
+        const auto shoot = [&](bool with_physics_state, bool debug) {
+            kin::Scene3D scene;
+            scene.camera = camera;
+            scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            state.propagate_transforms();
+            state.collect(scene);
+            if (with_physics_state) {
+                bodies.config().debug_draw = debug;
+                bodies.collect_debug(r3d, scene);
+            }
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const auto count_near = [](const Pixels& p, Color want, int tolerance) {
+            int n = 0;
+            for (int y = 0; y < p.size.y; ++y) {
+                for (int x = 0; x < p.size.x; ++x) {
+                    n += near(p.at(x, y), want, tolerance) ? 1 : 0;
+                }
+            }
+            return n;
+        };
+        bodies.sync_bodies();
+        // Falling: the box is awake.
+        bodies.step(1.0f / 60.0f);
+        const Pixels plain = shoot(false, false);
+        const Pixels off = shoot(true, false);
+        const Pixels on = shoot(true, true);
+        assert(plain.rgba == off.rgba);
+        assert(plain.rgba != on.rgba);
+        const kin::DebugDraw3DOptions colours;
+        const int awake = count_near(on, colours.dynamic_body, 24);
+        const int fixed = count_near(on, colours.static_body, 24);
+        std::cerr << "physics debug lines: " << awake << " px of the awake colour, " << fixed << " of the static colour, "
+                  << count_near(plain, colours.dynamic_body, 24) << " without them\n";
+        dump(on, "physics_debug_lines_awake");
+        assert(awake > 15 && fixed > 30);
+        assert(count_near(plain, colours.dynamic_body, 24) == 0);
+        // At rest and asleep: the box's edges are in the sleeping colour, none in the awake one.
+        for (int i = 0; i < 180; ++i) {
+            bodies.step(1.0f / 60.0f);
+        }
+        assert(!physics.is_active(bodies.body_of(box)));
+        const Pixels asleep = shoot(true, true);
+        const int sleeping = count_near(asleep, colours.sleeping_body, 24);
+        std::cerr << "physics debug lines, asleep: " << sleeping << " px of the sleeping colour\n";
+        assert(sleeping > 15 && count_near(asleep, colours.dynamic_body, 24) == 0);
+        dump(asleep, "physics_debug_lines_asleep");
+        // Where the lines are: the box's top front edge (0.5 up, 0.5 in front) is drawn at its projection.
+        const kin::Vec2f edge = camera.project({0.0f, 1.0f, 0.5f}, screen)->pos;
+        bool found = false;
+        for (int dy = -2; dy <= 2 && !found; ++dy) {
+            for (int dx = -2; dx <= 2; ++dx) {
+                found = found || near(asleep.at(static_cast<int>(edge.x) + dx, static_cast<int>(edge.y) + dy), colours.sleeping_body, 24);
+            }
+        }
+        assert(found);
+        // A ray and its hit through the same view.
+        bodies.config().debug_draw = true;
+        const auto hit = physics.raycast({0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
+        assert(hit && std::fabs(hit->point.y - 1.0f) < 0.03f);
+        bodies.debug().ray({0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, hit);
+        const Pixels ray = shoot(true, true);
+        assert(count_near(ray, colours.ray, 24) > 5 || count_near(ray, colours.ray_hit, 24) > 5);
+        dump(ray, "physics_debug_lines_ray");
+    });
+}
+
 const char* test_filter = nullptr;
 bool selected(const char* name) { return !test_filter || std::strstr(name, test_filter) != nullptr; }
 #define RUN(test) \
@@ -9056,5 +9154,6 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ik_on_workers());
     RUN(test_gpu_ik_limits_fabrik_locking_toes());
     RUN(test_gpu_skinned_everything());
+    RUN(test_gpu_physics_debug_lines());
     return 0;
 }

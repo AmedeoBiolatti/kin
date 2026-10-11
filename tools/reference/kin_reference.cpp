@@ -59,6 +59,7 @@
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/core/jobs.hpp>
+#include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/app.hpp>
@@ -536,6 +537,107 @@ struct Hidden {
         scene.draw(wall, Mat4f::translation({0.0f, 4.0f, 0.0f}), {.color = kin::Color::rgb(190, 186, 176), .roughness = 0.8f});
         scene.draw_instanced(torus, behind, {.roughness = 0.45f});
         scene.draw_instanced(torus, front, {.roughness = 0.45f});
+    }
+};
+
+
+// `procedural: "physics_pile"` (docs/physics_3d.md): boxes and spheres dropped into a walled yard of kin/physics3d, at a
+// fixed step from a fixed recipe, drawn as meshes with the physics debug lines over them (the shapes in the colour of
+// awake and sleeping, the contacts and their normals). The picture of frame f is the world 150 + f steps in; a frame
+// asked for out of order starts the world again, so every frame is the same whatever order the run takes them in.
+struct PhysicsPile {
+    struct Item {
+        kin::Body3D body;
+        Vec3f half;
+        bool ball = false;
+        kin::Color colour;
+    };
+    static constexpr int lead = 150;
+    kin::Mesh box_mesh, ball_mesh, debug_mesh;
+    std::unique_ptr<kin::World3D> world;
+    std::vector<Item> items;
+    std::vector<kin::ContactEvent3D> last_events;
+    int count = 60;
+    bool debug = true;
+    int stepped = 0;
+    float yard = 3.0f;
+
+    void reset() {
+        kin::World3DConfig cfg;
+        cfg.single_threaded = true; // one thread: the picture does not depend on a pool
+        cfg.persist_events = true;
+        world = std::make_unique<kin::World3D>(cfg);
+        items.clear();
+        last_events.clear();
+        stepped = 0;
+        const auto wall = [&](Vec3f half, Vec3f at) {
+            world->create_body({.shape = kin::Shape3D::box(half), .motion = kin::Body3DMotion::Static, .position = at, .friction = 0.6f});
+        };
+        wall({yard + 0.3f, 0.25f, yard + 0.3f}, {0.0f, -0.25f, 0.0f});
+        wall({0.15f, 0.75f, yard + 0.3f}, {-yard - 0.15f, 0.75f, 0.0f});
+        wall({0.15f, 0.75f, yard + 0.3f}, {yard + 0.15f, 0.75f, 0.0f});
+        wall({yard + 0.3f, 0.75f, 0.15f}, {0.0f, 0.75f, -yard - 0.15f});
+        wall({yard + 0.3f, 0.75f, 0.15f}, {0.0f, 0.75f, yard + 0.15f});
+        std::uint32_t seed = 2024u;
+        const auto next = [&] {
+            seed = seed * 1664525u + 1013904223u;
+            return static_cast<float>(seed >> 8) / static_cast<float>(1u << 24);
+        };
+        for (int i = 0; i < count; ++i) {
+            const int column = i % 5, row = (i / 5) % 4, layer = i / 20;
+            const Vec3f at{(static_cast<float>(column) - 2.0f) * 1.0f + (next() - 0.5f) * 0.3f, 1.2f + static_cast<float>(layer) * 1.05f,
+                           (static_cast<float>(row) - 1.5f) * 1.0f + (next() - 0.5f) * 0.3f};
+            const kin::Quatf q = kin::Quatf::axis_angle({next() + 0.1f, next(), next()}, next() * 360.0f);
+            Item item;
+            item.ball = i % 3 == 0;
+            item.half = item.ball ? Vec3f{0.32f, 0.32f, 0.32f} : Vec3f{0.35f + 0.1f * next(), 0.25f + 0.1f * next(), 0.3f};
+            item.colour = item.ball ? kin::Color::rgb(220, 90, 70) : kin::Color::rgb(static_cast<kin::u8>(90 + 20 * (i % 4)), 150, static_cast<kin::u8>(200 - 15 * (i % 5)));
+            item.body = world->create_body({.shape = item.ball ? kin::Shape3D::sphere(item.half.x) : kin::Shape3D::box(item.half),
+                                            .position = at, .rotation = q, .friction = 0.5f, .restitution = 0.15f, .user_id = static_cast<kin::u64>(i)});
+            items.push_back(item);
+        }
+        world->optimize_broad_phase();
+    }
+
+    void make(kin::Renderer3D& r3d, const kin::JsonValue& doc) {
+        count = static_cast<int>(doc.number_at("count", 60));
+        debug = doc.find("debug") == nullptr || doc.bool_at("debug");
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12));
+        reset();
+    }
+
+    void advance_to(int steps) {
+        if (steps < stepped) {
+            reset();
+        }
+        while (stepped < steps) {
+            world->step(1.0f / 60.0f);
+            last_events = world->drain_events();
+            ++stepped;
+        }
+    }
+
+    void draw(kin::Renderer3D& r3d, kin::Scene3D& scene, int time) {
+        advance_to(lead + std::max(0, time));
+        const kin::Material3D stone{.color = kin::Color::rgb(150, 146, 140), .roughness = 0.9f};
+        scene.draw(box_mesh, Mat4f::translation({0.0f, -0.25f, 0.0f}) * Mat4f::scaling({2 * yard + 0.6f, 0.5f, 2 * yard + 0.6f}), stone);
+        scene.draw(box_mesh, Mat4f::translation({-yard - 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}), stone);
+        scene.draw(box_mesh, Mat4f::translation({yard + 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}), stone);
+        scene.draw(box_mesh, Mat4f::translation({0.0f, 0.75f, -yard - 0.15f}) * Mat4f::scaling({2 * yard + 0.6f, 1.5f, 0.3f}), stone);
+        for (const Item& item : items) {
+            const Mat4f m = Mat4f::trs(world->position(item.body), world->rotation(item.body), item.half * (item.ball ? 1.0f : 2.0f));
+            scene.draw(item.ball ? ball_mesh : box_mesh, m, {.color = item.colour, .roughness = 0.5f});
+        }
+        if (debug) {
+            kin::DebugDraw3DOptions look;
+            look.point_size = 0.07f; // a metre-scale yard seen from 9 m: crosses and normals that show
+            look.normal_length = 0.45f;
+            kin::DebugDraw3D lines{look};
+            lines.world(*world);
+            lines.contacts(last_events);
+            debug_mesh = kin::draw_debug_lines(r3d, scene, lines.lines());
+        }
     }
 };
 
@@ -1079,6 +1181,11 @@ int main(int argc, char** argv) {
         if (is_hidden) {
             hidden.make(r3d, model_options_of(doc), doc);
         }
+        PhysicsPile pile;
+        const bool is_pile = doc.string_at("procedural") == "physics_pile";
+        if (is_pile) {
+            pile.make(r3d, doc);
+        }
         const bool animated = doc.bool_at("animated") || (over.crowd_move && doc.string_at("procedural") == "crowd");
         std::array<std::vector<kin::MeshInstance>, 3> crowd_moved;
         const double load_ms = ms_since(load_start);
@@ -1126,6 +1233,7 @@ int main(int argc, char** argv) {
         const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
                                     : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
                                     : is_hidden ? kin::Bounds3{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
+                                    : is_pile   ? kin::Bounds3{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
                                                 : bounds_of(placed);
 
         // The view.
@@ -1269,6 +1377,9 @@ int main(int argc, char** argv) {
             }
             if (is_motion) {
                 motion.draw(scene, time);
+            }
+            if (is_pile) {
+                pile.draw(r3d, scene, time);
             }
             if (is_hidden) {
                 hidden.draw(scene);

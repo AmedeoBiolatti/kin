@@ -12,6 +12,7 @@
 #include "settings.hpp"
 
 #include <kin/core/json.hpp>
+#include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -102,6 +103,7 @@ const std::map<std::string, std::string>& presets() {
         {"ik-reach", "character=on,char_count=1,char_clip=sway,ik=on,ik_hand_x=0.8,ik_hand_y=0.5,ik_hand_z=0.2,ik_pole=3"},
         {"ik-tail", "character=on,char_count=1,char_clip=sway,ik=on,ik_tail=on,ik_tail_x=0.6,ik_tail_y=1.1,ik_tail_z=-0.2"},
         {"ik-walk", "character=on,char_count=1,char_clip=sway,ik=on,ik_feet=on,ik_lock=on,ik_toes=on,ik_limits=on,ik_walk=on,ik_step=off"},
+        {"physics", "physics=on,phys_debug=on,phys_count=30"}, // Jolt boxes on a floor, thrown once when it goes on, with debug lines (P2b)
         {"ik-all", "character=on,char_count=3,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
     };
     return p;
@@ -213,7 +215,7 @@ struct Row {
 };
 
 struct Hooks {
-    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset, reset_history;
+    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset, reset_history, throw_boxes, clear_boxes;
 };
 
 struct Caps {
@@ -502,6 +504,15 @@ private:
         slider("ik_tail_y", "Tail target y", s.ik_tail_y, 0.0f, 1.6f);
         slider("ik_tail_z", "Tail target z", s.ik_tail_z, -1.2f, 0.6f);
 
+        section("Physics (Jolt: kin/physics3d)");
+        check("physics", "Physics on (a floor at y = 0)", s.physics);
+        check("phys_debug", "Debug lines (shapes, awake and asleep, contacts)", s.phys_debug);
+        islider("phys_count", "Boxes a throw", s.phys_count, 1, 100);
+        slider("phys_size", "Box size (m)", s.phys_size, 0.1f, 1.5f);
+        slider("phys_speed", "Throw speed (m/s)", s.phys_speed, 0.0f, 30.0f);
+        button("phys_throw", "Throw boxes (B)", _h.throw_boxes);
+        button("phys_clear", "Remove the boxes", _h.clear_boxes);
+
         section("Debug", true);
         check("stats", "Stats (F3)", s.stats);
         check("gpu_timing", "GPU timing", s.gpu_timing);
@@ -511,7 +522,7 @@ private:
         section("Keys");
         note("WASD move, Q/Ctrl down, E/Space up, Shift fast");
         note("Wheel: speed. Esc: free the mouse / quit");
-        note("Tab: panel or mouse. 1/2: views. L: sun, K: light");
+        note("Tab: panel or mouse. 1/2: views. L: sun, K: light, B: throw boxes");
     }
 
     Settings& _s;
@@ -606,6 +617,7 @@ public:
         _backend_stats = renderer.backend_stats();
 
         update_characters(dt);
+        update_physics(dt);
         fill_scene();
         warm_up_features();
         _r3d->render(_view, _scene);
@@ -734,6 +746,8 @@ private:
         h.print = [this] { print_settings(); };
         h.reset = [this] { reset_all(); };
         h.reset_history = [this] { _view.reset_history(); };
+        h.throw_boxes = [this] { throw_boxes(); };
+        h.clear_boxes = [this] { clear_boxes(); };
         _controls = std::make_unique<Controls>(_s, std::move(h), _caps);
     }
 
@@ -813,6 +827,7 @@ private:
         if (input.frame_pressed(Key::Num2)) reference_view(true);
         if (input.frame_pressed(Key::L)) _s.sun_animate = !_s.sun_animate;
         if (input.frame_pressed(Key::K)) drop_light();
+        if (input.frame_pressed(Key::B)) throw_boxes();
         if (input.frame_pressed(Key::F3)) _s.stats = !_s.stats;
         if (input.frame_pressed(Key::F2)) print_settings();
         if (input.frame_pressed(Key::F12) || input.frame_pressed(Key::P)) _shot_requested = true;
@@ -979,13 +994,74 @@ private:
         _ecs_state->animate(dt);
     }
 
+    // Physics: the ECS world gets a World3D with a floor (made when the switch goes on) and boxes (entities with a
+    // MeshRenderer, a Collider3D and a RigidBody3D) thrown from the camera; WorldPhysicsState3D steps it at 60 Hz.
+    void ensure_physics() {
+        if (!_ecs) {
+            _ecs = std::make_unique<::kin::EcsWorld>();
+            _ecs_state = std::make_unique<WorldRenderState3D>(*_ecs);
+        }
+        if (!_bodies) {
+            World3DConfig cfg;
+            cfg.single_threaded = true; // 100 boxes: not worth a pool
+            cfg.persist_events = true;  // resting contacts for the debug lines
+            _physics = std::make_unique<World3D>(cfg);
+            _bodies = std::make_unique<WorldPhysicsState3D>(*_ecs, *_physics);
+            Collider3D floor;
+            floor.half_extents = {200.0f, 0.5f, 200.0f};
+            _floor = _ecs->raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor);
+        }
+        if (!_box_mesh) _box_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
+    }
+
+    void throw_boxes() {
+        if (!_r3d || !_s.physics) return;
+        ensure_physics();
+        const Camera3D c = camera();
+        const float size = _s.phys_size;
+        for (int i = 0; i < std::clamp(_s.phys_count, 1, 100); ++i) {
+            // A small cloud ahead of the camera, going the way it looks.
+            const float u = float(i % 5) - 2.0f, v = float(i / 5 % 4) - 1.5f;
+            const Vec3f at = _pos + c.forward() * 1.5f + c.right() * (u * size * 1.3f) + Vec3f{0.0f, 0.2f + v * size * 1.3f, 0.0f};
+            _boxes.push_back(_ecs->raw().entity()
+                                 .set(Transform3D{.position = at, .rotation = Quatf::axis_angle({0.3f, 1.0f, 0.2f}, float(i) * 37.0f),
+                                                  .scale = {size, size, size}})
+                                 .set(MeshRenderer{.mesh = _box_mesh, .material = {.color = Color::rgb(210, 150, 60), .roughness = 0.6f}})
+                                 .set(Collider3D{.kind = Collider3D::Kind::Box, .half_extents = {0.5f, 0.5f, 0.5f}})
+                                 .set(RigidBody3D{.density = 400.0f, .friction = 0.5f, .restitution = 0.1f,
+                                                  .linear_velocity = c.forward() * _s.phys_speed}));
+        }
+    }
+
+    void clear_boxes() {
+        for (flecs::entity e : _boxes) e.destruct();
+        _boxes.clear();
+    }
+
+    void update_physics(float dt) {
+        if (!_s.physics) {
+            if (!_boxes.empty()) clear_boxes();
+            return;
+        }
+        ensure_physics();
+        if (!_physics_started) { // the first volley when the switch goes on (so a headless run has something to show)
+            _physics_started = true;
+            throw_boxes();
+        }
+        _bodies->advance(dt);
+    }
+
     void fill_scene() {
         _scene.clear();
         _scene.camera = camera();
         apply(_s, _scene, environment(), _model.bounds, _pos);
-        if (_ecs_state && !_characters.empty()) {
+        if (_ecs_state && (!_characters.empty() || !_boxes.empty())) {
             _ecs_state->propagate_transforms();
             _ecs_state->collect(_scene);
+            if (_bodies) {
+                _bodies->config().debug_draw = _s.physics && _s.phys_debug;
+                _bodies->collect_debug(*_r3d, _scene);
+            }
             if (_s.ik && _characters_are_people) {
                 // The hand's target (a small red ball), the tail's (a green one) and the step, in each person's own space as it was
                 // placed (they stay put while the person walks).
@@ -1384,6 +1460,12 @@ private:
     std::unique_ptr<::kin::EcsWorld> _ecs;
     std::unique_ptr<WorldRenderState3D> _ecs_state;
     std::vector<flecs::entity> _characters;
+    std::unique_ptr<World3D> _physics;
+    std::unique_ptr<WorldPhysicsState3D> _bodies;
+    flecs::entity _floor;
+    std::vector<flecs::entity> _boxes;
+    Mesh _box_mesh;
+    bool _physics_started = false;
     Model _model;
     Mesh _marker;
     Mesh _step_mesh;

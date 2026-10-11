@@ -1,0 +1,19 @@
+{
+ "name": "physics_pile",
+ "purpose": "kin/physics3d (P2b): 60 boxes and spheres dropped into a walled yard by Jolt at 60 Hz from a fixed recipe, 150 steps (2.5 s) in at frame 0. Drawn with the debug lines on: shapes as wireframes (green awake, blue asleep, grey static), the contact points (red crosses) and their normals (orange). No Cycles truth: the check is that two runs give the same picture byte for byte.",
+ "procedural": "physics_pile",
+ "count": 60,
+ "debug": true,
+ "view": {"samples": 4, "background": [58, 64, 74]},
+ "lights": {
+  "sun": {"direction": [-0.4364, 0.788, -0.4364], "color": [1.15, 1.09, 1.01]},
+  "fill": {"direction": [0.1424, 0.5736, 0.8067], "color": [0.22, 0.22, 0.22]},
+  "ambient": [0.42, 0.42, 0.42],
+  "ground_ambient": [0.18, 0.18, 0.18],
+  "shadow_area": [[-4, -0.6, -4], [4, 4, 4]]
+ },
+ "cameras": [
+  {"name": "above", "eye": [5.2, 6.5, 6.8], "target": [0.0, 0.3, 0.0], "fov": 42, "near": 0.05},
+  {"name": "side", "eye": [0.0, 2.2, 9.0], "target": [0.0, 0.7, 0.0], "fov": 42, "near": 0.05}
+ ]
+}

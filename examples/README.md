@@ -186,6 +186,11 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   FABRIK tail to a green ball (sliders for its position). `--preset ik`, `ik-reach`, `ik-tail`, `ik-walk`, `ik-all`. What the panel does
   to the constraints is `sponza_walk/ik_rig.hpp`, driven by a unit test (`kin_skeleton_tests`); the panel's click path is untested here
   (no display).
+- The "Physics (Jolt: kin/physics3d)" section turns on `WorldPhysicsState3D` over the viewer's ECS world: a floor at y = 0 (Sponza's own
+  collision is not used: the viewer holds no triangles of the model) and boxes thrown from the camera (key B or the button: count, size,
+  speed), stepped at 60 Hz, with the debug lines on or off (shapes green while awake and blue once asleep, contacts as red crosses with
+  orange normals). `--preset physics` throws 30 boxes along the nave when the switch comes on. The panel's click path is untested here
+  (no display).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8

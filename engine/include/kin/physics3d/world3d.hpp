@@ -18,6 +18,12 @@
 // numbers reused last in, first out), the descriptors and `dt` (a fixed step).
 // Not thread safe: use one world from one thread at a time (the step itself
 // runs on the job system; do not call into a world from other threads meanwhile).
+//
+// Queries (raycast, shape_cast, overlap, ...) read the world as the last step left it and
+// return values, never calling back; each result list has a fixed order (documented at
+// the call), so the same world gives the same answers in every run and on every worker count.
+// Contact events are collected by the step and handed over afterwards in a fixed order
+// (events(), drain_events()): nothing of the game runs on Jolt's threads.
 
 #include <kin/core/jobs.hpp>
 #include <kin/core/math3d.hpp>
@@ -25,6 +31,7 @@
 #include <kin/physics3d/shape3d.hpp>
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -70,6 +77,196 @@ inline constexpr u8 Auto = 255;
 
 constexpr Layer3DMask layer_bit(u8 layer) { return layer < 32 ? (Layer3DMask{1} << layer) : 0; }
 inline constexpr Layer3DMask all_layers3d = 0xFFFFFFFFu;
+
+
+// A constraint between two bodies (or a body and the world): an index and a generation,
+// as Body3D is.
+struct Constraint3D {
+    u32 index = UINT32_MAX;
+    u32 generation = 0;
+
+    bool valid() const { return index != UINT32_MAX; }
+    explicit operator bool() const { return valid(); }
+    friend constexpr bool operator==(Constraint3D, Constraint3D) = default;
+};
+
+// What a query tests. A body is considered when its layer is in `mask` and it is not `ignore`.
+struct QueryFilter3D {
+    Layer3DMask mask = all_layers3d;
+    // One body the query never reports (the caster's own, say). An invalid handle: none.
+    Body3D ignore{};
+    // Sensor bodies (trigger volumes) are left out of queries unless this is set: a ray that
+    // is for walls and floors should not stop at a trigger.
+    bool sensors = false;
+};
+
+// Where a ray met a body (Jolt reports the first hit on each body's surface; a ray that
+// starts inside a convex solid hits it at fraction 0, at the start, and a triangle mesh
+// is hit from either side).
+struct RayHit3D {
+    Body3D body{};
+    u64 user_id = 0;
+    Vec3f point{};
+    // The surface's normal there, unit, out of the body (a triangle mesh's is its front
+    // side's, also when the ray came from behind it).
+    Vec3f normal{};
+    f32 fraction = 0.0f; // 0 at `from`, 1 at `to`
+    f32 distance = 0.0f; // fraction times the segment's length
+    // For a compound: the index of the child that was hit, in the order the children were
+    // given; 0 for any other shape.
+    u32 sub_shape = 0;
+};
+
+// A shape swept along a displacement: the first thing it meets.
+struct ShapeHit3D {
+    Body3D body{};
+    u64 user_id = 0;
+    // 0 to 1 along the displacement (time of impact as a share of it).
+    f32 fraction = 0.0f;
+    // Where the shape's origin is at that time.
+    Vec3f position{};
+    // On the surface of the body that was hit, in the world.
+    Vec3f point{};
+    // The hit surface's normal, unit, pointing toward the swept shape.
+    Vec3f normal{};
+    // Above zero when the shape already overlapped the body at the start (fraction 0).
+    f32 penetration = 0.0f;
+    u32 sub_shape = 0;
+};
+
+// A body a shape overlaps.
+struct OverlapHit3D {
+    Body3D body{};
+    u64 user_id = 0;
+    // The deepest contact found with that body: how far (m) the shape would have to move
+    // along `normal` to be clear, and the point on the body where it is deepest.
+    f32 penetration = 0.0f;
+    Vec3f point{};
+    Vec3f normal{};
+};
+
+struct ClosestPoint3D {
+    Body3D body{};
+    u64 user_id = 0;
+    Vec3f point{};   // on the body's surface (or the query point itself when it is inside)
+    f32 distance = 0.0f;
+};
+
+// What a contact event is.
+enum class ContactKind3D : u8 {
+    Begin,   // the pair touches now and did not at the last step
+    Persist, // still touches (only reported when persist events are on)
+    End,     // no longer touches (also when a body of it is destroyed)
+};
+
+// One body pair's contact, as the step saw it. `a` is the body with the lower body number
+// (slot index), so a pair always comes the same way round; `normal` points from a to b.
+struct ContactEvent3D {
+    Body3D a{};
+    Body3D b{};
+    u64 user_a = 0;
+    u64 user_b = 0;
+    ContactKind3D kind = ContactKind3D::Begin;
+    // Either body is a sensor: nothing was pushed, this only says that they overlap.
+    bool sensor = false;
+    // Begin and Persist: the mean of the contact points (world), the normal from a to b, how
+    // fast they were closing along it before the solver ran (m/s, negative when parting),
+    // and how many contact points the manifold had. Zero on End.
+    //
+    // A pair that falls asleep together is still touching: Jolt drops such contacts but no End is
+    // reported for them, and no Begin when they are woken and still touch. End comes when a
+    // woken body leaves the other, or a body is destroyed. (A static sensor does not see sleeping
+    // bodies, so the same rule applies to what sleeps inside one.)
+    Vec3f point{};
+    Vec3f normal{};
+    f32 closing_speed = 0.0f;
+    u32 point_count = 0;
+};
+
+enum class Constraint3DKind : u8 {
+    Fixed,    // the two bodies keep their relative placing
+    Distance, // two points keep a distance within [min, max], optionally springy
+    Point,    // two points are one (a ball joint)
+    Hinge,    // one axis of rotation, optional limits, friction and motor
+    Cone,     // a ball joint with a swing cone and twist limits (a shoulder, a neck)
+    Slider,   // one axis of translation, optional limits, friction and motor
+};
+
+enum class Motor3DMode : u8 { Off, Velocity, Position };
+
+// A constraint to make, in world space as the bodies are NOW: the anchors and axes are
+// converted to each body's own space, so the constraint holds the bodies as they stand.
+struct Constraint3DDesc {
+    Constraint3DKind kind = Constraint3DKind::Fixed;
+    // An invalid `a` is the world (a fixed point); `b` must be a body.
+    Body3D a{};
+    Body3D b{};
+    // The anchor in the world. Distance: the point on a; `point_b` is the point on b.
+    Vec3f point{};
+    Vec3f point_b{};
+    // Hinge: the axis; Cone: the twist axis; Slider: the axis of sliding (world, any length).
+    Vec3f axis{0.0f, 1.0f, 0.0f};
+
+    // Distance: the allowed range. A negative bound is the distance at creation (min = max =
+    // that: a rod). A frequency above 0 makes the limits springs (Hz, damping ratio).
+    f32 min_distance = -1.0f;
+    f32 max_distance = -1.0f;
+    f32 spring_frequency = 0.0f;
+    f32 spring_damping = 0.0f;
+
+    // Hinge: limits in degrees from the pose at creation, min in [-180, 0], max in [0, 180].
+    // Cone: swing is the half angle of the cone about `axis`, twist the range about it.
+    // Slider: min and max are metres along `axis` from the creation pose (min <= 0 <= max).
+    bool limits = false;
+    f32 min_angle = -180.0f;
+    f32 max_angle = 180.0f;
+    f32 swing_angle = 45.0f;
+    f32 min_position = -1e30f;
+    f32 max_position = 1e30f;
+
+    // Hinge, Cone, Slider: friction (N m or N) when no motor drives it.
+    f32 max_friction = 0.0f;
+
+    // Breaks (is disabled, and reported by drain_constraint_events) when the force (or torque)
+    // it applied in a step exceeded this; 0 for never. Force is the constraint impulse of the
+    // last collision step over that step's length: an estimate, good to a few percent.
+    f32 break_force = 0.0f;
+    f32 break_torque = 0.0f;
+
+    // Whether the two bodies it joins still collide with each other. Off by default (a door and its post, the links
+    // of a chain, a limb on its trunk: they would fight the joint), which also saves their contact work.
+    // Needs contact events on in the World3DConfig (the filter runs in the contact callback).
+    bool collide_connected = false;
+
+    u64 user_id = 0;
+};
+
+// What a constraint is now.
+struct Constraint3DInfo {
+    Constraint3DKind kind = Constraint3DKind::Fixed;
+    Body3D a{};
+    Body3D b{};
+    // The anchors, in the world as the bodies are now.
+    Vec3f point_a{};
+    Vec3f point_b{};
+    Vec3f axis{};     // hinge, cone, slider: the axis in the world
+    bool broken = false;
+    bool enabled = true;
+    u64 user_id = 0;
+    // Hinge: the angle (degrees) from the pose at creation. Slider: metres. Distance: the
+    // current distance.
+    f32 value = 0.0f;
+};
+
+// A constraint that broke in a step.
+struct ConstraintEvent3D {
+    Constraint3D constraint{};
+    Body3D a{};
+    Body3D b{};
+    u64 user_id = 0;
+    f32 force = 0.0f;
+    f32 torque = 0.0f;
+};
 
 struct Body3DDesc {
     Shape3D shape;
@@ -120,6 +317,13 @@ struct World3DConfig {
     JobSystem* jobs = nullptr;
     // Runs the whole step on the calling thread (no jobs; for tests and tools).
     bool single_threaded = false;
+    // Contact events (begin and end of each body pair's touching, sensor overlaps). Off costs
+    // nothing. Persist events (one a step for every touching pair) are for tools and tests:
+    // they cost a record a pair a step.
+    bool contact_events = true;
+    bool persist_events = false;
+    // The events kept between drains (past it the oldest are dropped and counted).
+    u32 max_events = 1u << 16;
 };
 
 class World3D {
@@ -189,6 +393,75 @@ public:
     f32 mass(Body3D body) const; // 0 for a static or kinematic body
     Shape3D shape(Body3D body) const;
 
+    // --- helpers for bodies that something else drives ---
+    // A body to a place at once with no velocity and awake: a respawn, a spawn point. (set_position and
+    // set_rotation do the same but keep the velocity.)
+    void teleport(Body3D body, Vec3f position, Quatf rotation);
+    // Makes a body reach `position` and `rotation` by the end of the next step of `dt`, by what suits its
+    // motion: a kinematic body as move_kinematic does, a dynamic one by setting the velocities that get there
+    // (it still collides on the way and is stopped by what it meets), a static one by a teleport.
+    void follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 dt);
+    // A body's layer (the rules of create_body: only static bodies may be in layer 0). Contacts it has keep
+    // going until the pair is tested again.
+    bool set_layer(Body3D body, u8 layer);
+    bool is_sensor(Body3D body) const;
+    // A sensor is not pushed by or pushing anything but reports overlaps. Bodies already inside get a Begin
+    // event at the next step when they start to count as overlapping.
+    void set_sensor(Body3D body, bool sensor);
+    // Swaps a body's shape (a crouch, a different scale: build a shape of the new size). A dynamic body keeps
+    // its mass and gets the new shape's inertia; a mesh or height field is refused for a dynamic body. The
+    // body is woken. Returns false when refused.
+    bool set_shape(Body3D body, const Shape3D& shape);
+    // The live bodies, by body number.
+    std::vector<Body3D> bodies() const;
+
+    // --- queries ---
+    // The first body along the segment from `from` to `to`.
+    std::optional<RayHit3D> raycast(Vec3f from, Vec3f to, const QueryFilter3D& filter = {}) const;
+    // Every body the segment crosses (a convex body once, a mesh once for the nearest of its triangles on each
+    // sub shape), nearest first, ties by body number then sub shape.
+    std::vector<RayHit3D> raycast_all(Vec3f from, Vec3f to, const QueryFilter3D& filter = {}) const;
+    // `shape` placed at `position` and `rotation` (its origin, as a body's) swept by `displacement`: the first
+    // thing it meets, with the time of impact. Not for meshes or height fields. A shape that starts overlapping
+    // reports fraction 0 and a penetration. Ties go to the lower body number.
+    std::optional<ShapeHit3D> shape_cast(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
+                                         const QueryFilter3D& filter = {}) const;
+    // The bodies `shape` at `position` and `rotation` overlaps, sorted by body number (one entry for each).
+    std::vector<OverlapHit3D> overlap(const Shape3D& shape, Vec3f position, Quatf rotation,
+                                      const QueryFilter3D& filter = {}) const;
+    // The bodies whose solid contains `point`, by body number (a mesh or height field has no inside).
+    std::vector<Body3D> point_inside(Vec3f point, const QueryFilter3D& filter = {}) const;
+    // The nearest surface within `max_distance` of `point`; a point inside a solid is at distance 0 on it.
+    std::optional<ClosestPoint3D> closest_point(Vec3f point, f32 max_distance, const QueryFilter3D& filter = {}) const;
+
+    // --- events ---
+    // The contact events of the steps since the last drain: each step's batch sorted by (a, b, kind) with
+    // generations after, batches in step order. They name bodies by handle and by user id (the ECS puts the
+    // entity's id there).
+    std::span<const ContactEvent3D> events() const;
+    // Takes them (and clears).
+    std::vector<ContactEvent3D> drain_events();
+    // Events dropped because `max_events` was reached since the world was made.
+    u64 dropped_events() const;
+    // Constraints that broke, by step then constraint number.
+    std::vector<ConstraintEvent3D> drain_constraint_events();
+
+    // --- constraints ---
+    // An invalid handle for an invalid body, the same body twice, or a non-finite number. Constraints are
+    // destroyed with either of their bodies.
+    Constraint3D create_constraint(const Constraint3DDesc& desc);
+    void destroy_constraint(Constraint3D constraint);
+    bool contains(Constraint3D constraint) const;
+    i32 constraint_count() const;
+    Constraint3DInfo constraint_info(Constraint3D constraint) const;
+    // Hinge (target in degrees or degrees a second; max_force a torque in N m) and slider (metres, m/s, N).
+    // `max_force` must be above 0 for a mode but Off.
+    void set_constraint_motor(Constraint3D constraint, Motor3DMode mode, f32 target, f32 max_force);
+    // A disabled constraint does nothing (a broken one is disabled; enabling it mends it).
+    void set_constraint_enabled(Constraint3D constraint, bool enabled);
+    // The constraints' live handles, by number.
+    std::vector<Constraint3D> constraints() const;
+
     // Sleeping. activate() wakes a body (its island with it, at the next step);
     // deactivate() puts it to sleep at once.
     bool is_active(Body3D body) const;
@@ -217,8 +490,9 @@ public:
     // The world's dynamic state (bodies' transforms and velocities, sleeping,
     // contact caches) as bytes, for a rollback. restore_state() takes bytes
     // from this world with the same set of bodies (none created or destroyed
-    // since, shapes, layers and gravity as they were) and returns false, doing
-    // nothing, otherwise. A restored world steps to the same bits as the saved
+    // since, shapes, layers and gravity as they were; constraints likewise,
+    // with their motors and whether they broke) and returns false, doing
+    // nothing, otherwise. Pending events are dropped by a restore. A restored world steps to the same bits as the saved
     // one did.
     std::vector<u8> save_state() const;
     bool restore_state(std::span<const u8> state);

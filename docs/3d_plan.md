@@ -3265,6 +3265,196 @@ def` and `render all` (--cascades 4 --ao --contact-shadows --taa) of crowd, spon
 the `PhysicsSystem`, so a `ContactListener` and `BroadPhaseQuery` / `NarrowPhaseQuery` calls are additions inside `world3d.cpp`; the
 ground query of P1b is `raycast(from, to, mask)`.
 
+#### P2b — queries, events, constraints, debug draw, ECS — results
+
+Done 2026-10-11 on `exp/3d-rendering` (head b337278 plus the working tree). The character controller, grab and climb, ragdoll and
+ropes are the next steps (P2c onward); the constraints they need are here.
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| Queries | `World3D::raycast`, `raycast_all`, `shape_cast`, `overlap`, `point_inside`, `closest_point` | `QueryFilter3D {mask, ignore, sensors}`; values, no callbacks; results sorted (`overlap` and `point_inside` by body number, `raycast_all` by distance then body then sub shape) |
+| Contact events | `World3D::events()`, `drain_events()`, `ContactEvent3D` | Begin / Persist (config, off) / End per body pair; collected under a lock in Jolt's callbacks and turned into events after the step in (a, b, kind) order |
+| Constraints | `create_constraint(Constraint3DDesc)`, `constraint_info`, `set_constraint_motor`, `drain_constraint_events` | fixed, distance (range, spring), point, hinge (limits, friction, motor), cone (Jolt's swing-twist), slider (limits, friction, motor); breakable by force or torque; in hash and save state |
+| Kinematic and body helpers | `teleport`, `follow_transform`, `set_layer`, `set_sensor`, `set_shape`, `bodies` | `user_id` was the per-body user data already |
+| Debug draw | `kin/physics3d/debug_draw3d.hpp` (`DebugDraw3D`), `draw_debug_lines` | plain line lists; drawn into a view as one unlit wireframe mesh |
+| ECS | `kin/ecs/physics3d.hpp`: `Collider3D`, `RigidBody3D`, `PhysicsBody3D`, `PhysicsContacts3D`, `WorldPhysicsState3D`, `ground_query_from_world`, `collider_from_mesh*` | |
+| Harness | `kin_reference` scene `physics_pile`; Sponza Walk "Physics" section, `--preset physics`, key B | |
+| Tests, bench | `kin-physics3d` (now 34 test functions, 2.4 s), `kin-physics3d-ecs` (13, CPU only, 0.2 s), `test_gpu_physics_debug_lines` in `kin-render3d`; `kin_physics3d_bench queries` | |
+
+**Decisions where the plan was open.**
+1. *Debug draw is CPU lines from kin's own view of the shapes*, not Jolt's debug renderer (kept compiled out: it would be a second
+   renderer to feed and a build-time and size cost for something that is a list of segments). Into a 3D view it is a mesh of
+   sliver triangles drawn with the existing `wireframe` + `unlit` material: no renderer, shader or scene change, so
+   the engine has nothing new to keep byte-identical; the cost is one `create_mesh` a frame while it is on. Two device findings
+   shaped it: the (a, b, b) "line" of the wireframe material's comment is dropped by lavapipe (a triangle of no area is culled before
+   its edges are drawn; the old test passed through an `||`), and the material's depth bias does not lift coplanar edges above their
+   face there. So each line is a thin triangle (a, b, c) and its ends are moved a hair toward the eye along their view rays; the two
+   devices then draw the same pixels (106 awake and 426 static ones in the test). Opt-in through
+   `WorldPhysicsState3DConfig::debug_draw` (default off: nothing is made or drawn). A CPU projection through the 2D renderer was the
+   alternative; this is cheaper to write and depth-tests against the scene.
+2. *Sensors are left out of queries unless `QueryFilter3D::sensors`*; they report overlaps as `sensor` events. A trigger volume should
+   not stop a ray meant for floors.
+3. *Rays start-inside*: a ray that starts inside a convex solid hits it at fraction 0 (Jolt's `mTreatConvexAsSolid`); a triangle mesh
+   is hit from both sides (the shape was already documented as double sided) with its front normal.
+4. *Events are per body pair, not per sub shape*: a compound or a mesh touching counts once (a per-pair count of sub contacts; Begin when
+   it goes from 0, End when it returns to 0). The data (point, normal, closing speed) is the lowest sub shape pair's of that step.
+5. *Sleeping is not ending.* Jolt reports a contact as removed when its bodies fall asleep (found by the first test: a box that landed
+   once made an End at the step it slept). The world keeps such pairs as dormant (still touching, in the saved state) and reports
+   neither End nor a second Begin when they wake and still touch; a woken body that is not seen touching for two steps ends it. A
+   destroyed body ends its pairs at the next step.
+6. *Closing speed, not impulse.* The solver has not run when a contact is added; the event carries the closing speed along the normal
+   from the bodies' velocities (a sound's volume is made from it), which is exact for a first impact.
+7. *No callbacks into game code from Jolt's threads*: the listener records into a vector under a mutex; everything else happens after
+   `Update` on the calling thread. The mutex was not a cost (see numbers).
+8. *Connected bodies do not collide by default* (`collide_connected`), by rejecting the pair in `OnContactValidate` from a pair table
+   read-only during the step; that needs the listener installed (it always is; `contact_events` only turns recording off).
+9. *Broken constraints are disabled, not removed*, so a restore can mend them (Jolt saves the enabled flag); the world's state hash and
+   save state carry which broke. The force is the last collision step's total impulse over its length.
+10. *Cone is Jolt's swing-twist constraint* (a swing half angle and twist limits), which is what a shoulder or neck wants; the plain cone
+    (swing only) is a special case with twist unlimited.
+11. *ECS rules.* A body exists when an entity has `Transform3D` and `Collider3D` (static without `RigidBody3D`); made in ascending
+    entity id order, with the entity's world scale applied to the collider's sizes; bodies are world level (a parent does not carry a
+    dynamic child; its Transform3D is rewritten as the place from the parent as it is now); a kinematic body follows the entity with
+    parents; a dynamic entity moved by game code is taken there. flecs reuses entity ids, so "ascending id" means numeric order of the
+    ids as flecs gives them (still a function of the order the world was built in, which is what matters).
+12. *Colliders from meshes.* The GPU `Mesh` keeps no CPU triangles (checked: `Mesh` holds a backend, counts and bounds; `Model` keeps
+    parts of `Mesh`), so `collider_from_mesh(entity)` is a box about the bounds; hulls and triangle meshes are made from the
+    `MeshData` the game still holds (`collider_hull_from_mesh_data`, `collider_triangles_from_mesh_data`) or a prebuilt `Shape3D`.
+    Not done: retaining triangles in `Mesh` (a memory cost on every mesh for a feature few use).
+13. *Interpolation is an opt-in call* (`interpolate(alpha)`), not a mode: `step()` always leaves Transform3D at the last state.
+14. *Scale is not a shape operation*: shapes are built at their size (the ECS builds them at the entity's world scale);
+    `set_shape` swaps a body's shape. No scaled or mutable shape is exposed.
+
+**Numbers** (this machine, one thread, a loaded desktop: indicative; `kin_physics3d_bench queries`).
+
+| What | Cost |
+|---|---|
+| 1000 raycasts into a pile of 2000 bodies (1993 awake), straight down | 1.1 ms (1.1 us each) |
+| 1000 `raycast_all` through the same pile (3.6 hits each) | 1.9 ms (1.9 us each) |
+| 100 shape casts (sphere and box, 15 m) into it | 0.42 ms (4.2 us each) |
+| 100 overlaps (sphere, 2.9 bodies each) | 0.82 ms (8.2 us each) |
+| 1000 raycasts into one mesh of 100,352 triangles | 0.97 ms (1.0 us each) |
+| 100 sphere casts (20 m) against that mesh | 0.69 ms (6.9 us each) |
+| step of a 500 body pile, steps 0-120, events off / begin-end / persist too | 4.152 / 4.181 / 4.414 ms |
+| steps 120-360, the same | 1.655 / 1.670 / 1.817 ms |
+| events made over 360 steps (begin and end / with persist) | 6,542 / 236,283 |
+| ECS: `World3D::step` against `WorldPhysicsState3D::step`, 500 dynamic bodies, steps 0-120 / 120-360 | 4.186 / 1.673 ms against 4.370 / 1.976 ms: overhead 0.18 / 0.30 ms |
+
+So events cost under 1 % (begin and end) and 6 % (persist, a record per touching pair per step); the entity system costs about 0.2 to 0.3
+ms a step for 500 bodies (a world matrix up the parents and a transform write for each awake dynamic body, and a compare for the rest),
+which is under 2 % of a 60 Hz frame. Queries are an order of magnitude below what a character controller needs (a dozen a frame).
+Build: Jolt's debug draw was not enabled; the new sources compile in a few seconds each.
+
+**Tests.**
+- `kin-physics3d` (CPU, 2.4 s): rays at known distances and normals against box, sphere (centre and off centre: y = 0.9 and the
+  (0.6, 0.8, 0) normal), capsule, cylinder, hull, mesh (from above and below), height field and compound (the child index); a ray from
+  inside; layer mask, ignore body, sensors; `raycast_all` sorted nearest first and reversed; shape cast against analytic times (sphere
+  on a floor 0.45, box on a wall 0.7, a turned box at its corner, none when short, fraction 0 with penetration when overlapping);
+  overlap sorted by body number with mask, ignore and sensors; `point_inside`, `closest_point`; events: exactly one Begin and no End for a
+  box that lands and sleeps (400 steps), alternate Begin / End and one more Begin than End for a bouncing ball with closing speeds
+  decreasing, sensor enter and exit once each in order, user ids and normals, persist events and draining, off by config, sleeping
+  and waking (no new Begin, End once when thrown, Begin on landing), destroying a body ends its pair at the next step and the batch is
+  sorted; event hashes identical across two runs and 0, 1 and 4 workers for a 200 body pile (all fields of every event), for
+  compound bodies on a mesh floor (many sub shapes a pair; 3 runs on 4 workers), with persist events; constraints: hinge limits
+  (+45 / -30 held within 1.5 degrees, the hinge point does not drift), hinge velocity motor (90 degrees a second) and position motor,
+  distance rod (2 m within 0.03 over a swing), range (falls to the max), spring (gives under load), point, slider limits both ways
+  under force, cone swing limit (25 degrees), a weld carrying a body (relative placing kept), breakable (400 N breaks, 2000 N holds,
+  one event with the right handle and user id; mending); connected bodies do not collide / do with `collide_connected`; constraints in
+  the hash, in save and restore (a break after the save is undone by the restore, the trajectory repeats, another world takes the
+  state, one with a constraint more refuses it), 4 workers equal; teleport, follow_transform (kinematic and dynamic), set_layer
+  (falls through a layer that does not collide, only static in layer 0), set_sensor, set_shape (rest height changes, mass kept, mesh
+  refused for dynamic).
+- `kin-physics3d-ecs` (CPU): bodies in entity order, destroyed with entities (and with `Collider3D`), slots reused in id order;
+  scale, offset and compound colliders by raycast (sub shape index); dynamic write back (position, rotation, scale left alone,
+  initial velocity, gravity factor); parented bodies (made at the parent's world pose, rewritten from the parent as it is, left behind
+  when the parent moves, rest at 0.5); kinematic follows Transform3D (carries a crate by friction; a kinematic child follows its
+  parent); game code moving a dynamic or static entity; motion change and `rebuild`; events routed with entity ids and as the
+  singleton, a destroyed entity names nobody, `advance()` step counts and the cap; a 60 body scene hashed per step equal run to run and
+  on 4 workers; interpolation (alpha 0, 0.5, 1; an interpolated pose is not read as a move); debug lines (counts per colour:
+  12 / 12 / 48 ...; sleeping boxes in their colour; a sphere's lines all 0.5 from its centre; a ray and its hit; contacts and
+  normals; constraints and a broken one in its colour; the line cap; mesh and height field triangle caps); foot placement over a
+  physics floor and a step (below); colliders from mesh bounds and from `MeshData` (hull and triangles), a dynamic mesh refused.
+- `test_gpu_physics_debug_lines` (`kin-render3d`, GPU): with the switch off the picture is the one without the physics state, byte
+  for byte; on, 106 px of the awake colour and 426 of the static one, 0 without; after the box sleeps, 96 px of the sleeping
+  colour and none of the awake one; a pixel of its colour at the projection of the box's top front edge; the ray and its hit show.
+  Run on NVIDIA and lavapipe.
+
+**IK on a physics floor** (`test_foot_placement_over_physics`, in `kin-physics3d-ecs`): a biped (the P1b fixture) over a floor
+whose top is at y = -0.2 and a step (top y = 0) under its left foot, the ground query `ground_query_from_world`. The ankles settle at
+y = 0.05 (left, on the step) and y = -0.15 (right, on the floor) to 2 mm, each 0.05 above the surface the raycast reports; the pelvis
+at y = 0.8, the lower foot's drop; the query was called at least twice a leg a frame; the character's own kinematic capsule is
+ignored through `ignore` (without it the hit is the capsule's top at y > 1).
+
+**Pictures.** `physics_pile` (`tests/reference/scenes/physics_pile.json`; 60 boxes and spheres in a walled yard, frame 0 150 steps
+in, `above` and `side`): two runs byte for byte equal. Looked at: the pile of boxes and red spheres in a stone yard, every body
+outlined in green (awake: at 2.5 s the pile has not all settled), contact crosses in red and their normals in orange, the yard's
+static boxes in grey; the sphere circles show dotted where the facets of the lit mesh lie outside them (the outline is exact, the
+mesh is 24 segments). Sponza Walk `--preset physics`: 30 boxes thrown along the nave land on the floor, outlined green while awake
+and blue once asleep.
+
+**Mutation checks** (each: break the source, build, run `kin-physics3d` and `kin-physics3d-ecs`, restore; the four sources compared
+with copies afterwards, identical):
+
+| Mutation | Result |
+|---|---|
+| ray normal negated | caught (11 checks) |
+| layer mask ignored by queries | caught (7) |
+| ignore body ignored | caught (5) |
+| sensors not excluded from queries | caught (8) |
+| shape cast reports the start (fraction 0, position the start) | caught (4) |
+| event batch not sorted | caught only after `test_events_destroy_order` was added (2): the first version of the tests survived it because the raw records' sort already orders everything but the events a destroy queues |
+| neither the raw records nor the batch sorted | caught (5,610 checks: events differ run to run on 4 workers) |
+| only the raw records not sorted | **survived**: an equivalent mutant: Jolt serialises the callbacks of one pair and the batch sort carries the order, so the first sort is a guard (it keeps the data of a pair's lowest sub shape if the callbacks ever interleave) |
+| End events dropped | caught (14) |
+| sleeping pair reported as ended | caught (10) |
+| hinge limits ignored | caught (3) |
+| distance range ignored (rod becomes slack) | caught (4) |
+| break force never exceeded | caught (5) |
+| restore forgets broken flags | caught (3) |
+| connected bodies still collide | caught (5) |
+| teleport keeps the velocity | caught (1) |
+| debug draw ignores sleeping | caught (2) |
+| ECS write back skipped | caught (10) |
+| ECS bodies made in reverse entity order | caught (8) |
+| kinematic bodies not moved from the entity | caught (3) |
+| ECS write back ignores the parent | caught (2) |
+| ground query ignores `ignore` | caught (1) |
+
+**Checks run.** `ninja -C build -j8` and `ninja -C build-no3d -j8`: no warnings from the new code (the build's existing ones are Lua's
+`tmpnam` and `skeleton_tests` / `kin_reference` explicit-constructor notes). `build`: `KIN_REQUIRE_GPU_TESTS=1 ctest -j4 --timeout 600`:
+71 of 71 (70 before and `kin-physics3d-ecs`), `kin-render3d` on the NVIDIA device included. `build-no3d`: 65 of 65, no Jolt or
+physics3d in its `build.ninja`. `kin_render3d_tests` on lavapipe (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`): exit 0,
+and the new debug-line test gives the same pixel counts as on NVIDIA. Identity: `render def` and `render all` (--cascades 4 --ao
+--contact-shadows --taa), 120 frames, of crowd, shadows, sponza, helmet, motion, spheres, cornell and the eight skinned scenes
+(skinned_ik, skinned_ik_look and skinned_ik_limits among them, rendered by the committed HEAD binary before the first edit): 37
+pictures each, all byte for byte equal to the HEAD binary's, and the 17 of the seven static scenes also to
+`reference_out/p1a_base_def` and `p1a_base_all`. `physics_pile` twice: equal byte for byte.
+
+**Limits and not done.**
+- No character controller (next: P2c, on `shape_cast`, `overlap`, `follow_transform` and the constraints), grab or climb, ragdoll or
+  ropes (they use the constraints and `collide_connected` here); no soft bodies, no per-contact material callbacks, no
+  contact-modification hooks, no collision groups beyond the layer table.
+- Contact events carry closing speed, not the solver's impulse (the solver has not run when a contact is added).
+- A static sensor does not see sleeping bodies (Jolt); a pair that both sleep is held as dormant by the world, not Jolt.
+  A woken body that leaves while its other half sleeps is ended two steps after it was last seen (a grace for contacts
+  that are re-found a step late).
+- `shape_cast` is for convex shapes and compounds (Jolt's rule: not meshes or height fields as the swept shape); ties between
+  equal times go to whichever Jolt found first (deterministic, not by body number).
+- Constraint force estimates for breaking are the last collision step's impulse over its length: with `collision_steps` > 1 and many
+  solver iterations they are approximate. Hinge, slider and cone limits are measured from the pose at creation.
+- The debug mesh is made again each frame (one `create_mesh`; no cost when off). A curved shape's outline is exact and the lit mesh
+  of it a polygon, so a sphere's circles show dotted where its facets lie outside them. The lines are moved 0.2 % of their distance
+  toward the eye: in a view with a very near plane or an orthographic one the shift is fixed (4 mm). A body with a mesh of 100,000 triangles is drawn with at most `max_triangles_per_shape` (600).
+- ECS: no collider cache (identical shapes are made per entity unless a ready `Shape3D` is given); no scale tracking after
+  creation (use `rebuild`); a kinematic child of a moving parent is placed by its world pose with `follow_transform`, so its
+  velocity is the parent's included, once a step.
+- Sponza Walk's floor is a plane at y = 0, not Sponza's own collision (the viewer has no triangles of the model).
+- Cross-platform determinism of events and constraints is Jolt's claim; only this machine was run (as P2a).
+- Not run: the "all-on" identity render on the Windows or MSVC build; the panel's click path of the new section (no display).
+
+
 ### P3 — A whole scene: sky, fog, spot lights, weather
 
 A sky as the background (a procedural gradient and sun disc first, a cubemap later), height
