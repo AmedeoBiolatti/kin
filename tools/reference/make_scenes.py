@@ -20,6 +20,8 @@ skinned_bend.glb  a tube bound to a chain of three joints, with the clips
 skinned_biped.glb  a person of 1.95 m on 18 joints (pelvis, spine, chest, neck, head, a leg and an arm
              each side; the arms out), facing +Z, with the clip "idle" (a sway): what the IK scenes (P1b) pose.
              ik_marker.glb is a small red sphere (a target), ik_step.glb a 0.8 x 0.2 x 0.8 box (a step), ik_ramp.glb a 25 degree wedge.
+skinned_biped_walk.glb  the same person (with the toes) and the clips "idle", "walk" (a 1.0 s cycle), "run" (0.6 s) and "fall" (a held
+             pose, legs apart, arms out): what the character controller's scene (P2c) blends by ground speed.
 
 Deterministic: the same files every time.
 """
@@ -218,7 +220,7 @@ def skinned_bend(path, rings=49, segments=16):
         f.write(struct.pack("<II", len(data), 0x004E4942) + data)
 
 
-def skinned_biped(path, extras=False):
+def skinned_biped(path, extras=False, walk=False):
     """A person on the 18 joints of tests/skin_fixtures.hpp's biped (names and rest placing the same), made of tubes and spheres whose
     weights ramp to the next joint over the last 40% of each bone. Written by hand, as skinned_bend is.
     With `extras` (skinned_biped_tail.glb: the same person, then) two toes (toe_L, toe_R, joints 18 and 19) and a tail of five joints
@@ -374,6 +376,48 @@ def skinned_biped(path, extras=False):
     track(index["chest"], times, [quat((1, 0, 0), d) for d in (0, 2, 0, -2, 0)])
     track(index["head"], times, [quat((0, 1, 0), d) for d in (0, -4, 0, 4, 0)])
     idle = {"name": "idle", "samplers": samplers, "channels": channels}
+    animations = [idle]
+    if walk:
+        # Locomotion: legs swing about their own X (a negative angle swings the foot forward, +Z), the knee folds the shank
+        # back as the leg comes through, the arms swing opposite the legs and the spine bobs a little. Keys eight to a cycle.
+        def gait(name, period, hip_deg, knee_deg, arm_deg, lean_deg):
+            keys = 8
+            times = [period * k / keys for k in range(keys + 1)]
+            local_samplers, local_channels = [], []
+
+            def add_track(node, values_deg, axis):
+                t = accessor(add(struct.pack("<%df" % len(times), *times)), 5126, len(times), "SCALAR", min=[min(times)], max=[max(times)])
+                v = accessor(add(struct.pack("<%df" % (4 * len(times)), *flat([quat(axis, d) for d in values_deg]))), 5126, len(times), "VEC4")
+                local_samplers.append({"input": t, "output": v, "interpolation": "LINEAR"})
+                local_channels.append({"sampler": len(local_samplers) - 1, "target": {"node": node, "path": "rotation"}})
+            phase = [2.0 * math.pi * k / keys for k in range(keys + 1)]
+            for side, sign in (("L", 1.0), ("R", -1.0)):
+                add_track(index["hip_" + side], [-sign * hip_deg * math.sin(p) for p in phase], (1, 0, 0))
+                # the knee folds while the leg swings forward through the middle of the cycle
+                add_track(index["knee_" + side], [knee_deg * max(0.0, math.cos(p + (0.0 if sign > 0 else math.pi))) for p in phase], (1, 0, 0))
+                add_track(index["shoulder_" + side], [sign * arm_deg * math.sin(p) for p in phase], (0, 1, 0))
+            add_track(index["spine"], [lean_deg + 1.5 * math.sin(2.0 * p) for p in phase], (1, 0, 0))
+            return {"name": name, "samplers": local_samplers, "channels": local_channels}
+        animations.append(gait("walk", 1.0, 26.0, 38.0, 18.0, 2.0))
+        animations.append(gait("run", 0.6, 42.0, 70.0, 38.0, 9.0))
+        # fall: one held pose (two keys): legs a little apart, knees bent, arms swung up and out.
+        def held(name):
+            local_samplers, local_channels = [], []
+            times = [0.0, 1.0]
+
+            def add_track(node, deg, axis):
+                t = accessor(add(struct.pack("<%df" % len(times), *times)), 5126, len(times), "SCALAR", min=[0.0], max=[1.0])
+                v = accessor(add(struct.pack("<%df" % (4 * len(times)), *flat([quat(axis, deg)] * 2))), 5126, len(times), "VEC4")
+                local_samplers.append({"input": t, "output": v, "interpolation": "LINEAR"})
+                local_channels.append({"sampler": len(local_samplers) - 1, "target": {"node": node, "path": "rotation"}})
+            add_track(index["hip_L"], -20.0, (1, 0, 0))
+            add_track(index["hip_R"], 12.0, (1, 0, 0))
+            add_track(index["knee_L"], 30.0, (1, 0, 0))
+            add_track(index["knee_R"], 55.0, (1, 0, 0))
+            add_track(index["shoulder_L"], -35.0, (0, 0, 1))
+            add_track(index["shoulder_R"], 35.0, (0, 0, 1))
+            return {"name": name, "samplers": local_samplers, "channels": local_channels}
+        animations.append(held("fall"))
     nodes = []
     for i, (name, parent, t) in enumerate(joint_defs):
         node = {"name": name, "translation": list(t)}
@@ -390,7 +434,7 @@ def skinned_biped(path, extras=False):
                                                                     "WEIGHTS_0": a_weight}, "indices": a_index, "material": 0}]}],
         "materials": [{"name": "clay", "pbrMetallicRoughness": {"baseColorFactor": [0.78, 0.5, 0.36, 1], "metallicFactor": 0.0, "roughnessFactor": 0.65}}],
         "skins": [{"joints": list(range(len(joint_defs))), "inverseBindMatrices": a_ibm, "skeleton": 0}],
-        "animations": [idle],
+        "animations": animations,
         "buffers": [{"byteLength": len(blob)}], "bufferViews": views, "accessors": accessors,
     }
     text = json.dumps(gltf, separators=(",", ":")).encode()
@@ -466,6 +510,7 @@ def main():
     floor20(os.path.join(out, "floor20.glb"))
     skinned_biped(os.path.join(out, "skinned_biped.glb"))
     skinned_biped(os.path.join(out, "skinned_biped_tail.glb"), extras=True)
+    skinned_biped(os.path.join(out, "skinned_biped_walk.glb"), walk=True)
     ik_props(os.path.join(out, "ik_marker.glb"), os.path.join(out, "ik_step.glb"))
     ik_ramp(os.path.join(out, "ik_ramp.glb"))
 

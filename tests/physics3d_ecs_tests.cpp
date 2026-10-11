@@ -5,6 +5,7 @@
 
 #include "skin_fixtures.hpp"
 
+#include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/render3d/mesh.hpp>
@@ -649,6 +650,332 @@ void test_colliders_from_meshes() {
     CHECK(other.body_count() == 2 && bodies2.body_count() == 2);
 }
 
+
+// --- characters ---------------------------------------------------------------------------------------------------------
+
+flecs::entity add_character(flecs::world& world, Vec3f at, CharacterDesc3D desc = {}) {
+    CharacterController3D c;
+    c.desc = desc;
+    return world.entity().set(Transform3D{.position = at}).set(c);
+}
+
+void press(flecs::entity e, Vec2f move, Vec3f forward = {1, 0, 0}, bool jump = false) {
+    CharacterController3D* c = e.get_mut<CharacterController3D>();
+    c->input.move = move;
+    c->input.forward = forward;
+    c->input.jump = jump;
+}
+
+void test_character_entity() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    const flecs::entity floor = add_floor(world);
+    const flecs::entity crate = add_crate(world, {5, 0.5f, 3});
+    // A collider on the same entity makes no second body: the controller is its capsule.
+    const flecs::entity hero = add_character(world, {0, 0.5f, 0});
+    hero.set(box_collider({0.5f, 0.9f, 0.5f}));
+    bodies.sync_bodies();
+    // Bodies first (entity order), then the character's capsule after them.
+    CHECK(bodies.body_count() == 2);
+    CHECK(physics.body_count() == 3 && physics.character_count() == 1 && bodies.character_count() == 1);
+    const Character3D handle = bodies.character_of(hero);
+    CHECK(handle.valid() && hero.get<PhysicsCharacter3D>() != nullptr && hero.get<PhysicsCharacter3D>()->character == handle);
+    CHECK(physics.character(handle).body.index == 2);
+    CHECK(physics.user_id(physics.character(handle).body) == hero.id());
+
+    // It settles on the floor, written back into the entity.
+    for (int i = 0; i < 60; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
+    CHECK(hero.get<CharacterController3D>()->state.ground == CharacterGround3D::OnGround);
+    CHECK(hero.get<CharacterController3D>()->state.ground_user_id == floor.id());
+    // Walk: position follows, the facing the game sets goes to the rotation (physics does not turn it).
+    press(hero, {0, 1});
+    hero.get_mut<CharacterController3D>()->facing = Quatf::axis_angle({0, 1, 0}, 90.0f);
+    for (int i = 0; i < 60; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(hero.get<Transform3D>()->position.x > 3.0f);
+    CHECK(near(hero.get<CharacterController3D>()->state.ground_speed, 4.0f, 0.05f));
+    CHECK(hero.get<Transform3D>()->rotation == Quatf::axis_angle({0, 1, 0}, 90.0f));
+    // With apply_facing off the rotation is the game's own.
+    hero.get_mut<CharacterController3D>()->apply_facing = false;
+    hero.get_mut<Transform3D>()->rotation = Quatf::axis_angle({0, 1, 0}, 30.0f);
+    bodies.step(dt);
+    CHECK(hero.get<Transform3D>()->rotation == Quatf::axis_angle({0, 1, 0}, 30.0f));
+
+    // Game code moving the entity is a teleport (velocity cleared).
+    hero.get_mut<Transform3D>()->position = {-10, 3, 0};
+    press(hero, {0, 0});
+    bodies.step(dt);
+    CHECK(near(hero.get<Transform3D>()->position.x, -10.0f, 0.1f));
+    for (int i = 0; i < 90; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(near(hero.get<Transform3D>()->position.x, -10.0f, 0.1f) && near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
+
+    // Events with entity ids: a jump and a landing; the singleton carries them too.
+    std::vector<CharacterEvent3D> seen;
+    press(hero, {0, 0}, {1, 0, 0}, true);
+    for (int i = 0; i < 90; ++i) {
+        bodies.step(dt);
+        if (i == 0) {
+            press(hero, {0, 0}, {1, 0, 0}, false);
+        }
+        for (const CharacterEvent3D& e : bodies.character_events()) {
+            seen.push_back(e);
+        }
+        if (!bodies.character_events().empty()) {
+            const CharacterEvents3D* singleton = world.get<CharacterEvents3D>();
+            CHECK(singleton != nullptr && singleton->events.size() == bodies.character_events().size());
+        }
+    }
+    bool left = false, landed = false;
+    for (const CharacterEvent3D& e : seen) {
+        CHECK(e.user_id == hero.id());
+        left = left || (e.kind == CharacterEventKind3D::LeftGround && e.jumped);
+        landed = landed || (e.kind == CharacterEventKind3D::Landed && e.body_user_id == floor.id());
+    }
+    CHECK(left && landed);
+    // The entity going takes the character and its body.
+    const i32 before = physics.body_count();
+    hero.destruct();
+    bodies.sync_bodies();
+    CHECK(physics.character_count() == 0 && bodies.character_count() == 0 && physics.body_count() == before - 1);
+    (void)crate;
+}
+
+void test_character_carried_by_kinematic_platform() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    const flecs::entity platform = world.entity()
+                                       .set(Transform3D{.position = {0, 0.25f, 0}})
+                                       .set(box_collider({2.0f, 0.25f, 2.0f}))
+                                       .set(RigidBody3D{.motion = Body3DMotion::Kinematic, .friction = 0.9f});
+    const flecs::entity hero = add_character(world, {0, 0.5f, 0});
+    for (int i = 0; i < 30; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(hero.get<CharacterController3D>()->state.ground_user_id == platform.id());
+    // The game moves the platform's entity 2 m/s along X; the character on it goes along without any input.
+    for (int i = 0; i < 180; ++i) {
+        platform.get_mut<Transform3D>()->position.x += 2.0f * dt;
+        bodies.step(dt);
+    }
+    CHECK(near(platform.get<Transform3D>()->position.x, 6.0f, 1e-3f));
+    CHECK(near(hero.get<Transform3D>()->position.x, 6.0f, 0.06f));
+    CHECK(near(hero.get<Transform3D>()->position.y, 0.5f, 0.03f));
+    CHECK(near(hero.get<CharacterController3D>()->state.ground_velocity.x, 2.0f, 0.1f));
+}
+
+void test_character_parented_and_interpolated() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    // Under a parent at x = 10: the character is made at the parent's world place of its local position, and its
+    // Transform3D is rewritten as its place seen from the parent.
+    const flecs::entity parent = world.entity().set(Transform3D{.position = {10, 0, 0}});
+    const flecs::entity hero = add_character(world, {2, 0.5f, 0});
+    hero.child_of(parent);
+    bodies.sync_bodies();
+    const Character3D handle = bodies.character_of(hero);
+    CHECK(near(physics.character(handle).position.x, 12.0f, 1e-3f));
+    for (int i = 0; i < 60; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(near(physics.character(handle).position.x, 12.0f, 1e-3f));
+    CHECK(near(hero.get<Transform3D>()->position.x, 2.0f, 1e-3f) && near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
+    press(hero, {0, 1});
+    for (int i = 0; i < 30; ++i) {
+        bodies.step(dt);
+    }
+    // Interpolation: between the last two steps' feet, alpha 0 the earlier; alpha 1 what step leaves.
+    const f32 x_now = hero.get<Transform3D>()->position.x;
+    bodies.interpolate(0.0f);
+    const f32 x_before = hero.get<Transform3D>()->position.x;
+    bodies.interpolate(0.5f);
+    const f32 x_half = hero.get<Transform3D>()->position.x;
+    bodies.interpolate(1.0f);
+    CHECK(near(hero.get<Transform3D>()->position.x, x_now, 1e-4f));
+    CHECK(x_before < x_half && x_half < x_now && near(x_now - x_before, 4.0f * dt, 0.02f));
+    CHECK(near(x_half, 0.5f * (x_before + x_now), 1e-4f));
+    // An interpolated pose is not read as a move by the next step.
+    bodies.step(dt);
+    CHECK(hero.get<Transform3D>()->position.x > x_now);
+}
+
+void test_character_animation_link() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    const flecs::entity hero = add_character(world, {0, 0, 0});
+    Animator3D animator = locomotion_animator();
+    IKConstraint feet;
+    feet.name = "feet";
+    feet.kind = IKKind::FootPlacer;
+    feet.weight = 0.0f;
+    animator.add_ik(feet);
+    hero.set(static_cast<const Animator3D&>(animator));
+    hero.set(CharacterAnimationLink3D{});
+    for (int i = 0; i < 30; ++i) {
+        bodies.step(dt);
+    }
+    const auto params = [&]() -> const AnimationParams& { return hero.get<Animator3D>()->params; };
+    CHECK(near(params().get_float("speed"), 0.0f, 0.01f));
+    CHECK(!params().get_bool("airborne"));
+    // Its foot placer is given the physics floor as the ground, weight 1, and the capsule is not part of it.
+    const IKConstraint* placer = hero.get<Animator3D>()->ik_constraints.empty() ? nullptr : &hero.get<Animator3D>()->ik_constraints[0];
+    CHECK(placer != nullptr && placer->ground && near(placer->weight, 1.0f, 1e-6f));
+    if (placer != nullptr && placer->ground) {
+        const auto hit = placer->ground({0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
+        CHECK(hit.has_value() && near(hit->position.y, 0.0f, 1e-3f) && near(hit->normal.y, 1.0f, 1e-3f));
+        // From inside the capsule (its middle), a downward ray starts in the character's body: ignored, so the floor.
+        const auto from_inside = placer->ground({0.0f, 0.9f, 0.0f}, {0.0f, -0.5f, 0.0f});
+        CHECK(from_inside.has_value() && near(from_inside->position.y, 0.0f, 1e-3f));
+    }
+    // Walking: the speed parameter is the ground speed; jumping: airborne, foot weight 0; back down: grounded again.
+    press(hero, {0, 1});
+    for (int i = 0; i < 40; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(near(params().get_float("speed"), 4.0f, 0.05f));
+    press(hero, {0, 1}, {1, 0, 0}, true);
+    bodies.step(dt);
+    press(hero, {0, 1}, {1, 0, 0}, false);
+    for (int i = 0; i < 10; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(params().get_bool("airborne"));
+    CHECK(params().get_float("vertical") > 1.0f);
+    CHECK(near(hero.get<Animator3D>()->ik_constraints[0].weight, 0.0f, 1e-6f));
+    for (int i = 0; i < 90; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(!params().get_bool("airborne"));
+    CHECK(near(hero.get<Animator3D>()->ik_constraints[0].weight, 1.0f, 1e-6f));
+    // The machine the helper makes: ground state with a blend over speed, an air state, transitions on `airborne`.
+    const Animator3D made = locomotion_animator({.idle = "idle", .walk = "walk", .run = "run", .fall = "fall"});
+    CHECK(made.machine && made.machine->initial == "ground" && made.machine->transitions.size() == 2);
+    CHECK(made.blend_spaces.at("ground").entries.size() == 3 && made.blend_spaces.at("ground").parameter == "speed");
+}
+
+
+// The foot placer on a character's own capsule: the biped of the P1b fixture stands on a floor (y = 0) with a 10 cm step in a
+// layer the character walks through but the foot rays hit, under its left foot. The ground the system hands the placer is the
+// physics world with the capsule left out; the ankles land on what it says.
+void test_character_feet_on_physics_ground() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    const flecs::entity step = world.entity()
+                                   .set(Transform3D{.position = {0.55f, 0.05f, 0}})
+                                   .set(box_collider({0.5f, 0.05f, 1.0f}))
+                                   .set(RigidBody3D{.motion = Body3DMotion::Static, .layer = layers3d::User0});
+    (void)step;
+
+    auto model = std::make_shared<Model>();
+    model->skeletons.push_back(skin_fixtures::make_biped());
+    const Skeleton& sk = model->skeletons[0];
+    AnimClip3D idle;
+    idle.name = "idle";
+    idle.duration = 1.0f;
+    idle.channels.resize(sk.joint_count());
+    model->clips.push_back(idle);
+
+    CharacterDesc3D desc;
+    desc.collides_with = all_layers3d & ~layer_bit(layers3d::User0);
+    CharacterController3D controller;
+    controller.desc = desc;
+    Animator3D animator = locomotion_animator({.idle = "idle", .walk = "", .run = "", .fall = "idle"});
+    IKConstraint feet;
+    feet.name = "feet";
+    feet.kind = IKKind::FootPlacer;
+    feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
+    feet.foot_heights = {0.05f, 0.05f};
+    feet.pole = IKConstraint::Pole::ModelDirection;
+    feet.pole_vector = {0, 0, 1};
+    feet.foot.smooth_seconds = 0.0f;
+    feet.foot.ray_down = 0.8f;
+    animator.add_ik(feet);
+    const flecs::entity hero = world.entity()
+                                   .set(Transform3D{.position = {0, 0.02f, 0}})
+                                   .set(controller)
+                                   .set(SkinnedMeshRenderer{.model = model})
+                                   .set(static_cast<const Animator3D&>(animator))
+                                   .set(CharacterAnimationLink3D{});
+    WorldRenderState3D state{ecs};
+    for (int frame = 0; frame < 60; ++frame) {
+        bodies.step(dt);
+        state.animate(dt);
+        state.propagate_transforms();
+        state.apply_ik();
+    }
+    CHECK(near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
+    CHECK(hero.get<CharacterController3D>()->state.ground == CharacterGround3D::OnGround);
+    const Animator3D& a = *hero.get<Animator3D>();
+    const auto joint = [&](int j) {
+        const Mat4f& m = a.ik_world[static_cast<std::size_t>(j)];
+        return Vec3f{m.m[12], m.m[13], m.m[14]};
+    };
+    namespace B = skin_fixtures::biped;
+    // Left foot (x = +0.1) on the step (top y = 0.1), right (x = -0.1) on the floor (y = 0): the ankle 0.05 above each sole,
+    // and the capsule round the pelvis was not taken for ground.
+    CHECK(near(joint(B::ankle_l).y, 0.1f + 0.05f, 4e-3f));
+    CHECK(near(joint(B::ankle_r).y, 0.0f + 0.05f, 4e-3f));
+    CHECK(near(joint(B::ankle_l).x, 0.1f, 0.02f) && near(joint(B::ankle_r).x, -0.1f, 0.02f));
+}
+
+// A character's own state hashed with the bodies', per step: the same across runs and worker counts.
+std::vector<u64> character_scene_hashes(World3DConfig cfg, int frames) {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(cfg);
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    for (int i = 0; i < 12; ++i) {
+        add_crate(world, {static_cast<f32>(i % 4) * 1.2f + 2.0f, 0.5f + static_cast<f32>(i / 4) * 1.1f, static_cast<f32>(i % 3) - 1.0f});
+    }
+    std::vector<flecs::entity> heroes;
+    for (int i = 0; i < 4; ++i) {
+        heroes.push_back(add_character(world, {static_cast<f32>(i) * 2.0f - 3.0f, 0.2f, 4.0f - static_cast<f32>(i)}));
+    }
+    std::vector<u64> out;
+    u32 seed = 77;
+    for (int f = 0; f < frames; ++f) {
+        for (std::size_t i = 0; i < heroes.size(); ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            const f32 a = static_cast<f32>(seed >> 8) / static_cast<f32>(1u << 24);
+            press(heroes[i], {a - 0.5f, 0.8f}, {1, 0, 0}, (f + static_cast<int>(i) * 17) % 70 == 0);
+        }
+        bodies.step(dt);
+        out.push_back(physics.state_hash());
+    }
+    return out;
+}
+
+void test_character_scene_determinism() {
+    constexpr int frames = 150;
+    const std::vector<u64> a = character_scene_hashes(serial(), frames);
+    CHECK(a == character_scene_hashes(serial(), frames));
+    JobSystem four({.workers = 4, .max_background = 4});
+    World3DConfig cfg;
+    cfg.jobs = &four;
+    CHECK(character_scene_hashes(cfg, frames) == a);
+    CHECK(a.front() != a.back());
+}
+
 } // namespace
 
 int main() {
@@ -665,6 +992,12 @@ int main() {
     test_debug_mesh_and_height_field_caps();
     test_foot_placement_over_physics();
     test_colliders_from_meshes();
+    test_character_entity();
+    test_character_carried_by_kinematic_platform();
+    test_character_parented_and_interpolated();
+    test_character_animation_link();
+    test_character_feet_on_physics_ground();
+    test_character_scene_determinism();
     if (failures != 0) {
         std::fprintf(stderr, "physics3d_ecs_tests: %d check(s) failed\n", failures);
         return 1;

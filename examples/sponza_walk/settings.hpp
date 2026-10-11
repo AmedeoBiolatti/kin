@@ -153,6 +153,17 @@ struct Settings {
     int phys_count = 10;        // boxes a throw
     float phys_size = 0.4f;     // metres a side
     float phys_speed = 8.0f;    // m/s along the view
+    // Character controller (kin/physics3d, P2c): a person driven by a capsule controller over the physics floor and the test level
+    // (tests/character_level.hpp, put in front of the camera when it goes on). WASD relative to the camera, Space jumps, Shift
+    // sprints, Ctrl crouches; the camera follows behind. `ctrl_demo` plays a scripted walk instead of the keys (a headless run).
+    bool ctrl = false;
+    bool ctrl_debug = true;     // the capsule, the level's bodies and the character's contacts as lines
+    bool ctrl_demo = false;
+    float ctrl_speed = 4.0f;    // walk speed, m/s (sprint 1.75 times)
+    float ctrl_jump = 5.0f;     // m/s up: the apex is v^2 / 2g
+    float ctrl_slope = 45.0f;   // the steepest ground it stands on, degrees
+    float ctrl_step = 0.4f;     // the highest step it climbs, m
+    float ctrl_distance = 3.5f; // the camera behind it, m
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

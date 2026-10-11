@@ -1,5 +1,6 @@
 #include <kin/physics3d/world3d.hpp>
 
+#include "character3d_impl.hpp"
 #include "jolt_runtime.hpp"
 
 #include <Jolt/Core/FixedSizeFreeList.h>
@@ -240,6 +241,7 @@ public:
 
     std::vector<u8>& bytes() { return _bytes; }
     std::size_t read_position() const { return _read; }
+    void skip(std::size_t count) { _read += count; }
 
 private:
     std::vector<u8> _bytes;
@@ -420,6 +422,8 @@ struct World3D::Impl {
         u64 user_id = 0;
         f32 mass = 0.0f;
         bool alive = false;
+        // The inner body of a character: made, moved and destroyed by it.
+        bool owned = false;
     };
 
     // A constraint. The anchors and axis are kept in the bodies' own frames (origin and rotation) so that
@@ -474,9 +478,11 @@ struct World3D::Impl {
                 system.RemoveConstraint(c.constraint.GetPtr());
             }
         }
+        // The characters take their inner bodies with them.
+        characters.reset();
         JPH::BodyInterface& bi = system.GetBodyInterfaceNoLock();
         for (Slot& slot : slots) {
-            if (slot.alive) {
+            if (slot.alive && !slot.owned) {
                 bi.RemoveBody(slot.id);
                 bi.DestroyBody(slot.id);
             }
@@ -491,6 +497,11 @@ struct World3D::Impl {
         return slot.alive && slot.generation == body.generation ? &slot : nullptr;
     }
     const Slot* find(Body3D body) const { return const_cast<Impl*>(this)->find(body); }
+    // As find, but not a character's own body: those are the character's to move, reshape and destroy.
+    Slot* find_free(Body3D body) {
+        Slot* s = find(body);
+        return s != nullptr && !s->owned ? s : nullptr;
+    }
 
     ConstraintSlot* find(Constraint3D c) {
         if (c.index >= constraint_slots.size()) {
@@ -525,6 +536,7 @@ struct World3D::Impl {
     void collect_events();
     // Disables constraints whose force went over their limit.
     void check_breaks(f32 step_dt);
+    void retire_body(Body3D body, bool jolt);
     void push_event(const ContactEvent3D& e) {
         if (events.size() >= config.max_events) {
             ++dropped;
@@ -537,6 +549,13 @@ struct World3D::Impl {
 
     JPH::BodyInterface& bi() { return system.GetBodyInterfaceNoLock(); }
     const JPH::BodyInterface& bi() const { return system.GetBodyInterfaceNoLock(); }
+
+    // A Jolt body made elsewhere (a character's inner body) becomes a slot of the world, so that it has a number,
+    // takes part in events, queries and the hash like any body.
+    Body3D register_body(const JPH::BodyID& id, u64 user_id);
+
+    World3D* self = nullptr;
+    std::unique_ptr<physics3d_detail::CharacterSet> characters;
 
     World3DConfig config;
     std::array<u32, 32> table{};
@@ -571,8 +590,54 @@ struct World3D::Impl {
     i32 constraints_live = 0;
 };
 
+Body3D World3D::Impl::register_body(const JPH::BodyID& id, u64 user_id) {
+    u32 index;
+    if (!free_slots.empty()) {
+        index = free_slots.back();
+        free_slots.pop_back();
+    } else {
+        index = static_cast<u32>(slots.size());
+        slots.emplace_back();
+    }
+    Slot& slot = slots[index];
+    slot.id = id;
+    if (entries.size() <= id.GetIndex()) {
+        entries.resize(id.GetIndex() + 1);
+    }
+    entries[id.GetIndex()] = {index, id};
+    slot.user_id = user_id;
+    slot.mass = 0.0f;
+    slot.alive = true;
+    slot.owned = true;
+    ++live;
+    return {index, slot.generation};
+}
+
 World3D::World3D(World3DConfig config)
-    : _impl(std::make_unique<Impl>(config)) {}
+    : _impl(std::make_unique<Impl>(config)) {
+    Impl& m = *_impl;
+    m.self = this;
+    physics3d_detail::CharacterEnv env;
+    env.system = &m.system;
+    env.temp = &m.temp;
+    env.table = &m.table;
+    Impl* impl = &m;
+    env.gravity = [impl] { return from_jolt(impl->system.GetGravity()); };
+    env.body_of = [impl](const JPH::BodyID& id) {
+        const Impl::Slot* s = impl->slot_of(id);
+        return s != nullptr ? Body3D{static_cast<u32>(s - impl->slots.data()), s->generation} : Body3D{};
+    };
+    env.user_id_of = [impl](Body3D b) {
+        const Impl::Slot* s = impl->find(b);
+        return s != nullptr ? s->user_id : u64{0};
+    };
+    env.body_of_slot = [impl](u32 slot) {
+        return slot < impl->slots.size() && impl->slots[slot].alive ? impl->handle(slot) : Body3D{};
+    };
+    env.register_inner = [impl](const JPH::BodyID& id, u64 user_id) { return impl->register_body(id, user_id); };
+    env.unregister_inner = [impl](Body3D b) { impl->retire_body(b, false); };
+    m.characters = std::make_unique<physics3d_detail::CharacterSet>(std::move(env));
+}
 
 World3D::~World3D() = default;
 
@@ -602,6 +667,12 @@ void World3D::step(f32 dt) {
     Impl& m = *_impl;
     const i32 collision_steps = std::max(1, m.config.collision_steps);
     m.collector.clear();
+    // Characters first, in number order (see character3d.hpp): they move through the world as the last step left it,
+    // push what they meet by impulses, and the step below then integrates all of it.
+    if (m.characters->count() > 0) {
+        m.characters->update(dt);
+        m.characters->cap_events(m.config.max_events);
+    }
     m.system.Update(dt, collision_steps, &m.temp, m.job_system);
     if (m.config.contact_events) {
         m.collect_events();
@@ -865,7 +936,16 @@ Body3D World3D::create_body(const Body3DDesc& d) {
 }
 
 void World3D::destroy_body(Body3D body) {
-    Impl& m = *_impl;
+    if (_impl->find_free(body) == nullptr) {
+        return;
+    }
+    _impl->retire_body(body, true);
+}
+
+// Takes a body out of the world: what it touched wakes, its constraints and pairs end, its slot is freed. `jolt` says
+// whether the Jolt body is removed and destroyed here (a character's inner body is the character's own to destroy).
+void World3D::Impl::retire_body(Body3D body, bool jolt) {
+    Impl& m = *this;
     Impl::Slot* slot = m.find(body);
     if (slot == nullptr) {
         return;
@@ -893,7 +973,7 @@ void World3D::destroy_body(Body3D body) {
     for (u32 i = 0; i < m.constraint_slots.size(); ++i) {
         const auto& c = m.constraint_slots[i];
         if (c.alive && (c.a == body || c.b == body)) {
-            destroy_constraint({i, c.generation});
+            self->destroy_constraint({i, c.generation});
         }
     }
     // Pairs it touches end now (Jolt reports a removal for them too, for an id that no longer names a body: ignored).
@@ -936,9 +1016,12 @@ void World3D::destroy_body(Body3D body) {
         }
     }
     m.entries[slot->id.GetIndex()] = {};
-    m.bi().RemoveBody(slot->id);
-    m.bi().DestroyBody(slot->id);
+    if (jolt) {
+        m.bi().RemoveBody(slot->id);
+        m.bi().DestroyBody(slot->id);
+    }
     slot->alive = false;
+    slot->owned = false;
     slot->id = JPH::BodyID();
     ++slot->generation;
     m.free_slots.push_back(body.index);
@@ -952,67 +1035,67 @@ i32 World3D::active_body_count() const {
 }
 
 void World3D::set_position(Body3D body, Vec3f position) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(position)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(position)) {
         _impl->bi().SetPosition(s->id, to_jolt(position), JPH::EActivation::Activate);
     }
 }
 
 void World3D::set_rotation(Body3D body, Quatf rotation) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(rotation)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(rotation)) {
         _impl->bi().SetRotation(s->id, to_jolt(rotation.normalized()), JPH::EActivation::Activate);
     }
 }
 
 void World3D::set_linear_velocity(Body3D body, Vec3f velocity) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(velocity)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(velocity)) {
         _impl->bi().SetLinearVelocity(s->id, to_jolt(velocity));
     }
 }
 
 void World3D::set_angular_velocity(Body3D body, Vec3f velocity) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(velocity)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(velocity)) {
         _impl->bi().SetAngularVelocity(s->id, to_jolt(velocity));
     }
 }
 
 void World3D::move_kinematic(Body3D body, Vec3f position, Quatf rotation, f32 dt) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(position) && finite(rotation) && dt > 0.0f) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(position) && finite(rotation) && dt > 0.0f) {
         _impl->bi().MoveKinematic(s->id, to_jolt(position), to_jolt(rotation.normalized()), dt);
     }
 }
 
 void World3D::add_force(Body3D body, Vec3f force) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(force)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(force)) {
         _impl->bi().AddForce(s->id, to_jolt(force));
     }
 }
 
 void World3D::add_force_at(Body3D body, Vec3f force, Vec3f world_point) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(force) && finite(world_point)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(force) && finite(world_point)) {
         _impl->bi().AddForce(s->id, to_jolt(force), to_jolt(world_point));
     }
 }
 
 void World3D::add_torque(Body3D body, Vec3f torque) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(torque)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(torque)) {
         _impl->bi().AddTorque(s->id, to_jolt(torque));
     }
 }
 
 void World3D::add_impulse(Body3D body, Vec3f impulse) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(impulse)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(impulse)) {
         _impl->bi().AddImpulse(s->id, to_jolt(impulse));
     }
 }
 
 void World3D::add_impulse_at(Body3D body, Vec3f impulse, Vec3f world_point) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(impulse) && finite(world_point)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(impulse) && finite(world_point)) {
         _impl->bi().AddImpulse(s->id, to_jolt(impulse), to_jolt(world_point));
     }
 }
 
 void World3D::add_angular_impulse(Body3D body, Vec3f impulse) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(impulse)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(impulse)) {
         _impl->bi().AddAngularImpulse(s->id, to_jolt(impulse));
     }
 }
@@ -1065,7 +1148,7 @@ u64 World3D::user_id(Body3D body) const {
 }
 
 void World3D::set_user_id(Body3D body, u64 user_id) {
-    if (auto* s = _impl->find(body)) {
+    if (auto* s = _impl->find_free(body)) {
         s->user_id = user_id;
     }
 }
@@ -1104,13 +1187,13 @@ bool World3D::is_active(Body3D body) const {
 }
 
 void World3D::activate(Body3D body) {
-    if (const auto* s = _impl->find(body)) {
+    if (const auto* s = _impl->find_free(body)) {
         _impl->bi().ActivateBody(s->id);
     }
 }
 
 void World3D::deactivate(Body3D body) {
-    if (const auto* s = _impl->find(body)) {
+    if (const auto* s = _impl->find_free(body)) {
         _impl->bi().DeactivateBody(s->id);
     }
 }
@@ -1142,7 +1225,7 @@ void World3D::optimize_broad_phase() { _impl->system.OptimizeBroadPhase(); }
 // --- helpers for driven bodies ---
 
 void World3D::teleport(Body3D body, Vec3f position, Quatf rotation) {
-    if (const auto* s = _impl->find(body); s != nullptr && finite(position) && finite(rotation)) {
+    if (const auto* s = _impl->find_free(body); s != nullptr && finite(position) && finite(rotation)) {
         _impl->bi().SetPositionAndRotation(s->id, to_jolt(position), to_jolt(rotation.normalized()),
                                            JPH::EActivation::Activate);
         _impl->bi().SetLinearAndAngularVelocity(s->id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
@@ -1151,7 +1234,7 @@ void World3D::teleport(Body3D body, Vec3f position, Quatf rotation) {
 
 void World3D::follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 dt) {
     Impl& m = *_impl;
-    const auto* s = m.find(body);
+    const auto* s = m.find_free(body);
     if (s == nullptr || !finite(position) || !finite(rotation) || !(dt > 0.0f)) {
         return;
     }
@@ -1184,7 +1267,7 @@ void World3D::follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 
 
 bool World3D::set_layer(Body3D body, u8 layer) {
     Impl& m = *_impl;
-    const auto* s = m.find(body);
+    const auto* s = m.find_free(body);
     if (s == nullptr) {
         return false;
     }
@@ -1201,12 +1284,12 @@ bool World3D::set_layer(Body3D body, u8 layer) {
 }
 
 bool World3D::is_sensor(Body3D body) const {
-    const auto* s = _impl->find(body);
+    const auto* s = _impl->find_free(body);
     return s != nullptr && _impl->bi().IsSensor(s->id);
 }
 
 void World3D::set_sensor(Body3D body, bool sensor) {
-    if (const auto* s = _impl->find(body)) {
+    if (const auto* s = _impl->find_free(body)) {
         _impl->bi().SetIsSensor(s->id, sensor);
         _impl->bi().ActivateBody(s->id);
     }
@@ -1214,7 +1297,7 @@ void World3D::set_sensor(Body3D body, bool sensor) {
 
 bool World3D::set_shape(Body3D body, const Shape3D& shape) {
     Impl& m = *_impl;
-    auto* s = m.find(body);
+    auto* s = m.find_free(body);
     if (s == nullptr || !shape.valid()) {
         return false;
     }
@@ -1520,8 +1603,8 @@ std::vector<ConstraintEvent3D> World3D::drain_constraint_events() {
 
 Constraint3D World3D::create_constraint(const Constraint3DDesc& d) {
     Impl& m = *_impl;
-    const auto* sb = m.find(d.b);
-    const auto* sa = d.a.valid() ? m.find(d.a) : nullptr;
+    const auto* sb = m.find_free(d.b);
+    const auto* sa = d.a.valid() ? m.find_free(d.a) : nullptr;
     if (sb == nullptr || (d.a.valid() && sa == nullptr) || d.a == d.b) {
         return {};
     }
@@ -1804,6 +1887,29 @@ std::vector<Constraint3D> World3D::constraints() const {
     return out;
 }
 
+// --- characters ---
+
+Character3D World3D::create_character(const CharacterDesc3D& desc) {
+    if (_impl->live >= static_cast<i32>(_impl->config.max_bodies)) {
+        return {};
+    }
+    return _impl->characters->create(desc);
+}
+void World3D::destroy_character(Character3D c) { _impl->characters->destroy(c); }
+bool World3D::contains(Character3D c) const { return _impl->characters->contains(c); }
+i32 World3D::character_count() const { return _impl->characters->count(); }
+std::vector<Character3D> World3D::characters() const { return _impl->characters->list(); }
+void World3D::set_character_input(Character3D c, const CharacterInput3D& input) { _impl->characters->set_input(c, input); }
+CharacterInput3D World3D::character_input(Character3D c) const { return _impl->characters->input(c); }
+CharacterState3D World3D::character(Character3D c) const { return _impl->characters->state(c); }
+std::vector<CharacterContact3D> World3D::character_contacts(Character3D c) const { return _impl->characters->contacts(c); }
+void World3D::teleport_character(Character3D c, Vec3f feet) { _impl->characters->teleport(c, feet); }
+void World3D::set_character_up(Character3D c, Vec3f up, bool instant) { _impl->characters->set_up(c, up, instant); }
+bool World3D::set_character_crouch(Character3D c, bool crouch) { return _impl->characters->set_crouch(c, crouch); }
+void World3D::set_character_desc(Character3D c, const CharacterDesc3D& desc) { _impl->characters->set_desc(c, desc); }
+std::span<const CharacterEvent3D> World3D::character_events() const { return _impl->characters->events(); }
+std::vector<CharacterEvent3D> World3D::drain_character_events() { return _impl->characters->drain_events(); }
+
 u64 World3D::state_hash() const {
     const Impl& m = *_impl;
     Hasher h;
@@ -1848,6 +1954,15 @@ u64 World3D::state_hash() const {
             h.byte(c.constraint->GetEnabled() ? 1 : 0);
         }
     }
+    // Characters, only when there are some: their own state (the input, the up vector, timers, what they stand on),
+    // which the inner bodies' places above do not carry.
+    if (m.characters->count() > 0) {
+        std::vector<u8> bytes;
+        m.characters->save_header(bytes);
+        for (const u8 b : bytes) {
+            h.byte(b);
+        }
+    }
     return h.value();
 }
 
@@ -1888,7 +2003,10 @@ std::vector<u8> World3D::save_state() const {
         out.WriteBytes(&key, sizeof key);
         out.WriteBytes(&waited, sizeof waited);
     }
+    // The characters' own state, then Jolt's after the physics system's.
+    m.characters->save_header(out.bytes());
     m.system.SaveState(out);
+    m.characters->save_jolt(out);
     return std::move(out.bytes());
 }
 
@@ -1954,7 +2072,19 @@ bool World3D::restore_state(std::span<const u8> state) {
         in.ReadBytes(&waited, sizeof waited);
         dormant[key] = waited;
     }
-    if (in.IsFailed() || !m.system.RestoreState(in)) {
+    if (in.IsFailed()) {
+        return false;
+    }
+    // The characters' own state (the same set of characters, as with bodies).
+    const u8* cursor = in.bytes().data() + in.read_position();
+    const u8* const end = in.bytes().data() + in.bytes().size();
+    std::unique_ptr<physics3d_detail::CharacterSet::Parsed> characters = m.characters->parse_header(cursor, end);
+    if (characters == nullptr) {
+        return false;
+    }
+    in.skip(static_cast<std::size_t>(cursor - (in.bytes().data() + in.read_position())));
+    m.characters->prepare_restore(*characters);
+    if (!m.system.RestoreState(in) || !m.characters->restore(*characters, in)) {
         return false;
     }
     for (u32 i = 0; i < count; ++i) {
@@ -1968,6 +2098,7 @@ bool World3D::restore_state(std::span<const u8> state) {
     m.queued.clear();
     m.events.clear();
     m.constraint_events.clear();
+    m.characters->clear_events();
     m.collector.clear();
     return true;
 }

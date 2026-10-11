@@ -191,6 +191,15 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   speed), stepped at 60 Hz, with the debug lines on or off (shapes green while awake and blue once asleep, contacts as red crosses with
   orange normals). `--preset physics` throws 30 boxes along the nave when the switch comes on. The panel's click path is untested here
   (no display).
+- The "Character controller (kin/physics3d, P2c)" section puts the controller's test level (`tests/character_level.hpp`: ramps of 20, 35
+  and 50 degrees, a hump, stairs of 15 cm, a 60 cm ledge, a low tunnel, boxes, a platform that moves and one that turns, a trigger) in
+  front of the camera and a skinned person on it, an ECS entity with a `CharacterController3D`, a locomotion `Animator3D` (idle, walk and
+  run blended by ground speed, a fall pose in the air) and the foot placer on the physics floor. WASD move it relative to the camera, Space
+  jumps, Shift sprints, Ctrl crouches (the model is squashed: it has no crouch clip), R puts it back at the start; the camera follows
+  behind. Sliders: walk speed, jump speed, steepest slope, highest step, camera distance, all live. The level is built on the physics
+  floor only: Sponza's own walls are not collidable (the viewer holds no triangles of the model), so the level runs through them.
+  `--preset controller` plays a scripted walk through the same command struct instead of the keys, which is what a headless run does
+  (`--frames 400 --eye -14,2,0 --target 0,1,0`); the keyboard path itself is not exercised by any test here (no display).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8

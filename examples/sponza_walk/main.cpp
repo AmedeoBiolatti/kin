@@ -7,6 +7,7 @@
 // the Scene3D every frame. The panel, `--set key=value`, `--preset` and the
 // printed settings all read one table of rows (SponzaScene::build_controls):
 // a new feature (contact shadows, TAA) is a field and a row there.
+#include "../../tests/character_level.hpp"
 #include "character.hpp"
 #include "ik_rig.hpp"
 #include "settings.hpp"
@@ -104,6 +105,7 @@ const std::map<std::string, std::string>& presets() {
         {"ik-tail", "character=on,char_count=1,char_clip=sway,ik=on,ik_tail=on,ik_tail_x=0.6,ik_tail_y=1.1,ik_tail_z=-0.2"},
         {"ik-walk", "character=on,char_count=1,char_clip=sway,ik=on,ik_feet=on,ik_lock=on,ik_toes=on,ik_limits=on,ik_walk=on,ik_step=off"},
         {"physics", "physics=on,phys_debug=on,phys_count=30"}, // Jolt boxes on a floor, thrown once when it goes on, with debug lines (P2b)
+        {"controller", "ctrl=on,ctrl_demo=on,ctrl_debug=on"}, // a person walks the test level by a scripted route, camera behind (P2c)
         {"ik-all", "character=on,char_count=3,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
     };
     return p;
@@ -215,7 +217,7 @@ struct Row {
 };
 
 struct Hooks {
-    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset, reset_history, throw_boxes, clear_boxes;
+    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset, reset_history, throw_boxes, clear_boxes, respawn;
 };
 
 struct Caps {
@@ -513,6 +515,17 @@ private:
         button("phys_throw", "Throw boxes (B)", _h.throw_boxes);
         button("phys_clear", "Remove the boxes", _h.clear_boxes);
 
+        section("Character controller (kin/physics3d, P2c)");
+        check("ctrl", "Controller on (a person and the test level in front of you)", s.ctrl);
+        check("ctrl_debug", "Debug lines (capsule, level, contacts)", s.ctrl_debug);
+        check("ctrl_demo", "Scripted walk (instead of the keys)", s.ctrl_demo);
+        slider("ctrl_speed", "Walk speed (m/s)", s.ctrl_speed, 1.0f, 8.0f);
+        slider("ctrl_jump", "Jump speed (m/s)", s.ctrl_jump, 1.0f, 10.0f);
+        slider("ctrl_slope", "Steepest slope it stands on (deg)", s.ctrl_slope, 10.0f, 80.0f);
+        slider("ctrl_step", "Highest step (m)", s.ctrl_step, 0.0f, 0.8f);
+        slider("ctrl_distance", "Camera distance (m)", s.ctrl_distance, 1.0f, 10.0f);
+        button("ctrl_respawn", "Back to the start", _h.respawn);
+
         section("Debug", true);
         check("stats", "Stats (F3)", s.stats);
         check("gpu_timing", "GPU timing", s.gpu_timing);
@@ -523,6 +536,7 @@ private:
         note("WASD move, Q/Ctrl down, E/Space up, Shift fast");
         note("Wheel: speed. Esc: free the mouse / quit");
         note("Tab: panel or mouse. 1/2: views. L: sun, K: light, B: throw boxes");
+        note("Controller on: WASD walk (camera relative), Space jump, Shift sprint, Ctrl crouch, R back to the start");
     }
 
     Settings& _s;
@@ -562,6 +576,7 @@ public:
         _frame_ms = _frame_ms == 0 ? dt * 1000 : _frame_ms + (dt * 1000 - _frame_ms) * 0.05f;
 
         Input& input = ctx.input;
+        _input = &input;
         handle_keys(ctx, input, headless);
         if (_quit) {
             ctx.app.quit();
@@ -747,6 +762,7 @@ private:
         h.reset = [this] { reset_all(); };
         h.reset_history = [this] { _view.reset_history(); };
         h.throw_boxes = [this] { throw_boxes(); };
+        h.respawn = [this] { respawn_controller(); };
         h.clear_boxes = [this] { clear_boxes(); };
         _controls = std::make_unique<Controls>(_s, std::move(h), _caps);
     }
@@ -783,6 +799,8 @@ private:
     void move(Input& input, float dt) {
         const Camera3D c = camera();
         Vec3f wish{};
+        // With the controller on, the keys walk the person (drive_controller) and the camera follows it.
+        if (_s.ctrl) return;
         // With the panel up the mouse is free and the keys do not fly.
         if (_captured) {
             wish += c.forward() * (float(input.held(Key::W)) - float(input.held(Key::S)));
@@ -828,6 +846,7 @@ private:
         if (input.frame_pressed(Key::L)) _s.sun_animate = !_s.sun_animate;
         if (input.frame_pressed(Key::K)) drop_light();
         if (input.frame_pressed(Key::B)) throw_boxes();
+        if (input.frame_pressed(Key::R) && _s.ctrl) respawn_controller();
         if (input.frame_pressed(Key::F3)) _s.stats = !_s.stats;
         if (input.frame_pressed(Key::F2)) print_settings();
         if (input.frame_pressed(Key::F12) || input.frame_pressed(Key::P)) _shot_requested = true;
@@ -1039,29 +1058,202 @@ private:
     }
 
     void update_physics(float dt) {
+        if (!_s.ctrl && _ctrl_hero.is_valid()) remove_controller();
         if (!_s.physics) {
             if (!_boxes.empty()) clear_boxes();
+        }
+        if (!_s.physics && !_s.ctrl) {
             return;
         }
         ensure_physics();
-        if (!_physics_started) { // the first volley when the switch goes on (so a headless run has something to show)
+        if (_s.physics && !_physics_started) { // the first volley when the switch goes on (so a headless run has something to show)
             _physics_started = true;
             throw_boxes();
         }
-        _bodies->advance(dt);
+        if (_s.ctrl) {
+            ensure_controller();
+            drive_controller(dt);
+        }
+        if (_s.ctrl && _ctrl_built) {
+            // The level's platforms are a function of the step number: moved a step ahead before each fixed step, so the
+            // steps are taken here (what advance() does, with that call in it).
+            const float fixed = _bodies->config().fixed_dt;
+            _ctrl_accumulator += dt;
+            int taken = 0;
+            while (_ctrl_accumulator >= fixed && taken < 8) {
+                _ctrl_level.drive(*_physics, _ctrl_steps, fixed);
+                _bodies->step(fixed);
+                ++_ctrl_steps;
+                ++taken;
+                _ctrl_accumulator -= fixed;
+            }
+            if (taken == 8) _ctrl_accumulator = 0.0f;
+        } else {
+            _bodies->advance(dt);
+        }
+        if (_s.ctrl && _ctrl_hero.is_valid()) {
+            follow_controller(dt);
+            if (!_s.character) _ecs_state->animate(dt); // (update_characters does it when the characters are on)
+        }
+    }
+
+    // --- the character controller (P2c) ----------------------------------------------------------------------------------
+    // The test level (tests/character_level.hpp) is built in front of the camera, along +X from there, and a person (entity with a
+    // CharacterController3D, a locomotion Animator3D and the foot placer on the physics floor) is put at its start. WASD move it
+    // relative to the camera (Space jumps, Shift sprints, Ctrl crouches); the camera follows behind. The keys are the only thing
+    // a headless run cannot press: `ctrl_demo` plays a scripted walk through the same command struct instead.
+    void ensure_controller() {
+        if (!_r3d->capabilities().skinning) return;
+        if (_ctrl_hero.is_valid() && _ctrl_hero.is_alive()) return;
+        if (!_person_model) _person_model = make_person(*_r3d);
+        if (!_ball_mesh) _ball_mesh = _r3d->create_mesh(meshes::sphere(1.0f, 32, 16));
+        _ctrl_origin = {_pos.x - 1.0f, 0.0f, _pos.z};
+        _ctrl_level = character_level::build(*_physics, true, _ctrl_origin);
+        _physics->optimize_broad_phase();
+        _ctrl_built = true;
+        Animator3D animator = locomotion_animator({.idle = "Sway", .walk = "Walk", .run = "Run", .fall = "Fall"});
+        IKConstraint feet = person_constraints(nullptr)[0];
+        feet.fade_seconds = 0.12f;
+        animator.add_ik(feet);
+        CharacterController3D controller;
+        controller.desc.height = 1.8f;
+        controller.input.forward = {1.0f, 0.0f, 0.0f};
+        _ctrl_hero = _ecs->raw().entity()
+                         .set(Transform3D{.position = _ctrl_origin + Vec3f{1.0f, 0.0f, 0.0f}})
+                         .set(controller)
+                         .set(SkinnedMeshRenderer{.model = _person_model})
+                         .set(static_cast<const Animator3D&>(animator))
+                         .set(CharacterAnimationLink3D{});
+        _ctrl_time = 0.0f;
+        _ctrl_facing = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 90.0f);
+        _yaw = -90.0f; // looking along +X, the way the level runs
+    }
+
+    void remove_controller() {
+        if (_ctrl_hero.is_valid() && _ctrl_hero.is_alive()) _ctrl_hero.destruct();
+        _ctrl_hero = {};
+        if (_ctrl_built && _physics) {
+            for (const character_level::Piece& p : _ctrl_level.pieces) _physics->destroy_body(p.body);
+        }
+        _ctrl_level = {};
+        _ctrl_built = false;
+    }
+
+    void respawn_controller() {
+        if (!_ctrl_hero.is_valid() || !_ctrl_hero.is_alive()) return;
+        _ctrl_hero.get_mut<Transform3D>()->position = _ctrl_origin + Vec3f{1.0f, 0.0f, 0.0f}; // a move by game code is a teleport
+        _ctrl_time = 0.0f;
+    }
+
+    // The command of this frame (held for the fixed steps that follow) and the descriptor's live numbers.
+    void drive_controller(float dt) {
+        if (!_ctrl_hero.is_valid() || !_ctrl_hero.is_alive()) return;
+        CharacterController3D* c = _ctrl_hero.get_mut<CharacterController3D>();
+        const Character3D handle = _bodies->character_of(_ctrl_hero);
+        if (handle.valid()) {
+            CharacterDesc3D d = c->desc;
+            d.walk_speed = _s.ctrl_speed;
+            d.sprint_speed = _s.ctrl_speed * 1.75f;
+            d.jump_speed = _s.ctrl_jump;
+            d.max_slope_degrees = _s.ctrl_slope;
+            d.max_step_height = _s.ctrl_step;
+            _physics->set_character_desc(handle, d);
+        }
+        _ctrl_time += dt;
+        CharacterInput3D in;
+        in.forward = camera().forward();
+        if (_s.ctrl_demo) {
+            // Along +X: walk, a jump now and then, a sprint, a crouch; over and over (the level is about 30 m of it).
+            const float t = std::fmod(_ctrl_time, 14.0f);
+            in.forward = {1.0f, 0.0f, 0.0f};
+            in.move = {0.0f, t > 0.5f ? 1.0f : 0.0f};
+            in.jump = std::fmod(t, 2.5f) < 0.1f && t > 1.0f;
+            in.sprint = t > 7.0f && t < 9.0f;
+            in.crouch = t > 11.0f && t < 12.0f;
+        } else if (_input != nullptr && _captured) {
+            const Input& k = *_input;
+            in.move = {float(k.held(Key::D)) - float(k.held(Key::A)), float(k.held(Key::W)) - float(k.held(Key::S))};
+            in.jump = k.held(Key::Space);
+            in.sprint = k.modifier_held(KeyModifiers::Shift);
+            in.crouch = k.modifier_held(KeyModifiers::Ctrl);
+        }
+        c->input = in;
+        // It faces the way it goes (the person faces +Z); physics never turns it.
+        const Vec3f fwd = normalize(Vec3f{in.forward.x, 0.0f, in.forward.z});
+        const Vec3f right{-fwd.z, 0.0f, fwd.x};
+        const Vec3f dir = right * -in.move.x + fwd * in.move.y;
+        if (length(dir) > 0.1f) _ctrl_facing = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, std::atan2(dir.x, dir.z) * 180.0f / pi);
+        c->facing = _ctrl_facing;
+    }
+
+    void follow_controller(float) {
+        const Transform3D* t = _ctrl_hero.get<Transform3D>();
+        if (t == nullptr) return;
+        // The person has no crouch clip: while the capsule is crouched the model is squashed to its height.
+        if (const CharacterController3D* c = _ctrl_hero.get<CharacterController3D>(); c != nullptr && c->state.height > 0.0f) {
+            _ctrl_hero.get_mut<Transform3D>()->scale.y = c->state.height / c->desc.height;
+        }
+        const Vec3f target = t->position + Vec3f{0.0f, 1.3f, 0.0f};
+        _pos = target - camera().forward() * _s.ctrl_distance;
+        _velocity = {};
+    }
+
+    // The level's pieces as meshes (the bodies are drawn by the debug lines only when asked).
+    void draw_controller_level() {
+        if (!_ctrl_built) return;
+        using character_level::Kind;
+        const auto colour_of = [](Kind k) {
+            switch (k) {
+            case Kind::Floor: return Color::rgb(112, 120, 108);
+            case Kind::Ramp: return Color::rgb(214, 150, 80);
+            case Kind::Plateau: return Color::rgb(196, 176, 140);
+            case Kind::Hump: return Color::rgb(120, 170, 120);
+            case Kind::Step: return Color::rgb(176, 170, 160);
+            case Kind::Ledge: return Color::rgb(170, 120, 120);
+            case Kind::Wall: return Color::rgb(150, 160, 180);
+            case Kind::Ceiling: return Color::rgb(130, 140, 160);
+            case Kind::Box: return Color::rgb(220, 190, 90);
+            case Kind::HeavyBox: return Color::rgb(90, 70, 60);
+            case Kind::Platform: return Color::rgb(80, 140, 220);
+            case Kind::Spinner: return Color::rgb(80, 200, 190);
+            case Kind::Sensor: return Color::rgb(240, 220, 90);
+            }
+            return Color::rgb(200, 200, 200);
+        };
+        for (const character_level::Piece& p : _ctrl_level.pieces) {
+            if (p.kind == Kind::Sensor || p.kind == Kind::Floor) continue; // (Sponza has its own floor; a trigger is not a thing)
+            const Vec3f centre = p.moving ? _physics->position(p.body) : p.centre;
+            const Quatf rotation = p.moving ? _physics->rotation(p.body) : p.rotation;
+            const Material3D m{.color = colour_of(p.kind), .roughness = 0.85f};
+            if (p.shape == Shape3DKind::Sphere) {
+                _scene.draw(_ball_mesh, Mat4f::trs(centre, rotation, p.half), m);
+            } else {
+                _scene.draw(_box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), m);
+            }
+        }
+        // The level's platforms move by the physics step: drive them from its clock, one step ahead of the world's.
     }
 
     void fill_scene() {
         _scene.clear();
         _scene.camera = camera();
         apply(_s, _scene, environment(), _model.bounds, _pos);
-        if (_ecs_state && (!_characters.empty() || !_boxes.empty())) {
+        if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid())) {
             _ecs_state->propagate_transforms();
             _ecs_state->collect(_scene);
             if (_bodies) {
-                _bodies->config().debug_draw = _s.physics && _s.phys_debug;
+                _bodies->config().debug_draw = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug);
+                if (_s.ctrl && _s.ctrl_debug && _ctrl_hero.is_valid()) {
+                    // What the character touches: a cross at each contact and its normal (green: it can stand on it).
+                    for (const CharacterContact3D& k : _physics->character_contacts(_bodies->character_of(_ctrl_hero))) {
+                        _bodies->debug().cross(k.point, k.sensor ? Color::rgb(255, 220, 60) : Color::rgb(255, 60, 60));
+                        _bodies->debug().line(k.point, k.point + k.normal * 0.4f,
+                                              k.walkable ? Color::rgb(60, 255, 120) : Color::rgb(255, 120, 0));
+                    }
+                }
                 _bodies->collect_debug(*_r3d, _scene);
             }
+            draw_controller_level();
             if (_s.ik && _characters_are_people) {
                 // The hand's target (a small red ball), the tail's (a green one) and the step, in each person's own space as it was
                 // placed (they stay put while the person walks).
@@ -1465,7 +1657,17 @@ private:
     flecs::entity _floor;
     std::vector<flecs::entity> _boxes;
     Mesh _box_mesh;
+    Mesh _ball_mesh;
     bool _physics_started = false;
+    // The character controller section.
+    flecs::entity _ctrl_hero;
+    character_level::Level _ctrl_level;
+    bool _ctrl_built = false;
+    Vec3f _ctrl_origin{};
+    Quatf _ctrl_facing{};
+    float _ctrl_time = 0.0f, _ctrl_accumulator = 0.0f;
+    int _ctrl_steps = 0;
+    const Input* _input = nullptr;
     Model _model;
     Mesh _marker;
     Mesh _step_mesh;

@@ -206,6 +206,89 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
   mesh was made from.
 * `ground_query_from_world(world, mask, ignore)` is a `GroundQuery` for foot placement (`IKConstraint::ground`): a raycast.
 
+## Character controller
+
+`kin/physics3d/character3d.hpp` and the `World3D::*_character*` calls: a capsule controller on Jolt's `CharacterVirtual`, with its
+feet as the origin. The step is a pure function of (its state, the command, dt): no clock, the same bits with no workers, 1 or 4, and
+in `state_hash()`, `save_state()` and `restore_state()` (a restored world repeats the exact trajectory).
+
+```cpp
+kin::CharacterDesc3D desc;                       // radius 0.3, height 1.8, mass 70, slope 45, step 0.4, stick 0.5, walk 4 m/s, jump 5 m/s
+desc.position = {0, 1, 0};
+const kin::Character3D hero = world.create_character(desc);
+...each fixed step:
+world.set_character_input(hero, {.move = {0, 1}, .forward = camera.forward(), .jump = pressed, .sprint = held});
+world.step(dt);                                  // characters first (in number order), then the world
+const kin::CharacterState3D s = world.character(hero);   // position (feet), velocity, ground, ground_body, ground_speed, ...
+for (const kin::CharacterEvent3D& e : world.drain_character_events()) { /* Landed, LeftGround, HitHead, ContactBegin, ContactEnd */ }
+```
+
+* **Command.** `CharacterInput3D`: `move` (x right, y forward, each -1 to 1, cut to length 1), `forward` (a world vector, the camera's or
+  the character's; its part across `up` is used), `jump` (a level: a jump happens on a rising edge), `crouch`, `sprint`. Held until
+  set again. Never raw device state: it is what a netcode layer sends.
+* **Descriptor.** Capsule `radius`, `height`, `crouch_height`; `mass` and `push_strength` (N: a body that needs more to move is a
+  wall); `max_slope_degrees` (steeper ground is slid down), `max_step_height` (0 = no stairs), `step_down_distance` (the stick to the
+  ground: 0 = it hops over humps), `walk_speed`, `sprint_speed`, `crouch_speed`, `acceleration`, `deceleration`, `air_acceleration`,
+  `ground_friction` (scales acceleration and braking: 0.05 is ice), `wall_friction` (Coulomb against walls it is pressed to; 0 slides
+  along a wall at full speed), `gravity_scale`, `jump_speed` (apex = v^2 / 2g), options `coyote_seconds` and `jump_buffer_seconds` (off),
+  `up` (zero = against the world's gravity), `up_blend_rate`, `layer` (default `layers3d::Character`) and `collides_with` (a mask), `user_id`.
+* **Order.** `World3D::step` updates the characters BEFORE the world's step, in ascending handle number (Jolt's own order: a
+  character is swept against the world as the last step left it; a kinematic platform already holds this step's velocity, so a
+  character on it is carried exactly; what it pushes gets its impulse before the solver). Two characters that want the same room: the
+  lower number moves first.
+* **State.** `character(c)`: `position` (feet), `velocity` (what the last step achieved: the ground's included; a stair shows as a short
+  spike), `up`, `ground` (`OnGround`, `OnSteepSlope`, `Sliding`, `InAir`), `ground_body` / `ground_user_id` / `ground_normal` /
+  `ground_velocity`, `ground_speed` (m/s along the surface it stands on, relative to it: an animation blend's input), `vertical_speed`,
+  `crouching`, `stand_blocked`, `air_time`, `height`, `body`, `jumped`. `character_contacts(c)` lists what it touches (by body number;
+  point, normal toward it, sensor, walkable).
+* **Up and gravity.** Gravity for a character is `|world gravity| x gravity_scale` along its own `-up`. Default: up is against the world's
+  gravity and follows `set_gravity`; `set_character_up(c, v)` makes it explicit (a wall, a ceiling, a planet's surface). It turns toward
+  the target by `up_blend_rate` a second (normalised blending, no trigonometry), so walking onto a wall is a turn, not a jump.
+* **Crouch.** `input.crouch` decides each step; standing is tried every step while wanted and the head clearance is checked (it stays
+  crouched under a low ceiling and `stand_blocked` says so). `set_character_crouch` does it at once and says whether it could.
+* **Its body.** A kinematic capsule in its layer, never asleep (Jolt's inner body): other bodies are stopped by it, sensors report it,
+  queries hit it (`QueryFilter3D::ignore = state.body` for a foot ray). It is one of the world's bodies (`body_count()`, `bodies()`, the
+  hash, the debug draw); `destroy_body`, `set_position` and the other body calls refuse it. Two characters stop each other; they do not
+  push each other.
+* **Layers.** The body is in `desc.layer`; the world's layer table decides what else collides with it; `collides_with` masks what its own
+  movement hits (a layer left out is walked through).
+* **Events.** `Landed` (`speed`: how fast it was falling, `body`: the ground), `LeftGround` (`jumped`), `HitHead` (`speed` going up),
+  `ContactBegin` / `ContactEnd` (the body and its user id; `sensor` for a trigger volume). Each step's batch is in character order, then in
+  the order of the kinds.
+
+### Entities
+
+`CharacterController3D {desc, input, facing, apply_facing, state}` on an entity with `Transform3D`: made by the same system
+(`WorldPhysicsState3D`) after the bodies of the sync, in ascending entity id order, from the entity's world place (a `Collider3D` on the
+same entity makes no second body). The game sets `input` (and `facing`); the system sends it, steps, writes the feet into
+`Transform3D::position`, `facing` into its rotation (physics never turns a character) and the state into the component. Moving the
+entity from game code is a teleport. A character under a parent is rewritten as its place from the parent, as a body is.
+`character_events()` and the singleton `CharacterEvents3D` carry the events with entity ids. A kinematic platform's entity moved by game
+code carries a character standing on it (`follow_transform`). `rebuild(entity)` makes the character again from the descriptor.
+
+**Animation.** `locomotion_animator()` is an `Animator3D` with a `ground` state (a 1D blend over `speed`: idle, walk, run clips) and an
+`air` state (a fall pose), crossfading on `airborne`; add a `CharacterAnimationLink3D` to the entity and the system sets `speed` (the
+ground speed), `airborne`, `crouching` and `vertical` after each step, and hands the animator's foot placer constraint `feet` the
+physics world as its ground (`ground_query_from_world`, the character's own capsule and sensors left out) with weight 1 on the ground
+and 0 in the air. `drive_character_animator(animator, state, world)` does the same by hand.
+
+### The test level and the harness
+
+`tests/character_level.hpp` builds the level every test, the picture and the bench use: a floor, a ramp of 20 degrees up to a plateau
+and one of 35 down, a round hump, six stairs of 15 cm, a 60 cm ledge, a 50 degree ramp, a low tunnel, a light box and a heavy one, a
+platform that moves along X, one that turns, a trigger. The kin_reference scene `physics_character` runs a scripted route through it
+(commands, teleports between pieces, checkpoints: boxes the feet must be in at a frame) with a skinned person
+(`made/skinned_biped_walk.glb`, made by `tools/reference/make_scenes.py`), and `kin-physics3d-character` runs the same route from the
+same JSON with no GPU. `kin_physics3d_character_tests -r scene.json N` prints where the character is every N frames (to write
+checkpoints from).
+
+### Limits
+
+Jolt's capsule rolls over a step's corner, so the highest step climbed is about 0.1 m above `max_step_height` for this capsule. It has
+no friction of its own (the acceleration limits and `wall_friction` are kin's). The orientation of the capsule about its axis is not
+meaningful and is not kept; a character never turns itself. Character against character is blocking only, no pushing. Cross-platform
+determinism is Jolt's claim (only this machine was run). The viewer's level is on its physics floor only.
+
 ## Cost
 
 `kin_physics3d_bench` (built with the benchmarks): 500 boxes in a pile step in 1 to 4 ms, 2000 in
@@ -223,8 +306,10 @@ texts ([third_party_notices.md](third_party_notices.md)).
 
 Queries cost 1 to 8 microseconds against a 2000 body pile and 1 to 7 against a 100,000 triangle mesh; contact events add under 1 % to
 a 500 body step (persist events 6 %); the entity system adds 0.2 to 0.3 ms a step for 500 bodies. Table in the plan ("P2b").
+A character costs about 2 to 5 microseconds a step in the test level (100 of them 0.2 ms alone, 0.7 ms beside a heap of 500 boxes
+they wake); `kin_physics3d_bench characters`, table in the plan ("P2c").
 
 ## Not yet
 
-The character controller; grab and climb; ragdoll; ropes; soft bodies; per-contact material callbacks; continuous collision
+Grab and climb; ragdoll; ropes; soft bodies; per-contact material callbacks; continuous collision
 between dynamic bodies beyond Jolt's linear cast; scaled or mutable shapes (swap with `set_shape`).

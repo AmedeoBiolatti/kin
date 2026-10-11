@@ -1,0 +1,71 @@
+{
+ "name": "physics_character",
+ "purpose": "kin/physics3d's character controller (P2c) on its test level (tests/character_level.hpp): a skinned person (skinned_biped_walk.glb) runs a scripted route of commands through ramps of 20 and 35 degrees, a round hump, six stairs of 15 cm, a 60 cm ledge, a 50 degree ramp, a low tunnel (crouching), a light and a heavy box, a platform that moves, one that turns and a trigger volume. The route and its checkpoints are in this file; tests/physics3d_character_tests.cpp runs the same route with no GPU and asserts the positions. The character is an ECS entity (CharacterController3D) animated by a locomotion Animator3D with the foot placer on the physics floor; the debug lines show the bodies, its capsule and its contacts (green: a surface it can stand on, orange: a steeper one). No Cycles truth: the check is that two runs give the same picture byte for byte.",
+ "procedural": "physics_character",
+ "debug": true,
+ "lead": 456,
+ "view": {"samples": 4, "background": [128, 150, 178]},
+ "lights": {
+  "sun": {"direction": [-0.45, 0.8, -0.4], "color": [1.15, 1.09, 1.0]},
+  "fill": {"direction": [0.2, 0.5, 0.8], "color": [0.22, 0.22, 0.24]},
+  "ambient": [0.42, 0.43, 0.46],
+  "ground_ambient": [0.2, 0.2, 0.18],
+  "shadow_area": [[-6, -0.6, -31], [71, 8, 31]],
+  "shadow_resolution": 4096,
+  "shadow_cascades": 3,
+  "shadow_distance": 120
+ },
+ "cameras": [
+  {"name": "overview", "eye": [30, 36, 48], "target": [32, 0, -3], "fov": 55, "near": 0.1, "frame": 456},
+  {"name": "stairs", "follow": {"eye": [-4.5, 2.4, 5.0], "target": [1.2, 0.7, 0.0]}, "fov": 38, "near": 0.05, "frame": 456},
+  {"name": "tunnel", "follow": {"eye": [-5.0, 1.05, -0.9], "target": [1.5, 0.7, 0.0]}, "fov": 40, "near": 0.05, "frame": 960},
+  {"name": "platform", "follow": {"eye": [-3.2, 3.0, 5.5], "target": [0.0, 0.5, 0.0]}, "fov": 40, "near": 0.05, "frame": 1590},
+  {"name": "spinner", "follow": {"eye": [-3.0, 7.0, 7.0], "target": [-1.0, 0.3, 0.0]}, "fov": 40, "near": 0.05, "frame": 1740}
+ ],
+ "character": {
+  "start": [1, 0, 0],
+  "frames": 2040,
+  "script": [
+   {"frame": 0, "move": [0, 0], "forward": [1, 0, 0], "sprint": false, "crouch": false, "jump": false},
+   {"frame": 20, "jump": true},
+   {"frame": 21, "jump": false},
+   {"frame": 60, "move": [0, 1]},
+   {"frame": 240, "sprint": true},
+   {"frame": 340, "sprint": false},
+   {"frame": 540, "teleport": [38, 0, 6]},
+   {"frame": 630, "teleport": [38, 0, -6]},
+   {"frame": 720, "teleport": [46, 0, 12]},
+   {"frame": 840, "crouch": true},
+   {"frame": 1110, "crouch": false},
+   {"frame": 1230, "teleport": [43, 0, -12]},
+   {"frame": 1410, "teleport": [43, 0, -16]},
+   {"frame": 1500, "teleport": [61, 0.6, 18], "move": [0, 0]},
+   {"frame": 1680, "teleport": [64, 0.6, 24]},
+   {"frame": 1860, "teleport": [58, 0, -18], "move": [0, 1]},
+   {"frame": 1980, "move": [0, 0]}
+  ],
+  "checkpoints": [
+   {"frame": 15, "what": "at rest on the floor", "min": [0.9, -0.03, -0.05], "max": [1.1, 0.03, 0.05], "crouching": false},
+   {"frame": 45, "what": "at the top of its jump", "min": [0.9, 1.09, -0.05], "max": [1.1, 1.33, 0.05]},
+   {"frame": 120, "what": "walking on the flat at 4 m/s", "min": [3.921, -0.03, -0.05], "max": [4.421, 0.03, 0.05], "crouching": false},
+   {"frame": 195, "what": "on the 20 degree ramp", "min": [8.671, 1.022, -0.05], "max": [9.271, 1.182, 0.05]},
+   {"frame": 225, "what": "on the plateau (top y = 1.456)", "min": [10.509, 1.416, -0.05], "max": [11.309, 1.496, 0.05]},
+   {"frame": 285, "what": "down the 35 degree ramp at sprint speed and on the floor again", "min": [16.274, -0.03, -0.05], "max": [17.074, 0.03, 0.05]},
+   {"frame": 330, "what": "over the hump (0.3 m high), held to it", "min": [21.399, 0.26, -0.05], "max": [22.399, 0.34, 0.05]},
+   {"frame": 420, "what": "on the flat again", "min": [28.016, -0.03, -0.05], "max": [28.816, 0.03, 0.05]},
+   {"frame": 520, "what": "on top of the staircase (6 steps of 15 cm, y = 0.9)", "min": [34.382, 0.87, -0.05], "max": [35.182, 0.93, 0.05]},
+   {"frame": 600, "what": "stopped by the 60 cm ledge", "min": [39.58, -0.03, 5.95], "max": [39.78, 0.03, 6.05]},
+   {"frame": 690, "what": "the 50 degree ramp is not climbed", "min": [39.551, -0.15, -6.05], "max": [40.151, 0.15, -5.95]},
+   {"frame": 810, "what": "standing, stopped at the tunnel's roof", "min": [49.58, -0.03, 11.95], "max": [49.78, 0.03, 12.05], "crouching": false},
+   {"frame": 960, "what": "crouched, in the tunnel", "min": [53.38, -0.03, 11.95], "max": [53.98, 0.03, 12.05], "crouching": true},
+   {"frame": 1100, "what": "crouched, at the tunnel's far end", "min": [58.047, -0.03, 11.95], "max": [58.647, 0.03, 12.05], "crouching": true},
+   {"frame": 1190, "what": "out of the tunnel and standing", "min": [63.713, -0.03, 11.95], "max": [64.313, 0.03, 12.05], "crouching": false},
+   {"frame": 1350, "what": "pushing the light box", "min": [49.661, -0.03, -12.05], "max": [50.661, 0.03, -11.95]},
+   {"frame": 1470, "what": "stopped by the heavy box", "min": [44.18, -0.03, -16.05], "max": [44.38, 0.03, -15.95]},
+   {"frame": 1590, "what": "carried by the platform that moves along X", "min": [63.55, 0.46, 17.95], "max": [63.85, 0.54, 18.05]},
+   {"frame": 1740, "what": "carried round by the turning platform", "min": [63.12, 0.46, 22.297], "max": [63.52, 0.54, 22.697]},
+   {"frame": 1920, "what": "walking through the sensor volume", "min": [61.6, -0.03, -18.05], "max": [62.2, 0.03, -17.95]},
+   {"frame": 2030, "what": "stopped", "min": [65.8, -0.03, -18.05], "max": [66.2, 0.03, -17.95]}
+  ]
+ }
+}

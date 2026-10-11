@@ -9,6 +9,21 @@ releases may change APIs.
 
 ### Added
 
+- 3D physics, the character controller (experimental; see [3D physics](physics_3d.md) "Character controller" and the plan's "P2c"):
+  `kin/physics3d/character3d.hpp` and `World3D::create_character`, `set_character_input`, `character`, `character_contacts`,
+  `teleport_character`, `set_character_up`, `set_character_crouch`, `set_character_desc`, `character_events`: a capsule controller on
+  Jolt's `CharacterVirtual` (slopes up to a set angle and a slide down steeper ones, stairs up to a step height, stick to the ground
+  over humps and down ramps, jumps with optional coyote time and buffering, moving platforms and dynamic bodies carry it, it pushes
+  dynamic bodies by its strength, layers and a mask, sensors, crouching with a clearance check, wall and ground friction, an up vector
+  per character that turns smoothly so that walls and ceilings can be walked on); the command is a struct (move, forward, jump,
+  crouch, sprint), the step is a pure function of state, command and dt, the same bits on every worker count, in `state_hash()`,
+  `save_state()` and `restore_state()`; characters update before the world's step in number order. ECS: `CharacterController3D`
+  (made in entity id order, written back to Transform3D, events with entity ids), `CharacterAnimationLink3D` and
+  `locomotion_animator` (speed, airborne, crouching and the foot placer's ground from the physics world). Level
+  `tests/character_level.hpp`; `kin_reference` scene `physics_character` (a scripted route and its checkpoints, also run with no GPU
+  by `kin-physics3d-character`); Sponza Walk "Character controller" section and `--preset controller`; `kin_physics3d_bench
+  characters`. `DebugDraw3D` draws a capsule wrapped for an offset. Off unless used; the no-3D build and every existing picture are
+  unchanged. Not in this step: grab and climb, ragdoll, ropes.
 - 3D physics, queries, events, constraints, debug draw and entities (experimental; see [3D physics](physics_3d.md) and the plan's "P2b"):
   `World3D::raycast`, `raycast_all`, `shape_cast`, `overlap`, `point_inside`, `closest_point` (a layer mask, an ignored body, sensors
   in or out; values in a fixed order, no callbacks); contact events per body pair (Begin, Persist, End; sensors; user ids, point,

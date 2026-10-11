@@ -2,8 +2,9 @@
 
 // Procedural skinned characters for Sponza Walk (docs/3d_plan.md, P1a and P1b), made in code so that the viewer needs no
 // download: make_character, a tube bound to a chain of three joints with three clips (P1a); and make_person, a person on 18
-// joints (a leg and an arm each side, arms out, 1.95 m, facing +Z) with the same clip names, which the inverse kinematics section
-// poses (P1b). P1c extends them (a real model).
+// joints (a leg and an arm each side, arms out, 1.95 m, facing +Z) with the same clip names (and Walk, Run and Fall, which the
+// character controller section blends by speed, P2c), which the inverse kinematics section poses (P1b). P1c extends them
+// (a real model).
 #include <kin/render3d/ik.hpp>
 #include <kin/render3d/model.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -206,6 +207,46 @@ inline PersonRig person_rig() {
         fore.times = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
         fore.values = {Quatf::axis_angle({0, 1, 0}, 0.0f), Quatf::axis_angle({0, 1, 0}, 35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f),
                        Quatf::axis_angle({0, 1, 0}, -35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f)};
+    }));
+    // Locomotion for the character controller section (P2c): "Walk" (a 1.0 s cycle), "Run" (0.6 s) and "Fall" (a held pose). Legs
+    // swing about their own X (a negative angle swings a foot forward, +Z), the knee folds the shank back as the leg comes
+    // through, the arms swing against the legs about Y, the spine leans. Eight keys a cycle.
+    const auto gait = [&](const char* name, float period, float hip, float knee, float arm, float lean) {
+        return clip(name, period, [&](AnimClip3D& c) {
+            constexpr int keys = 8;
+            const auto track = [&](const char* joint_name, Vec3f axis, auto&& angle) {
+                Track3D<Quatf>& t = c.channels[std::size_t(sk.find(joint_name))].rotation;
+                for (int k = 0; k <= keys; ++k) {
+                    const float phase = 6.2831853f * float(k) / float(keys);
+                    t.times.push_back(period * float(k) / float(keys));
+                    t.values.push_back(Quatf::axis_angle(axis, angle(phase)));
+                }
+            };
+            for (const float sign : {1.0f, -1.0f}) {
+                const char side = sign > 0.0f ? 'L' : 'R';
+                const std::string s = std::string(1, side);
+                track(("hip_" + s).c_str(), {1, 0, 0}, [&](float p) { return -sign * hip * std::sin(p); });
+                track(("knee_" + s).c_str(), {1, 0, 0},
+                      [&](float p) { return knee * std::max(0.0f, std::cos(p + (sign > 0.0f ? 0.0f : 3.14159265f))); });
+                track(("shoulder_" + s).c_str(), {0, 1, 0}, [&](float p) { return sign * arm * std::sin(p); });
+            }
+            track("spine", {1, 0, 0}, [&](float p) { return lean + 1.5f * std::sin(2.0f * p); });
+        });
+    };
+    rig.clips.push_back(gait("Walk", 1.0f, 26.0f, 38.0f, 18.0f, 2.0f));
+    rig.clips.push_back(gait("Run", 0.6f, 42.0f, 70.0f, 38.0f, 9.0f));
+    rig.clips.push_back(clip("Fall", 1.0f, [&](AnimClip3D& c) {
+        const auto held = [&](const char* joint_name, Vec3f axis, float deg) {
+            Track3D<Quatf>& t = c.channels[std::size_t(sk.find(joint_name))].rotation;
+            t.times = {0.0f, 1.0f};
+            t.values = {Quatf::axis_angle(axis, deg), Quatf::axis_angle(axis, deg)};
+        };
+        held("hip_L", {1, 0, 0}, -20.0f);
+        held("hip_R", {1, 0, 0}, 12.0f);
+        held("knee_L", {1, 0, 0}, 30.0f);
+        held("knee_R", {1, 0, 0}, 55.0f);
+        held("shoulder_L", {0, 0, 1}, -35.0f);
+        held("shoulder_R", {0, 0, 1}, 35.0f);
     }));
     return rig;
 }

@@ -27,6 +27,13 @@
 //    a dynamic entity's Transform3D between steps, the body is moved there (velocities kept).
 //  * Determinism: bodies are made and destroyed in ascending entity id order, so body numbers, the step and the events
 //    are the same in two runs that do the same things.
+//  * Characters (kin/physics3d/character3d.hpp): an entity with Transform3D and CharacterController3D has a capsule
+//    controller, made after the bodies of the same sync in ascending entity id order (and it gets no body from a
+//    Collider3D). The game sets `input` each step (and `facing`); the system sends it, steps the world (which updates
+//    the characters before its own step), and writes the feet into Transform3D::position, the facing into its rotation
+//    (physics never turns the character), and the state back into the component. A character is world level like a body.
+//    Its events (landed, left the ground, hit head, contacts begun and ended) come in `character_events()` with the
+//    entity ids, in the world's order.
 
 #if !defined(KIN_EXPERIMENTAL_3D)
 #error "kin's 3D physics is experimental: configure kin with -DKIN_EXPERIMENTAL_3D=ON"
@@ -99,6 +106,44 @@ struct PhysicsContacts3D {
     std::vector<ContactEvent3D> events;
 };
 
+// A character controller on an entity (see the rules at the top). `desc` is read when the character is made (position
+// and user id come from the entity; `rebuild(entity)` makes it again from the descriptor as it is); `input` is the
+// command for the next steps; `state` is the controller as the last step left it.
+struct CharacterController3D {
+    CharacterDesc3D desc;
+    CharacterInput3D input;
+    // Written to Transform3D::rotation after each step when `apply_facing` (the game turns the character, not physics).
+    Quatf facing{};
+    bool apply_facing = true;
+    // Written by the system.
+    CharacterState3D state;
+};
+
+// The character made for an entity (set by the system, as PhysicsBody3D is).
+struct PhysicsCharacter3D {
+    Character3D character{};
+};
+
+// The character events of the last step (or advance), on the ECS world as a singleton too (user ids are entity ids).
+struct CharacterEvents3D {
+    std::vector<CharacterEvent3D> events;
+};
+
+// Maps a character's state to an Animator3D on the same entity each step (set it up with `locomotion_animator`, or
+// make your own machine that reads the same parameters): `speed` the ground speed in m/s, `airborne` true when not on
+// the ground (a jump, a fall, a slide), `crouching`, `vertical` the speed up. The foot placer constraint `feet` (an
+// IKKind::FootPlacer) is given the physics world as its ground, ignoring the character's own capsule, and its weight is
+// 1 on the ground and 0 in the air (it fades by the constraint's own fade_seconds). Names that are empty are not set.
+struct CharacterAnimationLink3D {
+    std::string speed = "speed";
+    std::string airborne = "airborne";
+    std::string crouching = "crouching";
+    std::string vertical = "vertical";
+    std::string feet = "feet";
+    // What the foot rays hit: all layers but the character layers and sensors.
+    Layer3DMask ground_mask = all_layers3d & ~layer_bit(layers3d::Character) & ~layer_bit(layers3d::Sensor);
+};
+
 struct WorldPhysicsState3DConfig {
     // advance() steps in whole multiples of this, the way the engine's fixed step does.
     f32 fixed_dt = 1.0f / 60.0f;
@@ -140,6 +185,12 @@ public:
     // The contact events of the last step() (all the steps of one advance()), in the world's order, with the
     // entity ids in user_a and user_b.
     std::span<const ContactEvent3D> events() const { return _events; }
+    // The character events of the same steps (entity ids in `user_id` and `body_user_id`).
+    std::span<const CharacterEvent3D> character_events() const { return _character_events; }
+    // The character made for an entity (invalid when it has none yet).
+    Character3D character_of(flecs::entity entity) const;
+    // Entities that have a character now, in ascending id order.
+    std::size_t character_count() const { return _characters.size(); }
     // The entity a user id of an event is (invalid when it is gone).
     flecs::entity entity_of(u64 user_id) const;
     // The body of an entity (invalid when it has none yet).
@@ -173,16 +224,55 @@ private:
     void create_body(flecs::entity entity, Bound& out);
     void write_back(Bound& b, Vec3f position, Quatf rotation);
 
+    struct BoundCharacter {
+        flecs::entity_t entity = 0;
+        Character3D character{};
+        // The Transform3D position as this system last wrote it (a change by game code is a teleport).
+        Vec3f last_position{};
+        // The feet after the last step and before it (interpolation).
+        Vec3f position{}, previous_position{};
+        Vec3f scale{1.0f, 1.0f, 1.0f};
+        bool rebuild = false;
+    };
+    void sync_characters();
+    void characters_to_world(f32 dt);
+    void characters_from_world();
+    void write_character(BoundCharacter& c, Vec3f feet);
+
     flecs::world _ecs;
     World3D& _physics;
     WorldPhysicsState3DConfig _config;
     flecs::query<const Transform3D, const Collider3D, const RigidBody3D*> _query;
+    flecs::query<const Transform3D, const CharacterController3D> _character_query;
     std::vector<Bound> _bound; // ascending entity id
+    std::vector<BoundCharacter> _characters; // ascending entity id
     std::vector<ContactEvent3D> _events;
+    std::vector<CharacterEvent3D> _character_events;
     f32 _accumulator = 0.0f;
     DebugDraw3D _debug;
     Mesh _debug_mesh; // the lines of the last collect_debug, kept so the GPU is done with them before they go
 };
+
+// An Animator3D for a character: a machine with `ground` (a 1D blend over `speed`: `idle` at 0, `walk` at walk_speed,
+// `run` at run_speed) and `air` (the clip `fall`), crossfading on `airborne`. The clips are looked up by name when it plays;
+// a name that is empty or missing is left out of the blend. Pair it with CharacterAnimationLink3D (same names).
+struct LocomotionClips3D {
+    std::string idle = "idle";
+    std::string walk = "walk";
+    std::string run = "run";
+    std::string fall = "fall";
+    f32 walk_speed = 1.6f; // the speed (m/s) at which the walk clip is right for the feet
+    f32 run_speed = 4.2f;
+    f32 fade_seconds = 0.15f;
+    std::string speed_param = "speed";
+    std::string airborne_param = "airborne";
+};
+Animator3D locomotion_animator(const LocomotionClips3D& clips = {});
+
+// Drives `animator` from the state as the component's system does (see CharacterAnimationLink3D); for entities that are
+// not driven by the system (a replay, a puppet). `world` is where the foot rays go (`state.body` is ignored).
+void drive_character_animator(Animator3D& animator, const CharacterState3D& state, const World3D& world,
+                              const CharacterAnimationLink3D& link = {});
 
 // A ground query for foot placement (kin/render3d/ik.hpp) over a World3D: the first surface along the segment, in the
 // world's space, by raycast. `ignore` is the character's own body. The world must outlive the query.

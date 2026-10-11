@@ -156,6 +156,7 @@ WorldPhysicsState3D::WorldPhysicsState3D(flecs::world& world, World3D& physics, 
     , _physics(physics)
     , _config(config)
     , _query(world.query_builder<const Transform3D, const Collider3D, const RigidBody3D*>().build())
+    , _character_query(world.query_builder<const Transform3D, const CharacterController3D>().build())
     , _debug(config.debug) {}
 
 void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out) {
@@ -203,7 +204,12 @@ void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out) {
 void WorldPhysicsState3D::sync_bodies() {
     // The entities that should have a body, by id.
     std::vector<flecs::entity> wanted;
-    _query.each([&](flecs::entity e, const Transform3D&, const Collider3D&, const RigidBody3D*) { wanted.push_back(e); });
+    _query.each([&](flecs::entity e, const Transform3D&, const Collider3D&, const RigidBody3D*) {
+        // A character is its own capsule: a collider beside it would make a second body for the same thing.
+        if (!e.has<CharacterController3D>()) {
+            wanted.push_back(e);
+        }
+    });
     std::ranges::sort(wanted, [](flecs::entity a, flecs::entity b) { return a.id() < b.id(); });
 
     // Destroy first (ascending), then create (ascending): the order is a function of the ids only.
@@ -250,6 +256,140 @@ void WorldPhysicsState3D::sync_bodies() {
             e.set<PhysicsBody3D>({found->body});
         }
     }
+    sync_characters();
+}
+
+void WorldPhysicsState3D::sync_characters() {
+    std::vector<flecs::entity> wanted;
+    _character_query.each([&](flecs::entity e, const Transform3D&, const CharacterController3D&) { wanted.push_back(e); });
+    std::ranges::sort(wanted, [](flecs::entity a, flecs::entity b) { return a.id() < b.id(); });
+
+    // Destroyed first (ascending), then made (ascending), as bodies are.
+    std::vector<BoundCharacter> kept;
+    kept.reserve(_characters.size());
+    std::vector<flecs::entity> to_create;
+    std::size_t i = 0, j = 0;
+    while (i < _characters.size() || j < wanted.size()) {
+        const bool have_bound = i < _characters.size();
+        const bool have_wanted = j < wanted.size();
+        if (have_bound && (!have_wanted || _characters[i].entity < wanted[j].id())) {
+            _physics.destroy_character(_characters[i].character);
+            ++i;
+        } else if (have_wanted && (!have_bound || wanted[j].id() < _characters[i].entity)) {
+            to_create.push_back(wanted[j]);
+            ++j;
+        } else {
+            if (_characters[i].rebuild || !_physics.contains(_characters[i].character)) {
+                _physics.destroy_character(_characters[i].character);
+                to_create.push_back(wanted[j]);
+            } else {
+                kept.push_back(_characters[i]);
+            }
+            ++i;
+            ++j;
+        }
+    }
+    for (const flecs::entity e : to_create) {
+        const CharacterController3D& controller = *e.get<CharacterController3D>();
+        const Placed pose = decompose(world_matrix(e));
+        CharacterDesc3D desc = controller.desc;
+        desc.position = pose.position;
+        desc.user_id = e.id();
+        BoundCharacter c;
+        c.entity = e.id();
+        c.character = _physics.create_character(desc);
+        c.scale = pose.scale;
+        c.last_position = e.get<Transform3D>()->position;
+        c.position = c.previous_position = pose.position;
+        if (!c.character.valid()) {
+            KIN_LOG_WARN_F("physics3d", "entity has no valid character (descriptor refused)",
+                           (LogFields{{.name = "entity", .value = std::to_string(e.id())}}));
+        }
+        kept.push_back(c);
+    }
+    std::ranges::sort(kept, [](const BoundCharacter& a, const BoundCharacter& b) { return a.entity < b.entity; });
+    std::erase_if(kept, [](const BoundCharacter& c) { return !c.character.valid(); });
+    _characters = std::move(kept);
+    for (const flecs::entity e : to_create) {
+        const auto found = std::ranges::lower_bound(_characters, e.id(), {}, &BoundCharacter::entity);
+        if (found != _characters.end() && found->entity == e.id()) {
+            e.set<PhysicsCharacter3D>({found->character});
+        }
+    }
+}
+
+void WorldPhysicsState3D::write_character(BoundCharacter& c, Vec3f feet) {
+    flecs::entity e(_ecs, c.entity);
+    if (!e.is_alive()) {
+        return;
+    }
+    Transform3D* t = e.get_mut<Transform3D>();
+    if (t == nullptr) {
+        return;
+    }
+    if (!e.parent().is_valid() || parent_matrix(e) == Mat4f{}) {
+        t->position = feet;
+    } else {
+        const Mat4f local = parent_matrix(e).inverse() * Mat4f::translation(feet);
+        t->position = {local.m[12], local.m[13], local.m[14]};
+    }
+    c.last_position = t->position;
+}
+
+void WorldPhysicsState3D::characters_to_world(f32) {
+    for (BoundCharacter& c : _characters) {
+        flecs::entity e(_ecs, c.entity);
+        if (!e.is_alive()) {
+            continue;
+        }
+        const Transform3D* t = e.get<Transform3D>();
+        const CharacterController3D* controller = e.get<CharacterController3D>();
+        if (t == nullptr || controller == nullptr) {
+            continue;
+        }
+        // Moved by game code since we wrote it: a teleport to where it was put (its world place now).
+        if (t->position != c.last_position) {
+            const Placed p = decompose(world_matrix(e));
+            _physics.teleport_character(c.character, p.position);
+            c.position = c.previous_position = p.position;
+            c.last_position = t->position;
+        }
+        _physics.set_character_input(c.character, controller->input);
+    }
+}
+
+void WorldPhysicsState3D::characters_from_world() {
+    for (BoundCharacter& c : _characters) {
+        flecs::entity e(_ecs, c.entity);
+        if (!e.is_alive()) {
+            continue;
+        }
+        const CharacterState3D state = _physics.character(c.character);
+        c.previous_position = c.position;
+        c.position = state.position;
+        write_character(c, state.position);
+        CharacterController3D* controller = e.get_mut<CharacterController3D>();
+        if (controller != nullptr) {
+            controller->state = state;
+            if (controller->apply_facing) {
+                if (Transform3D* t = e.get_mut<Transform3D>()) {
+                    t->rotation = controller->facing;
+                }
+            }
+        }
+        // The animator, when the entity has the link.
+        const CharacterAnimationLink3D* link = e.get<CharacterAnimationLink3D>();
+        if (link != nullptr) {
+            if (Animator3D* animator = e.get_mut<Animator3D>()) {
+                drive_character_animator(*animator, state, _physics, *link);
+            }
+        }
+    }
+}
+
+Character3D WorldPhysicsState3D::character_of(flecs::entity entity) const {
+    const auto found = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
+    return found != _characters.end() && found->entity == entity.id() ? found->character : Character3D{};
 }
 
 void WorldPhysicsState3D::write_back(Bound& b, Vec3f position, Quatf rotation) {
@@ -280,6 +420,7 @@ void WorldPhysicsState3D::step(f32 dt) {
         return;
     }
     _events.clear();
+    _character_events.clear();
     sync_bodies();
 
     // Entities to bodies.
@@ -310,6 +451,7 @@ void WorldPhysicsState3D::step(f32 dt) {
         }
     }
 
+    characters_to_world(dt);
     _physics.step(dt);
 
     // Bodies to entities (the awake dynamic ones: a sleeping body has not moved).
@@ -327,6 +469,8 @@ void WorldPhysicsState3D::step(f32 dt) {
         write_back(b, b.position, b.rotation);
     }
 
+    characters_from_world();
+
     // Events: out of the world, in its order.
     for (const ContactEvent3D& e : _physics.drain_events()) {
         _events.push_back(e);
@@ -334,6 +478,14 @@ void WorldPhysicsState3D::step(f32 dt) {
     PhysicsContacts3D contacts;
     contacts.events = _events;
     _ecs.set<PhysicsContacts3D>(std::move(contacts));
+    for (const CharacterEvent3D& e : _physics.drain_character_events()) {
+        _character_events.push_back(e);
+    }
+    if (!_characters.empty() || !_character_events.empty()) {
+        CharacterEvents3D events;
+        events.events = _character_events;
+        _ecs.set<CharacterEvents3D>(std::move(events));
+    }
 }
 
 i32 WorldPhysicsState3D::advance(f32 frame_seconds) {
@@ -343,9 +495,11 @@ i32 WorldPhysicsState3D::advance(f32 frame_seconds) {
     _accumulator += frame_seconds;
     i32 steps = 0;
     std::vector<ContactEvent3D> all;
+    std::vector<CharacterEvent3D> character_all;
     while (_accumulator >= _config.fixed_dt && steps < std::max(1, _config.max_steps)) {
         step(_config.fixed_dt);
         all.insert(all.end(), _events.begin(), _events.end());
+        character_all.insert(character_all.end(), _character_events.begin(), _character_events.end());
         _accumulator -= _config.fixed_dt;
         ++steps;
     }
@@ -354,10 +508,16 @@ i32 WorldPhysicsState3D::advance(f32 frame_seconds) {
     }
     // One advance's events: all of its steps' batches.
     _events = std::move(all);
+    _character_events = std::move(character_all);
     if (steps > 1) {
         PhysicsContacts3D contacts;
         contacts.events = _events;
         _ecs.set<PhysicsContacts3D>(std::move(contacts));
+        if (!_characters.empty() || !_character_events.empty()) {
+            CharacterEvents3D events;
+            events.events = _character_events;
+            _ecs.set<CharacterEvents3D>(std::move(events));
+        }
     }
     return steps;
 }
@@ -370,12 +530,19 @@ void WorldPhysicsState3D::interpolate(f32 alpha) {
         }
         write_back(b, lerp(b.previous_position, b.position, alpha), slerp(b.previous_rotation, b.rotation, alpha));
     }
+    for (BoundCharacter& c : _characters) {
+        write_character(c, lerp(c.previous_position, c.position, alpha));
+    }
 }
 
 void WorldPhysicsState3D::rebuild(flecs::entity entity) {
     const auto found = std::ranges::lower_bound(_bound, entity.id(), {}, &Bound::entity);
     if (found != _bound.end() && found->entity == entity.id()) {
         found->rebuild = true;
+    }
+    const auto character = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
+    if (character != _characters.end() && character->entity == entity.id()) {
+        character->rebuild = true;
     }
 }
 
@@ -402,6 +569,63 @@ void WorldPhysicsState3D::collect_debug(Renderer3D& renderer, Scene3D& scene) {
     }
     _debug_mesh = draw_debug_lines(renderer, scene, d.lines());
     d.clear();
+}
+
+Animator3D locomotion_animator(const LocomotionClips3D& clips) {
+    Animator3D a;
+    auto machine = std::make_shared<AnimationStateMachine>();
+    machine->initial = "ground";
+    machine->states = {{"ground", ""}, {"air", clips.fall}};
+    AnimTransition up;
+    up.from = "ground";
+    up.to = "air";
+    up.when = {{clips.airborne_param, CondOp::IsTrue, 0.0f}};
+    AnimTransition down;
+    down.from = "air";
+    down.to = "ground";
+    down.when = {{clips.airborne_param, CondOp::IsFalse, 0.0f}};
+    machine->transitions = {up, down};
+    a.machine = machine;
+    Animator3D::BlendSpace space;
+    space.parameter = clips.speed_param;
+    if (!clips.idle.empty()) {
+        space.entries.push_back({clips.idle, 0.0f});
+    }
+    if (!clips.walk.empty()) {
+        space.entries.push_back({clips.walk, clips.walk_speed});
+    }
+    if (!clips.run.empty()) {
+        space.entries.push_back({clips.run, clips.run_speed});
+    }
+    a.blend_spaces["ground"] = space;
+    a.fade_seconds = clips.fade_seconds;
+    a.remove_root_motion = true;
+    return a;
+}
+
+void drive_character_animator(Animator3D& animator, const CharacterState3D& state, const World3D& world,
+                              const CharacterAnimationLink3D& link) {
+    const bool on_ground = state.ground == CharacterGround3D::OnGround;
+    if (!link.speed.empty()) {
+        animator.params.set_float(link.speed, on_ground ? state.ground_speed : length(Vec3f{state.velocity.x, 0.0f, state.velocity.z}));
+    }
+    if (!link.airborne.empty()) {
+        animator.params.set_bool(link.airborne, !on_ground);
+    }
+    if (!link.crouching.empty()) {
+        animator.params.set_bool(link.crouching, state.crouching);
+    }
+    if (!link.vertical.empty()) {
+        animator.params.set_float(link.vertical, state.vertical_speed);
+    }
+    if (!link.feet.empty()) {
+        if (IKConstraint* feet = animator.find_ik(link.feet)) {
+            // The feet go where the physics world's floor is, never onto the character's own capsule; in the air the
+            // clip's feet are the right ones (the weight fades by the constraint's own time).
+            feet->ground = ground_query_from_world(world, link.ground_mask, state.body);
+            feet->set_weight(on_ground ? 1.0f : 0.0f);
+        }
+    }
 }
 
 GroundQuery ground_query_from_world(const World3D& world, Layer3DMask mask, Body3D ignore) {

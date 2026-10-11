@@ -6,6 +6,7 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/CompoundShape.h>
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
 #include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
@@ -131,6 +132,16 @@ void DebugDraw3D::jolt_shape(const void* erased, Vec3f com, Quatf q, Color color
                 line(a, b, color);
             }
         }
+        return;
+    }
+    case JPH::EShapeSubType::RotatedTranslated: {
+        // A character's capsule (its feet are the origin): the inner shape has the same centre of mass, turned by the
+        // wrapper's own rotation.
+        if (depth >= 4) {
+            return;
+        }
+        const auto* wrapped = static_cast<const JPH::RotatedTranslatedShape*>(shape);
+        jolt_shape(wrapped->GetInnerShape(), com, (q * from_jolt(wrapped->GetRotation())).normalized(), color, depth + 1);
         return;
     }
     case JPH::EShapeSubType::StaticCompound:

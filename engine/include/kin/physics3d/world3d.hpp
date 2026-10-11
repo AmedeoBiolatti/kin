@@ -28,6 +28,8 @@
 #include <kin/core/jobs.hpp>
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
+#include <kin/physics3d/character3d.hpp>
+#include <kin/physics3d/handles3d.hpp>
 #include <kin/physics3d/shape3d.hpp>
 
 #include <memory>
@@ -36,48 +38,6 @@
 #include <vector>
 
 namespace kin {
-
-enum class Body3DMotion : u8 {
-    Static,    // never moves (moved by set_position it stays where put; costs nothing)
-    Kinematic, // moved by the caller (velocity or move_kinematic), pushes dynamic bodies
-    Dynamic,   // moved by forces, contacts and gravity
-};
-
-// A body in a World3D: an index and a generation, so that a handle to a
-// destroyed body never names the body that took its place.
-struct Body3D {
-    u32 index = UINT32_MAX;
-    u32 generation = 0;
-
-    bool valid() const { return index != UINT32_MAX; }
-    explicit operator bool() const { return valid(); }
-    friend constexpr bool operator==(Body3D, Body3D) = default;
-};
-
-// Collision layers: a body is in one of 32, and a world holds a 32 x 32 table of
-// which pairs collide. A set of layers is a 32-bit mask, bit n for layer n, also
-// what queries filter by (a ray that ignores the character's layer, ...).
-using Layer3DMask = u32;
-
-namespace layers3d {
-// Layer numbers. 0 is for static bodies only (it is its own broad phase tree);
-// the rest are free for any body but are named for what they are usually used for.
-inline constexpr u8 Static = 0;
-inline constexpr u8 Dynamic = 1;
-inline constexpr u8 Kinematic = 2;
-inline constexpr u8 Character = 3;
-// Detects but does not collide: sensors pair with nothing else's layer by
-// default (a trigger volume sits here). Events come with P2b's queries.
-inline constexpr u8 Sensor = 4;
-inline constexpr u8 User0 = 5; // 5 to 31 are the game's
-inline constexpr u8 Count = 32;
-// "The layer that goes with the motion type": Static, Kinematic or Dynamic.
-inline constexpr u8 Auto = 255;
-} // namespace layers3d
-
-constexpr Layer3DMask layer_bit(u8 layer) { return layer < 32 ? (Layer3DMask{1} << layer) : 0; }
-inline constexpr Layer3DMask all_layers3d = 0xFFFFFFFFu;
-
 
 // A constraint between two bodies (or a body and the world): an index and a generation,
 // as Body3D is.
@@ -461,6 +421,41 @@ public:
     void set_constraint_enabled(Constraint3D constraint, bool enabled);
     // The constraints' live handles, by number.
     std::vector<Constraint3D> constraints() const;
+
+    // --- characters (character3d.hpp) ---
+    // A capsule controller with its feet at desc.position. An invalid handle for a non-finite number, a radius or
+    // height that is not positive (or a height under 2 x radius) or a layer out of range. The inner body is made now
+    // (it takes the next body number).
+    Character3D create_character(const CharacterDesc3D& desc);
+    // Does nothing for a handle that is not (or no longer) a character; the body goes with it.
+    void destroy_character(Character3D character);
+    bool contains(Character3D character) const;
+    i32 character_count() const;
+    // The live characters, by number: the order step() updates them in.
+    std::vector<Character3D> characters() const;
+    // The command for the coming steps (held until set again). Takes effect at the next step().
+    void set_character_input(Character3D character, const CharacterInput3D& input);
+    CharacterInput3D character_input(Character3D character) const;
+    // Everything readable about it, as the last step() left it (a default state for a dead handle).
+    CharacterState3D character(Character3D character) const;
+    // What it touches (see CharacterContact3D), sorted by body number.
+    std::vector<CharacterContact3D> character_contacts(Character3D character) const;
+    // To a place at once: velocity cleared, the up vector kept, the ground looked for at once. (The next step moves
+    // it from there.)
+    void teleport_character(Character3D character, Vec3f feet);
+    // Makes `up` the character's explicit up vector (any length but zero; zero goes back to against the world's
+    // gravity). It turns toward it at CharacterDesc3D::up_blend_rate, or at once when `instant`.
+    void set_character_up(Character3D character, Vec3f up, bool instant = false);
+    // Crouches or stands at once. Standing is refused (false, and it stays crouched) when the standing capsule
+    // would hit something above. The next step's input.crouch decides again.
+    bool set_character_crouch(Character3D character, bool crouch);
+    // Changes how it is simulated while it lives: the numbers of the descriptor but the shape, layer and position
+    // (radius, heights, layer and mask are fixed at creation).
+    void set_character_desc(Character3D character, const CharacterDesc3D& desc);
+    // The events of the steps since the last drain (landings, leaving the ground, head bumps, contacts begun and ended),
+    // each step's batch in character order, then in the order the kinds are listed.
+    std::span<const CharacterEvent3D> character_events() const;
+    std::vector<CharacterEvent3D> drain_character_events();
 
     // Sleeping. activate() wakes a body (its island with it, at the next step);
     // deactivate() puts it to sleep at once.

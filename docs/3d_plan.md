@@ -3455,6 +3455,201 @@ pictures each, all byte for byte equal to the HEAD binary's, and the 17 of the s
 - Not run: the "all-on" identity render on the Windows or MSVC build; the panel's click path of the new section (no display).
 
 
+#### P2c — character controller — results
+
+Done 2026-10-11 on `exp/3d-rendering` (head 2e665ad plus the working tree, not committed). Grab and climb, ragdoll and ropes are the
+next steps (P2d onward); the constraints and the character they use are here.
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| Controller | `kin/physics3d/character3d.hpp` (data), `World3D::create_character`, `set_character_input`, `character`, `character_contacts`, `teleport_character`, `set_character_up`, `set_character_crouch`, `set_character_desc`, `character_events`; `engine/src/physics3d/character3d.cpp` | Jolt's `CharacterVirtual` behind kin types, no Jolt header in a public header; handles are `{index, generation}` |
+| ECS | `CharacterController3D`, `PhysicsCharacter3D`, `CharacterEvents3D`, `CharacterAnimationLink3D`, `locomotion_animator`, `drive_character_animator` in `kin/ecs/physics3d.hpp` | made in ascending entity id order after the bodies; written back to `Transform3D`; events carry entity ids |
+| Level, route | `tests/character_level.hpp`, `tests/reference/scenes/physics_character.json` | one level and one scripted route (commands, teleports, checkpoints) for the CPU test, the picture and the bench |
+| Tests, bench | `kin-physics3d-character` (CPU), 6 more functions in `kin-physics3d-ecs`, `kin_physics3d_bench characters` | |
+| Harness, viewer | `kin_reference` scene `physics_character`; Sponza Walk section "Character controller", `--preset controller` | |
+
+**Decisions where the plan was open.**
+1. *Characters update BEFORE the world's step* (Jolt's samples do the same: `PrePhysicsUpdate`): a character is moved by swept tests against
+   the world as the last step left it, a kinematic platform already holds the velocity this step will give it (so a character on it is
+   carried exactly), and what it pushes gets its impulse before the solver runs. Within the call, characters go in ascending handle
+   number (documented in `character3d.hpp`, tested by two characters meeting: the lower number moves first and gets the room; made in
+   the other order, the other one does).
+2. *The controller has a body in the world* (Jolt's inner rigid body, a kinematic capsule in layer `Character`, never asleep): other bodies
+   are stopped by it, sensors report it, queries hit it (`ignore` it with `CharacterState3D::body`), the debug draw shows it. It is a slot
+   of the world's body table (counted in `body_count()`, in `bodies()` and in the hash); the body calls refuse it (`destroy_body`,
+   `set_position`, ...).
+3. *Velocity is the controller's own, not Jolt's.* The character keeps (a) the velocity it achieved (displacement over dt, the ground's
+   included; a step up a stair shows as a spike), (b) a "control" velocity for the next step's acceleration, which leaves out the
+   height corrections that stair walking and stick-to-ground add (a snap down a ramp is not a speed: with it in, a ramp sped the character
+   up 5 x in 8 steps), (c) its speed relative to the ground it stands on. Acceleration, deceleration and air acceleration are limits on
+   how fast that relative velocity approaches the wish, which is why a platform that has just got going does not drag it backwards.
+4. *Along the ground, not across the plan.* The wish speed is held along a slope; what is sent to Jolt is a horizontal vector whose slide
+   along the surface is that speed when going uphill (a velocity with an upward part makes Jolt think the character is leaving the
+   ground), and the tangent itself downhill (a horizontal one runs off the surface). A ground normal steeper than it may stand on (stair
+   walking says it is on the ground while on a step's corner) is not walked along.
+5. *ExtendedUpdate is written out* (slide, stick to the floor, walk stairs: the same calls in the same order) so that the slide's own move
+   can be told from the snaps after it.
+6. *Wall friction is Coulomb, applied before the move* from the contacts of the last step (Jolt's `OnContactSolve` hook is not called for
+   a contact the character already rests on, which was found by a test that did nothing). Ground friction scales acceleration and
+   braking (ice 0.05). Zero friction slides along a wall at full speed; the speed into it is killed by the solver.
+7. *Up is a vector, per character.* Default: against the world's gravity (it follows `set_gravity`); `set_character_up` makes it explicit.
+   It turns toward its target by normalised blending (a fraction `up_blend_rate x dt` of the way a step, square roots only: no
+   trigonometry, so the same bits everywhere), around a fixed side when it must turn exactly upside down; the capsule's rotation is the
+   shortest arc from +Y. Gravity for a character is `|world gravity| x gravity_scale` along -up.
+8. *Input is a command*: `move` (x right, y forward, cut to length 1), `forward` (any world vector; its part across up is used), `jump`
+   (a level: a jump on a rising edge), `crouch`, `sprint`. Coyote time and jump buffering are options, off.
+9. *State in the hash and saved state.* The hash gets each character's own state (command, up vector and target, stance, timers, achieved
+   and relative velocities, what it stands on, which bodies it touches) after the bodies and constraints (a world with none hashes as
+   before); `save_state` writes it, and Jolt's own character state after the system's. Restore puts each character in the stance saved
+   BEFORE the system restores (found by a test: a body's saved position is its centre of mass, and a capsule has another centre
+   crouched, so restoring first and reshaping after moved it 0.4 m).
+
+**Numbers** (this machine; `kin-physics3d-character`, one thread, the measured values the tests print with `-v`).
+
+| Behaviour | Measured |
+|---|---|
+| Walk, sprint, crouch speed on the flat | 4.00, 7.00, 2.00 m/s (acceleration 40 m/s^2: 0.1 s to 4) |
+| Speed along a slope of 20, 35, 44 degrees | 4.00 m/s along it (the horizontal command is 4 / cos angle going up) |
+| 50 and 60 degree slopes | slides: loses 5.3 m and 6.2 m of height in 1 s, state `Sliding` |
+| Ledge of 0.35 / 0.6 m, max step 0.4 | climbed / blocked at the foot; with max step 0.2: 0.35 blocked, 0.19 climbed; the round capsule climbs about 0.1 m past `max_step_height` (0.45 yes, 0.5 no) |
+| Six stairs of 15 cm at 4 m/s | top at y = 0.900, on the ground |
+| 30 degree ramp down at 7 m/s | 0 steps in the air, 5 cm above the surface (its padding); stick-to-ground off: 48 steps in the air, up to 0.85 m above it |
+| Hump 0.3 m high (radius 10) at 7 m/s | 0 steps in the air, top y = 0.30 |
+| Jump at 5 m/s | apex 1.233 m (analytic 1.274: the discrete step loses v dt / 2 = 0.042), 0.583 against 0.625 at g = 20; 60 steps in the air (analytic 61) |
+| 2 cm wall at 60 m/s | stopped at x = 4.67 (the wall's face less radius and padding) |
+| Platform at 2 m/s for 3 s | 0.00 m off it; ground speed 4.00 walking on it (world 6.00); 2.0 m/s as it jumps off |
+| Platform turning at 1 rad/s, 2 m out, 6 s | radius 2.000, angle exact to 0.02 rad |
+| Light box (10 kg) / heavy (800 kg, mu 0.9) / heavy with 20 kN | box moves 6.24 m (character 6.96) / 0.00 m (character stopped at 0.78) / 6.39 m |
+| Ceiling 0.4 m over its head | hit at 4.18 m/s, falling again 2 steps later (no hanging); head stops at 2.16 under a slab at 2.2 |
+| Gravity flipped | up turns at most 8.8 degrees a step, within 1 degree after 49 steps (0.8 s), then stands on the ceiling at y = 6.00 and walks at 4.00 m/s; a wall at x = 10 the same, a jump from it rises 1.27 m along its normal |
+| Wall: free fall 0.5 s / pressed hard with friction 1 | 4.91 m/s (g t = 4.90) / 0.91 m/s |
+| Sliding along a wall at 45 degrees, friction 0 | (2.83, 0, 0): the full speed along it, 0.00 into it |
+| Dropped from 2 m | `Landed` at 6.21 m/s (sqrt(2 g h) = 6.26) |
+| Two characters meeting | the lower number reaches x = -0.300, the other 0.320 (made the other way round it flips) |
+
+*Cost*, `kin_physics3d_bench characters` (60 Hz steps, the test level; walkers on a grid that walk +X and back, one jump each 97 steps,
+mean of steps 240 to 480; 500 boxes are a heap the walkers walk into; a loaded desktop: indicative):
+
+| Workers | Boxes | Characters | Step mean / worst ms | Per character |
+|---|---|---|---|---|
+| none | 0 | 0 / 1 / 10 / 100 | 0.005 / 0.035 / 0.029 / 0.182 | 31 us (one awake body), 2 us |
+| none | 500 | 0 / 1 / 10 / 100 | 0.178 / 0.186 / 0.179 / 0.726 (worst 1.03) | 8 us, 0 us, 5 us (they wake up to 197 bodies) |
+| 4 | 0 | 1 / 10 / 100 | 0.132 / 0.157 / 0.293 | 129 us (the job system's wake-up), 15 us, 3 us |
+| 4 | 500 | 1 / 10 / 100 | 0.230 / 0.265 / 0.686 (worst 3.1) | 4 us |
+
+So a character costs about 2 to 5 microseconds a step (a capsule's swept tests against a level of boxes), 100 of them 0.2 to 0.7 ms,
+well under 5 % of a 60 Hz frame; the fixed cost of one awake body (about 30 us) and of waking the job system with workers (about
+0.1 ms) is what the first character pays. The controller runs on the calling thread whatever the workers.
+
+**Tests.**
+- `kin-physics3d-character` (CPU, 0.3 s, 26 functions): stand and rest (feet y within 3 cm, ground body and user id, no drift in 300
+  steps); walk, sprint, half input, braking, a diagonal not faster; the camera frame (forward and strafe, a forward along up moves
+  nothing); slopes 20 to 44 climbed at 4 m/s along them (ground normal checked), 50 and 60 slid; stairs of 15 cm (top and still on the
+  ground), ledges against the step height both ways; stick to ground (a 30 degree ramp at 7 m/s with it on: 0 steps in the air, gap
+  < 5 cm; off: more than 5 steps, gap > 5 cm; a hump); jump apex and flight time against the analytic law at two gravities,
+  `gravity_scale`, a held command not jumping again; tunnelling at 60 m/s through 2 cm; a platform moving (carried, ground speed, leaving
+  speed) and one turning (radius, angle); pushing a light box, a heavy one (blocked) and a heavy one with strength; standing on a
+  dynamic raft; a ceiling bump (one `HitHead`, no hanging); a sensor (walked through at speed, one begin and one end); layers (masked
+  out and not); gravity turned over (smooth turn: monotone, largest step, settled; stands and walks on the ceiling), a wall (stands,
+  walks, jumps along its normal), an explicit up on a world of ordinary gravity; wall friction (pressed fall, slide along a wall, off
+  the wall at once); crouch (cannot go under standing, crouched speed, `stand_blocked` under it, stands outside, the explicit call
+  refused under a roof, the body's shape follows by ray); events (`Landed` speed, `LeftGround` with `jumped`, ContactBegin / End with
+  user ids, the order of the kinds); coyote time and jump buffering (on and off); handles (refused descriptors, the body is its own,
+  generations, slot reuse); teleport; the order of two characters, both ways; the scripted route of the scene file: 21 checkpoints
+  (positions at frames, the stance), the light box moved more than 5 m, the heavy one not at all, the trigger entered and left once,
+  four landings, no head bump; determinism (hash every step of 240 steps, a level with 20 boxes and 5 characters on seeded commands,
+  equal run to run and with 1 and 4 workers); save, run 120 steps, restore, run the same 120 again (equal hashes), a second world made
+  the same way taking the state, a world with another set of characters refusing it; the hash seeing the command alone, the up target
+  and one more character.
+- `kin-physics3d-ecs` (6 more functions): the entity's character made after the bodies in entity order (a collider on it makes none),
+  settles, walks, facing written (and not when `apply_facing` is off), game code moving the entity is a teleport, events with entity ids
+  and the singleton, the entity going takes the character; carried by a kinematic platform moved from game code (6 m, within 6 cm);
+  under a parent (made at the parent's world place, written back in its space), interpolation; the animation link (speed 4.00 walking,
+  airborne in the jump, the foot placer's ground is the floor and not the capsule, weight 1 / 0); the foot placer on the capsule's own
+  physics ground (ankles at 0.15 on a step and 0.05 on the floor to 4 mm); a scene of crates and four characters hashed per step, equal
+  on 4 workers.
+- `kin_reference` `physics_character`: the picture of each camera twice, byte for byte equal (also with `--cascades 4 --ao
+  --contact-shadows --taa`, which has no stored baseline).
+
+**Pictures** (`reference_out/p2c_physics_character/`, 1280x720). Looked at: `stairs`, the person (with a spread, mid-stride walk pose)
+on the third of six steps, its capsule outlined in cyan, a green axis and a red cross at its feet (the contact and its normal), the
+stairs, a plateau and the 20 degree ramp (orange) behind; `tunnel`, the person crouched under the roof, squashed to the capsule's height
+(there is no crouch clip), arms out against the walls, the capsule's rings and the roof's dark underside; `platform`, the person
+standing on the blue platform that moves, shadow on it; `spinner`, standing on the turning teal platform, the blue one behind;
+`overview`, the whole level small from above (ramps, the hump as a green disc, stairs with the person a speck on them, the tunnel, the
+platforms, the trigger as a yellow wire box). Sponza Walk `--preset controller` (`--eye -14,2,0 --target 0,1,0`): the person in the
+nave with its capsule, the level's boxes in front.
+
+**Mutation checks** (each: break the source on purpose, build, run `kin-physics3d-character`, `kin-physics3d-ecs` and `kin-physics3d`,
+restore; the five sources compared with copies afterwards, identical):
+
+| Mutation | Result |
+|---|---|
+| max slope ignored (always 89 degrees) | caught (10 checks) |
+| step height ignored (stairs off) | caught (5) |
+| stick to ground off | caught (6) |
+| gravity ignores the up vector (always -Y) | caught (12) |
+| up vector does not follow the world's gravity | caught (5) |
+| jump 20 % short, from the ground | caught (11) |
+| jump 20 % short, from coyote time | caught (1) |
+| platform (ground) velocity not added | caught (14, and 3 in the ECS test) |
+| layer mask ignored | caught (1, and 3 in the ECS test) |
+| crouch clearance check removed | caught (3) |
+| characters updated in reverse number order | caught (2: the meeting test) |
+| characters left out of `state_hash` | caught (2) |
+| restore does not restore the velocities | caught (4) |
+| stance restored after the physics system, not before | caught (3) |
+| ECS write-back of the feet skipped | caught (10) |
+| ECS: input not sent to the character | caught (9) |
+| ECS: game moving the entity is not a teleport | caught (2) |
+| wall friction ignored | caught (1) |
+| up turns at once (blend rate ignored) | caught (5) |
+| push strength unlimited (live) | caught (5) |
+| coyote time ignored | caught (1) |
+| `HitHead` events dropped | caught (2) |
+| sprint speed ignored | caught (6) |
+| push strength unlimited, at creation only | **survived, as it should**: an equivalent mutant (`apply_desc` sets it again right after creation); the row above is the version that matters |
+
+Bugs the tests found while writing them (each is now a check): the up vector would not turn from exactly upside down (a normalised blend
+stays on its line: it now aims at a side first); a restore moved a crouched capsule 0.4 m (the stance has to be set before the system
+restores); the 15 cm stairs were a hop at best (a rolled-over edge's upward speed was carried into the air); a character on a platform
+that had just got going was braked as if it ran backwards on it; a ramp down sped the character up 5 x (a stick-to-ground snap counted
+as speed); the "step height" case of 0.45 m launched the character 7 m up (the same carry); `OnContactSolve` was never called for a wall
+the character rested on, so wall friction did nothing.
+
+**Checks run.** `ninja -C build -j8` and `ninja -C build-no3d -j8`: no warnings from the new code (the existing ones are Lua's `tmpnam`
+and the explicit-constructor notes of `skeleton_tests`, `physics3d_ecs_tests` and `kin_reference`). `build`: `KIN_REQUIRE_GPU_TESTS=1
+ctest -j4 --timeout 600`: 72 of 72 (71 and `kin-physics3d-character`), `kin-render3d` on the NVIDIA device included. `build-no3d`: 65 of 65, and its
+`build.ninja` has no Jolt, physics3d or character3d in it. `kin_render3d_tests` on NVIDIA (`VK_ICD_FILENAMES` unset) and on lavapipe
+(`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`): exit 0 each, the debug-line pixel counts the same on both (106 / 426 / 96).
+Identity: `render def` and `render all` (--cascades 4 --ao --contact-shadows --taa), 120 frames, of crowd, shadows, sponza, helmet,
+motion, spheres, cornell, skinned_bend, skinned_ecs, skinned_blend, skinned_cesium, skinned_fox, skinned_ik, skinned_ik_look,
+skinned_ik_limits and physics_pile (the skinned_ik*, skinned_ik_limits and physics_pile ones rendered by the head binary before the first
+edit): 39 pictures each, all byte for byte equal to the head binary's, and the 17 of the seven static scenes also to
+`reference_out/p1a_base_def` and `p1a_base_all`. `physics_character` twice, default and all-on: equal byte for byte.
+
+**Limits and not done.**
+- Jolt's capsule rolls over a corner, so the highest step is about 0.1 m past `max_step_height`; stair walking at 4 m/s puts it on a
+  step's corner for a few steps before it rolls up (the achieved velocity shows a vertical spike there). A very steep or very fast
+  approach to a stair can still be refused.
+- The visual crouch is a squash of the model (no crouch clip); the locomotion clips of the test person are synthetic (swing, fold).
+- Character against character only blocks (no pushing); a dynamic body that falls on a character is held off by its kinematic body but
+  does not press it down (the character's own mass acts on what it stands on).
+- Jolt's friction does not exist for a character: `ground_friction` scales how quickly it changes speed, nothing more; no per-material
+  ground (ice patches) yet, though the field is per character and can be set from the ground's user id.
+- The viewer: the level runs through Sponza's walls (the physics world has only the floor and the level); the keyboard path is not
+  exercised by any test (no display here): the scripted `ctrl_demo` goes through the same command struct and is what the headless run
+  shows.
+- Cross-platform determinism is Jolt's claim; only this machine was run (as P2a). The platforms of the level use `std::fmod` and
+  `std::sin` (game code, not the engine) for their poses, so the level itself is not claimed to be cross-platform.
+- Not done: the character as a dynamic-body-aware "stand on a ragdoll"; grab and climb, ragdoll, ropes (next); a networked rollback
+  test (the command struct and the saved state are there; no netcode exists yet).
+- `tools/reference/make_scenes.py` (run by `fetch.py`) writes `skinned_biped_walk.glb` into the cache's `made/`; on this machine it was
+  written by calling that function alone (the other files are byte for byte what it makes: checked); `kin_reference` says so when the
+  file is missing and the scene does not render.
+
 ### P3 — A whole scene: sky, fog, spot lights, weather
 
 A sky as the background (a procedural gradient and sun disc first, a cubemap later), height

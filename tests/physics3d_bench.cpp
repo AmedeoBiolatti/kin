@@ -6,11 +6,17 @@
 // With the argument `queries`: the cost of P2b instead: 1000 raycasts into a pile of 2000 bodies and into a mesh of 100,000
 // triangles, 100 shape casts, 100 overlaps, the step with contact events on and off for 500 bodies, and the ECS system's
 // overhead (WorldPhysicsState3D::step against World3D::step) for 500 dynamic bodies.
+//
+// With the argument `characters`: the cost of P2c: the controller's step in the test level (tests/character_level.hpp), 0, 1, 10
+// and 100 characters walking about it, with and without 500 dynamic boxes round them (a heap they walk through), world steps on the
+// calling thread and with 4 workers.
 
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/physics3d/world3d.hpp>
+
+#include "character_level.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -271,11 +277,84 @@ int queries() {
     return 0;
 }
 
+// The characters' cost: `count` walkers in the test level over a heap of `boxes` dynamic boxes. Each walks along +X (or back)
+// on its own lane, with a jump now and then, and turns round at the ends. Milliseconds a step over steps 240 to 480 (the heap
+// has settled by then; the walkers wake what they touch).
+int characters() {
+    std::printf("%-9s %6s %11s | %-22s | %s\n", "workers", "boxes", "characters", "step mean / worst ms", "per character (mean over none)");
+    for (const int workers : {-1, 4}) {
+        for (const int boxes : {0, 500}) {
+            double base = 0.0;
+            for (const int count : {0, 1, 10, 100}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                World3D world(cfg);
+                const character_level::Level level = character_level::build(world);
+                Lcg rng;
+                for (int i = 0; i < boxes; ++i) {
+                    // A heap on the walkers' side of the level (x 11 to 30, z -29 to -5) that they walk into.
+                    const Vec3f at{11.0f + rng.next() * 19.0f, 0.4f + 0.55f * static_cast<f32>(i / 170), -29.0f + rng.next() * 24.0f};
+                    world.create_body({.shape = Shape3D::box({0.35f, 0.25f, 0.3f}), .position = at,
+                                       .rotation = Quatf::axis_angle({0, 1, 0}, rng.next() * 360.0f), .friction = 0.5f});
+                }
+                world.optimize_broad_phase();
+                std::vector<Character3D> walkers;
+                for (int i = 0; i < count; ++i) {
+                    CharacterDesc3D d;
+                    // A grid: five columns 2.5 m apart, rows 1.2 m apart over z -29 to -5 (clear of the pieces of the level).
+                    d.position = {1.0f + static_cast<f32>(i % 5) * 2.5f, 0.0f, -29.0f + 1.2f * static_cast<f32>(i / 5)};
+                    walkers.push_back(world.create_character(d));
+                }
+                Window w;
+                const int total = 480;
+                for (int step = 0; step < total; ++step) {
+                    for (std::size_t i = 0; i < walkers.size(); ++i) {
+                        CharacterInput3D in;
+                        const bool back = ((step / 150) + static_cast<int>(i / 5)) % 2 == 1;
+                        in.forward = {back ? -1.0f : 1.0f, 0.0f, 0.0f};
+                        in.move = {0.0f, 1.0f};
+                        in.jump = step % 97 == static_cast<int>(i % 97);
+                        world.set_character_input(walkers[i], in);
+                    }
+                    const auto t0 = std::chrono::steady_clock::now();
+                    world.step(1.0f / 60.0f);
+                    const double ms = since_ms(t0);
+                    if (step >= 240) {
+                        w.mean += ms;
+                        w.worst = std::max(w.worst, ms);
+                    }
+                }
+                w.mean /= static_cast<double>(total - 240);
+                if (count == 0) {
+                    base = w.mean;
+                }
+                std::printf("%-9s %6d %11d | %8.3f / %-11.3f | %s", workers < 0 ? "none" : std::to_string(workers).c_str(), boxes, count,
+                            w.mean, w.worst, "");
+                if (count > 0) {
+                    std::printf("%.4f ms (%.0f us)", (w.mean - base) / count, (w.mean - base) / count * 1000.0);
+                }
+                std::printf("   awake bodies %d\n", world.active_body_count());
+            }
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "queries") {
         return queries();
+    }
+    if (argc > 1 && std::string(argv[1]) == "characters") {
+        return characters();
     }
     std::printf("%-8s %6s %8s | %-24s | %-24s | %s\n", "scene", "boxes", "workers", "steps 0-120 mean/worst ms",
                 "steps 120-360 mean/worst", "awake at end");

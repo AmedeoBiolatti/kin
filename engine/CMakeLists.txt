@@ -210,6 +210,7 @@ if(KIN_EXPERIMENTAL_3D)
     add_library(kin_physics3d_objects OBJECT
         src/physics3d/shape3d.cpp
         src/physics3d/world3d.cpp
+        src/physics3d/character3d.cpp
         src/physics3d/debug_draw3d.cpp
     )
     target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
