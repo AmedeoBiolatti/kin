@@ -34,6 +34,13 @@
 //    (physics never turns the character), and the state back into the component. A character is world level like a body.
 //    Its events (landed, left the ground, hit head, contacts begun and ended) come in `character_events()` with the
 //    entity ids, in the world's order.
+//  * Grab and climb (kin/physics3d/traversal3d.hpp): `CharacterController3D::desc.traversal.enabled` turns it on for a
+//    character; `traversal` is the limbs' command and `traversal_state` what they hold. An entity with a body can carry a
+//    SurfaceMaterial3D (what a hand finds: grippable, slippery, tiring) and a Hold3D (an authored hold); both are read when
+//    the body is made (`rebuild(entity)` reads them again). The grips' events (Gripped, Slipped, GripReleased, Exhausted,
+//    MantleStarted, MantleFinished, MantleBlocked, Fell) come with the character events, with entity ids in `user_id` and
+//    `body_user_id`. With a CharacterAnimationLink3D that names hand constraints, the hands of the model are put on the
+//    anchors by IK (weight fades while they reach, hold and let go) and the character faces what it hangs from.
 
 #if !defined(KIN_EXPERIMENTAL_3D)
 #error "kin's 3D physics is experimental: configure kin with -DKIN_EXPERIMENTAL_3D=ON"
@@ -77,6 +84,17 @@ struct Collider3D {
     Shape3D shape;
 };
 
+// An authored hold on an entity with a collider (the physics type's data, HoldDesc3D, as a component): the body is
+// grippable by itself, with its own quality; `snap` puts the hand on `anchor` (in the entity's space) whatever was aimed at.
+struct Hold3D {
+    f32 quality = 1.0f;
+    f32 drain = 1.0f;
+    bool snap = false;
+    Vec3f anchor{};
+    Vec3f anchor_normal{0.0f, 0.0f, 1.0f};
+    bool slide = false;
+};
+
 // How an entity moves.
 struct RigidBody3D {
     Body3DMotion motion = Body3DMotion::Dynamic;
@@ -113,8 +131,14 @@ struct CharacterController3D {
     CharacterDesc3D desc;
     CharacterInput3D input;
     // Written to Transform3D::rotation after each step when `apply_facing` (the game turns the character, not physics).
+    // While it hangs it faces the surface it holds (and this is set to that, so that it keeps the way it faced when it lets
+    // go).
     Quatf facing{};
     bool apply_facing = true;
+    // Grab and climb: the limbs' command (see TraversalInput3D; the move command is `input.move`, up the surface while
+    // hanging), sent each step. Written by the system: the limbs and the resource as the last step left them.
+    TraversalInput3D traversal;
+    TraversalState3D traversal_state;
     // Written by the system.
     CharacterState3D state;
 };
@@ -139,7 +163,20 @@ struct CharacterAnimationLink3D {
     std::string airborne = "airborne";
     std::string crouching = "crouching";
     std::string vertical = "vertical";
+    std::string hanging = "hanging";
     std::string feet = "feet";
+    // Grab and climb: the IK constraints (two-bone, hand joints as their end) that put each limb's hand on its grip, by limb
+    // number (limb 0 first); none: the hands are not driven. While a limb reaches the constraint's weight goes to 1 and
+    // its target is the anchor, with its rotation from the surface when `align_hands`; free or let go, the weight goes to 0.
+    // The constraints' own `fade_seconds` make the hand come and go smoothly.
+    std::vector<std::string> hands;
+    bool align_hands = true;
+    // The target is this far off the surface, out along its normal (the hand's own thickness: a ball of 5 cm).
+    f32 hand_clearance = 0.0f;
+    // Turns the hand joint's own axes to the hold: the rotation that takes the rig's rest hand to "palm into the surface,
+    // fingers up it" (model +Z into the surface, +Y up it, +X to the character's left: what the identity gives for a hand
+    // modelled as the biped fixture's ball).
+    Quatf hand_offset{};
     // What the foot rays hit: all layers but the character layers and sensors.
     Layer3DMask ground_mask = all_layers3d & ~layer_bit(layers3d::Character) & ~layer_bit(layers3d::Sensor);
 };
@@ -154,6 +191,8 @@ struct WorldPhysicsState3DConfig {
     DebugDraw3DOptions debug{};
     // Draw the contacts of the step as well (persist events must be on in the World3DConfig to see resting contacts).
     bool debug_contacts = true;
+    // Draw the grips (anchors, surface normals, the hands' lines, the ledge's top) of characters with traversal on.
+    bool debug_grips = true;
 };
 
 class WorldPhysicsState3D {
@@ -191,6 +230,8 @@ public:
     Character3D character_of(flecs::entity entity) const;
     // Entities that have a character now, in ascending id order.
     std::size_t character_count() const { return _characters.size(); }
+    // The limbs and resource of an entity's character as the last step left them (a default state for none).
+    TraversalState3D traversal_of(flecs::entity entity) const;
     // The entity a user id of an event is (invalid when it is gone).
     flecs::entity entity_of(u64 user_id) const;
     // The body of an entity (invalid when it has none yet).
@@ -261,11 +302,15 @@ struct LocomotionClips3D {
     std::string walk = "walk";
     std::string run = "run";
     std::string fall = "fall";
+    // Grab and climb: a clip for hanging by the hands (empty: the machine has no hanging state and the `fall` clip plays in
+    // the air); the machine goes to it while the parameter is true.
+    std::string hang = "";
     f32 walk_speed = 1.6f; // the speed (m/s) at which the walk clip is right for the feet
     f32 run_speed = 4.2f;
     f32 fade_seconds = 0.15f;
     std::string speed_param = "speed";
     std::string airborne_param = "airborne";
+    std::string hanging_param = "hanging";
 };
 Animator3D locomotion_animator(const LocomotionClips3D& clips = {});
 
@@ -273,6 +318,10 @@ Animator3D locomotion_animator(const LocomotionClips3D& clips = {});
 // not driven by the system (a replay, a puppet). `world` is where the foot rays go (`state.body` is ignored).
 void drive_character_animator(Animator3D& animator, const CharacterState3D& state, const World3D& world,
                               const CharacterAnimationLink3D& link = {});
+// The hands of the same: each limb in `link.hands` puts its constraint's target on the grip, in the world, with the weight
+// of its phase. `up` and `facing` give a ceiling's frame. Called by drive_character_animator's system after it.
+void drive_traversal_animator(Animator3D& animator, const TraversalState3D& traversal, const CharacterAnimationLink3D& link,
+                              Vec3f up);
 
 // A ground query for foot placement (kin/render3d/ik.hpp) over a World3D: the first surface along the segment, in the
 // world's space, by raycast. `ignore` is the character's own body. The world must outlive the query.

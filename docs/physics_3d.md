@@ -289,6 +289,105 @@ no friction of its own (the acceleration limits and `wall_friction` are kin's). 
 meaningful and is not kept; a character never turns itself. Character against character is blocking only, no pushing. Cross-platform
 determinism is Jolt's claim (only this machine was run). The viewer's level is on its physics floor only.
 
+## Grab and climb
+
+`kin/physics3d/traversal3d.hpp`, `World3D::probe_grips`, `set_traversal_input`, `traversal`, `set_surface_material`, `set_hold`:
+a general way for a character to hang from the world by its hands, shimmy along it, pull up over a ledge, jump off and let go.
+Nothing in it knows about a mountain or a game: a surface is any collider, and what makes one grippable, slippery or tiring is data
+on its body. Off unless `CharacterDesc3D::traversal.enabled`; with it off a character is the P2c controller bit for bit (its state is
+not in the hash, no byte of it). `enabled` is fixed at creation (it is in the saved state's layout); every other number is read live.
+
+```cpp
+kin::CharacterDesc3D desc;
+desc.traversal.enabled = true;                          // two hands (limb_count 2), reach 0.8 m, 100 units of stamina
+const kin::Character3D hero = world.create_character(desc);
+world.set_surface_material(ice, {.slip = 1.0f, .drain = 2.0f, .tag = 1});     // data, not code
+world.set_hold(rung, {.quality = 0.8f, .snap = true, .anchor = {0, 0, 0}});   // an authored hold
+...each fixed step:
+world.set_character_input(hero, {.move = {0, 1}, .forward = wall_direction}); // hanging: x along the surface, y up it
+world.set_traversal_input(hero, {.grab = {left_held, right_held}, .reach = camera.forward(),
+                                 .pull_up = f, .jump_off = space, .drop = x});
+world.step(dt);
+const kin::TraversalState3D t = world.traversal(hero);  // mode, the grips, the resource
+```
+
+* **Four layers.** (1) *Probe*: `probe_grips({origin, direction, up, reach, radius, spread, mask, ignore, ...})` casts a fan of seven
+  sphere sweeps (`shape_cast`) and refines each hit with a ray (`raycast`) against the layers of `mask`; the hits go through the
+  providers (hold, then ledge, then surface: a hit is one candidate) and come back best first: `{body, user_id, point, normal, right,
+  surface_up, kind, quality, score, surface_tag, drain, slip, distance, fixed, ledge, ledge_top, clear}`. Pure: nothing is held.
+  (2) *Grip*: one per limb (`GripState3D`: phase `Free`, `Reaching`, `Held`, `Slipping`, `Released`), its anchor stored in the
+  GRABBED BODY'S OWN SPACE, so a hold on a platform or a crate goes where it goes; `strength` = quality x the surface's grip x the
+  exhaustion fade. (3) *Body*: `Walking`, `Hanging`, `Mantling`. Hanging is kinematic: the feet are driven from the anchors (below the
+  mean of the held anchors by `hang_drop`, a capsule's width out from the surface, the held limbs' shoulders under their hands) through
+  Jolt's swept move, with a damped swing about that place (a pendulum across `up`, stiff arms along it). (4) *Resource*: `Resource3D
+  {value, max, delay, exhausted}` with `step(config, dt, drain_per_second)` and `take(config, amount)`; stamina for the grips and
+  what sprinting spends.
+* **Providers** share one interface (`GripProvider3D`: `probe`, `attach`, `move`, `detach`; `grip_provider(kind)`): the *surface*
+  (any collider whose material is grippable and whose normal is not floor-like), the *ledge* (a ray down just inside the surface finds
+  the top edge within `ledge_search_height` of the hit; the hand goes to the lip; `clear` says the capsule fits over it and has a floor
+  to stand on; the underside of a ledge counts: the edge is on the hand's side) and the authored *hold* (`HoldDesc3D`: quality, drain,
+  `snap` to a point of the body, `slide`; taken from the front, not the side the sweep grazed). A rope would be another provider.
+* **Surface materials.** `SurfaceMaterial3D {grippable, grip, slip, drain, tag}` on a body: `grippable` false takes it out (a smooth
+  wall; its holds are bodies of their own); `slip` (x `slip_speed` m/s) slides a held grip down the surface and lets it go after
+  `slip_release_seconds` or at the end of the surface; `drain` multiplies the resource's drain while a hand holds it; `tag` is yours
+  (reported in candidates, grips and events). Not in the hash: it is the level's setup, set it at creation.
+* **Commands.** `TraversalInput3D`: `grab[limb]` (a level), `reach` (a world direction; zero: the way it faces), `pull_up` and
+  `jump_off` (rising edges), `drop` (a level). A hand the character let go of (exhausted, slipped, dropped, jumped off) takes hold
+  again only after its `grab` is given up and given again. While hanging `CharacterInput3D::move` is x along the surface (shimmy,
+  `shimmy_speed`) and y up it (`climb_speed`): every hand moves together or none (a hand at the end of a wall stops the others), a
+  hold with `snap` does not move, and a hand going up a face finds the lip within 12 cm and takes it.
+* **Mantle.** `pull_up` over a ledge grip: the capsule must fit over the top and have a floor, and be free where it comes over the
+  edge and all the way in (an overlap and a sweep) or it stays hanging with `MantleBlocked` (`NoLedge`, `NoRoom`, `Tired`). Else a
+  deterministic move of `mantle_seconds` in the ledge body's own space (up the wall, then over the edge, smoothstep), swept so that it
+  cannot pass through anything, then walking: `GripReleased` (`Mantle`) for each hand and `MantleFinished`.
+* **Load.** A held DYNAMIC body gets the character's weight (`mass x |g| x gravity_scale` along -up, shared between the hands) as a
+  force at each anchor every step: hanging from a loose crate moves and tilts it, and the character follows the anchor. A kinematic
+  body carries the character (the anchor is predicted over the step: no lag).
+* **Resource.** Hanging: `drain_one_hand` (12 a second) for one hand, `drain_two_hands` (7) for two or more, `+ drain_moving`, times the
+  mean of the held surfaces' `drain`; standing on walkable ground costs `ground_drain_factor` of that (0: rest, and it comes back);
+  `grab_cost` and `pull_up_cost` once; sprinting `drain_sprint`. It comes back at `regen_rate` after `regen_delay` seconds without being
+  spent; it is `exhausted` at 0 until `recover_fraction` of `max` is back (no grip and no sprint while it is). Exhausted and hanging: the
+  weakest hand's strength fades to 0 over `exhaust_fade` and it lets go, the next `exhaust_interval` later.
+* **Events** (in `character_events()` with the others, per step in character order, the traversal ones after the walking ones
+  sorted by kind and then limb): `Gripped` (`hand`, the body, point, normal), `Slipped` (`speed`), `GripReleased` (`reason`:
+  `GripRelease3D`), `Exhausted`, `MantleStarted`, `MantleFinished`, `MantleBlocked` (`reason`: `MantleBlock3D`), `Fell` (let go of
+  everything and not by a jump or a pull-up).
+* **Gravity** is the character's `up`: every direction, frame and force above uses it, so a wall treated as a floor climbs the same.
+* **State.** The grips (phase, kind, body, anchor, quality, drain, slip, timers, latches), the resource, mode, swing velocity, hang
+  place, the mantle's path and body, the command and its edges are in `state_hash()`, `save_state()` and `restore_state()`.
+  `World3D::traversal(c).grips[i].point` is where the anchor is NOW (after the bodies' step).
+
+### Entities
+
+`CharacterController3D::desc.traversal.enabled`, `::traversal` (the command, sent each step) and `::traversal_state` (written);
+`SurfaceMaterial3D` (the physics type is the component) and `Hold3D` on an entity with a collider, read when its body is made
+(`rebuild(entity)` reads them again); `WorldPhysicsState3D::traversal_of(entity)`. The system turns a hanging character to face the
+surface (`controller.facing`, slerped). With `CharacterAnimationLink3D::hands = {"hand_L", "hand_R"}` (names of two-bone IK
+constraints with the hand as their end, by limb number) each hand's constraint gets the anchor as its target (`hand_clearance` off
+the surface), the surface's frame as its rotation (`align_hands`, `hand_offset`) and weight 1 while the limb reaches or holds, 0 when it
+is free or let go (the constraint's own `fade_seconds` makes the hand come and go), and `hanging` is a parameter; `locomotion_animator`
+takes a `hang` clip (empty: the `fall` pose plays while it hangs). `DebugDraw3D::grips(world, character)` and `candidates(...)` draw
+the anchors (yellow reaching, green held, orange slipping), normals and frames, the line to the body, the hang place, and a probe's
+candidates by provider; `WorldPhysicsState3DConfig::debug_grips` adds the first to `collect_debug`.
+
+### The climb level and the harness
+
+`tests/climb_level.hpp`: a 4 m wall with a ledge, a 5 m wall with a roof reaching out at 3 m, a smooth wall that cannot be gripped with
+four holds on it and a lip of rock standing out on top, a kinematic slab that moves along X (a hold), a pedestal with a 30 kg crate a third
+over its edge, a 7 m wall of ice (slip 1, drain 2), a ledge at 3 m under a roof 1.4 m over it. The kin_reference scene `physics_climb`
+runs a scripted timeline of commands through it (`tests/reference/scenes/physics_climb.json`: grab per hand, reach, move, pull up,
+jump off, drop, teleports, stamina; checkpoints with the feet's box, the mode and how many hands hold) with the biped, and
+`kin-physics3d-traversal` runs the same timeline from the same JSON with no GPU. `kin_physics3d_traversal_tests -r scene.json N` prints
+where the character is every N frames (to write checkpoints from) and the events.
+
+### Limits
+
+The probe's casts stop at the first thing they meet: a grippable thing exactly flush behind a smooth wall cannot be seen (the lip of the
+test level stands 20 cm out); a ledge is found on the body that was hit (a top made of another body is not). A hand takes the aimed
+point, not "the best hold": reach and the command are the game's. No feet on the wall: the legs dangle (the `fall` pose, or a clip), and
+P1b's foot placement is not active while it hangs. Two grips on one hold are allowed more than 0.2 m apart. Ropes, ladders as a mode of
+their own, and a mantle that is interrupted are not built. The keyboard and mouse path of the viewer is not exercised by any test.
+
 ## Cost
 
 `kin_physics3d_bench` (built with the benchmarks): 500 boxes in a pile step in 1 to 4 ms, 2000 in
@@ -307,9 +406,10 @@ texts ([third_party_notices.md](third_party_notices.md)).
 Queries cost 1 to 8 microseconds against a 2000 body pile and 1 to 7 against a 100,000 triangle mesh; contact events add under 1 % to
 a 500 body step (persist events 6 %); the entity system adds 0.2 to 0.3 ms a step for 500 bodies. Table in the plan ("P2b").
 A character costs about 2 to 5 microseconds a step in the test level (100 of them 0.2 ms alone, 0.7 ms beside a heap of 500 boxes
-they wake); `kin_physics3d_bench characters`, table in the plan ("P2c").
+they wake); `kin_physics3d_bench characters`, table in the plan ("P2c"). A grip probe is about 14 to 16 microseconds, a hanging
+character 4 to 5 microseconds a step; `kin_physics3d_bench climbing`, table in the plan ("P2d").
 
 ## Not yet
 
-Grab and climb; ragdoll; ropes; soft bodies; per-contact material callbacks; continuous collision
+Ragdoll; ropes (the grip providers' interface is ready for one); soft bodies; per-contact material callbacks; continuous collision
 between dynamic bodies beyond Jolt's linear cast; scaled or mutable shapes (swap with `set_shape`).

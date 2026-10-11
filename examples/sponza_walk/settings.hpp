@@ -164,6 +164,17 @@ struct Settings {
     float ctrl_slope = 45.0f;   // the steepest ground it stands on, degrees
     float ctrl_step = 0.4f;     // the highest step it climbs, m
     float ctrl_distance = 3.5f; // the camera behind it, m
+    // Climb (kin/physics3d, P2d): a person with two hands that take hold of the world, on the climb level (tests/climb_level.hpp:
+    // a wall with a ledge, an overhang, a smooth wall with holds, a platform that moves, a crate, ice, a low roof) in front of the
+    // camera. WASD walk (while it hangs: along the surface and up it), the camera aims the reach, the mouse buttons (or Q and E)
+    // hold with the left and the right hand, Space jumps (jumps off while it hangs), F pulls up, X lets go. `climb_demo` plays
+    // a scripted climb instead of the keys (a headless run). Replaces the controller section's level when both are on.
+    bool climb = false;
+    bool climb_debug = true;    // the bodies, the grips (anchors, normals, the hands' lines), the hang place, what a free hand sees
+    bool climb_demo = false;
+    float climb_reach = 0.95f;  // the arm's reach, m
+    float climb_stamina = 100.0f; // the resource's size: it drains by the mode (hanging 7 or 12 a second, sprinting 20)
+    float climb_distance = 4.0f;  // the camera behind it, m
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

@@ -195,6 +195,21 @@ void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out) {
     if (!out.body.valid()) {
         KIN_LOG_WARN_F("physics3d", "entity has no valid body (shape, mass or layer refused)",
                        (LogFields{{.name = "entity", .value = std::to_string(entity.id())}}));
+    } else {
+        // What a hand finds in it (grab and climb): its material and, if it is one, its hold.
+        if (const SurfaceMaterial3D* m = entity.get<SurfaceMaterial3D>()) {
+            _physics.set_surface_material(out.body, *m);
+        }
+        if (const Hold3D* h = entity.get<Hold3D>()) {
+            HoldDesc3D hold;
+            hold.quality = h->quality;
+            hold.drain = h->drain;
+            hold.snap = h->snap;
+            hold.anchor = h->anchor;
+            hold.anchor_normal = h->anchor_normal;
+            hold.slide = h->slide;
+            _physics.set_hold(out.body, hold);
+        }
     }
     const Transform3D* local = entity.get<Transform3D>();
     out.last_position = desc.motion == Body3DMotion::Dynamic ? local->position : pose.position;
@@ -355,6 +370,9 @@ void WorldPhysicsState3D::characters_to_world(f32) {
             c.last_position = t->position;
         }
         _physics.set_character_input(c.character, controller->input);
+        if (controller->desc.traversal.enabled) {
+            _physics.set_traversal_input(c.character, controller->traversal);
+        }
     }
 }
 
@@ -369,8 +387,22 @@ void WorldPhysicsState3D::characters_from_world() {
         c.position = state.position;
         write_character(c, state.position);
         CharacterController3D* controller = e.get_mut<CharacterController3D>();
+        TraversalState3D traversal;
         if (controller != nullptr) {
             controller->state = state;
+            if (controller->desc.traversal.enabled) {
+                traversal = _physics.traversal(c.character);
+                controller->traversal_state = traversal;
+                // Hanging, it faces what it holds (turning to it over a few steps, then keeping the way it faced).
+                if (controller->apply_facing && traversal.hanging() && length(traversal.surface_normal) > 0.0f) {
+                    const Vec3f across = traversal.surface_normal - state.up * dot(traversal.surface_normal, state.up);
+                    if (length(across) > 0.2f) {
+                        // The model faces +Z; look_rotation turns -Z.
+                        const Quatf wanted = Quatf::look_rotation(normalize(across), state.up);
+                        controller->facing = slerp(controller->facing, wanted, 0.25f);
+                    }
+                }
+            }
             if (controller->apply_facing) {
                 if (Transform3D* t = e.get_mut<Transform3D>()) {
                     t->rotation = controller->facing;
@@ -382,9 +414,17 @@ void WorldPhysicsState3D::characters_from_world() {
         if (link != nullptr) {
             if (Animator3D* animator = e.get_mut<Animator3D>()) {
                 drive_character_animator(*animator, state, _physics, *link);
+                if (traversal.enabled) {
+                    drive_traversal_animator(*animator, traversal, *link, state.up);
+                }
             }
         }
     }
+}
+
+TraversalState3D WorldPhysicsState3D::traversal_of(flecs::entity entity) const {
+    const Character3D c = character_of(entity);
+    return c.valid() ? _physics.traversal(c) : TraversalState3D{};
 }
 
 Character3D WorldPhysicsState3D::character_of(flecs::entity entity) const {
@@ -567,6 +607,11 @@ void WorldPhysicsState3D::collect_debug(Renderer3D& renderer, Scene3D& scene) {
     if (_config.debug_contacts) {
         d.contacts(_events);
     }
+    if (_config.debug_grips) {
+        for (const BoundCharacter& c : _characters) {
+            d.grips(_physics, c.character);
+        }
+    }
     _debug_mesh = draw_debug_lines(renderer, scene, d.lines());
     d.clear();
 }
@@ -585,6 +630,24 @@ Animator3D locomotion_animator(const LocomotionClips3D& clips) {
     down.to = "ground";
     down.when = {{clips.airborne_param, CondOp::IsFalse, 0.0f}};
     machine->transitions = {up, down};
+    if (!clips.hang.empty()) {
+        // Hanging by the hands: from the ground or the air while the parameter is true (listed first: they win), and back to
+        // whichever the character is in when it is not.
+        machine->states["hang"] = clips.hang;
+        AnimTransition from_ground, from_air, to_air, to_ground;
+        from_ground.from = "ground";
+        from_ground.to = "hang";
+        from_ground.when = {{clips.hanging_param, CondOp::IsTrue, 0.0f}};
+        from_air = from_ground;
+        from_air.from = "air";
+        to_air.from = "hang";
+        to_air.to = "air";
+        to_air.when = {{clips.hanging_param, CondOp::IsFalse, 0.0f}, {clips.airborne_param, CondOp::IsTrue, 0.0f}};
+        to_ground = to_air;
+        to_ground.to = "ground";
+        to_ground.when = {{clips.hanging_param, CondOp::IsFalse, 0.0f}, {clips.airborne_param, CondOp::IsFalse, 0.0f}};
+        machine->transitions = {from_ground, from_air, to_air, to_ground, up, down};
+    }
     a.machine = machine;
     Animator3D::BlendSpace space;
     space.parameter = clips.speed_param;
@@ -618,12 +681,47 @@ void drive_character_animator(Animator3D& animator, const CharacterState3D& stat
     if (!link.vertical.empty()) {
         animator.params.set_float(link.vertical, state.vertical_speed);
     }
+    if (!link.hanging.empty()) {
+        animator.params.set_bool(link.hanging, state.traversal_mode != TraversalMode3D::Walking);
+    }
     if (!link.feet.empty()) {
         if (IKConstraint* feet = animator.find_ik(link.feet)) {
             // The feet go where the physics world's floor is, never onto the character's own capsule; in the air the
             // clip's feet are the right ones (the weight fades by the constraint's own time).
             feet->ground = ground_query_from_world(world, link.ground_mask, state.body);
             feet->set_weight(on_ground ? 1.0f : 0.0f);
+        }
+    }
+}
+
+void drive_traversal_animator(Animator3D& animator, const TraversalState3D& traversal, const CharacterAnimationLink3D& link,
+                              Vec3f up) {
+    (void)up;
+    const u32 limbs = std::min<u32>(static_cast<u32>(link.hands.size()), max_grip_limbs3d);
+    for (u32 h = 0; h < limbs; ++h) {
+        IKConstraint* hand = animator.find_ik(link.hands[h]);
+        if (hand == nullptr) {
+            continue;
+        }
+        const GripState3D& g = traversal.grips[h];
+        const bool reaching = g.phase == GripPhase3D::Reaching;
+        const bool holding = g.phase == GripPhase3D::Held || g.phase == GripPhase3D::Slipping;
+        // Over a ledge the hands are let go of half way up (they would be pulled through the chest).
+        const bool over = traversal.mode == TraversalMode3D::Mantling && traversal.mantle_progress > 0.6f;
+        if ((reaching || holding) && !over) {
+            hand->set_target(g.point + g.normal * link.hand_clearance);
+            if (link.align_hands) {
+                // The hand's own axes: +Z into the surface, +Y up it, +X to the character's left.
+                Mat4f m;
+                const Vec3f x = -g.right, y = g.surface_up, z = -g.normal;
+                m.m[0] = x.x; m.m[1] = x.y; m.m[2] = x.z;
+                m.m[4] = y.x; m.m[5] = y.y; m.m[6] = y.z;
+                m.m[8] = z.x; m.m[9] = z.y; m.m[10] = z.z;
+                hand->set_target_rotation(quat_of(m, {1.0f, 1.0f, 1.0f}) * link.hand_offset, 1.0f);
+            }
+            hand->set_weight(1.0f);
+        } else {
+            hand->set_weight(0.0f);
         }
     }
 }

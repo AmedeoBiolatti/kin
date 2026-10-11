@@ -7,6 +7,11 @@
 // triangles, 100 shape casts, 100 overlaps, the step with contact events on and off for 500 bodies, and the ECS system's
 // overhead (WorldPhysicsState3D::step against World3D::step) for 500 dynamic bodies.
 //
+// With the argument `climbing`: the cost of P2d (grab and climb): one grip probe (World3D::probe_grips: a fan of seven sphere sweeps
+// and the rays that refine them) in the climb level (tests/climb_level.hpp) with 500 dynamic boxes round it, a hand that is asked
+// to grab and finds nothing (two probes a step, per character), and 1, 10 and 100 characters hanging by both hands from a long wall
+// and shimmying along it, with and without the 500 boxes.
+//
 // With the argument `characters`: the cost of P2c: the controller's step in the test level (tests/character_level.hpp), 0, 1, 10
 // and 100 characters walking about it, with and without 500 dynamic boxes round them (a heap they walk through), world steps on the
 // calling thread and with 4 workers.
@@ -17,6 +22,7 @@
 #include <kin/physics3d/world3d.hpp>
 
 #include "character_level.hpp"
+#include "climb_level.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -347,6 +353,126 @@ int characters() {
     return 0;
 }
 
+
+// The cost of grab and climb. The probe on its own (1000 of them, best of three runs), then characters.
+int climbing() {
+    const auto heap = [](World3D& world, int boxes, Vec3f from, Vec3f size) {
+        Lcg rng;
+        for (int i = 0; i < boxes; ++i) {
+            const Vec3f at{from.x + rng.next() * size.x, from.y + 0.4f + 0.55f * static_cast<f32>(i / 150), from.z + rng.next() * size.z};
+            world.create_body({.shape = Shape3D::box({0.35f, 0.25f, 0.3f}), .position = at,
+                               .rotation = Quatf::axis_angle({0, 1, 0}, rng.next() * 360.0f), .friction = 0.5f});
+        }
+    };
+    std::printf("probe: %-10s %-26s | %s\n", "boxes", "situation", "microseconds a probe");
+    for (const int boxes : {0, 500}) {
+        World3DConfig cfg;
+        cfg.single_threaded = true;
+        cfg.max_bodies = 4096;
+        cfg.max_body_pairs = 262144;
+        cfg.max_contact_constraints = 65536;
+        World3D world(cfg);
+        const climb_level::Level level = climb_level::build(world);
+        (void)level;
+        heap(world, boxes, {-4.0f, 0.0f, 3.0f}, {14.0f, 0.0f, 10.0f});
+        world.optimize_broad_phase();
+        for (int i = 0; i < 120; ++i) {
+            world.step(1.0f / 60.0f);
+        }
+        struct Case {
+            const char* name;
+            Vec3f origin, direction;
+        };
+        const Case cases[] = {{"nothing in reach", {0.0f, 1.65f, 6.0f}, {0.0f, 0.0f, -1.0f}},
+                              {"a wall face", {0.0f, 1.65f, 0.7f}, {0.0f, 0.3f, -1.0f}},
+                              {"a ledge (lip found)", {0.0f, 3.7f, 0.7f}, {0.0f, 0.0f, -1.0f}},
+                              {"holds on a smooth wall", {19.75f, 1.65f, 0.5f}, {0.0f, 0.1f, -1.0f}}};
+        for (const Case& c : cases) {
+            GripProbeDesc3D p;
+            p.origin = c.origin;
+            p.direction = c.direction;
+            p.reach = 0.95f;
+            double best = 1e30;
+            std::size_t found = 0;
+            for (int run = 0; run < 3; ++run) {
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < 1000; ++i) {
+                    found += world.probe_grips(p).size();
+                }
+                best = std::min(best, since_ms(t0));
+            }
+            std::printf("probe: %-10d %-26s | %8.2f us   (%zu candidates a probe)\n", boxes, c.name, best, found / 3000);
+        }
+    }
+
+    std::printf("\n%-9s %6s %-22s %11s | %-22s | %s\n", "workers", "boxes", "what", "characters", "step mean / worst ms", "per character");
+    for (const int boxes : {0, 500}) {
+        for (const int mode : {0, 1, 2}) {
+            // 0: hanging still, 1: shimmying along the wall, 2: standing 6 m off with the grab command given (two probes a step)
+            double base = 0.0;
+            for (const int count : {0, 1, 10, 100}) {
+                World3DConfig cfg;
+                cfg.single_threaded = true;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                World3D world(cfg);
+                world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}, .friction = 0.6f});
+                world.create_body({.shape = Shape3D::box({40.0f, 4.0f, 0.5f}), .motion = Body3DMotion::Static, .position = {0, 4.0f, -0.5f}, .friction = 0.6f});
+                heap(world, boxes, {-25.0f, 0.0f, 8.0f}, {50.0f, 0.0f, 20.0f});
+                world.optimize_broad_phase();
+                std::vector<Character3D> hands;
+                for (int i = 0; i < count; ++i) {
+                    CharacterDesc3D d;
+                    d.traversal.enabled = true;
+                    d.traversal.resource.max = 1.0e6f; // never tired: the cost of hanging is what is measured
+                    // A row along the wall, 0.7 m apart (the first at x = -34), in the air and 1.5 m up (or 6 m off the wall).
+                    d.position = {-34.0f + 0.7f * static_cast<f32>(i % 100), mode == 2 ? 0.0f : 1.5f, mode == 2 ? 6.0f : 0.7f};
+                    hands.push_back(world.create_character(d));
+                }
+                Window w;
+                const int total = 360;
+                for (int step = 0; step < total; ++step) {
+                    for (std::size_t i = 0; i < hands.size(); ++i) {
+                        CharacterInput3D in;
+                        in.forward = {0.0f, 0.0f, -1.0f};
+                        if (mode == 1 && step > 60) {
+                            in.move = {((step / 80) % 2 == 0) ? 1.0f : -1.0f, 0.0f};
+                        }
+                        TraversalInput3D t;
+                        t.grab = {true, true};
+                        t.reach = {0.0f, 0.0f, -1.0f};
+                        world.set_character_input(hands[i], in);
+                        world.set_traversal_input(hands[i], t);
+                    }
+                    const auto t0 = std::chrono::steady_clock::now();
+                    world.step(1.0f / 60.0f);
+                    const double ms = since_ms(t0);
+                    if (step >= 120) {
+                        w.mean += ms;
+                        w.worst = std::max(w.worst, ms);
+                    }
+                }
+                w.mean /= static_cast<double>(total - 120);
+                if (count == 0) {
+                    base = w.mean;
+                }
+                int holding = 0;
+                for (const Character3D c : hands) {
+                    holding += world.traversal(c).held > 0 ? 1 : 0;
+                }
+                std::printf("%-9s %6d %-22s %11d | %8.3f / %-11.3f | ", "none", boxes,
+                            mode == 0 ? "hanging still" : mode == 1 ? "shimmying" : "asking, nothing there", count, w.mean, w.worst);
+                if (count > 0) {
+                    std::printf("%.4f ms (%.0f us)", (w.mean - base) / count, (w.mean - base) / count * 1000.0);
+                }
+                std::printf("   holding %d\n", holding);
+            }
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -355,6 +481,9 @@ int main(int argc, char** argv) {
     }
     if (argc > 1 && std::string(argv[1]) == "characters") {
         return characters();
+    }
+    if (argc > 1 && std::string(argv[1]) == "climbing") {
+        return climbing();
     }
     std::printf("%-8s %6s %8s | %-24s | %-24s | %s\n", "scene", "boxes", "workers", "steps 0-120 mean/worst ms",
                 "steps 120-360 mean/worst", "awake at end");

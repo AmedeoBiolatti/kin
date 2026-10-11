@@ -200,6 +200,16 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   floor only: Sponza's own walls are not collidable (the viewer holds no triangles of the model), so the level runs through them.
   `--preset controller` plays a scripted walk through the same command struct instead of the keys, which is what a headless run does
   (`--frames 400 --eye -14,2,0 --target 0,1,0`); the keyboard path itself is not exercised by any test here (no display).
+- The "Climb (kin/physics3d, P2d)" section puts the climb level (`tests/climb_level.hpp`: a 4 m wall with a ledge, an overhang, a smooth
+  wall with four holds and a lip, a platform that moves, a crate on a pedestal, a wall of ice, a ledge under a low roof) in front of the
+  camera with the person on it: the same entity as the controller's, with traversal on, a two-bone arm per hand on the grips, the foot
+  placer, and a stamina bar under the picture (the bar, like the stats, is drawn by a headless run only with `--hud`). The camera's forward is
+  where the hands reach; the left and right mouse buttons (or Q and E) hold with the left and the right hand; WASD walk, or while it hangs
+  shimmy along the surface and climb up it; Space jumps (jumps off while it hangs), F pulls up, X lets go, R puts it back. Sliders: reach,
+  stamina, camera distance; the debug lines show the grips (yellow reaching, green held, orange slipping), the hang place and what a hand
+  that is asked to hold and holds nothing can see. `--preset climb` plays a scripted climb of the first wall (both hands, 4 m up, a
+  pull-up over the ledge) through the same command structs, which is what a headless run does (`--frames 420`); the keyboard and mouse
+  path itself is not exercised by any test here (no display). It replaces the controller's level when both are on.
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8

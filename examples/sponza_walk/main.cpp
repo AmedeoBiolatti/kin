@@ -8,6 +8,7 @@
 // printed settings all read one table of rows (SponzaScene::build_controls):
 // a new feature (contact shadows, TAA) is a field and a row there.
 #include "../../tests/character_level.hpp"
+#include "../../tests/climb_level.hpp"
 #include "character.hpp"
 #include "ik_rig.hpp"
 #include "settings.hpp"
@@ -106,6 +107,7 @@ const std::map<std::string, std::string>& presets() {
         {"ik-walk", "character=on,char_count=1,char_clip=sway,ik=on,ik_feet=on,ik_lock=on,ik_toes=on,ik_limits=on,ik_walk=on,ik_step=off"},
         {"physics", "physics=on,phys_debug=on,phys_count=30"}, // Jolt boxes on a floor, thrown once when it goes on, with debug lines (P2b)
         {"controller", "ctrl=on,ctrl_demo=on,ctrl_debug=on"}, // a person walks the test level by a scripted route, camera behind (P2c)
+        {"climb", "climb=on,climb_demo=on,climb_debug=on"}, // a person climbs a wall and pulls up over its ledge (P2d)
         {"ik-all", "character=on,char_count=3,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
     };
     return p;
@@ -526,6 +528,17 @@ private:
         slider("ctrl_distance", "Camera distance (m)", s.ctrl_distance, 1.0f, 10.0f);
         button("ctrl_respawn", "Back to the start", _h.respawn);
 
+        section("Climb (kin/physics3d, P2d)");
+        check("climb", "Climb on (a person and the climb level in front of you)", s.climb);
+        check("climb_debug", "Debug lines (grips, anchors, hang place, what a hand sees)", s.climb_debug);
+        check("climb_demo", "Scripted climb (instead of the keys)", s.climb_demo);
+        slider("climb_reach", "Reach (m)", s.climb_reach, 0.4f, 1.4f);
+        slider("climb_stamina", "Stamina (units)", s.climb_stamina, 10.0f, 400.0f);
+        slider("climb_distance", "Camera distance (m)", s.climb_distance, 1.5f, 10.0f);
+        button("climb_respawn", "Back to the start", _h.respawn);
+        note("Mouse buttons (or Q, E): left, right hand. Aim with the view");
+        note("WASD walk; hanging: along and up. Space jump / jump off, F pull up, X let go");
+
         section("Debug", true);
         check("stats", "Stats (F3)", s.stats);
         check("gpu_timing", "GPU timing", s.gpu_timing);
@@ -762,7 +775,10 @@ private:
         h.reset = [this] { reset_all(); };
         h.reset_history = [this] { _view.reset_history(); };
         h.throw_boxes = [this] { throw_boxes(); };
-        h.respawn = [this] { respawn_controller(); };
+        h.respawn = [this] {
+            respawn_controller();
+            respawn_climb();
+        };
         h.clear_boxes = [this] { clear_boxes(); };
         _controls = std::make_unique<Controls>(_s, std::move(h), _caps);
     }
@@ -799,8 +815,8 @@ private:
     void move(Input& input, float dt) {
         const Camera3D c = camera();
         Vec3f wish{};
-        // With the controller on, the keys walk the person (drive_controller) and the camera follows it.
-        if (_s.ctrl) return;
+        // With the controller or the climb on, the keys walk the person (drive_controller, drive_climb) and the camera follows it.
+        if (_s.ctrl || _s.climb) return;
         // With the panel up the mouse is free and the keys do not fly.
         if (_captured) {
             wish += c.forward() * (float(input.held(Key::W)) - float(input.held(Key::S)));
@@ -846,7 +862,10 @@ private:
         if (input.frame_pressed(Key::L)) _s.sun_animate = !_s.sun_animate;
         if (input.frame_pressed(Key::K)) drop_light();
         if (input.frame_pressed(Key::B)) throw_boxes();
-        if (input.frame_pressed(Key::R) && _s.ctrl) respawn_controller();
+        if (input.frame_pressed(Key::R) && (_s.ctrl || _s.climb)) {
+            respawn_controller();
+            respawn_climb();
+        }
         if (input.frame_pressed(Key::F3)) _s.stats = !_s.stats;
         if (input.frame_pressed(Key::F2)) print_settings();
         if (input.frame_pressed(Key::F12) || input.frame_pressed(Key::P)) _shot_requested = true;
@@ -1058,11 +1077,13 @@ private:
     }
 
     void update_physics(float dt) {
+        if (_s.climb && _s.ctrl) _s.ctrl = false; // (the two levels would stand on each other)
         if (!_s.ctrl && _ctrl_hero.is_valid()) remove_controller();
+        if (!_s.climb && _climb_hero.is_valid()) remove_climb();
         if (!_s.physics) {
             if (!_boxes.empty()) clear_boxes();
         }
-        if (!_s.physics && !_s.ctrl) {
+        if (!_s.physics && !_s.ctrl && !_s.climb) {
             return;
         }
         ensure_physics();
@@ -1074,16 +1095,22 @@ private:
             ensure_controller();
             drive_controller(dt);
         }
-        if (_s.ctrl && _ctrl_built) {
-            // The level's platforms are a function of the step number: moved a step ahead before each fixed step, so the
+        if (_s.climb) {
+            ensure_climb();
+            drive_climb(dt);
+        }
+        if ((_s.ctrl && _ctrl_built) || (_s.climb && _climb_built)) {
+            // The levels' platforms are a function of the step number: moved a step ahead before each fixed step, so the
             // steps are taken here (what advance() does, with that call in it).
             const float fixed = _bodies->config().fixed_dt;
             _ctrl_accumulator += dt;
             int taken = 0;
             while (_ctrl_accumulator >= fixed && taken < 8) {
-                _ctrl_level.drive(*_physics, _ctrl_steps, fixed);
+                if (_s.ctrl && _ctrl_built) _ctrl_level.drive(*_physics, _ctrl_steps, fixed);
+                if (_s.climb && _climb_built) _climb_level.drive(*_physics, _climb_steps, fixed);
                 _bodies->step(fixed);
                 ++_ctrl_steps;
+                ++_climb_steps;
                 ++taken;
                 _ctrl_accumulator -= fixed;
             }
@@ -1094,6 +1121,10 @@ private:
         if (_s.ctrl && _ctrl_hero.is_valid()) {
             follow_controller(dt);
             if (!_s.character) _ecs_state->animate(dt); // (update_characters does it when the characters are on)
+        }
+        if (_s.climb && _climb_hero.is_valid()) {
+            follow_climb(dt);
+            if (!_s.character) _ecs_state->animate(dt);
         }
     }
 
@@ -1198,6 +1229,205 @@ private:
         _velocity = {};
     }
 
+    // --- grab and climb (P2d) -------------------------------------------------------------------------------------------------
+    // The climb level (tests/climb_level.hpp) is built in front of the camera, along +X from there, with its walls facing +Z, and
+    // a person (an entity with a CharacterController3D with traversal on, a locomotion Animator3D, the foot placer and a two-bone
+    // arm each on the grips) at its start. The camera's forward is the way the hands reach; the mouse buttons (or Q and E) hold
+    // with the left and the right hand. A headless run cannot press anything: `climb_demo` plays a scripted climb of the first
+    // wall through the same command structs.
+    void ensure_climb() {
+        if (!_r3d->capabilities().skinning) return;
+        if (_climb_hero.is_valid() && _climb_hero.is_alive()) return;
+        if (!_person_model) _person_model = make_person(*_r3d);
+        _climb_origin = {_pos.x - 1.0f, 0.0f, _pos.z - 4.0f};
+        _climb_level = climb_level::build(*_physics, {}, _climb_origin);
+        _climb_steps = 0;
+        _climb_built = true;
+        Animator3D animator = locomotion_animator({.idle = "Sway", .walk = "Walk", .run = "Run", .fall = "Fall"});
+        IKConstraint feet = person_constraints(nullptr)[0];
+        feet.fade_seconds = 0.12f;
+        animator.add_ik(feet);
+        for (const char* side : {"L", "R"}) {
+            IKConstraint hand;
+            hand.name = std::string("hand_") + side;
+            hand.kind = IKKind::TwoBone;
+            hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
+            hand.weight = 0.0f;
+            hand.fade_seconds = 0.12f;
+            hand.pole = IKConstraint::Pole::ModelDirection;
+            hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
+            hand.two_bone.max_stretch = 1.05f;
+            animator.add_ik(hand);
+        }
+        CharacterController3D controller;
+        controller.desc = climb_level::climber_desc();
+        controller.desc.traversal.reach = _s.climb_reach;
+        controller.desc.traversal.resource.max = _s.climb_stamina;
+        controller.input.forward = {0.0f, 0.0f, -1.0f};
+        controller.facing = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 180.0f);
+        CharacterAnimationLink3D link;
+        link.hands = {"hand_L", "hand_R"};
+        link.hand_clearance = 0.05f;
+        _climb_hero = _ecs->raw().entity()
+                          .set(Transform3D{.position = _climb_origin + Vec3f{0.0f, 0.0f, 0.7f}})
+                          .set(controller)
+                          .set(SkinnedMeshRenderer{.model = _person_model})
+                          .set(static_cast<const Animator3D&>(animator))
+                          .set(link);
+        _climb_time = 0.0f;
+        _yaw = 0.0f; // looking along -Z, at the wall
+        _pitch = -8.0f;
+    }
+
+    void remove_climb() {
+        if (_climb_hero.is_valid() && _climb_hero.is_alive()) _climb_hero.destruct();
+        _climb_hero = {};
+        if (_climb_built && _physics) {
+            for (const climb_level::Piece& p : _climb_level.pieces) _physics->destroy_body(p.body);
+        }
+        _climb_level = {};
+        _climb_built = false;
+    }
+
+    void respawn_climb() {
+        if (!_climb_hero.is_valid() || !_climb_hero.is_alive()) return;
+        _climb_hero.get_mut<Transform3D>()->position = _climb_origin + Vec3f{0.0f, 0.0f, 0.7f}; // a move by game code is a teleport
+        _physics->set_traversal_resource(_bodies->character_of(_climb_hero), _s.climb_stamina);
+        _climb_time = 0.0f;
+    }
+
+    // The commands of this frame (held for the fixed steps that follow) and the descriptor's live numbers.
+    void drive_climb(float dt) {
+        if (!_climb_hero.is_valid() || !_climb_hero.is_alive()) return;
+        CharacterController3D* c = _climb_hero.get_mut<CharacterController3D>();
+        const Character3D handle = _bodies->character_of(_climb_hero);
+        if (handle.valid()) {
+            CharacterDesc3D d = c->desc;
+            d.traversal.reach = _s.climb_reach;
+            d.traversal.resource.max = _s.climb_stamina;
+            _physics->set_character_desc(handle, d);
+        }
+        _climb_time += dt;
+        CharacterInput3D in;
+        TraversalInput3D t;
+        in.forward = camera().forward();
+        t.reach = camera().forward();
+        if (_s.climb_demo) {
+            // The first wall: take hold with both hands, climb its 4 m, pull up over the ledge, walk off the back; over and over.
+            const float s = std::fmod(_climb_time, 12.0f);
+            in.forward = {0.0f, 0.0f, -1.0f};
+            t.reach = {0.0f, 0.45f, -1.0f};
+            t.grab = {s > 0.2f && s < 6.8f, s > 0.2f && s < 6.8f};
+            in.move = {0.0f, s > 0.7f && s < 5.0f ? 1.0f : (s > 7.2f ? 1.0f : 0.0f)};
+            t.pull_up = s > 5.4f && s < 5.5f;
+            if (s < 0.05f && _climb_time > 1.0f) respawn_climb();
+        } else if (_input != nullptr && _captured) {
+            const Input& k = *_input;
+            in.move = {float(k.held(Key::D)) - float(k.held(Key::A)), float(k.held(Key::W)) - float(k.held(Key::S))};
+            in.jump = k.held(Key::Space);
+            t.jump_off = k.held(Key::Space);
+            t.grab = {k.mouse_held(MouseButton::Left) || k.held(Key::Q), k.mouse_held(MouseButton::Right) || k.held(Key::E)};
+            t.pull_up = k.held(Key::F);
+            t.drop = k.held(Key::X);
+        }
+        c->input = in;
+        c->traversal = t;
+        // While it walks it faces the way it goes (the person faces +Z); hanging, the system turns it to the surface.
+        if (c->state.traversal_mode == TraversalMode3D::Walking) {
+            const Vec3f fwd = normalize(Vec3f{in.forward.x, 0.0f, in.forward.z});
+            const Vec3f right{-fwd.z, 0.0f, fwd.x};
+            const Vec3f dir = right * -in.move.x + fwd * in.move.y;
+            if (length(dir) > 0.1f) c->facing = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, std::atan2(dir.x, dir.z) * 180.0f / pi);
+        }
+    }
+
+    void follow_climb(float) {
+        const Transform3D* t = _climb_hero.get<Transform3D>();
+        if (t == nullptr) return;
+        const Vec3f target = t->position + Vec3f{0.0f, 1.3f, 0.0f};
+        _pos = target - camera().forward() * _s.climb_distance;
+        _velocity = {};
+    }
+
+    void draw_climb_level() {
+        if (!_climb_built) return;
+        using climb_level::Kind;
+        const auto colour_of = [](Kind k) {
+            switch (k) {
+            case Kind::Floor: return Color::rgb(112, 120, 108);
+            case Kind::Wall: return Color::rgb(186, 160, 130);
+            case Kind::Lip: return Color::rgb(210, 190, 150);
+            case Kind::Roof: return Color::rgb(130, 140, 160);
+            case Kind::SmoothWall: return Color::rgb(150, 156, 170);
+            case Kind::Hold: return Color::rgb(230, 130, 70);
+            case Kind::Platform: return Color::rgb(80, 140, 220);
+            case Kind::Pedestal: return Color::rgb(176, 170, 160);
+            case Kind::Crate: return Color::rgb(220, 190, 90);
+            case Kind::IceWall: return Color::rgb(150, 205, 235);
+            case Kind::LowRoof: return Color::rgb(110, 110, 125);
+            case Kind::Ledge: return Color::rgb(170, 120, 120);
+            }
+            return Color::rgb(200, 200, 200);
+        };
+        for (const climb_level::Piece& p : _climb_level.pieces) {
+            if (p.kind == Kind::Floor) continue; // (Sponza has its own floor)
+            const Vec3f centre = p.moving ? _physics->position(p.body) : p.centre;
+            const Quatf rotation = p.moving ? _physics->rotation(p.body) : p.rotation;
+            _scene.draw(_box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), Material3D{.color = colour_of(p.kind), .roughness = 0.85f});
+        }
+    }
+
+    // What the hands that are asked to hold and hold nothing could take (the best one with a longer normal).
+    void climb_candidates_lines() {
+        if (!_climb_hero.is_valid() || !_climb_built) return;
+        const Character3D c = _bodies->character_of(_climb_hero);
+        const CharacterController3D* controller = _climb_hero.get<CharacterController3D>();
+        if (!c.valid() || controller == nullptr) return;
+        const TraversalState3D t = _physics->traversal(c);
+        const CharacterState3D s = _physics->character(c);
+        const Vec3f facing = t.mode == TraversalMode3D::Walking ? normalize(Vec3f{controller->input.forward.x, 0.0f, controller->input.forward.z})
+                                                                  : -normalize(t.surface_normal);
+        const Vec3f right = normalize(cross(facing, s.up));
+        for (u32 h = 0; h < t.limb_count; ++h) {
+            if (!controller->traversal.grab[h] || t.grips[h].phase != GripPhase3D::Free) continue;
+            GripProbeDesc3D probe;
+            const Vec3f sh = controller->desc.traversal.limbs[h].shoulder;
+            probe.origin = s.position + right * sh.x + s.up * sh.y + facing * sh.z;
+            probe.direction = length(controller->traversal.reach) > 0.0f ? controller->traversal.reach : facing;
+            probe.up = s.up;
+            probe.forward = facing;
+            probe.reach = controller->desc.traversal.reach;
+            probe.clearance_radius = controller->desc.radius;
+            probe.clearance_height = controller->desc.height;
+            probe.ignore = s.body;
+            _bodies->debug().candidates(_physics->probe_grips(probe));
+        }
+    }
+
+    // The resource as a bar under the middle of the picture while the climb is on (not drawn by a headless run without --hud).
+    void draw_climb_hud(Vec2i out, float u, Color glass, Color rim, Color ink, Color muted) {
+        if (!_climb_hero.is_valid() || !_climb_hero.is_alive()) return;
+        const Character3D c = _bodies->character_of(_climb_hero);
+        if (!c.valid()) return;
+        const TraversalState3D t = _physics->traversal(c);
+        const float w = 260 * u, h = 22 * u;
+        const Rectf r{(float(out.x) - w) * 0.5f, float(out.y) - 48 * u, w, h};
+        ui2::Panel back{.bounds = r, .color = glass, .border = rim};
+        ui2::run(_ui, back);
+        const float f = std::clamp(t.resource.fraction(), 0.0f, 1.0f);
+        const Color fill = t.resource.exhausted ? Color::rgb(220, 70, 60) : f < 0.3f ? Color::rgb(230, 170, 60) : Color::rgb(80, 200, 120);
+        if (f > 0.0f) {
+            ui2::Panel bar{.bounds = {r.x + 3 * u, r.y + 3 * u, (w - 6 * u) * f, h - 6 * u}, .color = fill, .border = fill};
+            ui2::run(_ui, bar);
+        }
+        char label[96];
+        const char* mode = t.mode == TraversalMode3D::Walking ? "walking" : t.mode == TraversalMode3D::Hanging ? "hanging" : "pulling up";
+        std::snprintf(label, sizeof label, "%s   hands %u   stamina %.0f / %.0f%s", mode, t.held, t.resource.value, t.resource.max,
+                      t.resource.exhausted ? "  EXHAUSTED" : "");
+        const ui2::TextStyle st = text_style(u, t.resource.exhausted ? ink : muted, 11);
+        put(label, r.x, r.y - 18 * u, 16 * u, st);
+    }
+
     // The level's pieces as meshes (the bodies are drawn by the debug lines only when asked).
     void draw_controller_level() {
         if (!_ctrl_built) return;
@@ -1238,11 +1468,12 @@ private:
         _scene.clear();
         _scene.camera = camera();
         apply(_s, _scene, environment(), _model.bounds, _pos);
-        if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid())) {
+        if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid() || _climb_hero.is_valid())) {
             _ecs_state->propagate_transforms();
             _ecs_state->collect(_scene);
             if (_bodies) {
-                _bodies->config().debug_draw = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug);
+                _bodies->config().debug_draw = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug) || (_s.climb && _s.climb_debug);
+                if (_s.climb && _s.climb_debug) climb_candidates_lines();
                 if (_s.ctrl && _s.ctrl_debug && _ctrl_hero.is_valid()) {
                     // What the character touches: a cross at each contact and its normal (green: it can stand on it).
                     for (const CharacterContact3D& k : _physics->character_contacts(_bodies->character_of(_ctrl_hero))) {
@@ -1254,6 +1485,7 @@ private:
                 _bodies->collect_debug(*_r3d, _scene);
             }
             draw_controller_level();
+            draw_climb_level();
             if (_s.ik && _characters_are_people) {
                 // The hand's target (a small red ball), the tail's (a green one) and the step, in each person's own space as it was
                 // placed (they stay put while the person walks).
@@ -1461,6 +1693,7 @@ private:
             ctx.renderer.fill_rect({cx - u * 0.5f, cy + 3 * u, u, 5 * u}, cross);
         }
         if (_s.stats && (!ctx.app.headless() || _options.hud)) draw_stats(out, u, glass, rim, ink, muted);
+        if (_s.climb && (!ctx.app.headless() || _options.hud)) draw_climb_hud(out, u, glass, rim, ink, muted);
         if (!panel_shown) {
             if (_captured) {
                 const std::string hint = "Tab or Esc: panel";
@@ -1667,6 +1900,13 @@ private:
     Quatf _ctrl_facing{};
     float _ctrl_time = 0.0f, _ctrl_accumulator = 0.0f;
     int _ctrl_steps = 0;
+    // The climb section.
+    flecs::entity _climb_hero;
+    climb_level::Level _climb_level;
+    bool _climb_built = false;
+    Vec3f _climb_origin{};
+    float _climb_time = 0.0f;
+    int _climb_steps = 0;
     const Input* _input = nullptr;
     Model _model;
     Mesh _marker;

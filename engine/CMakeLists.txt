@@ -211,6 +211,8 @@ if(KIN_EXPERIMENTAL_3D)
         src/physics3d/shape3d.cpp
         src/physics3d/world3d.cpp
         src/physics3d/character3d.cpp
+        src/physics3d/traversal3d.cpp
+        src/physics3d/traversal_character3d.cpp
         src/physics3d/debug_draw3d.cpp
     )
     target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)

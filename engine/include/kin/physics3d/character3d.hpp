@@ -28,11 +28,15 @@
 //    it: dynamic bodies are stopped by it, sensors report it, queries hit it (ignore it with `body`). It counts in
 //    World3D::body_count() and is in bodies(); do not destroy, move or reshape it through the body calls.
 //
-// Not here: grab and climb, ragdolls, ropes (later), character against character pushing (they stop each other).
+// Grab and climb is on top of it (traversal3d.hpp, off by default: CharacterDesc3D::traversal.enabled): two hands take hold
+// of the world, the character hangs from them (kinematic, with a swing), shimmies, pulls up over a ledge or lets go.
+//
+// Not here: ragdolls, ropes (later), character against character pushing (they stop each other).
 
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
 #include <kin/physics3d/handles3d.hpp>
+#include <kin/physics3d/traversal3d.hpp>
 
 namespace kin {
 
@@ -103,6 +107,9 @@ struct CharacterDesc3D {
     u8 layer = layers3d::Character;
     Layer3DMask collides_with = all_layers3d;
 
+    // Grab and climb (traversal3d.hpp): off by default, which leaves everything above as it was.
+    TraversalDesc3D traversal{};
+
     // Yours (not read by the engine; hashed, and the user id of its body: events name it).
     u64 user_id = 0;
 };
@@ -159,6 +166,10 @@ struct CharacterState3D {
     Body3D body{};
     // Jumped in the last step.
     bool jumped = false;
+    // Grab and climb: what the body is doing (Walking when traversal is off). While it is not Walking, `ground` is only
+    // what the capsule touches (no Landed or LeftGround events come of it) and the walking fields above are the achieved
+    // motion. World3D::traversal() has the grips and the resource.
+    TraversalMode3D traversal_mode = TraversalMode3D::Walking;
 };
 
 // One thing the character touches (as the last step left it): sorted by body number, a body once.
@@ -180,6 +191,16 @@ enum class CharacterEventKind3D : u8 {
     HitHead,     // moving up, met a ceiling; `speed` how fast it was going up
     ContactBegin, // began to touch `body` (a sensor: entered it)
     ContactEnd,   // stopped touching `body`
+    // Grab and climb (traversal3d.hpp). `hand` is the limb's number; `body` and `body_user_id` what it holds; `point` and
+    // `normal` the anchor and its surface.
+    Gripped,       // a hand took hold (`jumped` is not used)
+    Slipped,       // a held grip began to slide (`speed` how fast)
+    GripReleased,  // a hand let go; `reason` is a GripRelease3D
+    Exhausted,     // the resource ran out (`speed` is the value it had a step before)
+    MantleStarted, // the pull-up began; `point` is where the feet will stand
+    MantleFinished,// the pull-up is done: walking again
+    MantleBlocked, // a pull-up was asked for and could not be made; `reason` is a MantleBlock3D; still hanging
+    Fell,          // the character let go of everything and is falling (not a jump off or a pull-up); `reason` as GripReleased
 };
 
 struct CharacterEvent3D {
@@ -195,6 +216,9 @@ struct CharacterEvent3D {
     f32 speed = 0.0f;
     // LeftGround: it was the jump command that did it (and not an edge).
     bool jumped = false;
+    // The grab and climb kinds: the limb, and why (see the kind).
+    u8 hand = 0;
+    u8 reason = 0;
 };
 
 } // namespace kin

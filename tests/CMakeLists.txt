@@ -114,6 +114,8 @@ if(KIN_EXPERIMENTAL_3D)
     kin_add_test(kin_physics3d_ecs_tests kin-physics3d-ecs SOURCES physics3d_ecs_tests.cpp)
     kin_add_test(kin_physics3d_character_tests kin-physics3d-character SOURCES physics3d_character_tests.cpp
         DEFINITIONS KIN_TEST_REFERENCE_SCENES="${PROJECT_SOURCE_DIR}/tests/reference/scenes")
+    kin_add_test(kin_physics3d_traversal_tests kin-physics3d-traversal SOURCES physics3d_traversal_tests.cpp
+        DEFINITIONS KIN_TEST_REFERENCE_SCENES="${PROJECT_SOURCE_DIR}/tests/reference/scenes")
     kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")

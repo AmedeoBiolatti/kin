@@ -4,11 +4,14 @@
 // world's Impl owns one and calls it from step(), the hash and the saved state.
 
 #include "jolt_runtime.hpp"
+#include "traversal3d_impl.hpp"
 
 #include <kin/physics3d/character3d.hpp>
 #include <kin/physics3d/world3d.hpp>
 
 #include <Jolt/Core/TempAllocator.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Collision/ObjectLayer.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorder.h>
@@ -20,8 +23,21 @@
 
 namespace kin::physics3d_detail {
 
+// Which layers a character's own movement meets.
+class MaskFilter final : public JPH::ObjectLayerFilter {
+public:
+    explicit MaskFilter(Layer3DMask mask) : _mask(mask) {}
+    bool ShouldCollide(JPH::ObjectLayer layer) const override { return layer < 32 && (_mask >> layer & 1u) != 0; }
+
+private:
+    Layer3DMask _mask;
+};
+
 // What the set needs of the world around it.
 struct CharacterEnv {
+    // The world the set is in: grab and climb asks it the public questions (rays, sweeps, a body's place and velocity) and
+    // loads what is held.
+    World3D* world = nullptr;
     JPH::PhysicsSystem* system = nullptr;
     JPH::TempAllocator* temp = nullptr;
     const std::array<u32, 32>* table = nullptr;
@@ -57,6 +73,10 @@ public:
     void set_up(Character3D c, Vec3f up, bool instant);
     bool set_crouch(Character3D c, bool crouch);
     void set_desc(Character3D c, const CharacterDesc3D& desc);
+    void set_traversal_input(Character3D c, const TraversalInput3D& input);
+    TraversalInput3D traversal_input(Character3D c) const;
+    TraversalState3D traversal(Character3D c) const;
+    void set_traversal_resource(Character3D c, f32 value);
 
     // Advances every character by dt, in ascending number, before the world's step.
     void update(f32 dt);
@@ -94,6 +114,7 @@ public:
             u8 ground = 0;
             bool touching_ceiling = false;
             std::vector<std::pair<u32, bool>> touched;
+            TravData trav;
         };
         std::vector<One> slots;
     };
@@ -134,12 +155,31 @@ private:
         // What it touched at the last step: (body number, sensor) sorted, to make Begin and End from.
         std::vector<std::pair<u32, bool>> touched;
         std::vector<CharacterContact3D> contacts;
+        // Grab and climb (TraversalDesc3D::enabled): what the limbs hold, the resource, the mode.
+        TravData trav;
     };
 
     Slot* find(Character3D c) { return c.index < _slots.size() && _slots[c.index].alive && _slots[c.index].generation == c.generation ? &_slots[c.index] : nullptr; }
     const Slot* find(Character3D c) const { return const_cast<CharacterSet*>(this)->find(c); }
 
     void update_one(u32 index, Slot& s, f32 dt);
+    // Grab and climb. Called at the start of a step of a character with traversal on: takes the grips, the resource and
+    // the hanging or mantling move. True when it moved the character itself (hanging, mantling); false leaves the step to
+    // the walking controller (which it may have given a jump off or a fall to do). The events go in `traversal_events_`.
+    bool update_traversal(u32 index, Slot& s, f32 dt);
+    bool mantle_step(u32 index, Slot& s, f32 dt);
+    // Where a grip's anchor is in the world (false when its body is gone); `predicted` adds the body's motion over `dt`
+    // (a kinematic platform that is about to move: the hand and the character arrive together).
+    bool anchor_world(const Slot& s, const GripData& g, bool predicted, f32 dt, Vec3f& point, Vec3f& normal) const;
+    // One limb lets go: the event (when it held), the limb free, latched when the command is still given.
+    void release_grip(Slot& s, u32 hand, GripRelease3D reason);
+    void add_traversal_event(CharacterEventKind3D kind, u32 hand, u8 reason, Body3D body, Vec3f point, Vec3f normal, f32 speed);
+    // Hanging or mantling ends: back to the walking controller with the speed it has; `fell` says so (an event).
+    void leave_hang(Slot& s, bool fell, GripRelease3D why);
+    void push_event(u32 index, const Slot& s, CharacterEvent3D e);
+    // Contacts begun and ended since `before` (the sorted (body number, sensor) list of the step before).
+    void emit_contact_changes(u32 index, Slot& s, const std::vector<std::pair<u32, bool>>& before);
+    void flush_traversal_events(u32 index, const Slot& s);
     void collect_contacts(u32 index, Slot& s);
     void swap_shape(Slot& s, bool crouch);
     // Settings the descriptor gives a live character (slope, mass, strength, friction).
@@ -151,6 +191,8 @@ private:
     std::vector<u32> _free;
     i32 _live = 0;
     std::vector<CharacterEvent3D> _events;
+    // The grab and climb events of the character being updated, sorted and moved to `_events` at the end of its step.
+    std::vector<CharacterEvent3D> _traversal_events;
 };
 
 } // namespace kin::physics3d_detail

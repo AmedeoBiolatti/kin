@@ -49,6 +49,14 @@ struct DebugDraw3DOptions {
     Color contact_normal = Color::rgb(255, 170, 0);
     Color ray = Color::rgb(255, 255, 255);
     Color ray_hit = Color::rgb(0, 255, 255);
+    // Grab and climb: a hand reaching, holding, slipping; the candidates of a probe (by provider); the character's hang place.
+    Color grip_reaching = Color::rgb(255, 230, 60);
+    Color grip_held = Color::rgb(70, 255, 110);
+    Color grip_slipping = Color::rgb(255, 120, 30);
+    Color candidate_surface = Color::rgb(120, 170, 255);
+    Color candidate_ledge = Color::rgb(255, 120, 230);
+    Color candidate_hold = Color::rgb(255, 255, 255);
+    Color hang_place = Color::rgb(160, 160, 160);
 };
 
 class DebugDraw3D {
@@ -80,6 +88,12 @@ public:
     // A swept shape: it at the start, at the end (or where it hit), and the hit's point and normal.
     void shape_cast(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
                     const std::optional<ShapeHit3D>& hit);
+    // A character's grips (traversal3d.hpp): a cross at each anchor in the colour of its phase, its surface's normal and
+    // frame, a line from the limb's anchor to the character's feet, the hang place, and the ledge top a pull-up goes to.
+    // Nothing for a character with traversal off.
+    void grips(const World3D& world, Character3D character);
+    // A probe's candidates: a cross and a normal each, by provider, the best one longer.
+    void candidates(std::span<const GripCandidate3D> candidates);
 
 private:
     void circle(Vec3f centre, Vec3f u, Vec3f v, f32 radius, Color color);

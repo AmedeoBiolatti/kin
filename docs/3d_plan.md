@@ -3127,6 +3127,9 @@ a scripted-input run of the climbing test level, the physics step's cost with 50
 Risk to watch: Jolt is large to compile; this machine has 14 GB of RAM and a nearly full
 disk (see HANDOFF.md): build with `-j8`, check the disk first.
 
+Done so far: P2a (the core), P2b (queries, events, constraints, debug draw, ECS), P2c (the character controller) and P2d (grab and
+climb), each with its results below; the ragdoll and the ropes remain.
+
 #### P2a — Jolt core — results
 
 Done 2026-10-11 on `exp/3d-rendering` (head 4d3ae05 plus the working tree). The rest of P2 (queries, events, debug draw, ECS
@@ -3649,6 +3652,232 @@ edit): 39 pictures each, all byte for byte equal to the head binary's, and the 1
 - `tools/reference/make_scenes.py` (run by `fetch.py`) writes `skinned_biped_walk.glb` into the cache's `made/`; on this machine it was
   written by calling that function alone (the other files are byte for byte what it makes: checked); `kin_reference` says so when the
   file is missing and the scene does not render.
+
+#### P2d — grab and climb — results
+
+Done 2026-10-11 on `exp/3d-rendering` (head bca1c18 plus the working tree, not committed). A GENERAL traversal capability on the
+character controller, two hands by default, hands only; nothing in it knows about a mountain. Ragdoll and ropes are next (the grip
+providers' interface is ready for a rope and none is built).
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| Data, providers, resource | `kin/physics3d/traversal3d.hpp`, `engine/src/physics3d/traversal3d.cpp` | `SurfaceMaterial3D`, `HoldDesc3D`, `GripProbeDesc3D`, `GripCandidate3D`, `Resource3D`, `TraversalDesc3D` (in `CharacterDesc3D::traversal`), `TraversalInput3D`, `GripState3D`, `TraversalState3D`, the `GripProvider3D` interface (probe, attach, move, detach) with the hold, ledge and surface providers; no Jolt header |
+| Probe, material, hold, state | `World3D::probe_grips`, `set_surface_material`, `set_hold`, `set_traversal_input`, `traversal`, `set_traversal_resource` | the probe is written over the public queries (`shape_cast`, `raycast`, `overlap`) |
+| The body response | `engine/src/physics3d/traversal_character3d.cpp`, hooks in `character3d.cpp` | grips, hanging, shimmy and climb, slip, load, mantle, resource, exhaustion; Jolt's swept `CharacterVirtual::Update` makes every move |
+| Events | `CharacterEventKind3D::Gripped, Slipped, GripReleased, Exhausted, MantleStarted, MantleFinished, MantleBlocked, Fell` (+ `hand`, `reason`) | with the walking events, sorted by (kind, limb) |
+| ECS | `Hold3D`, `SurfaceMaterial3D` (the physics struct is the component), `CharacterController3D::traversal` / `traversal_state`, `CharacterAnimationLink3D::hands` / `hanging` / `hand_clearance` / `align_hands` / `hand_offset`, `LocomotionClips3D::hang`, `drive_traversal_animator`, `WorldPhysicsState3D::traversal_of` | facing turned to the surface, the hands' IK on the anchors with the weight of the phase |
+| Debug draw | `DebugDraw3D::grips`, `candidates`, `WorldPhysicsState3DConfig::debug_grips` | anchors by phase, normals and frames, line to the body, hang place, ledge top, a probe's candidates by provider |
+| Level, timeline | `tests/climb_level.hpp`, `tests/reference/scenes/physics_climb.json` | one level and one scripted timeline (commands, teleports, stamina, checkpoints) for the CPU test, the picture and the bench |
+| Tests, bench | `kin-physics3d-traversal` (CPU), 3 functions in `kin-physics3d-ecs`, `kin_physics3d_bench climbing` | |
+| Harness, viewer | `kin_reference` scene `physics_climb`; Sponza Walk section "Climb (kin/physics3d, P2d)", `--preset climb` | |
+
+**Decisions where the plan was open.**
+1. *Traversal is a mode of the character, inside the controller's step* (not a second object): each step runs the limbs first (grips,
+   edges of the commands, the resource), then either the hanging or mantling move or the walking controller of P2c. With
+   `traversal.enabled` false nothing of it runs and no byte of it is in the header the hash reads, so a P2c scene hashes as it did (the
+   five P2c test programs pass unchanged and the pictures of `physics_character` and `physics_pile` are the head binary's, byte for
+   byte). `enabled` is fixed at creation (it is in the saved state's layout); the other numbers are live.
+2. *The move is kinematic and swept*: the hanging character's feet are driven to the hang place with Jolt's `CharacterVirtual::Update`
+   at a velocity that arrives in one step, so it cannot pass through a wall or the floor (it stands on tiptoe when the hands are low), and
+   the same call carries the pull-up. Nothing is a constraint: the plan floated "a constraint or a kinematic move"; a constraint to a
+   body would have made the character a dynamic body that can be pulled through things.
+3. *Anchors live in the grabbed body's own space* (position and normal), and the move uses where they will be at the end of the step
+   (`position + (v + w x r) dt`), so that a kinematic platform carries the hands and the character together with no lag (measured:
+   the carried offset stays within 4 cm over a there-and-back, the swing is only the character's reaction to acceleration). A dynamic
+   body that is held gets the character's weight as a force at each anchor, shared by the hands that hold it, added before the
+   world's step: the crate goes over its pedestal's edge and the character follows its anchor down.
+4. *The swing is a spring about the hang place, measured from the anchors as they are and driven to where they will be*: 0.9 Hz and a
+   damping ratio of 0.4 across `up` (a pendulum), 3 Hz and 1 along it (the arms); its velocity is read back from what the move
+   achieved, so a floor in the way does not wind it up. A grab in the air keeps 0.4 of the speed as the start of the swing.
+5. *Hands are independent*; each has its own grip, reaches for 0.15 s (the IK fades in on it), and is not put within 0.2 m of another
+   hand's anchor (two hands on one point is not a grip). A limb the character let go of (exhausted, slipped, dropped, jumped off)
+   is latched until its command is given up: a held button does not re-grab at once. The shoulders of the held limbs go under their
+   hands: a body hangs from one hand with that shoulder under it, which is where the other hand can reach.
+6. *Move is along the surface, all hands or none*: x shimmies, y climbs (a surface only; a ledge's lip is a line, and a hold with
+   `snap` is a point); the anchors are re-projected on the surface by a ray, so an edge, a corner or a gap stops them, and one hand at
+   the end of a wall stops the other (they do not tear apart). A hand going up a face finds the lip within 12 cm and becomes a ledge
+   grip.
+7. *The ledge is a ray down just inside the surface* (10 cm in, `ledge_search_height` up): a hit on the body's top within range is the
+   lip; for a hit on the underside of a ledge the edge is on the hand's side. `clear` is a standing capsule's overlap (and a floor
+   ray) at the place over the edge; a pull-up also sweeps the capsule over the edge. The ledge must be a top of the body that was hit.
+8. *The mantle is a path in the ledge body's own space* (start, straight up the wall, then over the edge to a spot a capsule's radius
+   and 10 cm in), smoothstep over `mantle_seconds` (0.7 s) with the swept move, so a moving platform under the ledge carries it.
+   Failure is `MantleBlocked` (`NoLedge`, `NoRoom`, `Tired`) and it stays hanging with nothing spent.
+9. *The resource is generic* (`Resource3D` and a config): drain is a rate the caller passes, so the same type is the stamina and the
+   sprint; `step` returns the rising edge of exhaustion; it comes back after a delay since it was last spent and is exhausted
+   with hysteresis (15 % of max back). Exhausted while hanging: grips fail hand by hand, the weakest first (strength fades over 0.3 s,
+   the next hand 0.4 s later), then `Fell`.
+10. *Holding with the feet on walkable ground is rest*: the drain is scaled by `ground_drain_factor` (default 0), so the resource comes
+    back after its delay while a hand is on the wall of a character that stands.
+11. *A hold is taken from the front*: a small hold's face is found by a ray along the character's facing through the place the sweep
+    went, moved 5 cm toward the hold's middle (the sweep itself grazes its side or underside).
+12. *Events are collected per character and flushed after the walking events*, sorted by (kind, limb), so that the order is not the
+    order the limbs were worked in (a mutant that leaves them unsorted is caught).
+13. *Gravity direction is the character's `up`* in every frame, force and path above: the whole level turned 90 degrees about Z (a wall
+    that is a floor, gravity along +X) or 35 degrees about X and 20 about Y gives the same climb and the same place on the ledge (the
+    two agree to better than 0.1 mm, printed 0.0000, against a 6 and 8 cm bound in the test).
+14. *The probe is written over the public queries* (a fan of seven sphere sweeps and a ray each: the sweep gives the body and the
+    reach, the ray the face and its exact normal): a game can do the same from outside, and the providers need nothing of Jolt.
+    The first thing a cast meets is the only thing it sees (documented limit).
+
+**Numbers** (this machine; `kin-physics3d-traversal` with `-v`, one thread; the level is `tests/climb_level.hpp`).
+
+| Behaviour | Measured |
+|---|---|
+| Reach for a hold | the hand arrives in 0.15 s (9 steps), `Gripped` then; the body swings in to the wall over about 0.5 s |
+| Hanging place | feet 1.70 m under the hands (shoulder 1.45 + 0.25), 0.34 m (radius + 4 cm) out from the face: z = 0.338 |
+| Climb of the 4 m wall from the floor | 0.6 m/s along the face; the lip is found 12 cm below it and both hands become ledge grips at y = 4.000; 2.17 m in the 217 steps counted from the first hold (the first hold is at 1.73 m) |
+| Pull-up | 0.7 s (42 steps): mantle progress 0.762 at step 32; ends standing at y = 4.000, z = -0.400 (the radius and 10 cm inside the lip), on the ground, no landing event |
+| Drain, two hands / one hand | 7.00 / 12.00 units a second (ratio 1.714); wet rock (x 2): 14.00; moving +4; ice (x 2) with two grabs: 25.0 in 1.5 s of sliding |
+| Resource | 5.000 left of 10 after 1 s at 5 a second; no regen inside the 0.5 s delay (5.000), then 4 a second (7.0 after 0.5 s more); exhausted once (the edge) and until half is back |
+| Sprint (20 units, 20 a second) | 7.0 m/s while it lasts, 4.0 m/s from step 62 (exhausted), sprint again after the rest (delay 1 s, 10 a second) |
+| Low stamina climb (20 units) | exhausted at step 104 (worked out from the rates: 104), first hand lets go 17 steps later, the second 25 after that, `Fell` the same step |
+| Exhaustion with 6 units (after the grabs 2 left) | exhausted 17 steps after the second grab (analytic 17.1), weakest hand 17 steps later (0.3 s fade less the step it began on), the other 25 later (0.4 s) |
+| Shimmy | 1.00 m in 60 steps (1.0 m/s); stops 0.4 m apart at the wall's end (x = 2.6 and 3.0), both still holding |
+| Slip on ice | slides at 1.200 m/s for 1.500 s (1.78 m), `GripReleased` (Slipped) and `Fell` at the end; the `Slipped` event's speed 1.2 |
+| Jump off | 3.00 m/s away from the face and 3.84 m/s up one step on (4.0 less g dt); off the platform that moves at 1.5 m/s: x velocity 1.50 |
+| Platform carrying | the anchor's place in the platform's own space unchanged to the bit over 8 s there and back; the character within 4 cm of its offset; the anchor on its face (z = 0.800) |
+| Crate (30 kg, a third over the edge) | alone: stays at (y 2.40, z 0.90) for 2.5 s; held: over the edge within half a second (turned by more than 20 degrees), 1.0 m lower or more at 2.5 s, the anchor 0.000 m from where its own-space point is on the crate; a 10 t crate does not move |
+| Probe | 0.70 m to a wall face (point z = 0.000, normal +Z, frame right = +X, up = +Y); a hold 0.15 out of a smooth wall, the ledge's lip y = 4.000 with the stand 0.35 in and clear (not clear under the roof); the same list bit for bit twice |
+| Redirected gravity | climb on the level turned 90 degrees about Z and 35/20 about Y/X: ends where the upright one does to 0.0000 m |
+| Determinism | hash every step of 600 steps, three climbers, a platform, a crate and ice: equal run to run and on 1 and 4 workers; save at step 150 (hanging), run 400, restore: equal hashes; the same mid-pull-up; a second world made the same way taking the state |
+
+*Cost*, `kin_physics3d_bench climbing` (60 Hz, no workers, a loaded desktop: indicative; 500 boxes are a heap in front of the wall):
+
+| What | Cost |
+|---|---|
+| One probe (`probe_grips`: seven sweeps, up to seven rays, the ledge ray and the capsule overlap) | nothing in reach 1.4 us; a wall face 14.3 us; a ledge with its clearance 15.9 us; holds on a smooth wall 14.6 us; 13.6 to 15.6 us with the 500 boxes round it |
+| A hanging character, 1 / 10 / 100, no boxes | 0.015 / 0.045 / 0.357 ms a step: 12 us for the first (one awake body), 4 us each after |
+| The same shimmying | 0.016 / 0.061 / 0.537 ms: 5 to 6 us each (a re-projection ray and a ledge ray a hand) |
+| Hands asked to grab with nothing in reach (two probes a step), 1 / 10 / 100 | 0.017 / 0.072 / 0.750 ms: 7 to 9 us each |
+| With 500 dynamic boxes, hanging / shimmying / asking, 100 characters | 0.440 / 0.650 / 0.901 ms (the heap alone 0.042) |
+
+So a hanging character costs 4 to 6 microseconds a step and a free hand's probe about 15 when it finds something and 1.4 when it does
+not; 100 characters hanging and shimmying cost 0.5 ms, under 4 % of a 60 Hz frame, all of it on the calling thread.
+
+**Tests.**
+- `kin-physics3d-traversal` (CPU, 0.5 s, 26 functions): the probe (a wall face and its frame, the same list twice, out of reach, the
+  layer mask both ways, the ground not held, a smooth wall with and without holds and with holds only, tag/slip/drain in the candidate, a
+  ledge with its clearance and not under a roof, no ledges wanted, a fan, `max_candidates`, invalid input); a climb to the top and a
+  pull-up (the reach for 0.15 s, held, the hang's place, the speed of the climb, the lip found, the pull-up's phases and end, the events
+  and their reasons, walking on); phases and latch (reach cancelled, one hand, two hands not on one place, a hand released for one step
+  and free, the level held, drop, no regrab until the command is given up); two hands against one (7 and 12 a second) and wet rock
+  (14); `Resource3D` on its own; the sprint spending it and stopping, resting, a character without traversal sprinting for ever; an
+  exhaustion with 6 units (the times worked out) and with none; a low-stamina climb whose exhaustion step is worked out from the
+  rates; events sorted (a step with exhaustion and both hands' release); the mantle blocked under a roof (and made once the roof
+  is gone, `Tired`, `NoLedge`; the press an edge); the shimmy (both ways, to the end of the wall); jump off (velocity, the platform's
+  speed carried) and drop; the platform carrying a grip over its whole cycle; the crate's load (alone and held, the anchor following
+  in its own space, a heavy crate); ice (the slip, the release time, the distance, the tag, the twice drain); the body lost; handles
+  and descriptors (nonsense numbers refused, `enabled` fixed, a character without traversal, a slot reused by another body);
+  an authored hold (snap, strength, fixed, the second hand not on the same point, then on another hold); three limbs; standing on
+  the ground is rest (and not with a factor); walking unchanged (traversal on and unused is the same feet bit for bit as off); the
+  turned level; determinism (three climbers on commands, 600 steps, 0, 1 and 4 workers, the events counted); save and restore
+  mid-hang and mid-pull-up and into another world; the hash seeing the command, the resource and a let-go grip; the debug lines;
+  the scene file's timeline: 19 checkpoints (feet box, mode, hands holding), two pull-ups, one refusal, a slide, falls, no exhaustion,
+  and the same hash every step twice.
+- `kin-physics3d-ecs` (3 more functions): the components' data read when the body is made and again at `rebuild`; the command sent
+  and the state written back (held, the tag of the surface, the facing turned to the wall within 3 degrees); the events with entity ids
+  per step and in the singleton; the biped's hands within 2 cm of the two anchors by IK, weight 1 while they hold and 0 after,
+  the `hanging` parameter, the machine's `hang` state.
+- `kin_reference` `physics_climb`: the picture of each of 8 cameras twice, byte for byte equal (also with `--cascades 4 --ao
+  --contact-shadows --taa`).
+
+**Pictures** (`reference_out/p2d_physics_climb/`, 1280x720). Looked at all eight: `wall`, the person hanging by both hands near the
+top of the 4 m wall, the capsule in cyan, green crosses and short blue frame lines at the two anchors, arms bent up to them, legs
+apart in the fall pose; `mantle`, the person half way through the pull-up over the holds wall's lip (frame 1122: feet level with the top, about to go
+over), the green lines from the grips running down to the lip and the last hold, an orange hold and the smooth wall below; `holds`, hanging from two of the orange holds of the grey smooth wall, the
+lip of rock above, the other holds below; `platform`, hanging from the blue slab's face with the feet just off the floor, the
+pedestal and crate small to the right; `crate`, the crate tipped over its edge and the person standing under it holding its
+underside, the ice wall to the right; `ice`, hanging on the ice wall with orange (slipping) crosses at the hands; `low_roof`, hanging
+by the lip of the red ledge with the dark roof over it (the pull-up refused); `overview`, the level small from above with the
+person on the lip. The arms are the fixture's tubes, two-bone IK with the elbows pushed out and down: legible but not graceful.
+Sponza Walk `--preset climb --frames 420 --hud`: the person on the wall's top after the scripted climb, the stamina bar at 51 of 100
+under the picture, the debug capsule, Sponza behind.
+
+**Mutation checks** (each: break the source on purpose, build, run `kin-physics3d-traversal`, `kin-physics3d-ecs`,
+`kin-physics3d-character` and `kin-physics3d`, restore; the five sources compared with copies afterwards, identical; the P2c and P2b
+programs failed nothing in any of them):
+
+| Mutation | Result |
+|---|---|
+| anchor stored in world space, not body-local | caught (65 in `kin-physics3d-traversal`) |
+| probe ignores the layer mask | caught (1 in `kin-physics3d-traversal`) |
+| grippable flag (surface tag) ignored | caught (9 in `kin-physics3d-traversal`) |
+| drain multiplier of the surface ignored | caught (2 in `kin-physics3d-traversal`) |
+| two-hand discount removed | caught (10 in `kin-physics3d-traversal`) |
+| mantle clearance check removed | caught (8 in `kin-physics3d-traversal`) |
+| resource regen ignores its delay | caught (7 in `kin-physics3d-traversal`) |
+| load not applied to the dynamic body | caught (3 in `kin-physics3d-traversal`) |
+| traversal state not in the hash and saved state | caught (11 in `kin-physics3d-traversal`) |
+| restore does not restore the grips | caught (11 in `kin-physics3d-traversal`) |
+| events not sorted | caught (2 in `kin-physics3d-traversal`) |
+| up vector ignored while hanging | caught (6 in `kin-physics3d-traversal`) |
+| slip never lets go | caught (3 in `kin-physics3d-traversal`) |
+| jump-off has no upward kick | caught (3 in `kin-physics3d-traversal`) |
+| exhaustion never lets go | caught (7 in `kin-physics3d-traversal`) |
+| sprint not stopped by exhaustion | caught (1 in `kin-physics3d-traversal`) |
+| a limb let go by the character grabs again at once (no latch) | caught (5 in `kin-physics3d-traversal`) |
+| platform motion not predicted over the step | caught (4 in `kin-physics3d-traversal`) |
+| hand does not find the ledge when climbing | caught (7 in `kin-physics3d-traversal`) |
+| hands may take the same place | caught (4 in `kin-physics3d-traversal`) |
+| grab cost not taken | caught (8 in `kin-physics3d-traversal`) |
+| standing on the ground drains as hanging does | caught (1 in `kin-physics3d-traversal`) |
+| ECS: traversal command not sent | caught (19 in `kin-physics3d-ecs`) |
+| ECS: hands not driven (weight stays) | caught (3 in `kin-physics3d-ecs`) |
+| ECS: facing not turned to the surface | caught (1 in `kin-physics3d-ecs`) |
+| ECS: surface material component not applied | caught (5 in `kin-physics3d-ecs`) |
+| ledge found from the wrong side (inset the other way) | caught (52 in `kin-physics3d-traversal`) |
+| shimmy moves hands independently (a blocked hand does not stop the other) | caught (3 in `kin-physics3d-traversal`) |
+
+All 28 were run twice, the second time against the final sources (a late change to where the pull-up ends, 5 mm lower, came after
+the first). "hands may take the same place" survived the first run (0 failures: no test had sent both hands at one point); the check
+"both hands for the one snapped hold take one grip" was added to `test_authored_hold_snaps` and it is caught (4). No mutant survives
+and none is known to be equivalent (the table is the second run). Several rows count many failures because the mutated function is everywhere (the
+anchors in world space moves every grip on a body that is not at the origin; the ledge searched from the wrong side fails every
+climb).
+
+Bugs the tests and the pictures found while writing them (each is now a check or a decision above): a hold was taken by whichever
+face the sweep grazed (a side or the underside), turning the character sideways to it or giving no ledge; a body hung from one
+hand with its middle under that hand, out of reach of the other; a platform carried the hands with a lag of 0.2 m (the swing was
+measured from where the anchors will be, not where they are); a grippable lip exactly flush behind a smooth wall was never
+seen (the first-hit rule); the ray along the top plane of a ledge missed it, so the shimmy never moved; both hands aimed at a
+big hold took its middle, the second refused; a character set to 0 stamina regenerated at once (a set restarts the delay now);
+`Landed` fired after a pull-up for the few millimetres the stand is above the floor.
+
+**Checks run.** `ninja -C build -j8` and `ninja -C build-no3d -j8`: no warnings from the new code (the existing ones are Lua's `tmpnam`
+and the explicit-constructor notes of `skeleton_tests`, `physics3d_ecs_tests` and `kin_reference`). `build`: `KIN_REQUIRE_GPU_TESTS=1
+ctest -j4 --timeout 600`: 73 of 73 (72 and `kin-physics3d-traversal`), `kin-render3d` on the NVIDIA device included. `build-no3d`: 65 of
+65, and its `build.ninja` has no Jolt, physics3d, character3d or traversal in it. `kin_render3d_tests` on NVIDIA (`VK_ICD_FILENAMES`
+unset) and on lavapipe (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`): exit 0 each, the debug-line pixel counts the same
+on both (106 / 426 / 96). Identity: `render def` and `render all` (--cascades 4 --ao --contact-shadows --taa), 120 frames, of crowd,
+shadows, sponza, helmet, motion, spheres, cornell, skinned_bend, skinned_ecs, skinned_blend, skinned_cesium, skinned_fox,
+skinned_ik, skinned_ik_look, skinned_ik_limits, physics_pile and physics_character (the head binary, copied before the first edit,
+rendered all of them): 44 pictures each, all byte for byte equal to the head binary's, the 17 of the seven static scenes also to
+`reference_out/p1a_base_def` and `p1a_base_all`, and the 5 of `physics_character` to `reference_out/p2c_physics_character`.
+`physics_climb` twice, default and all-on: equal byte for byte.
+
+**Limits and not done.**
+- The casts stop at the first thing they meet: a grippable body exactly flush behind a non-grippable one is invisible to a hand
+  (the level's lip stands out 20 cm), and a hold behind another body is not found. A ledge must be a top of the body that was hit.
+- A hand goes where it is aimed (the camera's forward for all hands): choosing the best hold for a limb is the game's. The probe is
+  15 us, so a game can ask several.
+- Hands only: the legs hang (the clip's pose; no sway, no foot placement while hanging, no foot grips). The hang clip is the `fall`
+  pose in the fixture (a `hang` clip is a name on `LocomotionClips3D`, not made); the arm IK is the fixture's T-pose tubes, with
+  `hand_offset` untried on any other rig.
+- The pull-up cannot be interrupted (no drop or jump off while it runs) and does not look at what moved into the way after it
+  started (the swept move stops at it and the path ends where it can).
+- Ropes and ladders as a mode are not built (a ladder is a column of `snap` holds; the provider interface is ready for a rope).
+- A very fast platform is carried with the prediction of one step only; one that turns carries the anchor but not the normal's turn
+  over the step.
+- Two characters on the same crate each add their weight (it is correct, and untested); a character gripping a character's body
+  needs the character layer in the grip mask (it is out by default).
+- Cross-platform determinism is Jolt's claim and kin's arithmetic uses square roots and no trigonometry in the step; only this
+  machine was run. The level's platform pose in the test uses `std::fmod` (game code).
+- The viewer's keyboard and mouse path (hands on the buttons, F, X, the reach by the view) is not exercised by any test: there is no
+  display here; `--preset climb` plays the same command structs from a script, which is what the headless run shows.
+- Not done: ragdoll, ropes (next), a networked rollback test (the structs and the saved state are there).
 
 ### P3 — A whole scene: sky, fog, spot lights, weather
 

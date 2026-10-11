@@ -246,6 +246,47 @@ void DebugDraw3D::contacts(std::span<const ContactEvent3D> events) {
     }
 }
 
+void DebugDraw3D::grips(const World3D& world, Character3D character) {
+    const TraversalState3D t = world.traversal(character);
+    if (!t.enabled) {
+        return;
+    }
+    const CharacterState3D s = world.character(character);
+    for (u32 h = 0; h < t.limb_count; ++h) {
+        const GripState3D& g = t.grips[h];
+        if (g.phase == GripPhase3D::Free || g.phase == GripPhase3D::Released) {
+            continue;
+        }
+        const Color colour = g.phase == GripPhase3D::Reaching ? _options.grip_reaching
+                           : g.phase == GripPhase3D::Slipping ? _options.grip_slipping : _options.grip_held;
+        cross(g.point, colour);
+        line(g.point, g.point + g.normal * _options.normal_length, colour);
+        // The surface's frame at the anchor: up it, along it.
+        line(g.point, g.point + g.surface_up * (0.5f * _options.normal_length), _options.candidate_surface);
+        line(g.point, g.point + g.right * (0.5f * _options.normal_length), _options.candidate_surface);
+        // To the character: a line from the anchor to the shoulder's height over the feet.
+        line(g.point, s.position + s.up * (0.8f * s.height), colour);
+    }
+    if (t.mode != TraversalMode3D::Walking) {
+        cross(t.hang_place, _options.hang_place);
+        line(t.hang_place, s.position, _options.hang_place);
+    }
+}
+
+void DebugDraw3D::candidates(std::span<const GripCandidate3D> candidates) {
+    bool first = true;
+    for (const GripCandidate3D& c : candidates) {
+        const Color colour = c.kind == GripKind3D::Hold ? _options.candidate_hold
+                           : c.kind == GripKind3D::Ledge ? _options.candidate_ledge : _options.candidate_surface;
+        cross(c.point, colour);
+        line(c.point, c.point + c.normal * (first ? 2.0f : 1.0f) * _options.normal_length, colour);
+        if (c.ledge) {
+            cross(c.ledge_top, c.clear ? _options.grip_held : _options.grip_slipping);
+        }
+        first = false;
+    }
+}
+
 void DebugDraw3D::ray(Vec3f from, Vec3f to, const std::optional<RayHit3D>& hit) {
     if (!hit) {
         line(from, to, _options.ray);

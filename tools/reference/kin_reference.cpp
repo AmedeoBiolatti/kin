@@ -68,6 +68,7 @@
 #include <kin/renderer/renderer2d.hpp>
 
 #include "character_level.hpp"
+#include "climb_level.hpp"
 
 #include <algorithm>
 #include <array>
@@ -821,6 +822,216 @@ struct PhysicsCharacter {
     }
 };
 
+
+// `procedural: "physics_climb"` (docs/physics_3d.md, "Grab and climb"): the climb level (tests/climb_level.hpp: a 4 m wall with a
+// ledge, an overhang, a smooth wall with holds, a platform that moves, a crate on a pedestal, ice, a ledge under a low roof) with
+// the skinned person of `physics_character` driven through it by the scripted route of the scene file (grab and release by
+// hand, reach, climb, pull up, jump off, drop), through the ECS system (CharacterController3D with traversal on, the locomotion
+// Animator3D with the hands' IK on the anchors). The picture of frame f is the world `lead + f` fixed steps in; a frame asked
+// for out of order starts the world again, so every frame is the same whatever order the run takes them in. The debug lines
+// show every body, the grips (a cross at each anchor, its surface's normal and frame, a line to the body), the hang place and,
+// for a hand that has the command and holds nothing, what its probe sees.
+struct PhysicsClimb {
+    kin::Mesh box_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model> person;
+    std::unique_ptr<kin::World3D> world;
+    std::unique_ptr<kin::EcsWorld> ecs;
+    std::unique_ptr<kin::WorldPhysicsState3D> bodies;
+    std::unique_ptr<kin::WorldRenderState3D> render;
+    climb_level::Level level;
+    climb_level::Route route;
+    flecs::entity hero;
+    int lead = 300;
+    int stepped = 0;
+    bool debug = true;
+    bool loaded = false;
+    climb_level::Applied applied;
+
+    Vec3f feet() const {
+        const kin::Transform3D* t = hero.is_valid() ? hero.get<kin::Transform3D>() : nullptr;
+        return t != nullptr ? t->position : Vec3f{};
+    }
+
+    void reset() {
+        // What refers to the ECS world and the physics world goes first (a frame earlier than the last one asked for starts again).
+        render.reset();
+        bodies.reset();
+        hero = {};
+        ecs.reset();
+        world.reset();
+        kin::World3DConfig cfg;
+        cfg.single_threaded = true; // one thread: the picture does not depend on a pool
+        world = std::make_unique<kin::World3D>(cfg);
+        ecs = std::make_unique<kin::EcsWorld>();
+        level = climb_level::build(*world);
+        bodies = std::make_unique<kin::WorldPhysicsState3D>(*ecs, *world);
+        render = std::make_unique<kin::WorldRenderState3D>(*ecs);
+        kin::CharacterController3D controller;
+        controller.desc = climb_level::climber_desc();
+        controller.input.forward = {0.0f, 0.0f, -1.0f};
+        // The model faces +Z; it starts looking into the wall.
+        controller.facing = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 180.0f);
+        kin::LocomotionClips3D clips;
+        kin::Animator3D animator = kin::locomotion_animator(clips);
+        kin::IKConstraint feet_ik;
+        feet_ik.name = "feet";
+        feet_ik.kind = kin::IKKind::FootPlacer;
+        feet_ik.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
+        feet_ik.foot_heights = {0.05f, 0.05f};
+        feet_ik.pole = kin::IKConstraint::Pole::ModelDirection;
+        feet_ik.pole_vector = {0.0f, 0.0f, 1.0f};
+        feet_ik.two_bone.max_stretch = 1.1f;
+        feet_ik.foot.smooth_seconds = 0.08f;
+        feet_ik.fade_seconds = 0.12f;
+        animator.add_ik(feet_ik);
+        // The hands: a two-bone arm each, the elbows out, down and back; on the anchors while a limb reaches or holds.
+        for (const char* side : {"L", "R"}) {
+            kin::IKConstraint hand;
+            hand.name = std::string("hand_") + side;
+            hand.kind = kin::IKKind::TwoBone;
+            hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
+            hand.weight = 0.0f;
+            hand.fade_seconds = 0.12f;
+            hand.pole = kin::IKConstraint::Pole::ModelDirection;
+            hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
+            hand.two_bone.max_stretch = 1.05f;
+            animator.add_ik(hand);
+        }
+        kin::CharacterAnimationLink3D link;
+        link.hands = {"hand_L", "hand_R"};
+        link.hand_clearance = 0.05f;
+        hero = ecs->raw().entity()
+                   .set(kin::Transform3D{.position = route.start})
+                   .set(controller)
+                   .set(kin::SkinnedMeshRenderer{.model = person})
+                   .set(static_cast<const kin::Animator3D&>(animator))
+                   .set(link);
+        stepped = 0;
+        applied = {};
+        applied.input.forward = {0.0f, 0.0f, -1.0f};
+    }
+
+    void make(kin::Renderer3D& r3d, const kin::JsonValue& doc, const fs::path& cache) {
+        debug = doc.find("debug") == nullptr || doc.bool_at("debug");
+        lead = static_cast<int>(doc.number_at("lead", 300));
+        if (const kin::JsonValue* c = doc.find("character")) {
+            route = climb_level::load_route(*c);
+        }
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        std::string error;
+        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        if (!model) {
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            return;
+        }
+        person = std::make_shared<const kin::Model>(std::move(model));
+        loaded = true;
+        reset();
+    }
+
+    // One fixed step of the route: the keys of this frame, the level's platform, the physics system, the animator.
+    void step_once() {
+        const int n = stepped;
+        applied = climb_level::apply_keys(applied, route, n);
+        kin::CharacterController3D* c = hero.get_mut<kin::CharacterController3D>();
+        c->input = applied.input;
+        c->traversal = applied.traversal;
+        if (applied.teleport) {
+            hero.get_mut<kin::Transform3D>()->position = applied.teleport_to;
+        }
+        if (applied.stamina) {
+            world->set_traversal_resource(bodies->character_of(hero), applied.stamina_value);
+        }
+        // While walking it faces the way it was told to go (the model faces +Z); hanging, the system turns it to the wall.
+        const Vec3f f = c->input.forward;
+        if (c->state.traversal_mode == kin::TraversalMode3D::Walking && (f.x != 0.0f || f.z != 0.0f)) {
+            c->facing = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, std::atan2(f.x, f.z) * 57.29578f);
+        }
+        level.drive(*world, n, 1.0f / 60.0f);
+        bodies->step(1.0f / 60.0f);
+        render->animate(1.0f / 60.0f);
+        ++stepped;
+    }
+
+    void advance_to(int steps) {
+        if (steps < stepped) {
+            reset();
+        }
+        while (stepped < steps) {
+            step_once();
+        }
+    }
+
+    void draw(kin::Renderer3D& r3d, kin::Scene3D& scene, int base, int time) {
+        if (!loaded) {
+            return;
+        }
+        advance_to(base + std::max(0, time));
+        using climb_level::Kind;
+        const auto colour_of = [](Kind k) {
+            switch (k) {
+            case Kind::Floor: return kin::Color::rgb(112, 120, 108);
+            case Kind::Wall: return kin::Color::rgb(186, 160, 130);
+            case Kind::Lip: return kin::Color::rgb(210, 190, 150);
+            case Kind::Roof: return kin::Color::rgb(130, 140, 160);
+            case Kind::SmoothWall: return kin::Color::rgb(150, 156, 170);
+            case Kind::Hold: return kin::Color::rgb(230, 130, 70);
+            case Kind::Platform: return kin::Color::rgb(80, 140, 220);
+            case Kind::Pedestal: return kin::Color::rgb(176, 170, 160);
+            case Kind::Crate: return kin::Color::rgb(220, 190, 90);
+            case Kind::IceWall: return kin::Color::rgb(150, 205, 235);
+            case Kind::LowRoof: return kin::Color::rgb(110, 110, 125);
+            case Kind::Ledge: return kin::Color::rgb(170, 120, 120);
+            }
+            return kin::Color::rgb(200, 200, 200);
+        };
+        for (const climb_level::Piece& p : level.pieces) {
+            Vec3f centre = p.centre;
+            kin::Quatf rotation = p.rotation;
+            if (p.moving) {
+                centre = world->position(p.body);
+                rotation = world->rotation(p.body);
+            }
+            const kin::Material3D material{.color = colour_of(p.kind), .roughness = 0.85f};
+            scene.draw(box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), material);
+        }
+        render->propagate_transforms();
+        render->collect(scene);
+        if (debug) {
+            kin::DebugDraw3DOptions look;
+            look.point_size = 0.05f;
+            look.normal_length = 0.3f;
+            kin::DebugDraw3D lines{look};
+            lines.world(*world);
+            const kin::Character3D c = bodies->character_of(hero);
+            lines.grips(*world, c);
+            // A hand that has the command and holds nothing: what it could take (best one longer).
+            const kin::TraversalState3D t = world->traversal(c);
+            const kin::CharacterDesc3D desc = climb_level::climber_desc();
+            const kin::CharacterState3D s = world->character(c);
+            for (kin::u32 h = 0; h < t.limb_count; ++h) {
+                if (!applied.traversal.grab[h] || t.grips[h].phase != kin::GripPhase3D::Free) {
+                    continue;
+                }
+                kin::GripProbeDesc3D probe;
+                const Vec3f sh = desc.traversal.limbs[h].shoulder;
+                const Vec3f facing = t.mode == kin::TraversalMode3D::Walking ? Vec3f{0.0f, 0.0f, -1.0f} : -normalize(t.surface_normal);
+                const Vec3f right = normalize(kin::cross(facing, s.up));
+                probe.origin = s.position + right * sh.x + s.up * sh.y + facing * sh.z;
+                probe.direction = length(applied.traversal.reach) > 0.0f ? applied.traversal.reach : facing;
+                probe.up = s.up;
+                probe.forward = facing;
+                probe.reach = desc.traversal.reach;
+                probe.clearance_radius = desc.radius;
+                probe.clearance_height = desc.height;
+                probe.ignore = s.body;
+                lines.candidates(world->probe_grips(probe));
+            }
+            debug_mesh = kin::draw_debug_lines(r3d, scene, lines.lines());
+        }
+    }
+};
+
 kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Placed& p : placed) {
@@ -1376,6 +1587,16 @@ int main(int argc, char** argv) {
                 continue;
             }
         }
+        PhysicsClimb climber;
+        int climber_frame = 0;
+        const bool is_climber = doc.string_at("procedural") == "physics_climb";
+        if (is_climber) {
+            climber.make(r3d, doc, cache);
+            if (!climber.loaded) {
+                ++failures;
+                continue;
+            }
+        }
         const bool animated = doc.bool_at("animated") || (over.crowd_move && doc.string_at("procedural") == "crowd");
         std::array<std::vector<kin::MeshInstance>, 3> crowd_moved;
         const double load_ms = ms_since(load_start);
@@ -1425,6 +1646,7 @@ int main(int argc, char** argv) {
                                     : is_hidden ? kin::Bounds3{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
                                     : is_pile   ? kin::Bounds3{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
                                     : is_walker ? kin::Bounds3{{-2.0f, -0.5f, -30.0f}, {70.0f, 5.0f, 30.0f}}
+                                    : is_climber ? kin::Bounds3{{-4.0f, -0.5f, -2.0f}, {64.0f, 7.0f, 6.0f}}
                                                 : bounds_of(placed);
 
         // The view.
@@ -1575,6 +1797,9 @@ int main(int argc, char** argv) {
             if (is_walker) {
                 walker.draw(r3d, scene, walker_frame, time);
             }
+            if (is_climber) {
+                climber.draw(r3d, scene, climber_frame, time);
+            }
             if (is_hidden) {
                 hidden.draw(scene);
             }
@@ -1609,13 +1834,16 @@ int main(int argc, char** argv) {
             if (is_walker) {
                 walker_frame = static_cast<int>(c.number_at("frame", walker.lead));
             }
+            if (is_climber) {
+                climber_frame = static_cast<int>(c.number_at("frame", climber.lead));
+            }
             const auto pose = [&](int time) {
                 fill_scene(time);
                 const Vec3f moved = pan * static_cast<float>(time);
-                if (is_walker) {
+                if (is_walker || is_climber) {
                     // `follow: {eye, target}`: offsets from the character's feet (the camera goes where it goes).
                     if (const kin::JsonValue* follow = c.find("follow")) {
-                        const Vec3f feet = walker.feet();
+                        const Vec3f feet = is_walker ? walker.feet() : climber.feet();
                         scene.camera = kin::Camera3D::look_at(feet + vec3(follow->find("eye")), feet + vec3(follow->find("target")), fov);
                         scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
                         return;

@@ -22,14 +22,28 @@ bool finite(Vec3f v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::i
 bool positive(f32 v) { return std::isfinite(v) && v > 0.0f; }
 bool non_negative(f32 v) { return std::isfinite(v) && v >= 0.0f; }
 
-class MaskFilter final : public JPH::ObjectLayerFilter {
-public:
-    explicit MaskFilter(Layer3DMask mask) : _mask(mask) {}
-    bool ShouldCollide(JPH::ObjectLayer layer) const override { return layer < 32 && (_mask >> layer & 1u) != 0; }
-
-private:
-    Layer3DMask _mask;
-};
+// The grab and climb numbers of a descriptor: finite, and the sizes that must be positive.
+bool valid_traversal(const TraversalDesc3D& t) {
+    if (!t.enabled) {
+        return true;
+    }
+    if (t.limb_count < 1 || t.limb_count > max_grip_limbs3d || !positive(t.reach) || !non_negative(t.probe_radius) ||
+        !non_negative(t.probe_spread) || !non_negative(t.reach_seconds) || !non_negative(t.min_hand_separation) ||
+        !positive(t.resource.max) || !non_negative(t.resource.regen_rate) || !non_negative(t.resource.regen_delay) ||
+        !non_negative(t.mantle_seconds) || !non_negative(t.exhaust_interval) || !non_negative(t.exhaust_fade)) {
+        return false;
+    }
+    for (const GripLimbDesc3D& l : t.limbs) {
+        if (!finite(l.shoulder)) {
+            return false;
+        }
+    }
+    return finite(Vec3f{t.hang_drop, t.wall_gap, t.swing_frequency}) && finite(Vec3f{t.swing_damping, t.max_swing, t.grab_momentum}) &&
+           finite(Vec3f{t.shimmy_speed, t.climb_speed, t.slip_speed}) && finite(Vec3f{t.jump_off_speed, t.jump_up_speed, t.drain_one_hand}) &&
+           finite(Vec3f{t.drain_two_hands, t.drain_moving, t.drain_sprint}) && finite(Vec3f{t.grab_cost, t.pull_up_cost, t.pull_up_min}) &&
+           finite(Vec3f{t.slip_release_seconds, t.mantle_inset, t.ground_drain_factor}) &&
+           finite(Vec3f{t.swing_vertical_frequency, t.swing_vertical_damping, t.ledge_search_height});
+}
 
 // The rotation that takes +Y to the unit vector `up` (a capsule is round about its axis, so which twist does not matter,
 // only that it is a function of `up` alone). Antiparallel: a half turn about X. Square roots only: no trigonometry, so it
@@ -111,6 +125,105 @@ struct In {
     }
 };
 
+void save_trav(Out& out, const TravData& t) {
+    out.bytes.push_back(static_cast<u8>(t.mode));
+    for (const bool g : t.input.grab) out.b(g);
+    out.vec(t.input.reach);
+    out.b(t.input.pull_up);
+    out.b(t.input.jump_off);
+    out.b(t.input.drop);
+    out.b(t.prev_pull);
+    out.b(t.prev_jump_off);
+    out.f32v(t.resource.value);
+    out.f32v(t.resource.max);
+    out.f32v(t.resource.delay);
+    out.b(t.resource.exhausted);
+    out.vec(t.swing);
+    out.vec(t.swing_velocity);
+    out.vec(t.hang_place);
+    out.b(t.has_hang_place);
+    out.f32v(t.hang_time);
+    out.vec(t.facing);
+    out.f32v(t.mantle_time);
+    out.u32v(t.mantle_body.index);
+    out.u32v(t.mantle_body.generation);
+    for (const Vec3f& p : t.mantle_path) out.vec(p);
+    for (const GripData& g : t.grips) {
+        out.bytes.push_back(static_cast<u8>(g.phase));
+        out.bytes.push_back(static_cast<u8>(g.kind));
+        out.u32v(g.body.index);
+        out.u32v(g.body.generation);
+        out.vec(g.local_point);
+        out.vec(g.local_normal);
+        out.f32v(g.quality);
+        out.f32v(g.drain);
+        out.f32v(g.slip);
+        out.u32v(g.tag);
+        out.b(g.fixed);
+        out.b(g.ledge);
+        out.f32v(g.reach_t);
+        out.f32v(g.slip_time);
+        out.b(g.slipping);
+        out.f32v(g.exhaust_t);
+        out.f32v(g.exhaust_delay);
+        out.f32v(g.fade);
+        out.b(g.latch);
+    }
+}
+
+bool parse_trav(In& in, TravData& t) {
+    if (in.end - in.p < 1) {
+        return false;
+    }
+    t.mode = static_cast<TraversalMode3D>(*in.p++);
+    for (bool& g : t.input.grab) g = in.b();
+    t.input.reach = in.vec();
+    t.input.pull_up = in.b();
+    t.input.jump_off = in.b();
+    t.input.drop = in.b();
+    t.prev_pull = in.b();
+    t.prev_jump_off = in.b();
+    t.resource.value = in.f32v();
+    t.resource.max = in.f32v();
+    t.resource.delay = in.f32v();
+    t.resource.exhausted = in.b();
+    t.swing = in.vec();
+    t.swing_velocity = in.vec();
+    t.hang_place = in.vec();
+    t.has_hang_place = in.b();
+    t.hang_time = in.f32v();
+    t.facing = in.vec();
+    t.mantle_time = in.f32v();
+    t.mantle_body.index = in.u32v();
+    t.mantle_body.generation = in.u32v();
+    for (Vec3f& p : t.mantle_path) p = in.vec();
+    for (GripData& g : t.grips) {
+        if (in.end - in.p < 2) {
+            return false;
+        }
+        g.phase = static_cast<GripPhase3D>(*in.p++);
+        g.kind = static_cast<GripKind3D>(*in.p++);
+        g.body.index = in.u32v();
+        g.body.generation = in.u32v();
+        g.local_point = in.vec();
+        g.local_normal = in.vec();
+        g.quality = in.f32v();
+        g.drain = in.f32v();
+        g.slip = in.f32v();
+        g.tag = in.u32v();
+        g.fixed = in.b();
+        g.ledge = in.b();
+        g.reach_t = in.f32v();
+        g.slip_time = in.f32v();
+        g.slipping = in.b();
+        g.exhaust_t = in.f32v();
+        g.exhaust_delay = in.f32v();
+        g.fade = in.f32v();
+        g.latch = in.b();
+    }
+    return !in.failed;
+}
+
 } // namespace
 
 Layer3DMask CharacterSet::mask_of(const Slot& s) const {
@@ -131,7 +244,8 @@ Character3D CharacterSet::create(const CharacterDesc3D& d) {
         || !std::isfinite(d.max_slope_degrees) || !finite(Vec3f{d.walk_speed, d.sprint_speed, d.crouch_speed})
         || !finite(Vec3f{d.acceleration, d.deceleration, d.air_acceleration})
         || !finite(Vec3f{d.ground_friction, d.wall_friction, d.gravity_scale}) || !std::isfinite(d.jump_speed)
-        || !finite(Vec3f{d.coyote_seconds, d.jump_buffer_seconds, d.up_blend_rate}) || d.layer == layers3d::Static) {
+        || !finite(Vec3f{d.coyote_seconds, d.jump_buffer_seconds, d.up_blend_rate}) || d.layer == layers3d::Static
+        || !valid_traversal(d.traversal)) {
         return {};
     }
     const f32 crouch_height = std::clamp(d.crouch_height, 2.0f * d.radius, d.height);
@@ -200,6 +314,11 @@ Character3D CharacterSet::create(const CharacterDesc3D& d) {
     s.touching_ceiling = false;
     s.touched.clear();
     s.contacts.clear();
+    s.trav = {};
+    if (d.traversal.enabled) {
+        s.trav.resource.max = std::max(0.0f, d.traversal.resource.max);
+        s.trav.resource.value = s.trav.resource.max;
+    }
     s.alive = true;
     apply_desc(s);
     if (s.ch->GetInnerBodyID().IsInvalid()) {
@@ -287,6 +406,7 @@ CharacterState3D CharacterSet::state(Character3D c) const {
     out.height = s->crouching ? std::clamp(s->desc.crouch_height, 2.0f * s->desc.radius, s->desc.height) : s->desc.height;
     out.body = s->inner;
     out.jumped = s->jumped;
+    out.traversal_mode = s->trav.mode;
     return out;
 }
 
@@ -309,6 +429,16 @@ void CharacterSet::teleport(Character3D c, Vec3f feet) {
     s->air_time = 0.0f;
     s->coyote = 0.0f;
     s->jump_buffer = 0.0f;
+    if (s->desc.traversal.enabled) {
+        // Taken somewhere else: nothing it held is within reach any more. The resource and the command stay.
+        const Resource3D resource = s->trav.resource;
+        const TraversalInput3D input = s->trav.input;
+        s->trav = {};
+        s->trav.resource = resource;
+        s->trav.input = input;
+        s->trav.prev_pull = input.pull_up;
+        s->trav.prev_jump_off = input.jump_off;
+    }
     const MaskFilter layer_filter(mask_of(*s));
     const JPH::IgnoreSingleBodyFilter body_filter(s->ch->GetInnerBodyID());
     s->ch->RefreshContacts(_env.system->GetDefaultBroadPhaseLayerFilter(s->desc.layer), layer_filter, body_filter,
@@ -376,9 +506,12 @@ void CharacterSet::set_desc(Character3D c, const CharacterDesc3D& d) {
     if (s == nullptr) {
         return;
     }
-    // The shape, layer, position and up are not changed here.
+    // The shape, layer, position and up are not changed here. Grab and climb numbers that are not valid are not taken.
     const CharacterDesc3D keep = s->desc;
     s->desc = d;
+    if (!valid_traversal(d.traversal)) {
+        s->desc.traversal = keep.traversal;
+    }
     s->desc.radius = keep.radius;
     s->desc.height = keep.height;
     s->desc.crouch_height = keep.crouch_height;
@@ -386,6 +519,8 @@ void CharacterSet::set_desc(Character3D c, const CharacterDesc3D& d) {
     s->desc.position = keep.position;
     s->desc.up = keep.up;
     s->desc.user_id = keep.user_id;
+    // Whether grab and climb is on is fixed at creation: it is in the saved state's layout.
+    s->desc.traversal.enabled = keep.traversal.enabled;
     apply_desc(*s);
 }
 
@@ -470,6 +605,24 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
     const JPH::IgnoreSingleBodyFilter body_filter(ch.GetInnerBodyID());
     const JPH::BroadPhaseLayerFilter& bp_filter_ref = _env.system->GetDefaultBroadPhaseLayerFilter(d.layer);
 
+    // --- grab and climb: the grips, the resource and, while it hangs or mantles, the move itself
+    if (d.traversal.enabled) {
+        _traversal_events.clear();
+        if (update_traversal(index, s, dt)) {
+            // The character was moved by the grips: what it touches now, then the events (contacts first, as walking does).
+            const std::vector<std::pair<u32, bool>> before = std::move(s.touched);
+            collect_contacts(index, s);
+            s.touched.clear();
+            for (const CharacterContact3D& c : s.contacts) {
+                s.touched.push_back({c.body.index, c.sensor});
+            }
+            s.touching_ceiling = false;
+            emit_contact_changes(index, s, before);
+            flush_traversal_events(index, s);
+            return;
+        }
+    }
+
     // --- stance: crouching is immediate; standing needs the room (tried every step while it is wanted and blocked)
     const bool want_crouch = s.input.crouch;
     if (want_crouch != s.crouching) {
@@ -527,7 +680,9 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
         wish_dir = n > 1.0f ? dir / n : dir;
     }
     const bool has_wish = length_squared(wish_dir) > 1.0e-8f;
-    const f32 top_speed = s.crouching ? d.crouch_speed : (s.input.sprint ? d.sprint_speed : d.walk_speed);
+    // A character with a resource that has run out cannot sprint.
+    const bool sprinting = s.input.sprint && !(d.traversal.enabled && d.traversal.sprint_needs_resource && s.trav.resource.exhausted);
+    const f32 top_speed = s.crouching ? d.crouch_speed : (sprinting ? d.sprint_speed : d.walk_speed);
     Vec3f wish = wish_dir * top_speed;
 
     // The speed along `up` that is its own (not the ground's slope under it): what it carries into the air.
@@ -739,7 +894,19 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
     }
     s.touching_ceiling = ceiling;
     // Contacts begun (in the order of body numbers), then ended.
-    std::size_t bi = 0;
+    emit_contact_changes(index, s, before);
+    if (d.traversal.enabled) {
+        flush_traversal_events(index, s);
+    }
+}
+
+void CharacterSet::push_event(u32 index, const Slot& s, CharacterEvent3D e) {
+    e.character = {index, s.generation};
+    e.user_id = s.desc.user_id;
+    _events.push_back(e);
+}
+
+void CharacterSet::emit_contact_changes(u32 index, Slot& s, const std::vector<std::pair<u32, bool>>& before) {
     for (const CharacterContact3D& c : s.contacts) {
         const bool known = std::any_of(before.begin(), before.end(), [&](const auto& p) { return p.first == c.body.index; });
         if (!known) {
@@ -750,7 +917,7 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
             e.sensor = c.sensor;
             e.point = c.point;
             e.normal = c.normal;
-            emit(e);
+            push_event(index, s, e);
         }
     }
     for (const auto& [slot_index, sensor] : before) {
@@ -763,7 +930,7 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
             e.body = live;
             e.body_user_id = live.valid() ? _env.user_id_of(live) : 0;
             e.sensor = sensor;
-            emit(e);
+            push_event(index, s, e);
         }
     }
 }
@@ -814,6 +981,10 @@ void CharacterSet::save_header(std::vector<u8>& bytes) const {
         out.u32v(s.ch->GetGroundBodyID().GetIndexAndSequenceNumber());
         out.vec(from_jolt(s.ch->GetGroundNormal()));
         out.vec(from_jolt(s.ch->GetGroundVelocity()));
+        // Grab and climb: only for a character that has it (the others hash as they always did).
+        if (s.desc.traversal.enabled) {
+            save_trav(out, s.trav);
+        }
     }
 }
 
@@ -888,6 +1059,12 @@ std::unique_ptr<CharacterSet::Parsed> CharacterSet::parse_header(const u8*& curs
         if (in.failed) {
             return nullptr;
         }
+        if (_slots[i].desc.traversal.enabled) {
+            o.trav = TravData{};
+            if (!parse_trav(in, o.trav)) {
+                return nullptr;
+            }
+        }
     }
     cursor = in.p;
     return parsed;
@@ -943,6 +1120,9 @@ bool CharacterSet::restore(Parsed& parsed, JPH::StateRecorder& in) {
         s.ground = static_cast<CharacterGround3D>(o.ground);
         s.touching_ceiling = o.touching_ceiling;
         s.touched = o.touched;
+        if (s.desc.traversal.enabled) {
+            s.trav = o.trav;
+        }
         // Up is a property of the Jolt character that its own state does not carry.
         s.ch->SetUp(to_jolt(s.up));
         s.ch->RestoreState(in);

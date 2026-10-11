@@ -9,6 +9,23 @@ releases may change APIs.
 
 ### Added
 
+- 3D physics, grab and climb (experimental; see [3D physics](physics_3d.md) "Grab and climb" and the plan's "P2d"):
+  `kin/physics3d/traversal3d.hpp`, `CharacterDesc3D::traversal`, `World3D::probe_grips`, `set_traversal_input`, `traversal`,
+  `set_traversal_resource`, `set_surface_material`, `set_hold`: a general capability on top of the controller, two hands by default
+  (the limbs are an array). A probe (a fan of sphere sweeps and rays against a layer mask, through the hold, ledge and surface
+  providers) finds what a hand can take; a grip per limb keeps its anchor in the grabbed body's own space (platforms and crates carry it)
+  with strength, slip and exhaustion; the character hangs (kinematic, driven from the anchors with a damped swing), shimmies and climbs
+  along the surface, pulls up over a ledge in a swept deterministic move that fails cleanly under a low roof, jumps off and drops; a held
+  dynamic body is loaded with its weight; surface materials (grippable, grip, slip, drain, tag) and authored holds are data on bodies;
+  `Resource3D` (drain by mode, a delay before it regenerates, exhaustion with hysteresis) is the stamina and what sprinting spends. A pure
+  function of state, commands and dt, in `state_hash()`, `save_state()` and `restore_state()`, the same bits on every worker count, and
+  any up vector. Events: gripped, slipped, released, exhausted, mantle started, finished, blocked, fell. ECS: `Hold3D`,
+  `SurfaceMaterial3D`, `CharacterController3D::traversal` and `traversal_state`, the hands' IK and the facing from
+  `CharacterAnimationLink3D::hands`, `locomotion_animator`'s `hang` clip, `DebugDraw3D::grips` and `candidates`. Level
+  `tests/climb_level.hpp`; `kin_reference` scene `physics_climb` (a scripted timeline and its checkpoints, also run with no GPU by
+  `kin-physics3d-traversal`); Sponza Walk "Climb" section and `--preset climb`; `kin_physics3d_bench climbing`. Off unless
+  `traversal.enabled`; a character without it, the no-3D build and every existing picture are unchanged. Not in this step: ropes, feet
+  on the wall, ragdoll.
 - 3D physics, the character controller (experimental; see [3D physics](physics_3d.md) "Character controller" and the plan's "P2c"):
   `kin/physics3d/character3d.hpp` and `World3D::create_character`, `set_character_input`, `character`, `character_contacts`,
   `teleport_character`, `set_character_up`, `set_character_crouch`, `set_character_desc`, `character_events`: a capsule controller on

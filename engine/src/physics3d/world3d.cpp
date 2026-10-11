@@ -424,6 +424,10 @@ struct World3D::Impl {
         bool alive = false;
         // The inner body of a character: made, moved and destroyed by it.
         bool owned = false;
+        // Grab and climb: what a hand finds in this body (level setup: not hashed).
+        SurfaceMaterial3D material{};
+        bool is_hold = false;
+        HoldDesc3D hold{};
     };
 
     // A constraint. The anchors and axis are kept in the bodies' own frames (origin and rotation) so that
@@ -609,6 +613,9 @@ Body3D World3D::Impl::register_body(const JPH::BodyID& id, u64 user_id) {
     slot.mass = 0.0f;
     slot.alive = true;
     slot.owned = true;
+    slot.material = {};
+    slot.is_hold = false;
+    slot.hold = {};
     ++live;
     return {index, slot.generation};
 }
@@ -618,6 +625,7 @@ World3D::World3D(World3DConfig config)
     Impl& m = *_impl;
     m.self = this;
     physics3d_detail::CharacterEnv env;
+    env.world = this;
     env.system = &m.system;
     env.temp = &m.temp;
     env.table = &m.table;
@@ -929,6 +937,9 @@ Body3D World3D::create_body(const Body3DDesc& d) {
     slot.user_id = d.user_id;
     slot.mass = mass;
     slot.alive = true;
+    slot.material = {};
+    slot.is_hold = false;
+    slot.hold = {};
     const bool wake = d.start_active && d.motion != Body3DMotion::Static;
     m.bi().AddBody(slot.id, wake ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
     ++m.live;
@@ -1907,6 +1918,55 @@ void World3D::teleport_character(Character3D c, Vec3f feet) { _impl->characters-
 void World3D::set_character_up(Character3D c, Vec3f up, bool instant) { _impl->characters->set_up(c, up, instant); }
 bool World3D::set_character_crouch(Character3D c, bool crouch) { return _impl->characters->set_crouch(c, crouch); }
 void World3D::set_character_desc(Character3D c, const CharacterDesc3D& desc) { _impl->characters->set_desc(c, desc); }
+void World3D::set_traversal_input(Character3D c, const TraversalInput3D& input) { _impl->characters->set_traversal_input(c, input); }
+TraversalInput3D World3D::traversal_input(Character3D c) const { return _impl->characters->traversal_input(c); }
+TraversalState3D World3D::traversal(Character3D c) const { return _impl->characters->traversal(c); }
+void World3D::set_traversal_resource(Character3D c, f32 value) { _impl->characters->set_traversal_resource(c, value); }
+
+// --- grab and climb: what a body is to a hand ---
+
+void World3D::set_surface_material(Body3D body, const SurfaceMaterial3D& material) {
+    Impl::Slot* s = _impl->find(body);
+    if (s == nullptr || !std::isfinite(material.grip) || !std::isfinite(material.slip) || !std::isfinite(material.drain)) {
+        return;
+    }
+    s->material = material;
+}
+
+SurfaceMaterial3D World3D::surface_material(Body3D body) const {
+    const Impl::Slot* s = _impl->find(body);
+    return s != nullptr ? s->material : SurfaceMaterial3D{};
+}
+
+bool World3D::set_hold(Body3D body, const HoldDesc3D& hold) {
+    Impl::Slot* s = _impl->find(body);
+    if (s == nullptr || !std::isfinite(hold.quality) || !std::isfinite(hold.drain) || !finite(hold.anchor)
+        || !finite(hold.anchor_normal)) {
+        return false;
+    }
+    s->is_hold = true;
+    s->hold = hold;
+    s->hold.anchor_normal = normalize(hold.anchor_normal) == Vec3f{} ? Vec3f{0.0f, 0.0f, 1.0f} : normalize(hold.anchor_normal);
+    return true;
+}
+
+void World3D::clear_hold(Body3D body) {
+    if (Impl::Slot* s = _impl->find(body)) {
+        s->is_hold = false;
+        s->hold = {};
+    }
+}
+
+bool World3D::is_hold(Body3D body) const {
+    const Impl::Slot* s = _impl->find(body);
+    return s != nullptr && s->is_hold;
+}
+
+HoldDesc3D World3D::hold(Body3D body) const {
+    const Impl::Slot* s = _impl->find(body);
+    return s != nullptr && s->is_hold ? s->hold : HoldDesc3D{};
+}
+
 std::span<const CharacterEvent3D> World3D::character_events() const { return _impl->characters->events(); }
 std::vector<CharacterEvent3D> World3D::drain_character_events() { return _impl->characters->drain_events(); }
 

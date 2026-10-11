@@ -976,6 +976,214 @@ void test_character_scene_determinism() {
     CHECK(a.front() != a.back());
 }
 
+
+// --- grab and climb ---------------------------------------------------------------------------------------------------
+
+// A wall (z from -1.5 to 0, 4 m tall) with a hand-sized hold on its face, a crate and a character in front of it.
+struct ClimbScene {
+    kin::EcsWorld ecs;
+    World3D physics{serial()};
+    WorldPhysicsState3D bodies{ecs, physics};
+    flecs::entity wall, hold, hero;
+
+    explicit ClimbScene(CharacterDesc3D desc = {}, Vec3f at = {0.0f, 1.6f, 0.7f}) {
+        flecs::world& world = ecs.raw();
+        add_floor(world);
+        wall = world.entity()
+                   .set(Transform3D{.position = {0, 2.0f, -0.75f}})
+                   .set(box_collider({3.0f, 2.0f, 0.75f}))
+                   .set(RigidBody3D{.motion = Body3DMotion::Static})
+                   .set(SurfaceMaterial3D{.grip = 0.9f, .slip = 0.0f, .drain = 1.5f, .tag = 42});
+        hold = world.entity()
+                   .set(Transform3D{.position = {2.0f, 1.5f, 0.075f}})
+                   .set(box_collider({0.15f, 0.06f, 0.075f}))
+                   .set(RigidBody3D{.motion = Body3DMotion::Static})
+                   .set(Hold3D{.quality = 0.7f});
+        desc.traversal.enabled = true;
+        CharacterController3D c;
+        c.desc = desc;
+        c.input.forward = {0, 0, -1};
+        hero = world.entity().set(Transform3D{.position = at}).set(c);
+    }
+    CharacterController3D& controller() { return *hero.get_mut<CharacterController3D>(); }
+};
+
+void test_traversal_entities() {
+    ClimbScene scene;
+    scene.bodies.sync_bodies();
+    // What a hand finds is read from the components when the body is made.
+    const Body3D wall_body = scene.bodies.body_of(scene.wall);
+    CHECK(scene.physics.surface_material(wall_body).tag == 42);
+    CHECK(near(scene.physics.surface_material(wall_body).grip, 0.9f, 1e-6f) && near(scene.physics.surface_material(wall_body).drain, 1.5f, 1e-6f));
+    const Body3D hold_body = scene.bodies.body_of(scene.hold);
+    CHECK(scene.physics.is_hold(hold_body) && near(scene.physics.hold(hold_body).quality, 0.7f, 1e-6f));
+    CHECK(!scene.physics.is_hold(wall_body));
+    // A component changed on a live body is read at the next rebuild.
+    scene.wall.set(SurfaceMaterial3D{.tag = 43});
+    CHECK(scene.physics.surface_material(wall_body).tag == 42);
+    scene.bodies.rebuild(scene.wall);
+    scene.bodies.sync_bodies();
+    CHECK(scene.physics.surface_material(scene.bodies.body_of(scene.wall)).tag == 43);
+    scene.wall.set(SurfaceMaterial3D{.grip = 0.9f, .slip = 0.0f, .drain = 1.5f, .tag = 42});
+    scene.bodies.rebuild(scene.wall);
+
+    // The command is sent, the state comes back: the character takes hold of the wall and hangs.
+    scene.bodies.sync_bodies(); // (adds the character's handle component: take references to components after it)
+    CharacterController3D* c = &scene.controller();
+    c->traversal.grab = {true, true};
+    c->traversal.reach = {0.0f, 0.0f, -1.0f};
+    for (int i = 0; i < 60; ++i) {
+        scene.bodies.step(dt);
+    }
+    const CharacterController3D& after = *scene.hero.get<CharacterController3D>();
+    CHECK(after.traversal_state.enabled && after.traversal_state.mode == TraversalMode3D::Hanging);
+    CHECK(after.traversal_state.held == 2);
+    CHECK(after.state.traversal_mode == TraversalMode3D::Hanging);
+    CHECK(scene.bodies.traversal_of(scene.hero).held == 2);
+    CHECK(after.traversal_state.grips[0].body == scene.bodies.body_of(scene.wall));
+    CHECK(after.traversal_state.grips[0].surface_tag == 42);
+    // Its events come with the entity ids: two Gripped, naming the character and the wall.
+    int gripped = 0;
+    for (const CharacterEvent3D& e : scene.bodies.character_events()) {
+        gripped += e.kind == CharacterEventKind3D::Gripped ? 1 : 0;
+    }
+    int gripped_total = 0;
+    // (events are per step: look in the singleton of a step that had them by running the grab again below)
+    (void)gripped;
+    (void)gripped_total;
+    // It faces the wall: the model's +Z is the way it looks (-Z, into the wall).
+    const Vec3f looks = scene.hero.get<Transform3D>()->rotation.rotate({0, 0, 1});
+    CHECK(near(looks.z, -1.0f, 0.05f));
+    // And its feet are where the hang puts them: a capsule out from the wall, the hands 1.7 above.
+    CHECK(near(scene.hero.get<Transform3D>()->position.z, 0.34f, 0.04f));
+    // The resource is in the state.
+    CHECK(after.traversal_state.resource.max == 100.0f && after.traversal_state.resource.value < 100.0f);
+    // Letting go: it falls, the events of that step name the entity.
+    c = &scene.controller();
+    c->traversal.grab = {false, false};
+    bool fell = false;
+    for (int i = 0; i < 10 && !fell; ++i) {
+        scene.bodies.step(dt);
+        for (const CharacterEvent3D& e : scene.bodies.character_events()) {
+            if (e.kind == CharacterEventKind3D::GripReleased) {
+                CHECK(e.user_id == scene.hero.id() && e.body_user_id == scene.wall.id());
+            }
+            if (e.kind == CharacterEventKind3D::Fell) {
+                fell = true;
+                CHECK(e.user_id == scene.hero.id());
+            }
+        }
+    }
+    CHECK(fell);
+    CHECK(scene.hero.get<CharacterController3D>()->state.traversal_mode == TraversalMode3D::Walking);
+    // The authored hold: reaching for it takes the hold's quality.
+    c = &scene.controller();
+    c->traversal.grab = {false, true};
+    c->traversal.reach = {0.0f, 0.0f, -1.0f};
+    scene.physics.teleport_character(scene.bodies.character_of(scene.hero), {1.8f, 0.0f, 0.7f});
+    for (int i = 0; i < 40; ++i) {
+        scene.bodies.step(dt);
+    }
+    const TraversalState3D t = scene.bodies.traversal_of(scene.hero);
+    CHECK(t.grips[1].phase == GripPhase3D::Held && t.grips[1].kind == GripKind3D::Hold);
+    CHECK(near(t.grips[1].strength, 0.7f, 1e-4f));
+    CHECK(t.grips[1].body_user_id == scene.hold.id());
+}
+
+void test_traversal_entities_events() {
+    // The events of the step, in the singleton too, with entity ids (a step with Gripped events).
+    ClimbScene scene({}, {0.0f, 1.6f, 0.7f});
+    scene.bodies.sync_bodies();
+    CharacterController3D& c = scene.controller();
+    c.traversal.grab = {true, true};
+    c.traversal.reach = {0.0f, 0.0f, -1.0f};
+    int gripped = 0;
+    for (int i = 0; i < 40; ++i) {
+        scene.bodies.step(dt);
+        for (const CharacterEvent3D& e : scene.bodies.character_events()) {
+            if (e.kind == CharacterEventKind3D::Gripped) {
+                ++gripped;
+                CHECK(e.user_id == scene.hero.id() && e.body_user_id == scene.wall.id() && e.hand == static_cast<u8>(gripped - 1));
+                CHECK(near(e.point.z, 0.0f, 1e-3f));
+            }
+        }
+        const CharacterEvents3D* singleton = scene.ecs.raw().get<CharacterEvents3D>();
+        if (singleton != nullptr) {
+            CHECK(singleton->events.size() == scene.bodies.character_events().size());
+        }
+    }
+    CHECK(gripped == 2);
+}
+
+void test_traversal_hands_ik() {
+    // The biped's two hands go to the two anchors by IK (limb 0 the left hand), from the animation link, while it hangs; and
+    // the hands go free (weight 0) when it lets go.
+    auto model = std::make_shared<Model>();
+    model->skeletons.push_back(skin_fixtures::make_biped());
+    const Skeleton& sk = model->skeletons[0];
+    AnimClip3D idle;
+    idle.name = "idle";
+    idle.duration = 1.0f;
+    idle.channels.resize(sk.joint_count());
+    model->clips.push_back(idle);
+    CharacterDesc3D desc;
+    desc.height = 1.95f;
+    desc.traversal.limbs[0].shoulder = {-0.2f, 1.65f, 0.0f};
+    desc.traversal.limbs[1].shoulder = {0.2f, 1.65f, 0.0f};
+    ClimbScene scene(desc);
+    Animator3D animator = locomotion_animator({.idle = "idle", .walk = "", .run = "", .fall = "idle", .hang = "idle"});
+    for (const char* side : {"L", "R"}) {
+        IKConstraint hand;
+        hand.name = std::string("hand_") + side;
+        hand.kind = IKKind::TwoBone;
+        hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
+        hand.weight = 0.0f;
+        hand.fade_seconds = 0.0f;
+        hand.pole = IKConstraint::Pole::ModelDirection;
+        hand.pole_vector = {0.0f, -0.3f, -1.0f};
+        animator.add_ik(hand);
+    }
+    CHECK(animator.machine && animator.machine->transitions.size() == 6 && animator.machine->states.count("hang") == 1);
+    scene.hero.set(SkinnedMeshRenderer{.model = model});
+    scene.hero.set(static_cast<const Animator3D&>(animator));
+    CharacterAnimationLink3D link;
+    link.hands = {"hand_L", "hand_R"};
+    scene.hero.set(link);
+    WorldRenderState3D state{scene.ecs};
+    scene.bodies.sync_bodies();
+    scene.controller().traversal.grab = {true, true};
+    scene.controller().traversal.reach = {0.0f, 0.0f, -1.0f};
+    const auto step = [&] {
+        scene.bodies.step(dt);
+        state.animate(dt);
+        state.propagate_transforms();
+        state.apply_ik();
+    };
+    for (int i = 0; i < 70; ++i) {
+        step();
+    }
+    CHECK(scene.bodies.traversal_of(scene.hero).held == 2);
+    const Animator3D& a = *scene.hero.get<Animator3D>();
+    CHECK(a.params.get_bool("hanging"));
+    CHECK(near(a.ik_constraints[0].weight, 1.0f, 1e-6f) && near(a.ik_constraints[1].weight, 1.0f, 1e-6f));
+    const Mat4f world = scene.hero.get<Transform3D>()->matrix();
+    const auto hand_world = [&](int joint) { return world.apply(Vec3f{a.ik_world[static_cast<std::size_t>(joint)].m[12],
+                                                                       a.ik_world[static_cast<std::size_t>(joint)].m[13],
+                                                                       a.ik_world[static_cast<std::size_t>(joint)].m[14]}); };
+    namespace B = skin_fixtures::biped;
+    const TraversalState3D t = scene.bodies.traversal_of(scene.hero);
+    // Each hand within 2 cm of its anchor (the left model hand is the character's left: limb 0).
+    CHECK(near(hand_world(B::hand_l), t.grips[0].point, 0.02f));
+    CHECK(near(hand_world(B::hand_r), t.grips[1].point, 0.02f));
+    // Let go: the weights fade to 0 (at once here: fade_seconds 0), the machine is not hanging.
+    scene.controller().traversal.grab = {false, false};
+    for (int i = 0; i < 6; ++i) {
+        step();
+    }
+    CHECK(near(a.ik_constraints[0].weight, 0.0f, 1e-6f) && near(a.ik_constraints[1].weight, 0.0f, 1e-6f));
+    CHECK(!a.params.get_bool("hanging"));
+}
+
 } // namespace
 
 int main() {
@@ -998,6 +1206,9 @@ int main() {
     test_character_animation_link();
     test_character_feet_on_physics_ground();
     test_character_scene_determinism();
+    test_traversal_entities();
+    test_traversal_entities_events();
+    test_traversal_hands_ik();
     if (failures != 0) {
         std::fprintf(stderr, "physics3d_ecs_tests: %d check(s) failed\n", failures);
         return 1;

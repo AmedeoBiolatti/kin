@@ -457,6 +457,31 @@ public:
     std::span<const CharacterEvent3D> character_events() const;
     std::vector<CharacterEvent3D> drain_character_events();
 
+    // --- grab and climb (traversal3d.hpp) ---
+    // What a body's surface is to a hand: grippable, how well, how slippery, how tiring. Data on the body: ice or wet rock is
+    // a material, not code. Not in the hash or the saved state (it is the level's setup, as shapes are); set it when the
+    // body is made, the same in every run. Does nothing for a handle that is not a body.
+    void set_surface_material(Body3D body, const SurfaceMaterial3D& material);
+    SurfaceMaterial3D surface_material(Body3D body) const;
+    // Marks a body as an authored hold (an own grip quality; a fixed grip point if asked). Returns false for a body that
+    // is not one.
+    bool set_hold(Body3D body, const HoldDesc3D& hold);
+    void clear_hold(Body3D body);
+    bool is_hold(Body3D body) const;
+    HoldDesc3D hold(Body3D body) const;
+    // What a hand could take hold of from `probe.origin` along `probe.direction`, best first (score, then body number and
+    // place): a fan of sphere sweeps and rays against the layers of `probe.mask`, each hit made a candidate by the hold,
+    // ledge and surface providers (one candidate a hit). Reads the world as the last step left it; nothing is held.
+    std::vector<GripCandidate3D> probe_grips(const GripProbeDesc3D& probe) const;
+    // The limbs' command for the coming steps (held until set again), what they hold and the resource as the last step
+    // left it. A character with CharacterDesc3D::traversal.enabled false has none (a default state).
+    void set_traversal_input(Character3D character, const TraversalInput3D& input);
+    TraversalInput3D traversal_input(Character3D character) const;
+    TraversalState3D traversal(Character3D character) const;
+    // Sets the resource's value (clamped to 0..max; an item that gives stamina, a respawn). 0 counts as exhausted; the
+    // recovery rule is the resource's own.
+    void set_traversal_resource(Character3D character, f32 value);
+
     // Sleeping. activate() wakes a body (its island with it, at the next step);
     // deactivate() puts it to sleep at once.
     bool is_active(Body3D body) const;
