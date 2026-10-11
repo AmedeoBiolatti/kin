@@ -331,6 +331,8 @@ enum : int {
     shoulder_l, elbow_l, hand_l, shoulder_r, elbow_r, hand_r,
     count
 };
+// The two joints make_biped_toes() adds after those (a toe on each ankle, 0.15 m forward and 0.05 m below it).
+inline constexpr int toe_l = 18, toe_r = 19;
 } // namespace biped
 
 inline kin::Skeleton make_biped() {
@@ -362,6 +364,24 @@ inline kin::Skeleton make_biped() {
     return sk;
 }
 
+// make_biped() with a toe on each foot appended (toe_L and toe_R, joints 18 and 19): the indices of the biped are unchanged.
+inline kin::Skeleton make_biped_toes() {
+    kin::Skeleton sk = make_biped();
+    for (const auto& [name, parent] : {std::pair{"toe_L", biped::ankle_l}, std::pair{"toe_R", biped::ankle_r}}) {
+        sk.names.emplace_back(name);
+        sk.parents.push_back(parent);
+        kin::JointPose r;
+        r.translation = {0.0f, -0.05f, 0.15f};
+        sk.rest.push_back(r);
+    }
+    std::vector<Mat4f> world;
+    kin::compute_world_matrices(sk, sk.rest_pose(), world);
+    sk.inverse_bind.clear();
+    for (const Mat4f& m : world) {
+        sk.inverse_bind.push_back(m.inverse());
+    }
+    return sk;
+}
 
 // A skinned body for the biped: a box along each bone (from the parent joint to the joint, the end at the parent bound to the
 // parent and the end at the joint bound to the joint), `radius` thick, and, separately, a cube round one joint (a hand marker).

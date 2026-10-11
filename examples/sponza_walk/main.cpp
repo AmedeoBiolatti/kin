@@ -8,6 +8,7 @@
 // printed settings all read one table of rows (SponzaScene::build_controls):
 // a new feature (contact shadows, TAA) is a field and a row there.
 #include "character.hpp"
+#include "ik_rig.hpp"
 #include "settings.hpp"
 
 #include <kin/core/json.hpp>
@@ -99,6 +100,8 @@ const std::map<std::string, std::string>& presets() {
         {"character-all", "character=on,char_count=5,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
         {"ik", "character=on,char_count=1,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ik_step=on"}, // a person with IK (P1b)
         {"ik-reach", "character=on,char_count=1,char_clip=sway,ik=on,ik_hand_x=0.8,ik_hand_y=0.5,ik_hand_z=0.2,ik_pole=3"},
+        {"ik-tail", "character=on,char_count=1,char_clip=sway,ik=on,ik_tail=on,ik_tail_x=0.6,ik_tail_y=1.1,ik_tail_z=-0.2"},
+        {"ik-walk", "character=on,char_count=1,char_clip=sway,ik=on,ik_feet=on,ik_lock=on,ik_toes=on,ik_limits=on,ik_walk=on,ik_step=off"},
         {"ik-all", "character=on,char_count=3,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
     };
     return p;
@@ -475,7 +478,7 @@ private:
         slider("char_scale", "Size", s.char_scale, 0.5f, 3.0f);
 
         section("Character IK (the person rig)");
-        check("ik", "IK on (the Person rig, 18 joints)", s.ik);
+        check("ik", "IK on (the Person rig, 25 joints)", s.ik);
         slider("ik_hand_x", "Hand target x (to its left)", s.ik_hand_x, -1.2f, 1.2f);
         slider("ik_hand_y", "Hand target y (up)", s.ik_hand_y, -1.0f, 1.2f);
         slider("ik_hand_z", "Hand target z (forward)", s.ik_hand_z, -0.3f, 1.4f);
@@ -490,6 +493,14 @@ private:
         check("ik_feet", "Foot placement", s.ik_feet);
         check("ik_step", "A step under the left foot", s.ik_step);
         slider("ik_step_height", "Step height (m)", s.ik_step_height, 0.0f, 0.4f);
+        check("ik_limits", "Joint limits (knee hinge, hip twist 35, fold 150)", s.ik_limits);
+        check("ik_lock", "Foot locking", s.ik_lock);
+        check("ik_toes", "Toes on the ground", s.ik_toes);
+        check("ik_walk", "The person drifts side to side", s.ik_walk);
+        check("ik_tail", "Tail (FABRIK) to the green ball", s.ik_tail);
+        slider("ik_tail_x", "Tail target x", s.ik_tail_x, -1.2f, 1.2f);
+        slider("ik_tail_y", "Tail target y", s.ik_tail_y, 0.0f, 1.6f);
+        slider("ik_tail_z", "Tail target z", s.ik_tail_z, -1.2f, 0.6f);
 
         section("Debug", true);
         check("stats", "Stats (F3)", s.stats);
@@ -890,6 +901,7 @@ private:
         if (person != _characters_are_people) {
             for (flecs::entity e : _characters) e.destruct();
             _characters.clear();
+            _person_origin.clear();
             _characters_are_people = person;
         }
         const int count = std::clamp(_s.char_count, 1, 64);
@@ -900,6 +912,7 @@ private:
         if (int(_characters.size()) != count) {
             for (flecs::entity e : _characters) e.destruct();
             _characters.clear();
+            _person_origin.clear();
             const Vec3f forward{-std::sin(_yaw * pi / 180.0f), 0.0f, -std::cos(_yaw * pi / 180.0f)};
             const Vec3f right{-forward.z, 0.0f, forward.x};
             auto machine = std::make_shared<AnimationStateMachine>();
@@ -916,17 +929,9 @@ private:
                 // turns the spine, and the arm then reaches from where the shoulder has got to).
                 const Quatf facing = Quatf::axis_angle({0, 1, 0}, _yaw);
                 if (person) {
-                    IKConstraint feet;
-                    feet.name = "feet";
-                    feet.kind = IKKind::FootPlacer;
-                    feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
-                    feet.foot_heights = {0.05f, 0.05f};
-                    feet.pole = IKConstraint::Pole::ModelDirection;
-                    feet.pole_vector = {0.0f, 0.0f, 1.0f};
-                    feet.two_bone.max_stretch = 1.1f;
-                    feet.foot.smooth_seconds = 0.08f;
-                    // The game's ground, in the world: the floor at the feet's height and the step, found in the person's own space.
-                    feet.ground = [this, at, facing](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+                    // The game's ground, in the world: the floor at the feet's height and the step, found in the person's own space as
+                    // it was placed (the ground stays where it is when the person walks).
+                    const GroundQuery ground = [this, at, facing](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
                         const float sc = _s.char_scale;
                         const Mat4f m = Transform3D{.position = at, .rotation = facing, .scale = {sc, sc, sc}}.matrix();
                         const Mat4f inverse = m.inverse();
@@ -935,20 +940,8 @@ private:
                         if (!hit) return std::nullopt;
                         return GroundHit{m.apply(hit->position), normalize(inverse.transposed().apply_vector(hit->normal))};
                     };
-                    a.add_ik(feet);
-                    IKConstraint look;
-                    look.name = "look";
-                    look.kind = IKKind::LookAt;
-                    look.joints = {"spine", "neck", "head"};
-                    look.look_links = {{.weight = 0.2f, .max_yaw_degrees = 15.0f, .max_pitch_up_degrees = 10.0f, .max_pitch_down_degrees = 10.0f},
-                                       {.weight = 0.3f, .max_yaw_degrees = 35.0f, .max_pitch_up_degrees = 20.0f, .max_pitch_down_degrees = 20.0f},
-                                       {.weight = 0.5f, .max_yaw_degrees = 60.0f, .max_pitch_up_degrees = 35.0f, .max_pitch_down_degrees = 35.0f}};
-                    a.add_ik(look);
-                    IKConstraint hand;
-                    hand.name = "hand";
-                    hand.kind = IKKind::TwoBone;
-                    hand.joints = {"shoulder_L", "elbow_L", "hand_L"};
-                    a.add_ik(hand);
+                    for (const IKConstraint& k : person_constraints(ground)) a.add_ik(k);
+                    _person_origin.push_back({at, facing});
                 }
                 _characters.push_back(_ecs->raw().entity()
                                           .set(Transform3D{.position = at, .rotation = person ? facing : Quatf{}})
@@ -956,7 +949,8 @@ private:
                                           .set(static_cast<const Animator3D&>(a)));
             }
         }
-        for (flecs::entity e : _characters) {
+        for (std::size_t index = 0; index < _characters.size(); ++index) {
+            flecs::entity e = _characters[index];
             Animator3D* a = e.get_mut<Animator3D>();
             a->speed = _s.char_speed;
             a->params.set_float("blend", _s.char_blend);
@@ -966,27 +960,22 @@ private:
             static const char* states[] = {"Sway", "Bend", "Wave", "Blend"};
             a->state = states[std::clamp(_s.char_clip, 0, 3)];
             if (person) {
-                const Mat4f m = t->matrix();
-                IKConstraint& hand = a->ik("hand");
-                hand.set_target(m.apply({0.2f + _s.ik_hand_x, 1.65f + _s.ik_hand_y, _s.ik_hand_z})).set_weight(_s.ik_weight);
-                hand.fade_seconds = _s.ik_fade;
-                hand.two_bone.max_stretch = _s.ik_stretch;
-                static const Vec3f poles[] = {{0, 0, 0}, {0, -1, 0}, {0, 0, -1}, {0, 1, 0}, {1, 0, 0}};
-                const int pole = std::clamp(_s.ik_pole, 0, 4);
-                if (pole == 0) {
-                    hand.pole = IKConstraint::Pole::None;
-                } else {
-                    hand.set_pole_direction(poles[pole]);
+                if (index < _person_origin.size()) {
+                    // The person as it was placed: its targets are in this space and stay where they are while it drifts.
+                    const auto [origin, facing] = _person_origin[index];
+                    const Mat4f base = Transform3D{.position = origin, .rotation = facing, .scale = t->scale}.matrix();
+                    const PersonIk ik = person_ik(_s);
+                    if (ik.walk) {
+                        const Vec3f along = facing.rotate({1.0f, 0.0f, 0.0f});
+                        t->position = origin + along * (person_walk_offset(_ik_time) * _s.char_scale);
+                    } else {
+                        t->position = origin;
+                    }
+                    drive_person(*a, ik, base, _pos);
                 }
-                IKConstraint& look = a->ik("look");
-                look.set_target(_pos).set_weight(_s.ik_look ? _s.ik_look_weight : 0.0f);
-                look.fade_seconds = _s.ik_fade;
-                look.look_at.smooth_seconds = _s.ik_look_smooth;
-                IKConstraint& feet = a->ik("feet");
-                feet.set_weight(_s.ik_feet ? 1.0f : 0.0f);
-                feet.fade_seconds = _s.ik_fade;
             }
         }
+        _ik_time += dt;
         _ecs_state->animate(dt);
     }
 
@@ -998,18 +987,27 @@ private:
             _ecs_state->propagate_transforms();
             _ecs_state->collect(_scene);
             if (_s.ik && _characters_are_people) {
-                // The hand's target (a small red ball) and the step, in each person's own space.
-                for (flecs::entity e : _characters) {
-                    const Transform3D* t = e.get<Transform3D>();
+                // The hand's target (a small red ball), the tail's (a green one) and the step, in each person's own space as it was
+                // placed (they stay put while the person walks).
+                const PersonIk ik = person_ik(_s);
+                for (std::size_t i = 0; i < _characters.size() && i < _person_origin.size(); ++i) {
+                    const Transform3D* t = _characters[i].get<Transform3D>();
                     if (!t) continue;
-                    const Mat4f m = t->matrix();
+                    const Mat4f m = Transform3D{.position = _person_origin[i].first, .rotation = _person_origin[i].second, .scale = t->scale}.matrix();
+                    const float r = 0.04f * t->scale.x;
                     if (_s.ik_marker) {
                         Material3D red;
                         red.color = Color::rgb(255, 40, 30);
                         red.unlit = true;
                         red.casts_shadow = false;
-                        const float r = 0.04f * t->scale.x;
-                        _scene.draw(_marker, Mat4f::translation(m.apply({0.2f + _s.ik_hand_x, 1.65f + _s.ik_hand_y, _s.ik_hand_z})) * Mat4f::scaling({r, r, r}), red);
+                        _scene.draw(_marker, Mat4f::translation(m.apply(person_hand_target(ik))) * Mat4f::scaling({r, r, r}), red);
+                        if (ik.tail) {
+                            Material3D green;
+                            green.color = Color::rgb(40, 220, 60);
+                            green.unlit = true;
+                            green.casts_shadow = false;
+                            _scene.draw(_marker, Mat4f::translation(m.apply(person_tail_target(ik))) * Mat4f::scaling({r, r, r}), green);
+                        }
                     }
                     if (_s.ik_step && _s.ik_step_height > 1e-4f) {
                         const float h = _s.ik_step_height;
@@ -1390,6 +1388,8 @@ private:
     Mesh _marker;
     Mesh _step_mesh;
     std::shared_ptr<const Model> _person_model;
+    std::vector<std::pair<Vec3f, Quatf>> _person_origin; // where each person was placed (its IK targets and the step are in that space)
+    float _ik_time = 0.0f;
     bool _characters_are_people = false;
     Material3D _wire_material;
     std::vector<Material3D> _materials;

@@ -12,6 +12,8 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 namespace sponza_walk {
 using namespace kin;
@@ -132,10 +134,17 @@ inline std::optional<GroundHit> floor_and_step(Vec3f from, Vec3f to, bool with_s
     return hit;
 }
 
-// A person: tubes (weights ramping to the next joint over the last 40% of a bone) and balls, on the joints named
-// pelvis, spine, chest, neck, head, hip/knee/ankle and shoulder/elbow/hand _L and _R. Clips Sway (the spine), Bend (a bow) and
-// Wave (the right arm), named as make_character's so that the viewer's animator drives either.
-inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
+// The person's skeleton and clips, with no GPU: 18 joints named pelvis, spine, chest, neck, head, hip/knee/ankle and
+// shoulder/elbow/hand _L and _R (under a root), then toe_L and toe_R (on the ankles) and a tail of five joints (tail_1 to
+// tail_5, hanging straight back from the pelvis). Clips Sway (the spine), Bend (a bow) and Wave (the right arm), named as
+// make_character's so that the viewer's animator drives either. `world` is each joint's place at rest.
+struct PersonRig {
+    Skeleton skeleton;
+    std::vector<AnimClip3D> clips;
+    std::vector<Vec3f> world;
+};
+
+inline PersonRig person_rig() {
     struct Def {
         const char* name;
         int parent;
@@ -147,9 +156,14 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
         {"ankle_L", 7, {0, -0.45f, 0}},   {"hip_R", 1, {-0.1f, 0, 0}},       {"knee_R", 9, {0, -0.5f, 0}},      {"ankle_R", 10, {0, -0.45f, 0}},
         {"shoulder_L", 3, {0.2f, 0.2f, 0}}, {"elbow_L", 12, {0.5f, 0, 0}},  {"hand_L", 13, {0.45f, 0, 0}},     {"shoulder_R", 3, {-0.2f, 0.2f, 0}},
         {"elbow_R", 15, {-0.5f, 0, 0}},   {"hand_R", 16, {-0.45f, 0, 0}},
+        // Appended, so that the indices above are what they were: the ball of each foot, and a tail that hangs straight back.
+        {"toe_L", 8, {0, -0.03f, 0.12f}}, {"toe_R", 11, {0, -0.03f, 0.12f}},
+        {"tail_1", 1, {0, -0.05f, -0.1f}}, {"tail_2", 20, {0, 0, -0.18f}}, {"tail_3", 21, {0, 0, -0.18f}}, {"tail_4", 22, {0, 0, -0.18f}},
+        {"tail_5", 23, {0, 0, -0.18f}},
     };
-    Skeleton sk;
-    std::vector<Vec3f> world;
+    PersonRig rig;
+    Skeleton& sk = rig.skeleton;
+    std::vector<Vec3f>& world = rig.world;
     for (const Def& d : defs) {
         sk.names.emplace_back(d.name);
         sk.parents.push_back(d.parent);
@@ -159,6 +173,48 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
         world.push_back(d.at + (d.parent >= 0 ? world[std::size_t(d.parent)] : Vec3f{}));
     }
     for (const Vec3f& w : world) sk.inverse_bind.push_back(Mat4f::translation({-w.x, -w.y, -w.z}));
+    const u32 count = sk.joint_count();
+    const auto clip = [&](const char* name, float duration, auto&& fill) {
+        AnimClip3D c;
+        c.name = name;
+        c.duration = duration;
+        c.channels.resize(count);
+        fill(c);
+        return c;
+    };
+    const auto swing = [&](AnimClip3D& c, const char* joint_name, Vec3f axis, float a, float duration) {
+        Track3D<Quatf>& t = c.channels[std::size_t(sk.find(joint_name))].rotation;
+        const Quatf z{};
+        t.times = {0.0f, duration * 0.25f, duration * 0.5f, duration * 0.75f, duration};
+        t.values = {z, Quatf::axis_angle(axis, a), z, Quatf::axis_angle(axis, -a), z};
+    };
+    rig.clips.push_back(clip("Sway", 2.5f, [&](AnimClip3D& c) {
+        swing(c, "spine", {0, 0, 1}, 6.0f, 2.5f);
+        swing(c, "chest", {1, 0, 0}, 3.0f, 2.5f);
+        swing(c, "head", {0, 1, 0}, 8.0f, 2.5f);
+    }));
+    rig.clips.push_back(clip("Bend", 2.0f, [&](AnimClip3D& c) {
+        Track3D<Quatf>& t = c.channels[std::size_t(sk.find("spine"))].rotation;
+        t.times = {0.0f, 1.0f, 2.0f};
+        t.values = {Quatf{}, Quatf::axis_angle({1, 0, 0}, 40.0f), Quatf{}};
+    }));
+    rig.clips.push_back(clip("Wave", 1.0f, [&](AnimClip3D& c) {
+        Track3D<Quatf>& up = c.channels[std::size_t(sk.find("shoulder_R"))].rotation;
+        up.times = {0.0f, 0.5f, 1.0f};
+        up.values = {Quatf::axis_angle({0, 0, 1}, -70.0f), Quatf::axis_angle({0, 0, 1}, -85.0f), Quatf::axis_angle({0, 0, 1}, -70.0f)};
+        Track3D<Quatf>& fore = c.channels[std::size_t(sk.find("elbow_R"))].rotation;
+        fore.times = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
+        fore.values = {Quatf::axis_angle({0, 1, 0}, 0.0f), Quatf::axis_angle({0, 1, 0}, 35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f),
+                       Quatf::axis_angle({0, 1, 0}, -35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f)};
+    }));
+    return rig;
+}
+
+// A person: tubes (weights ramping to the next joint over the last 40% of a bone) and balls, on person_rig()'s joints.
+inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
+    const PersonRig rig = person_rig();
+    const Skeleton& sk = rig.skeleton;
+    const std::vector<Vec3f>& world = rig.world;
     const auto joint = [&](const char* name) { return sk.find(name); };
 
     MeshData mesh;
@@ -229,49 +285,28 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
         bone(("hip_" + s).c_str(), ("knee_" + s).c_str(), 0.075f, 0.055f);
         bone(("knee_" + s).c_str(), ("ankle_" + s).c_str(), 0.055f, 0.04f);
         const Vec3f ankle = world[std::size_t(joint(("ankle_" + s).c_str()))];
-        tube(ankle + Vec3f{0, -0.03f, -0.05f}, ankle + Vec3f{0, -0.03f, 0.14f}, 0.04f, 0.035f, joint(("ankle_" + s).c_str()), joint(("ankle_" + s).c_str()), 2);
+        // The foot: heel to ball on the ankle, ball to tip on the toe joint.
+        const Vec3f toe_at = world[std::size_t(joint(("toe_" + s).c_str()))];
+        tube(ankle + Vec3f{0, -0.03f, -0.05f}, toe_at, 0.04f, 0.038f, joint(("ankle_" + s).c_str()), joint(("ankle_" + s).c_str()), 2);
+        tube(toe_at, ankle + Vec3f{0, -0.03f, 0.14f}, 0.038f, 0.034f, joint(("toe_" + s).c_str()), joint(("toe_" + s).c_str()), 2);
         bone("chest", ("shoulder_" + s).c_str(), 0.05f, 0.05f);
         bone(("shoulder_" + s).c_str(), ("elbow_" + s).c_str(), 0.05f, 0.04f);
         bone(("elbow_" + s).c_str(), ("hand_" + s).c_str(), 0.04f, 0.032f);
         ball(world[std::size_t(joint(("hand_" + s).c_str()))], 0.055f, joint(("hand_" + s).c_str()));
     }
 
-    const u32 count = sk.joint_count();
-    const auto clip = [&](const char* name, float duration, auto&& fill) {
-        AnimClip3D c;
-        c.name = name;
-        c.duration = duration;
-        c.channels.resize(count);
-        fill(c);
-        return c;
-    };
-    const auto swing = [&](AnimClip3D& c, const char* joint_name, Vec3f axis, float a, float duration) {
-        Track3D<Quatf>& t = c.channels[std::size_t(sk.find(joint_name))].rotation;
-        const Quatf z{};
-        t.times = {0.0f, duration * 0.25f, duration * 0.5f, duration * 0.75f, duration};
-        t.values = {z, Quatf::axis_angle(axis, a), z, Quatf::axis_angle(axis, -a), z};
-    };
+    // The tail: tubes along the chain, each bound to its joint and the next, tapering to the tip.
+    {
+        const char* names[] = {"pelvis", "tail_1", "tail_2", "tail_3", "tail_4", "tail_5"};
+        for (int i = 0; i + 1 < 6; ++i) {
+            tube(world[std::size_t(joint(names[i]))], world[std::size_t(joint(names[i + 1]))], 0.045f - 0.007f * float(i), 0.045f - 0.007f * float(i + 1),
+                 joint(names[i]), joint(names[i + 1]), 6, 0.5f);
+        }
+    }
+
     auto model = std::make_shared<Model>();
     model->skeletons.push_back(sk);
-    model->clips.push_back(clip("Sway", 2.5f, [&](AnimClip3D& c) {
-        swing(c, "spine", {0, 0, 1}, 6.0f, 2.5f);
-        swing(c, "chest", {1, 0, 0}, 3.0f, 2.5f);
-        swing(c, "head", {0, 1, 0}, 8.0f, 2.5f);
-    }));
-    model->clips.push_back(clip("Bend", 2.0f, [&](AnimClip3D& c) {
-        Track3D<Quatf>& t = c.channels[std::size_t(sk.find("spine"))].rotation;
-        t.times = {0.0f, 1.0f, 2.0f};
-        t.values = {Quatf{}, Quatf::axis_angle({1, 0, 0}, 40.0f), Quatf{}};
-    }));
-    model->clips.push_back(clip("Wave", 1.0f, [&](AnimClip3D& c) {
-        Track3D<Quatf>& up = c.channels[std::size_t(sk.find("shoulder_R"))].rotation;
-        up.times = {0.0f, 0.5f, 1.0f};
-        up.values = {Quatf::axis_angle({0, 0, 1}, -70.0f), Quatf::axis_angle({0, 0, 1}, -85.0f), Quatf::axis_angle({0, 0, 1}, -70.0f)};
-        Track3D<Quatf>& fore = c.channels[std::size_t(sk.find("elbow_R"))].rotation;
-        fore.times = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
-        fore.values = {Quatf::axis_angle({0, 1, 0}, 0.0f), Quatf::axis_angle({0, 1, 0}, 35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f),
-                       Quatf::axis_angle({0, 1, 0}, -35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f)};
-    }));
+    model->clips = rig.clips;
     ModelPart part;
     part.name = "person";
     part.mesh = r3d.create_mesh(mesh);

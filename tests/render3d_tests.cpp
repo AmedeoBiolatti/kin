@@ -8598,6 +8598,267 @@ void test_gpu_ik_on_workers() {
     });
 }
 
+// --- The limits of P1b, fixed: FABRIK as a constraint, joint limits, foot locking and toes, as the renderer draws them ---
+
+namespace ik_scene {
+
+// A biped with toes (skin_fixtures::make_biped_toes) and one bright cube bound to `joint` at `offset` in the joint's own space (unlit: its
+// pixels are told), so that where the renderer draws a joint can be read from the picture.
+struct Marked {
+    std::shared_ptr<kin::Model> model;
+    kin::Mesh body, marker;
+};
+
+Marked make_marked(kin::Renderer3D& r3d, int joint, Vec3f offset = {}) {
+    Marked b;
+    b.model = std::make_shared<kin::Model>();
+    b.model->skeletons.push_back(skin_fixtures::make_biped_toes());
+    const kin::Skeleton& sk = b.model->skeletons[0];
+    b.body = r3d.create_mesh(skin_fixtures::make_biped_body(sk));
+    std::vector<Mat4f> world;
+    kin::compute_world_matrices(sk, sk.rest_pose(), world);
+    const Mat4f& w = world[static_cast<std::size_t>(joint)];
+    const Vec3f at = Vec3f{w.m[12], w.m[13], w.m[14]} + offset;
+    kin::MeshData cube;
+    const float r = 0.06f;
+    skin_fixtures::append_box(cube, at - Vec3f{0, 0, r}, at + Vec3f{0, 0, r}, r, joint, joint);
+    b.marker = r3d.create_mesh(cube);
+    assert(b.body.valid() && b.marker.valid());
+    kin::ModelPart body;
+    body.name = "body";
+    body.mesh = b.body;
+    body.material = {.color = Color::rgb(170, 170, 180)};
+    body.skin = 0;
+    kin::ModelPart marker;
+    marker.name = "marker";
+    marker.mesh = b.marker;
+    marker.material = {.color = Color::rgb(255, 40, 30), .unlit = true};
+    marker.skin = 0;
+    b.model->parts = {body, marker};
+    return b;
+}
+
+// One frame of an entity: animate, propagate, collect, draw.
+Pixels frame(kin::Renderer2D& renderer, kin::Renderer3D& r3d, kin::View3D& view, kin::WorldRenderState3D& state, float dt = 1.0f / 60.0f) {
+    state.animate(dt);
+    kin::Scene3D scene;
+    scene.camera = camera();
+    skin_lights(scene, 1);
+    state.propagate_transforms();
+    state.collect(scene);
+    Pixels p = shoot_view(renderer, r3d, view, scene);
+    renderer.present();
+    return p;
+}
+
+// Where `local` of joint `j` is in the world, by the animator's own IK matrices (the CPU's answer), and where that is on the screen.
+Vec3f joint_world(const kin::Animator3D& a, int j, const Mat4f& entity, Vec3f local = {}) {
+    return entity.apply(a.ik_world[static_cast<std::size_t>(j)].apply(local));
+}
+kin::Vec2f on_screen(Vec3f p) { return ik_scene::camera().project(p, screen)->pos; }
+
+kin::IKConstraint feet_constraint(kin::GroundQuery ground, bool toes) {
+    kin::IKConstraint k;
+    k.name = "feet";
+    k.kind = kin::IKKind::FootPlacer;
+    k.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
+    k.foot_heights = {0.05f, 0.05f};
+    k.pole = kin::IKConstraint::Pole::ModelDirection;
+    k.pole_vector = {0.0f, 0.0f, 1.0f};
+    k.foot.smooth_seconds = 0.0f;
+    k.two_bone.max_stretch = 1.3f;
+    if (toes) {
+        k.toe_joints = {"toe_L", "toe_R"};
+        k.toe_heights = {0.0f, 0.0f};
+    }
+    k.ground = std::move(ground);
+    return k;
+}
+
+} // namespace ik_scene
+
+// FABRIK as a constraint kind, joint limits, foot locking and toes: the marker the renderer draws on a joint is where the CPU's IK pose puts that
+// joint (within a pixel and a half), and the behaviour each of them is for shows in the picture.
+void test_gpu_ik_limits_fabrik_locking_toes() {
+    with_gpu("test_gpu_ik_limits_fabrik_locking_toes", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        namespace B = skin_fixtures::biped;
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+
+        // FABRIK: the head on the end of the spine chain goes to the target, and stays there as the pole turns the chain's bulge.
+        {
+            const ik_scene::Marked m = ik_scene::make_marked(r3d, B::head);
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            const kin::Transform3D placed{.position = {0.1f, 0.0f, 0.2f}, .rotation = kin::Quatf::axis_angle({0, 1, 0}, 20.0f)};
+            kin::Animator3D animator;
+            kin::IKConstraint k;
+            k.name = "spine";
+            k.kind = kin::IKKind::Fabrik;
+            k.joints = {"pelvis", "spine", "chest", "neck", "head"};
+            animator.add_ik(k);
+            const flecs::entity e = world.raw().entity().set(placed).set(kin::SkinnedMeshRenderer{.model = m.model}).set(animator);
+            const Vec3f target = placed.matrix().apply({0.35f, 1.5f, 0.35f});
+            kin::Vec2f first{};
+            Pixels pictures[2];
+            for (int side = 0; side < 2; ++side) {
+                e.get_mut<kin::Animator3D>()->ik("spine").set_target(target).set_pole_direction({side == 0 ? 1.0f : -1.0f, 0.0f, 0.0f});
+                Pixels p;
+                for (int i = 0; i < 3; ++i) {
+                    p = ik_scene::frame(renderer, r3d, view, state);
+                }
+                const ik_scene::Blob blob = ik_scene::red_blob(p);
+                const kin::Vec2f at = ik_scene::on_screen(target);
+                const float error = std::hypot(blob.x - at.x, blob.y - at.y);
+                std::cerr << "ik fabrik, pole " << (side == 0 ? "+x" : "-x") << ": head marker at (" << blob.x << ", " << blob.y << "), target projects to (" << at.x
+                          << ", " << at.y << "), " << error << " px\n";
+                assert(blob.count > 10 && error < 1.5f);
+                pictures[side] = p;
+                if (side == 0) {
+                    first = {blob.x, blob.y};
+                }
+                dump(p, std::string{"ik_fabrik_"} + std::to_string(side));
+            }
+            // The head did not move with the pole; the body did (the chain's bulge turned).
+            assert(pictures[0].rgba != pictures[1].rgba);
+            (void)first;
+        }
+
+        // Limits: the knee marker with the pole back and the left foot on a 0.2 m step. The marker is on the CPU's knee both ways; with the hinge and
+        // 25 degrees of hip twist the knee is in front of the line hip-ankle, without it behind: seen from the camera at +z (in front) as the knee
+        // marker's pixels being nearer the camera: its screen y is lower (larger) for the knee in front when the camera is above... read from the CPU.
+        for (const bool limited : {false, true}) {
+            const ik_scene::Marked m = ik_scene::make_marked(r3d, B::knee_l);
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            kin::Animator3D animator;
+            kin::IKConstraint feet = ik_scene::feet_constraint(
+                [](Vec3f from, Vec3f to) -> std::optional<kin::GroundHit> {
+                    const float h = from.x > 0.0f ? 0.2f : 0.0f;
+                    if (from.y < h || to.y > h) {
+                        return std::nullopt;
+                    }
+                    return kin::GroundHit{{from.x, h, from.z}, {0, 1, 0}};
+                },
+                false);
+            feet.pole_vector = {0.0f, 0.0f, -1.0f};
+            if (limited) {
+                feet.two_bone.hinge = true;
+                feet.two_bone.hinge_axis = {1, 0, 0};
+                feet.two_bone.max_twist_degrees = 25.0f;
+                feet.two_bone.max_bend_degrees = 150.0f;
+            }
+            animator.add_ik(feet);
+            const flecs::entity e = world.raw().entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = m.model}).set(animator);
+            Pixels p;
+            for (int i = 0; i < 3; ++i) {
+                p = ik_scene::frame(renderer, r3d, view, state);
+            }
+            const kin::Animator3D& a = *e.get<kin::Animator3D>();
+            const Vec3f knee = ik_scene::joint_world(a, B::knee_l, Mat4f{});
+            const Vec3f hip = ik_scene::joint_world(a, B::hip_l, Mat4f{}), ankle = ik_scene::joint_world(a, B::ankle_l, Mat4f{});
+            const ik_scene::Blob blob = ik_scene::red_blob(p);
+            const kin::Vec2f at = ik_scene::on_screen(knee);
+            const float error = std::hypot(blob.x - at.x, blob.y - at.y);
+            const Vec3f axis = normalize(ankle - hip);
+            const float in_front = dot(knee - hip - axis * dot(knee - hip, axis), Vec3f{0, 0, 1});
+            std::cerr << "ik knee, pole back, " << (limited ? "hinge + 25 degrees of twist" : "no limits") << ": knee marker " << error << " px from the CPU's knee, " << in_front
+                      << " m in front of the hip-ankle line, ankle height " << ankle.y << "\n";
+            assert(blob.count > 10 && error < 1.5f && std::fabs(ankle.y - 0.25f) < 2e-3f);
+            assert(limited ? in_front > 0.02f : in_front < -0.02f);
+            dump(p, limited ? "ik_knee_limited" : "ik_knee_free");
+        }
+
+        // Toes: the marker is on the toe's tip (0.1 m along its own z): drawn where the CPU's toe tilted it, on a 25 degree ramp under the ball of the
+        // foot; and with the toes off (no toe constraint joints) it is somewhere else.
+        {
+            const ik_scene::Marked m = ik_scene::make_marked(r3d, B::toe_l, {0.0f, 0.0f, 0.1f});
+            const auto ground = [](Vec3f from, Vec3f to) -> std::optional<kin::GroundHit> {
+                const float t = std::tan(25.0f * 3.14159265f / 180.0f);
+                const float h = from.z > 0.1f ? (from.z - 0.1f) * t : 0.0f;
+                if (from.y < h || to.y > h) {
+                    return std::nullopt;
+                }
+                return kin::GroundHit{{from.x, h, from.z}, from.z > 0.1f ? normalize(Vec3f{0, 1, -t}) : Vec3f{0, 1, 0}};
+            };
+            kin::Vec2f with_toes{}, without{};
+            for (const bool toes : {true, false}) {
+                kin::EcsWorld world;
+                kin::WorldRenderState3D state{world};
+                kin::Animator3D animator;
+                animator.add_ik(ik_scene::feet_constraint(ground, toes));
+                const flecs::entity e = world.raw().entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = m.model}).set(animator);
+                Pixels p;
+                for (int i = 0; i < 3; ++i) {
+                    p = ik_scene::frame(renderer, r3d, view, state);
+                }
+                const kin::Animator3D& a = *e.get<kin::Animator3D>();
+                const Vec3f tip = ik_scene::joint_world(a, B::toe_l, Mat4f{}, {0.0f, 0.0f, 0.1f});
+                const ik_scene::Blob blob = ik_scene::red_blob(p);
+                const kin::Vec2f at = ik_scene::on_screen(tip);
+                const float error = std::hypot(blob.x - at.x, blob.y - at.y);
+                const Vec3f toe_up = normalize(a.ik_world[B::toe_l].apply_vector({0, 1, 0}));
+                std::cerr << "ik toes " << (toes ? "on" : "off") << ": tip marker at (" << blob.x << ", " << blob.y << "), " << error << " px from the CPU's, toe tilted "
+                          << std::acos(std::clamp(toe_up.y, -1.0f, 1.0f)) * 57.29578f << " degrees, tip height " << tip.y << "\n";
+                assert(blob.count > 6 && error < 1.5f);
+                (toes ? with_toes : without) = {blob.x, blob.y};
+                if (toes) {
+                    assert(std::fabs(std::acos(toe_up.y) * 57.29578f - 25.0f) < 0.2f && tip.y > 0.02f);
+                } else {
+                    assert(std::acos(std::clamp(toe_up.y, -1.0f, 1.0f)) * 57.29578f < 0.1f);
+                }
+                dump(p, toes ? "ik_toes_on" : "ik_toes_off");
+            }
+            assert(std::hypot(with_toes.x - without.x, with_toes.y - without.y) > 0.3f);
+        }
+
+        // Locking: the ankle marker while the entity walks along x at 4 cm a frame. Locked, it is where it was put (in the world: the same pixel), for
+        // the frames before the release; unlocked, it goes with the body (a pixel or more a frame).
+        {
+            const ik_scene::Marked m = ik_scene::make_marked(r3d, B::ankle_l);
+            for (const bool lock : {true, false}) {
+                kin::EcsWorld world;
+                kin::WorldRenderState3D state{world};
+                kin::Animator3D animator;
+                kin::IKConstraint feet = ik_scene::feet_constraint(
+                    [](Vec3f from, Vec3f to) -> std::optional<kin::GroundHit> {
+                        if (from.y < 0.0f || to.y > 0.0f) {
+                            return std::nullopt;
+                        }
+                        return kin::GroundHit{{from.x, 0.0f, from.z}, {0, 1, 0}};
+                    },
+                    false);
+                feet.foot.lock_feet = lock;
+                feet.foot.lock_release_distance = 0.5f; // held for all of the walk (the leg stretches to it)
+                animator.add_ik(feet);
+                const flecs::entity e = world.raw().entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = m.model}).set(animator);
+                kin::Vec2f start{};
+                float worst = 0.0f;
+                for (int i = 0; i < 8; ++i) {
+                    e.get_mut<kin::Transform3D>()->position = {0.04f * static_cast<float>(i), 0.0f, 0.0f};
+                    const Pixels p = ik_scene::frame(renderer, r3d, view, state);
+                    const ik_scene::Blob blob = ik_scene::red_blob(p);
+                    const kin::Animator3D& a = *e.get<kin::Animator3D>();
+                    const kin::Vec2f cpu = ik_scene::on_screen(ik_scene::joint_world(a, B::ankle_l, e.get<kin::Transform3D>()->matrix()));
+                    assert(blob.count >= 4 && std::hypot(blob.x - cpu.x, blob.y - cpu.y) < 1.5f);
+                    if (i == 0) {
+                        start = {blob.x, blob.y};
+                    }
+                    worst = std::max(worst, std::hypot(blob.x - start.x, blob.y - start.y));
+                    if (i == 7) {
+                        dump(p, lock ? "ik_lock_on" : "ik_lock_off");
+                    }
+                }
+                std::cerr << "ik foot lock " << (lock ? "on" : "off") << ": the ankle marker moves " << worst << " px over 28 cm of walking\n";
+                assert(lock ? worst < 1.5f : worst > 6.0f);
+            }
+        }
+    });
+}
+
 // Everything on with skinned copies: cascades 4, ambient occlusion, contact shadows, temporal anti-aliasing, with a job system and without,
 // over several frames of moving poses: a picture, the same one both ways, with every pass counted.
 void test_gpu_skinned_everything() {
@@ -8793,6 +9054,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ik_taa_matches_clip());
     RUN(test_gpu_ik_shadow_cache());
     RUN(test_gpu_ik_on_workers());
+    RUN(test_gpu_ik_limits_fabrik_locking_toes());
     RUN(test_gpu_skinned_everything());
     return 0;
 }

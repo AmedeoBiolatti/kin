@@ -138,6 +138,14 @@ struct Settings {
     bool ik_feet = false;       // foot placement on the floor (and the step)
     bool ik_step = true;        // a step under the left foot
     float ik_step_height = 0.2f;
+    bool ik_tail = false;       // a FABRIK chain on the tail, to a point of the person's own space
+    float ik_tail_x = 0.5f;
+    float ik_tail_y = 0.9f;
+    float ik_tail_z = -0.35f;
+    bool ik_limits = false;     // knee hinges with a twist limit at the hip, the arm folds to 150 degrees
+    bool ik_lock = false;       // planted feet stay where they were put while the person moves
+    bool ik_toes = false;       // toes lie on the ground under them
+    bool ik_walk = false;       // the person drifts from side to side
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

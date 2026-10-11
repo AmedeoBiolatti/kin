@@ -19,7 +19,7 @@ skinned_bend.glb  a tube bound to a chain of three joints, with the clips
              200-copy cost scene). floor20.glb is a 20 m floor to stand things on.
 skinned_biped.glb  a person of 1.95 m on 18 joints (pelvis, spine, chest, neck, head, a leg and an arm
              each side; the arms out), facing +Z, with the clip "idle" (a sway): what the IK scenes (P1b) pose.
-             ik_marker.glb is a small red sphere (a target), ik_step.glb a 0.8 x 0.2 x 0.8 box (a step).
+             ik_marker.glb is a small red sphere (a target), ik_step.glb a 0.8 x 0.2 x 0.8 box (a step), ik_ramp.glb a 25 degree wedge.
 
 Deterministic: the same files every time.
 """
@@ -218,9 +218,11 @@ def skinned_bend(path, rings=49, segments=16):
         f.write(struct.pack("<II", len(data), 0x004E4942) + data)
 
 
-def skinned_biped(path):
+def skinned_biped(path, extras=False):
     """A person on the 18 joints of tests/skin_fixtures.hpp's biped (names and rest placing the same), made of tubes and spheres whose
-    weights ramp to the next joint over the last 40% of each bone. Written by hand, as skinned_bend is."""
+    weights ramp to the next joint over the last 40% of each bone. Written by hand, as skinned_bend is.
+    With `extras` (skinned_biped_tail.glb: the same person, then) two toes (toe_L, toe_R, joints 18 and 19) and a tail of five joints
+    (tail_1 to tail_5, 20 to 24, hanging straight back from the pelvis) are added after the 18, for the FABRIK and toe scenes."""
     import json
     import struct
     joint_defs = [  # name, parent, translation
@@ -231,6 +233,9 @@ def skinned_biped(path):
         ("shoulder_L", 3, (0.2, 0.2, 0)), ("elbow_L", 12, (0.5, 0, 0)), ("hand_L", 13, (0.45, 0, 0)),
         ("shoulder_R", 3, (-0.2, 0.2, 0)), ("elbow_R", 15, (-0.5, 0, 0)), ("hand_R", 16, (-0.45, 0, 0)),
     ]
+    if extras:
+        joint_defs += [("toe_L", 8, (0, -0.03, 0.12)), ("toe_R", 11, (0, -0.03, 0.12)), ("tail_1", 1, (0, -0.05, -0.1)),
+                       ("tail_2", 20, (0, 0, -0.18)), ("tail_3", 21, (0, 0, -0.18)), ("tail_4", 22, (0, 0, -0.18)), ("tail_5", 23, (0, 0, -0.18))]
     world = []
     for name, parent, t in joint_defs:
         base = world[parent] if parent >= 0 else (0.0, 0.0, 0.0)
@@ -307,11 +312,21 @@ def skinned_biped(path):
         bone("hip_" + side, "knee_" + side, 0.075, 0.055)
         bone("knee_" + side, "ankle_" + side, 0.055, 0.04)
         ank = world[index["ankle_" + side]]
-        tube((ank[0], ank[1] - 0.03, ank[2] - 0.05), (ank[0], ank[1] - 0.03, ank[2] + 0.14), 0.04, 0.035, index["ankle_" + side], index["ankle_" + side], rings=2)
+        if extras:
+            ball_at = world[index["toe_" + side]]
+            tube((ank[0], ank[1] - 0.03, ank[2] - 0.05), ball_at, 0.04, 0.038, index["ankle_" + side], index["ankle_" + side], rings=2)
+            tube(ball_at, (ank[0], ank[1] - 0.03, ank[2] + 0.14), 0.038, 0.034, index["toe_" + side], index["toe_" + side], rings=2)
+        else:
+            tube((ank[0], ank[1] - 0.03, ank[2] - 0.05), (ank[0], ank[1] - 0.03, ank[2] + 0.14), 0.04, 0.035, index["ankle_" + side], index["ankle_" + side], rings=2)
         bone("chest", "shoulder_" + side, 0.05, 0.05)
         bone("shoulder_" + side, "elbow_" + side, 0.05, 0.04)
         bone("elbow_" + side, "hand_" + side, 0.04, 0.032)
         ball(world[index["hand_" + side]], 0.055, index["hand_" + side])
+    if extras:
+        chain = ["pelvis", "tail_1", "tail_2", "tail_3", "tail_4", "tail_5"]
+        for k in range(len(chain) - 1):
+            tube(world[index[chain[k]]], world[index[chain[k + 1]]], 0.045 - 0.007 * k, 0.045 - 0.007 * (k + 1), index[chain[k]], index[chain[k + 1]],
+                 rings=6, ramp=0.5)
     blob = bytearray()
     views = []
 
@@ -401,6 +416,35 @@ def ik_props(marker_path, step_path):
     h.save(step_path)
 
 
+def ik_ramp(path, degrees=25.0, length=0.8, width=1.2):
+    """A wedge standing on y = 0, rising along +z from its z = 0 edge at `degrees` (skinned_ik_limits' ramp under a person's toes)."""
+    import math as _m
+    g = Glb()
+    stone = g.material("ramp", color=(0.45, 0.46, 0.5, 1))
+    h = length * _m.tan(_m.radians(degrees))
+    w = width / 2
+    A, B, C, D = (-w, 0, 0), (w, 0, 0), (w, h, length), (-w, h, length)
+    Eb, Fb = (-w, 0, length), (w, 0, length)
+    n_top = (0.0, _m.cos(_m.radians(degrees)), -_m.sin(_m.radians(degrees)))
+    faces = [  # (normal, [triangles of points])
+        (n_top, [(A, D, C), (A, C, B)]),
+        ((0, 0, 1), [(Eb, Fb, C), (Eb, C, D)]),
+        ((0, -1, 0), [(A, B, Fb), (A, Fb, Eb)]),
+        ((1, 0, 0), [(B, C, Fb)]),
+        ((-1, 0, 0), [(A, Eb, D)]),
+    ]
+    positions, normals, uvs, indices = [], [], [], []
+    for n, tris in faces:
+        for tri in tris:
+            for pnt in tri:
+                indices.append(len(positions))
+                positions.append(pnt)
+                normals.append(n)
+                uvs.append((pnt[0], pnt[2]))
+    g.node("ramp", mesh=g.mesh("ramp", positions, normals, uvs, indices, material=stone))
+    g.save(path)
+
+
 def floor20(path):
     """A 20 m square floor, its top at y = 0, light grey."""
     g = Glb()
@@ -421,7 +465,9 @@ def main():
     skinned_bend(os.path.join(out, "skinned_dense.glb"), rings=65, segments=32)  # 4,096 triangles
     floor20(os.path.join(out, "floor20.glb"))
     skinned_biped(os.path.join(out, "skinned_biped.glb"))
+    skinned_biped(os.path.join(out, "skinned_biped_tail.glb"), extras=True)
     ik_props(os.path.join(out, "ik_marker.glb"), os.path.join(out, "ik_step.glb"))
+    ik_ramp(os.path.join(out, "ik_ramp.glb"))
 
 
 if __name__ == "__main__":

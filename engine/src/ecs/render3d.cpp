@@ -52,6 +52,7 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
       _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()) {}
 
 void WorldRenderState3D::animate(f32 dt) {
+    ++_epoch;
     _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer& renderer, Animator3D& a, Transform3D* own) {
         const Model* model = renderer.model.get();
         if (!model || model->skeletons.empty()) {
@@ -169,7 +170,8 @@ void WorldRenderState3D::animate(f32 dt) {
     });
 }
 
-void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose& base, const Mat4f& entity_matrix, const flecs::world& ecs) {
+void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose& base, const Mat4f& entity_matrix, const flecs::world& ecs,
+                                  u64 epoch) {
     a.ik_pose = base;
     compute_world_matrices(sk, a.ik_pose, a.ik_world);
     const Mat4f to_model = entity_matrix.inverse();
@@ -182,6 +184,10 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
             for (const std::string& name : k.joints) {
                 k.resolved.push_back(sk.find(name));
             }
+            k.resolved_toes.clear();
+            for (const std::string& name : k.toe_joints) {
+                k.resolved_toes.push_back(name.empty() ? -1 : sk.find(name));
+            }
             k.resolved_for = &sk;
         }
         const auto resolved = [&](std::size_t count) {
@@ -193,6 +199,7 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
         if (w <= 0.0f) {
             k.look_state.valid = false;
             k.foot_state.valid = false;
+            k.bend_state.valid = false;
             continue;
         }
         // The target in the model's space: the point of the world, or the entity's grip point; a vanished entity is
@@ -249,7 +256,29 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
                 o.end_rotation = (rotation_of(to_model) * k.target_rotation).normalized();
                 o.rotation_weight = k.rotation_weight;
             }
-            solve_two_bone(sk, a.ik_pose, a.ik_world, {k.resolved[0], k.resolved[1], k.resolved[2]}, target, o);
+            solve_two_bone(sk, a.ik_pose, a.ik_world, {k.resolved[0], k.resolved[1], k.resolved[2]}, target, o, &k.bend_state, dt);
+            break;
+        }
+        case IKKind::Fabrik: {
+            if (k.resolved.size() < 2 || !resolved(k.resolved.size())) {
+                break;
+            }
+            FabrikOptions o = k.fabrik;
+            o.weight = k.fabrik.weight * w;
+            switch (k.pole) {
+            case IKConstraint::Pole::WorldPosition:
+                o.pole_mode = PoleMode::Position;
+                o.pole = to_model.apply(k.pole_vector);
+                break;
+            case IKConstraint::Pole::ModelDirection:
+                o.pole_mode = PoleMode::Direction;
+                o.pole = k.pole_vector;
+                break;
+            case IKConstraint::Pole::None:
+                o.pole_mode = PoleMode::None;
+                break;
+            }
+            solve_chain_fabrik(sk, a.ik_pose, a.ik_world, k.resolved, target, o);
             break;
         }
         case IKKind::LookAt: {
@@ -283,17 +312,33 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
             for (std::size_t i = 0; i < n; ++i) {
                 feet[i].leg = {k.resolved[1 + i * 3], k.resolved[2 + i * 3], k.resolved[3 + i * 3]};
                 feet[i].foot_height = i < k.foot_heights.size() ? k.foot_heights[i] : 0.1f;
+                feet[i].toe = i < k.resolved_toes.size() ? k.resolved_toes[i] : -1;
+                feet[i].toe_height = i < k.toe_heights.size() ? k.toe_heights[i] : 0.03f;
             }
             const std::span<const FootLeg> leg_span{feet.data(), n};
-            // The game's query is in the world: the segment goes out, the hit comes back into the model's space.
+            // The game's query is in the world: the segment goes out, the hit comes back into the model's space. Its answers are
+            // kept for the frame (the epoch: animate() and propagate_transforms() advance it) by the order they were asked in, for
+            // the same segment: a second solve in the frame (collect() after apply_ik(), two views) does not ask again.
+            std::size_t asked = 0;
             const GroundQuery model_ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
-                const std::optional<GroundHit> hit = k.ground(entity_matrix.apply(from), entity_matrix.apply(to));
+                const Vec3f world_from = entity_matrix.apply(from), world_to = entity_matrix.apply(to);
+                if (k.ground_cache.size() <= asked) {
+                    k.ground_cache.resize(asked + 1);
+                }
+                IKConstraint::GroundCache& cached = k.ground_cache[asked++];
+                if (cached.epoch != epoch || !(cached.from == world_from) || !(cached.to == world_to)) {
+                    cached.hit = k.ground(world_from, world_to);
+                    cached.epoch = epoch;
+                    cached.from = world_from;
+                    cached.to = world_to;
+                }
+                const std::optional<GroundHit>& hit = cached.hit;
                 if (!hit) {
                     return std::nullopt;
                 }
                 return GroundHit{to_model.apply(hit->position), normalize(entity_matrix.transposed().apply_vector(hit->normal))};
             };
-            FootPlan plan = plan_foot_placement(sk, a.ik_pose, a.ik_world, leg_span, model_ground, k.foot, &k.foot_state, dt);
+            FootPlan plan = plan_foot_placement(sk, a.ik_pose, a.ik_world, leg_span, model_ground, k.foot, &k.foot_state, dt, &entity_matrix);
             plan.pelvis_offset *= w;
             TwoBoneOptions o = k.two_bone;
             o.weight = w;
@@ -314,12 +359,13 @@ void WorldRenderState3D::apply_ik() {
         }
         const Skeleton& skeleton = model->skeletons[0];
         if (animator->bound == model && animator->player.skeleton() == &skeleton) {
-            solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world());
+            solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
         }
     });
 }
 
 void WorldRenderState3D::propagate_transforms() {
+    ++_epoch;
     // Tables come parents first (cascade), and every entity in a table shares
     // its parent: one tight loop a table.
     _transforms.run([](flecs::iter& it) {
@@ -390,7 +436,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                 }
             } else {
                 // The clips' pose with the constraints solved on it, in this frame's place of the entity.
-                solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world());
+                solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
                 world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
             }
         } else {

@@ -2971,7 +2971,7 @@ Continuity sweeps (worst step of either rotation, or of the elbow's direction, b
 - Two things on the person's mesh that are the fixture's, not the solver's: the open ends of the tubes at the shoulders and the crease
   where the clavicle tubes cross the chest.
 
-**Honest limits.**
+**Honest limits (as first written, at 8eb72bb; the follow-up below says which are fixed and what remains).**
 1. *A target through the exact centre of a folded chain with equal bones* turns the upper arm 180 degrees in one step about its own axis with
    every joint in the same place (the fold's plane flips). No continuous rule has no such place; the pose is right, the skin twists. Real
    bones are unequal (a hole of `|l1 - l2|` round the root, through which the chain turns steeply but continuously), and a hand targeted at its
@@ -2993,10 +2993,113 @@ Continuity sweeps (worst step of either rotation, or of the elbow's direction, b
    is in `ik.hpp`; the ECS hook has two-bone, look-at and the foot placer); prefab / component-schema support (the 3D components have none);
    kin/anim events or state-machine parameters driving weights (the game sets them each frame: `set_weight`).
 
+#### P1b follow-up — the known limits, fixed (2026-10-11, `exp/3d-rendering`, working tree on 8eb72bb; not committed)
+
+All CPU maths, the ECS hook, the harness and the viewer: no shader or renderer change. Every new option is off by default and every
+picture and test of before is byte for byte (the identity check below).
+
+| # | Limit | What was done | Where |
+|---|---|---|---|
+| 1 | no joint limits | `TwoBoneOptions::max_bend_degrees` (the mid joint folds to that and no further), `hinge` / `hinge_axis` (the mid joint's own axis: a pure turn about it, the positive way, even from a straight pose or a hyperextended clip) and `max_twist_degrees` (the root's swing-twist twist about the bone, from what the clips did). A pole that asks a knee backward carries the hinge round by twisting the hip; the limit holds the twist, and eases to nothing at a half turn so the knee comes back to the clips' side without a flip. The twist limit turns the elbow's side about the target's axis (the end stays on target) by a bracketed bisection on the twist as a function of the side. | `ik.hpp`, `ik.cpp` `two_bone_pass` |
+| 2 | FABRIK not an ECS kind | `IKKind::Fabrik` (joints root to tip, target, pole, weight and fade like the others, `IKConstraint::fabrik`), and a pole in `FabrikOptions`: the solved chain is turned about the root-to-tip line (no end, no length moves) so its bulge faces the pole, fading out for a straight chain or a pole on the line. | `render3d.hpp`/`.cpp` (ECS), `ik.cpp` |
+| 3 | foot placement | the ground query once per leg per frame: it was once per leg per solve, and a second solve in a frame (`apply_ik()` then `collect()`, two views) asked again; the ECS now keeps the answers for the frame (an epoch advanced by `animate()` and `propagate_transforms()`, matched by segment). Foot locking (`lock_feet`: planted when the animated sole is within `lock_height`, held in the WORLD while the body moves, released at `lock_release_height` / `lock_release_distance`, eased back over `lock_replant_seconds`). Toes (`FootLeg::toe`: a second query under the animated toe, the toe turns to its normal, clamped to the foot's slope and `toe_max_tilt_degrees`, not in the air). | `ik.cpp` `plan_foot_placement`, `apply_foot_placement`; ECS `solve_ik` |
+| 4 | non-uniform scale on the root joint or between mid and end | exact now (hand within 4e-7 of 360 reachable targets, three scalings). A turn of the mid joint changes the forearm's drawn length when its parent's matrix is a non-uniform scale, so the rigid triangle is wrong however it is rotated. The mid joint is first turned about its hinge (the pose's plane, or the hinge) until the end is at the distance the target asks for (a scalar equation in the turn: 72 samples, then bisection), the rigid solve then sees the true lengths, and up to 8 passes from its own result (same side, same end orientation) finish to rounding and to the end orientation. A weight below 1 blends the solve with the pose. | `ik.cpp` `solve_two_bone` |
+| 5 | straight chain, no pole, goes to -Y | the rest pose's bend (the rest chain's bend direction, turned by the root's change from rest) when it has one (more than 1 degree), else the hinge's side, else -Y of the root's parent as before. Rigs with a straight rest (the biped fixtures) are unchanged. | `ik.cpp` |
+| 6 | the two singular cases | investigated: see "Singularities" below. A stateful treatment exists for the pole case (`bend_swing_degrees_per_second` with a `TwoBoneState`), implemented; the fold's centre is topologically inherent. | `ik.cpp`, ECS `bend_state` |
+| 7 | not tested | CesiumMan: arms and legs reach targets made by turning their joints (400 targets, 4 limbs, hand within 3e-7, bones 8e-7 relative); Sponza Walk's panel logic factored into `examples/sponza_walk/ik_rig.hpp` (`person_rig`, `person_constraints`, `drive_person`, `person_ik(Settings)`) and driven by a unit test. | `tests/skeleton_tests.cpp` |
+
+**Singularities (item 6).** *A pole exactly behind the target* (the side across the target's axis is undefined where the pole is on it): for
+any function of the target direction alone, the elbow's side is a tangent vector across the sphere of directions, and a continuous
+nowhere-zero tangent field on a sphere does not exist (the hairy-ball theorem), so some target direction has an undefined side, and near
+it the side turns over a few degrees of the target's travel; moving the zero (as the pull toward the pose's own bend does) cannot remove it.
+Stateless it stays: 8.3 degrees a step in a 120-frame sweep through the axis (0.005 of the reach a frame), 24.4 degrees in a 40-frame one.
+With memory it is a different problem, and it has a solution: the side may swing toward the one wanted at a bounded speed, whatever the
+target does (the end stays on the target the whole time: only the elbow lags). `TwoBoneState` + `bend_swing_degrees_per_second`: the same
+sweeps give 6.0 and 6.1 degrees a step at 360 degrees a second (6 a frame), in the ECS 6.1 against 45.0 for the stateless 40-frame sweep.
+It is off by default (a state is something a caller must keep), a weight of 0 forgets it, and a second solve in a frame (dt 0) holds the side.
+*A target through the exact centre of a folded chain of equal bones*: every joint's place is continuous through it, but the upper bone's twist
+about its own axis is not: the plane of the fold is the thing that flips, and no choice of it can be continuous, because the target comes
+out of the centre on the opposite side of it and the elbow, which has not moved, would have to be on the other
+side of the shoulder (a jump in position instead of one in twist). The worst step is
+therefore path-dependent: a pass exactly through it is one half turn (136 degrees at the nearest of 2,000 samples), 2 mm off it 21.8
+degrees a step, 20 mm off 2.3 degrees. A real arm has unequal bones, which makes a hole of `|l1 - l2|` where the chain turns steeply but
+continuously (8.1 degrees a step, as before). Documented, not fixable.
+
+**Results.**
+
+| Check | Result |
+|---|---|
+| `ninja -C build -j8`, `ninja -C build-no3d -j8` | build; no warnings from the new code |
+| `ctest` in `build`, `KIN_REQUIRE_GPU_TESTS=1` | 69 of 69 (twice: before and after the last tidy) |
+| `ctest` in `build-no3d` | 65 of 65 |
+| `kin_render3d_tests` | passes on NVIDIA RTX 4080 (VK_ICD_FILENAMES unset, 78 s) and on lavapipe (118 s); the new GPU test's numbers are the same on both |
+| Identity: default and `--cascades 4 --ao --contact-shadows --taa`, 120 frames, over crowd, shadows, sponza, helmet, motion, spheres, cornell; kiln_near with `--lod --lod-clusters` | 37 of 37 byte-identical to `p1a_base_def` / `p1a_base_all` / `p1a_base_kiln` |
+| Skinned scenes (skinned_bend, skinned_ecs, skinned_blend, skinned_cesium, skinned_fox, skinned_ik, skinned_ik_look), default and all-on, against pictures rendered from the 8eb72bb binary first | 32 of 32 byte-identical |
+| `skinned_ik_limits` rendered twice (and all-on once) | identical |
+| `kin_skeleton_tests` | passes; new tests: `test_ik_joint_limits`, `test_ik_rest_bend_fallback`, `test_ik_two_bone_nonuniform_scale`, `test_ik_bend_swing_and_singularities`, `test_ik_fabrik_pole`, `test_ik_foot_locking_and_toes`, `test_ecs_ik_fabrik_locking_and_limits`, `test_sponza_walk_ik_panel`, `test_ik_cesium_man` |
+| hinge | 300 of 300 random knees are pure hinges (about X, the positive way) with it, 0 of 300 without |
+| twist limit 30 / 90 / 180, pole all the way round the leg in 0.5 degree steps | worst step of the knee 0.49 / 0.73 / 0.56 degrees; twist held to 30.05 |
+| FABRIK pole round the axis, 0.5 degree steps | worst step of the bulge 0.67 degrees; the bulge faces the pole to 0.99 |
+| foot lock (CPU, body 1 cm a frame) | held to 0.2 mm for 14 frames, then released at 15 cm and eased back: worst step 3.9 cm (the smoothstep's 2.5 and the body's 1); planted again 25 frames in. In the ECS: 0.07 mm drift over 11 cm of walking against 0.11 m unlocked |
+| toes | 20 / 50 / 20-with-clamp-8 degree slopes give 20 / 30 (the foot's clamp) / 8 degrees of toe tilt to 0.2; none for a foot in the air |
+| ground query counts | 2 a frame for two legs through `apply_ik()` + `collect()` + a second `collect()`, 4 with toes |
+| scaled chains (root (1.5, 0.6, 2), mid (0.7, 1.4, 1.1), both) | hand within 4.0e-7 / 2.5e-7 / 2.9e-7 of 120 reachable targets each; idempotent to 5e-5; end orientation 0 degrees from the goal |
+| rest-bend fallback, straight pose, no pole, sweep | worst step 0.69 degrees |
+| CesiumMan (arms, legs; 400 targets) | hand within 2.7e-7; bones kept to 8e-7 relative |
+| panel (Sponza Walk) | hand at the panel's target for each of the 4 poles (the elbow on the pole's side); weight 0 and fades; stretch to 1.2; look on/off; the step lifts the left ankle to 0.25; tail to its target (2 mm); locked foot drifts 0.2 mm vs 0.11 m over 11 cm of drift |
+| GPU (`test_gpu_ik_limits_fabrik_locking_toes`) | FABRIK head marker 0.26 / 0.38 px from the target (two poles; the pictures differ); knee marker 0.5 / 0.04 px from the CPU's knee, the knee behind the hip-ankle line by 0.29 m without limits and in front by 0.29 with them; toe-tip marker 0.11 / 0.40 px from the CPU's, tilted 25 / 0 degrees; ankle marker moves 0 px locked, 10.3 px unlocked over 28 cm of walking |
+
+**Mutation checks** (a new break each, a test fails, restored; the sources compared with copies afterwards). 18 mutations against the CPU
+tests: 16 caught at first, 2 survived and were caught after a new case was added (marked *); 4 of them also against the GPU test (3 caught;
+the toe clamp is under the GPU slope):
+
+| Break | Caught by |
+|---|---|
+| hinge ignored | `test_ik_joint_limits` (pure hinge); GPU: knee in front |
+| twist clamp off / limit not eased at a half turn | `test_ik_joint_limits` (twist held; the sweep's step) |
+| max bend ignored | `test_ik_joint_limits` |
+| rest-bend fallback ignored | `test_ik_rest_bend_fallback` |
+| mid-joint pre-step off / refinement passes off | `test_ik_two_bone_nonuniform_scale` (idempotence; the end orientation) |
+| bend swing unbounded | `test_ik_bend_swing_and_singularities` |
+| FABRIK pole ignored (maths / dropped by the ECS) | `test_ik_fabrik_pole`; `test_ecs_ik_fabrik_locking_and_limits`; GPU: the two pictures equal |
+| lock not in the world (model matrix ignored) / never released / no easing | the foot lock test (held, still, the step); the ECS lock test; GPU: marker moves |
+| toe clamp off | `test_ik_foot_locking_and_toes` (not the GPU test, whose slope is under the clamp) |
+| toe follows the ground in the air * | survived until the airborne-foot case was added |
+| ground answers not kept for the frame | `test_ecs_ik_fabrik_locking_and_limits` (counts) |
+| ECS drops the bend state * | survived until the ECS bend swing case was added |
+
+**What I looked at.** `kin_reference` scene `skinned_ik_limits` (four people, `skinned_biped_tail.glb`, `ik_ramp.glb`): the two people with the left foot
+on a 0.2 m step and the knees' pole pointing back: the left one's knee is behind and its hip turned half way round, the right one's
+(hinge, 25 degrees of twist, fold to 150) is in front with the foot on the step; a tail of five joints reaching a red marker with its
+bulge up (the tip on the marker); and the feet at the foot of a 25 degree ramp, the toes tilted up onto it, the foot flat. Viewer:
+`--preset ik-tail`, `ik-walk`, `ik-all` run headless without error (the tail hidden behind the person from the front camera: judged on
+the scene's `tail` camera, not the viewer's).
+
+**What remains.**
+1. *The fold's centre with equal bones*: a half turn of the upper bone in one step for a target through it exactly (inherent, above); a
+   hand targeted at its own shoulder is a bug in the game.
+2. *A pole exactly behind the target stays a fast turn without a state*; with a `TwoBoneState` it is bounded, but the elbow then lags
+   the pole by up to a few frames (it is the elbow's side only; the hand is always on target).
+3. *The twist limit needs a plane*: a hinge, or a pose that is bent; with a nearly straight pose and no hinge the limit fades with how bent
+   it is, so a straight leg with no hinge can still be turned fully by a pole.
+4. *Foot locking is a plan too*: it holds the ankle target, not the sole (a locked foot that the leg cannot reach is as near as `max_stretch`
+   lets it get, and floats off the ground), the thresholds are in model units, and it needs the animation to put the foot down (a clip that
+   never brings the sole within `lock_height` of `ground_level` never plants). A planted foot is not re-planted while it is still easing.
+5. *Toes*: the toe follows the normal at the ball, not the height (a ball over a ledge is not lifted); one tilt amount (the foot's
+   `tilt_blend_height`) for ankle and toe; the toe's query is one more call.
+6. *Scaled chains* are exact for reachable targets; for a target outside what a scaled forearm can reach (the reach is an ellipsoid's, not a
+   sphere's) the end stands as near as the mid joint's turn allows, `reached` false. `min_bend_degrees` and `max_bend_degrees` are laws of
+   cosines in the rigid triangle, so under a non-uniform scale on the root they are measured in the parent's space, not the drawn one.
+7. *Look-at smoothing in the ECS is in world space and starts from the head's own aim* (as before).
+8. *Not done or not tested*: D3D12 and Metal (nothing here is GPU); the Sponza Walk panel's widgets and click path, the marker, step and
+   tail-target meshes and the keyboard (no display: the state-to-constraint mapping is tested, and the presets run headless); the new `toe` /
+   `lock` / `ik: fabrik` keys of `kin_reference` have scenes but no unit test of their parser; prefab / component-schema support;
+   kin/anim events driving weights. P2's physics raycast is the one ground query still to plug in.
+
 **What P2 needs from this.**
 - *The ground query* is a physics raycast: `GroundQuery` is `(Vec3f from, Vec3f to) -> optional<GroundHit{position, normal}>` in world
-  space, from the foot's place down by `ray_up + ray_down` metres; P2's `raycast(from, to)` returns that. Two calls per foot per frame; give it a
-  layer mask for the level (not the character's own body).
+  space, from the foot's place down by `ray_up + ray_down` metres; P2's `raycast(from, to)` returns that. One call per leg per frame (one more
+  for each toe joint), however many times the constraints are solved in the frame; give it a layer mask for the level (not the character's own body).
 - *Grab*: a hold is an entity (or a point) with `WorldTransform3D`: `ik("right_hand").set_target(hold, grip_offset).set_target_rotation(
   surface_rotation).set_pole_direction(away_from_wall)`; `set_weight(1)` with a fade of 0.1 to 0.2 s to reach and `set_weight(0)` to
   release. A hold that is destroyed is let go of by itself. To drive the character's body toward the hold (hanging), move the entity (the physics

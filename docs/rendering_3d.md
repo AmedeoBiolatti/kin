@@ -593,10 +593,37 @@ as near as the chain can, on the line to it. The elbow goes to the pole's side (
 the given pose (0 returns it bit for bit), `max_stretch` lets the bones lengthen with a soft clamp (measured against the skeleton's
 rest lengths, so solving twice never stretches twice), `min_bend_degrees` keeps a knee from locking, and `match_rotation` turns the
 end joint to a model-space orientation. Details worth knowing: it is solved in the space of the root joint's parent, so a scaled or
-turned model and a non-uniform scale above the chain are exact; the upper bone's turn carries the bend plane with it as far as the
-pose is bent, so the elbow hinges and the twist is taken at the shoulder (a straight pose has no plane: the shortest turn); a pole
-on the target's axis falls back smoothly on the pose's own bend and, for a straight chain, on "toward -Y" (give a pole). A target
-nearer the root than the folded chain can come, with unequal bones, turns the chain steeply but without a jump.
+turned model and a non-uniform scale above the chain are exact (and so is one on the root joint itself, or between it and the
+mid joint, where the forearm's drawn length depends on how it is turned: the mid joint is turned until the end is at the right
+distance, then the rigid solve and up to 8 passes from its own result; a hand lands within 1e-6 of any reachable target);
+the upper bone's turn carries the bend plane with it as far as the pose is bent, so the elbow hinges and the twist is taken at the
+shoulder (a straight pose has no plane: the shortest turn); a pole on the target's axis falls back smoothly on the pose's own bend
+and, for a chain that is straight with no pole, on the way the **rest pose** is bent (what the rig's author built, turned as the
+root has turned), else the hinge's side, else toward -Y of the root's parent (give a pole). A target nearer the root than the
+folded chain can come, with unequal bones, turns the chain steeply but without a jump.
+
+*Joint limits* (all off by default; the pose is then what it always was):
+
+```cpp
+arm.max_bend_degrees = 150.0f;            // the mid joint folds to 150 and no further (a target nearer is aimed at as nearly)
+leg.hinge = true; leg.hinge_axis = {1, 0, 0};  // the knee bends about ITS OWN X, the positive way only
+leg.max_twist_degrees = 30.0f;            // the hip turns at most 30 degrees about the thigh from what the clips did
+```
+
+With a hinge the mid joint's local rotation is a pure turn about the axis (a knee never takes a sideways twist, and a clip's
+hyperextension is brought back to the forward side); a pole that asks the knee to go behind makes the root twist to carry the hinge
+round to it, and `max_twist_degrees` limits that twist: the knee's side falls short of the pole's (the foot still reaches), and
+as the pole goes round to straight behind the limit itself eases to nothing at a half turn, so the knee comes back to the clips'
+side and never flips (swept round the leg in 0.5 degree steps: 0.5 to 0.7 degrees a step). The twist is measured from a plane: the
+hinge, or the pose's bend (a nearly straight pose with no hinge fades the limit with how bent it is).
+
+*The side of the bend over time.* A pole going through the target's axis (the hand over the head with the elbow pole up) must
+swing the elbow to the other side: for any function of the target alone that is inevitable (no field of directions across the
+axis of every target is without a zero: the hairy-ball theorem), and it happens over a few degrees of the target's travel. With a
+`TwoBoneState` and `bend_swing_degrees_per_second` (the ECS constraint keeps the state) the side swings at that bounded speed
+instead, whatever the target does: 6 degrees a frame at 360 a second, from 24 degrees a frame stateless in the test sweep. The one
+case that stays: a target through the exact centre of a chain folded on itself with equal bones turns the upper bone half a turn in
+one step (the joints are in the same places); passing 2 cm off it the same turn takes steps of 2.3 degrees.
 
 **`solve_look_at`**: a head, or a chain (spine, neck, head) whose `LookAtJoint::weight`s share the turn. Each joint has yaw and pitch
 limits (an ellipse, seen from the head); past a limit the joint is held there and eased back toward forward over `release_degrees`,
@@ -605,7 +632,9 @@ Smoothing is a `LookAtState` (the followed direction, in the space the target is
 and a `dt`: the function does not hold state itself.
 
 **`solve_chain_fabrik`**: FABRIK for tails, ropes and spines (any number of joints, a tolerance and an iteration cap, optional
-fixed root); bone lengths are kept, each joint but the tip is turned the shortest way onto its new bone.
+fixed root); bone lengths are kept, each joint but the tip is turned the shortest way onto its new bone. A `pole_mode` / `pole`
+turns the solved chain about the line from its first joint to the tip (so neither end nor any length moves) until its bulge
+faces the pole; a straight chain, or a pole along the line, fades the turn out rather than flip.
 
 **`plan_foot_placement` / `apply_foot_placement`**: for each leg it casts the game's `GroundQuery` (`std::function<optional<GroundHit>
 (Vec3f from, Vec3f to)>`; P2's physics raycast is one) from above the animated ankle, puts the ankle target on the hit lifted by
@@ -615,9 +644,19 @@ the foot height (a foot in the air keeps its clearance over the ground it is abo
 the ground fell away from (it rises at once: no sinking into a step). The plan touches no pose; `apply_foot_placement` moves
 the pelvis joint and solves the legs.
 
+*Foot locking* (`FootPlacementOptions::lock_feet`, off by default; needs a state and a `model_to_world`, which the ECS gives it): a foot
+whose animated sole is within `lock_height` of the ground is planted, and its ankle target is held at the place it was planted, in
+the world, while the body moves over it; it lets go when the animated foot rises past `lock_release_height` or the animated ankle is
+`lock_release_distance` from the held place (the clip has moved on), and eases back to the animated ankle over `lock_replant_seconds`
+(smoothstep), then plants again. The leg's reach and `max_stretch` are the limit: a held foot the leg cannot reach is as near as it
+can get. *Toes* (`FootLeg::toe`, a child of the ankle): a second ground query under the animated toe; the toe turns to that normal,
+clamped to the foot's slope and to `toe_max_tilt_degrees` from its animated turn, and not at all while the foot is in the air. The
+ground query is called once for each leg (and once more for each toe), however many times the constraints are solved in a frame
+(the ECS keeps the answers for the frame).
+
 ### In the ECS animator
 
-`Animator3D::ik_constraints` (an `IKConstraint` each: `name`, `kind` TwoBone / LookAt / FootPlacer, `joints` by name, `weight`,
+`Animator3D::ik_constraints` (an `IKConstraint` each: `name`, `kind` TwoBone / LookAt / FootPlacer / Fabrik, `joints` by name, `weight`,
 `fade_seconds`, a target, a pole, options) are solved in `WorldRenderState3D::collect()` (or by `apply_ik()`), in list order,
 on the pose the clips and layers made, with the entity's `WorldTransform3D` of the frame; then the joint matrices are made from
 the result. An animator with none is exactly what it was, to the byte.
@@ -651,11 +690,18 @@ a->ik("right_hand").set_target(hold_entity, {0, 0.05f, 0}).set_pole_direction({0
   into view is not culled), the previous frame's matrices (TAA velocity) are the previous frame's IK'd ones, and the shadow cache
   sees the pose change.
 
+- **FABRIK** (`IKKind::Fabrik`): `joints` root to tip, a target, an optional pole (`set_pole_position` / `set_pole_direction`), `weight`
+  and fade like the others, and `fabrik` options (tolerance, iterations, `fix_root`): a tail, a rope held by a hand, a spine.
+- **Limits and state.** `two_bone` carries `max_bend_degrees`, `hinge` / `hinge_axis`, `max_twist_degrees` and
+  `bend_swing_degrees_per_second` (the elbow's side swings at that speed; the constraint keeps the state, a weight of 0 forgets it); a
+  foot placer's legs use them too. `foot.lock_feet` (and its thresholds) lock planted feet in the world; `toe_joints` / `toe_heights`
+  / `foot.toe_max_tilt_degrees` give the legs toes.
+
 Cost (an 18-joint person, a hand, a three-joint look-at and two feet, with the matrices): about 6 microseconds on one core; 500
 such characters in the ECS (`animate` + `propagate` + `collect`, 3 constraints each) 3.2 ms against 0.65 ms for the same
-500 with none. Limits: a non-uniform scale on the root joint or between the mid and end joints is approximate; the solvers know
-nothing of collisions or joint limits (look-at has them; the two-bone has none beyond `min_bend_degrees`); D3D12 and Metal are
-untested (nothing here is GPU).
+500 with none. The solvers know nothing of collisions (the ground query is the game's) or of a limit's reach beyond what is
+written above; look-at has its limits, the two-bone and FABRIK (a pole only) have the ones above; D3D12 and Metal are untested
+(nothing here is GPU).
 
 ## Entities
 
@@ -723,7 +769,10 @@ material feature (done to copies of the model's materials, so the model is
 kept). Its settings are one struct applied to a `Scene3D` each frame, so a new
 feature is a field and a row in its table of switches; `--set`, `--preset` and
 `--headless --screenshot` use the same table. It warms the renderer up once at start (`Renderer3D::warm_up`, below) and has a switch for the shadow cache. See the
-[examples README](../examples/README.md#sponza-walk).
+[examples README](../examples/README.md#sponza-walk). Its "Character IK" section drives a person of 25 joints (toes and a tail
+among them): a hand to a target, the head to the camera, feet on the floor and a step, FABRIK on the tail to a green ball, joint
+limits, foot locking, toes, and a person that drifts from side to side to see feet lock (`--preset ik`, `ik-reach`, `ik-tail`,
+`ik-walk`, `ik-all`). What the panel does to the constraints is `examples/sponza_walk/ik_rig.hpp`, which a unit test drives.
 
 ## Cameras
 
@@ -803,7 +852,7 @@ staging buffer its size). kin-render-studio's kiln (5.15 million triangles)
 draws in 6-8 ms at 1280x800 with 4x MSAA, against 70 ms or more on the CPU
 (see the plan's M4).
 
-Not yet: skinned meshes, PBR materials (see [the plan](3d_plan.md)).
+Not yet: morph targets (the plan's later stages list what else).
 
 
 ### Clusters

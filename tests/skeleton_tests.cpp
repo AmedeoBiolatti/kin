@@ -3,6 +3,7 @@
 // motion, the player's crossfade, bounds that no posed vertex leaves, and the loader on glTF files made in code.
 
 #include "skin_fixtures.hpp"
+#include "../examples/sponza_walk/ik_rig.hpp"
 
 #include <kin/ecs/render3d.hpp>
 #include <kin/ecs/world.hpp>
@@ -2391,6 +2392,1314 @@ void test_ecs_ik_deterministic_and_unresolved() {
     assert(max_difference(with, direct) < 1e-6f);
 }
 
+// --- the fixes to P1b's known limits: joint limits, rest-bend fallback, scaled chains, the bend's swing, FABRIK in the ECS, foot locking ---
+
+// The twist of a rotation about `axis` (its swing-twist decomposition), in degrees, signed.
+float twist_degrees(Quatf q, Vec3f axis) {
+    if (q.w < 0.0f) {
+        q = {-q.x, -q.y, -q.z, -q.w};
+    }
+    return 2.0f * std::atan2(q.x * axis.x + q.y * axis.y + q.z * axis.z, q.w) * 180.0f / 3.14159265f;
+}
+
+// The across-the-axis part of (p - from), for where a joint sits to the side of the line from `from` to `to`.
+Vec3f side_of(Vec3f p, Vec3f from, Vec3f to) {
+    const Vec3f axis = normalize(to - from);
+    const Vec3f v = p - from;
+    return v - axis * dot(v, axis);
+}
+
+// A rig whose rest pose has `joint` turned (so that the rest chain is bent), pose at rest.
+Rig rig_with_rest_turn(int joint, Quatf turn) {
+    Skeleton sk = skin_fixtures::make_biped();
+    sk.rest[static_cast<std::size_t>(joint)].rotation = turn;
+    std::vector<Mat4f> w;
+    compute_world_matrices(sk, sk.rest_pose(), w);
+    sk.inverse_bind.clear();
+    for (const Mat4f& m : w) {
+        sk.inverse_bind.push_back(m.inverse());
+    }
+    return Rig{std::move(sk)};
+}
+
+// Item 1: the mid joint's maximum bend; the hinge (it only bends one way, about its own axis); the root's twist limit.
+void test_ik_joint_limits() {
+    const Rig base;
+    const Vec3f hip = base.at(biped::hip_l);
+    const float l1 = base.bone(biped::hip_l, biped::knee_l), l2 = base.bone(biped::knee_l, biped::ankle_l);
+
+    // A maximum bend: a target near the hip makes the knee fold as far as the limit lets it and no further; the foot then stands at
+    // the chord of that fold, toward the target (as near it as a hole round the root, as with unequal bones, lets).
+    for (const float most : {150.0f, 100.0f}) {
+        Rig r = base;
+        TwoBoneOptions o;
+        o.pole_mode = PoleMode::Direction;
+        o.pole = {0, 0, 1};
+        o.max_bend_degrees = most;
+        const Vec3f target = hip + normalize(Vec3f{0.2f, -0.3f, 0.5f}) * 0.12f;
+        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+        assert(res.solved && !res.reached && close(res.bend_degrees, most, 0.05f));
+        const float chord = std::sqrt(l1 * l1 + l2 * l2 + 2.0f * l1 * l2 * std::cos(most * 3.14159265f / 180.0f));
+        assert(close(length(r.at(biped::ankle_l) - hip), chord, 2e-4f));
+        assert(dot(normalize(r.at(biped::ankle_l) - hip), normalize(target - hip)) > 0.3f); // toward it (not on the line: the hole's aim)
+        assert(close(r.bone(biped::hip_l, biped::knee_l), l1, 1e-5f) && close(r.bone(biped::knee_l, biped::ankle_l), l2, 1e-5f));
+        // A target further out than the fold's chord is not changed by the limit: the pose is the unlimited one's, bit for bit.
+        Rig far_limited = base, far_free = base;
+        const Vec3f far_target = hip + Vec3f{0.1f, -0.7f, 0.3f};
+        solve_two_bone(far_limited.sk, far_limited.pose, far_limited.world, left_leg, far_target, o);
+        o.max_bend_degrees = 180.0f;
+        solve_two_bone(far_free.sk, far_free.pose, far_free.world, left_leg, far_target, o);
+        assert(std::memcmp(far_limited.pose.joints.data(), far_free.pose.joints.data(), far_free.pose.joints.size() * sizeof(JointPose)) == 0);
+    }
+
+    // The hinge: with the knee's X as the axis, every reachable target and every pole leave the knee's local rotation a pure turn
+    // about X by the bend, the positive way. (A straight leg has no plane of its own: it is the hinge's.)
+    {
+        Lcg rng;
+        int pure = 0, free_pure = 0;
+        for (int i = 0; i < 300; ++i) {
+            Rig r = base, f = base;
+            const Vec3f target = hip + rng.direction() * (0.2f + 0.7f * (rng.next() * 0.5f + 0.5f)) * (l1 + l2);
+            TwoBoneOptions o;
+            o.pole_mode = PoleMode::Direction;
+            o.pole = rng.direction();
+            const TwoBoneResult free_res = solve_two_bone(f.sk, f.pose, f.world, left_leg, target, o);
+            Quatf fq = f.pose.joints[biped::knee_l].rotation;
+            free_pure += std::fabs(fq.y) < 1e-3f && std::fabs(fq.z) < 1e-3f ? 1 : 0;
+            o.hinge = true;
+            o.hinge_axis = {1, 0, 0};
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            assert(res.solved && res.reached && close(r.at(biped::ankle_l), target, 2e-4f));
+            // The same place for the knee and foot (the hinge changes the twist of the bones, not where the joints are).
+            // (A pole near the target's axis leans on the pose's own side a little, which the hinge gives differently: not compared.)
+            const Vec3f axis = normalize(target - hip);
+            if (length(o.pole - axis * dot(o.pole, axis)) > 0.5f) {
+                assert(close(r.at(biped::knee_l), f.at(biped::knee_l), 1e-4f) && close(res.bend_degrees, free_res.bend_degrees, 1e-3f));
+            }
+            Quatf q = r.pose.joints[biped::knee_l].rotation;
+            if (q.w < 0.0f) {
+                q = {-q.x, -q.y, -q.z, -q.w};
+            }
+            assert(std::fabs(q.y) < 1e-3f && std::fabs(q.z) < 1e-3f);
+            assert(q.x > -1e-4f && close(twist_degrees(q, {1, 0, 0}), res.bend_degrees, 0.1f));
+            ++pure;
+        }
+        std::cout << "  ik hinge: " << pure << " of 300 knees are pure hinges with it, " << free_pure << " without" << std::endl;
+        assert(free_pure < 150);
+    }
+
+    // A knee that a clip hyperextended (bent backward, about X by -25 degrees) is brought to bend the right way by the hinge, to the
+    // same angle and with the foot where it was; without the hinge the solver keeps the clip's side.
+    {
+        Rig bent = base;
+        bent.pose.joints[biped::knee_l].rotation = Quatf::axis_angle({1, 0, 0}, -25.0f);
+        bent.refresh();
+        const Vec3f target = bent.at(biped::ankle_l);
+        const auto knee_forward = [&](bool hinge) {
+            Rig r = bent;
+            TwoBoneOptions o;
+            o.hinge = hinge;
+            o.hinge_axis = {1, 0, 0};
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            assert(res.reached && close(r.at(biped::ankle_l), target, 2e-4f) && close(res.bend_degrees, 25.0f, 0.2f));
+            return side_of(r.at(biped::knee_l), hip, target).z;
+        };
+        assert(knee_forward(false) < -0.01f);
+        assert(knee_forward(true) > 0.01f);
+    }
+
+    // The twist limit: a pole behind a leg that has to bend forward. Without a limit the hip turns half way round to put the knee
+    // behind; with 30 degrees it turns 30 and the knee is mostly forward, the foot still on the target.
+    {
+        const Vec3f target = hip + Vec3f{0.05f, -0.8f, 0.25f};
+        const auto solve = [&](float limit, Vec3f pole) {
+            Rig r = base;
+            TwoBoneOptions o;
+            o.hinge = true;
+            o.hinge_axis = {1, 0, 0};
+            o.pole_mode = PoleMode::Direction;
+            o.pole = pole;
+            o.max_twist_degrees = limit;
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            assert(res.reached && close(r.at(biped::ankle_l), target, 2e-4f));
+            const Quatf delta = (r.pose.joints[biped::hip_l].rotation * base.pose.joints[biped::hip_l].rotation.conjugate()).normalized();
+            return std::pair{r, std::fabs(twist_degrees(delta, {0, -1, 0}))};
+        };
+        const auto [free_rig, free_twist] = solve(180.0f, {0, 0, -1});
+        assert(free_twist > 120.0f && side_of(free_rig.at(biped::knee_l), hip, target).z < -0.01f);
+        const auto [held, held_twist] = solve(30.0f, {0, 0, -1});
+        assert(held_twist < 30.05f);
+        // Still bent the way the hinge allows: the knee is on the forward side (the clips' side), though the pole says back.
+        assert(side_of(held.at(biped::knee_l), hip, target).z > 0.0f);
+        // Pole to the side (out): 30 degrees of twist is not enough to reach it from the front, so it is partway.
+        const auto [part, part_twist] = solve(30.0f, {1, 0, 0});
+        assert(part_twist < 30.05f && part_twist > 5.0f);
+        // A limit that is not reached changes nothing: the pole is a few degrees from the clips' side.
+        const auto [near, near_twist] = solve(30.0f, normalize(Vec3f{0.1f, 0, 1}));
+        const auto [near_free, nf_twist] = solve(180.0f, normalize(Vec3f{0.1f, 0, 1}));
+        assert(close(near.at(biped::knee_l), near_free.at(biped::knee_l), 1e-5f) && close(near_twist, nf_twist, 1e-3f));
+    }
+
+    // Continuity: the pole goes all the way round the leg (720 steps, 0.5 degrees each) with a limit of 30: the knee moves smoothly,
+    // by about as much as the pole does (its elbow-to-pole gain is at most a few), never a jump, and the foot is always on target.
+    for (const float limit : {30.0f, 90.0f, 180.0f}) {
+        const Vec3f target = hip + Vec3f{0.05f, -0.8f, 0.25f};
+        Rig previous;
+        float worst = 0.0f;
+        for (int i = 0; i <= 720; ++i) {
+            Rig r = base;
+            const float a = static_cast<float>(i) * 0.5f * 3.14159265f / 180.0f;
+            TwoBoneOptions o;
+            o.hinge = true;
+            o.hinge_axis = {1, 0, 0};
+            o.pole_mode = PoleMode::Direction;
+            o.pole = {std::sin(a), 0.2f, std::cos(a)};
+            o.max_twist_degrees = limit;
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            assert(res.reached && close(r.at(biped::ankle_l), target, 2e-4f));
+            if (i > 0) {
+                worst = std::max(worst, angle_degrees(side_of(r.at(biped::knee_l), hip, target), side_of(previous.at(biped::knee_l), hip, target)));
+            }
+            previous = std::move(r);
+        }
+        std::cout << "  ik twist limit " << limit << ": pole round the leg in 0.5 degree steps, worst step of the knee " << worst << " degrees" << std::endl;
+        assert(worst < 4.0f);
+    }
+}
+
+// Item 5: a straight chain with no pole bends the way the rest pose is bent (what the rig's author built), not toward -Y.
+void test_ik_rest_bend_fallback() {
+    // An arm (along +X) whose elbow is built bent (a turn of 30 degrees about Y in its rest pose: the forearm toward -Z, the elbow
+    // pointing forward, +Z); a pose that has the forearm straight on the upper arm (the elbow's own turn undone).
+    const Quatf built = Quatf::axis_angle({0, 1, 0}, 30.0f);
+    Rig rig = rig_with_rest_turn(biped::elbow_l, built);
+    const Vec3f shoulder = rig.at(biped::shoulder_l);
+    // Straight pose: the elbow's own turn cancelled.
+    rig.pose.joints[biped::elbow_l].rotation = Quatf{};
+    rig.refresh();
+    assert(angle_degrees(rig.at(biped::hand_l) - shoulder, rig.at(biped::elbow_l) - shoulder) < 0.01f);
+    const Vec3f target = shoulder + Vec3f{0.25f, -0.2f, 0.1f};
+    const auto elbow_side = [&](const Rig& base_rig) {
+        Rig r = base_rig;
+        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target);
+        assert(res.reached && close(r.at(biped::hand_l), target, 2e-4f));
+        return side_of(r.at(biped::elbow_l), shoulder, target);
+    };
+    const Vec3f side = elbow_side(rig);
+    // The rest elbow's side (from the line shoulder-hand): the solver's elbow lies on that side, whichever way it is (not down).
+    Rig at_rest = rig_with_rest_turn(biped::elbow_l, built);
+    const Vec3f rest_side = side_of(at_rest.at(biped::elbow_l), shoulder, at_rest.at(biped::hand_l));
+    assert(length(rest_side) > 0.02f);
+    assert(dot(normalize(side), normalize(rest_side)) > 0.4f);
+    // The straight rest (the biped as it is): the old behaviour, an elbow down.
+    const Rig straight_rig;
+    const Vec3f old_side = elbow_side(straight_rig);
+    assert(old_side.y < -0.01f);
+    // The same rig with the hinge named: the side comes from the hinge when the rest is straight (a knee's X: forward).
+    {
+        Rig leg = straight_rig;
+        const Vec3f hip = leg.at(biped::hip_l);
+        const Vec3f t = hip + Vec3f{0.05f, -0.75f, 0.1f};
+        TwoBoneOptions o;
+        o.hinge = true;
+        o.hinge_axis = {1, 0, 0};
+        solve_two_bone(leg.sk, leg.pose, leg.world, left_leg, t, o);
+        assert(side_of(leg.at(biped::knee_l), hip, t).z > 0.01f);
+        Rig no_hinge = straight_rig;
+        solve_two_bone(no_hinge.sk, no_hinge.pose, no_hinge.world, left_leg, t);
+        assert(side_of(no_hinge.at(biped::knee_l), hip, t).y < side_of(leg.at(biped::knee_l), hip, t).y);
+    }
+    // Continuity: a sweep of the straight pose's target round the root (no pole) keeps small steps with the rest bend as the default.
+    {
+        Rig previous;
+        float worst = 0.0f;
+        for (int i = 0; i <= 2000; ++i) {
+            Rig r = rig;
+            const float u = static_cast<float>(i) / 2000.0f * 6.2831853f;
+            const Vec3f t = shoulder + Vec3f{0.3f + 0.4f * std::cos(u), 0.4f * std::sin(u), 0.2f};
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, t);
+            assert(res.solved);
+            if (i > 0) {
+                worst = std::max(worst, pose_step(previous, r, left_arm).worst());
+            }
+            previous = std::move(r);
+        }
+        std::cout << "  ik rest-bend fallback, straight pose, no pole: worst step " << worst << " degrees" << std::endl;
+        assert(worst < 4.0f);
+    }
+}
+
+// Item 4: a non-uniform scale on the root joint itself, on the mid joint, and on both: the hand lands on targets that are reachable
+// (made by turning the joints of a scaled arm), the pose matches a full recompute, a second solve changes nothing.
+void test_ik_two_bone_nonuniform_scale() {
+    struct Case {
+        const char* what;
+        Vec3f root_scale, mid_scale;
+    };
+    const Case cases[] = {
+        {"root joint scaled (1.5, 0.6, 2)", {1.5f, 0.6f, 2.0f}, {1, 1, 1}},
+        {"mid joint scaled (0.7, 1.4, 1.1)", {1, 1, 1}, {0.7f, 1.4f, 1.1f}},
+        {"both", {1.3f, 0.8f, 1.6f}, {0.8f, 1.2f, 0.9f}},
+    };
+    for (const Case& c : cases) {
+        Lcg rng;
+        float worst_hand = 0.0f, worst_length = 0.0f;
+        int solved = 0;
+        for (int i = 0; i < 120; ++i) {
+            Rig truth = bent_arm_rig();
+            truth.pose.joints[biped::shoulder_l].scale = c.root_scale;
+            truth.pose.joints[biped::elbow_l].scale = c.mid_scale;
+            truth.refresh();
+            // A reachable target: the hand of this arm turned at random.
+            Rig made = truth;
+            made.pose.joints[biped::shoulder_l].rotation = Quatf::axis_angle(rng.direction(), 40.0f * (rng.next() * 0.5f + 0.5f)) * truth.pose.joints[biped::shoulder_l].rotation;
+            made.pose.joints[biped::elbow_l].rotation = Quatf::axis_angle({0.1f, 1, 0.2f}, -10.0f - 90.0f * (rng.next() * 0.5f + 0.5f));
+            made.refresh();
+            const Vec3f target = made.at(biped::hand_l);
+            Rig r = truth;
+            TwoBoneOptions o;
+            o.pole_mode = PoleMode::Direction;
+            o.pole = normalize(side_of(made.at(biped::elbow_l), made.at(biped::shoulder_l), made.at(biped::hand_l))); // the side it was made with
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
+            assert(res.solved);
+            worst_hand = std::max(worst_hand, length(r.at(biped::hand_l) - target));
+            // The matrices kept in step are the pose's own.
+            std::vector<Mat4f> again;
+            compute_world_matrices(r.sk, r.pose, again);
+            assert(max_difference(again, r.world) < 1e-4f);
+            // Solving again moves nothing.
+            const std::vector<Mat4f> once = r.world;
+            solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
+            assert(max_difference(once, r.world) < 5e-5f);
+            // Bones: the upper bone is what it was; the forearm is the length it is drawn at, which depends on how the scaled joints turn
+            // it, so it is not asserted equal (no rotation can keep it).
+            worst_length = std::max(worst_length, std::fabs(r.bone(biped::shoulder_l, biped::elbow_l) - truth.bone(biped::shoulder_l, biped::elbow_l)));
+            ++solved;
+        }
+        std::cout << "  ik scaled chain, " << c.what << ": hand within " << worst_hand << " of 120 reachable targets, upper bone off by at most " << worst_length << "" << std::endl;
+        assert(solved == 120 && worst_hand < 2e-4f && worst_length < 1e-4f);
+    }
+    // The end orientation on a chain whose mid joint is scaled: the matrices' own rotation of the hand reaches the goal.
+    {
+        Rig r = bent_arm_rig();
+        r.pose.joints[biped::elbow_l].scale = {0.7f, 1.4f, 1.1f};
+        r.pose.joints[biped::shoulder_l].scale = {1.4f, 0.7f, 1.2f};
+        r.refresh();
+        const Vec3f target = r.at(biped::shoulder_l) + Vec3f{0.3f, -0.15f, 0.35f};
+        const Quatf want = Quatf::axis_angle({0.4f, 1, -0.3f}, 110.0f);
+        TwoBoneOptions o;
+        o.pole_mode = PoleMode::Direction;
+        o.pole = {0, 0, -1};
+        o.match_rotation = true;
+        o.end_rotation = want;
+        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
+        assert(res.solved);
+        const float angle = angle_degrees(r.rotation(biped::hand_l), want);
+        std::cout << "  ik scaled chain, orientation: hand " << length(r.at(biped::hand_l) - target) << " from the target, " << angle << " degrees from the goal" << std::endl;
+        assert(angle < 0.05f && length(r.at(biped::hand_l) - target) < 2e-4f);
+    }
+    // A weight of 0.5 on a scaled chain is half way (as an angle) between the pose and the full solve, for both rotations.
+    {
+        Rig base = bent_arm_rig();
+        base.pose.joints[biped::shoulder_l].scale = {1.5f, 0.6f, 2.0f};
+        base.refresh();
+        const Vec3f target = base.at(biped::shoulder_l) + Vec3f{0.2f, -0.3f, 0.4f};
+        TwoBoneOptions o;
+        o.pole_mode = PoleMode::Direction;
+        o.pole = {0, 1, 0};
+        Rig full = base, half = base;
+        solve_two_bone(full.sk, full.pose, full.world, left_arm, target, o);
+        o.weight = 0.5f;
+        solve_two_bone(half.sk, half.pose, half.world, left_arm, target, o);
+        for (int j : {biped::shoulder_l, biped::elbow_l}) {
+            const float whole = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation, full.pose.joints[static_cast<std::size_t>(j)].rotation);
+            const float part = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation, half.pose.joints[static_cast<std::size_t>(j)].rotation);
+            assert(whole > 3.0f && close(part, whole * 0.5f, 0.1f));
+        }
+    }
+}
+
+// Item 6: the elbow's side through the pole's axis, and the fold's centre. Statelessly the side has to turn over a few degrees of the
+// target's travel (the hairy-ball theorem: no tangent field on the sphere of target directions is without a zero), over time with
+// a TwoBoneState it turns at a bounded speed.
+void test_ik_bend_swing_and_singularities() {
+    const Rig base = bent_arm_rig();
+    const Vec3f root = base.at(biped::shoulder_l);
+    TwoBoneOptions pole;
+    pole.pole_mode = PoleMode::Direction;
+    pole.pole = {0, 1, 0};
+    // A target crossing the pole's axis at the rate of a hand across the top of the head, in 120 frames at 60 Hz (2 s): the stateless
+    // side turns over a handful of frames; with a swing speed it is limited.
+    const Vec3f across_dir = normalize(Vec3f{1.0f, 0.0f, 0.6f});
+    const auto run = [&](float speed_degrees, int steps) {
+        TwoBoneState state;
+        Rig previous;
+        float worst_side = 0.0f, worst_hand_err = 0.0f;
+        for (int i = 0; i <= steps; ++i) {
+            Rig r = base;
+            const float u = static_cast<float>(i) / static_cast<float>(steps);
+            const Vec3f target = root + Vec3f{0, 0.7f, 0} + across_dir * (u * 0.6f - 0.3f);
+            TwoBoneOptions o = pole;
+            o.bend_swing_degrees_per_second = speed_degrees;
+            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o, &state, 1.0f / 60.0f);
+            assert(res.solved && res.reached);
+            worst_hand_err = std::max(worst_hand_err, length(r.at(biped::hand_l) - target));
+            if (i > 0) {
+                worst_side = std::max(worst_side, angle_degrees(side_of(r.at(biped::elbow_l), root, r.at(biped::hand_l)), side_of(previous.at(biped::elbow_l), root, previous.at(biped::hand_l))));
+            }
+            previous = std::move(r);
+        }
+        assert(worst_hand_err < 2e-4f);
+        return worst_side;
+    };
+    for (const int frames : {120, 40}) {
+        const float free_worst = run(0.0f, frames);
+        const float limited = run(360.0f, frames);
+        std::cout << "  ik pole-axis crossing in " << frames << " frames: worst step of the elbow's side " << free_worst << " degrees stateless, " << limited
+                  << " with a swing of 360 degrees a second (6 a frame)" << std::endl;
+        assert(limited < 6.0f + 0.5f);
+        if (frames == 40) {
+            assert(free_worst > 15.0f);
+        }
+    }
+    // And it gets where the stateless side is, given time: hold the last target for a second.
+    {
+        TwoBoneState state;
+        const Vec3f end_target = root + Vec3f{0.3f, 0.7f, 0.18f};
+        Rig r = base, free = base;
+        TwoBoneOptions o = pole;
+        o.bend_swing_degrees_per_second = 360.0f;
+        solve_two_bone(r.sk, r.pose, r.world, left_arm, root + Vec3f{-0.3f, 0.7f, -0.18f}, o, &state, 1.0f / 60.0f);
+        for (int i = 0; i < 60; ++i) {
+            r = base;
+            solve_two_bone(r.sk, r.pose, r.world, left_arm, end_target, o, &state, 1.0f / 60.0f);
+        }
+        solve_two_bone(free.sk, free.pose, free.world, left_arm, end_target, pole);
+        assert(close(r.at(biped::elbow_l), free.at(biped::elbow_l), 1e-3f));
+    }
+    // dt of 0 holds the side it was on (a second solve in the frame is the first's).
+    {
+        TwoBoneState state;
+        TwoBoneOptions o = pole;
+        o.bend_swing_degrees_per_second = 90.0f;
+        Rig a = base, b = base;
+        const Vec3f t1 = root + Vec3f{0.2f, 0.6f, 0.3f}, t2 = root + Vec3f{-0.2f, 0.6f, -0.3f};
+        solve_two_bone(a.sk, a.pose, a.world, left_arm, t1, o, &state, 1.0f / 60.0f);
+        Rig c = base;
+        solve_two_bone(c.sk, c.pose, c.world, left_arm, t2, o, &state, 1.0f / 60.0f);
+        Rig d = base;
+        solve_two_bone(d.sk, d.pose, d.world, left_arm, t2, o, &state, 0.0f);
+        assert(close(c.at(biped::elbow_l), d.at(biped::elbow_l), 1e-4f));
+        (void)b;
+    }
+
+    // The fold's centre: equal bones, a target passing through the root. The joints are in the same places on both sides (the pose is
+    // continuous); the upper bone's twist about its own axis goes 180 degrees in one step AT the centre, and for a target that
+    // passes at a distance d from it, over the steps within about d of it. Worst step of the root's rotation for passes at
+    // 0, 2 mm and 20 mm, 2,000 steps over 1.6 m.
+    {
+        Rig equal = base;
+        equal.pose.joints[biped::hand_l].translation = {0.5f, 0, 0};
+        equal.refresh();
+        const Vec3f line = normalize({0.4f, 0.1f, 0.5f});
+        const Vec3f offset = normalize(cross(line, Vec3f{0, 1, 0}));
+        float worst_for[3] = {};
+        int k = 0;
+        for (const float distance : {0.0f, 0.002f, 0.02f}) {
+            Rig previous;
+            float worst = 0.0f, move = 0.0f;
+            for (int i = 0; i <= 2000; ++i) {
+                Rig r = equal;
+                const Vec3f target = root + line * ((static_cast<float>(i) / 2000.0f) * 1.6f - 0.8f) + offset * distance;
+                solve_two_bone(r.sk, r.pose, r.world, left_arm, target, pole);
+                if (i > 0) {
+                    worst = std::max(worst, angle_degrees(previous.pose.joints[biped::shoulder_l].rotation, r.pose.joints[biped::shoulder_l].rotation));
+                    move = std::max(move, length(r.at(biped::elbow_l) - previous.at(biped::elbow_l)));
+                }
+                previous = std::move(r);
+            }
+            std::cout << "  ik fold centre, pass at " << distance * 1000.0f << " mm: worst step of the shoulder " << worst << " degrees, elbow moves at most " << move << " a step" << std::endl;
+            worst_for[k++] = worst;
+        }
+        // Through it exactly: the half turn in one step. A pass 2 cm off turns the shoulder over some steps, each of them well under that.
+        assert(worst_for[0] > 90.0f);
+        assert(worst_for[2] < 20.0f);
+    }
+}
+
+// Item 2: FABRIK with a pole (CPU) and as an ECS constraint kind.
+void test_ik_fabrik_pole() {
+    const std::array<i32, 5> spine = {biped::pelvis, biped::spine, biped::chest, biped::neck, biped::head};
+    Rig base;
+    base.pose.joints[biped::spine].rotation = Quatf::axis_angle({1, 0, 0}, 20.0f);
+    base.pose.joints[biped::chest].rotation = Quatf::axis_angle({0, 0, 1}, 25.0f);
+    base.refresh();
+    const Vec3f root = base.at(biped::pelvis);
+    float reach = 0.0f;
+    for (std::size_t i = 0; i + 1 < spine.size(); ++i) {
+        reach += base.bone(spine[i], spine[i + 1]);
+    }
+    const Vec3f target = root + Vec3f{0.35f, 0.5f, 0.1f};
+    const auto bulge_of = [&](const Rig& r) {
+        Vec3f sum{};
+        for (std::size_t i = 1; i + 1 < spine.size(); ++i) {
+            sum += side_of(r.at(spine[i]), root, r.at(spine.back()));
+        }
+        return sum;
+    };
+    // Without a pole: the old solve, bit for bit (the options' new fields are off).
+    Rig plain = base;
+    solve_chain_fabrik(plain.sk, plain.pose, plain.world, spine, target);
+    for (const Vec3f pole : {Vec3f{0, 0, 1}, Vec3f{0, 0, -1}, Vec3f{-1, 0, 0}}) {
+        Rig r = base;
+        FabrikOptions o;
+        o.pole_mode = PoleMode::Direction;
+        o.pole = pole;
+        const FabrikResult res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
+        assert(res.solved && res.reached && close(r.at(biped::head), target, 1e-3f) && close(r.at(biped::pelvis), root, 1e-5f));
+        for (std::size_t k = 0; k + 1 < spine.size(); ++k) {
+            assert(close(r.bone(spine[k], spine[k + 1]), base.bone(spine[k], spine[k + 1]), 1e-4f));
+        }
+        // The bulge faces the pole: its across-the-axis part has a positive component along the pole's across part.
+        const Vec3f axis = normalize(r.at(biped::head) - root);
+        const Vec3f pole_across = pole - axis * dot(pole, axis);
+        assert(dot(normalize(bulge_of(r)), normalize(pole_across)) > 0.99f);
+        std::vector<Mat4f> again;
+        compute_world_matrices(r.sk, r.pose, again);
+        assert(max_difference(again, r.world) < 1e-4f);
+    }
+    // A pole as a point equals the direction to it from the first joint.
+    {
+        Rig a = base, b = base;
+        FabrikOptions o;
+        o.pole_mode = PoleMode::Direction;
+        o.pole = normalize(Vec3f{-1, 0.2f, 0.5f});
+        solve_chain_fabrik(a.sk, a.pose, a.world, spine, target, o);
+        o.pole_mode = PoleMode::Position;
+        o.pole = root + Vec3f{-1, 0.2f, 0.5f} * 3.0f;
+        solve_chain_fabrik(b.sk, b.pose, b.world, spine, target, o);
+        assert(close(a.at(biped::chest), b.at(biped::chest), 1e-4f));
+    }
+    // Continuity: the pole turning all the way round the axis (360 steps): the chain turns with it, a step at most the pole's own plus a
+    // little; a pole along the axis fades out (no jump) rather than flips.
+    {
+        Rig previous;
+        float worst = 0.0f;
+        for (int i = 0; i <= 720; ++i) {
+            Rig r = base;
+            const float a = static_cast<float>(i) * 0.5f * 3.14159265f / 180.0f;
+            FabrikOptions o;
+            o.pole_mode = PoleMode::Direction;
+            o.pole = {std::sin(a), 0.1f, std::cos(a)};
+            solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
+            if (i > 0) {
+                worst = std::max(worst, angle_degrees(side_of(r.at(biped::chest), root, r.at(biped::head)), side_of(previous.at(biped::chest), root, previous.at(biped::head))));
+            }
+            previous = std::move(r);
+        }
+        std::cout << "  ik fabrik pole round the axis in 0.5 degree steps: worst step of the bulge " << worst << " degrees" << std::endl;
+        assert(worst < 3.0f);
+    }
+    // Weight 0 leaves it, bit for bit.
+    {
+        Rig r = base;
+        FabrikOptions o;
+        o.weight = 0.0f;
+        o.pole_mode = PoleMode::Direction;
+        o.pole = {0, 0, 1};
+        assert(!solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o).solved);
+        assert(std::memcmp(r.pose.joints.data(), base.pose.joints.data(), base.pose.joints.size() * sizeof(JointPose)) == 0);
+    }
+}
+
+// Item 3: a foot planted in the world stays there while the body moves over it, lets go at the threshold and eases back; the toe turns
+// to its own ground; the ground query is called once for a leg (and once for a toe).
+void test_ik_foot_locking_and_toes() {
+    const Skeleton toes = skin_fixtures::make_biped_toes();
+    const Rig base{toes};
+    const std::array<FootLeg, 2> legs = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f, biped::toe_l, 0.0f},
+                                         FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f, biped::toe_r, 0.0f}};
+    TwoBoneOptions knee;
+    knee.pole_mode = PoleMode::Direction;
+    knee.pole = {0, 0, 1};
+    knee.max_stretch = 1.3f;
+    const float dt = 1.0f / 60.0f;
+
+    // Locking: the body (model_to_world) moves 1 cm a frame along +Z over feet that stand on the ground in the animation.
+    const auto run = [&](bool lock, std::vector<Vec3f>* ankle_world, std::vector<bool>* locked) {
+        FootPlacementOptions o;
+        o.smooth_seconds = 0.0f;
+        o.lock_feet = lock;
+        FootPlacementState state;
+        FakeGround ground{[](float, float) { return 0.0f; }};
+        for (int i = 0; i < 60; ++i) {
+            Rig r = base;
+            const Mat4f to_world = Mat4f::translation({0.0f, 0.0f, 0.01f * static_cast<float>(i)});
+            const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &to_world);
+            apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, knee);
+            ankle_world->push_back(to_world.apply(r.at(biped::ankle_l)));
+            locked->push_back(plan.feet[0].locked);
+        }
+    };
+    std::vector<Vec3f> held, free_run;
+    std::vector<bool> held_flags, free_flags;
+    run(true, &held, &held_flags);
+    run(false, &free_run, &free_flags);
+    // Unlocked: the ankle goes with the body, 1 cm a frame.
+    assert(close(free_run[59].z - free_run[0].z, 0.59f, 1e-4f));
+    // Locked: the ankle stays at its place in the world until the animated foot is 15 cm from it (frame 15), then eases back over
+    // 0.15 s to the animated ankle (which has gone on), by steps no bigger than the smoothstep's (1.5 x 15 cm / 9 frames = 2.5 cm) and
+    // the body's own 1 cm.
+    for (int i = 1; i < 15; ++i) {
+        assert(held_flags[static_cast<std::size_t>(i)] && close(held[static_cast<std::size_t>(i)], held[0], 2e-4f));
+    }
+    float worst = 0.0f;
+    for (int i = 1; i < 60; ++i) {
+        worst = std::max(worst, length(held[static_cast<std::size_t>(i)] - held[static_cast<std::size_t>(i - 1)]));
+    }
+    std::cout << "  ik foot lock: held to " << length(held[14] - held[0]) << " m over 14 frames, worst step of the ankle in the world " << worst
+              << " m (the body moves 0.01 a frame)" << std::endl;
+    assert(worst < 0.04f);
+    // After the release the foot catches up and plants again: later frames hold still again.
+    int still = 0;
+    for (int i = 26; i < 39; ++i) {
+        still += length(held[static_cast<std::size_t>(i + 1)] - held[static_cast<std::size_t>(i)]) < 1e-4f ? 1 : 0;
+    }
+    assert(still >= 12);
+    // The held foot is not a different foot: bones keep their lengths and the matrices are the pose's own.
+    {
+        FootPlacementOptions o;
+        o.smooth_seconds = 0.0f;
+        o.lock_feet = true;
+        FootPlacementState state;
+        FakeGround ground{[](float, float) { return 0.0f; }};
+        Rig r = base;
+        const Mat4f first = Mat4f::translation({0, 0, 0});
+        FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &first);
+        Rig r2 = base;
+        const Mat4f later = Mat4f::translation({0, 0, 0.08f});
+        plan = plan_foot_placement(r2.sk, r2.pose, r2.world, legs, ground.query(), o, &state, dt, &later);
+        apply_foot_placement(r2.sk, r2.pose, r2.world, biped::pelvis, legs, plan, knee);
+        assert(close(later.apply(r2.at(biped::ankle_l)), {0.1f, 0.05f, 0.0f}, 3e-4f));
+        std::vector<Mat4f> again;
+        compute_world_matrices(r2.sk, r2.pose, again);
+        assert(max_difference(again, r2.world) < 1e-4f);
+    }
+    // A foot that lifts in the animation lets go at once (the hip swings the foot forward and up); weight of the lock is easing.
+    {
+        FootPlacementOptions o;
+        o.smooth_seconds = 0.0f;
+        o.lock_feet = true;
+        FootPlacementState state;
+        FakeGround ground{[](float, float) { return 0.0f; }};
+        const Mat4f id{};
+        Rig r = base;
+        FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &id);
+        assert(plan.feet[0].locked && state.locks[0].planted);
+        Rig lifted = base;
+        lifted.pose.joints[biped::hip_l].rotation = Quatf::axis_angle({1, 0, 0}, -40.0f);
+        lifted.refresh();
+        plan = plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, ground.query(), o, &state, dt, &id);
+        assert(!state.locks[0].planted); // let go...
+        const FootTarget& first = plan.feet[0];
+        assert(first.locked);            // ...and easing, not snapped
+        for (int i = 0; i < 12; ++i) {
+            plan = plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, ground.query(), o, &state, dt, &id);
+        }
+        assert(!plan.feet[0].locked && close(plan.feet[0].target, lifted.at(biped::ankle_l), 1e-4f));
+    }
+
+    // Ground query counts: once a leg; a toe is one more.
+    {
+        FakeGround ground{[](float, float) { return 0.0f; }};
+        Rig r = base;
+        FootPlacementOptions o;
+        plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o);
+        assert(ground.casts == 4); // two legs, each with a toe
+        ground.casts = 0;
+        const std::array<FootLeg, 2> no_toes = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}, FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
+        plan_foot_placement(r.sk, r.pose, r.world, no_toes, ground.query(), o);
+        assert(ground.casts == 2);
+    }
+
+    // Toes: ground rising at 20 degrees from z = 0.1 (under the toe, 0.15 forward of the ankle; the ankle's own ground is flat). The toe
+    // turns to the slope's normal; clamped by toe_max_tilt_degrees and by the foot's slope clamp; none while the foot is high.
+    {
+        const auto ground_with_slope = [](float degrees, int* casts) {
+            return [degrees, casts](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+                ++*casts;
+                const float rad = degrees * 3.14159265f / 180.0f;
+                const auto height = [&](float z) { return z > 0.1f ? (z - 0.1f) * std::tan(rad) : 0.0f; };
+                const Vec3f n = from.z > 0.1f ? Vec3f{0, std::cos(rad), -std::sin(rad)} : Vec3f{0, 1, 0};
+                const float h = height(from.z);
+                if (from.y < h || to.y > h) {
+                    return std::nullopt;
+                }
+                return GroundHit{{from.x, h, from.z}, n};
+            };
+        };
+        for (const auto& [slope, toe_max, expect] : {std::tuple{20.0f, 40.0f, 20.0f}, std::tuple{50.0f, 40.0f, 30.0f}, std::tuple{20.0f, 8.0f, 8.0f}}) {
+            int casts = 0;
+            Rig r = base;
+            FootPlacementOptions o;
+            o.smooth_seconds = 0.0f;
+            o.toe_max_tilt_degrees = toe_max;
+            const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground_with_slope(slope, &casts), o);
+            assert(casts == 4 && plan.feet[0].toe_grounded && plan.feet[0].grounded);
+            apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, knee);
+            const Vec3f toe_up = normalize(r.world[biped::toe_l].apply_vector({0, 1, 0}));
+            const float tilt = angle_degrees(toe_up, {0, 1, 0});
+            assert(close(tilt, expect, 0.2f));
+            // The ankle was on flat ground: the foot itself is level.
+            assert(angle_degrees(normalize(r.world[biped::ankle_l].apply_vector({0, 1, 0})), {0, 1, 0}) < 0.1f);
+            // Which way: the toe's up leans back (toward -Z) on a slope that rises ahead.
+            assert(toe_up.z < 0.0f);
+        }
+        // A foot in the air (the hip swung forward and up) does not follow the ground under its toe: the toe is turned with the foot only.
+        {
+            Rig lifted = base;
+            lifted.pose.joints[biped::hip_l].rotation = Quatf::axis_angle({1, 0, 0}, -40.0f);
+            lifted.refresh();
+            FootPlacementOptions o;
+            o.smooth_seconds = 0.0f;
+            // A ramp that is under the lifted toe too (the ground rises everywhere ahead of z = -1): the toe would tilt on it if it were on the ground.
+            const auto tilted_everywhere = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+                const float t = std::tan(25.0f * 3.14159265f / 180.0f);
+                const float h = (from.z + 1.0f) * t;
+                if (from.y < h || to.y > h) {
+                    return std::nullopt;
+                }
+                return GroundHit{{from.x, h, from.z}, normalize(Vec3f{0, 1, -t})};
+            };
+            const FootPlan plan = plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, tilted_everywhere, o);
+            Rig placed = lifted;
+            apply_foot_placement(placed.sk, placed.pose, placed.world, biped::pelvis, legs, plan, knee);
+            // The toe's up against the ankle's up: the same (the toe's own animated turn was none), whatever the ground there says.
+            const Vec3f toe_up = normalize(placed.world[biped::toe_l].apply_vector({0, 1, 0}));
+            const Vec3f ankle_up = normalize(placed.world[biped::ankle_l].apply_vector({0, 1, 0}));
+            assert(plan.feet[0].grounded && plan.feet[0].toe_grounded);
+            assert(angle_degrees(toe_up, ankle_up) < 0.5f);
+        }
+        // No toe joint named: the foot is as it was.
+        int casts = 0;
+        Rig r = base;
+        FootPlacementOptions o;
+        o.smooth_seconds = 0.0f;
+        const std::array<FootLeg, 2> no_toes = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}, FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
+        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, no_toes, ground_with_slope(20.0f, &casts), o);
+        assert(casts == 2 && !plan.feet[0].toe_grounded);
+        // Weight 0 of the leg options leaves the toe too.
+        TwoBoneOptions zero = knee;
+        zero.weight = 0.5f;
+        Rig half = base, full = base;
+        int c2 = 0;
+        const FootPlan plan2 = plan_foot_placement(half.sk, half.pose, half.world, legs, ground_with_slope(20.0f, &c2), o);
+        apply_foot_placement(half.sk, half.pose, half.world, biped::pelvis, legs, plan2, zero);
+        apply_foot_placement(full.sk, full.pose, full.world, biped::pelvis, legs, plan2, knee);
+        const float whole = angle_degrees(normalize(full.world[biped::toe_l].apply_vector({0, 1, 0})), {0, 1, 0});
+        const float part = angle_degrees(normalize(half.world[biped::toe_l].apply_vector({0, 1, 0})), {0, 1, 0});
+        assert(part > 1.0f && part < whole - 1.0f);
+    }
+}
+
+// The ECS: a FABRIK constraint (reach, pole, fade), the ground query once a frame per leg however many solves, foot locking in the world,
+// the limits through an IKConstraint, bend-swing state.
+void test_ecs_ik_fabrik_locking_and_limits() {
+    // A model with toes.
+    struct FakeMesh final : IMeshBackend {};
+    auto model = std::make_shared<Model>();
+    model->skeletons.push_back(skin_fixtures::make_biped_toes());
+    const Skeleton& sk = model->skeletons[0];
+    AnimClip3D idle;
+    idle.name = "idle";
+    idle.duration = 1.0f;
+    idle.channels.resize(sk.joint_count());
+    model->clips.push_back(idle);
+    ModelPart part;
+    part.name = "body";
+    part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, sk.joint_count()};
+    part.skin = 0;
+    model->parts.push_back(part);
+    std::vector<Mat4f> rest_world;
+    compute_world_matrices(sk, sk.rest_pose(), rest_world);
+    const auto joint_at = [&](const Animator3D& a, int j, const Mat4f& entity) {
+        const Mat4f& m = a.ik_world[static_cast<std::size_t>(j)];
+        return entity.apply({m.m[12], m.m[13], m.m[14]});
+    };
+    const float dt = 1.0f / 60.0f;
+
+    // FABRIK: the head of the spine chain reaches a world target; the pole turns the bulge; the fade takes its time; 0 lets go.
+    {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const Transform3D placed{.position = {1, 0, 2}, .rotation = Quatf::axis_angle({0, 1, 0}, 40.0f)};
+        const flecs::entity e = world.raw().entity().set(placed).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint k;
+        k.name = "spine";
+        k.kind = IKKind::Fabrik;
+        k.joints = {"pelvis", "spine", "chest", "neck", "head"};
+        k.fade_seconds = 0.5f;
+        e.get_mut<Animator3D>()->add_ik(k);
+        const Mat4f m = placed.matrix();
+        const Vec3f pelvis = m.apply({0, 1.0f, 0});
+        const Vec3f target = pelvis + m.apply_vector({0.35f, 0.5f, 0.1f});
+        const auto frame = [&](float weight, Vec3f pole) {
+            Animator3D& a = *e.get_mut<Animator3D>();
+            a.ik("spine").set_target(target).set_weight(weight).set_pole_direction(pole);
+            state.animate(dt);
+            Scene3D scene;
+            state.propagate_transforms();
+            state.collect(scene);
+            return e.get<Animator3D>();
+        };
+        // Half way through the fade: partly there.
+        const Animator3D* a = nullptr;
+        for (int i = 0; i < 15; ++i) {
+            a = frame(1.0f, {0, 0, 1});
+        }
+        const float partway = length(joint_at(*a, biped::head, m) - target);
+        for (int i = 0; i < 40; ++i) {
+            a = frame(1.0f, {0, 0, 1});
+        }
+        const float arrived = length(joint_at(*a, biped::head, m) - target);
+        assert(partway > 0.05f && arrived < 2e-3f);
+        // The pole in the model's space: the bulge (the chest off the line pelvis-head) faces it.
+        const Vec3f bulge_front = side_of(joint_at(*a, biped::chest, m), joint_at(*a, biped::pelvis, m), joint_at(*a, biped::head, m));
+        for (int i = 0; i < 40; ++i) {
+            a = frame(1.0f, {0, 0, -1});
+        }
+        const Vec3f bulge_back = side_of(joint_at(*a, biped::chest, m), joint_at(*a, biped::pelvis, m), joint_at(*a, biped::head, m));
+        assert(length(joint_at(*a, biped::head, m) - target) < 2e-3f);
+        assert(dot(normalize(bulge_front), normalize(m.apply_vector({0, 0, 1}))) > 0.5f);
+        assert(dot(normalize(bulge_back), normalize(m.apply_vector({0, 0, 1}))) < -0.5f);
+        // Let go: the weight falls over the fade to the clips' pose (the spine straight).
+        for (int i = 0; i < 60; ++i) {
+            a = frame(0.0f, {0, 0, 1});
+        }
+        assert(close(joint_at(*a, biped::head, m), m.apply(rest_world[biped::head].apply({0, 0, 0})), 1e-4f));
+    }
+
+    // The ground query: once a frame per leg (and toe), however often the constraints are solved in it (apply_ik, then collect).
+    {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint feet;
+        feet.name = "feet";
+        feet.kind = IKKind::FootPlacer;
+        feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
+        feet.foot_heights = {0.05f, 0.05f};
+        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.pole_vector = {0, 0, 1};
+        int casts = 0;
+        feet.ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            ++casts;
+            const float t = (from.y - 0.0f) / std::max(from.y - to.y, 1e-6f);
+            if (t < 0.0f || t > 1.0f) {
+                return std::nullopt;
+            }
+            return GroundHit{{from.x, 0.0f, from.z}, {0, 1, 0}};
+        };
+        e.get_mut<Animator3D>()->add_ik(feet);
+        for (int frame = 1; frame <= 3; ++frame) {
+            state.animate(dt);
+            state.propagate_transforms();
+            state.apply_ik(); // the game reads a joint early...
+            Scene3D a, b;
+            state.collect(a); // ...and draws, and a second view draws
+            state.collect(b);
+            assert(casts == 2 * frame);
+        }
+        // The same with a toe on each leg: two more.
+        casts = 0;
+        e.get_mut<Animator3D>()->ik("feet").toe_joints = {"toe_L", "toe_R"};
+        e.get_mut<Animator3D>()->ik("feet").toe_heights = {0.0f, 0.0f};
+        e.get_mut<Animator3D>()->ik("feet").resolved_for = nullptr; // (a game sets toes when it builds the constraint; re-bind here)
+        state.animate(dt);
+        state.propagate_transforms();
+        state.apply_ik();
+        Scene3D s;
+        state.collect(s);
+        assert(casts == 4);
+        // The ground moved between two solves in one frame (a different segment): asked again, not served from the frame's answers.
+        casts = 0;
+        state.animate(dt);
+        state.propagate_transforms();
+        state.apply_ik();
+        e.get_mut<Transform3D>()->position = {0.5f, 0, 0};
+        state.propagate_transforms(); // a new frame's epoch, as it would be
+        state.collect(s);
+        assert(casts == 8);
+    }
+
+    // Foot locking in the world: the entity walks along z at 1 m/s; the planted foot stays in the world; unlocked it goes along.
+    for (const bool lock : {true, false}) {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint feet;
+        feet.name = "feet";
+        feet.kind = IKKind::FootPlacer;
+        feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
+        feet.foot_heights = {0.05f, 0.05f};
+        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.pole_vector = {0, 0, 1};
+        feet.two_bone.max_stretch = 1.3f;
+        feet.foot.smooth_seconds = 0.0f;
+        feet.foot.lock_feet = lock;
+        feet.ground = [](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            if (from.y < 0.0f || to.y > 0.0f) {
+                return std::nullopt;
+            }
+            return GroundHit{{from.x, 0.0f, from.z}, {0, 1, 0}};
+        };
+        e.get_mut<Animator3D>()->add_ik(feet);
+        Vec3f first{};
+        float drift = 0.0f;
+        for (int i = 0; i < 12; ++i) {
+            e.get_mut<Transform3D>()->position = {0, 0, 0.01f * static_cast<float>(i)};
+            state.animate(dt);
+            state.propagate_transforms();
+            Scene3D scene;
+            state.collect(scene);
+            const Animator3D& a = *e.get<Animator3D>();
+            const Vec3f ankle = joint_at(a, biped::ankle_l, e.get<Transform3D>()->matrix());
+            if (i == 0) {
+                first = ankle;
+            }
+            drift = std::max(drift, length(ankle - first));
+        }
+        std::cout << "  ik foot lock in the ECS, " << (lock ? "locked" : "unlocked") << ": the ankle drifts " << drift << " m in the world over 11 cm of walking" << std::endl;
+        assert(lock ? drift < 1e-3f : drift > 0.1f);
+    }
+
+    // Limits through the constraint: a maximum bend on an arm; a knee hinge and twist limit on the foot placer's legs (the knee does
+    // not go behind however the pole asks).
+    {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint hand = hand_constraint();
+        hand.two_bone.max_bend_degrees = 60.0f;
+        e.get_mut<Animator3D>()->add_ik(hand).set_target(Vec3f{0.35f, 1.62f, 0.05f}).set_pole_direction({0, 0, -1});
+        state.animate(dt);
+        Scene3D scene;
+        state.propagate_transforms();
+        state.collect(scene);
+        const Animator3D& a = *e.get<Animator3D>();
+        const Vec3f sh = joint_at(a, biped::shoulder_l, Mat4f{}), el = joint_at(a, biped::elbow_l, Mat4f{}), ha = joint_at(a, biped::hand_l, Mat4f{});
+        const float bend = angle_degrees(el - sh, ha - el);
+        assert(bend < 60.05f && length(ha - Vec3f{0.35f, 1.62f, 0.05f}) > 0.05f);
+    }
+    // The knee through a foot placer, a pole pointing back and the left foot on a 0.2 m step: without limits the knee goes behind
+    // (z < the hip's), with a hinge about X and 25 degrees of hip twist it stays in front; the foot is on the step either way.
+    for (const bool limited : {false, true}) {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint feet;
+        feet.name = "feet";
+        feet.kind = IKKind::FootPlacer;
+        feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
+        feet.foot_heights = {0.05f, 0.05f};
+        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.pole_vector = {0, 0, -1};
+        feet.foot.smooth_seconds = 0.0f;
+        if (limited) {
+            feet.two_bone.hinge = true;
+            feet.two_bone.hinge_axis = {1, 0, 0};
+            feet.two_bone.max_twist_degrees = 25.0f;
+            feet.two_bone.max_bend_degrees = 150.0f;
+        }
+        feet.ground = [](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            const float h = from.x > 0.0f ? 0.2f : 0.0f;
+            if (from.y < h || to.y > h) {
+                return std::nullopt;
+            }
+            return GroundHit{{from.x, h, from.z}, {0, 1, 0}};
+        };
+        e.get_mut<Animator3D>()->add_ik(feet);
+        state.animate(dt);
+        state.propagate_transforms();
+        state.apply_ik();
+        const Animator3D& a = *e.get<Animator3D>();
+        const Vec3f hip = joint_at(a, biped::hip_l, Mat4f{}), knee = joint_at(a, biped::knee_l, Mat4f{}), ankle = joint_at(a, biped::ankle_l, Mat4f{});
+        assert(close(ankle.y, 0.25f, 1e-3f));
+        const float side = side_of(knee, hip, ankle).z;
+        std::cout << "  ik knee through the foot placer, pole back, " << (limited ? "hinge + 25 degrees of hip twist" : "no limits") << ": knee " << side
+                  << " m in front of the line hip-ankle" << std::endl;
+        assert(limited ? side > 0.02f : side < -0.02f);
+    }
+    // The elbow's side swings at the constraint's bounded speed: the state is kept by the constraint (a target through the pole's axis, 40 frames).
+    for (const float swing : {0.0f, 360.0f}) {
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint hand = hand_constraint();
+        hand.two_bone.bend_swing_degrees_per_second = swing;
+        hand.set_pole_direction({0, 1, 0});
+        e.get_mut<Animator3D>()->add_ik(hand);
+        const Vec3f shoulder{rest_world[biped::shoulder_l].m[12], rest_world[biped::shoulder_l].m[13], rest_world[biped::shoulder_l].m[14]};
+        const Vec3f across = normalize(Vec3f{1.0f, 0.0f, 0.6f});
+        Vec3f previous_side{};
+        float worst = 0.0f;
+        for (int i = 0; i <= 40; ++i) {
+            const Vec3f target = shoulder + Vec3f{0, 0.7f, 0} + across * (static_cast<float>(i) / 40.0f * 0.6f - 0.3f);
+            e.get_mut<Animator3D>()->ik("hand").set_target(target);
+            state.animate(dt);
+            state.propagate_transforms();
+            state.apply_ik();
+            const Animator3D& a = *e.get<Animator3D>();
+            const Vec3f side = side_of(joint_at(a, biped::elbow_l, Mat4f{}), joint_at(a, biped::shoulder_l, Mat4f{}), joint_at(a, biped::hand_l, Mat4f{}));
+            assert(length(joint_at(a, biped::hand_l, Mat4f{}) - target) < 3e-4f);
+            if (i > 0) {
+                worst = std::max(worst, angle_degrees(side, previous_side));
+            }
+            previous_side = side;
+        }
+        std::cout << "  ik bend swing in the ECS, " << swing << " degrees a second: worst step of the elbow's side " << worst << " degrees" << std::endl;
+        assert(swing == 0.0f ? worst > 15.0f : worst < 6.5f);
+    }
+}
+
+// Item 7: Sponza Walk's IK panel logic with no window: Settings to the person's constraints, the panel's fields to what they do.
+// (What stays untested here: the control table's widgets, the pictures, the marker and step meshes, the keyboard.)
+void test_sponza_walk_ik_panel() {
+    using namespace sponza_walk;
+    const PersonRig rig = person_rig();
+    assert(rig.skeleton.joint_count() == 25 && rig.skeleton.find("toe_L") == 18 && rig.skeleton.find("tail_5") == 24);
+    // Every joint a constraint names exists.
+    auto model = std::make_shared<Model>();
+    model->skeletons.push_back(rig.skeleton);
+    model->clips = rig.clips;
+    const GroundQuery floor_only = [](Vec3f from, Vec3f to) { return floor_and_step(from, to, false, {}, {}); };
+    for (const IKConstraint& k : person_constraints(floor_only)) {
+        for (const std::string& n : k.joints) {
+            assert(rig.skeleton.find(n) >= 0);
+        }
+        for (const std::string& n : k.toe_joints) {
+            assert(rig.skeleton.find(n) >= 0);
+        }
+    }
+    // The world, its render state (which must go first) and the person.
+    struct Placed {
+        std::unique_ptr<kin::EcsWorld> world;
+        std::unique_ptr<WorldRenderState3D> state;
+        flecs::entity e;
+        ~Placed() {
+            state.reset();
+            world.reset();
+        }
+    };
+    const auto make = [&](const GroundQuery& ground, const Transform3D& at) {
+        auto placed = std::make_unique<Placed>();
+        placed->world = std::make_unique<kin::EcsWorld>();
+        placed->state = std::make_unique<WorldRenderState3D>(*placed->world);
+        Animator3D a;
+        a.clip = "Sway";
+        for (const IKConstraint& k : person_constraints(ground)) {
+            a.add_ik(k);
+        }
+        placed->e = placed->world->raw().entity().set(at).set(SkinnedMeshRenderer{.model = model}).set(a);
+        return placed;
+    };
+    const float dt = 1.0f / 60.0f;
+    const auto settle = [&](WorldRenderState3D& state, flecs::entity e, const PersonIk& panel, const Mat4f& base, int frames) {
+        for (int i = 0; i < frames; ++i) {
+            drive_person(*e.get_mut<Animator3D>(), panel, base, {0.0f, 1.7f, 4.0f});
+            state.animate(dt);
+            state.propagate_transforms();
+            state.apply_ik();
+        }
+        return e.get<Animator3D>();
+    };
+    const Transform3D placed{.position = {3, 0, -2}, .rotation = Quatf::axis_angle({0, 1, 0}, 25.0f)};
+    const Mat4f base = placed.matrix();
+    const auto at = [&](const Animator3D& a, const char* name) {
+        const Mat4f& m = a.ik_world[static_cast<std::size_t>(rig.skeleton.find(name))];
+        return base.apply({m.m[12], m.m[13], m.m[14]});
+    };
+
+    // The hand: at the panel's target for each pole choice, with the elbow on the side the choice names.
+    for (int pole = 1; pole <= 4; ++pole) {
+        auto placed_person = make(floor_only, placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+        PersonIk panel;
+        panel.on = true;
+        panel.hand_x = 0.45f;
+        panel.hand_y = 0.0f;
+        panel.hand_z = 0.5f;
+        panel.pole = pole;
+        panel.fade = 0.0f;
+        const Animator3D* a = settle(*state, e, panel, base, 3);
+        const Vec3f target = base.apply(person_hand_target(panel));
+        assert(length(at(*a, "hand_L") - target) < 1e-3f);
+        const Vec3f side = side_of(at(*a, "elbow_L"), at(*a, "shoulder_L"), at(*a, "hand_L"));
+        const Vec3f want = base.apply_vector(person_elbow_pole(pole));
+        assert(dot(normalize(side), normalize(want)) > 0.3f);
+    }
+    // Weight and fade: the weight 0 leaves the clip's hand; a fade takes its time.
+    {
+        auto placed_person = make(floor_only, placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+        PersonIk panel;
+        panel.on = true;
+        panel.weight = 0.0f;
+        panel.fade = 0.5f;
+        const Animator3D* a = settle(*state, e, panel, base, 3);
+        const Vec3f clip_hand = at(*a, "hand_L");
+        assert(length(clip_hand - base.apply(person_hand_target(panel))) > 0.1f);
+        panel.weight = 1.0f;
+        a = settle(*state, e, panel, base, 15);
+        const float partway = length(at(*a, "hand_L") - base.apply(person_hand_target(panel)));
+        a = settle(*state, e, panel, base, 40);
+        assert(partway > 0.01f && length(at(*a, "hand_L") - base.apply(person_hand_target(panel))) < 1e-3f);
+    }
+    // The stretch slider: a target beyond the reach is reached to the stretch's factor.
+    {
+        auto placed_person = make(floor_only, placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+        PersonIk panel;
+        panel.hand_x = 1.2f;
+        panel.hand_y = 0.0f;
+        panel.hand_z = 0.0f;
+        panel.fade = 0.0f;
+        panel.stretch = 1.0f;
+        const Animator3D* a = settle(*state, e, panel, base, 3);
+        const float reach = length(at(*a, "hand_L") - at(*a, "shoulder_L"));
+        panel.stretch = 1.2f;
+        a = settle(*state, e, panel, base, 3);
+        const float stretched = length(at(*a, "hand_L") - at(*a, "shoulder_L"));
+        assert(close(reach, 0.95f, 1e-3f) && stretched > reach * 1.1f && stretched <= reach * 1.2f + 1e-3f);
+    }
+    // Look: the head's aim turns toward the camera by the weight, not at all with the switch off.
+    {
+        auto placed_person = make(floor_only, placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+        PersonIk panel;
+        panel.fade = 0.0f;
+        panel.look = false;
+        panel.look_smooth = 0.0f;
+        const Animator3D* a = settle(*state, e, panel, base, 3);
+        const Vec3f nose_off = at(*a, "head");
+        const Quatf head_off = rotation_of(a->ik_world[static_cast<std::size_t>(rig.skeleton.find("head"))]);
+        panel.look = true;
+        panel.look_weight = 1.0f;
+        a = settle(*state, e, panel, base, 3);
+        const Quatf head_on = rotation_of(a->ik_world[static_cast<std::size_t>(rig.skeleton.find("head"))]);
+        assert(angle_degrees(head_off, head_on) > 1.0f);
+        (void)nose_off;
+    }
+    // Feet and the step: the left foot is lifted onto a 0.2 m step when the switch is on, and nothing moves when off.
+    {
+        const auto ground_of = [&](bool step, float height) {
+            return GroundQuery{[=](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+                const Mat4f inverse = base.inverse();
+                const auto hit = floor_and_step(inverse.apply(from), inverse.apply(to), step, {0.0f, 0.0f, -0.4f}, {0.6f, height, 0.4f});
+                if (!hit) {
+                    return std::nullopt;
+                }
+                return GroundHit{base.apply(hit->position), normalize(inverse.transposed().apply_vector(hit->normal))};
+            }};
+        };
+        for (const bool on : {false, true}) {
+            auto placed_person = make(ground_of(true, 0.2f), placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+            PersonIk panel;
+            panel.feet = on;
+            panel.fade = 0.0f;
+            const Animator3D* a = settle(*state, e, panel, base, 60);
+            const float pelvis_y = (base.inverse().apply(at(*a, "pelvis"))).y;
+            const float left_y = (base.inverse().apply(at(*a, "ankle_L"))).y;
+            if (on) {
+                // Standing on the floor with the left foot lifted onto the step: the pelvis stays (a raise is off), the left ankle is
+                // the step's height up.
+                assert(close(pelvis_y, 1.0f, 5e-3f) && close(left_y, 0.25f, 5e-3f));
+            } else {
+                assert(close(pelvis_y, 1.0f, 1e-4f) && close(left_y, 0.05f, 1e-4f));
+            }
+        }
+    }
+    // The tail: FABRIK to the panel's target, off with the switch.
+    {
+        auto placed_person = make(floor_only, placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+        PersonIk panel;
+        panel.fade = 0.0f;
+        panel.tail = false;
+        const Animator3D* a = settle(*state, e, panel, base, 3);
+        const Vec3f rest_tip = at(*a, "tail_5");
+        assert(close(base.inverse().apply(rest_tip), rig.world[24], 1e-4f));
+        panel.tail = true;
+        panel.tail_x = 0.4f;
+        panel.tail_y = 0.9f;
+        panel.tail_z = -0.4f;
+        a = settle(*state, e, panel, base, 3);
+        assert(length(at(*a, "tail_5") - base.apply(person_tail_target(panel))) < 2e-3f);
+        // Bones kept: the tail's five joints are 0.18 apart.
+        assert(close(length(at(*a, "tail_3") - at(*a, "tail_2")), 0.18f, 1e-3f));
+    }
+    // Limits, lock, toes: the knee stays forward with a pole that would push it back (the limits switch makes the foot placer's
+    // knees hinges); a locked foot stays while the person walks; the toes tilt on a slope.
+    {
+        const auto flat = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            const Mat4f inverse = base.inverse();
+            const auto hit = floor_and_step(inverse.apply(from), inverse.apply(to), false, {}, {});
+            if (!hit) {
+                return std::nullopt;
+            }
+            return GroundHit{base.apply(hit->position), base.apply_vector({0, 1, 0})};
+        };
+        Vec3f first{};
+        float drift_locked = 0.0f, drift_free = 0.0f;
+        for (const bool lock : {true, false}) {
+            auto placed_person = make(flat, placed);
+        WorldRenderState3D* state = placed_person->state.get();
+        flecs::entity e = placed_person->e;
+        kin::EcsWorld* world = placed_person->world.get();
+        (void)world;
+            PersonIk panel;
+            panel.feet = true;
+            panel.fade = 0.0f;
+            panel.lock = lock;
+            panel.toes = true;
+            panel.limits = true;
+            float drift = 0.0f;
+            for (int i = 0; i < 12; ++i) {
+                // The person drifts 1 cm a frame along its own x.
+                e.get_mut<Transform3D>()->position = placed.position + base.apply_vector({0.01f * static_cast<float>(i), 0, 0});
+                drive_person(*e.get_mut<Animator3D>(), panel, base, {0.0f, 1.7f, 4.0f});
+                state->animate(dt);
+                state->propagate_transforms();
+                state->apply_ik();
+                const Mat4f moved = e.get<Transform3D>()->matrix();
+                const Mat4f& m = e.get<Animator3D>()->ik_world[static_cast<std::size_t>(rig.skeleton.find("ankle_R"))];
+                const Vec3f ankle = moved.apply({m.m[12], m.m[13], m.m[14]});
+                if (i == 0) {
+                    first = ankle;
+                }
+                drift = std::max(drift, length(ankle - first));
+            }
+            (lock ? drift_locked : drift_free) = drift;
+        }
+        std::cout << "  sponza walk panel: right ankle drifts " << drift_locked << " m locked, " << drift_free << " m unlocked, over 11 cm of drift" << std::endl;
+        assert(drift_locked < 2e-3f && drift_free > 0.08f);
+    }
+    // The settings struct maps field for field.
+    {
+        Settings s;
+        s.ik = true;
+        s.ik_hand_x = 0.1f;
+        s.ik_tail = true;
+        s.ik_lock = true;
+        s.ik_toes = true;
+        s.ik_limits = true;
+        s.ik_walk = true;
+        s.ik_pole = 3;
+        s.ik_step_height = 0.31f;
+        const PersonIk p = person_ik(s);
+        assert(p.on && p.hand_x == 0.1f && p.tail && p.lock && p.toes && p.limits && p.walk && p.pole == 3 && p.step_height == 0.31f);
+        assert(person_walk_offset(0.0f) == 0.0f && std::fabs(person_walk_offset(1.7f)) > 0.1f);
+    }
+}
+
+// Item 7: CesiumMan (the Khronos sample, from the reference cache when it is there): an arm and a leg reach targets made by turning
+// their joints. Its joint names are not a rig's: "Skeleton_arm_joint_R" to "Skeleton_arm_joint_R__3_" is the right arm, the leg_joint_R_1,
+// _2, _3 the right leg; found by name, solved in the model's own (Z-up, rotated) space.
+void test_ik_cesium_man() {
+    const char* cache = std::getenv("KIN_REFERENCE_CACHE");
+    const std::filesystem::path path =
+        (cache ? std::filesystem::path{cache} : std::filesystem::path{std::getenv("HOME") ? std::getenv("HOME") : "."} / ".cache/kin/reference") / "cesium_man/CesiumMan.glb";
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        std::cerr << "ik: CesiumMan is not in the reference cache (tools/reference/fetch.py): its IK test is skipped" << std::endl;
+        return;
+    }
+    const std::string bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    ModelData data;
+    std::string error;
+    if (!read_model_data(bytes, path, data, &error)) {
+        std::cerr << "ik: " << error << "" << std::endl;
+        assert(false);
+    }
+    assert(data.skeletons.size() == 1 && !data.clips.empty());
+    Skeleton sk = data.skeletons[0];
+    struct Limb {
+        const char* name;
+        const char* names[3];
+    };
+    const Limb limbs[] = {
+        {"right arm", {"Skeleton_arm_joint_R", "Skeleton_arm_joint_R__2_", "Skeleton_arm_joint_R__3_"}},
+        {"left arm", {"Skeleton_arm_joint_L__4_", "Skeleton_arm_joint_L__3_", "Skeleton_arm_joint_L__2_"}},
+        {"right leg", {"leg_joint_R_1", "leg_joint_R_2", "leg_joint_R_3"}},
+        {"left leg", {"leg_joint_L_1", "leg_joint_L_2", "leg_joint_L_3"}},
+    };
+    const AnimClip3D& clip = data.clips[0];
+    int total = 0;
+    for (const Limb& limb : limbs) {
+        const TwoBoneChain chain{sk.find(limb.names[0]), sk.find(limb.names[1]), sk.find(limb.names[2])};
+        assert(chain.root >= 0 && chain.mid >= 0 && chain.end >= 0);
+        float worst = 0.0f, worst_len = 0.0f;
+        int count = 0;
+        Lcg rng;
+        for (const float time : {0.0f, 0.3f, 0.7f, 1.1f}) {
+            Pose pose = sk.rest_pose();
+            sample_clip(clip, sk, time, true, pose);
+            std::vector<Mat4f> world;
+            compute_world_matrices(sk, pose, world);
+            const auto point = [&](const std::vector<Mat4f>& w, i32 j) { return Vec3f{w[static_cast<std::size_t>(j)].m[12], w[static_cast<std::size_t>(j)].m[13], w[static_cast<std::size_t>(j)].m[14]}; };
+            const float l1 = length(point(world, chain.mid) - point(world, chain.root)), l2 = length(point(world, chain.end) - point(world, chain.mid));
+            for (int i = 0; i < 25; ++i) {
+                // A reachable target: this pose's hand with the shoulder and elbow turned a little (the pose itself, by FK).
+                Pose goal = pose;
+                goal.joints[static_cast<std::size_t>(chain.root)].rotation = (Quatf::axis_angle(rng.direction(), 35.0f * (rng.next() * 0.5f + 0.5f)) * goal.joints[static_cast<std::size_t>(chain.root)].rotation).normalized();
+                goal.joints[static_cast<std::size_t>(chain.mid)].rotation = (Quatf::axis_angle(rng.direction(), 30.0f * (rng.next() * 0.5f + 0.5f)) * goal.joints[static_cast<std::size_t>(chain.mid)].rotation).normalized();
+                std::vector<Mat4f> goal_world;
+                compute_world_matrices(sk, goal, goal_world);
+                const Vec3f target = point(goal_world, chain.end);
+                Pose p = pose;
+                std::vector<Mat4f> w = world;
+                TwoBoneOptions o;
+                o.pole_mode = PoleMode::Position;
+                o.pole = point(goal_world, chain.mid); // the elbow where the goal had it (any pole would do for the hand)
+                const TwoBoneResult res = solve_two_bone(sk, p, w, chain, target, o);
+                assert(res.solved);
+                worst = std::max(worst, length(point(w, chain.end) - target));
+                // The bones keep their lengths (in the root's parent's space: the model has its own scale, uniform here).
+                worst_len = std::max(worst_len, std::fabs(length(point(w, chain.mid) - point(w, chain.root)) - l1) / l1);
+                worst_len = std::max(worst_len, std::fabs(length(point(w, chain.end) - point(w, chain.mid)) - l2) / l2);
+                std::vector<Mat4f> again;
+                compute_world_matrices(sk, p, again);
+                assert(max_difference(again, w) < 1e-4f);
+                ++count;
+            }
+        }
+        std::cout << "  ik CesiumMan " << limb.name << " (" << limb.names[0] << " ...): " << count << " targets, hand within " << worst << " of them, bones kept to "
+                  << worst_len << " (relative)" << std::endl;
+        assert(worst < 5e-4f && worst_len < 1e-4f);
+        total += count;
+    }
+    assert(total == 400);
+}
+
 // The cost of constraints on a character, and of 500 of them with three constraints each.
 void bench_ik() {
     const BipedCharacter hero = make_biped_character();
@@ -2524,6 +3833,15 @@ int main() {
     test_ecs_ik_entity_target_and_fades();
     test_ecs_ik_order_and_off_path();
     test_ecs_ik_deterministic_and_unresolved();
+    test_ik_joint_limits();
+    test_ik_rest_bend_fallback();
+    test_ik_two_bone_nonuniform_scale();
+    test_ik_bend_swing_and_singularities();
+    test_ik_fabrik_pole();
+    test_ik_foot_locking_and_toes();
+    test_ecs_ik_fabrik_locking_and_limits();
+    test_sponza_walk_ik_panel();
+    test_ik_cesium_man();
     bench_ik();
     bench_animation();
     std::cout << "skeleton tests passed\n";

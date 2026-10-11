@@ -42,6 +42,7 @@
 #include <flecs.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -102,6 +103,7 @@ enum class IKKind : u8 {
     TwoBone,    // joints: root, mid, end (shoulder, elbow, hand). The end goes to the target.
     LookAt,     // joints: root to tip (spine, neck, head). The tip's aim axis turns to the target.
     FootPlacer, // joints: the pelvis, then hip, knee, ankle for each leg. The `ground` query puts the feet; no target.
+    Fabrik,     // joints: root to tip, any number (a tail, a rope, a spine). The tip goes to the target; `pole` turns the bulge.
 };
 
 // One constraint of an Animator3D. Joint names are looked up in the model's skeleton when the animator binds to it (and again
@@ -127,8 +129,9 @@ struct IKConstraint {
     Pole pole = Pole::None;
     Vec3f pole_vector{};
 
-    // Two-bone: stretch, minimum bend (its weight and pole are taken from the fields above); with `match_rotation` the end
-    // joint is turned to `target_rotation` (a world-space orientation: a hand to a hold's surface) by `rotation_weight`.
+    // Two-bone: stretch, minimum and maximum bend, the hinge and the twist limit (its weight and pole are taken from the fields
+    // above); with `match_rotation` the end joint is turned to `target_rotation` (a world-space orientation: a hand to a hold's
+    // surface) by `rotation_weight`. The knees of a foot placer take these too.
     TwoBoneOptions two_bone;
     bool match_rotation = false;
     Quatf target_rotation{};
@@ -138,10 +141,18 @@ struct IKConstraint {
     std::vector<LookAtJoint> look_links;
     LookAtOptions look_at;
 
+    // Fabrik: tolerance, iterations, whether the first joint is fixed, its pole is `pole` above (the weight is taken from above).
+    FabrikOptions fabrik;
+
     // Foot placer: the ankle's height above the sole for each leg (0.1 when missing), the options, and the ground as the game
     // knows it, in WORLD space (a physics raycast); the knees follow the pole as above (none: they keep the clips' bend).
-    // `foot.up`, `ground_level` and the heights are in the model's space.
+    // `foot.up`, `ground_level` and the heights are in the model's space. Foot locking (`foot.lock_feet`) holds a planted
+    // foot in the world while the entity moves. `toe_joints` names a toe for each leg (an empty name: none; the list may be
+    // shorter) and `toe_heights` the ball's height above the sole (0.03 when missing); each toe costs the game's query one more
+    // call a frame. The query is called once a frame for each leg (and toe), however many times the constraints are solved.
     std::vector<f32> foot_heights;
+    std::vector<std::string> toe_joints;
+    std::vector<f32> toe_heights;
     FootPlacementOptions foot;
     GroundQuery ground;
 
@@ -186,7 +197,15 @@ struct IKConstraint {
     Vec3f last_target{};      // the last world point the target gave (a target that goes away is let go of from there)
     bool has_last_target = false;
     FootPlacementState foot_state;
+    TwoBoneState bend_state;   // the side the elbow was on (two_bone.bend_swing_degrees_per_second)
+    struct GroundCache {
+        u64 epoch = ~u64{0};
+        Vec3f from{}, to{};
+        std::optional<GroundHit> hit;
+    };
+    std::vector<GroundCache> ground_cache; // the query's answers of this frame, by the order it was asked in
     std::vector<i32> resolved; // joint indices of `joints`
+    std::vector<i32> resolved_toes; // joint indices of `toe_joints` (-1: none)
     const Skeleton* resolved_for = nullptr;
 };
 
@@ -303,7 +322,8 @@ public:
 
 private:
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
-    static void solve_ik(Animator3D& animator, const Skeleton& skeleton, const Pose& base, const Mat4f& world, const flecs::world& ecs);
+    static void solve_ik(Animator3D& animator, const Skeleton& skeleton, const Pose& base, const Mat4f& world, const flecs::world& ecs,
+                         u64 epoch);
     flecs::observer _transform_observer;
     flecs::query<WorldTransform3D, const Transform3D, const WorldTransform3D> _transforms;
     flecs::query<const WorldTransform3D, const MeshRenderer> _meshes;
@@ -316,6 +336,7 @@ private:
         std::vector<MeshInstance> instances;
     };
     std::vector<Bucket> _buckets; // kept between frames, emptied each collect
+    u64 _epoch = 0; // advanced by animate() and propagate_transforms(): what the game's ground query said is good until it moves
 };
 
 } // namespace kin

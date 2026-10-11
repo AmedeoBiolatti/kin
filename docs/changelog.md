@@ -9,6 +9,18 @@ releases may change APIs.
 
 ### Added
 
+- 3D, inverse kinematics, the known limits fixed (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b follow-up"):
+  joint limits for `solve_two_bone` (`max_bend_degrees`, `hinge` / `hinge_axis`, `max_twist_degrees`: a knee that bends one way about its own
+  axis and whose hip turns no more than a limit, with no flip as the pole goes round behind); FABRIK as an ECS constraint kind
+  (`IKKind::Fabrik`) with a pole; foot locking (a planted foot held in the world while the body moves, released and eased back), toes
+  (`FootLeg::toe`, `IKConstraint::toe_joints`) that lie on the ground under them, and the ground query called once a frame per leg however
+  often the constraints are solved; a non-uniform scale on the root joint or between the mid and end joints is now exact (it was approximate);
+  a straight chain with no pole bends the way the rest pose is bent (else the hinge's side, else -Y as before); `TwoBoneState` and
+  `bend_swing_degrees_per_second` for the elbow's side to swing at a bounded speed where a pole passes through the target's axis.
+  Everything is off by default and the pictures of before are byte for byte. `kin_reference`: `fabrik`, `max_bend`, `hinge_axis`,
+  `max_twist`, `bend_swing`, `toes`, `lock`, ground `ramps`; the scene `skinned_ik_limits`; Sponza Walk's person has toes and a tail, and
+  `--preset ik-tail`, `ik-walk`. Fixed: `TwoBoneResult::reached` was true for a target inside the hole round the root. Docs: the stale
+  "Not yet: skinned meshes" line of the 3D guide.
 - 3D, inverse kinematics (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b"): `kin/render3d/ik.hpp`:
   `solve_two_bone` (an arm to a hold, a leg to the ground: pole by direction or point, soft stretch, minimum bend, an end orientation
   target, a weight; exact under scaled and turned models), `solve_look_at` (a head or a spine-neck-head chain with shared turn, yaw and

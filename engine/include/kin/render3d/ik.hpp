@@ -83,6 +83,38 @@ struct TwoBoneOptions {
     bool match_rotation = false;
     Quatf end_rotation{};
     f32 rotation_weight = 1.0f;
+
+    // --- joint limits of the mid joint and the twist of the root (all off by default: the pose is then what it always was).
+    //
+    // The most the mid joint bends from a straight chain, in degrees (a knee that folds to 150 and no further; 180: no limit).
+    // A target nearer than the chain can then fold to is aimed at through the point its own axis adds to it, as with unequal
+    // bones (a hole round the root), so the end stands at the chord of the fold, toward the target, and the pose is continuous
+    // in the target. `reached` is false there.
+    f32 max_bend_degrees = 180.0f;
+    // The mid joint is a hinge about `hinge_axis` (in ITS OWN local space: a knee's X): it only bends one way about it, the
+    // positive way (the rotation of the upper bone's direction onto the lower's, about the axis). A pose that is straight, or
+    // bent the wrong way by a clip, takes its plane from the hinge, so that a knee is never driven backwards by a pole
+    // behind it: the root turns to carry the hinge round to the pole instead (see `max_twist_degrees`).
+    bool hinge = false;
+    Vec3f hinge_axis{1.0f, 0.0f, 0.0f};
+    // The most the root joint turns about its own bone from what the clips did (the swing-twist decomposition of the root's
+    // turn about the bone's axis), in degrees; 180: no limit. Past it the elbow's side falls short of the pole's (the end
+    // still reaches the target), and eases back toward the clips' side as the pole goes round behind, so that nothing flips.
+    // Needs a plane to measure from: a `hinge`, or a pose that is bent (with a pose that is nearly straight and no hinge the
+    // limit fades with how bent it is).
+    f32 max_twist_degrees = 180.0f;
+    // With a TwoBoneState (and a dt): the elbow's side swings toward the pole's at no more than this many degrees a second
+    // (0: at once). This is the one treatment that makes the side continuous in TIME where a pole passes through the target's
+    // axis (see TwoBoneState).
+    f32 bend_swing_degrees_per_second = 0.0f;
+};
+
+// What to keep between frames for `bend_swing_degrees_per_second`: the side the elbow was on, as a direction in the space of
+// the root joint's parent. The caller keeps it; the first call (valid false) starts from the side the solver wants.
+struct TwoBoneState {
+    Vec3f bend{};
+    f32 sense = 1.0f; // which way round the target's axis the last swing went (used when the two sides are exactly opposite)
+    bool valid = false;
 };
 
 struct TwoBoneResult {
@@ -96,9 +128,15 @@ struct TwoBoneResult {
 // that the end joint reaches `target`, or stands as near as the chain can on the line to it. Solved in the space of the
 // root joint's parent, so a scaled or turned model, or a non-uniform scale above the chain, is exact. Degenerate input
 // (target at the root, on the chain's axis, a pole on the axis, a straight chain) falls back to the bend plane of the pose
-// given and varies continuously with the target.
+// given and varies continuously with the target. The side a straight chain with no pole bends to is the rest pose's bend
+// (what the rig's author built), else the hinge's, else -Y of the root's parent.
+//
+// A non-uniform scale on the root joint itself (or on a joint between the root and the mid joint) makes the forearm's drawn
+// length depend on how it is turned, which no rotation of rigid bones can follow: the solve is repeated from its own result
+// (at most 8 times) until the end is on its goal, which it is to 1e-5 of the reach for scales within a factor of about 2.
+// `state` and `dt` are for `bend_swing_degrees_per_second`; both may be left out.
 TwoBoneResult solve_two_bone(const Skeleton& skeleton, Pose& pose, std::span<Mat4f> world, const TwoBoneChain& chain, Vec3f target,
-                             const TwoBoneOptions& options = {});
+                             const TwoBoneOptions& options = {}, TwoBoneState* state = nullptr, f32 dt = 0.0f);
 
 // --- look at: a head, or a spine to a neck to a head ------------------------------------------------------------------
 
@@ -154,6 +192,12 @@ struct FabrikOptions {
     u32 max_iterations = 16;
     f32 tolerance = 1e-4f;   // in the model's units: the tip is this near the target
     bool fix_root = true;    // the first joint stays where it is; false lets the chain's start follow the target
+    // A pole: the solved chain is turned about the line from its first joint to its tip (which moves neither end nor any
+    // length) so that the chain's bulge points toward it, as a two-bone's elbow does. A straight chain has no bulge and a pole
+    // on the line says nothing: both fade out smoothly. Direction: a model-space direction; Position: a point of the model's
+    // space seen from the first joint.
+    PoleMode pole_mode = PoleMode::None;
+    Vec3f pole{};
 };
 
 struct FabrikResult {
@@ -182,6 +226,10 @@ using GroundQuery = std::function<std::optional<GroundHit>(Vec3f from, Vec3f to)
 struct FootLeg {
     TwoBoneChain leg;      // hip, knee, ankle
     f32 foot_height = 0.1f; // how far the ankle is above the sole of the foot
+    // The toe (the ball of the foot: a child of the ankle), or -1. With it, a second ground query is made for the leg, from
+    // the animated toe, and the toe turns to that ground's normal (see FootPlacementOptions::toe_max_tilt_degrees).
+    i32 toe = -1;
+    f32 toe_height = 0.03f; // how far the toe joint (the ball) is above the sole
 };
 
 struct FootPlacementOptions {
@@ -201,6 +249,23 @@ struct FootPlacementOptions {
     // The pelvis eases to its offset, and a foot eases down onto ground that fell away (it rises at once: no sinking into
     // a step), with this time constant. 0: no smoothing.
     f32 smooth_seconds = 0.1f;
+
+    // --- toes (a FootLeg with a toe joint; off with none)
+    // The toe turns to the normal of the ground under it (clamped to the same slope as the foot's, then to this many degrees
+    // from its animated turn), only while the foot is on the ground, easing out over `tilt_blend_height` as the foot's tilt does.
+    f32 toe_max_tilt_degrees = 40.0f;
+
+    // --- foot locking (needs a FootPlacementState; off by default: a foot is then planned from the animated ankle each frame)
+    // A foot whose animated sole is within `lock_height` of the ground is planted: its ankle target is held at the place it
+    // was when it planted (in the world: the caller's `model_to_world`), while the body moves over it. It lets go when the
+    // animated foot rises past `lock_release_height`, or the animated ankle is further than `lock_release_distance` from the
+    // held place (the animation has moved on: the leg would be pulled out of its reach). It then eases back to the animated
+    // ankle over `lock_replant_seconds` (a smoothstep), not at once.
+    bool lock_feet = false;
+    f32 lock_height = 0.02f;
+    f32 lock_release_height = 0.06f;
+    f32 lock_release_distance = 0.15f;
+    f32 lock_replant_seconds = 0.15f;
 };
 
 // Kept between frames; the first call (valid false) starts from the plan itself.
@@ -208,6 +273,16 @@ struct FootPlacementState {
     f32 pelvis_offset = 0.0f;
     std::vector<f32> foot_offset;
     bool valid = false;
+    // The foot locks, one a leg (see FootPlacementOptions::lock_feet). Positions are in the space `model_to_world` leads to.
+    struct Lock {
+        bool planted = false;
+        f32 blend = 0.0f;       // 1 held at `point`, falling to 0 over the re-plant
+        Vec3f point{};          // the held ankle target (world)
+        Vec3f normal{0.0f, 1.0f, 0.0f};
+        Quatf rotation{};       // the held foot orientation (world)
+        f32 rise = 0.0f;        // the ground's height there above `ground_level`, for the pelvis
+    };
+    std::vector<Lock> locks;
 };
 
 struct FootTarget {
@@ -216,6 +291,13 @@ struct FootTarget {
     Quatf rotation{};          // the end orientation to give the two-bone solver (model space)
     f32 rotation_weight = 0.0f;
     Vec3f normal{0.0f, 1.0f, 0.0f}; // the (clamped) normal the foot follows
+    bool locked = false;       // the target is the held place of a planted foot (or easing back from it)
+    // The toe (a leg with a toe joint, the foot on the ground, and ground under the toe): the orientation to give it (model
+    // space), and how much of the way (the foot's tilt blend).
+    bool toe_grounded = false;
+    Quatf toe_rotation{};
+    f32 toe_weight = 0.0f;
+    f32 toe_max_degrees = 0.0f; // how far from its animated turn it may go
 };
 
 struct FootPlan {
@@ -226,12 +308,16 @@ struct FootPlan {
 // For each leg: casts the ground query from the animated ankle, puts the ankle target on the hit lifted by the foot height,
 // tilts the foot to the (clamped) normal, and finds how far the pelvis must go down for the lowest foot (smoothed in
 // `state`). Touches no pose: the targets go to solve_two_bone (apply_foot_placement does it). `state` may be null.
+// `model_to_world` (optional): where the working space sits in a space that stays still while the character moves; foot
+// locks are kept in it (null: the working space stays still itself). The ground query is called once for each leg, and once
+// more for each leg that has a toe joint.
 FootPlan plan_foot_placement(const Skeleton& skeleton, const Pose& pose, std::span<const Mat4f> world, std::span<const FootLeg> legs,
                              const GroundQuery& ground, const FootPlacementOptions& options = {}, FootPlacementState* state = nullptr,
-                             f32 dt = 0.0f);
+                             f32 dt = 0.0f, const Mat4f* model_to_world = nullptr);
 
 // Moves the pelvis joint along `up` by the plan's offset (its local translation, in its parent's space), then solves each
-// grounded leg to its target with `leg_options` (its pole, stretch, weight; the foot's rotation from the plan).
+// grounded leg to its target with `leg_options` (its pole, stretch, weight; the foot's rotation from the plan), then turns each
+// toe the plan has one for (by `leg_options.weight`, within `toe_max_tilt_degrees` of its animated turn).
 void apply_foot_placement(const Skeleton& skeleton, Pose& pose, std::span<Mat4f> world, i32 pelvis_joint, std::span<const FootLeg> legs,
                           const FootPlan& plan, const TwoBoneOptions& leg_options = {}, Vec3f up = {0.0f, 1.0f, 0.0f});
 
