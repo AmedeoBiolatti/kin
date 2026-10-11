@@ -1,0 +1,351 @@
+{
+ "name": "skinned_ik",
+ "purpose": "Inverse kinematics (P1b) on a procedural person (skinned_biped.glb: 18 joints; CesiumMan's joint names are not limbs a rig can name): the left hand reaches a target (red ball) with the elbow to the pole's side, the right foot stands on a step with the pelvis lowered and the foot flat, a head looks at a point. A second person reaches far out of reach (stretch off), a third has weight 0 (the clip only). Constraints run in list order and each one moves what hangs below its joints: feet first (they lower the pelvis), then the look (it turns the spine), then the arm, so that the hand lands on its target.",
+ "models": [
+  {
+   "file": "made/floor20.glb"
+  },
+  {
+   "file": "made/ik_step.glb",
+   "position": [
+    0.45,
+    0,
+    0.0
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    0.75,
+    1.85,
+    0.55
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    -1.25,
+    1.9,
+    0.9
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    -3.4,
+    2.3,
+    1.0
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    -0.6,
+    1.35,
+    0.55
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    1.9,
+    1.7,
+    0.6
+   ]
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    0.0,
+    0.2,
+    0.0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "feet",
+      "kind": "foot_placer",
+      "joints": [
+       "pelvis",
+       "hip_L",
+       "knee_L",
+       "ankle_L",
+       "hip_R",
+       "knee_R",
+       "ankle_R"
+      ],
+      "foot_heights": [
+       0.05,
+       0.05
+      ],
+      "pole_direction": [
+       0.0,
+       0.0,
+       1.0
+      ],
+      "max_pelvis_drop": 0.4,
+      "smooth": 0.0,
+      "ground": {
+       "floor": 0.0,
+       "boxes": [
+        {
+         "min": [
+          0.05,
+          0.0,
+          -0.4
+         ],
+         "max": [
+          0.85,
+          0.2,
+          0.4
+         ]
+        }
+       ]
+      }
+     },
+     {
+      "name": "look",
+      "kind": "look_at",
+      "joints": [
+       "spine",
+       "neck",
+       "head"
+      ],
+      "weights": [
+       0.2,
+       0.3,
+       0.5
+      ],
+      "max_yaw": [
+       15,
+       35,
+       60
+      ],
+      "max_pitch_up": [
+       10,
+       20,
+       30
+      ],
+      "max_pitch_down": [
+       10,
+       20,
+       30
+      ],
+      "target": [
+       -1.25,
+       1.9,
+       0.9
+      ]
+     },
+     {
+      "name": "hand",
+      "kind": "two_bone",
+      "joints": [
+       "shoulder_L",
+       "elbow_L",
+       "hand_L"
+      ],
+      "target": [
+       0.75,
+       1.85,
+       0.55
+      ],
+      "pole_direction": [
+       0.0,
+       0.0,
+       -1.0
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    -1.4,
+    0,
+    0.0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "hand",
+      "kind": "two_bone",
+      "joints": [
+       "shoulder_R",
+       "elbow_R",
+       "hand_R"
+      ],
+      "target": [
+       -3.4,
+       2.3,
+       1.0
+      ],
+      "pole_direction": [
+       0.0,
+       0.0,
+       -1.0
+      ],
+      "max_stretch": 1.0
+     },
+     {
+      "name": "hand_left",
+      "kind": "two_bone",
+      "joints": [
+       "shoulder_L",
+       "elbow_L",
+       "hand_L"
+      ],
+      "target": [
+       -0.6,
+       1.35,
+       0.55
+      ],
+      "pole_direction": [
+       0.3,
+       -1.0,
+       0.0
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    1.6,
+    0,
+    0.0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "hand",
+      "kind": "two_bone",
+      "joints": [
+       "shoulder_L",
+       "elbow_L",
+       "hand_L"
+      ],
+      "target": [
+       1.9,
+       1.7,
+       0.6
+      ],
+      "weight": 0.0
+     }
+    ]
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -6,
+    -0.3,
+    -6
+   ],
+   [
+    6,
+    5,
+    6
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    1.3,
+    6.5
+   ],
+   "target": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "above",
+   "eye": [
+    -3.0,
+    4.5,
+    5.0
+   ],
+   "target": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "close_arm",
+   "eye": [
+    1.6,
+    2.4,
+    2.2
+   ],
+   "target": [
+    0.3,
+    1.75,
+    0.2
+   ],
+   "fov": 35,
+   "near": 0.05
+  },
+  {
+   "name": "close_leg",
+   "eye": [
+    2.0,
+    1.2,
+    1.8
+   ],
+   "target": [
+    0.2,
+    0.5,
+    0.0
+   ],
+   "fov": 35,
+   "near": 0.05
+  }
+ ]
+}

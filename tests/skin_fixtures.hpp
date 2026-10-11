@@ -319,4 +319,105 @@ inline Gltf make_gltf(const GltfOptions& o = {}) {
     return out;
 }
 
+
+// --- a small biped for inverse kinematics --------------------------------------------------------------------------------
+
+// Joint indices of make_biped(). A person of 1 m of leg and 0.95 m of arm, facing +Z, standing straight with the arms out
+// (so every limb chain is straight at rest: the bend plane is the pole's to give).
+namespace biped {
+enum : int {
+    root, pelvis, spine, chest, neck, head,
+    hip_l, knee_l, ankle_l, hip_r, knee_r, ankle_r,
+    shoulder_l, elbow_l, hand_l, shoulder_r, elbow_r, hand_r,
+    count
+};
+} // namespace biped
+
+inline kin::Skeleton make_biped() {
+    kin::Skeleton sk;
+    struct J {
+        const char* name;
+        int parent;
+        Vec3f at;
+    };
+    const J joints[] = {
+        {"root", -1, {0, 0, 0}},        {"pelvis", 0, {0, 1.0f, 0}},     {"spine", 1, {0, 0.2f, 0}},       {"chest", 2, {0, 0.25f, 0}},
+        {"neck", 3, {0, 0.25f, 0}},     {"head", 4, {0, 0.1f, 0}},       {"hip_L", 1, {0.1f, 0, 0}},       {"knee_L", 6, {0, -0.5f, 0}},
+        {"ankle_L", 7, {0, -0.45f, 0}}, {"hip_R", 1, {-0.1f, 0, 0}},     {"knee_R", 9, {0, -0.5f, 0}},     {"ankle_R", 10, {0, -0.45f, 0}},
+        {"shoulder_L", 3, {0.2f, 0.2f, 0}}, {"elbow_L", 12, {0.5f, 0, 0}}, {"hand_L", 13, {0.45f, 0, 0}},
+        {"shoulder_R", 3, {-0.2f, 0.2f, 0}}, {"elbow_R", 15, {-0.5f, 0, 0}}, {"hand_R", 16, {-0.45f, 0, 0}},
+    };
+    for (const J& j : joints) {
+        sk.names.emplace_back(j.name);
+        sk.parents.push_back(j.parent);
+        kin::JointPose r;
+        r.translation = j.at;
+        sk.rest.push_back(r);
+    }
+    std::vector<Mat4f> world;
+    kin::compute_world_matrices(sk, sk.rest_pose(), world);
+    for (const Mat4f& m : world) {
+        sk.inverse_bind.push_back(m.inverse());
+    }
+    return sk;
+}
+
+
+// A skinned body for the biped: a box along each bone (from the parent joint to the joint, the end at the parent bound to the
+// parent and the end at the joint bound to the joint), `radius` thick, and, separately, a cube round one joint (a hand marker).
+inline void append_box(kin::MeshData& m, Vec3f p0, Vec3f p1, float radius, int joint0, int joint1) {
+    const Vec3f d = kin::normalize(p1 - p0);
+    const Vec3f helper = std::fabs(d.y) < 0.9f ? Vec3f{0, 1, 0} : Vec3f{1, 0, 0};
+    const Vec3f u = kin::normalize(kin::cross(helper, d)); // so that (d, u, v) is right-handed: cross(d, u) = v
+    const Vec3f v = kin::cross(d, u);
+    const float half = kin::length(p1 - p0) * 0.5f;
+    const Vec3f mid = (p0 + p1) * 0.5f;
+    struct Face {
+        Vec3f normal, e1, e2;
+    };
+    const Face faces[6] = {
+        {u, v * radius, d * half},  {u * -1.0f, d * half, v * radius}, {v, d * half, u * radius},
+        {v * -1.0f, u * radius, d * half}, {d, u * radius, v * radius}, {d * -1.0f, v * radius, u * radius},
+    };
+    for (int f = 0; f < 6; ++f) {
+        const Face& face = faces[f];
+        const Vec3f centre = f < 4 ? mid + face.normal * radius : (f == 4 ? p1 : p0);
+        const float sx[4] = {-1, 1, 1, -1}, sy[4] = {-1, -1, 1, 1};
+        const std::uint32_t first = static_cast<std::uint32_t>(m.vertices.size());
+        for (int c = 0; c < 4; ++c) {
+            const Vec3f pos = centre + face.e1 * sx[c] + face.e2 * sy[c];
+            m.vertices.push_back({pos, face.normal, {sx[c] * 0.5f + 0.5f, sy[c] * 0.5f + 0.5f}});
+            kin::MeshSkinVertex k;
+            k.joints = {static_cast<std::uint8_t>(kin::dot(pos - p0, d) > half ? joint1 : joint0), 0, 0, 0};
+            m.skin.push_back(k);
+        }
+        m.indices.insert(m.indices.end(), {first, first + 1, first + 2, first, first + 2, first + 3});
+    }
+}
+
+// The boxes of every bone but those of the root and the pelvis (their bone is the spine's beginning).
+inline kin::MeshData make_biped_body(const kin::Skeleton& sk, float radius = 0.045f) {
+    kin::MeshData m;
+    std::vector<Mat4f> world;
+    kin::compute_world_matrices(sk, sk.rest_pose(), world);
+    const auto at = [&](std::size_t j) { return Vec3f{world[j].m[12], world[j].m[13], world[j].m[14]}; };
+    for (std::size_t j = 2; j < sk.joint_count(); ++j) {
+        const std::size_t p = static_cast<std::size_t>(sk.parents[j]);
+        if (p >= 1) {
+            append_box(m, at(p), at(j), radius, static_cast<int>(p), static_cast<int>(j));
+        }
+    }
+    return m;
+}
+
+inline kin::MeshData make_joint_cube(const kin::Skeleton& sk, int joint, float radius = 0.07f) {
+    kin::MeshData m;
+    std::vector<Mat4f> world;
+    kin::compute_world_matrices(sk, sk.rest_pose(), world);
+    const Mat4f& w = world[static_cast<std::size_t>(joint)];
+    const Vec3f at{w.m[12], w.m[13], w.m[14]};
+    append_box(m, at - Vec3f{0, 0, radius}, at + Vec3f{0, 0, radius}, radius, joint, joint);
+    return m;
+}
+
 } // namespace skin_fixtures

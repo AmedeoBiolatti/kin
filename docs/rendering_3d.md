@@ -564,6 +564,99 @@ held at the ends), each clip at the same phase of its own length. The base's `ti
 `dt * speed / (the duration blended at the parameter now)`, so a walk and a run step in time and a changing parameter never jumps.
 Fades, root motion and layers work as for a clip.
 
+## Inverse kinematics
+
+A hand to a hold, a foot on the ground, a head to a point: solvers that bend a posed skeleton after the clips and before the
+matrices (`kin/render3d/ik.hpp`, CPU only, no shader changes; the stage P1b of the plan). They work on the **local** pose and
+keep the joints' **model-space** world matrices in step, so they chain (each sees what the one before did) and cost a few
+microseconds a character.
+
+```cpp
+kin::Pose pose = player.pose();
+std::vector<kin::Mat4f> world, joints(skeleton.joint_count());
+kin::compute_world_matrices(skeleton, pose, world);
+
+kin::TwoBoneOptions arm;
+arm.pole_mode = kin::PoleMode::Direction;          // the elbow points back
+arm.pole = {0, 0, -1};
+arm.max_stretch = 1.1f;                            // may lengthen 10%, softly
+arm.match_rotation = true;                         // the hand to the hold's surface
+arm.end_rotation = kin::Quatf::look_rotation(-hold_normal);
+kin::solve_two_bone(skeleton, pose, world, {shoulder, elbow, hand}, hold_in_model_space, arm);
+
+kin::world_to_joint_matrices(skeleton, world, joints);   // what draw_skinned wants
+```
+
+**`solve_two_bone`**: an arm or a leg (root, mid, end joints; twist joints between them are carried along). It rotates the root and
+the mid joint (local rotations; the pose's local translations and scales are kept) so that the end reaches the target, or stands
+as near as the chain can, on the line to it. The elbow goes to the pole's side (a direction or a point), the weight blends from
+the given pose (0 returns it bit for bit), `max_stretch` lets the bones lengthen with a soft clamp (measured against the skeleton's
+rest lengths, so solving twice never stretches twice), `min_bend_degrees` keeps a knee from locking, and `match_rotation` turns the
+end joint to a model-space orientation. Details worth knowing: it is solved in the space of the root joint's parent, so a scaled or
+turned model and a non-uniform scale above the chain are exact; the upper bone's turn carries the bend plane with it as far as the
+pose is bent, so the elbow hinges and the twist is taken at the shoulder (a straight pose has no plane: the shortest turn); a pole
+on the target's axis falls back smoothly on the pose's own bend and, for a straight chain, on "toward -Y" (give a pole). A target
+nearer the root than the folded chain can come, with unequal bones, turns the chain steeply but without a jump.
+
+**`solve_look_at`**: a head, or a chain (spine, neck, head) whose `LookAtJoint::weight`s share the turn. Each joint has yaw and pitch
+limits (an ellipse, seen from the head); past a limit the joint is held there and eased back toward forward over `release_degrees`,
+so a target going round behind never flips the head from one side to the other. The turn is the shortest one, so nothing twists.
+Smoothing is a `LookAtState` (the followed direction, in the space the target is in) with `smooth_seconds` and `max_speed_degrees`
+and a `dt`: the function does not hold state itself.
+
+**`solve_chain_fabrik`**: FABRIK for tails, ropes and spines (any number of joints, a tolerance and an iteration cap, optional
+fixed root); bone lengths are kept, each joint but the tip is turned the shortest way onto its new bone.
+
+**`plan_foot_placement` / `apply_foot_placement`**: for each leg it casts the game's `GroundQuery` (`std::function<optional<GroundHit>
+(Vec3f from, Vec3f to)>`; P2's physics raycast is one) from above the animated ankle, puts the ankle target on the hit lifted by
+the foot height (a foot in the air keeps its clearance over the ground it is above), tilts the foot to the normal clamped to
+`max_tilt_degrees` (not at all in the air), and finds how far the pelvis must go down for the lowest foot (`max_pelvis_drop`;
+`max_pelvis_raise`, 0 by default, for the pelvis to rise on a step). `FootPlacementState` eases the pelvis offset and a foot that
+the ground fell away from (it rises at once: no sinking into a step). The plan touches no pose; `apply_foot_placement` moves
+the pelvis joint and solves the legs.
+
+### In the ECS animator
+
+`Animator3D::ik_constraints` (an `IKConstraint` each: `name`, `kind` TwoBone / LookAt / FootPlacer, `joints` by name, `weight`,
+`fade_seconds`, a target, a pole, options) are solved in `WorldRenderState3D::collect()` (or by `apply_ik()`), in list order,
+on the pose the clips and layers made, with the entity's `WorldTransform3D` of the frame; then the joint matrices are made from
+the result. An animator with none is exactly what it was, to the byte.
+
+```cpp
+kin::Animator3D animator{.clip = "Idle"};
+animator.add_ik({.name = "feet", .kind = kin::IKKind::FootPlacer, .joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"},
+                 .foot_heights = {0.05f, 0.05f}, .ground = [&](kin::Vec3f from, kin::Vec3f to) { return physics.raycast(from, to); }});
+animator.add_ik({.name = "right_hand", .kind = kin::IKKind::TwoBone, .joints = {"shoulder_R", "elbow_R", "hand_R"}, .fade_seconds = 0.15f});
+entity.set(animator);
+
+// each frame, from game code (a set from a non-const lvalue moves it: take the pointer)
+auto* a = entity.get_mut<kin::Animator3D>();
+a->ik("right_hand").set_target(hold_entity, {0, 0.05f, 0}).set_pole_direction({0, 0, -1}).set_weight(gripping ? 1.0f : 0.0f);
+```
+
+- **Targets.** A world-space point (`set_target(Vec3f)`), a point carried by another entity (`set_target(entity, local_offset)`:
+  its `WorldTransform3D` of the frame, so it follows it), or none. A target entity that is destroyed, or has no `WorldTransform3D`,
+  counts as no target: the constraint lets go over its fade, from the place it was last at. Poles are a world point
+  (`set_pole_position`) or a model-space direction (`set_pole_direction`). The foot placer's `ground` is in world space.
+- **Weights** are a goal (`set_weight`) the weight in force eases to linearly in `fade_seconds` and shapes with a smoothstep: a hand
+  lifts to a hold and lets go with no jerk. 0 in force means the constraint does nothing and costs nothing.
+- **Order matters.** A constraint moves everything below its joints, so list them in the order the pose wants them: feet (they lower
+  the pelvis), then the look (it turns the spine), then the arms, so that a hand lands on its target. A second constraint on the
+  same chain wins.
+- **When.** Solving is in `collect()`, not `animate()`, because the entity's matrix of the frame is known only after
+  `propagate_transforms()`. Smoothing uses the `dt` of the `animate()` steps since the last solve, once: two views, or an early
+  `apply_ik()` to read a joint, change nothing. The solved pose and its model-space world matrices stay on the animator
+  (`ik_pose`, `ik_world`), for gameplay that wants to know where a hand is.
+- **Culling, velocity, shadows.** All take the matrices as they come: the bound is made from the posed joints (a hand reaching
+  into view is not culled), the previous frame's matrices (TAA velocity) are the previous frame's IK'd ones, and the shadow cache
+  sees the pose change.
+
+Cost (an 18-joint person, a hand, a three-joint look-at and two feet, with the matrices): about 6 microseconds on one core; 500
+such characters in the ECS (`animate` + `propagate` + `collect`, 3 constraints each) 3.2 ms against 0.65 ms for the same
+500 with none. Limits: a non-uniform scale on the root joint or between the mid and end joints is approximate; the solvers know
+nothing of collisions or joint limits (look-at has them; the two-bone has none beyond `min_bend_degrees`); D3D12 and Metal are
+untested (nothing here is GPU).
+
 ## Entities
 
 `kin/ecs/render3d.hpp` puts meshes on ECS entities: `Transform3D` (position,

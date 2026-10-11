@@ -146,6 +146,154 @@ std::string quoted(const std::string& s) {
     return out + "\"";
 }
 
+
+// `animation: {ecs: true, ik: [...]}` (docs/rendering_3d.md, Inverse kinematics): the entity's IK constraints, in order. Each:
+//   {name, kind: "two_bone" | "look_at" | "foot_placer", joints: [...], weight, fade,
+//    target: [x, y, z] (the world; none: no target), pole_direction: [x, y, z] (model) | pole_position: [x, y, z] (world),
+//    max_stretch, min_bend, target_rotation: {axis, degrees} (world),
+//    look_at: weights: [...], max_yaw: [...], max_pitch_up: [...], max_pitch_down: [...] (per joint), smooth, release, aim: [..], up: [..],
+//    foot_placer: foot_heights: [...], up, max_tilt, max_pelvis_drop, max_pelvis_raise, smooth,
+//      ground: {floor: y, boxes: [{min: [..], max: [..]}], slope: {point, normal}} (what the query hits first, in the world)}
+std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
+    std::vector<kin::IKConstraint> out;
+    for (const kin::JsonValue& j : list.items()) {
+        kin::IKConstraint k;
+        k.name = j.string_at("name");
+        const std::string kind = j.string_at("kind");
+        k.kind = kind == "look_at" ? kin::IKKind::LookAt : kind == "foot_placer" ? kin::IKKind::FootPlacer : kin::IKKind::TwoBone;
+        if (const kin::JsonValue* joints = j.find("joints")) {
+            for (const kin::JsonValue& n : joints->items()) {
+                k.joints.push_back(n.as_string());
+            }
+        }
+        k.weight = static_cast<float>(j.number_at("weight", 1.0));
+        k.fade_seconds = static_cast<float>(j.number_at("fade", 0.0));
+        if (const kin::JsonValue* t = j.find("target")) {
+            k.set_target(vec3(t));
+        }
+        if (const kin::JsonValue* d = j.find("pole_direction")) {
+            k.set_pole_direction(vec3(d));
+        } else if (const kin::JsonValue* pp = j.find("pole_position")) {
+            k.set_pole_position(vec3(pp));
+        }
+        k.two_bone.max_stretch = static_cast<float>(j.number_at("max_stretch", 1.0));
+        k.two_bone.min_bend_degrees = static_cast<float>(j.number_at("min_bend", 0.0));
+        if (const kin::JsonValue* r = j.find("target_rotation")) {
+            k.set_target_rotation(kin::Quatf::axis_angle(vec3(r->find("axis"), {0, 1, 0}), static_cast<float>(r->number_at("degrees", 0.0))),
+                                  static_cast<float>(r->number_at("weight", 1.0)));
+        }
+        const auto numbers = [&](const char* key, std::vector<float>& into) {
+            if (const kin::JsonValue* a = j.find(key)) {
+                for (const kin::JsonValue& n : a->items()) {
+                    into.push_back(static_cast<float>(n.as_number()));
+                }
+            }
+        };
+        if (k.kind == kin::IKKind::LookAt) {
+            std::vector<float> w, yaw, up, down;
+            numbers("weights", w);
+            numbers("max_yaw", yaw);
+            numbers("max_pitch_up", up);
+            numbers("max_pitch_down", down);
+            for (std::size_t i = 0; i < k.joints.size(); ++i) {
+                kin::LookAtJoint l;
+                l.weight = i < w.size() ? w[i] : 1.0f;
+                l.max_yaw_degrees = i < yaw.size() ? yaw[i] : 180.0f;
+                l.max_pitch_up_degrees = i < up.size() ? up[i] : 180.0f;
+                l.max_pitch_down_degrees = i < down.size() ? down[i] : 180.0f;
+                k.look_links.push_back(l);
+            }
+            k.look_at.smooth_seconds = static_cast<float>(j.number_at("smooth", 0.0));
+            k.look_at.release_degrees = static_cast<float>(j.number_at("release", 30.0));
+            k.look_at.aim_axis = vec3(j.find("aim"), k.look_at.aim_axis);
+            k.look_at.up_axis = vec3(j.find("up"), k.look_at.up_axis);
+        }
+        if (k.kind == kin::IKKind::FootPlacer) {
+            numbers("foot_heights", k.foot_heights);
+            k.foot.max_tilt_degrees = static_cast<float>(j.number_at("max_tilt", 30.0));
+            k.foot.max_pelvis_drop = static_cast<float>(j.number_at("max_pelvis_drop", 0.5));
+            k.foot.max_pelvis_raise = static_cast<float>(j.number_at("max_pelvis_raise", 0.0));
+            k.foot.smooth_seconds = static_cast<float>(j.number_at("smooth", 0.1));
+            if (const kin::JsonValue* g = j.find("ground")) {
+                struct Box {
+                    Vec3f lo, hi;
+                };
+                std::vector<Box> boxes;
+                if (const kin::JsonValue* b = g->find("boxes")) {
+                    for (const kin::JsonValue& item : b->items()) {
+                        boxes.push_back({vec3(item.find("min")), vec3(item.find("max"))});
+                    }
+                }
+                const bool has_floor = g->find("floor") != nullptr;
+                const float floor_y = static_cast<float>(g->number_at("floor", 0.0));
+                const bool has_slope = g->find("slope") != nullptr;
+                const Vec3f slope_point = has_slope ? vec3(g->find("slope")->find("point")) : Vec3f{};
+                const Vec3f slope_normal = has_slope ? normalize(vec3(g->find("slope")->find("normal"), {0, 1, 0})) : Vec3f{0, 1, 0};
+                // The first hit along the segment: the nearest of the boxes' faces, the slope plane and the floor.
+                k.ground = [boxes, has_floor, floor_y, has_slope, slope_point, slope_normal](Vec3f from, Vec3f to) -> std::optional<kin::GroundHit> {
+                    const Vec3f d = to - from;
+                    float best = 2.0f;
+                    kin::GroundHit hit;
+                    const auto plane = [&](Vec3f point, Vec3f n) {
+                        const float denom = dot(d, n);
+                        if (denom >= -1e-9f) {
+                            return;
+                        }
+                        const float t = dot(point - from, n) / denom;
+                        if (t >= 0.0f && t < best) {
+                            best = t;
+                            hit = {from + d * t, n};
+                        }
+                    };
+                    if (has_floor) {
+                        plane({0.0f, floor_y, 0.0f}, {0.0f, 1.0f, 0.0f});
+                    }
+                    if (has_slope) {
+                        plane(slope_point, slope_normal);
+                    }
+                    for (const Box& b : boxes) {
+                        // Slab test; the face it enters through gives the normal.
+                        float t0 = 0.0f, t1 = 1.0f;
+                        Vec3f n{};
+                        bool inside = true;
+                        const float lo[3] = {b.lo.x, b.lo.y, b.lo.z}, hi[3] = {b.hi.x, b.hi.y, b.hi.z};
+                        const float o[3] = {from.x, from.y, from.z}, dir[3] = {d.x, d.y, d.z};
+                        for (int a = 0; a < 3 && inside; ++a) {
+                            if (std::fabs(dir[a]) < 1e-9f) {
+                                inside = o[a] >= lo[a] && o[a] <= hi[a];
+                                continue;
+                            }
+                            float ta = (lo[a] - o[a]) / dir[a], tb = (hi[a] - o[a]) / dir[a];
+                            float sign = -1.0f;
+                            if (ta > tb) {
+                                std::swap(ta, tb);
+                                sign = 1.0f;
+                            }
+                            if (ta > t0) {
+                                t0 = ta;
+                                n = {};
+                                (a == 0 ? n.x : a == 1 ? n.y : n.z) = sign;
+                            }
+                            t1 = std::min(t1, tb);
+                            inside = t0 <= t1;
+                        }
+                        if (inside && t0 < best && (n.x != 0.0f || n.y != 0.0f || n.z != 0.0f)) {
+                            best = t0;
+                            hit = {from + d * t0, n};
+                        }
+                    }
+                    if (best > 1.0f) {
+                        return std::nullopt;
+                    }
+                    return hit;
+                };
+            }
+        }
+        out.push_back(std::move(k));
+    }
+    return out;
+}
+
 // A model placed in the scene.
 struct Placed {
     kin::Model model;
@@ -771,6 +919,9 @@ int main(int argc, char** argv) {
                         back.speed = a->number_at("speed", 1.0);
                         back.remove_root_motion = a->string_at("root_motion") == "remove";
                         back.ecs = a->bool_at("ecs");
+                        if (const kin::JsonValue* ik = a->find("ik")) {
+                            back.animator.ik_constraints = parse_ik(*ik);
+                        }
                         if (const kin::JsonValue* blend = a->find("blend")) {
                             if (const kin::JsonValue* points = blend->find("points")) {
                                 for (const kin::JsonValue& point : points->items()) {

@@ -178,6 +178,11 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   and Wave by a slider) as ECS entities (`SkinnedMeshRenderer`, `Animator3D`) in a row in front of the camera (1 to 64), with speed and size;
   changing the clip is a state change, which crossfades. The stats show skinned copies, draws and joint matrices. `--preset character` and
   `--preset character-all` (with occlusion, contact shadows, TAA and four cascades). The panel's click path is untested here (no display).
+- The "Character IK" section (the Person rig: 18 joints, procedural, same clip names) poses the same entities by inverse kinematics
+  (`Animator3D::ik`): a hand to a target (sliders for its position from the left shoulder, which way the elbow points, weight, fade,
+  how much the arm may stretch; a red ball marks the target), the head looking at the camera (weight, smoothing), and foot placement on
+  the floor and on a step under the left foot (height slider). `--preset ik`, `--preset ik-reach`, `--preset ik-all`.
+  The panel's click path is untested here (no display).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8

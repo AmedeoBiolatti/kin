@@ -2837,6 +2837,174 @@ with five characters, AO, contact shadows, TAA and four cascades (the stats line
 matrices; it needs one (a callback or a list of IK targets by joint name, applied before `compute_joint_matrices`). P1c wants a time offset and a start
 phase on the animator, event keys on skeletal clips (footsteps) and the real model path in Sponza Walk (the viewer's character is procedural).
 
+#### P1b — inverse kinematics — results
+
+Done 2026-10-11 on `exp/3d-rendering` (head 5b66837 plus the working tree; not committed). All of it is CPU maths plus the ECS hook: no shader
+or renderer change. Opt-in: an `Animator3D` with no constraints is exactly what it was, and every earlier picture is byte for byte.
+
+**What was built (the spec's items).**
+
+| # | Piece | Where | Notes |
+|---|---|---|---|
+| 1a | `solve_two_bone` | `kin/render3d/ik.hpp`, `src/render3d/ik.cpp` | pole by direction or point, weight, soft stretch, minimum bend, end-orientation target, intermediate (twist) joints carried; solved in the root joint's parent space |
+| 1b | `solve_look_at` | same | chain with shared turn, per-joint yaw / pitch limits (ellipse), release toward forward past a limit, smoothing in a `LookAtState` (the function takes `dt`; the Animator keeps the state, in world space) |
+| 1c | `solve_chain_fabrik` | same | done: tolerance, iteration cap, fixed or free root; bone lengths kept |
+| 1d | `plan_foot_placement`, `apply_foot_placement` | same | `GroundQuery` = `std::function<optional<GroundHit>(Vec3f, Vec3f)>`; targets, orientation, pelvis offset, `FootPlacementState` (pelvis eased both ways, a foot eased down only) |
+| 1 | partial matrix updates | `update_world_below`, `world_to_joint_matrices` | only the joints below a changed one are recomputed; the shader's matrices are one multiplication a joint from the world matrices |
+| 2 | ECS hook | `kin/ecs/render3d.hpp`, `src/ecs/render3d.cpp` | `IKConstraint`, `Animator3D::{ik_constraints, add_ik, ik(name), find_ik, ik_pose, ik_world}`, `WorldRenderState3D::apply_ik()`; targets: world point, entity (+ local offset), none; pole: world point or model direction; weight goal + fade (linear, smoothstep-shaped) |
+| 3 | bounds | none needed | the bound is made from the posed joint matrices, which include the IK: `test_gpu_ik_not_culled` |
+| 4 | harness, viewer | `tools/reference/kin_reference.cpp` (`animation.ik`), `make_scenes.py` (`skinned_biped.glb`, `ik_marker.glb`, `ik_step.glb`), scenes `skinned_ik`, `skinned_ik_look`; Sponza Walk "Character IK" section, presets `ik`, `ik-reach`, `ik-all` | procedural person (CesiumMan's joint names are not limbs a rig can name); the viewer's person is `make_person` in `character.hpp` |
+| 5 | tests | `tests/skeleton_tests.cpp` (16 CPU tests and a bench, `kin-skeleton`), `tests/render3d_tests.cpp` (5 GPU tests, `kin_render3d_tests test_gpu_ik`), `tests/skin_fixtures.hpp` (`make_biped`, `make_biped_body`, `make_joint_cube`) | see below |
+
+**Design decisions** (the reasons are in the code comments):
+- *Solved in the space of the root joint's parent*, not the model's: a rotation of the root is then exactly a rotation whatever scale a model
+  or an ancestor carries (non-uniform scale tested), and the bones are the lengths they are drawn at.
+- *The upper bone's turn carries the bend plane* (so the elbow only hinges and the twist is taken at the shoulder, continuously with the
+  pole), mixed with the shortest turn by how bent the input pose is (a straight arm has no plane). Rejected, in this order: shortest turn
+  of each bone (the forearm lands out of plane and the elbow twists: 10 degrees a step in the sweeps); choosing the plane's normal by the
+  shorter twist (a hinge reversed, an elbow bending backwards, whenever a pole is more than 90 degrees from the animated bend).
+- *The side of the bend falls back smoothly*: a pole on the target's axis gives way to the pose's own bend, and a straight chain with no
+  pole to "toward -Y", each by a small pull that acts only near the degenerate case (a switch made 42 jumps in the straight-chain sweep).
+- *Stretch is measured against the skeleton's rest bone lengths*, so a second solve of the same chain (or two constraints on it) never
+  stretches twice: idempotent. Found by the idempotence test (the first version stretched again each pass).
+- *Solved in `collect()`*, not `animate()`: the entity's WorldTransform3D of the frame is known only after `propagate_transforms()`. The
+  smoothing state advances by the `dt` of the animate() steps since the last solve, once; a second solve in the frame (two views, an early
+  `apply_ik()`) changes nothing.
+- *Look-at limits are an ellipse in the deflection's azimuth, eased to forward over `release_degrees` past the limit*, so a target going
+  behind the head does not flip it from one limit to the other (worst step of the aim 1.6 degrees for a target moving 0.5).
+- *Constraint order is the list order and it matters*: a constraint moves what hangs below its joints. In `skinned_ik` the first
+  version listed the arm before the foot placer and the look: the hand missed its target by 11 cm (the pelvis lowered, the spine turned
+  after it). Put feet first, then the look, then the arms. The docs say so.
+- *A target that goes away lets go*: an entity that is destroyed counts as no target, the goal weight falls to 0 and the fade runs from
+  the last place the target was. Without a fade it is at once.
+
+**Results.**
+
+| Check | Result |
+|---|---|
+| `ninja -C build -j8`, `ninja -C build-no3d -j8` | build; the 3D-off build is untouched (the new files are under the option) |
+| `ctest` in `build`, `KIN_REQUIRE_GPU_TESTS=1` | 69 of 69 |
+| `ctest` in `build-no3d` | 65 of 65 |
+| `kin_render3d_tests` | passes on NVIDIA RTX 4080 (VK_ICD_FILENAMES unset, 91 s) and on lavapipe (151 s) |
+| `kin_skeleton_tests` | passes (16 new tests and the bench) |
+| Off-path pictures: default and `--cascades 4 --ao --contact-shadows --taa` over crowd, shadows, sponza, helmet, motion, spheres, cornell; kiln_near with `--lod --lod-clusters` | 37 of 37 byte-identical to `p1a_base_def` / `p1a_base_all` / `p1a_base_kiln` |
+| Skinned scenes (skinned_bend, skinned_ecs, skinned_blend, skinned_cesium, skinned_fox), default and all-on, before the edit vs after | 20 of 20 byte-identical; a second render of the same build matched itself |
+| `skinned_ik`, `skinned_ik_look` rendered twice | identical |
+
+**What the tests assert** (CPU unless said):
+
+| Test | What |
+|---|---|
+| two-bone reach | 800 random reachable targets (arm and leg, random poles): end within 2e-4 of the target, bone lengths kept to 1e-5, only the chain's rotations changed (translations and scales bit equal), the kept matrices equal a full recompute |
+| out of reach | the end on the line to the target at full extension, the elbow on the line (needed Heron's factors: `l1^2 - a^2` lost it to rounding, 3e-4 off); soft stretch monotonic and continuous in the distance, never above the limit; minimum bend 10 degrees gives exactly 10 |
+| pole | the elbow on the pole's side for +-Y and +-Z; opposite poles mirror across the axis; a point equals the direction to it |
+| weight | 0: pose and matrices equal bit for bit; 0.5: each rotation half way; 1e-4: hardly moved |
+| idempotence | solving a solved pose again: matrices within 2e-5, with and without a pole, in and out of reach, with stretch and minimum bend |
+| continuity | sweeps of 1,999 to 4,000 steps; table below |
+| scaled and turned | a model with a non-uniform scale and a turn at its root and a scaled chest above the shoulder: 200 targets, hand within 1e-3 of the target, bones kept to 2e-5 in the parent's space |
+| orientation | the end joint within 0.05 degrees of the target orientation; half the weight half way; without it the local rotation is untouched |
+| look-at | arrives; shares 20/30/50%; limits hold exactly (5/15/25 degrees, aim 45 off); asymmetric pitch; weight 0 bit for bit, 0.5 half; target circling the head: worst step of the aim 1.6 degrees for 0.5 of target, at the back 0 from forward; smoothing monotonic and e^-1 left after one time constant; the speed cap holds |
+| foot placement | flat ground: nothing moves; a step down under one foot: pelvis -0.2, that foot on it, the other bent (knee forward), bones kept; a step up: pelvis stays, with a raise allowed it takes the lowest rise; slopes of 20 and 50 degrees: the foot's up follows the normal to 0.1 degrees, 30 degrees at most; easing: snapped on the first call, e^-t/tau afterwards; a foot falling away eases down and rising is at once; no ground: left as animated |
+| FABRIK | 100 targets reached to 1e-3, lengths kept to 1e-4, root fixed; out of reach: straight at it; free root follows; weight 0 untouched |
+| order, bad input | the later constraint on a chain wins; a pelvis lowered then an arm: the shoulder moved, the hand arrives; reversed chains, equal joints, indices out of range, a zero-length bone: nothing happens (`solved` false) |
+| ECS | a hand reaches a world target for an entity moved, turned and scaled (1.7); the elbow on the pole's side; an entity target followed; a destroyed one is safe and fades; fade-in at 0.3 s partway, full at 0.5 s; `set_weight(0)` lets go; order; no constraints: matrices bit equal to the player's; unresolved joint names do nothing; two runs equal |
+| GPU: hand at target | the red marker's centre of mass within 0.04 to 0.2 pixels of the target's projection (5 cases: three positions, an entity moved and turned, scaled 1.3), and not there at weight 0 |
+| GPU: not culled | a person below the view (culled at rest) with the arm raised into view is drawn, the marker at the target |
+| GPU: TAA | a hand moved by IK under TAA for 16 frames: the pictures equal those of the same poses played from a baked clip, 0 of 19,200 pixels over 4 levels (the marker moves 10.8 px) |
+| GPU: shadow cache | cached and still: hit; only the IK target moves: miss, picture equal to the uncached one, arms again |
+| GPU: workers | 40 and 2,200 IK characters: two runs and the job system give the same picture |
+
+Continuity sweeps (worst step of either rotation, or of the elbow's direction, between consecutive targets; the targets move 0.0004 to 0.001 of the reach a step):
+
+| Sweep | Worst step | Note |
+|---|---|---|
+| through the root, equal bones | 0.16 degrees | and one 180-degree twist at the fold's exact centre, the joints in the same places (see limits) |
+| through the root, unequal bones (5 cm hole) | 8.1 degrees, elbow/hand 0.07 a step | the chain turns end over end within the hole, steeply, without a jump |
+| along the axis, through full extension | 3.9 degrees | the bend's angle goes as the square root of the distance short of full reach; a minimum bend flattens it |
+| straight chain, no pole | 0.86 degrees | |
+| round the pole (cones of 40, 8, 2 degrees) | 0.10 to 0.16 | |
+| through the pole's axis (three directions) | 0.19, 0.39, 3.2 degrees | the elbow swings to the other side over a few degrees of the target's travel |
+
+**Mutation checks** (each: break one thing, see a test fail, revert; the sources were compared with copies afterwards). 20 mutations, all caught:
+
+| Break | Caught by |
+|---|---|
+| pole side flipped | `test_ik_two_bone_pole` |
+| stretch leaves the forearm at its own length | `test_ik_two_bone_idempotent` (the out-of-reach test passes this break, also with the check on the hand's place that I added there: the pose's translations are stretched right whatever the solve assumed; idempotence is what sees it) |
+| weight ignored | `test_ik_two_bone_weight` |
+| stretch against the current lengths | `test_ik_two_bone_idempotent` |
+| model space instead of the root's parent's | `test_ik_two_bone_scaled_and_turned` |
+| look-at limits ignored / a hard clamp with no release | `test_ik_look_at` (both) |
+| look-at weight ignored | `test_ik_look_at` |
+| look-at smoothing ignores `dt` | `test_ik_look_at` (only after a time-constant assertion was added: it first SURVIVED) |
+| pelvis takes the highest foot | `test_ik_foot_placement` |
+| foot tilt not clamped | `test_ik_foot_placement` |
+| foot ground offsets not eased | `test_ik_foot_placement` |
+| FABRIK without the forward pass | `test_ik_fabrik` |
+| two-bone without the mid joint's turn | `test_ik_two_bone_reach` (and the GPU tests) |
+| weights do not fade | `test_ecs_ik_entity_target_and_fades` |
+| destroyed target keeps its weight | `test_ecs_ik_entity_target_and_fades` |
+| constraints in reverse order | `test_ecs_ik_order_and_off_path` |
+| entity matrix ignored | `test_ecs_ik_reaches_world_target` (and the GPU hand test) |
+| `collect()` ignores the IK (matrices of the clips) | the ECS test, and all four GPU tests: hand at target, not culled, TAA vs clip, shadow cache (workers passes: it compares one build with itself) |
+| matrices one frame stale | the same |
+
+**Cost** (one core, Release; the machine's other load was light).
+
+| Measure | Value |
+|---|---|
+| An 18-joint person: world matrices, a two-bone arm, a three-joint look-at, a foot placer for two legs, the matrices (`bench_ik`, 20,000 runs) | 5.6 to 5.7 us |
+| 500 such persons in the ECS with three constraints each, `animate` + `propagate_transforms` + `collect` | 3.27 to 3.32 ms a frame (6.5 to 6.6 us each) against 0.66 ms for the same 500 with no constraints |
+| The part spent in constraints, then, per person | about 5.4 us: single-digit microseconds, as asked (it includes a heap-allocated `std::function` per foot placer per frame and the IK pose copy) |
+| GPU | nothing changes (the matrices are the same array of the same size); not timed separately |
+
+**What I looked at** (`kin_reference` `skinned_ik` and `skinned_ik_look`, Sponza Walk `--preset ik`, `ik-reach`, `ik-all`; the test pictures with `KIN_TEST_DUMP`).
+- The hand reaching the target: on it at every position tried (the marker ball sits under the hand's ball). The elbow goes to the pole's side
+  (back for the arm to the front-right, down for the arm across the body). No collapse and no visible candy-wrapper at the elbow of this
+  procedural person; its limbs are tubes with a ramp of weights over the last 40% of each bone, which is gentle.
+- Over-reach: the right arm of the second person straight at a target 2.2 m away, in line with it; stretch off.
+- A foot on a step with the pelvis lowered: the person stands at the edge of a 0.2 m step with the left foot on it and the right on the
+  floor: the pelvis is 0.2 lower than the step's level (the right foot's drop), the left leg bent with the knee forward and the foot flat on
+  the step. The foot sits near the step's back edge (the animated foot is there), nothing slides in a still picture.
+- The head: 40 and 80 degrees turn it to face the target (the nose shows it), 125 degrees stops short of the target at the limits (the
+  head is turned to the side), straight behind eases back to facing front, 60 degrees up tilts the head back to the limits. No flips.
+- Two things on the person's mesh that are the fixture's, not the solver's: the open ends of the tubes at the shoulders and the crease
+  where the clavicle tubes cross the chest.
+
+**Honest limits.**
+1. *A target through the exact centre of a folded chain with equal bones* turns the upper arm 180 degrees in one step about its own axis with
+   every joint in the same place (the fold's plane flips). No continuous rule has no such place; the pose is right, the skin twists. Real
+   bones are unequal (a hole of `|l1 - l2|` round the root, through which the chain turns steeply but continuously), and a hand targeted at its
+   own shoulder is a bug in the game.
+2. *A pole exactly behind the target* (opposite the pose's own bend, near the axis) is the one place the elbow's side must flip: it does so
+   over a few degrees of the target's travel (3.2 degrees a step at 0.0003 of the reach a step), not at once.
+3. *A straight chain with no pole* bends toward -Y: a knee, or an arm that is not to hang, needs a pole. The ECS foot placer's knees
+   keep the clips' bend with `Pole::None`, so give it a model direction when the legs are straight.
+4. *A non-uniform scale on the root joint itself or between the mid and end joints* is approximate (the mid and end rotations are applied
+   through the rotation of the parent's matrix); one above the chain is exact.
+5. *Foot placement is a plan, not physics*: no foot locking (a planted foot slides if the character's root does between frames: the ankle
+   target comes from the animated ankle's place), no toe, no slope-aware pelvis tilt, no leg-length limit besides `max_stretch` and
+   `max_pelvis_drop`. A foot in the air keeps its clearance above the ground it is over, so a swing across a ledge lifts and drops with it
+   (eased down). The ground query is called twice a frame per foot planner (once per leg).
+6. *Joint limits*: look-at has them; the two-bone solver has none (an elbow can be driven backwards by a pole behind it).
+7. *Look-at smoothing in the ECS is in world space and starts from the head's own aim* when its weight comes up from 0.
+8. *Not done or not tested*: D3D12 and Metal (nothing here is GPU); Sponza Walk's panel click path (no display): the section ran only
+   through `--preset` and `--set`; CesiumMan's IK (its joint names are not a rig's); a FABRIK use with an ECS constraint kind (the maths
+   is in `ik.hpp`; the ECS hook has two-bone, look-at and the foot placer); prefab / component-schema support (the 3D components have none);
+   kin/anim events or state-machine parameters driving weights (the game sets them each frame: `set_weight`).
+
+**What P2 needs from this.**
+- *The ground query* is a physics raycast: `GroundQuery` is `(Vec3f from, Vec3f to) -> optional<GroundHit{position, normal}>` in world
+  space, from the foot's place down by `ray_up + ray_down` metres; P2's `raycast(from, to)` returns that. Two calls per foot per frame; give it a
+  layer mask for the level (not the character's own body).
+- *Grab*: a hold is an entity (or a point) with `WorldTransform3D`: `ik("right_hand").set_target(hold, grip_offset).set_target_rotation(
+  surface_rotation).set_pole_direction(away_from_wall)`; `set_weight(1)` with a fade of 0.1 to 0.2 s to reach and `set_weight(0)` to
+  release. A hold that is destroyed is let go of by itself. To drive the character's body toward the hold (hanging), move the entity (the physics
+  body) and the feet planner's pelvis follows.
+- *Reading where a hand is* before drawing (grip checks, stamina, rope attachment): `state.apply_ik()` after `propagate_transforms()`,
+  then `animator.ik_world[hand_joint]` in the model's space (times the entity's `WorldTransform3D`).
+- *Order of the list* for a climber: feet, look, arms (and the spine's lean as a clip layer before them).
+
 ### P2 — 3D physics with Jolt, and a character
 
 Jolt behind `kin/physics3d` (the Box2D module stays as it is): bodies (static, kinematic,

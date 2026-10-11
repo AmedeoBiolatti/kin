@@ -1,6 +1,8 @@
 #include <kin/ecs/render3d.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 
 namespace kin {
 
@@ -47,10 +49,10 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
                       .build()),
       _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer>().cached().build()),
       _animators(world.query_builder<const SkinnedMeshRenderer, Animator3D, Transform3D*>().build()),
-      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, const Animator3D*>().build()) {}
+      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()) {}
 
 void WorldRenderState3D::animate(f32 dt) {
-    _animators.each([&](const SkinnedMeshRenderer& renderer, Animator3D& a, Transform3D* own) {
+    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer& renderer, Animator3D& a, Transform3D* own) {
         const Model* model = renderer.model.get();
         if (!model || model->skeletons.empty()) {
             return;
@@ -141,6 +143,179 @@ void WorldRenderState3D::animate(f32 dt) {
                 }
             }
         }
+        if (!a.ik_constraints.empty()) {
+            // The weights ease toward their goals (a target that is gone has the goal 0); the solving itself waits for
+            // collect(), when the entity's WorldTransform3D of this frame is known.
+            a.ik_dt += dt;
+            const flecs::world ecs = it.world();
+            for (IKConstraint& k : a.ik_constraints) {
+                k.target_valid = false;
+                if (k.target.kind == IKTarget::Kind::World) {
+                    k.target_valid = true;
+                } else if (k.target.kind == IKTarget::Kind::Entity) {
+                    k.target_valid = ecs.is_alive(k.target.entity) && ecs.entity(k.target.entity).get<WorldTransform3D>() != nullptr;
+                }
+                // A target that is gone (or was never given) lets go: the goal is 0, and the fade runs from where it was.
+                const bool needs_target = k.kind != IKKind::FootPlacer;
+                const f32 want = needs_target && !k.target_valid ? 0.0f : std::clamp(k.weight, 0.0f, 1.0f);
+                if (k.fade_seconds > 0.0f) {
+                    const f32 step = dt / k.fade_seconds;
+                    k.current += std::clamp(want - k.current, -step, step);
+                } else {
+                    k.current = want;
+                }
+            }
+        }
+    });
+}
+
+void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose& base, const Mat4f& entity_matrix, const flecs::world& ecs) {
+    a.ik_pose = base;
+    compute_world_matrices(sk, a.ik_pose, a.ik_world);
+    const Mat4f to_model = entity_matrix.inverse();
+    const f32 dt = a.ik_dt;
+    for (IKConstraint& k : a.ik_constraints) {
+        const f32 c = std::clamp(k.current, 0.0f, 1.0f);
+        const f32 w = c * c * (3.0f - 2.0f * c);
+        if (k.resolved_for != &sk) {
+            k.resolved.clear();
+            for (const std::string& name : k.joints) {
+                k.resolved.push_back(sk.find(name));
+            }
+            k.resolved_for = &sk;
+        }
+        const auto resolved = [&](std::size_t count) {
+            if (k.resolved.size() < count) {
+                return false;
+            }
+            return std::none_of(k.resolved.begin(), k.resolved.begin() + static_cast<std::ptrdiff_t>(count), [](i32 j) { return j < 0; });
+        };
+        if (w <= 0.0f) {
+            k.look_state.valid = false;
+            k.foot_state.valid = false;
+            continue;
+        }
+        // The target in the model's space: the point of the world, or the entity's grip point; a vanished entity is
+        // left from the point it was last at (the weight is fading out).
+        Vec3f target_world{};
+        bool has_target = false;
+        if (k.kind != IKKind::FootPlacer) {
+            if (k.target.kind == IKTarget::Kind::World) {
+                target_world = k.target.position;
+                has_target = true;
+            } else if (k.target.kind == IKTarget::Kind::Entity && ecs.is_alive(k.target.entity)) {
+                if (const WorldTransform3D* t = ecs.entity(k.target.entity).get<WorldTransform3D>()) {
+                    target_world = t->matrix.apply(k.target.position);
+                    has_target = true;
+                }
+            }
+            if (has_target) {
+                k.last_target = target_world;
+                k.has_last_target = true;
+            } else if (k.has_last_target) {
+                target_world = k.last_target;
+                has_target = true;
+            }
+            if (!has_target) {
+                continue;
+            }
+        }
+        const Vec3f target = to_model.apply(target_world);
+        const auto pole_mode = [&](TwoBoneOptions& o) {
+            switch (k.pole) {
+            case IKConstraint::Pole::WorldPosition:
+                o.pole_mode = PoleMode::Position;
+                o.pole = to_model.apply(k.pole_vector);
+                break;
+            case IKConstraint::Pole::ModelDirection:
+                o.pole_mode = PoleMode::Direction;
+                o.pole = k.pole_vector;
+                break;
+            case IKConstraint::Pole::None:
+                o.pole_mode = PoleMode::None;
+                break;
+            }
+        };
+        switch (k.kind) {
+        case IKKind::TwoBone: {
+            if (!resolved(3)) {
+                break;
+            }
+            TwoBoneOptions o = k.two_bone;
+            o.weight = w;
+            pole_mode(o);
+            if (k.match_rotation) {
+                o.match_rotation = true;
+                o.end_rotation = (rotation_of(to_model) * k.target_rotation).normalized();
+                o.rotation_weight = k.rotation_weight;
+            }
+            solve_two_bone(sk, a.ik_pose, a.ik_world, {k.resolved[0], k.resolved[1], k.resolved[2]}, target, o);
+            break;
+        }
+        case IKKind::LookAt: {
+            if (!resolved(1) || !resolved(k.resolved.size())) {
+                break;
+            }
+            std::array<LookAtJoint, 8> chain{};
+            const std::size_t n = std::min<std::size_t>(k.resolved.size(), chain.size());
+            for (std::size_t i = 0; i < n; ++i) {
+                chain[i] = i < k.look_links.size() ? k.look_links[i] : LookAtJoint{};
+                chain[i].joint = k.resolved[i];
+            }
+            LookAtOptions o = k.look_at;
+            o.weight = k.look_at.weight * w;
+            LookAtState state = k.look_state;
+            if (state.valid) {
+                state.direction = normalize(to_model.apply_vector(state.direction));
+            }
+            solve_look_at(sk, a.ik_pose, a.ik_world, std::span<const LookAtJoint>{chain.data(), n}, target, o, &state, dt);
+            k.look_state.direction = normalize(entity_matrix.apply_vector(state.direction));
+            k.look_state.valid = state.valid;
+            break;
+        }
+        case IKKind::FootPlacer: {
+            const std::size_t legs = k.resolved.size() >= 4 ? (k.resolved.size() - 1) / 3 : 0;
+            if (legs == 0 || !k.ground || !resolved(1 + legs * 3)) {
+                break;
+            }
+            std::array<FootLeg, 4> feet{};
+            const std::size_t n = std::min<std::size_t>(legs, feet.size());
+            for (std::size_t i = 0; i < n; ++i) {
+                feet[i].leg = {k.resolved[1 + i * 3], k.resolved[2 + i * 3], k.resolved[3 + i * 3]};
+                feet[i].foot_height = i < k.foot_heights.size() ? k.foot_heights[i] : 0.1f;
+            }
+            const std::span<const FootLeg> leg_span{feet.data(), n};
+            // The game's query is in the world: the segment goes out, the hit comes back into the model's space.
+            const GroundQuery model_ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+                const std::optional<GroundHit> hit = k.ground(entity_matrix.apply(from), entity_matrix.apply(to));
+                if (!hit) {
+                    return std::nullopt;
+                }
+                return GroundHit{to_model.apply(hit->position), normalize(entity_matrix.transposed().apply_vector(hit->normal))};
+            };
+            FootPlan plan = plan_foot_placement(sk, a.ik_pose, a.ik_world, leg_span, model_ground, k.foot, &k.foot_state, dt);
+            plan.pelvis_offset *= w;
+            TwoBoneOptions o = k.two_bone;
+            o.weight = w;
+            pole_mode(o);
+            apply_foot_placement(sk, a.ik_pose, a.ik_world, k.resolved[0], leg_span, plan, o, k.foot.up);
+            break;
+        }
+        }
+    }
+    a.ik_dt = 0.0f;
+}
+
+void WorldRenderState3D::apply_ik() {
+    _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator) {
+        const Model* model = renderer.model.get();
+        if (!animator || animator->ik_constraints.empty() || !model || model->skeletons.empty()) {
+            return;
+        }
+        const Skeleton& skeleton = model->skeletons[0];
+        if (animator->bound == model && animator->player.skeleton() == &skeleton) {
+            solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world());
+        }
     });
 }
 
@@ -199,7 +374,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         scene.draw_instanced(bucket.mesh, bucket.instances, bucket.material);
     }
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
-    _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, const Animator3D* animator) {
+    _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator) {
         const Model* model = renderer.model.get();
         if (!renderer.visible || !model || model->skeletons.empty()) {
             return;
@@ -207,7 +382,17 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         const Skeleton& skeleton = model->skeletons[0];
         _pose_scratch.resize(skeleton.joint_count());
         if (animator && animator->bound == model && animator->player.skeleton() == &skeleton) {
-            animator->player.joint_matrices(_pose_scratch);
+            if (animator->ik_constraints.empty()) {
+                animator->player.joint_matrices(_pose_scratch);
+                if (!animator->ik_world.empty()) {
+                    animator->ik_world.clear();
+                    animator->ik_pose.joints.clear();
+                }
+            } else {
+                // The clips' pose with the constraints solved on it, in this frame's place of the entity.
+                solve_ik(*animator, skeleton, animator->player.pose(), world.matrix, it.world());
+                world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
+            }
         } else {
             compute_joint_matrices(skeleton, skeleton.rest_pose(), _pose_scratch);
         }

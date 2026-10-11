@@ -1,5 +1,6 @@
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/render3d.hpp>
+#include <kin/render3d/ik.hpp>
 #include <kin/platform/app.hpp>
 #include "skin_fixtures.hpp"
 
@@ -8212,6 +8213,391 @@ void test_gpu_ecs_character() {
     });
 }
 
+
+// --- Inverse kinematics (P1b): the posed copy at the target, culling, TAA, the shadow cache, workers ---
+
+namespace ik_scene {
+
+// A biped model: a grey body of boxes along the bones and a bright cube on the left hand (unlit, so that its pixels are told).
+struct Biped {
+    std::shared_ptr<kin::Model> model;
+    kin::Mesh body, hand;
+    std::vector<Mat4f> rest_world;
+};
+
+Biped make_biped(kin::Renderer3D& r3d) {
+    Biped b;
+    b.model = std::make_shared<kin::Model>();
+    b.model->skeletons.push_back(skin_fixtures::make_biped());
+    const kin::Skeleton& sk = b.model->skeletons[0];
+    b.body = r3d.create_mesh(skin_fixtures::make_biped_body(sk));
+    b.hand = r3d.create_mesh(skin_fixtures::make_joint_cube(sk, skin_fixtures::biped::hand_l));
+    assert(b.body.valid() && b.body.skinned() && b.hand.skinned());
+    kin::ModelPart body;
+    body.name = "body";
+    body.mesh = b.body;
+    body.material = {.color = Color::rgb(170, 170, 180)};
+    body.skin = 0;
+    kin::ModelPart hand;
+    hand.name = "hand";
+    hand.mesh = b.hand;
+    hand.material = {.color = Color::rgb(255, 40, 30), .unlit = true};
+    hand.skin = 0;
+    b.model->parts = {body, hand};
+    kin::compute_world_matrices(sk, sk.rest_pose(), b.rest_world);
+    return b;
+}
+
+kin::IKConstraint left_hand() {
+    kin::IKConstraint k;
+    k.name = "hand";
+    k.kind = kin::IKKind::TwoBone;
+    k.joints = {"shoulder_L", "elbow_L", "hand_L"};
+    k.pole = kin::IKConstraint::Pole::ModelDirection;
+    k.pole_vector = {0.0f, 0.0f, -1.0f};
+    return k;
+}
+
+kin::Camera3D camera() { return kin::Camera3D::look_at({0.0f, 1.3f, 5.0f}, {0.0f, 1.1f, 0.0f}, 40.0f); }
+
+// The centre and count of the pixels that are the marker's red.
+struct Blob {
+    float x = 0.0f, y = 0.0f;
+    int count = 0;
+};
+Blob red_blob(const Pixels& p) {
+    Blob b;
+    for (int y = 0; y < p.size.y; ++y) {
+        for (int x = 0; x < p.size.x; ++x) {
+            const Color c = p.at(x, y);
+            if (c.r > 200 && c.g < 90 && c.b < 90) {
+                b.x += static_cast<float>(x) + 0.5f;
+                b.y += static_cast<float>(y) + 0.5f;
+                ++b.count;
+            }
+        }
+    }
+    if (b.count > 0) {
+        b.x /= static_cast<float>(b.count);
+        b.y /= static_cast<float>(b.count);
+    }
+    return b;
+}
+
+} // namespace ik_scene
+
+// The hand of a skinned character, posed by IK to a point of the world, is drawn where that point projects: the marker cube's centre of
+// mass within a pixel and a half of it, for several targets, for an entity moved and turned and scaled, and not there with the weight 0.
+void test_gpu_ik_hand_at_target() {
+    with_gpu("test_gpu_ik_hand_at_target", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+        struct Case {
+            const char* what;
+            kin::Transform3D transform;
+            Vec3f target_model; // in the model's space
+        };
+        const std::vector<Case> cases = {
+            {"in front", {}, {0.45f, 1.75f, 0.45f}},
+            {"out to the side and down", {}, {0.9f, 1.2f, 0.2f}},
+            {"across the chest", {}, {-0.15f, 1.5f, 0.5f}},
+            {"entity moved and turned", {.position = {0.3f, 0.0f, 0.4f}, .rotation = kin::Quatf::axis_angle({0, 1, 0}, 30.0f)}, {0.5f, 1.7f, 0.4f}},
+            {"entity scaled", {.position = {-0.2f, 0.0f, 0.0f}, .scale = {1.3f, 1.3f, 1.3f}}, {0.6f, 1.8f, 0.5f}},
+        };
+        for (const Case& c : cases) {
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            kin::Animator3D animator;
+            animator.add_ik(ik_scene::left_hand());
+            const flecs::entity e = world.raw().entity().set(c.transform).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator);
+            const Mat4f entity_matrix = c.transform.matrix();
+            const Vec3f target = entity_matrix.apply(c.target_model);
+            const auto shoot = [&](float weight) {
+                kin::Animator3D& a = *e.get_mut<kin::Animator3D>();
+                a.ik("hand").set_target(target).set_weight(weight);
+                state.animate(1.0f / 60.0f);
+                kin::Scene3D scene;
+                scene.camera = ik_scene::camera();
+                skin_lights(scene, 1);
+                state.propagate_transforms();
+                state.collect(scene);
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                const auto where = scene.camera.project(target, screen);
+                assert(where.has_value());
+                return std::pair{p, where->pos};
+            };
+            const auto [p, at] = shoot(1.0f);
+            const ik_scene::Blob blob = ik_scene::red_blob(p);
+            const float error = std::hypot(blob.x - at.x, blob.y - at.y);
+            std::cerr << "ik hand, " << c.what << ": marker at (" << blob.x << ", " << blob.y << ") px, target projects to (" << at.x << ", " << at.y
+                      << "), " << error << " px apart, " << blob.count << " marker pixels\n";
+            assert(blob.count > 25 && error < 1.5f);
+            assert(pixels_lit(p) > 1200);
+            dump(p, std::string{"ik_hand_"} + std::to_string(&c - cases.data()));
+            // Weight 0: the clips' pose, the hand elsewhere.
+            const auto [q, unchanged] = shoot(0.0f);
+            const ik_scene::Blob rest = ik_scene::red_blob(q);
+            std::cerr << "  weight 0: marker at (" << rest.x << ", " << rest.y << "), " << rest.count << " pixels\n";
+            assert(rest.count > 10 && std::hypot(rest.x - at.x, rest.y - at.y) > 5.0f);
+        }
+    });
+}
+
+// A character the camera does not see by its rest pose is not culled when IK puts a limb in view: the bound is made of the joints' posed
+// matrices, which include the IK. (Below the view: the head's top at y = -1.0; the hand reaching up to y = -0.4, inside the view's bottom.)
+void test_gpu_ik_not_culled() {
+    with_gpu("test_gpu_ik_not_culled", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::EcsWorld world;
+        kin::WorldRenderState3D state{world};
+        kin::Animator3D animator;
+        animator.add_ik(ik_scene::left_hand());
+        const kin::Transform3D below{.position = {0.0f, -3.0f, 0.0f}};
+        const flecs::entity e = world.raw().entity().set(below).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator);
+        const Vec3f target = below.matrix().apply({0.35f, 2.55f, 0.3f}); // the arm held up: 0.9 above the shoulder
+        const auto frame = [&](float weight) {
+            e.get_mut<kin::Animator3D>()->ik("hand").set_target(target).set_weight(weight);
+            state.animate(1.0f / 60.0f);
+            kin::Scene3D scene;
+            scene.camera = ik_scene::camera();
+            skin_lights(scene, 1);
+            state.propagate_transforms();
+            state.collect(scene);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        Pixels p = frame(0.0f);
+        // At rest the hand's part is culled (the body's bound, a sphere round everything, may still touch the view's edge: nothing of it shows).
+        assert(r3d.stats().culled >= 1 && pixels_lit(p) == 0);
+        p = frame(1.0f);
+        assert(r3d.stats().culled == 0);
+        const ik_scene::Blob blob = ik_scene::red_blob(p);
+        const auto at = ik_scene::camera().project(target, screen);
+        assert(blob.count > 10 && std::hypot(blob.x - at->pos.x, blob.y - at->pos.y) < 1.5f);
+        std::cerr << "ik culling: out of view at rest (culled), the hand reaching in is drawn (" << blob.count << " marker pixels)\n";
+        dump(p, "ik_reach_into_view");
+    });
+}
+
+// The previous joint matrices include the IK: a hand that moves by IK under TAA gives, frame by frame, the picture of the same poses
+// played from a clip (baked from the IK's own poses), whose history is the same as any skinned animation's.
+void test_gpu_ik_taa_matches_clip() {
+    with_gpu("test_gpu_ik_taa_matches_clip", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes") || lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        const kin::Mesh floor = make_box(r3d, {8.0f, 0.2f, 8.0f});
+        const int steps = 16;
+        const float dt = 1.0f / 30.0f;
+        const auto target_at = [](int i) {
+            const float a = 0.35f * static_cast<float>(i);
+            return Vec3f{0.45f + 0.25f * std::cos(a), 1.65f + 0.3f * std::sin(a), 0.4f};
+        };
+        // The IK run, recording the pose it made at each step.
+        std::vector<kin::Pose> poses;
+        std::vector<Pixels> from_ik, from_clip;
+        const auto draw = [&](kin::WorldRenderState3D& state, kin::View3D& view) {
+            kin::Scene3D scene;
+            scene.camera = ik_scene::camera();
+            skin_lights(scene, 1);
+            scene.taa = {.enabled = true};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+            state.propagate_transforms();
+            state.collect(scene);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            kin::Animator3D animator;
+            animator.add_ik(ik_scene::left_hand());
+            const flecs::entity e = world.raw().entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator);
+            for (int i = 0; i < steps; ++i) {
+                e.get_mut<kin::Animator3D>()->ik("hand").set_target(target_at(i));
+                state.animate(dt);
+                from_ik.push_back(draw(state, view));
+                assert(r3d.stats().skinned_copies == 2); // the body and the marker, parts of one model
+                poses.push_back(e.get<kin::Animator3D>()->ik_pose);
+            }
+        }
+        // The same poses as a clip: key k + 1 is the pose of step k (the player's time after step k is (k + 1) dt), and a key 0.
+        auto model = std::make_shared<kin::Model>(*biped.model);
+        {
+            const kin::Skeleton& sk = model->skeletons[0];
+            kin::AnimClip3D clip;
+            clip.name = "baked";
+            clip.duration = static_cast<float>(steps + 1) * dt;
+            clip.channels.resize(sk.joint_count());
+            for (std::size_t j = 0; j < sk.joint_count(); ++j) {
+                kin::JointChannels& ch = clip.channels[j];
+                for (int k = 0; k <= steps; ++k) {
+                    const kin::JointPose& jp = poses[static_cast<std::size_t>(std::max(k - 1, 0))].joints[j];
+                    const float t = static_cast<float>(k) * dt;
+                    ch.translation.times.push_back(t);
+                    ch.translation.values.push_back(jp.translation);
+                    ch.rotation.times.push_back(t);
+                    ch.rotation.values.push_back(jp.rotation);
+                    ch.scale.times.push_back(t);
+                    ch.scale.values.push_back(jp.scale);
+                }
+            }
+            model->clips.push_back(std::move(clip));
+        }
+        {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            world.raw().entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = model}).set(kin::Animator3D{.clip = "baked"});
+            for (int i = 0; i < steps; ++i) {
+                state.animate(dt);
+                from_clip.push_back(draw(state, view));
+            }
+        }
+        int worst = 0;
+        for (int i = 0; i < steps; ++i) {
+            worst = std::max(worst, pixels_differing(from_ik[static_cast<std::size_t>(i)], from_clip[static_cast<std::size_t>(i)], 4));
+        }
+        const ik_scene::Blob first = ik_scene::red_blob(from_ik.front()), last = ik_scene::red_blob(from_ik.back());
+        std::cerr << "ik under taa: the marker moves " << std::hypot(last.x - first.x, last.y - first.y) << " px over " << steps
+                  << " frames; the IK run and the baked clip differ in at most " << worst << " of 19200 pixels by more than 4 levels\n";
+        assert(std::hypot(last.x - first.x, last.y - first.y) > 4.0f);
+        assert(worst <= 10);
+        dump(from_ik.back(), "ik_taa_last");
+    });
+}
+
+// Only IK moves the limb: the shadow cache sees it (the matrices are in its key), the picture is the uncached render's, and it arms again.
+void test_gpu_ik_shadow_cache() {
+    with_gpu("test_gpu_ik_shadow_cache", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        const kin::Mesh floor = make_box(r3d, {10.0f, 0.2f, 10.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::EcsWorld world;
+        kin::WorldRenderState3D state{world};
+        kin::Animator3D animator;
+        animator.add_ik(ik_scene::left_hand());
+        const flecs::entity e = world.raw().entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(animator);
+        Vec3f target{0.5f, 1.7f, 0.4f};
+        const auto shoot = [&](kin::View3D& v, bool cache) {
+            e.get_mut<kin::Animator3D>()->ik("hand").set_target(target);
+            state.animate(1.0f / 60.0f);
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 4.0f, 4.0f}, {0.0f, 0.9f, 0.0f}, 50.0f);
+            scene.lights.sun = {.direction = {1.0f, 1.0f, 0.4f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+            scene.lights.shadow_area = kin::Bounds3{{-5.0f, -0.2f, -5.0f}, {5.0f, 3.0f, 5.0f}};
+            scene.lights.shadow_resolution = 1024;
+            scene.lights.cache_shadows = cache;
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            state.propagate_transforms();
+            state.collect(scene);
+            Pixels p = shoot_view(renderer, r3d, v, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels first = shoot(view, true);
+        if (r3d.stats().shadow_cascades == 0) {
+            std::cerr << "shadows: not available on this device, skipped\n";
+            return;
+        }
+        assert(!r3d.stats().shadow_cached);
+        for (int i = 0; i < 4; ++i) {
+            shoot(view, true);
+        }
+        assert(r3d.stats().shadow_cached && r3d.stats().shadow_draws == 0);
+        // The hand's target moves: nothing else does.
+        target = {0.7f, 1.3f, 0.2f};
+        const Pixels moved = shoot(view, true);
+        assert(!r3d.stats().shadow_cached && r3d.stats().shadow_draws > 0);
+        assert(moved.rgba == shoot(reference_view, false).rgba);
+        assert(pixels_differing(moved, first, 3) > 0);
+        bool armed = false;
+        for (int i = 0; i < 14 && !armed; ++i) {
+            shoot(view, true);
+            armed = r3d.stats().shadow_cached;
+        }
+        assert(armed);
+        assert(shoot(view, true).rgba == moved.rgba);
+        std::cerr << "ik shadow cache: a hand moved only by IK invalidates it, the picture is the uncached one's, and it arms again\n";
+    });
+}
+
+// Many characters with IK, every hand somewhere else: the same pictures twice, and on workers as serial.
+void test_gpu_ik_on_workers() {
+    with_gpu("test_gpu_ik_on_workers", [](kin::Renderer2D& renderer) {
+        kin::JobSystem jobs;
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const ik_scene::Biped biped = ik_scene::make_biped(r3d);
+        const kin::Mesh floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto run = [&](kin::JobSystem* workers, int count) {
+            kin::EcsWorld world;
+            kin::WorldRenderState3D state{world};
+            const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(count))));
+            for (int i = 0; i < count; ++i) {
+                kin::Animator3D a;
+                a.add_ik(ik_scene::left_hand()).set_target(Vec3f{0.0f, 0.0f, 0.0f});
+                const float x = (static_cast<float>(i % side) - static_cast<float>(side) * 0.5f) * (60.0f / static_cast<float>(side));
+                const float z = (static_cast<float>(i / side) - static_cast<float>(side) * 0.5f) * (60.0f / static_cast<float>(side));
+                const Vec3f shoulder{x + 0.2f, 1.65f, z};
+                a.ik("hand").set_target(shoulder + Vec3f{0.3f * std::sin(static_cast<float>(i)), 0.4f * std::cos(static_cast<float>(i) * 0.7f), 0.5f});
+                world.raw().entity().set(kin::Transform3D{.position = {x, 0.0f, z}}).set(kin::SkinnedMeshRenderer{.model = biped.model}).set(a);
+            }
+            renderer.set_job_system(workers);
+            Pixels p;
+            for (int step = 0; step < 3; ++step) {
+                state.animate(1.0f / 60.0f);
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+                skin_lights(scene, 1);
+                scene.lights.shadow_area = kin::Bounds3{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}};
+                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                state.propagate_transforms();
+                state.collect(scene);
+                p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+            return p;
+        };
+        for (const int count : {40, 2200}) {
+            const Pixels a = run(nullptr, count);
+            const Pixels b = run(nullptr, count);
+            const Pixels c = run(&jobs, count);
+            assert(a.rgba == b.rgba && a.rgba == c.rgba);
+            assert(pixels_lit(a) > 1500);
+            if (count == 2200) {
+                dump(a, "ik_crowd");
+            }
+        }
+        std::cerr << "ik characters: two runs, and 40 and 2,200 on workers: the same pictures\n";
+    });
+}
+
 // Everything on with skinned copies: cascades 4, ambient occlusion, contact shadows, temporal anti-aliasing, with a job system and without,
 // over several frames of moving poses: a picture, the same one both ways, with every pass counted.
 void test_gpu_skinned_everything() {
@@ -8402,6 +8788,11 @@ int main(int argc, char** argv) {
     RUN(test_gpu_skinned_shadow_cache());
     RUN(test_gpu_skinned_shared_range());
     RUN(test_gpu_ecs_character());
+    RUN(test_gpu_ik_hand_at_target());
+    RUN(test_gpu_ik_not_culled());
+    RUN(test_gpu_ik_taa_matches_clip());
+    RUN(test_gpu_ik_shadow_cache());
+    RUN(test_gpu_ik_on_workers());
     RUN(test_gpu_skinned_everything());
     return 0;
 }

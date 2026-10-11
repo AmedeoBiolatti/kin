@@ -121,6 +121,23 @@ struct Settings {
     float char_speed = 1.0f;
     int char_count = 1;         // a row of up to 64 (their poses are in step)
     float char_scale = 1.0f;
+    // Inverse kinematics (P1b) on a person of 18 joints (the Person rig, chosen by `ik`): a hand to a target, the head to the camera,
+    // the feet on a floor and a step. The characters' clips are the person's Sway, Bend and Wave.
+    bool ik = false;
+    float ik_hand_x = 0.45f;    // the hand's target from the left shoulder, in the person's own axes (x to its left, y up, z forward), metres
+    float ik_hand_y = 0.1f;
+    float ik_hand_z = 0.45f;
+    int ik_pole = 1;            // where the elbow points: 0 as animated, 1 down, 2 back, 3 up, 4 out
+    float ik_weight = 1.0f;
+    float ik_fade = 0.2f;       // seconds a weight takes to change
+    float ik_stretch = 1.0f;    // the arm may lengthen to this factor
+    bool ik_marker = true;      // a small red ball at the hand's target
+    bool ik_look = false;       // the head looks at the camera
+    float ik_look_weight = 1.0f;
+    float ik_look_smooth = 0.15f; // seconds
+    bool ik_feet = false;       // foot placement on the floor (and the step)
+    bool ik_step = true;        // a step under the left foot
+    float ik_step_height = 0.2f;
     // View
     int msaa = 2;              // index into the device's sample counts
     float background[3] = {120, 150, 190};

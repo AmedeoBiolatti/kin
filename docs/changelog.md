@@ -9,6 +9,16 @@ releases may change APIs.
 
 ### Added
 
+- 3D, inverse kinematics (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b"): `kin/render3d/ik.hpp`:
+  `solve_two_bone` (an arm to a hold, a leg to the ground: pole by direction or point, soft stretch, minimum bend, an end orientation
+  target, a weight; exact under scaled and turned models), `solve_look_at` (a head or a spine-neck-head chain with shared turn, yaw and
+  pitch limits, released toward forward past a limit so a target behind does not flip it, smoothing in a state object),
+  `solve_chain_fabrik`, and `plan_foot_placement` / `apply_foot_placement` (a `GroundQuery` the game supplies, the foot lifted to the hit
+  and tilted to the clamped normal, the pelvis lowered for the lowest foot, eased). CPU only: no shader changes. ECS: `Animator3D::ik_constraints`
+  (`IKConstraint`, `animator.ik("name").set_target(...).set_weight(...)`, targets as a world point or another entity, weight fades),
+  solved after the clips and before the joint matrices in `WorldRenderState3D::collect()` (or `apply_ik()`); an animator with none, and every
+  existing picture, is byte for byte as before. `kin_reference` `animation.ik` and the scene `skinned_ik` (a procedural person,
+  `skinned_biped.glb`); Sponza Walk's "Character IK" section (`--preset ik`).
 - 3D, skinned meshes and clips, part 2 (experimental; see [3D rendering](rendering_3d.md) "Skinned meshes" and the plan's "P1a part 2"): a skinned
   copy is now in every pass: the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's occluders), the temporal velocity of a
   moving pose (last frame's joint matrices matched to the copy by `MeshInstance::id` or order), cut-outs, and pick; the shadow cache keeps the

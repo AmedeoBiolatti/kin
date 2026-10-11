@@ -1,0 +1,365 @@
+{
+ "name": "skinned_ik_look",
+ "purpose": "Look-at limits (P1b): five people look at a point 40, 80 and 125 degrees round, straight behind, and 60 degrees up. Spine, neck and head share the turn 0.2/0.3/0.5 and are limited to 15/35/60 degrees of yaw (110 in all) and 10/20/30 of pitch (60 in all); past the limit the head is eased back toward forward, so the one looking behind faces front.",
+ "models": [
+  {
+   "file": "made/floor20.glb"
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    -1.114,
+    1.9,
+    1.532
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    0.77,
+    1.9,
+    0.347
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    1.638,
+    1.9,
+    -1.147
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    1.2,
+    1.9,
+    -2.0
+   ]
+  },
+  {
+   "file": "made/ik_marker.glb",
+   "position": [
+    2.8,
+    3.602,
+    1.0
+   ]
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    -2.4,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "look",
+      "kind": "look_at",
+      "joints": [
+       "spine",
+       "neck",
+       "head"
+      ],
+      "weights": [
+       0.2,
+       0.3,
+       0.5
+      ],
+      "max_yaw": [
+       15,
+       35,
+       60
+      ],
+      "max_pitch_up": [
+       10,
+       20,
+       30
+      ],
+      "max_pitch_down": [
+       10,
+       20,
+       30
+      ],
+      "target": [
+       -1.114,
+       1.9,
+       1.532
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    -1.2,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "look",
+      "kind": "look_at",
+      "joints": [
+       "spine",
+       "neck",
+       "head"
+      ],
+      "weights": [
+       0.2,
+       0.3,
+       0.5
+      ],
+      "max_yaw": [
+       15,
+       35,
+       60
+      ],
+      "max_pitch_up": [
+       10,
+       20,
+       30
+      ],
+      "max_pitch_down": [
+       10,
+       20,
+       30
+      ],
+      "target": [
+       0.77,
+       1.9,
+       0.347
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    0.0,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "look",
+      "kind": "look_at",
+      "joints": [
+       "spine",
+       "neck",
+       "head"
+      ],
+      "weights": [
+       0.2,
+       0.3,
+       0.5
+      ],
+      "max_yaw": [
+       15,
+       35,
+       60
+      ],
+      "max_pitch_up": [
+       10,
+       20,
+       30
+      ],
+      "max_pitch_down": [
+       10,
+       20,
+       30
+      ],
+      "target": [
+       1.638,
+       1.9,
+       -1.147
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    1.2,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "look",
+      "kind": "look_at",
+      "joints": [
+       "spine",
+       "neck",
+       "head"
+      ],
+      "weights": [
+       0.2,
+       0.3,
+       0.5
+      ],
+      "max_yaw": [
+       15,
+       35,
+       60
+      ],
+      "max_pitch_up": [
+       10,
+       20,
+       30
+      ],
+      "max_pitch_down": [
+       10,
+       20,
+       30
+      ],
+      "target": [
+       1.2,
+       1.9,
+       -2.0
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "file": "made/skinned_biped.glb",
+   "position": [
+    2.4,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "idle",
+    "time": 0.0,
+    "ecs": true,
+    "ik": [
+     {
+      "name": "look",
+      "kind": "look_at",
+      "joints": [
+       "spine",
+       "neck",
+       "head"
+      ],
+      "weights": [
+       0.2,
+       0.3,
+       0.5
+      ],
+      "max_yaw": [
+       15,
+       35,
+       60
+      ],
+      "max_pitch_up": [
+       10,
+       20,
+       30
+      ],
+      "max_pitch_down": [
+       10,
+       20,
+       30
+      ],
+      "target": [
+       2.8,
+       3.602,
+       1.0
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -6,
+    -0.3,
+    -6
+   ],
+   [
+    6,
+    5,
+    6
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    1.9,
+    6.0
+   ],
+   "target": [
+    0.0,
+    1.5,
+    0.0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "above",
+   "eye": [
+    5.0,
+    4.0,
+    5.0
+   ],
+   "target": [
+    0.0,
+    1.4,
+    0.0
+   ],
+   "fov": 40,
+   "near": 0.05
+  }
+ ]
+}

@@ -192,7 +192,7 @@ if(KIN_EXPERIMENTAL_3D)
     target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
-                                      src/render3d/skeleton.cpp src/render3d/animation3d.cpp)
+                                      src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/taa.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c

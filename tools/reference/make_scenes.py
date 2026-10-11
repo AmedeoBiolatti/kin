@@ -17,6 +17,9 @@ skinned_bend.glb  a tube bound to a chain of three joints, with the clips
              "wave" (every joint sways in turn): skinning with no download
              (P1a); skinned_dense.glb the same with 4,096 triangles (the
              200-copy cost scene). floor20.glb is a 20 m floor to stand things on.
+skinned_biped.glb  a person of 1.95 m on 18 joints (pelvis, spine, chest, neck, head, a leg and an arm
+             each side; the arms out), facing +Z, with the clip "idle" (a sway): what the IK scenes (P1b) pose.
+             ik_marker.glb is a small red sphere (a target), ik_step.glb a 0.8 x 0.2 x 0.8 box (a step).
 
 Deterministic: the same files every time.
 """
@@ -215,6 +218,189 @@ def skinned_bend(path, rings=49, segments=16):
         f.write(struct.pack("<II", len(data), 0x004E4942) + data)
 
 
+def skinned_biped(path):
+    """A person on the 18 joints of tests/skin_fixtures.hpp's biped (names and rest placing the same), made of tubes and spheres whose
+    weights ramp to the next joint over the last 40% of each bone. Written by hand, as skinned_bend is."""
+    import json
+    import struct
+    joint_defs = [  # name, parent, translation
+        ("root", -1, (0, 0, 0)), ("pelvis", 0, (0, 1.0, 0)), ("spine", 1, (0, 0.2, 0)), ("chest", 2, (0, 0.25, 0)),
+        ("neck", 3, (0, 0.25, 0)), ("head", 4, (0, 0.1, 0)),
+        ("hip_L", 1, (0.1, 0, 0)), ("knee_L", 6, (0, -0.5, 0)), ("ankle_L", 7, (0, -0.45, 0)),
+        ("hip_R", 1, (-0.1, 0, 0)), ("knee_R", 9, (0, -0.5, 0)), ("ankle_R", 10, (0, -0.45, 0)),
+        ("shoulder_L", 3, (0.2, 0.2, 0)), ("elbow_L", 12, (0.5, 0, 0)), ("hand_L", 13, (0.45, 0, 0)),
+        ("shoulder_R", 3, (-0.2, 0.2, 0)), ("elbow_R", 15, (-0.5, 0, 0)), ("hand_R", 16, (-0.45, 0, 0)),
+    ]
+    world = []
+    for name, parent, t in joint_defs:
+        base = world[parent] if parent >= 0 else (0.0, 0.0, 0.0)
+        world.append((base[0] + t[0], base[1] + t[1], base[2] + t[2]))
+    index = {name: i for i, (name, _, _) in enumerate(joint_defs)}
+    positions, normals, uvs, joints, weights, indices = [], [], [], [], [], []
+
+    def sub(a, b):
+        return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+    def cross(a, b):
+        return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+    def unit(a):
+        n = math.sqrt(a[0] ** 2 + a[1] ** 2 + a[2] ** 2)
+        return (a[0] / n, a[1] / n, a[2] / n)
+
+    def tube(p0, p1, radius0, radius1, joint_a, joint_b, rings=8, segments=10, ramp=0.6, cap=True):
+        d = unit(sub(p1, p0))
+        helper = (0.0, 0.0, 1.0) if abs(d[2]) < 0.9 else (1.0, 0.0, 0.0)
+        u = unit(cross(helper, d))
+        v = cross(d, u)
+        first = len(positions)
+        for r in range(rings):
+            t = r / (rings - 1)
+            radius = radius0 + (radius1 - radius0) * t
+            w = min(1.0, max(0.0, (t - ramp) / (1.0 - ramp)))
+            w = w * w * (3 - 2 * w)
+            for sgm in range(segments + 1):
+                a = 2 * math.pi * sgm / segments
+                n = (u[0] * math.cos(a) + v[0] * math.sin(a), u[1] * math.cos(a) + v[1] * math.sin(a), u[2] * math.cos(a) + v[2] * math.sin(a))
+                c = tuple(p0[i] + (p1[i] - p0[i]) * t for i in range(3))
+                positions.append(tuple(c[i] + n[i] * radius for i in range(3)))
+                normals.append(n)
+                uvs.append((sgm / segments, t))
+                joints.append((joint_a, joint_b, 0, 0))
+                weights.append((1.0 - w, w, 0.0, 0.0))
+        row = segments + 1
+        for r in range(rings - 1):
+            for sgm in range(segments):
+                a, b, c, e = first + r * row + sgm, first + r * row + sgm + 1, first + (r + 1) * row + sgm + 1, first + (r + 1) * row + sgm
+                # Outward-facing: rings go up the bone, the angle turns from u toward v (u x v = d): a, c, b is counter-clockwise from outside.
+                indices.extend([a, c, b, a, e, c])
+
+    def ball(centre, radius, joint, rings=8, segments=12):
+        first = len(positions)
+        for r in range(rings + 1):
+            theta = math.pi * r / rings
+            for sgm in range(segments + 1):
+                phi = 2 * math.pi * sgm / segments
+                n = (math.sin(theta) * math.cos(phi), math.cos(theta), math.sin(theta) * math.sin(phi))
+                positions.append(tuple(centre[i] + n[i] * radius for i in range(3)))
+                normals.append(n)
+                uvs.append((sgm / segments, r / rings))
+                joints.append((joint, 0, 0, 0))
+                weights.append((1.0, 0.0, 0.0, 0.0))
+        row = segments + 1
+        for r in range(rings):
+            for sgm in range(segments):
+                a, b, c, e = first + r * row + sgm, first + r * row + sgm + 1, first + (r + 1) * row + sgm + 1, first + (r + 1) * row + sgm
+                indices.extend([a, b, c, a, c, e])
+
+    def bone(a, b, r0, r1):
+        tube(world[index[a]], world[index[b]], r0, r1, index[a], index[b])
+
+    bone("pelvis", "spine", 0.12, 0.115)
+    bone("spine", "chest", 0.115, 0.13)
+    bone("chest", "neck", 0.13, 0.05)
+    bone("neck", "head", 0.05, 0.045)
+    ball((world[5][0], world[5][1] + 0.07, world[5][2]), 0.105, 5)
+    ball((world[5][0], world[5][1] + 0.06, world[5][2] + 0.115), 0.032, 5)  # a nose: which way the head faces
+    for side in ("L", "R"):
+        bone("pelvis", "hip_" + side, 0.08, 0.075)
+        bone("hip_" + side, "knee_" + side, 0.075, 0.055)
+        bone("knee_" + side, "ankle_" + side, 0.055, 0.04)
+        ank = world[index["ankle_" + side]]
+        tube((ank[0], ank[1] - 0.03, ank[2] - 0.05), (ank[0], ank[1] - 0.03, ank[2] + 0.14), 0.04, 0.035, index["ankle_" + side], index["ankle_" + side], rings=2)
+        bone("chest", "shoulder_" + side, 0.05, 0.05)
+        bone("shoulder_" + side, "elbow_" + side, 0.05, 0.04)
+        bone("elbow_" + side, "hand_" + side, 0.04, 0.032)
+        ball(world[index["hand_" + side]], 0.055, index["hand_" + side])
+    blob = bytearray()
+    views = []
+
+    def add(data, target=None):
+        while len(blob) % 4:
+            blob.append(0)
+        views.append({"buffer": 0, "byteOffset": len(blob), "byteLength": len(data)})
+        if target:
+            views[-1]["target"] = target
+        blob.extend(data)
+        return len(views) - 1
+
+    def flat(items):
+        return [x for item in items for x in item]
+    accessors = []
+
+    def accessor(view, ctype, count, kind, **extra):
+        accessors.append({"bufferView": view, "componentType": ctype, "count": count, "type": kind, **extra})
+        return len(accessors) - 1
+    lo = [min(q[i] for q in positions) for i in range(3)]
+    hi = [max(q[i] for q in positions) for i in range(3)]
+    a_pos = accessor(add(struct.pack("<%df" % (3 * len(positions)), *flat(positions)), 34962), 5126, len(positions), "VEC3", min=lo, max=hi)
+    a_nor = accessor(add(struct.pack("<%df" % (3 * len(normals)), *flat(normals)), 34962), 5126, len(normals), "VEC3")
+    a_uv = accessor(add(struct.pack("<%df" % (2 * len(uvs)), *flat(uvs)), 34962), 5126, len(uvs), "VEC2")
+    a_joint = accessor(add(struct.pack("<%dB" % (4 * len(joints)), *flat(joints)), 34962), 5121, len(joints), "VEC4")
+    a_weight = accessor(add(struct.pack("<%df" % (4 * len(weights)), *flat(weights)), 34962), 5126, len(weights), "VEC4")
+    a_index = accessor(add(struct.pack("<%dI" % len(indices), *indices), 34963), 5125, len(indices), "SCALAR")
+    ibm = []
+    for w in world:
+        ibm += [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -w[0], -w[1], -w[2], 1]
+    a_ibm = accessor(add(struct.pack("<%df" % len(ibm), *ibm)), 5126, len(world), "MAT4")
+
+    def quat(axis, deg):
+        s = math.sin(math.radians(deg) / 2)
+        return (axis[0] * s, axis[1] * s, axis[2] * s, math.cos(math.radians(deg) / 2))
+    samplers, channels = [], []
+
+    def track(node, times, values):
+        t = accessor(add(struct.pack("<%df" % len(times), *times)), 5126, len(times), "SCALAR", min=[min(times)], max=[max(times)])
+        v = accessor(add(struct.pack("<%df" % (4 * len(times)), *flat(values))), 5126, len(times), "VEC4")
+        samplers.append({"input": t, "output": v, "interpolation": "LINEAR"})
+        channels.append({"sampler": len(samplers) - 1, "target": {"node": node, "path": "rotation"}})
+    times = [0.0, 1.0, 2.0, 3.0, 4.0]
+    track(index["spine"], times, [quat((0, 0, 1), d) for d in (0, 3, 0, -3, 0)])
+    track(index["chest"], times, [quat((1, 0, 0), d) for d in (0, 2, 0, -2, 0)])
+    track(index["head"], times, [quat((0, 1, 0), d) for d in (0, -4, 0, 4, 0)])
+    idle = {"name": "idle", "samplers": samplers, "channels": channels}
+    nodes = []
+    for i, (name, parent, t) in enumerate(joint_defs):
+        node = {"name": name, "translation": list(t)}
+        kids = [j for j, (_, pj, _) in enumerate(joint_defs) if pj == i]
+        if kids:
+            node["children"] = kids
+        nodes.append(node)
+    nodes.append({"name": "person", "mesh": 0, "skin": 0})
+    gltf = {
+        "asset": {"version": "2.0", "generator": "kin make_scenes.py"},
+        "scene": 0, "scenes": [{"nodes": [0, len(nodes) - 1]}],
+        "nodes": nodes,
+        "meshes": [{"name": "person", "primitives": [{"attributes": {"POSITION": a_pos, "NORMAL": a_nor, "TEXCOORD_0": a_uv, "JOINTS_0": a_joint,
+                                                                    "WEIGHTS_0": a_weight}, "indices": a_index, "material": 0}]}],
+        "materials": [{"name": "clay", "pbrMetallicRoughness": {"baseColorFactor": [0.78, 0.5, 0.36, 1], "metallicFactor": 0.0, "roughnessFactor": 0.65}}],
+        "skins": [{"joints": list(range(len(joint_defs))), "inverseBindMatrices": a_ibm, "skeleton": 0}],
+        "animations": [idle],
+        "buffers": [{"byteLength": len(blob)}], "bufferViews": views, "accessors": accessors,
+    }
+    text = json.dumps(gltf, separators=(",", ":")).encode()
+    text += b" " * (-len(text) % 4)
+    data = bytes(blob) + b"\0" * (-len(blob) % 4)
+    total = 12 + 8 + len(text) + 8 + len(data)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<III", 0x46546C67, 2, total))
+        f.write(struct.pack("<II", len(text), 0x4E4F534A) + text)
+        f.write(struct.pack("<II", len(data), 0x004E4942) + data)
+
+
+def ik_props(marker_path, step_path):
+    """A small red sphere (an IK target, unlit-looking by its emission) and a step: a 0.8 x 0.2 x 0.8 box standing on y = 0."""
+    g = Glb()
+    red = g.material("target", color=(0.9, 0.1, 0.08, 1), emissive=(1.0, 0.1, 0.05), emissive_strength=2.0)
+    g.node("marker", mesh=g.mesh("marker", *sphere(0.04, 16, 8), material=red))
+    g.save(marker_path)
+    h = Glb()
+    stone = h.material("stone", color=(0.45, 0.46, 0.5, 1))
+    positions, normals, uvs, indices = box((0.8, 0.2, 0.8))
+    h.node("step", mesh=h.mesh("step", [(x, y + 0.1, z) for x, y, z in positions], normals, uvs, indices, material=stone))
+    h.save(step_path)
+
+
 def floor20(path):
     """A 20 m square floor, its top at y = 0, light grey."""
     g = Glb()
@@ -234,6 +420,8 @@ def main():
     skinned_bend(os.path.join(out, "skinned_bend.glb"))
     skinned_bend(os.path.join(out, "skinned_dense.glb"), rings=65, segments=32)  # 4,096 triangles
     floor20(os.path.join(out, "floor20.glb"))
+    skinned_biped(os.path.join(out, "skinned_biped.glb"))
+    ik_props(os.path.join(out, "ik_marker.glb"), os.path.join(out, "ik_step.glb"))
 
 
 if __name__ == "__main__":
