@@ -4887,6 +4887,254 @@ a seed and a scripted input run that can be checked headless. It is where the mi
 show up; each finding becomes a step. Gamepad input (aiming and moving; kin has none in
 `platform`) lands here if the slice needs it, along with camera controllers and rebinding.
 
+#### P4 — Summit — design
+
+Written 2026-10-12 before the code, for P4a (the simulation core, by one agent); P4b (HUD, audio, environment presentation, polish)
+follows by another and must be able to add to the game without touching the simulation. Where the numbers below changed while
+building, "P4a - results" says so.
+
+**Goals.** (1) A one-player vertical slice you can finish: a procedural mountain of about 150 m, a character that walks, sprints,
+jumps, grabs, climbs on stamina, falls, is knocked out, gets up and respawns at camps, and a rope. (2) The netcode-ready core (5a):
+the whole simulation advances only by a fixed 60 Hz step that consumes plain-data commands; its state hashes, saves and restores,
+and a recorded command log replays to the same final hash. (3) Everything about the sim can be checked on the CPU in seconds,
+headless, without a GPU; pictures come second.
+
+**The simulation is a library, the example a view of it.** `examples/summit/` holds `summit_sim` (no renderer, no window: level,
+`Game`, the command and input mapper, the camera rig, the scripted bot) and the executable (the scene, the view, the debug line).
+`Game` owns a `World3D` (Jolt, single-threaded by default so that the run does not depend on a pool), the `SummitLevel` it was
+built from, `std::vector<Player>`, a seeded RNG key, the step counter and the wind. The renderer, the camera and the sky read it
+(const) and never write it; the only way in is `Game::step(std::span<const PlayerCommand>)`.
+
+**The level.** A seed makes a `SummitLevel`: plain data (a list of `Piece`s: oriented boxes with a kind, a surface and an authored
+hold or not; camps; rope anchors; the summit box; a `Route` of legs for the bot and for the climbability check). The same pieces
+make the colliders (`Game` makes a static body each) and the render meshes (`build_render_meshes`), so what you see is what you
+hit. The shape is a stack of cliffs and terraces rising along a wandering heading, about 150 m from base camp to the top:
+
+| Stage | What | Rise | The skill |
+|---|---|---|---|
+| 0 Base camp | flat field, tents' place, checkpoint 0 | 0 | walk, sprint, jump |
+| 1 Scramble | a 28 degree approach, a 4 m wall with a bench on top | ~25 m | the first grab and pull-up |
+| 2 Face | a smooth slab with authored holds beside a cracked face of two pitches and a rest bench between | ~30 m | stamina: rest on the bench, or take the hold line (cheaper, slower) |
+| 3 Chimney and traverse | two walls 1.4 m apart (cheaper to climb: wedged), then a shimmy along a ledge-less face | ~30 m | commit to a traverse that takes most of a bar |
+| 4 Overhang | a leaning face (more drain) with no bench for 6 m, a rope-less shortcut (the leaning line) and a long way round (a ramp of loose steep scree) | ~30 m | stamina management, a route choice |
+| 5 Rope | a smooth wall of 6 m no hand can hold, a fixed rope beside it, a lip on top | ~15 m | the rope, a hand over to the lip |
+| 6 Plateau and summit | a wide flat rest spot (camp 5), a last ramp and a boulder field, the summit box | ~20 m | walk the last bit |
+
+Camps (checkpoints) sit at the tops of stages 1 to 5. A route is "climbable" when the stamina model, run over its legs in
+order with rests on the benches, never runs out between two rest places (checked on paper by `plan_route`, and by the scripted
+run for real). Shortcuts: each stage has a straight line that skips a bench and costs more than one bar of stamina (so it needs
+a rest in the middle that the face does not give: a fall), a cheaper but longer line, or a hold line.
+
+**The player model.** A capsule (0.3 m radius, 1.95 m) of kin's character controller with grab and climb on; `Player` adds what a
+game needs: health, injury, stamina caps, a state (`Alive`, `Stunned`, `GettingUp`, `Dead`), the look angles, the facing, the last
+camp, the ragdoll. Numbers (all in `PlayerRules`, tested): walk 4, sprint 7 m/s (sprint 15 stamina/s), jump 5 m/s up for 6
+stamina; stamina 120, comes back at 25/s after 1 s of rest, climb 0.8 m/s, two hands 7 and one hand 12 stamina/s (+4 while
+moving), a grab 2, a pull-up 8, standing on ground costs nothing; fall: landing speed under 7 m/s is free, above it 7 health per
+m/s, 9 m/s (a 4 m drop) knocks out for at least 1.5 s then a 0.8 s get-up; health 100, at 0 you are dead and respawn at the last
+camp with health and stamina full; injury: the stamina cap is 120 x (0.5 + 0.5 x health/100), health comes back at 0.5/s while
+standing still and at 10/s at a camp. Wind and cold are not in P4a (the wind exists as state for P4b's sound and snow).
+
+**Controls (the mapper's default table, rebindable).** WASD move, mouse look, Shift sprint, Space jump (jump off a grip), left and
+right mouse (or Q and E) the left and right hand's grab, F pull up (it also happens by itself when both hands are on a lip and
+you press forward), X let go, R at a camp rest (Q and E also take hold). Gamepad: left stick move, right stick look, A jump,
+LT/RT the hands, X pull up, B let go, Y rest, left stick click sprint. The mapper turns raw device state into a `PlayerCommand`; nothing else reads a device.
+
+**Systems, in order of a step.** (1) commands in (a missing command is the default one); (2) per player: look, facing, rules
+(rest, rope, grab edges), the controller's command and the limbs' command into the world; (3) `World3D::step` (characters, then
+bodies, ropes, ragdolls); (4) per player: read events (landed, fell, exhausted, mantle), damage, stun, ragdoll hand-over, get-up
+and respawn, camps, the summit; (5) the wind and the RNG; (6) the step counter. No clock, no global RNG, no render state.
+
+**State, hash, save.** `state_hash()` = the world's hash and every `Player` field, the RNG key, the wind and the step counter,
+by bytes in a fixed order (FNV-1a 64). `save()` writes the same fields and `World3D::save_state()`; `restore()` takes it back
+into a `Game` made from the same seed. The scripted run's hash is stored as a constant: it is "same machine" determinism (Jolt
+claims more; the look and facing use `std::sin`, `std::atan2`).
+
+**The camera** is presentation: a rig that reads the player's state and the world's queries (a sphere cast from the head along
+the arm, eased out slowly and pulled in at once, kept 0.3 m from rock), third or first person; look enters the sim as
+commands, the camera follows the sim's own look angles (interpolated between steps). It never writes to the sim.
+
+**The bot and the scripted run.** `summit --headless --script climb` (also `fall`, `rope`) builds the game, lets the route
+follower (a state machine over the route's legs: walk, climb, rest for stamina, rope, summit) produce commands from the
+state, records them, and checks: the summit reached within a step bound, the final hash, no non-finite number, never inside
+a collider. `--screenshot DIR` renders the key moments (low resolution on lavapipe) and prints the timing.
+
+**Not in P4a.** HUD, audio, particles at the player, a stamina bar, the sky's time of day as a mechanic, weather effects on
+grip, items (food, rope placing), more than one player on screen, a network, a save file of the game, the death screen. They are
+P4b's or later; the sim's events (`GameEvent`: landed, fell, camp, summit, stun, get-up, death, step) are how they will hear of
+things.
+
+**Acceptance.** (a) Same seed, same level bytes; another seed another level, both climbable by the planner. (b) Command replay,
+save/restore, frame-rate independence and step purity give equal hashes. (c) The mapper: dead zones, rebinding, a keyboard and
+a gamepad press give the same command. (d) The stamina numbers above, measured. (e) A fall of 5 m knocks out, ragdolls, gets up
+and the character walks; a fall of 40 m kills and respawns at the camp. (f) The rope climbs. (g) The camera is never inside
+rock along the scripted run. (h) The scripted run reaches the summit under 40 000 steps. (i) 14 or more mutation checks caught.
+(j) Nothing existing changes: no .spv, no picture, `build-no3d` 65 of 65.
+
+#### P4a — results
+
+Done 2026-10-12 on `exp/3d-rendering` (head e2b170d plus the working tree, not committed). The simulation core of Summit
+(`examples/summit`, about 5000 lines); P4b (HUD, sound, presentation, polish) builds on `SummitView` and the `GameEvent` list without
+touching `Game`.
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| Level | `summit/level.*` | `generate_level(seed)`: 55 to 70 boxes (`Piece`), 7 camps, a rope, a 33-leg route; `bytes()`/`hash()`; `plan_route` (stamina planner); `build_render_meshes` (faces cut into cells, noise-coloured: from the same pieces) |
+| Game | `summit/game.*` | `Game::step(commands)`, `state_hash`, `save`, `restore`, events, `std::vector<Player>`, seeded RNG key, wind, `FrameStepper`, two test hooks (`debug_teleport`, `debug_set_health`) |
+| Mapper | `summit/input_map.*` | `RawInput` (plain data), `InputBindings` (rebinding table, text round trip, dead zone, sensitivities, invert), `map_input` |
+| Camera | `summit/camera.*` | `CameraRig`: third person spring arm (sphere cast, pulled in at once, eased out), first person, the view swings round while hanging |
+| Bot, logs | `summit/script.*` | route follower state machine, command log files, `script_config` (climb, fall, rope) |
+| View | `summit/view.*`, `main.cpp` | meshes, person (ECS animator, IK hands and tail, ragdoll pose override), rope, camps, 7 looks, debug line, scripted shots |
+| Engine | `kin/platform/gamepad.hpp`, `src/platform/gamepad.cpp`; `physics3d/character3d_impl.hpp`, `world3d.cpp` | two gaps, below |
+
+**Decisions where the design was open.**
+1. *The simulation owns a raw `World3D`, not the ECS bridge.* The ECS physics state is a view of entities; a `Game` that must hash,
+   save and replay wants the world, its characters, ragdolls and rope handles and nothing else. The presentation uses an ECS world
+   only for the skinned person (animator, IK, pose override), driven from the const state.
+2. *The ragdoll is parked (`animated_bodies = false`) and started from the T pose at the capsule's place*: no clip is evaluated in the
+   simulation; a get-up blends to the rest pose. Stun and death share one path (hand-over, capsule disabled, the capsule follows the
+   pelvis's ground point, a get-up place and clearance check, respawn after a timeout when there is no room).
+3. *Stamina is the engine's `Resource3D`*; the rules' numbers are written into `TraversalDesc3D`, the jump cost and the injury cap
+   (`set_character_desc` live) are the game's. Standing on the ground with a hand on the wall costs nothing (the engine's rest rule), so
+   the planner's climb starts from the first hold at 2 m.
+4. *Level = a staircase of boxes.* Pitches are boxes whose top is the next bench: the engine's pull-up cannot go over a protruding slab
+   and a flat face is what its hand projection follows, so rock "features" are benches, a roof slab (the overhang), a chimney (two
+   walls, drain x0.6), a smooth wall with a lip and a rope on a beam, and a smooth slab with authored holds. Shortcuts are the lines
+   that skip a bench (they need more than a bar and the planner says so).
+5. *Auto pull-up*: both hands on a ledge grip and forward pressed alternate the engine's edge each step (`pull_up_sent`).
+6. *Seeds are mixed* (splitmix of the seed): the first version's stream was the same stream shifted for seeds 8 apart (found by seeds 1 and
+   9 having one height).
+7. *Input is sampled once a step* from `Input::mouse_motion()` (the update-time reading) and held keys; the look delta is part of the
+   command, the camera interpolates the sim's own yaw.
+
+**Gaps found in the engine.**
+- *No gamepad in `kin::platform`* (plan P4 predicted it). Added `kin/platform/gamepad.hpp` and `src/platform/gamepad.cpp` (a new
+  source in the always-built platform list): `GamepadState` (plain data), `Gamepads::poll()` on SDL's gamepad API, started only when a
+  `Gamepads` is made. `Input` and the app loop are untouched, so nothing changes when it is not used: `build-no3d` 65 of 65 and its
+  `build.ninja` has no Jolt, physics3d or summit. Not exercised with a device here (none): the mapper is tested with made-up states, and
+  `Gamepads` without a device is checked to report nothing (`test_gamepad_poll_without_a_device`).
+- *A character's own movement collided with bodies set to collide with nothing* (`set_no_collisions`, `ignore_all`: a parked ragdoll's
+  bodies, a disabled character), because `OwnBodyFilter` knew groups only. With two players 1.2 m apart the first one's T-pose arms held
+  the second's capsule (it could not move). Fix: `CharacterEnv::collides_nothing` (the rule flag already in the world) checked in
+  `OwnBodyFilter::ShouldCollide`. Behaviour changes only for a body with that flag set against a character's sweeps; the 5 physics3d
+  test programs (character, traversal, ragdoll, rope, ecs) and `kin-physics3d` pass unchanged (79 of 79 in the whole suite), and the
+  reference pictures are byte-equal (below). Mutation: removing the check is caught by `test_two_players`.
+
+**Numbers** (this machine; `kin_summit_tests -v`).
+
+| Behaviour | Measured |
+|---|---|
+| Hang, two hands, still / moving up / one hand | 7.00 / 11.00 / 12.00 stamina a second |
+| Climb speed | 0.80 m/s along the face |
+| Jump | costs 6.0 (150 to 144.0); sprint 7.0 m/s at 15.0 a second; regeneration 25 a second after 1 s |
+| Injury cap | health 40: 105.25 (150 x (0.5 + 0.5 x 0.4) with 0.25 of health regenerated), health 0: 75.25 |
+| Fall of 2 m (6.3 m/s) / 5 m (9.97 m/s) | no damage, no stun / health 100 - (v - 7) x 7 = 79, knocked out, lies at least 90 steps, gets up in 48 |
+| Fall of 40 m onto a camp / below the kill plane | dies (`Died`), back at the camp in 2 s with health 100 and stamina 150 / `Died` and respawn |
+| Level | 146 to 158 m of altitude over seeds 1 to 60; seed 1: 155.5 m |
+| Scripted climb, seed 1 | summit at step 9769 (162.8 s of game time), no falls; 60 seeds: all reach it, none fall; lowest stamina 31.4 (seed 10: 6.0) |
+| Planner against the run | seeds 1 to 4: the planner's least margin and the run's lowest stamina agree to about 10 units (the planner is the lower) |
+| Wall time of the run (CPU) | 1.0 s for 9769 steps: 100 microseconds a step including the bot (23 800 steps a second in the last run, a quiet machine) |
+| Scripted run with pictures, lavapipe, 480x270, 1 sample | 2.6 s wall, 7 pictures; NVIDIA 640x360 `fall`: 2.8 s, 8 pictures |
+| Hash, seed 1 climb | `c80d269809d52fb0` at step 9769 ("same machine" determinism) |
+
+**Tests.** `kin-summit` (CPU, 12 s, 23 functions): level determinism and altitude over 20 seeds, colliders and meshes are one list (a body
+for each piece at its place, holds are holds, a ray down onto a ground piece and a mesh vertex on that face), the planner (30 seeds
+climbable, a worked leg to 0.01, an infeasible mountain says so, the run's lowest stamina within the planner's margin), the stamina
+numbers above, look clamp and non-finite commands, the mapper (a key and a stick give the same command, jump, hands, sprint, release,
+triggers at the threshold, dead zone values, unit length, mouse and stick look, invert, rebinding, text round trip, refusing a bad
+name, a disconnected pad), the gamepad poll, command log files (round trip, cut file refused), replay (same hash; another seed and a
+changed command differ), save and restore (mid-hang into a fresh game, back into the same game, refusing another seed, player count,
+cut and damaged bytes), the state covering the RNG, wind, health and step, frame-rate independence (30, 60, 144, 240 fps and jitter,
+camera updated every frame: one hash), step purity (pool against one thread with another game stepped in between, a missing command),
+two players, falls (free, stun, ragdoll, get-up, walk on, death, respawn at camp 3, kill plane), the rope (200 steps, 4 m up it, the
+leg done), the camera (never inside rock along the run, shortened by the chimney, eased out within the rate, first person, writes
+nothing), the scripted climb (summit, steps, hash, no non-finite number, never inside a collider, 6 other seeds), the scripted fall,
+authored holds in reach and climbed hand over hand by a test's own state machine up to a pull-up over the lip, and the cost of a step.
+ctest: `kin-summit`, `summit-script-climb` and `-fall` (CPU, expected hash and steps) and `summit-script-shots` (GPU, 320x180,
+skips without a device): 79 of 79 in `build` with `KIN_REQUIRE_GPU_TESTS=1` (75 and the four), 65 of 65 in `build-no3d`.
+
+**Mutation checks** (break a source, build, run `kin_summit_tests`, restore from a copy and `cmp`; 31 mutants, 31 caught, all sources
+restored identical). The first run had one survivor that is an equivalent mutant: fall damage "from any landing speed" (`speed > 0`
+for `speed > safe_landing`) gives negative damage under 7 m/s, which the camp's health cap undoes the next step; it was replaced by the
+formula mutant below, which is caught. After the bot's last change the three bot and damage mutants were run again (caught).
+
+| Mutation | Result |
+|---|---|
+| damage not reduced by the safe speed | caught (1) |
+| stun threshold ignored | caught (12) |
+| injury does not lower the stamina cap | caught (3) |
+| jump costs no stamina | caught (1) |
+| RNG key not in the state bytes | caught (3) |
+| restore skips the world | caught (5) |
+| respawn keeps the health | caught (6) |
+| respawn always at camp 0 | caught (2) |
+| camp never recorded | caught (5) |
+| hand-over keeps the capsule | caught (1) |
+| never gets up | caught (7) |
+| kill plane ignored | caught (3) |
+| look pitch not clamped | caught (2) |
+| no automatic pull-up | caught (29) |
+| summit box of no size | caught (15) |
+| hidden state in step (a call counter) | caught (5) |
+| first pitch three times too high | caught (115) |
+| holds too far apart sideways | caught (11) |
+| rope's pole where the hands go | caught (8) |
+| planner forgets the pull-up | caught (1) |
+| dead zone ignored | caught (2) |
+| invert_y ignored | caught (1) |
+| trigger threshold ignored | caught (1) |
+| right key goes left | caught (1) |
+| keys at 45 degrees faster | caught (1) |
+| camera does not collide | caught (5) |
+| camera arm snaps out | caught (1) |
+| bot never rests | caught (6) |
+| bot's handover aimed at the rope | caught (23) |
+| frame stepper drops the remainder | caught (3) |
+| characters collide with parked bodies (engine) | caught (1) |
+
+Bugs the tests and runs found: a character's capsule held by another player's parked ragdoll (engine, above); the landing slab of a
+stage floated over the previous bench and blocked the route (found by the first run: 0.8 m short of the top of a ramp); the rope's
+pole stood in the pull-up's clearance (NoRoom) and the beam in the head's; the rope handover had to aim left of the rope or the probe
+found the rope again; a grip on the lip's face is not a ledge (retry with another aim); the frame stepper test hung under a mutant (now
+bounded); the planner was 30 units pessimistic (the hands take hold 2 m up) and later 10 (a settle time); a held `release` was
+overridden by the bot's re-grab during a scripted fall; presentation clips advanced once a shot (T-pose arms in the first pictures).
+
+**Checks run.** `ninja -C build -j4` and `build-no3d`: no new warnings. `build`: `KIN_REQUIRE_GPU_TESTS=1 ctest -j2 --timeout 600`
+79 of 79; `build-no3d`: 65 of 65, no Jolt, physics3d or summit in `build.ninja`. `kin_render3d_tests` on lavapipe
+(`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`): exit 0; also inside ctest on NVIDIA. No `.glsl` was touched, so the .spv
+are the HEAD's. Identity: `render def` and `render all` (`--cascades 4 --ao --contact-shadows --taa`), 120 frames, crowd, shadows,
+sponza, helmet, motion, spheres, cornell: every picture byte for byte equal to `reference_out/p1a_base_def` and `p1a_base_all` (only
+`results.json`, the timings, differs). The scripted run on lavapipe and on NVIDIA: the same summit step and hash (the simulation is on
+the CPU: the GPU only draws); windowed `summit --screenshot` on NVIDIA 1280x720 drew the base camp in the `dusk` look.
+
+**Pictures looked at** (320x180 to 1280x720). Base camp: the person standing arms down, the mountain's first ramp behind, a camp flag at
+the side; first wall and second pitch: the person hanging, arms up to the face, from behind and to the left (the view swings round
+while it hangs), the face a mottled grey-brown slab; chimney: arms bent up, close; overhang: the person under the roof's brown
+underside with one arm up the face; rope: the person on the rope with its end curled on the ground, the smooth blue-grey wall behind;
+summit: the pole and red flag over the flat top, the person with its arms down; `fall`'s ragdoll shot: the camera sits at the pelvis
+and shows only a pair of legs (ugly). Dusk in the window: warm and soft, a hazy ground. **Ugly parts, plainly:** the mountain is boxes
+(stacked slabs with noise-coloured faces): flat walls, no silhouette to speak of, the same grey-brown everywhere; the person is the
+fixture's tubes (arms bent at odd elbows when hanging, a stiff pose standing, a tail hung by IK); the ragdoll lies at the pelvis with
+the camera inside the chimney; the ground shows faint banding from the cell triangulation; fog makes far slabs a pale blue grey.
+
+**Limits and not done.**
+- Not tested with a real controller or by hand: the keyboard, mouse capture and the gamepad path through `Gamepads` (no device; the
+  window opened and drew on NVIDIA, no key was pressed); the pictures' `--first-person` and the looks `night`, `snow`, `storm` were not
+  looked at (only the default, `dusk`).
+- The route is one line of staircase and the bot knows only it; the hold line is climbed by a test's own machine, not the bot;
+  "shortcuts with risk" are the lines the planner calls infeasible from a full bar (no second route, no ice, no loose rock, no
+  wind or cold effect on grip). Overhang is a roof slab, not a leaning face.
+- Cross-platform determinism is not claimed: the look and facing use `std::sin`, `std::atan2` and `Quatf::axis_angle`; the stored hash
+  is for this machine and this compiler. Only one machine was run.
+- The person has no idle, hang or tumble clips of its own (an `Idle` made in the view; hanging is the `Fall` pose with IK hands); a
+  get-up blends from the lying pose to the T pose standing.
+- `GameEvent` carries no entity or item data yet; there are no items (food, ropes to place), no HUD and no sound (P4b).
+- The ragdoll's camera while lying is the pelvis (see the pictures); a death has no screen.
+- Two test hooks (`debug_teleport`, `debug_set_health`) change the state outside commands: for tests only.
+- Memory and disk: `/mnt/windows` was down to 393 MB at the end (this build's objects and another project's); pictures were kept in the
+  scratchpad and deleted.
+
 ### P5 — Netcode-ready, then co-op
 
 *P5a (inside P4):* keep the rules honest: a fixed-step simulation reading input commands, no

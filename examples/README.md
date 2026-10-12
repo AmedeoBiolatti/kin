@@ -255,6 +255,42 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   each frame) and `sponza_walk/main.cpp`; a new feature is a field and one row
   in `Controls::build`.
 
+## Summit
+
+A one-player climbing game on the experimental 3D renderer and physics (`-DKIN_EXPERIMENTAL_3D=ON`; docs/3d_plan.md, "P4"): a
+procedural mountain of about 150 m made from a seed (`--seed N`), seven camps, and a route of walkable approaches, pitches to
+climb on stamina, a chimney, a roof to traverse under, a smooth wall with a rope, and a summit. It needs the SDL_GPU backend
+(`KIN_RENDER_BACKEND=gpu`) to draw; its simulation needs nothing.
+
+- Click the picture to play (Esc lets the mouse go; again, quits). WASD move, mouse look, Shift sprints (15 stamina a second), Space
+  jumps (6 stamina; while it hangs, jumps off), the left and right mouse buttons (or Q and E) take hold with the left and right hand
+  and hold while pressed, W and S climb and A and D shimmy while it hangs, F pulls up over a lip (it also happens by itself when both
+  hands are on one and you press forward), X lets go of everything, R rests at a camp, V first person, F2 the next look, F3 the debug
+  line, F12 or P a picture. Gamepad: left stick move, right stick look, A jump, LT and RT the hands, X pull up, B let go, Y rest,
+  L3 sprint (the controller path is not exercised by any test with a device: the mapper is, with a made-up state). The bindings,
+  dead zones and sensitivities are `summit::InputBindings` (`summit/input_map.hpp`), a text table that round trips.
+- The model: stamina 150, which comes back at 25 a second after a second of rest; two hands cost 7 a second, one hand 12, moving 4 more,
+  a grab 2, a pull-up 8; standing with the feet on the ground is rest. Falls: under 7 m/s is free, above it 7 health for each m/s,
+  9 m/s (a drop of about 4 m) knocks out (a ragdoll for at least 1.5 s, then a 0.8 s get-up); 0 health is a respawn at the last camp
+  with everything back. Hurt lowers the stamina cap (150 x (0.5 + 0.5 x health / 100)). Health returns slowly standing still and fast
+  in a camp.
+- Looks (`--look NAME`): `afternoon` (the default), `morning`, `noon`, `dusk`, `night`, `snow`, `storm`: a fixed sky, fog and
+  weather (the P3 sky, time of day and particles), not a mechanic. The wind is simulation state (it wanders with the game's seeded
+  RNG) and drives the weather's wind. The debug line at the top is altitude, stamina, health, state and camp (a HUD is P4b).
+- A scripted run by a route bot (the same code the tests use), no window or GPU: `summit --script climb --timing` walks and climbs to
+  the summit in about 9500 fixed steps (2.6 minutes of game time) and prints the steps, the state hash and the wall time (about
+  1 s); `--script fall` lets go near the top of the chimney once (a knock-out and a get-up) and climbs on; `--script rope` stops over
+  the rope. `--expect-hash HEX --expect-steps N` fail the run unless it ends so ("same machine" determinism: the look and the
+  facing use `std::sin` and `std::atan2`), `--record FILE` writes the commands, `--replay FILE` plays them back.
+  With `--screenshot PREFIX` a script is drawn at key moments to `PREFIX_<moment>.png` (base, first wall, second pitch, chimney,
+  overhang, rope, summit; `ragdoll` for `fall`): `KIN_RENDER_BACKEND=gpu summit --headless --script climb --width 480 --height
+  270 --samples 1 --screenshot out/climb` (lavapipe is enough: a few seconds). `ctest -R summit` runs the unit tests (`kin-summit`,
+  the simulation on the CPU) and the three scripted runs.
+- The code is `summit/level.*` (the generator, the planner and the render meshes), `game.*` (`Game::step` of commands, the hash, save
+  and restore), `input_map.*`, `camera.*` (a spring arm and a first person view), `script.*` (the bot, the command log files), `view.*`
+  (the person, the rope, the sky; reads a `Game` and writes a `Scene3D`) and `main.cpp`. `summit_sim` links no renderer: the view is
+  the executable's.
+
 ## Run Observatory
 
 A simulated LLM training tracker. Search experiments by name, model, or status;

@@ -54,6 +54,7 @@ add_library(kin_engine STATIC
     src/platform/app.cpp
     src/platform/input.cpp
     src/platform/file_dialogs.cpp
+    src/platform/gamepad.cpp
     src/platform/process.cpp
     src/platform/log.cpp
     src/platform/user_data.cpp

@@ -421,7 +421,7 @@ world.ragdoll_get_up(r, 0.8f);                          // blend back to the cli
   `pelvis` down. Neighbours never collide with each other (joined: `collide_connected` false); all the bones of one ragdoll are in a
   collision group and skip each other too unless `self_collision` is set (then only neighbours skip).
 * **States.** `Animated`: kinematic bodies that follow the targets (so characters and projectiles can hit them; `animated_bodies`
-  false parks them: no collisions, asleep, until the ragdoll starts). `Ragdoll`: dynamic, the pose is the bodies', blending in over
+  false parks them: no collisions, asleep, until the ragdoll starts; a character's own movement leaves a parked body alone too, as it does any body set to collide with nothing, `set_no_collisions`: found by Summit, whose second player's capsule was held by the first one's T-pose arms). `Ragdoll`: dynamic, the pose is the bodies', blending in over
   `blend_seconds` (smoothstep). `Blend`: dynamic, a held share (`blend_ragdoll(alpha, seconds)`; 0 reached means Animated again).
   `GetUp`: the bodies are back to kinematic on the clip at once and the POSE blends from where the bodies lay (a snapshot) to the clip
   over `seconds`, then Animated and a `Recovered` event: nothing fights the character's capsule or the floor while it stands up. A

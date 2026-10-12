@@ -37,9 +37,14 @@ private:
 class OwnBodyFilter final : public JPH::BodyFilter {
 public:
     template <typename Env>
-    OwnBodyFilter(JPH::BodyID self, const Env& env) : _self(self), _group(env.group_of ? env.group_of(self) : 0u), _group_of(&env.group_of) {}
+    OwnBodyFilter(JPH::BodyID self, const Env& env)
+        : _self(self), _group(env.group_of ? env.group_of(self) : 0u), _group_of(&env.group_of), _nothing(&env.collides_nothing) {}
     bool ShouldCollide(const JPH::BodyID& id) const override {
         if (id == _self) {
+            return false;
+        }
+        // A body set to collide with nothing (a parked ragdoll, a disabled character) is not in the way either.
+        if (*_nothing && (*_nothing)(id)) {
             return false;
         }
         return _group == 0 || !*_group_of || (*_group_of)(id) != _group;
@@ -50,6 +55,7 @@ private:
     JPH::BodyID _self;
     u32 _group;
     const std::function<u32(const JPH::BodyID&)>* _group_of;
+    const std::function<bool(const JPH::BodyID&)>* _nothing;
 };
 
 // What the set needs of the world around it.
@@ -64,6 +70,8 @@ struct CharacterEnv {
     std::function<Vec3f()> gravity;
     // The collision group of a Jolt body (0: none): a character skips the bodies of its own group (its ragdoll's).
     std::function<u32(const JPH::BodyID&)> group_of;
+    // Whether a Jolt body is set to collide with nothing (World3D::set_no_collisions, Body3DDesc::ignore_all).
+    std::function<bool(const JPH::BodyID&)> collides_nothing;
     // The kin body a Jolt body is (invalid for none), and its user id.
     std::function<Body3D(const JPH::BodyID&)> body_of;
     std::function<u64(Body3D)> user_id_of;

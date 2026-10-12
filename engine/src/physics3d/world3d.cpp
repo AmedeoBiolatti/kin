@@ -715,6 +715,10 @@ World3D::World3D(World3DConfig config)
         const u32 slot = impl->slot_index(id);
         return slot < impl->rules.size() ? impl->rules[slot].group : 0u;
     };
+    env.collides_nothing = [impl](const JPH::BodyID& id) {
+        const u32 slot = impl->slot_index(id);
+        return slot < impl->rules.size() && (impl->rules[slot].flags & 2u) != 0;
+    };
     env.register_inner = [impl](const JPH::BodyID& id, u64 user_id) { return impl->register_body(id, user_id); };
     env.unregister_inner = [impl](Body3D b) { impl->retire_body(b, false); };
     m.characters = std::make_unique<physics3d_detail::CharacterSet>(std::move(env));

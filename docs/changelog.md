@@ -9,6 +9,15 @@ releases may change APIs.
 
 ### Added
 
+- Summit, a one-player climbing game on the experimental 3D renderer and physics (`examples/summit`; see the plan's "P4" and the
+  examples' README): a procedural mountain from a seed (pieces that make both the colliders and the render meshes, a route a bot
+  follows and a stamina planner checks), a player model (stamina, grab and climb, falls, a knock-out with a ragdoll and a get-up,
+  respawn at camps, injury), input as commands (`PlayerCommand`, an input mapper with rebinding, dead zones and a gamepad), a
+  simulation that advances only by a fixed step of commands with `state_hash()`, `save()` and `restore()` (replay, save and restore,
+  frame-rate independence and step purity are tested), a spring-arm camera, a scripted run (`summit --script climb`), and a fixed look
+  with the sky, fog and weather of P3. Engine: `kin/platform/gamepad.hpp` (`Gamepads`, `GamepadState`: a polled controller, opt-in;
+  `Input` is unchanged). A character's own movement no longer collides with a body set to collide with nothing (`set_no_collisions`,
+  `Body3DDesc::ignore_all`: a parked ragdoll's bodies, a disabled character), which they did before.
 - 3D particles and weather (experimental; see [3D rendering](rendering_3d.md) "Particles and weather" and the plan's "P3c"):
   `kin/render3d/particles3d.hpp` (`ParticleSystem3D`: point, box, sphere, cone and disc emitters, ranges, gravity, drag, a shared `Wind3D`
   with gusts and turbulence, size, colour and alpha over life, a flipbook, a ground; a fixed-step deterministic simulation with `state_hash`,

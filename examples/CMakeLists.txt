@@ -43,6 +43,33 @@ if(KIN_EXPERIMENTAL_3D)
     add_executable(sponza_walk sponza_walk/main.cpp)
     target_link_libraries(sponza_walk PRIVATE kin_example_workloads)
     kin_game(sponza_walk TITLE "Sponza Walk" NO_CONTENT)
+
+    # Summit: a one-player Peak-like on the 3D renderer and physics (docs/3d_plan.md, P4). The simulation is a library with no
+    # window or renderer (summit/level, game, input_mapper, camera, script); the executable is its view.
+    add_library(kin_summit_sim STATIC summit/level.cpp summit/game.cpp summit/script.cpp summit/input_map.cpp summit/camera.cpp)
+    target_include_directories(kin_summit_sim PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(kin_summit_sim PUBLIC kin::engine)
+    kin_enable_release_optimizations(kin_summit_sim)
+    add_executable(summit summit/main.cpp summit/view.cpp)
+    target_link_libraries(summit PRIVATE kin_summit_sim kin_example_workloads)
+    kin_game(summit TITLE "Summit" NO_CONTENT)
+    if(BUILD_TESTING)
+        add_executable(kin_summit_tests summit/summit_tests.cpp)
+        target_link_libraries(kin_summit_tests PRIVATE kin_summit_sim)
+        add_test(NAME kin-summit COMMAND kin_summit_tests)
+        # The scripted runs: a CPU run with no window (the route bot to the summit, the same with a fall), and the same with
+        # pictures at key moments, small, which skips (77) without a 3D device and fails without one when
+        # KIN_REQUIRE_GPU_TESTS is set (lavapipe is enough). The hash is "same machine" determinism.
+        add_test(NAME summit-script-climb
+            COMMAND summit --script climb --seed 1 --expect-hash c80d269809d52fb0 --expect-steps 9769 --timing)
+        add_test(NAME summit-script-fall COMMAND summit --script fall --seed 1)
+        add_test(NAME summit-script-shots
+            COMMAND summit --headless --script climb --seed 1 --width 320 --height 180 --samples 1
+                    "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/summit_shots/climb" --skip-if-unavailable)
+        set_tests_properties(summit-script-shots PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu" SKIP_RETURN_CODE 77 TIMEOUT 300
+            PASS_REGULAR_EXPRESSION "summit_shots/climb_summit.png")
+        set_tests_properties(summit-script-climb summit-script-fall PROPERTIES TIMEOUT 120)
+    endif()
 endif()
 
 if(BUILD_TESTING)
