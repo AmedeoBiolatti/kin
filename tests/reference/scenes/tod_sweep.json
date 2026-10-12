@@ -1,0 +1,156 @@
+{
+ "name": "tod_sweep",
+ "purpose": "One scene at six times of day (P3a, each camera its own `hours`): 5:30 before dawn, 7:00, 12:30, 17:30, 20:00 and 22:30, with sky, fog from the sky and Lights3D::sky_lights_scene, the same camera and the same trees. The lights, the sky's colour and the shadows' length go through the day.",
+ "procedural": "landscape",
+ "trees": 2500,
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.35
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    1,
+    1,
+    1
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.2,
+   0.25
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 4,
+  "shadow_distance": 500,
+  "sky_lights_scene": true
+ },
+ "time_of_day": {
+  "hours": 12.0,
+  "day_of_year": 172,
+  "latitude": 45.0
+ },
+ "sky": {
+  "enabled": true,
+  "turbidity": 3.0,
+  "stars": true,
+  "moon": {
+   "enabled": true
+  }
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.0003,
+  "height_density": 0.004,
+  "height_falloff": 0.05,
+  "base_height": 20.0,
+  "color_from_sky": true,
+  "sun_scatter": 0.2
+ },
+ "cameras": [
+  {
+   "name": "t0530",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    60.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "hours": 5.5
+  },
+  {
+   "name": "t0700",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    60.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "hours": 7.0
+  },
+  {
+   "name": "t1230",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    60.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "hours": 12.5
+  },
+  {
+   "name": "t1730",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    60.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "hours": 17.5
+  },
+  {
+   "name": "t2000",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    60.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "hours": 20.0
+  },
+  {
+   "name": "t2230",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    60.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "hours": 22.5
+  }
+ ]
+}

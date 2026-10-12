@@ -9,6 +9,18 @@ releases may change APIs.
 
 ### Added
 
+- Sky, fog and time of day (experimental; see [3D rendering](rendering_3d.md) "Sky, fog and time of day" and the plan's "P3a"):
+  `kin/render3d/sky3d.hpp` (`Sky3D`, `Fog3D`, `Scene3D::sky`, `Scene3D::fog`, and the CPU's `sky_radiance`, `sky_color`, `sky_sun_light`,
+  `sky_irradiance`, `fog_optical_depth`, `fog_opacity`, `fog_apply`), `kin/render3d/timeofday3d.hpp` (`TimeOfDay3D`, `evaluate`, `apply`,
+  `sun_times`, `advance`; an ECS component with `WorldRenderState3D::advance_time_of_day` and `apply_time_of_day`),
+  `Lights3D::sky_lights_scene`, `Render3DStats::{sky_drawn, fog_applied, sky_env_regenerated, sky_env_generations, sky_env_cpu_ms}`.
+  A procedural single-scattering sky (Rayleigh, Mie, ozone; sun disc, stars, moon, ground below the horizon, or the environment's
+  panorama) drawn in the main pass after the opaque meshes, jitter- and velocity-correct under TAA; exponential distance and height fog
+  integrated exactly along the view ray, coloured by the sky with the sun's lobe, applied to opaque, cut-out, skinned, instanced,
+  clustered, blended and additive meshes (not custom shaders, not the overlay); the sky as the scene's image-based light, remade only
+  when the sun moves; a one-step dither for views with a sky. Opt-in: with it off every picture is unchanged byte for byte and the 70 earlier
+  shaders compile to the same code. Harness: `kin_reference` scenes `sky_day`, `sky_dusk`, `sky_night`, `fog_valley`, `tod_sweep`
+  (`procedural: "landscape"`); Sponza Walk "Sky and fog" section and `--preset sky|dusk|fog|night|day-night`.
 - 3D physics, ragdolls and ropes (experimental; see [3D physics](physics_3d.md) "Ragdolls" and "Ropes" and the plan's "P2e"):
   `kin/physics3d/ragdoll3d.hpp`, `rope3d.hpp`; `World3D::create_ragdoll`, `start_ragdoll`, `blend_ragdoll`, `ragdoll_get_up`,
   `set_ragdoll_subtree`, `ragdoll_pose`, `ragdoll_get_up_place`, `create_rope`, `rope_points`, `rope_closest_point`, `rope_tension`,

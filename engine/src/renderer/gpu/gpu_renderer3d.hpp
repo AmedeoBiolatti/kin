@@ -247,8 +247,14 @@ private:
     // `velocity`: the main pass of a frame with temporal anti-aliasing and no pre-pass: mesh_velocity's shaders and a
     // second colour target, written by opaque meshes and masked for the rest.
     // `skinned`: for a skinned copy's draws (every pass): the skinning vertex shaders and the layout with the second vertex buffer.
+    // `fog`: the main pass's stock shaders with the fog applied (mesh_fog.frag / mesh_velocity_fog.frag; a custom shader is not fogged).
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
-                                         SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false) const;
+                                         SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false, bool fog = false) const;
+    // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`: the
+    // second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is far.
+    SDL_GPUGraphicsPipeline* sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const;
+    // The camera's turn into the pre-pass's velocity target, over the pre-pass's depth.
+    SDL_GPUGraphicsPipeline* sky_velocity_pipeline(SDL_GPUTextureFormat depth) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
@@ -260,6 +266,8 @@ private:
     u32 ensure_shadow_map(u32 resolution, u32 layers);
     // Records the compute passes that make `environment`'s filtered copies.
     void filter_environment(SDL_GPUCommandBuffer* commands, GpuEnvironment3D& environment);
+    // An environment's textures at `w` x `h` (its picture's size), empty: for create_environment and the sky's own.
+    std::shared_ptr<GpuEnvironment3D> allocate_environment(u32 w, u32 h);
     // Makes `view`'s pre-pass targets for its size, or reports they can't be made:
     // the depth and normals always; the occlusion's three targets (half the size
     // when `half`) with `want_ao`, the contact shadows' with `want_contact`.
@@ -282,7 +290,8 @@ private:
     // The view's passes after the picture is drawn: bloom (HDR), then out to what 2D draws.
     // `source` is the picture (the view's float scene, or the temporal resolve's);
     // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
-    void finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain);
+    // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one without it).
+    void finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither = false);
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
     void release_taa(GpuView3D& view);
@@ -328,6 +337,10 @@ private:
     void resolve_history(FrameCtx& ctx);      // the temporal resolve
     void pick_pass(FrameCtx& ctx);
     void push_frame_uniforms(const FrameCtx& ctx, u32 s);
+    // Lights3D::sky_lights_scene: the sky drawn into a small panorama and filtered, when it has moved enough.
+    void sky_environment(FrameCtx& ctx);
+    // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
+    void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
     void resume_2d();
     // `buffer` as a storage buffer of at least `bytes` (grown to twice its size, and not under `minimum`).
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum, SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
@@ -360,6 +373,26 @@ private:
     GpuShader _prepass_velocity_mask_shader;   // prepass_velocity_mask.frag
     GpuShader _mesh_velocity_vertex_shader;    // mesh_velocity.vert
     GpuShader _mesh_velocity_shader;           // mesh_velocity.frag
+    // P3a: fog variants of the two stock mesh fragment shaders, and the sky's. Absent, and the features off (said once), if
+    // they cannot be made.
+    GpuShader _mesh_fog_shader;                // mesh_fog.frag
+    GpuShader _mesh_velocity_fog_shader;       // mesh_velocity_fog.frag
+    GpuShader _sky_shader;                     // sky.frag
+    GpuShader _sky_velocity_shader;            // sky_velocity.frag
+    GpuShader _sky_velocity_only_shader;       // sky_velocity_only.frag
+    GpuShader _sky_env_shader;                 // sky_env.frag
+    GpuShader _output_dither_shader;           // view_output_dither.frag: view_output.frag with a dither, for a view with a sky
+    bool _fog_available = false;
+    bool _sky_available = false;
+    bool _sky_env_available = false;
+    bool _fog_warned = false;
+    bool _sky_warned = false;
+    // The environment made from the sky (Lights3D::sky_lights_scene), shared by the renderer's views, the sky parameters
+    // it was made from, the renders since it was, and how many times it has been made.
+    std::shared_ptr<GpuEnvironment3D> _sky_env;
+    std::array<f32, 16> _sky_key{};
+    u32 _sky_env_age = 0;
+    u32 _sky_env_generations = 0;
     // Skinned copies (Scene3D::draw_skinned): the vertex shaders that pose the vertex by its joints, with the same varyings.
     // Absent (and skinned copies not drawn, said once) if they cannot be made.
     GpuShader _mesh_skinned_vertex_shader;          // mesh_skinned.vert

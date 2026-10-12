@@ -51,8 +51,21 @@ layout(set = 3, binding = 0) uniform Frame {
 layout(set = 3, binding = 1) uniform Material {
     vec4 params; // x: emissive, y: unlit, z: receives the sun's shadow, w: alpha cutoff (0: none)
     vec4 pbr;    // x: metallic, y: roughness, z: normal scale, w: occlusion strength
-    vec4 maps;   // x: has a normal map, y: has an emissive map, z: opaque (it is in the occlusion pre-pass)
+    vec4 maps;   // x: has a normal map, y: has an emissive map, z: opaque (it is in the occlusion pre-pass), w: additive
 } material;
+
+// Fog (Scene3D::fog): only the shaders made with KIN_FOG have it (mesh_fog.frag, mesh_velocity_fog.frag), so that every
+// other shader, and its compiled code, is as it was. Its block takes the slot custom parameters have elsewhere.
+#ifdef KIN_FOG
+#ifndef KIN_NO_CUSTOM_PARAMS
+#error "KIN_FOG takes the uniform slot custom parameters use"
+#endif
+#include "kin_fog.inc.glsl"
+layout(set = 3, binding = 2) uniform FogParams {
+    KinFog fog;
+    KinSky sky;
+} fog_params;
+#endif
 
 // Custom material shaders (Material3D::shader) include this file and write
 // main() with the functions at its end; they declare nothing else. Their
@@ -395,7 +408,34 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
 
 // What a shader writes: `colour` (linear) encoded for the target, with its
 // alpha, premultiplied as kin's targets are.
+#ifdef KIN_FOG
+// `colour` as seen through the fog from the camera to this fragment: mixed toward the fog's colour by its opacity (a
+// blended surface fades the same way, its alpha applied after), or, for an additive one, only dimmed (what it lies over
+// has the fog already).
+vec3 kin_fog_apply(vec3 colour) {
+    const vec3 to = vWorld - frame.eye.xyz;
+    float dist = length(to);
+    vec3 dir = dist > 1e-6 ? to / dist : vec3(0.0, 0.0, -1.0);
+    if (fog_params.fog.view.x > 0.5) {
+        dir = frame.cascade_forward.xyz;
+        dist = dot(to, dir);
+    }
+    const float tau = kin_fog_optical_depth(fog_params.fog, frame.eye.xyz, dir, dist, false);
+    const float opacity = kin_fog_opacity(fog_params.fog, tau);
+    if (opacity <= 0.0) {
+        return colour;
+    }
+    if (material.maps.w > 0.5) {
+        return colour * (1.0 - opacity);
+    }
+    return mix(colour, kin_fog_colour(fog_params.fog, fog_params.sky, dir, frame.sun_direction.xyz, frame.sun_color.rgb), opacity);
+}
+#endif
+
 vec4 kin_output(vec3 colour, float alpha) {
+#ifdef KIN_FOG
+    colour = kin_fog_apply(colour);
+#endif
     if (frame.flags.x > 0.5) {
         colour = encode(colour);
     }

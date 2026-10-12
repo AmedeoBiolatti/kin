@@ -136,6 +136,14 @@ struct Render3DStats {
     u32 samples = 0;        // samples a pixel of the scene took: the view's, or 1 with temporal anti-aliasing
     u32 lights = 0;    // point lights used
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
+    // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader variants (custom
+    // shaders are not fogged); with Lights3D::sky_lights_scene the environment was made again this render (the sky moved
+    // past Sky3D::light_threshold and light_interval renders had passed), how many times so far, and the CPU time spent recording the last one.
+    bool sky_drawn = false;
+    bool fog_applied = false;
+    bool sky_env_regenerated = false;
+    u32 sky_env_generations = 0;
+    f64 sky_env_cpu_ms = 0.0;
     u64 triangles = 0; // drawn by the main pass: at the level each copy is drawn at (Scene3D::lod)
     // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is off).
     std::array<u32, max_mesh_levels> lod_copies_by_level{};

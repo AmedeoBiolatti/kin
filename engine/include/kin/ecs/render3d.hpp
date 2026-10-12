@@ -38,6 +38,7 @@
 #include <kin/render3d/mesh.hpp>
 #include <kin/render3d/model.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
 
 #include <flecs.h>
 
@@ -343,6 +344,12 @@ public:
     // fills `ik_pose` / `ik_world`. collect() does this itself; call it earlier only to read an IK'd joint before drawing.
     // Calling it more than once a frame is harmless (the smoothing advances only once per animate()), it just costs again.
     void apply_ik();
+    // Time of day (render3d/timeofday3d.hpp): a TimeOfDay3D component on any entity is a game clock. advance_time_of_day steps
+    // each by `dt` real seconds (kin::advance: `speed` game seconds a second, hours wrapping into days); apply_time_of_day puts
+    // the first one's sun, moonlight, ambient colours, sky moon and fog colour into `scene` (kin::apply), and says whether
+    // there was one. Call the first once a frame (or fixed step) and the second before render().
+    void advance_time_of_day(f32 dt);
+    bool apply_time_of_day(Scene3D& scene) const;
 
 private:
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
@@ -356,6 +363,7 @@ private:
     flecs::query<const WorldTransform3D, const MeshRenderer> _meshes;
     flecs::query<const SkinnedMeshRenderer, Animator3D, Transform3D*> _animators; // the transform is optional (a pointer)
     flecs::query<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*> _skinned; // the animator is optional
+    flecs::query<TimeOfDay3D> _time_of_day;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
     struct Bucket {
         Mesh mesh;

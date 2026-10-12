@@ -111,6 +111,12 @@ const std::map<std::string, std::string>& presets() {
         {"ragdoll", "rag=on,rag_demo=on,rag_debug=on,rag_count=4"}, // people knocked down, lying, getting up, a ball thrown (P2e)
         {"rope", "rope=on,rope_demo=on"},                          // a person takes hold of a rope, climbs, swings, lets go (P2e)
         {"ik-all", "character=on,char_count=3,char_clip=sway,ik=on,ik_look=on,ik_feet=on,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
+        // Sky, fog and time of day (P3a). The sky is seen through the nave's open roof (--camera roof looks up).
+        {"sky", "sky=on,hdr=on,bloom=0.35"},
+        {"dusk", "sky=on,tod=on,tod_hours=19.4,sky_lights=on,fog=on,fog_density=0.003,hdr=on,bloom=0.4,cascades=4,shadow_distance=60"},
+        {"fog", "sky=on,tod=on,tod_hours=7.4,fog=on,fog_density=0.02,fog_height_density=0.08,fog_falloff=0.12,fog_base=4,hdr=on,bloom=0.3"},
+        {"night", "sky=on,tod=on,tod_hours=1.5,sky_lights=on,fog=on,fog_density=0.004,hdr=on,bloom=0.3,exposure=1.5"},
+        {"day-night", "sky=on,tod=on,tod_play=on,tod_speed=3600,sky_lights=on,fog=on,fog_density=0.003,hdr=on,bloom=0.35,cascades=4,shadow_distance=60"},
     };
     return p;
 }
@@ -419,6 +425,34 @@ private:
         slider("contact_intensity", "Intensity", s.contact_intensity, 0.0f, 1.0f);
         islider("contact_steps", "Steps", s.contact_steps, 4, 64);
 
+        section("Sky and fog (P3a)");
+        check("sky", "Sky behind the model", s.sky);
+        slider("sky_turbidity", "Haze (turbidity)", s.sky_turbidity, 1.5f, 12.0f);
+        slider("sky_sun_intensity", "Sun above the air", s.sky_sun_intensity, 0.5f, 8.0f);
+        slider("sky_intensity", "Sky intensity", s.sky_intensity, 0.0f, 3.0f);
+        slider("sky_sun_size", "Sun disc (degrees)", s.sky_sun_size, 0.1f, 8.0f);
+        slider("sky_sun_disc", "Sun disc radiance (x light)", s.sky_sun_disc, 0.0f, 120.0f);
+        check("sky_stars", "Stars at night", s.sky_stars);
+        check("sky_moon", "Moon (the time of day's)", s.sky_moon);
+        check("sky_lights", "Sky lights the scene (ambient and reflections)", s.sky_lights);
+        check("fog", "Fog", s.fog);
+        slider("fog_density", "Fog per metre", s.fog_density, 0.0f, 0.05f);
+        slider("fog_height_density", "Height fog per metre", s.fog_height_density, 0.0f, 0.2f);
+        slider("fog_falloff", "Height fog falls off (per m)", s.fog_falloff, 0.01f, 1.0f);
+        slider("fog_base", "Height fog base (m)", s.fog_base, -5.0f, 20.0f);
+        slider("fog_start", "Fog starts (m)", s.fog_start, 0.0f, 50.0f);
+        slider("fog_max", "Fog's greatest opacity", s.fog_max, 0.0f, 1.0f);
+        check("fog_from_sky", "Fog takes the sky's colour", s.fog_from_sky);
+        slider("fog_sun_scatter", "Sun in the fog", s.fog_sun_scatter, 0.0f, 2.0f);
+        slider("fog_anisotropy", "Sun in the fog: tightness", s.fog_anisotropy, 0.0f, 0.95f);
+        check("tod", "Time of day drives the lights and sky", s.tod);
+        slider("tod_hours", "Hour (solar)", s.tod_hours, 0.0f, 24.0f);
+        slider("tod_day", "Day of the year", s.tod_day, 1.0f, 365.0f);
+        slider("tod_latitude", "Latitude", s.tod_latitude, -80.0f, 80.0f);
+        check("tod_play", "Play the day", s.tod_play);
+        slider("tod_speed", "Game seconds a second", s.tod_speed, 0.0f, 20000.0f);
+        note("A sky shows where the model has an opening (--camera roof looks up); presets: sky, dusk, fog, night, day-night");
+
         section("Levels of detail");
         check("lod", caps.clusters ? "Clusters (cut by error)" : "Levels of detail", s.lod);
         slider("lod_error", "Error (pixels)", s.lod_error, 0.1f, 16.0f);
@@ -642,6 +676,12 @@ public:
         _yaw += _options.spin;
         move(input, dt);
         if (_s.sun_animate) _s.sun_azimuth = std::remainder(_s.sun_azimuth + _s.sun_speed * dt, 360.0f);
+        if (_s.tod && _s.tod_play) {
+            TimeOfDay3D clock{.hours = _s.tod_hours, .day_of_year = _s.tod_day, .speed = _s.tod_speed};
+            kin::advance(clock, dt);
+            _s.tod_hours = clock.hours;
+            _s.tod_day = clock.day_of_year;
+        }
 
         // The view, made again when a setting that is part of it changes (not
         // while a slider is held, so dragging stays smooth).

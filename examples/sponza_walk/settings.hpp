@@ -6,6 +6,7 @@
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 #include <kin/render3d/taa.hpp>
+#include <kin/render3d/timeofday3d.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -106,6 +107,33 @@ struct Settings {
     float taa_jitter_scale = 1.0f;
     int taa_jitter_samples = 8;
     bool taa_freeze = false;
+    // Sky and fog (P3a): a procedural atmosphere behind the model (seen through its open roof and the arches), fog that takes its
+    // colour from it, and a time of day that drives the sun, the moonlight, the ambient light and the sky together.
+    bool sky = false;
+    float sky_turbidity = 2.5f;     // haze
+    float sky_sun_intensity = 3.0f; // the sun's light above the atmosphere (the time of day makes the sun's own from it)
+    float sky_intensity = 1.0f;
+    float sky_sun_size = 0.8f;      // degrees across
+    float sky_sun_disc = 30.0f;     // the disc's radiance over the sun's light (HDR: bloom picks it up)
+    bool sky_stars = true;
+    bool sky_moon = true;
+    bool sky_lights = false;        // Lights3D::sky_lights_scene: ambient light and reflections from the sky (replaces the hemisphere ambient)
+    bool fog = false;
+    float fog_density = 0.004f;     // per metre of distance
+    float fog_height_density = 0.0f;
+    float fog_falloff = 0.1f;       // per metre of height
+    float fog_base = 0.0f;          // the height its density is measured at
+    float fog_start = 0.0f;
+    float fog_max = 1.0f;           // the greatest opacity
+    bool fog_from_sky = true;       // its colour is the sky's in the view's direction
+    float fog_sun_scatter = 0.25f;
+    float fog_anisotropy = 0.6f;
+    bool tod = false;               // the time of day sets the sun, the fill (the moon), the ambient light, the moon of the sky and the fog's colour
+    float tod_hours = 12.0f;        // solar time
+    float tod_day = 172.0f;         // day of the year
+    float tod_latitude = 45.0f;
+    bool tod_play = false;
+    float tod_speed = 1800.0f;      // game seconds a second (1800: a game hour in two seconds)
     // Levels of detail (meshes are made with levels at load: --lod-levels)
     bool lod = false;
     float lod_error = 1.0f;     // pixels
@@ -272,6 +300,35 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     scene.lod = {.enabled = s.lod, .error_pixels = s.lod_error, .bias = s.lod_bias, .force_level = s.lod_force, .gpu_culling = s.lod_gpu,
                  .stats_readback = s.lod && s.lod_readback, .occlusion = {.enabled = s.lod && s.lod_occlusion}};
     scene.cull = s.cull;
+    // The sky and the fog (the time of day, when it drives them, last: it replaces the sun's direction and colour, the fill and the ambient).
+    scene.sky = {.enabled = s.sky,
+                 .turbidity = s.sky_turbidity,
+                 .sun_intensity = s.sky_sun_intensity,
+                 .intensity = s.sky_intensity,
+                 .sun_size = s.sky_sun_size,
+                 .sun_disc = s.sky_sun_disc,
+                 .stars = s.sky_stars,
+                 .moon = false};
+    scene.fog = {.enabled = s.fog,
+                 .density = s.fog_density,
+                 .height_density = s.fog_height_density,
+                 .height_falloff = s.fog_falloff,
+                 .base_height = s.fog_base,
+                 .start = s.fog_start,
+                 .max_opacity = s.fog_max,
+                 .colour = {0.62f, 0.68f, 0.76f},
+                 .colour_from_sky = s.fog_from_sky,
+                 .sun_scatter = s.fog_sun_scatter,
+                 .sun_anisotropy = s.fog_anisotropy};
+    l.sky_lights_scene = s.sky_lights;
+    if (s.tod) {
+        const Vec3f own_fog = scene.fog.colour;
+        const bool moon = s.sky_moon;
+        kin::apply({.hours = s.tod_hours, .day_of_year = s.tod_day, .latitude = s.tod_latitude}, l, scene.sky, scene.fog);
+        scene.sky.moon = scene.sky.moon && moon;
+        if (s.fog_from_sky) scene.fog.colour = own_fog;
+        if (!s.sun) l.sun.color = {};
+    }
 }
 
 // `m` as the settings want it.

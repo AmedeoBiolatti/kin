@@ -55,6 +55,13 @@
 // for every scene (it turns the selection on too): clusters behind others are not drawn. With --readback each camera also prints
 // the clusters of the first pass, those occluded and those drawn for nothing. `procedural: "hidden"` builds a wall, a floor, a
 // few objects in front of it and 64 copies of a 100,000-triangle torus (`clusters: true`) behind it, the scene it is judged on.
+// Sky, fog and time of day (P3a): a scene file may have `sky: {enabled, mode: "procedural"|"image", turbidity, sun_intensity, intensity,
+// ground_color, sun_size, sun_disc, stars, star_brightness, moon: {enabled, direction, size, light, color}, night_color,
+// light_threshold, light_interval}`, `fog: {enabled, density, height_density, height_falloff, base_height, start, max_opacity, color,
+// color_from_sky, sun_scatter, sun_anisotropy}`, `lights.sky_lights_scene`, and `time_of_day: {hours, day_of_year, latitude, axial_tilt,
+// moon_phase}` (applied to the sun, the moon's fill light, the ambient light, the moon of the sky and the fog's colour); a camera may
+// say `hours` (its own time of day: tod_sweep). `procedural: "landscape"` builds a 6 km valley: a height-field, 2500 cone trees
+// and six red pillars at 50 m to 4 km. --sky, --no-sky, --fog D, --no-fog, --sky-light and --time H set or remove them for every scene.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -64,6 +71,7 @@
 #include <kin/ecs/world.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
 #include <kin/render3d/taa.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
@@ -490,6 +498,102 @@ struct Motion {
         scene.draw(block, Mat4f::translation({3.5f + to_and_fro, 0.25f, -0.2f}) * Mat4f::rotation_y(time * 2.0f), warm);
         scene.draw(ball, Mat4f::translation({-0.8f + 1.2f * std::sin(time * 0.04f), 0.5f, 0.6f}), warm);
         scene.draw(pole, Mat4f::translation({0.6f * std::sin(time * 0.06f), 1.2f, 0.2f}), warm);
+    }
+};
+
+// A valley, for the sky and the fog (`procedural: "landscape"`, P3a): a height-field 6 km long and 6 km wide with the valley's
+// walls and mountains at the far end (vertices spaced finer near the camera), 2500 cone trees on its floor and slopes, and
+// six red pillars 40 m tall at 50, 200, 500, 1000, 2000 and 4000 m down the valley (their colour against the fog tells the
+// distance). The ground is coloured by height and slope: grass, rock, snow.
+struct Landscape {
+    kin::Mesh terrain, tree, pillar;
+    std::vector<kin::MeshInstance> trees;
+
+    static float smooth(float a, float b, float x) {
+        const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+    static float height(float x, float z) {
+        const float ax = std::abs(x);
+        const float rolling = 14.0f * std::sin(x * 0.0045f + 0.7f) * std::cos(z * 0.0031f) + 7.0f * std::sin(x * 0.011f - z * 0.0067f) +
+                              3.0f * std::sin(x * 0.031f + z * 0.027f);
+        const float walls = 260.0f * std::pow(smooth(120.0f, 1500.0f, ax), 1.4f);
+        const float far = 950.0f * smooth(1400.0f, 5600.0f, -z) * (0.65f + 0.35f * std::sin(x * 0.0021f + 1.1f));
+        return rolling * (0.3f + 0.7f * smooth(0.0f, 400.0f, ax)) + walls + far;
+    }
+
+    void make(kin::Renderer3D& r3d, const kin::JsonValue& doc) {
+        constexpr int nx = 255, nz = 400;
+        kin::MeshData grid;
+        grid.vertices.reserve(static_cast<std::size_t>(nx) * nz);
+        const auto at = [&](int i, int j) {
+            const float s = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(nx - 1);
+            const float t = static_cast<float>(j) / static_cast<float>(nz - 1);
+            const float x = 3000.0f * (s < 0 ? -1.0f : 1.0f) * std::pow(std::abs(s), 2.5f);
+            const float z = 120.0f - 6120.0f * t * t;
+            return std::pair<float, float>{x, z};
+        };
+        for (int j = 0; j < nz; ++j) {
+            for (int i = 0; i < nx; ++i) {
+                const auto [x, z] = at(i, j);
+                const float y = height(x, z);
+                const float e = 2.0f;
+                const Vec3f n = kin::normalize({height(x - e, z) - height(x + e, z), 2.0f * e, height(x, z - e) - height(x, z + e)});
+                // Grass low and flat, rock steep, snow high.
+                const float rock = smooth(0.78f, 0.55f, n.y);
+                const float snow = smooth(520.0f, 700.0f, y + 40.0f * (n.y - 0.7f));
+                const float grass = 1.0f - rock;
+                float r = 0.20f * grass + 0.42f * rock, g = 0.36f * grass + 0.38f * rock, b = 0.14f * grass + 0.33f * rock;
+                r += (0.9f - r) * snow;
+                g += (0.92f - g) * snow;
+                b += (0.95f - b) * snow;
+                grid.vertices.push_back({.position = {x, y, z}, .normal = n, .uv = {x * 0.01f, z * 0.01f},
+                                         .color = kin::Color::rgb(static_cast<kin::u8>(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f),
+                                                                  static_cast<kin::u8>(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f),
+                                                                  static_cast<kin::u8>(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f))});
+            }
+        }
+        for (int j = 0; j + 1 < nz; ++j) {
+            for (int i = 0; i + 1 < nx; ++i) {
+                const kin::u32 a = static_cast<kin::u32>(j * nx + i), b = a + 1, c = a + static_cast<kin::u32>(nx), d = c + 1;
+                // Counter-clockwise seen from above (+y): rows run toward -z (up the picture seen from above), columns toward +x.
+                grid.indices.insert(grid.indices.end(), {a, b, c, b, d, c});
+            }
+        }
+        terrain = r3d.create_mesh(grid);
+        tree = r3d.create_mesh(kin::meshes::cone(3.0f, 12.0f, 10));
+        pillar = r3d.create_mesh(kin::meshes::box({8.0f, 40.0f, 8.0f}));
+        // The trees: a fixed hash puts each (no random numbers to differ between runs), on the valley's floor and
+        // lower slopes, not on rock or snow.
+        const int count = static_cast<int>(doc.number_at("trees", 2500));
+        kin::u32 state = 0x2545F491u;
+        const auto random = [&] {
+            state = state * 1664525u + 1013904223u;
+            return static_cast<float>(state >> 8) / 16777216.0f;
+        };
+        for (int i = 0; i < count * 4 && static_cast<int>(trees.size()) < count; ++i) {
+            const float x = (random() * 2.0f - 1.0f) * 420.0f;
+            const float z = 100.0f - 3200.0f * random() * random();
+            const float y = height(x, z);
+            const float e = 2.0f;
+            const float slope = kin::normalize({height(x - e, z) - height(x + e, z), 2.0f * e, height(x, z - e) - height(x, z + e)}).y;
+            if (slope < 0.8f || y > 160.0f || (std::abs(x - 12.0f) < 14.0f)) {
+                continue; // none on steep ground, high up, or in the lane the pillars stand in
+            }
+            const float scale = 0.6f + 1.0f * random();
+            trees.push_back({.transform = Mat4f::trs({x, y, z}, kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 360.0f * random()),
+                                                     {scale, scale * (0.9f + 0.4f * random()), scale}),
+                             .tint = kin::Color::rgb(static_cast<kin::u8>(40 + 40 * random()), static_cast<kin::u8>(80 + 50 * random()), 40)});
+        }
+    }
+
+    void draw(kin::Scene3D& scene) const {
+        scene.draw(terrain, Mat4f::identity(), {.color = kin::colors::white, .roughness = 1.0f});
+        scene.draw_instanced(tree, trees, {.color = kin::colors::white, .roughness = 0.9f});
+        const kin::Material3D red{.color = kin::Color::rgb(200, 30, 30), .roughness = 0.8f};
+        for (const float z : {-50.0f, -200.0f, -500.0f, -1000.0f, -2000.0f, -4000.0f}) {
+            scene.draw(pillar, Mat4f::translation({12.0f, height(12.0f, z) + 20.0f, z}), red);
+        }
     }
 };
 
@@ -1482,6 +1586,13 @@ struct Overrides {
     bool warm_up = false; // with --hitch: Renderer3D::warm_up before the feature goes on
     bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on and after (see Render3DStats::feature_bytes)
     bool crowd_move = false; // the crowd's enemies drift each frame (a game's crowd always moves): the scene is posed per frame
+    bool sky = false, no_sky = false;    // --sky: the procedural sky on for every scene; --no-sky: the scene's own off (to time its cost)
+    bool no_fog = false;                  // --no-fog
+    double fog = 0.0;                     // --fog D: distance and height fog of density D, coloured by the sky, on every scene
+    bool sky_light = false;               // --sky-light: Lights3D::sky_lights_scene
+    bool sky_light_every = false;         // --sky-light-every: with it, the panorama is made again every render (to time that)
+    bool fog_fixed = false;               // --fog-fixed: with --fog, a fixed colour (the cheaper path) instead of the sky's
+    double time_hours = -1.0;             // --time H: the time of day (solar hours) of every scene, with its date and latitude
     bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and the shadow pass would be timed once
 };
 
@@ -1584,6 +1695,86 @@ void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over
 
 // The process's resident memory, in MB (Linux; 0 elsewhere).
 // The GPU's memory in use (MiB), from nvidia-smi: the whole device, so only differences mean anything (this process is nearly alone on it); -1 without.
+// The sky, fog and time of day (P3a): the scene file's, then the command line's.
+void merge_sky(kin::Sky3D& sky, const kin::JsonValue* doc, const Overrides& over) {
+    if (doc) {
+        sky.enabled = doc->bool_at("enabled", true);
+        sky.mode = doc->string_at("mode", "procedural") == "image" ? kin::SkyMode3D::Image : kin::SkyMode3D::Procedural;
+        sky.turbidity = static_cast<float>(doc->number_at("turbidity", sky.turbidity));
+        sky.sun_intensity = static_cast<float>(doc->number_at("sun_intensity", sky.sun_intensity));
+        sky.intensity = static_cast<float>(doc->number_at("intensity", sky.intensity));
+        sky.ground_color = vec3(doc->find("ground_color"), sky.ground_color);
+        sky.sun_size = static_cast<float>(doc->number_at("sun_size", sky.sun_size));
+        sky.sun_disc = static_cast<float>(doc->number_at("sun_disc", sky.sun_disc));
+        sky.stars = doc->bool_at("stars", false);
+        sky.star_brightness = static_cast<float>(doc->number_at("star_brightness", sky.star_brightness));
+        sky.night_color = vec3(doc->find("night_color"), sky.night_color);
+        sky.light_threshold = static_cast<float>(doc->number_at("light_threshold", sky.light_threshold));
+        sky.light_interval = static_cast<kin::u32>(doc->number_at("light_interval", sky.light_interval));
+        if (const kin::JsonValue* moon = doc->find("moon")) {
+            sky.moon = moon->bool_at("enabled", true);
+            sky.moon_direction = vec3(moon->find("direction"), sky.moon_direction);
+            sky.moon_size = static_cast<float>(moon->number_at("size", sky.moon_size));
+            sky.moon_light = static_cast<float>(moon->number_at("light", sky.moon_light));
+            sky.moon_color = vec3(moon->find("color"), sky.moon_color);
+        }
+    }
+    if (over.sky_light_every) {
+        sky.light_threshold = -1.0f;
+        sky.light_interval = 0;
+    }
+    if (over.sky) {
+        sky.enabled = true;
+    }
+    if (over.no_sky) {
+        sky.enabled = false;
+    }
+}
+
+void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over) {
+    if (doc) {
+        fog.enabled = doc->bool_at("enabled", true);
+        fog.density = static_cast<float>(doc->number_at("density", fog.density));
+        fog.height_density = static_cast<float>(doc->number_at("height_density", fog.height_density));
+        fog.height_falloff = static_cast<float>(doc->number_at("height_falloff", fog.height_falloff));
+        fog.base_height = static_cast<float>(doc->number_at("base_height", fog.base_height));
+        fog.start = static_cast<float>(doc->number_at("start", fog.start));
+        fog.max_opacity = static_cast<float>(doc->number_at("max_opacity", fog.max_opacity));
+        fog.colour = vec3(doc->find("color"), fog.colour);
+        fog.colour_from_sky = doc->bool_at("color_from_sky", false);
+        fog.sun_scatter = static_cast<float>(doc->number_at("sun_scatter", fog.sun_scatter));
+        fog.sun_anisotropy = static_cast<float>(doc->number_at("sun_anisotropy", fog.sun_anisotropy));
+    }
+    if (over.fog > 0.0) {
+        fog.enabled = true;
+        fog.density = static_cast<float>(over.fog);
+        fog.height_density = static_cast<float>(over.fog);
+        fog.colour_from_sky = !over.fog_fixed;
+        fog.sun_scatter = over.fog_fixed ? 0.0f : 0.3f;
+    }
+    if (over.no_fog) {
+        fog.enabled = false;
+    }
+}
+
+// `hours` of 0 or more replaces the scene's time of day (a camera's own, tod_sweep, or --time).
+bool merge_time_of_day(kin::TimeOfDay3D& time, const kin::JsonValue* doc, double hours_override) {
+    bool set = false;
+    if (doc) {
+        time.hours = static_cast<float>(doc->number_at("hours", time.hours));
+        time.day_of_year = static_cast<float>(doc->number_at("day_of_year", time.day_of_year));
+        time.latitude = static_cast<float>(doc->number_at("latitude", time.latitude));
+        time.axial_tilt = static_cast<float>(doc->number_at("axial_tilt", time.axial_tilt));
+        time.moon_phase = static_cast<float>(doc->number_at("moon_phase", time.moon_phase));
+        set = true;
+    }
+    if (hours_override >= 0.0) {
+        time.hours = static_cast<float>(hours_override);
+        set = true;
+    }
+    return set;
+}
+
 double gpu_used_mb() {
     FILE* pipe = popen("nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null", "r");
     if (!pipe) {
@@ -1719,6 +1910,22 @@ int main(int argc, char** argv) {
             over.crowd_move = true;
         } else if (a == "--shadow-cache") {
             over.shadow_cache = true;
+        } else if (a == "--sky") {
+            over.sky = true;
+        } else if (a == "--no-sky") {
+            over.no_sky = true;
+        } else if (a == "--no-fog") {
+            over.no_fog = true;
+        } else if (a == "--fog") {
+            over.fog = std::atof(next().c_str());
+        } else if (a == "--sky-light") {
+            over.sky_light = true;
+        } else if (a == "--sky-light-every") {
+            over.sky_light = over.sky_light_every = true;
+        } else if (a == "--fog-fixed") {
+            over.fog_fixed = true;
+        } else if (a == "--time") {
+            over.time_hours = std::atof(next().c_str());
         } else if (a == "--taa") {
             over.taa = true;
         } else if (a == "--taa-blend") {
@@ -1977,6 +2184,11 @@ int main(int argc, char** argv) {
         if (is_motion) {
             motion.make(r3d, levels_of(doc));
         }
+        Landscape landscape;
+        const bool is_landscape = doc.string_at("procedural") == "landscape";
+        if (is_landscape) {
+            landscape.make(r3d, doc);
+        }
         Hidden hidden;
         const bool is_hidden = doc.string_at("procedural") == "hidden";
         if (is_hidden) {
@@ -2072,6 +2284,7 @@ int main(int argc, char** argv) {
         }
         const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
                                     : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
+                                    : is_landscape ? kin::Bounds3{{-3000.0f, -60.0f, -6000.0f}, {3000.0f, 1000.0f, 120.0f}}
                                     : is_hidden ? kin::Bounds3{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
                                     : is_pile   ? kin::Bounds3{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
                                     : is_walker ? kin::Bounds3{{-2.0f, -0.5f, -30.0f}, {70.0f, 5.0f, 30.0f}}
@@ -2108,6 +2321,7 @@ int main(int argc, char** argv) {
         }
 
         kin::Scene3D scene;
+        double camera_hours = -1.0; // the current camera's own time of day (< 0: the scene's)
         const auto fill_scene = [&](int time) {
             scene.clear();
             const kin::JsonValue* l = doc.find("lights");
@@ -2240,6 +2454,19 @@ int main(int argc, char** argv) {
             if (is_hidden) {
                 hidden.draw(scene);
             }
+            if (is_landscape) {
+                landscape.draw(scene);
+            }
+            // The sky, fog and time of day last, so that a time of day's sun and ambient replace the scene's own lights.
+            scene.sky = {};
+            merge_sky(scene.sky, doc.find("sky"), over);
+            scene.fog = {};
+            merge_fog(scene.fog, doc.find("fog"), over);
+            scene.lights.sky_lights_scene = lights.bool_at("sky_lights_scene") || over.sky_light;
+            kin::TimeOfDay3D day;
+            if (merge_time_of_day(day, doc.find("time_of_day"), camera_hours >= 0.0 ? camera_hours : over.time_hours)) {
+                kin::apply(day, scene.lights, scene.sky, scene.fog);
+            }
         };
 
         fs::create_directories(out / name);
@@ -2254,6 +2481,7 @@ int main(int argc, char** argv) {
         const kin::JsonValue* cameras = doc.find("cameras");
         for (const kin::JsonValue& c : cameras ? cameras->items() : kin::JsonValue::Array{}) {
             const std::string camera_name = c.string_at("name", "camera");
+            camera_hours = c.number_at("hours", -1.0);
             const float fov = static_cast<float>(c.number_at("fov", 50.0));
             Vec3f eye = vec3(c.find("eye")), target = vec3(c.find("target"));
             if (const kin::JsonValue* fit = c.find("fit")) {
@@ -2264,6 +2492,13 @@ int main(int argc, char** argv) {
                 const float yaw = static_cast<float>(fit->number_at("yaw", 0.0)) * 3.14159265f / 180.0f;
                 const float pitch = static_cast<float>(fit->number_at("pitch", 30.0)) * 3.14159265f / 180.0f;
                 eye = target + Vec3f{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * distance;
+            }
+            // `at_sun` / `at_moon`: look toward the sun (or moon) of the camera's time of day, plus `target_offset`.
+            if (c.bool_at("at_sun") || c.bool_at("at_moon")) {
+                kin::TimeOfDay3D day;
+                merge_time_of_day(day, doc.find("time_of_day"), camera_hours >= 0.0 ? camera_hours : over.time_hours);
+                const kin::SkyState3D state = kin::evaluate(day);
+                target = eye + (c.bool_at("at_sun") ? state.sun_direction : state.moon_direction) * 100.0f + vec3(c.find("target_offset"));
             }
             // The scene at `time` (frames; 0 is the picture, earlier is negative), the camera
             // having panned `pan` units a frame to reach `eye` at 0.

@@ -4141,6 +4141,200 @@ particles, wind) for snow and rain; transparency ordering for them. Opt-in like 
 byte-identical when off. Checks: the harness scenes plus new ones (a mountain with fog, a
 night scene with spot lights), cost per feature.
 
+Split in three: **P3a** (sky, fog, day-night, the sky's image-based light: done, below), **P3b**
+(spot lights, more shadow-casting lights: not started; the moon is the fill light for now, which casts no
+shadow) and **P3c** (3D particles and weather: not started; `kin_fog.inc.glsl` and the `fog` pipeline variants are
+there for them, and `Material3D` blended and additive passes are already fogged).
+
+#### P3a — sky, fog, time of day — results
+
+(2026-10-12, `exp/3d-rendering`, working tree on `d42443b`; not committed.)
+
+**What exists.**
+- `kin/render3d/sky3d.hpp`: `Sky3D` (`Scene3D::sky`) and `Fog3D` (`Scene3D::fog`), plain data, off by default, and the same maths on the
+  CPU (`sky_radiance`, `sky_color`, `sky_sun_light`, `sky_ground_light`, `sky_irradiance`, `fog_optical_depth`, `fog_opacity`, `fog_color`,
+  `fog_apply`; `sky3d.cpp`). The tests compare the pictures with them.
+- `kin/render3d/timeofday3d.hpp`: `TimeOfDay3D` {hours, day_of_year, latitude, axial_tilt, moon_phase, speed}, `evaluate()` (pure:
+  sun and moon direction/elevation/azimuth, sun colour, moonlight, ambient and ground ambient, fog colour and density suggestion,
+  daylight), `apply()` (into `Lights3D`, `Sky3D`, `Fog3D`), `sun_times()`, `advance()`. ECS: a `TimeOfDay3D` component on an entity,
+  `WorldRenderState3D::advance_time_of_day(dt)` and `apply_time_of_day(scene)`.
+- `Lights3D::sky_lights_scene`; `Render3DStats::{sky_drawn, fog_applied, sky_env_regenerated, sky_env_generations, sky_env_cpu_ms}`.
+- Shaders: `kin_sky.inc.glsl` (the atmosphere), `kin_fog.inc.glsl` (fog, one include a particle pass will use), `kin_sky_pass.inc.glsl`
+  with `sky.frag`, `sky_velocity.frag`, `sky_velocity_only.frag`, `sky_env.frag`; `mesh_fog.frag` and `mesh_velocity_fog.frag`
+  (`#define KIN_FOG` before the one shared mesh fragment include); `view_output_dither.frag`. `kin_material.inc.glsl` gained
+  `#ifdef KIN_FOG` code only.
+- Harness (`kin_reference`): JSON keys `sky`, `fog`, `time_of_day`, `lights.sky_lights_scene`, a camera's `hours`, `at_sun`, `at_moon`;
+  `procedural: "landscape"` (a 6 km height-field valley, 2500 cone trees, six red pillars at 50 m to 4 km); options `--sky`, `--no-sky`,
+  `--fog D`, `--fog-fixed`, `--no-fog`, `--sky-light`, `--sky-light-every`, `--time H`; scenes `sky_day`, `sky_dusk`, `sky_night`,
+  `fog_valley`, `tod_sweep` (default pictures in `reference_out/p3a_<scene>/`, 18 PNGs, two runs byte for byte equal).
+- Sponza Walk: a "Sky and fog (P3a)" section (sky, haze, sun disc, stars, moon, sky-lights-the-scene; fog distance, height, falloff,
+  base, start, cap, colour from the sky, sun lobe; time of day with hour, day, latitude, play and speed), presets `sky`, `dusk`, `fog`,
+  `night`, `day-night`.
+
+**Models and why.**
+- *Sky*: a single-scattering atmosphere, Rayleigh and Mie (Henyey-Greenstein, g = 0.8) and an ozone absorber for the twilight blue, an
+  exponential atmosphere seen over a flat ground, **eight midpoint steps** along the ray in the variable `w = 1 - e^(-h/H_R)` (squared, so that
+  the ground's air has the finer steps), flat-earth air mass by Kasten and Young rounded off over the last 1.4 degrees of the horizon
+  (so the colour has no kink where the ground begins). Chosen over a Preetham or Hosek-Wilkie fit because (a) it is closed enough to run
+  in the **mesh fragment shader**: the fog's colour "from the sky" is that same function evaluated along each fragment's view ray, so far
+  geometry converges to the sky by construction, not by a second set of constants; (b) it handles low and sub-horizon suns (sunsets,
+  twilight, the horizon's red) which the fits do not; (c) the same function fills the environment panorama (the IBL link). Cost: about
+  8 exps and pows per pixel. What it lacks: multiple scattering (a fixed x2 `brightness` stands in for it and the ground's bounce, a look
+  choice: single scattering alone gives a zenith a fifth as bright as photographs), earth shadow and the Belt of Venus, clouds,
+  aerial perspective inside a pixel's ray (the fog is separate).
+- *Where it is drawn*: a full-screen triangle at depth 0 in the **main pass**, after the scene's opaque meshes and before its blended
+  and additive ones and the overlay, with the depth test of "greater or equal" (reverse Z: it passes only where nothing was drawn, the
+  early-z skipping the rest). It binds its own pipeline in that pass (the draw binder and the texture cache are forgotten after it).
+  Under MSAA each pixel is shaded once and the depth test is per sample; under TAA the matrix it unprojects with is the jittered one
+  (its samples are where the meshes' are) and the camera's turn is written as the velocity (in the second target of the main pass, or,
+  with the pre-pass, as a velocity-only triangle in the pre-pass over its depth): without it a bright sub-pixel sun keeps 6% of its light
+  in a pan (tested).
+- *Sun disc*: coverage by the angle to its centre, a one-pixel linear edge (`atan(|d x s|, d . s)`, exact for small angles), the horizon's
+  edge likewise, limb darkening, the radiance `sun_disc` (30) times the sun's light through the air: HDR, so bloom has it.
+- *Stars*: a grid of cells over the sphere, a hash on integers (PCG3D: the same stars on every GPU; a float hash differed between
+  NVIDIA and lavapipe by 2%), 1.25 pixels wide at least (more than a sixth of a cell: the neighbours are looked in), faded in as the sun
+  goes from -3 to -12 degrees. *Moon*: a disc and a second light in the scattering (a glow round it).
+- *Fog*: exponential distance density plus an exponential height density, **integrated in closed form** along the ray (`tau = d
+  (s - start) + h e^{-k (y0 + dy start - base)} (1 - e^{-k dy L}) / (k dy)`, a series where `k dy L` is small, a finite limit to the sky),
+  opacity `1 - e^-tau` capped at `max_opacity`; the colour is the fixed one or `kin_sky_scatter(view direction)` (the horizon's for rays
+  that look down), plus the sun's light times a Henyey-Greenstein lobe. Applied **in `kin_output`**, before the sRGB encode, to the lit colour
+  (a blended mesh mixes its colour, then its alpha is applied; an additive one is dimmed by `1 - opacity`). It reaches the sky pass
+  too: the height fog's integral to infinity (no distance term), so a mist hides the horizon's low sun.
+- *Variants*: `pipeline(..., fog)` picks `mesh_fog.frag` / `mesh_velocity_fog.frag` (a fragment shader with one more uniform block in
+  slot 2, where custom parameters sit elsewhere, so it is pushed again after a custom draw); custom material shaders are not fogged.
+  The old shaders are untouched: **70 of 70 .spv of the build before the stage are byte for byte the ones after**; the stage adds seven.
+- *IBL link*: with `Lights3D::sky_lights_scene` the sky (atmosphere and ground, no disc, moon or stars) is drawn into a 256 x 128
+  equirectangular panorama (`sky_env.frag`), mipped, and filtered by the same `env_filter.comp` machinery into the specular levels and the
+  irradiance; `Lights3D::environment` and `ambient` are not used then. Made again only when a sky parameter has moved by more than
+  `Sky3D::light_threshold` (0.004, relative to a light of 1) **and** `light_interval` (4) renders have passed since the last time; it
+  is world space, so `environment_rotation` does not turn it. It works whether or not the sky is drawn.
+- *Time of day*: Cooper's declination, the hour angle, solar time (no equation of time), north is -z, east +x; sunrise with 0.833
+  degrees of refraction; the sun's light is `sun_intensity` times its transmittance through the same atmosphere (so the lights and the
+  sky agree by construction); the moon's hour angle follows the phase and its declination swings from the sun's to its opposite; its
+  light is 0.1 at full (an art scale: the real ratio is 1 in 400000) and is the fill light.
+- *Dither*: a view with a sky is output through `view_output_dither.frag` (one 8-bit step, triangular, from interleaved gradient noise:
+  a function of the pixel, so it holds still under TAA): a night sky is a few levels of 8 bits and came out in rings without it. It
+  touches every pixel of such a view by one level (an opaque pixel under it differs by <= 1 from the same view without a sky).
+
+**Checks run.**
+- *Off is off*: default and all-on (`--cascades 4 --ao --contact-shadows --taa`) renders of crowd, shadows, sponza, helmet, motion,
+  spheres, cornell: **34 of 34** pictures byte for byte those of `reference_out/p1a_base_def` and `p1a_base_all`; kiln_near
+  (`--lod --lod-clusters`) 3 of 3 against `p1a_base_kiln`; the 13 skinned and physics scenes (rendered from the unmodified binary
+  into the scratchpad before the first edit) default 49 of 49 and all-on 49 of 49, and `physics_character`, `physics_climb`,
+  `physics_ragdoll`, `physics_rope` 27 of 27 against `p2c`, `p2d`, `p2e` stored pictures. Plus the unit test: a sky or fog "configured but
+  off" is the plain picture to the byte, in 8-bit and HDR.
+- `ctest` 75 of 75 (`KIN_REQUIRE_GPU_TESTS=1`; the new tests are in `kin-render3d`), `build-no3d` 65 of 65, `kin_render3d_tests` whole
+  on NVIDIA and on lavapipe (2 min 20 s), re-run on the final sources after the last edit (star hash, tests, docs).
+- New tests (18; the CPU ones and the GPU ones against the CPU's maths): `test_time_of_day_formulae` (equinox noon elevation = 90 - |lat|
+  at five latitudes to 0.05 degrees, azimuth sweep, June solstice, sunrise and sunset against the standard formula to 0.03 h and
+  to -0.833 degrees, London's 16 h 38, polar day and night, the moon opposite at full and with the sun at new, reddening, apply,
+  the clock), `test_sky_model_cpu`, `test_fog_math_cpu` (the closed form against a Simpson integral of the density along
+  the ray: 60 rays, relative 2e-4), `test_gpu_sky_matches_cpu` (1187 pixels, worst difference **1** level of 255, four views including
+  the ground below the horizon, with haze and intensity changed), `test_gpu_sky_horizon_is_smooth`, `test_gpu_sky_sun_position` (six
+  orientations and fields of view from 30 to 100 degrees: the disc's centroid off the projection by at most **0.05 px**),
+  `test_gpu_sky_stays_behind_geometry` (a box at 20 m and one at 3 km, 1 and 4 samples, glass in front), `test_gpu_sky_and_fog_off_are_unchanged`,
+  `test_gpu_fog_matches_formula` (8 cases x 54 pixels: the ray's length, start and cap, height fog from near its base and above
+  it, the sky's colour with the sun's lobe: worst **1** level), `test_gpu_fog_blended_and_custom` (glass, additive, cut-out, custom shader),
+  `test_gpu_fog_melts_into_the_sky` (the ground's last rows are the sky's colour, 160/162/143 against 161/161/140), `test_gpu_sky_under_taa`
+  (still: consecutive frames differ by <= 1 level away from the disc; turning: within 2 levels of the same frame without TAA),
+  `test_gpu_sky_sun_under_taa` (a sub-pixel disc, still and at 2.6 px a frame, both velocity paths: centroid off the projection by
+  0.03 px still, 0.25 px worst turning; its light 0.74 to 1.08 of the same frame without TAA), `test_gpu_sky_lights_the_scene` (a white
+  sphere lit only by the sky: the picture against the CPU's cosine-weighted estimate, noon 0.596/0.633/0.686 against 0.596/0.634/0.688,
+  dusk and night within 3%; warmer at dusk, 3% of noon at night; the light's rotation does not turn it),
+  `test_gpu_sky_environment_regeneration`, `test_gpu_sky_image_mode` (the panorama's colours, the intensity, the rotation: a test that
+  found the rotation was left out of the first version), `test_gpu_sky_stars_and_moon`, `test_gpu_sky_overlay_and_warm_up`.
+- NVIDIA and lavapipe: every new test passes on both. The five scenes' pictures (18) rendered on lavapipe against NVIDIA: mean
+  difference 0.02 to 0.04 of 255, nothing over 27 apart from 0.003 to 0.017% of the night pictures' pixels (stars: before the integer
+  hash 0.02%; the numbers above are the first run; the stored pictures are from the final build).
+
+**Pictures looked at** (1280x720). `sky_day`: `valley` a clear blue sky paling to a hazy horizon, snow ridges and the pillars fading into
+it (the far pillars pink), a green plain with cone trees casting short shadows; `sun` the disc, small and white, a broad
+white-blue aureole (the Mie lobe), no ring or banding; `high` plain blue. `sky_dusk`: `sun` the sun on the ridge, the whole low sky
+orange to yellow, a purple-grey zenith (the ozone), long dark shadows, trees as silhouettes with a rim of orange; `away` the
+anti-solar side, orange horizon band under a grey-violet sky, the terrain black. `sky_night`: `stars` a dark navy sky with 40 or so
+faint stars, no rings; `moon` the disc with a wide brownish glow (the moon is low and its light passes much air; the glow is
+bigger and browner than a camera's: left), the horizon a dim amber band; `valley` a night plain, a few stars, the red pillar dark red.
+`fog_valley`: `valley` a mist in the plain, trees fading, the ridges' snow dissolving into a bright warm haze; `above` from a ridge the mist
+lying in the floor with the pillars poking through, a clear green slope on the left; `sun` a washed-out bright sun through the fog.
+`tod_sweep` (contact sheet): 5:30 a bright white glare on the east, 7:00 pale, 12:30 flat and pale (fog from a bright sky: low contrast),
+17:30 a glare on the west, 20:00 an orange sunset and black ground, 22:30 a navy night. **Ugly or weak**: noon is washed out (the fog's
+colour is the whole bright sky; a lower density or `colour_from_sky = false` is the look, not a fault); the glare at 5:30 and 17:30
+saturates a large area (HDR: bloom and a lower `sun_disc` or a higher turbidity tame it); the moon's glow is brown and large; the
+dusk's sun is hidden by the ridge (it is below it); the night's stars are few single-pixel specks (about 40 in a 90 degree view);
+no clouds, so the sky is a smooth gradient (rings are gone with the dither; a faint darker patch round the night's zenith remains: the
+gradient's own).
+Seams fixed on the way: the terrain's winding (the harness's, culled: the ground showed as the sky's), the horizon's band
+(a hard edge of the airmass at y = 0: rounded), banding (dither), stars at low resolution (sub-pixel: sized by the pixel).
+
+**Cost** (NVIDIA RTX 4080 Laptop, GPU ms of a frame with the view rendered 8 times in it, divided by 8, median of 300 frames; the noise is
++-0.03 ms, so these are one significant figure at best):
+
+| What | 1280x720 | 1920x1080 | Notes |
+|---|---|---|---|
+| Sky pass (`sky_day`, sky only against neither) | +0.0 to +0.08 | +0.06 to +0.15 | the sky is 40 to 100% of the picture |
+| Sky pass at night (stars, moon) | +0.07 | +0.11 | the star cell(s) only where the sun is under -3 degrees |
+| Fog in the main pass, colour from the sky (sponza nave, roof) | +0.09, +0.12 | +0.26, +0.28 | the eight-step integral per fragment |
+| the same on kiln_near (`--lod --lod-clusters`, three cameras) | +0.04 to +0.12 | +0.10 to +0.23 | |
+| Fog, a fixed colour (sponza; kiln) | +0.03, +0.02; +0.01 to +0.03 | +0.015, +0.05; +0.03 to +0.05 | |
+| Sky + fog + TAA's sky velocity (`sky_day`, `--taa`) | +0.04 to +0.1 | +0.2 to +0.3 | against TAA alone (one run, 100 frames) |
+| The sky's panorama made and filtered (`--sky-light-every`: every render) | +0.35 to +0.4 | +0.35 to +0.6 | independent of the view's size (the 1080p spread is noise); once, then a few a second |
+| `sky_lights_scene` with nothing changing | 0 | 0 | the same texture reads |
+
+**Limits and not done.**
+- Custom material shaders (`Material3D::shader`) are not fogged (their pipelines have no fog block); a game's own shader can include
+  `kin_fog.inc.glsl` itself.
+- No spot lights, no second shadow-casting light (P3b): at night the moon is the fill light and casts no shadow. No clouds, no 3D
+  particles, no weather (P3c). Fog is not a volume: no light shafts, no shadowed in-scattering, the sun's lobe ignores occlusion.
+- Orthographic cameras: the fog uses the depth along the view and one direction for the sky and the fog's colour (a flat sky colour);
+  tested only for not failing (no picture test).
+- The sky's panorama is 256 x 128: a sharp sun glow is blurred in the light (the sun is a light of its own), the filter's noise at
+  the roughest levels is the environment filter's.
+- The image sky (`SkyMode3D::Image`) shows the specular's first level (the panorama at its own size, up to 1024 wide), bilinear, no
+  sun disc or stars; with no environment it draws nothing.
+- Sub-pixel stars twinkle by the camera's turn at low resolution (they are 1.25 px wide: a star between two pixels is dimmer in each).
+- `Sky3D::intensity` scales the sky and the panorama but not the sun's light: set `sun_intensity` and the lights together (apply() does).
+- One survivor of the mutation run (below): the sky's unjittered matrix under TAA is not observable on this analytic sky.
+- Not run: Windows or MSVC; a TAA scene with a *moving sun* (the camera turning is tested, the sun moving is the same arithmetic);
+  the ECS clock's component in a headless run beyond the unit-level call (`advance_time_of_day`/`apply_time_of_day` are
+  exercised by Sponza Walk's `tod_play` through `kin::advance`, not through flecs); Sponza Walk's panel click path.
+
+**Mutation run** (25 deliberate breaks; each source restored from a saved copy and compared afterwards: all seven files byte for byte
+equal; the test suite is `kin_render3d_tests` filtered on "time_of_day", "sky" and "fog").
+
+| # | Break | Caught by |
+|---|---|---|
+| 0 | sun direction flipped in the sky pass | `test_gpu_sky_matches_cpu` |
+| 1 | fog uses the depth z, not the ray's length | `test_gpu_fog_matches_formula` ("wide view") |
+| 2 | height fog's sign | `test_gpu_fog_matches_formula` |
+| 3 | fog colour not from the sky | `test_gpu_fog_melts_into_the_sky` |
+| 4 | the sun's in-scattering ignored | `test_gpu_fog_matches_formula` |
+| 5 | the sky drawn over geometry (no depth test) | `test_gpu_sky_stays_behind_geometry` |
+| 6 | the sky unprojected with the unjittered matrix under TAA | **survived** (see below) |
+| 7 | time-of-day azimuth (the east sign) | `test_time_of_day_formulae` |
+| 8 | sunrise offset (no refraction) | `test_time_of_day_formulae` |
+| 9 | the IBL regeneration threshold ignoring changes | `test_gpu_sky_lights_the_scene` |
+| 10 | the horizon's ground colour ignored | `test_gpu_sky_matches_cpu` |
+| 11 | the sky's intensity applied twice | `test_gpu_sky_matches_cpu` (needed a view with intensity 0.55: the first version of the test missed it) |
+| 12 | the cut-out's discard skipped under fog | `test_gpu_fog_blended_and_custom` (a test added for it) |
+| 13 | the star fade ignoring the sun's elevation | `test_gpu_sky_stars_and_moon` |
+| 14 | the moon on the wrong side (phase not applied) | `test_time_of_day_formulae` |
+| 15 | the sky's velocity zero (no reprojection under TAA) | `test_gpu_sky_sun_under_taa` (first version **survived**: the smooth sky and a 1.2 degree pan hide it; a sub-pixel disc on black does not: its light falls to 6%) |
+| 16 | the fog's max opacity ignored | `test_gpu_fog_matches_formula` |
+| 17 | the fog's start distance ignored | `test_gpu_fog_matches_formula` |
+| 18 | the overlay fogged | `test_gpu_sky_overlay_and_warm_up` (first version of the test used a thin fog and passed it) |
+| 19 | the sun's twilight fade ignored | `test_gpu_sky_horizon_is_smooth` |
+| 20 | the panorama turned by `environment_rotation` | `test_gpu_sky_lights_the_scene` |
+| 21 | an additive mesh fogged as an opaque one | `test_gpu_fog_blended_and_custom` |
+| 22 | blended meshes not fogged | `test_gpu_fog_blended_and_custom` |
+| 23 | the sky's velocity sign flipped | `test_gpu_sky_sun_under_taa` |
+| 24 | the air mass without the horizon's rounding | `test_gpu_sky_matches_cpu` |
+
+**The survivor, plainly.** Mutant 6 is not caught by anything, and I could not make a test that catches it: the sky is analytic and
+smooth, its sun disc's edge is already filtered a pixel wide in the shader, so sampling the sky at the pixel's centre instead of
+the jittered position changes the resolved picture by under one level and the disc's centroid by under 0.1 px (measured: the
+unjittered build has the *smaller* wobble, 0.008 px against 0.03). It is an equivalent mutant for this content, kept right because
+a sky texture or a hard-edged feature (a future cloud layer) would crawl against the meshes' edges with it.
+
 ### P4 — The vertical slice, "Summit" (a one-player Peak-like)
 
 A new example (`examples/summit`): a small mountain of hand-assembled rock segments with

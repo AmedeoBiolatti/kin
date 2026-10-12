@@ -49,7 +49,23 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
                       .build()),
       _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer>().cached().build()),
       _animators(world.query_builder<const SkinnedMeshRenderer, Animator3D, Transform3D*>().build()),
-      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()) {}
+      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()),
+      _time_of_day(world.query_builder<TimeOfDay3D>().build()) {}
+
+void WorldRenderState3D::advance_time_of_day(f32 dt) {
+    _time_of_day.each([dt](TimeOfDay3D& time) { kin::advance(time, dt); });
+}
+
+bool WorldRenderState3D::apply_time_of_day(Scene3D& scene) const {
+    bool applied = false;
+    _time_of_day.each([&](TimeOfDay3D& time) {
+        if (!applied) {
+            kin::apply(time, scene.lights, scene.sky, scene.fog);
+            applied = true;
+        }
+    });
+    return applied;
+}
 
 void WorldRenderState3D::animate(f32 dt) {
     ++_epoch;

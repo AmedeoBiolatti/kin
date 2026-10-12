@@ -11,6 +11,7 @@
 #include <kin/render3d/mesh_lod.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
+#include <kin/render3d/timeofday3d.hpp>
 #include <kin/render3d/taa.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
@@ -9341,6 +9342,1315 @@ void test_gpu_rope_tube() {
     });
 }
 
+// --- Sky, fog and time of day (P3a) ---
+
+// The sun's elevation and azimuth at the March equinox (declination 0) are the textbook ones, the sweep through the day
+// turns east to west, sunrise and sunset agree with the standard formula (and London's June day is 16 h 38), the polar
+// day and night are found, the moon is where its phase puts it, the sun's light reddens toward the horizon and goes out
+// under it, and the clock steps and wraps.
+void test_time_of_day_formulae() {
+    using kin::TimeOfDay3D;
+    const auto at = [](float hours, float day, float latitude, float phase = 0.5f) {
+        return kin::evaluate(TimeOfDay3D{.hours = hours, .day_of_year = day, .latitude = latitude, .moon_phase = phase});
+    };
+    for (const float latitude : {0.0f, 20.0f, 45.0f, 60.0f, -35.0f}) {
+        const kin::SkyState3D noon = at(12.0f, 81.0f, latitude);
+        assert(std::abs(noon.declination) < 0.05f);
+        assert(std::abs(noon.sun_elevation - (90.0f - std::abs(latitude))) < 0.05f);
+        assert(std::abs(kin::length(noon.sun_direction) - 1.0f) < 1e-5f);
+    }
+    // Noon: due south (+z) in the north, due north (-z) in the south.
+    assert(std::abs(at(12.0f, 81.0f, 45.0f).sun_azimuth - 180.0f) < 0.5f && at(12.0f, 81.0f, 45.0f).sun_direction.z > 0.5f);
+    const float south_azimuth = at(12.0f, 81.0f, -35.0f).sun_azimuth;
+    assert(std::min(south_azimuth, 360.0f - south_azimuth) < 0.5f && at(12.0f, 81.0f, -35.0f).sun_direction.z < -0.5f);
+    // The solstices: the tilt added to, and taken from, the equinox's elevation.
+    assert(std::abs(at(12.0f, 172.0f, 45.0f).declination - 23.44f) < 0.1f);
+    assert(std::abs(at(12.0f, 172.0f, 45.0f).sun_elevation - (90.0f - 45.0f + 23.44f)) < 0.1f);
+    assert(std::abs(at(12.0f, 355.0f, 45.0f).sun_elevation - (90.0f - 45.0f - 23.44f)) < 0.3f);
+    // The sweep: east at 6 (+x), west at 18 (-x), the azimuth growing all day, the elevation peaking at noon.
+    assert(std::abs(at(6.0f, 81.0f, 45.0f).sun_azimuth - 90.0f) < 0.5f && std::abs(at(6.0f, 81.0f, 45.0f).sun_elevation) < 0.1f);
+    assert(std::abs(at(18.0f, 81.0f, 45.0f).sun_azimuth - 270.0f) < 0.5f);
+    assert(at(6.0f, 81.0f, 45.0f).sun_direction.x > 0.99f && at(18.0f, 81.0f, 45.0f).sun_direction.x < -0.99f);
+    float last_azimuth = -1.0f, last_elevation = -90.0f;
+    for (float hours = 6.5f; hours < 18.0f; hours += 0.5f) {
+        const kin::SkyState3D s = at(hours, 81.0f, 45.0f);
+        assert(s.sun_azimuth > last_azimuth);
+        if (hours <= 12.0f) {
+            assert(s.sun_elevation > last_elevation);
+        } else {
+            assert(s.sun_elevation < last_elevation);
+        }
+        last_azimuth = s.sun_azimuth;
+        last_elevation = s.sun_elevation;
+    }
+    // Sunrise and sunset: the standard hour angle with 0.833 degrees of refraction and the sun's radius.
+    const auto standard = [](double latitude, double declination) {
+        const double r = 3.14159265358979 / 180.0;
+        return std::acos((std::sin(-0.833 * r) - std::sin(latitude * r) * std::sin(declination * r)) / (std::cos(latitude * r) * std::cos(declination * r))) / r / 15.0;
+    };
+    for (const auto [latitude, day, declination] : {std::array<double, 3>{51.5, 172.0, 23.44}, std::array<double, 3>{0.0, 81.0, 0.0},
+                                                    std::array<double, 3>{40.0, 355.0, -23.44}, std::array<double, 3>{-33.0, 172.0, 23.44}}) {
+        const kin::SunTimes3D t = kin::sun_times({.day_of_year = static_cast<float>(day), .latitude = static_cast<float>(latitude)});
+        const double half = standard(latitude, declination);
+        assert(!t.polar_day && !t.polar_night);
+        assert(std::abs(t.sunrise - (12.0 - half)) < 0.03 && std::abs(t.sunset - (12.0 + half)) < 0.03);
+        // The elevation there is the refraction's -0.833 degrees.
+        assert(std::abs(at(t.sunrise, static_cast<float>(day), static_cast<float>(latitude)).sun_elevation + 0.833f) < 0.1f);
+        assert(std::abs(at(t.sunset, static_cast<float>(day), static_cast<float>(latitude)).sun_elevation + 0.833f) < 0.1f);
+    }
+    {
+        const kin::SunTimes3D london = kin::sun_times({.day_of_year = 172.0f, .latitude = 51.5f});
+        assert(std::abs((london.sunset - london.sunrise) - 16.63f) < 0.1f); // 16 h 38 min
+        assert(london.sunrise > 3.5f && london.sunrise < 3.9f);             // solar time: 03:43 UTC (the equation of time is a few minutes)
+        const kin::SunTimes3D equator = kin::sun_times({.day_of_year = 81.0f, .latitude = 0.0f});
+        assert(std::abs((equator.sunset - equator.sunrise) - 12.1f) < 0.1f);
+        assert(kin::sun_times({.day_of_year = 172.0f, .latitude = 80.0f}).polar_day);
+        assert(kin::sun_times({.day_of_year = 355.0f, .latitude = 80.0f}).polar_night);
+        assert(at(0.0f, 172.0f, 80.0f).sun_elevation > 0.0f); // the midnight sun
+    }
+    // The sun's light: warm and bright by day, redder low, none under the horizon; the ambient follows it.
+    const kin::Sky3D sky{};
+    const kin::SkyState3D noon = kin::evaluate({.hours = 12.0f, .day_of_year = 172.0f, .latitude = 45.0f}, sky);
+    const kin::SkyState3D low = kin::evaluate({.hours = 19.4f, .day_of_year = 172.0f, .latitude = 45.0f}, sky);
+    const kin::SkyState3D night = kin::evaluate({.hours = 0.0f, .day_of_year = 172.0f, .latitude = 45.0f, .moon_phase = 0.0f}, sky);
+    assert(low.sun_elevation > 0.5f && low.sun_elevation < 7.0f);
+    assert(noon.sun_color.x > noon.sun_color.y && noon.sun_color.y > noon.sun_color.z && noon.sun_color.z > 1.0f);
+    assert(low.sun_color.x / low.sun_color.z > 2.0f * (noon.sun_color.x / noon.sun_color.z));
+    assert(low.sun_color.x < noon.sun_color.x);
+    assert(night.sun_elevation < -10.0f && night.sun_color.x == 0.0f && night.sun_color.y == 0.0f && night.sun_color.z == 0.0f);
+    const auto sum = [](Vec3f v) { return v.x + v.y + v.z; };
+    assert(sum(night.ambient) < 0.01f * sum(noon.ambient) && sum(night.ambient) > 0.0f);
+    assert(sum(noon.ambient) > 0.15f && noon.ambient.z > noon.ambient.x);          // a blue sky's light
+    assert(low.ambient.x / low.ambient.z > noon.ambient.x / noon.ambient.z);       // warmer at the end of the day
+    assert(noon.daylight == 1.0f && night.daylight == 0.0f && low.daylight < 1.0f);
+    assert(noon.fog_density > 0.0f && sum(noon.fog_color) > 0.0f);
+    // The moon: opposite the sun at full, with it at new; its light follows its elevation and phase.
+    const kin::SkyState3D full = at(0.0f, 81.0f, 45.0f, 0.5f), fresh = at(0.0f, 81.0f, 45.0f, 0.0f);
+    assert(kin::dot(full.moon_direction, full.sun_direction) < -0.999f);
+    assert(kin::dot(fresh.moon_direction, fresh.sun_direction) > 0.999f);
+    assert(full.moon_elevation > 40.0f && full.moon_light > 0.09f && full.moon_color.z > full.moon_color.x);
+    assert(fresh.moon_light == 0.0f && fresh.moon_illumination < 0.001f);
+    assert(at(12.0f, 81.0f, 45.0f, 0.5f).moon_light == 0.0f); // a full moon at noon is under the horizon
+    // Applied: the sun and the moon's fill light, the ambient colours, the sky's moon, the fog's colour.
+    kin::Lights3D lights;
+    kin::Sky3D sky_in;
+    kin::Fog3D fog;
+    const kin::SkyState3D applied = kin::apply({.hours = 0.0f, .day_of_year = 81.0f, .latitude = 45.0f, .moon_phase = 0.5f}, lights, sky_in, fog);
+    assert(lights.sun.direction == applied.sun_direction && lights.sun.color == applied.sun_color);
+    assert(lights.fill.direction == applied.moon_direction && lights.fill.color == applied.moon_color && sum(lights.fill.color) > 0.0f);
+    assert(lights.ambient == applied.ambient && lights.ground_ambient.has_value() && *lights.ground_ambient == applied.ground_ambient);
+    assert(sky_in.moon && sky_in.moon_direction == applied.moon_direction && sky_in.moon_light == applied.moon_light);
+    assert(fog.colour == applied.fog_color);
+    kin::apply({.hours = 12.0f, .day_of_year = 81.0f, .latitude = 45.0f, .moon_phase = 0.5f}, lights, sky_in, fog);
+    assert(!sky_in.moon && sum(lights.fill.color) == 0.0f);
+    // The clock: `speed` game seconds a second, hours wrapping into days and the year.
+    TimeOfDay3D clock{.hours = 23.5f, .day_of_year = 365.0f, .speed = 3600.0f}; // a game hour a second
+    kin::advance(clock, 1.0f);
+    assert(std::abs(clock.hours - 0.5f) < 1e-4f && clock.day_of_year == 1.0f);
+    kin::advance(clock, -2.0f);
+    assert(std::abs(clock.hours - 22.5f) < 1e-3f && clock.day_of_year == 365.0f);
+    clock.speed = 0.0f;
+    kin::advance(clock, 100.0f);
+    assert(std::abs(clock.hours - 22.5f) < 1e-3f);
+    // Pure: the same inputs give the same bits.
+    const kin::SkyState3D a = at(15.3f, 200.0f, 37.0f, 0.3f), b = at(15.3f, 200.0f, 37.0f, 0.3f);
+    assert(std::memcmp(&a, &b, sizeof(a)) == 0);
+}
+
+// The atmosphere on the CPU: blue overhead and white-orange at the horizon by day, brighter toward the sun, the sun's
+// disc-side glow, the night's own light, continuity at the horizon (no seam), the ground colour deep below it.
+void test_sky_model_cpu() {
+    kin::Sky3D sky;
+    const Vec3f sun = normalize(Vec3f{0.3f, 0.6f, -0.5f});
+    const Vec3f up{0.0f, 1.0f, 0.0f};
+    const Vec3f zenith = kin::sky_radiance(sky, sun, up);
+    const Vec3f horizon_away = kin::sky_radiance(sky, sun, normalize(Vec3f{-0.3f, 0.0f, 0.5f}));
+    assert(zenith.z > zenith.y && zenith.y > zenith.x);                       // blue overhead
+    assert(zenith.z / zenith.x > horizon_away.z / horizon_away.x + 1.0f);     // and bluer than the horizon, which is whiter
+    assert(horizon_away.x + horizon_away.y + horizon_away.z > zenith.x + zenith.y + zenith.z); // brighter at the horizon
+    // Toward the sun (the aureole): brighter than the same elevation on the far side.
+    const Vec3f near_sun = kin::sky_radiance(sky, sun, normalize(sun + Vec3f{0.05f, 0.0f, 0.0f}));
+    const Vec3f far_side = kin::sky_radiance(sky, sun, normalize(Vec3f{-sun.x, sun.y, -sun.z}));
+    assert(near_sun.x + near_sun.y + near_sun.z > 2.0f * (far_side.x + far_side.y + far_side.z));
+    // Haze whitens: more turbidity, a smaller blue-to-red ratio overhead and a brighter sky near the sun.
+    kin::Sky3D hazy = sky;
+    hazy.turbidity = 8.0f;
+    const Vec3f hazy_zenith = kin::sky_radiance(hazy, sun, up);
+    assert(hazy_zenith.z / hazy_zenith.x < zenith.z / zenith.x);
+    // `intensity` scales the atmosphere (and not the night's own light).
+    kin::Sky3D doubled = sky;
+    doubled.intensity = 2.0f;
+    const Vec3f twice = kin::sky_radiance(doubled, sun, up);
+    assert(std::abs((twice.y - sky.night_color.y) / (zenith.y - sky.night_color.y) - 2.0f) < 1e-3f);
+    // Continuous at the horizon, whatever the sun does, and smooth: the two sides within 0.5% and the slopes alike.
+    for (const Vec3f s : {sun, normalize(Vec3f{0.5f, 0.02f, -0.8f}), normalize(Vec3f{0.5f, -0.1f, -0.8f})}) {
+        const Vec3f over = normalize(Vec3f{0.6f, 1e-4f, -0.8f}), under = normalize(Vec3f{0.6f, -1e-4f, -0.8f});
+        const Vec3f a = kin::sky_color(sky, s, over), b = kin::sky_color(sky, s, under);
+        for (const float d : {a.x - b.x, a.y - b.y, a.z - b.z}) {
+            assert(std::abs(d) < 0.005f * std::max({a.x, a.y, a.z, 1e-3f}));
+        }
+        // Over the 9 degrees below it the colour goes smoothly (no step larger than a tenth of the whole change) to the ground's.
+        Vec3f previous = a;
+        float biggest = 0.0f;
+        const Vec3f ground = kin::sky_ground_light(sky, s);
+        const float total = std::abs(a.y - ground.y);
+        for (int i = 1; i <= 90; ++i) {
+            const float elevation = -static_cast<float>(i) * 0.1f * 3.14159265f / 180.0f;
+            const Vec3f d{0.6f * std::cos(elevation), std::sin(elevation), -0.8f * std::cos(elevation)};
+            const Vec3f c = kin::sky_color(sky, s, d);
+            biggest = std::max(biggest, std::abs(c.y - previous.y));
+            previous = c;
+        }
+        assert(biggest < 0.1f * std::max(total, 1e-4f) + 1e-5f);
+    }
+    // Deep under the horizon: the ground's colour, lit by the sun and the zenith's light.
+    const Vec3f ground = kin::sky_color(sky, sun, normalize(Vec3f{0.2f, -0.9f, 0.1f}));
+    const Vec3f lit = kin::sky_ground_light(sky, sun);
+    assert(std::abs(ground.x - lit.x) < 1e-6f && std::abs(ground.y - lit.y) < 1e-6f && std::abs(ground.z - lit.z) < 1e-6f);
+    assert(lit.x > lit.z && lit.x > 0.0f); // the default ground colour is a warm grey
+    kin::Sky3D black_ground = sky;
+    black_ground.ground_color = {};
+    assert(kin::sky_ground_light(black_ground, sun).x == 0.0f);
+    // The sun's light, per colour, through the atmosphere: dimmer and redder with the elevation, cut under the horizon.
+    const Vec3f high = kin::sky_sun_light(sky, normalize(Vec3f{0.0f, 1.0f, 0.1f}));
+    const Vec3f lower = kin::sky_sun_light(sky, normalize(Vec3f{1.0f, 0.1f, 0.0f}));
+    const Vec3f below = kin::sky_sun_light(sky, normalize(Vec3f{1.0f, -0.2f, 0.0f}));
+    assert(high.x > lower.x && lower.x / lower.z > high.x / high.z && below.x == 0.0f);
+    assert(high.x < sky.sun_intensity && high.x > 0.7f * sky.sun_intensity);
+    // At night only the stars' own faint light and the moon's glow: the moon brightens its side of the sky.
+    kin::Sky3D night = sky;
+    night.moon = true;
+    night.moon_direction = normalize(Vec3f{0.5f, 0.5f, 0.0f});
+    night.moon_light = 0.1f;
+    const Vec3f midnight_sun = normalize(Vec3f{0.0f, -0.8f, 0.6f});
+    const Vec3f toward_moon = kin::sky_radiance(night, midnight_sun, normalize(night.moon_direction + Vec3f{0.0f, 0.1f, 0.0f}));
+    const Vec3f away = kin::sky_radiance(night, midnight_sun, normalize(Vec3f{-0.5f, 0.5f, 0.0f}));
+    assert(toward_moon.z > 3.0f * away.z && away.z > 0.0f);
+    kin::Sky3D dark = night;
+    dark.moon = false;
+    assert(kin::sky_radiance(dark, midnight_sun, up).z < toward_moon.z);
+    // Pure.
+    const Vec3f once = kin::sky_color(sky, sun, normalize(Vec3f{0.3f, 0.2f, 0.9f})), twice_again = kin::sky_color(sky, sun, normalize(Vec3f{0.3f, 0.2f, 0.9f}));
+    assert(once == twice_again);
+    // The cosine-weighted irradiance over pi: of a flat sky of colour c it is c (the quadrature's own test).
+    kin::Sky3D flat;
+    flat.intensity = 0.0f;
+    flat.ground_color = {};
+    flat.night_color = {0.25f, 0.5f, 1.0f};
+    const Vec3f flat_light = kin::sky_irradiance(flat, sun, up);
+    assert(std::abs(flat_light.x - 0.25f) < 1e-3f && std::abs(flat_light.y - 0.5f) < 1e-3f && std::abs(flat_light.z - 1.0f) < 1e-3f);
+    assert(kin::sky_irradiance(flat, sun, normalize(Vec3f{1.0f, 1.0f, 0.3f})).y > 0.0f);
+}
+
+// The fog's optical depth: the closed form equals a numerical integral of the density along the ray (Simpson, 20000 steps),
+// for rays up, down and level, from above and under the base, with a start distance, to a distance and to infinity; the
+// opacity is 1 - e^-tau capped by max_opacity; the sun's in-scattering adds a Henyey-Greenstein lobe.
+void test_fog_math_cpu() {
+    const auto integrate = [](const kin::Fog3D& fog, Vec3f eye, Vec3f dir, float distance) {
+        // The density at distance t from the eye along dir, integrated from `start` to `distance`.
+        const double a = fog.start, b = distance;
+        if (b <= a) {
+            return 0.0;
+        }
+        const int n = 20000;
+        const double h = (b - a) / n;
+        const auto density = [&](double t) {
+            const double y = eye.y + dir.y * t;
+            return static_cast<double>(fog.density) +
+                   static_cast<double>(fog.height_density) * std::exp(-static_cast<double>(fog.height_falloff) * (y - fog.base_height));
+        };
+        double sum = density(a) + density(b);
+        for (int i = 1; i < n; ++i) {
+            sum += density(a + i * h) * (i % 2 ? 4.0 : 2.0);
+        }
+        return sum * h / 3.0;
+    };
+    kin::Fog3D fog{.enabled = true, .density = 0.002f, .height_density = 0.03f, .height_falloff = 0.08f, .base_height = 10.0f, .start = 5.0f};
+    for (const Vec3f eye : {Vec3f{0.0f, 2.0f, 0.0f}, Vec3f{0.0f, 10.0f, 0.0f}, Vec3f{0.0f, 80.0f, 0.0f}}) {
+        for (const Vec3f raw : {Vec3f{0.0f, 1.0f, 3.0f}, Vec3f{0.0f, 0.0f, 1.0f}, Vec3f{1.0f, -0.4f, 2.0f}, Vec3f{0.0f, -1.0f, 0.1f}, Vec3f{0.0f, 0.02f, 1.0f}}) {
+            const Vec3f dir = normalize(raw);
+            for (const float distance : {3.0f, 20.0f, 150.0f, 900.0f}) {
+                const double want = integrate(fog, eye, dir, distance);
+                const double got = kin::fog_optical_depth(fog, eye, dir, distance);
+                assert(std::abs(got - want) <= 2e-4 * std::max(want, 1e-3) + 1e-6);
+            }
+        }
+    }
+    // To infinity: the height term alone, going up it is finite and equals the closed integral d e^{-k (y0 - base)} / (k dy).
+    {
+        kin::Fog3D layer{.enabled = true, .density = 0.5f, .height_density = 0.02f, .height_falloff = 0.1f, .base_height = 0.0f};
+        const Vec3f dir = normalize(Vec3f{0.0f, 0.5f, 1.0f});
+        const float want = 0.02f * std::exp(-0.1f * 4.0f) / (0.1f * dir.y);
+        assert(std::abs(kin::fog_optical_depth(layer, {0.0f, 4.0f, 0.0f}, dir, std::numeric_limits<float>::infinity()) - want) < 1e-4f * want);
+        // Horizontal and downward: nothing ends it (a ray that stays in the layer, or goes into it): a large depth.
+        assert(kin::fog_optical_depth(layer, {0.0f, 4.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, std::numeric_limits<float>::infinity()) > 1e6f);
+    }
+    // Opacity: 1 - e^-tau, capped; zero density is zero fog.
+    {
+        kin::Fog3D plain{.enabled = true, .density = 0.01f};
+        const Vec3f eye{}, dir{0.0f, 0.0f, 1.0f};
+        for (const float distance : {10.0f, 100.0f, 400.0f}) {
+            assert(std::abs(kin::fog_opacity(plain, eye, dir, distance) - (1.0f - std::exp(-0.01f * distance))) < 1e-6f);
+        }
+        plain.max_opacity = 0.6f;
+        assert(kin::fog_opacity(plain, eye, dir, 1000.0f) == 0.6f);
+        plain.max_opacity = 1.0f;
+        plain.density = 0.0f;
+        assert(kin::fog_opacity(plain, eye, dir, 1000.0f) == 0.0f);
+    }
+    // Colour: the fixed one, or the sky's; the sun adds a lobe that peaks toward it and is the same all round at g = 0.
+    {
+        kin::Sky3D sky;
+        const Vec3f sun = normalize(Vec3f{0.0f, 0.2f, -1.0f});
+        kin::Fog3D coloured{.enabled = true, .density = 0.01f, .colour = {0.2f, 0.3f, 0.4f}};
+        assert(kin::fog_color(coloured, sky, sun, {1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 1.0f}) == Vec3f(0.2f, 0.3f, 0.4f));
+        coloured.colour_from_sky = true;
+        assert(kin::fog_color(coloured, sky, sun, {}, normalize(Vec3f{0.0f, 0.3f, 1.0f})) == kin::sky_radiance(sky, sun, normalize(Vec3f{0.0f, 0.3f, 1.0f})));
+        coloured.sun_scatter = 0.5f;
+        coloured.sun_anisotropy = 0.7f;
+        const Vec3f light{2.0f, 1.0f, 0.5f};
+        const Vec3f toward = kin::fog_color(coloured, sky, sun, light, sun), away = kin::fog_color(coloured, sky, sun, light, -sun);
+        const Vec3f base = kin::sky_radiance(sky, sun, sun), base_away = kin::sky_radiance(sky, sun, -sun);
+        assert((toward.x - base.x) > 10.0f * (away.x - base_away.x) && (toward.x - base.x) / (toward.z - base.z) > 3.9f); // the sun's own, warm colour
+        coloured.sun_anisotropy = 0.0f;
+        const Vec3f even = kin::fog_color(coloured, sky, sun, light, -sun);
+        assert(std::abs((even.x - base_away.x) - 0.5f * 2.0f) < 1e-4f);
+        // Applied: the surface's colour mixed toward the fog's by the opacity.
+        kin::Fog3D mix{.enabled = true, .density = 0.01f, .colour = {1.0f, 0.0f, 0.0f}};
+        const Vec3f result = kin::fog_apply(mix, sky, sun, {}, {}, {0.0f, 0.0f, 1.0f}, 100.0f, {0.0f, 0.0f, 1.0f});
+        const float opacity = 1.0f - std::exp(-1.0f);
+        assert(std::abs(result.x - opacity) < 1e-5f && std::abs(result.z - (1.0f - opacity)) < 1e-5f);
+    }
+}
+
+// --- The sky, the fog and the sky's light on the GPU ---
+
+Vec3f linear_of(Color c) {
+    return {kin::srgb_to_linear(static_cast<float>(c.r) / 255.0f), kin::srgb_to_linear(static_cast<float>(c.g) / 255.0f),
+            kin::srgb_to_linear(static_cast<float>(c.b) / 255.0f)};
+}
+
+// What a gamma 8-bit target holds for linear light `c` (an 8-bit view has no exposure or tonemap).
+Color stored_of(Vec3f c) {
+    const auto one = [](float v) {
+        return static_cast<kin::u8>(std::lround(255.0f * kin::linear_to_srgb(std::clamp(v, 0.0f, 1.0f))));
+    };
+    return Color::rgb(one(c.x), one(c.y), one(c.z));
+}
+
+int largest_difference(Color a, Color b) {
+    return std::max({std::abs(int(a.r) - int(b.r)), std::abs(int(a.g) - int(b.g)), std::abs(int(a.b) - int(b.b))});
+}
+
+// The largest and the mean difference over two pictures, leaving out a square (a sun disc's neighbourhood) if asked.
+struct Spread {
+    int largest = 0;
+    double mean = 0.0;
+};
+// Only the rows above `end_row` (the sky's, in a scene whose ground begins lower) if given.
+Spread compare_pictures(const Pixels& a, const Pixels& b, int skip_x = -1, int skip_y = -1, int skip_radius = 0, int end_row = 1 << 20) {
+    Spread s;
+    double sum = 0.0;
+    int count = 0;
+    for (int y = 0; y < std::min(a.size.y, end_row); ++y) {
+        for (int x = 0; x < a.size.x; ++x) {
+            if (skip_radius > 0 && std::abs(x - skip_x) <= skip_radius && std::abs(y - skip_y) <= skip_radius) {
+                continue;
+            }
+            const int d = largest_difference(a.at(x, y), b.at(x, y));
+            s.largest = std::max(s.largest, d);
+            sum += d;
+            ++count;
+        }
+    }
+    s.mean = count > 0 ? sum / count : 0.0;
+    return s;
+}
+
+bool same_picture(const Pixels& a, const Pixels& b) { return a.size == b.size && a.rgba == b.rgba; }
+
+// A daytime sky with the sun's disc left out (a hundredth of a degree), nothing else drawn: what the CPU model says
+// each pixel shows. The sun is 17 degrees up, so a level camera sees it.
+kin::Scene3D clear_sky_scene(Vec3f eye, Vec3f target, float fov, Vec3f sun = {0.45f, 0.30f, -0.84f}) {
+    kin::Scene3D scene;
+    scene.camera = kin::Camera3D::look_at(eye, target, fov);
+    scene.lights.sun = {.direction = normalize(sun), .color = {1.0f, 1.0f, 1.0f}};
+    scene.sky.enabled = true;
+    scene.sky.turbidity = 3.0f;
+    scene.sky.sun_intensity = 1.0f; // the sky stays under 1: an 8-bit view does not clip it
+    scene.sky.sun_size = 0.01f;
+    return scene;
+}
+
+// The direction the camera sees through `pixel` (its centre) of the 160 x 120 window.
+Vec3f pixel_direction(const kin::Camera3D& camera, int x, int y) {
+    return camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, screen).direction;
+}
+
+// The sky pass shows the CPU model's colour for each pixel's direction: a level view, one tilted up, one tilted down (the
+// ground below the horizon, with the 9 degrees of blend) and a wide one; the sun's own neighbourhood is left out.
+void test_gpu_sky_matches_cpu() {
+    with_gpu("test_gpu_sky_matches_cpu", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const Vec3f eye{0.0f, 1.0f, 0.0f};
+        int worst = 0, count = 0;
+        const std::array<std::pair<Vec3f, float>, 4> views{std::pair<Vec3f, float>{{0.0f, 1.0f, -10.0f}, 60.0f}, {{4.0f, 14.0f, -10.0f}, 70.0f},
+                                                           {{0.0f, -9.0f, -10.0f}, 50.0f}, {{-10.0f, 3.0f, 2.0f}, 90.0f}};
+        int index = 0;
+        for (const auto& [target, fov] : views) {
+            kin::Scene3D scene = clear_sky_scene(eye, target, fov);
+            // The last two with the intensity and the haze changed (a factor applied twice, or the haze ignored, shows).
+            scene.sky.intensity = index >= 2 ? 0.55f : 1.0f;
+            scene.sky.turbidity = index == 3 ? 7.0f : 3.0f;
+            ++index;
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            assert(r3d.stats().sky_drawn && !r3d.stats().fog_applied);
+            const Vec3f sun = normalize(scene.lights.sun.direction);
+            for (int y = 2; y < 120; y += 7) {
+                for (int x = 3; x < 160; x += 9) {
+                    const Vec3f d = pixel_direction(scene.camera, x, y);
+                    if (kin::dot(d, sun) > 0.985f) {
+                        continue; // a few degrees of the sun: its glare is steep and the dither's
+                    }
+                    const Color want = stored_of(kin::sky_color(scene.sky, sun, d));
+                    const int off = largest_difference(p.at(x, y), want);
+                    worst = std::max(worst, off);
+                    ++count;
+                    if (off > 4) {
+                        std::cerr << "sky at (" << x << ", " << y << "): got " << p.at(x, y) << ", the CPU model says " << want << '\n';
+                    }
+                    assert(off <= 4);
+                }
+            }
+            renderer.present();
+        }
+        std::cerr << "sky: " << count << " pixels against the CPU model, worst " << worst << " of 255\n";
+    });
+}
+
+// No seam at the horizon: down a column of a level view the colour runs smoothly through the horizon line (no step
+// larger than the steepest step above it, in a sky whose sun sits on the horizon, where the gradient is steepest), and
+// far below it, the ground's colour.
+void test_gpu_sky_horizon_is_smooth() {
+    with_gpu("test_gpu_sky_horizon_is_smooth", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        for (const Vec3f sun : {Vec3f{0.45f, 0.30f, -0.84f}, normalize(Vec3f{-0.5f, 0.04f, 0.8f}), normalize(Vec3f{0.0f, -0.12f, -1.0f})}) {
+            // Looking level from the ground (a fov of 70: the horizon is the picture's middle row, ground below, sky above).
+            kin::Scene3D scene = clear_sky_scene({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -10.0f}, 70.0f, sun);
+            scene.sky.ground_color = {0.35f, 0.3f, 0.2f};
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            const int x = 120;
+            // The steps down the column are all small: the horizon is no edge.
+            int biggest = 0;
+            for (int y = 1; y < 119; ++y) {
+                biggest = std::max(biggest, largest_difference(p.at(x, y), p.at(x, y + 1)));
+            }
+            int around = 0;
+            for (int y = 50; y < 70; ++y) {
+                around = std::max(around, largest_difference(p.at(x, y), p.at(x, y + 1)));
+            }
+            std::cerr << "horizon: largest step in the column " << biggest << ", within 10 rows of the horizon " << around << "; column:";
+            for (int y = 40; y < 100; y += 3) {
+                std::cerr << ' ' << int(p.at(x, y).g);
+            }
+            std::cerr << '\n';
+            // No seam: the largest step between neighbouring rows is a small part of the whole change from the sky to the ground
+            // (the blend runs over 9 degrees), and the rows at the horizon itself step no more than their neighbours.
+            const int top = p.at(x, 20).g, bottom = p.at(x, 118).g;
+            assert(biggest <= static_cast<int>(0.3f * static_cast<float>(std::abs(top - bottom))) + 3);
+            // Far below it (more than the 9 degrees of blend) the sky is the ground's colour.
+            const Vec3f down = pixel_direction(scene.camera, x, 118);
+            assert(down.y < -0.4f);
+            const Color ground = stored_of(kin::sky_ground_light(scene.sky, scene.lights.sun.direction));
+            expect(p.at(x, 118), ground, "the ground colour far below the horizon", 4);
+            // Black ground: black, whatever the sun.
+            scene.sky.ground_color = {};
+            expect(shoot_view(renderer, r3d, view, scene).at(x, 118), kin::colors::black, "a black ground", 1);
+            renderer.present();
+        }
+    });
+}
+
+// The sun disc's centre is where the sun projects, within a pixel, at several camera orientations and fields of view
+// (its light centroid, which is sub-pixel exact), with the sky itself left black so that only the disc shows.
+void test_gpu_sky_sun_position() {
+    with_gpu("test_gpu_sky_sun_position", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const Vec3f sun = normalize(Vec3f{0.45f, 0.30f, -0.84f});
+        struct Config {
+            Vec3f offset;
+            float fov;
+        };
+        double worst = 0.0;
+        int checked = 0;
+        for (const Config c : {Config{{0.0f, 0.0f, 0.0f}, 60.0f}, {{0.15f, 0.05f, 0.0f}, 60.0f}, {{-0.2f, 0.1f, 0.1f}, 90.0f},
+                               {{0.05f, -0.15f, 0.0f}, 30.0f}, {{0.0f, 0.25f, 0.0f}, 100.0f}, {{0.3f, 0.0f, 0.2f}, 45.0f}}) {
+            const Vec3f eye{3.0f, 1.0f, -2.0f};
+            kin::Scene3D scene = clear_sky_scene(eye, eye + normalize(sun + c.offset) * 10.0f, c.fov);
+            scene.sky.intensity = 0.0f;
+            scene.sky.night_color = {};
+            scene.sky.ground_color = {};
+            scene.sky.sun_size = 2.0f;
+            scene.sky.sun_disc = 1.0f; // 1 x the sun's light: the disc stays under white
+            const auto at = scene.camera.project(eye + sun * 1000.0f, screen);
+            assert(at && at->pos.x > 8.0f && at->pos.x < 152.0f && at->pos.y > 8.0f && at->pos.y < 112.0f);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            double sum = 0.0, sx = 0.0, sy = 0.0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const double w = linear_of(p.at(x, y)).y;
+                    sum += w;
+                    sx += w * (x + 0.5);
+                    sy += w * (y + 0.5);
+                }
+            }
+            assert(sum > 1.0); // something drawn: a disc of at least a few pixels
+            const double dx = sx / sum - at->pos.x, dy = sy / sum - at->pos.y;
+            const double off = std::sqrt(dx * dx + dy * dy);
+            worst = std::max(worst, off);
+            ++checked;
+            if (off > 0.6) {
+                std::cerr << "sun disc centroid (" << sx / sum << ", " << sy / sum << ") against (" << at->pos.x << ", " << at->pos.y << ") fov " << c.fov << '\n';
+            }
+            assert(off < 0.6); // the brief's bound is a pixel; the centroid of a smooth disc is better
+            renderer.present();
+        }
+        std::cerr << "sun disc: " << checked << " views, centroid off by at most " << worst << " px\n";
+    });
+}
+
+// The sky draws only where nothing was drawn: a near box and a far one (3 km, past where a finite far plane would be)
+// show their own colour all over, with 1 sample and with 4; and it draws behind blended meshes.
+void test_gpu_sky_stays_behind_geometry() {
+    with_gpu("test_gpu_sky_stays_behind_geometry", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        for (const kin::u32 samples : {1u, 4u}) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            kin::Scene3D scene = clear_sky_scene({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -10.0f}, 60.0f);
+            const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
+            const kin::Material3D green{.color = Color::rgb(40, 200, 40), .unlit = true};
+            scene.draw(box, Mat4f::translation({0.0f, 1.0f, -20.0f}) * Mat4f::scaling({6.0f, 6.0f, 1.0f}), red);
+            scene.draw(box, Mat4f::translation({800.0f, 0.0f, -3000.0f}) * Mat4f::scaling({1200.0f, 1200.0f, 1.0f}), green);
+            // A blue glass in front of the sky and the box, drawn after: the sky is under it.
+            const kin::Material3D glass{.color = Color::rgba(0, 0, 255, 128), .unlit = true, .blend = kin::Blend3D::Alpha};
+            scene.draw(box, Mat4f::translation({-5.0f, 1.0f, -10.0f}) * Mat4f::scaling({3.0f, 8.0f, 0.2f}), glass);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            const auto near_spot = scene.camera.project({0.0f, 1.0f, -19.0f}, screen);
+            const auto far_spot = scene.camera.project({800.0f, 0.0f, -2999.0f}, screen);
+            const auto glass_spot = scene.camera.project({-5.0f, 1.0f, -10.0f}, screen);
+            assert(near_spot && far_spot && glass_spot && far_spot->pos.x < 150.0f);
+            for (int dy = -8; dy <= 8; dy += 4) {
+                for (int dx = -8; dx <= 8; dx += 4) {
+                    expect(p.at(static_cast<int>(near_spot->pos.x) + dx, static_cast<int>(near_spot->pos.y) + dy), red.color, "the near box, the sky not over it", 1);
+                }
+            }
+            expect(p.at(far_spot->pos), green.color, "the far box", 1);
+            // The glass over the sky: the sky's blue-ish colour and the glass's blue, mixed half and half.
+            const Color through = p.at(glass_spot->pos);
+            assert(through.b > 120 && through.r < 160);
+            // Sky elsewhere, as the CPU model has it.
+            expect(p.at(5, 5), stored_of(kin::sky_color(scene.sky, scene.lights.sun.direction, pixel_direction(scene.camera, 5, 5))), "the sky in the corner", 4);
+            assert(r3d.stats().sky_drawn);
+            renderer.present();
+        }
+    });
+}
+
+// Off is off: with the sky disabled (its settings set), or the fog disabled or its densities zero, the picture is the one a
+// scene without any of it draws, byte for byte; and sky pixels cover the background where on.
+void test_gpu_sky_and_fog_off_are_unchanged() {
+    with_gpu("test_gpu_sky_and_fog_off_are_unchanged", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        for (const bool hdr : {false, true}) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .background = Color::rgb(20, 50, 90), .hdr = hdr});
+            const auto make_plain = [&] {
+                kin::Scene3D plain;
+                plain.camera = kin::Camera3D::look_at({0.0f, 1.0f, 5.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
+                plain.lights.sun = {.direction = {0.4f, 1.0f, 0.5f}, .color = {1.0f, 0.95f, 0.9f}};
+                plain.draw(box, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 120, 60)});
+                plain.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({20.0f, 0.2f, 20.0f}), {.color = Color::rgb(120, 130, 120)});
+                plain.draw(box, Mat4f::translation({1.5f, 0.5f, 1.0f}), {.color = Color::rgb(60, 120, 220), .blend = kin::Blend3D::Alpha});
+                return plain;
+            };
+            const kin::Scene3D plain = make_plain();
+            const Pixels base = shoot_view(renderer, r3d, view, plain);
+            renderer.present();
+            // The sky and the fog configured, switched off.
+            kin::Scene3D off = make_plain();
+            off.sky = {.enabled = false, .turbidity = 6.0f, .sun_intensity = 9.0f, .stars = true, .moon = true, .moon_light = 1.0f};
+            off.fog = {.enabled = false, .density = 0.5f, .height_density = 0.5f, .colour_from_sky = true, .sun_scatter = 2.0f};
+            assert(same_picture(shoot_view(renderer, r3d, view, off), base));
+            assert(!r3d.stats().sky_drawn && !r3d.stats().fog_applied);
+            renderer.present();
+            // Fog enabled with nothing in it, or a capacity of nothing.
+            off.fog = {.enabled = true, .density = 0.0f, .height_density = 0.0f};
+            assert(same_picture(shoot_view(renderer, r3d, view, off), base));
+            off.fog = {.enabled = true, .density = 0.5f, .max_opacity = 0.0f};
+            assert(same_picture(shoot_view(renderer, r3d, view, off), base));
+            assert(!r3d.stats().fog_applied);
+            renderer.present();
+            // The sky's light on lights the scene from the sky's settings, drawn or not (a picture of its own); off, no panorama is made.
+            off.fog = {};
+            off.lights.sky_lights_scene = true;
+            off.sky = {.enabled = false, .turbidity = 3.0f};
+            const Pixels lit = shoot_view(renderer, r3d, view, off);
+            assert(r3d.stats().sky_env_generations >= 1 && !r3d.stats().sky_drawn && !same_picture(lit, base));
+            renderer.present();
+            off.lights.sky_lights_scene = false;
+            assert(same_picture(shoot_view(renderer, r3d, view, off), base));
+            assert(!r3d.stats().sky_env_regenerated);
+            renderer.present();
+            // On: the background gives way to the sky where nothing is drawn (and nowhere else).
+            kin::Scene3D on = make_plain();
+            on.sky.enabled = true;
+            on.sky.turbidity = 3.0f;
+            const Pixels with_sky = shoot_view(renderer, r3d, view, on);
+            assert(r3d.stats().sky_drawn);
+            expect(with_sky.at(80, 60), base.at(80, 60), "the box under the sky (an HDR view's output is dithered by a step)", hdr ? 1 : 0); // the box
+            assert(with_sky.at(4, 4) != base.at(4, 4) && with_sky.at(4, 4).b > with_sky.at(4, 4).r);
+            renderer.present();
+        }
+    });
+}
+
+
+// The fog: a wall of a known colour at known distances and heights is the colour the CPU formula says, through the
+// view's pixels (the ray's length, not its depth; heights above and below the base; a start distance; the cap; the sky's
+// own colour and the sun's lobe). Unlit green wall, an 8-bit view: the tolerance is 4 of 255.
+void test_gpu_fog_matches_formula() {
+    with_gpu("test_gpu_fog_matches_formula", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        struct Case {
+            const char* name;
+            Vec3f eye;
+            Vec3f target;
+            float fov;
+            float wall;  // the wall's front face, z
+            kin::Fog3D fog;
+        };
+        const kin::Fog3D none{};
+        const std::array<Case, 8> cases{{
+            {"10 m", {0, 1, 0}, {0, 1, -1}, 60.0f, -10.0f, {.enabled = true, .density = 0.02f}},
+            {"40 m", {0, 1, 0}, {0, 1, -1}, 60.0f, -40.0f, {.enabled = true, .density = 0.02f, .colour = {0.8f, 0.5f, 0.3f}}},
+            {"160 m", {0, 1, 0}, {0, 1, -1}, 60.0f, -160.0f, {.enabled = true, .density = 0.006f}},
+            {"wide view: the ray's length", {0, 1, 0}, {0, 1, -1}, 110.0f, -30.0f, {.enabled = true, .density = 0.03f}},
+            {"start and cap", {0, 1, 0}, {0, 1, -1}, 60.0f, -120.0f, {.enabled = true, .density = 0.03f, .start = 20.0f, .max_opacity = 0.7f}},
+            {"height fog from near its base", {0, 1.7f, 0}, {0, 1.7f, -1}, 60.0f, -70.0f,
+             {.enabled = true, .height_density = 0.04f, .height_falloff = 0.12f, .base_height = 0.0f}},
+            {"height fog from above its base", {0, 60, 0}, {0, 30, -80}, 70.0f, -80.0f,
+             {.enabled = true, .density = 0.001f, .height_density = 0.05f, .height_falloff = 0.07f, .base_height = 20.0f, .start = 5.0f}},
+            {"the sky's colour and the sun's lobe", {0, 2, 0}, {0, 2, -1}, 90.0f, -90.0f,
+             {.enabled = true, .density = 0.012f, .colour_from_sky = true, .sun_scatter = 0.4f, .sun_anisotropy = 0.6f}},
+        }};
+        const kin::Material3D wall{.color = Color::rgb(60, 180, 90), .unlit = true};
+        const Vec3f wall_linear = linear_of(wall.color);
+        int worst = 0;
+        for (const Case& c : cases) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at(c.eye, c.target, c.fov);
+            scene.lights.sun = {.direction = normalize(Vec3f{0.2f, 0.25f, -1.0f}), .color = {1.2f, 1.0f, 0.8f}};
+            scene.sky.turbidity = 3.0f; // not drawn: the fog takes its parameters
+            scene.fog = c.fog;
+            scene.draw(box, Mat4f::translation({0.0f, c.eye.y, c.wall - 0.5f}) * Mat4f::scaling({4000.0f, 4000.0f, 1.0f}), wall);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            assert(r3d.stats().fog_applied && !r3d.stats().sky_drawn);
+            for (int y = 6; y < 120; y += 21) {
+                for (int x = 6; x < 160; x += 19) {
+                    const kin::Ray3 ray = scene.camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, screen);
+                    const float t = (c.wall - ray.origin.z) / ray.direction.z;
+                    const Vec3f hit = ray.origin + ray.direction * t;
+                    const Vec3f to = hit - scene.camera.position;
+                    const float distance = kin::length(to);
+                    const Vec3f want = kin::fog_apply(scene.fog, scene.sky, scene.lights.sun.direction, scene.lights.sun.color,
+                                                      scene.camera.position, to / distance, distance, wall_linear);
+                    const Color expected = stored_of(want);
+                    const int off = largest_difference(p.at(x, y), expected);
+                    worst = std::max(worst, off);
+                    if (off > 4) {
+                        std::cerr << c.name << " at (" << x << ", " << y << "): got " << p.at(x, y) << ", the formula says " << expected << " (distance "
+                                  << distance << ")\n";
+                    }
+                    assert(off <= 4);
+                }
+            }
+            renderer.present();
+        }
+        std::cerr << "fog: " << cases.size() << " cases against the formula, worst " << worst << " of 255\n";
+        static_cast<void>(none);
+    });
+}
+
+// Blended and additive meshes are fogged too, as particles will be: a glass of alpha a shows a*fogged colour over the
+// window's black; an additive glow dims by the opacity (what it lies over has the fog already). A custom material shader
+// runs its own code and is not fogged (documented): its picture is the same with the fog on.
+void test_gpu_fog_blended_and_custom() {
+    with_gpu("test_gpu_fog_blended_and_custom", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -1.0f}, 60.0f);
+        scene.lights.sun.color = {};
+        scene.fog = {.enabled = true, .density = 0.02f, .colour = {0.7f, 0.8f, 1.0f}};
+        const float opacity = 1.0f - std::exp(-0.02f * 50.0f);
+        // An alpha glass 50 m away (its face at z = -50), over nothing.
+        const kin::Material3D glass{.color = Color::rgba(255, 60, 20, 128), .unlit = true, .blend = kin::Blend3D::Alpha};
+        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), glass);
+        Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const Vec3f glass_linear = linear_of(glass.color);
+        const float alpha = 128.0f / 255.0f;
+        const Vec3f fog_colour{0.7f, 0.8f, 1.0f};
+        // A point on the face: the centre ray's, 50 m.
+        const Vec3f fogged = glass_linear + (fog_colour - glass_linear) * opacity;
+        // The shader encodes the colour and then applies the alpha (premultiplied), and the target blends encoded values.
+        const Color encoded = stored_of(fogged);
+        const Color half = Color::rgb(static_cast<kin::u8>(std::lround(encoded.r * alpha)), static_cast<kin::u8>(std::lround(encoded.g * alpha)),
+                                      static_cast<kin::u8>(std::lround(encoded.b * alpha)));
+        expect(p.at(80, 60), half, "a glass seen through the fog", 4);
+        // Additive: the colour dims by (1 - opacity), no fog colour added.
+        scene.clear();
+        const kin::Material3D glow{.color = Color::rgb(220, 140, 60), .unlit = true, .blend = kin::Blend3D::Additive};
+        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), glow);
+        p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        expect(p.at(80, 60), stored_of(linear_of(glow.color) * (1.0f - opacity)), "an additive glow through the fog", 4);
+        // A cut-out (Blend3D::Mask): where its alpha is under the cutoff nothing is drawn, fogged or not; where over, it is
+        // opaque and fogged as any opaque surface.
+        scene.clear();
+        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}),
+                   {.color = Color::rgba(250, 40, 40, 60), .unlit = true, .blend = kin::Blend3D::Mask, .alpha_cutoff = 0.5f});
+        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -60.5f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}), {.color = Color::rgb(40, 250, 40), .unlit = true});
+        p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const float far_opacity = 1.0f - std::exp(-0.02f * 60.0f);
+        const Vec3f green = linear_of(Color::rgb(40, 250, 40));
+        // The wall is cut away wherever (alpha 60/255 < 0.5): the green box behind it shows, fogged at 60 m.
+        expect(p.at(80, 60), stored_of(green + (fog_colour - green) * far_opacity), "behind a cut-away wall, fogged", 4);
+        scene.clear();
+        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}),
+                   {.color = Color::rgba(250, 40, 40, 220), .unlit = true, .blend = kin::Blend3D::Mask, .alpha_cutoff = 0.5f});
+        p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const Vec3f red = linear_of(Color::rgb(250, 40, 40));
+        expect(p.at(80, 60), stored_of(red + (fog_colour - red) * opacity), "a cut-out that stays, opaque and fogged", 4);
+        // Custom material shader: not fogged.
+        if (kin::shader_compiler_available()) {
+            const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+            std::string error;
+            const kin::MaterialShader3D flat = r3d.compile_material_shader(dir / "custom_flat.frag.glsl", &error);
+            assert(flat.valid());
+            kin::Material3D custom{.shader = flat};
+            custom.shader_params[4] = 0.1f;
+            custom.shader_params[5] = 0.7f;
+            custom.shader_params[6] = 0.2f;
+            scene.clear();
+            scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), custom);
+            scene.draw(box, Mat4f::translation({0.0f, 1.0f, -60.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}), {.color = Color::rgb(200, 60, 60), .unlit = true});
+            const Pixels fogged_picture = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            scene.fog.enabled = false;
+            const Pixels clear_picture = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            // The custom wall in front is the same either way (the red box behind it is hidden by it).
+            assert(same_picture(fogged_picture, clear_picture));
+        }
+    });
+}
+
+// Far geometry melts into the sky at the horizon: with the fog's colour taken from the sky, a ground that runs to the
+// horizon, seen level, is the sky's own colour for the last rows of it, and there is no seam where the two meet. Fog off:
+// the ground keeps its colour to the horizon.
+void test_gpu_fog_melts_into_the_sky() {
+    with_gpu("test_gpu_fog_melts_into_the_sky", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene = clear_sky_scene({0.0f, 2.0f, 0.0f}, {0.0f, 2.0f, -10.0f}, 60.0f);
+        scene.lights.sun.direction = normalize(Vec3f{-0.6f, 0.35f, -0.7f});
+        scene.draw(box, Mat4f::translation({0.0f, -0.5f, -9000.0f}) * Mat4f::scaling({40000.0f, 1.0f, 20000.0f}),
+                   {.color = Color::rgb(90, 140, 60), .unlit = true});
+        // Without fog: a hard line, the green ground against the sky.
+        const Pixels hard = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const int horizon = 60; // the level view's middle row: the sky above it, the ground below
+        assert(largest_difference(hard.at(80, horizon + 2), hard.at(80, horizon - 3)) > 40);
+        // Fog from the sky, thick enough that 100 m is gone: the ground's last rows are the sky's colour.
+        scene.fog = {.enabled = true, .density = 0.05f, .colour_from_sky = true};
+        const Pixels fogged = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const Color above = fogged.at(80, horizon - 3), below = fogged.at(80, horizon + 2);
+        std::cerr << "fog at the horizon: sky " << above << ", ground " << below << '\n';
+        assert(largest_difference(above, below) <= 8);
+        // And it matches the model: the fog colour is the sky's in that direction (the ground's pixel 2 rows under the horizon).
+        const Vec3f d = pixel_direction(scene.camera, 80, horizon + 2);
+        const Vec3f sky_there = kin::sky_radiance(scene.sky, scene.lights.sun.direction, d);
+        const float distance = 2.0f / std::max(-d.y, 1e-4f);
+        const Vec3f want = kin::fog_apply(scene.fog, scene.sky, scene.lights.sun.direction, scene.lights.sun.color, scene.camera.position, d, distance,
+                                          linear_of(Color::rgb(90, 140, 60)));
+        expect(below, stored_of(want), "the ground's last rows", 4);
+        assert(largest_difference(below, stored_of(sky_there)) <= 10);
+        // The sky itself, with the fog on, is unchanged where it is far from the ground (distance fog is not applied to it).
+        const Pixels sky_only = [&] {
+            kin::Scene3D s = clear_sky_scene({0.0f, 2.0f, 0.0f}, {0.0f, 2.0f, -10.0f}, 60.0f);
+            s.lights.sun.direction = scene.lights.sun.direction;
+            return shoot_view(renderer, r3d, view, s);
+        }();
+        renderer.present();
+        assert(largest_difference(fogged.at(80, 10), sky_only.at(80, 10)) <= 1);
+    });
+}
+
+// The sky and the fog under temporal anti-aliasing: a still camera's frames settle and stay (no flicker: the consecutive
+// frames differ by a level or two, the sun's disc not at all in where it sits), and a turning camera's sky is
+// reprojected by the camera's turn, not smeared: the disc stays a disc where the sun projects, and the whole picture is
+// within a few levels of the same frame drawn without temporal anti-aliasing. Both paths: the main pass writes the
+// velocity, and (with ambient occlusion) the pre-pass does, where the sky's turn is a pass of its own.
+void test_gpu_sky_under_taa() {
+    with_gpu("test_gpu_sky_under_taa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const Vec3f sun = normalize(Vec3f{0.45f, 0.30f, -0.84f});
+        const auto make_scene = [&](float yaw_degrees, bool taa, bool ao) {
+            const float yaw = yaw_degrees * 3.14159265f / 180.0f;
+            const Vec3f eye{0.0f, 1.0f, 0.0f};
+            kin::Scene3D scene;
+            // The camera turns about +y from facing the sun.
+            const Vec3f facing = normalize(Vec3f{sun.x * std::cos(yaw) - sun.z * std::sin(yaw), 0.18f, sun.x * std::sin(yaw) + sun.z * std::cos(yaw)});
+            scene.camera = kin::Camera3D::look_at(eye, eye + facing * 10.0f, 60.0f);
+            scene.lights.sun = {.direction = sun, .color = {1.0f, 0.95f, 0.9f}};
+            scene.sky.enabled = true;
+            scene.sky.sun_intensity = 1.0f;
+            scene.sky.sun_size = 2.0f;
+            scene.sky.sun_disc = 2.0f; // the disc is at about 1.6 (HDR): above white where it counts
+            scene.fog = {.enabled = true, .density = 0.004f, .colour_from_sky = true, .sun_scatter = 0.1f};
+            scene.draw(box, Mat4f::translation({-2.0f, 0.0f, -14.0f}), {.color = Color::rgb(200, 120, 60)});
+            scene.draw(box, Mat4f::translation({0.0f, -0.6f, 0.0f}) * Mat4f::scaling({60.0f, 0.2f, 60.0f}), {.color = Color::rgb(120, 130, 120)});
+            scene.taa.enabled = taa;
+            scene.ambient_occlusion.enabled = ao;
+            return scene;
+        };
+        for (const bool ao : {false, true}) {
+            if (ao && lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
+                continue;
+            }
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+            kin::View3D reference = r3d.create_view({160, 120}, {.samples = 1});
+            // Still: let it settle, then compare consecutive frames.
+            const kin::Scene3D still = make_scene(0.0f, true, ao);
+            Pixels last;
+            double biggest_mean = 0.0;
+            int biggest = 0, in_disc = 0;
+            const auto sun_screen = still.camera.project(still.camera.position + sun * 1000.0f, screen);
+            assert(sun_screen);
+            for (int frame = 0; frame < 24; ++frame) {
+                const Pixels p = shoot_view(renderer, r3d, view, still);
+                renderer.present();
+                if (frame >= 16) {
+                    // The sky's rows (the ground and the box are below row 72: their edges, high contrast, are temporal
+                    // anti-aliasing's own business, a few tens of levels a frame between the pixels of an edge).
+                    const Spread s = compare_pictures(p, last, static_cast<int>(sun_screen->pos.x), static_cast<int>(sun_screen->pos.y), 10, 72);
+                    const Spread whole = compare_pictures(p, last, -1, -1, 0, 72);
+                    biggest = std::max(biggest, s.largest);
+                    biggest_mean = std::max(biggest_mean, s.mean);
+                    in_disc = std::max(in_disc, whole.largest);
+                }
+                last = p;
+            }
+            std::cerr << "sky under TAA" << (ao ? " (pre-pass velocity)" : " (main-pass velocity)") << ": still frames differ by at most " << biggest
+                      << " levels (mean " << biggest_mean << ") away from the sun disc, " << in_disc << " with it\n";
+            assert(biggest <= 2 && biggest_mean < 0.25);
+            // Turning: 0.7 degrees a frame; the last frame against the same view drawn without temporal anti-aliasing.
+            view.reset_history();
+            Pixels turned;
+            kin::Scene3D last_scene;
+            for (int frame = 0; frame < 30; ++frame) {
+                last_scene = make_scene(static_cast<float>(frame) * 0.7f, true, ao);
+                turned = shoot_view(renderer, r3d, view, last_scene);
+                renderer.present();
+            }
+            kin::Scene3D truth = make_scene(29.0f * 0.7f, false, ao);
+            const Pixels exact = shoot_view(renderer, r3d, reference, truth);
+            renderer.present();
+            const auto sun_at = last_scene.camera.project(last_scene.camera.position + sun * 1000.0f, screen);
+            assert(sun_at && sun_at->pos.x > 10.0f && sun_at->pos.x < 150.0f);
+            // The whole picture, the sun's neighbourhood left out (its edge is anti-aliased by the history, which is the point).
+            const Spread s = compare_pictures(turned, exact, static_cast<int>(sun_at->pos.x), static_cast<int>(sun_at->pos.y), 9, 72);
+            // The disc: where it is (centroid) and that it is still bright (not smeared away).
+            const auto centroid = [&](const Pixels& p) {
+                double sum = 0.0, sx = 0.0, sy = 0.0;
+                for (int y = std::max(0, static_cast<int>(sun_at->pos.y) - 12); y < std::min(120, static_cast<int>(sun_at->pos.y) + 12); ++y) {
+                    for (int x = std::max(0, static_cast<int>(sun_at->pos.x) - 12); x < std::min(160, static_cast<int>(sun_at->pos.x) + 12); ++x) {
+                        const double w = std::max(0.0, linear_of(p.at(x, y)).y - 0.5);
+                        sum += w;
+                        sx += w * (x + 0.5);
+                        sy += w * (y + 0.5);
+                    }
+                }
+                return std::array<double, 3>{sum > 0.0 ? sx / sum : 0.0, sum > 0.0 ? sy / sum : 0.0, sum};
+            };
+            const auto c_turned = centroid(turned), c_exact = centroid(exact);
+            std::cerr << "sky under TAA, turning" << (ao ? " (pre-pass)" : " (main pass)") << ": picture differs by at most " << s.largest << ", mean " << s.mean
+                      << "; sun centroid (" << c_turned[0] << ", " << c_turned[1] << ") against projected (" << sun_at->pos.x << ", " << sun_at->pos.y
+                      << "), disc light " << c_turned[2] << " against " << c_exact[2] << '\n';
+            assert(s.mean < 1.5 && s.largest <= 24);
+            assert(c_turned[2] > 0.5 * c_exact[2]);
+            assert(std::abs(c_turned[0] - sun_at->pos.x) < 1.0 && std::abs(c_turned[1] - sun_at->pos.y) < 1.0);
+        }
+    });
+}
+
+// The sky lights the scene (Lights3D::sky_lights_scene): a white diffuse sphere with no sun and no ambient takes its
+// light from the sky's panorama, so its colour follows the time of day (blue-white at noon, warm at the end of the day,
+// near black at night) and is the CPU estimate (the cosine-weighted sky over each pixel's normal) within a tenth.
+void test_gpu_sky_lights_the_scene() {
+    with_gpu("test_gpu_sky_lights_the_scene", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "compute (the environment's filter)")) {
+            return;
+        }
+        const kin::Mesh sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
+        const kin::Mesh slab = make_box(r3d, {30.0f, 0.2f, 30.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        struct Result {
+            Vec3f mean;
+            Vec3f estimate;
+            Vec3f up;
+            Vec3f up_estimate;
+        };
+        const auto shoot = [&](float hours, float rotation = 0.0f) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.sky.enabled = false; // the light only: the picture shows the sphere
+            scene.sky.turbidity = 3.0f;
+            scene.sky.stars = false;
+            scene.sky.ground_color = {0.3f, 0.28f, 0.25f};
+            kin::apply({.hours = hours, .day_of_year = 172.0f, .latitude = 45.0f, .moon_phase = 0.5f}, scene.lights, scene.sky, scene.fog);
+            scene.lights.sun.color = {}; // only the sky's light
+            scene.lights.fill.color = {};
+            scene.lights.ambient = {1.0f, 0.0f, 1.0f}; // not used with an environment
+            scene.lights.sky_lights_scene = true;
+            scene.lights.environment_rotation = rotation;
+            scene.draw(sphere, Mat4f::identity(), {.color = Color::rgb(255, 255, 255), .metallic = 0.0f, .roughness = 1.0f});
+            // The panorama follows the sky after `light_interval` renders: a few frames of the same time, as a game's are.
+            Pixels p;
+            for (int frame = 0; frame < 6; ++frame) {
+                p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+            }
+            Result r{};
+            double count = 0.0;
+            for (int y = 0; y < 120; y += 2) {
+                for (int x = 0; x < 160; x += 2) {
+                    const kin::Ray3 ray = scene.camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, screen);
+                    // The sphere of radius 1 at the origin.
+                    const Vec3f oc = ray.origin;
+                    const float b = kin::dot(oc, ray.direction), c = kin::dot(oc, oc) - 1.0f;
+                    const float disc = b * b - c;
+                    if (disc <= 0.0f) {
+                        continue;
+                    }
+                    const Vec3f hit = ray.origin + ray.direction * (-b - std::sqrt(disc));
+                    const Vec3f n = normalize(hit);
+                    if (n.z < 0.35f) {
+                        continue; // not the grazing rim: the specular's Fresnel is the model's own
+                    }
+                    r.mean += linear_of(p.at(x, y));
+                    r.estimate += kin::sky_irradiance(scene.sky, scene.lights.sun.direction, n, 24, 12);
+                    count += 1.0;
+                }
+            }
+            assert(count > 100.0);
+            r.mean = r.mean / static_cast<float>(count);
+            r.estimate = r.estimate / static_cast<float>(count);
+            return r;
+        };
+        const auto sum = [](Vec3f v) { return v.x + v.y + v.z; };
+        const Result noon = shoot(12.0f);
+        assert(r3d.stats().sky_env_generations >= 1);
+        const Result dusk = shoot(19.4f);
+        const Result night = shoot(0.5f);
+        for (const auto& [name, r] : {std::pair<const char*, Result>{"noon", noon}, {"dusk", dusk}, {"night", night}}) {
+            std::cerr << "sky light on a white sphere, " << name << ": drawn (" << r.mean.x << ", " << r.mean.y << ", " << r.mean.z << "), estimated ("
+                      << r.estimate.x << ", " << r.estimate.y << ", " << r.estimate.z << ")\n";
+        }
+        // The colour follows the CPU estimate: within 12% of it per channel (the sphere also reflects the sky a little).
+        for (const Result& r : {noon, dusk}) {
+            for (const auto& [got, want] : {std::pair<float, float>{r.mean.x, r.estimate.x}, {r.mean.y, r.estimate.y}, {r.mean.z, r.estimate.z}}) {
+                assert(std::abs(got - want) < 0.12f * want + 0.004f);
+            }
+        }
+        assert(std::abs(sum(night.mean) - sum(night.estimate)) < 0.2f * sum(night.estimate) + 0.01f);
+        // The panorama is in the world's space: the light's own rotation (for a picture's environment) does not turn it.
+        const Result rotated = shoot(12.0f, 90.0f);
+        assert(std::abs(rotated.mean.x - noon.mean.x) < 0.01f * noon.mean.x && std::abs(rotated.mean.z - noon.mean.z) < 0.01f * noon.mean.z);
+        // Warmer at the end of the day than at noon, and the night dark.
+        assert(dusk.mean.x / dusk.mean.z > noon.mean.x / noon.mean.z);
+        assert(sum(night.mean) < 0.05f * sum(noon.mean));
+        assert(noon.mean.z > noon.mean.x); // a blue sky's light
+    });
+}
+
+// The panorama is made again when the sky has moved, and not otherwise: the first render makes it, the same sky
+// does not, a change under the threshold or inside the interval does not, a change over it does (after the interval),
+// the cost is recorded; and with the option off the scene's ambient light is used as before.
+void test_gpu_sky_environment_regeneration() {
+    with_gpu("test_gpu_sky_environment_regeneration", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "compute (the environment's filter)")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 4.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        scene.lights.sun = {.direction = normalize(Vec3f{0.4f, 0.8f, 0.3f}), .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.ambient = {0.6f, 0.0f, 0.0f}; // red: the fallback's colour, which the sky's light would not have
+        scene.sky.enabled = false;
+        scene.sky.light_threshold = 0.02f;
+        scene.sky.light_interval = 3;
+        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(220, 220, 220)});
+        const auto render = [&](const kin::Scene3D& s) {
+            const Pixels p = shoot_view(renderer, r3d, view, s);
+            renderer.present();
+            return p;
+        };
+        const Pixels fallback = render(scene);
+        assert(!r3d.stats().sky_env_regenerated && r3d.stats().sky_env_generations == 0);
+        assert(fallback.at(80, 60).r > fallback.at(80, 60).b + 20); // the red hemisphere ambient
+        scene.lights.sky_lights_scene = true;
+        const Pixels first = render(scene);
+        assert(r3d.stats().sky_env_regenerated && r3d.stats().sky_env_generations == 1);
+        assert(r3d.stats().sky_env_cpu_ms > 0.0 && r3d.stats().environment_prefilters == 0); // the sky's own filter, not a user environment's
+        assert(first.at(80, 60).b + 10 >= first.at(80, 60).r); // a blue sky: not the red ambient
+        // The same sky: kept, and the picture is the same.
+        for (int i = 0; i < 6; ++i) {
+            const Pixels again = render(scene);
+            assert(!r3d.stats().sky_env_regenerated && r3d.stats().sky_env_generations == 1);
+            assert(same_picture(again, first));
+        }
+        // Moved under the threshold (0.005 of a unit of direction): kept.
+        scene.lights.sun.direction = normalize(Vec3f{0.4f, 0.8f, 0.3f} + Vec3f{0.004f, 0.0f, 0.0f});
+        for (int i = 0; i < 6; ++i) {
+            render(scene);
+            assert(!r3d.stats().sky_env_regenerated);
+        }
+        // Moved over it: made again, but not before the interval (3 renders) has passed since the last one.
+        scene.lights.sun.direction = normalize(Vec3f{-0.6f, 0.5f, 0.3f});
+        int renders_until = 0;
+        do {
+            render(scene);
+            ++renders_until;
+        } while (renders_until < 8 && !r3d.stats().sky_env_regenerated);
+        assert(r3d.stats().sky_env_regenerated && r3d.stats().sky_env_generations == 2);
+        std::cerr << "sky environment: made again " << renders_until << " render(s) after the sun moved, recording took " << r3d.stats().sky_env_cpu_ms << " ms\n";
+        // Right after one, a new move waits out the interval (3 renders kept, the 4th makes it).
+        scene.lights.sun.direction = normalize(Vec3f{0.5f, 0.2f, -0.6f});
+        int waited = 0;
+        do {
+            render(scene);
+            ++waited;
+        } while (waited < 8 && !r3d.stats().sky_env_regenerated);
+        assert(r3d.stats().sky_env_regenerated && waited == 4);
+        // The haze changing counts too; the sun's own light too (each after the interval has passed).
+        for (int i = 0; i < 6; ++i) {
+            render(scene);
+        }
+        const kin::u32 before = r3d.stats().sky_env_generations;
+        scene.sky.turbidity = 9.0f;
+        for (int i = 0; i < 6; ++i) {
+            render(scene);
+        }
+        assert(r3d.stats().sky_env_generations == before + 1);
+        scene.sky.sun_intensity = 6.0f;
+        for (int i = 0; i < 6; ++i) {
+            render(scene);
+        }
+        assert(r3d.stats().sky_env_generations == before + 2);
+        // Off again: the hemisphere ambient, as at the start.
+        scene.lights.sky_lights_scene = false;
+        scene.lights.sun.direction = normalize(Vec3f{0.4f, 0.8f, 0.3f});
+        scene.sky.turbidity = 2.5f;
+        scene.sky.sun_intensity = 3.0f;
+        assert(same_picture(render(scene), fallback));
+    });
+}
+
+// The image sky shows the environment's panorama as it lights: the six-colour sky's red at +z, green at +x, white
+// above; the intensity scales it and the rotation turns it, as for the light.
+void test_gpu_sky_image_mode() {
+    with_gpu("test_gpu_sky_image_mode", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Vec2i size{256, 128};
+        const kin::Environment3D environment = r3d.create_environment(size, six_colour_sky(size));
+        if (!environment.valid()) {
+            std::cerr << "no compute: environment not made, skipped\n";
+            return;
+        }
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto look = [&](Vec3f toward, float intensity = 1.0f, float rotation = 0.0f) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, toward, 40.0f);
+            scene.lights.environment = environment;
+            scene.lights.environment_intensity = intensity;
+            scene.lights.environment_rotation = rotation;
+            scene.sky.enabled = true;
+            scene.sky.mode = kin::SkyMode3D::Image;
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            assert(r3d.stats().sky_drawn);
+            return p.at(80, 60);
+        };
+        const Color red = look({0.0f, 0.0f, 1.0f}), green = look({1.0f, 0.0f, 0.0f}), up = look({0.0f, 1.0f, 0.3f});
+        expect(red, stored_of({0.8f, 0.0f, 0.0f}), "the panorama's +z", 6);
+        expect(green, stored_of({0.0f, 0.8f, 0.0f}), "the panorama's +x", 6);
+        expect(up, stored_of({0.8f, 0.8f, 0.8f}), "the panorama's up", 6);
+        expect(look({0.0f, 0.0f, 1.0f}, 0.25f), stored_of({0.2f, 0.0f, 0.0f}), "a quarter of the intensity", 6);
+        // A quarter turn about +y takes the red off +z, onto +x or -x.
+        const Color turned_z = look({0.0f, 0.0f, 1.0f}, 1.0f, 90.0f);
+        const Color turned_x = look({1.0f, 0.0f, 0.0f}, 1.0f, 90.0f), turned_nx = look({-1.0f, 0.0f, 0.0f}, 1.0f, 90.0f);
+        std::cerr << "image sky turned 90: +z " << turned_z << ", +x " << turned_x << ", -x " << turned_nx << '\n';
+        assert(turned_z.r < 100 && (turned_x.r > 200 || turned_nx.r > 200));
+        // Without an environment the image sky draws nothing (the background shows); the procedural one is not asked.
+        kin::Scene3D bare;
+        bare.sky.enabled = true;
+        bare.sky.mode = kin::SkyMode3D::Image;
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 60, 90)});
+        expect(shoot_view(renderer, r3d, plain, bare).at(80, 60), Color::rgb(30, 60, 90), "no panorama: the background", 1);
+        assert(!r3d.stats().sky_drawn);
+        renderer.present();
+    });
+}
+
+// Stars fade in as the sun sinks (none above -3 degrees, more by -6, all by -12) and the moon disc sits where its
+// direction projects (from a time of day's own moon, opposite the sun at full): with the sky's light off, so that only
+// they show.
+void test_gpu_sky_stars_and_moon() {
+    with_gpu("test_gpu_sky_stars_and_moon", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto stars_at = [&](float sun_elevation_degrees) {
+            const float e = sun_elevation_degrees * 3.14159265f / 180.0f;
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, -0.4f}, 100.0f);
+            scene.lights.sun = {.direction = {std::cos(e), std::sin(e), 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.sky.enabled = true;
+            scene.sky.intensity = 0.0f;
+            scene.sky.night_color = {};
+            scene.sky.ground_color = {};
+            scene.sky.sun_size = 0.01f;
+            scene.sky.stars = true;
+            scene.sky.star_brightness = 8.0f;
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            int count = 0;
+            double light = 0.0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const int v = p.at(x, y).g;
+                    light += linear_of(p.at(x, y)).y;
+                    count += v > 24 ? 1 : 0;
+                }
+            }
+            return std::pair<int, double>{count, light};
+        };
+        const auto day = stars_at(30.0f), civil = stars_at(-1.0f), nautical = stars_at(-6.0f), night = stars_at(-15.0f);
+        std::cerr << "stars (pixels over 24, their light): day " << day.first << "/" << day.second << ", sun at -1: " << civil.first << "/" << civil.second
+                  << ", at -6: " << nautical.first << "/" << nautical.second << ", at -15: " << night.first << "/" << night.second << '\n';
+        assert(day.first == 0 && day.second == 0.0 && civil.first == 0 && civil.second == 0.0);
+        assert(night.first >= 15 && night.second > 1.5 * nautical.second && nautical.second > 0.0);
+        // The moon: a disc where the time of day's moon is, nowhere else; the sun's below the horizon.
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, 50.0f);
+        scene.sky.enabled = true;
+        scene.sky.intensity = 0.0f;
+        scene.sky.night_color = {};
+        scene.sky.ground_color = {};
+        scene.sky.sun_size = 0.01f;
+        scene.sky.moon_size = 3.0f;
+        kin::SkyState3D state{};
+        // Midnight at the equinox, 45 N: the full moon is high in the south (+z).
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f},
+                                              kin::evaluate({.hours = 0.0f, .day_of_year = 81.0f, .latitude = 45.0f, .moon_phase = 0.5f}).moon_direction * 10.0f +
+                                                  Vec3f{0.3f, -0.4f, 0.0f},
+                                              50.0f);
+        state = kin::apply({.hours = 0.0f, .day_of_year = 81.0f, .latitude = 45.0f, .moon_phase = 0.5f}, scene.lights, scene.sky, scene.fog);
+        scene.sky.moon_light = 0.04f; // under white
+        assert(state.moon_elevation > 40.0f && scene.sky.moon);
+        const auto at = scene.camera.project(state.moon_direction * 1000.0f, screen);
+        assert(at && at->pos.x > 10.0f && at->pos.x < 150.0f && at->pos.y > 10.0f && at->pos.y < 110.0f);
+        const Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        double sum = 0.0, sx = 0.0, sy = 0.0;
+        for (int y = 0; y < 120; ++y) {
+            for (int x = 0; x < 160; ++x) {
+                const double w = linear_of(p.at(x, y)).y;
+                sum += w;
+                sx += w * (x + 0.5);
+                sy += w * (y + 0.5);
+            }
+        }
+        assert(sum > 3.0);
+        const double dx = sx / sum - at->pos.x, dy = sy / sum - at->pos.y;
+        std::cerr << "moon disc centroid off by (" << dx << ", " << dy << ") px\n";
+        assert(std::sqrt(dx * dx + dy * dy) < 0.8);
+        // Moon off: a black sky.
+        scene.sky.moon = false;
+        const Pixels none = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        expect(none.at(static_cast<int>(at->pos.x), static_cast<int>(at->pos.y)), kin::colors::black, "no moon", 2);
+    });
+}
+
+// The overlay is never fogged (a gun in the hand) and the sky stays behind it; the fog of the world still applies to the
+// world; warm_up makes the sky's and the fog's pipelines (and the dither's) so that the first render makes none.
+void test_gpu_sky_overlay_and_warm_up() {
+    with_gpu("test_gpu_sky_overlay_and_warm_up", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .hdr = true, .bloom = 0.2f});
+        kin::Scene3D scene = clear_sky_scene({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -10.0f}, 60.0f);
+        scene.fog = {.enabled = true, .density = 0.3f, .colour = {1.0f, 1.0f, 1.0f}}; // 99.99% at 30 m; 36% at the gun's 1.5 m
+        scene.taa.enabled = false;
+        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -30.0f}) * Mat4f::scaling({6.0f, 6.0f, 1.0f}), {.color = Color::rgb(200, 40, 40), .unlit = true});
+        kin::Scene3D& gun = scene.overlay();
+        gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
+        gun.draw(box, Mat4f::translation({0.4f, -0.3f, -1.5f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}), {.color = Color::rgb(40, 200, 40), .unlit = true});
+        assert(r3d.warm_up(view, scene));
+        render_ok(r3d, view, scene);
+        assert(r3d.stats().pipelines_made == 0);
+        const Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const auto gun_at = gun.camera.project({0.4f, -0.3f, -1.2f}, screen);
+        assert(gun_at);
+        // The gun's green is its own (tonemapped, unfogged: green dominates, and it is not washed to white by the fog's white).
+        const Color g = p.at(gun_at->pos);
+        assert(g.g > 150 && g.r < 60 && g.b < 60); // the gun's own green (tonemapped); 36% of white fog in it would lift red and blue over 100
+        // The world's box, 30 m away through the fog 0.3 (all white), is the fog's colour.
+        const Color far_box = p.at(80, 60);
+        assert(far_box.r > 200 && far_box.g > 200 && far_box.b > 200);
+        assert(r3d.stats().fog_applied && r3d.stats().sky_drawn);
+    });
+}
+
+
+
+// A sub-pixel sun disc (0.45 degrees, in a black sky: only it shows) is the point to judge the sky's temporal handling by:
+// still, its centroid sits where the sun projects (within 0.15 px) and holds there; turning at 1.2 degrees a frame
+// (2.6 px) it follows the camera within 0.3 px on average and 0.6 at worst, and keeps its light (over half of the
+// same frame drawn without temporal anti-aliasing): a sky with no velocity of its own would be rejected by the history's
+// clamp frame after frame and lose nearly all of it. Both ways the velocity is made: by the main pass (no pre-pass) and
+// by the pre-pass (with ambient occlusion), where the sky's turn is a pass of its own.
+void test_gpu_sky_sun_under_taa() {
+    with_gpu("test_gpu_sky_sun_under_taa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const Vec3f sun = normalize(Vec3f{0.45f, 0.30f, -0.84f});
+        // The disc's light, over a threshold above the dither's floor, and its centroid.
+        struct Disc {
+            double x = 0.0, y = 0.0, light = 0.0;
+        };
+        const auto measure = [](const Pixels& p) {
+            Disc d;
+            double sx = 0.0, sy = 0.0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    const double w = std::max(0.0, linear_of(p.at(x, y)).y - 0.004);
+                    d.light += w;
+                    sx += w * (x + 0.5);
+                    sy += w * (y + 0.5);
+                }
+            }
+            if (d.light > 0.0) {
+                d.x = sx / d.light;
+                d.y = sy / d.light;
+            }
+            return d;
+        };
+        for (const bool ao : {false, true}) {
+            if (ao && lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
+                continue;
+            }
+            for (const float step : {0.0f, 1.2f}) {
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+                kin::View3D reference = r3d.create_view({160, 120}, {.samples = 1});
+                const auto make_scene = [&](float yaw_degrees, bool taa) {
+                    const float yaw = yaw_degrees * 3.14159265f / 180.0f;
+                    const Vec3f eye{0.0f, 1.0f, 0.0f};
+                    kin::Scene3D scene;
+                    // Turning about +y, the sun staying at the same height on the screen.
+                    const Vec3f facing = normalize(Vec3f{sun.x * std::cos(yaw) - sun.z * std::sin(yaw), sun.y, sun.x * std::sin(yaw) + sun.z * std::cos(yaw)});
+                    scene.camera = kin::Camera3D::look_at(eye, eye + facing * 10.0f, 60.0f);
+                    scene.lights.sun = {.direction = sun, .color = {1.0f, 0.95f, 0.9f}};
+                    scene.sky.enabled = true;
+                    scene.sky.intensity = 0.0f;
+                    scene.sky.night_color = {};
+                    scene.sky.ground_color = {};
+                    scene.sky.sun_intensity = 1.0f;
+                    scene.sky.sun_size = 0.45f;
+                    scene.sky.sun_disc = 1.0f; // under white
+                    // Something to draw (a box far below the view), so that the pre-pass has its storage.
+                    scene.draw(box, Mat4f::translation({0.0f, -40.0f, 0.0f}), {.color = Color::rgb(120, 130, 120)});
+                    scene.taa.enabled = taa;
+                    scene.ambient_occlusion.enabled = ao;
+                    return scene;
+                };
+                double worst = 0.0, sum_x = 0.0, sum_y = 0.0, lowest_light = 1e9, highest_light = 0.0;
+                double wobble_x = 0.0, wobble_y = 0.0;
+                std::vector<std::array<double, 2>> offsets;
+                for (int frame = 0; frame < 26; ++frame) {
+                    const kin::Scene3D scene = make_scene(static_cast<float>(frame) * step, true);
+                    const Pixels p = shoot_view(renderer, r3d, view, scene);
+                    renderer.present();
+                    if (frame < 14) {
+                        continue;
+                    }
+                    const kin::Scene3D exact_scene = make_scene(static_cast<float>(frame) * step, false);
+                    const Pixels exact = shoot_view(renderer, r3d, reference, exact_scene);
+                    renderer.present();
+                    const auto at = scene.camera.project(scene.camera.position + sun * 1000.0f, screen);
+                    assert(at && at->pos.x > 6.0f && at->pos.x < 154.0f);
+                    const Disc d = measure(p), e = measure(exact);
+                    offsets.push_back({d.x - at->pos.x, d.y - at->pos.y});
+                    worst = std::max(worst, std::hypot(d.x - at->pos.x, d.y - at->pos.y));
+                    assert(e.light > 0.1);
+                    lowest_light = std::min(lowest_light, d.light / e.light);
+                    highest_light = std::max(highest_light, d.light / e.light);
+                }
+                for (const auto& o : offsets) {
+                    sum_x += o[0];
+                    sum_y += o[1];
+                }
+                const double mean_x = sum_x / static_cast<double>(offsets.size()), mean_y = sum_y / static_cast<double>(offsets.size());
+                for (const auto& o : offsets) {
+                    wobble_x += (o[0] - mean_x) * (o[0] - mean_x);
+                    wobble_y += (o[1] - mean_y) * (o[1] - mean_y);
+                }
+                const double wobble = std::sqrt((wobble_x + wobble_y) / static_cast<double>(offsets.size()));
+                std::cerr << "sun disc under TAA, " << (ao ? "pre-pass" : "main pass") << ", " << step << " deg a frame: centroid off by (" << mean_x << ", "
+                          << mean_y << ") on average, worst " << worst << ", wobble " << wobble << " px; light " << lowest_light << " to " << highest_light
+                          << " of the same frame without TAA\n";
+                assert(std::abs(mean_x) < (step > 0.0f ? 0.3 : 0.15) && std::abs(mean_y) < (step > 0.0f ? 0.3 : 0.15));
+                assert(worst < (step > 0.0f ? 0.6 : 0.2) && wobble < 0.3);
+                assert(lowest_light > 0.55 && highest_light < 1.3); // a sub-pixel dot keeps 0.7 to 1.1 of its flux; with no velocity of its own the sky kept 0.06
+            }
+        }
+    });
+}
+
 const char* test_filter = nullptr;
 bool selected(const char* name) { return !test_filter || std::strstr(name, test_filter) != nullptr; }
 #define RUN(test) \
@@ -9483,5 +10793,23 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ragdoll_pose_reaches_render());
     RUN(test_gpu_ragdoll_taa_matches_clip());
     RUN(test_gpu_rope_tube());
+    RUN(test_time_of_day_formulae());
+    RUN(test_sky_model_cpu());
+    RUN(test_fog_math_cpu());
+    RUN(test_gpu_sky_matches_cpu());
+    RUN(test_gpu_sky_horizon_is_smooth());
+    RUN(test_gpu_sky_sun_position());
+    RUN(test_gpu_sky_stays_behind_geometry());
+    RUN(test_gpu_sky_and_fog_off_are_unchanged());
+    RUN(test_gpu_fog_matches_formula());
+    RUN(test_gpu_fog_blended_and_custom());
+    RUN(test_gpu_fog_melts_into_the_sky());
+    RUN(test_gpu_sky_under_taa());
+    RUN(test_gpu_sky_sun_under_taa());
+    RUN(test_gpu_sky_lights_the_scene());
+    RUN(test_gpu_sky_environment_regeneration());
+    RUN(test_gpu_sky_image_mode());
+    RUN(test_gpu_sky_stars_and_moon());
+    RUN(test_gpu_sky_overlay_and_warm_up());
     return 0;
 }

@@ -13,6 +13,7 @@
 #include <kin/render3d/camera3d.hpp>
 #include <kin/render3d/environment.hpp>
 #include <kin/render3d/mesh.hpp>
+#include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
 
@@ -172,6 +173,12 @@ struct Lights3D {
     Environment3D environment{};
     f32 environment_intensity = 1.0f;
     f32 environment_rotation = 0.0f;
+    // With Scene3D::sky enabled (procedural): the environment is made from the sky, in place of `environment` and
+    // `ambient`: ambient light and reflections agree with the sky you see and with the time of day (P3a). It is drawn
+    // into a small panorama, filtered as any environment is, and made again only when the sun or the sky moved
+    // (Sky3D::light_threshold, light_interval; Render3DStats::sky_env_*). `environment_intensity` scales it;
+    // `environment_rotation` does not apply (it is in world space). Off, or with the image sky, as before.
+    bool sky_lights_scene = false;
     // Where the sun casts shadows: a box round what casts and receives them
     // (the level, say). Empty: no shadows. Smaller is sharper.
     Bounds3 shadow_area{};
@@ -322,6 +329,10 @@ public:
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
     Lod3D lod{};
+    // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:
+    // off, the picture and the cost are as without the features.
+    Sky3D sky{};
+    Fog3D fog{};
     // Copies wholly outside the camera's view are skipped (each tested as the
     // sphere round its mesh's bounds, moved and scaled with it).
     bool cull = true;

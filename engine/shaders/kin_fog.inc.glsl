@@ -1,0 +1,51 @@
+// kin's fog (kin/render3d/sky3d.hpp, Fog3D): distance and height fog with the sky's colour, shared by the main pass's
+// meshes (kin_material.inc.glsl, under KIN_FOG), the sky pass (the height fog's share, to infinity) and, to come, a
+// particle pass. The same arithmetic runs on the CPU in sky3d.cpp (fog_optical_depth, fog_opacity, fog_color).
+#include "kin_sky.inc.glsl"
+
+struct KinFog {
+    vec4 colour;  // rgb: the fixed colour (linear), w: 1 to take it from the sky
+    vec4 density; // x: per unit of distance, y: the height fog's at its base, z: its fall-off per unit of height, w: the base height
+    vec4 limits;  // x: the start distance, y: the greatest opacity, z: the sun's in-scattering, w: its anisotropy
+    vec4 view;    // x: 1 for an orthographic camera
+};
+
+// The optical depth from `eye` along the unit `dir` for `dist` (`infinite`: to the end of the ray, the distance term
+// left out). The height fog's density is d * e^(-k (y - base)): its integral along the ray is closed.
+float kin_fog_optical_depth(KinFog f, vec3 eye, vec3 dir, float dist, bool infinite) {
+    const float start = f.limits.x;
+    const float len = infinite ? 1e30 : max(dist - start, 0.0);
+    float tau = infinite ? 0.0 : f.density.x * len;
+    const float d = f.density.y;
+    if (d > 0.0 && len > 0.0) {
+        const float k = f.density.z;
+        const float y0 = eye.y + dir.y * (infinite ? 0.0 : start) - f.density.w;
+        const float kd = k * dir.y;
+        const float at_start = exp(clamp(-k * y0, -80.0, 80.0));
+        float shape;
+        if (infinite) {
+            shape = kd > 1e-6 ? 1.0 / kd : 1e8;
+        } else {
+            const float x = kd * len;
+            shape = abs(x) < 1e-3 ? len * (1.0 - 0.5 * x) : (1.0 - exp(clamp(-x, -80.0, 80.0))) / kd;
+        }
+        tau += d * at_start * shape;
+    }
+    return tau;
+}
+
+float kin_fog_opacity(KinFog f, float tau) {
+    return min(1.0 - exp(-tau), f.limits.y);
+}
+
+// The fog's colour along `dir`: the fixed one or the sky's, brightened toward the sun by its in-scattering (the
+// Henyey-Greenstein lobe, scaled so that an even one is 1).
+vec3 kin_fog_colour(KinFog f, KinSky sky, vec3 dir, vec3 sun_dir, vec3 sun_light) {
+    vec3 c = f.colour.w > 0.5 ? kin_sky_scatter(sky, dir) : f.colour.rgb;
+    if (f.limits.z > 0.0) {
+        const float g = f.limits.w;
+        const float mu = dot(dir, sun_dir);
+        c += sun_light * (f.limits.z * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
+    }
+    return c;
+}

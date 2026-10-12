@@ -1,0 +1,101 @@
+{
+ "name": "sky_dusk",
+ "purpose": "The same valley at 19:45 in June (the sun just above the horizon, warm light and long shadows, the sky orange near the sun and blue behind), with Lights3D::sky_lights_scene: the ambient light and reflections come from the sky. 'sun' looks at the sun low over the pillars, 'away' at the dusk's blue side.",
+ "procedural": "landscape",
+ "trees": 2500,
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.35
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    1,
+    1,
+    1
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.2,
+   0.25
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 4,
+  "shadow_distance": 500,
+  "sky_lights_scene": true
+ },
+ "time_of_day": {
+  "hours": 19.6,
+  "day_of_year": 172,
+  "latitude": 45.0
+ },
+ "sky": {
+  "enabled": true,
+  "turbidity": 3.5,
+  "sun_disc": 30.0
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.0004,
+  "color_from_sky": true,
+  "sun_scatter": 0.25,
+  "sun_anisotropy": 0.7
+ },
+ "cameras": [
+  {
+   "name": "sun",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "at_sun": true,
+   "target_offset": [
+    0,
+    8,
+    0
+   ],
+   "fov": 70,
+   "near": 0.1
+  },
+  {
+   "name": "away",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    80.0,
+    900.0
+   ],
+   "fov": 70,
+   "near": 0.1
+  },
+  {
+   "name": "valley",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    30.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1
+  }
+ ]
+}

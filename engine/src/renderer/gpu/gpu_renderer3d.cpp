@@ -197,6 +197,53 @@ struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
 };
 static_assert(sizeof(CutoffUniforms) == 16);
+// The sky's and the fog's (kin_sky.inc.glsl's KinSky and kin_fog.inc.glsl's KinFog, vec4s all, so no padding to get wrong).
+struct AtmosphereUniforms {
+    f32 sun[4];    // toward the sun (unit), its light above the atmosphere
+    f32 shape[4];  // Mie's optical depth at the zenith, its anisotropy, the sky's intensity, the moon's light
+    f32 ground[4]; // the ground's colour
+    f32 moon[4];   // toward the moon (unit)
+    f32 night[4];  // the night sky's own light
+};
+static_assert(sizeof(AtmosphereUniforms) == 80);
+struct FogParamUniforms {
+    f32 colour[4];  // the fixed colour, 1 to take it from the sky
+    f32 density[4]; // per unit of distance, the height fog's at its base, its fall-off, the base height
+    f32 limits[4];  // the start, the greatest opacity, the sun's in-scattering and its anisotropy
+    f32 view[4];    // 1 for an orthographic camera
+};
+static_assert(sizeof(FogParamUniforms) == 64);
+// mesh_fog.frag's slot 2.
+struct FogBlockUniforms {
+    FogParamUniforms fog;
+    AtmosphereUniforms sky;
+};
+static_assert(sizeof(FogBlockUniforms) == 144);
+// sky.frag's slot 1 (slot 0 of sky_velocity_only.frag).
+struct SkyUniforms {
+    f32 inverse_view_projection[16];
+    f32 view_projection[16];
+    f32 prior_view_projection[16];
+    f32 target[4];     // the picture's size, 1 to show the panorama, 1 when orthographic
+    f32 camera[4];
+    f32 forward[4];
+    f32 disc[4];       // the sun's angular radius, the moon's, the sun disc's radiance over its light, the stars' brightness
+    f32 moon_color[4]; // the moon disc's radiance, 1 when drawn
+    AtmosphereUniforms atmosphere;
+    FogParamUniforms fog;
+};
+static_assert(sizeof(SkyUniforms) == 416);
+// sky_env.frag's.
+struct SkyEnvUniforms {
+    f32 target[4];
+    AtmosphereUniforms atmosphere;
+};
+static_assert(sizeof(SkyEnvUniforms) == 96);
+// How much brighter than the sky's light the moon's disc is drawn: the moon's light is a sky-scale one (0.1 at full moon).
+constexpr f32 moon_disc_gain = 20.0f;
+// The sky's panorama for image-based light: its size (2:1), as the environment filter wants it.
+constexpr u32 sky_env_width = 256, sky_env_height = 128;
+
 
 // A view's six bounding planes from its view-projection matrix, reverse Z:
 // near at depth 1, far at 0. An infinite far plane has no normal.
@@ -385,6 +432,25 @@ void put(f32* out, Vec3f v, f32 w) {
     out[3] = w;
 }
 
+void fill_atmosphere(AtmosphereUniforms& a, const Sky3D& sky, Vec3f sun_direction) {
+    const Vec3f sun = length_squared(sun_direction) > 0.0f ? normalize(sun_direction) : Vec3f{0.0f, 1.0f, 0.0f};
+    const Vec3f moon = length_squared(sky.moon_direction) > 0.0f ? normalize(sky.moon_direction) : Vec3f{0.0f, 1.0f, 0.0f};
+    put(a.sun, sun, sky.sun_intensity);
+    put(a.shape, {sky_model::mie_per_turbidity * std::clamp(sky.turbidity, 1.0f, 20.0f), sky_model::mie_anisotropy, sky.intensity},
+        sky.moon ? std::max(sky.moon_light, 0.0f) : 0.0f);
+    put(a.ground, sky.ground_color, 0.0f);
+    put(a.moon, moon, 0.0f);
+    put(a.night, sky.night_color, 0.0f);
+}
+
+void fill_fog(FogParamUniforms& f, const Fog3D& fog, bool orthographic) {
+    put(f.colour, fog.colour, fog.colour_from_sky ? 1.0f : 0.0f);
+    put(f.density, {std::max(fog.density, 0.0f), std::max(fog.height_density, 0.0f), fog.height_falloff}, fog.base_height);
+    put(f.limits, {std::max(fog.start, 0.0f), std::clamp(fog.max_opacity, 0.0f, 1.0f), std::max(fog.sun_scatter, 0.0f)},
+        std::clamp(fog.sun_anisotropy, -0.95f, 0.95f));
+    put(f.view, {orthographic ? 1.0f : 0.0f, 0.0f, 0.0f}, 0.0f);
+}
+
 // A depth target cleared to the far plane (reverse Z: 0), whose stencil is not used.
 SDL_GPUDepthStencilTargetInfo depth_target(SDL_GPUTexture* texture, SDL_GPUStoreOp store_op, bool cycle = false, u32 layer = 0) {
     SDL_GPUDepthStencilTargetInfo depth{};
@@ -500,6 +566,14 @@ public:
         const SDL_GPUBufferBinding skin{mesh->skin, 0};
         SDL_BindGPUVertexBuffers(_pass, 1, &skin, 1);
         _skin_mesh = mesh;
+    }
+
+    // Forget what is bound: something else (the sky pass) bound its own pipeline, in the same render pass.
+    void reset() {
+        _pipeline = nullptr;
+        _skin_mesh = nullptr;
+        _mesh = nullptr;
+        _indices = nullptr;
     }
 
 private:
@@ -698,6 +772,38 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _capabilities.ambient_occlusion = _capabilities.contact_shadows = _ao_available;
     _capabilities.temporal_aa = _taa_available;
+    // Fog and the sky (P3a): the fog variants of the stock mesh shaders (one more uniform block, in the slot custom parameters
+    // have elsewhere), the sky pass's shaders, the panorama pass of the sky's image-based light. Each its own try: a device
+    // without them draws as before (said once when a scene asks).
+    try {
+        _mesh_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_fog.frag.spv", /*uniform_buffers=*/3, /*samplers=*/10);
+        if (_mesh_velocity_shader) {
+            _mesh_velocity_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_fog.frag.spv",
+                                                                 /*uniform_buffers=*/3, /*samplers=*/10);
+        }
+        _fog_available = true;
+    } catch (const std::exception& e) {
+        KIN_LOG_INFO_F("render", "3D: fog not available", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    try {
+        _sky_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "sky.frag.spv", /*uniform_buffers=*/2, /*samplers=*/1);
+        if (_mesh_velocity_shader) {
+            _sky_velocity_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "sky_velocity.frag.spv", /*uniform_buffers=*/2,
+                                                            /*samplers=*/1);
+            _sky_velocity_only_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "sky_velocity_only.frag.spv",
+                                                                 /*uniform_buffers=*/1, /*samplers=*/0);
+        }
+        _sky_available = true;
+    } catch (const std::exception& e) {
+        KIN_LOG_INFO_F("render", "3D: sky not available", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    try {
+        _output_dither_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "view_output_dither.frag.spv", /*uniform_buffers=*/1,
+                                                         /*samplers=*/2);
+        _sky_env_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "sky_env.frag.spv", /*uniform_buffers=*/1, /*samplers=*/0);
+    } catch (const std::exception& e) {
+        KIN_LOG_INFO_F("render", "3D: image-based light from the sky not available", (LogFields{{.name = "reason", .value = e.what()}}));
+    }
     // The cluster cut in compute (Lod3D::gpu_culling): four compute pipelines over storage buffers, and buffers that are
     // storage and index or indirect arguments at once. KIN_GPU_CLUSTERS=0 turns it off (to compare, and to test the fallback).
     {
@@ -858,7 +964,7 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask, SDL_GPUShader* custom,
-                                                 bool velocity, bool skinned) const {
+                                                 bool velocity, bool skinned, bool fog) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
@@ -924,8 +1030,13 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     // writes nothing there, so its draws are masked too (a frame with an opaque custom shader has its pre-pass instead).
     SDL_GPUShader* vertex = skinned ? (velocity && !custom ? _mesh_skinned_velocity_vertex_shader : _mesh_skinned_vertex_shader).handle()
                                     : velocity && !custom ? _mesh_velocity_vertex_shader.handle() : _vertex_shader.handle();
+    // The fog's variants (P3a): only for a stock shader, and only where they were made.
+    const bool fogged = fog && !custom && _fog_available && (!velocity || _mesh_velocity_fog_shader);
+    SDL_GPUShader* fragment = custom ? custom
+                            : velocity ? (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader).handle()
+                                       : (fogged ? _mesh_fog_shader : _fragment_shader).handle();
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = vertex,
-                                                 .fragment = custom ? custom : velocity ? _mesh_velocity_shader.handle() : _fragment_shader.handle(),
+                                                 .fragment = fragment,
                                                  .blend = blend,
                                                  .format = format,
                                                  .layout = layout,
@@ -937,6 +1048,37 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                                  .depth_bias = pass == Pass::Wire,
                                                  .extra_format = velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
                                                  .extra_write = velocity && pass == Pass::Opaque && !custom});
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const {
+    if (!_sky_available || (velocity && !_sky_velocity_shader)) {
+        return nullptr;
+    }
+    // Reverse Z: the sky is drawn at depth 0 and passes where the depth buffer still holds the far plane (cleared to 0) and
+    // nowhere something was drawn (greater than 0). Replaces: it is opaque.
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                 .fragment = (velocity ? _sky_velocity_shader : _sky_shader).handle(),
+                                                 .blend = GpuBlendMode::Replace,
+                                                 .format = format,
+                                                 .layout = GpuVertexLayout::None,
+                                                 .depth_stencil = _depth_format,
+                                                 .depth = GpuDepthTest::Test,
+                                                 .samples = sample_count(samples),
+                                                 .extra_format = velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
+                                                 .extra_write = velocity});
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_velocity_pipeline(SDL_GPUTextureFormat depth) const {
+    if (!_sky_velocity_only_shader) {
+        return nullptr;
+    }
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                 .fragment = _sky_velocity_only_shader.handle(),
+                                                 .blend = GpuBlendMode::Replace,
+                                                 .format = hdr_format,
+                                                 .layout = GpuVertexLayout::None,
+                                                 .depth_stencil = depth,
+                                                 .depth = GpuDepthTest::Test});
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned) const {
@@ -1235,37 +1377,53 @@ std::shared_ptr<IMaterialShaderBackend> GpuRenderer3D::create_material_shader(st
     }
 }
 
+std::shared_ptr<GpuEnvironment3D> GpuRenderer3D::allocate_environment(u32 w, u32 h) {
+    constexpr SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    auto environment = std::make_shared<GpuEnvironment3D>();
+    const auto make = [&](u32 w, u32 h, u32 levels, SDL_GPUTextureUsageFlags usage) {
+        SDL_GPUTextureCreateInfo info{};
+        info.type = SDL_GPU_TEXTURETYPE_2D;
+        info.format = format;
+        info.usage = usage;
+        info.width = w;
+        info.height = h;
+        info.layer_count_or_depth = 1;
+        info.num_levels = levels;
+        info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device->handle(), &info);
+        if (!texture) {
+            throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
+        }
+        _device->poison_texture(texture, format, w, h, 1, levels, usage); // KIN_POISON_TEXTURES: a debug aid, nothing when unset
+        return GpuTexture{_device->shared(), texture, w, h, format};
+    };
+    // The levels the GPU can fill: by the shorter side, not the longer. A 2:1 picture's 1 x 1 level was
+    // never written (SDL's blit chain stops at an empty extent), and the filter's widest lobes read it:
+    // whatever its memory held went into the specular levels (stale values, now and then a NaN: a green sky).
+    const u32 source_levels = GpuDevice::complete_mip_levels(w, h);
+    constexpr SDL_GPUTextureUsageFlags source_usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+    environment->source = make(w, h, source_levels, source_usage);
+    // The mirror level as wide as the picture, up to 1024; a level more
+    // rough each, to the roughest at a sixteenth of that.
+    const u32 sw = std::clamp(w, 64u, 1024u);
+    u32 levels = 1;
+    while (levels < 7 && (sw >> levels) >= 16) {
+        ++levels;
+    }
+    environment->levels = levels;
+    environment->specular = make(sw, sw / 2, levels, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+    environment->irradiance = make(64, 32, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+    return environment;
+}
+
 std::shared_ptr<IEnvironmentBackend> GpuRenderer3D::create_environment(Vec2i size, std::span<const f32> rgb) {
     constexpr SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
     if (!_filter_pipeline || !_environment_sampler) {
         return {};
     }
     try {
-        auto environment = std::make_shared<GpuEnvironment3D>();
-        const auto make = [&](u32 w, u32 h, u32 levels, SDL_GPUTextureUsageFlags usage) {
-            SDL_GPUTextureCreateInfo info{};
-            info.type = SDL_GPU_TEXTURETYPE_2D;
-            info.format = format;
-            info.usage = usage;
-            info.width = w;
-            info.height = h;
-            info.layer_count_or_depth = 1;
-            info.num_levels = levels;
-            info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-            SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device->handle(), &info);
-            if (!texture) {
-                throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
-            }
-            _device->poison_texture(texture, format, w, h, 1, levels, usage); // KIN_POISON_TEXTURES: a debug aid, nothing when unset
-            return GpuTexture{_device->shared(), texture, w, h, format};
-        };
         const u32 w = static_cast<u32>(size.x), h = static_cast<u32>(size.y);
-        // The levels the GPU can fill: by the shorter side, not the longer. A 2:1 picture's 1 x 1 level was
-        // never written (SDL's blit chain stops at an empty extent), and the filter's widest lobes read it:
-        // whatever its memory held went into the specular levels (stale values, now and then a NaN: a green sky).
-        const u32 source_levels = GpuDevice::complete_mip_levels(w, h);
-        constexpr SDL_GPUTextureUsageFlags source_usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
-        environment->source = make(w, h, source_levels, source_usage);
+        std::shared_ptr<GpuEnvironment3D> environment = allocate_environment(w, h);
         std::vector<u16> texels(static_cast<std::size_t>(w) * h * 4);
         for (std::size_t i = 0; i < static_cast<std::size_t>(w) * h; ++i) {
             for (int c = 0; c < 3; ++c) {
@@ -1275,18 +1433,9 @@ std::shared_ptr<IEnvironmentBackend> GpuRenderer3D::create_environment(Vec2i siz
         }
         _device->update_texture(environment->source.handle(), 0, 0, w, h, reinterpret_cast<const u8*>(texels.data()), 8, true);
         // KIN_POISON_TEXTURES: the levels to be generated, filled with the poison after level 0's (cycling) upload.
-        _device->poison_texture(environment->source.handle(), format, w, h, 1, source_levels, source_usage, SDL_GPU_SAMPLECOUNT_1, /*first_level=*/1);
+        _device->poison_texture(environment->source.handle(), format, w, h, 1, GpuDevice::complete_mip_levels(w, h),
+                                SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET, SDL_GPU_SAMPLECOUNT_1, /*first_level=*/1);
         _device->generate_mipmaps(environment->source.handle());
-        // The mirror level as wide as the picture, up to 1024; a level more
-        // rough each, to the roughest at a sixteenth of that.
-        const u32 sw = std::clamp(w, 64u, 1024u);
-        u32 levels = 1;
-        while (levels < 7 && (sw >> levels) >= 16) {
-            ++levels;
-        }
-        environment->levels = levels;
-        environment->specular = make(sw, sw / 2, levels, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
-        environment->irradiance = make(64, 32, 1, SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
         return environment;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: environment not made", (LogFields{{.name = "reason", .value = e.what()}}));
@@ -1704,7 +1853,7 @@ void GpuRenderer3D::blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuVi
     dispatch(view._ao_raw, view._ao_across, view._contact_raw, view._contact_across);
 }
 
-void GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain) {
+void GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither) {
     const auto pass_into = [&](const GpuTexture& target, SDL_GPUGraphicsPipeline* p, std::span<const SDL_GPUTexture* const> sources,
                                const f32 (&params)[4]) {
         if (!p) {
@@ -1761,7 +1910,8 @@ void GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view,
                                                                          : 2.0f;
     const std::array<const SDL_GPUTexture*, 2> sources{source.handle(), bloom ? view._bloom_a.handle() : source.handle()};
     const f32 params[4] = {bloom ? view._options.bloom : 0.0f, plain ? 1.0f : view._options.exposure, mode, 0.0f};
-    pass_into(view._resolved->texture(), fullscreen(_output_shader.handle(), output), sources, params);
+    pass_into(view._resolved->texture(), fullscreen(dither && _output_dither_shader ? _output_dither_shader.handle() : _output_shader.handle(), output),
+              sources, params);
 }
 
 void GpuRenderer3D::suspend_taa(GpuView3D& view) {
@@ -2191,6 +2341,11 @@ struct GpuRenderer3D::FrameCtx {
 
     std::vector<std::pair<f32, const PointLight*>> chosen;
     GpuEnvironment3D* environment = nullptr; // null: the hemisphere ambient
+    bool sky_env_used = false;               // `environment` is the sky's own (Lights3D::sky_lights_scene): in world space, no rotation
+    // The sky and the fog (P3a): asked for and possible; `sky_pass` once the image sky's environment is known to be there.
+    bool sky = false;
+    bool sky_pass = false;
+    bool fog = false;
 
     // Recording.
     SDL_GPUCommandBuffer* commands = nullptr;
@@ -2364,6 +2519,18 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     stats.taa_reset = ctx.taa_reset;
     stats.taa_jitter = ctx.jitter;
     stats.samples = ctx.taa ? 1u : view->_samples;
+    // The sky and the fog, where the device made their shaders.
+    ctx.sky = scene.sky.enabled;
+    if (ctx.sky && !_sky_available) {
+        warn_once(_sky_warned, "3D: the sky asked for, but this device's shaders for it were not made: off");
+        ctx.sky = false;
+    }
+    const Fog3D& fog = scene.fog;
+    ctx.fog = fog.enabled && (fog.density > 0.0f || fog.height_density > 0.0f) && fog.max_opacity > 0.0f;
+    if (ctx.fog && !_fog_available) {
+        warn_once(_fog_warned, "3D: fog asked for, but this device's shaders for it were not made: off");
+        ctx.fog = false;
+    }
 }
 
 void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
@@ -3769,7 +3936,7 @@ void GpuRenderer3D::push_frame_uniforms(const FrameCtx& ctx, u32 s) {
     if (ctx.environment) {
         // The picture turned by the light's rotation; in the overlay's space the
         // directions come back to the scene's first.
-        const Mat4f to_environment = Mat4f::rotation_y(-lights.environment_rotation) * (s == 0 ? Mat4f{} : to_space.inverse());
+        const Mat4f to_environment = Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -lights.environment_rotation) * (s == 0 ? Mat4f{} : to_space.inverse());
         put(f.environment, {lights.environment_intensity, static_cast<f32>(ctx.environment->levels - 1), 0.0f}, 1.0f);
         std::memcpy(f.environment_matrix, to_environment.m, sizeof(f.environment_matrix));
     }
@@ -3803,6 +3970,134 @@ void GpuRenderer3D::push_frame_uniforms(const FrameCtx& ctx, u32 s) {
     SDL_PushGPUFragmentUniformData(ctx.commands, 0, &f, sizeof(f));
 }
 
+void GpuRenderer3D::sky_environment(FrameCtx& ctx) {
+    const Scene3D& scene = ctx.scene;
+    Render3DStats& stats = ctx.stats;
+    const Sky3D& sky = scene.sky;
+    stats.sky_env_generations = _sky_env_generations;
+    if (!scene.lights.sky_lights_scene || sky.mode != SkyMode3D::Procedural || !_sky_env_shader || !_filter_pipeline || !_environment_sampler) {
+        return;
+    }
+    // What the panorama is a function of: the sun and moon, the haze, the intensities and the colours. It is made again when
+    // any of them has moved by more than the threshold, and not sooner than `light_interval` renders after the last time.
+    AtmosphereUniforms atmosphere{};
+    fill_atmosphere(atmosphere, sky, scene.lights.sun.direction);
+    std::array<f32, 16> key{};
+    std::size_t k = 0;
+    for (const f32* part : {atmosphere.sun, atmosphere.moon}) {
+        for (int i = 0; i < 3; ++i) {
+            key[k++] = part[i];
+        }
+    }
+    key[k++] = atmosphere.sun[3];
+    key[k++] = atmosphere.shape[0];
+    key[k++] = atmosphere.shape[2];
+    key[k++] = atmosphere.shape[3];
+    for (const f32* part : {atmosphere.ground, atmosphere.night}) {
+        for (int i = 0; i < 3 && k < key.size(); ++i) {
+            key[k++] = part[i];
+        }
+    }
+    f32 moved = 0.0f;
+    for (std::size_t i = 0; i < key.size(); ++i) {
+        // Relative to a light of 1 and above: the sun's intensity of 3 moving by a hundredth is a third of a percent.
+        moved = std::max(moved, std::abs(key[i] - _sky_key[i]) / std::max(1.0f, std::abs(_sky_key[i])));
+    }
+    const bool have = _sky_env && _sky_env->filtered;
+    const bool changed = !have || moved > sky.light_threshold;
+    if (have && (!changed || _sky_env_age < sky.light_interval)) {
+        ++_sky_env_age;
+        ctx.environment = _sky_env.get();
+        ctx.sky_env_used = true;
+        return;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        if (!_sky_env) {
+            _sky_env = allocate_environment(sky_env_width, sky_env_height);
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the sky's environment not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return;
+    }
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    SDL_GPUColorTargetInfo target{};
+    target.texture = _sky_env->source.handle();
+    target.load_op = SDL_GPU_LOADOP_DONT_CARE; // all of it is written
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    target.cycle = true;
+    SDL_GPUGraphicsPipeline* p = fullscreen(_sky_env_shader.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+    if (!p) {
+        return;
+    }
+    if (SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &target, 1, nullptr)) {
+        set_viewport(pass, sky_env_width, sky_env_height);
+        SDL_BindGPUGraphicsPipeline(pass, p);
+        SkyEnvUniforms u{};
+        put(u.target, {static_cast<f32>(sky_env_width), static_cast<f32>(sky_env_height), 0.0f}, 0.0f);
+        u.atmosphere = atmosphere;
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+        SDL_EndGPURenderPass(pass);
+    }
+    SDL_GenerateMipmapsForGPUTexture(commands, _sky_env->source.handle());
+    filter_environment(commands, *_sky_env);
+    _sky_key = key;
+    _sky_env_age = 0;
+    ++_sky_env_generations;
+    stats.sky_env_generations = _sky_env_generations;
+    stats.sky_env_regenerated = true;
+    stats.sky_env_cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count();
+    ctx.environment = _sky_env.get();
+    ctx.sky_env_used = true;
+}
+
+// The sky triangle into `pass`, which is at the scene's viewport: mode 0 the colour, 1 the colour and the velocity (the main
+// pass of temporal anti-aliasing with no pre-pass), 2 the velocity alone (into the pre-pass's, over its depth).
+void GpuRenderer3D::draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode) {
+    const GpuView3D* view = ctx.view;
+    const Scene3D& scene = ctx.scene;
+    const Sky3D& sky = scene.sky;
+    SDL_GPUGraphicsPipeline* p = mode == 2 ? sky_velocity_pipeline(_ao_depth_format)
+                                           : sky_pipeline(ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples, mode == 1);
+    if (!p) {
+        return;
+    }
+    const bool orthographic = scene.camera.projection == Projection3D::Orthographic;
+    SkyUniforms u{};
+    // Where each pixel looks: the jittered view-projection (the meshes are drawn with it, and the sky's samples must be
+    // where theirs are, or the edge between them would crawl under temporal anti-aliasing), unprojected at the near plane.
+    std::memcpy(u.inverse_view_projection, ctx.drawn[0].inverse().m, sizeof(u.inverse_view_projection));
+    std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+    std::memcpy(u.prior_view_projection, (ctx.taa_reset || !ctx.taa ? ctx.view_projections : view->_taa_prior)[0].m,
+                sizeof(u.prior_view_projection));
+    const bool panorama = sky.mode == SkyMode3D::Image && ctx.environment;
+    put(u.target, {static_cast<f32>(view->_size.x), static_cast<f32>(view->_size.y), panorama ? 1.0f : 0.0f}, orthographic ? 1.0f : 0.0f);
+    put(u.camera, scene.camera.position, 1.0f);
+    put(u.forward, scene.camera.forward(), 0.0f);
+    constexpr f32 degrees_to_radians = 3.14159265f / 180.0f;
+    put(u.disc, {std::max(sky.sun_size, 0.01f) * 0.5f * degrees_to_radians, std::max(sky.moon_size, 0.01f) * 0.5f * degrees_to_radians, sky.sun_disc},
+        sky.stars ? sky.star_brightness : 0.0f);
+    const bool moon = sky.moon && sky.moon_light > 0.0f;
+    put(u.moon_color, sky.moon_color * (sky.moon_light * moon_disc_gain), moon ? 1.0f : 0.0f);
+    fill_atmosphere(u.atmosphere, sky, scene.lights.sun.direction);
+    if (ctx.fog) {
+        fill_fog(u.fog, scene.fog, orthographic);
+    }
+    if (mode != 2) {
+        const SDL_GPUTextureSamplerBinding environment = ctx.environment && panorama
+                                                             ? SDL_GPUTextureSamplerBinding{ctx.environment->specular.handle(), _environment_sampler}
+                                                             : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear};
+        SDL_BindGPUGraphicsPipeline(pass, p);
+        SDL_BindGPUFragmentSamplers(pass, 0, &environment, 1);
+        SDL_PushGPUFragmentUniformData(ctx.commands, 1, &u, sizeof(u));
+    } else {
+        SDL_BindGPUGraphicsPipeline(pass, p);
+        SDL_PushGPUFragmentUniformData(ctx.commands, 0, &u, sizeof(u));
+    }
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+}
+
 void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
     Render3DStats& stats = ctx.stats;
     ctx.environment = dynamic_cast<GpuEnvironment3D*>(ctx.scene.lights.environment.backend().get());
@@ -3818,6 +4113,10 @@ void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
     ctx.joints = _joints ? _joints->handle() : nullptr;
     ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
     SDL_GPUCommandBuffer* commands = ctx.commands;
+
+    // Lights3D::sky_lights_scene: the environment is the sky's, made again when the sky has moved.
+    sky_environment(ctx);
+    ctx.sky_pass = ctx.sky && (ctx.scene.sky.mode == SkyMode3D::Procedural || ctx.environment != nullptr);
 
     // An environment used for the first time: its filtered copies, once.
     if (ctx.environment && !ctx.environment->filtered) {
@@ -4351,6 +4650,10 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                     stats.ao_instances += ref.level_seen[l];
                 }
             }
+            // The camera's turn over the pixels nothing was drawn on (the far depth), so that the resolve reprojects the sky.
+            if (ctx.taa && ctx.sky_pass && (!ctx.occlusion || second)) {
+                draw_sky(ctx, prepass, 2);
+            }
             _phase = Phase::All;
         };
         if (SDL_GPURenderPass* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth)) {
@@ -4468,10 +4771,21 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // With an overlay, the scene's depths go in [0, 0.9] and the overlay's in
     // [0.9, 1]: nearer (reverse Z) than all of the scene, yet depth-tested
     // against itself, in one pass.
+    // Fog (P3a): the scene's block, and for the overlay a block of none (a gun in the hand is not fogged). The block is in
+    // slot 2, which a custom shader's parameters use too: it is pushed again before the first fogged draw after a custom one.
+    std::array<FogBlockUniforms, 2> fog_blocks{};
+    if (ctx.fog) {
+        const bool orthographic = ctx.scene.camera.projection == Projection3D::Orthographic;
+        fill_fog(fog_blocks[0].fog, ctx.scene.fog, orthographic);
+        fill_atmosphere(fog_blocks[0].sky, ctx.scene.sky, ctx.scene.lights.sun.direction);
+        stats.fog_applied = true;
+    }
+    bool fog_bound = false;
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && ctx.overlaid ? overlay_split : 1.0f;
         set_viewport(pass, view->_size.x, view->_size.y, lo, hi);
         push_frame_uniforms(ctx, s);
+        fog_bound = false;
     };
     begin_scene(0);
 
@@ -4502,12 +4816,26 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     Textures bound_textures = unbound;
     std::pair<Wrap3D, Wrap3D> bound_wrap{};
     u32 current_scene = 0;
+    // The sky: after the scene's opaque meshes (their depth is in, so the triangle at the far plane shades only what is
+    // left), before its blended and additive ones and the overlay. It binds a pipeline of its own: what the binder
+    // and the texture cache remember is forgotten.
+    bool sky_done = !ctx.sky_pass;
+    const auto sky_now = [&] {
+        sky_done = true;
+        draw_sky(ctx, pass, ctx.main_velocity ? 1u : 0u);
+        stats.sky_drawn = true;
+        binder.reset();
+        bound_textures = unbound;
+    };
     const auto draw_all = [&](auto& draw_uniforms) {
     fill_uniforms(draw_uniforms, 0);
     const std::array<SDL_GPUBuffer*, 2> buffers{storage, ctx.previous_storage};
     for (const u32 index : _order) {
         const DrawRef& ref = _refs[index];
         const Material3D& material = ref.draw->material;
+        if (!sky_done && (ref.scene != 0 || pass_of(material) != Pass::Opaque)) {
+            sky_now();
+        }
         if (ref.scene != current_scene) {
             current_scene = ref.scene;
             begin_scene(current_scene);
@@ -4518,7 +4846,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             continue;
         }
         SDL_GPUGraphicsPipeline* p = pipeline(ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples, !material.double_sided, pass_of(material), false,
-                                              custom ? custom->shader.handle() : nullptr, ctx.main_velocity, ref.skinned);
+                                              custom ? custom->shader.handle() : nullptr, ctx.main_velocity, ref.skinned, ctx.fog && !custom);
         if (!p) {
             continue;
         }
@@ -4562,10 +4890,14 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                   material.blend == Blend3D::Mask ? std::max(material.alpha_cutoff, 1e-6f) : 0.0f},
                                  {material.metallic, material.roughness, material.normal_scale, material.occlusion_strength},
                                  {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f,
-                                  pass_of(material) == Pass::Opaque ? 1.0f : 0.0f, 0.0f}};
+                                  pass_of(material) == Pass::Opaque ? 1.0f : 0.0f, pass_of(material) == Pass::Additive ? 1.0f : 0.0f}};
         SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
         if (custom) {
             SDL_PushGPUFragmentUniformData(commands, 2, material.shader_params.data(), sizeof(CustomUniforms));
+            fog_bound = false;
+        } else if (ctx.fog && !fog_bound) {
+            SDL_PushGPUFragmentUniformData(commands, 2, &fog_blocks[current_scene], sizeof(FogBlockUniforms));
+            fog_bound = true;
         }
         // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices.
         if (ref.clustered && _gc.active) {
@@ -4617,6 +4949,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     } else {
         DrawUniforms draw_uniforms{};
         draw_all(draw_uniforms);
+    }
+    if (!sky_done) {
+        sky_now(); // nothing but opaque meshes (or none) in the scene
     }
     SDL_EndGPURenderPass(pass);
     return true;
@@ -4748,9 +5083,9 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     resolve_history(ctx);
     pick_pass(ctx);
     if (ctx.taa) {
-        finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr);
+        finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass);
     } else if (view->_hdr) {
-        finish_view(ctx.commands, *view, view->_scene, /*plain=*/false);
+        finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass);
     }
     age_targets(ctx);
     stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines_before);
@@ -4853,6 +5188,20 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
     // The draws' own pipelines, for each kind of draw the scene has.
     const SDL_GPUTextureFormat format = taa ? hdr_format : view->_format;
     const u32 samples = taa ? 1u : view->_samples;
+    const Fog3D& fog = scene.fog;
+    const bool fog_on = fog.enabled && (fog.density > 0.0f || fog.height_density > 0.0f) && fog.max_opacity > 0.0f && _fog_available;
+    if (scene.sky.enabled && _sky_available) {
+        if ((view->_hdr || taa) && _output_dither_shader) {
+            fullscreen(_output_dither_shader.handle(), view->_output_format);
+        }
+        sky_pipeline(format, samples, main_velocity);
+        if (taa && !main_velocity) {
+            sky_velocity_pipeline(_ao_depth_format);
+        }
+    }
+    if (scene.lights.sky_lights_scene && _sky_env_shader) {
+        fullscreen(_sky_env_shader.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT);
+    }
     for (u32 index = 0; index < 2; ++index) {
         if (!scenes[index]) {
             continue;
@@ -4864,6 +5213,9 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
             const Material3D& m = draw.material;
             const GpuMaterialShader3D* custom = custom_of(m);
             pipeline(format, samples, !m.double_sided, pass_of(m), false, custom ? custom->shader.handle() : nullptr, main_velocity, draw.skinned);
+            if (fog_on && !custom) {
+                pipeline(format, samples, !m.double_sided, pass_of(m), false, nullptr, main_velocity, draw.skinned, /*fog=*/true);
+            }
             const bool opaque = pass_of(m) == Pass::Opaque;
             const bool cutout = m.blend == Blend3D::Mask;
             if (index == 0 && shadows && opaque && m.casts_shadow) {

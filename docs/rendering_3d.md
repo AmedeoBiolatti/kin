@@ -400,6 +400,56 @@ which levels would break) and meshes without levels are drawn as before; the ove
 its own (`scene.overlay().lod`, off). The temporal history survives a copy changing level: copies are
 matched by mesh and place, not by level.
 
+### Sky, fog and time of day
+
+Off by default; off, the picture and the cost are those without them (the old shaders are not touched: the fog is a variant of
+the stock fragment shader, the sky a pass of its own). `kin/render3d/sky3d.hpp` and `timeofday3d.hpp`; docs/3d_plan.md "P3a" has
+the numbers.
+
+```cpp
+scene.sky = {.enabled = true, .turbidity = 3.0f, .stars = true};       // a procedural atmosphere behind the opaque meshes
+scene.fog = {.enabled = true, .density = 0.0004f, .height_density = 0.004f, .height_falloff = 0.05f, .base_height = 20.0f,
+             .colour_from_sky = true, .sun_scatter = 0.25f};
+kin::TimeOfDay3D day{.hours = 19.4f, .day_of_year = 172, .latitude = 45.0f};
+kin::apply(day, scene.lights, scene.sky, scene.fog);                   // sun, moonlight (the fill), ambient, the sky's moon, fog colour
+scene.lights.sky_lights_scene = true;                                  // ambient light and reflections from the sky
+```
+
+**The sky** (`Sky3D`) is a single-scattering atmosphere (Rayleigh, Mie, an ozone term) lit by `Lights3D::sun.direction`: `turbidity` (haze),
+`sun_intensity` (the sun's light above the air; the sun's light on the meshes is that times the air's transmittance:
+`kin::sky_sun_light`, which `apply()` puts in `lights.sun.color`), `intensity` (times the sky), `ground_color` (the ground below the horizon,
+lit as a horizontal surface; the sky's colour reaches it over 9 degrees, no seam), a sun disc (`sun_size` degrees, `sun_disc` times the sun's
+light: HDR, bloom has it), optional `stars` and a `moon` (a disc, and a glow). `SkyMode3D::Image` shows `Lights3D::environment` instead
+(its intensity and rotation). It is drawn in the main pass after the opaque meshes and before the blended ones and the overlay, with the depth
+test of "nothing was drawn here", so it costs a triangle's pixels where nothing else is, is correct under MSAA and TAA (the jittered
+matrix, and the camera's turn as the velocity), and is HDR (bloom, exposure, tonemap) like the rest. A view with a sky is output through a
+shader with a one-step dither (night skies ring in 8 bits without it). `stats().sky_drawn`.
+
+**The fog** (`Fog3D`) is `density` per unit of distance plus a `height_density` that thins upward with `height_falloff`
+from `base_height`, from `start`, up to `max_opacity`; the optical depth along each fragment's **view ray** is exact (the integral of the
+height density is closed: `kin::fog_optical_depth` is the same arithmetic on the CPU). The colour is `colour`, or with `colour_from_sky` the
+sky's in that direction (so far geometry melts into it at the horizon, whatever the time of day), plus the sun's light times a lobe of
+`sun_anisotropy` (`sun_scatter`). Applied to everything the main pass shades through the stock shader (opaque, cut-out, skinned,
+instanced, clustered, blended, additive); the overlay (a gun in the hand) is not fogged and custom material shaders are not.
+`kin_fog.inc.glsl` holds it for a pass of your own. `stats().fog_applied`.
+
+**Time of day** (`TimeOfDay3D`): `hours` (solar time), `day_of_year`, `latitude`, `axial_tilt`, `moon_phase`, `speed` (game seconds a
+second for `advance(day, dt)`). `evaluate()` is a pure function of them (and the sky's haze and sun intensity): sun and moon
+directions, the sun's colour, the moonlight, ambient and ground ambient (the sky's cosine-weighted light), a fog colour and density
+suggestion; `apply()` writes them into the lights, the sky's moon and the fog's colour (not the haze, the stars or the density, which are
+looks); `sun_times()` gives sunrise and sunset. North is -z, east +x. As a component: put a `TimeOfDay3D` on an entity and call
+`WorldRenderState3D::advance_time_of_day(dt)` and `apply_time_of_day(scene)`.
+
+**The sky's light** (`Lights3D::sky_lights_scene`): the atmosphere and ground (no disc, stars or moon) are drawn into a 256 x 128 panorama,
+mipped and filtered with the environment machinery, and take the place of `environment` and `ambient`. It is made again only when
+the sun or the sky moved by more than `Sky3D::light_threshold` and `light_interval` renders (4) have passed, so a day sweep re-filters a few
+times a second (`stats().sky_env_regenerated`, `sky_env_generations`, `sky_env_cpu_ms`; about 0.4 ms of GPU each time). It lights the scene
+whether or not the sky is drawn. Without it the hemisphere ambient is used as before.
+
+`warm_up()` makes the sky's, the fog variants' and the dither's pipelines too. Harness: `kin_reference` JSON `sky`, `fog`,
+`time_of_day`, `lights.sky_lights_scene`, a camera's `hours`, `at_sun`, `at_moon`; `procedural: "landscape"`; scenes `sky_day`, `sky_dusk`,
+`sky_night`, `fog_valley`, `tod_sweep`. Sponza Walk's "Sky and fog (P3a)" section and `--preset sky|dusk|fog|night|day-night`.
+
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
@@ -772,7 +822,8 @@ feature is a field and a row in its table of switches; `--set`, `--preset` and
 [examples README](../examples/README.md#sponza-walk). Its "Character IK" section drives a person of 25 joints (toes and a tail
 among them): a hand to a target, the head to the camera, feet on the floor and a step, FABRIK on the tail to a green ball, joint
 limits, foot locking, toes, and a person that drifts from side to side to see feet lock (`--preset ik`, `ik-reach`, `ik-tail`,
-`ik-walk`, `ik-all`). What the panel does to the constraints is `examples/sponza_walk/ik_rig.hpp`, which a unit test drives.
+`ik-walk`, `ik-all`). What the panel does to the constraints is `examples/sponza_walk/ik_rig.hpp`, which a unit test drives. Its "Sky and fog"
+section (P3a) has the sky, fog, time of day and the sky's light on switches (`--preset sky`, `dusk`, `fog`, `night`, `day-night`).
 
 ## Cameras
 

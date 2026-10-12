@@ -186,6 +186,12 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   FABRIK tail to a green ball (sliders for its position). `--preset ik`, `ik-reach`, `ik-tail`, `ik-walk`, `ik-all`. What the panel does
   to the constraints is `sponza_walk/ik_rig.hpp`, driven by a unit test (`kin_skeleton_tests`); the panel's click path is untested here
   (no display).
+- The "Sky and fog (P3a)" section: a procedural sky behind the model (seen through Sponza's open roof and its arches; `--camera roof`
+  looks up), haze, the sun disc, stars and a moon; fog by distance and height with its colour taken from the sky and the sun's lobe;
+  a time of day (hour, day of the year, latitude, play with a speed) that drives the sun, the moonlight, the ambient light, the sky's
+  moon and the fog together; and "Sky lights the scene", which makes the ambient light and the reflections from the sky (the panorama
+  is made again as the sun moves). `--preset sky`, `dusk`, `fog`, `night`, `day-night` (the last plays a day: `--frames 400`).
+  A run with no display: `sponza_walk --headless --preset dusk --camera roof --screenshot dusk.png`.
 - The "Physics (Jolt: kin/physics3d)" section turns on `WorldPhysicsState3D` over the viewer's ECS world: a floor at y = 0 (Sponza's own
   collision is not used: the viewer holds no triangles of the model) and boxes thrown from the camera (key B or the button: count, size,
   speed), stepped at 60 Hz, with the debug lines on or off (shapes green while awake and blue once asleep, contacts as red crosses with
