@@ -23,6 +23,12 @@ layout(set = 2, binding = 6) uniform sampler2D uEnvSpecular;   // the environmen
 layout(set = 2, binding = 7) uniform sampler2D uEnvIrradiance; // and what a diffuse surface facing each way receives, over pi
 layout(set = 2, binding = 8) uniform sampler2D uAmbientOcclusion; // R: the share of ambient light that reaches the view's pixels (white without)
 layout(set = 2, binding = 9) uniform sampler2D uContactShadow;    // R: the share of the sun that gets through a short march toward it (white without)
+#ifdef KIN_LIGHTS
+// Spot and point lights' shadows and the moon's (P3b): only the shaders made with KIN_LIGHTS have them, so that every other
+// shader, and its compiled code, is as it was.
+layout(set = 2, binding = 10) uniform sampler2DArrayShadow uLocalShadow; // depth from a spot (a layer), or a face of a point light's cube (six layers), compared
+layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // depth from the fill light (the moon), a layer a cascade, compared
+#endif
 
 const int MAX_LIGHTS = 16;
 const float PI = 3.14159265358979;
@@ -65,6 +71,35 @@ layout(set = 3, binding = 2) uniform FogParams {
     KinFog fog;
     KinSky sky;
 } fog_params;
+#endif
+
+// Spot lights and the shadows of lights that are not the sun (P3b): KIN_LIGHTS (mesh_light.frag and its variants). Its block
+// takes the slot after the fog's (or, without fog, the fog's own: custom parameters' too, as the two never meet in one draw).
+#ifdef KIN_LIGHTS
+#ifndef KIN_NO_CUSTOM_PARAMS
+#error "KIN_LIGHTS takes the uniform slot custom parameters use"
+#endif
+#ifdef KIN_FOG
+#define KIN_LIGHTS_BINDING 3
+#else
+#define KIN_LIGHTS_BINDING 2
+#endif
+const int MAX_SPOTS = 16;
+const int MAX_LOCAL = 20; // layers: 8 spots' maps, then two cubes of six faces
+layout(set = 3, binding = KIN_LIGHTS_BINDING) uniform LocalLights {
+    vec4 counts;      // x: spot lights, y: the moon's cascades (0: no shadow), z: the moon's shadow strength, w: the sun's
+    vec4 local;       // x: 1 / the local array's side (a texel in uv)
+    vec4 moon;        // x: a texel of the moon's map (uv)
+    mat4 moon_matrix[4];
+    vec4 moon_bias[4]; // per cascade: x: depth bias, y: normal offset (world units)
+    vec4 moon_end;     // the view depth where each cascade ends
+    vec4 moon_blend;   // and where it starts to fade into the next
+    vec4 spots[MAX_SPOTS * 4]; // per spot: position.xyz radius; colour.rgb size^2; direction.xyz cos(outer); x: 1 / (cos inner - cos outer), y: its layer (-1: no shadow)
+    vec4 point_shadow[MAX_LIGHTS]; // per point light (as frame.lights): x: its cube's first layer (-1: no shadow)
+    mat4 local_matrix[MAX_LOCAL];  // world to the layer's clip space
+    vec4 local_a[MAX_LOCAL];       // x: the map's share of the array's side, y: a texel's world size per unit of depth, z: near, w: far
+    vec4 local_b[MAX_LOCAL];       // x: bias (texels), y: normal offset (texels), z: filter spacing (texels), w: where the shadow has faded to nothing (distance)
+} locals;
 #endif
 
 // Custom material shaders (Material3D::shader) include this file and write
@@ -137,6 +172,109 @@ float sunlight(vec3 n) {
     }
     return lit < 0.0 ? 1.0 : lit;
 }
+
+#ifdef KIN_LIGHTS
+// The share of a local light's shadow map that lets this surface point's light through (a spot's layer, or a face of a
+// point light's cube): nine comparisons in the layer's corner of the array, from a point pushed a little off the surface,
+// the reference moved toward the light by a bias of texels that grows with the surface's slope to it. Reverse Z, a
+// perspective depth: depth(d) = near (far / d - 1) / (far - near). -1 where the point is outside the map's view.
+float local_light(int layer, vec3 n, vec3 l) {
+    const vec4 a = locals.local_a[layer];
+    const vec4 b = locals.local_b[layer];
+    const float texel_world = (locals.local_matrix[layer] * vec4(vWorld, 1.0)).w * a.y;
+    const vec4 clip = locals.local_matrix[layer] * vec4(vWorld + n * (b.y * texel_world), 1.0);
+    if (clip.w <= a.z) {
+        return -1.0;
+    }
+    const vec2 ndc = clip.xy / clip.w;
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || clip.w > a.w) {
+        return -1.0;
+    }
+    const float n_l = clamp(dot(n, l), 0.0, 1.0);
+    const float slope = min(sqrt(max(1.0 - n_l * n_l, 0.0)) / max(n_l, 0.05), 12.0);
+    const float d = max(clip.w - texel_world * b.x * (1.0 + slope), a.z);
+    const float ref = a.z * (a.w / d - 1.0) / (a.w - a.z);
+    const float texel = locals.local.x;
+    const vec2 base = uv * a.x;
+    const vec2 lo = vec2(0.5 * texel), hi = vec2(a.x - 0.5 * texel);
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const vec2 q = clamp(base + vec2(x, y) * (b.z * texel), lo, hi);
+            lit += texture(uLocalShadow, vec4(q, float(layer), ref));
+        }
+    }
+    return lit / 9.0;
+}
+
+// Its share of the light, with the shadow faded out toward `b.w` from the light (1: no shadow, or not in the map's view).
+float local_shadow(int layer, vec3 n, vec3 l, float distance) {
+    float lit = local_light(layer, n, l);
+    if (lit < 0.0) {
+        return 1.0;
+    }
+    const float end = locals.local_b[layer].w;
+    return mix(lit, 1.0, smoothstep(0.8 * end, end, distance));
+}
+
+// A point light's: the face its direction from the light falls in (the axis it is longest along), its layer.
+float point_light_shadow(int i, vec3 n, vec3 toward, float distance) {
+    const float first = locals.point_shadow[i].x;
+    if (first < 0.0) {
+        return 1.0;
+    }
+    const vec3 from_light = -toward;
+    const vec3 m = abs(from_light);
+    int face;
+    if (m.x >= m.y && m.x >= m.z) {
+        face = from_light.x < 0.0 ? 1 : 0;
+    } else if (m.y >= m.z) {
+        face = from_light.y < 0.0 ? 3 : 2;
+    } else {
+        face = from_light.z < 0.0 ? 5 : 4;
+    }
+    return local_shadow(int(first) + face, n, toward, distance);
+}
+
+// One of the moon's cascades, as cascade_light is the sun's; -1 outside its map.
+float moon_cascade_light(int k, vec3 n) {
+    const vec4 clip = locals.moon_matrix[k] * vec4(vWorld + n * locals.moon_bias[k].y, 1.0);
+    const vec3 ndc = clip.xyz / clip.w;
+    const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    const float ref = ndc.z + locals.moon_bias[k].x;
+    float lit = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            lit += texture(uMoonShadow, vec4(uv + vec2(x, y) * locals.moon.x, float(k), ref));
+        }
+    }
+    return lit / 9.0;
+}
+
+// How much of the moon reaches here: its cascade for this depth, faded into the next as the sun's are, then by its strength.
+float moonlight(vec3 n) {
+    const int count = int(locals.counts.y);
+    if (count < 1 || material.params.z < 0.5) {
+        return 1.0;
+    }
+    const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
+    int k = 0;
+    for (int i = 0; i < count - 1; ++i) {
+        k += depth > locals.moon_end[i] ? 1 : 0;
+    }
+    float lit = moon_cascade_light(k, n);
+    if (k < count - 1 && depth > locals.moon_blend[k]) {
+        const float t = clamp((depth - locals.moon_blend[k]) / max(locals.moon_end[k] - locals.moon_blend[k], 1e-4), 0.0, 1.0);
+        const float next = moon_cascade_light(k + 1, n);
+        lit = lit < 0.0 ? next : next < 0.0 ? lit : mix(lit, next, t);
+    }
+    return lit < 0.0 ? 1.0 : mix(1.0, lit, locals.counts.z);
+}
+#endif
 
 // Where the equirectangular environment shows a direction (render3d/environment.hpp).
 vec2 environment_uv(vec3 d) {
@@ -349,13 +487,20 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     const float sun = dot(n, frame.sun_direction.xyz);
     if (sun > 0.0) {
         float lit = sunlight(n);
+#ifdef KIN_LIGHTS
+        lit = mix(1.0, lit, locals.counts.w);
+#endif
         if (frame.occlusion.y > 0.5) {
             lit *= contact_shadow(); // on top of the shadow map's; only the sun's term
         }
         light += shade(s, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
     }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {
+#ifdef KIN_LIGHTS
+        light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb * moonlight(n));
+#else
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb);
+#endif
     }
     const int count = int(frame.flags.w);
     for (int i = 0; i < count; ++i) {
@@ -369,8 +514,43 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const float r2 = d2 / (at.w * at.w);
         const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
         const float k = window * window / max(d2, frame.lights[2 * i + 1].w);
+#ifdef KIN_LIGHTS
+        const vec3 toward = to * inversesqrt(max(d2, 1e-8));
+        float seen = 1.0;
+        if (k > 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
+            seen = point_light_shadow(i, n, toward, sqrt(d2));
+        }
+        light += shade(s, toward, frame.lights[2 * i + 1].rgb * (k * seen));
+#else
         light += shade(s, to * inversesqrt(max(d2, 1e-8)), frame.lights[2 * i + 1].rgb * k);
+#endif
     }
+#ifdef KIN_LIGHTS
+    // Spot lights: a point light's falloff inside a cone (glTF's punctual spot: the square of the linear step of the
+    // cosine between the inner and the outer angle), its shadow from its layer of the local array.
+    const int spot_count = int(locals.counts.x);
+    for (int i = 0; i < spot_count; ++i) {
+        const vec4 at = locals.spots[4 * i];
+        const vec4 colour = locals.spots[4 * i + 1];
+        const vec4 axis = locals.spots[4 * i + 2];
+        const vec4 more = locals.spots[4 * i + 3];
+        const vec3 to = at.xyz - vWorld;
+        const float d2 = dot(to, to);
+        const float r2 = d2 / (at.w * at.w);
+        const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+        const vec3 toward = to * inversesqrt(max(d2, 1e-8));
+        const float step_in_cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
+        const float k = window * window * step_in_cone * step_in_cone / max(d2, colour.w);
+        if (k <= 0.0) {
+            continue;
+        }
+        float seen = 1.0;
+        if (more.y >= 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
+            seen = local_shadow(int(more.y), n, toward, sqrt(d2));
+        }
+        light += shade(s, toward, colour.rgb * (k * seen));
+    }
+#endif
 
     // Ambient, from the sky above to the ground below by which way a
     // direction looks: the diffuse by the normal, the specular by the

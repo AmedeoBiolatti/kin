@@ -9,6 +9,23 @@ releases may change APIs.
 
 ### Added
 
+- Spot lights and the shadows of lights that are not the sun (experimental; see [3D rendering](rendering_3d.md) "Spot lights and shadows
+  from lights that are not the sun" and the plan's "P3b"): `SpotLight` (position, direction, colour, radius, size, inner and outer cone
+  angle with glTF's squared step in the cosine), `LightShadow3D` (a per-light shadow map's resolution, bias, normal offset, near plane,
+  distance, softness; also on `PointLight`, whose map is a cube of six faces), `Lights3D::{spots, max_shadowed_spots, max_shadowed_points,
+  local_shadow_resolution, fill_shadow, sun_shadow_strength}`, `DirectionalShadow3D` (the fill light, the moon, casting through cascades of its
+  own), `Scene3D::add_spot_light`, `TimeOfDay3D::shadows` (`apply()` fades the sun's and the moon's shadow strength with their height),
+  `kin/render3d/local_lights.hpp` (the CPU twin of the falloff, the maps' views, the importance and the slot assignment with its
+  hysteresis), ECS `PointLight3D` and `SpotLight3D`, `Renderer3DCapabilities::local_shadows` and `Render3DStats::{spots, spot_slot,
+  point_slot, local_shadow_*, moon_cascades, lights_variant}`. Up to 16 spots a frame, up to 8 spot maps and 2 point cubes (the most
+  important ones, with a hysteresis so the choice does not flip), shared in one depth array of the largest side asked for; casters are
+  culled by the cone (a face of a cube only if a visible surface can fall in), include cut-out, skinned, instanced and clustered meshes (cut
+  from the light), and each map is kept while its exact inputs are unchanged (`cache_shadows`). Opt-in: with none of it used every picture
+  is unchanged byte for byte, the 88 earlier shaders compile to the same code, and four variants of the stock fragment shader are added.
+  Harness: `kin_reference` JSON `lights.spots`, `shadow`, `fill_shadow`, `attach` (a light carried with the camera),
+  `time_of_day.shadows`, `procedural: "stage"`, options `--spots`, `--spot-shadows`, `--point-lights`, `--point-shadows`, `--moon-shadow`,
+  `--moon-cascades`, `--local-res`; scenes `spot_shadows`, `spot_night`, `spot_budget`, `moon_shadow`, `point_shadow`; Sponza Walk "Spot lights
+  and shadows" section (J drops a spot light) and `--preset spots|flashlight|moon|lamps`.
 - Sky, fog and time of day (experimental; see [3D rendering](rendering_3d.md) "Sky, fog and time of day" and the plan's "P3a"):
   `kin/render3d/sky3d.hpp` (`Sky3D`, `Fog3D`, `Scene3D::sky`, `Scene3D::fog`, and the CPU's `sky_radiance`, `sky_color`, `sky_sun_light`,
   `sky_irradiance`, `fog_optical_depth`, `fog_opacity`, `fog_apply`), `kin/render3d/timeofday3d.hpp` (`TimeOfDay3D`, `evaluate`, `apply`,

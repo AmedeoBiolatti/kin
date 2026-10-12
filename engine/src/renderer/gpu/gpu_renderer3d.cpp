@@ -239,6 +239,23 @@ struct SkyEnvUniforms {
     AtmosphereUniforms atmosphere;
 };
 static_assert(sizeof(SkyEnvUniforms) == 96);
+// mesh_light.frag's block (kin_material.inc.glsl's LocalLights), pushed in slot 2 (slot 3 with the fog): all vec4s and mat4s, std140
+// with no padding to get wrong.
+struct LocalLightUniforms {
+    f32 counts[4];  // spot lights, the moon's cascades, the moon's strength, the sun's
+    f32 local[4];   // 1 / the local array's side
+    f32 moon[4];    // a texel of the moon's map (uv)
+    f32 moon_matrix[max_shadow_cascades * 16];
+    f32 moon_bias[max_shadow_cascades * 4]; // per cascade: depth bias, normal offset
+    f32 moon_end[4];
+    f32 moon_blend[4];
+    f32 spots[max_spot_lights * 16];
+    f32 point_shadow[max_lights * 4];
+    f32 local_matrix[max_local_shadow_layers * 16];
+    f32 local_a[max_local_shadow_layers * 4];
+    f32 local_b[max_local_shadow_layers * 4];
+};
+static_assert(sizeof(LocalLightUniforms) == 3600);
 // How much brighter than the sky's light the moon's disc is drawn: the moon's light is a sky-scale one (0.1 at full moon).
 constexpr f32 moon_disc_gain = 20.0f;
 // The sky's panorama for image-based light: its size (2:1), as the environment filter wants it.
@@ -900,6 +917,27 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID;
         }
     }
+    // Spot lights and the shadows of lights that are not the sun (P3b): the light variants of the stock mesh shaders. They sample two
+    // more depth arrays (the dummy `_no_shadow` where there is no map), so they need the shadow format; absent, and the features
+    // off (said once, when a scene asks).
+    if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow) {
+        try {
+            _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv", /*uniform_buffers=*/3,
+                                                          /*samplers=*/12);
+            _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
+                                                              /*samplers=*/12);
+            if (_mesh_velocity_shader) {
+                _mesh_velocity_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
+                                                                       /*uniform_buffers=*/3, /*samplers=*/12);
+                _mesh_velocity_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
+                                                                           /*uniform_buffers=*/4, /*samplers=*/12);
+            }
+            _lights_available = true;
+            _capabilities.local_shadows = true;
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: spot lights and local shadows not available", (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+    }
 }
 
 GpuRenderer3D::~GpuRenderer3D() {
@@ -964,7 +1002,7 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask, SDL_GPUShader* custom,
-                                                 bool velocity, bool skinned, bool fog) const {
+                                                 bool velocity, bool skinned, bool fog, bool lights) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
@@ -1032,9 +1070,13 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                     : velocity && !custom ? _mesh_velocity_vertex_shader.handle() : _vertex_shader.handle();
     // The fog's variants (P3a): only for a stock shader, and only where they were made.
     const bool fogged = fog && !custom && _fog_available && (!velocity || _mesh_velocity_fog_shader);
+    // The light variants (P3b), likewise (they have their own fog variants).
+    const bool lit = lights && !custom && _lights_available && (!velocity || _mesh_velocity_light_shader);
     SDL_GPUShader* fragment = custom ? custom
-                            : velocity ? (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader).handle()
-                                       : (fogged ? _mesh_fog_shader : _fragment_shader).handle();
+                            : velocity ? (lit ? (fogged ? _mesh_velocity_light_fog_shader : _mesh_velocity_light_shader)
+                                              : (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader)).handle()
+                                       : (lit ? (fogged ? _mesh_light_fog_shader : _mesh_light_shader)
+                                              : (fogged ? _mesh_fog_shader : _fragment_shader)).handle();
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = vertex,
                                                  .fragment = fragment,
                                                  .blend = blend,
@@ -2340,6 +2382,17 @@ struct GpuRenderer3D::FrameCtx {
     std::array<GpuFrustum, max_shadow_cascades> cascade_frustums{}, slice_frustums{};
 
     std::vector<std::pair<f32, const PointLight*>> chosen;
+    // Spot lights and the shadows of lights that are not the sun (P3b). `spots`: indices into Lights3D::spots of those used.
+    // `lights_variant`: the main pass uses the light shaders. `lu`: their block for the scene's own space. `moon_*`: the fill
+    // light's cascades (a single map is one cascade). The joints are uploaded for the frame (the local views' skinned casters).
+    std::vector<u32> spots;
+    bool lights_variant = false;
+    LocalLightUniforms lu{};
+    u32 moon_cascades = 0;
+    ShadowCascades moon_plan;
+    bool joints_uploaded = false;
+    u32 joint_total = 0;
+    std::array<u32, 2> joint_base{};
     GpuEnvironment3D* environment = nullptr; // null: the hemisphere ambient
     bool sky_env_used = false;               // `environment` is the sky's own (Lights3D::sky_lights_scene): in world space, no rotation
     // The sky and the fog (P3a): asked for and possible; `sky_pass` once the image sky's environment is known to be there.
@@ -2540,7 +2593,7 @@ void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
     const Bounds3& area = lights.shadow_area;
     const Vec3f area_size = area.size();
     ctx.cascades = 0;
-    ctx.shadows = ctx.sun_shines && area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 && length_squared(lights.sun.direction) > 0 &&
+    ctx.shadows = ctx.sun_shines && lights.sun_shadow_strength > 0.0f && area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 && length_squared(lights.sun.direction) > 0 &&
                   (ctx.cascades = ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades)) > 0;
     if (ctx.shadows && ctx.cascades > 1) {
         ctx.plan = fit_shadow_cascades(scene.camera, ctx.aspect, normalize(lights.sun.direction), area, ctx.cascades, lights.shadow_distance,
@@ -2560,6 +2613,884 @@ void GpuRenderer3D::fit_sun_shadow(FrameCtx& ctx) {
     }
 }
 
+
+bool GpuRenderer3D::ensure_local_map(u32 side, u32 spot_layers, u32 point_slots) {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || spot_layers + point_slots == 0) {
+        return false;
+    }
+    side = std::clamp(side, 64u, 4096u);
+    spot_layers = std::min(spot_layers, max_spot_shadow_maps);
+    point_slots = std::min(point_slots, max_point_shadow_maps);
+    // The layers: the spots' first, then six a point light's. Only ever more of either at one side (a light going out of view does
+    // not shrink the array, and coming back does not make it again), as the array's layout is part of what the cache keeps.
+    if (_local_map && _local_side == side) {
+        spot_layers = std::max(spot_layers, _local_spot_layers);
+        point_slots = std::max(point_slots, _local_point_slots);
+        if (spot_layers == _local_spot_layers && point_slots == _local_point_slots) {
+            return true;
+        }
+    }
+    const u32 layers = spot_layers + cube_faces * point_slots;
+    try {
+        _local_map = _device->create_target_array(side, side, layers, _shadow_format,
+                                                  SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _local_side = side;
+        _local_layers = layers;
+        _local_spot_layers = spot_layers;
+        _local_point_slots = point_slots;
+        ++_local_generation; // a new array: nothing cached is in it
+        return true;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: no shadow map for local lights", (LogFields{{.name = "side", .value = std::to_string(side)},
+                                                                                  {.name = "layers", .value = std::to_string(layers)},
+                                                                                  {.name = "reason", .value = e.what()}}));
+    }
+    _local_map = {};
+    _local_side = 0;
+    _local_layers = _local_spot_layers = _local_point_slots = 0;
+    ++_local_generation;
+    return false;
+}
+
+u32 GpuRenderer3D::ensure_moon_map(u32 side, u32 layers) {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID || layers == 0) {
+        return 0;
+    }
+    side = std::clamp(side, 64u, 8192u);
+    layers = std::clamp(layers, 1u, max_shadow_cascades);
+    if (_moon_map && _moon_side == side && _moon_layers >= layers) {
+        return _moon_layers;
+    }
+    const u32 want = _moon_map && _moon_side == side ? std::max(layers, _moon_layers) : layers;
+    try {
+        _moon_map = _device->create_target_array(side, side, want, _shadow_format,
+                                                 SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _moon_side = side;
+        _moon_layers = want;
+        ++_moon_generation;
+        return want;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: no shadow map for the fill light", (LogFields{{.name = "side", .value = std::to_string(side)},
+                                                                                    {.name = "reason", .value = e.what()}}));
+    }
+    _moon_map = {};
+    _moon_side = 0;
+    _moon_layers = 0;
+    ++_moon_generation;
+    return 0;
+}
+
+namespace {
+
+// A shadow-casting light's map side: its own, or the default; at most what the array is made for.
+u32 local_resolution(const LightShadow3D& shadow, const Lights3D& lights) {
+    return std::clamp(shadow.resolution != 0 ? shadow.resolution : lights.local_shadow_resolution, 64u, 4096u);
+}
+
+// Whether a mesh's draw casts into the extra shadow maps: as the sun's `caster` says, apart from the sun being on.
+bool casts_into_local(const Material3D& m) {
+    return (m.blend == Blend3D::Opaque || m.blend == Blend3D::Mask) && m.casts_shadow && !m.wireframe;
+}
+
+// Whether the view could see anything of a pyramid from `apex` out along `axis` (the face of a cube map: `tan_half` the
+// tangent of its half angle, `far` its depth): the corners all behind one of the view's planes say no; conservative.
+bool pyramid_in(const GpuFrustum& view, Vec3f apex, Vec3f axis, Vec3f up, f32 tan_half, f32 far) {
+    const Vec3f right = normalize(cross(axis, up));
+    const Vec3f u = cross(right, axis);
+    const Vec3f centre = apex + axis * far;
+    const f32 h = tan_half * far;
+    const std::array<Vec3f, 5> corners{apex, centre + right * h + u * h, centre - right * h + u * h, centre + right * h - u * h,
+                                       centre - right * h - u * h};
+    for (u32 k = 0; k < view.count; ++k) {
+        const Vec4f& p = view.planes[k];
+        bool any_in = false;
+        for (const Vec3f& c : corners) {
+            if (p.x * c.x + p.y * c.y + p.z * c.z + p.w >= 0.0f) {
+                any_in = true;
+                break;
+            }
+        }
+        if (!any_in) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
+    const Scene3D& scene = ctx.scene;
+    const Lights3D& lights = scene.lights;
+    Render3DStats& stats = ctx.stats;
+    stats.spot_slot.fill(-1);
+    stats.point_slot.fill(-1);
+    _local_views.clear();
+    ctx.spots.clear();
+    ctx.lights_variant = false;
+    ctx.moon_cascades = 0;
+    ctx.lu = {};
+    LocalLightUniforms& lu = ctx.lu;
+
+    // The spot lights that reach the view: the strongest and nearest first, as the point lights are chosen.
+    {
+        std::vector<std::pair<f32, u32>> reaching;
+        for (u32 i = 0; i < static_cast<u32>(lights.spots.size()); ++i) {
+            const SpotLight& light = lights.spots[i];
+            if (light.radius <= 0.0f || light.color.x + light.color.y + light.color.z <= 0.0f) {
+                continue;
+            }
+            Vec3f c;
+            f32 r;
+            spot_bounding_sphere(light, c, r);
+            if (ctx.scenes[0] && ctx.scene.cull && !sphere_in(ctx.frustums[0], c, r)) {
+                continue;
+            }
+            const f32 strength = std::max({light.color.x, light.color.y, light.color.z});
+            const f32 distance = std::max(1.0f, length(light.position - scene.camera.position) - light.radius);
+            reaching.push_back({strength / (distance * distance), i});
+        }
+        std::stable_sort(reaching.begin(), reaching.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        reaching.resize(std::min<std::size_t>(reaching.size(), max_spot_lights));
+        for (const auto& [strength, i] : reaching) {
+            ctx.spots.push_back(i);
+        }
+        stats.spots = static_cast<u32>(ctx.spots.size());
+    }
+
+    // Which of them, and of the point lights in view, have a shadow map: the most important, kept while they stay among them.
+    const bool maps_possible = _lights_available && _shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _shadow_shader && _shadow_vertex_shader;
+    const u32 spot_cap = std::min(lights.max_shadowed_spots, max_spot_shadow_maps);
+    const u32 point_cap = std::min(lights.max_shadowed_points, max_point_shadow_maps);
+    const bool asked = std::any_of(lights.spots.begin(), lights.spots.end(), [](const SpotLight& l) { return l.shadow.enabled; }) ||
+                       std::any_of(lights.points.begin(), lights.points.end(), [](const PointLight& l) { return l.shadow.enabled; });
+    const bool moon_asked = lights.fill_shadow.enabled && lights.fill_shadow.strength > 0.0f &&
+                            lights.fill.color.x + lights.fill.color.y + lights.fill.color.z > 0.0f && length_squared(lights.fill.direction) > 0.0f;
+    const bool needs_variant = !ctx.spots.empty() || asked || moon_asked || (lights.sun_shadow_strength < 1.0f && lights.sun_shadow_strength > 0.0f);
+    if (needs_variant && !_lights_available) {
+        warn_once(_lights_warned, "3D: spot lights, local shadows or the fill light's shadow asked for, but this device's shaders for them were not made: off");
+    }
+    std::vector<i32> spot_slot_of(ctx.spots.size(), -1), point_slot_of(ctx.chosen.size(), -1);
+    u32 side = 0;
+    if (maps_possible && asked) {
+        for (const SpotLight& l : lights.spots) {
+            side = l.shadow.enabled ? std::max(side, local_resolution(l.shadow, lights)) : side;
+        }
+        for (const PointLight& l : lights.points) {
+            side = l.shadow.enabled ? std::max(side, local_resolution(l.shadow, lights)) : side;
+        }
+        std::vector<ShadowRequest> requests;
+        // Spots.
+        _spot_slots.held.resize(spot_cap, 0);
+        for (u32 k = 0; k < ctx.spots.size(); ++k) {
+            const SpotLight& l = lights.spots[ctx.spots[k]];
+            Vec3f c;
+            f32 r;
+            spot_bounding_sphere(l, c, r);
+            const u64 key = (1ull << 48) | (l.id != 0 ? (1ull << 32) | l.id : static_cast<u64>(ctx.spots[k]) + 1);
+            requests.push_back({l.shadow.enabled ? key : 0u, shadow_importance(std::max({l.color.x, l.color.y, l.color.z}), l.radius, c, r, scene.camera.position)});
+        }
+        assign_shadow_slots(_spot_slots, requests, shadow_hysteresis, spot_slot_of);
+        // Point lights (those the camera reaches: `chosen`).
+        requests.clear();
+        _point_slots.held.resize(point_cap, 0);
+        for (const auto& [strength, light] : ctx.chosen) {
+            const u32 index = static_cast<u32>(light - lights.points.data());
+            const u64 key = (2ull << 48) | (light->id != 0 ? (1ull << 32) | light->id : static_cast<u64>(index) + 1);
+            requests.push_back({light->shadow.enabled ? key : 0u,
+                                shadow_importance(std::max({light->color.x, light->color.y, light->color.z}), light->radius, light->position, light->radius,
+                                                  scene.camera.position)});
+        }
+        assign_shadow_slots(_point_slots, requests, shadow_hysteresis, point_slot_of);
+    } else {
+        _spot_slots.held.assign(spot_cap, 0);
+        _point_slots.held.assign(point_cap, 0);
+    }
+    bool any_spot_map = false, any_point_map = false;
+    for (const i32 s : spot_slot_of) {
+        any_spot_map = any_spot_map || s >= 0;
+    }
+    for (const i32 s : point_slot_of) {
+        any_point_map = any_point_map || s >= 0;
+    }
+    u32 spot_layers = 0, point_slots = 0;
+    for (const i32 s : spot_slot_of) {
+        spot_layers = std::max(spot_layers, static_cast<u32>(s + 1));
+    }
+    for (const i32 s : point_slot_of) {
+        point_slots = std::max(point_slots, static_cast<u32>(s + 1));
+    }
+    if ((any_spot_map || any_point_map) && !ensure_local_map(side, spot_layers, point_slots)) {
+        // Not made: no local shadows this render (the lights still light).
+        std::fill(spot_slot_of.begin(), spot_slot_of.end(), -1);
+        std::fill(point_slot_of.begin(), point_slot_of.end(), -1);
+        any_spot_map = any_point_map = false;
+    }
+
+    // The shader's block: the spots, and each layer's matrix and numbers.
+    const f32 side_f = static_cast<f32>(std::max(_local_side, 1u));
+    lu.local[0] = 1.0f / side_f;
+    for (u32 k = 0; k < ctx.spots.size(); ++k) {
+        const SpotLight& l = lights.spots[ctx.spots[k]];
+        const SpotCone cone = spot_cone(l);
+        f32* o = lu.spots + 16 * k;
+        put(o, l.position, l.radius);
+        const f32 size = std::max(l.size, 0.01f);
+        put(o + 4, l.color, size * size);
+        put(o + 8, cone.axis, cone.cos_outer);
+        put(o + 12, {cone.scale, static_cast<f32>(spot_slot_of[k]), 0.0f}, 0.0f);
+        if (ctx.spots[k] < Render3DStats::max_reported_lights) {
+            stats.spot_slot[ctx.spots[k]] = spot_slot_of[k];
+        }
+    }
+    for (u32 i = 0; i < max_lights; ++i) {
+        lu.point_shadow[4 * i] = -1.0f;
+    }
+    const auto set_layer = [&](u32 layer, const LocalShadowView& v, u32 res, const LightShadow3D& shadow, f32 radius) {
+        std::memcpy(lu.local_matrix + 16 * layer, v.view_projection.m, 16 * sizeof(f32));
+        const f32 r = static_cast<f32>(res);
+        const f32 fade_end = local_shadow_far(shadow, radius);
+        put(lu.local_a + 4 * layer, {r / side_f, 2.0f * v.tan_half / r, v.near_plane}, v.far_plane);
+        put(lu.local_b + 4 * layer, {std::max(shadow.bias, 0.0f), std::max(shadow.normal_offset, 0.0f), std::clamp(shadow.softness, 0.25f, 4.0f)}, fade_end);
+    };
+    const auto add_view = [&](const LocalShadowView& v, u32 layer, u32 res, u32 kind, u32 owner, Vec3f centre, f32 radius, Vec3f eye, Vec3f axis) {
+        LocalView view;
+        view.eye = eye;
+        view.axis = axis;
+        view.near_plane = v.near_plane;
+        view.per_unit = 0.5f * static_cast<f32>(std::min(res, std::max(_local_side, 1u))) / std::max(v.tan_half, 1e-3f);
+        view.view_projection = v.view_projection;
+        view.frustum = frustum_of(v.view_projection);
+        view.texture = _local_map.handle();
+        view.layer = layer;
+        view.cache = layer;
+        view.size = std::min(res, std::max(_local_side, 1u));
+        view.kind = kind;
+        view.owner = owner;
+        view.centre = centre;
+        view.radius = radius;
+        view.bounded = true;
+        _local_views.push_back(std::move(view));
+        return static_cast<u32>(_local_views.size() - 1);
+    };
+    for (u32 k = 0; k < ctx.spots.size(); ++k) {
+        if (spot_slot_of[k] < 0) {
+            continue;
+        }
+        const SpotLight& l = lights.spots[ctx.spots[k]];
+        const u32 res = std::min(local_resolution(l.shadow, lights), _local_side);
+        const LocalShadowView v = spot_shadow_view(l, res);
+        Vec3f c;
+        f32 r;
+        spot_bounding_sphere(l, c, r);
+        const u32 layer = static_cast<u32>(spot_slot_of[k]);
+        set_layer(layer, v, res, l.shadow, l.radius);
+        add_view(v, layer, res, 0, ctx.spots[k], c, r, l.position, kin::spot_cone(l).axis);
+    }
+    for (u32 j = 0; j < ctx.chosen.size(); ++j) {
+        if (point_slot_of[j] < 0) {
+            continue;
+        }
+        const PointLight& l = *ctx.chosen[j].second;
+        const u32 index = static_cast<u32>(&l - lights.points.data());
+        const u32 res = std::min(local_resolution(l.shadow, lights), _local_side);
+        const u32 base = _local_spot_layers + cube_faces * static_cast<u32>(point_slot_of[j]);
+        lu.point_shadow[4 * j] = static_cast<f32>(base);
+        if (index < Render3DStats::max_reported_lights) {
+            stats.point_slot[index] = point_slot_of[j];
+        }
+        static const Vec3f axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+        for (u32 f = 0; f < cube_faces; ++f) {
+            const LocalShadowView v = cube_face_view(l, f, res);
+            set_layer(base + f, v, res, l.shadow, l.radius);
+            const u32 view = add_view(v, base + f, res, 1, index, l.position, l.radius, l.position, axes[f]);
+            const Vec3f up = std::abs(axes[f].y) > 0.99f ? Vec3f{0.0f, 0.0f, -1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
+            // A face no visible surface can fall in is not drawn.
+            _local_views[view].wanted = !ctx.scene.cull || pyramid_in(ctx.frustums[0], l.position, axes[f], up, v.tan_half, v.far_plane);
+        }
+    }
+
+    // The fill light's cascades (the moon).
+    if (maps_possible && moon_asked && lights.shadow_area.size().x > 0 && lights.shadow_area.size().z > 0 && lights.shadow_area.size().y >= 0) {
+        const DirectionalShadow3D& fs = lights.fill_shadow;
+        const u32 res = std::clamp(fs.resolution != 0 ? fs.resolution : lights.shadow_resolution, 64u, 8192u);
+        const u32 wanted = std::clamp(fs.cascades, 1u, max_shadow_cascades);
+        const u32 got = ensure_moon_map(res, wanted);
+        if (got > 0) {
+            const Vec3f to_moon = normalize(lights.fill.direction);
+            const f32 distance = fs.distance > 0.0f ? fs.distance : lights.shadow_distance;
+            ShadowCascades plan;
+            std::array<GpuFrustum, max_shadow_cascades> slices{};
+            if (std::min(wanted, got) > 1) {
+                plan = fit_shadow_cascades(scene.camera, ctx.aspect, to_moon, lights.shadow_area, std::min(wanted, got), distance, _moon_side);
+                for (u32 k = 0; k < plan.count; ++k) {
+                    const ShadowCascade& c = plan.cascade[k];
+                    slices[k] = frustum_of(slice_of(scene.camera, c.slice_near, c.slice_far).view_projection(ctx.aspect));
+                }
+            } else {
+                const SunBox box = fit_sun_box(lights.shadow_area, to_moon);
+                plan.count = 1;
+                plan.cascade[0].view_projection = Mat4f::orthographic(box.lo.x, box.hi.x, box.lo.y, box.hi.y, box.z_near, box.z_far) * box.light_view;
+                plan.cascade[0].texel_world = std::max(box.hi.x - box.lo.x, box.hi.y - box.lo.y) / static_cast<f32>(_moon_side);
+                plan.cascade[0].depth_range = std::max(box.z_far - box.z_near, 0.01f);
+            }
+            ctx.moon_plan = plan;
+            ctx.moon_cascades = plan.count;
+            lu.counts[1] = static_cast<f32>(plan.count);
+            lu.counts[2] = std::clamp(fs.strength, 0.0f, 1.0f);
+            lu.moon[0] = 1.0f / static_cast<f32>(_moon_side);
+            for (u32 k = 0; k < plan.count; ++k) {
+                const ShadowCascade& c = plan.cascade[k];
+                std::memcpy(lu.moon_matrix + 16 * k, c.view_projection.m, 16 * sizeof(f32));
+                lu.moon_bias[4 * k] = c.texel_world / c.depth_range;
+                lu.moon_bias[4 * k + 1] = c.texel_world * 1.5f;
+                lu.moon_end[k] = c.slice_far;
+                lu.moon_blend[k] = c.blend_from;
+                LocalView view;
+                view.view_projection = c.view_projection;
+                view.frustum = frustum_of(c.view_projection);
+                view.slice = slices[k];
+                view.texture = _moon_map.handle();
+                view.layer = k;
+                view.cache = max_local_shadow_layers + k;
+                view.size = _moon_side;
+                view.moon = true;
+                view.single_map = plan.count == 1;
+                view.down = to_moon * -1.0f;
+                view.axis = view.down;
+                view.eye = scene.camera.position;
+                view.per_unit = 1.0f / std::max(c.texel_world, 1e-6f); // orthographic: pixels a world unit spans
+                view.kind = 2;
+                _local_views.push_back(std::move(view));
+            }
+        }
+    }
+    stats.moon_cascades = ctx.moon_cascades;
+    lu.counts[0] = static_cast<f32>(ctx.spots.size());
+    lu.counts[3] = std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f);
+    ctx.lights_variant = _lights_available && (!ctx.spots.empty() || any_spot_map || any_point_map || ctx.moon_cascades > 0 ||
+                                               (lights.sun_shadow_strength < 1.0f && lights.sun_shadow_strength > 0.0f));
+
+    // Idle arrays go back after a while, as the view's targets do.
+    const bool local_used = any_spot_map || any_point_map;
+    if (local_used) {
+        _local_idle = 0;
+    } else if (_local_map && _release_after > 0 && ++_local_idle >= _release_after) {
+        _local_map = {};
+        _local_side = _local_layers = _local_spot_layers = _local_point_slots = 0;
+        ++_local_generation;
+        _local_idle = 0;
+    }
+    if (ctx.moon_cascades > 0) {
+        _moon_idle = 0;
+    } else if (_moon_map && _release_after > 0 && ++_moon_idle >= _release_after) {
+        _moon_map = {};
+        _moon_side = _moon_layers = 0;
+        ++_moon_generation;
+        _moon_idle = 0;
+    }
+    const u32 texel_bytes = _shadow_format == SDL_GPU_TEXTUREFORMAT_D16_UNORM ? 2u : 4u;
+    stats.local_shadow_bytes = static_cast<u64>(_local_side) * _local_side * _local_layers * texel_bytes +
+                               static_cast<u64>(_moon_side) * _moon_side * _moon_layers * texel_bytes;
+}
+
+void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
+    const u32 joint_bytes = ctx.joint_total * static_cast<u32>(sizeof(Mat4f));
+    ensure_buffer(_joints, joint_bytes, min_joint_buffer);
+    const std::function<void(std::span<u8>)> fill_joints = [&](std::span<u8> out) {
+        for (u32 s = 0; s < 2; ++s) {
+            if (ctx.scenes[s] && !ctx.scenes[s]->joint_matrices().empty()) {
+                std::memcpy(out.data() + static_cast<std::size_t>(ctx.joint_base[s]) * sizeof(Mat4f), ctx.scenes[s]->joint_matrices().data(),
+                            ctx.scenes[s]->joint_matrices().size() * sizeof(Mat4f));
+            }
+        }
+    };
+    _device->upload_storage_buffer(_joints->handle(), 0, joint_bytes, nullptr, /*cycle=*/true, &fill_joints);
+    ctx.joints_uploaded = true;
+}
+
+// The local views' casters: each view's copies by sphere against its frustum (a spot's cone and its radius, a cube's face, a
+// moon cascade as the sun's are tested), the exact bytes each draw is a function of when the cache is on (a view whose bytes are
+// those of the render before is not drawn again), and what the others draw: the union of their copies as instances, a list of
+// them for each (view, draw, level), and the posed ones' joint offsets.
+void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
+    Render3DStats& stats = ctx.stats;
+    const Lights3D& lights = ctx.scene.lights;
+    if (_local_views.empty()) {
+        return;
+    }
+    // Each copy's flat place (as _visible's), and its bounding sphere: once for all views.
+    std::vector<u32> base(_refs.size() + 1, 0);
+    for (u32 r = 0; r < _refs.size(); ++r) {
+        base[r + 1] = base[r] + _refs[r].draw->count;
+    }
+    const u32 total = base.back();
+    _local_spheres.resize(total);
+    std::vector<u8> caster(_refs.size(), 0);
+    constexpr u32 local_chunk = 2048;
+    JobSystem* jobs = _owner->_jobs;
+    bool any_skinned = false;
+    for (u32 r = 0; r < _refs.size(); ++r) {
+        const DrawRef& ref = _refs[r];
+        if (ref.scene != 0 || !casts_into_local(ref.draw->material)) {
+            continue;
+        }
+        if (ref.skinned && (!_skinning_available || !ref.mesh->skin)) {
+            continue;
+        }
+        caster[r] = 1;
+        any_skinned = any_skinned || ref.skinned;
+    }
+    // Each caster copy's bounding sphere (the posed bound for a skinned one), in pieces of a couple of thousand copies for the workers when
+    // there are many (one call: waking the workers costs tens of microseconds a time).
+    struct Piece2 {
+        u32 ref, begin, end;
+    };
+    std::vector<Piece2> sphere_pieces;
+    for (u32 r = 0; r < _refs.size(); ++r) {
+        for (u32 begin = 0; caster[r] && begin < _refs[r].draw->count; begin += local_chunk) {
+            sphere_pieces.push_back({r, begin, std::min(_refs[r].draw->count, begin + local_chunk)});
+        }
+    }
+    const auto spheres = [&](const Piece2& piece) {
+        const DrawRef& ref = _refs[piece.ref];
+        for (u32 i = piece.begin; i < piece.end; ++i) {
+            Vec3f c{};
+            f32 radius = 0.0f;
+            if (ref.skinned) {
+                Vec3f centre = ref.center;
+                f32 rr = ref.radius;
+                skin_sphere(ref.mesh->skin_bounds, {ref.joints + ref.skin_first[i], ref.mesh->skin_bounds.size()}, centre, rr);
+                sphere_of(ref.instances[i].transform, centre, rr, c, radius);
+            } else {
+                sphere_of(ref.instances[i].transform, ref.center, ref.radius, c, radius);
+            }
+            _local_spheres[base[piece.ref] + i] = {c.x, c.y, c.z, radius};
+        }
+    };
+    {
+        u32 copies = 0;
+        for (const Piece2& piece : sphere_pieces) {
+            copies += piece.end - piece.begin;
+        }
+        if (jobs && sphere_pieces.size() > 1 && copies >= 2 * local_chunk) {
+            jobs->parallel_for(static_cast<i32>(sphere_pieces.size()), [&](i32 k) { spheres(sphere_pieces[static_cast<std::size_t>(k)]); });
+        } else {
+            for (const Piece2& piece : sphere_pieces) {
+                spheres(piece);
+            }
+        }
+    }
+    const bool cache_on = lights.cache_shadows && _shadow_cache_allowed;
+    const GpuFrustum& camera = ctx.frustums[0];
+    const bool culled = ctx.scene.cull;
+    const Bounds3& area = lights.shadow_area;
+    _local_entries.clear();
+    // The copies of each view, by (draw, level): per view, per caster draw, the copies passing the tests bucketed by level. A clustered mesh's
+    // copies have each their cut, as the light's map sees them: a run of compacted indices, and the clusters' numbers (what the cache keys on).
+    struct Found {
+        u32 ref, level;
+        std::vector<u32> copies;
+        bool clustered = false;               // its copies are cut for the light's map (below)
+        std::vector<std::array<u32, 2>> runs; // clustered: first index and count, a copy each
+    };
+    struct ViewCull {
+        const GpuFrustum* frustum;
+        bool reaches(Vec3f c, f32 r) const { return sphere_in(*frustum, c, r); }
+        u32 views(Vec3f c, f32 r) const { return sphere_in(*frustum, c, r) ? 1u : 0u; }
+    };
+    _local_cluster_indices.clear();
+    std::vector<SelectedCluster> picks;
+    std::vector<u8> seen;
+    std::vector<u32> stack;
+    std::vector<std::vector<Found>> found(_local_views.size());
+    // What each view can see of each caster draw, in tasks of a piece of a draw: all of them in one call to the workers when there are many copies.
+    struct GatherTask {
+        u32 view, ref, begin, end;
+        std::array<std::vector<u32>, max_mesh_levels> by_level;
+        std::vector<u32> cuts;
+    };
+    std::vector<GatherTask> tasks;
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        if (!_local_views[v].wanted) {
+            continue;
+        }
+        for (u32 r = 0; r < _refs.size(); ++r) {
+            for (u32 begin = 0; caster[r] && begin < _refs[r].draw->count; begin += local_chunk) {
+                tasks.push_back({v, r, begin, std::min(_refs[r].draw->count, begin + local_chunk), {}, {}});
+            }
+        }
+    }
+    const auto gather = [&](GatherTask& task) {
+        const LocalView& view = _local_views[task.view];
+        const DrawRef& ref = _refs[task.ref];
+        const u32 levels = std::max(ref.levels, 1u);
+        const bool clustered = ref.clustered && ctx.lod[0].on;
+        for (u32 i = task.begin; i < task.end; ++i) {
+            const Vec4f& sp = _local_spheres[base[task.ref] + i];
+            const Vec3f c{sp.x, sp.y, sp.z};
+            const f32 rad = sp.w;
+            if (view.bounded) {
+                const Vec3f d = c - view.centre;
+                const f32 reach = rad + view.radius;
+                if (dot(d, d) > reach * reach) {
+                    continue;
+                }
+            }
+            if (!sphere_in(view.frustum, c, rad)) {
+                continue;
+            }
+            if (view.moon) {
+                // As the sun's: the shadow of the copy must be able to fall in the camera's view (its slice's depths with cascades).
+                const f32 leave = to_leave(area, c, view.down) + rad;
+                if (culled && !shadow_in(view.single_map ? camera : view.slice, c, rad, view.down, leave)) {
+                    continue;
+                }
+            }
+            if (clustered) {
+                task.cuts.push_back(i); // cut below, for the views that are drawn: the light's map judges the clusters
+                continue;
+            }
+            const u32 level = ref.levels > 1 ? std::min<u32>(_level_of[base[task.ref] + i], levels - 1) : 0u;
+            task.by_level[level].push_back(i);
+        }
+    };
+    {
+        std::size_t copies = 0;
+        for (const GatherTask& task : tasks) {
+            copies += task.end - task.begin;
+        }
+        if (jobs && tasks.size() > 1 && copies >= 4 * local_chunk) {
+            jobs->parallel_for(static_cast<i32>(tasks.size()), [&](i32 k) { gather(tasks[static_cast<std::size_t>(k)]); });
+        } else {
+            for (GatherTask& task : tasks) {
+                gather(task);
+            }
+        }
+    }
+    // Put together in order (view, draw, piece): the same lists one thread makes.
+    for (std::size_t t = 0; t < tasks.size();) {
+        const u32 v = tasks[t].view, r = tasks[t].ref;
+        const DrawRef& ref = _refs[r];
+        const u32 levels = std::max(ref.levels, 1u);
+        std::array<std::vector<u32>, max_mesh_levels> by_level;
+        Found cut;
+        cut.ref = r;
+        cut.level = 0;
+        cut.clustered = true;
+        for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t) {
+            for (u32 l = 0; l < levels; ++l) {
+                by_level[l].insert(by_level[l].end(), tasks[t].by_level[l].begin(), tasks[t].by_level[l].end());
+            }
+            cut.copies.insert(cut.copies.end(), tasks[t].cuts.begin(), tasks[t].cuts.end());
+        }
+        if (!cut.copies.empty()) {
+            found[v].push_back(std::move(cut));
+        }
+        for (u32 l = 0; l < levels; ++l) {
+            if (!by_level[l].empty()) {
+                found[v].push_back({r, l, std::move(by_level[l]), false, {}});
+            }
+        }
+    }
+
+    // Exact: the bytes a view's draw is a function of. The same bytes as in the cache, the same picture.
+    const u64 generation_local = _local_generation, generation_moon = _moon_generation;
+    u32 drawing = 0;
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        LocalView& view = _local_views[v];
+        view.drawn = view.cached = false;
+        if (!view.wanted) {
+            continue;
+        }
+        LocalCache& cache = _local_cache[view.cache];
+        bool cacheable = cache_on;
+        if (cache_on) {
+            std::vector<u8>& bytes = _local_payload;
+            bytes.clear();
+            const auto put_bytes = [&](const void* data, std::size_t n) {
+                const auto* b = static_cast<const u8*>(data);
+                bytes.insert(bytes.end(), b, b + n);
+            };
+            const auto value = [&](auto x) { put_bytes(&x, sizeof(x)); };
+            value(view.moon ? generation_moon : generation_local);
+            value(view.layer);
+            value(view.size);
+            put_bytes(view.view_projection.m, sizeof(view.view_projection.m));
+            for (const Found& f : found[v]) {
+                const DrawRef& ref = _refs[f.ref];
+                const Material3D& m = ref.draw->material;
+                const auto* texture = dynamic_cast<const GpuTextureBackend*>(m.texture.backend().get());
+                if (m.blend == Blend3D::Mask && texture && texture->premultiplied()) {
+                    cacheable = false; // a render target: drawn into without a trace
+                    break;
+                }
+                value(ref.mesh->serial);
+                value(f.level);
+                value(static_cast<u32>(f.copies.size()));
+                value(ref.skinned);
+                value(m.double_sided);
+                value(m.blend);
+                if (m.blend == Blend3D::Mask) {
+                    value(m.alpha_cutoff);
+                    value(m.wrap_u);
+                    value(m.wrap_v);
+                    value(texture);
+                    value(texture ? texture->version() : u64{0});
+                }
+                for (const u32 i : f.copies) {
+                    put_bytes(ref.instances[i].transform.m, sizeof(f32) * 16);
+                    if (ref.skinned) {
+                        put_bytes(ref.joints + ref.skin_first[i], ref.mesh->skin_bounds.size() * sizeof(Mat4f));
+                    }
+                }
+                if (f.clustered) {
+                    // The cut is a function of these and the hierarchy (the view's matrix and size are in already): not made for a map kept.
+                    value(ctx.lod[0].pixels);
+                    value(ctx.lod[0].force);
+                }
+            }
+            if (cacheable) {
+                if (cache.valid && cache.payload == bytes) {
+                    view.cached = true;
+                    ++stats.local_shadow_cached;
+                    continue;
+                }
+                cache.payload.swap(bytes);
+                cache.valid = true;
+            }
+        }
+        if (!cacheable) {
+            cache.valid = false;
+        }
+        view.drawn = true;
+        ++drawing;
+    }
+    // The cuts of the clustered copies, for the maps to be drawn (a map kept has not had them made).
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        const LocalView& view = _local_views[v];
+        if (!view.drawn) {
+            continue;
+        }
+        for (Found& f : found[v]) {
+            if (!f.clustered) {
+                continue;
+            }
+            const DrawRef& ref = _refs[f.ref];
+            const LodView& lv = ctx.lod[0];
+            std::vector<u32> kept;
+            for (const u32 i : f.copies) {
+                // The map is an image: the error is judged in its texels, from where the light is.
+                ClusterCutView cv;
+                cv.transform = ref.instances[i].transform;
+                cv.eye = view.eye;
+                cv.forward = view.axis;
+                cv.orthographic = view.moon;
+                cv.per_unit = view.per_unit;
+                cv.pixels = lv.pixels;
+                cv.nearest = view.near_plane;
+                cv.force_depth = lv.force;
+                select_clusters(*ref.mesh->clusters, cv, ViewCull{&view.frustum}, picks, seen, stack);
+                u32 triangles = 0;
+                for (const SelectedCluster& pick : picks) {
+                    triangles += ref.mesh->clusters->clusters[pick.cluster].triangle_count;
+                }
+                if (triangles == 0) {
+                    continue;
+                }
+                const u32 first = static_cast<u32>(_local_cluster_indices.size());
+                _local_cluster_indices.resize(first + triangles * 3u);
+                u32 at = first;
+                for (const SelectedCluster& pick : picks) {
+                    ref.mesh->clusters->append_indices(pick.cluster, _local_cluster_indices.data() + at);
+                    at += ref.mesh->clusters->clusters[pick.cluster].triangle_count * 3u;
+                }
+                kept.push_back(i);
+                f.runs.push_back({first, triangles * 3u});
+            }
+            f.copies = std::move(kept);
+        }
+        // A clustered draw none of whose copies has a triangle in the view has nothing to draw.
+        std::erase_if(found[v], [](const Found& f) { return f.copies.empty(); });
+    }
+    // Only the maps the cache has drawn from before are `valid`: a map not drawn at all (a face not wanted) keeps its entry.
+    stats.local_shadow_maps = 0;
+    for (const LocalView& view : _local_views) {
+        stats.local_shadow_maps += view.wanted ? 1u : 0u;
+    }
+    stats.local_shadow_drawn = drawing;
+    if (drawing == 0) {
+        return;
+    }
+
+    // The union of the copies the drawn views use, a list for each (view, draw, level).
+    _local_slot.assign(total, ~0u);
+    _local_instance_bytes.clear();
+    _local_joint_list.clear();
+    _local_list.clear();
+    _local_runs.clear();
+    u32 union_count = 0;
+    bool skinned_in_use = false;
+    const auto slot_of = [&](u32 r, u32 i) {
+        u32& slot = _local_slot[base[r] + i];
+        if (slot == ~0u) {
+            const DrawRef& ref = _refs[r];
+            slot = union_count++;
+            GpuInstance3D g{};
+            std::memcpy(g.model, ref.instances[i].transform.m, sizeof(g.model));
+            const Color m = ref.draw->material.color, tint = ref.instances[i].tint;
+            g.color[3] = static_cast<f32>(m.a) / 255.0f * static_cast<f32>(tint.a) / 255.0f;
+            const std::size_t at = _local_instance_bytes.size();
+            _local_instance_bytes.resize(at + sizeof(g));
+            std::memcpy(_local_instance_bytes.data() + at, &g, sizeof(g));
+            _local_joint_list.push_back(ref.skinned ? ref.joint_base + ref.skin_first[i] : 0u);
+        }
+        return slot;
+    };
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        LocalView& view = _local_views[v];
+        view.entry_first = static_cast<u32>(_local_entries.size());
+        view.entry_count = 0;
+        if (!view.drawn) {
+            continue;
+        }
+        for (const Found& f : found[v]) {
+            LocalEntry entry;
+            entry.ref = f.ref;
+            entry.level = f.level;
+            entry.list_first = static_cast<u32>(_local_list.size());
+            entry.clustered = !f.runs.empty();
+            entry.run_first = static_cast<u32>(_local_runs.size());
+            for (const u32 i : f.copies) {
+                _local_list.push_back(slot_of(f.ref, i));
+            }
+            _local_runs.insert(_local_runs.end(), f.runs.begin(), f.runs.end());
+            entry.count = static_cast<u32>(f.copies.size());
+            skinned_in_use = skinned_in_use || _refs[f.ref].skinned;
+            _local_entries.push_back(entry);
+            ++view.entry_count;
+        }
+    }
+    if (union_count == 0) {
+        return;
+    }
+    const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
+    ensure_buffer(_local_instances, instance_bytes, min_instance_buffer);
+    _device->upload_storage_buffer(_local_instances->handle(), 0, instance_bytes, _local_instance_bytes.data(), /*cycle=*/true);
+    const u32 list_bytes = static_cast<u32>(_local_list.size() * sizeof(u32));
+    ensure_buffer(_local_lists, std::max(list_bytes, 4u), min_caster_list_buffer);
+    _device->upload_storage_buffer(_local_lists->handle(), 0, std::max(list_bytes, 4u), _local_list.data(), /*cycle=*/true);
+    if (!_local_cluster_indices.empty()) {
+        const u32 index_bytes = static_cast<u32>(_local_cluster_indices.size() * sizeof(u32));
+        ensure_buffer(_local_index_buffer, index_bytes, 64 * 1024, SDL_GPU_BUFFERUSAGE_INDEX);
+        _device->upload_storage_buffer(_local_index_buffer->handle(), 0, index_bytes, _local_cluster_indices.data(), /*cycle=*/true);
+    }
+    if (skinned_in_use && any_skinned) {
+        if (!ctx.joints_uploaded) {
+            upload_joints(ctx);
+        }
+        const u32 offset_bytes = union_count * static_cast<u32>(sizeof(u32));
+        ensure_buffer(_local_joint_offsets, offset_bytes, min_caster_list_buffer);
+        _device->upload_storage_buffer(_local_joint_offsets->handle(), 0, offset_bytes, _local_joint_list.data(), /*cycle=*/true);
+    }
+}
+
+void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
+    Render3DStats& stats = ctx.stats;
+    SDL_GPUCommandBuffer* commands = ctx.commands;
+    if (_local_views.empty() || !_local_instances) {
+        return;
+    }
+    SDL_GPUBuffer* instances = _local_instances->handle();
+    SDL_GPUBuffer* lists = _local_lists ? _local_lists->handle() : instances;
+    SDL_GPUBuffer* joint_offsets = _local_joint_offsets ? _local_joint_offsets->handle() : nullptr;
+    for (LocalView& view : _local_views) {
+        if (!view.drawn) {
+            continue;
+        }
+        // Not cycled, as the sun's: the frames before are done with it in queue order.
+        const SDL_GPUDepthStencilTargetInfo depth = depth_target(view.texture, SDL_GPU_STOREOP_STORE, /*cycle=*/false, view.layer);
+        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+        if (!pass) {
+            _local_cache[view.cache].valid = false;
+            continue;
+        }
+        set_viewport(pass, view.size, view.size);
+        DrawUniforms u{};
+        std::memcpy(u.view_projection, view.view_projection.m, sizeof(u.view_projection));
+        DrawBinder binder{pass};
+        for (u32 e = view.entry_first; e < view.entry_first + view.entry_count; ++e) {
+            const LocalEntry& entry = _local_entries[e];
+            const DrawRef& ref = _refs[entry.ref];
+            const Material3D& caster = ref.draw->material;
+            const bool cutout = caster.blend == Blend3D::Mask;
+            if (ref.skinned && (!ctx.joints || !joint_offsets)) {
+                continue;
+            }
+            SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr, false, ref.skinned);
+            if (!p) {
+                continue;
+            }
+            SDL_GPUBuffer* const plain[2] = {instances, lists};
+            SDL_GPUBuffer* const posed[4] = {instances, lists, ctx.joints, joint_offsets};
+            binder.bind_pipeline(p, ref.skinned ? posed : plain, ref.skinned ? 4 : 2);
+            // A clustered mesh's copies are drawn from the cut the light's map made of each (a run of the compacted indices); else the mesh whole.
+            if (entry.clustered && !_local_index_buffer) {
+                continue;
+            }
+            binder.bind_mesh(ref.mesh, entry.clustered ? _local_index_buffer->handle() : nullptr);
+            if (ref.skinned) {
+                binder.bind_skin(ref.mesh);
+            }
+            if (cutout) {
+                bind_cutout(commands, pass, caster);
+            }
+            if (entry.clustered) {
+                for (u32 n = 0; n < entry.count; ++n) {
+                    const std::array<u32, 2>& run = _local_runs[entry.run_first + n];
+                    u.first[0] = _local_list[entry.list_first + n];
+                    u.first[1] = 0;
+                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                    SDL_DrawGPUIndexedPrimitives(pass, run[1], 1, run[0], 0, 0);
+                    ++stats.local_shadow_draws;
+                    ++stats.local_shadow_casters;
+                    stats.local_shadow_triangles += run[1] / 3;
+                }
+                continue;
+            }
+            const GpuMesh3D::Level& level = ref.mesh->levels[std::min<std::size_t>(entry.level, ref.mesh->levels.size() - 1)];
+            u.first[0] = 0;
+            u.first[1] = entry.list_first + 1;
+            SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+            SDL_DrawGPUIndexedPrimitives(pass, level.index_count, entry.count, level.first_index, 0, 0);
+            ++stats.local_shadow_draws;
+            stats.local_shadow_casters += entry.count;
+            stats.local_shadow_triangles += static_cast<u64>(level.index_count / 3) * entry.count;
+        }
+        SDL_EndGPURenderPass(pass);
+    }
+}
+
+// The light variants' block for scene `s`, into `slot`. The overlay's lights are carried into its space and have no shadows.
+void GpuRenderer3D::push_local_lights(const FrameCtx& ctx, u32 s, u32 slot) {
+    LocalLightUniforms u = ctx.lu;
+    if (s != 0) {
+        const Mat4f to_space = ctx.scenes[1]->camera.view().inverse() * ctx.scene.camera.view();
+        for (u32 k = 0; k < static_cast<u32>(u.counts[0]); ++k) {
+            f32* o = u.spots + 16 * k;
+            const Vec3f position = to_space.apply({o[0], o[1], o[2]});
+            const Vec3f axis = normalize(to_space.apply_vector({o[8], o[9], o[10]}));
+            put(o, position, o[3]);
+            put(o + 8, axis, o[11]);
+            o[13] = -1.0f;
+        }
+        for (u32 i = 0; i < max_lights; ++i) {
+            u.point_shadow[4 * i] = -1.0f;
+        }
+        u.counts[1] = 0.0f;
+    }
+    SDL_PushGPUFragmentUniformData(ctx.commands, slot, &u, sizeof(u));
+}
 
 void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
@@ -2621,6 +3552,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             }
         }
     }
+
+    ctx.joint_total = joint_total;
+    ctx.joint_base = joint_base;
 
     // Pieces of draws, and tasks of about `chunk` instances each (a big draw
     // split, small ones taken together), for the workers when there are many.
@@ -2919,6 +3853,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
             };
             _device->upload_storage_buffer(_joints->handle(), 0, joint_bytes, nullptr, /*cycle=*/true, &fill_joints);
+            ctx.joints_uploaded = true;
             const u32 offset_bytes = written * static_cast<u32>(sizeof(u32));
             ensure_buffer(_joint_offsets, offset_bytes, min_caster_list_buffer);
             _device->upload_storage_buffer(_joint_offsets->handle(), 0, offset_bytes, _skin_ordered.data(), /*cycle=*/true);
@@ -4125,7 +5060,7 @@ void GpuRenderer3D::begin_commands(FrameCtx& ctx) {
     }
 
     // Without shadows the shader still samples a map: one that is all far.
-    if (!ctx.shadows && _no_shadow && !_no_shadow_cleared) {
+    if ((!ctx.shadows || ctx.lights_variant) && _no_shadow && !_no_shadow_cleared) {
         const SDL_GPUDepthStencilTargetInfo clear = depth_target(_no_shadow.handle(), SDL_GPU_STOREOP_STORE);
         if (SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &clear)) {
             SDL_EndGPURenderPass(pass);
@@ -4781,11 +5716,16 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         stats.fog_applied = true;
     }
     bool fog_bound = false;
+    // The light variants' block (P3b): slot 3 after the fog's, else the fog's own slot 2, which a custom shader's parameters take
+    // as well (pushed again before the first stock draw after one).
+    const u32 lights_slot = ctx.fog ? 3u : 2u;
+    bool lights_bound = false;
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && ctx.overlaid ? overlay_split : 1.0f;
         set_viewport(pass, view->_size.x, view->_size.y, lo, hi);
         push_frame_uniforms(ctx, s);
         fog_bound = false;
+        lights_bound = false;
     };
     begin_scene(0);
 
@@ -4807,6 +5747,11 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const SDL_GPUTextureSamplerBinding occlusion_binding{ctx.occluded ? view->_ao_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding contact_binding{ctx.contacted ? view->_contact_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding shadow_binding{ctx.shadows ? _shadow_map.handle() : _no_shadow.handle(), _compare_sampler};
+    // The light variants' two more maps: the local array and the moon's (the dummy where there is none; never read then).
+    const bool local_maps = ctx.lights_variant && _local_map && !_local_views.empty();
+    const SDL_GPUTextureSamplerBinding local_binding{local_maps ? _local_map.handle() : _no_shadow.handle(), _compare_sampler};
+    const SDL_GPUTextureSamplerBinding moon_binding{ctx.lights_variant && ctx.moon_cascades > 0 && _moon_map ? _moon_map.handle() : _no_shadow.handle(),
+                                                    _compare_sampler};
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
@@ -4846,10 +5791,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             continue;
         }
         SDL_GPUGraphicsPipeline* p = pipeline(ctx.taa ? hdr_format : view->_format, ctx.taa ? 1u : view->_samples, !material.double_sided, pass_of(material), false,
-                                              custom ? custom->shader.handle() : nullptr, ctx.main_velocity, ref.skinned, ctx.fog && !custom);
+                                              custom ? custom->shader.handle() : nullptr, ctx.main_velocity, ref.skinned, ctx.fog && !custom,
+                                              ctx.lights_variant && !custom);
         if (!p) {
             continue;
         }
+        const bool lit_variant = ctx.lights_variant && !custom;
         // The velocity variant also has last frame's matrices, and the joints of the frame before with where each copy's start.
         const bool skinned_velocity = ref.skinned && ctx.main_velocity && !custom;
         if (skinned_velocity && !(ctx.previous_joints && ctx.previous_joint_offsets)) {
@@ -4867,14 +5814,14 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         }
         const std::pair<Wrap3D, Wrap3D> wrap{material.wrap_u, material.wrap_v};
         if (textures != bound_textures || wrap != bound_wrap) {
-            const std::array<SDL_GPUTextureSamplerBinding, 10> samplers{
+            const std::array<SDL_GPUTextureSamplerBinding, 12> samplers{
                 texture_binding(material.texture, material.wrap_u, material.wrap_v), shadow_binding,
                 texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v),
                 texture_binding(material.normal, material.wrap_u, material.wrap_v),
                 texture_binding(material.occlusion, material.wrap_u, material.wrap_v),
                 texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v), environment_bindings[0],
-                environment_bindings[1], occlusion_binding, contact_binding};
-            SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+                environment_bindings[1], occlusion_binding, contact_binding, local_binding, moon_binding};
+            SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), lit_variant ? 12u : 10u);
             bound_textures = textures;
             bound_wrap = wrap;
         }
@@ -4895,9 +5842,14 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         if (custom) {
             SDL_PushGPUFragmentUniformData(commands, 2, material.shader_params.data(), sizeof(CustomUniforms));
             fog_bound = false;
+            lights_bound = lights_bound && ctx.fog; // slot 2 was the lights' without fog
         } else if (ctx.fog && !fog_bound) {
             SDL_PushGPUFragmentUniformData(commands, 2, &fog_blocks[current_scene], sizeof(FogBlockUniforms));
             fog_bound = true;
+        }
+        if (lit_variant && !lights_bound) {
+            push_local_lights(ctx, current_scene, lights_slot);
+            lights_bound = true;
         }
         // A clustered mesh: a draw for each copy, over its run of the frame's compacted indices.
         if (ref.clustered && _gc.active) {
@@ -5068,9 +6020,13 @@ bool GpuRenderer3D::render(IView3DBackend& base, const Scene3D& scene, Render3DS
     cull_and_upload(ctx);
     order_draws(ctx);
     choose_point_lights(ctx);
+    choose_local_lights(ctx);
+    build_local_shadows(ctx);
     begin_commands(ctx);
     cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
     shadow_pass(ctx);
+    local_shadow_pass(ctx);
+    stats.lights_variant = ctx.lights_variant;
     prepass(ctx);
     stats.taa_main_velocity = ctx.main_velocity;
     if (ctx.occlusion && !ctx.occlusion_second) {
@@ -5134,7 +6090,8 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
     const bool sun_shines = lights.sun.color.x + lights.sun.color.y + lights.sun.color.z > 0.0f;
     const Bounds3& area = lights.shadow_area;
     const Vec3f area_size = area.size();
-    const bool shadows = sun_shines && area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 && length_squared(lights.sun.direction) > 0;
+    const bool shadows = sun_shines && lights.sun_shadow_strength > 0.0f && area_size.x > 0 && area_size.y >= 0 && area_size.z > 0 &&
+                         length_squared(lights.sun.direction) > 0;
     const bool ao = scene.ambient_occlusion.enabled && _ao_available;
     const bool contact = scene.contact_shadows.enabled && sun_shines && _ao_available;
     const bool occlusion = scene.lod.enabled && scene.lod.gpu_culling && scene.lod.occlusion.enabled && _occlusion_available && _gpu_clusters;
@@ -5160,6 +6117,30 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
     }
     if (shadows) {
         ensure_shadow_map(lights.shadow_resolution, lights.shadow_cascades);
+    }
+    // Spot lights and local shadows (P3b): the light variants, and the maps the configured lights will want.
+    const bool spot_shadows = std::any_of(lights.spots.begin(), lights.spots.end(), [](const SpotLight& l) { return l.shadow.enabled; });
+    const bool point_shadows = std::any_of(lights.points.begin(), lights.points.end(), [](const PointLight& l) { return l.shadow.enabled; });
+    const bool moon_shadow = lights.fill_shadow.enabled && lights.fill_shadow.strength > 0.0f && area_size.x > 0 && area_size.z > 0;
+    const bool lights_on = _lights_available && (!lights.spots.empty() || spot_shadows || point_shadows || moon_shadow || lights.sun_shadow_strength < 1.0f);
+    if (lights_on && (spot_shadows || point_shadows) && _shadow_shader && _shadow_vertex_shader) {
+        u32 side = 0;
+        for (const SpotLight& l : lights.spots) {
+            side = l.shadow.enabled ? std::max(side, local_resolution(l.shadow, lights)) : side;
+        }
+        for (const PointLight& l : lights.points) {
+            side = l.shadow.enabled ? std::max(side, local_resolution(l.shadow, lights)) : side;
+        }
+        const u32 spot_cap = std::min(lights.max_shadowed_spots, max_spot_shadow_maps);
+        const u32 point_cap = std::min(lights.max_shadowed_points, max_point_shadow_maps);
+        const auto count = [](const auto& list) {
+            return static_cast<u32>(std::count_if(list.begin(), list.end(), [](const auto& l) { return l.shadow.enabled; }));
+        };
+        ensure_local_map(side, std::min(spot_cap, count(lights.spots)), std::min(point_cap, count(lights.points)));
+    }
+    if (lights_on && moon_shadow && _shadow_shader && _shadow_vertex_shader) {
+        const u32 res = lights.fill_shadow.resolution != 0 ? lights.fill_shadow.resolution : lights.shadow_resolution;
+        ensure_moon_map(res, lights.fill_shadow.cascades);
     }
     const bool main_velocity = taa && !needs_prepass && !custom_opaque;
     if (occlusion) {
@@ -5216,9 +6197,15 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
             if (fog_on && !custom) {
                 pipeline(format, samples, !m.double_sided, pass_of(m), false, nullptr, main_velocity, draw.skinned, /*fog=*/true);
             }
+            if (lights_on && !custom) {
+                pipeline(format, samples, !m.double_sided, pass_of(m), false, nullptr, main_velocity, draw.skinned, /*fog=*/false, /*lights=*/true);
+                if (fog_on) {
+                    pipeline(format, samples, !m.double_sided, pass_of(m), false, nullptr, main_velocity, draw.skinned, /*fog=*/true, /*lights=*/true);
+                }
+            }
             const bool opaque = pass_of(m) == Pass::Opaque;
             const bool cutout = m.blend == Blend3D::Mask;
-            if (index == 0 && shadows && opaque && m.casts_shadow) {
+            if (index == 0 && (shadows || (lights_on && (spot_shadows || point_shadows || moon_shadow))) && opaque && m.casts_shadow) {
                 pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !m.double_sided, Pass::Shadow, cutout, nullptr, false, draw.skinned);
             }
             if (index == 0 && view->_pick && (opaque || m.blend == Blend3D::Alpha)) {

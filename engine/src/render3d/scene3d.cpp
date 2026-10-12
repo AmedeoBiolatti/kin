@@ -131,6 +131,7 @@ void Scene3D::clear() {
     _joints.clear();
     _skin_offsets.clear();
     lights.points.clear();
+    lights.spots.clear();
     if (_overlay) {
         _overlay->clear();
     }

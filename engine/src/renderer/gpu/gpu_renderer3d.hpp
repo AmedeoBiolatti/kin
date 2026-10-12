@@ -4,6 +4,7 @@
 // and frame: a view is rendered in the frame's command buffer between the 2D
 // draws around it. Experimental: see docs/3d_plan.md.
 #include <kin/render3d/backend3d.hpp>
+#include <kin/render3d/local_lights.hpp>
 #include <kin/render3d/skeleton.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 
@@ -248,8 +249,11 @@ private:
     // second colour target, written by opaque meshes and masked for the rest.
     // `skinned`: for a skinned copy's draws (every pass): the skinning vertex shaders and the layout with the second vertex buffer.
     // `fog`: the main pass's stock shaders with the fog applied (mesh_fog.frag / mesh_velocity_fog.frag; a custom shader is not fogged).
+    // `lights`: the stock shaders with spot lights and the shadows of lights that are not the sun (P3b: mesh_light.frag and its fog and
+    // velocity variants; a custom shader has neither).
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
-                                         SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false, bool fog = false) const;
+                                         SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false, bool fog = false,
+                                         bool lights = false) const;
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`: the
     // second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is far.
     SDL_GPUGraphicsPipeline* sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const;
@@ -325,6 +329,19 @@ private:
     void cull_and_upload(FrameCtx& ctx);      // what is seen, and the instance buffers
     void order_draws(FrameCtx& ctx);
     void choose_point_lights(FrameCtx& ctx);
+    // P3b: the spot lights that reach the view; which spot and point lights have a shadow map (importance, hysteresis); the moon's
+    // cascades; the views all those maps are drawn from. `build_local_shadows` then culls the casters for each view on the CPU, decides
+    // which maps are kept from last render (the cache) and uploads what the others draw; `local_shadow_pass` records them.
+    void choose_local_lights(FrameCtx& ctx);
+    void build_local_shadows(FrameCtx& ctx);
+    void local_shadow_pass(FrameCtx& ctx);
+    void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
+    // The local array made or kept (`side` x `side`, a layer for each of `spot_layers` spots then six for each of `point_slots` point
+    // lights: only ever more, until it has been idle for _release_after renders; false where it could not be made), and the moon's
+    // (its own side, `layers` cascades; how many it has, 0 where one could not be made).
+    bool ensure_local_map(u32 side, u32 spot_layers, u32 point_slots);
+    u32 ensure_moon_map(u32 side, u32 layers);
+    void upload_joints(FrameCtx& ctx);
     void begin_commands(FrameCtx& ctx);       // flushes 2D; environment and empty-shadow set-up
     void shadow_pass(FrameCtx& ctx);
     // End of a render: counts the renders each feature's targets went unused and releases those unused for `_release_after`;
@@ -377,6 +394,14 @@ private:
     // they cannot be made.
     GpuShader _mesh_fog_shader;                // mesh_fog.frag
     GpuShader _mesh_velocity_fog_shader;       // mesh_velocity_fog.frag
+    // P3b: the light variants (spot lights, local and moon shadows), each with and without fog and velocity. Absent, and the features
+    // off (said once), if they cannot be made.
+    GpuShader _mesh_light_shader;              // mesh_light.frag
+    GpuShader _mesh_light_fog_shader;          // mesh_light_fog.frag
+    GpuShader _mesh_velocity_light_shader;     // mesh_velocity_light.frag
+    GpuShader _mesh_velocity_light_fog_shader; // mesh_velocity_light_fog.frag
+    bool _lights_available = false;
+    bool _lights_warned = false;
     GpuShader _sky_shader;                     // sky.frag
     GpuShader _sky_velocity_shader;            // sky_velocity.frag
     GpuShader _sky_velocity_only_shader;       // sky_velocity_only.frag
@@ -477,6 +502,75 @@ private:
     u32 _shadow_layers = 0;
     u32 _shadow_layers_limit = max_shadow_cascades; // lowered when the device would not make more
     GpuTexture _no_shadow; // 1 x 1, all far: every comparison lit
+    // P3b. The local array: a layer a spot light's map and six a point light's, `_local_side` texels a side (a light draws
+    // into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is made again
+    // (nothing cached is in it).
+    GpuTexture _local_map;
+    u32 _local_side = 0, _local_layers = 0;
+    u32 _local_spot_layers = 0, _local_point_slots = 0; // its layout: the spots' layers, then the point lights' cubes
+    u64 _local_generation = 0;
+    u32 _local_idle = 0;
+    GpuTexture _moon_map;
+    u32 _moon_side = 0, _moon_layers = 0;
+    u64 _moon_generation = 0;
+    u32 _moon_idle = 0;
+    // Which light holds which slot, across renders.
+    ShadowSlots _spot_slots, _point_slots;
+    // What each layer (0..19 the local array, 20..23 the moon's) was last drawn from: the exact bytes of everything the draw is a
+    // function of (the view, the casters' meshes and materials, their copies and poses), so a render whose bytes are the same
+    // does not draw it again.
+    struct LocalCache {
+        std::vector<u8> payload;
+        u64 generation = 0;
+        bool valid = false;
+    };
+    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades> _local_cache;
+    // The local views' casters of this render: the union of their copies as GpuInstance3D, each view's lists of them (u32), and the
+    // joint offsets of the posed ones.
+    std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;
+    struct LocalEntry {
+        u32 ref = 0, level = 0;
+        u32 list_first = 0, count = 0;
+        // A clustered mesh's copies: each has its own run of the compacted indices (the cut as the light's map sees it), in `_local_runs`
+        // from `run_first`, one for each copy in the list.
+        bool clustered = false;
+        u32 run_first = 0;
+    };
+    struct LocalView {
+        Mat4f view_projection{};
+        GpuFrustum frustum{};
+        GpuFrustum slice{};      // the moon's: the camera's view of this cascade's depth range
+        SDL_GPUTexture* texture = nullptr;
+        u32 layer = 0;           // in its array
+        u32 cache = 0;           // its _local_cache index
+        u32 size = 0;            // the viewport's side
+        bool moon = false;
+        bool single_map = false; // a moon's lone map over the whole area (no slice test)
+        Vec3f down{};            // the moon's light's way
+        Vec3f centre{};          // a sphere that holds all that can cast into it (a spot's or point light's reach)
+        f32 radius = 0.0f;
+        bool bounded = false;
+        // What a clustered mesh's cut is judged from (the light's eye and axis, the pixels a unit spans, the near plane).
+        Vec3f eye{}, axis{0.0f, 0.0f, -1.0f};
+        f32 per_unit = 1.0f, near_plane = 0.1f;
+        u32 kind = 0;            // 0 a spot, 1 a face of a point light's cube, 2 the moon
+        u32 owner = 0;           // the light's index in the scene
+        bool wanted = true;      // a face of a cube no visible surface falls in is not drawn
+        bool cached = false;
+        bool drawn = false;
+        u32 entry_first = 0, entry_count = 0;
+    };
+    std::vector<LocalView> _local_views;
+    std::vector<LocalEntry> _local_entries;
+    std::vector<u32> _local_list;           // the lists, as uploaded
+    std::vector<u8> _local_instance_bytes;  // and the union's instances
+    std::vector<u32> _local_joint_list;
+    std::vector<std::array<u32, 2>> _local_runs; // a clustered copy's (first index, count) in _local_cluster_indices
+    std::vector<u32> _local_cluster_indices;     // the compacted indices of the clusters each local view's cut chose
+    std::shared_ptr<GpuBuffer> _local_index_buffer;
+    std::vector<Vec4f> _local_spheres;      // each copy's bounding sphere (flat, as _visible is), for the caster draws
+    std::vector<u32> _local_slot;           // each copy's place in the union (~0: none yet)
+    std::vector<u8> _local_payload;         // scratch
     bool _no_shadow_cleared = false;
     // Samplers for materials' textures by filter and wrap (made on first use).
     SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v);

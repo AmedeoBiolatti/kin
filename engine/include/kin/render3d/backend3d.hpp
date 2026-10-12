@@ -7,6 +7,7 @@
 #include <kin/core/types.hpp>
 #include <kin/render3d/mesh.hpp>
 #include <kin/render3d/mesh_clusters.hpp>
+#include <kin/render3d/local_lights.hpp>
 #include <kin/render3d/mesh_lod.hpp>
 #include <kin/render3d/scene3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
@@ -41,6 +42,9 @@ struct Renderer3DCapabilities {
     bool gpu_driven_clusters = false;
     // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
     bool occlusion_culling = false;
+    // Whether spot lights, the shadows of lights that are not the sun and the fill light's shadow can work (the light shaders and a depth
+    // format that can be sampled; P3b); where not, they are off and a line in the log says so the first time one is asked for.
+    bool local_shadows = false;
     // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not drawn.
     bool skinning = false;
 };
@@ -135,6 +139,22 @@ struct Render3DStats {
     u32 pipelines_made = 0;
     u32 samples = 0;        // samples a pixel of the scene took: the view's, or 1 with temporal anti-aliasing
     u32 lights = 0;    // point lights used
+    // Spot lights and the shadows of lights that are not the sun (P3b). `spots`: the spot lights used (those that reach the view, at
+    // most 16). `spot_slot[i]` and `point_slot[i]`: the shadow-map slot of Lights3D::spots[i] and ::points[i] (-1: none; a point
+    // light's is its cube's). `local_shadow_maps`: layers of the local array in use this render (a spot's one, a point light's cube's
+    // faces that a visible surface can fall in), `local_shadow_drawn` of them drawn now and `local_shadow_cached` kept from before
+    // (Lights3D::cache_shadows); `local_shadow_draws` and `local_shadow_casters` the draw calls and meshes drawn into them (the moon's
+    // cascades included). `moon_cascades`: the fill light's shadow cascades this render (0: none). `local_shadow_bytes`: the video
+    // memory the local and moon arrays hold. `lights_variant`: the main pass used the light shaders.
+    u32 spots = 0;
+    static constexpr std::size_t max_reported_lights = 64; // lights past this index are not reported
+    std::array<i32, max_reported_lights> spot_slot{};
+    std::array<i32, max_reported_lights> point_slot{};
+    u32 local_shadow_maps = 0, local_shadow_drawn = 0, local_shadow_cached = 0, local_shadow_draws = 0, local_shadow_casters = 0;
+    u32 moon_cascades = 0;
+    u64 local_shadow_bytes = 0;
+    u64 local_shadow_triangles = 0; // submitted to the local and moon maps this render (a clustered copy's: its cut's, from the light)
+    bool lights_variant = false;
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
     // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader variants (custom
     // shaders are not fogged); with Lights3D::sky_lights_scene the environment was made again this render (the sky moved

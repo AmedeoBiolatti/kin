@@ -62,6 +62,13 @@
 // moon_phase}` (applied to the sun, the moon's fill light, the ambient light, the moon of the sky and the fog's colour); a camera may
 // say `hours` (its own time of day: tod_sweep). `procedural: "landscape"` builds a 6 km valley: a height-field, 2500 cone trees
 // and six red pillars at 50 m to 4 km. --sky, --no-sky, --fog D, --no-fog, --sky-light and --time H set or remove them for every scene.
+// Spot lights and local shadows (P3b): `lights.spots: [{position, direction | target, color, radius, size, inner, outer, shadow, attach}]`
+// (`shadow: true` or `{enabled, resolution, bias, normal_offset, near, distance, softness}`; `attach: {offset: [right, up, forward], yaw,
+// pitch}` carries the light with each camera: a flashlight), `lights.points[].shadow` and `.size`, `lights.max_shadowed_spots`,
+// `max_shadowed_points`, `local_shadow_resolution`, `fill_shadow: {enabled, strength, cascades, resolution, distance}`, `sun_shadow_strength`,
+// `time_of_day.shadows`. `procedural: "stage"` builds a floor, walls (or a closed `room`), and the scene's `stage: {pillars, poles, lamps,
+// trees, benches}` as [[x, z], ...] ([x, z, height] for lamps). --spots N / --spot-shadows M / --point-lights N / --point-shadows M put lights
+// in front of every scene's camera (the cost tables), --moon-shadow and --moon-cascades N make the fill light cast, --local-res N sets their maps' side.
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -1546,6 +1553,129 @@ struct PhysicsRope {
     }
 };
 
+// A stage for the light scenes (`procedural: "stage"`, P3b): a floor 24 m by 22, a back wall and a left wall 6 m tall, and what the
+// scene file's `stage` places on it: `pillars` [[x, z], ...] (0.6 x 4 x 0.6 m), `poles` [[x, z], ...] (a thin 8 cm post 3 m
+// tall: its shadow is the check of where a shadow lands), `lamps` [[x, z, height], ...] (a post and a glowing bulb that casts
+// nothing; the light itself is the scene's own spot), `trees` [[x, z], ...] (two crossed quads, a leafy alpha texture, cut-out:
+// the cut-out caster), `benches` [[x, z], ...] (a slab on two blocks). Everything stands on the floor at y = 0.
+struct Stage {
+    kin::Mesh floor, wall_back, wall_side, pillar, pole, post, bulb, quad, slab, block;
+    kin::Texture leaf;
+    std::vector<Vec3f> pillars, poles, lamps, trees, benches;
+    bool walls = true, floor_on = true, room = false; // `room`: the right and front walls and a ceiling at 6 m too
+
+    static kin::MeshData square(float half) {
+        kin::MeshData m;
+        m.vertices = {{{-half, 0, 0}, {0, 0, 1}, {0, 1}}, {{half, 0, 0}, {0, 0, 1}, {1, 1}}, {{half, 2.0f * half, 0}, {0, 0, 1}, {1, 0}},
+                      {{-half, 2.0f * half, 0}, {0, 0, 1}, {0, 0}}};
+        m.indices = {0, 1, 2, 0, 2, 3};
+        return m;
+    }
+
+    void make(kin::Renderer3D& r3d, kin::Renderer2D& renderer, const kin::JsonValue& doc) {
+        floor = r3d.create_mesh(kin::meshes::box({24.0f, 0.2f, 22.0f}));
+        wall_back = r3d.create_mesh(kin::meshes::box({24.0f, 6.0f, 0.3f}));
+        wall_side = r3d.create_mesh(kin::meshes::box({0.3f, 6.0f, 22.0f}));
+        pillar = r3d.create_mesh(kin::meshes::box({0.6f, 4.0f, 0.6f}));
+        pole = r3d.create_mesh(kin::meshes::box({0.08f, 3.0f, 0.08f}));
+        post = r3d.create_mesh(kin::meshes::cylinder(0.06f, 1.0f, 10));
+        bulb = r3d.create_mesh(kin::meshes::sphere(0.18f, 16, 8));
+        quad = r3d.create_mesh(square(1.6f));
+        slab = r3d.create_mesh(kin::meshes::box({2.0f, 0.12f, 0.6f}));
+        block = r3d.create_mesh(kin::meshes::box({0.3f, 0.45f, 0.5f}));
+        // The leaf texture: green discs in a grid on a transparent ground, a trunk in the lower middle (nearest, so the holes are hard).
+        constexpr int n = 64;
+        std::vector<kin::u8> texels(static_cast<std::size_t>(n) * n * 4, 0);
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                const int cx = x % 16 - 8, cy = y % 16 - 8;
+                const bool leafy = y < 44 && cx * cx + cy * cy <= 36 && ((x / 16 + y / 16) % 4 != 3);
+                const bool trunk = y >= 40 && x >= 29 && x <= 34;
+                kin::u8* t = &texels[(static_cast<std::size_t>(y) * n + x) * 4];
+                if (leafy) {
+                    t[0] = static_cast<kin::u8>(30 + 10 * (x % 3));
+                    t[1] = static_cast<kin::u8>(130 + 8 * (y % 4));
+                    t[2] = 40;
+                    t[3] = 255;
+                } else if (trunk) {
+                    t[0] = 90;
+                    t[1] = 60;
+                    t[2] = 35;
+                    t[3] = 255;
+                }
+            }
+        }
+        leaf = renderer.create_texture_from_rgba(texels.data(), {n, n});
+        renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
+        const auto list = [&](const char* key, std::vector<Vec3f>& out) {
+            if (const kin::JsonValue* stage = doc.find("stage")) {
+                if (const kin::JsonValue* items = stage->find(key)) {
+                    for (const kin::JsonValue& item : items->items()) {
+                        const auto& v = item.items();
+                        out.push_back({v.size() > 0 ? static_cast<float>(v[0].as_number()) : 0.0f, v.size() > 2 ? static_cast<float>(v[2].as_number()) : 0.0f,
+                                       v.size() > 1 ? static_cast<float>(v[1].as_number()) : 0.0f});
+                    }
+                }
+            }
+        };
+        // [x, z] in the file; stored as (x, height or 0, z).
+        list("pillars", pillars);
+        list("poles", poles);
+        list("lamps", lamps); // [x, z, height]: stored (x, z -> .z, height -> .y)
+        list("trees", trees);
+        list("benches", benches);
+        if (const kin::JsonValue* stage = doc.find("stage")) {
+            walls = stage->bool_at("walls", true);
+            room = stage->bool_at("room", false);
+            floor_on = stage->bool_at("floor", true);
+        }
+    }
+
+    void draw(kin::Scene3D& scene) const {
+        const kin::Material3D grey{.color = kin::Color::rgb(150, 150, 150), .roughness = 0.9f};
+        const kin::Material3D plaster{.color = kin::Color::rgb(205, 198, 185), .roughness = 0.9f};
+        const kin::Material3D stone{.color = kin::Color::rgb(190, 180, 170), .roughness = 0.8f};
+        const kin::Material3D white{.color = kin::Color::rgb(235, 235, 235), .roughness = 0.7f};
+        if (floor_on) {
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, -3.0f}), grey);
+        }
+        if (walls) {
+            scene.draw(wall_back, Mat4f::translation({0.0f, 3.0f, -13.85f}), plaster);
+            scene.draw(wall_side, Mat4f::translation({-12.15f, 3.0f, -3.0f}), plaster);
+        }
+        if (room) {
+            scene.draw(wall_side, Mat4f::translation({12.15f, 3.0f, -3.0f}), plaster);
+            scene.draw(wall_back, Mat4f::translation({0.0f, 3.0f, 8.15f}), plaster);
+            scene.draw(floor, Mat4f::translation({0.0f, 6.1f, -3.0f}), plaster);
+        }
+        for (const Vec3f& p : pillars) {
+            scene.draw(pillar, Mat4f::translation({p.x, 2.0f, p.z}), stone);
+        }
+        for (const Vec3f& p : poles) {
+            scene.draw(pole, Mat4f::translation({p.x, 1.5f, p.z}), white);
+        }
+        for (const Vec3f& p : lamps) {
+            // The post stops a quarter metre under the bulb: a light right at a post's top would sit in a shadow of the post's own cap.
+            const float h = p.y > 0.0f ? p.y : 4.0f;
+            const float post_h = h - 0.25f;
+            scene.draw(post, Mat4f::trs({p.x, post_h * 0.5f, p.z}, kin::Quatf{}, {0.7f, post_h, 0.7f}), {.color = kin::Color::rgb(60, 62, 66), .metallic = 0.6f, .roughness = 0.5f});
+            scene.draw(bulb, Mat4f::translation({p.x, h + 0.1f, p.z}),
+                       {.color = kin::Color::rgb(255, 236, 190), .emissive = 3.0f, .unlit = true, .casts_shadow = false, .receives_shadow = false});
+        }
+        const kin::Material3D leaf_material{.color = kin::Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf,
+                                            .alpha_cutoff = 0.5f};
+        for (const Vec3f& p : trees) {
+            scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}), leaf_material);
+            scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}) * Mat4f::rotation_y(90.0f), leaf_material);
+        }
+        for (const Vec3f& p : benches) {
+            scene.draw(slab, Mat4f::translation({p.x, 0.51f, p.z}), {.color = kin::Color::rgb(150, 100, 60), .roughness = 0.7f});
+            scene.draw(block, Mat4f::translation({p.x - 0.7f, 0.225f, p.z}), stone);
+            scene.draw(block, Mat4f::translation({p.x + 0.7f, 0.225f, p.z}), stone);
+        }
+    }
+};
+
 kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Placed& p : placed) {
@@ -1593,6 +1723,11 @@ struct Overrides {
     bool sky_light_every = false;         // --sky-light-every: with it, the panorama is made again every render (to time that)
     bool fog_fixed = false;               // --fog-fixed: with --fog, a fixed colour (the cheaper path) instead of the sky's
     double time_hours = -1.0;             // --time H: the time of day (solar hours) of every scene, with its date and latitude
+    int spots = 0, spot_shadows = 0;        // --spots N, --spot-shadows M: N spot lights in front of the camera, the first M with a shadow map (cost tables)
+    int point_lights = 0, point_shadows = 0; // --point-lights N, --point-shadows M
+    bool moon_shadow = false;                // --moon-shadow: the fill light (a moon if the scene has none) casts, with --moon-cascades N (2)
+    int moon_cascades = 2;
+    int local_res = 0;                       // --local-res N: the local shadow maps' side for every light
     bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and the shadow pass would be timed once
 };
 
@@ -1757,6 +1892,29 @@ void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over
     }
 }
 
+// A light's shadow (`shadow: true`, or `{enabled, resolution, bias, normal_offset, near, distance, softness}`); `resolution` overrides (--local-res).
+kin::LightShadow3D shadow_of(const kin::JsonValue* doc, int resolution) {
+    kin::LightShadow3D s;
+    if (!doc) {
+        return s;
+    }
+    if (doc->is_bool()) {
+        s.enabled = doc->as_bool();
+    } else {
+        s.enabled = doc->bool_at("enabled", true);
+        s.resolution = static_cast<kin::u32>(doc->number_at("resolution", 0));
+        s.bias = static_cast<float>(doc->number_at("bias", s.bias));
+        s.normal_offset = static_cast<float>(doc->number_at("normal_offset", s.normal_offset));
+        s.near_plane = static_cast<float>(doc->number_at("near", s.near_plane));
+        s.distance = static_cast<float>(doc->number_at("distance", 0.0));
+        s.softness = static_cast<float>(doc->number_at("softness", s.softness));
+    }
+    if (resolution > 0 && s.enabled) {
+        s.resolution = static_cast<kin::u32>(resolution);
+    }
+    return s;
+}
+
 // `hours` of 0 or more replaces the scene's time of day (a camera's own, tod_sweep, or --time).
 bool merge_time_of_day(kin::TimeOfDay3D& time, const kin::JsonValue* doc, double hours_override) {
     bool set = false;
@@ -1766,6 +1924,7 @@ bool merge_time_of_day(kin::TimeOfDay3D& time, const kin::JsonValue* doc, double
         time.latitude = static_cast<float>(doc->number_at("latitude", time.latitude));
         time.axial_tilt = static_cast<float>(doc->number_at("axial_tilt", time.axial_tilt));
         time.moon_phase = static_cast<float>(doc->number_at("moon_phase", time.moon_phase));
+        time.shadows = doc->bool_at("shadows", time.shadows); // P3b: the sun's and the moon's shadow strength follow the time of day
         set = true;
     }
     if (hours_override >= 0.0) {
@@ -1910,6 +2069,21 @@ int main(int argc, char** argv) {
             over.crowd_move = true;
         } else if (a == "--shadow-cache") {
             over.shadow_cache = true;
+        } else if (a == "--spots") {
+            over.spots = std::clamp(std::atoi(next().c_str()), 0, 16);
+        } else if (a == "--spot-shadows") {
+            over.spot_shadows = std::clamp(std::atoi(next().c_str()), 0, 16);
+        } else if (a == "--point-lights") {
+            over.point_lights = std::clamp(std::atoi(next().c_str()), 0, 16);
+        } else if (a == "--point-shadows") {
+            over.point_shadows = std::clamp(std::atoi(next().c_str()), 0, 16);
+        } else if (a == "--moon-shadow") {
+            over.moon_shadow = true;
+        } else if (a == "--moon-cascades") {
+            over.moon_shadow = true;
+            over.moon_cascades = std::clamp(std::atoi(next().c_str()), 1, 4);
+        } else if (a == "--local-res") {
+            over.local_res = std::clamp(std::atoi(next().c_str()), 64, 4096);
         } else if (a == "--sky") {
             over.sky = true;
         } else if (a == "--no-sky") {
@@ -2189,6 +2363,11 @@ int main(int argc, char** argv) {
         if (is_landscape) {
             landscape.make(r3d, doc);
         }
+        Stage stage;
+        const bool is_stage = doc.string_at("procedural") == "stage";
+        if (is_stage) {
+            stage.make(r3d, renderer, doc);
+        }
         Hidden hidden;
         const bool is_hidden = doc.string_at("procedural") == "hidden";
         if (is_hidden) {
@@ -2285,6 +2464,7 @@ int main(int argc, char** argv) {
         const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
                                     : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
                                     : is_landscape ? kin::Bounds3{{-3000.0f, -60.0f, -6000.0f}, {3000.0f, 1000.0f, 120.0f}}
+                                    : is_stage  ? kin::Bounds3{{-12.0f, -0.2f, -14.0f}, {12.0f, 7.0f, 8.0f}}
                                     : is_hidden ? kin::Bounds3{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
                                     : is_pile   ? kin::Bounds3{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
                                     : is_walker ? kin::Bounds3{{-2.0f, -0.5f, -30.0f}, {70.0f, 5.0f, 30.0f}}
@@ -2321,6 +2501,15 @@ int main(int argc, char** argv) {
         }
 
         kin::Scene3D scene;
+        // Lights carried with the camera (a flashlight): which light, its offset in the camera's frame (right, up, forward), and a turn from
+        // the camera's axis; applied once the frame's camera is set.
+        struct Attached {
+            bool spot;
+            std::size_t index;
+            Vec3f offset;
+            float yaw, pitch;
+        };
+        std::vector<Attached> attached;
         double camera_hours = -1.0; // the current camera's own time of day (< 0: the scene's)
         const auto fill_scene = [&](int time) {
             scene.clear();
@@ -2366,11 +2555,79 @@ int main(int argc, char** argv) {
             merge_taa(scene.taa, doc.find("taa"), over);
             scene.lod = {};
             merge_lod(scene.lod, doc.find("lod"), over);
+            attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
                     scene.add_light({.position = vec3(p.find("position")), .color = vec3(p.find("color")),
-                                     .radius = static_cast<float>(p.number_at("radius", 1.0))});
+                                     .radius = static_cast<float>(p.number_at("radius", 1.0)), .size = static_cast<float>(p.number_at("size", 0.01)),
+                                     .shadow = shadow_of(p.find("shadow"), over.local_res), .id = static_cast<kin::u32>(scene.lights.points.size() + 1)});
+                    if (const kin::JsonValue* a = p.find("attach")) {
+                        attached.push_back({false, scene.lights.points.size() - 1, vec3(a->find("offset")), 0.0f, 0.0f});
+                    }
                 }
+            }
+            // Spot lights (P3b): `position` and `direction` (or `target`), `attach: {offset: [right, up, forward], yaw, pitch}` carries one with
+            // the camera (a flashlight: the offsets are in the camera's frame, `yaw` and `pitch` turn it from the camera's axis).
+            if (const kin::JsonValue* spots = lights.find("spots")) {
+                for (const kin::JsonValue& sp : spots->items()) {
+                    kin::SpotLight l;
+                    l.position = vec3(sp.find("position"));
+                    l.direction = sp.find("target") ? vec3(sp.find("target")) - l.position : vec3(sp.find("direction"), {0.0f, -1.0f, 0.0f});
+                    l.color = vec3(sp.find("color"), {1.0f, 1.0f, 1.0f});
+                    l.radius = static_cast<float>(sp.number_at("radius", 10.0));
+                    l.size = static_cast<float>(sp.number_at("size", 0.01));
+                    l.inner_angle = static_cast<float>(sp.number_at("inner", 20.0));
+                    l.outer_angle = static_cast<float>(sp.number_at("outer", 30.0));
+                    l.shadow = shadow_of(sp.find("shadow"), over.local_res);
+                    l.id = static_cast<kin::u32>(scene.lights.spots.size() + 1);
+                    scene.add_spot_light(l);
+                    if (const kin::JsonValue* a = sp.find("attach")) {
+                        attached.push_back({true, scene.lights.spots.size() - 1, vec3(a->find("offset")), static_cast<float>(a->number_at("yaw", 0.0)),
+                                            static_cast<float>(a->number_at("pitch", 0.0))});
+                    }
+                }
+            }
+            scene.lights.max_shadowed_spots = static_cast<kin::u32>(std::max<double>(lights.number_at("max_shadowed_spots", 4), over.spot_shadows));
+            scene.lights.max_shadowed_points = static_cast<kin::u32>(std::max<double>(lights.number_at("max_shadowed_points", 2), over.point_shadows));
+            scene.lights.local_shadow_resolution = static_cast<kin::u32>(over.local_res > 0 ? over.local_res : lights.number_at("local_shadow_resolution", 1024));
+            scene.lights.sun_shadow_strength = static_cast<float>(lights.number_at("sun_shadow_strength", 1.0));
+            if (const kin::JsonValue* fs = lights.find("fill_shadow")) {
+                scene.lights.fill_shadow.enabled = fs->bool_at("enabled", true);
+                scene.lights.fill_shadow.strength = static_cast<float>(fs->number_at("strength", 1.0));
+                scene.lights.fill_shadow.cascades = static_cast<kin::u32>(fs->number_at("cascades", 2));
+                scene.lights.fill_shadow.resolution = static_cast<kin::u32>(fs->number_at("resolution", 0));
+                scene.lights.fill_shadow.distance = static_cast<float>(fs->number_at("distance", 0));
+            } else {
+                scene.lights.fill_shadow = {};
+            }
+            if (over.moon_shadow) {
+                scene.lights.fill_shadow.enabled = true;
+                scene.lights.fill_shadow.cascades = static_cast<kin::u32>(std::max(1, over.moon_cascades));
+                if (scene.lights.fill.color.x + scene.lights.fill.color.y + scene.lights.fill.color.z <= 0.0f) {
+                    scene.lights.fill = {.direction = {0.3f, 0.8f, 0.5f}, .color = {0.25f, 0.3f, 0.45f}};
+                }
+            }
+            // The command line's lights (for the cost tables): in front of the camera, set once it is known (see `attach`).
+            for (int i = 0; i < over.spots; ++i) {
+                kin::SpotLight l;
+                l.color = {2.0f, 1.9f, 1.7f};
+                l.radius = std::clamp(static_cast<float>(bounds.radius()) * 0.6f, 8.0f, 60.0f);
+                l.inner_angle = 18.0f;
+                l.outer_angle = 32.0f;
+                l.shadow.enabled = i < over.spot_shadows;
+                l.id = static_cast<kin::u32>(1000 + i);
+                scene.add_spot_light(l);
+                const float across = static_cast<float>(i) - 0.5f * static_cast<float>(over.spots - 1);
+                attached.push_back({true, scene.lights.spots.size() - 1, {across * 2.5f, 0.6f, 0.5f}, across * 7.0f, -4.0f});
+            }
+            for (int i = 0; i < over.point_lights; ++i) {
+                kin::PointLight l;
+                l.color = {3.0f, 2.8f, 2.4f};
+                l.radius = std::clamp(static_cast<float>(bounds.radius()) * 0.5f, 8.0f, 40.0f);
+                l.shadow.enabled = i < over.point_shadows;
+                l.id = static_cast<kin::u32>(2000 + i);
+                scene.add_light(l);
+                attached.push_back({false, scene.lights.points.size() - 1, {(static_cast<float>(i) - 0.5f * static_cast<float>(over.point_lights - 1)) * 6.0f, 1.5f, -(l.radius * 0.4f + 2.0f)}, 0.0f, 0.0f});
             }
             if (any_ecs) {
                 // The entities start again and take the steps the frame's index stands for (60 a second, 240 before the picture, which
@@ -2457,6 +2714,9 @@ int main(int argc, char** argv) {
             if (is_landscape) {
                 landscape.draw(scene);
             }
+            if (is_stage) {
+                stage.draw(scene);
+            }
             // The sky, fog and time of day last, so that a time of day's sun and ambient replace the scene's own lights.
             scene.sky = {};
             merge_sky(scene.sky, doc.find("sky"), over);
@@ -2512,6 +2772,20 @@ int main(int argc, char** argv) {
             if (is_ragdoll || is_ropes) {
                 physics_frame = static_cast<int>(c.number_at("frame", is_ragdoll ? ragdolls.lead : ropes.lead));
             }
+            const auto attach = [&] {
+                const kin::Camera3D& cam = scene.camera;
+                for (const Attached& a : attached) {
+                    const Vec3f position = cam.position + cam.right() * a.offset.x + cam.up() * a.offset.y + cam.forward() * a.offset.z;
+                    if (a.spot) {
+                        kin::SpotLight& l = scene.lights.spots[a.index];
+                        l.position = position;
+                        const kin::Quatf turn = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, a.yaw) * kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, a.pitch);
+                        l.direction = cam.rotation.rotate(turn.rotate({0.0f, 0.0f, -1.0f}));
+                    } else {
+                        scene.lights.points[a.index].position = position;
+                    }
+                }
+            };
             const auto pose = [&](int time) {
                 fill_scene(time);
                 const Vec3f moved = pan * static_cast<float>(time);
@@ -2521,11 +2795,13 @@ int main(int argc, char** argv) {
                         const Vec3f feet = is_walker ? walker.feet() : climber.feet();
                         scene.camera = kin::Camera3D::look_at(feet + vec3(follow->find("eye")), feet + vec3(follow->find("target")), fov);
                         scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
+                        attach();
                         return;
                     }
                 }
                 scene.camera = kin::Camera3D::look_at(eye + moved, target + moved, fov);
                 scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
+                attach();
             };
             if (!over.hitch.empty()) {
                 // The first renders after a feature goes on at runtime: pipelines and targets made on first use. Steady state first (the
@@ -2761,6 +3037,12 @@ int main(int argc, char** argv) {
             std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
+            if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
+                std::printf("                 lights: %u spots, %u shadow maps (%u drawn, %u cached) with %u draws of %u casters, %u moon cascades, %.1f MB of maps%s\n",
+                            stats.spots, stats.local_shadow_maps, stats.local_shadow_drawn, stats.local_shadow_cached, stats.local_shadow_draws,
+                            stats.local_shadow_casters, stats.moon_cascades, static_cast<double>(stats.local_shadow_bytes) / 1048576.0,
+                            stats.lights_variant ? ", light shaders" : "");
+            }
             if (stats.skinned_copies > 0) {
                 std::printf("                 skinned: %u copies seen in %u draws, %u joint matrices uploaded, %u copies culled\n", stats.skinned_copies,
                             stats.skinned_draws, stats.skin_matrices, stats.culled);
@@ -2813,6 +3095,12 @@ int main(int argc, char** argv) {
                    << ", \"ao_instances\": " << stats.ao_instances
                    << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
+            if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
+                report << ", \"spots\": " << stats.spots << ", \"local_shadow_maps\": " << stats.local_shadow_maps << ", \"local_shadow_drawn\": "
+                       << stats.local_shadow_drawn << ", \"local_shadow_cached\": " << stats.local_shadow_cached << ", \"local_shadow_draws\": "
+                       << stats.local_shadow_draws << ", \"local_shadow_casters\": " << stats.local_shadow_casters << ", \"moon_cascades\": "
+                       << stats.moon_cascades << ", \"local_shadow_mb\": " << static_cast<double>(stats.local_shadow_bytes) / 1048576.0;
+            }
             if (stats.cluster_copies > 0) {
                 report << ", \"cluster_gpu\": " << (stats.cluster_gpu ? "true" : "false") << ", \"cluster_dispatches\": " << stats.cluster_dispatches
                        << ", \"cluster_overflow\": " << stats.cluster_overflow << ", \"cluster_copies\": " << stats.cluster_copies << ", \"clusters_tested\": " << stats.clusters_tested

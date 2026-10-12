@@ -10,6 +10,7 @@
 #include <kin/render3d/mesh_clusters.hpp>
 #include <kin/render3d/mesh_lod.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/local_lights.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #include <kin/render3d/taa.hpp>
@@ -10651,6 +10652,1688 @@ void test_gpu_sky_sun_under_taa() {
     });
 }
 
+// --- Spot lights and the shadows of lights that are not the sun (P3b) ---
+
+constexpr float deg_to_rad = 3.14159265358979f / 180.0f;
+
+// The cone's falloff (the CPU twin of mesh.frag's): 1 inside the inner angle, 0 at and beyond the outer one, the square of the
+// linear step in the cosine between; the radius's window; the bounding sphere holds the whole lit volume.
+void test_spot_light_maths() {
+    kin::SpotLight s{.position = {1.0f, 5.0f, -2.0f}, .direction = {0.0f, -2.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}, .radius = 10.0f, .size = 0.1f,
+                     .inner_angle = 20.0f, .outer_angle = 40.0f};
+    const kin::SpotCone c = kin::spot_cone(s);
+    assert(kin::length(c.axis - Vec3f{0.0f, -1.0f, 0.0f}) < 1e-6f);
+    const auto at = [&](float degrees) { return kin::spot_cone_factor(c, std::cos(degrees * deg_to_rad)); };
+    assert(at(0.0f) == 1.0f && at(10.0f) == 1.0f && at(20.0f) > 0.9999f);
+    assert(at(40.0f) < 1e-5f && at(40.5f) == 0.0f && at(90.0f) == 0.0f && at(180.0f) == 0.0f);
+    const float mid = (std::cos(30.0f * deg_to_rad) - std::cos(40.0f * deg_to_rad)) / (std::cos(20.0f * deg_to_rad) - std::cos(40.0f * deg_to_rad));
+    assert(std::abs(at(30.0f) - mid * mid) < 1e-5f);
+    float last = 1.0f;
+    for (float a = 20.0f; a <= 40.0f; a += 0.25f) {
+        assert(at(a) <= last + 1e-6f);
+        last = at(a);
+    }
+    // Angles the wrong way round or out of range are put right (no NaN, a cone still).
+    kin::SpotLight odd = s;
+    odd.inner_angle = 50.0f;
+    odd.outer_angle = 30.0f;
+    const kin::SpotCone co = kin::spot_cone(odd);
+    assert(std::isfinite(co.scale) && co.cos_inner >= co.cos_outer - 1e-6f);
+    odd.direction = {};
+    assert(kin::length(kin::spot_cone(odd).axis) > 0.99f);
+    // The radius's window and the inverse square, as the point light's, times the cone.
+    const Vec3f below = s.position + Vec3f{0.0f, -4.0f, 0.0f};
+    const float want = kin::point_attenuation(s.position, s.radius, s.size, below);
+    assert(std::abs(kin::spot_attenuation(s, below) - want) < 1e-6f);
+    assert(kin::spot_attenuation(s, s.position + Vec3f{0.0f, -s.radius, 0.0f}) == 0.0f);
+    assert(kin::spot_attenuation(s, s.position + Vec3f{0.0f, -s.radius * 1.1f, 0.0f}) == 0.0f);
+    assert(kin::spot_attenuation(s, s.position + Vec3f{0.0f, 4.0f, 0.0f}) == 0.0f); // behind it
+    // A light's own size: nearer than it is no brighter.
+    assert(kin::point_attenuation({}, 10.0f, 0.5f, {0.1f, 0.0f, 0.0f}) <= 1.0f / 0.25f + 1e-4f);
+    // The bounding sphere holds every point of the cone out to the radius.
+    for (const float outer : {10.0f, 30.0f, 44.0f, 60.0f, 85.0f}) {
+        kin::SpotLight t = s;
+        t.outer_angle = outer;
+        t.inner_angle = outer * 0.5f;
+        t.direction = {0.3f, -0.7f, 0.5f};
+        Vec3f centre;
+        float radius;
+        kin::spot_bounding_sphere(t, centre, radius);
+        const kin::SpotCone tc = kin::spot_cone(t);
+        for (int i = 0; i < 400; ++i) {
+            const float a = outer * deg_to_rad * (static_cast<float>(i % 20) / 19.0f);
+            const float around = 6.2831853f * static_cast<float>(i / 20) / 20.0f;
+            const Vec3f up = std::abs(tc.axis.y) > 0.9f ? Vec3f{1.0f, 0.0f, 0.0f} : Vec3f{0.0f, 1.0f, 0.0f};
+            const Vec3f side = kin::normalize(kin::cross(tc.axis, up));
+            const Vec3f other = kin::cross(tc.axis, side);
+            const Vec3f dir = tc.axis * std::cos(a) + (side * std::cos(around) + other * std::sin(around)) * std::sin(a);
+            for (const float d : {0.0f, 0.5f, 1.0f}) {
+                const Vec3f p = t.position + dir * (t.radius * d);
+                assert(kin::length(p - centre) <= radius * 1.0001f + 1e-4f);
+            }
+        }
+    }
+}
+
+// The views the shadow maps are drawn from: a spot's covers its cone with the guard band, a cube's six faces cover every direction
+// (each direction in the face of its longest axis, and a texel or two past the edge still inside the next face), depth in 0..1
+// with the near plane at 1 (reverse Z).
+void test_local_shadow_views() {
+    kin::SpotLight s{.position = {0.5f, 4.0f, 1.0f}, .direction = {0.2f, -1.0f, 0.1f}, .radius = 12.0f, .outer_angle = 35.0f};
+    s.shadow.near_plane = 0.1f;
+    const kin::u32 res = 512;
+    const kin::LocalShadowView v = kin::spot_shadow_view(s, res);
+    const kin::SpotCone c = kin::spot_cone(s);
+    assert(std::abs(v.near_plane - 0.1f) < 1e-6f && std::abs(v.far_plane - 12.0f) < 1e-5f);
+    // On the axis: the middle of the map.
+    Vec3f ndc = v.view_projection.apply_projective(s.position + c.axis * 5.0f);
+    assert(std::abs(ndc.x) < 1e-4f && std::abs(ndc.y) < 1e-4f && ndc.z > 0.0f && ndc.z < 1.0f);
+    // On the cone's edge: at 512 / 516 of the way out (the guard band is two texels a side).
+    const Vec3f up = Vec3f{0.0f, 0.0f, 1.0f};
+    const Vec3f side = kin::normalize(kin::cross(c.axis, up));
+    const Vec3f edge = c.axis * std::cos(35.0f * deg_to_rad) + side * std::sin(35.0f * deg_to_rad);
+    ndc = v.view_projection.apply_projective(s.position + edge * 6.0f);
+    const float want = 512.0f / 516.0f;
+    assert(std::abs(std::hypot(ndc.x, ndc.y) - want) < 0.01f);
+    // The near plane is depth 1, the far plane 0.
+    ndc = v.view_projection.apply_projective(s.position + c.axis * 0.1f);
+    assert(std::abs(ndc.z - 1.0f) < 1e-3f);
+    ndc = v.view_projection.apply_projective(s.position + c.axis * 12.0f);
+    assert(std::abs(ndc.z) < 1e-3f);
+    // The texel's size the shader works with.
+    assert(std::abs(v.tan_half - std::tan(35.0f * deg_to_rad) * 516.0f / 512.0f) < 1e-5f);
+
+    // The cube.
+    kin::PointLight p{.position = {-1.0f, 2.0f, 3.0f}, .radius = 9.0f};
+    p.shadow.near_plane = 0.05f;
+    std::array<kin::LocalShadowView, 6> faces;
+    for (kin::u32 f = 0; f < 6; ++f) {
+        faces[f] = kin::cube_face_view(p, f, 256);
+    }
+    static const Vec3f axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (kin::u32 f = 0; f < 6; ++f) {
+        assert(kin::cube_face_of(axes[f]) == f);
+        const Vec3f at = faces[f].view_projection.apply_projective(p.position + axes[f] * 4.0f);
+        assert(std::abs(at.x) < 1e-4f && std::abs(at.y) < 1e-4f);
+    }
+    // Every direction lies in the face cube_face_of names, inside its edge.
+    std::uint32_t seed = 12345;
+    const auto next = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f * 2.0f - 1.0f;
+    };
+    for (int i = 0; i < 2000; ++i) {
+        const Vec3f d = kin::normalize(Vec3f{next(), next(), next()} + Vec3f{1e-3f, 0.0f, 0.0f});
+        const kin::u32 f = kin::cube_face_of(d);
+        const Vec3f n = faces[f].view_projection.apply_projective(p.position + d * 5.0f);
+        assert(std::abs(n.x) <= 1.0f + 1e-4f && std::abs(n.y) <= 1.0f + 1e-4f && n.z > 0.0f && n.z < 1.0f);
+        // And the other faces cover a directions a little past 45 degrees: the guard (here, the neighbour of the longest axis).
+        const float limit = 256.0f / 260.0f;
+        assert(std::abs(n.x) <= 1.0f && std::abs(n.y) <= 1.0f);
+        static_cast<void>(limit);
+    }
+    // A direction 0.3 degrees past the 45 degree edge of face +x toward +z is inside face +x still (the guard band: two texels of 256).
+    const Vec3f past = kin::normalize(Vec3f{std::cos(45.3f * deg_to_rad), 0.0f, std::sin(45.3f * deg_to_rad)});
+    const Vec3f n = faces[0].view_projection.apply_projective(p.position + past * 5.0f);
+    assert(std::abs(n.x) <= 1.0f);
+}
+
+// Which lights hold the shadow maps: the most important ones, kept while they stay among them (the hysteresis), freed when they go,
+// deterministic, and the same set on the same input.
+void test_shadow_slots() {
+    kin::ShadowSlots slots;
+    slots.held.assign(2, 0);
+    std::vector<kin::i32> out;
+    const auto assign = [&](std::vector<kin::ShadowRequest> r) {
+        kin::assign_shadow_slots(slots, r, kin::shadow_hysteresis, out);
+        return out;
+    };
+    // Four lights, two slots: the two most important.
+    std::vector<kin::i32> r = assign({{1, 1.0f}, {2, 5.0f}, {3, 3.0f}, {4, 0.5f}});
+    assert(r[1] >= 0 && r[2] >= 0 && r[0] < 0 && r[3] < 0 && r[1] != r[2]);
+    const kin::i32 slot2 = r[1], slot3 = r[2];
+    // The same input: the same answer.
+    r = assign({{1, 1.0f}, {2, 5.0f}, {3, 3.0f}, {4, 0.5f}});
+    assert(r[1] == slot2 && r[2] == slot3);
+    // A newcomer more important than a holder, but under the hysteresis' factor (1.5 x): the holder stays.
+    r = assign({{1, 1.0f}, {2, 5.0f}, {3, 3.0f}, {5, 4.0f}});
+    assert(r[1] == slot2 && r[2] == slot3 && r[3] < 0);
+    // Over it (3 x 1.5 = 4.5 < 5): the newcomer takes the lesser holder's slot, the other keeps its own.
+    r = assign({{1, 1.0f}, {2, 5.0f}, {3, 3.0f}, {5, 5.0f}});
+    assert(r[1] == slot2 && r[3] == slot3 && r[2] < 0);
+    // Gone from the list: its slot is free for another.
+    r = assign({{7, 0.2f}, {5, 5.0f}});
+    assert(r[1] >= 0 && r[0] >= 0 && r[0] != r[1] && r[1] == slot3);
+    // A request with no key or no importance gets none; ties go to the first.
+    r = assign({{0, 100.0f}, {8, 0.0f}, {9, 1.0f}, {10, 1.0f}, {11, 1.0f}});
+    assert(r[0] < 0 && r[1] < 0);
+    assert(r[2] >= 0 && r[3] >= 0 && r[4] < 0);
+    // Two near-equal lights taking turns to be a little more important: nobody flickers.
+    kin::ShadowSlots one;
+    one.held.assign(1, 0);
+    kin::assign_shadow_slots(one, std::vector<kin::ShadowRequest>{{1, 1.00f}, {2, 0.99f}}, kin::shadow_hysteresis, out);
+    const kin::i32 first = out[0] >= 0 ? 0 : 1;
+    int changes = 0;
+    for (int f = 0; f < 40; ++f) {
+        const bool swap = f % 2 == 0;
+        kin::assign_shadow_slots(one, std::vector<kin::ShadowRequest>{{1, swap ? 0.99f : 1.00f}, {2, swap ? 1.00f : 0.99f}}, kin::shadow_hysteresis, out);
+        const kin::i32 holder = out[0] >= 0 ? 0 : 1;
+        changes += holder != first ? 1 : 0;
+    }
+    assert(changes == 0);
+    // The importance: more intensity, more reach, nearer, all more important; from inside a light's sphere its whole.
+    const Vec3f eye{};
+    const float a = kin::shadow_importance(1.0f, 10.0f, {0.0f, 0.0f, -20.0f}, 10.0f, eye);
+    assert(kin::shadow_importance(2.0f, 10.0f, {0.0f, 0.0f, -20.0f}, 10.0f, eye) > a);
+    assert(kin::shadow_importance(1.0f, 20.0f, {0.0f, 0.0f, -20.0f}, 10.0f, eye) > a);
+    assert(kin::shadow_importance(1.0f, 10.0f, {0.0f, 0.0f, -12.0f}, 10.0f, eye) > a);
+    assert(kin::shadow_importance(1.0f, 10.0f, {0.0f, 0.0f, -5.0f}, 10.0f, eye) == 10.0f);
+    assert(kin::shadow_importance(0.0f, 10.0f, {0.0f, 0.0f, -5.0f}, 10.0f, eye) == 0.0f);
+}
+
+// The cone's picture against the CPU twin: a white wall lit by a spot light at three distances, on and off the axis, from the
+// middle of the cone through the falloff to past its edge: the pixel is 0.966 (a white surface's diffuse and its sliver of
+// specular: 0.966 measured) x the colour x spot_attenuation x the surface's cosine, to a few levels. The cone's edge is where the angle says.
+void test_gpu_spot_cone_matches_cpu() {
+    with_gpu("test_gpu_spot_cone_matches_cpu", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const kin::Mesh wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {};
+        int worst = 0;
+        for (const float distance : {1.0f, 2.0f, 3.5f}) {
+            kin::SpotLight spot{.position = {0.0f, 0.0f, distance}, .direction = {0.0f, 0.0f, -1.0f}, .color = {1.0f, 1.0f, 1.0f}, .radius = 6.0f,
+                                .size = 0.05f, .inner_angle = 8.0f, .outer_angle = 28.0f};
+            scene.clear();
+            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+            scene.add_spot_light(spot);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            assert(r3d.stats().spots == 1 && r3d.stats().lights_variant);
+            for (const float angle : {0.0f, 4.0f, 8.0f, 12.0f, 16.0f, 20.0f, 24.0f, 27.0f, 29.0f, 33.0f}) {
+                // Along the wall's row y = 0 and along the column x = 0, and off both (a diagonal).
+                for (const int direction : {0, 1, 2}) {
+                    const float r0 = distance * std::tan(angle * deg_to_rad);
+                    const Vec3f aim = direction == 0 ? Vec3f{r0, 0.0f, 0.0f} : direction == 1 ? Vec3f{0.0f, -r0, 0.0f} : Vec3f{r0 * 0.7071f, r0 * 0.7071f, 0.0f};
+                    const auto px = scene.camera.project(aim, screen);
+                    if (!px || px->pos.x < 1 || px->pos.y < 1 || px->pos.x > 158 || px->pos.y > 118) {
+                        continue;
+                    }
+                    // The wall point the pixel's centre shows (a pixel is a few degrees of the cone's angle: the formula is read where it looks).
+                    const kin::Ray3 ray = scene.camera.ray({std::floor(px->pos.x) + 0.5f, std::floor(px->pos.y) + 0.5f}, screen);
+                    const Vec3f at = ray.origin + ray.direction * (-ray.origin.z / ray.direction.z);
+                    const float r = std::sqrt(at.x * at.x + at.y * at.y);
+                    const float cos_surface = distance / std::sqrt(r * r + distance * distance);
+                    const float lit = 0.966f * kin::spot_attenuation(spot, at) * cos_surface;
+                    const Color want = stored_of({lit, lit, lit});
+                    const Color got = p.at(px->pos);
+                    const int off = largest_difference(got, want);
+                    worst = std::max(worst, off);
+                    if (std::getenv("KIN_TEST_VERBOSE")) {
+                        std::cerr << "spot d " << distance << " angle " << angle << " dir " << direction << ": got " << linear_of(got).y << " formula/0.966 " << lit / 0.966f
+                                  << " ratio " << linear_of(got).y / (lit / 0.966f) << "\n";
+                    }
+                    if (off > 5) {
+                        std::cerr << "spot at " << distance << ", " << angle << " degrees (dir " << direction << "): got " << got << ", the formula says " << want
+                                  << " (" << lit << ")\n";
+                    }
+                    assert(off <= 5);
+                }
+            }
+        }
+        std::cerr << "spot cone against the CPU twin: worst " << worst << " of 255\n";
+        // Nothing past the outer angle: exactly the unlit wall (no ambient, no sun: black).
+        scene.clear();
+        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        scene.add_spot_light({.position = {0.0f, 0.0f, 2.0f}, .direction = {0.0f, 0.0f, -1.0f}, .color = {1.0f, 1.0f, 1.0f}, .radius = 20.0f,
+                              .inner_angle = 8.0f, .outer_angle = 28.0f});
+        const Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const auto at_angle = [&](float degrees) { return p.at(scene.camera.project({2.0f * std::tan(degrees * deg_to_rad), 0.0f, 0.0f}, screen)->pos); };
+        assert(brightness(at_angle(27.0f)) > 0);
+        assert(brightness(at_angle(28.5f)) == 0 && brightness(at_angle(31.0f)) == 0);
+        // The direction's sign: the light shines along its axis, not against it.
+        scene.clear();
+        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        scene.add_spot_light({.position = {0.0f, 0.0f, 2.0f}, .direction = {0.0f, 0.0f, 1.0f}, .color = {1.0f, 1.0f, 1.0f}, .radius = 20.0f,
+                              .inner_angle = 8.0f, .outer_angle = 28.0f});
+        const Pixels away = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(brightness(away.at(80, 60)) == 0);
+    });
+}
+
+// The cone's edge on a bigger picture: the pixel where the falloff has dropped to half is where the CPU says, to a pixel and a half,
+// and the light is nowhere beyond the outer angle; the inner angle's full light reaches as far as it says.
+void test_gpu_spot_cone_edges() {
+    with_gpu("test_gpu_spot_cone_edges", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const kin::Mesh wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1});
+        const kin::Rectf rect{0.0f, 0.0f, 640.0f, 480.0f};
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {};
+        const float d = 1.5f;
+        const auto make = [&](float inner, float outer, bool as_spot) {
+            scene.clear();
+            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+            if (as_spot) {
+                scene.add_spot_light({.position = {0.0f, 0.0f, d}, .direction = {0.0f, 0.0f, -1.0f}, .color = {1.0f, 1.0f, 1.0f}, .radius = 20.0f,
+                                      .size = 0.05f, .inner_angle = inner, .outer_angle = outer});
+            } else {
+                scene.add_light({.position = {0.0f, 0.0f, d}, .color = {1.0f, 1.0f, 1.0f}, .radius = 20.0f, .size = 0.05f});
+            }
+            return shoot_large(renderer, r3d, view, scene);
+        };
+        for (const auto& [inner, outer] : {std::pair{10.0f, 30.0f}, std::pair{20.0f, 24.0f}, std::pair{0.0f, 45.0f}}) {
+            const Pixels point = make(inner, outer, false);
+            const Pixels spot = make(inner, outer, true);
+            kin::SpotLight shape;
+            shape.inner_angle = inner;
+            shape.outer_angle = outer;
+            const kin::SpotCone cone = kin::spot_cone(shape);
+            // The angle at which the factor is a half, by bisection; its pixel on the row through the middle.
+            float lo = inner, hi = outer;
+            for (int i = 0; i < 40; ++i) {
+                const float mid = 0.5f * (lo + hi);
+                (kin::spot_cone_factor(cone, std::cos(mid * deg_to_rad)) > 0.5f ? lo : hi) = mid;
+            }
+            const float x_half = d * std::tan(lo * deg_to_rad);
+            const float expected_px = scene.camera.project({x_half, 0.0f, 0.0f}, rect)->pos.x;
+            float found = -1.0f;
+            for (int x = 321; x < 640; ++x) {
+                const float point_level = linear_of(point.at(x, 240)).y;
+                const float spot_level = linear_of(spot.at(x, 240)).y;
+                if (point_level > 0.02f && spot_level / point_level < 0.5f) {
+                    found = static_cast<float>(x) + 0.5f;
+                    break;
+                }
+            }
+            std::cerr << "cone " << inner << " to " << outer << ": half falloff at pixel " << found << ", the CPU says " << expected_px << "\n";
+            assert(found > 0.0f && std::abs(found - expected_px) <= 1.6f);
+            // Beyond the outer angle: black; just inside it: the light's tail.
+            const float x_out = d * std::tan((outer + 0.3f) * deg_to_rad);
+            const auto outside = scene.camera.project({x_out, 0.0f, 0.0f}, rect);
+            if (outside && outside->pos.x < 638.0f) {
+                assert(brightness(spot.at(outside->pos)) == 0 && brightness(point.at(outside->pos)) > 0);
+            }
+            // Full light inside the inner angle (a step inside it, where the spot is the point's picture).
+            if (inner > 1.0f) {
+                const float x_in = d * std::tan((inner - 0.5f) * deg_to_rad);
+                const auto inside = scene.camera.project({x_in, 0.0f, 0.0f}, rect);
+                assert(largest_difference(spot.at(inside->pos), point.at(inside->pos)) <= 1);
+            }
+        }
+    });
+}
+
+// The radius: past it a spot lights nothing, and the fade toward it follows the same window as a point light's.
+void test_gpu_spot_radius_fade() {
+    with_gpu("test_gpu_spot_radius_fade", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const kin::Mesh wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {};
+        const kin::SpotLight spot{.position = {0.0f, 0.0f, 2.0f}, .direction = {0.0f, 0.0f, -1.0f}, .color = {40.0f, 40.0f, 40.0f}, .radius = 3.0f,
+                                  .size = 0.05f, .inner_angle = 70.0f, .outer_angle = 85.0f};
+        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        scene.add_spot_light(spot);
+        const Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        // The lit disc has radius sqrt(3^2 - 2^2) = 2.236 on the wall.
+        const auto at = [&](float x) { return p.at(scene.camera.project({x, 0.0f, 0.0f}, screen)->pos); };
+        assert(brightness(at(1.0f)) > 100);
+        assert(brightness(at(2.4f)) == 0 && brightness(at(2.9f)) == 0);
+        int worst = 0;
+        for (const float x : {0.0f, 0.5f, 1.0f, 1.5f, 1.9f, 2.1f}) {
+            // The wall point the pixel's centre shows.
+            const auto px = scene.camera.project({x, 0.0f, 0.0f}, screen);
+            const kin::Ray3 ray = scene.camera.ray({std::floor(px->pos.x) + 0.5f, std::floor(px->pos.y) + 0.5f}, screen);
+            const Vec3f world = ray.origin + ray.direction * (-ray.origin.z / ray.direction.z);
+            const float cos_surface = 2.0f / std::sqrt(world.x * world.x + world.y * world.y + 4.0f);
+            const float lit = std::min(1.0f, 0.966f * 40.0f * kin::spot_attenuation(spot, world) * cos_surface);
+            const Color got = p.at(px->pos);
+            const int off = largest_difference(got, stored_of({lit, lit, lit}));
+            worst = std::max(worst, off);
+            if (off > 5) {
+                std::cerr << "radius fade at x = " << x << ": got " << got << ", the formula says " << stored_of({lit, lit, lit}) << "\n";
+            }
+            assert(off <= 5);
+        }
+        std::cerr << "spot radius fade against the CPU: worst " << worst << " of 255\n";
+    });
+}
+
+// Whether the segment from `a` to `b` passes through the box [lo, hi] (the slab test), for the shadow a box casts.
+bool segment_hits_box(Vec3f a, Vec3f b, Vec3f lo, Vec3f hi) {
+    float t0 = 0.0f, t1 = 1.0f;
+    const float from[3] = {a.x, a.y, a.z}, to[3] = {b.x - a.x, b.y - a.y, b.z - a.z}, mn[3] = {lo.x, lo.y, lo.z}, mx[3] = {hi.x, hi.y, hi.z};
+    for (int k = 0; k < 3; ++k) {
+        if (std::abs(to[k]) < 1e-9f) {
+            if (from[k] < mn[k] || from[k] > mx[k]) {
+                return false;
+            }
+            continue;
+        }
+        float near_t = (mn[k] - from[k]) / to[k], far_t = (mx[k] - from[k]) / to[k];
+        if (near_t > far_t) {
+            std::swap(near_t, far_t);
+        }
+        t0 = std::max(t0, near_t);
+        t1 = std::min(t1, far_t);
+        if (t0 > t1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The floor point (y = 0) a pixel of a camera looking down shows.
+Vec3f floor_point(const kin::Camera3D& camera, kin::Rectf rect, int x, int y) {
+    const kin::Ray3 ray = camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, rect);
+    return *kin::hit_plane_y(ray, 0.0f);
+}
+
+// A top-down stage for the shadow tests: a floor 20 m square (its top at y = 0), a camera 12 m above its middle.
+struct TopDown {
+    explicit TopDown(kin::Renderer3D& r3d) : floor(make_box(r3d, {20.0f, 0.2f, 20.0f})) {}
+    kin::Camera3D camera() const { return kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f); }
+    void draw_floor(kin::Scene3D& scene) const { scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(220, 220, 220)}); }
+    kin::Mesh floor;
+};
+
+// The pixels a shadow darkens (the picture without the light's shadow over the one with it), with their mean floor point and count.
+struct ShadowBlob {
+    int count = 0;
+    Vec3f centre{};
+};
+ShadowBlob shadow_blob(const Pixels& with, const Pixels& without, const kin::Camera3D& camera, kin::Rectf rect, float fraction = 0.55f, int minimum = 30) {
+    ShadowBlob blob;
+    for (int y = 0; y < with.size.y; ++y) {
+        for (int x = 0; x < with.size.x; ++x) {
+            const int lit = brightness(without.at(x, y));
+            if (lit >= minimum && brightness(with.at(x, y)) < static_cast<int>(static_cast<float>(lit) * fraction)) {
+                const Vec3f f = floor_point(camera, rect, x, y);
+                blob.centre = blob.centre + f;
+                ++blob.count;
+            }
+        }
+    }
+    if (blob.count > 0) {
+        blob.centre = blob.centre * (1.0f / static_cast<float>(blob.count));
+    }
+    return blob;
+}
+
+// A thin pole's shadow on the floor lands where the projection says: the mask of the darkened pixels against the segment test, the
+// centroid within a stated distance (the map's two texels or a pixel of the picture, whichever is larger), and the shadow begins
+// at the pole's foot (no peter-panning beyond a stated bound).
+void test_gpu_spot_shadow_position() {
+    with_gpu("test_gpu_spot_shadow_position", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
+        const Vec3f lo{1.8f, 0.0f, -0.2f}, hi{2.2f, 3.0f, 0.2f};
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1});
+        const kin::Rectf rect{0.0f, 0.0f, 640.0f, 480.0f};
+        for (const kin::u32 resolution : {512u, 1024u}) {
+            kin::Scene3D scene;
+            scene.camera = stage.camera();
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+            const auto shoot = [&](bool shadow) {
+                scene.clear();
+                stage.draw_floor(scene);
+                scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                kin::SpotLight spot{.position = {0.0f, 6.0f, 0.0f}, .direction = {0.0f, -1.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 20.0f,
+                                    .size = 0.1f, .inner_angle = 45.0f, .outer_angle = 60.0f};
+                spot.shadow.enabled = shadow;
+                spot.shadow.resolution = resolution;
+                scene.add_spot_light(spot);
+                // A light that asks for a bigger map (and is out of the picture): the array is made for it, and this light draws into a corner of it.
+                kin::SpotLight bigger{.position = {0.0f, 50.0f, 0.0f}, .direction = {0.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}, .radius = 1.0f};
+                bigger.shadow.enabled = shadow;
+                bigger.shadow.resolution = 2048;
+                scene.add_spot_light(bigger);
+                const Pixels p = shoot_large(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            const Pixels with = shoot(true);
+            assert(r3d.stats().local_shadow_maps == 1 && r3d.stats().local_shadow_drawn == 1 && r3d.stats().local_shadow_casters >= 1);
+            assert(r3d.stats().local_shadow_bytes >= 2048ull * 2048ull * 4ull);
+            assert(r3d.stats().spot_slot[0] == 0);
+            const Pixels without = shoot(false);
+            assert(r3d.stats().local_shadow_maps == 0);
+            const ShadowBlob blob = shadow_blob(with, without, scene.camera, rect);
+            // The expected: floor points whose segment to the light meets the pole (and are not under the pole's own top as the camera sees).
+            const Vec3f light{0.0f, 6.0f, 0.0f};
+            ShadowBlob want;
+            int mismatched = 0;
+            for (int y = 0; y < 480; ++y) {
+                for (int x = 0; x < 640; ++x) {
+                    const Vec3f f = floor_point(scene.camera, rect, x, y);
+                    // The camera's ray meets the pole first for the pixels it covers: those show the pole, not the floor.
+                    const kin::Ray3 ray = scene.camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, rect);
+                    if (segment_hits_box(ray.origin, f, lo, hi) || kin::length(f) > 8.0f) {
+                        continue;
+                    }
+                    const bool shadowed = segment_hits_box(light, f, lo, hi);
+                    const bool seen = brightness(without.at(x, y)) >= 30 && brightness(with.at(x, y)) < static_cast<int>(0.55f * static_cast<float>(brightness(without.at(x, y))));
+                    if (shadowed) {
+                        want.centre = want.centre + f;
+                        ++want.count;
+                    }
+                    mismatched += shadowed != seen ? 1 : 0;
+                }
+            }
+            want.centre = want.centre * (1.0f / static_cast<float>(want.count));
+            const float off = kin::length(blob.centre - want.centre);
+            // A texel of the map at the floor (6 m from the light, 60 degree half angle): 2 * 6 * tan(60) / resolution.
+            const float texel = 2.0f * 6.0f * std::tan(60.0f * deg_to_rad) / static_cast<float>(resolution);
+            const float bound = std::max(2.0f * texel, 0.03f);
+            std::cerr << "spot shadow at " << resolution << ": " << blob.count << " pixels (expected " << want.count << "), centroid off by " << off
+                      << " m (bound " << bound << "), " << mismatched << " mismatched\n";
+            assert(want.count > 400 && blob.count > 400);
+            assert(off <= bound);
+            assert(std::abs(blob.count - want.count) < want.count / 6);
+            assert(mismatched < want.count / 3);
+        }
+
+        // Peter-panning: the shadow of a box standing on the floor begins at its foot. Light at 45 degrees from -x; the shadow runs to +x from
+        // the box's +x side at x = 0.5. Along the row through the box's middle, the first pixel past the box that is dark.
+        kin::Scene3D scene;
+        scene.camera = stage.camera();
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {0.004f, 0.004f, 0.004f};
+        const kin::Mesh cube = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        stage.draw_floor(scene);
+        scene.draw(cube, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+        kin::SpotLight spot{.position = {-6.0f, 6.0f, 0.0f}, .direction = {1.0f, -1.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 30.0f, .size = 0.1f,
+                            .inner_angle = 40.0f, .outer_angle = 55.0f};
+        spot.shadow.enabled = true;
+        spot.shadow.resolution = 1024;
+        scene.add_spot_light(spot);
+        const Pixels p = shoot_large(renderer, r3d, view, scene);
+        renderer.present();
+        // The row z = 0: from the box's side outward the floor is in shadow up to where the top edge's shadow ends.
+        const auto level_at = [&](float x) {
+            const auto px = scene.camera.project({x, 0.0f, 0.0f}, rect);
+            return brightness(p.at(px->pos));
+        };
+        // The lit floor beside the shadow (past its end, where the light is as strong as in it) and a point in it.
+        const int lit_level = level_at(2.4f), shadow_level = level_at(1.0f);
+        assert(shadow_level < lit_level / 2);
+        float first = -1.0f;
+        for (float x = 0.5f; x < 2.5f; x += 0.01f) {
+            if (level_at(x) < (lit_level + shadow_level) / 2) {
+                first = x;
+                break;
+            }
+        }
+        std::cerr << "peter-panning: the shadow begins at x = " << first << " (the foot is at 0.5)\n";
+        assert(first > 0.0f && first - 0.5f <= 0.06f);
+        // And ends where the projection says: the top edge (0.5, 1) cast from (-6, 6): 0.5 + 1 x 6.5 / 5 = 1.8.
+        float last = -1.0f;
+        for (float x = 2.3f; x > 0.5f; x -= 0.01f) {
+            if (level_at(x) < (lit_level + shadow_level) / 2) {
+                last = x;
+                break;
+            }
+        }
+        std::cerr << "peter-panning: the shadow ends at x = " << last << " (the projection says 1.8)\n";
+        // The far end is where the surface slopes away from the light (38 degrees up): the bias's 2.3 texels (2.8 cm each at 10 m) show as 0.1 m.
+        assert(std::abs(last - 1.8f) <= 0.1f);
+    });
+}
+
+// A cut-out caster's shadow has its holes; a posed skinned caster's is the CPU-skinned mesh's (and not the straight tube's); every copy
+// of an instanced draw casts.
+void test_gpu_spot_shadow_casters() {
+    with_gpu("test_gpu_spot_shadow_casters", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto spot_for = [](float height, float x = 0.0f, Vec3f aim = {0.0f, -1.0f, 0.0f}) {
+            kin::SpotLight spot{.position = {x, height, 0.0f}, .direction = aim, .color = {12.0f, 12.0f, 12.0f}, .radius = 30.0f, .size = 0.1f,
+                                .inner_angle = 50.0f, .outer_angle = 65.0f};
+            spot.shadow.enabled = true;
+            spot.shadow.resolution = 1024;
+            return spot;
+        };
+        const auto base_scene = [&](kin::Scene3D& scene) {
+            scene.camera = stage.camera();
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+            scene.clear();
+            stage.draw_floor(scene);
+        };
+        // Cut-out: a 2 x 2 quad lying flat 1.5 m up, half its texture clear (the left), half opaque (the right).
+        {
+            const kin::Mesh leaf_mesh = r3d.create_mesh(uv_square(1.0f));
+            const kin::u8 texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
+            const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {2, 1});
+            renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
+            kin::Scene3D scene;
+            base_scene(scene);
+            // From the left, so that the quad's shadow falls to its right and the camera above sees it: the opaque half (x 0 to 1 at 1.5 m up) casts
+            // onto the floor from x = 1 to 2.33 (from (-3, 6) through the quad's plane: 4/3 the way), the clear half's light reaches x -0.33 to 1.
+            const Vec3f aim = Vec3f{3.0f, -4.5f, 0.0f};
+            scene.add_spot_light(spot_for(6.0f, -3.0f, aim));
+            scene.draw(leaf_mesh, Mat4f::translation({0.0f, 1.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
+                       {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf});
+            // A box behind the light and above it (9 m away, inside its radius but outside its cone), and one beyond its radius (50 m): neither is
+            // drawn into the map (only what can cast into the cone is).
+            const kin::Mesh away = make_box(r3d, {1.0f, 1.0f, 1.0f});
+            scene.draw(away, Mat4f::translation({-8.0f, 14.0f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            scene.draw(away, Mat4f::translation({0.0f, 1.0f, -60.0f}), {.color = Color::rgb(200, 200, 200)});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            assert(r3d.stats().local_shadow_casters == 2); // the floor casts too, the quad, and no more
+            base_scene(scene);
+            scene.add_spot_light(spot_for(6.0f, -3.0f, aim));
+            const Pixels bare = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const auto at = [&](const Pixels& px, float x) { return brightness(px.at(scene.camera.project({x, 0.0f, 0.0f}, screen)->pos)); };
+            std::cerr << "cut-out shadow: opaque half's " << at(p, 1.9f) << " of " << at(bare, 1.9f) << ", clear half's " << at(p, -0.2f) << " of " << at(bare, -0.2f)
+                      << "\n";
+            assert(at(p, 1.9f) < at(bare, 1.9f) / 2);
+            assert(at(p, -0.2f) > at(bare, -0.2f) * 9 / 10);
+        }
+        // Skinned: the same picture as the CPU-skinned mesh, drawn as a plain one; and not the straight tube's.
+        if (!lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            SkinRig rig{r3d};
+            const std::vector<Mat4f> bent = rig.matrices(80.0f, -70.0f, {0.0f, 1.0f, 0.0f});
+            const kin::Mesh baked = rig.baked(r3d, bent);
+            const auto shoot = [&](int mode) {
+                kin::Scene3D scene;
+                base_scene(scene);
+                scene.add_spot_light(spot_for(8.0f, -1.5f));
+                if (mode == 0) {
+                    scene.draw_skinned(rig.mesh, bent, Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
+                } else if (mode == 1) {
+                    scene.draw(baked, Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
+                } else {
+                    scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f, {0.0f, 1.0f, 0.0f}), Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
+                }
+                const Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            const Pixels skinned = shoot(0);
+            assert(r3d.stats().skinned_copies == 1 && r3d.stats().local_shadow_casters == 2);
+            const Pixels plain = shoot(1);
+            const Pixels straight = shoot(2);
+            const int differing = pixels_differing(skinned, plain);
+            const int different_pose = pixels_differing(skinned, straight);
+            std::cerr << "skinned caster in a spot's shadow: " << differing << " pixels differ from the CPU-skinned mesh, " << different_pose
+                      << " from the straight tube\n";
+            assert(differing <= 12);
+            assert(different_pose > 60);
+        }
+        // Instanced: every copy casts.
+        {
+            const kin::Mesh pole = make_box(r3d, {0.4f, 2.0f, 0.4f});
+            std::vector<kin::MeshInstance> copies;
+            for (int i = 0; i < 5; ++i) {
+                copies.push_back({.transform = Mat4f::translation({-3.0f + 1.5f * static_cast<float>(i), 1.0f, 1.0f})});
+            }
+            kin::View3D large = r3d.create_view({640, 480}, {.samples = 1});
+            const auto shoot_poles = [&](bool poles) {
+                kin::Scene3D scene;
+                base_scene(scene);
+                scene.add_spot_light(spot_for(7.0f));
+                if (poles) {
+                    scene.draw_instanced(pole, copies, {.color = Color::rgb(200, 200, 200)});
+                }
+                const Pixels p = shoot_large(renderer, r3d, large, scene);
+                renderer.present();
+                return std::pair{p, scene.camera};
+            };
+            const auto [with, camera] = shoot_poles(true);
+            assert(r3d.stats().local_shadow_casters == 6 && r3d.stats().local_shadow_draws == 2); // and the floor
+            const Pixels bare = shoot_poles(false).first;
+            // Each pole's shadow, at the far end of its strip where the pole's own top (the camera is above the light) does not hide it: the
+            // pole's back edge (z = 1.2) at 1.68 m up cast from 7 m: 1.317 of the way out from the light's foot, to z = 1.58.
+            int dark = 0;
+            for (int i = 0; i < 5; ++i) {
+                const float x = -3.0f + 1.5f * static_cast<float>(i);
+                const auto px = camera.project({x * 1.317f, 0.0f, 1.58f}, {0.0f, 0.0f, 640.0f, 480.0f});
+                dark += px && brightness(with.at(px->pos)) < brightness(bare.at(px->pos)) / 2 ? 1 : 0;
+            }
+            std::cerr << "instanced casters: " << dark << " of 5 shadows found\n";
+            assert(dark == 5);
+        }
+    });
+}
+
+// The nearest hit of a ray with a sphere (the distance, or a negative number).
+float ray_sphere_t(const kin::Ray3& ray, Vec3f centre, float radius) {
+    const Vec3f oc = ray.origin - centre;
+    const float b = kin::dot(oc, ray.direction), c = kin::dot(oc, oc) - radius * radius, disc = b * b - c;
+    if (disc < 0.0f) {
+        return -1.0f;
+    }
+    const float t = -b - std::sqrt(disc);
+    return t > 0.0f ? t : -1.0f;
+}
+
+// The nearest hit of a ray with a box (the distance, or a negative number).
+float ray_box_t(const kin::Ray3& ray, Vec3f lo, Vec3f hi) {
+    float t0 = 0.0f, t1 = 1e9f;
+    const float o[3] = {ray.origin.x, ray.origin.y, ray.origin.z}, d[3] = {ray.direction.x, ray.direction.y, ray.direction.z};
+    const float mn[3] = {lo.x, lo.y, lo.z}, mx[3] = {hi.x, hi.y, hi.z};
+    for (int k = 0; k < 3; ++k) {
+        if (std::abs(d[k]) < 1e-9f) {
+            if (o[k] < mn[k] || o[k] > mx[k]) {
+                return -1.0f;
+            }
+            continue;
+        }
+        float a = (mn[k] - o[k]) / d[k], b = (mx[k] - o[k]) / d[k];
+        if (a > b) {
+            std::swap(a, b);
+        }
+        t0 = std::max(t0, a);
+        t1 = std::min(t1, b);
+        if (t0 > t1) {
+            return -1.0f;
+        }
+    }
+    return t0 > 0.0f ? t0 : -1.0f;
+}
+
+// Acne and its cure: a lit plane, a sphere and a grazing wall, each with its own shadow on against off. These are surfaces nothing else
+// shadows (the light is above the floor, the sphere and the wall are not between the light and one another), so every pixel the shadow
+// darkens is acne; its share of the surface's lit pixels stays under a stated bound, with the bias at zero too, where it is the normal offset
+// that holds, and with the normal offset at zero, where it is the bias.
+void test_gpu_spot_shadow_acne() {
+    with_gpu("test_gpu_spot_shadow_acne", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh sphere = r3d.create_mesh(kin::meshes::sphere(1.5f, 48, 24));
+        const kin::Mesh wall = make_box(r3d, {12.0f, 4.0f, 0.2f});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
+        enum class Surface { Floor, Sphere, Wall };
+        struct Config {
+            const char* name;
+            Vec3f light, aim;
+            float bias, normal_offset;
+            Surface measured;
+            float limit; // the share of the surface's lit pixels, per cent
+        };
+        const std::array<Config, 6> configs{{
+            {"floor, light overhead", {0, 6, 0}, {0, 0, 0}, 1.0f, 1.5f, Surface::Floor, 0.2f},
+            {"floor at 45 degrees", {-5, 5, 0}, {0, 0, 0}, 1.0f, 1.5f, Surface::Floor, 0.2f},
+            {"floor at a grazing angle", {-9, 1.2f, 0}, {0, 0, 0}, 1.0f, 1.5f, Surface::Floor, 0.5f},
+            {"sphere, normal offset alone", {-4, 5, 2}, {0, 0.5f, 0}, 0.0f, 1.5f, Surface::Sphere, 0.5f},
+            {"sphere, bias alone", {-4, 5, 2}, {0, 0.5f, 0}, 1.0f, 0.0f, Surface::Sphere, 0.5f},
+            {"a wall the light grazes", {-9, 3, 4}, {0, 2, -3}, 1.0f, 1.5f, Surface::Wall, 0.5f},
+        }};
+        const Vec3f sphere_centre{0.0f, 1.5f, 0.0f}, wall_lo{-6.0f, 0.0f, -3.2f}, wall_hi{6.0f, 4.0f, -3.0f};
+        for (const Config& c : configs) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 9.0f, 7.0f}, {0.0f, 0.5f, -1.0f}, 55.0f);
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {};
+            const auto shoot = [&](bool shadow) {
+                scene.clear();
+                stage.draw_floor(scene);
+                if (c.measured == Surface::Sphere) {
+                    scene.draw(sphere, Mat4f::translation(sphere_centre), {.color = Color::rgb(220, 220, 220)});
+                }
+                if (c.measured == Surface::Wall) {
+                    scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.1f}), {.color = Color::rgb(220, 220, 220)});
+                }
+                kin::SpotLight spot{.position = c.light, .direction = c.aim - c.light, .color = {14.0f, 14.0f, 14.0f}, .radius = 40.0f, .size = 0.1f,
+                                    .inner_angle = 40.0f, .outer_angle = 55.0f};
+                spot.shadow.enabled = shadow;
+                spot.shadow.resolution = 1024;
+                spot.shadow.bias = c.bias;
+                spot.shadow.normal_offset = c.normal_offset;
+                scene.add_spot_light(spot);
+                const Pixels p = shoot_large(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            const Pixels with = shoot(true);
+            const Pixels without = shoot(false);
+            int lit_pixels = 0, wrong = 0;
+            for (int y = 0; y < 240; ++y) {
+                for (int x = 0; x < 320; ++x) {
+                    const kin::Ray3 ray = scene.camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, rect);
+                    float best = 1e9f;
+                    Surface hit = Surface::Floor;
+                    if (const auto plane = kin::hit_plane_y(ray, 0.0f)) {
+                        best = kin::length(*plane - ray.origin);
+                    }
+                    if (c.measured == Surface::Sphere) {
+                        const float t = ray_sphere_t(ray, sphere_centre, 1.5f);
+                        if (t > 0.0f && t < best) {
+                            best = t;
+                            hit = Surface::Sphere;
+                        }
+                    }
+                    if (c.measured == Surface::Wall) {
+                        const float t = ray_box_t(ray, wall_lo, wall_hi);
+                        if (t > 0.0f && t < best) {
+                            best = t;
+                            hit = Surface::Wall;
+                        }
+                    }
+                    if (hit != c.measured) {
+                        continue;
+                    }
+                    const int a = brightness(without.at(x, y));
+                    if (a < 60) {
+                        continue;
+                    }
+                    ++lit_pixels;
+                    const int b = brightness(with.at(x, y));
+                    wrong += (b < a - 6 && b < a * 88 / 100) ? 1 : 0;
+                }
+            }
+            const double share = 100.0 * wrong / std::max(1, lit_pixels);
+            std::cerr << "acne, " << c.name << ": " << wrong << " of " << lit_pixels << " lit pixels (" << share << "%), limit " << c.limit << "%\n";
+            assert(lit_pixels > 1500);
+            assert(share <= c.limit);
+        }
+    });
+}
+
+// The shadow fades out toward its distance, and a light's shadow reaches no further than the map does.
+void test_gpu_spot_shadow_distance() {
+    with_gpu("test_gpu_spot_shadow_distance", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        // A pole 5 m from the light's foot, a light 3 m up and aimed down the floor toward +x: the shadow lies at 6 to 9 m from the light.
+        const auto shoot = [&](float distance, bool shadow) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({6.0f, 12.0f, 0.01f}, {6.0f, 0.0f, 0.0f}, 60.0f);
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {};
+            stage.draw_floor(scene);
+            scene.draw(pole, Mat4f::translation({5.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            kin::SpotLight spot{.position = {0.0f, 3.0f, 0.0f}, .direction = {1.0f, -0.35f, 0.0f}, .color = {20.0f, 20.0f, 20.0f}, .radius = 40.0f, .size = 0.1f,
+                                .inner_angle = 40.0f, .outer_angle = 60.0f};
+            spot.shadow.enabled = shadow;
+            spot.shadow.distance = distance;
+            spot.shadow.resolution = 1024;
+            scene.add_spot_light(spot);
+            const Pixels p = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            return std::pair{p, scene.camera};
+        };
+        const auto [none, camera] = shoot(0.0f, false);
+        const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
+        const auto dark_pixels = [&](const Pixels& p, float from_x) {
+            int count = 0;
+            for (int y = 0; y < 240; ++y) {
+                for (int x = 0; x < 320; ++x) {
+                    const Vec3f f = floor_point(camera, rect, x, y);
+                    if (f.x >= from_x && f.x < 9.0f && std::abs(f.z) < 1.2f && brightness(none.at(x, y)) > 30 &&
+                        brightness(p.at(x, y)) < brightness(none.at(x, y)) * 6 / 10) {
+                        ++count;
+                    }
+                }
+            }
+            return count;
+        };
+        const int full = dark_pixels(shoot(0.0f, true).first, 5.3f);   // to the radius: the whole shadow
+        const int far_reach = dark_pixels(shoot(12.0f, true).first, 5.3f);
+        const int cut = dark_pixels(shoot(6.0f, true).first, 5.3f);    // fades out by 6 m: the pole's shadow starts at 5.8 m
+        std::cerr << "shadow distance: dark pixels " << full << " (to the radius), " << far_reach << " (12 m), " << cut << " (6 m)\n";
+        assert(full > 150);
+        assert(std::abs(far_reach - full) < full / 10);
+        assert(cut < full / 4);
+        // The fade: with the shadow's distance at 7.5 m it is lighter by the last fifth (from 6 m out). Along the pole's shadow (the row z = 0),
+        // the share of the light that is let through (shadowed over unshadowed) rises from the shadow's to 1 from 6 m to 7.5 m from the light.
+        const auto reference = shoot(7.5f, true);
+        const Pixels& none_picture = none;
+        const auto share_at = [&](float x) {
+            const auto px = reference.second.project({x, 0.0f, 0.0f}, rect);
+            return static_cast<float>(brightness(reference.first.at(px->pos))) / static_cast<float>(std::max(1, brightness(none_picture.at(px->pos))));
+        };
+        // Distances from the light (0, 3, 0): 6.15 m, 6.8 m, 7.3 m.
+        const float early = share_at(5.37f), middle = share_at(6.1f), late = share_at(6.65f);
+        std::cerr << "shadow distance 7.5: the light let through " << early << " at 6.15 m, " << middle << " at 6.8 m, " << late << " at 7.3 m\n";
+        // (in the picture's own, gamma-encoded numbers: a half of the light is about 0.73 of the level)
+        assert(early < 0.35f && middle > 0.45f && middle < 0.9f && late > 0.85f);
+    });
+}
+
+// A surface that does not receive shadows (Material3D::receives_shadow) is lit as if nothing were in the way, by spots and point lights too.
+void test_gpu_spot_receives_shadow_flag() {
+    with_gpu("test_gpu_spot_receives_shadow_flag", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
+        const kin::Mesh pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto shoot = [&](bool receives, bool point) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(220, 220, 220), .receives_shadow = receives});
+            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            if (point) {
+                kin::PointLight light{.position = {0.0f, 6.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 25.0f, .size = 0.1f};
+                light.shadow.enabled = true;
+                scene.add_light(light);
+            } else {
+                kin::SpotLight spot{.position = {0.0f, 6.0f, 0.0f}, .direction = {0.0f, -1.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 25.0f,
+                                    .size = 0.1f, .inner_angle = 45.0f, .outer_angle = 60.0f};
+                spot.shadow.enabled = true;
+                scene.add_spot_light(spot);
+            }
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        for (const bool point : {false, true}) {
+            const Pixels shadowed = shoot(true, point);
+            assert(r3d.stats().local_shadow_maps > 0);
+            const Pixels not_receiving = shoot(false, point);
+            assert(r3d.stats().local_shadow_maps > 0); // still drawn (the pole's own side takes it)
+            // The floor's pixels near the pole's foot at +x: dark when it receives, as lit as its surroundings when it does not.
+            int dark_shadowed = 0, dark_not = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    dark_shadowed += brightness(shadowed.at(x, y)) < 150 ? 1 : 0;
+                    dark_not += brightness(not_receiving.at(x, y)) < 150 ? 1 : 0;
+                }
+            }
+            std::cerr << (point ? "point" : "spot") << " light, receives_shadow off: " << dark_not << " dark pixels against " << dark_shadowed << " with it on\n";
+            assert(dark_shadowed > dark_not + 15);
+        }
+    });
+}
+
+// A clustered mesh casting into a spot light's map: the cut is made from the light (the error in the map's texels), so the shadow is the full
+// mesh's to within the error, and a coarse forced cut shows (the map takes the cut, not the leaves); the cache keeps it still.
+void test_gpu_spot_shadow_clustered_caster() {
+    for (const bool gpu : {false, true}) {
+        with_gpu(gpu ? "test_gpu_spot_shadow_clustered_caster (GPU cut)" : "test_gpu_spot_shadow_clustered_caster (CPU cut)", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+                return;
+            }
+            kin::MeshOptions options;
+            options.clusters = true;
+            const kin::Mesh torus = r3d.create_mesh(kin::meshes::torus(1.2f, 0.45f, 96, 48), options);
+            assert(torus.has_clusters());
+            const TopDown stage{r3d};
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+            const auto shoot = [&](const kin::Lod3D& lod, bool cache) {
+                kin::Scene3D scene;
+                scene.camera = stage.camera();
+                scene.lights.sun.color = {};
+                scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+                scene.lights.cache_shadows = cache;
+                scene.lod = lod;
+                stage.draw_floor(scene);
+                // The torus high up, so that its shadow (the camera sees the floor) is a ring on the floor, off its own picture.
+                scene.draw(torus, Mat4f::translation({-2.0f, 3.0f, 0.0f}) * Mat4f::rotation_x(60.0f), {.color = Color::rgb(220, 120, 60)});
+                kin::SpotLight spot{.position = {-2.0f, 9.0f, 3.0f}, .direction = {0.0f, -1.0f, -0.4f}, .color = {14.0f, 14.0f, 14.0f}, .radius = 30.0f,
+                                    .size = 0.1f, .inner_angle = 40.0f, .outer_angle = 60.0f};
+                spot.shadow.enabled = true;
+                spot.shadow.resolution = 1024;
+                scene.add_spot_light(spot);
+                const Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                return p;
+            };
+            const Pixels leaves = shoot(kin::Lod3D{.enabled = false}, false);
+            assert(r3d.stats().local_shadow_maps > 0);
+            assert(r3d.stats().local_shadow_casters >= 2);
+            const Pixels cut = shoot(cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f}), false);
+            const int fine = pixels_differing(leaves, cut, 6);
+            const Pixels coarse = shoot(cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f, .force_level = 4}), false);
+            const int rough = pixels_differing(leaves, coarse, 6);
+            std::cerr << "clustered caster in a spot's map (" << (gpu ? "GPU" : "CPU") << " cut for the camera): " << fine << " pixels differ at 1 px of error, "
+                      << rough << " with a forced coarse cut\n";
+            assert(fine <= 60);
+            assert(rough > fine + 10);
+            // What the cut chose is what the CPU's own cut says from the light (the torus is wholly in the cone), not from the camera: at an error
+            // where the two differ, the map's triangles are the first's (and the floor's twelve).
+            {
+                const kin::SpotLight spot{.position = {-2.0f, 9.0f, 3.0f}, .direction = {0.0f, -1.0f, -0.4f}, .radius = 30.0f, .outer_angle = 60.0f};
+                const kin::LocalShadowView lv = kin::spot_shadow_view(spot, 1024);
+                const kin::MeshData data = kin::meshes::torus(1.2f, 0.45f, 96, 48);
+                const kin::MeshClusters clusters = kin::build_mesh_clusters(data, options);
+                const auto triangles_of = [&](Vec3f eye, Vec3f forward, float per_unit, float pixels) {
+                    kin::ClusterCutView cv;
+                    cv.transform = Mat4f::translation({-2.0f, 3.0f, 0.0f}) * Mat4f::rotation_x(60.0f);
+                    cv.eye = eye;
+                    cv.forward = forward;
+                    cv.per_unit = per_unit;
+                    cv.pixels = pixels;
+                    cv.nearest = lv.near_plane;
+                    std::uint64_t n = 12;
+                    for (const kin::SelectedCluster& pick : kin::select_clusters(clusters, cv, kin::NoClusterCull{})) {
+                        n += clusters.clusters[pick.cluster].triangle_count;
+                    }
+                    return n;
+                };
+                const kin::Camera3D camera = stage.camera();
+                const float light_per_unit = 0.5f * 1024.0f / lv.tan_half;
+                const float camera_per_unit = 0.5f * 120.0f / std::tan(0.5f * camera.fov * deg_to_rad);
+                int differing_from_camera = 0;
+                for (const float pixels : {0.02f, 0.05f, 0.1f, 0.2f, 0.4f, 0.8f, 1.6f, 3.2f}) {
+                    const std::uint64_t from_light = triangles_of(spot.position, kin::spot_cone(spot).axis, light_per_unit, pixels);
+                    const std::uint64_t from_camera = triangles_of(camera.position, camera.forward(), camera_per_unit, pixels);
+                    differing_from_camera += from_light != from_camera ? 1 : 0;
+                    shoot(cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = pixels}), false);
+                    std::cerr << "clustered caster at " << pixels << " px: " << r3d.stats().local_shadow_triangles << " triangles in the map; the CPU's cut from the light says "
+                              << from_light << ", from the camera " << from_camera << "\n";
+                    assert(r3d.stats().local_shadow_triangles == from_light);
+                }
+                assert(differing_from_camera >= 3); // the check can tell the two apart
+            }
+            // Kept still: the second render with the cache draws nothing and is the same picture to the byte.
+            shoot(cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f}), true);
+            const Pixels kept = shoot(cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f}), true);
+            assert(r3d.stats().local_shadow_cached == 1 && r3d.stats().local_shadow_draws == 0);
+            assert(kept.rgba == cut.rgba);
+            // A change of what the cut is judged by (the error allowed) makes it again: not the kept map, and the picture of the coarse cut.
+            const Pixels coarser = shoot(cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f, .force_level = 4}), true);
+            assert(r3d.stats().local_shadow_cached == 0 && r3d.stats().local_shadow_draws > 0);
+            assert(coarser.rgba == coarse.rgba);
+        });
+    }
+}
+
+// A map kept is the map drawn again, to the byte; it is drawn again when a caster, the light or its settings change, and not before.
+void test_gpu_spot_shadow_cache() {
+    with_gpu("test_gpu_spot_shadow_cache", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
+        const kin::Mesh cube = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        struct Setup {
+            float pole_x = 2.0f, light_x = 0.0f, camera_x = 0.0f, cube_y = 0.5f;
+            kin::u32 resolution = 512;
+            float cone = 60.0f;
+            bool extra = false;
+        } setup;
+        const auto build = [&](kin::Scene3D& scene, bool cache) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({setup.camera_x, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+            scene.lights.cache_shadows = cache;
+            stage.draw_floor(scene);
+            scene.draw(pole, Mat4f::translation({setup.pole_x, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            scene.draw(cube, Mat4f::translation({-3.0f, setup.cube_y, 1.0f}), {.color = Color::rgb(200, 100, 100)});
+            if (setup.extra) {
+                scene.draw(cube, Mat4f::translation({0.0f, 0.5f, -3.0f}), {.color = Color::rgb(100, 200, 100)});
+            }
+            kin::SpotLight spot{.position = {setup.light_x, 6.0f, 0.0f}, .direction = {0.0f, -1.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 25.0f,
+                                .size = 0.1f, .inner_angle = 30.0f, .outer_angle = setup.cone};
+            spot.shadow.enabled = true;
+            spot.shadow.resolution = setup.resolution;
+            scene.add_spot_light(spot);
+        };
+        kin::Scene3D scene;
+        const auto shoot = [&](kin::View3D& target, bool cache) {
+            build(scene, cache);
+            Pixels p = shoot_view(renderer, r3d, target, scene);
+            renderer.present();
+            return p;
+        };
+        const auto truth = [&] { return shoot(reference_view, false); };
+        const Pixels first = shoot(view, true);
+        assert(r3d.stats().local_shadow_maps > 0);
+        assert(r3d.stats().local_shadow_drawn == 1 && r3d.stats().local_shadow_cached == 0);
+        const kin::u32 draws = r3d.stats().local_shadow_draws;
+        assert(draws > 0);
+        // Still: kept, nothing drawn, the same picture to the byte as drawn again.
+        for (int f = 0; f < 4; ++f) {
+            const Pixels p = shoot(view, true);
+            assert(r3d.stats().local_shadow_cached == 1 && r3d.stats().local_shadow_drawn == 0 && r3d.stats().local_shadow_draws == 0);
+            assert(p.rgba == first.rgba);
+        }
+        assert(truth().rgba == first.rgba);
+        assert(r3d.stats().local_shadow_cached == 0 && r3d.stats().local_shadow_draws == draws);
+        shoot(view, true); // the map was drawn into by the uncached render: drawn again, then kept again
+        assert(r3d.stats().local_shadow_cached == 0);
+        assert(shoot(view, true).rgba == first.rgba && r3d.stats().local_shadow_cached == 1);
+        // Not asked for: drawn every time.
+        shoot(view, false);
+        assert(r3d.stats().local_shadow_cached == 0);
+        setenv("KIN_SHADOW_CACHE", "0", 1);
+        shoot(view, true);
+        shoot(view, true);
+        assert(r3d.stats().local_shadow_cached == 0);
+        unsetenv("KIN_SHADOW_CACHE");
+        shoot(view, true);
+        shoot(view, true);
+        assert(r3d.stats().local_shadow_cached == 1);
+
+        const auto changes = [&](const char* name, const std::function<void()>& change, const std::function<void()>& restore, bool redraws = true) {
+            change();
+            const Pixels changed = shoot(view, true);
+            const bool drawn_again = r3d.stats().local_shadow_cached == 0;
+            const Pixels want = truth(); // draws into the same map: the kept one is no longer
+            shoot(view, true);
+            if ((redraws && !drawn_again) || changed.rgba != want.rgba) {
+                std::cerr << "spot cache: " << name << ": " << (drawn_again ? "drawn" : "STALE") << ", " << (changed.rgba == want.rgba ? "same" : "DIFFERENT")
+                          << " picture as uncached\n";
+            }
+            assert(!redraws || drawn_again);
+            assert(changed.rgba == want.rgba);
+            assert(shoot(view, true).rgba == want.rgba);
+            assert(r3d.stats().local_shadow_cached == 1);
+            restore();
+            shoot(view, true);
+            shoot(view, true);
+        };
+        changes("a caster moved", [&] { setup.pole_x = 2.5f; }, [&] { setup.pole_x = 2.0f; });
+        changes("a second caster moved", [&] { setup.cube_y = 0.9f; }, [&] { setup.cube_y = 0.5f; });
+        changes("the light moved", [&] { setup.light_x = 0.7f; }, [&] { setup.light_x = 0.0f; });
+        changes("the resolution", [&] { setup.resolution = 256; }, [&] { setup.resolution = 512; });
+        changes("the cone", [&] { setup.cone = 50.0f; }, [&] { setup.cone = 60.0f; });
+        changes("a caster added", [&] { setup.extra = true; }, [&] { setup.extra = false; });
+        // The camera does not matter to a spot's map: moving it does not redraw it (the picture changes, the shadow is the same).
+        setup.camera_x = 0.5f;
+        const Pixels moved = shoot(view, true);
+        assert(r3d.stats().local_shadow_cached == 1);
+        assert(moved.rgba == truth().rgba);
+        setup.camera_x = 0.0f;
+    });
+}
+
+// Twelve spot lights, four shadow maps: the lights that hold them are the most important ones (the CPU's importance, the same rule), the
+// same set every render of a still scene, and a light that holds one keeps it against a rival a little more important (the hysteresis).
+void test_gpu_spot_shadow_budget() {
+    with_gpu("test_gpu_spot_shadow_budget", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh pole = make_box(r3d, {0.3f, 2.0f, 0.3f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto build = [&](kin::Scene3D& scene, const std::vector<float>& scale, kin::u32 slots) {
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 9.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+            scene.lights.max_shadowed_spots = slots;
+            stage.draw_floor(scene);
+            for (int i = 0; i < 6; ++i) {
+                scene.draw(pole, Mat4f::translation({-8.0f + 3.2f * static_cast<float>(i), 1.0f, -2.0f}), {.color = Color::rgb(200, 200, 200)});
+            }
+            for (std::size_t i = 0; i < scale.size(); ++i) {
+                const float x = -9.0f + 18.0f * static_cast<float>(i) / std::max<float>(1.0f, static_cast<float>(scale.size() - 1));
+                kin::SpotLight spot{.position = {x, 5.0f, -1.0f + 0.6f * static_cast<float>(i % 3)}, .direction = {0.0f, -1.0f, -0.1f}, .color = {scale[i], scale[i], scale[i]},
+                                    .radius = 9.0f, .size = 0.1f, .inner_angle = 20.0f, .outer_angle = 38.0f};
+                spot.shadow.enabled = true;
+                spot.shadow.resolution = 256;
+                scene.add_spot_light(spot);
+            }
+        };
+        kin::Scene3D scene;
+        // Twelve of different strengths (and so different importance), in no order.
+        std::vector<float> scales{9.0f, 14.0f, 6.0f, 20.0f, 11.0f, 7.0f, 17.0f, 8.0f, 13.0f, 5.0f, 16.0f, 10.0f};
+        build(scene, scales, 4);
+        // The expected four: the CPU's importance for the lights that reach the view, the best four.
+        std::vector<std::pair<float, int>> ranked;
+        for (std::size_t i = 0; i < scene.lights.spots.size(); ++i) {
+            const kin::SpotLight& l = scene.lights.spots[i];
+            kin::Vec3f centre;
+            float radius;
+            kin::spot_bounding_sphere(l, centre, radius);
+            ranked.push_back({kin::shadow_importance(std::max({l.color.x, l.color.y, l.color.z}), l.radius, centre, radius, scene.camera.position), static_cast<int>(i)});
+        }
+        std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::set<int> expected;
+        for (int i = 0; i < 4; ++i) {
+            expected.insert(ranked[static_cast<std::size_t>(i)].second);
+        }
+        std::array<kin::i32, 12> first_slots{};
+        for (int f = 0; f < 10; ++f) {
+            build(scene, scales, 4);
+            shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats st = r3d.stats();
+            assert(st.local_shadow_maps > 0);
+            std::set<int> got;
+            for (int i = 0; i < 12; ++i) {
+                if (st.spot_slot[static_cast<std::size_t>(i)] >= 0) {
+                    got.insert(i);
+                }
+            }
+            assert(st.spots == 12 && st.local_shadow_maps == 4);
+            if (f == 0) {
+                first_slots = {};
+                for (int i = 0; i < 12; ++i) {
+                    first_slots[static_cast<std::size_t>(i)] = st.spot_slot[static_cast<std::size_t>(i)];
+                }
+                if (got != expected) {
+                    std::cerr << "budget: the lights with maps are";
+                    for (int i : got) std::cerr << ' ' << i;
+                    std::cerr << ", the importance says";
+                    for (int i : expected) std::cerr << ' ' << i;
+                    std::cerr << "\n";
+                }
+                assert(got == expected);
+            }
+            for (int i = 0; i < 12; ++i) {
+                assert(st.spot_slot[static_cast<std::size_t>(i)] == first_slots[static_cast<std::size_t>(i)]);
+            }
+        }
+        // The hysteresis: two lights, one map. A holds it; B, a little more important, does not take it; much more, it does; A, much more again, gets it
+        // back; a pair that swap places by 10% each render never change holder.
+        const auto holder = [&](float a, float b) {
+            std::vector<float> two{a, b};
+            build(scene, two, 1);
+            shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats st = r3d.stats();
+            assert(st.local_shadow_maps == 1);
+            return st.spot_slot[0] >= 0 ? 0 : 1;
+        };
+        assert(holder(10.0f, 8.0f) == 0);
+        assert(holder(10.0f, 12.0f) == 0);   // 1.2 x: not enough
+        assert(holder(10.0f, 14.0f) == 0);   // 1.4 x: not enough
+        assert(holder(10.0f, 20.0f) == 1);   // 2 x: B has it now
+        assert(holder(11.0f, 10.0f) == 1);
+        assert(holder(10.0f, 11.0f) == 1);
+        int changes = 0, previous = 1;
+        for (int f = 0; f < 12; ++f) {
+            const int h = f % 2 == 0 ? holder(10.5f, 10.0f) : holder(10.0f, 10.5f);
+            changes += h != previous ? 1 : 0;
+            previous = h;
+        }
+        assert(changes == 0);
+        assert(holder(40.0f, 10.0f) == 0);
+        // Deterministic: the same scene from the start gives the same holders.
+        std::array<kin::i32, 12> again{};
+        {
+            kin::Renderer3D other{renderer};
+            kin::View3D other_view = other.create_view({160, 120}, {.samples = 1});
+            build(scene, scales, 4);
+            renderer.clear(kin::colors::black);
+            assert(other.render(other_view, scene));
+            for (int i = 0; i < 12; ++i) {
+                again[static_cast<std::size_t>(i)] = other.stats().spot_slot[static_cast<std::size_t>(i)];
+            }
+            renderer.present();
+        }
+        assert(again == first_slots);
+    });
+}
+
+// The six faces of a point light's cube: a small caster beside each of the six axes casts its shadow onto the wall behind it, in every
+// direction round the light (a wrong face anywhere puts the shadow on the wrong wall or loses it).
+void test_gpu_point_shadow_cube() {
+    with_gpu("test_gpu_point_shadow_cube", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const kin::Mesh slab_x = make_box(r3d, {0.4f, 10.8f, 10.8f}), slab_y = make_box(r3d, {10.8f, 0.4f, 10.8f}), slab_z = make_box(r3d, {10.8f, 10.8f, 0.4f});
+        const kin::Mesh caster = make_box(r3d, {0.3f, 0.3f, 0.3f});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
+        // A caster for each of the six directions of the cube, 1.5 m from the light and 0.6 m to the side; its shadow on the wall 5 m away
+        // lands (5 / 1.5) x 0.6 = 2 m to the side.
+        struct Face {
+            Vec3f axis, side;
+        };
+        const std::array<Face, 6> faces{{{{1, 0, 0}, {0, 0, 1}}, {{-1, 0, 0}, {0, 0, 1}}, {{0, 1, 0}, {1, 0, 0}}, {{0, -1, 0}, {1, 0, 0}}, {{0, 0, 1}, {1, 0, 0}},
+                                         {{0, 0, -1}, {1, 0, 0}}}};
+        const std::array<Vec3f, 6> cams{{{-4, -4, -4}, {4, 4, 4}, {-4, 4, -4}, {4, -4, 4}, {-4, -4, 4}, {4, 4, -4}}};
+        kin::Scene3D scene;
+        const auto build = [&](bool shadow) {
+            scene.clear();
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {};
+            scene.draw(slab_x, Mat4f::translation({5.2f, 0, 0}), {.color = Color::rgb(220, 220, 220)});
+            scene.draw(slab_x, Mat4f::translation({-5.2f, 0, 0}), {.color = Color::rgb(220, 220, 220)});
+            scene.draw(slab_y, Mat4f::translation({0, 5.2f, 0}), {.color = Color::rgb(220, 220, 220)});
+            scene.draw(slab_y, Mat4f::translation({0, -5.2f, 0}), {.color = Color::rgb(220, 220, 220)});
+            scene.draw(slab_z, Mat4f::translation({0, 0, 5.2f}), {.color = Color::rgb(220, 220, 220)});
+            scene.draw(slab_z, Mat4f::translation({0, 0, -5.2f}), {.color = Color::rgb(220, 220, 220)});
+            for (const Face& f : faces) {
+                scene.draw(caster, Mat4f::translation(f.axis * 1.5f + f.side * 0.6f), {.color = Color::rgb(200, 100, 100)});
+            }
+            kin::PointLight light{.position = {0.0f, 0.0f, 0.0f}, .color = {40.0f, 40.0f, 40.0f}, .radius = 30.0f, .size = 0.1f};
+            light.shadow.enabled = shadow;
+            light.shadow.resolution = 512;
+            scene.add_light(light);
+        };
+        for (std::size_t f = 0; f < 6; ++f) {
+            const Face& face = faces[f];
+            const Vec3f lo_p = face.axis * 5.0f + face.side * 2.0f;  // the shadow
+            const Vec3f lit_p = face.axis * 5.0f - face.side * 2.0f; // the mirror image: lit
+            // A camera that sees both without a caster in the way.
+            const auto blocked = [&](Vec3f eye, Vec3f target) {
+                for (const Face& g : faces) {
+                    const Vec3f c = g.axis * 1.5f + g.side * 0.6f;
+                    if (segment_hits_box(eye, target, c - Vec3f{0.2f, 0.2f, 0.2f}, c + Vec3f{0.2f, 0.2f, 0.2f})) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            bool done = false;
+            for (const Vec3f& eye : cams) {
+                if (blocked(eye, lo_p) || blocked(eye, lit_p)) {
+                    continue;
+                }
+                // Looking from `eye` at the middle of the room (the wall points are in view of a wide lens).
+                scene.camera = kin::Camera3D::look_at(eye, face.axis * 3.0f, 100.0f);
+                const auto a = scene.camera.project(lo_p, rect), b = scene.camera.project(lit_p, rect);
+                if (!a || !b || a->pos.x < 3 || b->pos.x < 3 || a->pos.x > 316 || b->pos.x > 316 || a->pos.y < 3 || b->pos.y < 3 || a->pos.y > 236 ||
+                    b->pos.y > 236) {
+                    continue;
+                }
+                build(true);
+                const Pixels p = shoot_large(renderer, r3d, view, scene);
+                renderer.present();
+                assert(r3d.stats().local_shadow_maps > 0);
+                assert(r3d.stats().point_slot[0] == 0 && r3d.stats().local_shadow_maps <= 6);
+                const int dark = brightness(p.at(a->pos)), lit = brightness(p.at(b->pos));
+                std::cerr << "cube face " << f << ": shadow point " << dark << ", lit mirror point " << lit << "\n";
+                assert(lit > 60);
+                assert(dark < lit / 3);
+                done = true;
+                break;
+            }
+            assert(done);
+        }
+    });
+}
+
+// The moon: at night it casts its own shadow (the fill light's cascades), at noon there is none of it (it is below the horizon) and the sun's
+// remains; the sun's and the moon's strengths through the day are smooth and are 0 where the light is under the horizon.
+void test_time_of_day_shadows() {
+    kin::TimeOfDay3D day{.hours = 0.0f, .day_of_year = 172.0f, .latitude = 45.0f, .moon_phase = 0.5f, .shadows = true};
+    float previous_sun = -1.0f, previous_moon = -1.0f;
+    float worst_step = 0.0f;
+    bool saw_rising_moon = false, saw_setting_sun = false;
+    for (float h = 0.0f; h < 24.0f; h += 0.02f) {
+        day.hours = h;
+        kin::Lights3D lights;
+        kin::Sky3D sky;
+        kin::Fog3D fog;
+        const kin::SkyState3D s = kin::apply(day, lights, sky, fog);
+        assert(lights.sun_shadow_strength >= 0.0f && lights.sun_shadow_strength <= 1.0f);
+        assert(lights.fill_shadow.strength >= 0.0f && lights.fill_shadow.strength <= 1.0f);
+        // Under the horizon: none; high: all of it.
+        if (s.sun_elevation <= -2.0f) {
+            assert(lights.sun_shadow_strength == 0.0f);
+        }
+        if (s.sun_elevation >= 1.0f) {
+            assert(lights.sun_shadow_strength == 1.0f);
+        }
+        if (s.moon_elevation <= 0.0f) {
+            assert(lights.fill_shadow.strength == 0.0f && !lights.fill_shadow.enabled);
+        }
+        if (s.moon_elevation >= 8.0f && s.moon_light >= 0.02f) {
+            assert(lights.fill_shadow.strength == 1.0f && lights.fill_shadow.enabled);
+        }
+        // The moon fades in over its first degrees, not at once: partway when it is low (and not before it is up).
+        if (s.moon_elevation > 2.0f && s.moon_elevation < 6.0f && s.moon_light > 0.09f) {
+            assert(lights.fill_shadow.strength > 0.0f && lights.fill_shadow.strength < 1.0f);
+            saw_rising_moon = true;
+        }
+        if (s.sun_elevation > -1.5f && s.sun_elevation < 0.5f) {
+            assert(lights.sun_shadow_strength > 0.0f && lights.sun_shadow_strength < 1.0f);
+            saw_setting_sun = true;
+        }
+        if (previous_sun >= 0.0f) {
+            worst_step = std::max({worst_step, std::abs(lights.sun_shadow_strength - previous_sun), std::abs(lights.fill_shadow.strength - previous_moon)});
+        }
+        previous_sun = lights.sun_shadow_strength;
+        previous_moon = lights.fill_shadow.strength;
+    }
+    std::cerr << "shadow strengths through a day: the largest step in 0.02 h is " << worst_step << "\n";
+    assert(worst_step < 0.15f);
+    assert(saw_rising_moon && saw_setting_sun);
+    // Through the evening the sun's strength only falls; through the moon's rising its own only rises.
+    float last = 2.0f;
+    for (float h = 17.0f; h <= 22.0f; h += 0.05f) {
+        day.hours = h;
+        kin::Lights3D lights;
+        kin::Sky3D sky;
+        kin::Fog3D fog;
+        kin::apply(day, lights, sky, fog);
+        assert(lights.sun_shadow_strength <= last + 1e-6f);
+        last = lights.sun_shadow_strength;
+    }
+    // Off (the default), apply() leaves the shadow settings alone.
+    day.shadows = false;
+    kin::Lights3D lights;
+    lights.fill_shadow.enabled = true;
+    lights.fill_shadow.strength = 0.37f;
+    lights.sun_shadow_strength = 0.6f;
+    kin::Sky3D sky;
+    kin::Fog3D fog;
+    day.hours = 3.0f;
+    kin::apply(day, lights, sky, fog);
+    assert(lights.fill_shadow.enabled && lights.fill_shadow.strength == 0.37f && lights.sun_shadow_strength == 0.6f);
+}
+
+void test_gpu_moon_shadow() {
+    with_gpu("test_gpu_moon_shadow", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
+        struct Shot {
+            Pixels pixels;
+            kin::Camera3D camera;
+            kin::Lights3D lights;
+        };
+        const auto shoot = [&](float hours, bool moon_shadow, kin::u32 cascades) {
+            kin::Scene3D scene;
+            scene.camera = stage.camera();
+            kin::TimeOfDay3D day{.hours = hours, .day_of_year = 172.0f, .latitude = 45.0f, .moon_phase = 0.5f, .shadows = true};
+            kin::apply(day, scene.lights, scene.sky, scene.fog);
+            scene.lights.ambient = {0.01f, 0.01f, 0.01f};
+            scene.lights.ground_ambient = scene.lights.ambient;
+            scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 5.0f, 10.0f}};
+            scene.lights.shadow_resolution = 1024;
+            scene.lights.shadow_cascades = 1;
+            scene.lights.fill_shadow.cascades = cascades;
+            scene.lights.fill_shadow.resolution = 1024;
+            if (!moon_shadow) {
+                scene.lights.fill_shadow.enabled = false;
+            }
+            // The moon's light is a tenth of the sun's: a brighter one, so the shadow is measurable in 8 bits.
+            scene.lights.fill.color = scene.lights.fill.color * 6.0f;
+            stage.draw_floor(scene);
+            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            const Pixels p = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            return Shot{p, scene.camera, scene.lights};
+        };
+        for (const kin::u32 cascades : {1u, 2u}) {
+            const Shot with = shoot(0.0f, true, cascades);
+            const kin::Render3DStats st = r3d.stats();
+            assert(st.moon_cascades == cascades && st.shadow_cascades == 0); // the sun is under the horizon: no map of its own
+            assert(with.lights.sun_shadow_strength == 0.0f && with.lights.fill_shadow.strength > 0.9f);
+            const Shot without = shoot(0.0f, false, cascades);
+            assert(r3d.stats().moon_cascades == 0);
+            const ShadowBlob blob = shadow_blob(with.pixels, without.pixels, with.camera, rect, 0.7f, 20);
+            std::cerr << "moon shadow (" << cascades << " cascades): " << blob.count << " pixels darkened, centre (" << blob.centre.x << ", " << blob.centre.z << ")\n";
+            assert(blob.count > 100);
+            // Where it goes: away from the moon's direction, from the pole's foot: the shadow is on the side of the pole away from the moon.
+            const Vec3f to_moon = kin::normalize(Vec3f{with.lights.fill.direction.x, 0.0f, with.lights.fill.direction.z});
+            const float along = kin::dot(Vec3f{blob.centre.x - 2.0f, 0.0f, blob.centre.z}, to_moon);
+            assert(along < -0.3f);
+        }
+        // At noon the moon is down: none of it; the sun's shadow is there.
+        const Shot noon = shoot(12.0f, true, 2);
+        assert(r3d.stats().moon_cascades == 0 && r3d.stats().shadow_cascades == 1);
+        assert(noon.lights.sun_shadow_strength == 1.0f && !noon.lights.fill_shadow.enabled);
+        // A shadow of weaker strength is lighter: strength 0.4 is a lighter shadow than 1.
+        kin::Scene3D scene;
+        scene.camera = stage.camera();
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {0.01f, 0.01f, 0.01f};
+        scene.lights.fill = {.direction = {0.5f, 1.0f, 0.3f}, .color = {1.0f, 1.0f, 1.0f}};
+        scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 5.0f, 10.0f}};
+        scene.lights.fill_shadow = {.enabled = true, .strength = 1.0f, .cascades = 1, .resolution = 1024};
+        int level[3] = {};
+        for (int i = 0; i < 3; ++i) {
+            scene.lights.fill_shadow.strength = i == 0 ? 1.0f : i == 1 ? 0.4f : 0.0f;
+            scene.clear();
+            stage.draw_floor(scene);
+            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            const Pixels p = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            // A floor point in the pole's shadow (away from the light 0.5, 1, 0.3: toward -x, -z of the foot).
+            const float ratio = 1.5f / 1.0f;
+            const Vec3f at = Vec3f{2.0f - 0.5f * ratio * 0.8f, 0.0f, -0.3f * ratio * 0.8f};
+            level[i] = brightness(p.at(scene.camera.project(at, rect)->pos));
+        }
+        std::cerr << "moon shadow strength 1, 0.4, 0: " << level[0] << ", " << level[1] << ", " << level[2] << "\n";
+        assert(level[0] < level[1] && level[1] < level[2]);
+    });
+}
+
+// Spot lights are fogged like everything else (the fog is applied to the lit colour), and the light shaders' fog variant is the plain
+// one's: a lit wall's colour through the fog is the formula's, on the unfogged picture of the same wall.
+void test_gpu_spot_light_fogged() {
+    with_gpu("test_gpu_spot_light_fogged", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const kin::Mesh wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 12.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        scene.lights.sun.color = {};
+        scene.lights.ambient = {};
+        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        scene.add_spot_light({.position = {0.0f, 0.0f, 4.0f}, .direction = {0.0f, 0.0f, -1.0f}, .color = {8.0f, 7.0f, 6.0f}, .radius = 30.0f,
+                              .inner_angle = 20.0f, .outer_angle = 50.0f});
+        const Pixels plain = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(!r3d.stats().fog_applied && r3d.stats().lights_variant);
+        scene.fog = {.enabled = true, .density = 0.06f, .colour = {0.2f, 0.3f, 0.5f}};
+        const Pixels fogged = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(r3d.stats().fog_applied && r3d.stats().lights_variant);
+        int worst = 0;
+        for (int y = 10; y < 120; y += 14) {
+            for (int x = 10; x < 160; x += 17) {
+                const kin::Ray3 ray = scene.camera.ray({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, screen);
+                const float t = (0.0f - ray.origin.z) / ray.direction.z;
+                const float distance = t;
+                const Vec3f want = kin::fog_apply(scene.fog, scene.sky, scene.lights.sun.direction, scene.lights.sun.color, scene.camera.position, ray.direction,
+                                                  distance, linear_of(plain.at(x, y)));
+                const int off = largest_difference(fogged.at(x, y), stored_of(want));
+                worst = std::max(worst, off);
+                if (off > 4) {
+                    std::cerr << "fogged spot at (" << x << ", " << y << "): got " << fogged.at(x, y) << ", the formula says " << stored_of(want) << "\n";
+                }
+                assert(off <= 4);
+            }
+        }
+        std::cerr << "spot light under fog against the formula: worst " << worst << " of 255\n";
+        // The lit pixel is changed by the fog (the fog is on the lit light, not beside it).
+        assert(largest_difference(fogged.at(80, 60), plain.at(80, 60)) > 20);
+    });
+}
+
+// Spot lights configured but off are not there: no spots, shadows not asked for, a moon shadow and a sun strength left at their defaults:
+// the picture is the plain one's, to the byte, and the light shaders are not used; likewise the same lights when all are black or out of reach.
+void test_gpu_spot_lights_off_is_unchanged() {
+    with_gpu("test_gpu_spot_lights_off_is_unchanged", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh cube = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto shoot = [&](const std::function<void(kin::Scene3D&)>& configure) {
+            kin::Scene3D scene;
+            scene.camera = stage.camera();
+            scene.lights.sun = {.direction = {1.0f, 1.0f, 0.2f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.fill = {.direction = {-0.5f, 0.4f, 0.1f}, .color = {0.2f, 0.2f, 0.3f}};
+            scene.lights.ambient = {0.1f, 0.1f, 0.12f};
+            scene.lights.shadow_area = kin::Bounds3{{-10.0f, -0.2f, -10.0f}, {10.0f, 5.0f, 10.0f}};
+            scene.lights.shadow_cascades = 2;
+            stage.draw_floor(scene);
+            scene.draw(cube, Mat4f::translation({1.0f, 0.5f, 1.0f}), {.color = Color::rgb(200, 100, 80)});
+            scene.add_light({.position = {-2.0f, 2.0f, 0.0f}, .color = {3.0f, 3.0f, 3.0f}, .radius = 6.0f});
+            configure(scene);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels plain = shoot([](kin::Scene3D&) {});
+        assert(!r3d.stats().lights_variant && r3d.stats().spots == 0);
+        const Pixels configured = shoot([](kin::Scene3D& scene) {
+            scene.lights.max_shadowed_spots = 8;
+            scene.lights.max_shadowed_points = 1;
+            scene.lights.local_shadow_resolution = 2048;
+            scene.lights.fill_shadow = {.enabled = false, .strength = 0.5f, .cascades = 4, .resolution = 4096};
+            scene.lights.sun_shadow_strength = 1.0f;
+        });
+        assert(!r3d.stats().lights_variant && r3d.stats().local_shadow_maps == 0 && r3d.stats().moon_cascades == 0);
+        assert(configured.rgba == plain.rgba);
+        // A point light that may cast but does not (`shadow.enabled` false) is drawn as before.
+        const Pixels unshadowed = shoot([](kin::Scene3D& scene) { scene.lights.points[0].shadow.resolution = 2048; });
+        assert(!r3d.stats().lights_variant && unshadowed.rgba == plain.rgba);
+        // A spot with no light, or out of the view's reach: not used (no variant), the picture is the plain one's.
+        const Pixels dark = shoot([](kin::Scene3D& scene) {
+            scene.add_spot_light({.position = {0.0f, 3.0f, 0.0f}, .color = {0.0f, 0.0f, 0.0f}});
+            scene.add_spot_light({.position = {0.0f, 3.0f, 400.0f}, .direction = {0.0f, 0.0f, 1.0f}, .color = {5.0f, 5.0f, 5.0f}, .radius = 10.0f});
+        });
+        assert(!r3d.stats().lights_variant && r3d.stats().spots == 0);
+        assert(dark.rgba == plain.rgba);
+        // The strength of the sun's shadow at 1 is the shader's old way; below it the light shaders are used, and 0 is no shadow at all.
+        const Pixels half = shoot([](kin::Scene3D& scene) { scene.lights.sun_shadow_strength = 0.5f; });
+        assert(r3d.stats().lights_variant && r3d.stats().shadow_cascades == 2);
+        const Pixels none = shoot([](kin::Scene3D& scene) { scene.lights.sun_shadow_strength = 0.0f; });
+        assert(r3d.stats().shadow_cascades == 0);
+        const Pixels off = shoot([](kin::Scene3D& scene) { scene.lights.shadow_area = kin::Bounds3{}; });
+        assert(none.rgba == off.rgba);
+        assert(pixels_differing(half, plain, 2) > 50 && pixels_differing(half, none, 2) > 50);
+    });
+}
+
+// A shadowed spot under temporal anti-aliasing: the shadow map is not jittered, so a still camera's frames settle: a lit floor within a
+// level of the frame before, a shadow's own hard edge within a few (it is sharper than a pixel: TAA resolves it over the frames), and the
+// darkened area is the same size frame to frame.
+void test_gpu_spot_shadow_under_taa() {
+    with_gpu("test_gpu_spot_shadow_under_taa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
+            return;
+        }
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const TopDown stage{r3d};
+        const kin::Mesh pole = make_box(r3d, {0.3f, 3.0f, 0.3f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        int worst_by[2] = {};
+        int dark_by[2][2] = {};
+        for (const bool shadow : {false, true}) {
+            kin::Scene3D scene;
+            scene.camera = stage.camera();
+            scene.taa.enabled = true;
+            scene.lights.sun.color = {};
+            scene.lights.ambient = {0.03f, 0.03f, 0.03f};
+            stage.draw_floor(scene);
+            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            kin::SpotLight spot{.position = {0.0f, 6.0f, 0.0f}, .direction = {0.0f, -1.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 25.0f, .size = 0.1f,
+                                .inner_angle = 45.0f, .outer_angle = 60.0f};
+            spot.shadow.enabled = shadow;
+            scene.add_spot_light(spot);
+            view.reset_history();
+            Pixels previous;
+            for (int f = 0; f < 24; ++f) {
+                const Pixels p = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                assert(!shadow || r3d.stats().local_shadow_maps > 0);
+                if (f >= 12) {
+                    int largest = 0, dark = 0;
+                    // The pole's own top (a geometric edge, which TAA resolves over frames at any rate) is left out of the shadow's measure.
+                    const auto top = scene.camera.project({2.0f, 3.0f, 0.0f}, screen);
+                    for (int y = 0; y < p.size.y; ++y) {
+                        for (int x = 0; x < p.size.x; ++x) {
+                            const bool near_pole = top && std::abs(static_cast<float>(x) - top->pos.x) < 9.0f && std::abs(static_cast<float>(y) - top->pos.y) < 9.0f;
+                            const std::size_t i = (static_cast<std::size_t>(y) * 160u + static_cast<std::size_t>(x)) * 4u;
+                            for (std::size_t c = 0; c < 3; ++c) {
+                                if (!near_pole) {
+                                    largest = std::max(largest, std::abs(int(p.rgba[i + c]) - int(previous.rgba[i + c])));
+                                }
+                            }
+                            dark += int(p.rgba[i + 1]) < 60 ? 1 : 0;
+                        }
+                    }
+                    worst_by[shadow] = std::max(worst_by[shadow], largest);
+                    dark_by[shadow][f == 12 ? 0 : 1] = dark;
+                }
+                previous = p;
+            }
+        }
+        std::cerr << "spot shadow under TAA, still camera: consecutive frames differ by at most " << worst_by[1] << " levels (" << worst_by[0]
+                  << " without the shadow); dark pixels " << dark_by[1][0] << " then " << dark_by[1][1] << " (without it: " << dark_by[0][1] << ")\n";
+        // Away from the pole's top: a smooth floor is within a level; the shadow's own edge, much sharper than a pixel, is TAA's to resolve and
+        // flickers by a few levels (the sun's does the same); more than that would be a map that moves.
+        assert(worst_by[0] <= 1 && worst_by[1] <= 4);
+        assert(std::abs(dark_by[1][0] - dark_by[1][1]) <= 40 && dark_by[1][1] > dark_by[0][1] + 40);
+    });
+}
+
+// The ECS: a PointLight3D and a SpotLight3D at their entities' places (the spot down its -Z axis), the entity's id naming each; a disabled one
+// is not collected.
+void test_ecs_lights() {
+    kin::EcsWorld world;
+    world.raw().entity().set(kin::Transform3D{.position = {1.0f, 2.0f, 3.0f}}).set(kin::PointLight3D{.color = {2.0f, 1.0f, 0.5f}, .radius = 7.0f});
+    const flecs::entity spot = world.raw().entity()
+                                   .set(kin::Transform3D{.position = {-4.0f, 5.0f, 0.0f}, .rotation = kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, -90.0f)})
+                                   .set(kin::SpotLight3D{.color = {1.0f, 1.0f, 1.0f}, .radius = 12.0f, .inner_angle = 15.0f, .outer_angle = 35.0f, .shadow = {.enabled = true}});
+    world.raw().entity().set(kin::Transform3D{}).set(kin::SpotLight3D{.enabled = false});
+    kin::WorldRenderState3D state{world};
+    state.propagate_transforms();
+    kin::Scene3D scene;
+    state.collect(scene);
+    assert(scene.lights.points.size() == 1 && scene.lights.spots.size() == 1);
+    assert(kin::length(scene.lights.points[0].position - Vec3f{1.0f, 2.0f, 3.0f}) < 1e-5f && scene.lights.points[0].radius == 7.0f && scene.lights.points[0].id != 0);
+    const kin::SpotLight& l = scene.lights.spots[0];
+    assert(kin::length(l.position - Vec3f{-4.0f, 5.0f, 0.0f}) < 1e-5f);
+    // -Z turned by -90 degrees about x: along +y or -y; the aim is the entity's -Z, whichever way the rotation takes it.
+    const Vec3f want = kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, -90.0f).rotate({0.0f, 0.0f, -1.0f});
+    assert(kin::length(l.direction - want) < 1e-4f);
+    assert(l.shadow.enabled && l.outer_angle == 35.0f && l.id == static_cast<kin::u32>(spot.id() & 0xFFFFFFFFu));
+}
+
 const char* test_filter = nullptr;
 bool selected(const char* name) { return !test_filter || std::strstr(name, test_filter) != nullptr; }
 #define RUN(test) \
@@ -10811,5 +12494,26 @@ int main(int argc, char** argv) {
     RUN(test_gpu_sky_image_mode());
     RUN(test_gpu_sky_stars_and_moon());
     RUN(test_gpu_sky_overlay_and_warm_up());
+    RUN(test_spot_light_maths());
+    RUN(test_local_shadow_views());
+    RUN(test_shadow_slots());
+    RUN(test_time_of_day_shadows());
+    RUN(test_ecs_lights());
+    RUN(test_gpu_spot_cone_matches_cpu());
+    RUN(test_gpu_spot_cone_edges());
+    RUN(test_gpu_spot_radius_fade());
+    RUN(test_gpu_spot_shadow_position());
+    RUN(test_gpu_spot_shadow_casters());
+    RUN(test_gpu_spot_shadow_acne());
+    RUN(test_gpu_spot_shadow_distance());
+    RUN(test_gpu_spot_receives_shadow_flag());
+    RUN(test_gpu_spot_shadow_clustered_caster());
+    RUN(test_gpu_spot_shadow_cache());
+    RUN(test_gpu_spot_shadow_budget());
+    RUN(test_gpu_point_shadow_cube());
+    RUN(test_gpu_moon_shadow());
+    RUN(test_gpu_spot_light_fogged());
+    RUN(test_gpu_spot_lights_off_is_unchanged());
+    RUN(test_gpu_spot_shadow_under_taa());
     return 0;
 }

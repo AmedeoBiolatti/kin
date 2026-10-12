@@ -192,6 +192,13 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   moon and the fog together; and "Sky lights the scene", which makes the ambient light and the reflections from the sky (the panorama
   is made again as the sun moves). `--preset sky`, `dusk`, `fog`, `night`, `day-night` (the last plays a day: `--frames 400`).
   A run with no display: `sponza_walk --headless --preset dusk --camera roof --screenshot dusk.png`.
+- The "Spot lights and shadows (P3b)" section: spot lights dropped at the camera with J (they shine the way it looked; a small marker
+  shows each), a flashlight carried with the camera (intensity, inner and outer angle, radius, shadow), a ring of spot lamps hung over
+  the model's middle (count, intensity, angles, radius) and a ring of point lamps (cube shadows), the shadow maps' size, how many the
+  most important of the lights get (spots up to 8, point lights up to 2), the bias, the normal offset and the filter's width, and the
+  moon's shadow (the fill light's own cascades, faded with the moon's height under the time of day). The stats show the lights, the
+  maps drawn and kept, and the memory. `--preset spots`, `flashlight`, `moon`, `lamps`. A run with no display:
+  `sponza_walk --headless --preset flashlight --screenshot torch.png`. The panel's click path is untested here (no display).
 - The "Physics (Jolt: kin/physics3d)" section turns on `WorldPhysicsState3D` over the viewer's ECS world: a floor at y = 0 (Sponza's own
   collision is not used: the viewer holds no triangles of the model) and boxes thrown from the camera (key B or the button: count, size,
   speed), stepped at 60 Hz, with the debug lines on or off (shapes green while awake and blue once asleep, contacts as red crosses with

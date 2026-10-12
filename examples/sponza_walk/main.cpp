@@ -116,6 +116,11 @@ const std::map<std::string, std::string>& presets() {
         {"dusk", "sky=on,tod=on,tod_hours=19.4,sky_lights=on,fog=on,fog_density=0.003,hdr=on,bloom=0.4,cascades=4,shadow_distance=60"},
         {"fog", "sky=on,tod=on,tod_hours=7.4,fog=on,fog_density=0.02,fog_height_density=0.08,fog_falloff=0.12,fog_base=4,hdr=on,bloom=0.3"},
         {"night", "sky=on,tod=on,tod_hours=1.5,sky_lights=on,fog=on,fog_density=0.004,hdr=on,bloom=0.3,exposure=1.5"},
+        // Spot lights and shadows from lights that are not the sun (P3b).
+        {"spots", "sun=off,ambient_intensity=0.12,spot_ring=4,hdr=on,bloom=0.25,shadows=off"},
+        {"flashlight", "sun=off,ambient_intensity=0.04,flashlight=on,hdr=on,bloom=0.2,shadows=off"},
+        {"moon", "sky=on,tod=on,tod_hours=0,moon_shadow=on,sky_lights=on,hdr=on,exposure=8,cascades=2,shadow_distance=80"},
+        {"lamps", "sun=off,ambient_intensity=0.08,spot_ring=2,point_ring=2,fog=on,fog_density=0.004,fog_from_sky=off,hdr=on,bloom=0.3,shadows=off"},
         {"day-night", "sky=on,tod=on,tod_play=on,tod_speed=3600,sky_lights=on,fog=on,fog_density=0.003,hdr=on,bloom=0.35,cascades=4,shadow_distance=60"},
     };
     return p;
@@ -227,7 +232,7 @@ struct Row {
 };
 
 struct Hooks {
-    std::function<void()> view_nave, view_roof, drop_light, clear_lights, screenshot, print, reset, reset_history, throw_boxes, clear_boxes, respawn;
+    std::function<void()> view_nave, view_roof, drop_light, clear_lights, drop_spot, clear_spots, screenshot, print, reset, reset_history, throw_boxes, clear_boxes, respawn;
 };
 
 struct Caps {
@@ -402,6 +407,33 @@ private:
         light_slider("light_b", "Newest: blue", nullptr, 2, 0.0f, 40.0f);
         light_slider("light_radius", "Newest: radius", &PointLight::radius, 0, 0.5f, 40.0f);
         light_slider("light_size", "Newest: size", &PointLight::size, 0, 0.01f, 2.0f);
+
+        section("Spot lights and shadows (P3b)");
+        button("drop_spot", "Drop a spot light at the camera (J)", _h.drop_spot);
+        button("clear_spots", "Clear the dropped spot lights", _h.clear_spots);
+        check("flashlight", "Flashlight (a spot light carried with the camera)", s.flashlight);
+        slider("flash_intensity", "Flashlight intensity", s.flash_intensity, 1.0f, 200.0f);
+        slider("flash_inner", "Flashlight inner angle", s.flash_inner, 0.0f, 60.0f);
+        slider("flash_outer", "Flashlight outer angle", s.flash_outer, 1.0f, 80.0f);
+        slider("flash_radius", "Flashlight radius", s.flash_radius, 2.0f, 80.0f);
+        check("flash_shadow", "Flashlight casts a shadow", s.flash_shadow);
+        islider("spot_ring", "A ring of spot lamps over the model (0: none)", s.spot_ring, 0, 12);
+        slider("spot_ring_intensity", "Lamp intensity", s.spot_ring_intensity, 1.0f, 300.0f);
+        slider("spot_inner", "Lamps' inner angle", s.spot_inner, 0.0f, 80.0f);
+        slider("spot_outer", "Lamps' outer angle", s.spot_outer, 1.0f, 88.0f);
+        slider("spot_radius", "Lamps' radius", s.spot_radius, 2.0f, 60.0f);
+        check("spot_shadows", "Spot lamps cast shadows", s.spot_shadows);
+        choice("spot_shadow_resolution", "Spot map size", s.spot_shadow_resolution, {"256", "512", "1024", "2048"});
+        islider("spot_shadow_count", "Spot shadow maps a frame (the most important)", s.spot_shadow_count, 0, 8);
+        slider("spot_bias", "Shadow bias (texels)", s.spot_bias, 0.0f, 4.0f);
+        slider("spot_normal_offset", "Shadow normal offset (texels)", s.spot_normal_offset, 0.0f, 4.0f);
+        slider("spot_softness", "Shadow filter width (texels)", s.spot_softness, 0.25f, 3.0f);
+        islider("point_ring", "Point lamps over the model, cube shadows (0: none)", s.point_ring, 0, 6);
+        check("point_shadows", "Point lamps cast shadows", s.point_shadows);
+        islider("point_shadow_count", "Point shadow cubes a frame", s.point_shadow_count, 0, 2);
+        check("moon_shadow", "The moon casts shadows (the fill light's cascades; fades with its height with the time of day)", s.moon_shadow);
+        islider("moon_cascades", "Moon cascades", s.moon_cascades, 1, 4);
+        note("Presets: spots, flashlight, moon, lamps. The sun's shadows need Shadows on; spots and lamps use the maps above, not the cascades.");
 
         section("Shadows");
         check("shadows", "Sun shadows", s.shadows);
@@ -827,6 +859,8 @@ private:
         h.view_roof = [this] { reference_view(true); };
         h.drop_light = [this] { drop_light(); };
         h.clear_lights = [this] { _s.points.clear(); };
+        h.drop_spot = [this] { drop_spot(); };
+        h.clear_spots = [this] { _s.spots.clear(); };
         h.screenshot = [this] { _shot_requested = true; };
         h.print = [this] { print_settings(); };
         h.reset = [this] { reset_all(); };
@@ -894,6 +928,21 @@ private:
         if (_s.points.size() >= 16) _s.points.erase(_s.points.begin());
         _s.points.push_back(l);
     }
+    // A spot light at the camera, shining the way it looks (the newest settings: the ring's angles, radius and shadow).
+    void drop_spot() {
+        SpotLight l;
+        l.position = _pos;
+        l.direction = camera().forward();
+        l.color = {40.0f, 36.0f, 28.0f};
+        l.radius = _s.spot_radius;
+        l.size = 0.1f;
+        l.inner_angle = _s.spot_inner;
+        l.outer_angle = std::max(_s.spot_outer, _s.spot_inner + 0.5f);
+        l.shadow.enabled = _s.spot_shadows;
+        l.id = 0x7C000000u + static_cast<unsigned>(_spot_serial++);
+        if (_s.spots.size() >= 16) _s.spots.erase(_s.spots.begin());
+        _s.spots.push_back(l);
+    }
     void reset_all() {
         const Settings fresh;
         const float sensitivity = _options.sensitivity > 0 ? _options.sensitivity : fresh.sensitivity;
@@ -918,6 +967,7 @@ private:
         if (input.frame_pressed(Key::Num2)) reference_view(true);
         if (input.frame_pressed(Key::L)) _s.sun_animate = !_s.sun_animate;
         if (input.frame_pressed(Key::K)) drop_light();
+        if (input.frame_pressed(Key::J)) drop_spot();
         if (input.frame_pressed(Key::B)) throw_boxes();
         if (input.frame_pressed(Key::R) && (_s.ctrl || _s.climb)) {
             respawn_controller();
@@ -1856,6 +1906,15 @@ private:
                 const float r = std::max(0.04f, l.size);
                 _scene.draw(_marker, Mat4f::translation(l.position) * Mat4f::scaling({r, r, r}), marker);
             }
+            for (const SpotLight& l : _s.spots) {
+                Material3D marker;
+                marker.color = Color::rgb(255, 230, 160);
+                marker.unlit = true;
+                marker.casts_shadow = false;
+                marker.receives_shadow = false;
+                const float r = std::max(0.05f, l.size);
+                _scene.draw(_marker, Mat4f::translation(l.position) * Mat4f::scaling({r, r, r}), marker);
+            }
         }
     }
 
@@ -2129,6 +2188,12 @@ private:
         std::snprintf(line, sizeof line, "ao: %u draws, %u meshes, %u dispatches%s   lights %u", st.ao_draws, st.ao_instances, st.ao_dispatches,
                       st.ao_chain_built ? " (depth chain)" : "", st.lights);
         lines.push_back(line);
+        if (st.spots > 0 || st.local_shadow_maps > 0 || st.moon_cascades > 0) {
+            std::snprintf(line, sizeof line, "spots %u   local maps %u (%u drawn, %u kept) %u draws   moon cascades %u   %.1f MiB%s", st.spots,
+                          st.local_shadow_maps, st.local_shadow_drawn, st.local_shadow_cached, st.local_shadow_draws, st.moon_cascades,
+                          double(st.local_shadow_bytes) / 1048576.0, st.lights_variant ? "" : "   (light shaders off)");
+            lines.push_back(line);
+        }
         if (st.feature_bytes > 0 || st.taa_main_velocity) {
             std::snprintf(line, sizeof line, "feature targets %.1f MiB%s%s", double(st.feature_bytes) / 1048576.0,
                           st.taa_main_velocity ? "   taa velocity from the main pass" : "", st.blur_merged ? "   one blur for ao and contact" : "");
@@ -2249,6 +2314,7 @@ private:
     Vec3f _pos{}, _velocity{};
     float _yaw = 0, _pitch = 0;
     float _frame_ms = 0, _scroll = 0, _content = 0;
+    int _spot_serial = 0; // names the spot lights dropped with J, for the choice of which has a shadow map
     int _frames = 0;
     bool _warmed = false;
     std::tuple<bool, bool, bool, bool, bool, bool, int, bool, bool, bool, bool, bool, int, u32, bool, int, int> _warmed_key;

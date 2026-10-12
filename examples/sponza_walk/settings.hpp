@@ -81,6 +81,33 @@ struct Settings {
     // Point lights (at most 16 light a frame)
     std::vector<PointLight> points;
     bool light_markers = true;
+    // Spot lights and the shadows of lights that are not the sun (P3b). `spots` are dropped at the camera (J) and shine the way it looked;
+    // the flashlight is carried with the camera; a ring of `spot_ring` lamps hangs over the model's middle, and `point_ring` point lamps
+    // (cube shadows) beside them. The maps are given to the most important (`spot_shadow_count`, `point_shadow_count`); the moon's shadow is
+    // the fill light's own cascades (with the time of day, faded in with the moon's height).
+    std::vector<SpotLight> spots;
+    bool flashlight = false;
+    float flash_intensity = 45.0f;  // the light a white surface shows one unit away
+    float flash_inner = 7.0f;
+    float flash_outer = 16.0f;
+    float flash_radius = 30.0f;
+    bool flash_shadow = true;
+    int spot_ring = 0;
+    float spot_ring_intensity = 60.0f;
+    float spot_inner = 22.0f;       // for the ring and the lights dropped from now on
+    float spot_outer = 40.0f;
+    float spot_radius = 16.0f;
+    bool spot_shadows = true;       // a light made from now on asks for a shadow
+    int spot_shadow_resolution = 2; // index into local_resolutions
+    int spot_shadow_count = 4;      // Lights3D::max_shadowed_spots (0 to 8)
+    float spot_bias = 1.0f;
+    float spot_normal_offset = 1.5f;
+    float spot_softness = 1.0f;
+    int point_ring = 0;
+    bool point_shadows = true;
+    int point_shadow_count = 2;     // Lights3D::max_shadowed_points (0 to 2)
+    bool moon_shadow = false;       // the fill light's cascades (needs shadows on and, for the moon, the time of day)
+    int moon_cascades = 2;
     // Shadows
     bool shadows = true;
     int shadow_resolution = 2; // index into shadow_resolutions
@@ -239,6 +266,7 @@ struct Settings {
 };
 
 inline constexpr unsigned shadow_resolutions[] = {512, 1024, 2048, 4096};
+inline constexpr unsigned local_resolutions[] = {256, 512, 1024, 2048};
 
 // What a view is made with: changing one means making the view again.
 struct ViewKey {
@@ -275,7 +303,65 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     l.environment_intensity = s.environment_intensity;
     l.environment_rotation = s.environment_rotation;
     l.points = s.points;
-    if (s.shadows && s.sun) {
+    // Spot lights and local shadows (P3b), none unless asked for.
+    {
+        const unsigned local_res = local_resolutions[std::clamp(s.spot_shadow_resolution, 0, 3)];
+        const auto shadow_of = [&](bool wanted) {
+            LightShadow3D sh;
+            sh.enabled = wanted;
+            sh.resolution = local_res;
+            sh.bias = s.spot_bias;
+            sh.normal_offset = s.spot_normal_offset;
+            sh.softness = s.spot_softness;
+            return sh;
+        };
+        l.spots = s.spots;
+        if (s.flashlight) {
+            const Camera3D& cam = scene.camera;
+            SpotLight torch;
+            torch.position = cam.position + cam.right() * 0.18f - cam.up() * 0.14f + cam.forward() * 0.1f;
+            torch.direction = cam.forward();
+            torch.color = Vec3f{1.0f, 0.96f, 0.88f} * s.flash_intensity;
+            torch.radius = s.flash_radius;
+            torch.size = 0.04f;
+            torch.inner_angle = s.flash_inner;
+            torch.outer_angle = std::max(s.flash_outer, s.flash_inner + 0.5f);
+            torch.shadow = shadow_of(s.flash_shadow);
+            torch.id = 0x7F000001u;
+            l.spots.push_back(torch);
+        }
+        const Vec3f centre = area.center(), half = area.size() * 0.5f;
+        for (int i = 0; i < s.spot_ring; ++i) {
+            const float t = s.spot_ring > 1 ? float(i) / float(s.spot_ring - 1) * 2.0f - 1.0f : 0.0f;
+            SpotLight lamp;
+            lamp.position = {centre.x + t * half.x * 0.7f, area.min.y + std::min(half.y * 1.1f, 7.0f), centre.z + (i % 2 ? 0.25f : -0.25f) * half.z};
+            lamp.direction = {0.0f, -1.0f, i % 2 ? -0.2f : 0.2f};
+            lamp.color = Vec3f{1.0f, 0.82f, 0.6f} * s.spot_ring_intensity;
+            lamp.radius = s.spot_radius;
+            lamp.size = 0.15f;
+            lamp.inner_angle = s.spot_inner;
+            lamp.outer_angle = std::max(s.spot_outer, s.spot_inner + 0.5f);
+            lamp.shadow = shadow_of(s.spot_shadows);
+            lamp.id = 0x7E000000u + static_cast<unsigned>(i);
+            l.spots.push_back(lamp);
+        }
+        for (int i = 0; i < s.point_ring; ++i) {
+            const float t = s.point_ring > 1 ? float(i) / float(s.point_ring - 1) * 2.0f - 1.0f : 0.0f;
+            PointLight lamp;
+            lamp.position = {centre.x + t * half.x * 0.45f, area.min.y + std::min(half.y * 0.55f, 3.2f), centre.z + (i % 2 ? 0.3f : -0.3f) * half.z};
+            lamp.color = Vec3f{0.9f, 0.95f, 1.0f} * (s.spot_ring_intensity * 0.5f);
+            lamp.radius = s.spot_radius;
+            lamp.size = 0.2f;
+            lamp.shadow = shadow_of(s.point_shadows);
+            lamp.id = 0x7D000000u + static_cast<unsigned>(i);
+            l.points.push_back(lamp);
+        }
+        l.max_shadowed_spots = static_cast<u32>(std::clamp(s.spot_shadow_count, 0, 8));
+        l.max_shadowed_points = static_cast<u32>(std::clamp(s.point_shadow_count, 0, 2));
+        l.local_shadow_resolution = local_res;
+        l.fill_shadow = {.enabled = s.moon_shadow, .strength = 1.0f, .cascades = static_cast<u32>(std::clamp(s.moon_cascades, 1, 4)), .resolution = 1024};
+    }
+    if (s.shadows && (s.sun || s.moon_shadow)) {
         l.shadow_area = s.shadow_area == int(ShadowArea::Auto)
                             ? area
                             : Bounds3{eye - Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent},
@@ -324,7 +410,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     if (s.tod) {
         const Vec3f own_fog = scene.fog.colour;
         const bool moon = s.sky_moon;
-        kin::apply({.hours = s.tod_hours, .day_of_year = s.tod_day, .latitude = s.tod_latitude}, l, scene.sky, scene.fog);
+        kin::apply({.hours = s.tod_hours, .day_of_year = s.tod_day, .latitude = s.tod_latitude, .shadows = s.moon_shadow}, l, scene.sky, scene.fog);
         scene.sky.moon = scene.sky.moon && moon;
         if (s.fog_from_sky) scene.fog.colour = own_fog;
         if (!s.sun) l.sun.color = {};

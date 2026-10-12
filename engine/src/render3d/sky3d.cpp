@@ -258,12 +258,22 @@ SkyState3D apply(const TimeOfDay3D& time, Lights3D& lights, Sky3D& sky, Fog3D& f
     const SkyState3D s = evaluate(time, sky);
     lights.sun.direction = s.sun_direction;
     lights.sun.color = s.sun_color;
-    // The moon is the fill light: no shadow of its own (one shadow-casting light is all the renderer has yet).
+    // The moon is the fill light; with TimeOfDay3D::shadows it casts a shadow of its own, faded in with its height and light.
     const bool moon_up = s.moon_color.x + s.moon_color.y + s.moon_color.z > 0.0f;
     lights.fill.direction = s.moon_direction;
     lights.fill.color = s.moon_color;
     lights.ambient = s.ambient;
     lights.ground_ambient = s.ground_ambient;
+    if (time.shadows) {
+        const auto smooth = [](f32 a, f32 b, f32 x) {
+            const f32 t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+            return t * t * (3.0f - 2.0f * t);
+        };
+        lights.sun_shadow_strength = smooth(-2.0f, 1.0f, s.sun_elevation);
+        const f32 strength = smooth(0.0f, 8.0f, s.moon_elevation) * smooth(0.004f, 0.02f, s.moon_light);
+        lights.fill_shadow.strength = strength;
+        lights.fill_shadow.enabled = strength > 0.0f;
+    }
     sky.moon = moon_up;
     sky.moon_direction = s.moon_direction;
     sky.moon_light = s.moon_light;

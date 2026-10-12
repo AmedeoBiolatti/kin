@@ -77,6 +77,29 @@ struct MeshRenderer {
     bool visible = true;
 };
 
+// A point light at the entity's WorldTransform3D (P3b; opt-in: no light components, no lights). WorldRenderState3D::collect
+// adds each to Scene3D::lights.points, with the entity's id as the light's id (so its shadow slot is kept while it stays
+// important).
+struct PointLight3D {
+    Vec3f color{1.0f, 1.0f, 1.0f}; // linear; as PointLight::color
+    f32 radius = 5.0f;
+    f32 size = 0.01f;
+    LightShadow3D shadow{};
+    bool enabled = true;
+};
+
+// A spot light at the entity's WorldTransform3D, shining down the entity's own -Z axis (the way a camera looks; turn the
+// entity to aim it, or parent it to a camera or a hand). collect() adds each to Scene3D::lights.spots.
+struct SpotLight3D {
+    Vec3f color{1.0f, 1.0f, 1.0f};
+    f32 radius = 10.0f;
+    f32 size = 0.01f;
+    f32 inner_angle = 20.0f; // degrees; see SpotLight
+    f32 outer_angle = 30.0f;
+    LightShadow3D shadow{};
+    bool enabled = true;
+};
+
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the rest
 // pose without one). Not MeshRenderer: a mesh renderer's entities are instances of one mesh and merge into one draw, and a
 // character is a model of several parts with a skeleton and a pose of its own.
@@ -332,6 +355,7 @@ public:
 
     // Every WorldTransform3D from its Transform3D and its parent's, parents first.
     void propagate_transforms();
+    // (Also: a light in `scene` for each PointLight3D and SpotLight3D, at its entity's place.)
     // A draw into `scene` for each mesh and material the MeshRenderers use, all
     // their entities instances of it (in the order the world keeps them); and each SkinnedMeshRenderer's model in its
     // animator's pose (draw_skinned, one range of matrices for all its parts).
@@ -364,6 +388,8 @@ private:
     flecs::query<const SkinnedMeshRenderer, Animator3D, Transform3D*> _animators; // the transform is optional (a pointer)
     flecs::query<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*> _skinned; // the animator is optional
     flecs::query<TimeOfDay3D> _time_of_day;
+    flecs::query<const WorldTransform3D, const PointLight3D> _point_lights;
+    flecs::query<const WorldTransform3D, const SpotLight3D> _spot_lights;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
     struct Bucket {
         Mesh mesh;

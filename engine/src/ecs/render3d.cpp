@@ -50,7 +50,9 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
       _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer>().cached().build()),
       _animators(world.query_builder<const SkinnedMeshRenderer, Animator3D, Transform3D*>().build()),
       _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()),
-      _time_of_day(world.query_builder<TimeOfDay3D>().build()) {}
+      _time_of_day(world.query_builder<TimeOfDay3D>().build()),
+      _point_lights(world.query_builder<const WorldTransform3D, const PointLight3D>().build()),
+      _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D>().build()) {}
 
 void WorldRenderState3D::advance_time_of_day(f32 dt) {
     _time_of_day.each([dt](TimeOfDay3D& time) { kin::advance(time, dt); });
@@ -470,6 +472,21 @@ void WorldRenderState3D::collect(Scene3D& scene) {
     for (const Bucket& bucket : _buckets) {
         scene.draw_instanced(bucket.mesh, bucket.instances, bucket.material);
     }
+    // Lights (P3b): the entity's place, and for a spot its -Z axis; the entity's id names the light across frames.
+    _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light) {
+        if (light.enabled) {
+            scene.add_light({.position = world.position(), .color = light.color, .radius = light.radius, .size = light.size, .shadow = light.shadow,
+                             .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+        }
+    });
+    _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light) {
+        if (light.enabled) {
+            const Vec3f axis = world.matrix.apply_vector({0.0f, 0.0f, -1.0f});
+            scene.add_spot_light({.position = world.position(), .direction = length_squared(axis) > 0.0f ? normalize(axis) : Vec3f{0.0f, -1.0f, 0.0f},
+                                  .color = light.color, .radius = light.radius, .size = light.size, .inner_angle = light.inner_angle,
+                                  .outer_angle = light.outer_angle, .shadow = light.shadow, .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+        }
+    });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
     _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator) {
         const Model* model = renderer.model.get();

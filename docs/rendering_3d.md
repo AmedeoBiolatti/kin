@@ -152,7 +152,8 @@ stands in them blazes white. Before G1a the fall-off was `(1 - d^2/r^2)^2` witho
 square: colours of those days are about the old colour times the square of the
 distance they were used at. At most 16 point lights light a
 frame: those whose reach is in view, the strongest and nearest first; point
-lights are cleared with the draws. Light is added in linear light; the result
+lights are cleared with the draws. Spot lights (`add_spot_light`, a cone of a point light) and the shadows of lights that are not the sun
+are below ("Spot lights and shadows from lights that are not the sun"). Light is added in linear light; the result
 is stored as the 2D pipeline stores colour, or kept HDR (see Views).
 
 Image-based light: `scene.lights.environment` is an `Environment3D`, an
@@ -449,6 +450,69 @@ whether or not the sky is drawn. Without it the hemisphere ambient is used as be
 `warm_up()` makes the sky's, the fog variants' and the dither's pipelines too. Harness: `kin_reference` JSON `sky`, `fog`,
 `time_of_day`, `lights.sky_lights_scene`, a camera's `hours`, `at_sun`, `at_moon`; `procedural: "landscape"`; scenes `sky_day`, `sky_dusk`,
 `sky_night`, `fog_valley`, `tod_sweep`. Sponza Walk's "Sky and fog (P3a)" section and `--preset sky|dusk|fog|night|day-night`.
+
+### Spot lights and shadows from lights that are not the sun
+
+Off by default; off, the picture and the cost are those without them (the old shaders are not touched: the stock fragment shader has four
+more variants, used only when a scene has a spot light, a local shadow or a moon shadow). `kin/render3d/scene3d.hpp` (`SpotLight`,
+`LightShadow3D`, `DirectionalShadow3D`, `Lights3D::spots`), `kin/render3d/local_lights.hpp` (the maths); docs/3d_plan.md "P3b" has the models
+and the numbers.
+
+```cpp
+kin::SpotLight torch{.position = camera.position, .direction = camera.forward(), .color = {40, 38, 30}, .radius = 30.0f,
+                     .inner_angle = 8.0f, .outer_angle = 18.0f};      // degrees from the axis
+torch.shadow = {.enabled = true, .resolution = 1024};                  // a shadow map, if it is among the most important
+scene.add_spot_light(torch);
+
+kin::PointLight lamp{.position = {0, 3.5f, 0}, .color = {30, 27, 22}, .radius = 20.0f};
+lamp.shadow.enabled = true;                                            // a cube of six maps (the faces the view can use)
+scene.add_light(lamp);
+
+scene.lights.max_shadowed_spots = 4;       // up to 8; of the lights that ask, the most important this many a frame get a map
+scene.lights.max_shadowed_points = 2;      // up to 2 cubes
+scene.lights.fill_shadow = {.enabled = true, .cascades = 2};           // the fill light (the moon) casts: its own cascades, over shadow_area
+```
+
+**A spot light** is a point light inside a cone: the same photometry (`color` is what a white surface in the middle of the cone shows
+one unit away), `radius` and `size`, and a smooth falloff between `inner_angle` (full light) and `outer_angle` (none), by glTF's punctual
+spot curve: `t = clamp((cos a - cos outer) / (cos inner - cos outer), 0, 1)`, light times `t * t`. Exactly zero from the outer angle
+on, exactly full inside the inner one. At most 16 reach the view a frame (the cone's bounding sphere in view, the strongest and nearest
+first, as the point lights). `kin::spot_attenuation(light, point)` is the same number on the CPU.
+
+**Shadows.** A light's `shadow.enabled` asks for a map; of the spots in view that ask, the `max_shadowed_spots` most important have one,
+and of the point lights the `max_shadowed_points`. A map is a perspective depth map over the cone (a point light's: six 90-degree faces
+with a guard band, only those a visible surface can fall in drawn), in one array whose side is the largest `resolution` any shadow
+light asks for (default `Lights3D::local_shadow_resolution`, 1024; a light that asks for less draws into a corner of it). Importance is
+intensity times reach times the share of the view the light fills, and a light that had a map last frame counts 1.5 times over, so the
+choice does not flip between frames; name a light with `id` (else its index in the list) to keep that across frames. Filtering is
+3x3 comparisons as the sun's, `bias` (texels, times 1 + the surface's slope to the light) and `normal_offset` (texels) in the light's
+own texel at the surface's distance, `softness` the taps' spacing, `near_plane` the map's, and `distance` the reach (the shadow fades
+out over its last fifth and the map ends there). Casters are what the cone and the radius reach: opaque and cut-out meshes, instanced
+and posed (skinned) copies, levels of detail by the camera's choice, and clustered meshes cut from the light's own point of view (the
+error is judged in the map's texels). `Material3D::receives_shadow` and `casts_shadow` govern these shadows too; custom material shaders
+get neither the spots nor the shadows; the overlay gets the lights without shadows.
+
+**The moon.** `Lights3D::fill_shadow` makes the fill light cast through its own cascades (1 to 4, `Lights3D::shadow_area` and
+`shadow_distance` as the sun's, `resolution` of its own), drawn from the same casters. `strength` (0 to 1) lightens it. With
+`TimeOfDay3D::shadows = true`, `apply()` sets `fill_shadow.enabled` and `strength` from the moon's height (fading in over its first 8
+degrees, with its light) and `Lights3D::sun_shadow_strength` from the sun's (0 under 2 degrees below the horizon, 1 above 1 degree above
+it): a strength under 1 uses the light shaders, 0 draws no sun map. At dusk both cast: up to the sun's cascades plus the moon's.
+
+**Kept while nothing moves.** `lights.cache_shadows` keeps each local map as it is cached: the exact bytes the draw is a function of (the
+view's matrix and size, each caster's mesh, material, copies and pose, the cut's settings) are compared, so a static spot over static
+casters costs nothing after its first render, a moved light or caster redraws only its own map, and the camera is not part of it for a spot
+or a point light (it is for the moon's cascades). `stats()` has `spots`, `spot_slot[i]` / `point_slot[i]` (the slot of `Lights3D::spots[i]`
+and `points[i]`, -1 none), `local_shadow_maps`, `local_shadow_drawn`, `local_shadow_cached`, `local_shadow_draws`, `local_shadow_casters`,
+`moon_cascades`, `local_shadow_bytes` and `lights_variant`.
+
+Harness: `kin_reference` JSON `lights.spots` (`attach` carries one with the camera), `lights.points[].shadow`, `lights.fill_shadow`,
+`time_of_day.shadows`, `procedural: "stage"`, options `--spots`, `--spot-shadows`, `--point-lights`, `--point-shadows`, `--moon-shadow`, `--local-res`;
+scenes `spot_shadows`, `spot_night`, `spot_budget`, `moon_shadow`, `point_shadow`. Sponza Walk's "Spot lights and shadows" section and `--preset
+spots|flashlight|moon|lamps`. `warm_up()` makes the light variants' pipelines and the maps the configured lights will want.
+
+Memory: a layer is `side`^2 x 4 bytes (a spot 4 MiB at 1024, 1 MiB at 512), a point light six layers; the array holds the layers asked for
+and gives them back after 120 idle renders. Not done: shadows from custom material shaders' own light, contact shadows for spots, a light
+cone's in-scattering in fog (a lamp in mist shows no beam), soft shadows by light size (the filter is a fixed width).
 
 ## Custom shaders
 
@@ -769,6 +833,10 @@ state.propagate_transforms();
 state.collect(scene);
 ```
 
+**Lights.** `PointLight3D` and `SpotLight3D` (colour, radius, size, for a spot the cone's angles, a `LightShadow3D`, `enabled`) on an entity
+with a `Transform3D` put a light at its place in `collect(scene)` (a spot shines down the entity's own -Z, the way a camera looks; parent it to a
+camera or a hand to carry it); the entity's id names the light for the choice of which has a shadow map.
+
 **Characters.** `SkinnedMeshRenderer{.model}` (a `std::shared_ptr<const Model>`: its parts, skeleton and clips) draws the model at the
 entity's `WorldTransform3D`, in the pose of the entity's `Animator3D`. It is its own component, not `MeshRenderer`: a mesh renderer's
 entities merge into one instanced draw of one mesh, and a character is several parts with a skeleton and a pose of its own.
@@ -823,7 +891,9 @@ feature is a field and a row in its table of switches; `--set`, `--preset` and
 among them): a hand to a target, the head to the camera, feet on the floor and a step, FABRIK on the tail to a green ball, joint
 limits, foot locking, toes, and a person that drifts from side to side to see feet lock (`--preset ik`, `ik-reach`, `ik-tail`,
 `ik-walk`, `ik-all`). What the panel does to the constraints is `examples/sponza_walk/ik_rig.hpp`, which a unit test drives. Its "Sky and fog"
-section (P3a) has the sky, fog, time of day and the sky's light on switches (`--preset sky`, `dusk`, `fog`, `night`, `day-night`).
+section (P3a) has the sky, fog, time of day and the sky's light on switches (`--preset sky`, `dusk`, `fog`, `night`, `day-night`); its "Spot
+lights and shadows" section (P3b) drops spot lights at the camera (J), carries a flashlight, hangs rings of spot and point lamps over the
+model and switches their shadow maps, the moon's shadow and the budget (`--preset spots`, `flashlight`, `moon`, `lamps`).
 
 ## Cameras
 

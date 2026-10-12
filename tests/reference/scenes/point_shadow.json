@@ -1,0 +1,130 @@
+{
+ "name": "point_shadow",
+ "purpose": "A lamp in a room (P3b): one shadowed point light (a cube map of six faces) hanging in a closed room 24 m by 22 under a 6 m ceiling; pillars, poles, a cut-out tree and benches cast onto the floor, the walls and the ceiling, in every direction round the lamp. 'room' sees the room from a corner, 'ceiling' looks up.",
+ "procedural": "stage",
+ "stage": {
+  "walls": true,
+  "room": true,
+  "pillars": [
+   [
+    -5.0,
+    -6.0
+   ],
+   [
+    6.0,
+    -8.0
+   ]
+  ],
+  "poles": [
+   [
+    2.0,
+    -1.0
+   ],
+   [
+    -2.5,
+    0.5
+   ]
+  ],
+  "trees": [
+   [
+    -7.5,
+    -2.0
+   ]
+  ],
+  "benches": [
+   [
+    5.0,
+    2.0
+   ]
+  ],
+  "lamps": [
+   [
+    0.0,
+    -3.0,
+    3.2
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.0,
+  "background": [
+   5,
+   5,
+   8
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    0,
+    0,
+    0
+   ]
+  },
+  "ambient": [
+   0.02,
+   0.02,
+   0.025
+  ],
+  "points": [
+   {
+    "position": [
+     0.0,
+     3.5,
+     -3.0
+    ],
+    "color": [
+     30,
+     27,
+     22
+    ],
+    "radius": 22.0,
+    "size": 0.25,
+    "shadow": {
+     "enabled": true,
+     "resolution": 1024
+    }
+   }
+  ]
+ },
+ "cameras": [
+  {
+   "name": "room",
+   "eye": [
+    10.0,
+    4.5,
+    6.5
+   ],
+   "target": [
+    -2.0,
+    1.5,
+    -6.0
+   ],
+   "fov": 70,
+   "near": 0.1
+  },
+  {
+   "name": "ceiling",
+   "eye": [
+    4.0,
+    1.5,
+    4.0
+   ],
+   "target": [
+    -3.0,
+    5.0,
+    -8.0
+   ],
+   "fov": 75,
+   "near": 0.1
+  }
+ ]
+}

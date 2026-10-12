@@ -26,6 +26,11 @@ struct TimeOfDay3D {
     // A game clock (advance(), and WorldRenderState3D::advance_time_of_day): game seconds that pass each real second
     // (60: a game hour a real minute; 0: it stands still).
     f32 speed = 0.0f;
+    // With it (P3b), apply() also drives the shadows of the two lights: the sun's strength fades to nothing between 1 degree
+    // above the horizon and 2 below it, and the moon casts (Lights3D::fill_shadow, its cascades and resolution as the
+    // game set them) once it is above the horizon and bright enough, its strength fading in over its first 8 degrees and
+    // with its light. Off, apply() leaves them as they are (the sun casts while it shines, the moon never).
+    bool shadows = false;
 };
 
 // What a time of day makes of the sky.
@@ -49,8 +54,9 @@ struct SkyState3D {
 
 // The sun and the moon, and what they and the sky make of the light, for `time`, with `sky`'s haze and sun intensity.
 SkyState3D evaluate(const TimeOfDay3D& time, const Sky3D& sky = {});
-// Puts it into the scene's settings: lights.sun (direction and colour), lights.fill (the moon's light, no shadow), the
-// ambient and ground ambient, sky.moon_direction and moon_light and `moon` (on while the moon is up), and fog.colour.
+// Puts it into the scene's settings: lights.sun (direction and colour), lights.fill (the moon's light; its shadow when
+// TimeOfDay3D::shadows asks), the ambient and ground ambient, sky.moon_direction and moon_light and `moon` (on while the
+// moon is up), and fog.colour.
 // Leaves what is a look (the sky's haze and intensity, the fog's density, the stars) as it is. Returns the state.
 SkyState3D apply(const TimeOfDay3D& time, Lights3D& lights, Sky3D& sky, Fog3D& fog);
 // The solar hour (0 to 24) the sun's upper limb rises and sets, with 0.833 degrees of refraction and size; nothing

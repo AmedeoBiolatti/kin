@@ -4142,9 +4142,9 @@ byte-identical when off. Checks: the harness scenes plus new ones (a mountain wi
 night scene with spot lights), cost per feature.
 
 Split in three: **P3a** (sky, fog, day-night, the sky's image-based light: done, below), **P3b**
-(spot lights, more shadow-casting lights: not started; the moon is the fill light for now, which casts no
-shadow) and **P3c** (3D particles and weather: not started; `kin_fog.inc.glsl` and the `fog` pipeline variants are
-there for them, and `Material3D` blended and additive passes are already fogged).
+(spot lights, shadows of spots and point lights, a second shadow-casting directional light, the moon: done, below, after P3a's results) and **P3c**
+(3D particles and weather: not started; `kin_fog.inc.glsl` and the `fog` and `lights` pipeline variants are
+there for them, and `Material3D` blended and additive passes are already fogged and lit by spots).
 
 #### P3a — sky, fog, time of day — results
 
@@ -4283,7 +4283,7 @@ Seams fixed on the way: the terrain's winding (the harness's, culled: the ground
 **Limits and not done.**
 - Custom material shaders (`Material3D::shader`) are not fogged (their pipelines have no fog block); a game's own shader can include
   `kin_fog.inc.glsl` itself.
-- No spot lights, no second shadow-casting light (P3b): at night the moon is the fill light and casts no shadow. No clouds, no 3D
+- No spot lights, no second shadow-casting light (done in P3b, below): at night the moon is the fill light and casts no shadow. No clouds, no 3D
   particles, no weather (P3c). Fog is not a volume: no light shafts, no shadowed in-scattering, the sun's lobe ignores occlusion.
 - Orthographic cameras: the fog uses the depth along the view and one direction for the sky and the fog's colour (a flat sky colour);
   tested only for not failing (no picture test).
@@ -4334,6 +4334,264 @@ smooth, its sun disc's edge is already filtered a pixel wide in the shader, so s
 the jittered position changes the resolved picture by under one level and the disc's centroid by under 0.1 px (measured: the
 unjittered build has the *smaller* wobble, 0.008 px against 0.03). It is an equivalent mutant for this content, kept right because
 a sky texture or a hard-edged feature (a future cloud layer) would crawl against the meshes' edges with it.
+
+#### P3b — spot lights and more shadows — results
+
+(2026-10-12, `exp/3d-rendering`, working tree on `bb03d7e`; not committed.)
+
+**What exists.**
+- `kin/render3d/scene3d.hpp`: `SpotLight` (position, direction, colour, radius, size, `inner_angle`, `outer_angle`, `shadow`, `id`), `LightShadow3D`
+  (`enabled`, `resolution`, `bias`, `normal_offset`, `near_plane`, `distance`, `softness`; also a member of `PointLight`, with an `id`),
+  `DirectionalShadow3D` (the fill light's: `enabled`, `strength`, `cascades`, `resolution`, `distance`), `Lights3D::{spots, max_shadowed_spots (4),
+  max_shadowed_points (2), local_shadow_resolution (1024), fill_shadow, sun_shadow_strength (1)}`, `Scene3D::add_spot_light`.
+  `TimeOfDay3D::shadows` (opt-in; `apply()` then fades the sun's and the moon's strength by height). ECS `PointLight3D`, `SpotLight3D`
+  (`collect()` adds them: the entity's place, a spot down its -Z, the entity's id as the light's name).
+- `kin/render3d/local_lights.hpp` / `local_lights.cpp`: the CPU's side, testable without a GPU: `spot_cone`, `spot_cone_factor`,
+  `spot_attenuation`, `point_attenuation`, `spot_bounding_sphere`, `spot_shadow_view`, `cube_face_view`, `cube_face_of`, `shadow_importance`,
+  `assign_shadow_slots` (`ShadowSlots`, `ShadowRequest`, `shadow_hysteresis` 1.5).
+- `Renderer3DCapabilities::local_shadows`; `Render3DStats::{spots, spot_slot[], point_slot[], local_shadow_maps, local_shadow_drawn,
+  local_shadow_cached, local_shadow_draws, local_shadow_casters, local_shadow_triangles, moon_cascades, local_shadow_bytes, lights_variant}`.
+- Shaders: four new .spv, the stock fragment shader with `#define KIN_LIGHTS`: `mesh_light.frag`, `mesh_light_fog.frag`,
+  `mesh_velocity_light.frag`, `mesh_velocity_light_fog.frag` (with and without fog, with and without the TAA velocity: the same matrix as
+  P3a's fog variants). `kin_material.inc.glsl` gained `#ifdef KIN_LIGHTS` code only. The depth passes use the existing shadow vertex and fragment
+  shaders unchanged (a perspective matrix in the same uniform; the vertex shaders' list mode for the copies). **All 88 .spv of the build before the
+  stage are byte for byte the ones after** (88 same, 0 different, 4 new). Compile cost: four more glslc runs.
+- Harness (`kin_reference`): JSON `lights.spots` (`position`, `direction` or `target`, `color`, `radius`, `size`, `inner`, `outer`, `shadow`,
+  `attach` for a light carried with the camera), `lights.points[].shadow`, `lights.max_shadowed_spots`, `max_shadowed_points`,
+  `local_shadow_resolution`, `fill_shadow`, `sun_shadow_strength`, `time_of_day.shadows`; `procedural: "stage"` (a floor, walls or a closed
+  room, pillars, poles, lamp posts, cut-out trees, benches); options `--spots N`, `--spot-shadows M`, `--point-lights N`, `--point-shadows M`,
+  `--moon-shadow`, `--moon-cascades N`, `--local-res N`; scenes `spot_shadows`, `spot_night`, `spot_budget`, `moon_shadow`, `point_shadow`
+  (default pictures, 13 PNGs, two runs byte for byte equal, in `reference_out/p3b_<scene>/`).
+- Sponza Walk: "Spot lights and shadows (P3b)" (J drops a spot at the camera; a flashlight; a ring of spot lamps; a ring of point lamps with cube
+  shadows; map size, how many get one, bias, normal offset, filter width; the moon's shadow and its cascades), stats line, presets `spots`,
+  `flashlight`, `moon`, `lamps`.
+
+**Models and why.**
+- *The cone*: glTF's punctual spot, `t = clamp((cos a - cos outer) / (cos inner - cos outer), 0, 1)`, light times `t^2`, times the point
+  light's inverse square and window. Chosen over a smoothstep on the cosine because it is the format's own (an imported glTF light is the same
+  light), cheap (a dot and a multiply), exactly 0 at the outer angle and exactly 1 inside the inner one, and its tail is smooth (`t^2`).
+- *One array for all local maps.* Spot maps are layers 0..S-1, a point light's cube six layers after them, all `local_shadow_resolution` (or the
+  largest any light asks for) square; a light that asks for less draws into the corner of its layer (the viewport) and the shader scales
+  the coordinates and clamps the filter into the corner. One sampler, one array, one uniform block, whatever the lights. Layers are made for
+  the slots in use and only ever added to (until 120 idle renders give them back): the array's layout is part of what the caches key on.
+  The fill light's cascades are an array of their own (a different side, and cascade layers).
+- *Depth and bias.* Reverse Z perspective (`depth(d) = near (far/d - 1) / (far - near)`), compared with the same hardware comparison sampler
+  as the sun's. The bias is a distance toward the light of `bias` texels (at the surface's distance: `2 d tan_half / resolution`) times
+  `1 + slope` (the tangent of the angle to the light, capped at 12), moved into depth exactly by the formula above; the normal offset is
+  `normal_offset` texels along the normal. Texel-sized units mean the same default (1 and 1.5) suits a 256 or a 2048 map, near or far.
+  The slope cap was 6 at first: a sphere with the normal offset off showed 4% acne near its terminator; at 12 it is 0.15%.
+- *Cube.* Six perspective faces of 90 degrees plus a guard of two texels each side (so that the 3x3 taps at a face's edge read the map and
+  not the clamp); the shader picks the face by the longest axis of the vector from the light (no cube sampler: one array, one code path).
+  A face is drawn only if the camera's frustum reaches the face's pyramid (corners against the camera's planes, conservative).
+- *Importance and hysteresis.* `importance = intensity (brightest component) x reach (radius) x coverage^2`, coverage the bounding sphere's angular
+  radius over a right angle (1 from inside it). The choice is the top `max` by importance; a light that held a slot last render counts
+  1.5 times over; slots are released when the light is not chosen, and the lowest free slot is given to a newcomer. A light's name is its
+  `id`, else its index. 1.5 is a stability margin, not a measured optimum: a rival 1.4 times as important does not take a slot, 2 times does.
+- *The casters' path.* Not the sun's. The sun's culling writes a byte of view bits a copy (camera, sun, four cascades) and the cluster cut has
+  five view slots, the GPU cut eleven frustums: another eight spots and twelve faces and the moon's cascades would have been a rewrite of the
+  part that must stay byte for byte. Instead the local maps have a caster path of their own: each caster copy's bounding sphere (the posed
+  bound for a skinned one) once a frame; for each view the spheres inside the light's reach and the view's frustum (a moon cascade: also the
+  sun's own swept-shadow test against the camera's slice); the union of those copies written once as instances, a list of them a view
+  and level, drawn with the shadow vertex shaders' list mode (the cascades' own). Cost: O(views x casters) of sphere tests on the
+  CPU (a 22,000-copy crowd in four views: see the cost table). A clustered copy is cut on the CPU from the light (`select_clusters` with the
+  light as the eye, the map's texels as the pixels, as the error's judge) and drawn from the compacted indices; levels of detail use the camera's
+  choice (as every pass does: a shadow matches the surface).
+- *The cache.* Per map, exact by construction: the bytes of everything the draw is a function of (the array's generation, the layer and size, the
+  view's matrix, and for each (draw, level) the mesh's serial, material, a cut-out's texture and version, each copy's matrix and a posed copy's
+  matrices, and a clustered mesh's cut settings) are built and compared with those of the render the map was drawn from. A render target as a
+  cut-out's texture is never kept. A map kept costs the comparison; no snapshot, no sample (the sun's cache copies a scene's casters because the
+  cascades' fit depends on the camera; a local map's inputs are the casters in the cone). Another map's draw into a shared layer (an uncached
+  render) invalidates it. `KIN_SHADOW_CACHE=0` turns it off here too.
+- *The moon.* `fill_shadow`: its cascades fitted as the sun's (`fit_shadow_cascades` for the fill's direction; one map is `fit_sun_box`) over
+  the same `shadow_area`, from the same casters; the shader picks the cascade by view depth and blends as the sun's does. At dusk both cast:
+  the sun's `shadow_cascades` (1 to 4) plus the moon's (1 to 4, 2 by default). `strength` mixes the shadow toward lit.
+- *Time of day.* `apply()` with `shadows`: the moon's strength is `smoothstep(0, 8, elevation) x smoothstep(0.004, 0.02, moon_light)`, the sun's
+  `smoothstep(-2, 1, elevation)`: both move at most 0.09 in 0.02 of an hour. The sun's strength below 1 is a uniform of the light shaders
+  (the old shaders have no place for it), 0 draws no sun map. It is opt-in because the default pictures of P3a's sky scenes must stay as they were.
+- *Fog and the rest.* Fog is applied to the lit colour in `kin_output`, so a spot-lit pixel is fogged as every other (tested to 1 level of the
+  formula). Ambient occlusion dims only the ambient light as before. Contact shadows stay the sun's. TAA: the maps are not jittered, the
+  receiving pixel is; the overlay is lit by the scene's spots and point lights without their shadows.
+
+**Checks run.**
+- *Off is off*: default and all-on (`--cascades 4 --ao --contact-shadows --taa`, 120 frames) renders of crowd, shadows, sponza, helmet, motion,
+  spheres, cornell, the skinned and physics scenes (skinned_bend, skinned_ecs, skinned_blend, skinned_cesium, skinned_fox, skinned_ik,
+  skinned_ik_look, skinned_ik_limits, physics_pile, physics_character, physics_climb, physics_ragdoll, physics_rope) and the P3a scenes (sky_day,
+  sky_dusk, sky_night, fog_valley, tod_sweep): **84 of 84** pictures default and **84 of 84** all-on byte for byte those the binary before the
+  stage made (rendered from a copy of it before the first edit), kiln_near (`--lod --lod-clusters`) 3 of 3 and 3 of 3 likewise; against the
+  stored pictures: `p1a_base_def` 17 of 17, `p1a_base_all` 17 of 17, `p1a_base_kiln` 3 of 3, `p2c_physics_character` 5, `p2d_physics_climb` 8,
+  `p2e_physics_ragdoll` 8, `p2e_physics_rope` 6, `p3a_*` 18 (all equal). Plus `test_gpu_spot_lights_off_is_unchanged`: every new setting configured
+  and off, a point light that may cast but does not, a black spot, a spot out of reach: the picture is the plain one to the byte and the light
+  shaders are not used.
+- `ctest` (`KIN_REQUIRE_GPU_TESTS=1`): **75 of 75** (the new tests are in `kin-render3d`; 1 min 46 s), `build-no3d` **65 of 65**, `kin_render3d_tests`
+  whole on NVIDIA (RTX 4080 Laptop) and on lavapipe (2 min 26 s), both exit 0. Old shaders: 88 of 88 .spv byte for byte, 4 new.
+- New tests (21; the CPU ones and the GPU ones against the CPU's maths; limits are the ones in the asserts):
+  `test_spot_light_maths` (inner, outer, the glTF step's middle, monotone over 0.25-degree steps, clamped and zero angles, the window, behind the
+  light, the bounding sphere against 2000 points of 5 cones), `test_local_shadow_views` (the cone's edge at 512/516 of the map, near 1 and far 0,
+  the texel's tangent, every one of 2000 random directions inside the face `cube_face_of` names, 0.3 degrees past 45 inside by the guard),
+  `test_shadow_slots`, `test_time_of_day_shadows` (strengths 0 below, 1 above, the sun's falling through the evening, the largest step
+  0.087 in 0.02 h, a partial strength while the moon is low and while the sun is at the horizon, apply() leaves the settings alone when off),
+  `test_ecs_lights`, `test_gpu_spot_cone_matches_cpu` (a white wall at three distances, ten angles, three directions: the pixel against
+  0.966 x `spot_attenuation` x the cosine, **worst 1 of 255**; nothing past the outer angle; the direction's sign), `test_gpu_spot_cone_edges`
+  (three cones at 640 x 480: the pixel where the falloff is a half within **0.5 px** of the CPU's, black 0.3 degrees past the outer angle),
+  `test_gpu_spot_radius_fade` (worst 0 of 255 against the formula, black past the radius), `test_gpu_spot_shadow_position` (a 40 cm pole's
+  shadow on a floor against the segment test: centroid off **0.006 m at 512, 0.0024 m at 1024** (bound: two texels, 0.08 m and 0.04 m), area
+  within 17%; a box on the floor: the shadow begins **0.05 m** from its foot (bound 0.06) and ends 0.07 m short of the projection
+  (bound 0.1, the bias at a grazing 38 degrees); a light that asks for a 2048 map makes the array and the 512 light draws into its corner),
+  `test_gpu_spot_shadow_casters` (a cut-out quad: its opaque half's shadow is there (96 of 294) and the clear half's is not (357 of 357);
+  a skinned tube: **0 pixels** differ from the same mesh skinned on the CPU, 150 from the straight tube; five instanced copies: five shadows;
+  a box behind the light and one past its radius are not drawn), `test_gpu_spot_shadow_acne` (floor overhead, at 45 degrees and
+  at a grazing angle, a sphere with the normal offset alone and with the bias alone, a wall: **0, 0, 0, 0.15, 0.15, 0.04%** of the surface's lit
+  pixels wrongly darkened; the limit 0.2 to 0.5%), `test_gpu_spot_shadow_distance` (632 shadow pixels to the radius, none with the distance
+  at 6 m; with it at 7.5 m the light let through is 0.16, 0.74, 0.98 at 6.15, 6.8, 7.3 m), `test_gpu_spot_receives_shadow_flag` (spots and
+  point lights), `test_gpu_spot_shadow_clustered_caster` (a clustered torus: the cut from the light's own view, **9228 / 7628 / 4620 / 2802 / 2310 / 1158
+  triangles** at 0.05 to 3.2 px, the same as the CPU's `select_clusters` from the light and not from the camera, at eight errors, on both
+  cuts of the camera's; a forced coarse cut shows; the cache keeps it and a change of the error redraws), `test_gpu_spot_shadow_cache`
+  (a still map is kept and equals the redrawn one to the byte; each of a moved caster, a second caster, a moved light, the resolution, the cone's
+  angle, an added caster redraws and equals the uncached picture; the camera does not), `test_gpu_spot_shadow_budget` (12 spots, 4
+  maps: the four the importance rule names, the same slots in ten renders; a rival 1.2 x and 1.4 x as important does not take the map, 2 x
+  does; two lights swapping 5% each render never change holder; a second renderer gives the same slots), `test_gpu_point_shadow_cube` (six casters
+  and six walls: the shadow point is **0** against 726 to 732 for its mirror, on every face), `test_gpu_moon_shadow` (night: 812 pixels
+  darkened, on the side away from the moon, with one and two cascades, no map of the sun's; noon: none of the moon's, the sun's there;
+  strength 1, 0.4, 0 give 60, 492, 615), `test_gpu_spot_light_fogged` (worst 1 of 255 against `fog_apply` of the unfogged lit pixel),
+  `test_gpu_spot_shadow_under_taa` (still: **1 level** between frames on the floor, **3** at the shadow's own edge, which is sharper than a
+  pixel; 7499 and 7505 dark pixels).
+- NVIDIA and lavapipe: all of them pass on both; the 13 pictures of the five scenes on lavapipe against NVIDIA: mean difference 0.03 to 0.14 of 255,
+  at most 0.005% of the pixels over 8 levels, over 27 only 0.001% of the moon pictures (a few isolated pixels; not looked into further).
+
+**Pictures looked at** (1280x720, `reference_out/p3b_<scene>/`). `spot_shadows`: a dark stage lit by one warm cone from the front and above; 'overview'
+shows the pillars' shadows on the wall, the pole's long hairline across the floor, the bench's, the tree's blocky leaf holes and the man's
+(skinned, walking) shadow, all where the light says and edged about three map texels wide; the cone's edge is a smooth fade, no ring, no banding;
+'floor' from above shows the lit disc and each shadow on it; no acne anywhere I could find, no light leaking at the pillars' feet. The leaf texture is a 64 x 64
+nearest-filtered test pattern, so the tree's own look and its shadows are blocky. `spot_night`: two warm lamp pools and a cool torch beam on a
+foggy night with stars; the lamps' pools have a round shadow of the post's cap right under them (the post stops 25 cm under the bulb: physical, and
+visible: a real lamp has a housing); the torch's beam shows on the floor and the bench but, with no in-scattering, not in the mist; bloom on the bulbs.
+`spot_budget`: twelve coloured pools overlapping; the four with maps show the pillars' and bench's shadows, the rest light the pillars
+from both sides (an unshadowed light passes through: by design); no visible pop is asserted by the test, not by the picture. `moon_shadow`:
+'night' is a faint blue light with the pillars', poles', bench's and trees' shadows (and the sun's gone); 'low' (16:00) and 'dawn' (7:54) have both the
+low sun's long soft shadows and the moon's, and are **over-exposed** by the night's exposure of 5 (one exposure for a scene: white sky,
+saturated colours; a game would adapt it). `point_shadow`: a lamp in a closed room: shadows of the pillars, poles, bench and tree on the floor,
+the walls and the ceiling in every direction, the ceiling lit brighter than the walls; no seams at the cube's edges and no leaks at the walls' corners that I
+could find; a small round shadow of the lamp's own post under it. Sponza Walk (`--preset spots|flashlight|moon|lamps`, looked at headless): a pool
+of lamplight on the nave's floor with the columns' shadows; the torch's disc at the nave's end; the moonlit nave dim and blue; the lamps' pools
+fogged. **Ugly or weak**: the lamp post's cap shadow; an unshadowed light shining through walls (the 8 of 12 in `spot_budget`: the
+budget is the cure, and a light that should not leak has to be among the most important); the over-exposed twilight pictures; blocky cut-out
+shadows from the test texture; the PCF's nine taps show as faint stepping at `softness` over about 1.5; a beam in fog is missing.
+
+**Cost** (NVIDIA RTX 4080 Laptop, GPU ms of a frame with the view rendered 8 times in it, divided by 8, median of 120 frames; noise
++-0.03 ms; maps at 1024; the moon's 2 cascades at the scene's 2048 (sponza 1 sun cascade); caches are `--shadow-cache`):
+
+*sponza*: GPU ms of the frame (the view rendered 8 times in it, divided by 8; median of 120 frames; noise +-0.03 ms), and the change from no lights
+
+| What | maps (MiB) | nave 1280x720 | roof 1280x720 | nave 1920x1080 | roof 1920x1080 |
+|---|---|---|---|---|---|
+| no lights | 0 | 0.32 | 0.28 | 0.57 | 0.49 |
+| 1 spot | 0 | 0.36 (+0.04) | 0.30 (+0.02) | 0.63 (+0.06) | 0.54 (+0.05) |
+| 4 spots | 0 | 0.41 (+0.10) | 0.35 (+0.07) | 0.75 (+0.18) | 0.63 (+0.14) |
+| 8 spots | 0 | 0.48 (+0.16) | 0.41 (+0.14) | 0.88 (+0.31) | 0.75 (+0.26) |
+| 1 spot shadowed | 4 | 0.43 (+0.12) | 0.35 (+0.07) | 0.68 (+0.11) | 0.61 (+0.11) |
+| 4 spots shadowed | 16 | 0.66 (+0.34) | 0.52 (+0.24) | 1.06 (+0.49) | 0.85 (+0.36) |
+| 8 spots shadowed | 32 | 0.91 (+0.60) | 0.71 (+0.44) | 1.39 (+0.82) | 1.16 (+0.67) |
+| 4 spots shadowed, cached | 16 | 0.45 (+0.13) | 0.37 (+0.09) | 0.89 (+0.32) | 0.72 (+0.22) |
+| 8 spots shadowed, cached | 32 | 0.51 (+0.20) | 0.46 (+0.18) | 1.06 (+0.49) | 0.96 (+0.47) |
+| 1 point shadowed | 24 | 0.41 (+0.09) | 0.40 (+0.13) | 0.73 (+0.16) | 0.68 (+0.19) |
+| 2 points shadowed | 48 | 0.49 (+0.18) | 0.52 (+0.24) | 0.84 (+0.27) | 0.81 (+0.32) |
+| 2 points shadowed, cached | 48 | 0.35 (+0.03) | 0.29 (+0.02) | 0.73 (+0.16) | 0.59 (+0.10) |
+| moon, 2 cascades | 32 | 0.56 (+0.24) | 0.47 (+0.19) | 0.88 (+0.30) | 0.75 (+0.26) |
+| moon, 2 cascades, cached | 32 | 0.31 (-0.01) | 0.27 (-0.00) | 0.61 (+0.04) | 0.57 (+0.08) |
+
+*kiln_near* (`--lod --lod-clusters`): GPU ms of the frame (the view rendered 8 times in it, divided by 8; median of 120 frames; noise +-0.03 ms), and the change from no lights
+
+| What | maps (MiB) | dome_close 1280x720 | grazing 1280x720 | far 1280x720 | dome_close 1920x1080 | grazing 1920x1080 | far 1920x1080 |
+|---|---|---|---|---|---|---|---|
+| no lights | 0 | 0.34 | 0.25 | 0.27 | 0.55 | 0.36 | 0.38 |
+| 1 spot | 0 | 0.36 (+0.02) | 0.26 (+0.01) | 0.27 (+0.00) | 0.60 (+0.05) | 0.38 (+0.02) | 0.42 (+0.04) |
+| 4 spots | 0 | 0.40 (+0.05) | 0.29 (+0.04) | 0.32 (+0.05) | 0.67 (+0.12) | 0.44 (+0.08) | 0.49 (+0.11) |
+| 8 spots | 0 | 0.44 (+0.10) | 0.33 (+0.08) | 0.34 (+0.08) | 0.79 (+0.23) | 0.48 (+0.12) | 0.52 (+0.13) |
+| 1 spot shadowed | 4 | 0.38 (+0.04) | 0.29 (+0.04) | 0.34 (+0.07) | 0.62 (+0.07) | 0.40 (+0.04) | 0.52 (+0.14) |
+| 4 spots shadowed | 16 | 0.42 (+0.08) | 0.31 (+0.06) | 1.41 (+1.14) | 0.69 (+0.14) | 0.45 (+0.09) | 1.56 (+1.18) |
+| 8 spots shadowed | 32 | 0.47 (+0.12) | 0.35 (+0.10) | 1.58 (+1.31) | 0.79 (+0.24) | 0.52 (+0.15) | 1.75 (+1.36) |
+| 4 spots shadowed, cached | 16 | 0.32 (-0.03) | 0.22 (-0.03) | 0.32 (+0.05) | 0.58 (+0.03) | 0.37 (+0.00) | 0.56 (+0.18) |
+| 8 spots shadowed, cached | 32 | 0.36 (+0.02) | 0.26 (+0.01) | 0.34 (+0.07) | 0.67 (+0.12) | 0.41 (+0.05) | 0.59 (+0.21) |
+| 1 point shadowed | 24 | 0.49 (+0.15) | 0.36 (+0.11) | 0.29 (+0.02) | 0.81 (+0.26) | 0.52 (+0.16) | 0.42 (+0.04) |
+| 2 points shadowed | 48 | 0.58 (+0.24) | 0.43 (+0.18) | 0.31 (+0.04) | 1.03 (+0.48) | 0.68 (+0.32) | 0.44 (+0.06) |
+| 2 points shadowed, cached | 48 | 0.44 (+0.10) | 0.31 (+0.06) | 0.19 (-0.08) | 0.87 (+0.32) | 0.52 (+0.16) | 0.34 (-0.04) |
+| moon, 2 cascades | 32 | 1.99 (+1.65) | 1.92 (+1.67) | 1.96 (+1.69) | 2.10 (+1.54) | 1.93 (+1.57) | 1.96 (+1.57) |
+| moon, 2 cascades, cached | 32 | 0.32 (-0.03) | 0.23 (-0.02) | 0.21 (-0.06) | 0.59 (+0.03) | 0.35 (-0.02) | 0.35 (-0.04) |
+
+
+What it says: an **unshadowed spot costs 0.02 to 0.04 ms each at 720p and 0.03 to 0.06 at 1080p** (the light shaders' loop for every pixel; the
+light shaders as such are in the first spot: Sponza 4 spots +0.10, 8 spots +0.16 ms at 720p). A **shadowed spot adds 0.04 to 0.08 ms over an
+unshadowed one** at both sizes from a fresh 1024 map each frame (100 to 220 casters on Sponza), and **0.01 to 0.04** with the map kept (the
+3x3 taps and a depth read): 4 shadowed spots on Sponza are +0.34 / +0.49 ms (720p / 1080p), +0.13 / +0.32 kept. A shadowed point light is +0.09 to
+0.13 (720p) and +0.16 to 0.19 (1080p), two +0.18 to 0.24 and +0.27 to 0.32; kept, +0.02 to 0.03 at 720p and +0.10 to 0.16 at 1080p (six faces' taps
+over a larger picture). The moon's two cascades are +0.19 to 0.30 on Sponza and **+1.6 ms on the kiln** (the full-detail kiln is the work: its cut
+from a 2048 orthographic cascade is near the leaves), kept -0.02 to +0.08. A big clustered mesh in the maps of four spots is the expensive case
+(kiln `far` +1.1 ms): the cut from the light finds more detail than the camera's does (9228 against 7628 triangles in the test's torus at 0.05 px)
+and is drawn four times; a map kept costs none of it. Shadow memory is `side^2 x 4 bytes` a layer: 4 MiB a spot at 1024 (1 MiB at 512), 24 MiB a
+point light's cube, the moon's cascades 16 MiB each at 2048; the array is only as big as the slots in use.
+CPU: `render()` on the 20,000-enemy crowd: 0.2 ms without, **0.35 to 0.6 ms** with four shadowed spots in four maps (22,000 copies' spheres and
+four frustum tests each on the workers; 1.8 ms before the work was spread); the cache's byte comparison adds 0.1 ms.
+
+**Limits and not done.**
+- **No in-scattering**: a lamp in mist shows no beam, and no light shafts (the P3a note stands: fog is not a volume). The optional cone in
+  fog was not built. Contact shadows are still the sun's.
+- Custom material shaders (`Material3D::shader`) get no spot lights, no local or moon shadows and no fog; the light shaders are for the stock ones.
+- The overlay (a gun) is lit by spots and point lights, without shadows from them.
+- A light that does not hold a map shines through everything: the choice is by importance, not by distance to the wall; 16 spots and 16 point
+  lights (shared with the points' own limit) is the most a frame uses; 8 spot maps and 2 cubes.
+- The map's resolution is per light but its memory is the largest asked for, for all layers; the array is made again (nothing kept) when the
+  largest changes or more slots are first used. A face of a cube that no visible surface can fall in is not drawn (and a map's
+  cache entry is kept for when it is wanted again).
+- A directional light's second shadow set is the fill light only (one more is not an API: `fill` is a single light); its cascades are fitted
+  to the camera as the sun's (4 + 4 maps at most at dusk).
+- Levels of detail follow the camera's choice in every local map (as the sun's); clustered meshes are cut from the light on one CPU
+  thread per map (1.8 ms for the four-spot kiln_near far view uncached).
+- CPU cost is O(lights x casters) of sphere tests: fine for thousands, a million copies would want the sun's hierarchy of cells.
+- Not run: Windows or MSVC, Metal; the Sponza Walk panel's click path (no display); a moving moon under TAA, point shadows or cut-out
+  casters under TAA (the spot under TAA is tested); MSAA with local shadows beyond the harness's pictures (they are MSAA 4); a cache hit
+  across two views of one renderer with different cameras (the spot's map is camera-independent by construction, the moon's is not and its
+  key carries the cascades' matrices).
+
+**Mutation run** (28 deliberate breaks, each in a saved copy of its source that is put back and compared afterwards: the four files
+byte for byte equal; the tests are `kin_render3d_tests` filtered by the test's name). All 28 are caught; the first run found three survivors, which
+sharpened the tests (below the table).
+
+| # | Break | Caught by |
+|---|---|---|
+| 01 | spot direction's sign (the shader's `dot(-toward, axis)`) | `test_gpu_spot_cone_matches_cpu`, `test_gpu_spot_cone_edges` |
+| 02 | inner and outer angles swapped (the uniform's cosine) | `test_gpu_spot_cone_matches_cpu`, `test_gpu_spot_cone_edges` |
+| 03 | falloff curve linear, not squared | `test_gpu_spot_cone_matches_cpu` |
+| 04 | radius fade missing in the spot loop | `test_gpu_spot_radius_fade`, `test_gpu_spot_cone_matches_cpu` |
+| 05 | shadow bias's sign | `test_gpu_spot_shadow_acne` |
+| 06 | normal offset ignored | `test_gpu_spot_shadow_acne` (the sphere with the bias at 0) |
+| 07 | the map's matrix fov 20% too narrow | `test_local_shadow_views` (**not** by `test_gpu_spot_shadow_position`: the matrix draws and samples the map alike, so the shadow stays where it is; the texel and the edge of the cone move, which the CPU test sees) |
+| 08 | the cone cull ignores the light (every caster in the radius is drawn) | `test_gpu_spot_shadow_casters` (the box behind the light) |
+| 09 | importance inverted (in the renderer) | `test_gpu_spot_shadow_budget` |
+| 10 | importance without its coverage (in the function) | `test_shadow_slots` (the budget's expectation uses the same function, so only the CPU test can tell) |
+| 11 | hysteresis removed | `test_shadow_slots`, `test_gpu_spot_shadow_budget` |
+| 12 | cache ignores that the light moved | `test_gpu_spot_shadow_cache` |
+| 13 | cache ignores that a caster moved | `test_gpu_spot_shadow_cache` |
+| 14 | cut-out alpha ignored in the local maps | `test_gpu_spot_shadow_casters` |
+| 15 | a skinned caster drawn static (the unposed pipeline) | `test_gpu_spot_shadow_casters` |
+| 16 | cube face index swapped (+x and -x) | `test_gpu_point_shadow_cube` |
+| 17 | the moon's shadow ignores its elevation | `test_time_of_day_shadows` (the partial strength while it is low) |
+| 18 | the sun's shadow not disabled below the horizon | `test_time_of_day_shadows`, `test_gpu_moon_shadow` |
+| 19 | a shadow slot not released | `test_shadow_slots`, `test_gpu_spot_shadow_budget` |
+| 20 | fog not applied to spot-lit pixels | `test_gpu_spot_light_fogged` |
+| 21 | `receives_shadow` ignored by spots | `test_gpu_spot_receives_shadow_flag` |
+| 22 | the corner scale of a smaller map ignored | `test_gpu_spot_shadow_position` (the 2048 light beside it) |
+| 23 | the shadow's fade at its distance ignored | `test_gpu_spot_shadow_distance` (after the test was given the 7.5 m ramp) |
+| 24 | the sun's shadow strength ignored in the shader | `test_gpu_spot_lights_off_is_unchanged` |
+| 25 | the moon's strength ignored in the shader | `test_gpu_moon_shadow` |
+| 26 | no face of a cube wanted | `test_gpu_point_shadow_cube` (first run: **survived**, the test skipped itself when no map was drawn) |
+| 27 | a clustered cut judged from the camera's place | `test_gpu_spot_shadow_clustered_caster` (first run: **survived**: one error where the two cuts happen to agree; now eight errors against the CPU's cut) |
+| 28 | cache ignores the cut's settings | `test_gpu_spot_shadow_clustered_caster` |
+
+The three first-run survivors (23, 26, 27): the distance fade is only seen on a ramp between the shadow and the light (the first test counted dark
+pixels); 26 showed that a test that returns when no map was drawn passes a renderer that draws none (the tests now ask
+`Renderer3DCapabilities::local_shadows` and assert maps); 27 that a cut count can agree by chance at one error. No equivalent mutant was
+left standing except 07 against the GPU position test alone, as said; one more that is equivalent by construction and was not run: removing the
+sphere `bounded` pre-check of a view (the frustum's far plane makes it redundant).
 
 ### P4 — The vertical slice, "Summit" (a one-player Peak-like)
 

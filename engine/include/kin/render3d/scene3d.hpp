@@ -140,6 +140,31 @@ struct DirectionalLight {
     Vec3f color{1.0f, 1.0f, 1.0f};      // linear; above 1 is brighter
 };
 
+// What a shadow-casting light that is not the sun is asked to do (P3b). Every number is a default that suits a lamp or a
+// torch at a few metres: the resolution decides the sharpness, `bias` and `normal_offset` the acne against the detaching
+// of a shadow from its caster (both in texels of the map at the distance of the surface, so they scale with the map).
+struct LightShadow3D {
+    bool enabled = false;
+    // The map's side, in texels; 0: Lights3D::local_shadow_resolution. A map is drawn into a corner of the shared array
+    // (whose side is the largest any light asks for), so a small one costs less to draw, not less memory.
+    u32 resolution = 0;
+    // A depth bias away from the light, in texels, times (1 + the surface's slope to the light): 1 is enough for most
+    // surfaces; more hides acne on grazing ones and shows as a shadow that starts later than its caster.
+    f32 bias = 1.0f;
+    // The surface's point is pushed this many texels along its normal before the map is read (removes the acne on
+    // curved surfaces that the bias would need a large number for).
+    f32 normal_offset = 1.5f;
+    // The map's near plane (units; a caster nearer the light than this casts nothing). Raise it to spend the depth
+    // range on the scene; a small near plane costs depth precision far away.
+    f32 near_plane = 0.05f;
+    // Past this distance from the light its shadow fades to nothing (units; 0: the light's radius, where the light is
+    // nothing anyway). The map reaches as far.
+    f32 distance = 0.0f;
+    // The filter's width in texels (the taps lie this far apart): 1 is the sun's, up to about 1.5 is smooth, more
+    // shows the nine taps as bands.
+    f32 softness = 1.0f;
+};
+
 // Light from a point: a muzzle flash, a lamp. It falls off with the square of
 // the distance, as light does, and is faded to nothing at `radius` (smoothly,
 // over its outer part) so that few lights reach a pixel.
@@ -154,6 +179,43 @@ struct PointLight {
     // the light spreads over a body that big (a flash, a fireball, a bulb).
     // At least 0.01.
     f32 size = 0.01f;
+    // A shadow (P3b): drawn into a cube of six faces, at most Lights3D::max_shadowed_points a frame, chosen by importance.
+    LightShadow3D shadow{};
+    // Names the light across frames, for the choice of which light has a shadow map (hysteresis) and for its place in a
+    // cache; 0: its index in Lights3D::points.
+    u32 id = 0;
+};
+
+// Light from a point in a cone: a torch, a lamp shade, a car's headlight (P3b). The same photometry as PointLight
+// (`color` is what a white surface facing it, in the cone's middle, shows at one unit) and the same radius and size,
+// inside a cone: full light up to `inner_angle` from its axis, falling to none at `outer_angle`, by the glTF punctual
+// light's curve, t = clamp((cos a - cos outer) / (cos inner - cos outer), 0, 1), light times t * t (so it is exactly
+// zero from the outer angle on and exactly full inside the inner one). Angles are half angles, in degrees.
+struct SpotLight {
+    Vec3f position{};
+    Vec3f direction{0.0f, -1.0f, 0.0f}; // the way it shines (any length but zero)
+    Vec3f color{1.0f, 1.0f, 1.0f};
+    f32 radius = 10.0f;
+    f32 size = 0.01f;
+    f32 inner_angle = 20.0f; // degrees from the axis (at least 0)
+    f32 outer_angle = 30.0f; // degrees; below 90, above `inner_angle` (clamped to 0.1 degrees beyond it)
+    // A perspective shadow map over the cone, at most Lights3D::max_shadowed_spots a frame (the most important ones).
+    LightShadow3D shadow{};
+    u32 id = 0; // as PointLight::id, over Lights3D::spots
+};
+
+// A second directional light's shadow: the moon's, when the fill light is the moon (P3b). Its own cascade set, drawn from
+// the same casters and over the same `Lights3D::shadow_area` as the sun's, so that at night, or at dusk beside the sun's,
+// there are shadows from the light that is there.
+struct DirectionalShadow3D {
+    bool enabled = false;
+    // How dark the shadow is: 1 is as the sun's, 0 none (a map is not drawn at 0). TimeOfDay3D::apply fades it with the
+    // moon's height and strength, so that a rising moon does not make shadows pop in.
+    f32 strength = 1.0f;
+    // 1 to 4 (the sun's `Lights3D::shadow_cascades`, for the fill). Two is enough for the moon's soft, far light.
+    u32 cascades = 2;
+    u32 resolution = 0; // each cascade's side; 0: Lights3D::shadow_resolution
+    f32 distance = 0.0f; // how far from the camera they reach; 0: Lights3D::shadow_distance
 };
 
 struct Lights3D {
@@ -204,6 +266,22 @@ struct Lights3D {
     // At most 16 light a frame: those that reach the view, the strongest
     // and nearest first. Cleared with the draws.
     std::vector<PointLight> points;
+    // Spot lights (P3b): at most 16 a frame, chosen as the points are (the cone's bounding sphere reaches the view, the
+    // strongest and nearest first). Cleared with the draws.
+    std::vector<SpotLight> spots;
+    // Shadows of lights that are not the sun (P3b), all opt-in (a light's `shadow.enabled`; `fill_shadow.enabled`) and
+    // off, the picture and the cost are what they were. Of the lights that ask, the most important this many a frame
+    // have a map (importance: intensity x reach x the share of the view it covers, with a hysteresis in favour of the
+    // lights that had one, so the choice does not flip between frames): up to 8 spots, up to 2 point lights (six
+    // faces each). Their maps share one array of depth textures of `local_shadow_resolution` (a light may ask for less).
+    u32 max_shadowed_spots = 4;
+    u32 max_shadowed_points = 2;
+    u32 local_shadow_resolution = 1024;
+    // The fill light's shadow (the moon): its own cascades and cache; see DirectionalShadow3D.
+    DirectionalShadow3D fill_shadow{};
+    // How dark the sun's shadow is, 1 (as always) to 0 (none: no map is drawn). Below 1 the picture is drawn by the
+    // light shaders (the others know no strength). TimeOfDay3D::apply fades it through twilight when it is asked to.
+    f32 sun_shadow_strength = 1.0f;
 };
 
 // Ambient occlusion (GTAO) of the scene's own surfaces: how much of the
@@ -373,7 +451,8 @@ public:
     // threads, say). Valid until the next draw is added.
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material = {});
     void add_light(const PointLight& light) { lights.points.push_back(light); }
-    // Takes the draws and point lights away, the overlay's too (cameras, the
+    void add_spot_light(const SpotLight& light) { lights.spots.push_back(light); }
+    // Takes the draws and point and spot lights away, the overlay's too (cameras, the
     // sun and the ambient light stay), keeping their room.
     void clear();
 
