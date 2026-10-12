@@ -100,6 +100,14 @@ struct SpotLight3D {
     bool enabled = true;
 };
 
+// A particle emitter at the entity's WorldTransform3D (P3c; opt-in: no emitters, no particles). The simulation is the component's own
+// state (`system`: its seed, its desc, its live particles), stepped by WorldRenderState3D::simulate_particles and drawn by collect().
+// The emitter's shape and directions are in the entity's space (a cone's axis is the entity's +Y: turn the entity to aim it).
+struct ParticleEmitter3D {
+    ParticleSystem3D system{};
+    bool enabled = true; // false: no births, and not drawn (the live particles are kept)
+};
+
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the rest
 // pose without one). Not MeshRenderer: a mesh renderer's entities are instances of one mesh and merge into one draw, and a
 // character is a model of several parts with a skeleton and a pose of its own.
@@ -374,6 +382,14 @@ public:
     // there was one. Call the first once a frame (or fixed step) and the second before render().
     void advance_time_of_day(f32 dt);
     bool apply_time_of_day(Scene3D& scene) const;
+    // Particles and weather (render3d/particles3d.hpp, P3c). simulate_particles takes `dt` seconds for every ParticleEmitter3D (each
+    // is placed at its entity's WorldTransform3D, so call propagate_transforms() first; `wind`: null for still air); call it once a
+    // fixed step or frame. A Weather3D component on any entity is the game's weather: advance_weather steps its clock by `dt`
+    // seconds, and apply_weather puts the first one into `scene.weather`, dims `scene.lights` and thickens `scene.fog` by it from
+    // `base_fog` (call it after apply_time_of_day; it says whether there was one). collect() draws the emitters' particles.
+    void simulate_particles(f64 dt, const Wind3D* wind = nullptr);
+    void advance_weather(f64 dt);
+    bool apply_weather(Scene3D& scene, const Fog3D& base_fog) const;
 
 private:
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
@@ -390,6 +406,8 @@ private:
     flecs::query<TimeOfDay3D> _time_of_day;
     flecs::query<const WorldTransform3D, const PointLight3D> _point_lights;
     flecs::query<const WorldTransform3D, const SpotLight3D> _spot_lights;
+    flecs::query<const WorldTransform3D, ParticleEmitter3D> _emitters;
+    flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
     struct Bucket {
         Mesh mesh;

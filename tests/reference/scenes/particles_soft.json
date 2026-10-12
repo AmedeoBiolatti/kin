@@ -1,0 +1,201 @@
+{
+ "name": "particles_soft",
+ "purpose": "Soft particles (P3c): the same two clouds of 36 big dark smoke puffs (alpha, sorted, lit by the sun and ambient light), each sunk into the floor and a pillar; the left (x < 0) is hard, the right soft (fading over 0.8 m of the surface behind). The hard cloud's quads cut the floor and the pillar in straight lines; the soft one's fade into them. 'front' faces both, 'low' from floor level, 'top' from above.",
+ "procedural": "stage",
+ "stage": {
+  "walls": false,
+  "pillars": [
+   [
+    -3.0,
+    -3.0
+   ],
+   [
+    3.0,
+    -3.0
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.3,
+  "background": [
+   0,
+   0,
+   0
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.3,
+    1.0,
+    0.5
+   ],
+   "color": [
+    1.6,
+    1.55,
+    1.4
+   ]
+  },
+  "ambient": [
+   0.3,
+   0.32,
+   0.38
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048
+ },
+ "particles": [
+  {
+   "name": "hard",
+   "seed": 5,
+   "position": [
+    -3.0,
+    0.6,
+    -3.0
+   ],
+   "shape": "sphere",
+   "extent": [
+    1.4,
+    0.5,
+    0.9
+   ],
+   "burst": 36,
+   "lifetime": [
+    100,
+    100
+   ],
+   "speed": [
+    0,
+    0
+   ],
+   "size": [
+    2.0,
+    3.0
+   ],
+   "alpha_start": 0.7,
+   "alpha_end": 0.7,
+   "color_start": [
+    0.16,
+    0.12,
+    0.1
+   ],
+   "color_end": [
+    0.16,
+    0.12,
+    0.1
+   ],
+   "color_variation": 0.25,
+   "rotation_range": [
+    0,
+    360
+   ],
+   "look": {
+    "soft": false,
+    "lit": 1.0,
+    "soft_distance": 0.6,
+    "softness": 0.5
+   }
+  },
+  {
+   "name": "soft",
+   "seed": 5,
+   "position": [
+    3.0,
+    0.6,
+    -3.0
+   ],
+   "shape": "sphere",
+   "extent": [
+    1.4,
+    0.5,
+    0.9
+   ],
+   "burst": 36,
+   "lifetime": [
+    100,
+    100
+   ],
+   "speed": [
+    0,
+    0
+   ],
+   "size": [
+    2.0,
+    3.0
+   ],
+   "alpha_start": 0.7,
+   "alpha_end": 0.7,
+   "color_start": [
+    0.16,
+    0.12,
+    0.1
+   ],
+   "color_end": [
+    0.16,
+    0.12,
+    0.1
+   ],
+   "color_variation": 0.25,
+   "rotation_range": [
+    0,
+    360
+   ],
+   "look": {
+    "soft": true,
+    "soft_distance": 0.8,
+    "lit": 1.0,
+    "softness": 0.5
+   }
+  }
+ ],
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    1.4,
+    6.0
+   ],
+   "target": [
+    0.0,
+    0.5,
+    -3.0
+   ],
+   "fov": 50,
+   "near": 0.1
+  },
+  {
+   "name": "low",
+   "eye": [
+    0.0,
+    0.3,
+    5.0
+   ],
+   "target": [
+    0.0,
+    0.35,
+    -3.0
+   ],
+   "fov": 50,
+   "near": 0.1
+  },
+  {
+   "name": "top",
+   "eye": [
+    0.0,
+    6.0,
+    2.0
+   ],
+   "target": [
+    0.0,
+    0.0,
+    -3.0
+   ],
+   "fov": 50,
+   "near": 0.1
+  }
+ ]
+}

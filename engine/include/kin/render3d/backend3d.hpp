@@ -45,6 +45,10 @@ struct Renderer3DCapabilities {
     // Whether spot lights, the shadows of lights that are not the sun and the fill light's shadow can work (the light shaders and a depth
     // format that can be sampled; P3b); where not, they are off and a line in the log says so the first time one is asked for.
     bool local_shadows = false;
+    // Whether particles and weather can be drawn (P3c: the billboard shaders could be made), and whether soft particles can (the
+    // depth-reading variant and the pre-pass's targets); where not, they are not drawn and a line in the log says so once.
+    bool particles = false;
+    bool soft_particles = false;
     // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not drawn.
     bool skinning = false;
 };
@@ -164,6 +168,18 @@ struct Render3DStats {
     bool sky_env_regenerated = false;
     u32 sky_env_generations = 0;
     f64 sky_env_cpu_ms = 0.0;
+    // Particles and weather (P3c). `particles_submitted`: sprites handed in (the scene's batches and the weather's layers),
+    // `particles_drawn`: those left after the view's cull and the frame's limit (written to the GPU: 64 bytes each),
+    // `particle_batches`: batches drawn (one instanced draw each), `particle_soft`: batches that read the depth, `weather_particles`:
+    // of the submitted, the weather's. `particles_dropped`: past the frame's limit. `particle_cpu_ms`: the weather's making, the
+    // culling, the sorting and the writing.
+    u32 particles_submitted = 0;
+    u32 particles_drawn = 0;
+    u32 particle_batches = 0;
+    u32 particle_soft = 0;
+    u32 weather_particles = 0;
+    u32 particles_dropped = 0;
+    f64 particle_cpu_ms = 0.0;
     u64 triangles = 0; // drawn by the main pass: at the level each copy is drawn at (Scene3D::lod)
     // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is off).
     std::array<u32, max_mesh_levels> lod_copies_by_level{};

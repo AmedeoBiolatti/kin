@@ -13,6 +13,7 @@
 #include <kin/render3d/camera3d.hpp>
 #include <kin/render3d/environment.hpp>
 #include <kin/render3d/mesh.hpp>
+#include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
@@ -411,6 +412,10 @@ public:
     // off, the picture and the cost are as without the features.
     Sky3D sky{};
     Fog3D fog{};
+    // Rain, snow, dust and mist round the camera (render3d/particles3d.hpp, P3c): a function of `weather.time` and the camera, drawn
+    // as particles (fogged, soft, lit by the scene's light as the layers' looks say). Off by default (every layer's intensity 0:
+    // nothing is built, uploaded or drawn). The overlay's weather is ignored.
+    Weather3D weather{};
     // Copies wholly outside the camera's view are skipped (each tested as the
     // sphere round its mesh's bounds, moved and scaled with it).
     bool cull = true;
@@ -450,10 +455,16 @@ public:
     // Room for `count` copies of `mesh`, for the caller to fill (from worker
     // threads, say). Valid until the next draw is added.
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material = {});
+    // Particles (P3c): a batch of sprites drawn after the scene's blended meshes, depth-tested and not written, in the
+    // order of their depth (`look.sort`: the sprites within it back to front too). The sprites are copied (they need not
+    // outlive the call); clear() takes them away. The overlay's are not drawn.
+    void draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites);
+    // The system's live particles with its desc's look.
+    void draw_particles(const ParticleSystem3D& system);
     void add_light(const PointLight& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLight& light) { lights.spots.push_back(light); }
-    // Takes the draws and point and spot lights away, the overlay's too (cameras, the
-    // sun and the ambient light stay), keeping their room.
+    // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
+    // sun and the ambient light and the weather stay), keeping their room.
     void clear();
 
     struct Draw {
@@ -465,6 +476,14 @@ public:
         bool skinned = false;
         u32 skin_first = 0;
     };
+    // A batch of particles (draw_particles): its look and sprites [first, first + count) of particle_sprites().
+    struct ParticleDraw {
+        ParticleLook3D look;
+        u32 first = 0;
+        u32 count = 0;
+    };
+    std::span<const ParticleDraw> particle_draws() const { return _particle_draws; }
+    std::span<const ParticleSprite3D> particle_sprites() const { return _particle_sprites; }
     std::span<const Draw> draws() const { return _draws; }
     std::span<const MeshInstance> instances() const { return _instances; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned draw).
@@ -480,6 +499,8 @@ private:
     std::vector<MeshInstance> _instances;
     std::vector<Mat4f> _joints;
     std::vector<u32> _skin_offsets;
+    std::vector<ParticleDraw> _particle_draws;
+    std::vector<ParticleSprite3D> _particle_sprites;
     bool _warned_skin = false;
     std::unique_ptr<Scene3D> _overlay;
 };

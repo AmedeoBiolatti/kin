@@ -194,7 +194,7 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/physics3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
-                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp
+                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
                                       src/renderer/gpu/gpu_renderer3d.cpp)
     set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
@@ -280,7 +280,8 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               hiz_depth.comp hiz_reduce.comp
               mesh_skinned.vert mesh_skinned_velocity.vert shadow_skinned.vert shadow_mask_skinned.vert
               prepass_skinned.vert prepass_velocity_skinned.vert
-              mesh_fog.frag mesh_velocity_fog.frag mesh_light.frag mesh_light_fog.frag mesh_velocity_light.frag mesh_velocity_light_fog.frag sky.frag sky_velocity.frag sky_velocity_only.frag sky_env.frag view_output_dither.frag)
+              mesh_fog.frag mesh_velocity_fog.frag mesh_light.frag mesh_light_fog.frag mesh_velocity_light.frag mesh_velocity_light_fog.frag sky.frag sky_velocity.frag sky_velocity_only.frag sky_env.frag view_output_dither.frag
+              particle.vert particle.frag particle_soft.frag)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()
 # The .spv files stay in the build too, for tests that read every engine shader.

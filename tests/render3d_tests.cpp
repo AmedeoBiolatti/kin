@@ -12334,6 +12334,2030 @@ void test_ecs_lights() {
     assert(l.shadow.enabled && l.outer_angle == 35.0f && l.id == static_cast<kin::u32>(spot.id() & 0xFFFFFFFFu));
 }
 
+// --- Particles and weather (P3c) ---
+
+// A particle system whose desc is a fire-like stream: a cone, drag and gravity, a wind to push it.
+kin::ParticleSystem3D make_stream(kin::u64 seed) {
+    kin::ParticleSystem3D system{seed};
+    kin::ParticleDesc3D& d = system.desc;
+    d.shape = kin::ParticleShape3D::Cone;
+    d.extent = {0.3f, 1.0f, 1.0f};
+    d.cone_angle = 25.0f;
+    d.rate = 400.0f;
+    d.lifetime = {1.0f, 2.0f};
+    d.speed = {2.0f, 4.0f};
+    d.size = {0.1f, 0.2f};
+    d.gravity = {0.0f, -1.0f, 0.0f};
+    d.drag = 0.6f;
+    d.spin = {-90.0f, 90.0f};
+    system.transform = Mat4f::translation({1.0f, 0.5f, -2.0f});
+    return system;
+}
+
+kin::Wind3D test_wind() {
+    return {.direction = {1.0f, 0.0f, 0.4f}, .speed = 5.0f, .gust_strength = 0.5f, .gust_period = 6.0f, .gust_length = 50.0f, .turbulence = 0.8f};
+}
+
+// The simulation is a function of the seed and the time: the same seed gives the same particles whatever the frame lengths were
+// (60 fps, 144 fps, ragged ones), another seed gives others, a saved state continues as the original did, and a bad one is refused.
+void test_particles_deterministic_and_restorable() {
+    const kin::Wind3D wind = test_wind();
+    const auto run = [&](kin::u64 seed, const std::function<double(int)>& dt_of, double total) {
+        kin::ParticleSystem3D s = make_stream(seed);
+        double t = 0.0;
+        for (int i = 0; t < total - 1e-12; ++i) {
+            const double dt = std::min(dt_of(i), total - t);
+            s.update(dt, &wind);
+            t += dt;
+        }
+        return s;
+    };
+    const kin::ParticleSystem3D a = run(7, [](int) { return 1.0 / 60.0; }, 10.0);
+    const kin::ParticleSystem3D b = run(7, [](int) { return 1.0 / 144.0; }, 10.0);
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<double> ragged(0.001, 0.05);
+    std::vector<double> dts;
+    for (double sum = 0.0; sum < 10.0; sum += dts.back()) {
+        dts.push_back(ragged(rng));
+    }
+    const kin::ParticleSystem3D c = run(7, [&](int i) { return dts[static_cast<std::size_t>(i) % dts.size()]; }, 10.0);
+    assert(a.count() > 400);
+    assert(a.state_hash() == b.state_hash());
+    assert(a.state_hash() == c.state_hash());
+    assert(a.count() == b.count() && a.count() == c.count());
+    const kin::ParticleSystem3D other = run(8, [](int) { return 1.0 / 60.0; }, 10.0);
+    assert(other.state_hash() != a.state_hash());
+    // Save, go on; a fresh system restored from the bytes goes on to the same state.
+    kin::ParticleSystem3D original = run(7, [](int) { return 1.0 / 60.0; }, 4.0);
+    const std::vector<kin::u8> bytes = original.save();
+    const kin::u64 saved_hash = original.state_hash();
+    for (int i = 0; i < 120; ++i) {
+        original.update(1.0 / 60.0, &wind);
+    }
+    kin::ParticleSystem3D restored = make_stream(99); // another seed: restore() puts the saved one back
+    assert(restored.restore(bytes));
+    assert(restored.state_hash() == saved_hash && restored.seed() == 7);
+    for (int i = 0; i < 120; ++i) {
+        restored.update(1.0 / 60.0, &wind);
+    }
+    assert(restored.state_hash() == original.state_hash());
+    // Not from a system of this kind: refused, nothing changed.
+    std::vector<kin::u8> bad = bytes;
+    bad.pop_back();
+    const kin::u64 before = restored.state_hash();
+    assert(!restored.restore(bad) && !restored.restore({}) && restored.state_hash() == before);
+    bad = bytes;
+    bad[0] ^= 0xFFu;
+    assert(!restored.restore(bad) && restored.state_hash() == before);
+    // A state hash notices a single bit of a single particle.
+    kin::ParticleSystem3D probe = run(7, [](int) { return 1.0 / 60.0; }, 2.0);
+    std::vector<kin::u8> bits = probe.save();
+    const kin::u64 h0 = probe.state_hash();
+    bits[bits.size() - 20] ^= 1u;
+    assert(probe.restore(bits) && probe.state_hash() != h0);
+    std::cerr << "particles: 10 s at 60, 144 and ragged frame lengths: one state of " << a.count() << " particles (hash equal); save and restore continue to the same hash\n";
+}
+
+// Where particles are born and how fast, over 20,000 of them: each shape's distribution against its own statistics.
+void test_particles_emitter_distributions() {
+    const auto born = [](kin::ParticleDesc3D desc, Mat4f transform = Mat4f::identity()) {
+        kin::ParticleSystem3D s{3};
+        desc.max_particles = 30000;
+        desc.lifetime = {1.0f, 3.0f};
+        s.desc = desc;
+        s.transform = transform;
+        s.burst(20000);
+        assert(s.count() == 20000);
+        return s;
+    };
+    const auto mean_of = [](const kin::ParticleSystem3D& s, const std::function<double(const kin::Particle3D&)>& f) {
+        double sum = 0.0;
+        for (const kin::Particle3D& p : s.particles()) {
+            sum += f(p);
+        }
+        return sum / static_cast<double>(s.count());
+    };
+    // A point: all at the transform, straight up at the speeds drawn from the range.
+    {
+        kin::ParticleDesc3D d;
+        d.speed = {2.0f, 6.0f};
+        const kin::ParticleSystem3D s = born(d, Mat4f::translation({1.0f, 2.0f, 3.0f}));
+        double lo = 1e9, hi = -1e9;
+        for (const kin::Particle3D& p : s.particles()) {
+            assert(p.position == (Vec3f{1.0f, 2.0f, 3.0f}));
+            assert(std::abs(p.velocity.x) < 1e-5f && std::abs(p.velocity.z) < 1e-5f);
+            lo = std::min<double>(lo, p.velocity.y);
+            hi = std::max<double>(hi, p.velocity.y);
+            assert(p.lifetime >= 1.0f && p.lifetime <= 3.0f);
+        }
+        assert(lo >= 2.0 && hi <= 6.0 && lo < 2.05 && hi > 5.95);
+        assert(std::abs(mean_of(s, [](const kin::Particle3D& p) { return static_cast<double>(p.velocity.y); }) - 4.0) < 0.05);
+        assert(std::abs(mean_of(s, [](const kin::Particle3D& p) { return static_cast<double>(p.lifetime); }) - 2.0) < 0.03);
+    }
+    // A spread: every direction within it, and uniform over the solid angle (the mean of cos = (1 + cos 45) / 2).
+    {
+        kin::ParticleDesc3D d;
+        d.speed = {1.0f, 1.0f};
+        d.spread = 45.0f;
+        const kin::ParticleSystem3D s = born(d);
+        float widest = 0.0f;
+        for (const kin::Particle3D& p : s.particles()) {
+            widest = std::max(widest, std::acos(std::clamp(p.velocity.y / kin::length(p.velocity), -1.0f, 1.0f)));
+        }
+        assert(widest <= 45.0f * 3.14159265f / 180.0f + 1e-3f && widest > 44.0f * 3.14159265f / 180.0f);
+        const double want = (1.0 + std::cos(45.0 * 3.14159265 / 180.0)) / 2.0;
+        assert(std::abs(mean_of(s, [](const kin::Particle3D& p) { return static_cast<double>(p.velocity.y); }) - want) < 0.004);
+    }
+    // A box: uniform inside, the variance of a width 2e is (2e)^2 / 12.
+    {
+        kin::ParticleDesc3D d;
+        d.shape = kin::ParticleShape3D::Box;
+        d.extent = {1.0f, 2.0f, 3.0f};
+        const kin::ParticleSystem3D s = born(d);
+        const double e[3] = {1.0, 2.0, 3.0};
+        for (int axis = 0; axis < 3; ++axis) {
+            const auto coordinate = [axis](const kin::Particle3D& p) { return static_cast<double>(axis == 0 ? p.position.x : axis == 1 ? p.position.y : p.position.z); };
+            const double mean = mean_of(s, coordinate);
+            const double var = mean_of(s, [&](const kin::Particle3D& p) { return (coordinate(p) - mean) * (coordinate(p) - mean); });
+            assert(std::abs(mean) < 0.04 * e[axis]);
+            assert(std::abs(var / ((2.0 * e[axis]) * (2.0 * e[axis]) / 12.0) - 1.0) < 0.03);
+            for (const kin::Particle3D& p : s.particles()) {
+                assert(std::abs(coordinate(p)) <= e[axis] + 1e-5);
+            }
+        }
+        // Its surface: every point on a face, the faces in proportion to their areas (x faces 2*3*... : ax = ey ez ...).
+        d.surface_only = true;
+        const kin::ParticleSystem3D shell = born(d);
+        double faces[3] = {0, 0, 0};
+        for (const kin::Particle3D& p : shell.particles()) {
+            const bool on_x = std::abs(std::abs(p.position.x) - 1.0f) < 1e-4f, on_y = std::abs(std::abs(p.position.y) - 2.0f) < 1e-4f,
+                       on_z = std::abs(std::abs(p.position.z) - 3.0f) < 1e-4f;
+            assert(on_x || on_y || on_z);
+            faces[0] += on_x && !on_y && !on_z ? 1 : 0;
+            faces[1] += on_y && !on_x && !on_z ? 1 : 0;
+            faces[2] += on_z && !on_x && !on_y ? 1 : 0;
+        }
+        const double ax = 2.0 * 3.0, ay = 1.0 * 3.0, az = 1.0 * 2.0, total = ax + ay + az;
+        assert(std::abs(faces[0] / 20000.0 - ax / total) < 0.015 && std::abs(faces[1] / 20000.0 - ay / total) < 0.015 &&
+               std::abs(faces[2] / 20000.0 - az / total) < 0.015);
+    }
+    // A sphere: the radius' distribution is r^3 (an eighth inside half the radius), moving straight out; its surface exactly at R.
+    {
+        kin::ParticleDesc3D d;
+        d.shape = kin::ParticleShape3D::Sphere;
+        d.extent = {2.0f, 1.0f, 1.0f};
+        d.speed = {3.0f, 3.0f};
+        const kin::ParticleSystem3D s = born(d);
+        int inside = 0;
+        double mean_up = 0.0;
+        for (const kin::Particle3D& p : s.particles()) {
+            const float r = kin::length(p.position);
+            assert(r <= 2.0f + 1e-4f);
+            inside += r < 1.0f ? 1 : 0;
+            if (r > 0.1f) {
+                assert(kin::dot(kin::normalize(p.position), kin::normalize(p.velocity)) > 0.999f);
+            }
+            assert(std::abs(kin::length(p.velocity) - 3.0f) < 1e-3f);
+            mean_up += p.position.y;
+        }
+        assert(std::abs(static_cast<double>(inside) / 20000.0 - 0.125) < 0.01);
+        assert(std::abs(mean_up / 20000.0) < 0.03);
+        d.surface_only = true;
+        for (const kin::Particle3D& p : born(d).particles()) {
+            assert(std::abs(kin::length(p.position) - 2.0f) < 1e-4f);
+        }
+    }
+    // A cone: from a disc of radius R (area uniform: r^2 uniform), directions within the angle, uniform over its solid angle.
+    {
+        kin::ParticleDesc3D d;
+        d.shape = kin::ParticleShape3D::Cone;
+        d.extent = {0.5f, 1.0f, 1.0f};
+        d.cone_angle = 30.0f;
+        d.speed = {1.0f, 1.0f};
+        const kin::ParticleSystem3D s = born(d);
+        int inner = 0;
+        float widest = 0.0f;
+        for (const kin::Particle3D& p : s.particles()) {
+            assert(std::abs(p.position.y) < 1e-6f && std::hypot(p.position.x, p.position.z) <= 0.5f + 1e-5f);
+            inner += std::hypot(p.position.x, p.position.z) < 0.5f / std::sqrt(2.0f) ? 1 : 0;
+            widest = std::max(widest, std::acos(std::clamp(p.velocity.y, -1.0f, 1.0f)));
+        }
+        assert(std::abs(static_cast<double>(inner) / 20000.0 - 0.5) < 0.012);
+        assert(widest <= 30.0f * 3.14159265f / 180.0f + 1e-3f && widest > 29.0f * 3.14159265f / 180.0f);
+        const double want = (1.0 + std::cos(30.0 * 3.14159265 / 180.0)) / 2.0;
+        assert(std::abs(mean_of(s, [](const kin::Particle3D& p) { return static_cast<double>(p.velocity.y); }) - want) < 0.003);
+    }
+    // A disc is the cone's base with a spread of its own; the emitter's turn takes the +Y axis: a quarter turn about X sends it to +Z.
+    {
+        kin::ParticleDesc3D d;
+        d.shape = kin::ParticleShape3D::Disc;
+        d.extent = {1.5f, 1.0f, 1.0f};
+        d.speed = {2.0f, 2.0f};
+        const kin::ParticleSystem3D s = born(d, Mat4f::rotation_x(90.0f));
+        for (const kin::Particle3D& p : s.particles()) {
+            assert(std::abs(p.velocity.z - 2.0f) < 1e-4f && std::abs(p.velocity.y) < 1e-4f && std::abs(p.position.z) < 1e-4f);
+            assert(std::hypot(p.position.x, p.position.y) <= 1.5f + 1e-4f);
+        }
+    }
+    // Added velocity drawn between two vectors, and the cap on live particles.
+    {
+        kin::ParticleDesc3D d;
+        d.speed = {0.0f, 0.0f};
+        d.velocity_min = {-1.0f, 0.0f, 2.0f};
+        d.velocity_max = {3.0f, 0.0f, 4.0f};
+        const kin::ParticleSystem3D s = born(d);
+        assert(std::abs(mean_of(s, [](const kin::Particle3D& p) { return static_cast<double>(p.velocity.x); }) - 1.0) < 0.04);
+        assert(std::abs(mean_of(s, [](const kin::Particle3D& p) { return static_cast<double>(p.velocity.z); }) - 3.0) < 0.03);
+        kin::ParticleSystem3D capped{1};
+        capped.desc.max_particles = 1000;
+        capped.burst(50000);
+        assert(capped.count() == 1000);
+    }
+}
+
+// Forces: gravity alone is a parabola; gravity with drag falls to the terminal velocity g / k; the wind pulls a particle with drag
+// to its speed (not with no influence); in gusts its mean velocity over a minute is the wind's mean.
+void test_particles_forces() {
+    const auto step_for = [](kin::ParticleSystem3D& s, double seconds, const kin::Wind3D* wind) {
+        for (int i = 0; i < static_cast<int>(seconds * 60.0 + 0.5); ++i) {
+            s.update(1.0 / 60.0, wind);
+        }
+    };
+    const auto one = [](kin::ParticleDesc3D d) {
+        kin::ParticleSystem3D s{1};
+        d.lifetime = {1000.0f, 1000.0f};
+        s.desc = d;
+        s.burst(1);
+        return s;
+    };
+    {
+        kin::ParticleDesc3D d;
+        d.gravity = {0.0f, -10.0f, 0.0f};
+        d.speed = {5.0f, 5.0f}; // up
+        kin::ParticleSystem3D s = one(d);
+        step_for(s, 1.0, nullptr);
+        // y = v t - g t^2 / 2 = 0 at t = 1 (semi-implicit Euler at 120 Hz: within a step's worth of error)
+        assert(std::abs(s.particles()[0].position.y - 0.0f) < 0.06f);
+        assert(std::abs(s.particles()[0].velocity.y - (-5.0f)) < 1e-3f);
+    }
+    {
+        kin::ParticleDesc3D d;
+        d.gravity = {0.0f, -10.0f, 0.0f};
+        d.drag = 2.0f;
+        d.speed = {0.0f, 0.0f};
+        kin::ParticleSystem3D s = one(d);
+        step_for(s, 6.0, nullptr);
+        assert(std::abs(s.particles()[0].velocity.y - (-5.0f)) < 0.01f); // g / k
+        // Exact for the step: the position is the closed form's, too (y(t) = -(g/k) t + (g/k)(1 - e^-kt)/k at rest).
+        const double t = s.time();
+        const double want = -5.0 * t + 5.0 * (1.0 - std::exp(-2.0 * t)) / 2.0;
+        assert(std::abs(s.particles()[0].position.y - want) < 1e-3);
+    }
+    {
+        kin::Wind3D wind{.direction = {1.0f, 0.0f, 0.0f}, .speed = 4.0f};
+        kin::ParticleDesc3D d;
+        d.drag = 3.0f;
+        d.speed = {0.0f, 0.0f};
+        kin::ParticleSystem3D s = one(d);
+        step_for(s, 3.0, &wind);
+        assert(std::abs(s.particles()[0].velocity.x - 4.0f) < 0.05f && std::abs(s.particles()[0].velocity.y) < 1e-4f);
+        d.wind_influence = 0.0f;
+        kin::ParticleSystem3D still = one(d);
+        step_for(still, 3.0, &wind);
+        assert(std::abs(still.particles()[0].velocity.x) < 1e-5f);
+        d.wind_influence = 0.5f;
+        kin::ParticleSystem3D half = one(d);
+        step_for(half, 3.0, &wind);
+        assert(std::abs(half.particles()[0].velocity.x - 2.0f) < 0.05f);
+    }
+    {
+        // Gusts: the particle's velocity, averaged over a minute, is the wind's mean; the velocity itself swings by the gusts.
+        const kin::Wind3D wind = test_wind();
+        kin::ParticleDesc3D d;
+        d.drag = 4.0f;
+        d.speed = {0.0f, 0.0f};
+        kin::ParticleSystem3D s = one(d);
+        double sum = 0.0, lo = 1e9, hi = -1e9;
+        const kin::Vec3f dir = kin::normalize(wind.direction);
+        const int n = 60 * 60;
+        for (int i = 0; i < n; ++i) {
+            s.update(1.0 / 60.0, &wind);
+            const double along = kin::dot(s.particles()[0].velocity, dir);
+            sum += along;
+            lo = std::min(lo, along);
+            hi = std::max(hi, along);
+        }
+        // (A particle carried with the wind overtaken by a gust, which moves faster, rides each gust a little longer than a fixed
+        // point sees it: its mean is a little above the Eulerian 5.)
+        assert(sum / n > 4.8 && sum / n < 6.3);
+        assert(lo < 4.0 && hi > 6.0 && hi < 9.5); // gusts of 50%: 2.5 to 7.5, a little turbulence and the drag's smoothing
+        // And it is carried downwind: the net displacement is along the wind (the turbulence's cross term is small).
+        const kin::Vec3f moved = s.particles()[0].position;
+        assert(kin::dot(moved, dir) > 0.9f * 5.0f * 60.0f && std::abs(moved.y) < 0.5f * 60.0f);
+    }
+}
+
+// The wind: gusts have mean 0 and the deviation of three sines (0.48), stay within 1, travel with the wind; the closed-form
+// displacement is the integral of the velocity; turbulence is zero-mean; no direction is no wind.
+void test_wind_model() {
+    kin::Wind3D w{.direction = {2.0f, 0.0f, 0.0f}, .speed = 6.0f, .gust_strength = 0.5f, .gust_period = 6.0f, .gust_length = 60.0f};
+    double sum = 0.0, sq = 0.0, lo = 1e9, hi = -1e9;
+    int n = 0;
+    for (int ti = 0; ti < 4000; ++ti) {
+        for (int xi = 0; xi < 20; ++xi) {
+            const double g = (static_cast<double>(w.gust_factor({13.1f * static_cast<float>(xi), 0.0f, 7.7f * static_cast<float>(xi)}, ti * 0.37)) - 1.0) / 0.5;
+            sum += g;
+            sq += g * g;
+            lo = std::min(lo, g);
+            hi = std::max(hi, g);
+            ++n;
+        }
+    }
+    const double mean = sum / n, deviation = std::sqrt(sq / n - mean * mean);
+    std::cerr << "wind: gust mean " << mean << ", deviation " << deviation << " (three sines: 0.48), range " << lo << " to " << hi << "\n";
+    assert(std::abs(mean) < 0.03 && deviation > 0.44 && deviation < 0.52 && lo >= -1.0001 && hi <= 1.0001 && lo < -0.8 && hi > 0.8);
+    // No turbulence: the velocity is along the (normalised) direction at speed * the gust factor.
+    const kin::Vec3f v = w.velocity({5.0f, 1.0f, 2.0f}, 3.3);
+    assert(std::abs(v.y) < 1e-6f && std::abs(v.z) < 1e-6f && std::abs(v.x - 6.0f * w.gust_factor({5.0f, 1.0f, 2.0f}, 3.3)) < 1e-4f);
+    // Displacement is the integral of the velocity (trapezoid at 1 cm): with gusts and turbulence, at a place, over half a minute.
+    kin::Wind3D full = test_wind();
+    const kin::Vec3f place{5.0f, 2.0f, -3.0f};
+    double integral[3] = {0.0, 0.0, 0.0};
+    const double dt = 0.005;
+    for (int i = 0; i < 6000; ++i) {
+        const double t = i * dt;
+        const kin::Vec3f a = full.velocity(place, t), b = full.velocity(place, t + dt);
+        integral[0] += 0.5 * dt * (static_cast<double>(a.x) + b.x);
+        integral[1] += 0.5 * dt * (static_cast<double>(a.y) + b.y);
+        integral[2] += 0.5 * dt * (static_cast<double>(a.z) + b.z);
+    }
+    const kin::Vec3f closed = full.displacement(place, 0.0, 30.0);
+    assert(std::abs(closed.x - integral[0]) < 0.01 && std::abs(closed.y - integral[1]) < 0.01 && std::abs(closed.z - integral[2]) < 0.01);
+    assert(kin::length(closed) > 100.0f);
+    // And from a later start (the integral is additive).
+    const kin::Vec3f part = full.displacement(place, 10.0, 30.0) + full.displacement(place, 0.0, 10.0);
+    assert(kin::length(part - closed) < 1e-3f);
+    // Turbulence alone: zero-mean in every component, rms of half its amplitude, different components differ.
+    kin::Wind3D swirl{.direction = {0.0f, 0.0f, 0.0f}, .speed = 0.0f, .turbulence = 2.0f, .turbulence_length = 4.0f};
+    double mx = 0.0, my = 0.0, mz = 0.0, sx = 0.0;
+    int m = 0;
+    for (int ti = 0; ti < 3000; ++ti) {
+        const kin::Vec3f s = swirl.velocity({static_cast<float>(ti % 37) * 1.3f, static_cast<float>(ti % 11), static_cast<float>(ti % 23) * 0.7f}, ti * 0.173);
+        mx += s.x;
+        my += s.y;
+        mz += s.z;
+        sx += static_cast<double>(s.x) * s.x;
+        ++m;
+    }
+    assert(std::abs(mx / m) < 0.08 && std::abs(my / m) < 0.08 && std::abs(mz / m) < 0.08);
+    assert(std::abs(std::sqrt(sx / m) - 1.0) < 0.15); // 0.5 * 2 * sqrt(2 * 0.5)
+    // No direction, no wind.
+    kin::Wind3D none{.direction = {0.0f, 0.0f, 0.0f}, .speed = 5.0f, .gust_strength = 1.0f};
+    assert(none.velocity({1, 2, 3}, 4.0) == (Vec3f{}) && none.displacement({}, 0.0, 10.0) == (Vec3f{}));
+}
+
+// Life curves, colours and flipbook frames as the sprites carry them; the ground kills or bounces.
+void test_particles_life_and_ground() {
+    kin::ParticleDesc3D d;
+    d.size_start = 0.0f;
+    d.size_mid = 2.0f;
+    d.size_end = 1.0f;
+    d.alpha_start = 1.0f;
+    d.alpha_end = 0.2f;
+    d.fade_in = 0.2f;
+    assert(kin::ParticleSystem3D::size_over_life(d, 0.0f) == 0.0f && kin::ParticleSystem3D::size_over_life(d, 0.5f) == 2.0f &&
+           kin::ParticleSystem3D::size_over_life(d, 1.0f) == 1.0f);
+    assert(std::abs(kin::ParticleSystem3D::size_over_life(d, 0.25f) - 1.0f) < 1e-6f && std::abs(kin::ParticleSystem3D::size_over_life(d, 0.75f) - 1.5f) < 1e-6f);
+    assert(kin::ParticleSystem3D::alpha_over_life(d, 0.0f) == 0.0f); // faded in from nothing: no pop at birth
+    assert(std::abs(kin::ParticleSystem3D::alpha_over_life(d, 0.1f) - 0.5f * (1.0f - 0.8f * 0.1f)) < 1e-5f);
+    assert(std::abs(kin::ParticleSystem3D::alpha_over_life(d, 1.0f) - 0.2f) < 1e-6f);
+    // A particle at half its life in the sprites: colour at the middle, size scaled, alpha, a flipbook frame of 4 over a life.
+    kin::ParticleSystem3D s{2};
+    s.desc.lifetime = {2.0f, 2.0f};
+    s.desc.speed = {0.0f, 0.0f};
+    s.desc.size = {0.5f, 0.5f};
+    s.desc.size_start = 1.0f;
+    s.desc.size_mid = 3.0f;
+    s.desc.size_end = 1.0f;
+    s.desc.colour_start = {1.0f, 0.0f, 0.0f};
+    s.desc.colour_end = {0.0f, 0.0f, 1.0f};
+    s.desc.alpha_start = 1.0f;
+    s.desc.alpha_end = 0.0f;
+    s.desc.look.atlas_columns = 2;
+    s.desc.look.atlas_rows = 2;
+    s.desc.frames_per_life = 1.0f;
+    s.burst(1);
+    for (int i = 0; i < 60; ++i) {
+        s.update(1.0 / 60.0);
+    }
+    std::vector<kin::ParticleSprite3D> sprites;
+    s.sprites(sprites);
+    assert(sprites.size() == 1);
+    assert(std::abs(sprites[0].size - 1.5f) < 0.02f);
+    assert(std::abs(sprites[0].colour.x - 0.5f) < 0.02f && std::abs(sprites[0].colour.z - 0.5f) < 0.02f);
+    assert(std::abs(sprites[0].alpha - 0.5f) < 0.02f);
+    assert(std::abs(sprites[0].frame - 2.0f) < 0.1f);
+    // A ground: a particle falling on it dies, or bounces with the restitution and stays above it.
+    kin::ParticleDesc3D g;
+    g.gravity = {0.0f, -9.8f, 0.0f};
+    g.speed = {0.0f, 0.0f};
+    g.lifetime = {50.0f, 50.0f};
+    g.ground = true;
+    g.ground_height = 0.0f;
+    kin::ParticleSystem3D dies{1};
+    dies.desc = g;
+    dies.transform = Mat4f::translation({0.0f, 2.0f, 0.0f});
+    dies.burst(5);
+    for (int i = 0; i < 90; ++i) {
+        dies.update(1.0 / 60.0);
+    }
+    assert(dies.count() == 0);
+    g.bounce = 0.5f;
+    kin::ParticleSystem3D bounces{1};
+    bounces.desc = g;
+    bounces.transform = Mat4f::translation({0.0f, 2.0f, 0.0f});
+    bounces.burst(1);
+    float lowest = 1e9f, apex_after = 0.0f;
+    bool hit = false;
+    for (int i = 0; i < 240; ++i) {
+        bounces.update(1.0 / 60.0);
+        const kin::Particle3D& p = bounces.particles()[0];
+        lowest = std::min(lowest, p.position.y);
+        if (p.velocity.y > 0.0f) {
+            hit = true;
+        }
+        if (hit) {
+            apex_after = std::max(apex_after, p.position.y);
+        }
+    }
+    assert(bounces.count() == 1 && lowest >= 0.0f && hit);
+    // Half the speed at the ground: a quarter of the height (2 m): the first apex 0.5 m, within the step's slop.
+    assert(apex_after > 0.4f && apex_after < 0.6f);
+}
+
+// The quad's corners as the shader makes them, for each facing, against the geometry they must have.
+void test_particle_quads_cpu() {
+    kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+    kin::ParticleSprite3D s;
+    s.position = {1.0f, 2.0f, 0.0f};
+    s.size = 2.0f;
+    kin::ParticleLook3D look;
+    const auto near_v = [](Vec3f a, Vec3f b) { return kin::length(a - b) < 1e-4f; };
+    {
+        const kin::ParticleQuad3D q = kin::particle_quad(s, look, camera);
+        assert(near_v(q.corner[0], {0.0f, 1.0f, 0.0f}) && near_v(q.corner[1], {2.0f, 1.0f, 0.0f}) && near_v(q.corner[2], {2.0f, 3.0f, 0.0f}) &&
+               near_v(q.corner[3], {0.0f, 3.0f, 0.0f}));
+        s.rotation = 3.14159265f / 2.0f;
+        const kin::ParticleQuad3D r = kin::particle_quad(s, look, camera);
+        // A quarter turn: corner 0 (-1,-1) goes to (+1,-1) in the camera's plane.
+        assert(near_v(r.corner[0], {2.0f, 1.0f, 0.0f}) && near_v(r.corner[2], {0.0f, 3.0f, 0.0f}));
+        s.rotation = 0.0f;
+    }
+    {
+        // Stretched: its head at the particle, its tail one streak behind it (velocity * stretch: 1 long, so the tail is above a
+        // falling particle), broad across the view: the width side is square to both the streak and the way to the eye.
+        look.facing = kin::ParticleFacing3D::Stretched;
+        look.stretch = 0.2f;
+        s.velocity = {0.0f, -5.0f, 0.0f};
+        const kin::ParticleQuad3D q = kin::particle_quad(s, look, camera);
+        assert(std::abs(q.corner[2].y - 2.0f) < 1e-4f && std::abs(q.corner[3].y - 2.0f) < 1e-4f);
+        assert(std::abs(q.corner[0].y - 3.0f) < 1e-4f && std::abs(q.corner[1].y - 3.0f) < 1e-4f);
+        assert(std::abs(kin::length(q.corner[1] - q.corner[0]) - 2.0f) < 1e-4f);
+        const Vec3f side = kin::normalize(q.corner[1] - q.corner[0]);
+        const Vec3f to_eye = kin::normalize(camera.position - s.position);
+        assert(std::abs(kin::dot(side, Vec3f{0.0f, 1.0f, 0.0f})) < 1e-4f && std::abs(kin::dot(side, to_eye)) < 1e-4f);
+        assert((q.corner[2] + q.corner[3]) * 0.5f == s.position || kin::length((q.corner[2] + q.corner[3]) * 0.5f - s.position) < 1e-4f);
+        assert(kin::length(kin::particle_streak(s, look)) > 0.99f && kin::length(kin::particle_streak(s, look)) < 1.01f);
+        // A least length for a slow particle, along its velocity (or +Y at rest).
+        look.stretch_min = 0.5f;
+        s.velocity = {0.1f, 0.0f, 0.0f};
+        assert(std::abs(kin::length(kin::particle_streak(s, look)) - 0.5f) < 1e-5f);
+        s.velocity = {};
+        assert(kin::particle_streak(s, look) == (Vec3f{0.0f, 0.5f, 0.0f}));
+        look.stretch_min = 0.0f;
+        s.velocity = {0.0f, -5.0f, 0.0f};
+    }
+    {
+        // Axis: stands on its axis (up), turns about it to face the camera: a camera on +x sees it edge-on to z.
+        look.facing = kin::ParticleFacing3D::Axis;
+        look.axis = {0.0f, 1.0f, 0.0f};
+        kin::Camera3D side = kin::Camera3D::look_at({10.0f, 2.0f, 0.0f}, {0.0f, 2.0f, 0.0f}, 60.0f);
+        const kin::ParticleQuad3D q = kin::particle_quad(s, look, side);
+        for (const Vec3f& c : q.corner) {
+            assert(std::abs(c.x - 1.0f) < 1e-4f); // all in the plane x = 1, facing the camera on +x
+        }
+        assert(std::abs(q.corner[0].y - 1.0f) < 1e-4f && std::abs(q.corner[2].y - 3.0f) < 1e-4f);
+        assert(std::abs(std::abs(q.corner[1].z - q.corner[0].z) - 2.0f) < 1e-4f);
+    }
+    {
+        // Flat: in the plane normal to the axis, a ring on the ground.
+        look.facing = kin::ParticleFacing3D::Flat;
+        look.axis = {0.0f, 2.0f, 0.0f};
+        const kin::ParticleQuad3D q = kin::particle_quad(s, look, camera);
+        for (const Vec3f& c : q.corner) {
+            assert(std::abs(c.y - 2.0f) < 1e-4f && std::abs(std::max(std::abs(c.x - 1.0f), std::abs(c.z)) - 1.0f) < 1e-4f);
+        }
+    }
+    // The soft fade and the disc's alpha, as the shader has them.
+    assert(kin::soft_particle_fade(0.0f, 0.5f) == 0.0f && kin::soft_particle_fade(0.5f, 0.5f) == 1.0f && kin::soft_particle_fade(2.0f, 0.5f) == 1.0f);
+    assert(std::abs(kin::soft_particle_fade(0.25f, 0.5f) - 0.5f) < 1e-6f && kin::soft_particle_fade(-1.0f, 0.5f) == 0.0f);
+    assert(kin::particle_disc_alpha(0.0f, 1.0f) == 1.0f && kin::particle_disc_alpha(1.0f, 1.0f) == 0.0f && kin::particle_disc_alpha(1.2f, 0.0f) == 0.0f);
+    assert(kin::particle_disc_alpha(0.99f, 0.0f) == 1.0f && std::abs(kin::particle_disc_alpha(0.5f, 1.0f) - 0.5f) < 1e-5f);
+    assert(kin::particle_disc_alpha(0.0f, 0.5f, 0.4f) == 0.0f && kin::particle_disc_alpha(0.5f, 0.0f, 0.4f) == 0.0f && kin::particle_disc_alpha(0.99f, 0.0f, 0.4f) > 0.99f);
+}
+
+// The weather as a function of the clock and the camera: nothing stored, nothing drifting with the camera.
+void test_weather_volume_cpu() {
+    kin::Weather3D w;
+    w.rain.intensity = 1.0f;
+    w.rain.max_particles = 4000;
+    w.wind = {.direction = {1.0f, 0.0f, 0.0f}, .speed = 6.0f, .gust_strength = 0.4f, .turbulence = 0.5f};
+    w.time = 37.25;
+    kin::Camera3D cam;
+    cam.position = {3.0f, 1.7f, -2.0f};
+    // A function: the same weather and camera give the same sprites; time moves them; intensity 0 gives none (cost nothing).
+    std::vector<kin::ParticleSprite3D> a, b;
+    std::vector<kin::WeatherBatch3D> ba, bb;
+    kin::weather_sprites(w, cam, a, ba);
+    kin::weather_sprites(w, cam, b, bb);
+    assert(!a.empty() && a.size() == b.size() && ba.size() == bb.size());
+    assert(std::memcmp(a.data(), b.data(), a.size() * sizeof(kin::ParticleSprite3D)) == 0);
+    {
+        kin::Weather3D later = w;
+        later.time += 0.5;
+        std::vector<kin::ParticleSprite3D> c;
+        std::vector<kin::WeatherBatch3D> bc;
+        kin::weather_sprites(later, cam, c, bc);
+        assert(c.size() > 0 && std::memcmp(a.data(), c.data(), std::min(a.size(), c.size()) * sizeof(kin::ParticleSprite3D)) != 0);
+        // And the clock run back gives the picture again.
+        later.time -= 0.5;
+        std::vector<kin::ParticleSprite3D> d;
+        std::vector<kin::WeatherBatch3D> bd;
+        kin::weather_sprites(later, cam, d, bd);
+        assert(d.size() == a.size() && std::memcmp(a.data(), d.data(), a.size() * sizeof(kin::ParticleSprite3D)) == 0);
+    }
+    {
+        kin::Weather3D off = w;
+        off.rain.intensity = 0.0f;
+        std::vector<kin::ParticleSprite3D> c;
+        std::vector<kin::WeatherBatch3D> bc;
+        kin::weather_sprites(off, cam, c, bc);
+        assert(c.empty() && bc.empty() && !off.active());
+    }
+    // Intensity: the first n particles are shown, the rest hidden; the last one fades in (no pop).
+    {
+        kin::Weather3D half = w;
+        half.rain.intensity = 0.5f;
+        std::vector<kin::ParticleSprite3D> c;
+        std::vector<kin::WeatherBatch3D> bc;
+        kin::weather_sprites(half, cam, c, bc);
+        assert(c.size() > 1700 && c.size() < 2000 + 2);
+        // Particles up to 1999 are whole at 0.5 and 2000 and after are not there.
+        kin::ParticleSprite3D s;
+        int shown_last = 0, shown_past = 0;
+        for (kin::u32 i = 1990; i < 2000; ++i) {
+            shown_last += kin::weather_particle(half, half.rain, 0, i, cam.position, s) ? 1 : 0;
+        }
+        for (kin::u32 i = 2000; i < 2010; ++i) {
+            shown_past += kin::weather_particle(half, half.rain, 0, i, cam.position, s) ? 1 : 0;
+        }
+        assert(shown_last >= 8 && shown_past == 0);
+        // (the ones that are shown keep their places as the intensity rises)
+        kin::ParticleSprite3D at_half, at_more;
+        assert(kin::weather_particle(half, half.rain, 0, 7, cam.position, at_half));
+        assert(kin::weather_particle(w, w.rain, 0, 7, cam.position, at_more));
+        assert(at_half.position == at_more.position);
+    }
+    // No swimming: a particle's place before the wrap is the same whatever the camera; its wrapped place differs from the
+    // other camera's by whole boxes, and a particle that stays in both boxes is exactly where it was.
+    {
+        const kin::WeatherLayer3D& layer = w.rain;
+        kin::Vec3f eye_b = cam.position + Vec3f{1.3f, -0.4f, 2.2f};
+        int stayed = 0, checked = 0;
+        for (kin::u32 i = 0; i < 4000; ++i) {
+            kin::ParticleSprite3D sa, sb;
+            kin::Vec3f ua, ub;
+            const bool ka = kin::weather_particle(w, layer, 0, i, cam.position, sa, &ua);
+            const bool kb = kin::weather_particle(w, layer, 0, i, eye_b, sb, &ub);
+            assert(ua == ub); // before wrapping: a function of the number and the clock alone
+            if (ka && kb) {
+                ++checked;
+                const Vec3f d = sb.position - sa.position;
+                const auto whole = [](float v, float box) { return std::abs(v / box - std::round(v / box)) < 1e-3f; };
+                assert(whole(d.x, layer.box.x) && whole(d.y, layer.box.y) && whole(d.z, layer.box.z));
+                stayed += kin::length(d) < 1e-4f ? 1 : 0;
+            }
+        }
+        // 1.3 m of 36: most particles do not change their image.
+        assert(checked > 3000 && stayed > static_cast<int>(0.8 * checked));
+    }
+    // Bounded: moving the camera a thousand metres, the number of particles shown is the same (give or take the fade's zeros).
+    {
+        int near_count = 0, far_count = 0;
+        for (kin::u32 i = 0; i < 4000; ++i) {
+            kin::ParticleSprite3D s;
+            near_count += kin::weather_particle(w, w.rain, 0, i, cam.position, s) ? 1 : 0;
+            far_count += kin::weather_particle(w, w.rain, 0, i, cam.position + Vec3f{1000.0f, 0.0f, -1000.0f}, s) ? 1 : 0;
+        }
+        assert(near_count > 3800 && std::abs(near_count - far_count) < 60);
+        // And all of them inside the volume round the camera.
+        const Vec3f far_eye = cam.position + Vec3f{1000.0f, 0.0f, -1000.0f};
+        for (kin::u32 i = 0; i < 4000; ++i) {
+            kin::ParticleSprite3D s;
+            if (kin::weather_particle(w, w.rain, 0, i, far_eye, s)) {
+                assert(std::abs(s.position.x - far_eye.x) <= w.rain.box.x * 0.5f + 1e-3f && std::abs(s.position.z - far_eye.z) <= w.rain.box.z * 0.5f + 1e-3f);
+                assert(s.position.y >= far_eye.y - 0.25f * w.rain.box.y - 1e-3f && s.position.y <= far_eye.y + 0.75f * w.rain.box.y + 1e-3f);
+            }
+        }
+    }
+    // The wind carries the drops: their velocity is the fall plus the wind's share; the streak's slant is wind / fall.
+    {
+        kin::ParticleSprite3D s;
+        kin::Weather3D calm = w;
+        calm.wind = {.direction = {0.0f, 0.0f, 1.0f}, .speed = 4.5f};
+        calm.rain.fall_variation = 0.0f;
+        calm.rain.wind_influence = 1.0f;
+        int n = 0;
+        for (kin::u32 i = 0; i < 400; ++i) {
+            if (kin::weather_particle(calm, calm.rain, 0, i, cam.position, s)) {
+                // wind_influence per drop is 0.8 to 1 of the full
+                assert(std::abs(s.velocity.y + 9.0f) < 1e-4f && s.velocity.z >= 0.8f * 4.5f - 1e-4f && s.velocity.z <= 4.5f + 1e-4f &&
+                       std::abs(s.velocity.x) < 1e-4f);
+                ++n;
+            }
+        }
+        assert(n > 300);
+    }
+    // Over time the wind's drift moves the whole pattern downwind: the mean unwrapped x of the particles grows by the wind's mean.
+    {
+        kin::Weather3D drift = w;
+        drift.wind.gust_strength = 0.0f;
+        drift.wind.turbulence = 0.0f;
+        drift.time = 0.0;
+        double x0 = 0.0, x1 = 0.0;
+        for (kin::u32 i = 0; i < 1000; ++i) {
+            kin::ParticleSprite3D s;
+            kin::Vec3f u;
+            kin::weather_particle(drift, drift.rain, 0, i, cam.position, s, &u);
+            x0 += u.x;
+        }
+        drift.time = 10.0;
+        for (kin::u32 i = 0; i < 1000; ++i) {
+            kin::ParticleSprite3D s;
+            kin::Vec3f u;
+            kin::weather_particle(drift, drift.rain, 0, i, cam.position, s, &u);
+            x1 += u.x;
+        }
+        const double moved = (x1 - x0) / 1000.0;
+        assert(std::abs(moved - 10.0 * 6.0 * 0.9 * 0.9) < 0.6); // 10 s at 6 m/s, times the layer's 0.9 and the drop's 0.8 to 1 of it (mean 0.9)
+    }
+    // Splashes: with a ground, drops that have reached it show a ring on it for a moment (and no drop below it); without, none.
+    {
+        kin::Weather3D ground = w;
+        ground.has_ground = true;
+        ground.ground_height = 0.0f;
+        ground.rain.splash = 0.5f;
+        std::vector<kin::ParticleSprite3D> sprites;
+        std::vector<kin::WeatherBatch3D> batches;
+        kin::weather_sprites(ground, cam, sprites, batches);
+        int splashes = 0, drops = 0;
+        for (const kin::WeatherBatch3D& b : batches) {
+            for (kin::u32 k = 0; k < b.count; ++k) {
+                const kin::ParticleSprite3D& p = sprites[b.first + k];
+                if (b.kind == kin::WeatherBatch3D::Kind::Splash) {
+                    ++splashes;
+                    assert(std::abs(p.position.y - 0.004f) < 1e-5f && b.look.facing == kin::ParticleFacing3D::Flat);
+                } else {
+                    ++drops;
+                    assert(p.position.y >= 0.0f);
+                }
+            }
+        }
+        // The share of the drops in a splash's life: splash_time * fall / the height of the volume, times the chosen half.
+        assert(splashes > 5 && splashes < 450 && drops > 2500);
+        kin::Weather3D none = ground;
+        none.has_ground = false;
+        sprites.clear();
+        batches.clear();
+        kin::weather_sprites(none, cam, sprites, batches);
+        for (const kin::WeatherBatch3D& b : batches) {
+            assert(b.kind != kin::WeatherBatch3D::Kind::Splash);
+        }
+    }
+}
+
+// Weather's effect on the light and fog: dims the sun and ambient, thickens the fog from the base it is given (so applying it every
+// frame does not compound), nothing at 0.
+void test_weather_apply() {
+    kin::Weather3D w;
+    kin::Lights3D lights;
+    lights.sun.color = {2.0f, 1.8f, 1.5f};
+    lights.fill.color = {0.2f, 0.2f, 0.3f};
+    lights.ambient = {0.4f, 0.4f, 0.5f};
+    lights.ground_ambient = Vec3f{0.2f, 0.2f, 0.2f};
+    const kin::Lights3D base = lights;
+    kin::Fog3D base_fog{.enabled = false, .density = 0.001f, .colour = {0.9f, 0.6f, 0.3f}, .sun_scatter = 0.5f};
+    kin::Fog3D fog = base_fog;
+    // Dry: nothing changes (the fog is the base one, disabled as it was).
+    w.apply(lights, fog, base_fog);
+    assert(lights.sun.color == base.sun.color && lights.ambient == base.ambient && !fog.enabled && fog.density == base_fog.density);
+    assert(w.wetness() == 0.0f && w.sun_disc_scale() == 1.0f);
+    // Rain 1: the sun at 40%, the ambient at 70%, the fog turned on and thicker, its glare gone, its colour greyer.
+    w.rain.intensity = 1.0f;
+    w.apply(lights, fog, base_fog);
+    assert(std::abs(lights.sun.color.x - 2.0f * 0.4f) < 1e-5f && std::abs(lights.ambient.z - 0.5f * 0.7f) < 1e-5f);
+    assert(std::abs(lights.fill.color.x - 0.2f * 0.4f) < 1e-5f && std::abs(lights.ground_ambient->x - 0.2f * 0.7f) < 1e-5f);
+    assert(fog.enabled && std::abs(fog.density - (0.001f + 0.004f)) < 1e-6f && fog.sun_scatter == 0.0f);
+    assert(std::abs(fog.colour.x - fog.colour.z) < std::abs(base_fog.colour.x - base_fog.colour.z));
+    // Applied again from the base: the same (a fog given back as the base would compound; the lights are the caller's to rewrite).
+    kin::Fog3D again = fog;
+    lights = base;
+    w.apply(lights, again, base_fog);
+    assert(again.density == fog.density && std::abs(lights.sun.color.x - 2.0f * 0.4f) < 1e-6f);
+    // Snow counts less (0.6), mist half; the strongest layer decides.
+    w.rain.intensity = 0.0f;
+    w.snow.intensity = 1.0f;
+    assert(std::abs(w.wetness() - 0.6f) < 1e-6f);
+    w.mist.intensity = 0.4f;
+    assert(std::abs(w.wetness() - 0.6f) < 1e-6f);
+    assert(std::abs(w.sun_disc_scale() - (1.0f - 0.9f * 0.6f)) < 1e-6f);
+}
+
+// The ECS side: an emitter component is stepped at its entity's place (turn the entity, turn the stream), disabled it neither
+// makes nor draws, and a Weather3D component is a clock and a source of scene.weather.
+void test_ecs_particles() {
+    kin::EcsWorld world;
+    kin::ParticleEmitter3D emitter;
+    emitter.system = kin::ParticleSystem3D{5};
+    emitter.system.desc.rate = 100.0f;
+    emitter.system.desc.speed = {3.0f, 3.0f};
+    emitter.system.desc.lifetime = {5.0f, 5.0f};
+    const flecs::entity up = world.raw().entity().set(kin::Transform3D{.position = {1.0f, 0.0f, 0.0f}}).set(emitter);
+    // Another one turned a quarter turn about x: its +Y is the world's +Z.
+    const flecs::entity side = world.raw().entity()
+                                   .set(kin::Transform3D{.position = {-1.0f, 0.0f, 0.0f}, .rotation = kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, 90.0f)})
+                                   .set(emitter);
+    kin::ParticleEmitter3D off = emitter;
+    off.enabled = false;
+    const flecs::entity quiet = world.raw().entity().set(kin::Transform3D{}).set(off);
+    kin::Weather3D weather;
+    weather.rain.intensity = 0.7f;
+    weather.time = 5.0;
+    world.raw().entity().set(weather);
+    kin::WorldRenderState3D state{world};
+    state.propagate_transforms();
+    for (int i = 0; i < 60; ++i) {
+        state.simulate_particles(1.0 / 60.0);
+        state.advance_weather(1.0 / 60.0);
+    }
+    const kin::ParticleEmitter3D* a = up.get<kin::ParticleEmitter3D>();
+    const kin::ParticleEmitter3D* b = side.get<kin::ParticleEmitter3D>();
+    const kin::ParticleEmitter3D* c = quiet.get<kin::ParticleEmitter3D>();
+    assert(a && b && c);
+    assert(a->system.count() > 90 && a->system.count() == b->system.count() && c->system.count() == 0);
+    for (const kin::Particle3D& p : a->system.particles()) {
+        assert(std::abs(p.velocity.y - 3.0f) < 1e-4f && std::abs(p.velocity.z) < 1e-4f && p.position.x == 1.0f);
+    }
+    for (const kin::Particle3D& p : b->system.particles()) {
+        assert(std::abs(p.velocity.z - 3.0f) < 1e-4f && std::abs(p.velocity.y) < 1e-3f && std::abs(p.position.x + 1.0f) < 1e-5f);
+    }
+    kin::Scene3D scene;
+    state.collect(scene);
+    assert(scene.particle_draws().size() == 2 && scene.particle_sprites().size() == a->system.count() * 2);
+    assert(scene.particle_draws()[0].look.blend == kin::ParticleBlend3D::Alpha);
+    // The weather: its clock ran a second; the scene has it, and the light is dimmed from the base given.
+    kin::Fog3D base{.enabled = true, .density = 0.001f};
+    scene.lights.sun.color = {1.0f, 1.0f, 1.0f};
+    assert(state.apply_weather(scene, base));
+    assert(std::abs(scene.weather.time - 6.0) < 1e-9 && scene.weather.rain.intensity == 0.7f);
+    assert(scene.lights.sun.color.x < 0.7f && scene.fog.density > 0.001f);
+    // clear() takes the particles away, the weather stays (as the sun does).
+    scene.clear();
+    assert(scene.particle_draws().empty() && scene.particle_sprites().empty() && scene.weather.rain.intensity == 0.7f);
+    // A world with no weather says so, and leaves the scene.
+    kin::EcsWorld empty;
+    kin::WorldRenderState3D none{empty};
+    kin::Scene3D untouched;
+    assert(!none.apply_weather(untouched, base) && !untouched.weather.active() && untouched.fog.density == 0.0f);
+}
+
+// --- Particles and weather on the GPU ---
+
+// A 2 x 2 texture of one colour (nearest).
+kin::Texture solid_texture(kin::Renderer2D& renderer, Color c) {
+    const kin::u8 texels[16] = {c.r, c.g, c.b, c.a, c.r, c.g, c.b, c.a, c.r, c.g, c.b, c.a, c.r, c.g, c.b, c.a};
+    kin::Texture t = renderer.create_texture_from_rgba(texels, {2, 2});
+    renderer.set_scale_mode(t, kin::ScaleMode::Nearest);
+    return t;
+}
+
+// The camera at the origin looking down -z, no light (a particle that is unlit shows its own colour).
+kin::Scene3D particle_scene(float fov = 60.0f) {
+    kin::Scene3D scene;
+    scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, fov);
+    scene.lights.sun.color = {};
+    scene.lights.ambient = {};
+    return scene;
+}
+
+kin::ParticleSprite3D sprite(Vec3f position, float size, Vec3f colour, float alpha = 1.0f) {
+    kin::ParticleSprite3D s;
+    s.position = position;
+    s.size = size;
+    s.colour = colour;
+    s.alpha = alpha;
+    return s;
+}
+
+// What the particle shader does to a pixel of an 8-bit view (stored values 0..1 in `dst`): the CPU's twin of
+// kin_particle_fragment.inc.glsl for a sprite fragment of `tex` (linear rgb, alpha) tinted by `colour` and `alpha`.
+Vec3f particle_blend_cpu(kin::ParticleBlend3D mode, Vec3f tex_rgb, float tex_a, Vec3f colour, float alpha, Vec3f dst, float fog_opacity = 0.0f,
+                         Vec3f fog_colour = {}) {
+    const float k = alpha;
+    Vec3f p = {tex_rgb.x * colour.x, tex_rgb.y * colour.y, tex_rgb.z * colour.z};
+    float a;
+    if (mode == kin::ParticleBlend3D::Premultiplied) {
+        p = p * k;
+        a = tex_a * k;
+    } else {
+        a = tex_a * k;
+        p = p * a;
+    }
+    if (fog_opacity > 0.0f) {
+        if (mode == kin::ParticleBlend3D::Additive) {
+            p = p * (1.0f - fog_opacity);
+        } else {
+            p = p + (fog_colour * a - p) * fog_opacity;
+        }
+    }
+    const auto enc = [](float v) { return kin::linear_to_srgb(std::clamp(v, 0.0f, 1.0f)); };
+    Vec3f s;
+    if (a > 1e-4f) {
+        s = {enc(p.x / a) * a, enc(p.y / a) * a, enc(p.z / a) * a};
+    } else {
+        s = {enc(p.x), enc(p.y), enc(p.z)};
+    }
+    const float behind = mode == kin::ParticleBlend3D::Additive ? 1.0f : 1.0f - a;
+    return {std::min(1.0f, s.x + dst.x * behind), std::min(1.0f, s.y + dst.y * behind), std::min(1.0f, s.z + dst.z * behind)};
+}
+
+Vec3f stored01(Color c) { return {static_cast<float>(c.r) / 255.0f, static_cast<float>(c.g) / 255.0f, static_cast<float>(c.b) / 255.0f}; }
+Color color_of01(Vec3f v) {
+    const auto one = [](float x) { return static_cast<kin::u8>(std::lround(255.0f * std::clamp(x, 0.0f, 1.0f))); };
+    return Color::rgb(one(v.x), one(v.y), one(v.z));
+}
+
+// The wall every blend test draws over: a flat unlit colour filling the view, 6 m away.
+void draw_backdrop(kin::Scene3D& scene, const kin::Mesh& box, Color c, float z = -20.0f) {
+    scene.draw(box, Mat4f::translation({0.0f, 0.0f, z}) * Mat4f::scaling({200.0f, 200.0f, 0.1f}), {.color = c, .unlit = true});
+}
+
+// Every setting of the feature configured and left off gives the plain picture to the byte, in 8-bit, HDR and TAA views: weather with
+// every layer at 0 (and a ground, a wind, a clock, odd looks), batches of no sprites, systems with no particles, soft and lit set.
+void test_gpu_particles_off_is_unchanged() {
+    with_gpu("test_gpu_particles_off_is_unchanged", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        struct Config {
+            const char* name;
+            kin::View3DOptions options;
+            bool taa;
+        };
+        const std::array<Config, 4> configs{{{"8-bit, 1 sample", {.samples = 1}, false},
+                                             {"8-bit, MSAA 4", {.samples = 4}, false},
+                                             {"HDR with bloom", {.samples = 4, .hdr = true, .exposure = 1.2f, .bloom = 0.3f, .bloom_threshold = 0.8f}, false},
+                                             {"TAA", {.samples = 1}, true}}};
+        for (const Config& config : configs) {
+            if (config.taa && lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+                continue;
+            }
+            kin::View3D view = r3d.create_view({160, 120}, config.options);
+            const auto make_scene = [&](bool configured) {
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
+                scene.lights.sun = {.direction = {0.4f, 1.0f, 0.5f}, .color = {1.2f, 1.1f, 1.0f}};
+                scene.lights.shadow_area = kin::Bounds3{{-10.0f, -1.0f, -10.0f}, {10.0f, 5.0f, 10.0f}};
+                scene.sky.enabled = true;
+                scene.fog = {.enabled = true, .density = 0.01f, .colour_from_sky = true};
+                scene.taa.enabled = config.taa;
+                scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({12.0f, 0.2f, 12.0f}), {.color = Color::rgb(180, 170, 150)});
+                scene.draw(box, Mat4f::translation({-1.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 60, 50)});
+                scene.draw(box, Mat4f::translation({1.5f, 0.5f, -1.0f}), {.color = Color::rgb(50, 160, 70), .blend = kin::Blend3D::Alpha});
+                if (configured) {
+                    scene.weather.wind = {.direction = {1.0f, 0.0f, 0.2f}, .speed = 12.0f, .gust_strength = 0.8f, .turbulence = 2.0f};
+                    scene.weather.has_ground = true;
+                    scene.weather.ground_height = 0.0f;
+                    scene.weather.time = 123.5;
+                    scene.weather.seed = 9;
+                    for (kin::WeatherLayer3D* l : {&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist}) {
+                        l->intensity = 0.0f; // off
+                        l->look.soft = true;
+                        l->look.lit = 1.0f;
+                        l->look.blend = kin::ParticleBlend3D::Additive;
+                        l->max_particles = 50000;
+                        l->splash = 1.0f;
+                    }
+                    kin::ParticleLook3D look;
+                    look.soft = true;
+                    look.lit = 1.0f;
+                    look.blend = kin::ParticleBlend3D::Premultiplied;
+                    scene.draw_particles(look, {}); // a batch of nothing
+                    kin::ParticleSystem3D empty{4};
+                    empty.desc.look = look;
+                    empty.desc.rate = 1000.0f;
+                    scene.draw_particles(empty); // a system that has made nothing
+                }
+                return scene;
+            };
+            Pixels plain, configured;
+            for (int frame = 0; frame < (config.taa ? 6 : 1); ++frame) {
+                plain = shoot_view(renderer, r3d, view, make_scene(false));
+                renderer.present();
+            }
+            const kin::Render3DStats plain_stats = r3d.stats();
+            view.reset_history();
+            kin::View3D second = r3d.create_view({160, 120}, config.options);
+            for (int frame = 0; frame < (config.taa ? 6 : 1); ++frame) {
+                configured = shoot_view(renderer, r3d, second, make_scene(true));
+                renderer.present();
+            }
+            const kin::Render3DStats stats = r3d.stats();
+            std::cerr << "particles off (" << config.name << "): " << (same_picture(plain, configured) ? "the plain picture" : "DIFFERENT") << "\n";
+            assert(same_picture(plain, configured));
+            assert(stats.particles_submitted == 0 && stats.particle_batches == 0 && stats.particles_drawn == 0 && stats.particle_cpu_ms == 0.0);
+            assert(stats.draws == plain_stats.draws && stats.ao_draws == plain_stats.ao_draws && stats.taa_main_velocity == plain_stats.taa_main_velocity);
+        }
+    });
+}
+
+// The point in the polygon, and how far from its edge, for the corners test.
+float edge_distance(kin::Vec2f p, const std::array<kin::Vec2f, 4>& q, bool& inside) {
+    float best = 1e9f;
+    int positive = 0, negative = 0;
+    for (int i = 0; i < 4; ++i) {
+        const kin::Vec2f a = q[static_cast<std::size_t>(i)], b = q[static_cast<std::size_t>((i + 1) % 4)];
+        const kin::Vec2f ab{b.x - a.x, b.y - a.y}, ap{p.x - a.x, p.y - a.y};
+        const float cross = ab.x * ap.y - ab.y * ap.x;
+        (cross >= 0.0f ? positive : negative) += 1;
+        const float t = std::clamp((ap.x * ab.x + ap.y * ab.y) / std::max(ab.x * ab.x + ab.y * ab.y, 1e-9f), 0.0f, 1.0f);
+        const float dx = p.x - (a.x + ab.x * t), dy = p.y - (a.y + ab.y * t);
+        best = std::min(best, std::sqrt(dx * dx + dy * dy));
+    }
+    inside = positive == 4 || negative == 4;
+    return best;
+}
+
+// The picture of one big sprite is the CPU's quad: for each facing the covered pixels are those inside the projected corners
+// (rotation about the view direction; a streak along the velocity, head at the particle; a turn about an axis to face the camera;
+// flat on the ground), to the edge's own pixel.
+void test_gpu_particle_billboard_corners() {
+    with_gpu("test_gpu_particle_billboard_corners", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        struct Case {
+            const char* name;
+            kin::ParticleFacing3D facing;
+            kin::ParticleSprite3D s;
+            Vec3f axis;
+        };
+        std::array<Case, 6> cases{};
+        cases[0] = {"camera, turned", kin::ParticleFacing3D::Camera, sprite({0.3f, -0.2f, -4.0f}, 2.2f, {1, 1, 1}), {0, 1, 0}};
+        cases[0].s.rotation = 0.5f;
+        cases[1] = {"stretched", kin::ParticleFacing3D::Stretched, sprite({0.5f, 0.6f, -4.0f}, 0.7f, {1, 1, 1}), {0, 1, 0}};
+        cases[1].s.velocity = {1.5f, -6.0f, 0.0f};
+        cases[2] = {"axis", kin::ParticleFacing3D::Axis, sprite({-0.8f, 0.0f, -3.5f}, 1.8f, {1, 1, 1}), {0.3f, 1.0f, 0.0f}};
+        cases[3] = {"flat", kin::ParticleFacing3D::Flat, sprite({0.2f, -1.2f, -4.5f}, 3.0f, {1, 1, 1}), {0, 1, 0}};
+        cases[3].s.rotation = 0.4f;
+        cases[4] = {"stretched, toward the camera", kin::ParticleFacing3D::Stretched, sprite({1.2f, 0.6f, -6.0f}, 0.5f, {1, 1, 1}), {0, 1, 0}};
+        cases[4].s.velocity = {0.0f, 0.0f, 12.0f};
+        // A streak whose head (the particle's place) is outside the view while its body is in it: culled by its place alone it would vanish.
+        cases[5] = {"stretched, head out of view", kin::ParticleFacing3D::Stretched, sprite({4.5f, 0.5f, -4.0f}, 0.3f, {1, 1, 1}), {0, 1, 0}};
+        cases[5].s.velocity = {16.0f, 0.0f, 0.0f}; // 4 m of streak at 0.25 s: the tail is at x = 0.5
+        for (const Case& c : cases) {
+            kin::Scene3D scene = particle_scene();
+            kin::ParticleLook3D look;
+            look.facing = c.facing;
+            look.axis = c.axis;
+            look.stretch = 0.25f;
+            look.texture = white;
+            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&c.s, 1});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            assert(r3d.stats().particle_batches == 1);
+            const kin::ParticleQuad3D quad = kin::particle_quad(c.s, look, scene.camera);
+            std::array<kin::Vec2f, 4> q{};
+            for (int i = 0; i < 4; ++i) {
+                const auto projected = scene.camera.project(quad.corner[i], screen);
+                assert(projected);
+                q[static_cast<std::size_t>(i)] = projected->pos;
+            }
+            int mismatch = 0, lit = 0;
+            double area = 0.0;
+            for (int i = 0; i < 4; ++i) {
+                const kin::Vec2f a = q[static_cast<std::size_t>(i)], b = q[static_cast<std::size_t>((i + 1) % 4)];
+                area += static_cast<double>(a.x) * b.y - static_cast<double>(b.x) * a.y;
+            }
+            area = std::abs(area) * 0.5;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    bool inside = false;
+                    const float d = edge_distance({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, q, inside);
+                    const bool is_lit = p.at(x, y).r > 128;
+                    lit += is_lit ? 1 : 0;
+                    if (d > 0.75f && is_lit != inside) {
+                        ++mismatch;
+                    }
+                }
+            }
+            std::cerr << "billboard " << c.name << ": " << lit << " pixels lit, the CPU's quad " << area << ", " << mismatch << " pixels on the wrong side\n";
+            assert(mismatch == 0 && lit > 20);
+            // The quad's area is the lit count when all of it is in the window.
+            bool whole = true;
+            for (const kin::Vec2f& v : q) {
+                whole = whole && v.x >= 0.0f && v.x < 160.0f && v.y >= 0.0f && v.y < 120.0f;
+            }
+            if (whole) {
+                assert(std::abs(static_cast<double>(lit) - area) < 0.03 * area + 8.0);
+            }
+        }
+    });
+}
+
+// The same through an orthographic camera (no perspective: the quads' sides stay parallel; Stretched and Axis use the view's own
+// direction to the eye): the covered pixels are the CPU's corners', and a soft sprite and a fogged one draw.
+void test_gpu_particle_orthographic() {
+    with_gpu("test_gpu_particle_orthographic", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const std::array<std::pair<kin::ParticleFacing3D, kin::ParticleSprite3D>, 3> cases{{
+            {kin::ParticleFacing3D::Camera, sprite({0.4f, 0.2f, -4.0f}, 1.5f, {1, 1, 1})},
+            {kin::ParticleFacing3D::Stretched, sprite({-0.6f, 0.3f, -4.0f}, 0.5f, {1, 1, 1})},
+            {kin::ParticleFacing3D::Flat, sprite({0.0f, -1.0f, -4.0f}, 2.0f, {1, 1, 1})},
+        }};
+        for (std::size_t i = 0; i < cases.size(); ++i) {
+            kin::Scene3D scene = particle_scene();
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 3.0f}, {0.0f, 0.0f, -4.0f}, 60.0f);
+            scene.camera.projection = kin::Projection3D::Orthographic;
+            scene.camera.height = 6.0f;
+            scene.fog = {.enabled = true, .density = 0.01f, .colour = {0.2f, 0.2f, 0.9f}};
+            kin::ParticleLook3D look;
+            look.facing = cases[i].first;
+            look.texture = white;
+            look.fogged = false;
+            look.stretch = 0.2f;
+            kin::ParticleSprite3D s = cases[i].second;
+            s.velocity = {2.0f, -3.0f, 0.0f};
+            s.rotation = 0.3f;
+            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::ParticleQuad3D quad = kin::particle_quad(s, look, scene.camera);
+            std::array<kin::Vec2f, 4> q{};
+            for (int k = 0; k < 4; ++k) {
+                const auto projected = scene.camera.project(quad.corner[k], screen);
+                assert(projected);
+                q[static_cast<std::size_t>(k)] = projected->pos;
+            }
+            int mismatch = 0, lit = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    bool inside = false;
+                    const float d = edge_distance({static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f}, q, inside);
+                    const bool is_lit = p.at(x, y).r > 128;
+                    lit += is_lit ? 1 : 0;
+                    mismatch += d > 0.75f && is_lit != inside ? 1 : 0;
+                }
+            }
+            std::cerr << "orthographic billboard " << i << ": " << lit << " pixels lit, " << mismatch << " on the wrong side\n";
+            assert(mismatch == 0 && lit > 100);
+        }
+        // Soft and fogged with an orthographic camera: nothing is lost (a fogged one is the colour the fog gives at its depth).
+        kin::Scene3D scene = particle_scene();
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, -4.0f}, 60.0f);
+        scene.camera.projection = kin::Projection3D::Orthographic;
+        scene.camera.height = 6.0f;
+        scene.fog = {.enabled = true, .density = 0.05f, .colour = {0.2f, 0.2f, 0.9f}};
+        kin::ParticleLook3D look;
+        look.texture = white;
+        look.soft = true;
+        const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -7.0f}, 2.0f, {1.0f, 1.0f, 1.0f}, 1.0f); // 10 m from the eye along the view
+        scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+        const Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const float opacity = 1.0f - std::exp(-0.05f * 10.0f);
+        const Vec3f want = Vec3f{1.0f, 1.0f, 1.0f} + (Vec3f{0.2f, 0.2f, 0.9f} - Vec3f{1.0f, 1.0f, 1.0f}) * opacity;
+        assert(largest_difference(p.at(80, 60), stored_of(want)) <= 1);
+    });
+}
+
+// Alpha, additive and premultiplied particles over a known colour against the CPU's formula, in an 8-bit view (the blend of
+// encoded values, as meshes do it).
+void test_gpu_particle_blend_math() {
+    with_gpu("test_gpu_particle_blend_math", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const Color backdrop = Color::rgb(60, 120, 200);
+        struct Case {
+            const char* name;
+            kin::ParticleBlend3D mode;
+            Color texel;
+            Vec3f colour;
+            float alpha;
+        };
+        const std::array<Case, 6> cases{{
+            {"alpha, white texture", kin::ParticleBlend3D::Alpha, Color::rgb(255, 255, 255), {0.8f, 0.3f, 0.1f}, 0.4f},
+            {"alpha, half opaque texel", kin::ParticleBlend3D::Alpha, Color::rgba(255, 255, 255, 128), {0.2f, 0.9f, 0.5f}, 0.8f},
+            {"additive", kin::ParticleBlend3D::Additive, Color::rgb(255, 255, 255), {0.5f, 0.4f, 0.2f}, 0.7f},
+            {"additive, texel alpha", kin::ParticleBlend3D::Additive, Color::rgba(255, 255, 255, 100), {1.0f, 0.5f, 0.0f}, 1.0f},
+            {"premultiplied, opaque red", kin::ParticleBlend3D::Premultiplied, Color::rgba(255, 0, 0, 255), {1.0f, 1.0f, 1.0f}, 0.5f},
+            {"premultiplied, alpha 0 is additive", kin::ParticleBlend3D::Premultiplied, Color::rgba(255, 128, 0, 0), {1.0f, 1.0f, 1.0f}, 0.9f},
+        }};
+        int worst = 0;
+        for (const Case& c : cases) {
+            kin::Scene3D scene = particle_scene();
+            draw_backdrop(scene, box, backdrop);
+            const kin::Texture texture = solid_texture(renderer, c.texel);
+            kin::ParticleLook3D look;
+            look.blend = c.mode;
+            look.texture = texture;
+            const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -4.0f}, 3.0f, c.colour, c.alpha);
+            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const Vec3f tex_rgb = linear_of(c.texel);
+            const Vec3f want = particle_blend_cpu(c.mode, tex_rgb, static_cast<float>(c.texel.a) / 255.0f, c.colour, c.alpha, stored01(backdrop));
+            const Color got = p.at(80, 60);
+            const int off = largest_difference(got, color_of01(want));
+            worst = std::max(worst, off);
+            if (off > 2) {
+                std::cerr << c.name << ": got " << got << ", the formula says " << color_of01(want) << "\n";
+            }
+            assert(off <= 2);
+            assert(p.at(2, 2) == backdrop); // outside the sprite: the backdrop as it was
+        }
+        std::cerr << "particle blend: " << cases.size() << " cases against the CPU's formula, worst " << worst << " of 255\n";
+    });
+}
+
+// Order: a far and a near sprite in one batch, and in two batches submitted near first. Sorted (the default) both come out
+// back to front: the CPU's formula; unsorted, the array's order, which draws the far one last (and it is not rejected by the near
+// one's depth: particles are tested, not written). Additive needs no order.
+void test_gpu_particle_sorting_and_depth_write() {
+    with_gpu("test_gpu_particle_sorting_and_depth_write", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const Color backdrop = Color::rgb(40, 40, 40);
+        const Vec3f red{1.0f, 0.1f, 0.1f}, blue{0.1f, 0.2f, 1.0f};
+        const kin::ParticleSprite3D near_sprite = sprite({0.0f, 0.0f, -3.0f}, 3.0f, red, 0.5f);
+        const kin::ParticleSprite3D far_sprite = sprite({0.0f, 0.0f, -6.0f}, 5.0f, blue, 0.5f);
+        const auto over = [&](Vec3f a, Vec3f b) { // a drawn first, then b, over the backdrop
+            const Vec3f one = particle_blend_cpu(kin::ParticleBlend3D::Alpha, {1, 1, 1}, 1.0f, a, 0.5f, stored01(backdrop));
+            return particle_blend_cpu(kin::ParticleBlend3D::Alpha, {1, 1, 1}, 1.0f, b, 0.5f, one);
+        };
+        const Color back_to_front = color_of01(over(blue, red)), front_to_back = color_of01(over(red, blue));
+        assert(largest_difference(back_to_front, front_to_back) > 30);
+        const auto shoot = [&](bool one_batch, bool sort, kin::ParticleBlend3D mode, bool near_first) {
+            kin::Scene3D scene = particle_scene();
+            draw_backdrop(scene, box, backdrop);
+            kin::ParticleLook3D look;
+            look.sort = sort;
+            look.blend = mode;
+            const std::array<kin::ParticleSprite3D, 2> pair = near_first ? std::array<kin::ParticleSprite3D, 2>{near_sprite, far_sprite}
+                                                                         : std::array<kin::ParticleSprite3D, 2>{far_sprite, near_sprite};
+            if (one_batch) {
+                scene.draw_particles(look, pair);
+            } else {
+                scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&pair[0], 1});
+                scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&pair[1], 1});
+            }
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p.at(80, 60);
+        };
+        for (const bool near_first : {true, false}) {
+            const Color sorted = shoot(true, true, kin::ParticleBlend3D::Alpha, near_first);
+            std::cerr << "sorting, one batch, " << (near_first ? "near first" : "far first") << ": " << sorted << ", back to front " << back_to_front << "\n";
+            assert(largest_difference(sorted, back_to_front) <= 2);
+            const Color batches = shoot(false, true, kin::ParticleBlend3D::Alpha, near_first);
+            assert(largest_difference(batches, back_to_front) <= 2); // the batches are ordered by their depth
+        }
+        // Unsorted: the array's order. Near first draws the far one over it: not rejected by the near one's depth.
+        const Color unsorted = shoot(true, false, kin::ParticleBlend3D::Alpha, true);
+        assert(largest_difference(unsorted, front_to_back) <= 2 && largest_difference(unsorted, back_to_front) > 30);
+        const Color unsorted_other = shoot(true, false, kin::ParticleBlend3D::Alpha, false);
+        assert(largest_difference(unsorted_other, back_to_front) <= 2);
+        // Additive: either order, the same sum.
+        const Color a = shoot(true, true, kin::ParticleBlend3D::Additive, true), b = shoot(true, true, kin::ParticleBlend3D::Additive, false);
+        assert(largest_difference(a, b) <= 1);
+        const Vec3f sum = particle_blend_cpu(kin::ParticleBlend3D::Additive, {1, 1, 1}, 1.0f, blue, 0.5f,
+                                             particle_blend_cpu(kin::ParticleBlend3D::Additive, {1, 1, 1}, 1.0f, red, 0.5f, stored01(backdrop)));
+        assert(largest_difference(a, color_of01(sum)) <= 2);
+    });
+}
+
+// Particles are tested against the depth of the opaque meshes: behind a wall they are not seen, and a particle half behind it is cut
+// at the wall's edge to the pixel; in front of it they are.
+void test_gpu_particle_depth_test() {
+    with_gpu("test_gpu_particle_depth_test", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
+        for (const kin::u32 samples : {1u, 4u}) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            kin::Scene3D scene = particle_scene();
+            draw_backdrop(scene, box, Color::rgb(20, 20, 20), -30.0f);
+            // A wall covering x > 0, 4 m away; its edge is the screen's middle column.
+            const Color wall = Color::rgb(30, 160, 60);
+            scene.draw(box, Mat4f::translation({10.0f, 0.0f, -4.0f}) * Mat4f::scaling({20.0f, 20.0f, 0.2f}), {.color = wall, .unlit = true});
+            kin::ParticleLook3D look;
+            look.texture = white;
+            const kin::ParticleSprite3D behind = sprite({0.0f, 0.0f, -6.0f}, 6.0f, {1.0f, 1.0f, 1.0f}, 1.0f);   // half behind the wall
+            const kin::ParticleSprite3D front = sprite({-0.8f, 0.5f, -2.0f}, 0.6f, {1.0f, 0.0f, 0.0f}, 1.0f);    // wholly in front of everything
+            const kin::ParticleSprite3D hidden = sprite({3.0f, -1.0f, -6.0f}, 1.0f, {0.0f, 0.0f, 1.0f}, 1.0f);   // wholly behind the wall
+            const std::array<kin::ParticleSprite3D, 3> all{behind, front, hidden};
+            scene.draw_particles(look, all);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            // The left of the wall's edge: white; right: the wall's green (the sprite is behind it).
+            expect(p.at(70, 60), Color::rgb(255, 255, 255), "the sprite, left of the wall's edge", 1);
+            expect(p.at(90, 60), wall, "the wall, over the sprite", 1);
+            expect(p.at(10, 100), Color::rgb(20, 20, 20), "outside", 1);
+            // The edge to the pixel: the wall's edge is x = 0, the middle of the window (80).
+            expect(p.at(79, 60), Color::rgb(255, 255, 255), "the last column of the sprite", 1);
+            expect(p.at(80, 60), wall, "the first column of the wall", 1);
+            // The sprite in front is red where the camera sees it; the hidden one leaves the wall's green.
+            const auto in_front = scene.camera.project(front.position, screen);
+            assert(in_front);
+            expect(p.at(in_front->pos), Color::rgb(255, 0, 0), "the sprite in front", 1);
+            const auto where = scene.camera.project(hidden.position, screen);
+            assert(where);
+            expect(p.at(where->pos), wall, "the sprite behind the wall", 1);
+            assert(r3d.stats().particle_batches == 1 && r3d.stats().particles_drawn == 3);
+        }
+    });
+}
+
+// Soft particles: a camera-facing sprite 6 m away in front of a wall that slants through it. Where the wall is nearer than the sprite it
+// hides it; farther, the sprite's alpha is the smoothstep of the gap over the fade distance: nothing at the wall, all of it from
+// the distance on. Against the CPU's formula, pixel by pixel. Without soft the picture has the straight cut; the pre-pass costs nothing
+// when no particle is soft.
+void test_gpu_soft_particles() {
+    with_gpu("test_gpu_soft_particles", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().soft_particles, "soft particles")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const Color wall_colour = Color::rgb(40, 40, 120);
+        const auto build = [&](bool soft, float distance, bool with_particle) {
+            kin::Scene3D scene = particle_scene();
+            // The wall's plane: through (0, 0, -8), its normal turned 40 degrees from +z (toward the camera on its left).
+            scene.draw(box, Mat4f::translation({0.0f, 0.0f, -8.0f}) * Mat4f::rotation_y(40.0f) * Mat4f::scaling({60.0f, 40.0f, 0.2f}),
+                       {.color = wall_colour, .unlit = true});
+            if (with_particle) {
+                kin::ParticleLook3D look;
+                look.soft = soft;
+                look.soft_distance = distance;
+                look.softness = 0.0f;
+                const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -6.0f}, 16.0f, {1.0f, 0.5f, 0.2f}, 0.8f);
+                scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            }
+            return scene;
+        };
+        for (const kin::u32 samples : {1u, 4u}) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            const kin::Scene3D bare = build(false, 1.5f, false);
+            const Pixels baseline = shoot_view(renderer, r3d, view, bare);
+            renderer.present();
+            assert(r3d.stats().ao_draws == 0);
+            const kin::Scene3D hard = build(false, 1.5f, true);
+            const Pixels hard_picture = shoot_view(renderer, r3d, view, hard);
+            renderer.present();
+            assert(r3d.stats().ao_draws == 0 && r3d.stats().particle_soft == 0); // no pre-pass for particles that are not soft
+            const kin::Scene3D softened = build(true, 1.5f, true);
+            const Pixels p = shoot_view(renderer, r3d, view, softened);
+            renderer.present();
+            assert(r3d.stats().particle_soft == 1 && r3d.stats().ao_draws > 0);
+            const Vec3f n{std::sin(40.0f * 3.14159265f / 180.0f), 0.0f, std::cos(40.0f * 3.14159265f / 180.0f)};
+            const Vec3f p0 = Vec3f{0.0f, 0.0f, -8.0f} + n * 0.1f; // the box's front face: its centre plane and half its thickness
+            int worst = 0, compared = 0, faded = 0, whole = 0, hidden = 0, differs_from_hard = 0;
+            for (int y = 4; y < 120; y += 3) {
+                for (int x = 1; x < 160; x += 2) {
+                    const Vec3f d = pixel_direction(softened.camera, x, y);
+                    const float t = kin::dot(p0, n) / kin::dot(d, n);
+                    const float depth = t * -d.z; // along the camera's forward
+                    const float gap = depth - 6.0f;
+                    const Color base = baseline.at(x, y);
+                    float alpha = 0.0f;
+                    if (gap > 0.0f) {
+                        alpha = 0.8f * kin::soft_particle_fade(gap, 1.5f);
+                    }
+                    // Near the crossing (the wall's depth within a few cm of the sprite's) the depth test's own rounding decides.
+                    if (std::abs(gap) < 0.04f || (samples > 1 && std::abs(gap) < 0.25f)) {
+                        continue;
+                    }
+                    const Vec3f want = alpha > 0.0f ? particle_blend_cpu(kin::ParticleBlend3D::Alpha, {1, 1, 1}, 1.0f, {1.0f, 0.5f, 0.2f}, alpha, stored01(base))
+                                                    : stored01(base);
+                    const int off = largest_difference(p.at(x, y), color_of01(want));
+                    worst = std::max(worst, off);
+                    ++compared;
+                    faded += alpha > 0.0f && alpha < 0.79f ? 1 : 0;
+                    whole += alpha >= 0.79f ? 1 : 0;
+                    hidden += gap < 0.0f ? 1 : 0;
+                    differs_from_hard += largest_difference(p.at(x, y), hard_picture.at(x, y)) > 8 ? 1 : 0;
+                    if (off > 3) {
+                        std::cerr << "soft at (" << x << ", " << y << "): got " << p.at(x, y) << ", the formula says " << color_of01(want) << " (gap " << gap << ")\n";
+                    }
+                    assert(off <= 3);
+                }
+            }
+            std::cerr << "soft particles (" << samples << " sample" << (samples > 1 ? "s" : "") << "): " << compared << " pixels against the formula, worst " << worst
+                      << " of 255; " << faded << " faded, " << whole << " whole, " << hidden << " behind the wall, " << differs_from_hard << " unlike the hard sprite\n";
+            // The three regions all exist, and the soft picture is not the hard one's.
+            assert(faded > 200 && whole > 200 && hidden > 200 && differs_from_hard > 200);
+        }
+    });
+}
+
+// Fog agrees with the meshes': a particle at 40 m is the colour a mesh of that colour at 40 m is, and both are the CPU's fog_apply; an
+// additive particle is dimmed by it, not mixed; a particle that asks not to be fogged is not.
+void test_gpu_particle_fog_matches_meshes() {
+    with_gpu("test_gpu_particle_fog_matches_meshes", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        struct Case {
+            const char* name;
+            kin::Fog3D fog;
+            Vec3f eye;
+            Vec3f centre; // the particle's place
+        };
+        const std::array<Case, 3> cases{{{"fixed colour, 40 m", {.enabled = true, .density = 0.02f, .colour = {0.7f, 0.8f, 1.0f}}, {0.0f, 2.0f, 0.0f}, {0.0f, 2.0f, -40.0f}},
+                                         {"the sky's colour, 60 m, off axis", {.enabled = true, .density = 0.008f, .colour_from_sky = true, .sun_scatter = 0.02f},
+                                          {0.0f, 2.0f, 0.0f}, {12.0f, 5.0f, -60.0f}},
+                                         {"height fog, the eye above its base", {.enabled = true, .density = 0.001f, .height_density = 0.05f, .height_falloff = 0.07f,
+                                                                                 .base_height = 20.0f, .start = 5.0f},
+                                          {0.0f, 40.0f, 0.0f}, {-8.0f, 30.0f, -50.0f}}}};
+        const Vec3f colour_linear{0.2f, 0.9f, 0.3f};
+        const Color wall_colour = Color::rgb(static_cast<kin::u8>(std::lround(255.0f * kin::linear_to_srgb(colour_linear.x))),
+                                             static_cast<kin::u8>(std::lround(255.0f * kin::linear_to_srgb(colour_linear.y))),
+                                             static_cast<kin::u8>(std::lround(255.0f * kin::linear_to_srgb(colour_linear.z))));
+        int worst = 0;
+        for (const Case& c : cases) {
+            const Vec3f centre = c.centre;
+            const Vec3f mirrored{2.0f * c.eye.x - centre.x, centre.y, centre.z};
+            kin::ParticleLook3D look;
+            look.texture = white;
+            const kin::ParticleSprite3D s = sprite(centre, 1.0f, colour_linear, 1.0f);
+            const auto build = [&](const kin::ParticleLook3D& l, const kin::ParticleSprite3D& sp, bool with_mesh) {
+                kin::Scene3D scene = particle_scene(60.0f);
+                scene.camera = kin::Camera3D::look_at(c.eye, c.eye + Vec3f{0.0f, 0.0f, -1.0f}, 60.0f);
+                scene.lights.sun = {.direction = normalize(Vec3f{0.2f, 0.25f, -1.0f}), .color = {1.2f, 1.0f, 0.8f}};
+                scene.fog = c.fog;
+                scene.sky.turbidity = 3.0f;
+                scene.sky.intensity = 0.2f; // the sky's colour (the fog's) under white: a sky colour over 1 saturates, and shows nothing
+                scene.draw_particles(l, std::span<const kin::ParticleSprite3D>{&sp, 1});
+                if (with_mesh) {
+                    // The same colour as a mesh, as small, at the same height and distance, on the other side of the view's middle.
+                    scene.draw(box, Mat4f::translation(mirrored) * Mat4f::scaling({1.0f, 1.0f, 0.01f}), {.color = wall_colour, .unlit = true});
+                }
+                return scene;
+            };
+            const kin::Scene3D scene = build(look, s, true);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const auto particle_at = scene.camera.project(centre, screen);
+            const auto mesh_at = scene.camera.project(mirrored, screen);
+            assert(particle_at && mesh_at);
+            const Vec3f to = centre - scene.camera.position;
+            const float distance = kin::length(to);
+            const Vec3f want = kin::fog_apply(scene.fog, scene.sky, scene.lights.sun.direction, scene.lights.sun.color, scene.camera.position, to / distance,
+                                              distance, colour_linear);
+            const int off = largest_difference(p.at(particle_at->pos), stored_of(want));
+            const Vec3f to_mesh = mirrored - scene.camera.position;
+            const float mesh_distance = kin::length(to_mesh);
+            const Vec3f want_mesh = kin::fog_apply(scene.fog, scene.sky, scene.lights.sun.direction, scene.lights.sun.color, scene.camera.position,
+                                                   to_mesh / mesh_distance, mesh_distance, colour_linear);
+            const int mesh_off = largest_difference(p.at(mesh_at->pos), stored_of(want_mesh));
+            std::cerr << "particle fog, " << c.name << ": particle " << p.at(particle_at->pos) << " (formula " << stored_of(want) << "), mesh " << p.at(mesh_at->pos)
+                      << " (formula " << stored_of(want_mesh) << ")\n";
+            assert(off <= 1 && mesh_off <= 1);
+            worst = std::max(worst, off);
+            // Not fogged when it asks not to be: its own colour.
+            kin::ParticleLook3D clear = look;
+            clear.fogged = false;
+            const Pixels q = shoot_view(renderer, r3d, view, build(clear, s, false));
+            renderer.present();
+            assert(largest_difference(q.at(particle_at->pos), stored_of(colour_linear)) <= 1);
+            // Additive: dimmed by the opacity (what is behind it has the fog), not mixed toward the fog's colour.
+            kin::ParticleLook3D add = look;
+            add.blend = kin::ParticleBlend3D::Additive;
+            const kin::ParticleSprite3D half = sprite(centre, 1.0f, colour_linear, 0.5f);
+            const Pixels g = shoot_view(renderer, r3d, view, build(add, half, false));
+            renderer.present();
+            const float opacity = kin::fog_opacity(scene.fog, scene.camera.position, to / distance, distance);
+            const Vec3f dimmed = particle_blend_cpu(kin::ParticleBlend3D::Additive, {1, 1, 1}, 1.0f, colour_linear, 0.5f, {}, opacity);
+            assert(largest_difference(g.at(particle_at->pos), color_of01(dimmed)) <= 1);
+        }
+        std::cerr << "particle fog: " << cases.size() << " cases, worst " << worst << " of 255 against fog_apply\n";
+    });
+}
+
+// The light tint: a lit particle shows its colour times ambient + half the sun and the fill; unlit is its own; lit 0.5 is between.
+// Through a time of day: the same snow at noon and at night.
+void test_gpu_particle_light_tint() {
+    with_gpu("test_gpu_particle_light_tint", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto pixel = [&](const kin::Lights3D& lights, float lit, Vec3f colour) {
+            kin::Scene3D scene = particle_scene();
+            scene.lights = lights;
+            kin::ParticleLook3D look;
+            look.texture = white;
+            look.lit = lit;
+            const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -4.0f}, 3.0f, colour, 1.0f);
+            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p.at(80, 60);
+        };
+        kin::Lights3D lights;
+        lights.sun = {.direction = {0.2f, 1.0f, 0.1f}, .color = {0.5f, 0.4f, 0.3f}};
+        lights.fill = {.direction = {0.6f, 0.4f, -0.5f}, .color = {0.1f, 0.1f, 0.3f}};
+        lights.ambient = {0.1f, 0.2f, 0.3f};
+        lights.ground_ambient = Vec3f{0.3f, 0.2f, 0.1f};
+        const Vec3f colour{0.6f, 0.5f, 0.4f};
+        const Vec3f tint = (Vec3f{0.1f, 0.2f, 0.3f} + Vec3f{0.3f, 0.2f, 0.1f}) * 0.5f + Vec3f{0.5f, 0.4f, 0.3f} * 0.5f + Vec3f{0.1f, 0.1f, 0.3f} * 0.5f;
+        assert(kin::length(kin::particle_light_tint(lights) - tint) < 1e-6f);
+        const Color own = pixel(lights, 0.0f, colour);
+        const Color lit = pixel(lights, 1.0f, colour);
+        const Color half = pixel(lights, 0.5f, colour);
+        assert(largest_difference(own, stored_of(colour)) <= 1);
+        assert(largest_difference(lit, stored_of(colour * tint)) <= 1);
+        const Vec3f middle = lerp(Vec3f{1.0f, 1.0f, 1.0f}, tint, 0.5f);
+        assert(largest_difference(half, stored_of(colour * middle)) <= 1);
+        // A time of day: snow at noon is bright, at night dark and blue; the picture follows kin::apply's lights.
+        kin::Lights3D day, night;
+        kin::Sky3D sky;
+        kin::Fog3D fog;
+        kin::apply(kin::TimeOfDay3D{.hours = 12.0f}, day, sky, fog);
+        kin::apply(kin::TimeOfDay3D{.hours = 1.0f}, night, sky, fog);
+        const Vec3f snow{0.9f, 0.9f, 0.95f};
+        const Color noon_pixel = pixel(day, 1.0f, snow), night_pixel = pixel(night, 1.0f, snow);
+        const Vec3f noon_tint = kin::particle_light_tint(day), night_tint = kin::particle_light_tint(night);
+        std::cerr << "particle tint: noon " << noon_pixel << " (tint " << noon_tint.x << ", " << noon_tint.y << ", " << noon_tint.z << "), night " << night_pixel
+                  << " (tint " << night_tint.x << ", " << night_tint.y << ", " << night_tint.z << ")\n";
+        assert(largest_difference(noon_pixel, stored_of({snow.x * noon_tint.x, snow.y * noon_tint.y, snow.z * noon_tint.z})) <= 1);
+        assert(largest_difference(night_pixel, stored_of({snow.x * night_tint.x, snow.y * night_tint.y, snow.z * night_tint.z})) <= 1);
+        assert(night_pixel.r + night_pixel.g + night_pixel.b < (noon_pixel.r + noon_pixel.g + noon_pixel.b) / 2);
+        assert(night_pixel.b >= night_pixel.r); // the moon's light and the night's ambient are blue
+    });
+}
+
+// A flipbook: the atlas' frame a sprite names, and two frames mixed for a fractional one; nothing is drawn of a frame past the atlas.
+void test_gpu_particle_flipbook() {
+    with_gpu("test_gpu_particle_flipbook", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        // 2 x 2: red, green / blue, white.
+        const std::vector<kin::u8> texels{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255};
+        const kin::Texture atlas = renderer.create_texture_from_rgba(texels.data(), {2, 2});
+        renderer.set_scale_mode(atlas, kin::ScaleMode::Nearest);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Scene3D scene = particle_scene();
+        kin::ParticleLook3D look;
+        look.texture = atlas;
+        look.atlas_columns = 2;
+        look.atlas_rows = 2;
+        std::array<kin::ParticleSprite3D, 4> s;
+        for (int i = 0; i < 4; ++i) {
+            s[static_cast<std::size_t>(i)] = sprite({-1.5f + static_cast<float>(i), 0.0f, -4.0f}, 0.8f, {1, 1, 1}, 1.0f);
+            s[static_cast<std::size_t>(i)].frame = static_cast<float>(i);
+        }
+        scene.draw_particles(look, s);
+        Pixels p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const Color want[4] = {Color::rgb(255, 0, 0), Color::rgb(0, 255, 0), Color::rgb(0, 0, 255), Color::rgb(255, 255, 255)};
+        for (int i = 0; i < 4; ++i) {
+            const auto at = scene.camera.project(s[static_cast<std::size_t>(i)].position, screen);
+            assert(at);
+            expect(p.at(at->pos), want[i], "flipbook frame " + std::to_string(i), 1);
+        }
+        // Mixed: red (0) toward green (1): the red falls and the green rises with the fraction, whichever space the filter mixes in.
+        kin::ParticleLook3D mixed = look;
+        mixed.blend_frames = true;
+        std::array<kin::ParticleSprite3D, 3> m;
+        for (int i = 0; i < 3; ++i) {
+            m[static_cast<std::size_t>(i)] = sprite({-1.0f + static_cast<float>(i), 0.0f, -4.0f}, 0.8f, {1, 1, 1}, 1.0f);
+            m[static_cast<std::size_t>(i)].frame = 0.25f + 0.25f * static_cast<float>(i);
+        }
+        scene.clear();
+        scene.draw_particles(mixed, m);
+        p = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        Color c[3];
+        for (int i = 0; i < 3; ++i) {
+            c[i] = p.at(scene.camera.project(m[static_cast<std::size_t>(i)].position, screen)->pos);
+        }
+        std::cerr << "flipbook mixed at 0.25, 0.5, 0.75: " << c[0] << " " << c[1] << " " << c[2] << "\n";
+        assert(c[0].r > c[1].r && c[1].r > c[2].r && c[0].g < c[1].g && c[1].g < c[2].g);
+        assert(c[1].r > 60 && c[1].r < 235 && c[1].g > 60 && c[1].g < 235 && c[1].b == 0);
+    });
+}
+
+// The weather's picture is its particles where the CPU's function says: discs of a known size at the projected places, and the same
+// places after the camera has moved and turned (nothing swims); intensity 0 draws nothing and costs nothing.
+void test_gpu_weather_places_and_no_swim() {
+    with_gpu("test_gpu_weather_places_and_no_swim", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::Weather3D w;
+        w.snow.intensity = 1.0f;
+        w.snow.max_particles = 300;
+        w.snow.box = {24.0f, 14.0f, 24.0f};
+        w.snow.size_min = w.snow.size_max = 0.7f;
+        w.snow.alpha = 1.0f;
+        w.snow.colour = {1.0f, 1.0f, 1.0f};
+        w.snow.edge_fade = 0.05f;
+        w.snow.look.softness = 0.0f;
+        w.snow.look.lit = 0.0f;
+        w.snow.look.fogged = false;
+        w.wind = {.direction = {1.0f, 0.0f, 0.0f}, .speed = 3.0f, .gust_strength = 0.4f};
+        w.time = 11.0;
+        const auto make_scene = [&](const kin::Camera3D& camera, float intensity) {
+            kin::Scene3D scene = particle_scene();
+            scene.camera = camera;
+            scene.weather = w;
+            scene.weather.snow.intensity = intensity;
+            return scene;
+        };
+        const auto check = [&](const kin::Camera3D& camera, const char* what) {
+            const kin::Scene3D scene = make_scene(camera, 1.0f);
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::Render3DStats stats = r3d.stats();
+            assert(stats.weather_particles > 0 && stats.particle_batches == 1);
+            int wanted = 0, found = 0;
+            std::vector<kin::Vec2f> predicted;
+            for (kin::u32 i = 0; i < w.snow.max_particles; ++i) {
+                kin::ParticleSprite3D s;
+                if (!kin::weather_particle(w, w.snow, 1, i, camera.position, s) || s.alpha < 0.9f) {
+                    continue;
+                }
+                const float distance = kin::dot(s.position - camera.position, camera.forward());
+                if (distance < 2.0f || distance > 14.0f) {
+                    continue;
+                }
+                const auto at = camera.project(s.position, screen);
+                if (!at || at->pos.x < 3 || at->pos.y < 3 || at->pos.x > 156 || at->pos.y > 116) {
+                    continue;
+                }
+                predicted.push_back(at->pos);
+                ++wanted;
+                // The disc's pixel (0.7 m at 14 m is 3 px: the middle is in it).
+                const Color c = p.at(at->pos);
+                found += c.r > 100 ? 1 : 0;
+            }
+            // Nothing lit that no predicted particle explains: the weather's other (faded, far) particles are lit too, so only
+            // count lit pixels far from every particle the function makes at all.
+            std::vector<kin::Vec2f> everyone;
+            for (kin::u32 i = 0; i < w.snow.max_particles; ++i) {
+                kin::ParticleSprite3D s;
+                if (kin::weather_particle(w, w.snow, 1, i, camera.position, s)) {
+                    if (const auto at = camera.project(s.position, screen)) {
+                        everyone.push_back(at->pos);
+                    }
+                }
+            }
+            int stray = 0, lit = 0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    if (p.at(x, y).r > 100) {
+                        ++lit;
+                        bool near_one = false;
+                        for (const kin::Vec2f& e : everyone) {
+                            if (std::abs(e.x - static_cast<float>(x) - 0.5f) < 25.0f && std::abs(e.y - static_cast<float>(y) - 0.5f) < 25.0f) {
+                                near_one = true;
+                                break;
+                            }
+                        }
+                        stray += near_one ? 0 : 1;
+                    }
+                }
+            }
+            std::cerr << "weather places (" << what << "): " << found << " of " << wanted << " predicted discs lit, " << lit << " lit pixels, " << stray << " stray\n";
+            assert(wanted > 15 && found >= wanted - wanted / 40 - 1);
+            assert(stray == 0);
+            static_cast<void>(predicted);
+        };
+        kin::Camera3D a = kin::Camera3D::look_at({0.0f, 1.7f, 0.0f}, {0.0f, 1.7f, -10.0f}, 60.0f);
+        check(a, "first camera");
+        // Moved 4 m and turned 30 degrees: the same function of the same clock, at the new place.
+        kin::Camera3D b = kin::Camera3D::look_at({3.0f, 2.2f, -2.5f}, {-4.0f, 1.5f, -12.0f}, 60.0f);
+        check(b, "moved and turned");
+        // And a thousand metres off: nothing lost, nothing added: still a full volume round it.
+        kin::Camera3D far = kin::Camera3D::look_at({1000.0f, 1.7f, -1000.0f}, {1000.0f, 1.7f, -1010.0f}, 60.0f);
+        check(far, "1000 m away");
+        // Off: nothing built, nothing uploaded, nothing drawn, the picture is the plain one.
+        const Pixels none = shoot_view(renderer, r3d, view, make_scene(a, 0.0f));
+        renderer.present();
+        const kin::Render3DStats stats = r3d.stats();
+        assert(stats.particles_submitted == 0 && stats.weather_particles == 0 && stats.particle_batches == 0 && stats.particle_cpu_ms == 0.0);
+        for (kin::u8 byte : none.rgba) {
+            assert(byte == 0 || byte == 255); // black with alpha 255 (nothing drawn)
+        }
+    });
+}
+
+// Rain's streaks lean with the wind: in the world the streak's horizontal run over its fall is the wind's share over the fall speed,
+// and in the picture each streak lies along the segment the CPU's head and tail project to (nothing beside it).
+void test_gpu_rain_streaks_follow_the_wind() {
+    with_gpu("test_gpu_rain_streaks_follow_the_wind", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        for (const float wind_speed : {0.0f, 6.0f}) {
+            kin::Scene3D scene = particle_scene();
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.5f, 0.0f}, {0.0f, 1.5f, -10.0f}, 60.0f);
+            kin::Weather3D& w = scene.weather;
+            w.rain.intensity = 1.0f;
+            w.rain.max_particles = 1500;
+            w.rain.box = {20.0f, 12.0f, 20.0f};
+            w.rain.size_min = w.rain.size_max = 0.25f;
+            w.rain.fall_speed = 9.0f;
+            w.rain.fall_variation = 0.0f;
+            w.rain.wind_influence = 1.0f;
+            w.rain.alpha = 1.0f;
+            w.rain.colour = {1.0f, 1.0f, 1.0f};
+            w.rain.splash = 0.0f;
+            w.rain.look.stretch = 0.12f;
+            w.rain.look.lit = 0.0f;
+            w.rain.look.fogged = false;
+            w.wind = {.direction = {1.0f, 0.0f, 0.0f}, .speed = wind_speed};
+            w.time = 3.0;
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            int checked = 0, along = 0, beside_dark = 0;
+            double slant_sum = 0.0;
+            for (kin::u32 i = 0; i < w.rain.max_particles; ++i) {
+                kin::ParticleSprite3D s;
+                if (!kin::weather_particle(w, w.rain, 0, i, scene.camera.position, s) || s.alpha < 0.95f) {
+                    continue;
+                }
+                const float depth = kin::dot(s.position - scene.camera.position, scene.camera.forward());
+                if (depth < 3.0f || depth > 9.0f) {
+                    continue;
+                }
+                const Vec3f streak = kin::particle_streak(s, w.rain.look);
+                const auto head = scene.camera.project(s.position, screen);
+                const auto tail = scene.camera.project(s.position - streak, screen);
+                if (!head || !tail) {
+                    continue;
+                }
+                const auto inside = [](kin::Vec2f v) { return v.x > 6 && v.x < 154 && v.y > 6 && v.y < 114; };
+                if (!inside(head->pos) || !inside(tail->pos)) {
+                    continue;
+                }
+                ++checked;
+                slant_sum += -streak.x / streak.y; // run over fall (the streak points up, against the fall)
+                int lit = 0;
+                // The disc's shape is stretched with the quad (an ellipse: its tips are faint), so the middle three fifths are looked at.
+                for (int k = 0; k < 5; ++k) {
+                    const float t = 0.3f + 0.1f * static_cast<float>(k);
+                    const kin::Vec2f at{head->pos.x + (tail->pos.x - head->pos.x) * t, head->pos.y + (tail->pos.y - head->pos.y) * t};
+                    lit += p.at(at).r > 100 ? 1 : 0;
+                }
+                along += lit >= 4 ? 1 : 0;
+                // Beside the middle, 3 px past the streak's half width: dark, unless another drop is there.
+                const float half_width_px = 0.5f * s.size * 103.9f / depth; // 60 degrees over 120 rows
+                const kin::Vec2f mid{(head->pos.x + tail->pos.x) * 0.5f, (head->pos.y + tail->pos.y) * 0.5f};
+                kin::Vec2f across{-(tail->pos.y - head->pos.y), tail->pos.x - head->pos.x};
+                const float n = std::max(std::hypot(across.x, across.y), 1e-3f);
+                across = {across.x / n * (half_width_px + 3.0f), across.y / n * (half_width_px + 3.0f)};
+                const kin::Vec2f side{mid.x + across.x, mid.y + across.y};
+                beside_dark += inside(side) && p.at(side).r < 60 ? 1 : 0;
+            }
+            const double slant = slant_sum / std::max(checked, 1);
+            // The wind's drift is 0.8 to 1 (mean 0.9) of the wind at its place: run / fall = 0.9 * 6 / 9 = 0.6.
+            std::cerr << "rain streaks, wind " << wind_speed << " m/s: " << checked << " streaks, " << along << " lit along their segment, " << beside_dark
+                      << " dark beside; mean run over fall " << slant << " (the wind's share over the fall: " << 0.9f * wind_speed / 9.0f << ")\n";
+            assert(checked > 15);
+            assert(along >= checked - checked / 10 && beside_dark >= checked / 2); // (the rest have another drop beside them: 1,500 in view)
+            assert(std::abs(slant - 0.9 * wind_speed / 9.0) < 0.03);
+        }
+    });
+}
+
+// The weather's sprites are kept while the weather, the camera and the view are unchanged: after any one number changes, the picture is
+// that of a renderer that made them afresh (a field left out of the cache's key would show the old rain), and the same weather twice is
+// the same picture.
+void test_gpu_weather_cache_follows_every_change() {
+    with_gpu("test_gpu_weather_cache_follows_every_change", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        kin::Renderer3D fresh{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D fresh_view = fresh.create_view({160, 120}, {.samples = 1});
+        const auto base = [] {
+            kin::Weather3D w;
+            for (kin::WeatherLayer3D* l : {&w.rain, &w.snow}) {
+                l->intensity = 1.0f;
+                l->max_particles = 400;
+                l->box = {20.0f, 12.0f, 20.0f};
+                l->size_min = l->size_max = 0.25f;
+                l->alpha = 0.8f;
+                l->edge_fade = 0.1f;
+                l->look.fogged = false;
+                l->look.lit = 0.0f;
+                l->look.sort = false;
+            }
+            w.snow.fall_speed = 1.5f;
+            w.snow.flutter = 0.4f;
+            w.snow.colour = {1.0f, 0.9f, 0.6f};
+            w.rain.splash = 0.0f;
+            w.wind = {.direction = {1.0f, 0.0f, 0.3f}, .speed = 3.0f, .gust_strength = 0.3f, .turbulence = 0.5f};
+            w.time = 9.0;
+            return w;
+        };
+        const auto make = [&](const kin::Weather3D& w, Vec3f eye, float fov) {
+            kin::Scene3D scene = particle_scene();
+            scene.camera = kin::Camera3D::look_at(eye, eye + Vec3f{0.0f, 0.0f, -10.0f}, fov);
+            scene.weather = w;
+            return scene;
+        };
+        struct Change {
+            const char* name;
+            std::function<void(kin::Weather3D&)> apply;
+            Vec3f eye = {0.0f, 1.5f, 0.0f};
+            float fov = 60.0f;
+        };
+        const std::vector<Change> changes{
+            {"rain intensity", [](kin::Weather3D& w) { w.rain.intensity = 0.6f; }},
+            {"snow maximum", [](kin::Weather3D& w) { w.snow.max_particles = 250; }},
+            {"box", [](kin::Weather3D& w) { w.rain.box = {14.0f, 10.0f, 16.0f}; }},
+            {"above", [](kin::Weather3D& w) { w.snow.above = 0.4f; }},
+            {"fall speed", [](kin::Weather3D& w) { w.snow.fall_speed = 3.0f; }},
+            {"fall variation", [](kin::Weather3D& w) { w.rain.fall_variation = 0.6f; }},
+            {"wind influence", [](kin::Weather3D& w) { w.rain.wind_influence = 0.3f; }},
+            {"flutter", [](kin::Weather3D& w) { w.snow.flutter = 1.5f; }},
+            {"flutter rate", [](kin::Weather3D& w) { w.snow.flutter_rate = 1.2f; }},
+            {"size", [](kin::Weather3D& w) { w.rain.size_max = 0.5f; }},
+            {"edge fade", [](kin::Weather3D& w) { w.snow.edge_fade = 0.5f; }},
+            {"alpha", [](kin::Weather3D& w) { w.rain.alpha = 0.3f; }},
+            {"colour", [](kin::Weather3D& w) { w.snow.colour = {0.2f, 0.4f, 1.0f}; }},
+            {"stretch", [](kin::Weather3D& w) { w.rain.look.stretch = 0.3f; }},
+            {"facing", [](kin::Weather3D& w) { w.snow.look.facing = kin::ParticleFacing3D::Flat; }},
+            {"softness", [](kin::Weather3D& w) { w.snow.look.softness = 0.0f; }},
+            {"blend", [](kin::Weather3D& w) { w.rain.look.blend = kin::ParticleBlend3D::Additive; }},
+            {"lit", [](kin::Weather3D& w) { w.snow.look.lit = 1.0f; w.snow.look.softness = 1.0f; }},
+            {"wind speed", [](kin::Weather3D& w) { w.wind.speed = 9.0f; }},
+            {"wind direction", [](kin::Weather3D& w) { w.wind.direction = {0.0f, 0.0f, 1.0f}; }},
+            {"gust strength", [](kin::Weather3D& w) { w.wind.gust_strength = 0.9f; }},
+            {"gust period", [](kin::Weather3D& w) { w.wind.gust_period = 2.0f; }},
+            {"turbulence", [](kin::Weather3D& w) { w.wind.turbulence = 3.0f; }},
+            {"ground", [](kin::Weather3D& w) { w.has_ground = true; w.ground_height = 0.5f; }},
+            {"time", [](kin::Weather3D& w) { w.time += 0.25; }},
+            {"seed", [](kin::Weather3D& w) { w.seed = 7; }},
+            {"camera's place", [](kin::Weather3D&) {}, {1.1f, 1.5f, -0.7f}, 60.0f},
+            {"field of view (the cull)", [](kin::Weather3D&) {}, {0.0f, 1.5f, 0.0f}, 40.0f},
+        };
+        int visible = 0;
+        for (const Change& c : changes) {
+            const kin::Weather3D a = base();
+            kin::Weather3D b = a;
+            c.apply(b);
+            const Vec3f eye0{0.0f, 1.5f, 0.0f};
+            const Pixels first = shoot_view(renderer, r3d, view, make(a, eye0, 60.0f));
+            renderer.present();
+            const Pixels again = shoot_view(renderer, r3d, view, make(a, eye0, 60.0f));
+            renderer.present();
+            assert(same_picture(first, again)); // kept: the same picture
+            const Pixels changed = shoot_view(renderer, r3d, view, make(b, c.eye, c.fov));
+            renderer.present();
+            const Pixels truth = shoot_view(renderer, fresh, fresh_view, make(b, c.eye, c.fov));
+            renderer.present();
+            if (!same_picture(changed, truth)) {
+                std::cerr << "weather cache: after changing the " << c.name << " the picture is not that of a fresh render\n";
+            }
+            assert(same_picture(changed, truth));
+            visible += same_picture(first, changed) ? 0 : 1;
+        }
+        std::cerr << "weather cache: " << changes.size() << " single changes, each picture that of a fresh render; " << visible << " of them changed the picture\n";
+        assert(visible >= static_cast<int>(changes.size()) - 2);
+    });
+}
+
+// The budget: 24,000 sprites in one frame, one instanced draw, all of them seen; the frame's wall time with the picture read back
+// is stated (it includes the GPU's work: this is the lavapipe-safe bound; the real GPU's milliseconds are in the harness's report).
+void test_gpu_particle_budget() {
+    with_gpu("test_gpu_particle_budget", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        std::vector<kin::ParticleSprite3D> sprites;
+        std::mt19937 rng(11);
+        std::uniform_real_distribution<float> unit(-1.0f, 1.0f), depth(4.0f, 30.0f), size(0.05f, 0.3f), shade(0.2f, 1.0f);
+        for (int i = 0; i < 24000; ++i) {
+            const float z = depth(rng);
+            const float half = z * std::tan(30.0f * 3.14159265f / 180.0f) * 0.9f; // inside the view's height
+            kin::ParticleSprite3D s = sprite({unit(rng) * half * 1.2f, unit(rng) * half, -z}, size(rng), {shade(rng), shade(rng), shade(rng)}, 0.3f);
+            sprites.push_back(s);
+        }
+        kin::Scene3D scene = particle_scene();
+        kin::ParticleLook3D look; // alpha, sorted: the costly kind
+        scene.draw_particles(look, sprites);
+        double total = 0.0, worst = 0.0;
+        Pixels p;
+        for (int frame = 0; frame < 12; ++frame) {
+            const auto start = std::chrono::steady_clock::now();
+            p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            if (frame >= 2) {
+                total += ms;
+                worst = std::max(worst, ms);
+            }
+        }
+        const kin::Render3DStats stats = r3d.stats();
+        std::cerr << "particle budget: " << stats.particles_submitted << " submitted, " << stats.particles_drawn << " drawn in " << stats.particle_batches
+                  << " draw, CPU " << stats.particle_cpu_ms << " ms in render(), frame with read-back " << total / 10.0 << " ms (worst " << worst << ")\n";
+        assert(stats.particles_submitted == 24000 && stats.particles_drawn >= 20000 && stats.particle_batches == 1 && stats.particles_dropped == 0);
+        assert(total / 10.0 < 120.0);
+        // Something is drawn, and it is not the black of nothing.
+        long sum = 0;
+        for (int y = 0; y < 120; ++y) {
+            for (int x = 0; x < 160; ++x) {
+                sum += p.at(x, y).r;
+            }
+        }
+        assert(sum > 160 * 120 * 5);
+    });
+}
+
+// Particles under TAA are stable when nothing moves (the sprite's pixels settle: consecutive frames within a few levels), draw under
+// MSAA as under one sample (the interior of a sprite the same; only edges differ), and soft ones draw with the pre-pass the velocity
+// and the depth then come from.
+void test_gpu_particles_taa_and_msaa() {
+    with_gpu("test_gpu_particles_taa_and_msaa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles")) {
+            return;
+        }
+        const kin::Mesh box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const auto make_scene = [&](bool taa, bool soft, bool with_particles = true) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.5f, 5.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
+            scene.lights.sun = {.direction = {0.4f, 1.0f, 0.5f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.25f};
+            scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({10.0f, 0.2f, 10.0f}), {.color = Color::rgb(180, 180, 170)});
+            scene.draw(box, Mat4f::translation({-0.8f, 0.5f, 0.0f}), {.color = Color::rgb(200, 70, 60)});
+            std::vector<kin::ParticleSprite3D> sprites;
+            for (int i = 0; i < 40; ++i) {
+                sprites.push_back(sprite({-1.5f + 0.075f * static_cast<float>(i), 0.3f + 0.04f * static_cast<float>(i % 7), 0.6f - 0.04f * static_cast<float>(i)}, 0.7f,
+                                         {0.9f, 0.8f, 0.3f}, 0.25f));
+            }
+            kin::ParticleLook3D look;
+            look.soft = soft;
+            look.soft_distance = 0.4f;
+            if (with_particles) {
+                scene.draw_particles(look, sprites);
+            }
+            scene.taa.enabled = taa;
+            return scene;
+        };
+        if (!lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            // The scene's own flicker (the box's edges settle with the jitter), then with the particles: their pixels add no more
+            // than a few levels over it, and the means are within a hundredth of a level.
+            const auto still = [&](bool soft, bool particles, int& biggest, double& mean) {
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+                Pixels last;
+                for (int frame = 0; frame < 24; ++frame) {
+                    const Pixels p = shoot_view(renderer, r3d, view, make_scene(true, soft, particles));
+                    renderer.present();
+                    if (frame >= 16) {
+                        const Spread s = compare_pictures(p, last);
+                        biggest = std::max(biggest, s.largest);
+                        mean = std::max(mean, s.mean);
+                    }
+                    last = p;
+                }
+            };
+            int base_biggest = 0;
+            double base_mean = 0.0;
+            still(false, false, base_biggest, base_mean);
+            for (const bool soft : {false, true}) {
+                int biggest = 0;
+                double biggest_mean = 0.0;
+                still(soft, true, biggest, biggest_mean);
+                const kin::Render3DStats stats = r3d.stats();
+                std::cerr << "particles under TAA" << (soft ? " (soft, pre-pass velocity)" : " (main-pass velocity)") << ": still frames differ by at most " << biggest
+                          << " levels (mean " << biggest_mean << "); the scene without them " << base_biggest << " (mean " << base_mean << ")\n";
+                assert(stats.particle_batches == 1 && stats.taa_main_velocity == !soft);
+                assert(biggest <= base_biggest + 6 && biggest_mean < base_mean + 0.05);
+            }
+        }
+        // MSAA 4 against 1 sample: the same picture away from edges.
+        kin::View3D one = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D four = r3d.create_view({160, 120}, {.samples = 4});
+        for (const bool soft : {false, true}) {
+            const Pixels a = shoot_view(renderer, r3d, one, make_scene(false, soft));
+            renderer.present();
+            const Pixels b = shoot_view(renderer, r3d, four, make_scene(false, soft));
+            renderer.present();
+            const Spread s = compare_pictures(a, b);
+            std::cerr << "particles, MSAA 4 against 1" << (soft ? " (soft)" : "") << ": mean difference " << s.mean << " (largest " << s.largest << ")\n";
+            assert(s.mean < 1.5);
+            // A pixel inside the pile of sprites is the same.
+            const auto at = make_scene(false, soft).camera.project({-0.3f, 0.45f, 0.3f}, screen);
+            assert(at && largest_difference(a.at(at->pos), b.at(at->pos)) <= 4);
+        }
+    });
+}
+
+// Skinned meshes are untouched by particles beside them (the pixels the sprites do not cover are those of the scene without), and a
+// scene with particles keeps its skinned copies' counts.
+void test_gpu_particles_leave_skinned_alone() {
+    with_gpu("test_gpu_particles_leave_skinned_alone", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particles, "particles") || lacks(r3d.capabilities().skinning, "skinned meshes")) {
+            return;
+        }
+        const kin::Mesh floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
+        SkinRig rig{r3d};
+        kin::View3D view = r3d.create_view({160, 120});
+        const auto build = [&](bool particles) {
+            kin::Scene3D scene;
+            scene.camera = skin_camera(false);
+            skin_lights(scene, 1);
+            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            scene.draw_skinned(rig.mesh, rig.matrices(30.0f, 30.0f), Mat4f::translation({-1.0f, 0.0f, 0.0f}));
+            if (particles) {
+                // Sprites at the far right, away from the tube.
+                std::vector<kin::ParticleSprite3D> sprites;
+                for (int i = 0; i < 30; ++i) {
+                    sprites.push_back(sprite({3.0f + 0.05f * static_cast<float>(i), 1.0f + 0.03f * static_cast<float>(i), 0.0f}, 0.4f, {1.0f, 0.3f, 0.2f}, 0.5f));
+                }
+                scene.draw_particles(kin::ParticleLook3D{}, sprites);
+            }
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels plain = build(false);
+        const kin::Render3DStats before = r3d.stats();
+        const Pixels with = build(true);
+        const kin::Render3DStats after = r3d.stats();
+        assert(after.skinned_copies == before.skinned_copies && after.skinned_copies == 1 && after.particle_batches == 1);
+        // The tube's side of the picture (columns under 70) is the same to the byte.
+        int different = 0;
+        for (int y = 0; y < 120; ++y) {
+            for (int x = 0; x < 70; ++x) {
+                different += largest_difference(plain.at(x, y), with.at(x, y)) > 0 ? 1 : 0;
+            }
+        }
+        assert(different == 0);
+        assert(!same_picture(plain, with));
+    });
+}
+
 const char* test_filter = nullptr;
 bool selected(const char* name) { return !test_filter || std::strstr(name, test_filter) != nullptr; }
 #define RUN(test) \
@@ -12515,5 +14539,30 @@ int main(int argc, char** argv) {
     RUN(test_gpu_spot_light_fogged());
     RUN(test_gpu_spot_lights_off_is_unchanged());
     RUN(test_gpu_spot_shadow_under_taa());
+    RUN(test_particles_deterministic_and_restorable());
+    RUN(test_particles_emitter_distributions());
+    RUN(test_particles_forces());
+    RUN(test_wind_model());
+    RUN(test_particles_life_and_ground());
+    RUN(test_particle_quads_cpu());
+    RUN(test_weather_volume_cpu());
+    RUN(test_weather_apply());
+    RUN(test_ecs_particles());
+    RUN(test_gpu_particles_off_is_unchanged());
+    RUN(test_gpu_particle_billboard_corners());
+    RUN(test_gpu_particle_orthographic());
+    RUN(test_gpu_particle_blend_math());
+    RUN(test_gpu_particle_sorting_and_depth_write());
+    RUN(test_gpu_particle_depth_test());
+    RUN(test_gpu_soft_particles());
+    RUN(test_gpu_particle_fog_matches_meshes());
+    RUN(test_gpu_particle_light_tint());
+    RUN(test_gpu_particle_flipbook());
+    RUN(test_gpu_weather_places_and_no_swim());
+    RUN(test_gpu_rain_streaks_follow_the_wind());
+    RUN(test_gpu_weather_cache_follows_every_change());
+    RUN(test_gpu_particle_budget());
+    RUN(test_gpu_particles_taa_and_msaa());
+    RUN(test_gpu_particles_leave_skinned_alone());
     return 0;
 }

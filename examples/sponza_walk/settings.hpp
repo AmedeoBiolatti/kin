@@ -3,6 +3,7 @@
 // Everything Sponza Walk can switch, in one struct, and how it is applied to a
 // Scene3D each frame. A new renderer feature is a field here, a line in
 // apply() and one row in the controls table (main.cpp).
+#include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/shadow_cascades.hpp>
 #include <kin/render3d/taa.hpp>
@@ -108,6 +109,27 @@ struct Settings {
     int point_shadow_count = 2;     // Lights3D::max_shadowed_points (0 to 2)
     bool moon_shadow = false;       // the fill light's cascades (needs shadows on and, for the moon, the time of day)
     int moon_cascades = 2;
+    // Particles and weather (P3c). Rain, snow, dust and mist (0 to 1) fall in volumes round the camera as a function of the weather's
+    // clock (`weather_time`, seconds, which the walk advances); the wind blows them and the fires. The weather may dim the light and thicken
+    // the fog (Weather3D::apply), the ground is the model's floor (rain splashes on it). `fire` fires burn in the model's middle (each a
+    // flame and a few sparks, with a light); more are dropped at the camera (F), at `fires`.
+    float rain = 0.0f, snow = 0.0f, dust = 0.0f, mist = 0.0f;
+    float wind_speed = 0.0f;
+    float wind_direction = 20.0f; // degrees from +x toward +z
+    float wind_gust = 0.4f;
+    float wind_turbulence = 0.4f;
+    bool weather_dims = true;
+    bool weather_ground = true;
+    bool rain_splash = true;
+    bool soft_particles = true;
+    float soft_distance = 0.6f;
+    int fire = 0;
+    float fire_rate = 500.0f;
+    float fire_size = 0.5f;
+    bool fire_sparks = true;
+    bool fire_light = true;
+    std::vector<Vec3f> fires;
+    double weather_time = 0.0;
     // Shadows
     bool shadows = true;
     int shadow_resolution = 2; // index into shadow_resolutions
@@ -415,6 +437,90 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         if (s.fog_from_sky) scene.fog.colour = own_fog;
         if (!s.sun) l.sun.color = {};
     }
+    // Particles and weather (P3c), last: the weather dims the light the time of day has just written, and thickens the fog it has.
+    {
+        Weather3D& w = scene.weather;
+        w = Weather3D{};
+        w.rain.intensity = s.rain;
+        w.snow.intensity = s.snow;
+        w.dust.intensity = s.dust;
+        w.mist.intensity = s.mist;
+        w.rain.splash = s.rain_splash ? w.rain.splash : 0.0f;
+        for (WeatherLayer3D* layer : {&w.rain, &w.snow, &w.dust, &w.mist}) {
+            layer->look.soft = s.soft_particles;
+            layer->look.soft_distance = layer == &w.mist ? std::max(s.soft_distance, 2.0f) : s.soft_distance;
+        }
+        w.wind.direction = {std::cos(s.wind_direction * pi / 180.0f), 0.0f, std::sin(s.wind_direction * pi / 180.0f)};
+        w.wind.speed = s.wind_speed;
+        w.wind.gust_strength = s.wind_gust;
+        w.wind.turbulence = s.wind_turbulence;
+        w.has_ground = s.weather_ground;
+        w.ground_height = area.min.y;
+        w.time = s.weather_time;
+        if (s.weather_dims && w.active()) {
+            const Fog3D base = scene.fog;
+            w.apply(l, scene.fog, base);
+        }
+    }
+}
+
+// A fire's flame and its sparks, as particle systems' descs (the walk makes the systems). The flame is additive, soft, rising and
+// widening; the sparks are stretched along their velocity and fall, with drag.
+inline ParticleDesc3D fire_flame(const Settings& s) {
+    ParticleDesc3D d;
+    d.shape = ParticleShape3D::Cone;
+    d.extent = {0.25f * s.fire_size * 2.0f, 1.0f, 1.0f};
+    d.cone_angle = 14.0f;
+    d.rate = s.fire_rate;
+    d.max_particles = 4000;
+    d.lifetime = {0.7f, 1.4f};
+    d.speed = {0.9f, 1.8f};
+    d.size = {0.35f * s.fire_size * 2.0f, 0.55f * s.fire_size * 2.0f};
+    d.size_start = 0.5f;
+    d.size_mid = 1.0f;
+    d.size_end = 0.15f;
+    d.gravity = {0.0f, 1.2f, 0.0f}; // buoyancy
+    d.drag = 0.8f;
+    d.rotation = {0.0f, 360.0f};
+    d.spin = {-60.0f, 60.0f};
+    d.colour_start = {1.0f, 0.62f, 0.2f};
+    d.colour_end = {0.8f, 0.12f, 0.02f};
+    d.alpha_start = 0.55f;
+    d.alpha_end = 0.0f;
+    d.fade_in = 0.12f;
+    d.colour_variation = 0.25f;
+    d.look.blend = ParticleBlend3D::Additive;
+    d.look.softness = 1.0f;
+    d.look.soft = s.soft_particles;
+    d.look.soft_distance = s.soft_distance;
+    d.look.lit = 0.0f;
+    return d;
+}
+
+inline ParticleDesc3D fire_sparks(const Settings& s) {
+    ParticleDesc3D d;
+    d.shape = ParticleShape3D::Cone;
+    d.extent = {0.12f * s.fire_size * 2.0f, 1.0f, 1.0f};
+    d.cone_angle = 30.0f;
+    d.rate = s.fire_rate * 0.12f;
+    d.max_particles = 1500;
+    d.lifetime = {0.8f, 2.2f};
+    d.speed = {1.5f, 4.5f};
+    d.size = {0.012f, 0.025f};
+    d.gravity = {0.0f, -4.0f, 0.0f};
+    d.drag = 0.4f;
+    d.colour_start = {1.0f, 0.75f, 0.35f};
+    d.colour_end = {1.0f, 0.2f, 0.05f};
+    d.alpha_start = 1.0f;
+    d.alpha_end = 0.0f;
+    d.look.blend = ParticleBlend3D::Additive;
+    d.look.facing = ParticleFacing3D::Stretched;
+    d.look.stretch = 0.045f;
+    d.look.stretch_min = 0.03f;
+    d.look.softness = 0.6f;
+    d.look.soft = false;
+    d.look.lit = 0.0f;
+    return d;
 }
 
 // `m` as the settings want it.

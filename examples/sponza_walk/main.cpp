@@ -122,6 +122,11 @@ const std::map<std::string, std::string>& presets() {
         {"moon", "sky=on,tod=on,tod_hours=0,moon_shadow=on,sky_lights=on,hdr=on,exposure=8,cascades=2,shadow_distance=80"},
         {"lamps", "sun=off,ambient_intensity=0.08,spot_ring=2,point_ring=2,fog=on,fog_density=0.004,fog_from_sky=off,hdr=on,bloom=0.3,shadows=off"},
         {"day-night", "sky=on,tod=on,tod_play=on,tod_speed=3600,sky_lights=on,fog=on,fog_density=0.003,hdr=on,bloom=0.35,cascades=4,shadow_distance=60"},
+        // Particles and weather (P3c). Rain streaks, snow, a storm (rain, wind, dimmed light and thicker fog), and fires.
+        {"rain", "sky=on,tod=on,tod_hours=18.6,sky_lights=on,fog=on,fog_density=0.004,rain=0.8,wind_speed=4,hdr=on,bloom=0.3,cascades=4,shadow_distance=60"},
+        {"snow", "sky=on,tod=on,tod_hours=15,sky_lights=on,fog=on,fog_density=0.004,snow=0.9,wind_speed=3,hdr=on,bloom=0.2,cascades=4,shadow_distance=60"},
+        {"storm", "sky=on,tod=on,tod_hours=17,sky_lights=on,fog=on,fog_density=0.006,rain=1,mist=0.5,wind_speed=11,wind_gust=0.7,wind_turbulence=1.2,hdr=on,bloom=0.3,cascades=4,shadow_distance=60"},
+        {"fire", "sun=off,ambient_intensity=0.15,fire=2,fire_light=on,hdr=on,bloom=0.35,exposure=1.2,shadows=off"},
     };
     return p;
 }
@@ -232,7 +237,7 @@ struct Row {
 };
 
 struct Hooks {
-    std::function<void()> view_nave, view_roof, drop_light, clear_lights, drop_spot, clear_spots, screenshot, print, reset, reset_history, throw_boxes, clear_boxes, respawn;
+    std::function<void()> view_nave, view_roof, drop_light, clear_lights, drop_spot, clear_spots, drop_fire, clear_fires, screenshot, print, reset, reset_history, throw_boxes, clear_boxes, respawn;
 };
 
 struct Caps {
@@ -434,6 +439,29 @@ private:
         check("moon_shadow", "The moon casts shadows (the fill light's cascades; fades with its height with the time of day)", s.moon_shadow);
         islider("moon_cascades", "Moon cascades", s.moon_cascades, 1, 4);
         note("Presets: spots, flashlight, moon, lamps. The sun's shadows need Shadows on; spots and lamps use the maps above, not the cascades.");
+
+        section("Particles and weather (P3c)");
+        slider("rain", "Rain (intensity)", s.rain, 0.0f, 1.0f);
+        slider("snow", "Snow", s.snow, 0.0f, 1.0f);
+        slider("dust", "Dust motes", s.dust, 0.0f, 1.0f);
+        slider("mist", "Mist wisps", s.mist, 0.0f, 1.0f);
+        slider("wind_speed", "Wind speed (m/s)", s.wind_speed, 0.0f, 20.0f);
+        slider("wind_direction", "Wind direction (degrees)", s.wind_direction, -180.0f, 180.0f);
+        slider("wind_gust", "Gusts (share of the speed)", s.wind_gust, 0.0f, 1.0f);
+        slider("wind_turbulence", "Turbulence (m/s)", s.wind_turbulence, 0.0f, 4.0f);
+        check("weather_dims", "The weather dims the light and thickens the fog", s.weather_dims);
+        check("weather_ground", "Ground at the model's floor (rain splashes, flakes stop)", s.weather_ground);
+        check("rain_splash", "Rain splashes", s.rain_splash);
+        check("soft_particles", "Soft particles (fade near surfaces; costs the depth pre-pass)", s.soft_particles);
+        slider("soft_distance", "Soft fade distance", s.soft_distance, 0.05f, 3.0f);
+        button("drop_fire", "Drop a fire at the camera (F)", _h.drop_fire);
+        button("clear_fires", "Clear the dropped fires", _h.clear_fires);
+        islider("fire", "Fires in the model's middle", s.fire, 0, 3);
+        slider("fire_rate", "Fire: flame particles a second", s.fire_rate, 50.0f, 3000.0f);
+        slider("fire_size", "Fire: size", s.fire_size, 0.2f, 2.0f);
+        check("fire_sparks", "Fire: sparks", s.fire_sparks);
+        check("fire_light", "Fire: a flickering point light", s.fire_light);
+        note("Presets: rain, snow, storm, fire. Weather is a function of its clock and the camera: nothing is stored.");
 
         section("Shadows");
         check("shadows", "Sun shadows", s.shadows);
@@ -714,6 +742,8 @@ public:
             _s.tod_hours = clock.hours;
             _s.tod_day = clock.day_of_year;
         }
+        _s.weather_time += dt;
+        _fire_dt += dt; // the fires step after the scene has the frame's wind (fill_scene)
 
         // The view, made again when a setting that is part of it changes (not
         // while a slider is held, so dragging stays smooth).
@@ -861,6 +891,8 @@ private:
         h.clear_lights = [this] { _s.points.clear(); };
         h.drop_spot = [this] { drop_spot(); };
         h.clear_spots = [this] { _s.spots.clear(); };
+        h.drop_fire = [this] { drop_fire(); };
+        h.clear_fires = [this] { _s.fires.clear(); };
         h.screenshot = [this] { _shot_requested = true; };
         h.print = [this] { print_settings(); };
         h.reset = [this] { reset_all(); };
@@ -943,6 +975,40 @@ private:
         if (_s.spots.size() >= 16) _s.spots.erase(_s.spots.begin());
         _s.spots.push_back(l);
     }
+    // A fire on the floor in front of the camera (the model's own floor height).
+    void drop_fire() {
+        const Vec3f at = _pos + camera().forward() * 3.0f;
+        if (_s.fires.size() >= 8) _s.fires.erase(_s.fires.begin());
+        _s.fires.push_back({at.x, _model.bounds.min.y + 0.02f, at.z});
+    }
+    // The fires' particle systems follow the settings: one flame and one sparks system a fire (the model's `fire` first, then the dropped),
+    // stepped by the frame's time with the weather's wind.
+    void update_fires(float dt) {
+        const std::size_t wanted = std::size_t(std::max(0, _s.fire)) + _s.fires.size();
+        while (_fire_systems.size() < wanted) {
+            const u64 seed = 101 + 2 * u64(_fire_systems.size());
+            _fire_systems.push_back({ParticleSystem3D{seed}, ParticleSystem3D{seed + 1}});
+        }
+        _fire_systems.resize(wanted);
+        const Weather3D& w = _scene.weather;
+        for (std::size_t i = 0; i < wanted; ++i) {
+            Vec3f at;
+            if (i < std::size_t(std::max(0, _s.fire))) {
+                const Vec3f c = _model.bounds.center();
+                at = {c.x + (float(i) - 0.5f * float(std::max(0, _s.fire) - 1)) * 3.0f, _model.bounds.min.y + 0.02f, c.z};
+            } else {
+                at = _s.fires[i - std::size_t(std::max(0, _s.fire))];
+            }
+            FireSystems& f = _fire_systems[i];
+            f.flame.desc = fire_flame(_s);
+            f.sparks.desc = fire_sparks(_s);
+            f.flame.transform = f.sparks.transform = Mat4f::translation(at);
+            f.sparks.emitting = _s.fire_sparks;
+            f.position = at;
+            f.flame.update(dt, &w.wind);
+            f.sparks.update(dt, &w.wind);
+        }
+    }
     void reset_all() {
         const Settings fresh;
         const float sensitivity = _options.sensitivity > 0 ? _options.sensitivity : fresh.sensitivity;
@@ -968,6 +1034,7 @@ private:
         if (input.frame_pressed(Key::L)) _s.sun_animate = !_s.sun_animate;
         if (input.frame_pressed(Key::K)) drop_light();
         if (input.frame_pressed(Key::J)) drop_spot();
+        if (input.frame_pressed(Key::F)) drop_fire();
         if (input.frame_pressed(Key::B)) throw_boxes();
         if (input.frame_pressed(Key::R) && (_s.ctrl || _s.climb)) {
             respawn_controller();
@@ -1825,6 +1892,19 @@ private:
         _scene.clear();
         _scene.camera = camera();
         apply(_s, _scene, environment(), _model.bounds, _pos);
+        // Fires (P3c): stepped by the time since the last scene, drawn, and each a warm light that flickers.
+        update_fires(_fire_dt);
+        _fire_dt = 0.0f;
+        for (std::size_t i = 0; i < _fire_systems.size(); ++i) {
+            const FireSystems& f = _fire_systems[i];
+            _scene.draw_particles(f.flame);
+            if (_s.fire_sparks) _scene.draw_particles(f.sparks);
+            if (_s.fire_light) {
+                const float flicker = 0.8f + 0.2f * std::sin(float(_s.weather_time) * 17.0f + float(i) * 2.1f) * std::sin(float(_s.weather_time) * 5.3f);
+                _scene.add_light({.position = f.position + Vec3f{0.0f, 0.6f, 0.0f}, .color = Vec3f{7.0f, 3.4f, 1.0f} * flicker, .radius = 9.0f, .size = 0.25f,
+                                  .id = 0x7B000000u + static_cast<unsigned>(i)});
+            }
+        }
         if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid() || _climb_hero.is_valid() ||
                            !_rag_people.empty() || _rope_hero.is_valid())) {
             _ecs_state->propagate_transforms();
@@ -2194,6 +2274,11 @@ private:
                           double(st.local_shadow_bytes) / 1048576.0, st.lights_variant ? "" : "   (light shaders off)");
             lines.push_back(line);
         }
+        if (st.particles_submitted > 0) {
+            std::snprintf(line, sizeof line, "particles %u (%u weather) drawn %u in %u batches (%u soft)   CPU %.2f ms", st.particles_submitted,
+                          st.weather_particles, st.particles_drawn, st.particle_batches, st.particle_soft, st.particle_cpu_ms);
+            lines.push_back(line);
+        }
         if (st.feature_bytes > 0 || st.taa_main_velocity) {
             std::snprintf(line, sizeof line, "feature targets %.1f MiB%s%s", double(st.feature_bytes) / 1048576.0,
                           st.taa_main_velocity ? "   taa velocity from the main pass" : "", st.blur_merged ? "   one blur for ao and contact" : "");
@@ -2315,6 +2400,12 @@ private:
     float _yaw = 0, _pitch = 0;
     float _frame_ms = 0, _scroll = 0, _content = 0;
     int _spot_serial = 0; // names the spot lights dropped with J, for the choice of which has a shadow map
+    struct FireSystems {
+        ParticleSystem3D flame, sparks;
+        Vec3f position{};
+    };
+    std::vector<FireSystems> _fire_systems;
+    float _fire_dt = 0.0f;
     int _frames = 0;
     bool _warmed = false;
     std::tuple<bool, bool, bool, bool, bool, bool, int, bool, bool, bool, bool, bool, int, u32, bool, int, int> _warmed_key;

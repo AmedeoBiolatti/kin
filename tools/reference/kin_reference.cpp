@@ -69,6 +69,13 @@
 // `time_of_day.shadows`. `procedural: "stage"` builds a floor, walls (or a closed `room`), and the scene's `stage: {pillars, poles, lamps,
 // trees, benches}` as [[x, z], ...] ([x, z, height] for lamps). --spots N / --spot-shadows M / --point-lights N / --point-shadows M put lights
 // in front of every scene's camera (the cost tables), --moon-shadow and --moon-cascades N make the fill light cast, --local-res N sets their maps' side.
+// Particles and weather (P3c): `weather: {rain, snow, dust, mist: intensity or {intensity, max, box, above, fall_speed, wind_influence, flutter,
+// size: [a, b], alpha, color, splash, splash_size, soft, soft_distance, lit}, wind: {direction, speed, gust, gust_period, gust_length,
+// turbulence, turbulence_length}, ground: y, time, seed, apply}` (`apply`: the weather dims the sun and ambient light and thickens the fog) and
+// `particles: [{name, seed, simulate, position, rotation, shape, extent, cone_angle, spread, rate, max, burst, lifetime, speed, size,
+// gravity, drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance, lit, softness, ring, sort, fog}}]` (each
+// system is stepped `simulate` seconds at load: the pictures show that moment). --rain I, --snow I, --wind S (m/s), --no-weather,
+// --no-particles, --soft 0|1, --particles N (a system of N live particles in the middle of the scene: the cost tables).
 
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
@@ -1573,7 +1580,17 @@ struct Stage {
     }
 
     void make(kin::Renderer3D& r3d, kin::Renderer2D& renderer, const kin::JsonValue& doc) {
-        floor = r3d.create_mesh(kin::meshes::box({24.0f, 0.2f, 22.0f}));
+        // `stage.ground: [width, depth]` makes the floor larger (for the rain, which falls in a volume of 36 m), centred where the 24 x 22 one is.
+        float ground_w = 24.0f, ground_d = 22.0f;
+        if (const kin::JsonValue* stage = doc.find("stage")) {
+            if (const kin::JsonValue* g = stage->find("ground")) {
+                if (g->items().size() >= 2) {
+                    ground_w = static_cast<float>(g->items()[0].as_number());
+                    ground_d = static_cast<float>(g->items()[1].as_number());
+                }
+            }
+        }
+        floor = r3d.create_mesh(kin::meshes::box({ground_w, 0.2f, ground_d}));
         wall_back = r3d.create_mesh(kin::meshes::box({24.0f, 6.0f, 0.3f}));
         wall_side = r3d.create_mesh(kin::meshes::box({0.3f, 6.0f, 22.0f}));
         pillar = r3d.create_mesh(kin::meshes::box({0.6f, 4.0f, 0.6f}));
@@ -1728,6 +1745,10 @@ struct Overrides {
     bool moon_shadow = false;                // --moon-shadow: the fill light (a moon if the scene has none) casts, with --moon-cascades N (2)
     int moon_cascades = 2;
     int local_res = 0;                       // --local-res N: the local shadow maps' side for every light
+    double rain = -1.0, snow = -1.0, wind = -1.0; // --rain I, --snow I, --wind S: the weather's intensities and wind speed for every scene (-1: the scene's)
+    bool no_weather = false, no_particles = false;
+    int soft = -1;               // --soft 0|1: every particle batch's soft flag
+    long particles = 0;          // --particles N: a system with N live particles in the scene's middle
     bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and the shadow pass would be timed once
 };
 
@@ -1934,6 +1955,225 @@ bool merge_time_of_day(kin::TimeOfDay3D& time, const kin::JsonValue* doc, double
     return set;
 }
 
+kin::ParticleRange3D range_of(const kin::JsonValue* v, kin::ParticleRange3D fallback) {
+    if (!v) {
+        return fallback;
+    }
+    if (v->is_number()) {
+        return {static_cast<float>(v->as_number()), static_cast<float>(v->as_number())};
+    }
+    if (v->items().size() >= 2) {
+        return {static_cast<float>(v->items()[0].as_number()), static_cast<float>(v->items()[1].as_number())};
+    }
+    return fallback;
+}
+
+kin::ParticleBlend3D blend_of(const std::string& s, kin::ParticleBlend3D fallback) {
+    return s == "additive" ? kin::ParticleBlend3D::Additive : s == "premultiplied" ? kin::ParticleBlend3D::Premultiplied
+         : s == "alpha" ? kin::ParticleBlend3D::Alpha : fallback;
+}
+
+kin::ParticleFacing3D facing_of(const std::string& s, kin::ParticleFacing3D fallback) {
+    return s == "stretched" ? kin::ParticleFacing3D::Stretched : s == "axis" ? kin::ParticleFacing3D::Axis : s == "flat" ? kin::ParticleFacing3D::Flat
+         : s == "camera" ? kin::ParticleFacing3D::Camera : fallback;
+}
+
+void merge_look(kin::ParticleLook3D& look, const kin::JsonValue* d, const Overrides& over) {
+    if (d) {
+        look.blend = blend_of(d->string_at("blend"), look.blend);
+        look.facing = facing_of(d->string_at("facing"), look.facing);
+        look.axis = vec3(d->find("axis"), look.axis);
+        look.stretch = static_cast<float>(d->number_at("stretch", look.stretch));
+        look.stretch_min = static_cast<float>(d->number_at("stretch_min", look.stretch_min));
+        look.softness = static_cast<float>(d->number_at("softness", look.softness));
+        look.ring = static_cast<float>(d->number_at("ring", look.ring));
+        look.soft = d->bool_at("soft", look.soft);
+        look.soft_distance = static_cast<float>(d->number_at("soft_distance", look.soft_distance));
+        look.lit = static_cast<float>(d->number_at("lit", look.lit));
+        look.fogged = d->bool_at("fog", look.fogged);
+        look.sort = d->bool_at("sort", look.sort);
+    }
+    if (over.soft >= 0) {
+        look.soft = over.soft > 0;
+    }
+}
+
+// A weather layer's numbers (see the header): a bare number is the intensity.
+void merge_layer(kin::WeatherLayer3D& layer, const kin::JsonValue* d, const Overrides& over, double override_intensity) {
+    if (d) {
+        if (d->is_number()) {
+            layer.intensity = static_cast<float>(d->as_number());
+        } else {
+            layer.intensity = static_cast<float>(d->number_at("intensity", layer.intensity));
+            layer.max_particles = static_cast<kin::u32>(d->number_at("max", layer.max_particles));
+            layer.box = vec3(d->find("box"), layer.box);
+            layer.above = static_cast<float>(d->number_at("above", layer.above));
+            layer.fall_speed = static_cast<float>(d->number_at("fall_speed", layer.fall_speed));
+            layer.fall_variation = static_cast<float>(d->number_at("fall_variation", layer.fall_variation));
+            layer.wind_influence = static_cast<float>(d->number_at("wind_influence", layer.wind_influence));
+            layer.flutter = static_cast<float>(d->number_at("flutter", layer.flutter));
+            const kin::ParticleRange3D size = range_of(d->find("size"), {layer.size_min, layer.size_max});
+            layer.size_min = size.min;
+            layer.size_max = size.max;
+            layer.alpha = static_cast<float>(d->number_at("alpha", layer.alpha));
+            layer.colour = vec3(d->find("color"), layer.colour);
+            layer.splash = static_cast<float>(d->number_at("splash", layer.splash));
+            layer.splash_size = static_cast<float>(d->number_at("splash_size", layer.splash_size));
+            layer.edge_fade = static_cast<float>(d->number_at("edge_fade", layer.edge_fade));
+            merge_look(layer.look, d, over);
+        }
+    }
+    if (override_intensity >= 0.0) {
+        layer.intensity = static_cast<float>(override_intensity);
+    }
+    if (over.soft >= 0) {
+        layer.look.soft = over.soft > 0;
+    }
+}
+
+// A scene's particles (P3c): the systems stepped at load (the pictures show one moment), and the weather's settings.
+struct SceneParticles {
+    struct Emitter {
+        std::string name;
+        kin::ParticleSystem3D system;
+        bool wind = true;
+    };
+    std::vector<Emitter> emitters;
+    kin::Weather3D weather;
+    bool apply_weather = false;
+    double weather_time = 0.0;
+
+    void make(const kin::JsonValue& doc, const Overrides& over, const kin::Bounds3& bounds) {
+        if (const kin::JsonValue* w = doc.find("weather")) {
+            merge_layer(weather.rain, w->find("rain"), over, over.rain);
+            merge_layer(weather.snow, w->find("snow"), over, over.snow);
+            merge_layer(weather.dust, w->find("dust"), over, -1.0);
+            merge_layer(weather.mist, w->find("mist"), over, -1.0);
+            if (const kin::JsonValue* wind = w->find("wind")) {
+                weather.wind.direction = vec3(wind->find("direction"), weather.wind.direction);
+                weather.wind.speed = static_cast<float>(wind->number_at("speed", weather.wind.speed));
+                weather.wind.gust_strength = static_cast<float>(wind->number_at("gust", weather.wind.gust_strength));
+                weather.wind.gust_period = static_cast<float>(wind->number_at("gust_period", weather.wind.gust_period));
+                weather.wind.gust_length = static_cast<float>(wind->number_at("gust_length", weather.wind.gust_length));
+                weather.wind.turbulence = static_cast<float>(wind->number_at("turbulence", weather.wind.turbulence));
+                weather.wind.turbulence_length = static_cast<float>(wind->number_at("turbulence_length", weather.wind.turbulence_length));
+            }
+            if (const kin::JsonValue* g = w->find("ground")) {
+                weather.has_ground = true;
+                weather.ground_height = static_cast<float>(g->as_number());
+            }
+            weather_time = w->number_at("time", 0.0);
+            weather.seed = static_cast<kin::u32>(w->number_at("seed", 1.0));
+            apply_weather = w->bool_at("apply", false);
+        } else {
+            merge_layer(weather.rain, nullptr, over, over.rain);
+            merge_layer(weather.snow, nullptr, over, over.snow);
+        }
+        if (over.wind >= 0.0) {
+            weather.wind.speed = static_cast<float>(over.wind);
+            if (weather.wind.gust_strength == 0.0f) {
+                weather.wind.gust_strength = 0.4f;
+            }
+        }
+        if (over.no_weather) {
+            weather.rain.intensity = weather.snow.intensity = weather.dust.intensity = weather.mist.intensity = 0.0f;
+        }
+        if (over.no_particles) {
+            return;
+        }
+        const auto add = [&](const kin::JsonValue& d) {
+            Emitter e;
+            e.name = d.string_at("name", "particles");
+            e.system.set_seed(static_cast<kin::u64>(d.number_at("seed", 1.0)));
+            kin::ParticleDesc3D& p = e.system.desc;
+            const std::string shape = d.string_at("shape", "point");
+            p.shape = shape == "box" ? kin::ParticleShape3D::Box : shape == "sphere" ? kin::ParticleShape3D::Sphere
+                    : shape == "cone" ? kin::ParticleShape3D::Cone : shape == "disc" ? kin::ParticleShape3D::Disc : kin::ParticleShape3D::Point;
+            p.extent = vec3(d.find("extent"), p.extent);
+            p.surface_only = d.bool_at("surface", false);
+            p.cone_angle = static_cast<float>(d.number_at("cone_angle", p.cone_angle));
+            p.spread = static_cast<float>(d.number_at("spread", p.spread));
+            p.rate = static_cast<float>(d.number_at("rate", p.rate));
+            p.max_particles = static_cast<kin::u32>(d.number_at("max", p.max_particles));
+            p.lifetime = range_of(d.find("lifetime"), p.lifetime);
+            p.speed = range_of(d.find("speed"), p.speed);
+            p.size = range_of(d.find("size"), p.size);
+            p.rotation = range_of(d.find("rotation_range"), p.rotation);
+            p.spin = range_of(d.find("spin"), p.spin);
+            p.velocity_min = vec3(d.find("velocity_min"), p.velocity_min);
+            p.velocity_max = vec3(d.find("velocity_max"), p.velocity_max);
+            p.gravity = vec3(d.find("gravity"), p.gravity);
+            p.drag = static_cast<float>(d.number_at("drag", p.drag));
+            p.wind_influence = static_cast<float>(d.number_at("wind_influence", p.wind_influence));
+            p.size_start = static_cast<float>(d.number_at("size_start", p.size_start));
+            p.size_mid = static_cast<float>(d.number_at("size_mid", p.size_mid));
+            p.size_end = static_cast<float>(d.number_at("size_end", p.size_end));
+            p.colour_start = vec3(d.find("color_start"), p.colour_start);
+            p.colour_end = vec3(d.find("color_end"), p.colour_end);
+            p.alpha_start = static_cast<float>(d.number_at("alpha_start", p.alpha_start));
+            p.alpha_end = static_cast<float>(d.number_at("alpha_end", p.alpha_end));
+            p.fade_in = static_cast<float>(d.number_at("fade_in", p.fade_in));
+            p.colour_variation = static_cast<float>(d.number_at("color_variation", p.colour_variation));
+            if (const kin::JsonValue* g = d.find("ground")) {
+                p.ground = true;
+                p.ground_height = static_cast<float>(g->as_number());
+                p.bounce = static_cast<float>(d.number_at("bounce", 0.0));
+            }
+            merge_look(p.look, d.find("look"), over);
+            e.wind = d.bool_at("wind", true);
+            const Vec3f at = vec3(d.find("position"));
+            const Vec3f turn = vec3(d.find("rotation"));
+            e.system.transform = Mat4f::translation(at) * Mat4f::rotation_y(turn.y) * Mat4f::rotation_x(turn.x) * Mat4f::rotation_z(turn.z);
+            const kin::Wind3D* wind = e.wind ? &weather.wind : nullptr;
+            if (d.number_at("burst", 0.0) > 0.0) {
+                e.system.burst(static_cast<kin::u32>(d.number_at("burst", 0.0)));
+            }
+            const double seconds = d.number_at("simulate", 0.0);
+            for (double t = 0.0; t + 1e-9 < seconds; t += 1.0 / 60.0) {
+                e.system.update(1.0 / 60.0, wind);
+            }
+            emitters.push_back(std::move(e));
+        };
+        if (const kin::JsonValue* list = doc.find("particles")) {
+            for (const kin::JsonValue& d : list->items()) {
+                add(d);
+            }
+        }
+        if (over.particles > 0) {
+            // N live particles drifting in the middle of the scene: a soft smoke, alpha-blended and sorted (the cost tables).
+            Emitter e;
+            e.name = "budget";
+            e.system.set_seed(77);
+            kin::ParticleDesc3D& p = e.system.desc;
+            p.shape = kin::ParticleShape3D::Box;
+            p.extent = {std::max(bounds.radius() * 0.25f, 2.0f), 1.5f, std::max(bounds.radius() * 0.25f, 2.0f)};
+            p.max_particles = static_cast<kin::u32>(over.particles);
+            p.lifetime = {1e6f, 1e6f};
+            p.speed = {0.0f, 0.1f};
+            p.spread = 180.0f;
+            p.size = {0.15f, 0.35f};
+            p.alpha_start = p.alpha_end = 0.25f;
+            p.colour_start = p.colour_end = {0.8f, 0.85f, 0.95f};
+            e.system.transform = Mat4f::translation({bounds.center().x, bounds.min.y + 1.5f, bounds.center().z});
+            merge_look(p.look, nullptr, over);
+            e.system.burst(static_cast<kin::u32>(over.particles));
+            emitters.push_back(std::move(e));
+        }
+    }
+
+    void draw(kin::Scene3D& scene, double frame_time) const {
+        scene.weather = weather;
+        scene.weather.time = weather_time + frame_time;
+        if (apply_weather && weather.active()) {
+            const kin::Fog3D base = scene.fog;
+            scene.weather.apply(scene.lights, scene.fog, base);
+        }
+        for (const Emitter& e : emitters) {
+            scene.draw_particles(e.system);
+        }
+    }
+};
+
 double gpu_used_mb() {
     FILE* pipe = popen("nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null", "r");
     if (!pipe) {
@@ -2084,6 +2324,20 @@ int main(int argc, char** argv) {
             over.moon_cascades = std::clamp(std::atoi(next().c_str()), 1, 4);
         } else if (a == "--local-res") {
             over.local_res = std::clamp(std::atoi(next().c_str()), 64, 4096);
+        } else if (a == "--rain") {
+            over.rain = std::atof(next().c_str());
+        } else if (a == "--snow") {
+            over.snow = std::atof(next().c_str());
+        } else if (a == "--wind") {
+            over.wind = std::atof(next().c_str());
+        } else if (a == "--no-weather") {
+            over.no_weather = true;
+        } else if (a == "--no-particles") {
+            over.no_particles = true;
+        } else if (a == "--soft") {
+            over.soft = std::atoi(next().c_str()) > 0 ? 1 : 0;
+        } else if (a == "--particles") {
+            over.particles = std::max(0, std::atoi(next().c_str()));
         } else if (a == "--sky") {
             over.sky = true;
         } else if (a == "--no-sky") {
@@ -2368,6 +2622,7 @@ int main(int argc, char** argv) {
         if (is_stage) {
             stage.make(r3d, renderer, doc);
         }
+        SceneParticles scene_particles;
         Hidden hidden;
         const bool is_hidden = doc.string_at("procedural") == "hidden";
         if (is_hidden) {
@@ -2472,6 +2727,8 @@ int main(int argc, char** argv) {
                                     : is_ragdoll ? kin::Bounds3{{-14.0f, -0.5f, -8.0f}, {14.0f, 5.0f, 8.0f}}
                                     : is_ropes   ? kin::Bounds3{{-6.0f, -0.5f, -4.0f}, {18.0f, 10.0f, 4.0f}}
                                                 : bounds_of(placed);
+
+        scene_particles.make(doc, over, bounds);
 
         // The view.
         const kin::JsonValue* v = doc.find("view");
@@ -2727,6 +2984,8 @@ int main(int argc, char** argv) {
             if (merge_time_of_day(day, doc.find("time_of_day"), camera_hours >= 0.0 ? camera_hours : over.time_hours)) {
                 kin::apply(day, scene.lights, scene.sky, scene.fog);
             }
+            // Particles and weather (P3c): the weather's clock is the frame's (0 at the picture, 60 frames a second).
+            scene_particles.draw(scene, static_cast<double>(time) / 60.0);
         };
 
         fs::create_directories(out / name);
@@ -3043,6 +3302,11 @@ int main(int argc, char** argv) {
                             stats.local_shadow_casters, stats.moon_cascades, static_cast<double>(stats.local_shadow_bytes) / 1048576.0,
                             stats.lights_variant ? ", light shaders" : "");
             }
+            if (stats.particles_submitted > 0) {
+                std::printf("                 particles: %u submitted (%u weather), %u drawn, %u batches (%u soft), %u dropped, CPU %.3f ms\n",
+                            stats.particles_submitted, stats.weather_particles, stats.particles_drawn, stats.particle_batches, stats.particle_soft,
+                            stats.particles_dropped, stats.particle_cpu_ms);
+            }
             if (stats.skinned_copies > 0) {
                 std::printf("                 skinned: %u copies seen in %u draws, %u joint matrices uploaded, %u copies culled\n", stats.skinned_copies,
                             stats.skinned_draws, stats.skin_matrices, stats.culled);
@@ -3100,6 +3364,11 @@ int main(int argc, char** argv) {
                        << stats.local_shadow_drawn << ", \"local_shadow_cached\": " << stats.local_shadow_cached << ", \"local_shadow_draws\": "
                        << stats.local_shadow_draws << ", \"local_shadow_casters\": " << stats.local_shadow_casters << ", \"moon_cascades\": "
                        << stats.moon_cascades << ", \"local_shadow_mb\": " << static_cast<double>(stats.local_shadow_bytes) / 1048576.0;
+            }
+            if (stats.particles_submitted > 0) {
+                report << ", \"particles_submitted\": " << stats.particles_submitted << ", \"particles_drawn\": " << stats.particles_drawn
+                       << ", \"particle_batches\": " << stats.particle_batches << ", \"particle_soft\": " << stats.particle_soft
+                       << ", \"weather_particles\": " << stats.weather_particles << ", \"particle_cpu_ms\": " << stats.particle_cpu_ms;
             }
             if (stats.cluster_copies > 0) {
                 report << ", \"cluster_gpu\": " << (stats.cluster_gpu ? "true" : "false") << ", \"cluster_dispatches\": " << stats.cluster_dispatches

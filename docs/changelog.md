@@ -9,6 +9,21 @@ releases may change APIs.
 
 ### Added
 
+- 3D particles and weather (experimental; see [3D rendering](rendering_3d.md) "Particles and weather" and the plan's "P3c"):
+  `kin/render3d/particles3d.hpp` (`ParticleSystem3D`: point, box, sphere, cone and disc emitters, ranges, gravity, drag, a shared `Wind3D`
+  with gusts and turbulence, size, colour and alpha over life, a flipbook, a ground; a fixed-step deterministic simulation with `state_hash`,
+  `save` and `restore`; `Weather3D`: rain with splashes, snow, dust and mist as camera-following volumes in world space, a pure function of a
+  clock; `Weather3D::apply` dims the light and thickens the fog; the CPU's twins `particle_quad`, `soft_particle_fade`, `particle_light_tint`,
+  `weather_particle`), `Scene3D::draw_particles` and `Scene3D::weather`, ECS `ParticleEmitter3D` and a `Weather3D` component
+  (`simulate_particles`, `advance_weather`, `apply_weather`), `Renderer3DCapabilities::{particles, soft_particles}` and
+  `Render3DStats::{particles_submitted, particles_drawn, particle_batches, particle_soft, weather_particles, particles_dropped,
+  particle_cpu_ms}`. One instanced draw a batch from a CPU-written storage buffer: camera-facing, stretched, axis-locked and flat quads;
+  texture, atlas or procedural disc; alpha, additive and premultiplied; depth-tested and not written; sorted back to front by a radix sort;
+  soft particles reading the pre-pass's depth; fogged by `kin_fog.inc.glsl` in the vertex shader and lit by a one-colour tint of the sun,
+  fill and ambient light. Opt-in: with none of it used every picture is unchanged byte for byte, the 81 earlier shaders compile to the same
+  code, and three shaders are added. Harness: `kin_reference` JSON `weather` and `particles`, options `--rain`, `--snow`, `--wind`,
+  `--no-weather`, `--no-particles`, `--soft`, `--particles`; scenes `rain_street`, `snow_valley`, `particles_soft`, `particles_blend`,
+  `particles_budget`; Sponza Walk "Particles and weather" section (F drops a fire) and `--preset rain|snow|storm|fire`.
 - Spot lights and the shadows of lights that are not the sun (experimental; see [3D rendering](rendering_3d.md) "Spot lights and shadows
   from lights that are not the sun" and the plan's "P3b"): `SpotLight` (position, direction, colour, radius, size, inner and outer cone
   angle with glTF's squared step in the cosine), `LightShadow3D` (a per-light shadow map's resolution, bias, normal offset, near plane,

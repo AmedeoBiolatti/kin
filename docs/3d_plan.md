@@ -4143,8 +4143,8 @@ night scene with spot lights), cost per feature.
 
 Split in three: **P3a** (sky, fog, day-night, the sky's image-based light: done, below), **P3b**
 (spot lights, shadows of spots and point lights, a second shadow-casting directional light, the moon: done, below, after P3a's results) and **P3c**
-(3D particles and weather: not started; `kin_fog.inc.glsl` and the `fog` and `lights` pipeline variants are
-there for them, and `Material3D` blended and additive passes are already fogged and lit by spots).
+(3D particles and weather: done, below, after P3b's results: a CPU-simulated deterministic particle system and rain, snow, dust and mist as
+camera-following volumes, one instanced draw a batch, soft particles, fogged by `kin_fog.inc.glsl` and tinted by the scene's light).
 
 #### P3a — sky, fog, time of day — results
 
@@ -4592,6 +4592,291 @@ pixels); 26 showed that a test that returns when no map was drawn passes a rende
 `Renderer3DCapabilities::local_shadows` and assert maps); 27 that a cut count can agree by chance at one error. No equivalent mutant was
 left standing except 07 against the GPU position test alone, as said; one more that is equivalent by construction and was not run: removing the
 sphere `bounded` pre-check of a view (the frustum's far plane makes it redundant).
+
+#### P3c — particles and weather — results
+
+(2026-10-12, `exp/3d-rendering`, working tree on `7f35305`; not committed.)
+
+**What exists.**
+- `kin/render3d/particles3d.hpp` / `particles3d.cpp` (no GPU): `ParticleSystem3D` with `ParticleDesc3D` (shapes `Point`, `Box`, `Sphere`, `Cone`, `Disc`; `rate`
+  and `burst()`; lifetime, speed, extra velocity vectors, size, rotation and spin ranges; gravity, drag, `wind_influence`; size, colour and
+  alpha over life, `fade_in`, `colour_variation`; a flipbook (`frames_per_life`, `frame_random`); a ground that kills or bounces), `Wind3D`
+  (a direction, a speed, three gust sines, three turbulence sines a component: `velocity()`, `gust_factor()`, closed-form `displacement()`),
+  `ParticleLook3D` (blend `Alpha`/`Additive`/`Premultiplied`, facing `Camera`/`Stretched`/`Axis`/`Flat`, texture or atlas or procedural disc with
+  `softness` and `ring`, `soft` and `soft_distance`, `lit`, `fogged`, `sort`), `Weather3D` (four `WeatherLayer3D`: rain, snow, dust, mist; `Wind3D`;
+  a ground; a clock; `apply()`, `wetness()`, `sun_disc_scale()`), the pure `weather_sprites()` / `weather_particle()` / `weather_splash()`, and the
+  CPU's twins of what the shaders do: `particle_quad`, `particle_streak`, `soft_particle_fade`, `particle_disc_alpha`, `particle_light_tint`.
+- `Scene3D::draw_particles(look, sprites)` and `(system)`, `Scene3D::weather`, `particle_draws()`, `particle_sprites()`; ECS `ParticleEmitter3D`
+  (a system on an entity, stepped by `WorldRenderState3D::simulate_particles(dt, wind)`, drawn by `collect()`), `Weather3D` as a component
+  (`advance_weather`, `apply_weather(scene, base_fog)`).
+- `Renderer3DCapabilities::{particles, soft_particles}`, `Render3DStats::{particles_submitted, particles_drawn, particle_batches, particle_soft,
+  weather_particles, particles_dropped, particle_cpu_ms}`.
+- Shaders: three new .spv, `particle.vert` (the quad is built in the vertex shader from a storage buffer of sprites; fog is evaluated at each
+  corner), `particle.frag` and `particle_soft.frag` (`#define KIN_SOFT`, both over `kin_particle_fragment.inc.glsl`). No old shader or include was
+  touched: **all 81 .spv of the build before the stage are byte for byte the ones after** (81 same, 0 different, 3 new).
+- Harness (`kin_reference`): JSON `weather` and `particles`, `procedural: "stage"`'s `stage.ground: [w, d]`, options `--rain`, `--snow`, `--wind`,
+  `--no-weather`, `--no-particles`, `--soft 0|1`, `--particles N`; scenes `rain_street`, `snow_valley`, `particles_soft`, `particles_blend`,
+  `particles_budget` (default pictures in `reference_out/p3c_<scene>/`).
+- Sponza Walk: "Particles and weather (P3c)" (rain, snow, dust, mist, wind speed/direction/gusts/turbulence, dims-the-light, ground, splashes, soft
+  particles and their distance, fires: in the model's middle, F drops one at the camera; each a flame, sparks and a flickering light), stats line,
+  presets `rain`, `snow`, `storm`, `fire`.
+
+**Models and why.**
+- *A system is simulated, the weather is a formula.* A burst of sparks has a history (it was born at a place, with a velocity, and has been pushed
+  since), so `ParticleSystem3D` is state: a fixed step of 1/120 s taken out of the time given (`update(dt)` of any size: 60 fps, 144 fps and ragged
+  frames give one state, tested to the hash), semi-implicit Euler without drag and the **exact solution of constant air** with it (velocity relaxes
+  to `air + gravity/drag`, so drag is stable at any step), births spread over the step (a particle is born part-way and carried the rest, so a stream
+  is smooth and not clumped), and every random a PCG hash of (seed, birth number, purpose): no stream to keep in step, the same on every machine.
+  Rain and snow have no history worth keeping, and a game wants thousands round the camera that must not swim when it moves, so the weather is a
+  **pure function of (clock, camera)**: particle `i` is at `base_i + fall_i * t + drift(t) * influence_i + flutter_i(t)` (base a hash of `i`), wrapped
+  into the box round the camera by `lo + mod(p - lo, size)` in world space. Nothing is stored or saved, a rewound clock rewinds the rain, the same
+  particle is in the same world place whatever the camera did (tested: unwrapped places identical, wrapped ones differ by whole boxes, 1,000 m away the
+  same number are in the volume), and the count is bounded by construction. The cost is that the weather is not interactive (no particle is
+  pushed by anything, and rain does not stop at a roof) and that its drift is the wind at the world's origin (no variation with place inside a
+  36 m box; the gusts' length is 60 m).
+- *Wind as sums of sines.* A gust is three sines in time and place (periods 1, 0.43 and 0.19 of `gust_period`, lengths 1, 0.55 and 0.27 of `gust_length`,
+  weights 0.6, 0.3, 0.1), travelling with the wind; turbulence two sines for each component. Chosen over value noise because the integral of a
+  sine at a fixed place is closed, so the weather's drift needs no integration over time and no state (`displacement`, tested against a 5 ms
+  trapezoid of `velocity` to 1 cm over 30 s). The statistics are those of three sines: mean 0, deviation 0.48 of the strength, range within +-1
+  (tested over 80,000 samples: mean 0.00005, deviation 0.4796). The cost is a visible regularity over minutes: a game that wants a different
+  rhythm sets `gust_period`; real wind is not periodic.
+- *One instanced draw a batch, the quad in the vertex shader.* The CPU writes a 64-byte sprite (position and width, linear colour and alpha,
+  velocity and rotation, flipbook frame) into a storage buffer (the same upload path as the mesh instances: cycled, written from the caller's
+  thread into the transfer memory) and `particle.vert` makes the four corners from `gl_VertexIndex`: six vertices a sprite, no vertex buffer.
+  Chosen over a quad mesh with instances because a stretched streak and an axis-locked sprite need the camera and the velocity at every
+  corner, and a mesh-based draw would need a different instance transform per facing; over compute-simulated GPU particles because a
+  deterministic, savable, hashable state is what a rollback game wants and 20,000 sprites cost 1.5 ms of CPU on one thread (below).
+- *Order.* Within a batch: **a stable LSD radix sort on the view depth's bits, furthest first** (3 passes of 11 bits, O(n): 24,000 sprites 0.2 ms
+  where `std::sort` took 1.5 ms), per batch because alpha needs it and additive does not; equal depths keep their order, so a picture is the same
+  every run. Between batches: by the batch's **mean depth**, furthest first. A per-particle sort across systems would be a draw per run of one
+  system's particles in between another's, with no bound; what is given up is two interpenetrating systems (a smoke column through a rain
+  curtain): each is drawn whole. Blended and additive *meshes* are all drawn before any particle (particles come last in the scene's pass, before the
+  overlay): a glass pane behind rain is right, a pane in front of rain is not.
+- *Depth: tested, not written, and read for soft particles from the pre-pass.* A particle's pipeline tests the main pass's depth (the sample the
+  mesh wrote, so MSAA clips it per sample) and writes none, so two overlapping sprites both draw (tested: an unsorted far sprite drawn after a
+  near one is not rejected). **Soft particles read the pre-pass's depth** (`_ao_depth`: D32F, one sample, the view's size), by `texelFetch` at the
+  fragment's pixel, in view space with the inverse projection's z row (so under TAA the jitter does not matter and an orthographic camera
+  works); the main pass's own depth cannot be read in the pass that writes it, and under MSAA it is a multisampled texture. The fade is a smoothstep of the gap
+  in view depth over `soft_distance`. The pre-pass is made only when a batch asks for soft particles (and the opaque meshes it holds are drawn
+  a second time: its cost is the AO's pre-pass, `ao_draws`); with TAA the velocity then comes from it, as with AO. A blended mesh is not in it.
+- *Fog and light.* The fog is `kin_fog.inc.glsl`'s functions called from the vertex shader at each corner and interpolated: the optical depth is
+  smooth over a sprite, and the 8-step sky colour is then 4 evaluations a sprite and not one a fragment (a 20,000-particle sky-coloured fog at the
+  fragment rate would be the P3a table's +0.1 to 0.3 ms a million pixels over each layer). Tested to 1 level of 255 against `fog_apply` and against a
+  mesh of the same colour at the same distance. Alpha particles mix toward the fog by its opacity (the fog's colour premultiplied by the
+  particle's alpha); additive ones are dimmed by `1 - opacity` (what is behind them has the fog), as meshes are. Light: **one tint a batch**
+  (`particle_light_tint`: the mean of ambient and ground ambient, plus half the sun's and half the fill's colour: what a lit white ball
+  shows), times `lit`: no per-pixel light, no shadows, no spot or point lights. Cheap (no uniform beyond one vec4), good enough that snow is
+  not white at night (tested through `TimeOfDay3D::apply`: noon (255, 255, 255), night (55, 58, 67) for the same flake), wrong under a
+  roof (the sun's tint reaches a particle in a shadow).
+- *Weather's effect on the scene is a helper, not a coupling.* `Weather3D::apply(lights, fog, base_fog)` dims sun, fill and ambient by
+  `wetness()` (the strongest of rain, 0.6 snow, 0.5 mist) and returns the fog as `base_fog` plus the weather's, greyer and without its sun
+  glare. It takes the base fog and writes the result (so it does not compound), and must come after `TimeOfDay3D::apply` (which rewrites the
+  lights it dims). The sky's sun disc is a setting, not rewritten, so the scale is a function (`sun_disc_scale()`) for the game to apply to its own value.
+- *Splashes, without a physics query.* A drop's age under the ground is `(ground - y) / fall`: the same formula that hides it under the ground
+  shows its splash there (a flat ring on the ground, growing and fading over `splash_time`, at the place the drop was `age` ago), so a splash
+  costs a few instructions a drop that is under the ground and needs no state, and its place is world-stable. The ground is one height.
+
+- New tests (25 in `kin-render3d`; the CPU ones need no device; limits are the ones in the asserts):
+  `test_particles_deterministic_and_restorable` (10 s of a cone with wind at 60 fps, at 144 fps and at ragged 1 to 50 ms frames: one state of
+  601 particles, **hashes equal**; another seed differs; a saved state restored into a system of another seed continues to the same hash after
+  120 steps; truncated and mistagged bytes are refused with the state unchanged; a flipped bit changes the hash),
+  `test_particles_emitter_distributions` (20,000 particles of each shape: a point's speeds fill its range and its mean is the middle to 0.05;
+  a spread of 45 degrees stays inside it and its mean cosine is the solid-angle uniform one to 0.004; a box's coordinates have mean 0 and the
+  variance `(2e)^2 / 12` to 3%, its shell the faces by area to 1.5%; a sphere's radius is r^3 distributed (an eighth inside half the radius to
+  0.01) and its velocity is radial; a cone's base is area-uniform to 1.2% and its directions inside the angle with the solid-angle mean cosine
+  to 0.003; a disc turned a quarter about x throws along +z; added velocity vectors and the cap on live particles),
+  `test_particles_forces` (a parabola to 0.06 m in 1 s; terminal velocity `g/k` to 1 cm/s and the exact position over 6 s to 1 mm; wind pulls
+  to its speed with drag, half the speed at half the influence, none at 0; in gusts a dragged particle's mean along-wind velocity is 4.8 to
+  6.3 and it swings between under 4 and over 6), `test_wind_model` (gust mean 5e-5, deviation 0.4796, range -0.9987 to 0.9991 over
+  80,000 samples; the velocity is along the direction when there is no turbulence; **the closed-form displacement equals a 5 ms trapezoid of the
+  velocity within 1 cm over 30 s** and is additive; turbulence is zero-mean with the rms of half its amplitude; no direction, no wind),
+  `test_particles_life_and_ground` (the curves, fade-in, colour, flipbook frame; a ground kills, or bounces at half speed to a quarter of the
+  height), `test_particle_quads_cpu` (corners of each facing against their geometry; a streak's head at the particle and its width square to the
+  streak and the way to the eye; least length; the soft fade and the disc), `test_weather_volume_cpu` (a pure function: equal
+  twice and after a rewind to the byte; intensity 0 makes none; the first n are shown and the others hidden and the shown keep their places as
+  intensity rises; **unwrapped places do not depend on the camera, wrapped ones differ by whole boxes and 89% of them are exactly where they were
+  after the camera moved 2.6 m**; a camera 1,000 m away has the same number in its volume, all of them within it; drops' velocity is the fall plus
+  0.8 to 1 of the wind; the pattern drifts downwind by 48.6 m in 10 s at 6 m/s; with a ground there are splashes (flat, on the ground) and no drop below it),
+  `test_weather_apply` (dims, thickens from the base so it does not compound, snow 0.6, mist 0.5), `test_ecs_particles` (an emitter at its
+  entity's place and turned with it, disabled neither makes nor draws, `collect()` draws, a `Weather3D` component's clock and `apply_weather`),
+  `test_gpu_particles_off_is_unchanged` (weather with every layer at 0 and everything else turned, empty batches, an empty system, soft and lit
+  set: the plain picture **to the byte** in 8-bit 1 sample, 8-bit MSAA 4, HDR with bloom, and TAA, with 0 batches and 0.0 ms),
+  `test_gpu_particle_billboard_corners` (six sprites: turned, stretched, axis-locked, flat, a streak toward the camera, a streak whose head is out
+  of the view: the lit pixels are those inside the CPU's projected corners, **0 wrong at more than 0.75 px from an edge**, areas within
+  3%), `test_gpu_particle_orthographic`, `test_gpu_particle_blend_math` (alpha with a white and a half-opaque texel, additive, additive with
+  texel alpha, premultiplied opaque and with alpha 0: worst **1** of 255 against the formula),
+  `test_gpu_particle_sorting_and_depth_write` (near and far sprites in one batch in either order and in two batches submitted near first: back to
+  front to 1 level; unsorted: the array's order, the far one drawn last and not rejected by the depth of the near one; additive in either
+  order the same sum), `test_gpu_particle_depth_test` (1 and 4 samples: half behind a wall is cut at the wall's edge to the pixel, one wholly behind is
+  hidden, one in front shows), `test_gpu_soft_particles` (a sprite in front of a wall that slants through it: 3,081 pixels (1 sample) and 2,847 (4
+  samples) against `kin::soft_particle_fade` with the wall's own plane: **worst 1** of 255; 585 faded, 1,716 whole, 780 behind the wall; no
+  pre-pass for particles that are not soft: `ao_draws` 0), `test_gpu_particle_fog_matches_meshes` (three fogs: fixed colour, sky colour with a
+  lobe, height fog from above: a particle and a mesh of the same colour at the same distance both **within 1 of `fog_apply`**; `fogged = false`
+  is its own colour; additive dimmed), `test_gpu_particle_light_tint` (unlit, lit and half lit against `particle_light_tint`; noon and night from
+  `TimeOfDay3D::apply`: (255, 255, 255) and (55, 58, 67) for the same flake, within 1), `test_gpu_particle_flipbook` (the four frames of a 2 x 2
+  atlas; mixed frames at 0.25, 0.5 and 0.75: (191, 64, 0), (127, 127, 0), (64, 191, 0)), `test_gpu_weather_places_and_no_swim` (the CPU's
+  discs are lit where they project for three cameras: 33 of 33, 33 of 33, and 28 of 28 a thousand metres away, and no lit pixel is far from
+  a particle; intensity 0 draws nothing: 0 batches, 0.0 ms, a picture of black), `test_gpu_rain_streaks_follow_the_wind` (30 and 43 streaks:
+  all lit along the segment the CPU's head and tail project to; mean run over fall 0 and **0.603** against the wind's 0.6),
+  `test_gpu_weather_cache_follows_every_change` (28 single changes of the weather, the camera and the field of view, each picture that of a
+  second renderer that made the sprites afresh, 28 of 28 changing the picture; the same weather twice the same picture),
+  `test_gpu_particle_budget` (24,000 sprites: 24,000 drawn in one draw, 1.5 ms of CPU in `render()`, the frame with the read-back 3 ms),
+  `test_gpu_particles_taa_and_msaa` (TAA still frames differ by what the scene's own edges do, 19 levels and mean 0.09 against 19 and 0.087 without
+  the particles, with the main-pass velocity and with the pre-pass's for soft ones; MSAA 4 against 1 sample: mean difference 0.29 of 255),
+  `test_gpu_particles_leave_skinned_alone` (the tube's side of the picture is the same to the byte with sprites on the other).
+
+**Checks run.**
+- *Off is off*: default and all-on (`--cascades 4 --ao --contact-shadows --taa`, 120 frames) renders of crowd, shadows, sponza, helmet, motion,
+  spheres, cornell, the skinned and physics scenes and the P3a and P3b scenes, made by the binary of this stage: **17 of 17** pictures byte for byte
+  those of `reference_out/p1a_base_def` and **17 of 17** of `p1a_base_all`, kiln_near (`--lod --lod-clusters`) **3 of 3** of `p1a_base_kiln`; the
+  8 skinned scenes (20 pictures) default **20 of 20** and all-on **20 of 20** byte for byte those of the P3b binary (kept from that stage);
+  against the stored pictures `p2c` 5, `p2d` 8, `p2e` 14, `p3a` 18 and `p3b` 12 of 13: **57 of 58** equal; the one that is not is
+  `p3b_spot_budget/start.png`, which the P3b binary itself no longer reproduces either (three runs of each binary: the same picture, not the
+  stored one: a stale stored picture, the new binary equals the old). The final binary (after the last edits to the particle code: a cap on
+  births, the weather's splash look and near fade) again: default 17 of 17 and all-on 17 of 17 (the seven scenes), kiln 3 of 3, and 28 of 28
+  pictures of eight others the same as the first binary's (so the P3b binary's) and 6 of 6 all-on skinned. Plus
+  `test_gpu_particles_off_is_unchanged`: every new setting configured and off is the plain picture to the byte in 8-bit, MSAA 4, HDR with bloom
+  and TAA. **All 81 .spv of the build before the stage are byte for byte the ones after** (81 same, 0 different, 3 new). Two runs of the five
+  new scenes (13 pictures): byte for byte equal.
+- `ctest` (`KIN_REQUIRE_GPU_TESTS=1`): **75 of 75** (`kin-render3d` 115 s), `build-no3d` **65 of 65** (no Jolt, no physics3d in its build log; 6
+  warnings, all lua's `tmpnam`), `kin_render3d_tests` whole on NVIDIA (RTX 4080 Laptop) and on lavapipe (`VK_ICD_FILENAMES=.../lvp_icd.json`),
+  both exit 0 (each with `KIN_REQUIRE_GPU_TESTS=1`). New warnings of the build: none (the `AnimationPlayer3D` ones of the tests existed).
+- NVIDIA and lavapipe: every new test passes on both, with the same numbers to a level (the budget test's frame with the read-back 3 ms on
+  NVIDIA, 26 ms on lavapipe; the tint's night pixel (55, 58, 67) and (56, 58, 67); the flipbook's half mix (127, 127, 0) and (128, 128, 0)).
+
+**Pictures looked at** (1280x720, `reference_out/p3c_<scene>/`, two runs byte for byte equal; Sponza Walk's four presets headless at 1280x800).
+`rain_street`: `street`, a dusk street, the horizon orange, three warm lamp pools on the floor and the bench, rain as thin pale streaks leaning
+with the wind (5 m/s on 9 m/s of fall), long and clear near the camera and fine and faint far off, fogged into the sky's colour, the lamp
+bulbs bloomed; `lamp`, from under a lamp: streaks over the lit and the dark wall; `ground`, from 45 cm up: a dozen faint thin rings on the
+floor (20 to 60 cm across, the nearest the clearest). `snow_valley`: `valley`, a thousand soft cream flakes (warm: the afternoon sun's tint) over
+the green valley, large near the camera and points far off, the pillars hazed; `close`, flakes of several sizes (the nearest two metres
+from the lens as soft discs), the sun's disc through them; `drift`, side-on to the wind. `particles_soft`: `front`, two clouds of dark smoke on a pale floor
+with a pillar through each: the left (hard) one's puffs cut the floor and the pillar in straight lines, the right (soft) one fades into both;
+`low`, the same from floor level; `top`, from above: the left cloud's quads show where they cut the floor (a straight edge and the pillar's
+silhouette), the right's do not. `particles_blend`: `front` two streams of puffs flowing at the camera, red young and far, blue old and near,
+an additive green one between: the right (sorted) is blue over red as it should be, the left (unsorted, nearest first) is red over blue in
+its middle (the wrong order: orange where the nearest blue should hide red); `side`, the sorted one from the side, a clean red to blue
+gradient. `particles_budget`: `front`, a fountain of about 28,000 sparks (stretched, additive, gold) over the stage with snow falling
+through; they bounce and lie on the floor as a haze; `close`, the spray at 3 m, the sparks as elongated bright flecks, the snow's flakes
+soft discs. Sponza Walk: `rain` from the nave, streaks and a hazed far end (**rain falls under the arcade's roof**: the weather has none),
+`snow` (sparse: the volume is 30 m wide in a 60 m nave), `storm` (slanted streaks, the sun through haze), `fire` (two flames with sparks and
+warm light on the columns and banners, the nave dark).
+**Ugly or weak**: splashes are thin faint rings (they are small and a flat disc's ring is all there is: no droplets, no spray); rain is a
+volume round the camera only (nothing beyond 18 m, so a view across a plain has no rain on the horizon: a game adds a fogged backdrop);
+a flake or a drop near the lens fades out over two metres, so a drop never crosses the lens; the budget scene's bounced sparks form a bright
+haze on the floor; the weather's particles are not lit by the lamps (a streak is as bright in a pool as out of it); the snow in the nave is
+sparse and the rain stops nowhere; the pale test floor makes the soft-particle comparison less striking than it should be.
+
+**Cost** (NVIDIA RTX 4080 Laptop; GPU ms of a frame with the view rendered 8 times in it, divided by 8, median of 240 frames; a quiet run,
+noise about +-0.03 ms; two earlier runs, with other projects using the GPU and CPU, were 0.1 to 0.3 ms noisy and, with a weather made again by
+each of the 8 repeats, CPU-bound: the sprites are now kept while nothing changes, which also makes the repeats honest):
+
+| What (Sponza) | sprites in view (nave / roof) | nave 1280x720 | roof 1280x720 | nave 1920x1080 | roof 1920x1080 |
+|---|---|---|---|---|---|
+| none | 0 | 0.33 | 0.29 | 0.58 | 0.51 |
+| rain 1.0 (16,000 streaks) | 3,003 / 4,226 | 0.35 (+0.02) | 0.28 (-0.01) | 0.59 (+0.01) | 0.56 (+0.05) |
+| rain 1.0, soft | 3,003 / 4,226 | 0.33 (+0.00) | 0.33 (+0.04) | 0.65 (+0.07) | 0.88* |
+| snow 1.0 (9,000 flakes) | 1,613 / 2,118 | 0.34 (+0.01) | 0.28 (-0.01) | 0.56 (-0.02) | 0.52 (+0.01) |
+| rain 1.0 + snow 0.5, wind | 3,882 / 5,366 | 0.32 (-0.01) | 0.28 (-0.01) | 0.58 (+0.00) | 0.57 (+0.06) |
+| 20,000 alpha sprites, sorted | 20,000 / 351 | 0.38 (+0.05) | 0.32 (+0.03) | 0.63 (+0.05) | 0.63 (+0.12) |
+| 20,000 alpha sprites, soft | 20,000 / 351 | 0.41 (+0.08) | 0.38 (+0.09) | 0.75 (+0.17) | 0.74 (+0.23) |
+
+(*: one frame of 30 ms in that run's p90; its p10 is 0.61, +0.10.) And the two scenes of the harness:
+
+| Scene | sprites in view | 1280x720 | 1920x1080 |
+|---|---|---|---|
+| `particles_budget` without particles or weather | 0 | 0.17 | 0.35 |
+| `particles_budget` `front` (28,700 sparks + 800 flakes, 2 batches) | 28,686 | 0.37 (+0.20) | 0.54 (+0.19) |
+| `particles_budget` `close` | 16,596 | 0.46 (+0.29) | 0.55 (+0.20) |
+| `rain_street` without weather (`street`, `lamp`, `ground`) | 0 | 0.26, 0.34, 0.37 | 0.38, 0.38, 0.40 |
+| `rain_street` with rain 0.85 and splashes | 1,800 / 2,850 / 1,559 | 0.28, 0.42, 0.40 (+0.02, +0.08, +0.03) | 0.44, 0.44, 0.42 (+0.06, +0.06, +0.02) |
+
+What it says: **a rain or snow layer is within the noise (0 to +0.1 ms)**: a few thousand thin streaks or soft discs in view are cheap
+fragments. **20,000 alpha-blended, sorted sprites are +0.05 ms at 720p and +0.05 to +0.12 at 1080p; 28,700 additive streaks +0.2 ms.**
+Soft particles add the pre-pass: +0.03 to +0.12 ms over the same sprites at 720p and 1080p on this scene. The CPU is the larger cost, as given below.
+
+
+CPU (`render()` on the camera thread, a camera that moves each frame so nothing is kept; `--repeat 1`): Sponza nave 0.30 ms with none; rain
+1.0 (+0.7: 16,000 hashed, 3,000 of them in view, split over the job system's workers), rain with snow 1.6 (+1.3), 20,000 alpha sprites (all in
+view, sorted) 2.2 (+1.9). Kept from the last render while nothing changed: +0.1 to 0.3 (the cull, the sort and the upload only).
+The upload is 64 bytes a sprite in view (a 28,000-sprite frame 1.8 MB); the pre-pass of a soft batch is the AO pre-pass's cost (opaque
+depth and normal) and nothing else.
+
+**Limits and not done.**
+- **Not lit by spot or point lights, no shadows on particles.** The tint is the sun's, the fill's and the ambient colour: a flake in a lamp's
+  pool is as dark as one beside it, and under a roof (Sponza's nave) it takes the sun. The "lights variant" is not used by particles (the
+  stretch goal was not attempted).
+- **Rain falls through roofs.** The weather is a volume round the camera with a ground height and nothing else: no occlusion by geometry
+  (Sponza Walk's nave shows rain under the arcade). A game cuts the layer's intensity by where the player is (or draws a second, narrower layer).
+- **Splashes at one ground height only** (no depth-hit splashes: the depth buffer is not read for them). Dust and mist have no splashes.
+- **TAA and moving particles.** Particles are drawn into the main pass with the velocity target masked, so under TAA a moving particle takes the
+  velocity of what is behind it and trails by the resolve's blend (0.9: about ten frames). Stationary ones are stable (tested: still frames
+  differ by what the scene's own edges do); rain under TAA streaks into longer lines, and MSAA is what the weather scenes use. Giving particles a
+  velocity needs a second, blended-compatible velocity write; not done.
+- **A sort inside a batch, not across batches** (above), and not against blended meshes (particles are last).
+- **CPU-made.** `render()` builds the weather's sprites (about 0.1 us each, split over the job system's workers in chunks of 2,048; kept from
+  the last render while the weather, the camera and the view's frustum are unchanged) and writes every batch's sprites each frame. 16,000 rain
+  particles are 2 to 2.5 ms of CPU on this machine (about a third of them in view); a game with a worse CPU budget lowers `max_particles` or the
+  box. The upload is 64 bytes a visible sprite; the frame takes at most 1,048,576 (the rest are dropped, once in the log, `particles_dropped`).
+- **Soft particles cost the pre-pass** (a draw of the opaque meshes' depth and normal): +0.1 to 0.3 ms on Sponza at 720p, more at 1080p (the cost
+  table); a custom shader's opaque mesh is in it as any opaque mesh is. A scene whose soft batch is the weather asks for it every frame it has any.
+- **No custom shaders for particles** (no `Material3D`; a texture, an atlas or a disc), no particle trails, no collisions (a ground height
+  that kills or bounces is the whole of it), no emitter shapes from a mesh, no curl-noise fields, no GPU simulation.
+- The overlay (`Scene3D::overlay`) gets no particles and no weather. `Scene3D::draw_particles` batches are copied each frame (a game that
+  steps one system and draws it pays the copy: 52 bytes a particle, a vector append).
+- A `ParticleSystem3D`'s `save()` is the state of the simulation and not its desc, transform or look: put those back yourself (the seed is
+  saved). The format is versioned but not promised stable.
+- Not run: Windows or MSVC, Metal; Sponza Walk's panel click path (no display); a moving camera under the weather with TAA beyond the harness's
+  pictures; ECS `ParticleEmitter3D` through a headless GPU run beyond the unit-level tests (`test_ecs_particles` is CPU; the GPU tests draw what
+  `collect()` hands over through `draw_particles`).
+
+**Mutation run** (35 deliberate breaks, each in the source it names, rebuilt and run against the test(s) that should catch it, each source put back
+from a saved copy afterwards: the four files byte for byte equal, sha256 before and after; the tests are `kin_render3d_tests` filtered by the name). All 35 are caught,
+none survived, no equivalent mutant was found. (The suite was strengthened while it was written, so this is not a first-run score: the "streak
+whose head is out of the view" case of the corners test exists because the cull's streak length was found untested; the weather's
+tests were run by name filters that matched a wrong subset once, which found `test_particle_quads_cpu`'s own wrong expectation.)
+
+| # | Break | Caught by |
+|---|---|---|
+| 01 | the camera-facing quad's up axis turns the other way (a shear) | `test_gpu_particle_billboard_corners` |
+| 02 | a streak's head and tail swapped in the vertex shader | `test_gpu_particle_billboard_corners` |
+| 03 | additive ignores the sprite's alpha | `test_gpu_particle_blend_math`, `test_gpu_particle_sorting_and_depth_write` |
+| 04 | premultiplied colour not scaled by the particle's alpha | `test_gpu_particle_blend_math` |
+| 05 | the soft fade ignored | `test_gpu_soft_particles` |
+| 06 | the soft fade linear, not a smoothstep | `test_gpu_soft_particles` (the profile against the formula at 1 level: a linear ramp is 16 levels off at a quarter) |
+| 07 | soft: the inverse projection's wrong entries uploaded | `test_gpu_soft_particles` |
+| 08 | fog not applied to particles | `test_gpu_particle_fog_matches_meshes` |
+| 09 | an additive particle mixed toward the fog's colour, not dimmed | `test_gpu_particle_fog_matches_meshes` |
+| 10 | no depth test | `test_gpu_particle_depth_test` |
+| 11 | depth written by the particles | `test_gpu_particle_sorting_and_depth_write` (the unsorted far sprite drawn after the near one is rejected) |
+| 12 | no sort within a batch | `test_gpu_particle_sorting_and_depth_write` |
+| 13 | sorted near to far (the radix key not flipped) | `test_gpu_particle_sorting_and_depth_write` |
+| 14 | batches drawn near to far | `test_gpu_particle_sorting_and_depth_write` (the two-batch case) |
+| 15 | `lit` ignored (always tinted) | `test_gpu_particle_light_tint` |
+| 16 | the tint takes all of the sun, not half | `test_gpu_particle_light_tint` |
+| 17 | the weather wraps about the origin, not the camera | `test_weather_volume_cpu`, `test_gpu_weather_places_and_no_swim` |
+| 18 | the wind's drift runs against the wind | `test_weather_volume_cpu` |
+| 19 | the weather's ground ignored | `test_weather_volume_cpu` |
+| 20 | drag ignored in the simulation | `test_particles_forces` |
+| 21 | the seed ignored by the random numbers | `test_particles_deterministic_and_restorable` |
+| 22 | one step a call (no fixed step) | `test_particles_deterministic_and_restorable` |
+| 23 | the axis facing uses the camera's up | `test_particle_quads_cpu` |
+| 24 | the displacement leaves the turbulence out | `test_wind_model` |
+| 25 | `restore()` forgets the births not yet whole | `test_particles_deterministic_and_restorable` |
+| 26 | the cull ignores a streak's length | `test_gpu_particle_billboard_corners` (the head-out-of-view case) |
+| 27 | the flipbook's rows and columns swapped | `test_gpu_particle_flipbook` |
+| 28 | the encoding to sRGB left out | `test_gpu_particle_blend_math` |
+| 29 | the weather leaves the ambient light alone | `test_weather_apply` |
+| 30 | the weather's fog compounds (not from the base) | `test_weather_apply` |
+| 31 | rain's streak ignores the wind | `test_gpu_rain_streaks_follow_the_wind`, `test_weather_volume_cpu` |
+| 32 | the weather's cache key leaves the clock out | `test_gpu_weather_cache_follows_every_change` |
+| 33 | ... the camera's place | `test_gpu_weather_cache_follows_every_change` |
+| 34 | ... the view's matrix (the cull's frustum) | `test_gpu_weather_cache_follows_every_change` |
+| 35 | ... the wind's speed | `test_gpu_weather_cache_follows_every_change` |
+
+Not mutated, so not known to be tested: the per-corner fog's interpolation at large sprites (a 14 m mist wisp is fogged at its corners),
+the overlay's skipping, `particles_dropped` at the frame's limit, the ECS `apply_weather` fog thickness, the cache key's other fields (28
+single changes are tested together, but only four of their fields were broken one at a time).
 
 ### P4 — The vertical slice, "Summit" (a one-player Peak-like)
 

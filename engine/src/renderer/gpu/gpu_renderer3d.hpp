@@ -257,6 +257,9 @@ private:
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`: the
     // second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is far.
     SDL_GPUGraphicsPipeline* sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const;
+    // The particle pass (P3c): the sprites' pipeline for a blend mode, in the main pass's colour target (`velocity`: the second target
+    // too, masked), with the soft-particle fragment shader or not. Null where the shaders were not made.
+    SDL_GPUGraphicsPipeline* particle_pipeline(SDL_GPUTextureFormat format, u32 samples, ParticleBlend3D blend, bool soft, bool velocity) const;
     // The camera's turn into the pre-pass's velocity target, over the pre-pass's depth.
     SDL_GPUGraphicsPipeline* sky_velocity_pipeline(SDL_GPUTextureFormat depth) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
@@ -358,6 +361,10 @@ private:
     void sky_environment(FrameCtx& ctx);
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
+    // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to the
+    // instance buffer; draw_particles() then records them into the main pass.
+    void prepare_particles(FrameCtx& ctx);
+    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass);
     void resume_2d();
     // `buffer` as a storage buffer of at least `bytes` (grown to twice its size, and not under `minimum`).
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum, SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
@@ -407,6 +414,30 @@ private:
     GpuShader _sky_velocity_only_shader;       // sky_velocity_only.frag
     GpuShader _sky_env_shader;                 // sky_env.frag
     GpuShader _output_dither_shader;           // view_output_dither.frag: view_output.frag with a dither, for a view with a sky
+    // P3c: particles (the billboards' vertex shader, the fragment shader and its soft-particle variant).
+    GpuShader _particle_vertex_shader;         // particle.vert
+    GpuShader _particle_shader;                // particle.frag
+    GpuShader _particle_soft_shader;           // particle_soft.frag
+    bool _particles_available = false;
+    bool _soft_particles_available = false;
+    bool _particles_warned = false;
+    bool _particles_overflow_warned = false;
+    std::shared_ptr<GpuBuffer> _particle_buffer; // the frame's sprites, batch by batch (GpuParticle3D); grows
+    struct ParticleBatch {
+        ParticleLook3D look;
+        Texture texture; // the look's, kept for the draw
+        u32 first = 0;   // in the instance buffer, after culling and sorting
+        u32 count = 0;
+        f32 depth = 0.0f; // the batch's mean depth along the camera's forward (batches are drawn far to near)
+        bool soft = false; // reads the depth
+    };
+    std::vector<ParticleBatch> _particle_batches;
+    std::vector<ParticleSprite3D> _weather_sprites;  // the weather's, made each render
+    std::vector<WeatherBatch3D> _weather_batches;
+    std::vector<f32> _weather_key, _weather_key_now; // what _weather_sprites were made from (and this render's)
+    std::vector<std::pair<f32, u32>> _particle_keys, _particle_scratch; // render()'s scratch: a sprite's depth and its index (and the sort's)
+    std::vector<u32> _particle_order;                // the sprites to write, batch after batch in draw order
+    std::vector<const ParticleSprite3D*> _particle_source; // and where each batch's sprites are (a scene's or the weather's)
     bool _fog_available = false;
     bool _sky_available = false;
     bool _sky_env_available = false;

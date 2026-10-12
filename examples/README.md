@@ -199,6 +199,12 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   moon's shadow (the fill light's own cascades, faded with the moon's height under the time of day). The stats show the lights, the
   maps drawn and kept, and the memory. `--preset spots`, `flashlight`, `moon`, `lamps`. A run with no display:
   `sponza_walk --headless --preset flashlight --screenshot torch.png`. The panel's click path is untested here (no display).
+- The "Particles and weather (P3c)" section: rain, snow, dust motes and mist as volumes round the camera (intensity sliders; wind speed,
+  direction, gusts and turbulence), with the weather dimming the light and thickening the fog, rain splashing on the model's floor,
+  soft particles (fading near surfaces: costs the depth pre-pass) and fires: `Fires in the model's middle`, or F drops one at the camera
+  (each a flame, sparks and a flickering warm light). The stats show the sprites, batches and the CPU time. `--preset rain`, `snow`,
+  `storm`, `fire`. A run with no display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --preset storm --screenshot storm.png`. Rain falls
+  through Sponza's covered parts (the weather has no roof). The panel's click path is untested here (no display).
 - The "Physics (Jolt: kin/physics3d)" section turns on `WorldPhysicsState3D` over the viewer's ECS world: a floor at y = 0 (Sponza's own
   collision is not used: the viewer holds no triangles of the model) and boxes thrown from the camera (key B or the button: count, size,
   speed), stepped at 60 Hz, with the debug lines on or off (shapes green while awake and blue once asleep, contacts as red crosses with

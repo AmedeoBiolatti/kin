@@ -125,11 +125,31 @@ Scene3D& Scene3D::overlay() {
     return *_overlay;
 }
 
+void Scene3D::draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites) {
+    if (sprites.empty()) {
+        return;
+    }
+    const u32 first = static_cast<u32>(_particle_sprites.size());
+    _particle_sprites.insert(_particle_sprites.end(), sprites.begin(), sprites.end());
+    _particle_draws.push_back({look, first, static_cast<u32>(sprites.size())});
+}
+
+void Scene3D::draw_particles(const ParticleSystem3D& system) {
+    const u32 first = static_cast<u32>(_particle_sprites.size());
+    system.sprites(_particle_sprites);
+    const u32 count = static_cast<u32>(_particle_sprites.size()) - first;
+    if (count > 0) {
+        _particle_draws.push_back({system.desc.look, first, count});
+    }
+}
+
 void Scene3D::clear() {
     _draws.clear();
     _instances.clear();
     _joints.clear();
     _skin_offsets.clear();
+    _particle_draws.clear();
+    _particle_sprites.clear();
     lights.points.clear();
     lights.spots.clear();
     if (_overlay) {

@@ -514,6 +514,86 @@ Memory: a layer is `side`^2 x 4 bytes (a spot 4 MiB at 1024, 1 MiB at 512), a po
 and gives them back after 120 idle renders. Not done: shadows from custom material shaders' own light, contact shadows for spots, a light
 cone's in-scattering in fog (a lamp in mist shows no beam), soft shadows by light size (the filter is a fixed width).
 
+### Particles and weather
+
+Off by default; off, the picture and the cost are those without them (the old shaders are not touched: particles have three shaders of
+their own, and the depth pre-pass is made only for soft particles). `kin/render3d/particles3d.hpp`; docs/3d_plan.md "P3c" has the models
+and the numbers.
+
+```cpp
+kin::ParticleSystem3D sparks{7};                          // seeded: the same seed gives the same sparks on every machine
+sparks.desc.shape = kin::ParticleShape3D::Cone;
+sparks.desc.rate = 800.0f;  sparks.desc.speed = {3.0f, 7.0f};  sparks.desc.lifetime = {0.6f, 1.6f};
+sparks.desc.gravity = {0, -9.8f, 0};  sparks.desc.drag = 0.4f;
+sparks.desc.look = {.blend = kin::ParticleBlend3D::Additive, .facing = kin::ParticleFacing3D::Stretched, .stretch = 0.05f};
+sparks.transform = kin::Mat4f::translation({0, 0.2f, -4});
+sparks.update(dt, &scene.weather.wind);                  // fixed steps of 1/120 s inside: frame-rate independent, savable
+scene.draw_particles(sparks);                            // each frame, like a mesh
+
+scene.weather.rain.intensity = 0.7f;                     // a volume of rain round the camera: a function of (time, camera)
+scene.weather.wind = {.direction = {1, 0, 0.3f}, .speed = 5.0f, .gust_strength = 0.5f, .turbulence = 0.6f};
+scene.weather.has_ground = true;  scene.weather.ground_height = 0.0f;
+scene.weather.time += dt;
+scene.weather.apply(scene.lights, scene.fog, base_fog);  // dims the sun and ambient light, thickens the fog (after TimeOfDay's apply)
+```
+
+**Systems** (`ParticleSystem3D`, `ParticleDesc3D`): emitters of a point, box, sphere, cone or disc (in the emitter's own space: its
+`transform` places and turns it; the axis is +Y), a `rate` and `burst()`s, lifetimes, speeds along the emission direction and extra
+velocity vectors drawn between two, gravity, drag toward the air's velocity (the wind times `wind_influence`: the step is the exact
+solution for constant air, so any drag is stable), size, colour and alpha over life, rotation and spin, a per-particle random and a
+flipbook over the life. The simulation runs in fixed steps of 1/120 s taken out of the time `update(dt)` is given, with every random a hash of
+(seed, birth number, purpose): the same seed and the same calls make the same particles whatever the frame lengths were, `state_hash()` is
+a hash of all of it, and `save()` / `restore()` take the state to bytes and back for a rollback. A ground height (visual only: no
+physics) kills or bounces. ECS: `ParticleEmitter3D` holds a system and is stepped at its entity's place by
+`WorldRenderState3D::simulate_particles(dt, wind)` and drawn by `collect()`; a `Weather3D` component is the game's weather
+(`advance_weather(dt)`, `apply_weather(scene, base_fog)`).
+
+**Drawing** (`ParticleLook3D`, `Scene3D::draw_particles`): one instanced draw a batch of sprites (a system's, or the weather's layers),
+tested against the depth of the opaque meshes and never written, after the scene's own blended meshes and before the overlay (the overlay's
+and a Scene3D::overlay's particles are not drawn). Facings: `Camera` (turned by `rotation`), `Stretched` (along the velocity, `stretch`
+seconds of motion long, head at the particle, for rain and sparks), `Axis` (turns about an axis to face the camera), `Flat` (in the plane
+normal to the axis, a ring on the ground). A texture, an atlas of columns by rows (the sprite's `frame`, mixed with the next with
+`blend_frames`), or a procedural soft disc (`softness`, `ring`). Blend `Alpha`, `Additive` (adds light; dimmed by fog, not mixed) or
+`Premultiplied` (a texture that holds colour times alpha: alpha 0 with colour adds, inside one sprite). `sort`: back to front within the
+batch (a radix sort on the view depth, stable: O(n), 24,000 sprites 0.2 ms); batches are drawn in the order of their mean depth, so two
+systems overlap correctly as wholes and not particle by particle across systems. Additive never sorts.
+
+**Soft particles** (`soft`, `soft_distance`): the fragment shader reads the view's depth, the opaque meshes' pre-pass depth (one sample a
+pixel, a depth texture of its own: under MSAA the particle is shaded once a pixel and the depth read at its centre), and fades the sprite by
+a smoothstep of how far it is in front of the surface behind it: 0 at the surface, 1 `soft_distance` or more in front (`kin::soft_particle_fade`
+is the same number). It costs the pre-pass (a draw of the opaque meshes' depth and normal) where nothing else asks for one, and under TAA the
+velocity then comes from it too; a scene without a soft batch makes none. The surface must be opaque: a blended mesh is not in the pre-pass.
+
+**Light and fog.** The fog is `kin_fog.inc.glsl`'s, evaluated in the vertex shader at each corner and interpolated (the particle is small,
+the closed form smooth), so a particle takes the fog a mesh at the same place takes, to a level of 255 (tested); `fogged = false` leaves
+it out. `lit` (0 to 1) tints the particle by `kin::particle_light_tint(lights)`: ambient (sky and ground averaged) plus half the sun and half
+the fill, which is what a lit white ball shows; 0 shows its own colour (fire, sparks, glows). With `TimeOfDay3D::apply` it follows the
+day: snow is not white at night. No shadows fall on particles, and no spot or point light reaches them (the tint is the sun, the fill and the
+ambient light only).
+
+**Weather** (`Weather3D`, four `WeatherLayer3D`: rain, snow, dust, mist). A layer is `max_particles` in a box `box` round the camera of
+which the first `intensity` share are shown (one at a time: smooth); each one's place is a formula of its number and `weather.time`
+(fall speed, the wind's drift, a flutter), wrapped into the box in **world space**, so that it does not move when the camera does and any
+number costs no state. Rain is stretched streaks with the wind's slant and splashes (flat rings, `splash` share of the drops) where it
+meets `ground_height`; snow soft flakes lit by the scene; mist large soft wisps. A particle's fade at the box's sides and top keeps a
+wrapping one from popping, and one fades in over its first two metres from the eye (a flake at the lens is a blob across the picture).
+The renderer makes only the particles in the view (the sprites are kept while the weather, the camera and the frustum are unchanged: a view
+drawn twice, a photo mode). `Weather3D::apply` dims the sun, fill and ambient light by `wetness()` and sets the fog to your base fog
+thickened and greyed (rain at 1: the sun at 40%, ambient 70%, 0.004 more density); call it after the time of day, each frame, from the
+base fog (the fog is overwritten, so it does not compound), and scale your sun disc by `sun_disc_scale()`. `Wind3D` (a direction, a speed,
+three gust sines, three turbulence sines per component) has `velocity()` for simulated particles and a closed-form `displacement()` for the
+weather: the same wind.
+
+`stats()` has `particles_submitted`, `particles_drawn` (after the view's cull and the 1,048,576 sprites a frame it takes), `particle_batches`,
+`particle_soft`, `weather_particles`, `particles_dropped` and `particle_cpu_ms`. `capabilities().particles` and `soft_particles`. Not done:
+particles lit by spot lights, depth-hit splashes (the ground is one height), the velocity of a particle for TAA (a moving particle ghosts under
+TAA; use MSAA for rain), collisions with anything, GPU-simulated particles (the CPU writes the instance buffer each frame), a sort across
+batches, and rain that stops under a roof (it falls through Sponza's nave).
+
+Harness: `kin_reference` JSON `weather` and `particles`, options `--rain`, `--snow`, `--wind`, `--no-weather`, `--no-particles`, `--soft`,
+`--particles N`; scenes `rain_street`, `snow_valley`, `particles_soft`, `particles_blend`, `particles_budget`. Sponza Walk's "Particles and
+weather (P3c)" section and `--preset rain|snow|storm|fire`.
+
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,

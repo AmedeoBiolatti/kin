@@ -52,7 +52,33 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
       _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()),
       _time_of_day(world.query_builder<TimeOfDay3D>().build()),
       _point_lights(world.query_builder<const WorldTransform3D, const PointLight3D>().build()),
-      _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D>().build()) {}
+      _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D>().build()),
+      _emitters(world.query_builder<const WorldTransform3D, ParticleEmitter3D>().build()),
+      _weather(world.query_builder<Weather3D>().build()) {}
+
+void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
+    _emitters.each([&](const WorldTransform3D& world, ParticleEmitter3D& emitter) {
+        emitter.system.transform = world.matrix;
+        emitter.system.emitting = emitter.enabled;
+        emitter.system.update(dt, wind);
+    });
+}
+
+void WorldRenderState3D::advance_weather(f64 dt) {
+    _weather.each([dt](Weather3D& weather) { weather.time += dt; });
+}
+
+bool WorldRenderState3D::apply_weather(Scene3D& scene, const Fog3D& base_fog) const {
+    bool applied = false;
+    _weather.each([&](Weather3D& weather) {
+        if (!applied) {
+            scene.weather = weather;
+            weather.apply(scene.lights, scene.fog, base_fog);
+            applied = true;
+        }
+    });
+    return applied;
+}
 
 void WorldRenderState3D::advance_time_of_day(f32 dt) {
     _time_of_day.each([dt](TimeOfDay3D& time) { kin::advance(time, dt); });
@@ -485,6 +511,12 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             scene.add_spot_light({.position = world.position(), .direction = length_squared(axis) > 0.0f ? normalize(axis) : Vec3f{0.0f, -1.0f, 0.0f},
                                   .color = light.color, .radius = light.radius, .size = light.size, .inner_angle = light.inner_angle,
                                   .outer_angle = light.outer_angle, .shadow = light.shadow, .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+        }
+    });
+    // Particles (P3c): each enabled emitter's live particles, as a batch with its desc's look.
+    _emitters.each([&](const WorldTransform3D&, ParticleEmitter3D& emitter) {
+        if (emitter.enabled && emitter.system.count() > 0) {
+            scene.draw_particles(emitter.system);
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
