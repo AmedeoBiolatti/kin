@@ -20,6 +20,10 @@ layout(set = 3, binding = 0) uniform Frame {
     vec4 cascade_forward; // xyz: the camera's forward, to measure view depth along
     vec4 occlusion;     // x: 1 with ambient occlusion, y: 1 with contact shadows, zw: 1 / the view's size
     vec4 lights[MAX_LIGHTS * 2]; // position.xyz and radius; colour.rgb (linear)
+#ifdef KIN_POINT_TILES
+    uvec4 point_tiles; // columns, rows, tile size, reserved
+    uvec4 point_masks[128]; // eight 16-bit masks per std140 element, at most 1024 tiles
+#endif
 } frame;
 // The draw's.
 layout(set = 3, binding = 1) uniform Material {

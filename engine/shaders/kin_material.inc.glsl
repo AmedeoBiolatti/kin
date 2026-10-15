@@ -469,7 +469,20 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
 #endif
     }
     const int count = int(frame.flags.w);
+#ifdef KIN_POINT_TILES
+    const uvec2 tile = uvec2(gl_FragCoord.xy) / frame.point_tiles.z;
+    const uint tile_index = tile.y * frame.point_tiles.x + tile.x;
+    uint remaining = (1u << uint(count)) - 1u;
+    if (tile.x < frame.point_tiles.x && tile.y < frame.point_tiles.y && tile_index < 1024u) {
+        const uint word = tile_index >> 1u;
+        remaining = (frame.point_masks[word >> 2u][word & 3u] >> ((tile_index & 1u) * 16u)) & 65535u;
+    }
+    while (remaining != 0u) {
+        const int i = findLSB(remaining);
+        remaining &= remaining - 1u; // ascending indices preserve the accumulation order
+#else
     for (int i = 0; i < count; ++i) {
+#endif
         const vec4 at = frame.lights[2 * i];
         const vec3 to = at.xyz - vWorld;
         const float d2 = dot(to, to);

@@ -172,3 +172,10 @@ nonaffine matrices and truncation). GPU preflights also need visual inspection o
 both outside and warehouse screenshots.
 
 Measured results and practical conclusions are recorded in `docs/3d_plan.md`.
+
+The opt-in native experiment `KIN_POINT_TILES=1` adds bounded point-light tile
+masks; use `KIN_POINT_TILES=0` for the same-binary reference. The CSV appends
+`point_light_tiles`, `point_light_tile_slots`, `point_light_tile_bytes` and
+`point_light_tile_ms` so coverage and CPU preparation can be measured alongside
+frame intervals. It preserves scene settings and uses the original path for
+unsupported view sizes. See `docs/rendering_3d.md` for the limits.

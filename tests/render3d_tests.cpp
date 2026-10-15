@@ -7,6 +7,7 @@
 #include "../engine/src/renderer/gpu/gpu_shadow_cull.hpp"
 #include "../engine/src/renderer/gpu/gpu_shadow_reach.hpp"
 #include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
+#include "../engine/src/renderer/gpu/gpu_point_tiles.hpp"
 
 #include <kin/assets/image.hpp>
 #include <kin/render3d/animation3d.hpp>
@@ -843,6 +844,113 @@ void test_gpu_point_lights() {
 
 // Inactive points must not terminate the loop or erase a tiny positive contribution.
 // Exercise both the ordinary and local-light shader families at the radius boundary.
+// Every sampled point inside a light sphere must retain that light's tile.
+void test_point_tile_bounds() {
+    using namespace kin::gpu::point_tiles;
+    Masks masks;
+    assert(masks.reset(2560, 1440) && masks.columns == 40 && masks.rows == 23);
+    assert(!masks.reset(3840, 2160));
+    assert(!masks.reset(0, 1) && !masks.reset(1, 0));
+    assert(!masks.reset(std::numeric_limits<kin::u32>::max(), 64));
+    std::mt19937 random(0x71e5);
+    std::uniform_real_distribution<float> unit(-1, 1), positive(0.001f, 20);
+    std::size_t verified = 0, excluded = 0;
+    for (int camera = 0; camera < 16; ++camera) {
+        const auto view = kin::Camera3D::look_at({float(camera), 3, 8}, {0, 0, -15}).view();
+        auto projection = camera & 1 ? Mat4f::orthographic(-30, 30, -20, 20, .1f, 200)
+                                    : Mat4f::perspective(30.0f + camera * 6, 16.0f / 9, .1f);
+        projection.at(0, 2) += unit(random) / 2560; // temporal jitter
+        projection.at(1, 2) += unit(random) / 1440;
+        const auto vp = projection * view;
+        for (int light = 0; light < 256; ++light) {
+            const Vec3f c{unit(random) * 60, unit(random) * 40, unit(random) * 60 - 20};
+            const float r = positive(random);
+            assert(masks.reset(2560, 1440));
+            masks.add(vp, c, r, 15, 2560, 1440);
+            for (kin::u32 i = 0; i < masks.columns * masks.rows; ++i) excluded += masks.bits[i] == 0;
+            for (int sample = 0; sample < 256; ++sample) {
+                Vec3f d{unit(random), unit(random), unit(random)};
+                d = kin::normalize(d) * (r * (sample & 1 ? .999999f : std::abs(unit(random))));
+                const auto clip = vp * kin::Vec4f{c.x + d.x, c.y + d.y, c.z + d.z, 1};
+                if (clip.w <= 0) continue;
+                const float x = (.5f + .5f * clip.x / clip.w) * 2560;
+                const float y = (.5f - .5f * clip.y / clip.w) * 1440;
+                if (x < 0 || x >= 2560 || y < 0 || y >= 1440) continue;
+                const auto tile = kin::u32(y) / 64 * masks.columns + kin::u32(x) / 64;
+                assert(masks.bits[tile] & (1u << 15)); ++verified;
+            }
+        }
+    }
+    assert(verified > 10000 && excluded > 10000);
+    for (const float r : {1.0f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        assert(masks.reset(2560, 1440));
+        masks.add(Mat4f::perspective(60, 16.0f/9, .1f), {}, r, 0, 2560, 1440);
+        for (kin::u32 i = 0; i < masks.columns * masks.rows; ++i) assert(masks.bits[i] == 1);
+    }
+}
+
+void test_gpu_point_tiles() {
+    struct Override {
+        std::string previous = std::getenv("KIN_POINT_TILES") ? std::getenv("KIN_POINT_TILES") : "";
+        static void set(const char* value) {
+#ifdef _WIN32
+            _putenv_s("KIN_POINT_TILES", value);
+#else
+            if (*value) setenv("KIN_POINT_TILES", value, 1); else unsetenv("KIN_POINT_TILES");
+#endif
+        }
+        ~Override() { set(previous.c_str()); }
+    } restore;
+    std::vector<Pixels> reference;
+    for (const bool enabled : {false, true}) {
+        Override::set(enabled ? "1" : "0");
+        with_gpu("test_gpu_point_tiles", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            const auto wall = make_box(r3d, {80, 60, .2f});
+            std::size_t frame = 0;
+            for (int variant = 0; variant < 16; ++variant) {
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0, 0, 8}, {0, 0, 0}, 60);
+                if (variant == 12) { scene.camera.projection = kin::Projection3D::Orthographic; scene.camera.height = 20; }
+                scene.lights.sun.color = scene.lights.ambient = {0, 0, 0};
+                scene.taa.enabled = variant & 1;
+                scene.fog.enabled = variant & 2; scene.fog.density = .01f;
+                if (variant & 4) scene.add_spot_light({.position = {0, 0, 3}, .direction = {0, 0, -1}, .radius = 12});
+                for (int i = 0; i < 16; ++i) scene.add_light({
+                    .position = {float(i % 4) * 3 - 4, float(i / 4) * 2 - 3, variant == 13 ? 8.0f : 1.0f},
+                    .color = {.9f, .5f + i * .02f, .3f}, .radius = variant == 14 ? 12.0f : 2.5f});
+                scene.draw(wall, Mat4f::translation({0, 0, -.1f}), {.metallic = .3f, .roughness = .4f});
+                scene.draw(wall, Mat4f::translation({0, 0, .2f}) * Mat4f::scaling({.1f, .1f, 1}),
+                           {.color = Color::rgba(200, 220, 240, 80), .blend = kin::Blend3D::Alpha});
+                if (variant == 10) {
+                    scene.overlay().camera = kin::Camera3D::look_at({1, 2, 5}, {0, 0, 0});
+                    scene.overlay().draw(wall, Mat4f::scaling({.03f, .03f, 1}));
+                }
+                // A thin oversized view exceeds the mask budget without large target allocations.
+                auto view = r3d.create_view(variant == 15 ? kin::Vec2i{4097, 1025} : kin::Vec2i{640, 360}, {.samples = 1});
+                r3d.warm_up(view, scene);
+                for (int tick = 0; tick < 3; ++tick) {
+                    if (variant == 11 && tick == 1) assert(r3d.resize(view, {769, 433}));
+                    auto picture = tick == 0 && variant != 15 ? shoot_large(renderer, r3d, view, scene)
+                                                              : shoot_view(renderer, r3d, view, scene);
+                    assert((r3d.stats().point_light_tiles > 0) == (enabled && variant != 15));
+                    if (enabled && variant == 0) {
+                        assert(r3d.stats().point_light_tile_slots > 0);
+                        assert(r3d.stats().point_light_tile_slots < r3d.stats().point_light_tiles * 16);
+                        assert(r3d.stats().point_light_tile_bytes == 2064);
+                    }
+                    if (enabled) {
+                        if (picture.rgba != reference.at(frame).rgba) {
+                            std::cerr << "point tile mismatch variant " << variant << " tick " << tick << '\n'; assert(false);
+                        }
+                    } else reference.push_back(std::move(picture));
+                    ++frame; renderer.present();
+                }
+            }
+        });
+    }
+}
+
 void test_gpu_point_light_zero_attenuation() {
     with_gpu("test_gpu_point_light_zero_attenuation", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -16029,6 +16137,8 @@ int main(int argc, char** argv) {
     RUN(test_gpu_instances_on_workers());
     RUN(test_gpu_frustum_culling());
     RUN(test_gpu_overlay());
+    RUN(test_point_tile_bounds());
+    RUN(test_gpu_point_tiles());
     RUN(test_gpu_point_lights());
     RUN(test_gpu_point_light_zero_attenuation());
     RUN(test_gpu_shadows());

@@ -288,6 +288,7 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               mesh_skinned.vert mesh_skinned_velocity.vert shadow_skinned.vert shadow_mask_skinned.vert
               prepass_skinned.vert prepass_velocity_skinned.vert
               mesh_fog.frag mesh_velocity_fog.frag mesh_light.frag mesh_light_fog.frag mesh_velocity_light.frag mesh_velocity_light_fog.frag sky.frag sky_velocity.frag sky_velocity_only.frag sky_env.frag view_output_dither.frag
+              mesh_tiles_0.frag mesh_tiles_1.frag mesh_tiles_2.frag mesh_tiles_3.frag mesh_tiles_4.frag mesh_tiles_5.frag mesh_tiles_6.frag mesh_tiles_7.frag
               particle.vert particle.frag particle_soft.frag)
     list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
 endforeach()

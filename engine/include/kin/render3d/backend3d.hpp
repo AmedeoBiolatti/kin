@@ -127,6 +127,9 @@ struct Render3DStats {
     u64 camera_instance_tests = 0, bounds_instance_tests = 0, local_instance_tests = 0;
     u64 camera_group_rejected = 0, local_group_rejected = 0;
     u64 camera_range_accepted = 0; // copies classified together from a camera-inside cell proof
+    // Experimental point-light masks: tiles, sum of selected light bits, extra uniform payload, build/upload wall time.
+    u32 point_light_tiles = 0, point_light_tile_slots = 0, point_light_tile_bytes = 0;
+    double point_light_tile_ms = 0;
     u32 masked_depth_draws = 0, masked_depth_instances = 0; // experimental main-depth cutout prepass
     // Local gather after whole-cell rejection: candidates, fully accepted ranges,
     // potential plane tests before per-copy early outs, actual radius tests, byte scratch.

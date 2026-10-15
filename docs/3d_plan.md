@@ -7947,6 +7947,244 @@ Artifacts: `/home/bamedeo/kin-bench/industrial-yard-poses/` contains original/fi
 guarded commands, per-frame CSVs, images, CPU/GPU telemetry, paired analyses, same-binary controls and validation.
 Measurements precede the renderer/yard checkpoint commit.
 
+### Industrial yard — 1440p p95 after retained poses (2026-10-15)
+
+**Checkpoint.** Commit `3a9f566` records the pose API, skinned-layout reuse, dependent renderer experiments and the shared
+yard benchmark. Summit work remains separate. This investigation changes no engine/sample code, queue depth, clocks,
+power settings or quality defaults. All runs use the exact archived post-pose executable and medium recipe.
+
+**Where the tail occurs.** In the preceding four 1440p post-pose runs, **291 of 292 frames at or above each run's p95**
+belong to the last two wide-view segments, route 960–1439. These sustained segments take about 9.6–10.6 ms p50 and
+10.4–12.8 ms segment p95, while caller submission is typically 5–7 ms. One early 13.59 ms outlier is CPU work
+(13.30 ms caller CPU); it is distinct from the repeatable wide-view cost. Per-frame intervals measure the preceding
+render/present, so analysis attributes row F to the previous scene route, not to the current row's geometry.
+
+**Fresh normal runs.** With the same binary, two new 1,440-frame hidden runs measure **4.50 / 7.50 ms** and
+**4.81 / 7.81 ms p50/p95**; the runtime-profile run gives **4.84 / 7.74 ms**. A 720p route measures **4.67 / 5.78 ms**.
+Starting the complete route at offset 960 gives **4.86 / 7.76 ms**, with the wide sections still slow even though they
+now occur first. Scene order alone does not explain the wide-view tail. Clocks/load/power state materially affect the
+absolute values: this is not evidence of another optimization or a fixed 10–12 ms engine cost.
+
+**CPU wait attribution.** In the hidden full-route profile, wide segments have median `present.backend` times of
+**2.78 / 2.73 ms**, versus **.027 ms** in a warehouse segment. Wide `render.scene` medians are **4.17 / 4.49 ms**,
+caller CPU **4.03 / 4.37 ms**; swapchain acquisition remains about **.0005 ms**, with no pacing wait. The wait is
+the existing two-unshown-frame GPU fence throttle. Keep its bound: reducing CPU work exposes GPU backpressure without
+removing the GPU workload. For the hidden capture, interval minus matching runtime frame duration has median
+**.0075 ms**, p95 **.0156 ms** and maximum **.0339 ms**, validating the frame alignment.
+
+Two reversed-order hidden/visible passes over the wide 480-frame section give p95 **7.57 / 7.91 ms hidden** and
+**8.06 / 8.03 ms visible**, with matching geometry, poses, uploads and shadows. There is no evidence here that removing
+the hidden-frame throttle fixes p95. Visible runtime profiler IDs repeat with fixed-step ticks and cannot be keyed
+one-to-one to render CSV rows; only its CSV timings are used. Hidden profiler IDs are unique and validated above.
+
+**Current GPU pass costs.** Seven short Nsight individual-workload probes each use eight warm-up frames and sixteen
+measured frames in an uncapped visible window. Nine complete measured GPU marker ranges per probe are matched through
+CPU correlation IDs and render ordinals; the final seven ranges are absent and excluded. The worst-view probe starts
+at route offset 1140, near the recurring high-cost camera position. These are pass-attribution samples, not p95 runs.
+
+| Probe | Main GPU p50 ms | Local-shadow GPU p50 ms | Output GPU p50 ms |
+|---|---:|---:|---:|
+| Early, 1440p | 3.177 | .860 | .091 |
+| Worst view, 1440p, full repeat 1 | 4.974 | .860 | .091 |
+| Worst view, 1440p, full repeat 2 | 4.956 | .860 | .090 |
+| Worst view, 720p | 2.283 | .860 | .024 |
+| Worst view, zero point lights | 3.352 | .862 | .088 |
+| Worst view, shadow reception off | 4.225 | .862 | .095 |
+| Worst view, glass/smoke off | 4.647 | .860 | .117 |
+
+Worst-view main geometry is **3.08 M triangles / 5,466 draws**, versus **3.78 M / 6,659** early. Its slower GPU main
+pass despite less submitted geometry, resolution sensitivity and point/reception controls support fragment lighting
+as the primary remaining target. Shadow-map generation stays near .86 ms. Zero points and reception-off keep matching
+geometry, skin, uploads, movement, four shadow maps and shadow draw/triangle/caster counts. Alpha removal changes main
+geometry and joins adjacent opaque commands: four fewer shadow draw calls, with the same shadow casters/triangles.
+These lighting/alpha controls change the image and are diagnostic costs, not behavior-preserving speedups to add together.
+
+Ordinary wide-region p95 controls are **7.50–8.26 ms full**, **5.70 ms zero points**, **6.68 ms reception off**,
+**7.66 ms alpha off**, and **5.62 ms at 720p**. They are bracketed, not fixed-clock: no-alpha provides no clear
+normal-run gain, and zero-points approaches the CPU floor. The hardware probes support point lighting as a more useful
+target than transparency for this recipe. The no-point delta includes active illumination that an exact culling mask
+must retain; it is an upper bound, not a promised tile-mask saving.
+
+**Rare stalls and clock limits.** One profiled wide repeat also contains eight intervals above 16.67 ms, including
+**120.16 / 85.80 ms**. Their caller CPU remains about **4.7–5.1 ms**; corresponding `present.backend` waits are
+**114.91 / 80.69 ms**, with acquisition about .001 ms. The run's overall p95 is still 8.26 ms; no samples are removed.
+The software thermal-limit flag is active in 35% of sampled readings in its final segment. Fresh ordinary 1440p runs
+mostly report software power limiting; no hardware thermal/power-brake flag is observed. This associates a subset of
+stalls with GPU/driver/power-state behavior, but there is no hardware timestamp capture of the actual long stalls:
+driver, firmware and scheduling causes remain unresolved. They do not reproduce in the four hidden/visible repeats
+(maxima below 10 ms). One-second GPU process monitoring observes Kin and GNOME Shell, without another active client;
+that cannot rule out sub-second contention. The available kernel journal has no matching GPU-reset/OOM messages.
+
+GPU sensor values are sampled every 100 ms but may be cached/averaged by the driver; do not assign a reported clock or
+limit flag to a particular 7 ms frame or treat correlation as proof of thermal causation. Short Nsight probes also
+perturb execution, report runtime Vulkan 1.4 beyond supported 1.3, and upgrade the requested instance API to 1.1 for
+workload tracing. A separate batched-trace pilot completes but has no named GPU pass ranges; it is excluded from the
+pass table and does not resolve the rare stalls. No full-route individual-workload trace is attempted.
+
+**Next experiment.** Test conservative per-tile point-light masks while preserving active lighting and source light
+order. A 32-bit mask per 64×64 tile at 2560×1440 has a **3,680-byte payload per view**, before allocation alignment and
+in-flight copies. Bound the resource, retain all lights for uncertain near-plane/unsupported cases, and compare CPU
+mask-build/upload cost against GPU savings with exact image/radius tests. This targets inactive light tests in the main
+pass without dropping lights, changing shadow types or adding a large clustered-light structure. Treat the rare stall
+path separately if it recurs; deeper queues would conceal the symptom and increase queued resources.
+
+**Memory / evidence.** Serial normal targets peak at **274 MiB RSS**, within the unchanged 512 MiB guard; GPU probe
+targets stay below 259 MiB. Profiler/export commands use a separate 1 GiB ceiling, with the existing 256 MiB temporary
+trace cap and 2 GiB free-disk floor; scratch remains on Linux disk. RSS excludes dedicated VRAM. No new engine storage
+is introduced. All default-route, reordered-route, resolution and presentation controls match per-frame work; geometry,
+skin, shadow and motion checks pass for the applicable diagnostics. Executable/source identity is verified after the runs.
+No renderer test suite rerun is needed for this read-only profiling step; the checkpoint retains the preceding 205-case
+suite and NVIDIA/lavapipe/mutation evidence. Artifacts: `/home/bamedeo/kin-bench/industrial-yard-p95-retained/` contains
+CSV/JSON runs, sensor/process telemetry, aligned runtime profiles, seven bounded pass traces and SQL exports, the pilot,
+guard/analyzer scripts, work checks and `findings.json`. Godot is not rerun.
+
+### Industrial yard — bounded point-light tile masks (2026-10-16)
+
+**Implementation.** `KIN_POINT_TILES=1`, read at renderer creation, enables optional stock fragment variants for all
+fog/local-light/velocity combinations. Each selected point-light sphere must reach the four side planes of a 64×64
+pixel tile, derived from the actual jittered world-to-clip matrix. The CPU retains the rectangle of accepted rows and
+columns, with overlap and conservative arithmetic margins. Invalid inputs retain the light everywhere. No depth is
+needed; alpha/cutout draws keep the same lighting. The shader consumes set bits in ascending selected-light order.
+Selection, the 16-light cap, BRDFs, positive attenuation, shadow maps and shadow quality remain unchanged.
+
+The initial projected-cube pilot was too loose: it retained about 83% of candidates in the worst wide view. The
+sphere/side-plane version is used for the final measurements. Overlays/custom materials and views exceeding 1,024
+tiles retain the original path; 2560×1440 uses 920 tiles, while 3840×2160 falls back. `warm_up` covers the optional
+main-pass variants, including retained and masked-depth-read paths.
+
+**Memory.** Two 16-bit masks share a word: 2,048 mask bytes plus a 16-byte grid header extend the original 1,120-byte
+frame block to **3,184 bytes**. This fits this SDL Vulkan backend's **4 KiB descriptor range**; the original unpacked
+5,232-byte proposal did not and was replaced before final validation/measurement. No extra GPU buffer, texture or
+persistent CPU cache is allocated. Fixed local mask/uniform scratch is roughly 8 KiB; eight optional shader objects
+and their driver pipeline allocations are additional costs, not included in the 2,064-byte payload. The off path
+pushes the original block and keeps all **95 original SPIR-V binaries byte-identical**. Added renderer stats and yard
+CSV fields expose tile count, sum of selected light bits, extra uniform bytes and build/upload wall time. Candidate
+coverage is an unweighted tile/light count, not a count of active BRDF evaluations or fragment-weighted work.
+
+**Correctness.** The 207-case NVIDIA renderer suite passes with the feature enabled (**111.3 s, 265.6 MiB peak RSS**).
+The new focused NVIDIA/software Vulkan tests use exact comparisons, including full-resolution 640×360 frames for
+all eight shader combinations, multiple temporal frames, eye-plane/camera-inside cases, orthographic projection,
+overlays, resize and grid-budget fallback. Focused peaks are **195.8 / 693.6 MiB**, below the 768 MiB test ceiling.
+Seeded sphere samples near the radius exercise the conservative bounds under varied cameras, projection types and
+jitter, while requiring that the masks actually exclude candidates. A deliberately missing-bit mutant is rejected.
+Seven yard pairs (including TAA+AO+contact, both resolutions and no-point/no-local-shadow controls) have identical
+captured RGBA and matching geometry/skin/shadow/motion counters.
+
+**Measurement hygiene.** Initial long runs overlapped `portrait_mesh` on the GPU and `atlas_dump`/shader compilation
+on the CPU. Those runs and the interrupted first retry are retained separately and excluded from clean findings.
+After the user confirmed those jobs would finish, a process/GPU monitor requires a quiet interval before restarting
+and rejects ordinary runs overlapping observed competing renderers or compilers. Clocks/power/queue depth and
+quality settings are never changed. Builds/tests/apps remain serial, with 2 GiB/768 MiB/512 MiB RSS ceilings;
+short Nsight/export commands retain their separate 1 GiB guard and bounded Linux-disk scratch.
+
+**Clean remeasurement.** After the competing jobs finished, all **12 ordinary runs** and the six short GPU captures
+pass the process/GPU monitor with **no detected contention**. The same executable, recipe, workers, settings and
+CPU affinity are used, with alternating off/on order. There are four 1,440-frame pairs at 2560×1440 and two pairs at
+1280×720. The wide-view tail is derived from the same full 1440p routes; interval rows are attributed to the preceding
+route, rather than the current geometry. All **8,640 paired frames** match geometry/skin/shadow/motion work counters.
+Source/executable hashes still match the validated prototype; this follow-up changes no renderer code.
+
+Median of per-run frame-interval percentiles (ms):
+
+| Case | Off p50 / p95 | Tile masks p50 / p95 | p95 change |
+| --- | ---: | ---: | ---: |
+| Full 1440p route, four pairs | 4.887 / 7.901 | 4.859 / 7.378 | **−6.6%** |
+| Wide 1440p tail from those routes | 7.211 / 8.066 | 6.839 / 7.661 | **−5.0%** |
+| Full 720p route, two pairs | 4.484 / 4.895 | 4.540 / 4.975 | +1.6% |
+
+Every full-route 1440p pair improves p95 (**4.7–9.0%**, median paired reduction **5.2%**); the 6.6% table figure is the
+ratio of the two median p95 values, not the median paired percentage. The two 720p pairs disagree in direction and
+show no reliable gain. Full-route mean at 1440p changes **5.369 → 5.207 ms**; median caller CPU changes
+**4.443 → 4.498 ms**. Mask build/upload costs **.025 ms p50 / .029 ms p95** at 1440p and **.013 / .014 ms** at 720p.
+Masks retain **62.9%** of full-route tile/light candidates and **59.1%** in the wide segment. Those percentages do not
+mean that the same fraction of actual BRDF work is removed: contributing lights still execute the original shading.
+
+Normal-run telemetry still shows variable GPU clocks and software thermal limiting: 1440p run medians range from
+**1,290 to 1,455 MHz**, sampled temperatures from **69 to 89°C**. The final two pairs improve p95 by about **4.7–4.8%**
+even with similar or lower on-run median clocks. These whole-run, cached/averaged sensor readings cannot establish
+per-frame causation, and clocks were not locked. Treat 6.6% as the measured aggregate for this series, not an invariant
+speedup. Process isolation removes observed competing jobs, not normal clock/power variation.
+
+**GPU attribution.** In the reverse-order wide pair with stable unchanged shadow cost, main-pass GPU medians change
+**4.961 → 4.661 ms (−6.1%)**, while local shadows remain **.860 → .861 ms**. An early-view pair changes main-pass
+**3.171 → 2.955 ms (−6.8%)**, with local shadows **.860 → .860 ms**. Each probe has nine complete measured frames;
+these medians explain the main-pass reduction, not the full-route p95 distribution. The first wide off capture is
+slower in both main and shadow passes (**6.193 / 1.083 ms**, versus on **4.634 / .859 ms**), consistent with a different
+GPU speed state. Its raw data is retained, but its roughly 25% apparent main-pass reduction is not attributed to
+the optimization. No clock-normalized estimates replace the measured frame intervals. Runtime/Vulkan tracing caveats
+from the preceding investigation still apply; this does not diagnose or fix the earlier rare long GPU/driver stalls.
+
+**Decision / memory.** Keep `KIN_POINT_TILES=1` **opt-in**: the GPU-bound 1440p yard workload benefits consistently,
+while the 720p control does not establish a benefit. This is one scene/GPU and does not establish a universal threshold
+or gains at other resolutions. Normal peak RSS is **242.4 MiB off / 243.0 MiB on**; profile targets stay below
+**261 MiB**, within the 512 MiB target guard. RSS is separate from dedicated VRAM. The feature retains its fixed
+2,064-byte extra uniform payload, existing bounded queue, and no new GPU buffers/textures/persistent CPU cache.
+Shader/pipeline driver allocations remain additional costs. No renderer rebuild or test rerun was required for this
+measurement-only follow-up: the existing 207-case/image/mutation results apply to the identical source and binary.
+
+Artifacts: `/home/bamedeo/kin-bench/industrial-yard-tiles/` includes final source/executable hashes, patch/source
+snapshots, validation and mutation outputs, image comparisons, per-frame CSVs, process/clock telemetry, guarded
+commands, and separate cube/contended pilots. Clean measurements, audits, per-frame work checks, pass traces/SQL exports and `findings.json` are in
+`/home/bamedeo/kin-bench/industrial-yard-tiles-clean/`. The experiment defaults off; Godot is not rerun.
+
+### Industrial yard — Godot Forward+ after tile masks (2026-10-16)
+
+**Fresh paired comparison.** Current Kin release (`-O2` renderer, `KIN_POINT_TILES=1`, retained pose/layout paths)
+versus the installed **Godot 4.7.2 release template, Vulkan Forward+**. Both consume the exact same Medium recipe
+(SHA-256 `c6b40a7b21ff8613f12be5d4a644fbe9ad6f00a33251465c446c1bf97ce6d87e`): 8,000 props, 128 six-joint robots,
+800 moving props in 64 groups, 512 smoke cards, 16 point lights and four spot lights. The shared scene contains
+4.22 M instance triangles, not unique or necessarily visible triangles. Shadows remain four nominal 1024² D32 spot
+maps with range 60 / near .025 / nominal 90° cones; each engine retains its existing filter, bias and culling policy.
+AO/TAA/contact and sun/point shadows are off. All normal settings and queue bounds are unchanged.
+
+Four alternating-order engine pairs at each resolution, **1,440 measured frames after 300 warm-up frames**: 16 full
+runs / 23,040 measured frames. CPU affinity is 0–15 and both samples use four worker threads. A separate 16-frame
+1440p screenshot pair checks the current fixture. Runtime reports require Forward+ and a release build, two Godot
+skin validations, correct route/populations/features and uploaded moving transforms; paired motion sums match on
+all 11,520 measured frame pairs. Both engines perform nonzero shadow draws/triangles on every measured frame.
+Every Kin measured frame actually uses the tile masks. All 18 executions pass the continuous process/GPU monitor
+with **no observed contention or rejected runs**. Source, executable, recipe and freshly exported pack hashes are
+recorded and verified again at the end. No Kin rebuild, installation or shader/renderer change is part of this step.
+
+Median of per-run statistics; process RSS peaks are maxima of full timed runs (not the export editor or screenshots):
+
+| Resolution | Kin p50 / p95 ms | Godot Forward+ p50 / p95 ms | Kin / Godot peak RSS MiB |
+| --- | ---: | ---: | ---: |
+| 1280×720 | **4.690 / 5.223** | 8.059 / 9.119 | **218.6 / 613.4** |
+| 2560×1440 | **4.960 / 7.645** | 8.354 / 9.408 | **221.0 / 614.6** |
+
+Kin's median p50 frame time is **41.8% lower at 720p / 40.6% lower at 1440p**; its median p95 is **42.7% / 18.7% lower**.
+Every paired run has lower Kin p95: **41.6–45.0%** at 720p, **16.7–20.9%** at 1440p. In the final 480 wide-view route
+frames (intervals attributed to the preceding render), median-of-run p95 is **5.262 / 9.127 ms** Kin/Godot at 720p,
+and **7.825 / 9.496 ms** at 1440p. The former wide-view tail disadvantage is absent in this fresh series; do not assign
+the entire difference from older sessions to tile masks, since retained pose/layout work and desktop/clock state also
+changed. The directly controlled mask on/off experiment above isolates that optimization's smaller gain.
+
+**Work and interpretation.** Both engines retain their normal batching/culling: main-pass median draws are
+**4,208.5 Kin / 592 Godot**, main triangles **2.35 / 2.53 M**, shadow draws **14,509 / 4,107**, and shadow triangles
+**8.09 / 10.16 M**. Godot still has a substantial batching advantage. These counts are not forced to match or used
+as a substitute for full-frame time. The preflight images show corresponding geometry/cameras but visible material,
+background and highlight differences. Source inputs and feature/shadow setup match; **this is not pixel parity**.
+Normal-map basis, BRDF/environment/tonemapping details and native shadow kernels differ. Kin's scene updates are C++;
+Godot's are GDScript. Full-frame intervals include those costs and presentation/pacing, so these results do not isolate
+renderer-only GPU speed or establish a general engine ranking. Existing viewport CPU/GPU and Kin caller CPU columns
+have different scopes and are not directly compared.
+
+**Memory and limits.** Kin uses about **64% less peak RSS** in both timed cases. The screenshot preflights reach
+**242.9 MiB Kin / 633.5 MiB Godot**; the one-time Godot export editor reaches **685.5 MiB**. All applications run
+serially, with the existing **512 MiB Kin / 1,024 MiB Godot** ceilings and system available-RAM guard. Scratch is on
+Linux disk; the existing Godot release binary is hardlinked, and the exported pack is only about 19 KiB. RSS excludes
+dedicated VRAM. Sampled GPU temperatures span **72–89°C**, and the software thermal-limit flag appears in 14 of the 16 normal
+run sensor streams; these cached/averaged readings are not per-frame causation evidence. GPU clocks remain unlocked,
+and timings rise over the series in both engines; the alternating pairs
+and monitor reduce order/contention bias but do not eliminate normal clock/power/thermal variation. The effect applies
+to this scene, build, device and feature setup. Keep the tile experiment opt-in, as its separate 720p control showed
+no clear benefit.
+
+Artifacts: `/home/bamedeo/kin-bench/industrial-yard-tiles-godot/` contains the pack/project, identity/provenance,
+per-frame CSVs, checked reports, images, per-run GPU telemetry, process/GPU audit, pair validation, raw summaries,
+analysis script and `findings.json`.
+
 ### P5 — Netcode-ready, then co-op
 
 *P5a (inside P4):* keep the rules honest: a fixed-step simulation reading input commands, no

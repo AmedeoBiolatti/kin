@@ -260,7 +260,7 @@ private:
     // velocity variants; a custom shader has neither).
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                          SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false, bool fog = false,
-                                         bool lights = false, Unlit unlit = Unlit::Off, bool indexed = false, bool depth_read_only = false) const;
+                                         bool lights = false, Unlit unlit = Unlit::Off, bool indexed = false, bool depth_read_only = false, bool point_tiles = false) const;
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`: the
     // second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is far.
     SDL_GPUGraphicsPipeline* sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const;
@@ -366,7 +366,7 @@ private:
     bool main_pass(FrameCtx& ctx);            // false: the pass could not begin (2D is resumed already)
     void resolve_history(FrameCtx& ctx);      // the temporal resolve
     void pick_pass(FrameCtx& ctx);
-    void push_frame_uniforms(const FrameCtx& ctx, u32 s);
+    void push_frame_uniforms(FrameCtx& ctx, u32 s);
     // Lights3D::sky_lights_scene: the sky drawn into a small panorama and filtered, when it has moved enough.
     void sky_environment(FrameCtx& ctx);
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
@@ -424,6 +424,8 @@ private:
     GpuShader _mesh_light_fog_shader;          // mesh_light_fog.frag
     GpuShader _mesh_velocity_light_shader;     // mesh_velocity_light.frag
     GpuShader _mesh_velocity_light_fog_shader; // mesh_velocity_light_fog.frag
+    std::array<GpuShader, 8> _point_tile_shaders;
+    bool _point_tiles = false; // opt-in experiment: KIN_POINT_TILES=1
     bool _lights_available = false;
     bool _lights_warned = false;
     GpuShader _sky_shader;                     // sky.frag

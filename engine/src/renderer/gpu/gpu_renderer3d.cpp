@@ -2,6 +2,7 @@
 #include "gpu_shadow_cull.hpp"
 #include "gpu_shadow_reach.hpp"
 #include "gpu_sphere_cull4.hpp"
+#include "gpu_point_tiles.hpp"
 
 #include "embedded_gpu_shader.hpp"
 #include "gpu_device.hpp"
@@ -137,6 +138,14 @@ struct FrameUniforms {
     f32 lights[max_lights * 2 * 4];
 };
 static_assert(sizeof(FrameUniforms) == 1120);
+struct PointTileFrameUniforms {
+    FrameUniforms frame;
+    u32 grid[4];
+    std::array<u32, point_tiles::max_tiles / 2> masks;
+};
+static_assert(sizeof(PointTileFrameUniforms) == 3184);
+static_assert(sizeof(PointTileFrameUniforms) <= 4096, "SDL uniform slot limit");
+static_assert(max_lights == 16, "two 16-bit masks per word");
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1123,6 +1132,18 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             KIN_LOG_INFO_F("render", "3D: spot lights and local shadows not available", (LogFields{{.name = "reason", .value = e.what()}}));
         }
     }
+    const char* tiles = std::getenv("KIN_POINT_TILES");
+    if (tiles && std::strcmp(tiles, "1") == 0) {
+        try {
+            for (u32 i = 0; i < _point_tile_shaders.size(); ++i) {
+                _point_tile_shaders[i] = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                    "mesh_tiles_" + std::to_string(i) + ".frag.spv", 2 + ((i & 2) != 0) + ((i & 4) != 0), (i & 4) ? 12 : 10);
+            }
+            _point_tiles = true;
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: point tiles unavailable", (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+    }
 }
 
 GpuRenderer3D::~GpuRenderer3D() {
@@ -1187,7 +1208,7 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask, SDL_GPUShader* custom,
-                                                 bool velocity, bool skinned, bool fog, bool lights, Unlit unlit, bool indexed, bool depth_read_only) const {
+                                                 bool velocity, bool skinned, bool fog, bool lights, Unlit unlit, bool indexed, bool depth_read_only, bool point_tiles) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
@@ -1272,6 +1293,9 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
                                               : (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader)).handle()
                                        : (lit ? (fogged ? _mesh_light_fog_shader : _mesh_light_shader)
                                               : (fogged ? _mesh_fog_shader : _fragment_shader)).handle();
+    if (point_tiles && _point_tiles && !custom && unlit == Unlit::Off) {
+        fragment = _point_tile_shaders[(velocity ? 1u : 0u) | (fogged ? 2u : 0u) | (lit ? 4u : 0u)].handle();
+    }
     if (unlit != Unlit::Off) {
         vertex = (indexed ? (unlit == Unlit::Textured ? _indexed_unlit_textured_vertex : _indexed_unlit_vertex)
                           : (unlit == Unlit::Textured ? _unlit_textured_vertex_shader : _unlit_vertex_shader)).handle();
@@ -2650,6 +2674,7 @@ struct GpuRenderer3D::FrameCtx {
     // light's cascades (a single map is one cascade). The joints are uploaded for the frame (the local views' skinned casters).
     std::vector<u32> spots;
     bool lights_variant = false;
+    bool point_tiles = false;
     LocalLightUniforms lu{};
     u32 moon_cascades = 0;
     ShadowCascades moon_plan;
@@ -6010,7 +6035,7 @@ void GpuRenderer3D::choose_point_lights(FrameCtx& ctx) {
 // The frame's uniforms, the scene's (s = 0) and the overlay's (1). The overlay's space is its
 // camera's: the scene's lights are carried into it (seen from where the scene's camera is),
 // without shadows.
-void GpuRenderer3D::push_frame_uniforms(const FrameCtx& ctx, u32 s) {
+void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s) {
     const Scene3D& scene = ctx.scene;
     const Lights3D& lights = scene.lights;
     const GpuView3D* view = ctx.view;
@@ -6063,6 +6088,28 @@ void GpuRenderer3D::push_frame_uniforms(const FrameCtx& ctx, u32 s) {
         put(f.lights + i * 8, to_space.apply(ctx.chosen[i].second->position), ctx.chosen[i].second->radius);
         const f32 size = std::max(ctx.chosen[i].second->size, 0.01f);
         put(f.lights + i * 8 + 4, ctx.chosen[i].second->color, size * size);
+    }
+    ctx.point_tiles = false;
+    if (_point_tiles && s == 0 && !ctx.chosen.empty()) {
+        const auto started = std::chrono::steady_clock::now();
+        point_tiles::Masks masks;
+        if (masks.reset(view->_size.x, view->_size.y)) {
+            for (u32 i = 0; i < ctx.chosen.size(); ++i) {
+                const PointLight& light = *ctx.chosen[i].second;
+                masks.add(ctx.drawn[0], light.position, light.radius, i, view->_size.x, view->_size.y);
+            }
+            PointTileFrameUniforms tiled{f, {masks.columns, masks.rows, point_tiles::tile_size, 0}, {}};
+            ctx.stats.point_light_tiles = masks.columns * masks.rows;
+            for (u32 i = 0; i < ctx.stats.point_light_tiles; ++i) {
+                tiled.masks[i / 2] |= masks.bits[i] << ((i & 1u) * 16u);
+                ctx.stats.point_light_tile_slots += std::popcount(masks.bits[i]);
+            }
+            ctx.stats.point_light_tile_bytes = sizeof(tiled) - sizeof(f);
+            SDL_PushGPUFragmentUniformData(ctx.commands, 0, &tiled, sizeof(tiled));
+            ctx.point_tiles = true;
+            ctx.stats.point_light_tile_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            return;
+        }
     }
     SDL_PushGPUFragmentUniformData(ctx.commands, 0, &f, sizeof(f));
 }
@@ -7033,7 +7080,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                               pass_of(material), material.blend == Blend3D::Mask,
                                               custom ? custom->shader.handle() : nullptr, ctx.main_velocity, ref.skinned, ctx.fog && !custom,
                                               ctx.lights_variant && !custom, unlit, ref.retained != ~0u,
-                                              ctx.masked_depth_ran && masked_depth_draw(ref));
+                                              ctx.masked_depth_ran && masked_depth_draw(ref), ctx.point_tiles);
         if (!p) {
             continue;
         }
@@ -7509,6 +7556,19 @@ bool GpuRenderer3D::warm_up(IView3DBackend& base, const Scene3D& scene) {
                 pipeline(format, samples, !m.double_sided, pass_of(m), false, nullptr, main_velocity, draw.skinned, /*fog=*/false, /*lights=*/true);
                 if (fog_on) {
                     pipeline(format, samples, !m.double_sided, pass_of(m), false, nullptr, main_velocity, draw.skinned, /*fog=*/true, /*lights=*/true);
+                }
+            }
+            if (_point_tiles && index == 0 && !scene.lights.points.empty() && !custom && unlit == Unlit::Off) {
+                point_tiles::Masks grid;
+                if (grid.reset(view->_size.x, view->_size.y)) {
+                    for (bool indexed : {false, true}) {
+                        if (indexed && !(_retained_enabled && draw.batch && !taa && !draw.skinned)) continue;
+                        for (bool read_only : {false, true}) {
+                            if (read_only && !(_masked_depth && m.blend == Blend3D::Mask && samples == 1)) continue;
+                            pipeline(format, samples, !m.double_sided, pass_of(m), m.blend == Blend3D::Mask,
+                                     nullptr, main_velocity, draw.skinned, fog_on, lights_on, Unlit::Off, indexed, read_only, true);
+                        }
+                    }
                 }
             }
             const bool opaque = pass_of(m) == Pass::Opaque;

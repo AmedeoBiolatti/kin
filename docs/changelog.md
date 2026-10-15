@@ -9,6 +9,17 @@ releases may change APIs.
 
 ### Added
 
+- Remeasure the Medium industrial yard against Godot 4.7.2 Forward+ with Kin point-light masks enabled: four guarded
+  engine pairs at 720p/1440p, checked shared recipe/features/motion/skin/shadow work and continuous contention telemetry.
+  Record frame p50/p95, RAM peaks and native shading/script limitations; no renderer or quality changes.
+
+- Add opt-in conservative point-light tile masks (`KIN_POINT_TILES=1`) for stock 3D materials. Pack 1,024
+  16-light masks into an extra 2,064 bytes of frame uniforms, with no new GPU buffer or persistent cache.
+  Preserve light order, fog/local-shadow/velocity variants and fallback paths; add coverage/cost counters,
+  randomized bounds checks, full-resolution image parity and guarded yard measurements.
+  Clean paired yard runs reduce median 1440p p95 from 7.90 to 7.38 ms; retain opt-in status because the 720p control
+  shows no clear gain. Record process isolation, GPU pass attribution, clock variation and bounded-memory evidence.
+
 - Add fixed-range `Scene3D::update_joint_matrices` for animating submitted poses without rebuilding mesh commands.
   Allow bounded prepared-layout reuse for skinned commands while refreshing poses, bounds, shadow membership and
   current/previous GPU joint tables. Industrial yard retains commands by default, with `--rebuild-scene` as a reference.

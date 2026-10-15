@@ -387,6 +387,24 @@ The material shader skips a point light's shadow and BRDF evaluation when its
 windowed attenuation is zero. Positive contributions, however small, retain the
 same shading; this adds no light lists, caches or GPU buffers.
 
+An opt-in stock-material experiment, `KIN_POINT_TILES=1` (set before creating the
+renderer), builds conservative screen-space point-light masks for 64 × 64 pixel
+tiles. It preserves the selected lights and their accumulation order. Each
+light sphere must reach a tile's four homogeneous side planes, built from the
+jittered projection; uncertain inputs retain that light everywhere. No depth
+prepass is required. Overlays and custom materials use the original loop, as do
+views requiring more than 1,024 tiles (including 4K).
+
+The masks append a fixed 2,064-byte payload to the existing frame uniform, for a
+3,184-byte block within SDL's 4 KiB slot. Each tile uses 16 bits; there is no new
+GPU buffer, texture, persistent CPU cache, light-count reduction, or shadow-quality
+change. Eight optional fragment variants cover fog, local shadows and velocity.
+`Render3DStats::point_light_tiles`, `point_light_tile_slots`,
+`point_light_tile_bytes` and `point_light_tile_ms` report grid size, sum of set
+bits, extra uniform bytes and mask build/upload wall time. Divide the slot count
+by tiles × selected lights to estimate retained candidate coverage; it is not a
+fragment-weighted shading count. The experiment defaults off for comparison.
+
 Image-based light: `scene.lights.environment` is an `Environment3D`, an
 equirectangular HDR picture of the sky or a room (`r3d.load_environment(
 "sky.hdr")` reads a Radiance `.hdr` through the content folder or pack;

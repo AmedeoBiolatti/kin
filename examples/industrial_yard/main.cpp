@@ -29,7 +29,7 @@ class Yard final:public Scene {
 public:
     Yard(Options options,JobSystem* jobs):_o(std::move(options)),_jobs(jobs){
         _csv.open(_o.metrics);if(!_csv)throw std::runtime_error("cannot write yard CSV");
-        _csv<<"frame,route_frame,frame_interval_ms,scene_build_ms,cpu_submit_ms,render_main_cpu_ms,render_process_cpu_ms,draws,triangles,instances,culled,lights,spots,local_shadow_maps,local_shadow_draws,local_shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_sum,moving_z_sum,profile_mono_ms\n";
+        _csv<<"frame,route_frame,frame_interval_ms,scene_build_ms,cpu_submit_ms,render_main_cpu_ms,render_process_cpu_ms,draws,triangles,instances,culled,lights,spots,local_shadow_maps,local_shadow_draws,local_shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_sum,moving_z_sum,profile_mono_ms,point_light_tiles,point_light_tile_slots,point_light_tile_bytes,point_light_tile_ms\n";
     }
     std::string_view name()const override{return "Industrial yard";}
     void update(SceneContext& ctx)override{if(_o.preview&&ctx.input.frame_pressed(Key::Escape))ctx.app.quit();}
@@ -60,7 +60,7 @@ public:
         const auto main_ms=_o.profile?cpu(false)-main:0,process_ms=_o.profile?cpu(true)-process:0;
         const double submit_ms=std::chrono::duration<double,std::milli>(Clock::now()-submitted).count();
         ctx.renderer.clear(Color::rgb(15,22,35));ctx.renderer.draw_texture(_view.texture(),{0,0,1280,720});
-        if(_frame>_o.warmup){const auto& st=_r->stats();_csv<<std::fixed<<std::setprecision(6)<<_frame<<','<<_route<<','<<interval<<','<<std::chrono::duration<double,std::milli>(submitted-begin).count()<<','<<submit_ms<<','<<main_ms<<','<<process_ms<<','<<st.draws<<','<<st.triangles<<','<<st.instances<<','<<st.culled<<','<<st.lights<<','<<st.spots<<','<<st.local_shadow_maps<<','<<st.local_shadow_draws<<','<<st.local_shadow_triangles<<','<<st.local_shadow_casters<<','<<st.skinned_copies<<','<<st.skin_matrices<<','<<st.retained_upload_bytes<<','<<st.instance_upload_bytes<<','<<st.prepared_reused<<','<<st.prepared_draws<<','<<st.feature_bytes<<','<<st.local_shadow_bytes<<','<<_sums[0]<<','<<_sums[1]<<','<<_sums[2]<<','<<std::chrono::duration<double,std::milli>(begin.time_since_epoch()).count()<<'\n';}
+        if(_frame>_o.warmup){const auto& st=_r->stats();_csv<<std::fixed<<std::setprecision(6)<<_frame<<','<<_route<<','<<interval<<','<<std::chrono::duration<double,std::milli>(submitted-begin).count()<<','<<submit_ms<<','<<main_ms<<','<<process_ms<<','<<st.draws<<','<<st.triangles<<','<<st.instances<<','<<st.culled<<','<<st.lights<<','<<st.spots<<','<<st.local_shadow_maps<<','<<st.local_shadow_draws<<','<<st.local_shadow_triangles<<','<<st.local_shadow_casters<<','<<st.skinned_copies<<','<<st.skin_matrices<<','<<st.retained_upload_bytes<<','<<st.instance_upload_bytes<<','<<st.prepared_reused<<','<<st.prepared_draws<<','<<st.feature_bytes<<','<<st.local_shadow_bytes<<','<<_sums[0]<<','<<_sums[1]<<','<<_sums[2]<<','<<std::chrono::duration<double,std::milli>(begin.time_since_epoch()).count()<<','<<st.point_light_tiles<<','<<st.point_light_tile_slots<<','<<st.point_light_tile_bytes<<','<<st.point_light_tile_ms<<'\n';}
         ++_frame;
         if(_o.visible&&!_o.preview&&_frame>_o.warmup+_o.frames)ctx.app.quit();
     }
