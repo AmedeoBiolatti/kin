@@ -153,15 +153,21 @@ public:
         for (auto& b : smoke) b.bounds = instance_bounds(meshes[1], b.copies);
         const char* retain = std::getenv("KIN_GROVE_RETAINED");
         if (!retain || std::string_view(retain) != "0") {
+            const char* cells = std::getenv("KIN_GROVE_CELL_BATCHES");
+            const bool split = cells && std::string_view(cells) == "1";
             std::vector<MeshInstance> records;
             std::vector<InstanceGroup3D> groups;
-            records.reserve(foliage);
+            if (!split) records.reserve(foliage);
             for (auto& b : plants) if (!b.copies.empty()) {
                 groups.push_back({static_cast<u32>(records.size()), static_cast<u32>(b.copies.size()), b.bounds});
                 for (const auto& t : b.copies) records.push_back({t, colors::white, 0});
                 std::vector<Mat4f>().swap(b.copies);
+                if (split) {
+                    foliage_batches.emplace_back(meshes[0], std::move(records), std::move(groups));
+                    records.clear(); groups.clear();
+                }
             }
-            foliage_batch = InstanceBatch3D(meshes[0], std::move(records), std::move(groups));
+            if (!split) foliage_batches.emplace_back(meshes[0], std::move(records), std::move(groups));
             std::vector<Batch>().swap(plants);
         }
         foliage_count = foliage; transparent_count = transparent;
@@ -171,12 +177,12 @@ public:
         leaf.alpha_cutoff = 0.45f; leaf.casts_shadow = leaf.receives_shadow = shadows;
         Material3D mist{.unlit = true, .double_sided = true, .blend = Blend3D::Alpha, .texture = textures[1]};
         mist.casts_shadow = mist.receives_shadow = false;
-        if (foliage_batch) scene.draw_instanced(foliage_batch, leaf);
+        if (!foliage_batches.empty()) for (const auto& batch : foliage_batches) scene.draw_instanced(batch, leaf);
         else for (const auto& b : plants) if (!b.copies.empty()) scene.draw_instanced_group(meshes[0], b.copies, b.bounds, leaf);
         for (const auto& b : smoke) if (!b.copies.empty()) scene.draw_instanced_group(meshes[1], b.copies, b.bounds, mist);
     }
     std::array<Camera, route_count> route{};
-    InstanceBatch3D foliage_batch;
+    std::vector<InstanceBatch3D> foliage_batches;
     std::vector<Batch> plants, smoke;
     std::array<Mesh, 2> meshes;
     std::array<Texture, 2> textures;

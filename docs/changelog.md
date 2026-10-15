@@ -9,13 +9,40 @@ releases may change APIs.
 
 ### Added
 
+- Add fixed-range `Scene3D::update_joint_matrices` for animating submitted poses without rebuilding mesh commands.
+  Allow bounded prepared-layout reuse for skinned commands while refreshing poses, bounds, shadow membership and
+  current/previous GPU joint tables. Industrial yard retains commands by default, with `--rebuild-scene` as a reference.
+
 - Skip point-light BRDF work when the existing windowed attenuation is zero, before normalization and shadow lookup.
   Preserve every positive contribution without an epsilon cutoff; add ordinary/local-light radius-boundary and inactive
   light ordering coverage. Add no buffers or caches, and record image/work parity plus repeated industrial-yard p95 timings.
 
+- Add native industrial-yard profiling controls for short/visible GPU captures, point-light limits and shadow reception.
+  Attribute the wide-view p95 region to main-pass lighting and GPU backpressure, with bounded captures, default-image
+  checks and runtime/pass timing evidence; leave renderer/shader behavior unchanged.
+
+- Add a bounded industrial-yard rendering benchmark shared with Godot Forward+: independent PBR props, distributed
+  instance edits, real six-joint robots, glass/smoke and overlapping perspective spot shadows. Include deterministic
+  binary recipes, serial RAM guards, motion/skin validation and independent feature controls; retain the Grove benchmark.
+
+- Add opt-in `KIN_RENDERER3D_O3` for an isolated GCC/Clang Release compiler experiment on the GPU 3D renderer. Keep O2
+  as the default after image/work parity checks and small, mixed O2/O3 timing results; archive the comparison and flags.
+
+- Reduce 3D culling CPU work with cached-sphere camera classification and active LOD/cascade counter clearing, without
+  new per-copy storage or GPU resources. Keep original scalar decisions, source order and shadow selection, with reference
+  controls and image/picking tests across motion, worker rendering, cascades, TAA, HDR and MSAA transitions.
+
+- Reuse prepared 3D draw/task layouts across fixed-size instance-batch edits, with an eight-byte batch layout generation
+  separate from content revisions. Group validity changes invalidate ranges; camera/light visibility, bounds and uploads
+  still refresh. `KIN_PREPARED_BATCH_EDITS=0` keeps the prior invalidation rule, with shared-edit/validity/picking coverage.
+
+- Retained 3D batches refresh only edited CPU sphere ranges using a bounded 16-edit history (128 bytes/batch), with full
+  refresh for new/old readers. Large instance tables pack directly into staging on existing workers while retaining safe
+  full-table GPU cycling. Add reference switches and a native moving-instance benchmark; preserve image/picking behavior.
+
 - Reuse bounded 3D renderer draw/piece/task layout for unchanged scene commands, with scene identity/revision and exact
-  instance-batch revision checks. Refresh visibility, lighting, shadow membership and table bindings every render; keep
-  the reference path for LOD/skinning, edits and oversized layouts. Add diagnostics and `KIN_PREPARED_SCENES=0` for A/B runs,
+  instance-batch layout revision checks. Refresh visibility, lighting, shadow membership and table bindings every render; keep
+  the reference path for LOD, command edits and oversized layouts. Add diagnostics and `KIN_PREPARED_SCENES=0` for A/B runs,
   with image/picking tests for edits, moves, overlays, TAA, worker rendering and cache-budget fallback.
 
 - Fix Blockfield's Godot positional-shadow atlas allocation: omni shadows need adjacent slots and were silently omitted
@@ -380,6 +407,10 @@ releases may change APIs.
   `ibl_spheres` and `ibl_helmet` with Poly Haven's Kloofendal sky (CC0).
 
 ### Fixed
+
+- Rebind changed vertex storage buffers when consecutive 3D draws share a graphics pipeline. Multiple retained instance
+  batches previously kept the first table bound, hiding or misplacing later geometry despite correct draw counters. Add
+  streamed/retained RGBA and picking regression coverage for depth, shadows, AO/contact, MSAA and TAA, plus a mutation check.
 
 - SDL_GPU: mip chains of textures that are not square had levels nobody wrote. SDL's mip generation stops at the level where the shorter side
   is 1, but kin counted levels by the longer side, so a mipmapped 1024 x 512 texture had a last 1 x 1 level holding whatever its memory held,

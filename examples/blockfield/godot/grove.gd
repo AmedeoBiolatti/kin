@@ -7,6 +7,14 @@ var route: PackedVector3Array
 var foliage_instances = 0
 var transparent_instances = 0
 var batches: Array[MultiMeshInstance3D] = []
+var foliage_multis: Array[MultiMesh] = []
+var moving_count = 0
+var moving_first = 0
+var moving_multis: Array[MultiMesh] = []
+var moving_buffers: Array[PackedFloat32Array] = []
+var moving_spans: Array[Vector2i] = []
+var moving_origins: PackedVector3Array
+var motion_upload_bytes = 0
 
 func load_recipe(path: String, foliage: int, transparent: int, viewport: SubViewport, shadows: bool, unlit: bool) -> String:
     var file = FileAccess.open(path, FileAccess.READ)
@@ -33,6 +41,7 @@ func load_recipe(path: String, foliage: int, transparent: int, viewport: SubView
             multis[i % groups].set_instance_transform(i / groups, Transform3D((Basis(Vector3.UP, deg_to_rad(yaw)) * Basis.from_scale(scale)), p))
         file.seek(file.get_position() + ((TRANSPARENT_LIMIT if kind else FOLIAGE_LIMIT) - count) * 28)
         sets.append(multis)
+    foliage_multis = sets[0]
     for kind in 2:
         var nv = file.get_32()
         var ni = file.get_32()
@@ -80,6 +89,61 @@ func load_recipe(path: String, foliage: int, transparent: int, viewport: SubView
     foliage_instances = foliage
     transparent_instances = transparent
     return ""
+
+func configure_motion(count: int) -> String:
+    moving_count = count
+    if count == 0: return ""
+    moving_first = mini(foliage_instances - count, foliage_instances * 9 / 16)
+    var first = 0
+    for multi in foliage_multis:
+        var last = first + multi.instance_count
+        var begin_edit = maxi(first, moving_first)
+        var end_edit = mini(last, moving_first + count)
+        if begin_edit < end_edit:
+            var data = multi.buffer
+            if data.size() != multi.instance_count * 12: return "Unexpected MultiMesh transform buffer layout"
+            moving_multis.append(multi)
+            moving_buffers.append(data)
+            moving_spans.append(Vector2i(begin_edit - first, end_edit - begin_edit))
+            motion_upload_bytes += data.size() * 4
+            for i in range(begin_edit - first, end_edit - first):
+                var origin = multi.get_instance_transform(i).origin
+                if origin != Vector3(data[i * 12 + 3], data[i * 12 + 7], data[i * 12 + 11]): return "MultiMesh buffer origin mismatch"
+                moving_origins.append(origin)
+        first = last
+    return "" if moving_origins.size() == count else "Missing moving instances"
+
+func animate_motion(index: int) -> void:
+    if moving_count == 0: return
+    # Match native float phase/offset storage. Packed buffers submit each dirty
+    # cell in bulk, retaining its unchanged transforms and original instance IDs.
+    var phase = PackedFloat32Array([float(index) * PackedFloat32Array([0.025])[0]])[0]
+    var offset = Vector2(4.0 * sin(phase), 2.0 * (1.0 - cos(phase)))
+    var record = 0
+    for b in moving_multis.size():
+        var data = moving_buffers[b]
+        var span = moving_spans[b]
+        for i in range(span.x, span.x + span.y):
+            var origin = moving_origins[record]
+            data[i * 12 + 3] = origin.x + offset.x
+            data[i * 12 + 7] = origin.y + offset.y
+            data[i * 12 + 11] = origin.z
+            record += 1
+        moving_multis[b].buffer = data
+        moving_buffers[b] = data
+
+func motion_sums() -> Dictionary:
+    var sums = {"moving_base_x_sum":0.0,"moving_base_y_sum":0.0,"moving_base_z_sum":0.0,"moving_x_sum":0.0,"moving_y_sum":0.0,"moving_z_sum":0.0}
+    var record = 0
+    for b in moving_multis.size():
+        var span = moving_spans[b]
+        for i in range(span.x, span.x + span.y):
+            var origin = moving_origins[record]
+            var current = moving_multis[b].get_instance_transform(i).origin
+            sums["moving_base_x_sum"] += origin.x; sums["moving_base_y_sum"] += origin.y; sums["moving_base_z_sum"] += origin.z
+            sums["moving_x_sum"] += current.x; sums["moving_y_sum"] += current.y; sums["moving_z_sum"] += current.z
+            record += 1
+    return sums
 
 static func read_packed(file: FileAccess, type: int, count: int, stride: int) -> Variant:
     var payload = file.get_buffer(count * stride)

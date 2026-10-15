@@ -1,5 +1,9 @@
 # Interactive performance examples
 
+The experimental 3D [industrial yard](industrial_yard/README.md) adds a shared Kin/Godot Forward+ workload for independent
+objects, PBR material variation, distributed motion, real skinning, transparency and overlapping spot shadows. Its serial
+runner enforces RAM limits and measures a complete 1,440-frame interior/exterior route at 720p and 1440p, with feature controls.
+
 Two asset-free native applications share workload code with `kin_bench`.
 They are examples, playable/interactive demos, and reproducible performance
 fixtures. Neither requires downloaded assets, an account, or a network service.
@@ -510,6 +514,15 @@ The Grove harness already retains its scene, so this targets engine preparation 
 `--rebuild-scene` deliberately invalidates it every frame. CSV/report fields `prepared_reused`, `prepared_draws`,
 `prepared_cache_bytes` and `prepared_layout_bytes` distinguish the small new key/stamps from existing reused arrays.
 Visibility, lighting and shadow work still update each frame. See the prepared-layout measurements in `docs/3d_plan.md`.
+Ordinary fixed-size batch edits now reuse that layout too; `KIN_PREPARED_BATCH_EDITS=0` restores invalidation on content
+edits. Group validity changes still rebuild the layout. GPU uploads, bounds and camera/light selection always refresh.
+
+For a shared spot-shadow path, `--point-shadows 0` keeps point illumination but disables its shadows. With
+`--shadows 0 --local-shadows 1 --lights 4 --spots 1`, both engines render one perspective spot map. Godot uses
+one slot per quadrant in a smaller atlas with 32-bit depth; its slot width still matches `--shadow-resolution`.
+Reports expose point/spot shadow requests, spot projection/nominal cone FOV/range, near plane and depth bits. Kin's benchmark-only
+`--shadow-near 0.025` matches Godot's fixed local-shadow near plane (Kin's default remains 0.05). Filtering and bias
+remain engine-specific. The lighting sweep includes `spot-shadow-only`; matching near planes requires this extra Kin option.
 
 Godot reports actual shadow draw calls and triangles, alongside the requested light settings. Its positional atlas uses
 four slots per quadrant: an omni needs two adjacent slots, so one-slot quadrants silently omit point shadows. The lighting
@@ -610,6 +623,28 @@ show the work removed. See `docs/rendering_3d.md` for edit semantics, fallbacks 
 retention still enabled. The CPU sphere cache is capped at 4 MiB and replaces the retained batches' transient sphere ranges.
 `bounds_cache_bytes`, `bounds_scratch_bytes`, `bounds_cache_instances` and `bounds_cache_rebuilt` report its storage/work;
 `bounds_instance_tests` includes actual cold/edited cache rebuilds.
+
+Shared `--moving-instances N` animates a contiguous range of ground-route foliage using deterministic frame indices.
+It requires `N <= --foliage` (and native `KIN_GROVE_RETAINED` enabled); zero keeps the original static scene. The range starts
+near the middle of the grove. Kin keeps animation copies only for those records (two 72-byte records per moving instance).
+Godot bulk-writes the affected MultiMesh buffers and records `motion_update_ms`, including its GDScript loop/API overhead.
+Reports include `moving_instances`, `moving_first`, initial/current position sums and `foliage_batch_count`. Set
+`KIN_INCREMENTAL_BOUNDS=0 KIN_PARALLEL_INSTANCE_PACKING=0` for the previous full-sphere-refresh/caller-only packing path.
+The default refreshes edited spheres and packs large GPU tables on attached workers, keeping full GPU uploads for safe
+buffer cycling. Prepared command layouts survive ordinary batch edits; use `KIN_PREPARED_BATCH_EDITS=0` to compare the old
+invalidation behavior. Timings and limitations are in `docs/3d_plan.md`.
+`KIN_CACHED_CAMERA_CULL=0 KIN_ACTIVE_CULL_COUNTERS=0` keeps the previous general camera classifier and full LOD/cascade
+counter clearing. The default uses existing cached spheres for camera-only decisions and clears active counter prefixes;
+these CPU changes add no per-copy storage or GPU buffer and preserve local-shadow selection.
+
+Godot normally has one foliage MultiMesh per spatial cell (64 at 100k plants); Kin normally has one retained table with
+64 cell bounds. `KIN_GROVE_CELL_BATCHES=1` before native launch instead creates one retained batch per cell, preserving the
+source order and visibility bounds. Use this control to distinguish upload granularity from renderer differences. For the
+1,000-record motion range in the 100k recipe, two cells change: Kin's cell control uploads 399,872 bytes/frame versus
+12,800,000 in its normal layout; Godot submits 149,952 bytes of transform buffers (48-byte records versus Kin's 128).
+Native layouts must match images, triangles and camera/light selection; draw counts differ. The Forward+ dynamic comparison
+and its checks are recorded in `docs/3d_plan.md`.
+
 `KIN_LOCAL_SHADOW_CULLING=0` restores the previous local-shadow gather for comparison. Fully contained single-level ranges
 now skip per-copy classification; partial cells retain only unresolved frustum planes and skip proven radius tests.
 `local_candidates`, `local_group_accepted`, `local_radius_tests`, `local_plane_budget` and `local_bucket_bytes` expose the

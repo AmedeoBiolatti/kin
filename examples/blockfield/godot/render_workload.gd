@@ -88,7 +88,7 @@ static func set_light_colour(light: Light3D, linear: Vector3) -> void:
     light.light_color = Color(linear.x / energy, linear.y / energy, linear.z / energy).linear_to_srgb()
     light.light_energy = energy
 
-static func make_lights(viewport: SubViewport, points: int, spots: int, shadows: bool, local_shadows: bool, resolution: int, extent: float) -> Array[Light3D]:
+static func make_lights(viewport: SubViewport, points: int, spots: int, shadows: bool, local_shadows: bool, resolution: int, extent: float, point_shadows: bool = true) -> Array[Light3D]:
     var sun = DirectionalLight3D.new()
     viewport.add_child(sun)
     sun.look_at_from_position(Vector3.ZERO, Vector3(0.5, -1, -0.35), Vector3.UP)
@@ -105,6 +105,15 @@ static func make_lights(viewport: SubViewport, points: int, spots: int, shadows:
     viewport.positional_shadow_atlas_quad_1 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
     viewport.positional_shadow_atlas_quad_2 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
     viewport.positional_shadow_atlas_quad_3 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
+    if not point_shadows:
+        # Spots need one perspective slot, without the adjacent-slot requirement of an omni.
+        # Half the atlas width with one slot per quadrant preserves the requested slot size.
+        viewport.positional_shadow_atlas_size = resolution * 2
+        viewport.positional_shadow_atlas_16_bits = false
+        viewport.positional_shadow_atlas_quad_0 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
+        viewport.positional_shadow_atlas_quad_1 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
+        viewport.positional_shadow_atlas_quad_2 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
+        viewport.positional_shadow_atlas_quad_3 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
     var colours = [Vector3(2400,1200,600),Vector3(600,1200,2400),Vector3(1200,2400,900),Vector3(2400,700,1800)]
     var lights: Array[Light3D] = []
     for i in points:
@@ -113,7 +122,7 @@ static func make_lights(viewport: SubViewport, points: int, spots: int, shadows:
         light.omni_range = extent * 2
         light.omni_attenuation = 2.0
         light.omni_shadow_mode = OmniLight3D.SHADOW_CUBE
-        light.shadow_enabled = local_shadows and i == 0
+        light.shadow_enabled = local_shadows and point_shadows and i == 0
         viewport.add_child(light)
         lights.append(light)
     for i in spots:

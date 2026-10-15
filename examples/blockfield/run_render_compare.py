@@ -178,12 +178,13 @@ def lighting_cases(smoke=False):
              ('pbr-flat', pbr + ['--normal-map', '0'], all_engines), ('pbr-normal', pbr, all_engines),
              ('lights', lamps, all_engines),
              ('point-shadow-only', pbr + ['--lights', '1', '--spots', '0', '--local-shadows', '1'], all_engines),
+             ('spot-shadow-only', pbr + ['--lights', '4', '--spots', '1', '--point-shadows', '0', '--local-shadows', '1'], all_engines),
              ('sun-shadow', sun, all_engines), ('local-shadow', shadows, all_engines),
              ('msaa4', shadows + ['--samples', '4'], all_engines),
              ('ssaa2', shadows + ['--resolution-scale', '2'], all_engines),
              ('taa', shadows + ['--taa', '1'], ['kin', 'godot-forward']),
              ('ao-contact', shadows + ['--taa', '1', '--ao', '1', '--contact', '1'], ['kin'])]
-    return [c for c in cases if c[0] in ['lights', 'point-shadow-only', 'local-shadow', 'msaa4', 'taa', 'ao-contact']] if smoke else cases
+    return [c for c in cases if c[0] in ['lights', 'point-shadow-only', 'spot-shadow-only', 'local-shadow', 'msaa4', 'taa', 'ao-contact']] if smoke else cases
 
 
 

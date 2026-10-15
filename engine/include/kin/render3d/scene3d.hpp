@@ -418,6 +418,13 @@ public:
     std::span<const InstanceGroup3D> groups() const;
     u64 identity() const;
     u64 revision() const;
+    // Fixed-size storage/group ranges stay put after edits. Only a group
+    // gaining/losing valid bounds changes the renderer's piece layout.
+    u64 layout_revision() const;
+    struct ChangedRange { u32 first = 0, count = 0; };
+    // Union of edits after a reader's revision. Old/unknown readers get the
+    // whole batch; querying never consumes edits belonging to another reader.
+    ChangedRange changed_since(u64 revision) const;
     std::weak_ptr<const void> lifetime() const { return _data; }
     // Fixed size: an out-of-range edit throws. Existing scene handles see the edit on their next render.
     void update(u32 first, std::span<const MeshInstance> instances);
@@ -535,6 +542,12 @@ public:
     std::span<const InstanceGroup> instance_groups() const { return _instance_groups; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned draw).
     std::span<const Mat4f> joint_matrices() const { return _joints; }
+    // Edit an existing pose between renders without resubmitting mesh commands.
+    // `first` is an index in joint_matrices() (skin_offsets() locates a copy's pose).
+    // The range must fit; indices belong to this scene's current submissions and
+    // must be obtained again after clear(). Shared model parts see the same edit.
+    // Fixed-size edits preserve draw_revision(); no extra pose storage is kept.
+    void update_joint_matrices(u32 first, std::span<const Mat4f> matrices);
     std::span<const u32> skin_offsets() const { return _skin_offsets; }
 
 private:

@@ -80,18 +80,24 @@ lights, and draws.
 The GPU renderer can reuse the mesh draw/piece/task layout when the same `Scene3D` mesh commands remain submitted.
 `draw_identity()` and `draw_revision()` identify that command set: mesh submissions and `clear()` change its revision;
 moving a scene gives the destination a fresh identity and invalidates the source. Camera, light and particle changes do
-not invalidate the layout. Instance-batch revisions are checked separately, including edits through another shared handle.
+not invalidate the layout. Batch layout revisions are checked separately, including edits through another shared handle.
+Fixed-size batch content edits keep draw/piece/task metadata valid. Group bounds and all visibility proofs still refresh;
+a group gaining/losing valid bounds changes the batch layout revision and rebuilds the layout, even if the total number
+of valid groups stays the same. GPU tables and CPU spheres continue to use the full content revision independently.
 
 This reuses the renderer's existing arrays, not a copy of scene instances or visibility results. Camera frustums, shadow
 membership, group plane proofs, retained-table slots/bounds and uploads are refreshed each render. Writes through a still
 valid `add_instances()` span remain visible. A single layout is kept per renderer, bounded to 8,192 draw references,
 16,384 pieces, 4,096 valid spatial groups, 128 batch stamps and 16 MiB of existing vector payload capacity. LOD-enabled
-scenes and skinned draws use the original construction path; oversized or edited scenes rebuild it too.
+scenes use the original construction path; oversized layouts and scene-command edits rebuild it too. Skinned commands
+can reuse the layout: joint pointers/offsets, posed bounds, visibility, shadows and GPU uploads refresh each render.
 
 Set `KIN_PREPARED_SCENES=0` before renderer creation for the reference path. Stats `prepared_reused` (0/1) and
 `prepared_draws` report reuse and submitted valid draw references. `prepared_cache_bytes` counts key/stamp payload;
 `prepared_layout_bytes` counts the existing layout vector capacities, not additional allocations. Rebuilt scene commands
 miss the cache. No shader, render target or per-instance cache is added.
+`KIN_PREPARED_BATCH_EDITS=0` before renderer creation restores invalidation after every batch content edit while keeping
+unchanged-scene reuse. Batch `layout_revision()` adds eight bytes per shared batch; no new renderer stamp array is needed.
 
 `draw_instanced_group(mesh, instances, world_bounds, material)` preserves a spatial cell within an instanced draw. It accepts
 either transforms or `MeshInstance` records. Equal mesh/material groups still merge into one draw, retaining global alpha
@@ -120,6 +126,25 @@ handle; the caller can reuse its own handle next frame. Meshes, materials, trans
 `batch.update(first, records)` edits a fixed range, increments the shared revision, and refreshes affected cell bounds.
 Out-of-range edits throw; changing the count requires a new batch. Copies share edits, including handles already submitted
 into a scene. Edit between renders, never concurrently with rendering. The latest records are read when rendering starts.
+`changed_since(revision)` returns the enclosing changed range for an independent reader, or an empty range at the current
+revision. Each batch keeps the last 16 edit ranges in 128 bytes; zero, future or expired revisions conservatively return the
+whole batch. Queries do not consume history, and empty edits do not advance the revision.
+`layout_revision()` is separate from the content revision: fixed storage/group ranges and mesh identity do not change on
+updates. Only a group's validity changing affects the renderer's piece ranges. Empty handles report zero for both revisions.
+
+The camera classifier reuses current cached spheres for single-level, non-skinned/non-clustered draws that need no sun
+membership bits. It fills camera-inside/outside ranges and tests partial ranges four copies at a time, using the existing
+local-shadow SIMD helper (or its scalar fallback), in source order with the original boundary comparisons. Local shadow
+selection remains independent of camera rejection. `KIN_CACHED_CAMERA_CULL=0` before renderer creation keeps the general
+per-copy classifier. No sphere cache or GPU resource is added.
+Classification and prefix reduction also clear only the LOD/cascade counter prefixes consumed by the current render;
+enabling more levels/cascades clears those newly active slots before use. `KIN_ACTIVE_CULL_COUNTERS=0` restores full-array
+clearing. Setting both controls to zero selects the previous CPU culling path for measurement.
+
+For a compiler-only experiment, configure `-DKIN_RENDERER3D_O3=ON`. In GCC/Clang Release builds this appends `-O3`
+only to `gpu_renderer3d.cpp`, after the engine target's `-O2`; other engine sources, floating-point flags and GPU
+shaders stay unchanged. The default is OFF: the Grove O2/O3 comparison showed small, mixed performance changes and
+larger renderer code. Set it OFF and rebuild to restore O2; this is a CMake option, not a runtime environment variable.
 
 The GPU renderer retains up to **32 MiB of live instance tables / 128 batches**. Built-in opaque/masked, non-skinned copies
 with one selected mesh level use stable 128-byte records and per-view 32-bit index lists for main/prepass/pick and shadows.
@@ -129,6 +154,11 @@ material colours also fall back. TAA, blended materials, custom shaders, selecte
 unavailable shaders and capacity overflow keep the ordinary upload path. CPU batch handles work in these cases too.
 The budget covers live tables, not total GPU memory: streamed buffers, staging and in-flight buffer versions are additional.
 Expired batches are collected between GPU frames after waiting for submitted GPU work; recreate batches only when needed.
+Tables with at least 8,192 records pack directly into upload staging on the attached renderer workers, in 2,048-record
+slices. `KIN_PARALLEL_INSTANCE_PACKING=0` before renderer creation keeps caller-only packing. This changes neither GPU upload
+size nor the cycling/multiple-view safety rules, and adds no CPU instance mirror or GPU buffer.
+Consecutive retained batches can share a graphics pipeline while using different instance storage. The draw binding cache
+compares storage-buffer handles/counts independently of pipeline identity, including masked depth, shadows and picking.
 
 `KIN_RETAINED_INSTANCES=0` disables GPU retention before renderer creation. Stats expose live `retained_gpu_bytes`, submitted
 `retained_instances`, per-render `retained_upload_bytes`, and main-view `retained_index_bytes`. `instance_upload_bytes` counts
@@ -138,8 +168,10 @@ instance records. Combine it with `--rebuild-scene` to restore the original per-
 Mist keeps its existing alpha-sorted path.
 
 Resident tables also cache transformed culling spheres on the CPU, using 16 bytes/copy and at most **4 MiB per renderer**
-(plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes its
-whole sphere array on the next render; material-colour changes alone do not. Main and sun/local/moon culling still perform
+(plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes only
+the union of edited ranges since that table's own bounds revision; new tables and expired history refresh the full array.
+`KIN_INCREMENTAL_BOUNDS=0` before renderer creation restores full-array refreshes after edits. Material-colour changes alone
+do not refresh spheres. Main and sun/local/moon culling still perform
 their normal visibility tests, reading these spheres rather than retransforming each copy. CPU cache refresh is independent
 of GPU record uploads, including edits between views in one GPU frame.
 
@@ -924,6 +956,14 @@ of its joints' matrices and turns its normal by their linear part (right for rig
 joints; a non-uniform scale in a joint is approximated). `draw_skinned(model, joints, transform)`
 draws all of a model's parts (skinned ones in the pose, the others as `draw` does).
 `Renderer3DCapabilities::skinning`; `Render3DStats::skinned_copies`, `skin_matrices`, `skinned_draws`.
+
+To animate submitted commands, call `scene.update_joint_matrices(first, matrices)` between renders. `first` is an index
+in the scene's existing `joint_matrices()` array; record its size before `draw_skinned`, or use the copy's entry in
+`skin_offsets()`. The replacement range must fit or the call throws `std::out_of_range`; it never resizes the palette or
+changes `draw_revision()`. Empty ranges at the end are allowed and overlapping source spans are supported. Indices are
+local to the scene's current submissions: obtain them again after `clear()`. Parts sharing a model pose see one update.
+This edits existing storage without another palette or per-character cache. Transforms/materials still require ordinary
+scene submission. `KIN_PREPARED_SCENES=0` keeps the reference layout-building path while retaining pose updates.
 
 **Every pass** (P1a part 2). A skinned copy is drawn by the main pass, casts the sun's shadow (one map or any
 cascades, cut-out materials too), is in the depth and normal pre-pass (ambient occlusion, contact shadows, the

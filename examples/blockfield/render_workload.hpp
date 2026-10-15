@@ -14,6 +14,8 @@ struct Features {
     u32 resolution_scale = 1;
     u32 samples = 1, points = 0, spots = 0, shadow_resolution = 1024;
     bool hdr = false, taa = false, shadows = false, local_shadows = false;
+    bool point_shadows = true;
+    f32 shadow_near = 0.05f;
     bool normal_map = true, ao = false, contact = false, environment = false;
     void validate() const {
         if (material != "unlit" && material != "lit" && material != "pbr") throw std::runtime_error("material must be unlit, lit or pbr");
@@ -23,7 +25,8 @@ struct Features {
         if (points > 16 || spots > 16) throw std::runtime_error("point/spot light counts must be 0..16");
         if (shadow_resolution != 512 && shadow_resolution != 1024 && shadow_resolution != 2048) throw std::runtime_error("shadow resolution must be 512, 1024 or 2048");
         if (taa && samples != 1) throw std::runtime_error("choose TAA or MSAA, not both");
-        if (local_shadows && points + spots == 0) throw std::runtime_error("local shadows need a point or spot light");
+        if (!std::isfinite(shadow_near) || shadow_near < 0.001f || shadow_near > 1.0f) throw std::runtime_error("shadow near must be 0.001..1");
+        if (local_shadows && !(point_shadows && points) && !spots) throw std::runtime_error("local shadows need an eligible point or spot light");
         if (material == "unlit" && (points || spots || shadows || local_shadows || ao || contact))
             throw std::runtime_error("lighting features need a lit or pbr material");
     }
@@ -103,7 +106,7 @@ inline void configure(Scene3D& scene, const Features& f, f32 time, f32 extent) {
     scene.lights.shadow_area = f.shadows ? Bounds3{{-extent, -1, -extent}, {extent, 100, extent}} : Bounds3{};
     scene.lights.cache_shadows = false;
     scene.lights.local_shadow_resolution = f.shadow_resolution;
-    scene.lights.max_shadowed_points = 1;
+    scene.lights.max_shadowed_points = f.point_shadows ? 1 : 0;
     scene.lights.max_shadowed_spots = 2;
     scene.taa.enabled = f.taa;
     scene.ambient_occlusion = {.enabled = f.ao, .radius = 2, .half_resolution = true};
@@ -113,7 +116,8 @@ inline void configure(Scene3D& scene, const Features& f, f32 time, f32 extent) {
         const f32 a = f32(i) * 6.28318530718f / f32(f.points) + time * 0.18f;
         const f32 radius = std::min(extent * 0.45f, 200.0f);
         PointLight light{.position = {radius * std::cos(a), 80, radius * std::sin(a)}, .color = colours[i % 4], .radius = extent * 2, .size = 1};
-        light.shadow.enabled = f.local_shadows && i == 0;
+        light.shadow.enabled = f.local_shadows && f.point_shadows && i == 0;
+        light.shadow.near_plane = f.shadow_near;
         light.id = i + 1; scene.lights.points.push_back(light);
     }
     for (u32 i = 0; i < f.spots; ++i) {
@@ -122,6 +126,7 @@ inline void configure(Scene3D& scene, const Features& f, f32 time, f32 extent) {
         SpotLight light{.position = {radius * std::cos(a), 100, radius * std::sin(a)}, .direction = {0, -1, 0},
                         .color = colours[(i + 1) % 4] * 2, .radius = extent * 2, .size = 1, .inner_angle = 30, .outer_angle = 45};
         light.shadow.enabled = f.local_shadows && i < 2;
+        light.shadow.near_plane = f.shadow_near;
         light.id = i + 1; scene.lights.spots.push_back(light);
     }
 }

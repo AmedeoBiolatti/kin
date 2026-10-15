@@ -198,6 +198,11 @@ if(KIN_EXPERIMENTAL_3D)
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
                                       src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+    option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)
+    # Source options follow the target's -O2. Keep this experiment to one
+    # translation unit; other engine sources and floating-point flags stay put.
+    set_property(SOURCE src/renderer/gpu/gpu_renderer3d.cpp APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<AND:$<BOOL:${KIN_RENDERER3D_O3}>,$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3>")
     set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")

@@ -7357,6 +7357,126 @@ void test_gpu_skinned_poses_and_mix() {
     });
 }
 
+// Updating a retained pose must refresh every consumer while preserving the command layout.
+// Compare against resubmitting all draws, with independent TAA histories and explicit cache controls.
+void test_gpu_skinned_pose_updates() {
+    kin::Scene3D empty;
+    empty.update_joint_matrices(0, {});
+    bool rejected = false;
+    try { empty.update_joint_matrices(1, {}); } catch (const std::out_of_range&) { rejected = true; }
+    assert(rejected);
+    const char* old = std::getenv("KIN_PREPARED_SCENES");
+    const bool had = old != nullptr; const std::string saved = old ? old : "";
+    std::vector<Pixels> reference;
+    std::vector<kin::Render3DStats> counts;
+    std::vector<std::vector<kin::u32>> picks;
+    for (int mode = 0; mode < 4; ++mode) {
+        setenv("KIN_PREPARED_SCENES", mode >= 2 ? "1" : "0", 1);
+        with_gpu("test_gpu_skinned_pose_updates", [&](kin::Renderer2D& renderer) {
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
+            renderer.set_job_system(mode == 3 ? &jobs : nullptr);
+            kin::Renderer3D r3d{renderer};
+            if (lacks(r3d.capabilities().skinning, "skinned meshes")) return;
+            SkinRig rig{r3d};
+            const auto floor = make_box(r3d, {18, 0.2f, 18});
+            const auto box = make_box(r3d, {0.12f, 0.4f, 0.12f});
+            std::vector<kin::MeshInstance> copies;
+            for (kin::u32 i = 0; i < 2100; ++i)
+                copies.push_back({Mat4f::translation({float(i % 50) * 0.12f - 3, 0.2f, float(i / 50) * 0.12f - 3}), kin::colors::white, 1000+i});
+            kin::InstanceBatch3D batch(box, std::move(copies));
+            kin::Model model;
+            model.skeletons.push_back(rig.tube.skeleton);
+            for (int i = 0; i < 2; ++i) {
+                kin::ModelPart part; part.mesh = rig.mesh; part.skin = 0;
+                part.material = {.color = i ? Color::rgb(80, 190, 120) : Color::rgb(210, 70, 60)};
+                model.parts.push_back(part);
+            }
+            auto view = r3d.create_view({160, 120}, {.pick = true});
+            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true});
+            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+            kin::Scene3D scene;
+            for (int frame = 0; frame < 14; ++frame) {
+                const auto pose = rig.matrices(float(frame)*13-50, 35, frame == 3 || frame == 9 ? Vec3f{500, 0, 0} : Vec3f{});
+                const auto other = rig.matrices(-float(frame)*9+30, -25);
+                const auto arm = rig.matrices(40, float(frame)*7-30);
+                const bool build = !mode || frame == 0 || frame == 10;
+                if (build) {
+                    scene.clear();
+                    scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                    scene.draw_instanced(batch);
+                    scene.draw_skinned(model, pose, Mat4f::translation({-1.3f, 0, 0}), kin::colors::white, 101);
+                    scene.draw_skinned(rig.mesh, other, Mat4f::translation({1.3f, 0, 0}), {.color = Color::rgb(80, 90, 230)}, kin::colors::white, 102);
+                    scene.overlay().draw_skinned(rig.mesh, arm, Mat4f::translation({-2, -0.5f, 2}), {.unlit = true}, kin::colors::white, 103);
+                } else {
+                    const auto revision = scene.draw_revision();
+                    const auto* matrices = scene.joint_matrices().data();
+                    scene.update_joint_matrices(0, pose);
+                    scene.update_joint_matrices(3, other);
+                    scene.overlay().update_joint_matrices(0, arm);
+                    assert(scene.draw_revision() == revision && scene.joint_matrices().data() == matrices);
+                }
+                if (frame >= 8 && frame < 10 && (build || frame == 8))
+                    scene.draw_skinned(rig.mesh, other, Mat4f::translation({1000, 0, 0}));
+                if (frame == 12) { kin::Scene3D moved{std::move(scene)}; scene = std::move(moved); }
+                if (frame == 0) {
+                    const auto revision = scene.draw_revision();
+                    const auto old_pose = std::vector<Mat4f>(scene.joint_matrices().begin(), scene.joint_matrices().end());
+                    for (const auto first : {5u, 7u, std::numeric_limits<kin::u32>::max()}) {
+                        bool threw = false;
+                        try { scene.update_joint_matrices(first, pose); } catch (const std::out_of_range&) { threw = true; }
+                        assert(threw && scene.draw_revision() == revision);
+                        assert(std::memcmp(scene.joint_matrices().data(), old_pose.data(), old_pose.size()*sizeof(Mat4f)) == 0);
+                    }
+                    scene.update_joint_matrices(6, {});
+                    // An overlapping source span is well-defined and does not allocate a second palette.
+                    scene.update_joint_matrices(1, scene.joint_matrices().first(2));
+                    assert(std::memcmp(scene.joint_matrices().data()+1, old_pose.data(), 2*sizeof(Mat4f)) == 0);
+                    scene.update_joint_matrices(0, old_pose);
+                    assert(scene.skin_offsets()[0] == scene.skin_offsets()[1]);
+                }
+                scene.camera = skin_camera(false); scene.camera.position.x += 0.02f*frame;
+                scene.overlay().camera = scene.camera;
+                skin_lights(scene, frame % 3 == 0 ? 3 : 1);
+                scene.lights.shadow_resolution = scene.lights.local_shadow_resolution = 128;
+                scene.lights.cache_shadows = true;
+                scene.lights.spots.clear();
+                kin::SpotLight spot{.position = {0, 7, 1}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 20};
+                spot.shadow.enabled = true; spot.id = 1; scene.add_spot_light(spot);
+                scene.taa.enabled = frame >= 4 && frame <= 9 && r3d.capabilities().temporal_aa;
+                scene.ambient_occlusion.enabled = frame >= 6 && frame <= 7 && r3d.capabilities().ambient_occlusion;
+                scene.contact_shadows.enabled = frame == 7 && r3d.capabilities().contact_shadows;
+                auto& target = frame == 1 ? hdr : frame == 2 ? msaa : view;
+                const auto image = shoot_view(renderer, r3d, target, scene);
+                const auto st = r3d.stats();
+                std::vector<kin::u32> ids;
+                for (int y = 20; y < 110; y += 15) for (int x = 15; x < 150; x += 15) {
+                    const auto hit = r3d.pick(target, {x, y}); ids.push_back(hit.hit ? hit.id : 0);
+                }
+                assert(st.skin_matrices == kin::u32(frame >= 8 && frame < 10 ? 12 : 9));
+                if (!mode) { reference.push_back(image); counts.push_back(st); picks.push_back(ids); }
+                else {
+                    assert(image.rgba == reference[frame].rgba && ids == picks[frame]);
+                    const auto& ref = counts[frame];
+                    assert(st.draws == ref.draws && st.triangles == ref.triangles && st.culled == ref.culled);
+                    assert(st.skinned_copies == ref.skinned_copies && st.skin_matrices == ref.skin_matrices);
+                    assert(st.shadow_casters == ref.shadow_casters && st.cascade_casters == ref.cascade_casters);
+                    assert(st.local_shadow_casters == ref.local_shadow_casters && st.local_shadow_triangles == ref.local_shadow_triangles);
+                    assert(st.retained_upload_bytes == ref.retained_upload_bytes);
+                }
+                const bool expected = mode >= 2 && frame != 0 && frame != 8 && frame != 10 && frame != 12;
+                assert(st.prepared_reused == kin::u32(expected));
+                renderer.present();
+            }
+            scene.clear();
+            bool threw = false;
+            try { scene.update_joint_matrices(0, rig.matrices(0, 0)); } catch (const std::out_of_range&) { threw = true; }
+            assert(threw);
+            renderer.set_job_system(nullptr);
+        });
+    }
+    if (had) setenv("KIN_PREPARED_SCENES", saved.c_str(), 1); else unsetenv("KIN_PREPARED_SCENES");
+}
+
 // A posed copy is culled by where its pose puts it, not where the mesh rests: one wholly out of view is not drawn; an arm that swings
 // into view from above (outside the rest pose's bound) is; a copy in view is drawn at any pose.
 void test_gpu_skinned_culling() {
@@ -11663,9 +11783,15 @@ void test_scene_retained_instances() {
     assert(scene.draws().size() == 3 && scene.instances().size() == 1);
     assert(scene.draws()[0].batch.instances().data() == batch.instances().data());
     const auto revision = batch.revision();
+    const auto layout = batch.layout_revision();
     const kin::MeshInstance moved{Mat4f::translation({100, 0, 0}), kin::colors::white, 77};
     batch.update(1, {&moved, 1});
     assert(copy.revision() == revision + 1 && copy.instances()[1].id == 77);
+    assert(copy.layout_revision() == layout);
+    assert(copy.changed_since(revision).first == 1 && copy.changed_since(revision).count == 1);
+    assert(copy.changed_since(copy.revision()).count == 0);
+    assert(copy.changed_since(0).count == 2);
+    assert(kin::InstanceBatch3D{}.changed_since(0).count == 0);
     assert(scene.draws()[0].batch.groups()[1].world_bounds.min.x > 90);
     assert(batch.groups()[0].world_bounds.min.x < 0);
     bool caught = false;
@@ -11676,6 +11802,27 @@ void test_scene_retained_instances() {
     assert(caught);
     scene.clear();
     assert(copy.instances().size() == 2 && copy.identity() == batch.identity());
+    const auto before = batch.revision();
+    batch.update(0, {});
+    assert(batch.revision() == before);
+    batch.update(0, {&moved, 1});
+    assert(batch.changed_since(revision).first == 0 && batch.changed_since(revision).count == 2);
+    assert(batch.changed_since(before).count == 1); // another reader still sees its own edits
+    for (int i = 0; i < 16; ++i) batch.update(1, {&moved, 1});
+    assert(batch.changed_since(before).first == 0 && batch.changed_since(before).count == 2); // history overflow
+    assert(batch.changed_since(batch.revision() - 16).first == 1 && batch.changed_since(batch.revision() - 16).count == 1);
+    assert(batch.changed_since(batch.revision() + 1).count == 2);
+    auto broken = moved; broken.transform.m[0] = std::numeric_limits<float>::infinity();
+    batch.update(1,{&broken,1});
+    assert(copy.layout_revision() == layout + 1);
+    batch.update(1,{&broken,1});
+    assert(copy.layout_revision() == layout + 1);
+    batch.update(1,{&moved,1});
+    assert(copy.layout_revision() == layout + 2);
+    batch.update(0,{&broken,1});
+    const std::array<kin::MeshInstance,2> swap{moved,broken};
+    batch.update(0,swap); // same valid-group count, different group/range membership
+    assert(copy.layout_revision() == layout + 4);
 }
 
 void test_gpu_retained_instances() {
@@ -11752,7 +11899,8 @@ void test_gpu_retained_instances() {
                             if (cached) {
                                 assert(stats.bounds_cache_instances == 9600 * (mode == 7 ? 2 : 1));
                                 assert(stats.bounds_cache_bytes == 9600 * 16 && stats.bounds_scratch_bytes == 0);
-                                assert(stats.bounds_cache_rebuilt == (frame == 0 || frame == 2 ? 9600 : 0));
+                                const bool incremental = !std::getenv("KIN_INCREMENTAL_BOUNDS") || std::string_view(std::getenv("KIN_INCREMENTAL_BOUNDS")) != "0";
+                                assert(stats.bounds_cache_rebuilt == (frame == 0 ? 9600 : frame == 2 ? (incremental ? 1 : 9600) : 0));
                                 if (frame == 1 || frame == 3) assert(stats.bounds_instance_tests == 0);
                             } else assert(stats.bounds_cache_instances == 0 && stats.bounds_cache_bytes == 0);
                         } else assert(stats.retained_instances == 0);
@@ -11779,6 +11927,65 @@ void test_gpu_retained_instances() {
             }
         }
     });
+}
+
+void test_gpu_retained_bindings() {
+    const char* old = std::getenv("KIN_MASKED_DEPTH_PREPASS");
+    const bool had = old != nullptr; const std::string saved = old ? old : "";
+    for (int depth = 0; depth < 2; ++depth) {
+        setenv("KIN_MASKED_DEPTH_PREPASS", depth ? "1" : "0", 1);
+        with_gpu("test_gpu_retained_bindings", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            const auto mesh = make_box(r3d,{0.18f,0.6f,0.18f});
+            const auto floor = make_box(r3d,{10,0.1f,10});
+            const kin::u8 texels[]{240,210,100,255, 120,230,160,0};
+            const auto texture = renderer.create_texture_from_rgba(texels,{2,1});
+            const auto shoot = [&](bool retained) {
+                std::vector<kin::InstanceBatch3D> batches;
+                for (kin::u32 cell=0;cell<3;++cell) {
+                    std::vector<kin::MeshInstance> copies;
+                    for (kin::u32 i=0;i<200;++i) copies.push_back({
+                        Mat4f::translation({float(cell)*2.2f-3+float(i%10)*0.15f,0.3f,float(i/10)*0.15f-1.5f}),
+                        Color::rgb(kin::u8(90+cell*70),kin::u8(220-cell*50),160),cell*200+i+1});
+                    batches.emplace_back(mesh,std::move(copies),std::vector<kin::InstanceGroup3D>{{0,200}});
+                }
+                auto view=r3d.create_view({160,120},{.pick=true});
+                auto msaa=r3d.create_view({160,120},{.samples=4,.pick=true});
+                std::vector<Pixels> images; std::vector<kin::u32> picks;
+                for (int frame=0;frame<5;++frame) {
+                    if (frame==2) {
+                        const kin::MeshInstance changed{Mat4f::translation({0,1,2}),Color::rgb(240,70,30),9001};
+                        batches[2].update(199,{&changed,1});
+                    }
+                    kin::Scene3D scene; scene.camera=kin::Camera3D::look_at({0,5,9},{0,0,0},60); scene.camera.z_far=50;
+                    scene.lights.shadow_area={{-8,-2,-8},{8,8,8}};scene.lights.shadow_resolution=128;scene.lights.shadow_cascades=4;
+                    scene.lights.local_shadow_resolution=128;
+                    kin::PointLight point{.position={2,6,1},.color={20,20,20},.radius=20};point.shadow.enabled=true;scene.add_light(point);
+                    kin::SpotLight spot{.position={-2,7,0},.direction={0,-1,0},.color={20,20,20},.radius=20};spot.shadow.enabled=true;scene.add_spot_light(spot);
+                    scene.ambient_occlusion.enabled=frame==2 && r3d.capabilities().ambient_occlusion;
+                    scene.contact_shadows.enabled=frame==2 && r3d.capabilities().contact_shadows;
+                    scene.taa.enabled=frame==4 && r3d.capabilities().temporal_aa;
+                    scene.draw(floor,Mat4f::translation({0,-0.1f,0}));
+                    const kin::Material3D material{.unlit=frame==0,.double_sided=true,.blend=kin::Blend3D::Mask,.texture=texture};
+                    for (const auto& batch : batches) {
+                        if (retained) scene.draw_instanced(batch,material);
+                        else scene.draw_instanced_group(mesh,batch.instances(),batch.groups()[0].world_bounds,material);
+                    }
+                    auto& target=frame==3 ? msaa : view;
+                    images.push_back(shoot_view(renderer,r3d,target,scene));
+                    for (int y=20;y<100;y+=15) for (int x=20;x<145;x+=15) {
+                        const auto hit=r3d.pick(target,{x,y});picks.push_back(hit.hit ? hit.id : 0);
+                    }
+                    renderer.present();
+                }
+                return std::pair{images,picks};
+            };
+            const auto [images,picks]=shoot(false);const auto [other,ids]=shoot(true);
+            assert(picks==ids);
+            for (std::size_t i=0;i<images.size();++i) assert(images[i].rgba==other[i].rgba);
+        });
+    }
+    if (had) setenv("KIN_MASKED_DEPTH_PREPASS",saved.c_str(),1);else unsetenv("KIN_MASKED_DEPTH_PREPASS");
 }
 
 void test_gpu_retained_limits() {
@@ -11848,6 +12055,7 @@ void test_gpu_cached_instance_bounds() {
         if (lacks(r3d.capabilities().local_shadows && r3d.capabilities().temporal_aa, "local shadows and TAA")) return;
         const auto enabled = [](const char* name) { const auto* p = std::getenv(name); return !p || std::string_view(p) != "0"; };
         const bool cached = enabled("KIN_CACHED_INSTANCE_BOUNDS") && enabled("KIN_RETAINED_INSTANCES");
+        const bool incremental = enabled("KIN_INCREMENTAL_BOUNDS");
         const auto mesh = make_box(r3d, {0.3f, 2, 0.3f});
         const auto floor = make_box(r3d, {160, 0.2f, 160});
         const kin::u8 texels[]{200, 230, 180, 255, 200, 230, 180, 0};
@@ -11873,6 +12081,20 @@ void test_gpu_cached_instance_bounds() {
                 if (frame == 1 || frame == 3) {
                     const kin::MeshInstance moved{Mat4f::translation({float(frame) - 2, 2, 7}) * Mat4f::scaling({-2, 2, 1}), Color::rgb(255, 80, 40), 99999};
                     batch.update(5599, {&moved, 1});
+                }
+                if (frame == 2) {
+                    // Two edits through a shared handle, with untouched records
+                    // between them. Each reader must see the union independently.
+                    auto alias = batch;
+                    const kin::MeshInstance a{Mat4f::translation({-2, 2, 7}), Color::rgb(80, 120, 255), 99998};
+                    alias.update(0, {&a, 1});
+                    alias.update(5599, {&a, 1});
+                }
+                if (frame == 4) {
+                    for (int edit = 0; edit < 17; ++edit) {
+                        const kin::MeshInstance a{Mat4f::translation({float(edit) * 0.1f - 1, 2, 8}), Color::rgb(80, 255, 120), 99997};
+                        batch.update(static_cast<kin::u32>(edit), {&a, 1});
+                    }
                 }
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0.2f * float(frame), 7, 25}, {0, 1, 0}, 65);
@@ -11909,7 +12131,7 @@ void test_gpu_cached_instance_bounds() {
                 const auto stats = r3d.stats(); counts.push_back(stats);
                 if (retained && cached) {
                     assert(stats.bounds_cache_instances == 5600 && stats.bounds_cache_bytes == 5600 * 16);
-                    const kin::u64 rebuilt = frame == 0 || frame == 1 || frame == 3 ? 5600 : 0;
+                    const kin::u64 rebuilt = frame == 0 || frame == 2 || frame == 4 ? 5600 : frame == 1 || frame == 3 ? (incremental ? 1 : 5600) : 0;
                     assert(stats.bounds_cache_rebuilt == rebuilt && stats.bounds_instance_tests <= rebuilt + 8);
                     assert(stats.bounds_scratch_bytes < 4096 * 16); // old immediate sphere allocation was released
                     if (frame == 3 || frame == 4) assert(stats.retained_instances == 0); // CPU bounds survive GPU fallback
@@ -12402,6 +12624,8 @@ void test_gpu_instance_groups() {
 void test_gpu_prepared_scenes() {
     const char* old = std::getenv("KIN_PREPARED_SCENES");
     const bool had = old != nullptr; const std::string saved = old ? old : "";
+    const char* batch_edits = std::getenv("KIN_PREPARED_BATCH_EDITS");
+    const bool edit_reuse = !batch_edits || std::string_view(batch_edits) != "0";
     std::vector<Pixels> reference;
     std::vector<kin::Render3DStats> counts;
     std::vector<std::vector<kin::u32>> picks;
@@ -12436,6 +12660,7 @@ void test_gpu_prepared_scenes() {
             for (int frame=0;frame<26;++frame) {
                 bool expected = frame==1 || frame==2 || frame==3 || frame==5 || frame==7 || frame==10 ||
                                 frame==16 || frame==20 || frame==21 || frame==25;
+                if (frame==4 && edit_reuse) expected=true;
                 if (frame==4) {
                     const kin::MeshInstance edit{Mat4f::translation({8,2,0}),Color::rgb(70,250,120),9001};
                     batch.update(0,{&edit,1});
@@ -12507,6 +12732,160 @@ void test_gpu_prepared_scenes() {
         });
     }
     if (had) setenv("KIN_PREPARED_SCENES",saved.c_str(),1);else unsetenv("KIN_PREPARED_SCENES");
+}
+
+void test_gpu_prepared_batch_edits() {
+    const char* old = std::getenv("KIN_PREPARED_SCENES");
+    const char* edits = std::getenv("KIN_PREPARED_BATCH_EDITS");
+    const bool had = old != nullptr, had_edits = edits != nullptr;
+    const std::string saved = old ? old : "", saved_edits = edits ? edits : "";
+    std::vector<Pixels> reference;
+    std::vector<std::vector<kin::u32>> picks;
+    std::vector<kin::Render3DStats> counts;
+    for (int mode=0;mode<4;++mode) {
+        setenv("KIN_PREPARED_SCENES",mode ? "1" : "0",1);
+        setenv("KIN_PREPARED_BATCH_EDITS",mode>=2 ? "1" : "0",1);
+        with_gpu("test_gpu_prepared_batch_edits",[&](kin::Renderer2D& renderer) {
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers=2}};
+            renderer.set_job_system(mode==3 ? &jobs : nullptr);
+            kin::Renderer3D r3d{renderer};
+            const auto mesh=make_box(r3d,{0.15f,0.7f,0.15f});
+            const auto floor=make_box(r3d,{12,0.1f,12});
+            const kin::u8 texels[]{240,210,90,255, 80,220,160,0};
+            const auto texture=renderer.create_texture_from_rgba(texels,{2,1});
+            std::vector<kin::MeshInstance> copies;
+            for (kin::u32 i=0;i<2500;++i) copies.push_back({Mat4f::translation({float(i%50)*0.12f-3,0.4f,float(i/50)*0.12f-3}),kin::colors::white,i+1});
+            kin::InstanceBatch3D a(mesh,std::move(copies),{{0,1250},{1250,1250}});
+            kin::InstanceBatch3D b(mesh,{{Mat4f::translation({-2,1,2}),Color::rgb(80,180,250),6001},
+                                       {Mat4f::translation({1,1.5f,3})*Mat4f::scaling({3,2,3}),Color::rgb(250,70,40),6002},
+                                       {Mat4f::translation({1000,1,1000}),kin::colors::white,6004}},{{0,1},{1,2}});
+            kin::InstanceBatch3D outside(mesh,{{Mat4f::translation({1000,0,-1000}),kin::colors::white,6003}},{{0,1}});
+            kin::Scene3D scene;scene.lights.sun.color={};scene.lights.local_shadow_resolution=128;
+            scene.draw(floor,Mat4f::translation({0,-0.1f,0}));
+            const kin::Material3D material{.double_sided=true,.blend=kin::Blend3D::Mask,.texture=texture};
+            for (const auto& batch : {a,b,outside}) scene.draw_instanced(batch,material);
+            auto view=r3d.create_view({160,120},{.pick=true});
+            auto hdr=r3d.create_view({160,120},{.hdr=true,.pick=true});
+            auto msaa=r3d.create_view({160,120},{.samples=4,.pick=true});
+            for (int frame=0;frame<8;++frame) {
+                // Content changes through shared handles must refresh bounds,
+                // visibility and uploads even when the piece layout is reused.
+                auto alias=a;
+                const kin::MeshInstance moved{Mat4f::translation({frame%2 ? -8.0f : 8.0f,1,1}),Color::rgb(70,240,180),7001};
+                alias.update(0,{&moved,1});
+                kin::MeshInstance changing{Mat4f::translation({-2+0.03f*frame,1,2}),Color::rgb(80,180,250),6001};
+                if (frame==3) {
+                    // Finite GPU positions behind the camera, but an overflowing
+                    // CPU squared scale invalidates this group's sphere bounds.
+                    // Removing the group shifts the following visible/hidden groups.
+                    changing.transform=Mat4f::translation({0,1,1000})*Mat4f::scaling({1e20f,1,1});
+                }
+                if (frame==4) changing.transform=Mat4f::translation({1000,1,1000});
+                b.update(0,{&changing,1});
+                kin::MeshInstance tail{Mat4f::translation({1000,1,1000}),kin::colors::white,6004};
+                if (frame==4) tail.transform=Mat4f::translation({0,1,1000})*Mat4f::scaling({1e20f,1,1});
+                // At frame 4 the valid-group count is unchanged, but its range
+                // changes: the red copy still needs refinement in the invalid group.
+                b.update(2,{&tail,1});
+                scene.camera=kin::Camera3D::look_at({0.03f*frame,5,9},{0,0,0},65);scene.camera.z_far=50;
+                scene.lights.spots.clear();
+                kin::SpotLight light{.position={0.03f*frame,7,0},.direction={0,-1,0},.color={20,20,20},.radius=20};
+                light.shadow.enabled=true;scene.add_spot_light(light);
+                scene.taa.enabled=frame==6 && r3d.capabilities().temporal_aa;
+                auto& target=frame==2 ? hdr : frame==4 ? msaa : view;
+                const auto image=shoot_view(renderer,r3d,target,scene);const auto st=r3d.stats();
+                std::vector<kin::u32> ids;
+                for (int y=20;y<100;y+=15) for (int x=20;x<145;x+=15) {
+                    const auto hit=r3d.pick(target,{x,y});ids.push_back(hit.hit ? hit.id : 0);
+                }
+                if (!mode) {reference.push_back(image);picks.push_back(ids);counts.push_back(st);}
+                else {
+                    assert(image.rgba==reference[frame].rgba && ids==picks[frame]);
+                    const auto& ref=counts[frame];
+                    assert(st.instances==ref.instances && st.triangles==ref.triangles && st.culled==ref.culled);
+                    assert(st.local_shadow_casters==ref.local_shadow_casters && st.local_shadow_triangles==ref.local_shadow_triangles);
+                    assert(st.retained_upload_bytes==ref.retained_upload_bytes && st.bounds_cache_rebuilt==ref.bounds_cache_rebuilt);
+                }
+                assert(st.prepared_reused==kin::u32(mode>=2 && frame!=0 && frame!=3 && frame!=4 && frame!=5));
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+        });
+    }
+    if (had) setenv("KIN_PREPARED_SCENES",saved.c_str(),1);else unsetenv("KIN_PREPARED_SCENES");
+    if (had_edits) setenv("KIN_PREPARED_BATCH_EDITS",saved_edits.c_str(),1);else unsetenv("KIN_PREPARED_BATCH_EDITS");
+}
+
+// Compare the cached camera classifier against the original scalar path through
+// partial cells, ungrouped gaps, shared edits and changes of render consumer.
+void test_gpu_cached_camera_cull() {
+    const char* old=std::getenv("KIN_CACHED_CAMERA_CULL");
+    const bool had=old!=nullptr;const std::string saved=old?old:"";
+    const char* active=std::getenv("KIN_ACTIVE_CULL_COUNTERS");
+    const bool had_active=active!=nullptr;const std::string saved_active=active?active:"";
+    std::vector<Pixels> images;
+    std::vector<std::vector<kin::u32>> picks;
+    std::vector<kin::Render3DStats> counts;
+    for (int mode=0;mode<3;++mode) {
+        setenv("KIN_CACHED_CAMERA_CULL",mode?"1":"0",1);
+        setenv("KIN_ACTIVE_CULL_COUNTERS",mode?"1":"0",1);
+        with_gpu("test_gpu_cached_camera_cull",[&](kin::Renderer2D& renderer) {
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers=2}};
+            renderer.set_job_system(mode==2?&jobs:nullptr);
+            kin::Renderer3D r3d{renderer};
+            const auto mesh=make_box(r3d,{0.2f,0.8f,0.2f});
+            const auto floor=make_box(r3d,{24,0.1f,24});
+            const kin::u8 texels[]{240,210,90,255,80,220,160,0};
+            const auto texture=renderer.create_texture_from_rgba(texels,{2,1});
+            std::vector<kin::MeshInstance> copies;
+            for (kin::u32 i=0;i<3077;++i) copies.push_back({
+                Mat4f::translation({float(i%77)*0.5f-19,0.5f,float(i/77)*0.4f-8})*
+                    Mat4f::scaling({i%2?-1.0f:1.0f,0.8f+float(i%3)*0.2f,1}),
+                kin::colors::white,i+1});
+            kin::InstanceBatch3D batch(mesh,std::move(copies),{{7,1001},{1008,1003},{2011,1001}});
+            kin::Scene3D scene;scene.lights.local_shadow_resolution=128;scene.lights.shadow_resolution=128;
+            scene.draw(floor,Mat4f::translation({0,-0.1f,0}));
+            scene.draw_instanced(batch,{.double_sided=true,.blend=kin::Blend3D::Mask,.texture=texture});
+            kin::SpotLight light{.position={0,10,0},.direction={0,-1,0},.color={15,15,15},.radius=40};
+            light.shadow.enabled=true;scene.add_spot_light(light);
+            auto view=r3d.create_view({160,120},{.pick=true});
+            auto hdr=r3d.create_view({160,120},{.hdr=true,.pick=true});
+            auto msaa=r3d.create_view({160,120},{.samples=4,.pick=true});
+            for (int frame=0;frame<8;++frame) {
+                scene.camera=kin::Camera3D::look_at({0.1f*frame,8,16},frame==3?Vec3f{0,8,100}:Vec3f{},50);
+                scene.camera.z_far=80;scene.cull=frame!=2;
+                const bool sun=frame==4||frame==6;
+                scene.lights.sun.color=sun?Vec3f{1,1,1}:Vec3f{};
+                scene.lights.shadow_area=sun?kin::Bounds3{{-30,-2,-30},{30,5,30}}:kin::Bounds3{};
+                scene.lights.shadow_cascades=frame==6?4:3;
+                scene.taa.enabled=frame==5&&r3d.capabilities().temporal_aa;
+                auto alias=batch;
+                const kin::MeshInstance moved{Mat4f::translation({frame%2?-18.0f:18.0f,1,0}),kin::colors::white,5001};
+                alias.update(9,{&moved,1});
+                auto& target=frame==1?hdr:frame==2?msaa:view;
+                const auto image=shoot_view(renderer,r3d,target,scene);const auto st=r3d.stats();
+                std::vector<kin::u32> ids;
+                for (int y=15;y<110;y+=13) for (int x=10;x<150;x+=13) {
+                    const auto hit=r3d.pick(target,{x,y});ids.push_back(hit.hit?hit.id:0);
+                }
+                if (!mode) {images.push_back(image);picks.push_back(ids);counts.push_back(st);}
+                else {
+                    assert(image.rgba==images[frame].rgba && ids==picks[frame]);
+                    const auto& ref=counts[frame];
+                    assert(st.draws==ref.draws && st.instances==ref.instances && st.triangles==ref.triangles && st.culled==ref.culled);
+                    assert(st.camera_instance_tests==ref.camera_instance_tests && st.camera_range_accepted==ref.camera_range_accepted);
+                    assert(st.shadow_casters==ref.shadow_casters && st.cascade_casters==ref.cascade_casters);
+                    assert(st.local_shadow_casters==ref.local_shadow_casters && st.local_shadow_triangles==ref.local_shadow_triangles);
+                    assert(st.retained_upload_bytes==ref.retained_upload_bytes && st.bounds_cache_rebuilt==ref.bounds_cache_rebuilt);
+                }
+                if (frame==0 && st.bounds_cache_instances) assert(st.bounds_cache_instances==3077 && st.camera_instance_tests>100);
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+        });
+    }
+    if (had) setenv("KIN_CACHED_CAMERA_CULL",saved.c_str(),1);else unsetenv("KIN_CACHED_CAMERA_CULL");
+    if (had_active) setenv("KIN_ACTIVE_CULL_COUNTERS",saved_active.c_str(),1);else unsetenv("KIN_ACTIVE_CULL_COUNTERS");
 }
 
 void test_gpu_masked_depth_prepass() {
@@ -15737,6 +16116,8 @@ int main(int argc, char** argv) {
     RUN(test_gpu_alpha_mask());
     RUN(test_gpu_masked_depth_prepass());
     RUN(test_gpu_prepared_scenes());
+    RUN(test_gpu_prepared_batch_edits());
+    RUN(test_gpu_cached_camera_cull());
     RUN(test_gpu_inverse_square());
     RUN(test_gpu_model_materials());
     RUN(test_gpu_wrap_modes());
@@ -15747,6 +16128,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());
     RUN(test_gpu_skinned_poses_and_mix());
+    RUN(test_gpu_skinned_pose_updates());
     RUN(test_gpu_skinned_culling());
     RUN(test_gpu_skinned_off_path());
     RUN(test_gpu_skinned_on_workers());
@@ -15802,6 +16184,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_spot_shadow_casters());
     RUN(test_gpu_instance_groups());
     RUN(test_gpu_retained_instances());
+    RUN(test_gpu_retained_bindings());
     RUN(test_gpu_retained_limits());
     RUN(test_gpu_cached_instance_bounds());
     RUN(test_local_shadow_spheres4());

@@ -624,15 +624,21 @@ class DrawBinder {
 public:
     explicit DrawBinder(SDL_GPURenderPass* pass, bool pages) : _pass(pass), _pages(pages) {}
 
-    // The pipeline and the vertex shader's storage buffers, unless the pipeline is bound already: true if bound now.
+    // Retained batches share pipelines but have independent instance buffers.
+    // Rebind changed storage even when the pipeline stays put; the return value
+    // still reports pipeline changes for the caller's fragment binding cache.
     bool bind_pipeline(SDL_GPUGraphicsPipeline* pipeline, SDL_GPUBuffer* const* storage, u32 count) {
-        if (pipeline == _pipeline) {
-            return false;
+        const bool changed = pipeline != _pipeline;
+        if (changed) {
+            SDL_BindGPUGraphicsPipeline(_pass, pipeline);
+            _pipeline = pipeline;
         }
-        SDL_BindGPUGraphicsPipeline(_pass, pipeline);
-        SDL_BindGPUVertexStorageBuffers(_pass, 0, storage, count);
-        _pipeline = pipeline;
-        return true;
+        if (changed || count != _storage_count || !std::equal(storage, storage + count, _storage.begin())) {
+            SDL_BindGPUVertexStorageBuffers(_pass, 0, storage, count);
+            std::copy_n(storage, count, _storage.begin());
+            _storage_count = count;
+        }
+        return changed;
     }
 
     // The mesh's vertices and, unless `indices` is given (a clustered mesh's compacted ones), its own indices.
@@ -684,6 +690,8 @@ public:
 private:
     SDL_GPURenderPass* _pass;
     SDL_GPUGraphicsPipeline* _pipeline = nullptr;
+    std::array<SDL_GPUBuffer*, 6> _storage{}; // largest vertex storage layout is skinned velocity
+    u32 _storage_count = 0;
     const GpuMesh3D* _skin_mesh = nullptr;
     SDL_GPUBuffer* _vertices = nullptr;
     const SDL_GPUBuffer* _indices = nullptr;
@@ -790,8 +798,14 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     _shadow_reach_fast = !reach || std::string_view(reach) != "0";
     const char* ranges = std::getenv("KIN_CAMERA_RANGES");
     _camera_ranges = !ranges || std::string_view(ranges) != "0";
+    const char* cached_camera = std::getenv("KIN_CACHED_CAMERA_CULL");
+    _cached_camera_cull = !cached_camera || std::string_view(cached_camera) != "0";
+    const char* active_counters = std::getenv("KIN_ACTIVE_CULL_COUNTERS");
+    _active_cull_counters = !active_counters || std::string_view(active_counters) != "0";
     const char* prepared = std::getenv("KIN_PREPARED_SCENES");
     _prepared_enabled = !prepared || std::string_view(prepared) != "0";
+    const char* batch_edits = std::getenv("KIN_PREPARED_BATCH_EDITS");
+    _prepared_batch_edits = !batch_edits || std::string_view(batch_edits) != "0";
     const char* markers = std::getenv("KIN_GPU_PASS_MARKERS");
     _gpu_markers = markers && std::string_view(markers) == "1";
     const char* masked_depth = std::getenv("KIN_MASKED_DEPTH_PREPASS");
@@ -809,6 +823,10 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     _local_pack_fast = !local_packing || std::string_view(local_packing) != "0";
     const char* bounds = std::getenv("KIN_CACHED_INSTANCE_BOUNDS");
     _cached_bounds_enabled = !bounds || std::string_view(bounds) != "0";
+    const char* incremental = std::getenv("KIN_INCREMENTAL_BOUNDS");
+    _incremental_bounds = !incremental || std::string_view(incremental) != "0";
+    const char* packing = std::getenv("KIN_PARALLEL_INSTANCE_PACKING");
+    _parallel_instance_packing = !packing || std::string_view(packing) != "0";
     const char* retained = std::getenv("KIN_RETAINED_INSTANCES");
     if (!retained || std::string_view(retained) != "0") {
         try {
@@ -4304,10 +4322,21 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     if (dirty && (table.claimed == _retained_epoch || table.upload_frame == _owner->_frame_serial)) return;
     if (dirty) {
         const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
-            for (u32 i = 0; i < draw.count; ++i) {
-                const auto record = pack_instance(ref.instances[i], draw.material.color);
-                std::memcpy(out.data() + static_cast<std::size_t>(i) * sizeof(record), &record, sizeof(record));
-            }
+            // Cycling needs a complete table, including the unchanged records.
+            // Pack independent slices directly into staging, without a CPU mirror.
+            constexpr u32 chunk = 2048;
+            const auto pack = [&](u32 first, u32 end) {
+                for (u32 i = first; i < end; ++i) {
+                    const auto record = pack_instance(ref.instances[i], draw.material.color);
+                    std::memcpy(out.data() + static_cast<std::size_t>(i) * sizeof(record), &record, sizeof(record));
+                }
+            };
+            if (_parallel_instance_packing && _owner->_jobs && draw.count >= 4 * chunk)
+                _owner->_jobs->parallel_for(static_cast<i32>((draw.count + chunk - 1) / chunk), [&](i32 task) {
+                    const u32 first = static_cast<u32>(task) * chunk;
+                    pack(first, std::min(first + chunk, draw.count));
+                });
+            else pack(0, draw.count);
         };
         _device->upload_storage_buffer(table.buffer->handle(), 0, table.buffer->size(), nullptr, true, &fill);
         table.revision = batch.revision(); table.color = draw.material.color; table.upload_frame = _owner->_frame_serial;
@@ -4337,14 +4366,16 @@ void GpuRenderer3D::cache_instance_bounds(DrawRef& ref, Render3DStats& stats) {
         _bounds_cache_grew = true;
     }
     if (table.bounds_revision != ref.draw->batch.revision()) {
-        for (u32 i = 0; i < ref.draw->count; ++i) {
+        const auto changed = _incremental_bounds ? ref.draw->batch.changed_since(table.bounds_revision)
+                                                : InstanceBatch3D::ChangedRange{0, ref.draw->count};
+        for (u32 i = changed.first; i < changed.first + changed.count; ++i) {
             Vec3f centre; f32 radius;
             sphere_of(ref.instances[i].transform, ref.center, ref.radius, centre, radius);
             table.bounds[i] = {centre.x, centre.y, centre.z, radius};
         }
         table.bounds_revision = ref.draw->batch.revision();
-        stats.bounds_cache_rebuilt += ref.draw->count;
-        stats.bounds_instance_tests += ref.draw->count;
+        stats.bounds_cache_rebuilt += changed.count;
+        stats.bounds_instance_tests += changed.count;
     }
     // Updating CPU bounds is independent of the GPU record version/material colour.
     // A later view that must stream GPU records can still use these current bounds.
@@ -4368,7 +4399,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     }
     bool reuse = eligible && _prepared_valid && keys == _prepared_keys;
     if (reuse) for (const PreparedBatch& batch : _prepared_batches) {
-        if (_refs[batch.ref].draw->batch.revision() != batch.revision) { reuse = false; break; }
+        const auto& live = _refs[batch.ref].draw->batch;
+        if ((_prepared_batch_edits ? live.layout_revision() : live.revision()) != batch.revision) { reuse = false; break; }
     }
     _prepared_valid = false;
     if (!reuse) { _refs.clear(); _prepared_batches.clear(); }
@@ -4492,7 +4524,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             if (draw.batch) {
                 if (eligible) {
                     if (_prepared_batches.size() < 128)
-                        _prepared_batches.push_back({static_cast<u32>(_refs.size()-1), draw.batch.revision()});
+                        _prepared_batches.push_back({static_cast<u32>(_refs.size()-1), _prepared_batch_edits ? draw.batch.layout_revision() : draw.batch.revision()});
                     else eligible = false;
                 }
                 retain_instances(_refs.back(), ctx);
@@ -4507,6 +4539,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                      ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
         ref.retained = ~0u;
         ref.cached_spheres = nullptr;
+        if (ref.skinned) {
+            // Only the command layout is reused. Poses, bounds, shadow membership
+            // and current/previous GPU joint tables are refreshed every render.
+            ref.skin_first = ctx.scenes[ref.scene]->skin_offsets().data() + ref.draw->skin_first;
+            ref.joints = ctx.scenes[ref.scene]->joint_matrices().data();
+            ref.joint_base = joint_base[ref.scene];
+            any_skinned = true;
+        }
         if (ref.group_count) classify_groups(ref);
         if (ref.draw->batch) {
             retain_instances(ref, ctx);
@@ -4518,7 +4558,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     stats.bounds_cache_bytes = _bounds_cache_bytes;
     stats.spatial_groups = static_cast<u32>(_cull_groups.size());
 
-    eligible = eligible && !any_skinned && _refs.size() <= 8192 && _cull_groups.size() <= 4096;
+    eligible = eligible && _refs.size() <= 8192 && _cull_groups.size() <= 4096;
     ctx.joint_total = joint_total;
     ctx.joint_base = joint_base;
 
@@ -4623,6 +4663,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                (!ref.caster || ctx.cascades <= 1) &&
                (!local_bounds || ref.cached_spheres || ref.scene != 0 || !casts_into_local(ref.draw->material) || !group.local_mask);
     };
+    // Inactive slots are never consumed. Clear each active prefix on every
+    // render, including when a later view enables more levels or cascades.
+    const auto clear_counts = [&](auto& counts, u32 active) {
+        if (!_active_cull_counters) counts.fill(0);
+        else if (active == 1) counts[0] = 0;
+        else std::fill_n(counts.begin(), active, 0u);
+    };
+    const u32 counter_cascades = _active_cull_counters ? ctx.cascades : max_shadow_cascades;
     const auto classify = [&]<bool fast>(Piece& piece) {
         const DrawRef& ref = _refs[piece.ref];
         const CullGroup* group = piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
@@ -4631,11 +4679,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         const bool save_bounds = local_bounds && !ref.cached_spheres && ref.scene == 0 && casts_into_local(ref.draw->material) && (!group || group->local_mask);
         piece.camera_tests = camera == 1 ? piece.end - piece.begin : 0;
         piece.bounds_tests = 0;
-        piece.seen.fill(0);
-        piece.extra.fill(0);
-        for (auto& cascade : piece.cascade) {
-            cascade.fill(0);
-        }
+        clear_counts(piece.seen, ref.levels);
+        clear_counts(piece.extra, ref.levels);
+        for (u32 k=0;k<counter_cascades;++k) clear_counts(piece.cascade[k], ref.levels);
         if (camera_range(piece)) {
             std::fill_n(_visible.begin() + piece.flat, piece.end - piece.begin, camera_bit);
             piece.seen[0] = piece.end - piece.begin;
@@ -4644,6 +4690,34 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         if (group && camera == 0 && sun_mask == 0 && group->local_mask == 0) {
             std::fill_n(_visible.begin() + piece.flat, piece.end - piece.begin, u8{0});
             if (any_levels) std::fill_n(_level_of.begin() + piece.flat, piece.end - piece.begin, u8{0});
+            return;
+        }
+        // Resident, single-level copies already have current spheres for local
+        // shadows. With no sun membership to produce, only camera bits remain:
+        // preserve whole-range proofs and refine partial ranges four at a time.
+        if (_cached_camera_cull && ref.cached_spheres && ref.levels == 1 &&
+            !ref.caster && !ref.skinned && !ref.clustered) {
+            const u32 n = piece.end - piece.begin;
+            u8* visible = _visible.data() + piece.flat;
+            if (camera != 1) {
+                std::fill_n(visible, n, camera == 2 ? camera_bit : u8{0});
+                piece.seen[0] = camera == 2 ? n : 0;
+                return;
+            }
+            const sphere_cull4::Test test{{ref.frustum->planes.data(), ref.frustum->count}, {}, 0, false};
+            u32 i = piece.begin;
+            for (; piece.end - i >= 4; i += 4) {
+                const u32 mask = test.mask(ref.cached_spheres + i);
+                piece.seen[0] += static_cast<u32>(std::popcount(mask));
+                for (u32 k = 0; k < 4; ++k)
+                    visible[i - piece.begin + k] = mask & (1u << k) ? camera_bit : u8{0};
+            }
+            for (; i < piece.end; ++i) {
+                const Vec4f& s = ref.cached_spheres[i];
+                const bool seen = sphere_in(*ref.frustum, {s.x, s.y, s.z}, s.w);
+                visible[i - piece.begin] = seen ? camera_bit : u8{0};
+                piece.seen[0] += seen ? 1u : 0u;
+            }
             return;
         }
         // These small subsets are per spatial piece, never per copy. Leave the
@@ -4724,12 +4798,10 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     // Each draw's copies: by level, and in each those seen, then those only the sun sees.
     for (DrawRef& ref : _refs) {
         ref.out_count = ref.out_extra = 0;
-        ref.cascade_count.fill(0);
-        ref.level_seen.fill(0);
-        ref.level_extra.fill(0);
-        for (u32 k = 0; k < max_shadow_cascades; ++k) {
-            ref.cascade_level_count[k].fill(0);
-        }
+        clear_counts(ref.cascade_count, ctx.cascades);
+        clear_counts(ref.level_seen, ref.levels);
+        clear_counts(ref.level_extra, ref.levels);
+        for (u32 k=0;k<counter_cascades;++k) clear_counts(ref.cascade_level_count[k], ref.levels);
     }
     for (const Piece& piece : _pieces) {
         stats.camera_instance_tests += piece.camera_tests;
@@ -4772,11 +4844,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         for (Piece& piece : _pieces) {
             if (piece.ref != current) {
                 current = piece.ref;
-                seen.fill(0);
-                extra.fill(0);
-                for (auto& list : in_list) {
-                    list.fill(0);
-                }
+                clear_counts(seen, _refs[current].levels);
+                clear_counts(extra, _refs[current].levels);
+                for (u32 k=0;k<counter_cascades;++k) clear_counts(in_list[k], _refs[current].levels);
             }
             const DrawRef& ref = _refs[piece.ref];
             for (u32 l = 0; l < ref.levels; ++l) {

@@ -53,7 +53,8 @@ struct InstanceBatch3D::Data {
     Mesh mesh;
     std::vector<MeshInstance> instances;
     std::vector<InstanceGroup3D> groups;
-    u64 id = 0, revision = 1;
+    u64 id = 0, revision = 1, layout_revision = 1;
+    std::array<ChangedRange, 16> changes{}; // bounded history, no per-instance dirty array
 };
 InstanceBatch3D::InstanceBatch3D(Mesh mesh, std::vector<MeshInstance> instances, std::vector<InstanceGroup3D> groups) {
     if (instances.size() > std::numeric_limits<u32>::max()) throw std::length_error("instance batch too large");
@@ -72,15 +73,35 @@ std::span<const MeshInstance> InstanceBatch3D::instances() const { return _data 
 std::span<const InstanceGroup3D> InstanceBatch3D::groups() const { return _data ? std::span<const InstanceGroup3D>(_data->groups) : std::span<const InstanceGroup3D>{}; }
 u64 InstanceBatch3D::identity() const { return _data ? _data->id : 0; }
 u64 InstanceBatch3D::revision() const { return _data ? _data->revision : 0; }
+u64 InstanceBatch3D::layout_revision() const { return _data ? _data->layout_revision : 0; }
+InstanceBatch3D::ChangedRange InstanceBatch3D::changed_since(u64 revision) const {
+    if (!_data || revision == _data->revision) return {};
+    const u32 count = static_cast<u32>(_data->instances.size());
+    if (!revision || revision > _data->revision || _data->revision - revision > _data->changes.size()) return {0, count};
+    u32 first = count, end = 0;
+    const u64 edits = _data->revision - revision;
+    for (u64 i = 0; i < edits; ++i) {
+        const auto& range = _data->changes[(_data->revision - i) % _data->changes.size()];
+        first = std::min(first, range.first);
+        end = std::max(end, range.first + range.count);
+    }
+    return {first, end - first};
+}
 void InstanceBatch3D::update(u32 first, std::span<const MeshInstance> instances) {
     if (!_data || first > _data->instances.size() || instances.size() > _data->instances.size() - first)
         throw std::out_of_range("instance batch update");
     if (instances.empty()) return;
     // Copy via memmove so a range from this batch may also be used as the source.
     std::memmove(_data->instances.data() + first, instances.data(), instances.size_bytes());
-    for (auto& group : _data->groups) if (group.first < first + instances.size() && first < group.first + group.count)
+    bool layout_changed = false;
+    for (auto& group : _data->groups) if (group.first < first + instances.size() && first < group.first + group.count) {
+        const bool was_valid = valid_bounds(group.world_bounds);
         group.world_bounds = instance_bounds(_data->mesh, std::span<const MeshInstance>(_data->instances).subspan(group.first, group.count));
+        layout_changed = layout_changed || was_valid != valid_bounds(group.world_bounds);
+    }
+    if (layout_changed) ++_data->layout_revision;
     ++_data->revision;
+    _data->changes[_data->revision % _data->changes.size()] = {first, static_cast<u32>(instances.size())};
 }
 Scene3D::DrawStamp::DrawStamp() {
     // Once per scene/move, never once per submitted draw. Address reuse cannot revive a layout.
@@ -256,6 +277,13 @@ void Scene3D::draw_particles(const ParticleSystem3D& system) {
     if (count > 0) {
         _particle_draws.push_back({system.desc.look, first, count});
     }
+}
+
+void Scene3D::update_joint_matrices(u32 first, std::span<const Mat4f> matrices) {
+    if (first > _joints.size() || matrices.size() > _joints.size() - first)
+        throw std::out_of_range("joint matrix update outside submitted poses");
+    if (!matrices.empty())
+        std::memmove(_joints.data() + first, matrices.data(), matrices.size_bytes());
 }
 
 void Scene3D::clear() {

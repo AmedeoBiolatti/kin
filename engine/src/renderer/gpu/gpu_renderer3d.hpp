@@ -681,6 +681,7 @@ private:
     std::array<PreparedKey, 2> _prepared_keys{};
     std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
     bool _prepared_enabled = true, _prepared_valid = false;
+    bool _prepared_batch_edits = true; // KIN_PREPARED_BATCH_EDITS=0: content revisions invalidate layouts
     u32 _prepared_total = 0;
     struct RetainedTable {
         u64 id = 0, revision = 0, claimed = 0, upload_frame = ~0ull;
@@ -695,8 +696,12 @@ private:
     u32 _retained_bytes = 0;
     bool _retained_enabled = false;
     bool _cached_bounds_enabled = true, _bounds_cache_grew = false;
+    bool _incremental_bounds = true; // KIN_INCREMENTAL_BOUNDS=0: refresh every sphere after an edit
+    bool _parallel_instance_packing = true; // KIN_PARALLEL_INSTANCE_PACKING=0: pack on the caller
     bool _shadow_reach_fast = true; // KIN_SHADOW_REACH=0: original directional reach tests
     bool _camera_ranges = true; // KIN_CAMERA_RANGES=0: classify every copy in accepted cells
+    bool _cached_camera_cull = true; // KIN_CACHED_CAMERA_CULL=0: general per-copy classifier
+    bool _active_cull_counters = true; // KIN_ACTIVE_CULL_COUNTERS=0: clear every LOD/cascade slot
     bool _gpu_markers = false; // KIN_GPU_PASS_MARKERS=1: external GPU profiler labels, no fence scopes
     bool _masked_depth = false; // KIN_MASKED_DEPTH_PREPASS=1: experimental cutout prepass, off by default
     bool _local_spheres4 = true; // KIN_LOCAL_SHADOW_SIMD=0: scalar sphere tests

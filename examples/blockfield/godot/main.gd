@@ -29,12 +29,14 @@ var hdr = false
 var taa = false
 var shadows = false
 var local_shadows = false
+var point_shadows = true
 var normal_map = true
 var ao = false
 var contact = false
 var ibl = false
 var dressing_path = ""
 var foliage_count = 0
+var moving_count = 0
 var transparent_count = 0
 var dressing
 var route_frame = 0
@@ -92,6 +94,7 @@ func _ready() -> void:
             "--preset": pass
             "--dressing": dressing_path = args[i + 1]
             "--foliage": foliage_count = int(args[i + 1])
+            "--moving-instances": moving_count = int(args[i + 1])
             "--transparent": transparent_count = int(args[i + 1])
             "--snapshot": snapshot_path = args[i + 1]
             "--metrics": metrics_path = args[i + 1]
@@ -113,6 +116,7 @@ func _ready() -> void:
             "--taa": taa = args[i + 1] == "1"
             "--shadows": shadows = args[i + 1] == "1"
             "--local-shadows": local_shadows = args[i + 1] == "1"
+            "--point-shadows": point_shadows = args[i + 1] == "1"
             "--normal-map": normal_map = args[i + 1] == "1"
             "--ao": ao = args[i + 1] == "1"
             "--contact": contact = args[i + 1] == "1"
@@ -139,7 +143,7 @@ func _ready() -> void:
     if taa and samples != 1:
         fail("Choose TAA or MSAA, not both")
         return
-    if shadow_resolution not in [512,1024,2048] or (local_shadows and point_count + spot_count == 0):
+    if shadow_resolution not in [512,1024,2048] or (local_shadows and not (point_shadows and point_count > 0) and spot_count == 0):
         fail("Invalid shadows")
         return
     if material_kind == "unlit" and (point_count or spot_count or shadows or local_shadows or ao):
@@ -150,6 +154,9 @@ func _ready() -> void:
         return
     if camera_mode == "ground" and (dressing_path.is_empty() or copies != 1):
         fail("Ground route needs --dressing and one terrain copy")
+        return
+    if moving_count < 0 or moving_count > foliage_count or (moving_count > 0 and camera_mode != "ground"):
+        fail("Moving instances require enough ground-route foliage")
         return
     var file = FileAccess.open(snapshot_path, FileAccess.READ)
     csv = FileAccess.open(metrics_path, FileAccess.WRITE)
@@ -187,7 +194,7 @@ func _ready() -> void:
         environment.ambient_light_energy = 1.0
         environment.ssao_enabled = ao
         environment.ssao_radius = 2.0
-        lights = Workload.make_lights(viewport, point_count, spot_count, shadows, local_shadows, shadow_resolution, extent)
+        lights = Workload.make_lights(viewport, point_count, spot_count, shadows, local_shadows, shadow_resolution, extent, point_shadows)
     if ibl: Workload.make_environment(environment)
     var world_environment = WorldEnvironment.new()
     world_environment.environment = environment
@@ -271,6 +278,10 @@ func _ready() -> void:
         if not error.is_empty():
             fail(error)
             return
+        error = dressing.configure_motion(moving_count)
+        if not error.is_empty():
+            fail(error)
+            return
     viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
     RenderingServer.viewport_set_measure_render_time(viewport.get_viewport_rid(), true)
     # Match Kin's full-size render-target copy into the final 2D framebuffer.
@@ -279,7 +290,7 @@ func _ready() -> void:
     copy.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
     copy.size = Vector2(1280, 720)
     add_child(copy)
-    csv.store_line("frame,frame_interval_ms,godot_cpu_setup_ms,godot_cpu_viewport_ms,godot_gpu_timestamp_ms,draws,triangles,video_memory_bytes,foliage_requested,transparent_requested,route_frame,godot_shadow_draws,godot_shadow_triangles")
+    csv.store_line("frame,frame_interval_ms,godot_cpu_setup_ms,godot_cpu_viewport_ms,godot_gpu_timestamp_ms,draws,triangles,video_memory_bytes,foliage_requested,transparent_requested,route_frame,godot_shadow_draws,godot_shadow_triangles,motion_update_ms")
     print("snapshot: %d chunks, %d triangles, release=%s" % [chunks, triangles, str(OS.has_feature("release"))])
     previous_usec = Time.get_ticks_usec()
 
@@ -290,6 +301,9 @@ func _process(_delta: float) -> void:
     var interval_ms = (begin - previous_usec) / 1000.0
     previous_usec = begin
     var t = float(max(0, frame - WARMUP)) / 60.0
+    var motion_begin = Time.get_ticks_usec()
+    if moving_count: dressing.animate_motion(maxi(frame - WARMUP, 0))
+    var motion_update_ms = (Time.get_ticks_usec() - motion_begin) / 1000.0 if moving_count else 0.0
     var travel = fmod(t, 12.0)
     Workload.animate_lights(lights, point_count, t, extent)
     if camera_mode == "ground":
@@ -316,10 +330,10 @@ func _process(_delta: float) -> void:
         if field_camera() and visible_triangles != triangles * copies:
             fail("Triangle stress did not submit all requested geometry: %d != %d" % [visible_triangles, triangles * copies])
             return
-        csv.store_line("%d,%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,%d" % [frame, interval_ms,
+        csv.store_line("%d,%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,%d,%f" % [frame, interval_ms,
             RenderingServer.get_frame_setup_time_cpu(), RenderingServer.viewport_get_measured_render_time_cpu(rid),
             RenderingServer.viewport_get_measured_render_time_gpu(rid), draws, visible_triangles,
-            RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED), foliage_count, transparent_count, route_frame, shadow_draws, shadow_triangles])
+            RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED), foliage_count, transparent_count, route_frame, shadow_draws, shadow_triangles, motion_update_ms])
     frame += 1
     if frame > WARMUP + measured:
         csv.close()
@@ -362,15 +376,30 @@ func _process(_delta: float) -> void:
         report["ao_requested"] = ao
         report["contact_requested"] = contact
         report["shadow_resolution"] = shadow_resolution
+        report["point_shadows_requested"] = local_shadows and point_shadows and point_count > 0
+        report["spot_shadows_requested"] = local_shadows and spot_count > 0
+        report["local_shadow_near"] = 0.025
+        report["local_shadow_depth_bits"] = 16 if viewport.positional_shadow_atlas_16_bits else 32
         report["positional_shadow_atlas_size"] = viewport.positional_shadow_atlas_size
-        report["positional_shadow_atlas_slots_per_quadrant"] = 4
-        report["positional_shadow_slot_resolution"] = viewport.positional_shadow_atlas_size / 4
-        report["point_shadow_cube_face_resolution"] = viewport.positional_shadow_atlas_size / 8
+        report["positional_shadow_atlas_slots_per_quadrant"] = 4 if point_shadows else 1
+        report["positional_shadow_slot_resolution"] = viewport.positional_shadow_atlas_size / (4 if point_shadows else 2)
+        report["point_shadow_cube_face_resolution"] = viewport.positional_shadow_atlas_size / 8 if report["point_shadows_requested"] else 0
+        if spot_count > 0:
+            var spot = lights[point_count] as SpotLight3D
+            report["spot_shadow_projection"] = "perspective"
+            report["spot_shadow_fov"] = spot.spot_angle * 2
+            report["spot_shadow_far"] = spot.spot_range
+            report["spot_shadow_resolution"] = report["positional_shadow_slot_resolution"] if spot.shadow_enabled else 0
         report["shadow_draws_last"] = shadow_draws
         report["shadow_triangles_last"] = shadow_triangles
         report["procedural_texture_bytes"] = 65536 if material_kind == "pbr" else 0
         report["dressing"] = dressing_path
         report["foliage_instances"] = foliage_count
+        report["moving_instances"] = moving_count
+        report["foliage_batch_count"] = mini(foliage_count, 64) if camera_mode == "ground" else 0
+        report["moving_first"] = dressing.moving_first if moving_count else 0
+        report["motion_upload_bytes_requested"] = dressing.motion_upload_bytes if moving_count else 0
+        if moving_count: report.merge(dressing.motion_sums())
         report["transparent_instances"] = transparent_count
         report["camera_route_frame"] = route_frame
         report["extra_texture_bytes"] = 81920 if camera_mode == "ground" else 0

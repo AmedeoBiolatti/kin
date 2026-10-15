@@ -1,5 +1,6 @@
 // Shared, bounded rendering workload for Kin and Godot. Geometry is generated once,
-// then read a chunk at a time by each engine. No streaming, edits, physics or HUD.
+// then read a chunk at a time by each engine. Optional native batch edits diagnose
+// moving geometry; there is no terrain streaming, physics or HUD.
 #include "world.hpp"
 #include "render_workload.hpp"
 #include "grove.hpp"
@@ -37,7 +38,7 @@ f64 cpu_clock(bool process) {
 f64 monotonic_ms() {
     return std::chrono::duration<f64, std::milli>(Clock::now().time_since_epoch()).count();
 }
-struct Options { std::string snapshot, generate, metrics, dressing, generate_dressing; u32 foliage = 0, transparent = 0; bool preview = false, profile_cpu = false, rebuild_scene = false, visible = false; int workers = 0; int distance = 24, measured = 900, copies = 1; f32 fov = 110; bool triangle_stress = false; blockfield::compare::Features features; };
+struct Options { std::string snapshot, generate, metrics, dressing, generate_dressing; u32 foliage = 0, transparent = 0, moving = 0; bool preview = false, profile_cpu = false, rebuild_scene = false, visible = false; int workers = 0; int distance = 24, measured = 900, copies = 1; f32 fov = 110; bool triangle_stress = false; blockfield::compare::Features features; };
 void put(std::ostream& out, u32 n) { for (int i = 0; i < 4; ++i) out.put(char(n >> (i * 8))); }
 u32 get(std::istream& in) {
     u32 n = 0; for (int i = 0; i < 4; ++i) { const int c = in.get(); if (c == EOF) throw std::runtime_error("truncated snapshot"); n |= u32(c) << (8 * i); } return n;
@@ -101,8 +102,23 @@ public:
             _scene.camera.rotation = Quatf::yaw_pitch(18 * std::sin(t * 0.21f), -28);
             _scene.camera.fov = _options.fov; _scene.camera.z_far = f32((_distance + 2) * 16);
         }
-        // Geometry and materials are static on this route. Keep their commands as
-        // the Godot scene does; only the camera and animated light rig change.
+        if (_options.moving) {
+            const f32 phase = f32(std::max(_frame - warmup, 0)) * 0.025f;
+            for (u32 i = 0; i < _options.moving; ++i) {
+                _moving_copies[i] = _moving_base[i];
+                _moving_copies[i].transform.m[12] += 4 * std::sin(phase);
+                _moving_copies[i].transform.m[13] += 2 * (1 - std::cos(phase));
+            }
+            u32 first = 0;
+            for (auto& batch : _dressing.foliage_batches) {
+                const u32 end = first + static_cast<u32>(batch.instances().size());
+                const u32 begin_edit = std::max(first, _moving_first), end_edit = std::min(end, _moving_first + _options.moving);
+                if (begin_edit < end_edit) batch.update(begin_edit - first, std::span<const MeshInstance>(_moving_copies).subspan(begin_edit - _moving_first, end_edit - begin_edit));
+                first = end;
+            }
+        }
+        // Keep geometry commands as the Godot scene does. Batch edits above use
+        // the submitted shared handle, rather than resubmitting the terrain.
         if (_options.rebuild_scene || !_scene_ready) _scene.clear();
         else { _scene.lights.points.clear(); _scene.lights.spots.clear(); }
         if (_options.features.material != "unlit") blockfield::compare::configure(_scene, _options.features, t, _options.features.camera == "ground" ? 96.0f : f32((_distance + 2) * 16));
@@ -156,12 +172,33 @@ public:
             .field("local_shadows_requested", _options.features.local_shadows).field("normal_map", _options.features.material == "pbr" && _options.features.normal_map)
             .field("ao_requested", _options.features.ao).field("contact_requested", _options.features.contact)
             .field("shadow_resolution", _options.features.shadow_resolution).field("procedural_texture_bytes", _materials.texture_bytes);
+        json.field("point_shadows_requested", _options.features.local_shadows && _options.features.point_shadows && _options.features.points > 0)
+            .field("spot_shadows_requested", _options.features.local_shadows && _options.features.spots > 0)
+            .field("local_shadow_near", f64(_options.features.shadow_near))
+            .field("local_shadow_depth_bits", _renderer ? _renderer->capabilities().depth_bits : 0);
+        if (!_scene.lights.spots.empty()) {
+            const auto& spot = _scene.lights.spots.front();
+            json.field("spot_shadow_projection", "perspective").field("spot_shadow_fov", f64(spot.outer_angle * 2))
+                .field("spot_shadow_far", f64(spot.radius))
+                .field("spot_shadow_resolution", spot.shadow.enabled ? _options.features.shadow_resolution : 0);
+        }
         json.field("dressing", _options.dressing).field("foliage_instances", _dressing.foliage_count)
             .field("transparent_instances", _dressing.transparent_count).field("camera_route_frame", _route_frame)
             .field("extra_texture_bytes", _options.features.camera == "ground" ? 81920 : 0)
             .field("extra_mesh_triangles", u64(_dressing.foliage_count) * 6 + u64(_dressing.transparent_count) * 2)
             .field("preview", _options.preview).field("renderer_workers", _jobs ? _jobs->worker_count() : 0).field("profile_cpu", _options.profile_cpu)
-            .field("static_scene_commands", !_options.rebuild_scene).field("visible_window", _options.preview || _options.visible);
+            .field("static_scene_commands", !_options.rebuild_scene).field("visible_window", _options.preview || _options.visible)
+            .field("moving_instances", _options.moving).field("moving_first", _moving_first)
+            .field("foliage_batch_count", u64(_dressing.foliage_batches.size()));
+        if (_options.moving) {
+            f64 bx=0, by=0, bz=0, x=0, y=0, z=0;
+            for (u32 i = 0; i < _options.moving; ++i) {
+                const auto& a = _moving_base[i].transform; const auto& b = _moving_copies[i].transform;
+                bx += a.m[12]; by += a.m[13]; bz += a.m[14]; x += b.m[12]; y += b.m[13]; z += b.m[14];
+            }
+            json.field("moving_base_x_sum", bx).field("moving_base_y_sum", by).field("moving_base_z_sum", bz)
+                .field("moving_x_sum", x).field("moving_y_sum", y).field("moving_z_sum", z);
+        }
         if (_renderer) {
             const auto& st = _renderer->stats();
             json.field("spatial_groups", st.spatial_groups).field("camera_instance_tests", st.camera_instance_tests).field("camera_range_accepted", st.camera_range_accepted)
@@ -239,6 +276,24 @@ private:
         }
         if (in.peek() != EOF) throw std::runtime_error("trailing snapshot data");
         if (_options.features.camera == "ground") _dressing.load(_options.dressing, _options.foliage, _options.transparent, *_renderer, ctx.renderer);
+        if (_options.moving) {
+            if (_dressing.foliage_batches.empty()) throw std::runtime_error("--moving-instances requires retained Grove batches");
+            // Group-major records: start near the middle of the grove, keeping
+            // only the changed range as an immutable animation reference.
+            _moving_first = std::min(_options.foliage - _options.moving, _options.foliage * 9 / 16);
+            u32 first = 0;
+            _moving_base.reserve(_options.moving);
+            for (const auto& batch : _dressing.foliage_batches) {
+                const u32 end = first + static_cast<u32>(batch.instances().size());
+                const u32 begin_edit = std::max(first, _moving_first), end_edit = std::min(end, _moving_first + _options.moving);
+                if (begin_edit < end_edit) {
+                    const auto records = batch.instances().subspan(begin_edit - first, end_edit - begin_edit);
+                    _moving_base.insert(_moving_base.end(), records.begin(), records.end());
+                }
+                first = end;
+            }
+            _moving_copies = _moving_base;
+        }
         if (_options.preview) _frame = warmup;
         _previous = Clock::now();
     }
@@ -246,6 +301,8 @@ private:
     Options _options; JobSystem* _jobs = nullptr; std::ofstream _csv; std::vector<Chunk> _chunks;
     blockfield::compare::Materials _materials;
     blockfield::grove::Dressing _dressing; u32 _route_frame = 0;
+    u32 _moving_first = 0;
+    std::vector<MeshInstance> _moving_base, _moving_copies;
     std::unique_ptr<Renderer3D> _renderer; View3D _view; Scene3D _scene;
     int _frame = 0, _distance = 0; u64 _triangles = 0; Clock::time_point _previous{}; bool _scene_ready = false;
 };
@@ -265,6 +322,11 @@ int main(int argc, char** argv) {
             if (a == "--preset") { value(); }
             else if (a == "--dressing") o.dressing = value();
             else if (a == "--generate-dressing") o.generate_dressing = value();
+            else if (a == "--moving-instances") {
+                const int n = std::stoi(value());
+                if (n < 0 || n > int(blockfield::grove::foliage_limit)) throw std::runtime_error("moving instance count out of range");
+                o.moving = u32(n);
+            }
             else if (a == "--foliage" || a == "--transparent") {
                 const int count = std::stoi(value());
                 if (count < 0 || count > int(a == "--foliage" ? blockfield::grove::foliage_limit : blockfield::grove::transparent_limit)) throw std::runtime_error("grove instance count out of range");
@@ -287,10 +349,11 @@ int main(int argc, char** argv) {
             else if (a == "--lights") o.features.points = u32(std::stoi(value()));
             else if (a == "--spots") o.features.spots = u32(std::stoi(value()));
             else if (a == "--shadow-resolution") o.features.shadow_resolution = u32(std::stoi(value()));
-            else if (a == "--hdr" || a == "--taa" || a == "--shadows" || a == "--local-shadows" || a == "--normal-map" || a == "--ao" || a == "--contact" || a == "--environment") {
+            else if (a == "--shadow-near") o.features.shadow_near = std::stof(value());
+            else if (a == "--hdr" || a == "--taa" || a == "--shadows" || a == "--local-shadows" || a == "--point-shadows" || a == "--normal-map" || a == "--ao" || a == "--contact" || a == "--environment") {
                 const auto v = value(); if (v != "0" && v != "1") throw std::runtime_error("boolean options require 0 or 1");
                 bool* target = a == "--hdr" ? &o.features.hdr : a == "--taa" ? &o.features.taa : a == "--shadows" ? &o.features.shadows :
-                    a == "--local-shadows" ? &o.features.local_shadows : a == "--normal-map" ? &o.features.normal_map : a == "--ao" ? &o.features.ao : a == "--contact" ? &o.features.contact : &o.features.environment;
+                    a == "--local-shadows" ? &o.features.local_shadows : a == "--point-shadows" ? &o.features.point_shadows : a == "--normal-map" ? &o.features.normal_map : a == "--ao" ? &o.features.ao : a == "--contact" ? &o.features.contact : &o.features.environment;
                 *target = v == "1";
             }
             else runtime.push_back(argv[i]);
@@ -299,6 +362,7 @@ int main(int argc, char** argv) {
         if (o.profile_cpu) throw std::runtime_error("--profile-cpu requires Linux thread/process clocks");
 #endif
         o.features.validate();
+        if (o.moving > o.foliage || (o.moving && o.features.camera != "ground")) throw std::runtime_error("moving instances require enough ground-route foliage");
         if (!o.generate_dressing.empty()) { blockfield::grove::generate(o.generate_dressing); return 0; }
         if ((o.foliage || o.transparent) && o.features.camera != "ground") throw std::runtime_error("grove instances require --camera ground");
         if (o.features.camera == "ground" && (o.dressing.empty() || o.copies != 1)) throw std::runtime_error("ground route requires --dressing FILE and one terrain copy");

@@ -6718,7 +6718,7 @@ resolution or simplify the material/lighting recipe.
 #### Grove — Kin and Godot Forward+ CPU/GPU profile (2026-10-15)
 
 The rendering/Blockfield work was committed as `70da884`, preserving the pending Summit changes separately. This profile
-uses that Kin Release build (`-O3 -DNDEBUG`), four helpers and `KIN_MASKED_DEPTH_PREPASS=1`. Godot is the existing official
+uses that Kin Release build (engine `-O2`, benchmark wrapper `-O3`, `-DNDEBUG`), four helpers and `KIN_MASKED_DEPTH_PREPASS=1`. Godot is the existing official
 4.7.2 release template, Forward+, Vulkan, safe render thread. No source build or additional engine installation was needed.
 Artifacts, scripts, CSVs, CPU samples, Nsight reports/SQLite exports, hashes and validation are under
 `/home/bamedeo/kin-bench/grove-dual-profile/` (`summary.json`, `provenance.json`, `validation.json`).
@@ -6910,7 +6910,7 @@ selecting the reference path before renderer creation. Stats/CSV/report expose `
 `comparison.json`, `measurements.json`, `summary.json`, `validation.json`, `mutation.json` and `provenance.json`. Same shared
 100k-plant Grove recipe as the corrected Forward+ comparison, 1280x720/FOV 75, no mist, PBR/IBL/HDR, sun/local shadows at
 nominal 1024, 1 sample, no TAA/AO/contact; `KIN_MASKED_DEPTH_PREPASS=1` in both paths. All previous optimisations stay enabled.
-Release/O3, CPU affinity 0–15, 300 warm-up + 1,440 measured frames/full tour. Three alternating pairs at each of 0/4 helpers,
+Release (engine `-O2`, benchmark wrapper `-O3`), CPU affinity 0–15, 300 warm-up + 1,440 measured frames/full tour. Three alternating pairs at each of 0/4 helpers,
 one heavy process at a time, with cooling between individual runs.
 
 | Median of three run summaries | Rebuild layout | Reuse layout |
@@ -6968,7 +6968,7 @@ Godot ranking. Hierarchical visibility queries/smaller partial cells remain the 
 
 #### Forward+ — multi-scale comparison after prepared-layout reuse (2026-10-15)
 
-Current Kin Release (`-O3 -DNDEBUG`), four render helpers, prepared-layout reuse and masked foliage depth enabled;
+Current Kin Release (engine `-O2`, benchmark wrapper `-O3`, `-DNDEBUG`), four render helpers, prepared-layout reuse and masked foliage depth enabled;
 Godot 4.7.2 official release template, Forward+, Vulkan and safe render thread. Kin includes the uncommitted prepared-layout
 change above, on top of `02a7796`; executable and source hashes plus the exact renderer diff identify this tested state.
 The existing Godot project limits `threading/worker_pool/max_threads` to one for RAM use. A separate four-worker control
@@ -7052,6 +7052,761 @@ The useful result is that current Kin is competitive in this rich scene and uses
 its stronger unlit geometry throughput does not remove the cost of dense foliage, visibility and shadows. New profiling or
 controlled feature toggles would be needed to attribute individual scaling costs to functions or GPU stages.
 
+#### Forward+ — common perspective spot-shadow comparison (2026-10-15)
+
+The prepared-layout implementation and preceding multi-scale comparison are committed as **`276a3f7`**, preserving the
+pending Summit work separately. Following the request for the same shadow type, this experiment changes only the comparison
+harness/configuration, not the engine renderer or shaders. The new harness changes/results remain uncommitted at this point.
+Artifacts are under `/home/bamedeo/kin-bench/matched-spot-shadows/`: scripts, exact commands, hashes, harness diff, CSVs,
+reports, images, telemetry, `summary.json`, `validation.json` and `projection-details.json`. Primary projection/format code is
+archived in `projection-sources/` from Kin and the previously saved official Godot 4.7.2 sources.
+
+**Why spot shadows.** Godot's `SHADOW_CUBE` renders six perspective faces but converts them into a dual-paraboloid atlas
+before sampling. Kin samples its six perspective faces directly. Setting the same cube-face resolution would not make their
+point-shadow representation the same. Both engines support a perspective spot depth map, so this comparison uses **one
+1024x1024 perspective spot map, with 32-bit float depth**, and disables sun and point shadows. All four point lights, the
+spot and the sun still illuminate the same 100k-plant Grove; no lights are removed to achieve the shadow match.
+
+The nominal light cone is 90 degrees full width, near 0.025, far/range 192. Kin's benchmark `--shadow-near 0.025` matches
+Godot's fixed local-shadow near plane. Kin retains its two-texel filtering guard band: the actual shadow-map FOV is about
+**90.223 degrees**, versus Godot's 90 degrees. Both are perspective maps; the matrices and filtering are not identical.
+Filtering, bias/normal offset, angular light attenuation, material shading and caster culling remain engine-specific. This
+removes the different point-shadow representations and map-size/depth-format mismatch, rather than asserting equal pixels
+or an identical shadow sampling kernel.
+
+**An additional quality mismatch in the old setup.** The default-output checks report **16-bit local-shadow atlas depth in
+Godot, 32-bit depth in Kin**. Their default screenshots and main-camera work match the previous multi-scale run exactly,
+confirming the existing recipe was retained. For the new spot-only mode, Godot explicitly selects 32-bit atlas depth and
+one slot per quadrant in a 2048-wide atlas, preserving a 1024-wide spot slot while reducing unused atlas storage. Kin's one
+spot texture is 4,194,304 bytes; Godot's complete four-slot D32 atlas is 16,777,216 bytes. These are GPU depth storage sizes,
+not application RSS. The different allocation granularity is part of each engine's implementation.
+
+**Harness and protocol.** `--point-shadows 0` disables point shadows without removing point illumination; `--shadows 0`
+disables the sun shadow, and `--local-shadows 1/0` toggles the spot. The default flags retain the old atlas layout and output.
+Reports add per-type shadow requests, nominal spot cone/projection/range, near plane and depth bits. The existing lighting
+sweep/smoke includes a `spot-shadow-only` case; matching its near plane requires the extra native `--shadow-near 0.025` option.
+No new engine feature or permanent device setting is needed.
+
+Kin Release (engine `-O2`, benchmark wrapper `-O3`), masked depth and prepared layout enabled; Godot official 4.7.2 Forward+/Vulkan, safe render thread. Both use
+four helper/pool workers and CPU affinity 0–15. Shared 3,504 terrain chunks / 3,195,550 terrain triangles, 100,000 plants,
+no mist, full FOV-75 ground route, PBR maps, HDR/IBL, four points plus one spot, one sample, no TAA/AO/contact. Each run warms
+300 frames and measures the complete 1,440-frame tour. Three paired repeats at 720p/1440p, shadow on/off: **24 timed runs**.
+Reverse engine and case order in the second repeat. One application at a time, at least 15 seconds cooling, target at most
+78 C up to 60 seconds, RSS guards 512 MiB Kin / 1,024 MiB Godot, with available-RAM and 300-second guards. Export and two
+full-tour default-identity checks are separate from these timings.
+
+| Render size | Spot shadow | Kin p50 / p95 ms | Forward+ p50 / p95 ms | Paired Kin/Godot p50 ratios |
+|---|---|---:|---:|---:|
+| 1280x720 | on | 1.127494 / 1.200262 | 1.019000 / 1.143000 | 1.0344, 1.0925, 1.1185 |
+| 1280x720 | off | 0.652229 / 0.739255 | 0.605000 / 0.681000 | 1.0711, 1.0781, 1.0874 |
+| 2560x1440 | on | 2.114919 / 2.363264 | 2.052000 / 2.267000 | 1.0119, 1.0307, 1.0247 |
+| 2560x1440 | off | 1.610716 / 1.816058 | 1.543000 / 1.750000 | 1.0408, 1.0439, 1.0440 |
+
+Values are medians of the three individual run summaries. Forward+ leads every pair. With shadows, Kin takes **3.4–11.9%
+longer at 720p**, **1.2–3.1% longer at 1440p**; median paired ratios are about 1.0925 / 1.0247. The smaller 1440p difference
+should not establish a general engine ranking on this laptop. At 1440p the matched shadow feature's median paired on-minus-off
+frame-time increase is **0.493333 ms Kin / 0.509 ms Godot**; at 720p **0.452492 / 0.418 ms**. These include CPU/GPU interaction
+and the receiving material's sampling work, not isolated GPU shadow-pass duration. Ratios/differences of run-summary medians
+can differ from these medians of paired ratios/differences.
+
+Peak application RSS across matched runs is **222.91 MiB Kin / 638.97 MiB Godot**, including loading and excluding dedicated
+VRAM. The default checks peak at 225.9/623.2 MiB and the isolated pack export at 685.5 MiB. No guard triggered. CPU-clock
+profiling and GPU capture tools were not active during measurement.
+
+**Validation.** Both default full-tour runs have exactly equal RGBA images and per-frame main-camera counts to the previous
+comparison. Every matched report agrees on the common scene/projection settings, within 1e-6 for the float near plane.
+All native measured rows have no sun shadow, exactly one local map on / zero off, and 4 MiB / zero actual local depth storage.
+Godot has no point shadow request/cube-face allocation; its atlas slot and depth-format properties confirm 1024/D32. Its
+shadow-on runs render actual shadow triangles/draws in 1,439 of 1,440 rows; the cached/buffered boundary row is permitted,
+with a strict maximum of two such rows. All shadow-off rows have zero actual shadow work. Within each engine and resolution,
+on/off main-camera draws, triangles and route counts match every row in all three repeats. First-repeat shadow-on/off images
+visibly differ: **73,511 / 79,726 RGB pixels in Kin**, **19,356 / 23,582 in Godot**, for 720p/1440p (1440p PNGs are downsampled
+by the existing harness). These prove the effect reaches the output, not equality of shadow coverage or quality between engines.
+All native measured frames reuse prepared metadata. Binary/source/asset hashes remain unchanged through measurement; Python
+syntax and whitespace checks pass.
+
+An initial spot probe was excluded and archived in `initial-check/`: an overly strict all-frames-updated assertion rejected
+the legitimate first Godot metric row. The final matrix restarted after replacing that assertion and explicitly selecting
+D32 storage; no initial-probe timing contributes to the table.
+
+**Remaining measurement limits.** Start temperatures were 73–78 C. Active-run telemetry reached 86 C; brief thermal flags
+occurred in both engines. At shadow-on 720p, sampled median clocks per repeat were 1672.5/1717.5/1702.5 MHz Kin and
+1710/1650/1665 MHz Godot; at shadow-on 1440p 1560/1560/1560 versus 1530/1530/1515 MHz. These are sparse 500 ms samples
+within whole application runs, including loading (only 2–7 qualifying samples in shadow-on runs), not clock-normalised GPU
+measurements. No clocks or power settings were changed. The comparison now shares a shadow representation, physical map
+resolution and depth format, but does not establish equal image quality or identify which internal function explains the gap.
+
+#### Grove — moving-batch profile and bounded update optimisations (2026-10-15)
+
+Following the behaviour-parity proposals, first profile the common perspective-spot scene above and add a moving-object
+variant before choosing a larger change. The static profile confirms preparation is still the caller's main work: about
+56% of sampled main-thread cycles in `cull_and_upload`, 26% in `build_local_shadows`. Its render CPU p50 is 0.884 ms on the
+caller / 1.903 ms across the render process, with 1.033 ms frame p50. These are new Kin CPU captures of the matched scene,
+not a fresh Godot comparison or evidence that the remaining cross-engine image-quality differences are resolved.
+
+**What moving geometry exposes.** Native-only `--moving-instances 1000` changes a contiguous range of the existing 100k
+plant batch, starting at record 56,250 near the grove's middle. The frame index deterministically drives translation by
+`4*sin(frame*0.025)` in X and `2*(1-cos(frame*0.025))` in Y; immutable/working records exist only for the moving range
+(about 141 KiB for two 1k-record CPU arrays on this build). Terrain, camera/light route, lighting, materials and spot-map
+settings remain the common recipe. These are moving masked plants, not a simulation/animation/skinning benchmark, and
+Godot has no corresponding moving mode in this change. The report records `moving_instances`; zero retains the old scene.
+
+Before optimisation, the 5,760-frame moving CPU capture reports frame p50 3.683 ms, caller render CPU 3.588 ms and aggregate
+render-process CPU 4.677 ms. About 86% of caller sampled cycles lie in `cull_and_upload`; 52% lie in `retain_instances`
+(including 39% in `pack_instance`) and 14% in `cache_instance_bounds`. Every measured edit repacks/uploads all **12,800,000
+bytes** of GPU instance records and recomputes **100,000** CPU spheres, despite changing only 1,000 copies. This stronger
+measured bottleneck motivated fixing the edit path before implementing the initially considered spatial hierarchy.
+
+The captures use `perf record --clockid mono -F 499 --call-graph dwarf,4096 -e cycles:u`, four helpers, CPU affinity 0–15,
+300 warm-up frames and four complete tours (5,760 measured frames). CSV monotonic timestamps delimit steady samples.
+Main-thread percentages are inclusive, so packing is already included in retention/cull totals. Helper unwind coverage is
+incomplete; no claim assigns all aggregate cycles to these main-thread groups. `*-cpu-summary.json` retains sample counts,
+period-weighted percentages, raw leaf entries and CPU-clock measurements. No GPU timestamp/profile capture was added.
+
+**Kin changes, enabled by default.**
+
+- `InstanceBatch3D::changed_since(revision)` returns the enclosing union of edits since each reader's own revision. The
+  shared batch keeps exactly 16 range pairs (**128 bytes/batch**), without a per-copy dirty array. Empty edits do not advance
+  revision; current readers get an empty range. New/unknown, future or older-than-history readers get the full batch.
+  Independent renderers/views do not consume one another's edit history.
+- Cached CPU bounds transform only that changed range. Initial fills and expired history still rebuild everything; group
+  bounds retain the existing affected-group refresh. This also applies when GPU records fall back to streaming, including
+  TAA/alpha views. `KIN_INCREMENTAL_BOUNDS=0` restores full-array refreshes for A/B checks.
+- Dirty retained GPU tables with at least 8,192 records pack directly into the existing mapped staging buffer on attached
+  renderer workers, in disjoint 2,048-record slices. Joining finishes before unmapping; tasks only pack/write records and
+  do not call SDL. No second packed CPU table, sphere array, GPU buffer, shader or render target is introduced.
+  `KIN_PARALLEL_INSTANCE_PACKING=0` restores caller-only packing. Small tables and renderers without workers keep that path.
+
+Full GPU table uploads/cycling are deliberately preserved. SDL documents that cycling leaves replacement contents
+undefined, and that overwriting referenced data without cycling is unsafe. Updating only a subrange without preserving
+unchanged records would be incorrect. Per-frame upload limits, material-colour conflicts, multiple-view fallbacks, source
+ordering, picking IDs and exact normal/tint arithmetic remain unchanged. Prepared layouts still invalidate on batch edits.
+
+**Paired measurements.** Same Release (engine `-O2`, benchmark wrapper `-O3`) binary, both switches 0 versus both 1; masked prepass and prepared layouts enabled,
+100k plants / no mist, common 1024-square D32 spot map, near 0.025, far 192, nominal full cone 90 degrees, no sun/point shadows,
+all five local lights and sun illumination retained. Four helpers unless stated, CPU affinity 0–15, 300 warm-up plus the
+complete 1,440-frame route, three repeats per case, reversed case/mode order for repeat two: **24 runs / 34,560 measured
+frames**. `--profile-cpu` clocks are enabled in both A/B modes; `perf` is absent during these timings. Runs are serial with
+15–60 second cooling, start temperatures 74–76 C, application RSS cap 512 MiB and low-available-RAM/timeout guards.
+
+| Case | Old frame p50 / p95 ms | New frame p50 / p95 ms | Median paired p50 reduction |
+|---|---:|---:|---:|
+| Static, 720p, 4 helpers | 1.038472 / 1.154507 | 1.065313 / 1.172159 | -1.21% |
+| Moving 1k, 720p, 4 helpers | 3.403918 / 3.539515 | 1.768242 / 1.958391 | 48.36% |
+| Moving 1k, 1440p, 4 helpers | 3.387710 / 3.532977 | 2.773811 / 2.979342 | 18.46% |
+| Moving 1k, 720p, no helpers | 3.664066 / 3.792684 | 3.256424 / 3.370760 | 11.65% |
+
+Frame columns are medians of the three individual run percentiles. Paired reductions are medians of individual paired
+ratios, which can differ from a ratio of those column medians. Moving 720p reductions are 47.39%, 48.71%, 48.36%; moving
+1440p reductions 18.46%, 21.08%, 17.92%; no-helper reductions 11.13%, 11.65%, 12.09%. There is **no static-scene improvement**:
+its small paired slowdowns (0.87–3.11%) accompany different boost clocks and do not establish a new Godot ranking.
+
+Moving 720p caller render CPU p50 drops **3.327416 → 1.566777 ms**, but aggregate render-process CPU rises
+**4.220744 → 4.386637 ms** (about 4%). Parallel packing improves latency rather than total CPU efficiency here. Without
+helpers, caller CPU drops 3.599814 → 3.190876 ms and aggregate CPU 3.656831 → 3.238236 ms. At 1440p caller CPU falls
+3.310593 → 1.583533 ms, aggregate rises 4.207272 → 4.378456 ms. Bounds refreshes fall from **100,000 → 1,000/frame**;
+GPU uploads remain **12,800,000 bytes/frame**. Visibility, shadow-caster selection and draw work stay identical between modes.
+
+**Memory and thermals.** Moving four-helper peak application RSS is **215.3 MiB old / 234.6 MiB new** across resolutions;
+no-helper peaks are 215.1/215.3 MiB. The static control peaks at 222.7/224.8 MiB. Thus the faster worker path has a measured
+RSS cost of about 19 MiB in this protocol, even though tracked payload capacities are equal: retained GPU records 12.8 MB,
+CPU spheres 1.6 MB, prepared layout vectors 3,854,592 bytes and logical upload staging 16 MiB. These counters do not cover
+all driver/SDL in-flight allocations; the cause of the RSS difference has not been isolated. No guard triggers.
+
+GPU boost differs with the workload and CPU/GPU overlap. Qualifying sampled median clocks are about 2460 MHz in old moving
+720p runs versus 1995–2070 MHz new; at 1440p about 2018–2055 versus 1740–1800 MHz. Active-run telemetry reaches 84 C, with
+software thermal flags in both modes. At most 2–13 qualifying 500 ms samples occur per run and include loading. These are
+paired laptop observations, not equal-clock GPU efficiency measurements; no clock/power settings were changed.
+
+**Validation.** The paired matrix checks every frame's existing rendering/work/capacity columns, except intended CPU-bound
+rebuild counters and timing/staging diagnostics. First-repeat RGBA images match exactly in every case. The static screenshot
+also matches the previous matched-spot Kin run exactly, with matching main/shadow/route work; moving changes 347,550 RGB
+pixels in the final 720p image, proving the motion mode reaches output. All 95 pre-existing SPIR-V binaries remain identical.
+
+Focused retained/bounds/limits/prepared fixtures pass on NVIDIA, including caller/worker paths, mirrored transforms,
+normal/tint/material changes, multiple views, shadow casters, TAA/alpha streaming and picking. The expanded bounds fixture
+checks disjoint shared-handle edits and 17-edit history overflow; the unit fixture covers independent readers, empty edits,
+current/future/unknown revisions and the exact history boundary. The bounds fixture passes on lavapipe (1.6 s / 322 MiB).
+A deliberate mutation skips updated sphere writes while keeping counters current: the independent **RGBA equality**
+assertion fails. Source is restored in `finally`, rebuilt and the fixture passes again.
+
+The full NVIDIA 3D suite passes in **91.8 s / 258.8 MiB peak RSS** with both optimisations, prepared layouts and masked
+depth enabled. The final moving CPU profile reports frame p50 **1.748 ms**, caller render CPU **1.605 ms** and aggregate
+render-process CPU **4.463 ms**; use the paired unprofiled-with-respect-to-perf matrix above for the improvement claim.
+Single-job builds, Python syntax checks and `git diff --check` pass. No 3D-disabled build is configured here; D3D12/Metal
+were not tested.
+
+**Remaining limits.** This fixes dynamic update latency, not static per-instance camera/light selection. No spatial
+hierarchy or GPU culling for plain retained batches was added. Full GPU uploads, prepared-layout invalidation after edits,
+feature fallbacks and existing light/table/cache budgets remain. A bounded spatial hierarchy is still the next candidate
+for the static scene; safe incremental GPU storage needs a separate design that accounts for in-flight versions and RAM.
+This change supplies no moving-scene Godot comparison, no new cross-engine pixel-quality claim and no other-backend result.
+
+Artifacts: `/home/bamedeo/kin-bench/grove-parity-hierarchy/` contains exact commands/guards/RSS, same-binary matrix, images,
+telemetry, raw perf data/samples, analyses, mutation evidence, before sources/binary, shader/source/asset hashes and scripts.
+The directory name records the initially considered hierarchy; the implemented work is the bounded dynamic update path.
+No commit created; previous pending Summit changes remain separate.
+
+
+#### Forward+ — static/moving comparison with controlled batch granularity (2026-10-15)
+
+Fresh comparison after the bounded dynamic-update changes above, including a shared motion mode in Godot. This adds a
+benchmark-only native cell-batch control and fixes a retained-buffer binding bug exposed by that control. Changes remain
+uncommitted; pending Summit work is preserved separately. Artifacts: `/home/bamedeo/kin-bench/forward-dynamic-parity/`.
+
+**The batch layout matters.** The original recipes have the same 64 spatial foliage cells but different storage:
+Kin retains one 100k-record instance table with 64 group bounds; Godot has 64 independent MultiMeshes. A small edit then
+reuploads all 100k Kin records, versus only affected Godot cells. `KIN_GROVE_CELL_BATCHES=1` makes Kin use 64 retained
+batches with the same cell boundaries/source order. The default remains one table. Native layouts must produce exactly
+equal images and camera/light selection, although draw counts differ. This is an application batching control, not a new
+engine partial-upload implementation. Existing engine retention/culling and budgets are used unchanged.
+
+Shared `--moving-instances 1000` moves group-major records **56,250–57,249**, the same range previously profiled in Kin.
+It crosses the last 14 copies of cell 35 and the first 986 of cell 36. Frame-indexed X/Y motion follows the same sine/cosine
+recipe; initial and current position sums agree across all variants within 0.005 total units per axis. Godot reads/validates
+its transform-buffer layout at setup and bulk-submits the two affected MultiMesh buffers; it does not issue 1,000 setters
+every frame. `motion_update_ms` records the GDScript loop/API wall time. This includes language/API overhead, so the moving
+case is an application-level renderer comparison, not a pure native-kernel timing. No physics or skeletal animation is added.
+
+For this motion, the dirty cell sizes are 1,562 copies each. Kin uploads **12,800,000 bytes/frame** with one table,
+**399,872 bytes/frame** with cell tables (128-byte records). Godot submits **149,952 bytes/frame** of transform-buffer
+payload (48-byte records). The latter is API input size, not a measured PCIe transfer count. Static variants upload no
+changed instance records. Both Kin layouts refresh exactly 1,000 cached spheres after each moving edit.
+
+**Protocol.** Kin Release (engine `-O2`, benchmark wrapper `-O3`), incremental bounds, parallel packing, prepared layouts and masked depth enabled; Godot official
+4.7.2 release template, Forward+/Vulkan and safe render thread. Four Kin helpers / four Godot pool workers, affinity 0–15.
+All variants use the same d32 terrain snapshot (3,504 chunks / 3,195,550 resident terrain triangles), 100k plants, no mist,
+FOV-75 complete ground route, PBR/HDR/IBL, four points plus one spot and sun illumination. Only the spot casts a shadow:
+1024-square D32 perspective map, near 0.025, far 192, nominal full cone 90 degrees; no TAA/AO/contact, one sample. The
+previously documented guard-band/filter/bias/material/culling differences remain; shared representation is not pixel-quality parity.
+
+Static/moving at 720p/1440p, three variants and three repeats: **36 timed runs / 51,840 measured frames**, each with
+300 warm-up plus the complete 1,440-frame tour. Repeat two reverses cases and variant order. One application at a time,
+15–60 seconds cooling with a 78 C target, 512 MiB Kin / 1,024 MiB Godot application guards, available-RAM and 300 s limits.
+Neither perf nor external GPU capture nor native optional CPU-clock instrumentation is active in these throughput runs.
+The Godot export is separate and uses headless mode; all measured Godot runs use X11/Vulkan, not the dummy headless renderer.
+
+| Case | Kin 1 table p50 / p95 ms | Kin 64 tables p50 / p95 ms | Forward+ 64 MultiMeshes p50 / p95 ms |
+|---|---:|---:|---:|
+| static-s1 | 1.119239 / 1.226262 | 1.057061 / 1.193029 | 1.024000 / 1.144000 |
+| moving-s1 | 1.769326 / 2.002399 | 1.256083 / 1.327793 | 1.053000 / 1.186000 |
+| static-s2 | 2.118508 / 2.363101 | 2.082820 / 2.329506 | 2.062000 / 2.273000 |
+| moving-s2 | 2.783099 / 2.996678 | 2.166293 / 2.402415 | 2.121000 / 2.354000 |
+
+Entries are medians of three individual run percentiles. Individual paired Kin/Godot p50 ratios:
+
+| Case | Kin 1 table / Godot | Kin 64 tables / Godot |
+|---|---|---|
+| static-s1 | 1.0919, 1.1485, 1.0171 | 1.0403, 1.0294, 1.0323 |
+| moving-s1 | 1.6579, 1.6803, 1.7229 | 1.2149, 1.1929, 1.1929 |
+| static-s2 | 1.0274, 1.0320, 1.0159 | 1.0101, 1.0342, 0.9949 |
+| moving-s2 | 1.3122, 1.3135, 1.3019 | 0.9971, 1.0257, 1.0183 |
+
+Godot motion-loop/API p50s (median of run medians): 1280x720: 0.152000 ms, 2560x1440: 0.150000 ms.
+These are included in Godot frame intervals, not costs to subtract to manufacture a renderer-only score.
+
+**Application memory.** Peak process RSS including loading and excluding dedicated VRAM: kin: 236.52 MiB, kin-cells: 195.01 MiB, godot: 636.93 MiB.
+The cell layout stays within the same 32 MiB / 128-table Kin live GPU cache limit. It changes allocation/upload granularity,
+not the 12.8 MB live GPU instance-record payload or scene content. GPU/driver in-flight allocations are not fully described by
+the live-table counters. Export peaks at 688.8 MiB RSS; no measurement guard triggers.
+
+**Correctness fix found before timing.** The first native cell-layout preflight submitted matching geometry counters but
+produced missing foliage. `DrawBinder::bind_pipeline` returned early for an already-bound pipeline without checking that
+the next retained batch used another instance buffer. Main, masked-depth, shadow and picking passes share this binder.
+The fix tracks up to six vertex-storage handles/counts independently of pipeline identity; the return value still reports
+only a pipeline change, preserving fragment-binding cache semantics. It adds about 56 bytes of pass-local state and no
+GPU resource, shader or scene cache. The invalid preflight is archived under `invalid-binding-probe/` and excluded from
+all timing summaries. Original one-table screenshots for both engines still match the previous spot-map comparison exactly.
+
+The new regression compares three distinct retained tables sharing mesh/material/pipeline against streamed geometry,
+with exact RGBA/picking checks, masked depth off/on, sun/local shadows, edits, AO/contact, MSAA and TAA fallback. Restoring
+the old binding behavior deliberately fails the independent picking assertion. Source is restored in `finally`, rebuilt
+and checked again. NVIDIA/lavapipe fixtures pass; the full NVIDIA 3D suite passes **101.1 s / 262.3 MiB peak RSS**.
+Other GPU backends and a 3D-disabled build were not run for this fix.
+
+**Validation.** Default motion-off images and per-frame main geometry/route match archived Kin/Godot spot-map results.
+All native 1-vs-64 first-repeat images match exactly in the four matrix cases. All measured rows match native triangles,
+copies, camera/local tests, candidates, group acceptance, cache rebuilds and retained visibility-index bytes between layouts.
+All paired scene/projection/motion settings and position sums agree; actual Godot shadow draws/triangles are positive
+in all but at most two buffered/cached boundary rows. Every native frame has exactly one spot map / 4 MiB of local depth.
+Motion changes rendered pixels in every variant/resolution, and all 95 existing SPIR-V files remain unchanged.
+
+**Interpretation and limits.** The original monolithic motion comparison includes a large avoidable batch-layout cost.
+The cell control shows how much Kin recovers using its existing API while preserving the picture. Remaining differences
+include CPU preparation, record format, draw submission, native-vs-GDScript application work, per-copy versus aggregate
+visibility, shading/shadow filtering and thermals. The comparison does not isolate their individual contributions.
+Kin still reuploads complete dirty tables and invalidates prepared layouts after edits; no incremental GPU-version
+scheme, persistent visibility hierarchy or GPU selection for ordinary retained copies was added here.
+
+Thermal/clock details are retained per run in `analyzed-runs.json`: start range 75–78 C, active-run maximum 85 C, with 142 sampled software-thermal flags across variants.
+Telemetry is sparse 500 ms whole-run data including loading, not a steady-state/equal-clock measurement. No clocks/power
+limits were changed. Small differences should not establish a universal engine ranking.
+
+Artifacts include source/binary/asset/PCK hashes, commands/RSS, matrix, CSV/PNG output, telemetry, analyses, projection and
+motion settings, initial-invalid probe, regression/mutation/full-suite evidence and reproduction scripts. No new engine
+installation or Godot source build was needed.
+
+#### Grove — prepared layouts survive batch content edits (2026-10-15)
+
+Following the controlled cell-batch Forward+ comparison, profile and optimise the remaining moving-scene CPU cost without
+changing rendering behaviour. This is a Kin-side change, enabled by default. Cell batching remains an explicit benchmark
+control (`KIN_GROVE_CELL_BATCHES=1`); it is not made the sample default here. No commit created; pending Summit work is preserved.
+
+**Profile and target.** A new 5,760-frame/four-tour capture of the 64-cell scene reports about **60%** of caller sampled
+cycles in `cull_and_upload`, **21%** in local-shadow preparation, but only **6%** in retained-table work (including packing).
+Uploads have already fallen to 399,872 bytes/frame and sphere refreshes to 1,000 copies. Every content edit nevertheless
+invalidates the prepared scene layout, reconstructing references for 3,504 terrain draws and 64 foliage batches, their
+pieces and worker partitions. The fixed command structure is not changed by these edits.
+
+**Implementation.** `InstanceBatch3D::layout_revision()` separates layout changes from `revision()` content changes.
+Batches keep their mesh, record count/storage and ordered group ranges fixed. `update()` refreshes affected bounds and
+advances the layout generation only if any group gains/loses finite, ordered bounds. The identity of the valid groups
+matters, not only their count. Invalid groups are omitted from the renderer layout, so those changes still require a rebuild.
+The generation adds **eight bytes per shared batch**, or **512 bytes** for 64 cells. No per-copy flags/array, GPU buffer,
+render target or shader is added. It is stored beside the existing identity/content revision.
+
+The existing bounded prepared cache stamps this layout generation instead of the full content revision. Scene identity,
+draw revision/storage, LOD/skinning fallbacks and 8,192-reference / 16,384-piece / 4,096-group / 128-stamp / 16 MiB limits
+remain. Camera/light frustums, group proofs, shadow selection, retained slots and content uploads/bounds still refresh
+every render. GPU tables and CPU sphere caches continue to use the content revision, so reusing metadata never reuses
+old transforms, tints or picking IDs. `KIN_PREPARED_BATCH_EDITS=0` restores the previous content-key invalidation rule;
+`KIN_PREPARED_SCENES=0` still disables prepared reuse altogether. Renderers/views do not consume shared dirty state.
+
+**Validation.** The existing prepared-scene fixture now checks that its ordinary shared-batch edit reuses the layout.
+A new 32-render fixture compares full rebuilding, the old content key, the new key, and the new key with two workers.
+It covers shared-handle motion and changed IDs, fresh camera/light proofs, HDR/MSAA/TAA transitions, multiple retained
+batches and group-validity removal/restoration, including a same-count validity swap that changes the covered ranges.
+The overflow case uses finite GPU transforms behind the camera; only the CPU squared-scale bound overflows. Visible
+neighbouring geometry must stay present. RGBA, picks, instances/triangles, local casters, GPU uploads and sphere refreshes
+match the rebuild reference. Host tests cover separate generations, repeated invalidity, empty edits and shared handles.
+
+Focused tests pass on NVIDIA, with GPU retention disabled and spatial culling disabled; the new fixture also passes on
+lavapipe (4.7 s / 374 MiB peak RSS). A deliberate mutation suppresses the layout-generation increment when group validity
+changes: the **independent RGBA/picking assertion fails**, not only the reuse counter. Source is restored in `finally`,
+rebuilt and checked again. The full NVIDIA 3D suite passes **101.4 s / 261.2 MiB**. The preflight moving image also matches
+the archived 1-table and 64-cell results exactly. Other backends and a 3D-disabled build were not run.
+
+**Paired throughput and fresh Forward+ control.** One Release (engine `-O2`, benchmark wrapper `-O3`) Kin binary, old key versus new key. All previous
+optimisations enabled, 64 cells / 100k plants, moving 1k or static, 720p/1440p, same 1024-square D32 spot-only shadow
+recipe as the preceding comparison, all lights illuminating, no mist/TAA/AO/contact, one sample. Godot is the unchanged
+official 4.7.2 Forward+ PCK from the prior comparison. Four helpers/pool workers, CPU affinity 0–15, 300 warm-up plus
+1,440 measured frames/full tour. Three repeats: 6 static Kin runs plus 18 moving old/new/Godot runs, **24 runs / 34,560
+measured frames**. Repeat two reverses case/variant order. No perf or optional native CPU-clock instrumentation in these
+throughput runs. Serial applications, 15–60 s cooling (78 C target), 512 MiB Kin / 1,024 MiB Godot RSS guards and low-RAM/time limits.
+
+| Case | Old Kin p50 / p95 ms | New Kin p50 / p95 ms | Forward+ p50 / p95 ms | Median paired Kin reduction |
+|---|---:|---:|---:|---:|
+| static720 | 1.109357 / 1.190439 | 1.098058 / 1.197943 | — | 1.23% |
+| moving720 | 1.414144 / 1.529328 | 1.231079 / 1.341619 | 1.083000 / 1.195000 | 12.95% |
+| moving1440 | 2.167460 / 2.396634 | 2.177115 / 2.417333 | 2.162000 / 2.406000 | -0.45% |
+
+Table entries are medians of individual run percentiles. Paired reductions are medians of ratios, so they can differ
+from ratios of the table medians. Individual paired frame-time reductions and new-Kin/Godot ratios:
+
+- static720: reduction 1.23%, 1.61%, -5.80%.
+- moving720: reduction 8.08%, 12.95%, 15.47%; new Kin/Godot 1.0784, 1.1232, 1.2290.
+- moving1440: reduction -0.45%, 3.24%, -2.34%; new Kin/Godot 1.0089, 0.9811, 1.0088.
+
+The median paired moving-720p reduction is **12.95%**, with all three pairs improving (8.08–15.47%).
+New Kin takes about **12.3% more frame time than Forward+ at 720p** by the median paired ratio; individual ratios
+span 1.078–1.229 as the laptop slows across repeats. At 1440p the median paired change is **0.45% worse** and the
+individual signs vary: there is no consistent gain. New Kin/Forward+ is about 1.009 there. Static timing changes are
+mixed and within variation; this optimisation targets edited batches. The results are local throughput observations,
+with thermal drift recorded below, rather than clock-normalised speedups.
+
+All new moving frames reuse their layout, while old-key moving frames rebuild and both static modes reuse.
+Every existing work/capacity column agrees per frame apart from the intended reuse counter and timing/staging diagnostics.
+First-repeat old/new RGBA is identical in each case; both engines also match their archived corresponding screenshots.
+Uploads remain 399,872 bytes/frame and cache rebuilds 1,000 spheres/frame for motion: this change removes metadata work,
+not geometry, shader work or data uploads. All 95 existing SPIR-V binaries remain identical.
+
+**CPU captures.** Separate 499 Hz user-cycle / 4 KiB DWARF captures use the monotonic CSV window and 5,760 measured frames.
+Before/after caller render CPU p50 is 1.284130 → 1.083366 ms; aggregate render-process CPU 2.374147 → 2.162277 ms.
+Caller sample shares change from about 60.4% cull/upload / 20.8% local preparation to 54.2% / 22.7%. Stage percentages are
+inclusive CPU-cycle shares, not GPU times; helper unwinding is incomplete. These separate before/after profiling runs
+locate work and show CPU-clock observations; the same-binary unprofiled matrix above supports the frame-time claim.
+
+**Memory/measurement limits.** Peak application RSS (including loading, excluding dedicated VRAM): old: 195.82 MiB, new: 194.88 MiB, godot: 639.26 MiB.
+The renderer keeps the same existing layout/stamp capacity, instance-table, sphere and staging budgets. The new persistent
+payload is eight bytes per batch, with no duplicated instance/sphere storage; RSS also includes allocator, driver and SDL
+in-flight allocations. No guard triggers. Start temperatures 76–78 C; active-run maximum 85 C; sampled software-thermal flags 108.
+Per-run clocks and sparse 500 ms whole-application telemetry are in `analyzed-runs.json`; no clock/power settings changed.
+This CPU change should not imply a GPU/shader speedup or a universal engine ranking. The common shadow representation
+still has the previously documented guard-band, filtering/bias/material and culling differences between engines.
+
+**Remaining work.** Camera and local-shadow visibility still refine ordinary retained copies on the CPU; partial spatial
+cells and per-view candidate gathering remain. Complete dirty-table GPU uploads remain, and monolithic tables still pay
+for unchanged records. LOD/skinned/oversized layouts keep fallbacks. A bounded spatial hierarchy is the next larger candidate,
+after this smaller metadata fix; no GPU selection or new hierarchy is added here.
+
+Artifacts: `/home/bamedeo/kin-bench/grove-moving-layout/` contains archived before sources/binary, raw perf/samples, exact
+commands/RSS, CPU summaries, guarded 24-run matrix, CSV/PNG/telemetry, validation/mutation evidence and reproduction scripts.
+
+#### Grove — cached camera classification and active counters (2026-10-15)
+
+Reduce the next CPU cost after prepared-layout reuse, with no new per-copy storage, hierarchy or GPU resource.
+The prior capture put about 54% of caller cycles in `cull_and_upload` and 23% in local-shadow preparation.
+A camera-only SIMD probe by itself had mixed frame-time changes within noise. The combined change below also avoids
+repeatedly clearing unused LOD/cascade slots in the classification, reduction and prefix passes.
+
+**Build-label correction.** Inspecting the actual Ninja command found that `kin_enable_release_optimizations()`
+in the root `CMakeLists.txt` appends `-O2` to the engine target after Release's `-O3`. The benchmark translation unit
+uses `-O3`, but `gpu_renderer3d.cpp` and other engine sources use effective **`-O2`**. Earlier Release/O3 labels
+described the cache setting rather than the final renderer command; they should be read with this correction.
+No compiler flags are changed during this round, so the native comparisons keep the same effective optimisation level.
+Exact command flags are archived in `compile-flags.json`. A separate, serial renderer-only O3 experiment is the next
+build-level candidate; these results must not be presented as renderer O3 measurements.
+
+**Implementation.** A draw with current cached spheres, one mesh level, no skin/cluster cut and no sun-membership
+requirement can produce its camera bits directly. Existing inside/outside group proofs fill whole ranges; partial
+ranges reuse `sphere_cull4::Test` from local-shadow gathering, four records in source order with a scalar tail.
+Its original ordered boundary/NaN comparisons and non-SSE scalar fallback remain. Camera rejection never removes
+offscreen local/moon casters: their independent gather still reads the same current spheres. Other consumers keep
+the general classifier. `KIN_CACHED_CAMERA_CULL=0` restores that classifier before renderer creation.
+
+Only active LOD/cascade counter prefixes are cleared. A later render enabling more levels/cascades clears every newly
+active slot before use. The arrays/capacities are unchanged; inactive slots are never consumed as results.
+`KIN_ACTIVE_CULL_COUNTERS=0` restores full-array clearing, with the fixed-size reference stores kept explicit.
+Both controls are on by default. Two configuration booleans and temporary SIMD state replace CPU work; no persistent
+instance mirror, sphere array, candidate cache, GPU buffer, shader or render target is added. Existing RAM budgets remain.
+
+**Validation.** A new 24-render fixture compares the previous classifier/full clearing against the combined path,
+serially and with two helpers. It uses 3,077 masked retained copies, odd cell sizes, ungrouped gaps/tails, negative scales,
+shared transform/ID edits, partial/outside camera views, culling disabled, HDR/MSAA/TAA transitions and cascades
+3 → off → 4 on the same persistent scene. Exact RGBA/picks and main/shadow work counts match. Focused checks also pass
+with camera range acceptance, spatial culling or retention disabled. The unchanged four-sphere predicate unit test passes.
+Lavapipe passes in 3.0 s / 349.0 MiB.
+A deliberate mutation inverts only the new SIMD camera decisions; the independent RGBA/picking assertion fails.
+Source is restored in `finally`, rebuilt and checked again. The full NVIDIA 3D suite passes in
+**104.9 s / 261.3 MiB**. D3D12/Metal and a 3D-disabled build were not run.
+
+**CPU profiles.** Same final Release executable (renderer O2, harness O3), both controls off/on, 499 Hz user cycles / 4 KiB DWARF, four helpers,
+300 warm-up plus 5,760 measured frames/four tours, monotonic CSV sampling window and optional native CPU clocks.
+Measured CPU-clock medians (separate profiling runs, not GPU timings):
+
+| CPU metric | Reference | Combined | Reduction |
+|---|---:|---:|---:|
+| Caller render CPU | 1.170141 ms | 1.044856 ms | 10.71% |
+| Aggregate render-process CPU | 2.350347 ms | 1.895920 ms | 19.33% |
+
+Caller sampled cycle shares change from 53.8% cull/upload / 23.3% local-shadow preparation to 49.8% / 26.0%.
+These inclusive shares are not stage wall times; helper unwinding is incomplete. The 1,000 sphere refreshes,
+399,872-byte instance-table uploads, 25,386 camera refinements and 58,189 local refinements per median frame remain.
+A refined copy still counts once even when tested as part of a SIMD group.
+
+**Unprofiled throughput / Forward+ control.** Same d32 terrain + 100k plants, 64 cell batches, moving 1k, no mist,
+PBR/HDR/IBL and all lights illuminating, one sample, no TAA/AO/contact. Same single 1024² D32 perspective spot shadow
+as the preceding comparison; no sun/point shadows. Godot uses the unchanged official 4.7.2 Forward+ PCK.
+Four helpers/pool workers, affinity 0–15, 300 warm-up + 1,440 measured frames/full tour, three repeats at 720p/1440p.
+Repeat two reverses case/variant order. A static 720p pair is a single smoke/control run only.
+There are **23 runs / 33,120 measured frames**: native old/new controls, fresh Godot and an archived pre-change
+Kin executable in every moving-720p repeat. No perf or optional native CPU-clock instrumentation in these runs.
+Serial applications, 15–60 s cooling toward 78 C, 512 MiB native / 1,024 MiB Godot RSS guards plus low-RAM/time limits.
+
+| Case | Archived Kin p50 / p95 ms | Reference Kin p50 / p95 ms | Combined Kin p50 / p95 ms | Forward+ p50 / p95 ms |
+|---|---:|---:|---:|---:|
+| static720 | — | 1.263289 / 1.335936 | 1.133637 / 1.218892 | — |
+| moving720 | 1.355200 / 1.485532 | 1.170324 / 1.284444 | 1.215948 / 1.340864 | 1.068000 / 1.200000 |
+| moving1440 | — | 2.126595 / 2.413136 | 2.114793 / 2.357637 | 2.161000 / 2.402000 |
+
+Entries are medians of individual run percentiles, except the single static pair. Per-repeat paired frame-time
+reductions (median of ratios can differ from the table) and combined-Kin/Godot ratios:
+
+- static720: reference reduction 10.26%.
+- moving720: reference reduction 4.80%, -5.37%, 7.28%; archived reduction 17.79%, -4.81%, 4.79%; Kin/Godot 1.0471, 1.1385, 0.7722.
+- moving1440: reference reduction 1.54%, 0.55%, 0.61%; Kin/Godot 0.9956, 0.9795, 0.9718.
+
+**Interpretation.** At 720p the median paired reference reduction is **4.80%**, but one repeat regresses **5.37%**
+and another improves 7.28%. Against the actual archived executable the median paired reduction is 4.79%, spanning
+a 4.81% regression to a 17.79% gain. The table medians even point the other way (1.170 → 1.216 ms) because they
+combine different parts of the drift. This is **not a stable FPS win**. At 1440p the paired reductions are only
+0.55–1.54% (median 0.61%); that is a small change relative to laptop variation.
+
+The third Godot 720p repeat is 1.822 ms versus 1.064/1.068 ms in the earlier repeats. Its motion-update p50 rises
+from 0.180/0.181 to 0.328 ms, and viewport CPU from 0.322/0.326 to 0.596 ms, while the reported GPU timestamp
+falls from 1.002/1.000 to 0.835 ms. A CPU-side slowdown is visible, but CPU clocks/contention were not sampled
+and its cause cannot be assigned from sparse GPU telemetry. Keep the outlier in the results; do not interpret
+that Kin/Godot ratio as an engine win. CPU-clock reductions and identical work/output are the strongest result
+of this step; future throughput comparisons need a steadier CPU measurement window.
+
+Every existing native work/capacity CSV column agrees per frame, excluding timing/staging diagnostics. Prepared
+reuse stays one; upload bytes, camera/shadow candidates, copy tests, sphere refreshes and indices are unchanged.
+First-repeat images match reference/combined/archived native results exactly, and both engines match their previous
+corresponding screenshots. Motion identities and position sums agree across engines. All 95 SPIR-V binaries are unchanged.
+
+**Memory and limits.** Peak application RSS (including loading, excluding dedicated VRAM): before: 226.28 MiB, old: 195.02 MiB, new: 194.89 MiB, godot: 638.33 MiB.
+No memory/time guard triggers. Start temperatures 77–78 C, active-run maximum 86 C; sampled software-thermal flags 105.
+Sparse 500 ms telemetry and per-run clocks are recorded; clock/power settings were not changed.
+RSS includes allocator, driver and SDL in-flight allocations; the source change removes no buffer storage.
+Results are local observations with laptop thermal variation, not clock-normalised engine rankings. The shadow representation
+still has the documented filtering/bias, guard-band, material and culling differences between engines.
+
+**Remaining work.** Local-shadow preparation and per-view candidate packing remain; partial cells still refine copies.
+GPU dirty-table uploads remain complete for safe buffer cycling, so monolithic tables still pay for unchanged records.
+A bounded hierarchy for partial camera/light cells is still a larger future candidate. This step changes CPU preparation,
+not shader complexity, geometry, lighting quality or the sample default batch granularity. Renderer O3 should be tested
+separately before introducing a larger cache. No commit created.
+
+Artifacts: `/home/bamedeo/kin-bench/grove-camera-cull/` holds archived source/binary, diagnostic ablations, raw perf/samples,
+exact commands/RSS, CPU summaries, guarded matrix, CSV/PNG/telemetry, validation/mutation evidence and reproduction scripts.
+
+#### Grove — isolated renderer O2/O3 test (2026-10-15)
+
+Test `-O3` only on `engine/src/renderer/gpu/gpu_renderer3d.cpp`, after correcting the earlier Release/O3 labels.
+The root Release helper remains `-O2`; the native benchmark remains `-O3`. New opt-in CMake switch
+`KIN_RENDERER3D_O3=ON` appends a final `-O3` for this source only, on GCC/Clang Release builds. It defaults to **OFF**.
+The exact Ninja flags differ only by that appended flag. No fast-math, FMA, architecture, shader, scene, worker,
+or rendering-algorithm change is introduced. GCC 15.2.0; NVIDIA RTX 4080 Laptop / Vulkan.
+
+**Isolation and memory.** Exactly one engine object rebuilt; all other engine object mtimes and all 95 SPIR-V hashes
+are unchanged. Serial O3 build: 13.2 s / 803.1 MiB peak process-tree RSS.
+Renderer machine-code sections (`.text*`): 374,326 → 512,552 bytes
+(135.0 KiB / 36.9% more).
+The complete benchmark file grows 129,480 bytes.
+No instance/sphere array, GPU buffer or render target is added. Function-size comparison shows unchanged `pack_instance`
+(665 bytes), `cull_and_upload` 17,117 → 20,051, and `build_local_shadows` 11,972 → 20,069 bytes. Larger code alone
+does not establish an instruction-cache bottleneck; cache misses were not profiled.
+
+**Correctness.** O3 passes the focused camera/prepared fixtures and lavapipe camera fixture. The full NVIDIA 3D suite
+passes in **95.6 s / 262.9 MiB**. Every native work/capacity
+CSV column matches O2 per measured frame, apart from timing and staging diagnostics. First-repeat RGBA matches exactly
+for every case, and the 720p static/moving and 1440p images also match the archived pre-test images. Bounds refreshes
+stay 1,000/frame for motion, dirty uploads 399,872 bytes/frame, prepared reuse one. No new shader/test assertion is
+introduced; this is a compiler-option experiment using existing independent image/picking/sphere tests.
+D3D12, Metal, MSVC/Clang and a 3D-disabled build were not run.
+
+**Protocol.** Same 100k-plant/d32-terrain scene, 64 cell batches, moving 1k or static, one 1024² D32 spot shadow,
+PBR/HDR/IBL/all lights illuminating, no mist/TAA/AO/contact, one sample. Both recent culling optimisations remain on.
+Two archived executables with identical basenames; one process at a time, affinity 0–15, 300 warm-up + 1,440 measured
+frames/full tour. Four pairs each at moving 720p with 4/0 helpers; two static-720p and two moving-1440p pairs.
+Those **24 runs** enable the same optional native CPU-clock instrumentation. Two additional moving-720p pairs
+(**four runs**) disable it to check unprofiled throughput. **28 runs / 40,320 measured frames** total.
+Odd repeats run O2/O3, even repeats O3/O2. Cooling is before each pair only (15–60 s toward GPU ≤78 C), not between
+its variants; reversing order balances that directional bias. RSS guards: 512 MiB applications, 2 GiB builds;
+available-RAM and 300-second process limits also remain. No GPU/CPU clock, governor or power setting is changed.
+
+Table entries are medians of individual run p50 values. Paired reductions are medians of per-pair ratios; positive
+means O3 uses less time, negative means O3 uses more. They need not equal ratios of the table medians.
+
+| Case | O2 caller / process CPU ms | O3 caller / process CPU ms | Paired caller reduction | Paired process reduction |
+|---|---:|---:|---:|---:|
+| moving720 | 0.947627 / 1.701523 | 0.927345 / 1.639239 | 2.04% | 1.87% |
+| serial720 | 1.063708 / 1.089735 | 1.078930 / 1.106174 | -1.73% | -1.92% |
+| static720 | 0.857071 / 1.592011 | 0.858110 / 1.592116 | -0.12% | 0.01% |
+| moving1440 | 0.968392 / 1.693195 | 0.968085 / 1.720033 | 0.03% | -1.61% |
+
+| Case | O2 frame p50 / p95 ms | O3 frame p50 / p95 ms | Paired frame reduction |
+|---|---:|---:|---:|
+| moving720 | 1.079149 / 1.224595 | 1.085304 / 1.220837 | -0.40% |
+| serial720 | 1.136344 / 1.196053 | 1.146413 / 1.221160 | -1.37% |
+| static720 | 1.067538 / 1.178876 | 1.059116 / 1.186557 | 0.78% |
+| moving1440 | 2.167670 / 2.407506 | 2.138739 / 2.383608 | 1.33% |
+| throughput720 | 1.089648 / 1.210612 | 1.081618 / 1.218057 | 0.73% |
+
+Individual caller/process/frame paired reductions, in repeat order:
+
+- moving720: caller -1.60%, 2.48%, 1.79%, 2.29%; process -2.55%, 4.39%, 3.07%, 0.68%; frame -0.76%, 0.38%, -1.20%, -0.03%.
+- serial720: caller -1.86%, -1.59%, -2.01%, -0.86%; process -1.90%, -2.46%, -1.93%, -1.09%; frame -1.35%, -1.43%, -1.38%, -0.39%.
+- static720: caller -0.17%, -0.07%; process 0.48%, -0.46%; frame -0.51%, 2.07%.
+- moving1440: caller -0.59%, 0.65%; process -0.06%, -3.15%; frame 0.11%, 2.55%.
+- throughput720: frame -0.54%, 2.00%.
+
+**Telemetry/limits.** Peak application RSS (including loading, excluding dedicated VRAM): O2 195.51 MiB, O3 195.67 MiB.
+GPU and CPU telemetry is sampled every 500 ms. Native-clock cases use the measured monotonic CSV window for CPU
+samples; the unprofiled controls use whole application lifetime. Frequency samples include idle selected cores and
+are not effective per-thread frequency or a basis for normalising timings. CPU busy/thermal counters are system
+observations and can include other processes. CPU package maximum 98.0 C; GPU maximum 84 C;
+selected-logical-CPU throttle-counter deltas summed across runs 17008; GPU software-thermal flag samples 111.
+Sparse telemetry and balanced order reduce some uncertainty, but do not establish a clock-normalised engine ranking.
+GPU-limited frame changes cannot be assigned to a CPU compiler flag from timing alone.
+
+**Interpretation.** Moving 720p with four helpers shows a median paired **2.04% lower caller CPU** and **1.87% lower
+process CPU** under O3, but three of four frame-time pairs are slower (median paired frame change **0.40% worse**).
+Without helpers, all four pairs are slower: median paired caller CPU **1.73% worse**, process CPU **1.92% worse**,
+frame time **1.37% worse**. Static caller CPU is effectively unchanged (0.12% worse); 1440p caller CPU is also
+unchanged (0.03% lower), despite small frame-time changes at the GPU limit. The uninstrumented 720p frame pairs
+change by **0.54% worse / 2.00% better**, which does not establish a stable throughput improvement.
+Thermal throttling is present and the differences are small. Keep the complete pair distributions rather than
+treating a ratio of table medians as a universal speedup.
+
+**Decision.** Keep the default and local build at **O2**; renderer-only O3 does not show a compelling, consistent gain
+across these cases, and increases code size. The option stays available for reproducing the experiment; it does not
+change the optimisation level of the entire engine. The final O2 executable is byte-identical to the measured O2
+baseline, and all shaders remain identical. This does not rule out benefits in other workloads or from optimising
+other translation units; no global O3 switch was tested. No commit created.
+
+Reproduce with `cmake -S . -B build -DKIN_RENDERER3D_O3=ON`, then
+`cmake --build build --target blockfield_render_compare kin_render3d_tests -j1`; use OFF to return to O2.
+Artifacts: `/home/bamedeo/kin-bench/renderer-o3/` contains both binaries/objects, exact flags, object/shader isolation
+proof, code/symbol sizes, commands/RSS, validation, 28-run CSV/PNG reports, CPU/GPU telemetry and reproduction scripts.
+
+### Industrial yard — shared many-object workload (2026-10-15)
+
+**Scope.** Add `examples/industrial_yard/` and its executable, with a separate Godot Forward+ project. Preserve the
+Grove fixture and existing renderer behavior. A deterministic binary recipe supplies exact shared mesh/texture/sky,
+camera, prop motion and skin-palette/pose data; no downloaded models or engine changes. A 1,440-frame route enters and
+leaves a warehouse and ends with an elevated yard view, following 300 stationary warm-up frames.
+
+| Tier | Independent/moving props combined | Material variants | Moving props / batches | Robots | Smoke | Points / spots |
+|---|---:|---:|---:|---:|---:|---:|
+| Small | 2,000 | 16 | 40 / 16 | 32 | 128 | 8 / 2 |
+| Medium | 8,000 | 64 | 800 / 64 | 128 | 512 | 16 / 4 |
+| Heavy | 20,000 | 128 | 5,000 / 128 | 256 | 2,000 | 16 / 8 |
+
+All tiers share 215 architectural objects (including six glass panes), ten meshes / 4,378 unique source triangles,
+five small PBR/smoke maps and a 128×64 float sky. Medium's recipe is 1,416,104 bytes and represents 4,222,448 triangles
+across all instances; this is not unique geometry or a claim that all triangles are visible. Medium motion touches all
+64 material groups and all sixteen 20×20 yard cells. Source geometry is about 180 KiB in Kin; it is freed after upload.
+
+**Controls and parity.** Independent static objects use ordinary draws/nodes; moving objects share one batch per material.
+`--motion 0` preserves those batches and stops updates. `--animation 0` keeps robot geometry and freezes poses;
+`--actors 0` separately removes robots. Glass/smoke, local shadows, structures, AO and TAA have controls. Robots use actual
+GPU skinning, with six independent root bones / rigid single-joint weights and 200 triangles per actor. They do not test
+production animation graphs, blended rigs, IK or large character meshes. Godot's GDScript bone updates and native C++
+updates have different application costs; do not call full-frame times a pure GPU or renderer comparison.
+
+Shadow targets: nominal 90° perspective spot cones, near .025, range 60, 1024² D32, no sun/point shadows. Godot uses its
+normal atlas (four 1024 slots in 2048 for Medium; sixteen 1024 slots in 4096 for Heavy's eight spots). Kin retains its
+two-texel shadow guard, roughly 90.223° actual FOV. BRDF, filtering, normal basis, environment convolution, emission and
+glass highlights visibly differ; this is matched input/workload, not pixel-identical output. Baselines disable AO/TAA;
+the AO+TAA case compares each implementation's quality/cost with its ordinary defaults, not equal algorithms.
+
+**Validation and memory.** CPU-only tests cover every tier, deterministic/bounded assets, triangle winding/tangents,
+distributed edits, nonidentity pose/palette equivalence and nine native parser mutations. Native CPU validation creates
+no GPU resources. GPU checks verify route progression, per-frame motion sums, logical populations, uploaded native skin
+matrix counts and actual shadow/geometry counters. Godot reads back MultiMesh buffers and compares baked skeleton
+vertices with the native palette at startup and after animation advances; both errors must remain below tolerance.
+Those readbacks can add an outlier to frame 302; keep it in raw CSV/timing summaries. Outside/inside PNGs are inspected.
+
+Initialize Godot MultiMeshes through the bulk buffer, as used for updates. Per-instance initialization first created an
+internal CPU cache whose dirty-resource/AABB notification ordering caused alternating cached/redrawn shadows in the
+initial no-actor probe. The corrected path refreshed moving shadows every frame in the validation runs. Initial probes
+and the motion control that changed batching were archived separately and excluded from the final comparison.
+
+Serial runs reuse the existing Linux Godot release template, with no install/download. The guard requires 2 GiB available
+at launch, stops below 1 GiB, and enforces process-tree RSS ceilings of 512 MiB Kin / 1,024 MiB Godot / 2,048 MiB build,
+with 300-second command timeouts. All scratch output lives on Linux disk, not RAM-backed `/tmp`. RSS excludes dedicated
+VRAM. Kin's Release renderer/Scene3D stay at effective O2 (`KIN_RENDERER3D_O3=OFF`); the sample main uses O3. Renderer and
+existing sample source changes from earlier experiments remain intact.
+
+**Medium results.** Three alternating-order pairs per case, 1,440 measured frames per application (48 complete runs / 69,120 measured frames). Values below are medians of the per-run statistics; frame interval includes sample code, rendering, GPU pacing and presentation.
+
+| Internal resolution | Kin p50 / p95 ms | Godot Forward+ p50 / p95 ms | Kin / Godot peak RSS MiB |
+|---|---:|---:|---:|
+| 1280×720 | 7.09 / 7.72 | 10.25 / 11.36 | 214.4 / 609.8 |
+| 2560×1440 | 7.34 / 13.90 | 9.02 / 10.09 | 244.2 / 611.7 |
+
+Baseline per-run p50 ranges: Kin 720p **6.36–7.10 ms**, 1440p **6.61–8.29 ms**; Godot 720p **8.71–11.07 ms**, 1440p **9.01–9.27 ms**. The machine is shared, with background builds/CPU tests observed and a CPU-package startup snapshot near 96°C. Clocks are unlocked and telemetry is not continuous. These are indicative application timings, not an isolated or clock-normalized engine ranking; do not assign small differences between feature cases to one feature.
+
+**The useful failure region is the wide 1440p view.** In route segments 960–1199 and 1200–1439, median-of-run-median frame times are Kin **12.03 / 12.69 ms**, Godot **8.98 / 9.17 ms**. Kin render caller CPU remains around 5–6 ms (for example 5.47 / 5.78 ms in repeat 2). The extra wall time occurs outside that CPU scope: GPU/presentation-side waits are a hypothesis, not a measured GPU pass attribution. Godot has viewport GPU timestamps; this harness has no equivalent Kin GPU timestamps. This warrants a pass/fence/present profile of those final 480 frames rather than a claim that a particular shader is responsible.
+
+| 720p control (other inputs unchanged) | Kin frame p50 ms | Godot frame p50 ms |
+|---|---:|---:|
+| All features except AO/TAA | 7.09 | 10.25 |
+| Frozen robot poses; robots retained | 5.84 | 8.74 |
+| Robots removed | 5.27 | 8.14 |
+| Rigid motion stopped; batches retained | 7.18 | 9.01 |
+| Spot shadows disabled | 4.09 | 3.64 |
+| Glass/smoke removed | 7.43 | 9.86 |
+| AO + TAA enabled | 8.26 | 9.70 |
+
+Do not add these deltas: they change different engine paths and are not simultaneous paired feature-on/off samples. In particular, removing alpha does not show a reliable Kin frame-time benefit, and Godot AO/TAA does not show a trustworthy incremental full-frame cost amid the clock/load variation. Native AO/TAA allocates 37,324,800 feature-target bytes (zero in baseline). Both implementations rendered the requested feature case and passed the same logical input/motion checks.
+
+**Current pressure points / next work.**
+
+- Kin main-pass p50 **4,208.5 draws / 2.35 M triangles**, versus Godot **592 / 2.53 M**; shadow p50 **14,509 draws / 8.09 M triangles**, versus **4,107 / 10.16 M**. Batch/culling granularity and pass counters differ; they are not forced to submit identical primitive counts. Godot batches independent objects more effectively, while its application/scene-update path is more expensive here. Inspect global opaque/shadow grouping rather than increasing triangle counts again.
+- Freezing poses reduces native scene-command construction **0.925 → 0.036 ms**, retaining all 128 robots. Prepared-layout reuse remains **0** with frozen or animated skin commands; removing actors reaches **1**. A bounded retained pose/revision API and preparation that separates static and skinned commands are concrete candidates. Keep skin history, culling and shadow invalidation correct.
+- Native per-frame p50 instance staging remains **1,338,560 bytes**, plus **102,400 retained-upload bytes** for the 800 moving props. Retaining independent static transforms/pass lists may reduce this churn; measure it before adding large caches.
+- Add Kin GPU pass/fence/present timestamps and profile the wide 1440p segments. Then isolate light-loop/shadow-filter/overdraw cost using the new fixture; current CPU counters alone cannot distinguish them.
+
+**RAM and tier checks.** Medium full-suite peak process RSS is **244.2 MiB Kin / 735.7 MiB Godot**; an initial Godot AO/TAA preflight reached **906.7 MiB**, so keep the 1 GiB guard. Short Small/Heavy outside/inside checks use 300 warm-up + 60 measured frames each, with screenshots and matching feature/motion/skin checks; they are not full-route scaling results. Heavy (20,000 props, 256 robots, 2,000 smoke cards, eight spot maps) fits at **274.3 MiB Kin / 718.2 MiB Godot**. Its outside probe is about **24.04 / 44.27 ms** Kin/Godot p50; more than triangle count changes between tiers (materials, motion, actors and shadows all increase). CPU recipe tests, all 48 Medium runs and all six tier/position pairs passed. All shadowed Medium controls perform shadow work on every measured frame; the no-shadow case performs none. No safety ceiling was increased.
+
+
+Reproduction and feature limits: [industrial yard README](../examples/industrial_yard/README.md). Artifacts:
+`/home/bamedeo/kin-bench/industrial-yard/` (exact binary/pack/source hashes, flags, commands/RSS, recipes, CSV/JSON reports,
+outside/warehouse PNGs and provisional-run archives). Build with `cmake --build build --target industrial_yard -j1`;
+the README shows serial export/run and CPU-only test commands. No commit created for this scene.
+
+### Industrial yard — p95 investigation (2026-10-15)
+
+**Finding.** The repeated wide-view tail is primarily main-pass GPU lighting work, with CPU backpressure at presentation.
+Swapchain-acquisition time is negligible in the hidden baseline. No engine, shader,
+queue-depth, clock or power setting was changed. Add only native sample diagnostic controls and option-limit tests.
+
+**Reproduction and variability.** The archived original binary now measures **5.67 / 9.73 ms p50/p95** over the full
+1440-frame 1440p route, rather than the earlier **7.34 / 13.90 ms** median-of-three baseline. An existing runtime-profile
+capture gives **5.87 / 9.81 ms**. These are fresh measurements, not an optimization: GPU clocks/power/temperature and
+other system load vary. GPU samples include roughly 1.3–2.4 GHz SM clocks and temperatures up to the high 80s during
+controls; do not assign an absolute 13.9 ms to a fixed engine cost. The final two route segments remain slower.
+
+The runtime-profile trace maps frame IDs to the native CSV (runtime index = scene index + 1). Median scene/render wall
+time is **5.82 / 6.65 ms** in route segments 960–1199 / 1200–1439, with **2.67 / 2.51 ms** in `present.backend` versus
+about .02–.03 ms in earlier segments. Swapchain acquisition (`gpu.wait`) stays around **.001 ms**. The backend's hidden
+path bounds queued frames with `hold_back_unshown_frame()` / `SDL_WaitForGPUFences`; this is GPU backpressure included
+in `present.backend`, not in `gpu.wait`. Its fence-based GPU-frame estimates are roughly **8.84 / 9.07 ms** in those
+segments, but can include CPU recording gaps and lag the scene. Preserve the two-frame throttle; dropping it would
+hide the CPU wait and allow more queued resources, without removing GPU work.
+
+**GPU timestamps.** Use existing `KIN_GPU_PASS_MARKERS=1` with Nsight Vulkan annotations and a visible, uncapped window.
+The hidden trace has CPU API events but no usable GPU workload timestamp table. Native `--visible` exits after its
+measured frames; `--warmup 8 --measured 16` keeps the capture small. Six captures have nine complete measured GPU
+marker ranges each (the profiler does not return the final seven measured ranges before shutdown), matched through
+CPU-marker correlation IDs and frame counts. These are representative short pass probes, not p95 distributions or
+clock-normalized speedups. Each successful application stays under its 512 MiB RSS guard (peak about **260 MiB**).
+
+| Capture / diagnostic change | Main GPU p50 ms | Local-shadow GPU p50 ms | Output GPU p50 ms |
+|---|---:|---:|---:|
+| Early view, full lighting | 4.338 | .860 | .092 |
+| Wide view, full lighting | 6.488 | .859 | .090 |
+| Early view, zero points | 2.124 | .860 | .095 |
+| Wide view, zero points | 3.224 | .861 | .089 |
+| Wide view, shadow reception disabled | 5.847 | .859 | .092 |
+| Wide view, glass/smoke removed | 6.221 | .860 | .104 |
+
+The wide view submits about **2.92 M** main triangles versus **3.78 M** early, yet shading takes longer. Point-light
+evaluation is the largest tested main-pass component; shadow reception is secondary here, and alpha removal changes
+main GPU time only slightly. Shadow-map generation and output remain small/stable in these probes. The point and
+reception controls retain exactly the same route, main geometry/draw counts, skin matrices, uploads, movement sums,
+four local maps, shadow draws and shadow triangles at every matching frame. Only lighting/reception changes.
+
+**Ordinary timing controls.** Three alternating-order passes over the slow 480-frame region, with the normal 300-frame
+warm-up, give the following medians of per-run statistics. CPU/clock drift (including a CPU-limited zero-point repeat)
+means these are diagnostic changes, not same-output optimization gains.
+
+| Late-region case | Frame p50 / p95 ms | Per-run p95 range ms |
+|---|---:|---:|
+| Full lighting | 9.21 / 10.42 | 10.11–10.70 |
+| Zero point lights | 7.74 / 8.17 | 6.89–9.52 |
+| Shadow reception disabled | 8.81 / 9.41 | 9.07–9.82 |
+
+Initial controls: removing all local shadows gives about **7.26 / 8.24 ms**, removing glass/smoke **9.05 / 9.87 ms**,
+and showing the normal uncapped window **9.57 / 10.42 ms**. Removing architecture gives **8.07 / 9.25 ms**, consistent
+with visible surface shading mattering, but it changes geometry too and does not isolate the floor. Do not add these
+deltas. None of these controls is behavior-parity evidence for an optimization.
+
+**First proposed same-output experiment.** In `kin_material.inc.glsl`, the point loop computes attenuation `k`, then
+calls `shade()` even when `k` is zero. Its shadow lookup is guarded, and `shade()` rejects negative N·L, but there is no
+explicit radius/zero-attenuation exit before BRDF evaluation. The spot loop already has `if (k <= 0.0) continue`.
+Broad views expose large upward-facing floor surfaces to this loop; many of the sixteen points are out of radius.
+Test an equivalent point-light early exit before BRDF work, then verify images, edge/radius behavior and timings.
+It requires no per-frame cache or additional GPU buffers. A compact light-selection mask/list is a later candidate if
+that is insufficient; shader/pass profiling comes before adding a large clustering cache. No optimization applied yet.
+
+**Validation / limits.** Defaults retain the previous recipe, 300 warm-up frames, all points and shadow reception.
+Original and diagnostic default 1440p renders produce **byte-identical presentation PNGs** at the same route frame;
+zero warm-up emits the expected frame indices. Five CPU tests pass, covering previous recipe checks plus five rejected
+profiling-option limits before GPU creation. All six repeated point/reception pairs match geometry, shadow, pose,
+upload and movement counters. Existing engine source hashes are unchanged; no engine suite rerun was needed for these
+sample-only controls.
+
+The first full-route Nsight capture was too broad: its temporary data filled the remaining ~3.6 GiB scratch space.
+It was aborted, its own temporary data removed and disk space restored; its timings are excluded. Successful captures
+use a **256 MiB temporary trace cap and a 2 GiB free-disk floor**, a separate 1 GiB profiler/export RSS ceiling and the
+unchanged 512 MiB target guard. Runs/builds stay serial and use Linux disk. Artifacts:
+`/home/bamedeo/kin-bench/industrial-yard-p95/` contains both binaries/hashes, capture/guard/analyzer scripts, six small
+GPU traces and SQL exports, GPU frame-marker CSVs, normal per-frame probes, CPU/GPU telemetry, runtime samples,
+option/image validation and source snapshots. No commit created.
+
 ### Industrial yard — zero-attenuation point-light exit (2026-10-15)
 
 **Implemented.** The shared material point loop now continues when its existing windowed attenuation is zero,
@@ -7118,6 +7873,79 @@ Godot was not rerun, so this is a Kin optimization result rather than a fresh en
 Artifacts: `/home/bamedeo/kin-bench/industrial-yard-point-exit/` contains baseline/optimized binaries and shader
 hashes, seven image pairs and channel checks, guarded commands/RSS, all CSVs, CPU/GPU telemetry, paired analyses,
 four bounded traces/SQL exports, mutation evidence and renderer validation. No commit created.
+
+### Industrial yard — retained pose updates and skinned layouts (2026-10-15)
+
+**Implemented.** `Scene3D::update_joint_matrices(first, matrices)` edits an existing fixed range between renders,
+without changing the scene's draw revision or allocating another pose palette. The destination index refers to the
+current scene's `joint_matrices()` / `skin_offsets()`; out-of-range updates throw before changing data, empty ranges
+at the end are valid, and overlapping source spans are supported. Obtain indices again after clearing submissions.
+Existing `draw_skinned` APIs still copy the initial pose and retain their behavior.
+
+The existing bounded prepared-layout cache now admits skinned commands. On reuse it refreshes scene/overlay joint
+pointers, offsets and frame bases, and still recomputes posed bounds, camera/shadow visibility, current uploads and
+TAA history. No visibility or pose result is cached. LOD and the existing reference/piece/group/batch/byte budgets
+retain their fallback paths. No new renderer field, shader, GPU buffer or target is introduced. All shader hashes
+match the baseline containing the preceding point-light optimization; renderer compilation remains O2.
+
+The yard retains its command list and updates actor joint ranges by default. Its only new application-side table is
+one 32-bit joint offset per actor: **512 bytes for 128 medium actors**, plus the vector object. `--rebuild-scene` restores
+full resubmission while actors animate. `KIN_PREPARED_SCENES=0` independently keeps the original layout-building path.
+Actor transforms/materials still use ordinary submission; this API edits joint matrices only.
+
+**Full-route timings.** Compare the archived preceding binary with the new binary using four alternating AB/BA pairs
+per resolution, 1,440 measured frames, 300 warm-up frames, four workers, affinity 0–15 and the same medium recipe/features.
+The table gives medians of per-run statistics, not a pooled distribution.
+
+| Resolution | Before p50 / p95 ms | After p50 / p95 ms | Per-pair behavior |
+|---|---:|---:|---|
+| 720p | 6.94 / 7.64 | 5.59 / 6.28 | Every pair improves p50 18.3–24.4%, p95 16.4–22.8% |
+| 1440p | 7.13 / 12.00 | 6.68 / 11.44 | Every p50 improves 2.9–20.2%; p95 is mixed |
+
+At 720p the per-run p95 ranges are **7.56–9.38 ms before / 6.05–7.24 ms after**. At 1440p they are
+**9.48–12.45 / 10.30–12.38 ms**: three paired p95 values regress **3.0–8.6%**, while one improves **15.6%**.
+The median-of-four summary hides that inconsistency. This is a CPU optimization, **not evidence that the remaining
+1440p GPU tail is fixed**. CPU-side scene-build p50 falls **.934 → .041 ms at 720p / .936 → .038 ms at 1440p**;
+render caller CPU p50 falls **5.90 → 5.42 / 5.78 → 5.19 ms**. Both camera routes and per-frame rendering work match.
+
+**Same-binary attribution.** Two reverse-order three-way passes over the early 480-frame 720p section retain the
+same images and work counters. Medians of the two per-run p50 values:
+
+| Native path | Frame ms | Scene-build ms | Renderer submit wall ms |
+|---|---:|---:|---:|
+| Full command resubmission (`--rebuild-scene`) | 6.642 | .863 | 5.721 |
+| Pose updates, layout reuse disabled | 5.806 | .038 | 5.716 |
+| Pose updates and layout reuse | 5.311 | .036 | 5.221 |
+
+Avoiding command resubmission saves about **.83 ms** in this section; layout reuse saves another **.50 ms** in
+renderer submission. Those controls isolate the stages without changing the executable, geometry, animation or lighting.
+They do not imply that a GPU-bound section must improve by their sum.
+
+**Parity and regression.** Seven archived before/after presentation images match every RGBA channel, including warehouse,
+wide, 720p and AO/TAA/contact cases. All **11,520 matching measured frame pairs** in the full-route runs match geometry,
+light/shadow, skin, movement and upload counters; only prepared reuse changes from zero to one. Six control images
+also match, with counter parity at every matching frame. The new regression compares full resubmission, retained poses
+without layout reuse, caller layout reuse and worker layout reuse over fourteen frames. It covers shared model-part
+poses, independent actor/overlay ranges, posed culling, cascaded/local cached shadows, picking, HDR/MSAA transitions,
+TAA with main/prepass velocity, draw appends, clearing, moving a scene, invalid ranges and overlapping updates.
+
+The regression passes on NVIDIA and lavapipe (**7.2 seconds / 430.9 MiB** for software Vulkan). A deliberate mutation
+that ignores the destination joint offset is rejected by the overlapping-range assertion; restoring the correct update
+passes and reproduces both measured executable hashes. The full NVIDIA `kin_render3d_tests` suite (**205 registered
+cases, GPU required**) passes in **101.7 seconds**, peaking at **262.4 MiB** under the 768 MiB test guard.
+`git diff --check` passes. D3D12 and Metal are not tested.
+
+**Memory and limits.** Normal before peaks are **214–220 MiB**, after **214–243 MiB**, below the unchanged 512 MiB
+application guard; RSS varies and these data do not establish a memory reduction. Build peak is **1,273 MiB** under
+the separate 2 GiB ceiling, with `-j1`; the initial NVIDIA regression peaks at **208 MiB** under its 768 MiB test guard.
+No large pose mirror or new cache is added; prepared metadata retains its existing budgets. Linux-disk scratch and
+serial heavy processes remain mandatory. CPU package temperatures are around **96–97°C**. Measured GPU medians are
+86–89°C, and 1440p SM clocks differ materially (**1,290 MHz before / 975 MHz after**), with background CPU load too.
+Do not treat these as fixed-clock comparisons or attribute every p95 change to the code. Godot was not rerun.
+
+Artifacts: `/home/bamedeo/kin-bench/industrial-yard-poses/` contains original/final source and executable hashes,
+guarded commands, per-frame CSVs, images, CPU/GPU telemetry, paired analyses, same-binary controls and validation.
+Measurements precede the renderer/yard checkpoint commit.
 
 ### P5 — Netcode-ready, then co-op
 
