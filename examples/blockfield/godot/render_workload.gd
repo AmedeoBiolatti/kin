@@ -97,11 +97,14 @@ static func make_lights(viewport: SubViewport, points: int, spots: int, shadows:
     sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
     sun.directional_shadow_max_distance = 900.0
     RenderingServer.directional_shadow_atlas_set_size(resolution, true)
-    viewport.positional_shadow_atlas_size = resolution * 2
-    viewport.positional_shadow_atlas_quad_0 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
-    viewport.positional_shadow_atlas_quad_1 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
-    viewport.positional_shadow_atlas_quad_2 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
-    viewport.positional_shadow_atlas_quad_3 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_1
+    # Omni shadows occupy two adjacent slots in one quadrant. A single-slot quadrant
+    # cannot allocate them. Each atlas slot is resolution squared; Godot renders cube
+    # faces at half the slot width before converting to its dual-paraboloid atlas.
+    viewport.positional_shadow_atlas_size = resolution * 4
+    viewport.positional_shadow_atlas_quad_0 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
+    viewport.positional_shadow_atlas_quad_1 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
+    viewport.positional_shadow_atlas_quad_2 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
+    viewport.positional_shadow_atlas_quad_3 = Viewport.SHADOW_ATLAS_QUADRANT_SUBDIV_4
     var colours = [Vector3(2400,1200,600),Vector3(600,1200,2400),Vector3(1200,2400,900),Vector3(2400,700,1800)]
     var lights: Array[Light3D] = []
     for i in points:

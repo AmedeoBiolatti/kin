@@ -99,6 +99,8 @@ def summarize(root, labels, frames):
                 raise RuntimeError(f'{label}: actual submitted triangles differ from {expected}')
         if label.startswith('kin-') and '-lighting-' in label:
             verify_kin_features(report, rows)
+        if label.startswith('godot-') and ('-lighting-' in label or '-grove-' in label):
+            verify_godot_features(report, rows)
         if '-grove-' in label:
             if label.startswith('kin-'):
                 verify_kin_features(report, rows)
@@ -139,6 +141,16 @@ def summarize(root, labels, frames):
     return summary
 
 
+def verify_godot_features(report, rows):
+    # Requested light flags alone cannot prove a shadow was allocated. In particular,
+    # an omni needs adjacent atlas slots; the point-shadow-only case exercises that.
+    requested = report['shadows_requested'] or report['local_shadows_requested']
+    if requested and not any(int(r['godot_shadow_draws']) > 0 and int(r['godot_shadow_triangles']) > 0 for r in rows):
+        raise RuntimeError('Requested Godot shadows did not produce draw calls/triangles')
+    if not requested and any(int(r['godot_shadow_draws']) != 0 for r in rows):
+        raise RuntimeError('Godot rendered unrequested shadows')
+
+
 def verify_kin_features(report, rows):
     for key, column in [('point_lights_requested', 'lights'), ('spot_lights_requested', 'spots')]:
         if any(int(r[column]) != report[key] for r in rows):
@@ -164,12 +176,14 @@ def lighting_cases(smoke=False):
     all_engines = ['kin', 'godot-mobile', 'godot-forward']
     cases = [('unlit', base, all_engines), ('lit', base + ['--material', 'lit'], all_engines),
              ('pbr-flat', pbr + ['--normal-map', '0'], all_engines), ('pbr-normal', pbr, all_engines),
-             ('lights', lamps, all_engines), ('sun-shadow', sun, all_engines), ('local-shadow', shadows, all_engines),
+             ('lights', lamps, all_engines),
+             ('point-shadow-only', pbr + ['--lights', '1', '--spots', '0', '--local-shadows', '1'], all_engines),
+             ('sun-shadow', sun, all_engines), ('local-shadow', shadows, all_engines),
              ('msaa4', shadows + ['--samples', '4'], all_engines),
              ('ssaa2', shadows + ['--resolution-scale', '2'], all_engines),
              ('taa', shadows + ['--taa', '1'], ['kin', 'godot-forward']),
              ('ao-contact', shadows + ['--taa', '1', '--ao', '1', '--contact', '1'], ['kin'])]
-    return [c for c in cases if c[0] in ['lights', 'local-shadow', 'msaa4', 'taa', 'ao-contact']] if smoke else cases
+    return [c for c in cases if c[0] in ['lights', 'point-shadow-only', 'local-shadow', 'msaa4', 'taa', 'ao-contact']] if smoke else cases
 
 
 

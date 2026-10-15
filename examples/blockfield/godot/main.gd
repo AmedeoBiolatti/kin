@@ -279,7 +279,7 @@ func _ready() -> void:
     copy.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
     copy.size = Vector2(1280, 720)
     add_child(copy)
-    csv.store_line("frame,frame_interval_ms,godot_cpu_setup_ms,godot_cpu_viewport_ms,godot_gpu_timestamp_ms,draws,triangles,video_memory_bytes,foliage_requested,transparent_requested,route_frame")
+    csv.store_line("frame,frame_interval_ms,godot_cpu_setup_ms,godot_cpu_viewport_ms,godot_gpu_timestamp_ms,draws,triangles,video_memory_bytes,foliage_requested,transparent_requested,route_frame,godot_shadow_draws,godot_shadow_triangles")
     print("snapshot: %d chunks, %d triangles, release=%s" % [chunks, triangles, str(OS.has_feature("release"))])
     previous_usec = Time.get_ticks_usec()
 
@@ -310,14 +310,16 @@ func _process(_delta: float) -> void:
     var rid = viewport.get_viewport_rid()
     var draws = RenderingServer.viewport_get_render_info(rid, RenderingServer.VIEWPORT_RENDER_INFO_TYPE_VISIBLE, RenderingServer.VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME)
     var visible_triangles = RenderingServer.viewport_get_render_info(rid, RenderingServer.VIEWPORT_RENDER_INFO_TYPE_VISIBLE, RenderingServer.VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME)
+    var shadow_draws = RenderingServer.viewport_get_render_info(rid, RenderingServer.VIEWPORT_RENDER_INFO_TYPE_SHADOW, RenderingServer.VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME)
+    var shadow_triangles = RenderingServer.viewport_get_render_info(rid, RenderingServer.VIEWPORT_RENDER_INFO_TYPE_SHADOW, RenderingServer.VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME)
     if frame > WARMUP:
         if field_camera() and visible_triangles != triangles * copies:
             fail("Triangle stress did not submit all requested geometry: %d != %d" % [visible_triangles, triangles * copies])
             return
-        csv.store_line("%d,%f,%f,%f,%f,%d,%d,%d,%d,%d,%d" % [frame, interval_ms,
+        csv.store_line("%d,%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,%d" % [frame, interval_ms,
             RenderingServer.get_frame_setup_time_cpu(), RenderingServer.viewport_get_measured_render_time_cpu(rid),
             RenderingServer.viewport_get_measured_render_time_gpu(rid), draws, visible_triangles,
-            RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED), foliage_count, transparent_count, route_frame])
+            RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED), foliage_count, transparent_count, route_frame, shadow_draws, shadow_triangles])
     frame += 1
     if frame > WARMUP + measured:
         csv.close()
@@ -360,6 +362,12 @@ func _process(_delta: float) -> void:
         report["ao_requested"] = ao
         report["contact_requested"] = contact
         report["shadow_resolution"] = shadow_resolution
+        report["positional_shadow_atlas_size"] = viewport.positional_shadow_atlas_size
+        report["positional_shadow_atlas_slots_per_quadrant"] = 4
+        report["positional_shadow_slot_resolution"] = viewport.positional_shadow_atlas_size / 4
+        report["point_shadow_cube_face_resolution"] = viewport.positional_shadow_atlas_size / 8
+        report["shadow_draws_last"] = shadow_draws
+        report["shadow_triangles_last"] = shadow_triangles
         report["procedural_texture_bytes"] = 65536 if material_kind == "pbr" else 0
         report["dressing"] = dressing_path
         report["foliage_instances"] = foliage_count

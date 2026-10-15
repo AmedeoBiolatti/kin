@@ -505,6 +505,14 @@ triangles, local-shadow frame medians are 3.09 ms (Kin), 6.03 ms (Mobile), 7.36 
 
 
 
+Godot reports actual shadow draw calls and triangles, alongside the requested light settings. Its positional atlas uses
+four slots per quadrant: an omni needs two adjacent slots, so one-slot quadrants silently omit point shadows. The lighting
+sweep includes a point-shadow-only case (also in `--lighting --smoke`) and rejects requested shadows that produce no work.
+`--shadow-resolution N` sets the atlas slot width; Godot renders point cube faces at `N/2` before its dual-paraboloid
+conversion, while Kin renders perspective cube faces at `N`. Projection, filtering and culling differ between engines;
+matching recipe settings does not establish identical shadow quality. Earlier Godot local-shadow results used the invalid
+one-slot layout and must not be treated as full-feature comparisons. See the dual-engine profile in `docs/3d_plan.md`.
+
 ### Ground-level grove stress scene
 
 The rendering comparison also has a frame-indexed, 24-second ground tour through the seeded terrain. A `grove` preset adds

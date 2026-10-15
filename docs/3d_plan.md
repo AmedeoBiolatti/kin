@@ -6715,6 +6715,173 @@ GPU captures/SQLite/correlation-based summaries, mutation evidence and scripts (
 `profile_target.py`, `analyze.py`, `validate.py`, `mutate.py`). No commits created. This experiment does not lower shadow
 resolution or simplify the material/lighting recipe.
 
+#### Grove — Kin and Godot Forward+ CPU/GPU profile (2026-10-15)
+
+The rendering/Blockfield work was committed as `70da884`, preserving the pending Summit changes separately. This profile
+uses that Kin Release build (`-O3 -DNDEBUG`), four helpers and `KIN_MASKED_DEPTH_PREPASS=1`. Godot is the existing official
+4.7.2 release template, Forward+, Vulkan, safe render thread. No source build or additional engine installation was needed.
+Artifacts, scripts, CSVs, CPU samples, Nsight reports/SQLite exports, hashes and validation are under
+`/home/bamedeo/kin-bench/grove-dual-profile/` (`summary.json`, `provenance.json`, `validation.json`).
+
+**A benchmark correctness finding changes the comparison.** The former Godot recipe used four one-slot positional-shadow
+atlas quadrants. An omni needs two adjacent slots in the *same* quadrant: none could be allocated. The light remained
+marked `shadow_enabled`, but its requested point shadow was absent. This was confirmed both in the GPU timeline (no omni
+shadow stage) and by an isolated point-shadow-only run. All earlier Godot local-shadow timings in this document, including
+Mobile results, omit that work and must not be treated as full-feature comparisons. Unlit and sun-only results are unaffected.
+
+The recipe now uses four slots per quadrant and a `4 * resolution` atlas, preserving `resolution` as the slot width. Actual
+shadow draw/triangle counters, atlas dimensions and point cube-face dimensions are exported. A point-shadow-only case is
+included in the lighting sweep and smoke sweep; the runner rejects a requested shadow workload that produces no shadow
+work during the measured interval. Individual frames may legitimately reuse cached maps. The installed Grove PCK was also
+updated, so a direct invocation of the previously exported comparison binary uses the corrected recipe.
+
+The allocation regression is an actual render check: with the same current measurement code, restore the old atlas layout.
+It produces **zero shadow draws/triangles**, and the validator rejects it. The corrected Forward+ case has median **899
+shadow draws / 1,682,982 shadow triangles**; Mobile also produces the same median triangle count (185 draws, different
+batching). Main camera draws/triangles and route counters match across the old/corrected Forward+ runs, while **70,678
+screenshot pixels change** when the formerly missing point shadow appears. No production renderer code was changed for this fix.
+
+**Throughput, after correcting the recipe.** Shared distance-32 snapshot (3,504 terrain chunks, 3,195,550 resident terrain
+triangles), 100,000 plants, no mist, one terrain copy, ground route/FOV 75, 1280x720, PBR/IBL/HDR, four point lights and one
+spot, sun plus local shadows, nominal shadow resolution 1024, one sample, no TAA/AO/contact. Each run warms 300 frames and
+measures the complete 1,440-frame tour. CPU affinity is 0–15. Three paired repeats alternate engine order, with cooling
+between individual runs; starting GPU temperatures were 76–77 C.
+
+| Median of three run summaries | Kin, masked prepass, 4 helpers | Godot Forward+ |
+|---|---:|---:|
+| Frame interval p50 | 1.880928 ms | 1.826 ms |
+| Frame interval p95 | 2.082729 ms | 1.958 ms |
+| Frame interval p99 | 2.175236 ms | 2.065 ms |
+| Mean frame interval | 1.911859 ms | 1.821107 ms |
+| Maximum application RSS across these runs | 226.61 MiB | 612.45 MiB |
+
+Paired p50 Kin/Godot differences were **+0.07%, +4.16%, +4.50%**. This is near parity on this workload, not evidence of a
+large engine-wide speed difference. The earlier 1.188 ms Forward+ result used the missing-point-shadow recipe. Before the
+cooling repeats, sustained corrected runs gave 2.011/1.825 ms; those numbers also mix thermal conditions.
+
+Telemetry matters on this laptop: sustained sweeps reached 87–88 C and graphics clocks around 1290 MHz. The cooled
+throughput runs mostly sampled 1665–1770 MHz; brief thermal-slowdown flags still occurred in two Godot runs. A few percent
+cannot establish a clean winner under these conditions. No clocks, power limits or cooling settings were changed.
+
+**CPU profile.** `perf record -F 499 --call-graph dwarf,4096 -e cycles:u`, sequential 5,760-frame runs. Kin's CSV monotonic
+clock selects steady samples; the Godot profiling-only script emits the measured window's `/proc/uptime` and process CPU
+counters. Both include four tours, exclude loading/warm-up, and retain raw samples. Leaf-IP output supplements call chains
+that fail to unwind on helper threads. Kin had 9,218 steady samples; Godot's release binary is stripped, so its internal
+function-level attribution is unavailable. Its built-in CPU timestamps and DSO-level samples supply the supported detail.
+
+| Kin main-thread sampled cycles, inclusive by preparation stage | Share |
+|---|---:|
+| `cull_and_upload` | 46.24% |
+| `build_local_shadows` | 38.36% |
+| Shadow pass recording | 3.64% |
+| Masked depth recording | 2.06% |
+| Main pass recording | 0.96% |
+
+These are sampled **CPU cycles**, not elapsed GPU time. The Kin profiling run used **1.790 ms of main-thread render CPU /
+3.522 ms of aggregate process render CPU per frame**, with 1.860 ms mean frame intervals. Scene-command building is already
+about 0.0008 ms; the remaining work is inside the renderer. Helper leaf samples are primarily culling, swept shadow reach
+and local caster gathering rather than idle waits. `shadow_reach::Sweep::reaches` alone accounts for about 13.85% of aggregate
+sampled cycles; incomplete helper stacks prevent assigning every such sample to an enclosing stage.
+
+The corrected Godot CPU run used approximately **1.479 ms of whole-process CPU per frame**, including driver/other threads,
+with 2.176 ms mean frame intervals in the warmer sampling run. This is a different timer boundary from Kin's render-only
+counter and must not be added to viewport CPU timers. About 76% of aggregate sampled user cycles land in the stripped Godot
+binary and 15% in NVIDIA's driver. In separate timestamp diagnostics, CPU recording averages about 1.052 ms: omni-shadow
+recording 0.265 ms, directional/spot recording 0.141 ms, frame setup 0.138 ms, directional caster culling 0.126 ms, and individual
+cube-face culls around 0.03–0.04 ms each. Those diagnostic dumps add overhead and are not throughput measurements.
+
+Godot's unprofiled cooled runs report mean viewport CPU around **0.78–0.81 ms**, setup around **0.123 ms**, and viewport GPU
+around **1.77–1.82 ms**. Its GPU timer nearly tracks the frame interval. Kin's main CPU nearly fills its frame interval.
+This supports CPU preparation as Kin's next target and GPU/shadow work as Godot's larger remaining cost in this scene.
+
+**GPU profile.** Nsight Systems 2025.1.3, Vulkan annotations and individual workloads, no CPU sampling. Captures present
+uncapped frames (Kin `--visible`; a Godot profiling-only `force_draw(true, ...)`) so Nsight resets its timestamp allocation.
+The initial offscreen Godot probe exceeded Nsight's 8,192-timestamp limit and is retained only as a failed/legacy probe.
+Godot needs `--verbose` to emit release-build GPU debug labels. Both usable cooled captures have 1,433 complete measured
+frames after correlation with CPU marker ordinals; seven buffered tail frames are omitted. No overflow or error diagnostics
+occur in these captures. The profiler warns that the machine's Vulkan runtime is newer than its supported version; recently
+added API calls may be absent from API counts.
+
+| Raw mean GPU capture duration | Kin | Godot Forward+ |
+|---|---:|---:|
+| Render submission enclosing the main pass | 1.449 ms | 1.963 ms |
+| Sun + local shadow render labels | 0.024 + 0.768 ms | 1.009 ms combined |
+| Depth prepass | 0.120 ms, masked foliage | 0.213 ms, full scene |
+| Main/opaque render label | 0.311 ms | 0.452 ms |
+| Main start through submission completion | 0.536 ms | 0.483 ms |
+| Light cluster copy/draw/compute labels | none | 0.017 / 0.044 / 0.006 ms |
+
+GPU label durations can overlap and include dependencies; they are not additive shader costs. In particular, Kin's output
+label (0.200 ms) includes late fragment completion, and Godot's empty transparent-pass label (0.104 ms) also carries prior
+work. The previous no-HDR control already showed the Kin wait migrating into the final copy. Neither is evidence that
+simple tone mapping or zero transparent objects intrinsically cost those amounts.
+
+Do not use the raw GPU totals to claim greater shader efficiency: the sampled median graphics clocks were **2220 MHz for
+Kin / 1740 MHz for Godot** in these captures, and their annotation/timestamp counts differ. CPU/GPU overlap and differing
+capture/presentation paths also matter. The useful finding is the location of costs within each renderer.
+
+CPU Vulkan API timing gives a further cross-check: Godot spends about 0.074 ms/frame in `vkWaitForFences` in the visible
+capture, versus 0.0013 ms for Kin. Both have about 0.07–0.08 ms in uncapped presentation. Kin issues about 1,166 descriptor
+updates/frame, but their measured driver CPU total is only **0.020 ms/frame**; descriptor reuse is a secondary target,
+rather than an explanation for the much larger preparation cost. Counts cover the APIs this profiler supports.
+
+**Controlled depth test.** With the corrected Godot recipe, toggle only its built-in depth-prepass setting in the profiling
+PCK. Two alternating cooled pairs give p50s **1.834 / 1.820 ms on**, **3.440 / 3.489 ms off**: roughly **47% lower frame time**
+with the full prepass. The first pair's final RGBA screenshots match exactly (zero changed pixels). This confirms substantial
+cutout/opaque overdraw sensitivity. Kin's new masked prepass addresses much of the same issue; this result does **not** imply
+that adding opaque terrain to Kin's existing masked prepass would give another 47% gain.
+
+Other two-pair controls were run in the thermally warm sweep. Medians (Kin/Godot ms): no local shadows **1.249/1.004**;
+no shadows **0.935/0.754**; no plants **1.340/1.366**; no local lights or shadows **0.928/0.564**; 2x render dimensions
+(**four times the pixels**) **3.672/3.803**. These are diagnostics, not deltas to subtract from the cooled baseline. The
+terrain-lit sweep does not establish an improvement. A single generic triangle count or main shader instruction count
+cannot explain the performance of this scene.
+
+**What Godot does differently, and proposals.** Godot keeps persistent scene geometry in a spatial BVH and queries that
+structure for shadow views. A MultiMesh is culled by its aggregate box, trading finer CPU work for extra GPU copies.
+Kin's median main triangle count is about 377,614 versus Godot's 406,732, despite similar camera draw counts (219/210).
+Kin still refines about 25,386 camera copies and 162,452 local-shadow candidates per frame. Its coarse-cell acceptance already
+helps, but the remaining partial cells and rebuilding per-frame draw/task metadata are substantial.
+
+1. **Retain view-independent renderer preparation for unchanged scenes.** Keep mesh/material classification, draw metadata
+   and task structure until scene edits invalidate them; continue refreshing camera/light visibility. Reuse the existing
+   vectors and bound any cache. Target the 46%/38% CPU preparation groups, rather than the already negligible scene builder.
+2. **Add a hierarchy over persistent draw/batch bounds and refine smaller foliage cells.** Query camera and light volumes
+   before iterating all terrain draws or individual copies. Test 128/256 cells against the current 64, with bounded metadata
+   and no second transform/sphere array. Preserve offscreen casters and image/picking equivalence. Godot's coarser culling is
+   evidence for reducing CPU refinement, not permission to drop visible geometry or shadows.
+3. **Extend GPU culling to ordinary retained instance batches.** The existing GPU cut handles clustered meshes, not these
+   plain plants. Compact per-view indices and indirect counts on the GPU within a strict buffer budget, retaining scalar
+   fallbacks and stable IDs. Avoid duplicating CPU instance tables per light. This is a larger engine change, justified only
+   if simpler persistent metadata/hierarchy changes leave per-copy selection dominant.
+4. **Measure an optional opaque + masked main-depth prepass.** Use the existing depth target and test high-overdraw/high-pixel
+   scenes. Godot's depth toggle supports the mechanism, but extra CPU draws can hurt Kin's current bottleneck. Keep it opt-in
+   unless paired timings and exact images support a broader default.
+5. **Then specialize lit cutout/material/light paths and reduce binding work.** Profile foliage separately from terrain PBR;
+   remove unused maps/branches and consider clustered light assignment at larger light counts. Five broad lights do not prove
+   clustering will help Kin here. Descriptor-update API time and command recording are presently small, so neither should
+   displace the preparation work above. No proposed speedup is claimed without implementing and measuring it.
+
+**Comparison boundaries and validation.** The shared scene recipe is not pixel-identical across engines. In particular,
+Godot's 1024-wide positional atlas slots use **512-square point cube faces** before dual-paraboloid conversion; Kin uses
+**1024-square perspective cube faces** directly. Filtering, sun projection, culling and shadow caching differ. Record these
+physical dimensions rather than treating a shared nominal `--shadow-resolution` value as equal shadow quality.
+
+All 27 current Forward+ result CSVs passed actual shadow-work checks; the isolated point-only allocation regression passes
+on Forward+ and Mobile and fails under the restored old layout. The post-commit Kin masked-prepass GPU fixture passed,
+Python syntax/diff checks passed, and all 94 pre-existing SPIR-V hashes remain unchanged after trimming two trailing blank
+lines for the commit. The original full Kin GPU suite/lavapipe/image validations are recorded in the preceding section.
+
+One heavy process at a time throughout, serial builds, Linux-disk artifacts, guarded target processes and RSS/available-memory
+timeouts. Cooled applications peak at 227/613 MiB rounded up; GPU capture targets at about 238/708 MiB, the legacy-mutation
+export at 689 MiB, and the cold no-depth shader control at 681 MiB. The Nsight parent itself is only about 47 MiB and is not
+reported as game RSS. No new per-instance cache, render target or renderer allocation was introduced by this profiling work.
+
+Primary implementation references for the Godot interpretation (4.7.2 source, also saved in the artifact directory):
+[atlas allocation](https://github.com/godotengine/godot/blob/4.7.2-stable/servers/rendering/renderer_rd/storage_rd/light_storage.cpp),
+[depth/shadow ordering and cube-face size](https://github.com/godotengine/godot/blob/4.7.2-stable/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp),
+[scene and shadow BVH queries](https://github.com/godotengine/godot/blob/4.7.2-stable/servers/rendering/renderer_scene_cull.cpp).
+
 ### P5 — Netcode-ready, then co-op
 
 *P5a (inside P4):* keep the rules honest: a fixed-step simulation reading input commands, no

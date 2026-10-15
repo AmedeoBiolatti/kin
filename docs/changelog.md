@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- Fix Blockfield's Godot positional-shadow atlas allocation: omni shadows need adjacent slots and were silently omitted
+  by single-slot quadrants. Export actual shadow draw/triangle counts and atlas dimensions, and validate a point-shadow-only
+  lighting case. Record a fresh Kin/Forward+ CPU/GPU profile and mark earlier local-shadow comparisons as incomplete.
+
 - Opt-in `KIN_MASKED_DEPTH_PREPASS=1` experiments with stock lit cutouts in the existing main depth target. Shading loads
   that depth and uses read-only depth tests for prepassed draws. No new render target/per-instance cache; separate counters,
   profiler labels and warm-up cover the additional pass. Unsupported views/draws retain their paths; the default stays off.
