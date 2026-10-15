@@ -12346,6 +12346,116 @@ void test_gpu_instance_groups() {
 
 // Main depth must survive the cutout pass, including holes, overlapping cards,
 // foreground opaque occluders, tint/cutoff boundaries and a subsequent empty frame.
+void test_gpu_prepared_scenes() {
+    const char* old = std::getenv("KIN_PREPARED_SCENES");
+    const bool had = old != nullptr; const std::string saved = old ? old : "";
+    std::vector<Pixels> reference;
+    std::vector<kin::Render3DStats> counts;
+    std::vector<std::vector<kin::u32>> picks;
+    for (int mode = 0; mode < 3; ++mode) {
+        setenv("KIN_PREPARED_SCENES", mode ? "1" : "0", 1);
+        with_gpu("test_gpu_prepared_scenes", [&](kin::Renderer2D& renderer) {
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers=2}};
+            renderer.set_job_system(mode == 2 ? &jobs : nullptr);
+            kin::Renderer3D r3d{renderer};
+            const auto box = make_box(r3d,{0.12f,0.4f,0.12f});
+            const auto floor = make_box(r3d,{10,0.1f,10});
+            const kin::u8 texels[]{240,180,70,255, 100,210,140,0};
+            const auto texture = renderer.create_texture_from_rgba(texels,{2,1});
+            const kin::Material3D mask{.double_sided=true,.blend=kin::Blend3D::Mask,.texture=texture};
+            std::vector<kin::MeshInstance> copies;
+            for (kin::u32 i=0;i<2500;++i) copies.push_back({
+                Mat4f::translation({float(i%50)*0.12f-3,0.2f,float(i/50)*0.12f-3}) * Mat4f::scaling({i%2 ? -1.0f : 1.0f,1,1}),
+                kin::colors::white,i+1});
+            kin::InstanceBatch3D batch(box,std::move(copies),{{0,625},{625,625},{1250,625},{1875,625}});
+            kin::Scene3D scene, other, moved;
+            const auto populate = [&](kin::Scene3D& s, Color color) {
+                s.draw(floor,Mat4f::translation({0,-0.15f,0}),{.color=color});
+                s.draw_instanced(batch,mask);
+                s.draw(box,Mat4f::translation({0,0.5f,3}),{.color=Color::rgb(200,80,100)},kin::colors::white,5000);
+            };
+            populate(scene,Color::rgb(90,110,140));
+            auto view=r3d.create_view({160,120},{.pick=true});
+            auto hdr=r3d.create_view({160,120},{.hdr=true,.pick=true});
+            auto msaa=r3d.create_view({160,120},{.samples=4,.pick=true});
+            std::span<kin::MeshInstance> writable;
+            std::optional<kin::Scene3D> recycled;
+            for (int frame=0;frame<26;++frame) {
+                bool expected = frame==1 || frame==2 || frame==3 || frame==5 || frame==7 || frame==10 ||
+                                frame==16 || frame==20 || frame==21 || frame==25;
+                if (frame==4) {
+                    const kin::MeshInstance edit{Mat4f::translation({8,2,0}),Color::rgb(70,250,120),9001};
+                    batch.update(0,{&edit,1});
+                }
+                if (frame==6) { writable=scene.add_instances(box,1); writable[0]={Mat4f::translation({-1,1,2}),kin::colors::white,6000}; }
+                if (frame==7) writable[0]={Mat4f::translation({1,1,2}),Color::rgb(50,210,250),6001};
+                if (frame==8) {
+                    // Same counts and vector allocations, different meshes: revision validation
+                    // must reject the old mesh/bounds metadata even without a pointer change.
+                    scene.clear();
+                    scene.draw(box,Mat4f::translation({0,-0.15f,0}),{.color=Color::rgb(130,70,100)});
+                    scene.draw_instanced(batch,mask);
+                    scene.draw(box,Mat4f::translation({0,0.5f,3}),{.color=Color::rgb(200,80,100)},kin::colors::white,5000);
+                    scene.draw(floor,Mat4f::translation({0,-0.3f,0}),{.color=Color::rgb(70,100,130)});
+                }
+                if (frame==9) scene.overlay().draw(box,Mat4f::translation({0,1,2}),{.color=Color::rgb(250,160,60)},kin::colors::white,7000);
+                if (frame==11) populate(other,Color::rgb(30,140,90));
+                if (frame==13) moved=std::move(scene);
+                if (frame==15) scene=std::move(moved);
+                if (frame==16) assert(r3d.resize(view,{128,96}));
+                if (frame==17) scene=kin::Scene3D{};
+                if (frame==18) {populate(scene,Color::rgb(70,130,180));scene.lod.enabled=true;}
+                if (frame==19) scene.lod.enabled=false;
+                if (frame==22 || frame==23) {recycled.emplace();populate(*recycled,frame==22 ? Color::rgb(120,40,160) : Color::rgb(40,160,120));}
+                kin::Scene3D& selected=frame==11 ? other : frame==13 ? moved : frame>=22 && frame<=23 ? *recycled : scene;
+                selected.camera=kin::Camera3D::look_at({0.01f*frame,5,8},{0,0,0},65);selected.camera.z_far=100;
+                selected.cull=frame!=2;
+                selected.lights.shadow_area=frame==2 ? kin::Bounds3{} : kin::Bounds3{{-12,-2,-12},{12,8,12}};
+                selected.lights.shadow_resolution=128;selected.lights.shadow_cascades=frame%3==0 ? 4 : 1;
+                selected.lights.local_shadow_resolution=128;
+                selected.lights.points.clear();selected.lights.spots.clear();
+                kin::PointLight point{.position={float(frame)*0.03f,5,1},.color={20,20,20},.radius=20};
+                point.shadow.enabled=frame!=2;selected.add_light(point);
+                kin::SpotLight spot{.position={0,7,0},.direction={0,-1,0},.color={20,20,20},.radius=20};
+                spot.shadow.enabled=frame!=2;selected.add_spot_light(spot);
+                selected.taa.enabled=frame==20 && r3d.capabilities().temporal_aa;
+                if (auto* overlay=selected.overlay_if_any()) {
+                    (void)overlay;selected.overlay().camera=selected.camera;selected.overlay().cull=frame!=10;
+                }
+                auto& target=frame==3 ? hdr : frame==5 ? msaa : view;
+                const auto image=shoot_view(renderer,r3d,target,selected);const auto st=r3d.stats();
+                std::vector<kin::u32> ids;
+                for (int y=20;y<90;y+=20) for (int x=20;x<120;x+=20) {
+                    const auto hit=r3d.pick(target,{x,y});ids.push_back(hit.hit ? hit.id : 0);
+                }
+                if (!mode) {reference.push_back(image);counts.push_back(st);picks.push_back(ids);assert(st.prepared_reused==0);}
+                else {
+                    assert(image.rgba==reference[frame].rgba && ids==picks[frame]);
+                    const auto& a=counts[frame];
+                    assert(st.draws==a.draws && st.instances==a.instances && st.culled==a.culled && st.triangles==a.triangles);
+                    assert(st.shadow_casters==a.shadow_casters && st.cascade_casters==a.cascade_casters);
+                    assert(st.local_shadow_casters==a.local_shadow_casters && st.local_shadow_triangles==a.local_shadow_triangles);
+                    assert(st.retained_gpu_bytes==a.retained_gpu_bytes && st.feature_bytes==a.feature_bytes);
+                    assert(st.prepared_reused==kin::u32(expected));
+                    assert(st.prepared_cache_bytes<4096 && st.prepared_layout_bytes<=16*1024*1024);
+                }
+                renderer.present();
+            }
+            // Exceed the batch-stamp budget: repeated rendering must use the fallback.
+            kin::Scene3D many;many.camera=scene.camera;
+            for (kin::u32 i=0;i<129;++i) many.draw_instanced(kin::InstanceBatch3D(box,{{Mat4f::translation({0,0,0}),kin::colors::white,i+1}}));
+            for (int i=0;i<2;++i) {
+                const auto image=shoot_view(renderer,r3d,view,many);const auto st=r3d.stats();
+                assert(st.prepared_reused==0);
+                if (!mode) reference.push_back(image);else assert(image.rgba==reference[26+i].rgba);
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+        });
+    }
+    if (had) setenv("KIN_PREPARED_SCENES",saved.c_str(),1);else unsetenv("KIN_PREPARED_SCENES");
+}
+
 void test_gpu_masked_depth_prepass() {
     const char* old = std::getenv("KIN_MASKED_DEPTH_PREPASS");
     const bool had = old != nullptr; const std::string saved = old ? old : "";
@@ -15572,6 +15682,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_normal_map());
     RUN(test_gpu_alpha_mask());
     RUN(test_gpu_masked_depth_prepass());
+    RUN(test_gpu_prepared_scenes());
     RUN(test_gpu_inverse_square());
     RUN(test_gpu_model_materials());
     RUN(test_gpu_wrap_modes());

@@ -119,6 +119,10 @@ struct Render3DStats {
     // submitted copies using the cache, and actual cache rebuilds this render.
     u64 bounds_cache_bytes = 0, bounds_scratch_bytes = 0, bounds_cache_rebuilt = 0;
     u32 bounds_cache_instances = 0;
+    // Draw/piece/task layout reuse, excluding visibility and instance data. Layout bytes
+    // are existing vector payload capacities; cache bytes are the additional key/stamps.
+    u32 prepared_reused = 0, prepared_draws = 0;
+    u64 prepared_cache_bytes = 0, prepared_layout_bytes = 0;
     u32 spatial_groups = 0;
     u64 camera_instance_tests = 0, bounds_instance_tests = 0, local_instance_tests = 0;
     u64 camera_group_rejected = 0, local_group_rejected = 0;

@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Added
 
+- Reuse bounded 3D renderer draw/piece/task layout for unchanged scene commands, with scene identity/revision and exact
+  instance-batch revision checks. Refresh visibility, lighting, shadow membership and table bindings every render; keep
+  the reference path for LOD/skinning, edits and oversized layouts. Add diagnostics and `KIN_PREPARED_SCENES=0` for A/B runs,
+  with image/picking tests for edits, moves, overlays, TAA, worker rendering and cache-budget fallback.
+
 - Fix Blockfield's Godot positional-shadow atlas allocation: omni shadows need adjacent slots and were silently omitted
   by single-slot quadrants. Export actual shadow draw/triangle counts and atlas dimensions, and validate a point-shadow-only
   lighting case. Record a fresh Kin/Forward+ CPU/GPU profile and mark earlier local-shadow comparisons as incomplete.

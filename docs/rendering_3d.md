@@ -77,6 +77,22 @@ lights, and draws.
 - `add_instances(mesh, count, material)`: room to fill in place (valid until
   the next draw is added).
 
+The GPU renderer can reuse the mesh draw/piece/task layout when the same `Scene3D` mesh commands remain submitted.
+`draw_identity()` and `draw_revision()` identify that command set: mesh submissions and `clear()` change its revision;
+moving a scene gives the destination a fresh identity and invalidates the source. Camera, light and particle changes do
+not invalidate the layout. Instance-batch revisions are checked separately, including edits through another shared handle.
+
+This reuses the renderer's existing arrays, not a copy of scene instances or visibility results. Camera frustums, shadow
+membership, group plane proofs, retained-table slots/bounds and uploads are refreshed each render. Writes through a still
+valid `add_instances()` span remain visible. A single layout is kept per renderer, bounded to 8,192 draw references,
+16,384 pieces, 4,096 valid spatial groups, 128 batch stamps and 16 MiB of existing vector payload capacity. LOD-enabled
+scenes and skinned draws use the original construction path; oversized or edited scenes rebuild it too.
+
+Set `KIN_PREPARED_SCENES=0` before renderer creation for the reference path. Stats `prepared_reused` (0/1) and
+`prepared_draws` report reuse and submitted valid draw references. `prepared_cache_bytes` counts key/stamp payload;
+`prepared_layout_bytes` counts the existing layout vector capacities, not additional allocations. Rebuilt scene commands
+miss the cache. No shader, render target or per-instance cache is added.
+
 `draw_instanced_group(mesh, instances, world_bounds, material)` preserves a spatial cell within an instanced draw. It accepts
 either transforms or `MeshInstance` records. Equal mesh/material groups still merge into one draw, retaining global alpha
 sorting and instance order. Camera, sun and local/moon shadow views classify each cell independently; rejected cells skip

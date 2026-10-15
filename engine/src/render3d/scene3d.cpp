@@ -82,8 +82,22 @@ void InstanceBatch3D::update(u32 first, std::span<const MeshInstance> instances)
         group.world_bounds = instance_bounds(_data->mesh, std::span<const MeshInstance>(_data->instances).subspan(group.first, group.count));
     ++_data->revision;
 }
+Scene3D::DrawStamp::DrawStamp() {
+    // Once per scene/move, never once per submitted draw. Address reuse cannot revive a layout.
+    static std::atomic<u64> next{1};
+    identity = next.fetch_add(1, std::memory_order_relaxed);
+}
+Scene3D::DrawStamp::DrawStamp(DrawStamp&& other) noexcept : DrawStamp() { ++other.revision; }
+Scene3D::DrawStamp& Scene3D::DrawStamp::operator=(DrawStamp&& other) noexcept {
+    DrawStamp fresh;
+    identity = fresh.identity; revision = 0;
+    ++other.revision;
+    return *this;
+}
+
 void Scene3D::draw_instanced(const InstanceBatch3D& batch, const Material3D& material) {
     if (!batch || batch.instances().empty()) return;
+    touch_draws();
     Draw draw{batch.mesh(), material, 0, static_cast<u32>(batch.instances().size())};
     draw.batch = batch;
     _draws.push_back(std::move(draw));
@@ -97,6 +111,7 @@ std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t cou
     if (count == 0) {
         return {};
     }
+    touch_draws();
     const u32 first = static_cast<u32>(_instances.size());
     _instances.resize(_instances.size() + count);
     // Straight after a draw of the same mesh and material: one draw (skinned copies only with skinned ones: the pose of
@@ -244,6 +259,7 @@ void Scene3D::draw_particles(const ParticleSystem3D& system) {
 }
 
 void Scene3D::clear() {
+    touch_draws();
     _draws.clear();
     _instances.clear();
     _instance_groups.clear();

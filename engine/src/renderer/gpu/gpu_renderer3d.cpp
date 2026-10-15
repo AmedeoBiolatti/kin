@@ -790,6 +790,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     _shadow_reach_fast = !reach || std::string_view(reach) != "0";
     const char* ranges = std::getenv("KIN_CAMERA_RANGES");
     _camera_ranges = !ranges || std::string_view(ranges) != "0";
+    const char* prepared = std::getenv("KIN_PREPARED_SCENES");
+    _prepared_enabled = !prepared || std::string_view(prepared) != "0";
     const char* markers = std::getenv("KIN_GPU_PASS_MARKERS");
     _gpu_markers = markers && std::string_view(markers) == "1";
     const char* masked_depth = std::getenv("KIN_MASKED_DEPTH_PREPASS");
@@ -4357,7 +4359,19 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     const Lights3D& lights = scene.lights;
     const Bounds3& area = lights.shadow_area;
     // The draws of both scenes, each with its instances where the scene keeps them.
-    _refs.clear();
+    std::array<PreparedKey, 2> keys{};
+    bool eligible = _prepared_enabled;
+    for (u32 s = 0; s < 2; ++s) if (const Scene3D* submitted = ctx.scenes[s]) {
+        keys[s] = {submitted, submitted->draws().data(), submitted->instances().data(),
+                   submitted->draws().size(), submitted->draw_identity(), submitted->draw_revision()};
+        eligible = eligible && !submitted->lod.enabled;
+    }
+    bool reuse = eligible && _prepared_valid && keys == _prepared_keys;
+    if (reuse) for (const PreparedBatch& batch : _prepared_batches) {
+        if (_refs[batch.ref].draw->batch.revision() != batch.revision) { reuse = false; break; }
+    }
+    _prepared_valid = false;
+    if (!reuse) { _refs.clear(); _prepared_batches.clear(); }
     _bounds_cache_grew = false;
     ++_retained_epoch;
     if (_retained_gc_frame != _owner->_frame_serial) {
@@ -4441,7 +4455,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         const bool has_groups = _spatial_culling && !ctx.scenes[s]->instance_groups().empty();
         joint_base[s] = joint_total;
         joint_total += static_cast<u32>(ctx.scenes[s]->joint_matrices().size());
-        for (const Scene3D::Draw& draw : ctx.scenes[s]->draws()) {
+        if (!reuse) for (const Scene3D::Draw& draw : ctx.scenes[s]->draws()) {
             const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
             if (draw.count == 0 || !mesh) {
                 continue;
@@ -4476,9 +4490,27 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
             }
             if (_spatial_culling && !draw.skinned && ((has_groups && draw.group_count) || (draw.batch && !draw.batch.groups().empty()))) classify_groups(_refs.back());
             if (draw.batch) {
+                if (eligible) {
+                    if (_prepared_batches.size() < 128)
+                        _prepared_batches.push_back({static_cast<u32>(_refs.size()-1), draw.batch.revision()});
+                    else eligible = false;
+                }
                 retain_instances(_refs.back(), ctx);
                 cache_instance_bounds(_refs.back(), stats);
             }
+        }
+    }
+    if (reuse) for (DrawRef& ref : _refs) {
+        ref.frustum = ctx.scenes[ref.scene]->cull ? &ctx.frustums[ref.scene] : nullptr;
+        ref.caster = ctx.shadows && ref.scene == 0 &&
+                     (ref.draw->material.blend == Blend3D::Opaque || ref.draw->material.blend == Blend3D::Mask) &&
+                     ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
+        ref.retained = ~0u;
+        ref.cached_spheres = nullptr;
+        if (ref.group_count) classify_groups(ref);
+        if (ref.draw->batch) {
+            retain_instances(ref, ctx);
+            cache_instance_bounds(ref, stats);
         }
     }
 
@@ -4486,6 +4518,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     stats.bounds_cache_bytes = _bounds_cache_bytes;
     stats.spatial_groups = static_cast<u32>(_cull_groups.size());
 
+    eligible = eligible && !any_skinned && _refs.size() <= 8192 && _cull_groups.size() <= 4096;
     ctx.joint_total = joint_total;
     ctx.joint_base = joint_base;
 
@@ -4494,35 +4527,51 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     // Small tasks balance over many workers (22,000 copies in chunks of 4096 made six tasks on a 32-thread
     // machine); the scene must be big enough for waking them to pay (measured: a loss at 1,500 copies, a gain from 2,500).
     constexpr u32 chunk = 512, parallel_from = 2048;
-    _pieces.clear();
-    _tasks.assign(1, 0);
-    u32 total = 0, in_task = 0;
-    for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
-        const DrawRef& ref = _refs[r];
-        const u32 count = ref.draw->count;
-        u32 next_group = ref.group_first, groups_end = ref.group_first + ref.group_count;
-        for (u32 begin = 0; begin < count;) {
-            while (next_group < groups_end && _cull_groups[next_group].end <= begin) ++next_group;
-            u32 group = ~0u, boundary = count;
-            if (next_group < groups_end) {
-                const CullGroup& g = _cull_groups[next_group];
-                if (begin >= g.first) { group = next_group; boundary = g.end; }
-                else boundary = g.first;
+    u32 total = reuse ? _prepared_total : 0, in_task = 0;
+    if (!reuse) {
+        _pieces.clear();
+        _tasks.assign(1, 0);
+        for (u32 r = 0; r < static_cast<u32>(_refs.size()); ++r) {
+            const DrawRef& ref = _refs[r];
+            const u32 count = ref.draw->count;
+            u32 next_group = ref.group_first, groups_end = ref.group_first + ref.group_count;
+            for (u32 begin = 0; begin < count;) {
+                while (next_group < groups_end && _cull_groups[next_group].end <= begin) ++next_group;
+                u32 group = ~0u, boundary = count;
+                if (next_group < groups_end) {
+                    const CullGroup& g = _cull_groups[next_group];
+                    if (begin >= g.first) { group = next_group; boundary = g.end; }
+                    else boundary = g.first;
+                }
+                const u32 end = std::min(boundary, begin + (chunk - in_task));
+                _pieces.push_back({r, begin, end, total + begin, group});
+                in_task += end - begin;
+                begin = end;
+                if (in_task == chunk) {
+                    _tasks.push_back(static_cast<u32>(_pieces.size()));
+                    in_task = 0;
+                }
             }
-            const u32 end = std::min(boundary, begin + (chunk - in_task));
-            _pieces.push_back({r, begin, end, total + begin, group});
-            in_task += end - begin;
-            begin = end;
-            if (in_task == chunk) {
-                _tasks.push_back(static_cast<u32>(_pieces.size()));
-                in_task = 0;
-            }
+            total += count;
         }
-        total += count;
+        if (_tasks.back() != _pieces.size()) {
+            _tasks.push_back(static_cast<u32>(_pieces.size()));
+        }
     }
-    if (_tasks.back() != _pieces.size()) {
-        _tasks.push_back(static_cast<u32>(_pieces.size()));
-    }
+    const u64 layout_bytes = _refs.capacity() * sizeof(DrawRef) + _pieces.capacity() * sizeof(Piece) +
+                             _tasks.capacity() * sizeof(u32) + _cull_groups.capacity() * sizeof(CullGroup);
+    eligible = eligible && _pieces.size() <= 16384 && layout_bytes <= 16 * 1024 * 1024;
+    if (eligible) {
+        _prepared_keys = keys;
+        _prepared_total = total;
+        _prepared_valid = true;
+    } else std::vector<PreparedBatch>().swap(_prepared_batches);
+    stats.prepared_reused = reuse ? 1u : 0u;
+    stats.prepared_draws = static_cast<u32>(_refs.size());
+    stats.prepared_layout_bytes = layout_bytes;
+    stats.prepared_cache_bytes = sizeof(_prepared_keys) + sizeof(_prepared_batches) +
+                                 sizeof(_prepared_total) + sizeof(_prepared_valid) +
+                                 _prepared_batches.capacity() * sizeof(PreparedBatch);
     JobSystem* jobs = _owner->_jobs && total >= parallel_from ? _owner->_jobs : nullptr;
     const auto each_task = [&](const std::function<void(Piece&)>& body) {
         const auto run = [&](u32 t) {

@@ -667,6 +667,21 @@ private:
         const Vec4f* cached_spheres = nullptr; // stable CPU bounds from a resident table, one level only
         u32 sphere_first = 0; // uncached local casters' start in _world_spheres
     };
+    // One layout only, reusing the existing draw/piece/task arrays. The key stores no
+    // owning scene handles; check it before dereferencing any previous draw pointer.
+    struct PreparedKey {
+        const Scene3D* scene = nullptr;
+        const Scene3D::Draw* draws = nullptr;
+        const MeshInstance* instances = nullptr;
+        std::size_t count = 0;
+        u64 identity = 0, revision = 0;
+        bool operator==(const PreparedKey&) const = default;
+    };
+    struct PreparedBatch { u32 ref; u64 revision; };
+    std::array<PreparedKey, 2> _prepared_keys{};
+    std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
+    bool _prepared_enabled = true, _prepared_valid = false;
+    u32 _prepared_total = 0;
     struct RetainedTable {
         u64 id = 0, revision = 0, claimed = 0, upload_frame = ~0ull;
         Color color{};

@@ -527,6 +527,10 @@ public:
     std::span<const ParticleDraw> particle_draws() const { return _particle_draws; }
     std::span<const ParticleSprite3D> particle_sprites() const { return _particle_sprites; }
     std::span<const Draw> draws() const { return _draws; }
+    // Mesh-command identity/revision, independent of camera, lights and particles.
+    // A move gives its destination a fresh identity and invalidates the source revision.
+    u64 draw_identity() const { return _draw_stamp.identity; }
+    u64 draw_revision() const { return _draw_stamp.revision; }
     std::span<const MeshInstance> instances() const { return _instances; }
     std::span<const InstanceGroup> instance_groups() const { return _instance_groups; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned draw).
@@ -539,6 +543,13 @@ private:
     void add_skinned_copy(const Mesh& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material, Color tint, u32 id);
     void add_group(u32 first, u32 count, const Bounds3& world_bounds);
 
+    struct DrawStamp {
+        DrawStamp();
+        DrawStamp(DrawStamp&& other) noexcept;
+        DrawStamp& operator=(DrawStamp&& other) noexcept;
+        u64 identity = 0, revision = 0;
+    } _draw_stamp;
+    void touch_draws() { ++_draw_stamp.revision; }
     std::vector<Draw> _draws;
     std::vector<MeshInstance> _instances;
     std::vector<InstanceGroup> _instance_groups;

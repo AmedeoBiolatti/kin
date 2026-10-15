@@ -505,6 +505,12 @@ triangles, local-shadow frame medians are 3.09 ms (Kin), 6.03 ms (Mobile), 7.36 
 
 
 
+Kin reuses renderer draw/task layout for unchanged scene commands; `KIN_PREPARED_SCENES=0` restores rebuilding that layout.
+The Grove harness already retains its scene, so this targets engine preparation rather than the sample's command builder.
+`--rebuild-scene` deliberately invalidates it every frame. CSV/report fields `prepared_reused`, `prepared_draws`,
+`prepared_cache_bytes` and `prepared_layout_bytes` distinguish the small new key/stamps from existing reused arrays.
+Visibility, lighting and shadow work still update each frame. See the prepared-layout measurements in `docs/3d_plan.md`.
+
 Godot reports actual shadow draw calls and triangles, alongside the requested light settings. Its positional atlas uses
 four slots per quadrant: an omni needs two adjacent slots, so one-slot quadrants silently omit point shadows. The lighting
 sweep includes a point-shadow-only case (also in `--lighting --smoke`) and rejects requested shadows that produce no work.
