@@ -480,6 +480,10 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const float r2 = d2 / (at.w * at.w);
         const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
         const float k = window * window / max(d2, frame.lights[2 * i + 1].w);
+        // Zero attenuation contributes nothing, including to the specular BRDF.
+        if (k <= 0.0) {
+            continue;
+        }
 #ifdef KIN_LIGHTS
         const vec3 toward = to * inversesqrt(max(d2, 1e-8));
         float seen = 1.0;

@@ -9,6 +9,10 @@ releases may change APIs.
 
 ### Added
 
+- Skip point-light BRDF work when the existing windowed attenuation is zero, before normalization and shadow lookup.
+  Preserve every positive contribution without an epsilon cutoff; add ordinary/local-light radius-boundary and inactive
+  light ordering coverage. Add no buffers or caches, and record image/work parity plus repeated industrial-yard p95 timings.
+
 - Reuse bounded 3D renderer draw/piece/task layout for unchanged scene commands, with scene identity/revision and exact
   instance-batch revision checks. Refresh visibility, lighting, shadow membership and table bindings every render; keep
   the reference path for LOD/skinning, edits and oversized layouts. Add diagnostics and `KIN_PREPARED_SCENES=0` for A/B runs,

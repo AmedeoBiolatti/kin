@@ -351,6 +351,10 @@ lights are cleared with the draws. Spot lights (`add_spot_light`, a cone of a po
 are below ("Spot lights and shadows from lights that are not the sun"). Light is added in linear light; the result
 is stored as the 2D pipeline stores colour, or kept HDR (see Views).
 
+The material shader skips a point light's shadow and BRDF evaluation when its
+windowed attenuation is zero. Positive contributions, however small, retain the
+same shading; this adds no light lists, caches or GPU buffers.
+
 Image-based light: `scene.lights.environment` is an `Environment3D`, an
 equirectangular HDR picture of the sky or a room (`r3d.load_environment(
 "sky.hdr")` reads a Radiance `.hdr` through the content folder or pack;

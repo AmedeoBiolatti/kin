@@ -841,6 +841,59 @@ void test_gpu_point_lights() {
     });
 }
 
+// Inactive points must not terminate the loop or erase a tiny positive contribution.
+// Exercise both the ordinary and local-light shader families at the radius boundary.
+void test_gpu_point_light_zero_attenuation() {
+    with_gpu("test_gpu_point_light_zero_attenuation", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh wall = make_box(r3d, {20.0f, 20.0f, 0.2f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        for (const bool local : {false, true}) {
+            if (local && !r3d.capabilities().local_shadows) continue;
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 8}, {0, 0, 0}, 60.0f);
+            scene.lights.sun.color = scene.lights.ambient = {0, 0, 0};
+            scene.draw(wall, Mat4f::translation({0, 0, -0.1f}),
+                       {.color = Color::rgb(200, 200, 200), .metallic = 0.3f, .roughness = 0.4f});
+            if (local) {
+                // The cone faces away from the wall; it selects the local-light shader without lighting it.
+                scene.add_spot_light({.position = {0, 0, 1}, .direction = {0, 0, 1}, .color = {1, 1, 1}, .radius = 4});
+            }
+            const auto shoot = [&] {
+                Pixels p = shoot_view(renderer, r3d, view, scene);
+                assert(r3d.stats().spots == (local ? 1u : 0u));
+                renderer.present();
+                return p;
+            };
+            scene.add_light({.position = {-2, 0, 1}, .color = {2, 1, 0.5f}, .radius = 3});
+            const Pixels one = shoot();
+            assert(r3d.stats().lights == 1);
+            for (int i = 0; i < 15; ++i) {
+                // Bright enough to sort before the active point, inside the view but out of range of the wall.
+                scene.add_light({.position = {float(i % 5) - 2, float(i / 5) - 1, 1},
+                                 .color = {1000, 1000, 1000}, .radius = 0.25f});
+            }
+            const Pixels sixteen = shoot();
+            assert(r3d.stats().lights == 16 && one.rgba == sixteen.rgba);
+
+            // Align the light with an actual pixel's surface point. A small positive attenuation is observable
+            // with a bright light: an epsilon cutoff would incorrectly remove it.
+            const kin::Ray3 ray = scene.camera.ray({80.5f, 60.5f}, screen);
+            const Vec3f at = ray.origin + ray.direction * (-ray.origin.z / ray.direction.z);
+            const Vec3f position = at + Vec3f{0, 0, 1};
+            scene.lights.points.clear();
+            scene.add_light({.position = position, .color = {10000, 10000, 10000}, .radius = 1.001f});
+            const float k = kin::point_attenuation(position, 1.001f, 0.05f, at);
+            assert(k > 0 && k < 1e-4f);
+            assert(brightness(shoot().at(80, 60)) > 30);
+            for (const float radius : {1.0f, 0.999f}) {
+                scene.lights.points[0].radius = radius;
+                expect(shoot().at(80, 60), kin::colors::black, "at or beyond point radius", 1);
+            }
+        }
+    });
+}
+
 // The sun casts a box's shadow on the floor, where the shadow area says; none without it.
 void test_gpu_shadows() {
     with_gpu("test_gpu_shadows", [](kin::Renderer2D& renderer) {
@@ -15598,6 +15651,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_frustum_culling());
     RUN(test_gpu_overlay());
     RUN(test_gpu_point_lights());
+    RUN(test_gpu_point_light_zero_attenuation());
     RUN(test_gpu_shadows());
     RUN(test_gpu_blending());
     RUN(test_gpu_hdr_bloom());

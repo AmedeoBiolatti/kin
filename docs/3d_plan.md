@@ -7052,6 +7052,73 @@ The useful result is that current Kin is competitive in this rich scene and uses
 its stronger unlit geometry throughput does not remove the cost of dense foliage, visibility and shadows. New profiling or
 controlled feature toggles would be needed to attribute individual scaling costs to functions or GPU stages.
 
+### Industrial yard — zero-attenuation point-light exit (2026-10-15)
+
+**Implemented.** The shared material point loop now continues when its existing windowed attenuation is zero,
+before normalization, shadow lookup and BRDF evaluation, matching the spot loop. Use exactly `k <= 0.0`, with no
+epsilon and no changes to positive lighting, light selection, geometry, shadow generation or queue depth. No buffers,
+caches or per-frame storage are added. Only eight lit fragment SPIR-V variants change; all other generated shader
+hashes match the archived baseline. The engine remains at its existing O2 setting (`KIN_RENDERER3D_O3=OFF`).
+
+**Same-output checks.** Seven paired presentation images are identical in every RGBA channel: outside, warehouse,
+wide, wide AO/TAA/contact, wide 720p, zero points and shadows disabled. Per-frame geometry, light/shadow, skin, upload,
+movement and reuse counters match in those cases and in every one of the **7,680 matching measured frame pairs** in
+the timed runs. Both executables use the same medium recipe and native sample source; the archive retains executable
+and source hashes before/after. The new GPU regression covers ordinary and local-light shader families, fifteen
+inactive lights sorted ahead of an active light, and exact/inside/outside radius behavior. A deliberately incorrect
+`k <= 1e-4` mutant fails the tiny-positive-contribution assertion; restoring the exact-zero exit passes and reproduces
+the measured executable hashes.
+
+The full working-tree `kin_render3d_tests` suite (204 registered cases, GPU required) passes in **113.1 seconds**, with peak RSS
+**265.9 MiB** under its separate 768 MiB ceiling. `git diff --check` passes.
+
+Measurements use the archived working tree, including earlier renderer experiments and the shared industrial-yard
+benchmark. This commit isolates the point-light exit, its regression and these results; the preceding experiments
+remain separate working-tree changes.
+
+**Normal timing.** Four pairs per case alternate before/after and after/before order, with 300 warm-up frames,
+1440p, four workers, the original lighting/features and CPU affinity 0–15. Values below are medians of the four
+per-run statistics; ranges and paired changes are retained rather than combining runs into one distribution.
+
+| Case | Before p50 / p95 ms | After p50 / p95 ms | Per-pair p95 reduction |
+|---|---:|---:|---:|
+| Wide route section, 480 frames | 11.00 / 12.28 | 8.13 / 8.96 | 22.3–35.2% |
+| Full route, 1,440 frames | 7.48 / 12.98 | 7.07 / 9.99 | 20.1–26.8% |
+
+Wide per-run p95 ranges are **9.99–16.72 ms before / 7.76–10.83 ms after**; full-route ranges are
+**10.08–15.04 / 7.91–11.79 ms**. All eight paired p95 changes improve, including both orderings. The full-route
+median is less reliable: the first pair regresses 14.2%, while the other three improve 2.9–7.8%. CPU submit/process
+times show no consistent reduction, as expected from a shader-only change. This addresses the wide-view GPU tail,
+not scene-command construction or CPU submission.
+
+**Pass confirmation.** Four small Nsight captures at the same wide view use AB/BA order, eight warm-up frames and
+sixteen measured frames. Each provides nine complete measured frame-marker ranges; the final seven are absent and
+excluded. These short probes confirm pass attribution, not p95 distributions.
+
+| Wide-view GPU pass | Before p50 ms, repeats 1 / 2 | After p50 ms, repeats 1 / 2 |
+|---|---:|---:|
+| Main | 6.485 / 6.497 | 4.723 / 4.728 |
+| Local shadows | .860 / .860 | .862 / .860 |
+| Output | .089 / .091 | .089 / .089 |
+
+Main-pass GPU time falls about **27%**, with stable local-shadow/output work. The mean marked 3D span falls from
+about **7.48 to 5.68 ms**. Nsight reports that the runtime Vulkan 1.4 version exceeds its supported 1.3 and that
+workload tracing upgrades SDL's requested Vulkan 1.0 to 1.1; both sides use the same tracing configuration. Ordinary
+timings above run without Nsight. No clock or power settings are changed.
+
+**RAM / measurement limits.** Timed application peaks are **211–242 MiB**, with after runs **211–218 MiB**; captured
+targets peak at **253–259 MiB**, all below the unchanged 512 MiB application ceiling. Builds stay serial (`-j1`,
+2 GiB guard; initial peak about 1,271 MiB). Short captures retain the 256 MiB temporary-data cap, 2 GiB free-disk
+floor and separate 1 GiB collector/export ceiling. RSS excludes dedicated VRAM. The shared laptop gets hot:
+measured CPU package temperatures are around 96–97°C and GPU samples around 88°C, with varying clocks (median SM
+roughly 1.16–1.29 GHz by case/version). Some clock advantage accompanies the after runs; do not treat normal-run
+percentages as clock-normalized shader gains. Stable short-pass shadow timings support the separate GPU attribution.
+Godot was not rerun, so this is a Kin optimization result rather than a fresh engine comparison.
+
+Artifacts: `/home/bamedeo/kin-bench/industrial-yard-point-exit/` contains baseline/optimized binaries and shader
+hashes, seven image pairs and channel checks, guarded commands/RSS, all CSVs, CPU/GPU telemetry, paired analyses,
+four bounded traces/SQL exports, mutation evidence and renderer validation. No commit created.
+
 ### P5 — Netcode-ready, then co-op
 
 *P5a (inside P4):* keep the rules honest: a fixed-step simulation reading input commands, no
