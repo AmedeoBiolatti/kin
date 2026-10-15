@@ -527,6 +527,9 @@ void GpuRenderer2DBackend::end_frame() {
     _retired_textures.clear();
     _last_retained = nullptr;
     ++_frame_serial;
+#ifdef KIN_EXPERIMENTAL_3D
+    if (_renderer_3d) _renderer_3d->on_frame_submitted();
+#endif
 }
 
 void GpuRenderer2DBackend::retain(const Texture& texture) {

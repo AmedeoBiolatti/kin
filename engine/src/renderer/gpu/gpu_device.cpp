@@ -29,7 +29,9 @@ constexpr u32 DefaultUploadRingSize = 1024u * 1024u;
 // upload (fresh transfer memory each time writes several times slower, its
 // pages faulting in), and shrinks back once none has come for a while.
 constexpr u32 TextureStagingSize = 16u * 1024u * 1024u;
-constexpr u32 StagingShrinkAfterBatches = 600;
+constexpr u32 StagingShrinkAfterBatches = 600; // original large-upload policy
+constexpr u32 MinimumStagingSize = 1024u * 1024u;
+constexpr u32 StagingWindowBatches = 120;
 // Where each staged upload starts in it (Vulkan wants a multiple of the texel
 // size and of 4; this covers every format, and D3D12's 512 would be next).
 constexpr u32 TextureStagingAlignment = 256u;
@@ -124,6 +126,8 @@ GpuDevice::GpuDevice(Window& window, bool debug)
 GpuDevice::GpuDevice(Window& window, GpuDeviceOptions options)
     : _window(static_cast<SDL_Window*>(window.native_handle())),
       _present_mode(options.present_mode) {
+    const char* adaptive = std::getenv("KIN_ADAPTIVE_STAGING");
+    _adaptive_staging = !adaptive || std::string_view(adaptive) != "0";
     _device = SDL_CreateGPUDevice(SupportedShaderFormats, options.debug, nullptr);
     if (!_device) {
         std::string message = "SDL_CreateGPUDevice(SPIRV) failed: ";
@@ -201,6 +205,10 @@ GpuDevice::GpuDevice(GpuDevice&& other) noexcept
       _staging(std::exchange(other._staging, nullptr)),
       _staging_used(std::exchange(other._staging_used, 0)),
       _staging_size(std::exchange(other._staging_size, 0)),
+      _adaptive_staging(other._adaptive_staging),
+      _staging_recent_peak(std::exchange(other._staging_recent_peak, 0)),
+      _staging_recent_batches(std::exchange(other._staging_recent_batches, 0)),
+      _staging_allocations(std::exchange(other._staging_allocations, 0)),
       _big_upload_batch(std::exchange(other._big_upload_batch, 0)),
       _uploads_staged(std::exchange(other._uploads_staged, 0)),
       _upload_batches(std::exchange(other._upload_batches, 0)) {
@@ -431,7 +439,10 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
         }
         SDL_UnmapGPUTransferBuffer(_device, transfer);
     };
-    const u32 needed = std::max(TextureStagingSize, next_power_of_two(bytes));
+    // Start with bulk-loading capacity. Once recent batches prove a smaller
+    // working set, retain that floor instead of restoring 16 MiB on every call.
+    const u32 floor = _adaptive_staging && _staging_size ? _staging_size : TextureStagingSize;
+    const u32 needed = std::max(floor, next_power_of_two(bytes));
     if (_upload_commands && (align_up(_staging_used, TextureStagingAlignment) + bytes > _staging_size)) {
         lock.unlock();
         flush_uploads(); // full: send what is there
@@ -450,6 +461,7 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
             throw sdl_error("SDL_CreateGPUTransferBuffer failed");
         }
         _staging_size = info.size;
+        ++_staging_allocations;
     }
     if (bytes > TextureStagingSize / 2) {
         _big_upload_batch = _upload_batches;
@@ -706,13 +718,29 @@ void GpuDevice::flush_uploads() {
         _upload_pass = nullptr;
     }
     SDL_GPUCommandBuffer* commands = std::exchange(_upload_commands, nullptr);
-    _staging_used = 0;
+    const u32 batch_bytes = std::exchange(_staging_used, 0);
     if (_first_submit_ns == 0) {
         _first_submit_ns = SDL_GetTicksNS();
     }
     const bool submitted = SDL_SubmitGPUCommandBuffer(commands);
     ++_upload_batches;
-    if (_staging_size > TextureStagingSize && _upload_batches - _big_upload_batch > StagingShrinkAfterBatches) {
+    if (_adaptive_staging) {
+        // Use aggregate batch occupancy, not the largest individual upload:
+        // many small writes can together need a large buffer. Delayed shrinking
+        // and a 2x size threshold avoid resizing after isolated quiet frames.
+        _staging_recent_peak = std::max(_staging_recent_peak, batch_bytes);
+        if (++_staging_recent_batches == StagingWindowBatches) {
+            const u32 target = std::max(MinimumStagingSize, next_power_of_two(_staging_recent_peak));
+            if (_staging && target <= _staging_size / 2) {
+                // SDL defers disposal until submitted copies finish. The next
+                // upload allocates the smaller buffer; no new GPU wait is needed.
+                SDL_ReleaseGPUTransferBuffer(_device, _staging);
+                _staging = nullptr;
+                _staging_size = target;
+            }
+            _staging_recent_peak = _staging_recent_batches = 0;
+        }
+    } else if (_staging_size > TextureStagingSize && _upload_batches - _big_upload_batch > StagingShrinkAfterBatches) {
         // No big upload for a while: back to the usual size at the next upload.
         SDL_ReleaseGPUTransferBuffer(_device, _staging);
         _staging = nullptr;

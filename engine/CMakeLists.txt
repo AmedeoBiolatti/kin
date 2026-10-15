@@ -197,7 +197,7 @@ if(KIN_EXPERIMENTAL_3D)
     target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/physics3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
-                                      src/renderer/gpu/gpu_renderer3d.cpp)
+                                      src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
     set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
@@ -273,8 +273,9 @@ foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader
               pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
               pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
               transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
-              transition_iris.frag transition_crossfade.frag mesh.vert mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag
-              fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp
+              transition_iris.frag transition_crossfade.frag mesh_indexed.vert mesh_unlit_indexed.vert mesh_unlit_textured_indexed.vert prepass_indexed.vert mesh.vert mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag
+              mesh_unlit.vert mesh_unlit_textured.vert mesh_unlit.frag mesh_unlit_textured.frag mesh_unlit_mask.frag mesh_unlit_textured_mask.frag
+              fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp mesh_depth_mask.frag
               prepass.vert prepass.frag prepass_mask.frag gtao.comp gtao_chain.comp ao_depth_chain.comp ao_blur.comp ao_blur_chain.comp ao_blur_both.comp ao_blur_both_chain.comp contact.comp
               prepass_velocity.vert prepass_velocity.frag prepass_velocity_mask.frag taa.comp mesh_velocity.vert mesh_velocity.frag
               cluster_cull.comp cluster_cull_occ.comp cluster_scan.comp cluster_args.comp cluster_gather.comp

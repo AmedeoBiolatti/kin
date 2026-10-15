@@ -255,6 +255,387 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   each frame) and `sponza_walk/main.cpp`; a new feature is a field and one row
   in `Controls::build`.
 
+## Blockfield
+
+A Minecraft-style **creative voxel sandbox** and continuous 3D workload (`KIN_EXPERIMENTAL_3D=ON`, SDL_GPU). It has seeded hills,
+trees, underground passages, first-person walking/jumping and free flight, mining and placing six block types, selection outlines,
+and optional saved world edits. It uses original procedural geometry and textures, with no downloaded assets. This first slice
+does not implement survival, crafting, mobs, water simulation or multiplayer.
+
+```sh
+KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --world /tmp/blockfield.world
+KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --benchmark --headless --frames 1200 --distance 3 \
+    --report /tmp/blockfield-report.json --metrics /tmp/blockfield.csv --screenshot=/tmp/blockfield.png
+```
+
+Click to capture the mouse; Esc releases or captures it. WASD moves, Space jumps, Shift sprints, F switches flight, Space/Q flies
+up/down, left mouse mines and right mouse places the selected block. Keys 1–6 select grass, dirt, stone, sand, wood or leaves;
+`+`/`-` changes view distance, PgUp/PgDn changes camera FOV, R returns to spawn, F5 saves when `--world FILE` was supplied. Placement inside the player's body
+is refused. Bedrock is protected. Saved edits reload with the same `--seed N`; the seed defaults to 1. Edits remain when their
+chunks unload and are bounded to 16,384 changed cells. Saves contain terrain edits, not the player's location or physics state.
+
+The world streams **16×64×16 block columns**. Greedy meshing removes internal faces and merges rectangles of equal material;
+neighbor halos prevent duplicate faces at chunk seams. There is one meshing worker and one job in flight. GPU upload and Jolt
+collision creation happen on the scene thread. Only the nearest 3×3 columns have colliders, built from the exact visible mesh;
+walking pauses until these are ready. Edits invalidate the containing chunk and only the affected boundary neighbors. Distant
+chunks and collision shapes are evicted as the player travels. Render distance is 1–32 columns in each horizontal direction
+(default 8, at most 289 resident columns). Camera FOV is vertical, 45–150 degrees via `--fov N` (default 90).
+Angles above 120 are available for stress testing; perspective distortion becomes pronounced.
+The HUD and scene report show both settings. Wider angles reveal more of the resident world; increasing distance loads more columns.
+
+`--mesh-budget-mib N` bounds resident vertex/index data (64 MiB by default, maximum 256). Near-player changes take priority over
+distant scenery; rejected chunks apply backpressure instead of continuously rebuilding. This is **not a total RAM or VRAM cap**:
+the renderer, physics scratch space, buffers being retired by the GPU and the single pending mesh consume additional memory.
+The HUD and scene report expose the chunk limit, resident mesh bytes, blocked/dirty chunks, build/eviction counts and edit counts.
+
+`--benchmark` renders **every frame**. After a distance-dependent warm-up, a fixed flight path crosses chunk boundaries, returns
+over previously visited terrain and repeatedly changes blocks. The JSON report contains CPU update, scene preparation, render
+submission and available GPU frame p50/p95/p99/max, plus drawn triangles and draw calls. GPU values come from the engine's delayed
+device timer; zero samples means timing was unavailable. Headless mode waits for its single meshing job at fixed points to make
+the workload reproducible, so CPU update times there include those waits. Windowed play polls the worker instead. CSV rows include
+startup as well as steady-state frames; aggregate timing samples exclude warm-up and are bounded to 6,000 samples per series.
+Change one workload setting at a time and run sequentially. Larger distances may hit the mesh cap before filling the requested view.
+
+`kin-blockfield` checks greedy merging, winding, hidden faces and chunk seams, negative coordinates, picking, bounded edits,
+save/restore and actual Jolt collision rebuilding after mining. The existing scene server supports input-driven tests, screenshots,
+reports and resetting the world. All voxel code is in `examples/blockfield/`; no engine API change is required for this slice.
+
+The input-driven GPU smoke test also exercises jumping/landing, mining, placement, player overlap rejection, block selection,
+F5 save/reload and streaming eviction. It uses a fresh save file and writes screenshots and its final state to the supplied directory:
+
+```sh
+ctest --test-dir build -R '^kin-blockfield$' --output-on-failure -j1
+python3 examples/blockfield/smoke.py build/bin/blockfield /tmp/blockfield-smoke
+```
+
+Without explicit `--frames`, a benchmark chooses at least 900 measured frames beyond warm-up. For explicit frame limits, warm-up
+is `max(180, (2*distance+1)^2+60)` frames: distance 32 needs at least 5,185 total frames for that measured interval.
+For a bounded wide-view run:
+
+```sh
+KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --benchmark --headless --distance 24 --fov 110 --mesh-budget-mib 256 \
+    --report /tmp/blockfield-wide.json --metrics /tmp/blockfield-wide.csv --screenshot=/tmp/blockfield-wide.png
+```
+
+A benchmark tests the chosen workload, rather than certifying the engine's capacity: greedy voxel terrain is relatively cheap to draw and
+does not exercise animation, complex material stacks or large particle systems.
+
+For CPU profiling, add `--profile --profile-json /tmp/blockfield-profile.json` to an explicitly bounded benchmark. The runtime
+JSON records per-frame CPU scopes, presentation and available GPU samples; filter its `samples` by `frame > warmup_frames` from
+the scene report to exclude loading. Raw profile events grow with the frame count, so keep runs bounded and sequential. CPU scopes
+can nest and GPU work overlaps the CPU; their times are not additive. The CPU profiling section of `docs/3d_plan.md` records the
+distance-32 findings and a `perf` sampling command, with shared geometry buffers as the first measured optimisation target.
+
+Kin now shares GPU buffers for small static meshes, including these chunks. To compare the original allocation path, set
+`KIN_SHARED_MESH_BUFFERS=0` before launching; the choice applies when each mesh is created. The report's `shared_mesh_*` fields
+show reserved GPU page bytes, live/retired ranges, page counts and reuse. Pool reservation includes page padding, so it can exceed
+the sample's resident mesh bytes. Dedicated meshes, view targets and driver allocations are outside these pool counters.
+
+For a comparison with Godot, `blockfield_render_compare` generates a versioned binary snapshot using the existing seeded
+terrain and greedy mesher, then loads one chunk at a time into Kin. The Godot project in `blockfield/godot/` reads the same file,
+reversing index winding for Godot's clockwise front faces. Both draw one mesh per chunk, opaque unlit vertex colours, the same
+frame-indexed flight path, vertical FOV, near/far planes and 1280×720 offscreen target, followed by a full-size 2D copy. Shadows,
+sky, fog, AA, LOD, occlusion culling, HUD, physics, terrain edits and streaming are absent. Engine frustum culling stays enabled:
+Kin uses bounding spheres and Godot uses tighter bounds, so submitted draw/triangle counts can differ despite matching images.
+This compares rendering a common scene; it does not compare complete voxel games or the existing streaming benchmark's timings.
+
+Keep the standard Godot 4.7.2 Linux editor and `linux_release.x86_64` export template in
+`$HOME/kin-bench/godot-4.7.2/`. Only that template is needed; discard the full template download after extracting it. The runner
+copies the small project onto the Linux disk, imports it without opening the editor UI, exports a release build using the custom
+template, and hard-links identical executable copies to save disk space. Generated geometry stays outside the project/export pack.
+The tested editor/template pair is from the [official builds](https://github.com/godotengine/godot-builds/releases/tag/4.7.2-stable).
+
+```sh
+cmake --build build --target blockfield_render_compare --parallel 1
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare"
+```
+
+The Linux runner uses only the Python standard library and `/usr/bin/time`. It runs one process at a time, refuses to start below
+2 GiB available RAM or 2 GiB free disk, and terminates a run above 1.5 GiB RSS, below 1 GiB available RAM, or after 300 seconds.
+Snapshot generation holds only one chunk on the CPU and caps source mesh data at 256 MiB. Each renderer loads chunk arrays
+incrementally and periodically submits uploads. Defaults are three alternating repeats of distance 24/FOV 150 and distance
+32/FOV 110 and 150, each with 300 warm-up and 900 measured frames. `--frames`, `--repeats`, `--base` and `--godot-dir` are adjustable.
+Results, logs, screenshots, snapshot SHA-256 hashes and peak process RSS go under `$HOME/kin-bench/results/` (or `smoke/`).
+Avoid a RAM-backed `/tmp` for these snapshots and Godot's shader caches.
+
+Use `frame_interval_ms` for a common wall-clock render-loop interval, including submission, queue backpressure and engine work;
+it is an uncapped offscreen workload, not presented gameplay FPS. Kin's `kin_fence_ms` is a host fence-completion timer, whereas
+Godot's `godot_gpu_timestamp_ms` uses GPU timestamps for the 3D viewport. They have different timing boundaries and must not be
+compared as equivalent GPU frame times. Godot's CPU setup/viewport measurements also have different boundaries from Kin's
+scene-build/submit measurements. Godot `--headless` disables GPU rendering, so only import/export use that flag; actual benchmark
+runs use Vulkan with `RenderingServer.force_draw(false)` and automatic drawing disabled, avoiding display refresh pacing.
+
+On 2026-10-14, three alternating repeats on an RTX 4080 Laptop GPU (driver 580.178.04), Kin Release and Godot 4.7.2 release
+produced the following at distance 32 / vertical FOV 150 (about 1.49 million submitted triangles in Kin, 1.48 million in Godot):
+
+| Renderer | Median loop interval | 95th percentile | Peak process RSS |
+| --- | ---: | ---: | ---: |
+| Kin SDL_GPU Vulkan | 0.83 ms | 0.87 ms | 200 MiB |
+| Godot Mobile Vulkan | 0.49 ms | 0.63 ms | 541 MiB |
+| Godot Forward+ Vulkan | 0.73 ms | 0.90 ms | 574 MiB |
+
+All 27 large runs completed; all six screenshot pairs had identical foreground masks, and Forward+ matched over 99.999% of
+pixels. Godot import/export peaked at 703 MiB RSS. The retained binaries, snapshots and results occupied about 767 MiB under
+the benchmark directory, plus about 14 MiB of Godot caches/user data. These short, uncapped trials are a rendering baseline;
+CPU/GPU clocks were not locked. Mobile is faster on this simple material workload, while Kin uses much less process RAM and
+has comparable timings to Forward+. Lighting, shadows and streaming still need separately matched workloads before drawing
+broader conclusions about engine capacity. Full local measurements and machine/build metadata are in
+`$HOME/kin-bench/results/comparison.json`.
+
+To stress triangle throughput while keeping geometry storage bounded, use a multiplier sweep:
+
+```sh
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --triangles --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --triangles
+```
+
+This reuses the distance-32 snapshot after validating its SHA-256. A new top-down view frames the entire field at vertical FOV
+90, with no frustum rejection in Kin; all Godot instance bounds fit the camera. Both engines submit all 3,195,550 source triangles
+at 1×. Defaults test 1×, 5×, 10×, 20× and 100× (3.20, 15.98, 31.96, 63.91 and 319.56 million submitted triangles per frame).
+Copies form disjoint tiles in a grid with `ceil(sqrt(copies))` cells per side; uniform scaling keeps the complete tiled field
+inside the same footprint and camera frame. Copies are not coincident overlapping geometry.
+
+Kin uses `Scene3D::draw_instanced`, and Godot uses one `MultiMesh` per source chunk. Vertex/index buffers remain shared;
+each engine issues 3,504 instanced main-pass draws at every multiplier, and instance transforms scale with the copy count.
+Every measured frame is checked against the exact expected triangle count. This tests geometry throughput and instancing,
+including Kin's per-frame instance uploads, with fixed draw-call count and simple opaque materials. It does not multiply unique
+mesh storage, independent scene-object count, shader complexity, texture memory, or pixel count. At higher multipliers, triangles
+occupy fewer pixels and many are smaller than a pixel; the counters describe submitted triangles rather than shaded pixels.
+
+The stress sweep uses 300 warm-up plus 300 measured frames per run, three alternating repeats, the same memory/time limits,
+and separate outputs under `$HOME/kin-bench/triangle-sweep/`. Small smoke runs exercise 1×, 5× and 100× on 25 source chunks.
+Use `--scales 1 5 10 20 100`, `--frames N` and `--repeats N` to change the sweep. Because the complete field is now submitted,
+its 1× baseline differs from the earlier moving-camera/frustum-culling comparison; compare multipliers within this sweep.
+The triangle counter describes main-pass submissions. Godot Forward+ retains its default depth prepass, which draws geometry
+again; Mobile has no depth prepass, and Kin's optional depth-prepass features are disabled here. These are the tested renderer
+defaults, not identical internal pass counts. See Godot's
+[depth-prepass setting](https://docs.godotengine.org/en/stable/classes/class_projectsettings.html#class-projectsettings-property-rendering-driver-depth-prepass-enable).
+
+Shader probes on the same machine (2026-10-14) isolate the unlit workload's GPU overhead. Each probe keeps the original mesh
+buffers, 128-byte instance records, CPU renderer, transforms and draw counts; only embedded `mesh.vert.spv`/`mesh.frag.spv`
+change. Temporary probe executables live under `$HOME/kin-bench/shader-analysis/`; the default shaders and benchmark executable
+were restored byte-for-byte after creating the probes. Three alternating repeats produced these median render-loop intervals:
+
+| Shader path | 20× / 63.91 million triangles | 100× / 319.56 million triangles |
+| --- | ---: | ---: |
+| Kin general mesh shader | 13.30 ms | 65.63 ms |
+| General shader with `glslc -O` | 13.25 ms | — |
+| Remove unused vertex work, retain general fragment shader | 10.47 ms | — |
+| Minimal unlit, untextured vertex/fragment probe | 9.49 ms | 46.97 ms |
+| Godot Mobile reference | 9.91 ms | 49.04 ms |
+
+At 20× each run used 300 warm-up and 180 measured frames; at 100× it used 300 warm-up and 120 measured frames. All native probe
+screenshots match the general shader's pixels exactly. The unlit probe reduces loop time by about 29% at both scales, reaching
+roughly Mobile's performance; GPU clocks were not locked, so its small apparent lead is not a general engine ranking.
+
+Kin's general vertex shader transforms normals and exports normal/world-position/UV data even when the material is unlit.
+The fragment shader skips its lighting branch at runtime for these draws, but still samples a default white base texture.
+The probes demonstrate the value of dedicated unlit variants and shader input masks. Godot's Mobile shader has compile-time
+`NORMAL_USED`, `UV_USED` and `MODE_UNSHADED` feature branches. Godot also uses packed normals/separate vertex streams and
+48-byte MultiMesh transforms in this scene; Kin uses 36-byte interleaved vertices and 128-byte instance records. Packing/splitting
+vertex data and retained instance buffers are additional opportunities, whose separate performance gains have not been measured.
+At 100×, Kin prepares/uploads about 42.8 MiB of instance records each frame; Godot retains the unchanged copy transforms.
+
+These probes implement only this scene's unlit, untextured material. A production path needs correct textured/alpha/emissive
+behaviour and appropriate fog/skinning/velocity/custom-shader fallbacks. The prototype is not a global replacement for the
+general mesh shaders. `glslc -O` makes the SPIR-V smaller but changes this timing by only 0.4%, within run-to-run variation;
+static SPIR-V instruction counts also include unused or runtime-skipped branches and are not GPU machine-code counts.
+Full measurements, probe hashes, source observations and pixel checks are in `$HOME/kin-bench/shader-analysis/investigation.json`.
+
+The production implementation now uses dedicated unlit colour-only, textured and masked shaders in Kin, enabled by default.
+Set `KIN_UNLIT_SHADERS=0` before renderer creation for a same-binary reference. Fog, skinning, temporal AA and custom shaders
+use the general path; emission, blending, HDR and MSAA are supported by the specialization. New paired runs reduced frame time
+by about 27.5% at 20× and 29.8% at 100× (median paired p50 reductions), with exact Kin screenshot matches. Median run p50s were
+10.99→7.97 ms at 20× and 58.99→40.40 ms at 100×; Mobile measured 8.13 / 41.28 ms. Clocks drifted during the longer sweep, so
+these results support roughly Mobile-level performance for this unlit scene. Kin's peak process RSS stayed below 423 MiB;
+shared vertex/index data and the 36/128-byte vertex/instance layouts are preserved. Full details and reproduction are in
+`$HOME/kin-bench/unlit-specialization/findings.json` and `docs/3d_plan.md`.
+
+### Lighting, materials and sampling
+
+Blockfield now has playable quality presets:
+
+```sh
+KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --quality pbr
+KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --quality high --distance 8 --mesh-budget-mib 64
+```
+
+`basic` retains the existing daylight/sky/fog rendering. `pbr` adds shared albedo/ORM/normal textures, four point lights, one spot,
+HDR and 4× MSAA. `high` uses eight points, two spots, requests shadows from one point and two spots, TAA, half-resolution ambient occlusion
+and 16-step contact shadows. The coloured lamps follow the player; terrain remains a dielectric material and daylight/sky
+reflections remain active. The mesh budget and streaming/collision limits apply as before. Reports identify the quality preset
+and actual light, shadow and AA work. `smoke.py --quality pbr|high` exercises gameplay and checks those GPU counters.
+
+For separately measured Kin/Godot workloads:
+
+```sh
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --lighting --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --lighting --frames 180 --repeats 3
+```
+
+The default uses the existing distance-32 snapshot, 3.20 million main-pass triangles, 3,504 draws and one tiled copy. Steps add
+HDR, lit materials, three metallic/roughness families, albedo/ORM/normal/emissive maps, image-based illumination, eight moving
+points and two moving spots, sun shadows, local shadows, then separately 4× MSAA, 2× render resolution and TAA. A final Kin
+case adds half-resolution AO and contact shadows to TAA. Material maps occupy 64 KiB; the generated 128×64 linear RGB panorama
+uses 96 KiB before renderer filtering. Geometry stays shared. The 2× resolution case renders 2560×1440 and downsamples to the
+same 1280×720 output. These are real-time raster sampling options.
+
+Godot Mobile TAA and the unmatched Godot contact-shadow case are recorded as unsupported in `unsupported.json`. Mobile light
+counts above eight of either type are rejected. The renderers use their own BRDFs, normal mapping, environment filters, shadow
+atlases/filtering and tonemapping; compare workload cost and inspect quality, rather than assuming identical pixels. In particular,
+local shadow maps have different layouts and the non-IBL ambient lighting differs. Fine procedural detail intentionally exposes
+aliasing, and texture maps have linear filtering without mipmaps in this benchmark. MSAA mainly addresses geometry edges;
+TAA and the resolution test also expose surface-detail sampling cost.
+
+Individual Kin runs accept `--material unlit|lit|pbr`, `--lights 0..16`, `--spots 0..16`, `--samples 1|2|4|8`,
+`--resolution-scale 1|2`, `--shadow-resolution 512|1024|2048`, and `--hdr`, `--environment`, `--normal-map`, `--shadows`,
+`--local-shadows`, `--taa`, `--ao`, `--contact` with values `0|1`. Choose TAA or MSAA; requests that cannot run are rejected.
+Use `--copies 1 --camera detail` for a close inspection view (its frustum culling means the whole-field triangle assertion does
+not apply). CSV/report counters confirm the requested lights, samples, shadow passes and compute dispatches actually ran.
+Results and peak RSS go under `$HOME/kin-bench/lighting-materials/`; the sequential memory guards still apply.
+
+Kin now packs shadow casters into flat lists and addresses small meshes within already-bound GPU pages. Both changes are
+engine-wide and preserve the same shading and geometry. `KIN_MESH_PAGE_BINDINGS=0` disables page-addressed draws for diagnosis
+while retaining shared storage and the flat shadow gather. Paired before/after measurements and exact capture comparisons
+are recorded in `docs/3d_plan.md` and `$HOME/kin-bench/shadow-binding-opt/`.
+The subsequent 90-run Kin/Godot rerun is saved separately in `$HOME/kin-bench/lighting-after-cpu-opt/`. At 3.20 million main
+triangles, local-shadow frame medians are 3.09 ms (Kin), 6.03 ms (Mobile), 7.36 ms (Forward+); with MSAA 4× they are
+4.35 / 5.72 / 6.97 ms. These compare this draw-heavy workload with each renderer's own lighting/shadow implementation.
+
+
+
+### Ground-level grove stress scene
+
+The rendering comparison also has a frame-indexed, 24-second ground tour through the seeded terrain. A `grove` preset adds
+10,000 alpha-cutout plants, 512 layered transparent mist cards, PBR/IBL, HDR, four points / one spot, sun and local shadows.
+Plants share one crossed-card mesh and a 128×128 texture; mist shares one quad and a 64×64 texture. Extra textures total
+80 KiB. Placement, camera poses, geometry and texture bytes are baked once into a 3.32 MiB `.bfd` recipe used by both engines.
+The recipe streams requested prefixes rather than loading the maximum population; terrain continues to load one chunk at a time.
+
+Generate the recipe and preview the tour (60 FPS cap, Escape or window close exits):
+
+```sh
+./build/bin/blockfield_render_compare --generate-dressing "$HOME/kin-bench/blockfield-grove.bfd"
+KIN_RENDER_BACKEND=gpu ./build/bin/blockfield_render_compare --preset grove --preview \
+  --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
+  --metrics "$HOME/kin-bench/grove/preview.csv"
+```
+
+Use `--foliage 0..100000` and `--transparent 0..20000` to vary the populations independently. Explicit flags override preset
+values regardless of argument order. `--camera ground --dressing FILE` selects only the route; `--preset grove --foliage 0
+--transparent 0` retains the preset lighting with both added populations disabled. Ground mode requires one terrain copy.
+The route follows a clear lane and is baked above existing terrain/tree bounds. These are instanced plants and static
+transparent cards; animation/crowds, physics, streaming and destruction remain separate workloads.
+
+```sh
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --grove --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --grove --frames 300 --repeats 3
+```
+
+The full sweep tests the bare route, 10k/50k/100k plants, 512/5k transparent cards, the default combination and a 100k/5k
+combination. Results are in `$HOME/kin-bench/grove/` (`smoke-grove/` for the smoke run). A separate Godot export preserves the
+previous lighting package. Runs stay sequential under RAM guards; the terrain snapshot is reused. CSV includes requested
+populations, camera frame, actual draw/triangle counts, frame p50/p95/p99 summaries and memory metadata. Native CSV also has
+actual visible instance counts. Preview timings include its frame cap and are not benchmark results.
+
+Ground scenes enable each engine's normal frustum culling. Main-pass submitted triangle counts can therefore differ across
+renderers, unlike the uncropped full-field triangle test. Godot uses 64 spatial plant batches / eight mist batches, while Kin
+merges consecutive identical-mesh/material instance draws while preserving cell bounds for CPU culling. Reports retain actual work rather than asserting equal triangle
+submission. Lighting/shadow implementations differ as in the lighting sweep; no cross-engine pixel-equivalence claim is made.
+
+`KIN_MASKED_DEPTH_PREPASS=1` opts into the stock masked-material main-depth experiment (off by default). The dense Grove
+route then prepasses the visible plant copies into the existing main depth target and shades against it without rewriting
+depth. It does not change camera/shadow selection or allocate another depth texture. CSV/report fields
+`masked_depth_draws` and `masked_depth_instances` report the extra pass separately; other draw/caster counts keep their
+meaning. TAA/MSAA/overlay/GPU-occlusion/custom-shader views and unsupported draws keep their previous paths. This can cost
+CPU time, so measure it with the intended helper count; the recorded 100k four-helper gain does not apply to serial runs.
+
+For external GPU captures, `--visible` uses an uncapped visible window with the same 300-frame warm-up, frame-indexed
+camera/light route and exact `--measured` CSV count. It exits from the benchmark's own render count. Unlike `--preview`,
+it does not skip warm-up or impose a 60 FPS cap. Presentation gives Nsight Systems frame boundaries: hidden SDL windows
+can otherwise exhaust its per-frame GPU timestamp limit. Use hidden runs for the established throughput comparison;
+visible capture intervals include window/compositor and profiler overhead.
+
+`KIN_GPU_PASS_MARKERS=1` enables optional `kin3d.*` SDL debug groups without splitting submissions. For example, with
+Nsight Systems already installed (output/scratch on disk, not a RAM filesystem):
+
+```sh
+KIN_RENDER_BACKEND=gpu KIN_GPU_PASS_MARKERS=1 TMPDIR="$HOME/kin-bench/tmp" \
+nsys profile --trace=vulkan-annotations --sample=none --cpuctxsw=none --backtrace=none \
+  --vulkan-gpu-workload=individual --output="$HOME/kin-bench/grove-capture" \
+  ./build/bin/blockfield_render_compare --visible --preset grove --workers 4 \
+  --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
+  --foliage 100000 --transparent 0 --measured 1440 --profile-cpu \
+  --metrics "$HOME/kin-bench/grove-capture.csv" --report "$HOME/kin-bench/grove-capture.json"
+```
+
+Create the disk scratch directory first. The bounded capture scripts in the GPU-profile result archive additionally run
+the application under its own 512 MiB RSS / low-free-memory guard: Nsight session processes can be reparented, so the
+outer profiler's process-tree peak is not the game's peak. Export the `.nsys-rep` to SQLite with `nsys export --type=sqlite`.
+Match `VULKAN_DEBUG_API` label ordinals to native frame indices, join GPU markers by correlation ID, exclude loading/warm-up
+and missing buffered tail samples, and use the enclosing `VULKAN_WORKLOAD` submission to account for dependent completion.
+Do not add its duration to contained marker times. Results and controls are recorded in `docs/3d_plan.md` under
+“Grove — external GPU pass profile”.
+
+For Kin CPU diagnosis, `--profile-cpu` adds Linux caller-thread and process CPU clocks around `render()`, the caller's scene
+submission CPU time, and a monotonic timestamp to each CSV row. These columns are zero when disabled. Process CPU includes
+renderer/driver helper threads and can exceed elapsed time; the clocks are not GPU timestamps or additive frame phases.
+`--workers 0..4` attaches that many renderer helpers (the caller also works); default zero preserves the serial benchmark.
+This is an experiment control; choose a worker policy from measured workload costs. Shadow jobs now group small draws
+into batches instead of scheduling each draw separately; the documented profile retains the earlier overhead measurements.
+`KIN_SPATIAL_CULLING=0` before launch disables cell culling for a same-binary comparison. The grove caches conservative cell
+bounds at load; its GPU draw batching and geometry stay unchanged. CSV also reports active cells, refined
+camera/bounds/local-shadow copies and group-rejected candidates. Grove submits foliage using `InstanceBatch3D` shared CPU
+handles and retains its GPU records within the renderer's 32 MiB / 128-batch live-table cap. `KIN_RETAINED_INSTANCES=0`
+disables GPU retention; additionally set `KIN_GROVE_RETAINED=0` to use grouped streamed CPU records, and
+`--rebuild-scene` to restore per-frame CPU submission. CSV/report fields
+`retained_instances`, `retained_gpu_bytes`, `retained_upload_bytes`, `retained_index_bytes` and `instance_upload_bytes`
+show the work removed. See `docs/rendering_3d.md` for edit semantics, fallbacks and what the memory cap counts.
+`KIN_CACHED_INSTANCE_BOUNDS=0` keeps the per-render sphere transforms for a same-binary CPU-cache comparison, with GPU
+retention still enabled. The CPU sphere cache is capped at 4 MiB and replaces the retained batches' transient sphere ranges.
+`bounds_cache_bytes`, `bounds_scratch_bytes`, `bounds_cache_instances` and `bounds_cache_rebuilt` report its storage/work;
+`bounds_instance_tests` includes actual cold/edited cache rebuilds.
+`KIN_LOCAL_SHADOW_CULLING=0` restores the previous local-shadow gather for comparison. Fully contained single-level ranges
+now skip per-copy classification; partial cells retain only unresolved frustum planes and skip proven radius tests.
+`local_candidates`, `local_group_accepted`, `local_radius_tests`, `local_plane_budget` and `local_bucket_bytes` expose the
+work/memory change. The plane budget is an upper bound before per-copy early exits; `local_instance_tests` excludes fully
+accepted ranges.
+`KIN_LOCAL_SHADOW_PACKING=0` separately restores full task counter arrays, duplicate accepted/upload copy lists and slot
+lookup storage covering retained copies too. `local_task_bytes`, `local_slot_bytes` and `local_copy_bytes` report the
+corresponding CPU vector payload capacities; they do not represent total RSS or GPU memory.
+`KIN_SHADOW_REACH=0` restores eager sun/moon swept-sphere reach tests. The default prepares ray exit faces once,
+computes endpoints lazily, reuses them across sun cascades, and skips camera/slice planes proven safe for a spatial cell.
+Ordinary single-map draws keep the original main loop; grouped/cascaded sun draws use the prepared loop.
+Outside cells still cast into view; compact local tasks retain their 32-byte size. Eight extra bytes per cell replace
+repeated work without adding a per-instance cache. CPU cluster cuts use full reach frustums.
+The comparison harness retains its static geometry/material commands in `Scene3D`, updating the camera and animated
+light rig each frame, matching the persistent Godot scene's lifetime. This uses the existing API and the same vector
+capacities, rather than a new engine cache. `--rebuild-scene` restores clearing and resubmitting all geometry each frame;
+reports record `static_scene_commands`. Keep that setting consistent when comparing engine-only changes.
+`KIN_CAMERA_RANGES=0` restores per-copy classification/packing inside camera-visible cells. The default fills accepted
+single-level ranges together when no cascade/LOD/skin or uncached local bounds require refinement, and packs fully
+visible pieces without per-copy visibility branches. CSV `camera_range_accepted` counts classified copies, not packing
+alone; no new per-instance cache or task payload is allocated.
+`KIN_LOCAL_SHADOW_SIMD=0` selects scalar local-shadow candidate tests. Supported SSE2 builds test four existing bounds
+records together for ranges of at least 16 candidates, retain scalar tails/small draws and preserve accepted-copy order.
+No new per-instance storage or larger task records are needed; unsupported/contraction-enabled builds use scalar tests.
+`KIN_ADAPTIVE_STAGING=0` restores the GPU device's fixed 16 MiB shared-upload floor. The default can shrink after quiet
+120-batch windows, down to 1 MiB, and regrows for large uploads. CSV fields `upload_staging_bytes`,
+`upload_staging_allocations`, `upload_count` and `upload_batches` distinguish capacity, allocations and upload traffic;
+capacity excludes SDL cycle backings and driver pools.
+
+```sh
+KIN_RENDER_BACKEND=gpu taskset -c 0-15 ./build/bin/blockfield_render_compare --preset grove \
+  --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
+  --foliage 100000 --transparent 0 --copies 1 --measured 180 --profile-cpu --workers 2 \
+  --metrics "$HOME/kin-bench/grove-profile/manual.csv" --report "$HOME/kin-bench/grove-profile/manual.json"
+```
+
+Choose CPU affinity for the actual machine; 0–15 are this test laptop's P-core logical CPUs. The measured CPU bottlenecks,
+worker trade-offs, upload counts and ranked engine proposals are recorded in `docs/3d_plan.md` under “Grove — CPU profile and
+proposed engine work”.
+
 ## Summit
 
 A one-player climbing game on the experimental 3D renderer and physics (`-DKIN_EXPERIMENTAL_3D=ON`; docs/3d_plan.md, "P4"): a

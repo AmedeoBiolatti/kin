@@ -53,6 +53,14 @@ and indices, three a triangle, counter-clockwise seen from the front.
 a shape from shapes. `Renderer3D::create_mesh` keeps it on the GPU as a
 `kin::Mesh` (cheap to copy). Meshes may outlive the renderer.
 
+Small static meshes share bounded vertex/index buffer pages. The renderer binds a page at zero and selects each mesh with
+indexed-draw offsets, including its LOD ranges; consecutive meshes on the same pages avoid redundant buffer bindings in the
+main, shadow, depth, velocity and picking passes. Skinned and clustered meshes keep dedicated vertices. Retirement fences
+protect shared ranges before reuse, and empty pages are released. For diagnostics, `KIN_SHARED_MESH_BUFFERS=0` disables
+pooling; `KIN_MESH_PAGE_BINDINGS=0` keeps pooling but selects mesh offsets through buffer bindings. The latter is read once
+when the 3D renderer is created. Local-shadow preparation packs accepted caster copies into flat lists instead of allocating
+per-mesh/per-view vectors; the stable ordering preserves shadow-cache keys and clustered cuts.
+
 Shapes made in code (`kin::meshes`): `box`, `plane`, `sphere`, `cylinder`,
 `cone`, `torus`, `star_prism`, `octahedron`, `wedge` (a ramp).
 
@@ -68,6 +76,170 @@ lights, and draws.
   tint and an id.
 - `add_instances(mesh, count, material)`: room to fill in place (valid until
   the next draw is added).
+
+`draw_instanced_group(mesh, instances, world_bounds, material)` preserves a spatial cell within an instanced draw. It accepts
+either transforms or `MeshInstance` records. Equal mesh/material groups still merge into one draw, retaining global alpha
+sorting and instance order. Camera, sun and local/moon shadow views classify each cell independently; rejected cells skip
+per-copy tests, fully contained cells skip their plane tests, and intersecting cells refine individual spheres as usual.
+Camera rejection alone never removes an offscreen shadow caster. Ungrouped ranges interspersed with cells keep per-copy culling.
+
+Calculate `world_bounds` with `instance_bounds(mesh, instances)` when the mesh/transforms change, then cache it. It encloses
+the renderer's transformed culling spheres (including rotated/nonuniform/negative scales), rather than only the geometry's
+tighter box. Bounds use the coordinate space of their own scene, including an overlay's. Supplying stale or undersized valid
+bounds can incorrectly cull copies; invalid/nonfinite boxes fall back to per-copy tests. These calls submit plain instances;
+`draw_skinned` continues to use its posed bounds. `clear()` also clears group metadata while retaining its capacity.
+
+Set `KIN_SPATIAL_CULLING=0` before creating the GPU renderer for the reference per-copy path. `Render3DStats::spatial_groups`
+counts active cells; `camera_instance_tests`, `bounds_instance_tests` and `local_instance_tests` count refined copies, not
+planes. `camera_group_rejected` counts copies rejected for the camera; `local_group_rejected` counts rejected candidates
+across wanted shadow views. Group metadata introduces no additional GPU draws or instance buffers. Blockfield's grove caches
+64 foliage-cell bounds and eight mist-cell bounds when loading its shared recipe.
+
+`InstanceBatch3D(mesh, std::vector<MeshInstance>, std::vector<InstanceGroup3D>)` owns a fixed-size collection and optional
+ordered, disjoint cell ranges. Move the vectors in to avoid another CPU copy. Cell bounds are computed from the records.
+`scene.draw_instanced(batch, material)` retains a cheap shared handle; these records are in `Draw::batch.instances()`,
+rather than `Scene3D::instances()`. A batch stays a separate draw even beside equal materials. `clear()` releases the scene's
+handle; the caller can reuse its own handle next frame. Meshes, materials, transforms, tints and picking IDs behave as usual.
+
+`batch.update(first, records)` edits a fixed range, increments the shared revision, and refreshes affected cell bounds.
+Out-of-range edits throw; changing the count requires a new batch. Copies share edits, including handles already submitted
+into a scene. Edit between renders, never concurrently with rendering. The latest records are read when rendering starts.
+
+The GPU renderer retains up to **32 MiB of live instance tables / 128 batches**. Built-in opaque/masked, non-skinned copies
+with one selected mesh level use stable 128-byte records and per-view 32-bit index lists for main/prepass/pick and shadows.
+An unchanged batch uploads no records. An explicit edit or material-colour change reuploads the entire table, at most once
+per table per GPU frame; changed data in a later view of that frame uses the immediate path. Simultaneous conflicting
+material colours also fall back. TAA, blended materials, custom shaders, selected multi-level/cluster LOD, occlusion culling,
+unavailable shaders and capacity overflow keep the ordinary upload path. CPU batch handles work in these cases too.
+The budget covers live tables, not total GPU memory: streamed buffers, staging and in-flight buffer versions are additional.
+Expired batches are collected between GPU frames after waiting for submitted GPU work; recreate batches only when needed.
+
+`KIN_RETAINED_INSTANCES=0` disables GPU retention before renderer creation. Stats expose live `retained_gpu_bytes`, submitted
+`retained_instances`, per-render `retained_upload_bytes`, and main-view `retained_index_bytes`. `instance_upload_bytes` counts
+streamed main/local-shadow 128-byte records, excluding retained records and all index lists. The same fields appear in the
+Blockfield CSV/report. Grove retains its masked foliage by default; `KIN_GROVE_RETAINED=0` selects grouped streamed
+instance records. Combine it with `--rebuild-scene` to restore the original per-frame CPU submission workload for diagnosis.
+Mist keeps its existing alpha-sorted path.
+
+Resident tables also cache transformed culling spheres on the CPU, using 16 bytes/copy and at most **4 MiB per renderer**
+(plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes its
+whole sphere array on the next render; material-colour changes alone do not. Main and sun/local/moon culling still perform
+their normal visibility tests, reading these spheres rather than retransforming each copy. CPU cache refresh is independent
+of GPU record uploads, including edits between views in one GPU frame.
+
+Only batches already admitted to the GPU cache get CPU sphere storage. Non-skinned copies with one selected mesh level can
+reuse it during GPU streaming fallbacks too (for example, a later view with TAA, alpha or a conflicting material colour).
+Selected multi-level LOD keeps its original scale calculation to preserve threshold rounding; posed bounds remain dynamic.
+Uncached local casters use a compact transient sphere array addressed separately from visibility flags. When a batch becomes
+cached, oversized old transient storage is released, avoiding two full sphere arrays. Expired tables release both caches.
+
+`KIN_CACHED_INSTANCE_BOUNDS=0` before renderer creation disables sphere caching while retaining GPU records. Stats/CSV/report
+expose live allocated `bounds_cache_bytes`, allocated transient `bounds_scratch_bytes`, submitted `bounds_cache_instances`
+(counting repeated draws separately), and actual `bounds_cache_rebuilt` copies this render. `bounds_instance_tests` counts
+actual sphere calculations, including cache rebuilds; it therefore includes a cold or edited batch once and skips unchanged
+cached copies on following renders. These memory counters cover sphere payload capacity, not total process/GPU memory.
+
+Local shadow gathering also retains the unresolved frustum-plane mask for each spatial cell/view. A range proves full
+acceptance only when its whole sphere-enclosing box is inside the view and, for bounded lights, strictly inside the light
+radius. Single-level non-clustered ranges then fill consecutive accepted indices directly, without reading spheres or
+allocating classification bytes. Partial ranges test only the unresolved planes, copied once into a small worker-stack
+frustum in their original order. Proven light-radius containment skips per-copy distance tests independently of plane masks.
+Moon views retain their camera/slice shadow-reach tests when camera culling is enabled; camera rejection never removes
+local offscreen casters. Selected LOD/cluster ranges keep per-copy classification. No per-instance persistent cache is added.
+
+`KIN_LOCAL_SHADOW_CULLING=0` before renderer creation restores the original local gather refinement while retaining prior
+cell rejection, instance retention and bounds caching. `local_candidates` counts copy/view pairs after cell rejection;
+`local_instance_tests` counts those receiving per-copy gather work; `local_group_accepted` counts the rest. `local_radius_tests`
+counts actual per-copy radius checks. `local_plane_budget` is the **potential** plane-test count before radius rejection and
+per-copy early exits, not executed dot products. `local_bucket_bytes` counts temporary byte-classification payload. These
+fields appear in stats/Blockfield CSV/report. Extra metadata is one byte per possible local view per cell (24 bytes/cell
+with current limits); scratch may shrink, while accepted-copy lists and existing instance/bounds caches retain their budgets.
+
+Local shadow preparation uses one counter per task for single-level and clustered meshes. Only tasks that select among
+multiple mesh levels allocate per-level counters, sized once to their exact combined requirement. At eight levels the
+32-byte task plus its 32-byte counters equals the original 64-byte record, avoiding a memory regression in LOD-heavy scenes. Accepted indices reuse the local upload list's backing storage;
+cache decisions and cluster cuts finish before that list is compacted/remapped in source order. Retained draws keep raw
+batch indices, while streamed draws are remapped into the caster union. Slot lookup storage covers only streamed copies;
+oversized prior slot allocations are released when they exceed twice the required size (with a 4,096-slot floor).
+
+`KIN_LOCAL_SHADOW_PACKING=0` before renderer creation selects full per-task counters, separate accepted/upload lists and
+slots for all copies. This is independent of `KIN_LOCAL_SHADOW_CULLING`. Stats/CSV/report expose `local_task_bytes` (task and
+rare multi-level counter vector capacities), `local_slot_bytes` (allocated slot-vector capacity), and `local_copy_bytes`
+(combined simultaneous accepted/upload-list capacities). These measure specific CPU payloads, excluding allocator overhead,
+other scratch, GPU buffers and process RSS. The reused copy list retains its high-water capacity, as the upload list did.
+
+Directional sun/moon reach uses a prepared ray through `shadow_area` and computes each sphere's swept endpoint only
+when a camera/slice plane rejects its starting position. Sun cascades and CPU cluster selection reuse that endpoint.
+Spatial cells carry pending camera/slice plane masks: planes proven to contain every enclosed sphere can be skipped;
+a cell outside the camera is never rejected from that proof alone, since its shadows may enter view. Original plane
+coefficients, order and float divisions are retained. Cluster spheres use full plane sets rather than instance-cell proofs.
+
+`KIN_SHADOW_REACH=0` before renderer creation restores the original eager directional reach tests, independently of local
+culling/packing controls. The main loop compiles both forms separately. Spatial groups and multiple sun cascades use the
+prepared form; ordinary single-map draws and scenes without sun shadows use the original form, avoiding helper overhead
+for small draws. Masks add eight bytes per allocated spatial cell; no per-instance cache is added and compact local
+tasks remain 32 bytes. Existing culling/payload counters retain their meaning: `local_plane_budget` covers light
+frustums, not directional camera/slice reach. Camera-culling-off behavior and GPU cluster selection are unchanged.
+
+Camera-inside spatial cells can classify single-level, non-skinned, non-clustered copies as a range, filling the existing
+visibility bytes and recording one count. The shortcut requires that no per-copy sun-cascade membership or uncached
+local-shadow sphere is needed. Partial cells, offscreen casters and those consumers retain refinement. Fully visible
+single-level pieces also fill retained indices as consecutive source indices, or pack streamed records without reading
+visibility per copy. Source order, draw counts and alpha sorting are preserved, with no new per-instance storage.
+`KIN_CAMERA_RANGES=0` before renderer creation restores the previous classification and packing loops.
+`Render3DStats::camera_range_accepted` counts copies classified by the cell shortcut; `bounds_instance_tests` continues
+to count actual transformed bounds, so it may decrease for streamed cells. The counter does not include packing alone.
+
+Large local-shadow candidate ranges also test four spheres at once directly from the shared 16-byte cached/scratch
+bounds records. Prepared plane/radius constants live on the worker stack; no second bounds layout or per-instance cache
+is allocated. Ranges below 16 candidates retain the scalar loop, fully accepted cells retain their existing range path,
+and final one-to-three candidates use the scalar tail. Surviving lanes stay in source order through moon reach tests,
+LOD/cluster buckets and cache decisions. Single-bucket ranges classify four accepted copies together.
+
+`KIN_LOCAL_SHADOW_SIMD=0` before renderer creation selects scalar gathering independently of the other shadow controls.
+The native path uses SSE2 with scalar SSE math on GCC/Clang builds without FMA/fast-math flags; MSVC and other targets
+retain scalar gathering. Ordered rejection comparisons, arithmetic order, touching and unordered inputs match the scalar
+predicates on the tested build. Compact/reference tasks remain 32/64 bytes and existing diagnostics retain their meaning;
+`local_plane_budget` still describes potential scalar plane tests rather than executed SIMD operations. The native test
+object is 464 bytes on the tested x86-64 build, temporary per active worker task, plus one enable flag per renderer.
+
+The GPU device's shared texture/storage upload staging starts at the 16 MiB bulk-loading floor. Every 120 completed
+upload batches, it can shrink to the next power of two of that window's maximum aggregate batch occupancy, with a 1 MiB
+minimum and a factor-of-two size threshold. It grows immediately when an individual upload needs more space. Bursts can
+therefore take up to two windows of subsequent quiet batches to reach the minimum. Idle frames without upload submissions
+do not advance the window. SDL retires old transfer buffers after their submitted copies finish; this adds no GPU wait.
+
+`KIN_ADAPTIVE_STAGING=0` before device creation restores the 16 MiB floor and the previous policy that only shrank oversized
+buffers back to that floor after 600 batches without a large individual upload. The policy is device-wide, covering 2D
+textures and 3D storage uploads; the separate vertex/index upload ring is unchanged. `RendererBackendStats` exposes
+`upload_staging_bytes` (current single-handle capacity, zero between retirement and reallocation) and cumulative
+`upload_staging_allocations`. These exclude SDL's cycle backings, retired resources and driver pools, so are not total RAM.
+Blockfield's CSV also records `upload_count` and `upload_batches` from the shared upload path. Large active workloads,
+including the tested dense TAA case, retain 16 MiB; smaller staging is not a universal process-memory guarantee.
+
+`KIN_MASKED_DEPTH_PREPASS=1` before renderer creation opts into an experimental main-depth pass for stock lit cutout
+materials. Eligible single-level, non-skinned, non-clustered draws first write the view's existing main depth, using the
+same stock vertex shader, base sampler/wrap, tint alpha and `max(alpha_cutoff, 1e-6)` as shading. Main rendering loads that
+depth without cycling it; prepassed cutouts test depth without writing it, while other geometry retains its normal depth
+behaviour and source order. No extra render target or per-instance cache is allocated. `warm_up` prepares ordinary and
+retained depth/read-only variants. Diagnostics `masked_depth_draws` / `masked_depth_instances` count the additional work,
+separately from main and shadow counts; `kin3d.masked_depth` labels it for an external profiler.
+
+The experiment is **off by default**. TAA, MSAA, overlays, GPU occlusion and any submitted custom shader keep the existing
+view path; unlit/wireframe, skinned and selected multi-level/cluster draws are not prepassed. A view without eligible draws
+still clears main depth normally. The added pass can hurt CPU-bound or low-overdraw scenes; use measured workload evidence
+rather than enabling it globally. The tested dense Grove route benefits with four helpers but not reliably without them.
+
+For external GPU profilers, `KIN_GPU_PASS_MARKERS=1` before renderer creation adds SDL debug groups around clusters,
+sun/local shadows, prepass/occluders, overlay velocity, main rendering, temporal resolve, picking and view output. These
+are labels in the existing command buffer: they do not create timestamp pools, readbacks, fence scopes or submission
+splits. Disabled by default, with one flag per renderer and stack-only guards. SDL may ignore labels on unsupported
+backends. Vulkan/NVIDIA Nsight Systems can collect hardware timestamps for these ranges externally.
+
+Treat marker durations as pipeline spans, not isolated shader costs. A dependent output/copy can wait for fragments
+launched in the main pass. In the 100k Grove capture, disabling HDR moved ~0.6 ms from the output marker into the final
+copy without reducing the enclosing GPU submission. Compare enclosing submissions and controlled variants before blaming
+an output shader. Kin's ordinary fence timer remains a different measurement from these external hardware timestamps.
 
 `kin::Material3D`: `color` (times the mesh's vertex colours and each
 instance's tint), `texture` (the base colour's, by the mesh's UVs),
@@ -112,6 +284,13 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   all of the material's textures do past 0..1. Models set them from the
   glTF sampler (`REPEAT`, the glTF default, when it names none); samplers are
   made by filter and wrap on first use.
+
+Unlit materials use dedicated colour-only or base-textured main-pass shaders, with separate cut-out variants. They preserve
+vertex/material/tint colours, sRGB conversion, emission, alpha/additive blending, HDR and MSAA, while omitting lighting resources
+and unused normal/world-position outputs. Fog, skinned meshes, temporal AA and custom materials use the general shaders.
+Shadow, picking and depth/normal passes keep their existing shaders. `warmup()` prepares the selected unlit pipeline too.
+`Render3DStats::unlit_draws` counts specialized main-pass commands; `unlit_textured_draws` is its textured subset.
+Set `KIN_UNLIT_SHADERS=0` before creating the renderer to compare with the general path (default: enabled).
 
 `wireframe` draws only the mesh's triangles' edges, a pixel wide, unlit in
 the material's colour, just in front of faces in the same place (a little

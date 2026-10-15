@@ -1,0 +1,20 @@
+config_version=5
+
+[application]
+config/name="Blockfield render comparison"
+run/main_scene="res://main.tscn"
+
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/vsync/vsync_mode=0
+
+[rendering]
+renderer/rendering_method="mobile"
+renderer/rendering_method.mobile="mobile"
+rendering_device/driver.linuxbsd="vulkan"
+textures/default_filters/use_nearest_mipmap_filter=false
+environment/defaults/default_clear_color=Color(0.431373, 0.627451, 0.784314, 1)
+
+[threading]
+worker_pool/max_threads=1

@@ -103,15 +103,41 @@ struct ClusterDraw {
 
 // What the last render() drew.
 struct Render3DStats {
+    // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
+    u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;
+    u64 shared_mesh_range_reuses = 0;
+    u32 shared_mesh_pages = 0;
     u32 draws = 0;     // draw calls
     u32 instances = 0; // meshes drawn
     u32 culled = 0;    // meshes skipped, outside the view
+    // Optional instance-cell culling. Tests count refined copies, not individual planes;
+    // rejected local candidates count a copy once per wanted shadow view.
+    // Live bounded GPU tables; per-render upload bytes (records exclude index lists).
+    u64 retained_gpu_bytes = 0, retained_upload_bytes = 0, retained_index_bytes = 0, instance_upload_bytes = 0;
+    u32 retained_instances = 0;
+    // CPU sphere storage: resident-table cache (<=4 MiB), compact transient allocation,
+    // submitted copies using the cache, and actual cache rebuilds this render.
+    u64 bounds_cache_bytes = 0, bounds_scratch_bytes = 0, bounds_cache_rebuilt = 0;
+    u32 bounds_cache_instances = 0;
+    u32 spatial_groups = 0;
+    u64 camera_instance_tests = 0, bounds_instance_tests = 0, local_instance_tests = 0;
+    u64 camera_group_rejected = 0, local_group_rejected = 0;
+    u64 camera_range_accepted = 0; // copies classified together from a camera-inside cell proof
+    u32 masked_depth_draws = 0, masked_depth_instances = 0; // experimental main-depth cutout prepass
+    // Local gather after whole-cell rejection: candidates, fully accepted ranges,
+    // potential plane tests before per-copy early outs, actual radius tests, byte scratch.
+    u64 local_candidates = 0, local_group_accepted = 0, local_plane_budget = 0, local_radius_tests = 0, local_bucket_bytes = 0;
+    // Local preparation vector payload capacities: gather tasks/counts, caster-union slot map,
+    // and accepted/upload copy lists (including their simultaneous backing storage).
+    u64 local_task_bytes = 0, local_slot_bytes = 0, local_copy_bytes = 0;
     // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed to the
     // GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one mesh is one).
     // Also counted in draws, instances and triangles above. 0 for a frame without any.
     u32 skinned_copies = 0;
     u32 skin_matrices = 0;
     u32 skinned_draws = 0;
+    // Main-pass calls using the specialized unlit shaders; textured calls are a subset.
+    u32 unlit_draws = 0, unlit_textured_draws = 0;
     u32 shadow_draws = 0; // draw calls into the shadow map
     u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view; all cascades)
     u32 shadow_cascades = 0; // maps drawn (0: no shadows)

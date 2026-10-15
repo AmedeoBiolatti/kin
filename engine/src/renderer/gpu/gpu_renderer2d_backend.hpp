@@ -106,6 +106,7 @@ public:
     RendererBackendStats stats() const override {
         RendererBackendStats stats = _stats;
         std::tie(stats.texture_uploads, stats.texture_upload_submits) = _device.upload_counts();
+        std::tie(stats.upload_staging_bytes, stats.upload_staging_allocations) = _device.staging_stats();
         return stats;
     }
     void set_gpu_timing_enabled(bool enabled) override;

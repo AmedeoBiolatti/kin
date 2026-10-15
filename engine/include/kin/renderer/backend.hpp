@@ -150,6 +150,9 @@ struct RendererBackendStats {
     // command buffers that carried them (batched: many uploads, one submit).
     u64 texture_uploads = 0;
     u64 texture_upload_submits = 0;
+    // SDL_GPU shared upload staging: current single-handle capacity and allocations
+    // since device creation. Excludes SDL cycle backings, retired buffers and driver pools.
+    u64 upload_staging_bytes = 0, upload_staging_allocations = 0;
     u64 saved_texture_draws() const {
         return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
     }

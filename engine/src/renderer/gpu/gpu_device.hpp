@@ -122,6 +122,7 @@ public:
     void set_job_system(JobSystem* jobs) { _jobs = jobs; }
     // Texture uploads recorded and command buffers submitted for them so far.
     std::pair<u64, u64> upload_counts() const { return {_uploads_staged, _upload_batches}; }
+    std::pair<u64, u64> staging_stats() const { return {_staging ? _staging_size : 0u, _staging_allocations}; }
 
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
@@ -201,7 +202,10 @@ private:
     SDL_GPUCopyPass* _upload_pass = nullptr;
     SDL_GPUTransferBuffer* _staging = nullptr;
     u32 _staging_used = 0;
-    u32 _staging_size = 0;     // grows to fit the biggest upload, shrinks after
+    u32 _staging_size = 0;     // current or next capacity; initially uses the bulk-upload floor
+    bool _adaptive_staging = true; // KIN_ADAPTIVE_STAGING=0: fixed 16 MiB floor
+    u32 _staging_recent_peak = 0, _staging_recent_batches = 0;
+    u64 _staging_allocations = 0;
     u64 _big_upload_batch = 0; // the batch of the last upload over half the usual size
     JobSystem* _jobs = nullptr;
     std::shared_ptr<GpuTexturePool> _texture_pool; // released sampled textures, for create_texture

@@ -9,6 +9,99 @@ releases may change APIs.
 
 ### Added
 
+- Opt-in `KIN_MASKED_DEPTH_PREPASS=1` experiments with stock lit cutouts in the existing main depth target. Shading loads
+  that depth and uses read-only depth tests for prepassed draws. No new render target/per-instance cache; separate counters,
+  profiler labels and warm-up cover the additional pass. Unsupported views/draws retain their paths; the default stays off.
+
+- Optional `KIN_GPU_PASS_MARKERS=1` SDL debug groups name 3D GPU passes for external hardware profilers without fence
+  scopes, submission splits or new GPU allocations. Blockfield comparison `--visible` provides an uncapped, exactly
+  bounded visible capture with its normal warm-up/route, allowing Nsight Systems to observe frame boundaries.
+
+- Blockfield's render-comparison harness retains static `Scene3D` commands between frames, updating camera and lights
+  through the existing API. `--rebuild-scene` restores the former per-frame submission workload for paired measurements.
+
+- Camera-inside instance cells classify eligible single-level ranges together and pack fully visible pieces without
+  per-copy visibility branches. Cascade/LOD/skin and local-bound refinement, shadow selection and source order remain
+  intact. `KIN_CAMERA_RANGES=0` restores the prior loops; no per-instance storage is added.
+
+- Local-shadow gathering tests four cached/scratch spheres together on supported SSE2 builds, prepares plane/radius
+  constants on the worker stack and classifies single-bucket survivors in batches. Scalar small ranges/tails, moon reach,
+  LOD/cluster buckets and cache ordering remain intact. `KIN_LOCAL_SHADOW_SIMD=0` restores scalar tests; no per-instance
+  cache or larger task records are added, with scalar fallback on other build targets.
+
+- Directional shadow reach prepares sun/moon exit faces once, delays swept endpoints until needed, reuses them across sun
+  cascades and skips camera/slice planes proven inside for a spatial cell. Offscreen casters and boundary arithmetic are
+  preserved; masks add eight bytes per cell while compact local tasks remain 32 bytes. `KIN_SHADOW_REACH=0` restores eager tests.
+
+- GPU shared upload staging adapts to recent aggregate batch occupancy, shrinking below the previous 16 MiB floor after
+  quiet windows and regrowing for bursts. Capacity/allocation counters and `KIN_ADAPTIVE_STAGING=0` support comparisons.
+  This reduces steady resident upload memory for the Grove workload without changing draw/caster selection or shaders.
+
+- Local-shadow preparation compacts single-bucket task counters, reuses accepted indices for the upload list after cache/cluster
+  decisions, and keeps caster-union slot storage only for streamed instances. Multi-level LOD, clustered and cached maps retain
+  deterministic copy ordering. `KIN_LOCAL_SHADOW_PACKING=0` restores prior packing; diagnostics expose CPU payload capacities.
+
+- Local-shadow cell culling carries unresolved plane masks and strict light-radius containment proofs into gathering.
+  Fully accepted single-level ranges fill accepted indices without per-copy sphere tests or classification-byte storage;
+  partial ranges test only unresolved planes. Moon reach tests, LOD/cluster refinement and offscreen casters are preserved.
+  `KIN_LOCAL_SHADOW_CULLING=0` selects the previous refinement; new counters distinguish candidates, refinement and scratch.
+
+- Resident 3D instance batches cache transformed CPU culling spheres within a 4 MiB limit tied to the retained GPU-table
+  budget. Main and shadow views reuse them; edits refresh the cache independently of GPU upload fallbacks. Uncached local
+  casters use compact transient storage, with oversized old storage released when caching starts. Diagnostics expose cache,
+  scratch and rebuild counts; `KIN_CACHED_INSTANCE_BOUNDS=0` restores sphere transforms for comparison.
+
+- `InstanceBatch3D` keeps fixed-size instance records behind shared scene handles and supports explicit range edits with
+  refreshed cell bounds. A bounded GPU cache reuses opaque/masked records across camera and shadow views, uploading compact
+  visibility lists instead of repacking unchanged copies. Capacity/feature conflicts use the existing path. Grove retains
+  foliage; upload-byte counters and switches support paired measurements with the original CPU/GPU paths.
+
+- Plain 3D instances can retain spatial cells through draw merging with `draw_instanced_group` and cached `instance_bounds`.
+  Camera and shadow views reject whole cells or refine intersecting ones, preserving caster selection, draw counts, alpha
+  sorting and picking. Stats report avoided tests; `KIN_SPATIAL_CULLING=0` selects the reference path. The grove uses its
+  existing 64 foliage / eight mist cells without new geometry, textures or per-instance caches.
+- Kin's local-shadow jobs now batch candidate ranges across small draws, reuse current-render world bounds from the main
+  cull, and pack caster records directly into transfer memory. This removes the full CPU caster-record mirror while retaining
+  deterministic caster lists and existing shaders. GPU tests cover 9,000 separate draws, mirrored/nonuniform transforms,
+  local shadows without sun/camera culling, and serial/parallel image equivalence; paired grove timings are in the 3D plan.
+- Blockfield's native rendering benchmark has optional Linux thread/process CPU clocks and a bounded `--workers 0..4`
+  experiment control. Grove profiling records shadow preparation, static-instance upload traffic and worker overhead;
+  the renderer plan includes measured priorities and memory limits. Core rendering behavior and default worker policy are unchanged.
+- Blockfield's shared Kin/Godot benchmark has a `grove` preset with a ground-level camera tour, independently scaled
+  alpha-cutout foliage and layered transparency, a bounded shared scene recipe, interactive Kin preview, density sweeps,
+  per-frame recipe/work counters and p99 summaries. Geometry and small textures stay shared; existing lighting outputs are preserved.
+- Kin's local-shadow preparation uses flat caster lists with disjoint worker ranges, removing per-view/per-draw copy-vector
+  allocations. Indexed draws select shared meshes through page offsets, so the main, shadow, depth, velocity and picking passes
+  retain unchanged buffer bindings. `KIN_MESH_PAGE_BINDINGS=0` provides a diagnostic comparison. GPU tests cover page reuse and
+  serial/parallel shadow gathering across instance-piece boundaries; paired rich-lighting benchmarks retain identical pixels.
+- Blockfield has playable `--quality pbr|high` presets with shared PBR maps, additional point/spot lights, HDR, MSAA/TAA, local
+  shadows and AO/contact shadows. The comparison runner's `--lighting` sweep measures these features separately in Kin and
+  supported Godot renderers, with small procedural maps/IBL, shared geometry, strict work counters, close-up views and a 2×
+  render-resolution sampling test. Input-driven smoke tests exercise each playable preset and verify its GPU features.
+- Kin's unlit main pass now selects colour-only or base-textured shaders, with separate cut-out variants, removing unused vertex
+  work and lighting bindings. Colour conversion, emission, blending, HDR and MSAA are preserved; fog, skinning, TAA and custom
+  shaders retain the general path. Warm-up selects these pipelines too. `Render3DStats` reports specialized draws, and
+  `KIN_UNLIT_SHADERS=0` permits same-binary comparisons. Full-frame GPU equivalence tests cover the variants and resource switches.
+- Blockfield's Kin/Godot rendering comparison now includes a RAM-bounded 1×/5×/10×/20×/100× triangle sweep. Disjoint terrain
+  tiles share mesh buffers and use instanced draws; a full-field camera and exact per-frame counters ensure both engines submit
+  the same triangle workload. Separate stress results retain RAM limits and distinguish geometry throughput from draw-call,
+  unique-geometry and shader/pixel complexity.
+- A bounded Kin/Godot release rendering comparison for Blockfield: a shared chunk-mesh snapshot, matching camera/material/view
+  settings, Mobile and Forward+ Vulkan runs, sequential repeats, CSV metrics, screenshots and RAM limits. Geometry and Godot
+  assets live on the Linux disk; no voxel addon, duplicate terrain implementation or source build is required. Reports distinguish
+  whole render-loop intervals from the engines' different CPU/GPU timer boundaries.
+- Kin's SDL_GPU renderer pools small static meshes in shared vertex/index buffer pages, preserving independent mesh bounds,
+  draw order and edits. Freed ranges wait for GPU fences before reuse; empty pages are released, retired geometry has backpressure,
+  and oversized, skinned and clustered meshes retain dedicated buffers. `KIN_SHARED_MESH_BUFFERS=0` selects the original path
+  for comparisons. Render stats expose pool reservation, live/retired bytes, page counts and range reuse; Blockfield reports them.
+- Blockfield wider-view controls: vertical camera FOV 45–150 degrees (`--fov`, PgUp/PgDn), view distances up to 32 columns,
+  and a new default of distance 8 / FOV 90. Benchmarks without explicit frame limits include at least 900 frames after warm-up;
+  scene reports and the HUD expose the view settings. Sequential distance/FOV sweeps keep the mesh budget bounded.
+- Blockfield (`examples/blockfield`), a creative voxel sandbox on the experimental 3D backend: seeded hills, trees and caves,
+  first-person walking/flight, block picking/mining/placement, a hotbar and saved edits. Columns use greedy meshing and matching
+  Jolt colliders near the player, one bounded background meshing job, distance-based eviction and a resident mesh budget. Its
+  benchmark renders every frame while streaming and modifying terrain, exports bounded timing summaries and optional CSV metrics,
+  and exposes counts and memory bounds through scene reports. CPU tests cover meshing/seams, editing, saves, picking and collision.
 - Summit, a one-player climbing game on the experimental 3D renderer and physics (`examples/summit`; see the plan's "P4" and the
   examples' README): a procedural mountain from a seed (pieces that make both the colliders and the render meshes, a route a bot
   follows and a stamina planner checks), a player model (stamina, grab and climb, falls, a knock-out with a ragdoll and a get-up,

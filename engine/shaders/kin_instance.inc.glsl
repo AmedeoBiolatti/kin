@@ -16,3 +16,11 @@ struct Instance {
 layout(std430, set = 0, binding = 0) readonly buffer Instances {
     Instance instances[];
 };
+
+// Retained records keep their stable slot; each view uploads only compact indices.
+#ifdef KIN_INDEXED
+layout(std430, set = 0, binding = 1) readonly buffer VisibleInstances { uint instance_indices[]; };
+uint instance_at(uint i) { return instance_indices[i]; }
+#else
+uint instance_at(uint i) { return i; }
+#endif

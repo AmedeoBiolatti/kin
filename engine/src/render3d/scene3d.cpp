@@ -4,8 +4,90 @@
 #include <kin/render3d/model.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <atomic>
+#include <limits>
+#include <stdexcept>
 
 namespace kin {
+
+namespace {
+bool valid_bounds(const Bounds3& b) {
+    return std::isfinite(b.min.x) && std::isfinite(b.min.y) && std::isfinite(b.min.z) &&
+           std::isfinite(b.max.x) && std::isfinite(b.max.y) && std::isfinite(b.max.z) &&
+           b.min.x <= b.max.x && b.min.y <= b.max.y && b.min.z <= b.max.z;
+}
+template <class Transform> Bounds3 instance_bounds_of(const Bounds3& mesh, std::size_t count, const Transform& at) {
+    Bounds3 b{};
+    const Vec3f centre = mesh.center();
+    const f32 radius = mesh.radius();
+    for (std::size_t i = 0; i < count; ++i) {
+        const Mat4f& t = at(i);
+        const Vec3f c = t.apply(centre);
+        const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
+        const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
+        const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
+        f32 r = radius * std::sqrt(std::max({sx, sy, sz}));
+        if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) || !std::isfinite(r)) return {{1, 1, 1}, {-1, -1, -1}};
+        r += 1e-5f * (1 + std::max({std::abs(c.x), std::abs(c.y), std::abs(c.z)}) + r); // outward rounding margin
+        const Vec3f lo = c - Vec3f{r, r, r}, hi = c + Vec3f{r, r, r};
+        if (i == 0) b = {lo, hi};
+        else {
+            b.min = {std::min(b.min.x, lo.x), std::min(b.min.y, lo.y), std::min(b.min.z, lo.z)};
+            b.max = {std::max(b.max.x, hi.x), std::max(b.max.y, hi.y), std::max(b.max.z, hi.z)};
+        }
+    }
+    return b;
+}
+} // namespace
+
+Bounds3 instance_bounds(const Mesh& mesh, std::span<const Mat4f> transforms) {
+    return instance_bounds_of(mesh.bounds(), transforms.size(), [&](std::size_t i) -> const Mat4f& { return transforms[i]; });
+}
+Bounds3 instance_bounds(const Mesh& mesh, std::span<const MeshInstance> instances) {
+    return instance_bounds_of(mesh.bounds(), instances.size(), [&](std::size_t i) -> const Mat4f& { return instances[i].transform; });
+}
+
+struct InstanceBatch3D::Data {
+    Mesh mesh;
+    std::vector<MeshInstance> instances;
+    std::vector<InstanceGroup3D> groups;
+    u64 id = 0, revision = 1;
+};
+InstanceBatch3D::InstanceBatch3D(Mesh mesh, std::vector<MeshInstance> instances, std::vector<InstanceGroup3D> groups) {
+    if (instances.size() > std::numeric_limits<u32>::max()) throw std::length_error("instance batch too large");
+    u32 end = 0;
+    for (auto& group : groups) {
+        if (!group.count || group.first < end || group.first > instances.size() || group.count > instances.size() - group.first)
+            throw std::invalid_argument("instance batch groups must be ordered, nonempty and disjoint");
+        group.world_bounds = instance_bounds(mesh, std::span<const MeshInstance>(instances).subspan(group.first, group.count));
+        end = group.first + group.count;
+    }
+    static std::atomic<u64> next{1};
+    _data = std::make_shared<Data>(Data{std::move(mesh), std::move(instances), std::move(groups), next.fetch_add(1), 1});
+}
+const Mesh& InstanceBatch3D::mesh() const { static const Mesh empty; return _data ? _data->mesh : empty; }
+std::span<const MeshInstance> InstanceBatch3D::instances() const { return _data ? std::span<const MeshInstance>(_data->instances) : std::span<const MeshInstance>{}; }
+std::span<const InstanceGroup3D> InstanceBatch3D::groups() const { return _data ? std::span<const InstanceGroup3D>(_data->groups) : std::span<const InstanceGroup3D>{}; }
+u64 InstanceBatch3D::identity() const { return _data ? _data->id : 0; }
+u64 InstanceBatch3D::revision() const { return _data ? _data->revision : 0; }
+void InstanceBatch3D::update(u32 first, std::span<const MeshInstance> instances) {
+    if (!_data || first > _data->instances.size() || instances.size() > _data->instances.size() - first)
+        throw std::out_of_range("instance batch update");
+    if (instances.empty()) return;
+    // Copy via memmove so a range from this batch may also be used as the source.
+    std::memmove(_data->instances.data() + first, instances.data(), instances.size_bytes());
+    for (auto& group : _data->groups) if (group.first < first + instances.size() && first < group.first + group.count)
+        group.world_bounds = instance_bounds(_data->mesh, std::span<const MeshInstance>(_data->instances).subspan(group.first, group.count));
+    ++_data->revision;
+}
+void Scene3D::draw_instanced(const InstanceBatch3D& batch, const Material3D& material) {
+    if (!batch || batch.instances().empty()) return;
+    Draw draw{batch.mesh(), material, 0, static_cast<u32>(batch.instances().size())};
+    draw.batch = batch;
+    _draws.push_back(std::move(draw));
+}
 
 std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t count, const Material3D& material) {
     return add_instances(mesh, count, material, false, 0);
@@ -19,7 +101,7 @@ std::span<MeshInstance> Scene3D::add_instances(const Mesh& mesh, std::size_t cou
     _instances.resize(_instances.size() + count);
     // Straight after a draw of the same mesh and material: one draw (skinned copies only with skinned ones: the pose of
     // each is its own, and a plain copy of the mesh has none).
-    if (!_draws.empty() && _draws.back().mesh == mesh && _draws.back().material == material &&
+    if (!_draws.empty() && !_draws.back().batch && _draws.back().mesh == mesh && _draws.back().material == material &&
         _draws.back().first + _draws.back().count == first && _draws.back().skinned == skinned) {
         _draws.back().count += static_cast<u32>(count);
     } else {
@@ -125,6 +207,24 @@ Scene3D& Scene3D::overlay() {
     return *_overlay;
 }
 
+void Scene3D::add_group(u32 first, u32 count, const Bounds3& bounds) {
+    if (!count || !valid_bounds(bounds)) return;
+    Draw& draw = _draws.back();
+    if (!draw.group_count) draw.group_first = static_cast<u32>(_instance_groups.size());
+    _instance_groups.push_back({first - draw.first, count, bounds});
+    ++draw.group_count;
+}
+void Scene3D::draw_instanced_group(const Mesh& mesh, std::span<const Mat4f> transforms, const Bounds3& bounds, const Material3D& material) {
+    const u32 first = static_cast<u32>(_instances.size());
+    draw_instanced(mesh, transforms, material);
+    add_group(first, static_cast<u32>(transforms.size()), bounds);
+}
+void Scene3D::draw_instanced_group(const Mesh& mesh, std::span<const MeshInstance> instances, const Bounds3& bounds, const Material3D& material) {
+    const u32 first = static_cast<u32>(_instances.size());
+    draw_instanced(mesh, instances, material);
+    add_group(first, static_cast<u32>(instances.size()), bounds);
+}
+
 void Scene3D::draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites) {
     if (sprites.empty()) {
         return;
@@ -146,6 +246,7 @@ void Scene3D::draw_particles(const ParticleSystem3D& system) {
 void Scene3D::clear() {
     _draws.clear();
     _instances.clear();
+    _instance_groups.clear();
     _joints.clear();
     _skin_offsets.clear();
     _particle_draws.clear();

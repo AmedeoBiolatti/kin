@@ -9,6 +9,7 @@
 #include <kin/render3d/shadow_cascades.hpp>
 
 #include "gpu_buffer.hpp"
+#include "gpu_mesh_pool.hpp"
 #include "gpu_shader.hpp"
 #include "gpu_texture.hpp"
 
@@ -76,6 +77,9 @@ public:
 
     SharedDevice device;
     SDL_GPUBuffer* vertices = nullptr;
+    u32 vertex_offset = 0, index_offset = 0; // byte offsets for small static meshes in shared pages
+    std::shared_ptr<GpuMeshBufferPool> buffer_pool;
+    GpuMeshBufferAllocation allocation;
     // With a skin (MeshData::skin; never together with levels or clusters): the second vertex buffer (GpuSkinVertex), and the
     // sphere each joint's vertices stay within, for the culling of posed copies (render3d/skeleton.hpp).
     SDL_GPUBuffer* skin = nullptr;
@@ -219,6 +223,8 @@ class GpuRenderer3D final : public IRenderer3DBackend {
 public:
     GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device);
     ~GpuRenderer3D() override;
+    // Called after a frame is submitted: covers pending retired ranges without starting the GPU frame timer early.
+    void on_frame_submitted();
 
     // Whether `device` can draw 3D views (it has a depth format).
     static bool supported(SDL_GPUDevice* device);
@@ -239,12 +245,13 @@ public:
 
 private:
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder };
+    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder, MaskedDepth };
+    enum class Unlit : u8 { Off, Colour, Textured };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
     bool make_targets(GpuView3D& view);
     // `mask`: for a Blend3D::Mask material, in the shadow, pick and pre-passes
-    // (the others discard in mesh.frag itself).
+    // and the unlit main pass (the generic main pass discards in mesh.frag itself).
     // `velocity`: the main pass of a frame with temporal anti-aliasing and no pre-pass: mesh_velocity's shaders and a
     // second colour target, written by opaque meshes and masked for the rest.
     // `skinned`: for a skinned copy's draws (every pass): the skinning vertex shaders and the layout with the second vertex buffer.
@@ -253,7 +260,7 @@ private:
     // velocity variants; a custom shader has neither).
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                          SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false, bool fog = false,
-                                         bool lights = false) const;
+                                         bool lights = false, Unlit unlit = Unlit::Off, bool indexed = false, bool depth_read_only = false) const;
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`: the
     // second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is far.
     SDL_GPUGraphicsPipeline* sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const;
@@ -327,6 +334,7 @@ private:
     // that holds what they share. Each records into the frame's command buffer; any
     // pass in the middle of the frame is followed by resume_2d().
     struct FrameCtx;
+    struct DrawRef;
     void setup_frame(FrameCtx& ctx);          // cameras, temporal anti-aliasing and its jitter
     void fit_sun_shadow(FrameCtx& ctx);       // the shadow map and its cascades or box
     void cull_and_upload(FrameCtx& ctx);      // what is seen, and the instance buffers
@@ -353,6 +361,8 @@ private:
     void prepass(FrameCtx& ctx);              // depth and normals (or velocity), then the occlusion and contact shadows
     void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
     void overlay_velocity(FrameCtx& ctx);
+    static bool masked_depth_draw(const DrawRef& ref);
+    void masked_depth_pass(FrameCtx& ctx);
     bool main_pass(FrameCtx& ctx);            // false: the pass could not begin (2D is resumed already)
     void resolve_history(FrameCtx& ctx);      // the temporal resolve
     void pick_pass(FrameCtx& ctx);
@@ -378,8 +388,14 @@ private:
     SDL_GPUTextureFormat _depth_format = SDL_GPU_TEXTUREFORMAT_INVALID;
     SDL_GPUTextureFormat _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
     Renderer3DCapabilities _capabilities;
+    GpuShader _indexed_vertex, _indexed_unlit_vertex, _indexed_unlit_textured_vertex, _indexed_prepass_vertex;
     GpuShader _vertex_shader;     // mesh.vert
     GpuShader _fragment_shader;   // mesh.frag
+    // Optional unlit main-pass variants. Fog, skinning, custom shaders and TAA use the general shaders.
+    bool _page_mesh_bindings = true; // diagnostic override: KIN_MESH_PAGE_BINDINGS=0
+    bool _unlit_available = false;
+    GpuShader _unlit_vertex_shader, _unlit_textured_vertex_shader;
+    GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
     GpuShader _shadow_shader;     // shadow.frag
     GpuShader _shadow_vertex_shader; // shadow.vert
     GpuShader _fullscreen_shader; // fullscreen.vert
@@ -392,6 +408,7 @@ private:
     GpuShader _prepass_vertex_shader;     // prepass.vert
     GpuShader _prepass_shader;            // prepass.frag
     GpuShader _prepass_mask_shader;       // prepass_mask.frag
+    GpuShader _masked_depth_shader;      // optional main-depth cutout experiment
     GpuShader _prepass_velocity_vertex_shader; // prepass_velocity.vert
     GpuShader _prepass_velocity_shader;        // prepass_velocity.frag
     GpuShader _prepass_velocity_mask_shader;   // prepass_velocity_mask.frag
@@ -594,12 +611,12 @@ private:
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<u32> _local_list;           // the lists, as uploaded
-    std::vector<u8> _local_instance_bytes;  // and the union's instances
+    std::vector<std::array<u32, 2>> _local_copies; // the union's (ref, copy), packed directly into upload memory
     std::vector<u32> _local_joint_list;
     std::vector<std::array<u32, 2>> _local_runs; // a clustered copy's (first index, count) in _local_cluster_indices
     std::vector<u32> _local_cluster_indices;     // the compacted indices of the clusters each local view's cut chose
     std::shared_ptr<GpuBuffer> _local_index_buffer;
-    std::vector<Vec4f> _local_spheres;      // each copy's bounding sphere (flat, as _visible is), for the caster draws
+    std::vector<Vec4f> _world_spheres;      // uncached local casters only; DrawRef::sphere_first addresses this compact scratch
     std::vector<u32> _local_slot;           // each copy's place in the union (~0: none yet)
     std::vector<u8> _local_payload;         // scratch
     bool _no_shadow_cleared = false;
@@ -645,11 +662,51 @@ private:
         const u32* skin_first = nullptr;
         const Mat4f* joints = nullptr;
         u32 joint_base = 0;
+        u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
+        u32 retained = ~0u; // bounded retained-table cache entry, or immediate path
+        const Vec4f* cached_spheres = nullptr; // stable CPU bounds from a resident table, one level only
+        u32 sphere_first = 0; // uncached local casters' start in _world_spheres
+    };
+    struct RetainedTable {
+        u64 id = 0, revision = 0, claimed = 0, upload_frame = ~0ull;
+        Color color{};
+        std::weak_ptr<const void> lifetime;
+        std::shared_ptr<GpuBuffer> buffer;
+        u64 bounds_revision = 0;
+        std::vector<Vec4f> bounds; // at most 1/8 of the live GPU-table budget (4 MiB total)
+    };
+    std::vector<RetainedTable> _retained;
+    u64 _retained_epoch = 0, _retained_gc_frame = ~0ull;
+    u32 _retained_bytes = 0;
+    bool _retained_enabled = false;
+    bool _cached_bounds_enabled = true, _bounds_cache_grew = false;
+    bool _shadow_reach_fast = true; // KIN_SHADOW_REACH=0: original directional reach tests
+    bool _camera_ranges = true; // KIN_CAMERA_RANGES=0: classify every copy in accepted cells
+    bool _gpu_markers = false; // KIN_GPU_PASS_MARKERS=1: external GPU profiler labels, no fence scopes
+    bool _masked_depth = false; // KIN_MASKED_DEPTH_PREPASS=1: experimental cutout prepass, off by default
+    bool _local_spheres4 = true; // KIN_LOCAL_SHADOW_SIMD=0: scalar sphere tests
+    bool _local_pack_fast = true; // KIN_LOCAL_SHADOW_PACKING=0: full counters and separate copy lists
+    bool _local_cull_fast = true; // KIN_LOCAL_SHADOW_CULLING=0: original per-copy gather
+    u32 _bounds_cache_bytes = 0;
+    std::vector<u32> _retained_visible;
+    std::shared_ptr<GpuBuffer> _retained_indices;
+    GpuInstance3D pack_instance(const MeshInstance& instance, Color material) const;
+    void retain_instances(DrawRef& ref, FrameCtx& ctx);
+    void cache_instance_bounds(DrawRef& ref, Render3DStats& stats);
+    struct CullGroup {
+        u32 first = 0, end = 0; // relative to the draw
+        u8 camera = 1;         // 0 outside, 1 partial, 2 inside
+        u8 sun_mask = 0, sun_inside = 0;
+        std::array<u8, max_shadow_cascades> sun_reach_planes{}, moon_reach_planes{};
+        u32 local_mask = 0, local_radius_inside = 0;
+        std::array<u8, max_local_shadow_layers + max_shadow_cascades> local_planes{};
     };
     struct Piece {
         u32 ref = 0;
         u32 begin = 0, end = 0; // its copies, within the draw
         u32 flat = 0;           // the first's place among all the frame's copies
+        u32 group = ~0u;        // no group for unbounded gaps
+        u32 camera_tests = 0, bounds_tests = 0;
         // By level of detail (index 0 alone without): the copies seen, and those only the sun sees; where they go.
         std::array<u32, max_mesh_levels> seen{}, extra{};
         std::array<u32, max_mesh_levels> out{}, out_extra{};
@@ -750,6 +807,8 @@ private:
     // Room in a chunk for a mesh of `indices` indices and `clusters` clusters (a chunk made if none has): the chunk, and
     // where its ranges start.
     std::shared_ptr<GpuClusterChunk> allocate_cluster_range(u32 indices, u32 clusters, u32& index_first, u32& table_first);
+    std::shared_ptr<GpuMeshBufferPool> _mesh_buffers;
+    void collect_mesh_buffers();
     struct GcFrame {
         bool active = false;
         u32 jobs = 0, views = 0, clusters = 0; // copies, passes' views, clusters in all copies
@@ -769,6 +828,8 @@ private:
     } _gc;
     bool _gc_overflow_warned = false;
     std::vector<DrawRef> _refs;
+    bool _spatial_culling = true; // KIN_SPATIAL_CULLING=0: reference per-copy path
+    std::vector<CullGroup> _cull_groups;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start
     std::vector<u8> _visible;  // a copy: the bits of camera_bit, sun_bit and cascade_bit(k) (gpu_renderer3d.cpp)

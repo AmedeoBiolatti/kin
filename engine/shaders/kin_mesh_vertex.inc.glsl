@@ -51,22 +51,20 @@ layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
 
-vec3 decode(vec3 c) {
-    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
-}
+#include "kin_srgb.inc.glsl"
 
 void main() {
     // gl_InstanceIndex counts from 0: SDL_GPU's first_instance is left at 0
     // (backends disagree whether it adds to it), so the draw says where it starts.
 #ifdef KIN_VELOCITY
-    const uint at = draw.first.x + uint(gl_InstanceIndex);
+    const uint at = instance_at(draw.first.x + uint(gl_InstanceIndex));
     Instance instance = instances[at];
 #else
-    Instance instance = instances[draw.first.x + uint(gl_InstanceIndex)];
+    Instance instance = instances[instance_at(draw.first.x + uint(gl_InstanceIndex))];
 #endif
 #ifdef KIN_SKIN
     // The vertex posed by its joints, in the model's space; the copy's transform places that.
-    const mat4 skin = skin_matrix(draw.first.x + uint(gl_InstanceIndex));
+    const mat4 skin = skin_matrix(instance_at(draw.first.x + uint(gl_InstanceIndex)));
     const vec4 world = instance.model * (skin * vec4(aPos, 1.0));
 #else
     const vec4 world = instance.model * vec4(aPos, 1.0);

@@ -135,6 +135,11 @@ struct MeshInstance {
     u32 id = 0; // what Renderer3D::pick says is under a pixel showing it
 };
 
+// World-space box enclosing the renderer's transformed mesh spheres. Cache it while transforms
+// stay unchanged; recompute after edits. These bounds also cover rotated and negative scales.
+Bounds3 instance_bounds(const Mesh& mesh, std::span<const Mat4f> transforms);
+Bounds3 instance_bounds(const Mesh& mesh, std::span<const MeshInstance> instances);
+
 // Light from far away, in one direction: the sun.
 struct DirectionalLight {
     Vec3f direction{-0.4f, 1.0f, 0.3f}; // toward the light (any length but zero)
@@ -396,6 +401,31 @@ struct Lod3D {
     Occlusion3D occlusion{};
 };
 
+// A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a
+// handle rather than copying the records each frame. Update between renders, never concurrently
+// with rendering. Bounds are recomputed on edits; GPU retention is an optional bounded cache.
+struct InstanceGroup3D {
+    u32 first = 0, count = 0;
+    Bounds3 world_bounds{};
+};
+class InstanceBatch3D {
+public:
+    InstanceBatch3D() = default;
+    InstanceBatch3D(Mesh mesh, std::vector<MeshInstance> instances, std::vector<InstanceGroup3D> groups = {});
+    explicit operator bool() const { return bool(_data); }
+    const Mesh& mesh() const;
+    std::span<const MeshInstance> instances() const;
+    std::span<const InstanceGroup3D> groups() const;
+    u64 identity() const;
+    u64 revision() const;
+    std::weak_ptr<const void> lifetime() const { return _data; }
+    // Fixed size: an out-of-range edit throws. Existing scene handles see the edit on their next render.
+    void update(u32 first, std::span<const MeshInstance> instances);
+private:
+    struct Data;
+    std::shared_ptr<Data> _data;
+};
+
 class Scene3D {
 public:
     Scene3D() = default;
@@ -452,6 +482,15 @@ public:
     // Many copies of `mesh`, in one draw.
     void draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material = {});
     void draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
+    // Retain a handle; batch records need not be copied into instances(). The batch's groups
+    // are read at render time, including bounds refreshed by update().
+    void draw_instanced(const InstanceBatch3D& batch, const Material3D& material = {});
+    // A spatial cell of plain instances. `world_bounds` must enclose every copy's culling sphere
+    // (instance_bounds() computes it). Equal mesh/material cells still merge into one GPU draw;
+    // their bounds stay separate for camera and shadow culling. Invalid bounds fall back to
+    // per-copy culling. Bounds are copied; transforms/tints/IDs are copied as by draw_instanced().
+    void draw_instanced_group(const Mesh& mesh, std::span<const Mat4f> transforms, const Bounds3& world_bounds, const Material3D& material = {});
+    void draw_instanced_group(const Mesh& mesh, std::span<const MeshInstance> instances, const Bounds3& world_bounds, const Material3D& material = {});
     // Room for `count` copies of `mesh`, for the caller to fill (from worker
     // threads, say). Valid until the next draw is added.
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material = {});
@@ -475,7 +514,10 @@ public:
         // draw_skinned(): the copies are skinned; copy i's joint matrices start at joint_matrices()[skin_offsets()[skin_first + i]].
         bool skinned = false;
         u32 skin_first = 0;
+        u32 group_first = 0, group_count = 0; // into instance_groups(); ungrouped gaps use per-copy culling
+        InstanceBatch3D batch{}; // if set, first/count refer to batch.instances(), not instances()
     };
+    using InstanceGroup = InstanceGroup3D;
     // A batch of particles (draw_particles): its look and sprites [first, first + count) of particle_sprites().
     struct ParticleDraw {
         ParticleLook3D look;
@@ -486,6 +528,7 @@ public:
     std::span<const ParticleSprite3D> particle_sprites() const { return _particle_sprites; }
     std::span<const Draw> draws() const { return _draws; }
     std::span<const MeshInstance> instances() const { return _instances; }
+    std::span<const InstanceGroup> instance_groups() const { return _instance_groups; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned draw).
     std::span<const Mat4f> joint_matrices() const { return _joints; }
     std::span<const u32> skin_offsets() const { return _skin_offsets; }
@@ -494,9 +537,11 @@ private:
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material, bool skinned, u32 skin_first);
     // One skinned copy whose matrices start at `first_joint` of _joints (already there).
     void add_skinned_copy(const Mesh& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material, Color tint, u32 id);
+    void add_group(u32 first, u32 count, const Bounds3& world_bounds);
 
     std::vector<Draw> _draws;
     std::vector<MeshInstance> _instances;
+    std::vector<InstanceGroup> _instance_groups;
     std::vector<Mat4f> _joints;
     std::vector<u32> _skin_offsets;
     std::vector<ParticleDraw> _particle_draws;

@@ -4,6 +4,9 @@
 #include <kin/render3d/ik.hpp>
 #include <kin/platform/app.hpp>
 #include "skin_fixtures.hpp"
+#include "../engine/src/renderer/gpu/gpu_shadow_cull.hpp"
+#include "../engine/src/renderer/gpu/gpu_shadow_reach.hpp"
+#include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
 
 #include <kin/assets/image.hpp>
 #include <kin/render3d/animation3d.hpp>
@@ -36,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -362,6 +366,33 @@ void test_scene_merges_draws() {
     assert(scene.add_instances(a, 0).empty() && scene.draws().size() == 4);
     scene.clear();
     assert(scene.draws().empty() && scene.instances().empty());
+}
+
+void test_scene_instance_groups() {
+    struct Fake final : kin::IMeshBackend {};
+    const kin::Mesh mesh{std::make_shared<Fake>(), 3, 3, {{-1, -2, -0.5f}, {1, 2, 0.5f}}};
+    const std::vector<Mat4f> transforms{Mat4f::translation({10, 3, -8}) * Mat4f::rotation_y(37) * Mat4f::scaling({-2, 3, 0.5f}),
+                                        Mat4f::translation({-20, 2, 9})};
+    const kin::Bounds3 bounds = kin::instance_bounds(mesh, transforms);
+    const float radius = mesh.bounds().radius() * 3;
+    assert(bounds.min.x <= 10 - radius && bounds.max.x >= 10 + radius);
+    assert(bounds.min.y <= 3 - radius && bounds.max.y >= 3 + radius);
+    std::vector<kin::MeshInstance> copies;
+    for (const Mat4f& t : transforms) copies.push_back({.transform = t});
+    const kin::Bounds3 other = kin::instance_bounds(mesh, copies);
+    assert(bounds.min == other.min && bounds.max == other.max);
+    kin::Scene3D scene;
+    scene.draw(mesh, Mat4f{});
+    scene.draw_instanced_group(mesh, transforms, bounds);
+    scene.draw(mesh, Mat4f::translation({1, 0, 0})); // unbounded gap within the merged draw
+    scene.draw_instanced_group(mesh, copies, bounds);
+    assert(scene.draws().size() == 1 && scene.draws()[0].count == 6 && scene.draws()[0].group_count == 2);
+    assert(scene.instance_groups().size() == 2 && scene.instance_groups()[0].first == 1 && scene.instance_groups()[1].first == 4);
+    scene.draw_instanced_group(mesh, transforms, {{1, 1, 1}, {-1, -1, -1}}); // invalid bounds fall back
+    scene.draw_instanced_group(mesh, std::span<const Mat4f>{}, bounds);
+    assert(scene.draws()[0].count == 8 && scene.instance_groups().size() == 2);
+    scene.clear();
+    assert(scene.draws().empty() && scene.instance_groups().empty());
 }
 
 void test_cameras() {
@@ -916,6 +947,108 @@ void test_gpu_hdr_bloom() {
     });
 }
 
+// Compare complete frames against the generic path, including pipeline/resource switches.
+void test_gpu_unlit_specialization() {
+    struct Override {
+        const char* old = std::getenv("KIN_UNLIT_SHADERS");
+        bool had = old != nullptr;
+        std::string previous = old ? old : "";
+        static void set(const char* value) {
+#ifdef _WIN32
+            _putenv_s("KIN_UNLIT_SHADERS", value ? value : "");
+#else
+            if (value) setenv("KIN_UNLIT_SHADERS", value, 1); else unsetenv("KIN_UNLIT_SHADERS");
+#endif
+        }
+        ~Override() { set(had ? previous.c_str() : nullptr); }
+    } restore;
+    std::vector<Pixels> reference;
+    for (bool enabled : {false, true}) {
+        Override::set(enabled ? "1" : "0");
+        with_gpu("test_gpu_unlit_specialization", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            MeshData data;
+            data.vertices = {{{-1, -1, 0}, {0, 0, 1}, {0, 1}, Color::rgba(210, 100, 240, 60)},
+                             {{1, -1, 0}, {0, 0, 1}, {1, 1}, Color::rgb(100, 240, 180)},
+                             {{1, 1, 0}, {0, 0, 1}, {1, 0}, Color::rgba(250, 180, 70, 230)},
+                             {{-1, 1, 0}, {0, 0, 1}, {0, 0}, Color::rgb(100, 170, 250)}};
+            data.indices = {0, 1, 2, 0, 2, 3};
+            const auto mesh = r3d.create_mesh(data);
+            const std::vector<kin::u8> texels{200, 100, 50, 40, 50, 200, 100, 240, 100, 50, 200, 120, 220, 220, 220, 255};
+            const auto texture = renderer.create_texture_from_rgba(texels.data(), {2, 2});
+            std::size_t frame = 0;
+            const auto check = [&](kin::View3D& view, const kin::Scene3D& scene, bool fast, bool textured) {
+                Pixels picture = shoot_view(renderer, r3d, view, scene);
+                const auto stats = r3d.stats();
+                assert(stats.draws > 0);
+                assert(stats.unlit_draws == (enabled && fast ? stats.draws : 0));
+                assert(stats.unlit_textured_draws == (enabled && fast && textured ? 1u : 0u));
+                if (enabled) {
+                    assert(frame < reference.size());
+                    if (picture.rgba != reference[frame].rgba) {
+                        std::cerr << "unlit frame mismatch: " << frame << '\n';
+                        assert(false);
+                    }
+                } else {
+                    reference.push_back(std::move(picture));
+                }
+                ++frame;
+                renderer.present();
+            };
+            for (int output = 0; output < 3; ++output) {
+                if (output == 2 && !renderer.set_color_space(kin::ColorSpace::Linear, true)) continue;
+                for (kin::u32 samples : {1u, 4u}) {
+                    auto view = r3d.create_view({160, 120}, {.samples = samples, .hdr = output == 1});
+                    for (int variant = 0; variant < 10; ++variant) {
+                        kin::Scene3D scene;
+                        scene.camera = kin::Camera3D::look_at({0, 0, 4}, {0, 0, 0});
+                        kin::Material3D material;
+                        material.color = Color::rgba(220, 200, 150, 210);
+                        material.unlit = true;
+                        material.emissive = output == 1 ? 2.0f : 0.2f;
+                        material.texture = variant % 2 ? texture : kin::Texture{};
+                        material.blend = variant < 2 ? kin::Blend3D::Opaque : variant < 4 ? kin::Blend3D::Alpha :
+                                         variant < 6 ? kin::Blend3D::Additive : variant < 8 ? kin::Blend3D::Mask : kin::Blend3D::Opaque;
+                        material.wireframe = variant == 8;
+                        material.wrap_u = kin::Wrap3D::Mirror;
+                        material.wrap_v = kin::Wrap3D::Repeat;
+                        scene.draw(mesh, Mat4f::identity(), material, Color::rgb(190, 230, 200));
+                        if (variant == 9) {
+                            // Interleave textured -> generic lit -> colour-only -> textured in one pass.
+                            auto lit = material; lit.unlit = false;
+                            scene.draw(mesh, Mat4f::translation({-0.7f, 0, 0.1f}), lit);
+                            auto colour = material; colour.texture = {};
+                            scene.draw(mesh, Mat4f::translation({0.7f, 0, 0.2f}), colour);
+                            scene.draw(mesh, Mat4f::translation({0, 0.5f, 0.3f}), material);
+                        }
+                        // Mixed draws have two textured commands (same material, separated by other draws).
+                        if (variant == 9) {
+                            Pixels picture = shoot_view(renderer, r3d, view, scene);
+                            assert(r3d.stats().unlit_draws == (enabled ? 3u : 0u));
+                            assert(r3d.stats().unlit_textured_draws == (enabled ? 2u : 0u));
+                            if (enabled) assert(picture.rgba == reference[frame].rgba);
+                            else reference.push_back(std::move(picture));
+                            ++frame; renderer.present();
+                        } else check(view, scene, true, variant % 2);
+                    }
+                }
+            }
+            auto view = r3d.create_view({160, 120}, {.samples = 1});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 4}, {0, 0, 0});
+            scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture});
+            scene.fog = {.enabled = true, .density = 0.1f};
+            check(view, scene, false, false);
+            scene.fog.enabled = false;
+            if (r3d.capabilities().temporal_aa) {
+                scene.taa.enabled = true;
+                check(view, scene, false, false);
+            }
+            if (enabled) assert(frame == reference.size());
+        });
+    }
+}
+
 // A material's texture, by the mesh's UVs.
 void test_gpu_texture() {
     with_gpu("test_gpu_texture", [](kin::Renderer2D& renderer) {
@@ -1063,6 +1196,84 @@ void test_gpu_interleaves_with_2d() {
 
 // Meshes and views kept past the renderer (as scenes outliving it keep them)
 // are let go without touching the device it closed.
+void test_gpu_shared_mesh_buffers() {
+    const char* setting = std::getenv("KIN_SHARED_MESH_BUFFERS");
+    const bool had_setting = setting != nullptr;
+    const std::string previous = setting ? setting : "";
+    const char* binding_setting = std::getenv("KIN_MESH_PAGE_BINDINGS");
+    const bool had_binding_setting = binding_setting != nullptr;
+    const std::string previous_binding = binding_setting ? binding_setting : "";
+    Pixels reference;
+    for (const auto [pooled, pages] : {std::pair{false, false}, std::pair{true, false}, std::pair{true, true}}) {
+        setenv("KIN_MESH_PAGE_BINDINGS", pages ? "1" : "0", 1);
+        setenv("KIN_SHARED_MESH_BUFFERS", pooled ? "1" : "0", 1);
+        with_gpu("test_gpu_shared_mesh_buffers", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            auto view = r3d.create_view({160, 120});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 7}, {0, 0, 0});
+            std::vector<kin::Mesh> meshes;
+            for (int i = 0; i < 2200; ++i) {
+                MeshData data = kin::meshes::box({1, 1, 1});
+                if (i % 2) {
+                    data.vertices = {{{-0.5f, -0.5f, 0}, {0, 0, 1}}, {{-0.5f, 0.5f, 0}, {0, 0, 1}},
+                                     {{0.5f, -0.5f, 0}, {0, 0, 1}}, {{0.5f, 0.5f, 0}, {0, 0, 1}}};
+                    data.indices = {0, 2, 1, 2, 3, 1};
+                }
+                const Color colour = i == 0 ? Color::rgb(220, 30, 30) : i == 501 ? Color::rgb(30, 220, 30) : Color::rgb(30, 30, 220);
+                for (auto& v : data.vertices) v.color = colour;
+                meshes.push_back(r3d.create_mesh(data));
+                assert(meshes.back().valid());
+            }
+            scene.draw(meshes[0], Mat4f::translation({-2, 0, 0}), {.unlit = true});
+            scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
+            scene.draw(meshes.back(), Mat4f::translation({2, 0, 0}), {.unlit = true});
+            const Pixels picture = shoot_view(renderer, r3d, view, scene);
+            if (!pooled) reference = picture;
+            else {
+                assert(picture.rgba == reference.rgba);
+                const auto stats = r3d.stats();
+                assert(stats.shared_mesh_pages >= 3 && stats.shared_mesh_pages < 8);
+                assert(stats.shared_mesh_live_bytes > 1024 * 1024 && stats.shared_mesh_retired_bytes == 0);
+            }
+            renderer.present();
+            if (!pooled) return;
+
+            // Destroy geometry with its draws still recorded, then upload a replacement before submitting again.
+            // Reuse without submission/fence protection would overwrite the old draw's vertices or indices.
+            scene.clear(); scene.draw(meshes[0], Mat4f::identity(), {.unlit = true});
+            renderer.clear(kin::colors::black); render_ok(r3d, view, scene);
+            renderer.draw_texture(view.texture(), screen);
+            scene.clear(); meshes[0] = {};
+            auto replacement = r3d.create_mesh(kin::meshes::box({0.4f, 0.4f, 0.4f}));
+            assert(replacement.valid());
+            expect(read(renderer).at(80, 60), Color::rgb(220, 30, 30), "retired range still drawn before replacement");
+            renderer.present();
+
+            // Fragment and refill pages repeatedly, checking that unchanged meshes retain their exact picture.
+            for (int round = 0; round < 8; ++round) {
+                for (int i = 2; i < 400; i += 2) meshes[i] = {};
+                scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
+                shoot_view(renderer, r3d, view, scene); renderer.present(); scene.clear();
+                for (int i = 2; i < 400; i += 2) meshes[i] = r3d.create_mesh(kin::meshes::box({1, 1, 1}));
+                scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
+                expect(shoot_view(renderer, r3d, view, scene).at(80, 60), Color::rgb(30, 220, 30), "live range survived reuse");
+                assert(r3d.stats().shared_mesh_pages < 8);
+                renderer.present(); scene.clear();
+            }
+            assert(r3d.stats().shared_mesh_range_reuses > 0);
+            meshes.clear(); replacement = {};
+            // A completed empty frame covers retirement; the following collection must release every empty page.
+            shoot_view(renderer, r3d, view, scene); renderer.present();
+            shoot_view(renderer, r3d, view, scene); renderer.present();
+            assert(r3d.stats().shared_mesh_live_bytes == 0 && r3d.stats().shared_mesh_retired_bytes == 0);
+            assert(r3d.stats().shared_mesh_pages == 0 && r3d.stats().shared_mesh_allocated_bytes == 0);
+        });
+    }
+    if (had_binding_setting) setenv("KIN_MESH_PAGE_BINDINGS", previous_binding.c_str(), 1); else unsetenv("KIN_MESH_PAGE_BINDINGS");
+    if (had_setting) setenv("KIN_SHARED_MESH_BUFFERS", previous.c_str(), 1); else unsetenv("KIN_SHARED_MESH_BUFFERS");
+}
+
 void test_gpu_meshes_outlive_renderer() {
     constexpr std::string_view test_name = "test_gpu_meshes_outlive_renderer";
     kin::App app{};
@@ -11315,6 +11526,21 @@ void test_gpu_spot_shadow_casters() {
             };
             const auto [with, camera] = shoot_poles(true);
             assert(r3d.stats().local_shadow_casters == 6 && r3d.stats().local_shadow_draws == 2); // and the floor
+            // Rejected copies on both sides of worker-piece boundaries must neither leak into the
+            // light's lists nor move the five accepted copies. This exercises the parallel gather/merge.
+            const auto five = copies;
+            copies.assign(9000, kin::MeshInstance{.transform = Mat4f::translation({1000.0f, 1000.0f, 1000.0f})});
+            const std::array<std::size_t, 5> positions{0, 2047, 2048, 8191, 8192};
+            for (std::size_t i = 0; i < five.size(); ++i) copies[positions[i]] = five[i];
+            const Pixels sparse = shoot_poles(true).first;
+            assert(r3d.stats().local_shadow_casters == 6 && r3d.stats().local_shadow_draws == 2);
+            assert(sparse.rgba == with.rgba);
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
+            renderer.set_job_system(&jobs);
+            const Pixels parallel = shoot_poles(true).first;
+            renderer.set_job_system(nullptr);
+            assert(r3d.stats().local_shadow_casters == 6 && r3d.stats().local_shadow_draws == 2);
+            assert(parallel.rgba == sparse.rgba);
             const Pixels bare = shoot_poles(false).first;
             // Each pole's shadow, at the far end of its strip where the pole's own top (the camera is above the light) does not hide it: the
             // pole's back edge (z = 1.2) at 1.68 m up cast from 7 m: 1.317 of the way out from the light's foot, to z = 1.58.
@@ -11326,8 +11552,884 @@ void test_gpu_spot_shadow_casters() {
             }
             std::cerr << "instanced casters: " << dark << " of 5 shadows found\n";
             assert(dark == 5);
+            // Bounds shared from the main cull must still exist when camera culling and the sun
+            // are both off. Splitting identical geometry over thousands of small draws must also
+            // preserve the accepted set when shadow jobs group work across draw boundaries.
+            copies = five;
+            for (std::size_t i = 0; i < copies.size(); ++i) {
+                copies[i].transform = copies[i].transform * Mat4f::scaling({i % 2 ? -0.7f : 1.3f, 0.6f + 0.1f * static_cast<float>(i), 0.8f});
+            }
+            const Pixels scaled = shoot_poles(true).first;
+            const kin::u64 caster_triangles = r3d.stats().local_shadow_triangles;
+            const auto scaled_five = copies;
+            copies.assign(9000, kin::MeshInstance{.transform = Mat4f::translation({1000.0f, 1000.0f, 1000.0f})});
+            for (std::size_t i = 0; i < scaled_five.size(); ++i) copies[positions[i]] = scaled_five[i];
+            const kin::Mesh twin = make_box(r3d, {0.4f, 2.0f, 0.4f});
+            const auto shoot_batches = [&](bool split, bool cull) {
+                kin::Scene3D scene;
+                base_scene(scene);
+                scene.cull = cull;
+                scene.add_spot_light(spot_for(7.0f));
+                if (split) {
+                    for (std::size_t i = 0; i < copies.size(); ++i) {
+                        scene.draw(i % 2 ? twin : pole, copies[i].transform, {.color = Color::rgb(200, 200, 200)});
+                    }
+                } else {
+                    scene.draw_instanced(pole, copies, {.color = Color::rgb(200, 200, 200)});
+                }
+                const Pixels p = shoot_large(renderer, r3d, large, scene);
+                renderer.present();
+                assert(r3d.stats().local_shadow_casters == 6);
+                assert(r3d.stats().local_shadow_triangles == caster_triangles);
+                assert(r3d.stats().local_shadow_draws == (split ? 6u : 2u));
+                return p;
+            };
+            for (const bool split : {false, true}) {
+                const Pixels serial_batches = shoot_batches(split, split);
+                renderer.set_job_system(&jobs);
+                const Pixels parallel_batches = shoot_batches(split, split);
+                renderer.set_job_system(nullptr);
+                assert(serial_batches.rgba == scaled.rgba);
+                assert(parallel_batches.rgba == scaled.rgba);
+            }
         }
     });
+}
+
+// Spatial metadata must preserve the reference accepted sets, pixels and pick IDs while
+// retaining draw merging, including unbounded gaps, off-camera casters and moving TAA views.
+void test_scene_retained_instances() {
+    struct Fake final : kin::IMeshBackend {};
+    const kin::Mesh mesh{std::make_shared<Fake>(), 3, 3, {{-1, -2, -0.5f}, {1, 2, 0.5f}}};
+    kin::InstanceBatch3D batch(mesh, {{Mat4f::identity(), Color::rgb(100, 200, 30), 19}, {Mat4f::translation({5, 0, 0}), {}, 20}}, {{0, 1}, {1, 1}});
+    const auto copy = batch;
+    kin::Scene3D scene;
+    scene.draw_instanced(batch);
+    scene.draw(mesh, Mat4f::identity());
+    scene.draw_instanced(batch);
+    assert(scene.draws().size() == 3 && scene.instances().size() == 1);
+    assert(scene.draws()[0].batch.instances().data() == batch.instances().data());
+    const auto revision = batch.revision();
+    const kin::MeshInstance moved{Mat4f::translation({100, 0, 0}), kin::colors::white, 77};
+    batch.update(1, {&moved, 1});
+    assert(copy.revision() == revision + 1 && copy.instances()[1].id == 77);
+    assert(scene.draws()[0].batch.groups()[1].world_bounds.min.x > 90);
+    assert(batch.groups()[0].world_bounds.min.x < 0);
+    bool caught = false;
+    try { batch.update(2, {&moved, 1}); } catch (const std::out_of_range&) { caught = true; }
+    assert(caught);
+    caught = false;
+    try { kin::InstanceBatch3D invalid(mesh, std::vector<kin::MeshInstance>(2), {{1, 2}}); } catch (const std::invalid_argument&) { caught = true; }
+    assert(caught);
+    scene.clear();
+    assert(copy.instances().size() == 2 && copy.identity() == batch.identity());
+}
+
+void test_gpu_retained_instances() {
+    with_gpu("test_gpu_retained_instances", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh box = make_box(r3d, {0.4f, 2, 0.4f});
+        const kin::u8 texels[]{200, 230, 180, 255, 200, 230, 180, 0};
+        const auto texture = renderer.create_texture_from_rgba(texels, {2, 1});
+        std::vector<kin::MeshInstance> original;
+        std::vector<kin::InstanceGroup3D> groups;
+        for (int cell = 0; cell < 16; ++cell) {
+            groups.push_back({static_cast<kin::u32>(original.size()), 600});
+            for (int i = 0; i < 600; ++i) original.push_back({
+                Mat4f::translation({float(cell % 4 * 20 - 30) + float(i % 25) * 0.6f, 0, float(cell / 4 * 20 - 30) + float(i / 25) * 0.6f}) *
+                    Mat4f::rotation_y(float(i)) * Mat4f::scaling({i % 2 ? -0.8f : 1.2f, 0.7f + 0.1f * float(i % 5), 0.9f}),
+                Color::rgb(kin::u8(100 + i % 155), 200, 130), static_cast<kin::u32>(i + cell * 600 + 1)});
+        }
+        kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
+        for (int mode = 0; mode < 9; ++mode) {
+            if (mode == 4 && !r3d.capabilities().temporal_aa) continue;
+            if (mode == 6 && !r3d.capabilities().ambient_occlusion) continue;
+            const auto shoot = [&](bool retained, bool parallel) {
+                renderer.set_job_system(parallel ? &jobs : nullptr);
+                kin::InstanceBatch3D batch(box, original, groups);
+                const bool fallback = mode == 3 || mode == 4;
+                auto view = r3d.create_view({160, 120}, {.samples = mode == 8 ? 4u : 1u, .pick = true});
+                std::vector<Pixels> images;
+                std::vector<kin::Render3DStats> counts;
+                std::vector<kin::u32> ids;
+                for (int frame = 0; frame < 4; ++frame) {
+                    if (frame == 2) {
+                        const kin::MeshInstance moved{Mat4f::translation({0, 2, 7}) * Mat4f::scaling({-2, 2, 1}), Color::rgb(255, 80, 40), 99999};
+                        batch.update(9599, {&moved, 1});
+                    }
+                    kin::Scene3D scene;
+                    scene.camera = kin::Camera3D::look_at({float(frame) * 0.2f, 7, 25}, {0, 1, 0}, 65);
+                    scene.camera.z_far = 100;
+                    scene.cull = mode != 1;
+                    scene.lights.shadow_area = {{-80, -2, -80}, {80, 8, 80}};
+                    scene.lights.shadow_resolution = 256;
+                    scene.lights.sun.direction = {0.4f, 1, 0.2f};
+                    scene.lights.shadow_cascades = mode == 5 ? 4 : 1;
+                    scene.lights.local_shadow_resolution = 256;
+                    kin::PointLight light{.position = {0, 8, 8}, .color = {10, 10, 10}, .radius = 30};
+                    light.shadow.enabled = true; scene.add_light(light);
+                    kin::SpotLight spot{.position = {0, 15, 0}, .direction = {0, -1, 0}, .color = {10, 10, 10}, .radius = 35};
+                    spot.shadow.enabled = true; scene.add_spot_light(spot);
+                    scene.taa.enabled = mode == 4;
+                    scene.ambient_occlusion.enabled = mode == 6;
+                    scene.contact_shadows.enabled = mode == 6;
+                    kin::Material3D material{.unlit = mode <= 2, .double_sided = true,
+                        .blend = mode == 3 ? kin::Blend3D::Alpha : mode == 0 ? kin::Blend3D::Opaque : kin::Blend3D::Mask};
+                    if (mode != 0) material.texture = texture;
+                    if (frame == 3) material.color = Color::rgb(150, 230, 200); // invalidates packed colour
+                    const auto add = [&](const kin::Material3D& m) {
+                        if (retained) scene.draw_instanced(batch, m);
+                        else for (const auto& group : batch.groups()) scene.draw_instanced_group(box,
+                            batch.instances().subspan(group.first, group.count), group.world_bounds, m);
+                    };
+                    add(material);
+                    if (mode == 7) { // same batch with a conflicting colour must use the ordinary path
+                        material.color = Color::rgb(230, 100, 200); add(material);
+                    }
+                    images.push_back(shoot_view(renderer, r3d, view, scene));
+                    const auto stats = r3d.stats(); counts.push_back(stats);
+                    if (retained) {
+                        const bool enabled = !std::getenv("KIN_RETAINED_INSTANCES") || std::string_view(std::getenv("KIN_RETAINED_INSTANCES")) != "0";
+                        if (enabled && !fallback) {
+                            assert(stats.retained_instances == 9600);
+                            assert(stats.retained_upload_bytes == (frame == 1 ? 0 : 9600 * 128));
+                            assert(stats.retained_gpu_bytes <= 32 * 1024 * 1024);
+                            if (mode != 7) assert(stats.instance_upload_bytes == 0);
+                            const bool cached = !std::getenv("KIN_CACHED_INSTANCE_BOUNDS") || std::string_view(std::getenv("KIN_CACHED_INSTANCE_BOUNDS")) != "0";
+                            if (cached) {
+                                assert(stats.bounds_cache_instances == 9600 * (mode == 7 ? 2 : 1));
+                                assert(stats.bounds_cache_bytes == 9600 * 16 && stats.bounds_scratch_bytes == 0);
+                                assert(stats.bounds_cache_rebuilt == (frame == 0 || frame == 2 ? 9600 : 0));
+                                if (frame == 1 || frame == 3) assert(stats.bounds_instance_tests == 0);
+                            } else assert(stats.bounds_cache_instances == 0 && stats.bounds_cache_bytes == 0);
+                        } else assert(stats.retained_instances == 0);
+                    }
+                    for (int y = 20; y < 110; y += 25) for (int x = 20; x < 150; x += 25) {
+                        const auto hit = r3d.pick(view, {x, y}); ids.push_back(hit.hit ? hit.id : 0);
+                    }
+                    renderer.present();
+                }
+                renderer.set_job_system(nullptr);
+                return std::tuple{images, counts, ids};
+            };
+            const auto [images, counts, ids] = shoot(false, false);
+            for (const bool parallel : {false, true}) {
+                const auto [other, stats, picks] = shoot(true, parallel);
+                assert(ids == picks);
+                for (std::size_t f = 0; f < images.size(); ++f) {
+                    assert(images[f].rgba == other[f].rgba);
+                    const auto& a = counts[f]; const auto& b = stats[f];
+                    assert(a.draws == b.draws && a.instances == b.instances && a.culled == b.culled && a.triangles == b.triangles);
+                    assert(a.shadow_casters == b.shadow_casters && a.cascade_casters == b.cascade_casters);
+                    assert(a.local_shadow_casters == b.local_shadow_casters && a.local_shadow_triangles == b.local_shadow_triangles);
+                }
+            }
+        }
+    });
+}
+
+void test_gpu_retained_limits() {
+    with_gpu("test_gpu_retained_limits", [](kin::Renderer2D& renderer) {
+        if (std::getenv("KIN_RETAINED_INSTANCES") && std::string_view(std::getenv("KIN_RETAINED_INSTANCES")) == "0") return;
+        kin::Renderer3D r3d{renderer};
+        const auto mesh = make_box(r3d, {1, 1, 1});
+        auto first = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        auto second = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        auto reference = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0, 0, 6}, {}, 60);
+        const kin::Material3D material{.unlit = true};
+        const kin::MeshInstance old{Mat4f::translation({-1, 0, 0}), Color::rgb(250, 80, 30), 501};
+        const kin::MeshInstance changed{Mat4f::translation({1, 0, 0}), Color::rgb(30, 200, 100), 502};
+        kin::InstanceBatch3D batch(mesh, {old});
+        scene.draw_instanced(batch, material);
+        renderer.clear(kin::colors::black);
+        render_ok(r3d, first, scene);
+        assert(r3d.stats().retained_instances == 1 && r3d.stats().retained_upload_bytes == 128);
+        render_ok(r3d, second, scene); // second view reuses the same GPU records
+        assert(r3d.stats().retained_instances == 1 && r3d.stats().retained_upload_bytes == 0);
+        batch.update(0, {&changed, 1});
+        render_ok(r3d, second, scene); // edit in the same GPU frame must leave the first view's records alone
+        assert(r3d.stats().retained_instances == 0);
+        if (!std::getenv("KIN_CACHED_INSTANCE_BOUNDS") || std::string_view(std::getenv("KIN_CACHED_INSTANCE_BOUNDS")) != "0")
+            assert(r3d.stats().bounds_cache_rebuilt == 1 && r3d.stats().bounds_cache_instances == 1);
+        renderer.draw_texture(first.texture(), screen); const auto a = read(renderer); renderer.present();
+        renderer.clear(kin::colors::black); renderer.draw_texture(second.texture(), screen); const auto b = read(renderer); renderer.present();
+        scene.clear(); scene.draw_instanced(mesh, {&old, 1}, material);
+        const auto ref_a = shoot_view(renderer, r3d, reference, scene); renderer.present();
+        scene.clear(); scene.draw_instanced(mesh, {&changed, 1}, material);
+        const auto ref_b = shoot_view(renderer, r3d, reference, scene); renderer.present();
+        assert(a.rgba == ref_a.rgba && b.rgba == ref_b.rgba && a.rgba != b.rgba);
+        scene.clear(); batch = {};
+        std::vector<kin::InstanceBatch3D> tiny;
+        for (int i = 0; i < 129; ++i) {
+            tiny.emplace_back(mesh, std::vector<kin::MeshInstance>{old});
+            scene.draw_instanced(tiny.back(), material);
+        }
+        shoot_view(renderer, r3d, first, scene);
+        assert(r3d.stats().retained_instances == 128 && r3d.stats().retained_gpu_bytes == 128 * 128);
+        renderer.present(); scene.clear(); tiny.clear();
+        // Two 17.1 MiB tables exceed the 32 MiB live budget; the second takes the immediate path.
+        std::vector<kin::MeshInstance> far(140000, {Mat4f::translation({100000, 0, 0}), kin::colors::white, 0});
+        far[0] = old;
+        kin::InstanceBatch3D large_a(mesh, far), large_b(mesh, std::move(far));
+        scene.draw_instanced(large_a, material); scene.draw_instanced(large_b, material);
+        shoot_view(renderer, r3d, first, scene);
+        assert(r3d.stats().retained_instances == 140000 && r3d.stats().retained_gpu_bytes == 140000 * 128);
+        assert(r3d.stats().bounds_cache_bytes <= 4 * 1024 * 1024);
+        if (!std::getenv("KIN_CACHED_INSTANCE_BOUNDS") || std::string_view(std::getenv("KIN_CACHED_INSTANCE_BOUNDS")) != "0")
+            assert(r3d.stats().bounds_cache_instances == 140000 && r3d.stats().bounds_cache_bytes == 140000 * 16);
+        assert(r3d.stats().instances == 2 && r3d.stats().instance_upload_bytes == 128);
+        renderer.present(); scene.clear(); large_a = {}; large_b = {};
+        scene.draw(mesh, Mat4f::identity(), material);
+        shoot_view(renderer, r3d, first, scene);
+        assert(r3d.stats().retained_gpu_bytes == 0); // weak cache entries release on the next GPU frame
+        assert(r3d.stats().bounds_cache_bytes == 0);
+        renderer.present();
+    });
+}
+
+void test_gpu_cached_instance_bounds() {
+    with_gpu("test_gpu_cached_instance_bounds", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows && r3d.capabilities().temporal_aa, "local shadows and TAA")) return;
+        const auto enabled = [](const char* name) { const auto* p = std::getenv(name); return !p || std::string_view(p) != "0"; };
+        const bool cached = enabled("KIN_CACHED_INSTANCE_BOUNDS") && enabled("KIN_RETAINED_INSTANCES");
+        const auto mesh = make_box(r3d, {0.3f, 2, 0.3f});
+        const auto floor = make_box(r3d, {160, 0.2f, 160});
+        const kin::u8 texels[]{200, 230, 180, 255, 200, 230, 180, 0};
+        const auto texture = renderer.create_texture_from_rgba(texels, {2, 1});
+        std::vector<kin::MeshInstance> original;
+        std::vector<kin::InstanceGroup3D> groups;
+        for (int cell = 0; cell < 8; ++cell) {
+            groups.push_back({static_cast<kin::u32>(original.size()), 700});
+            for (int i = 0; i < 700; ++i) original.push_back({
+                Mat4f::translation({float(cell % 4 * 24 - 36) + float(i % 25) * 0.7f, 1, float(cell / 4 * 36 - 18) + float(i / 25) * 0.7f}) *
+                    Mat4f::rotation_y(float(i)) * Mat4f::scaling({i % 2 ? -0.8f : 1.2f, 0.7f + 0.1f * float(i % 5), 0.9f}),
+                kin::colors::white, static_cast<kin::u32>(1 + cell * 700 + i)});
+        }
+        kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
+        const auto shoot = [&](bool retained, bool parallel) {
+            renderer.set_job_system(parallel ? &jobs : nullptr);
+            kin::InstanceBatch3D batch(mesh, original, groups);
+            auto view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            std::vector<Pixels> images;
+            std::vector<kin::Render3DStats> counts;
+            std::vector<kin::u32> ids;
+            for (int frame = 0; frame < 6; ++frame) {
+                if (frame == 1 || frame == 3) {
+                    const kin::MeshInstance moved{Mat4f::translation({float(frame) - 2, 2, 7}) * Mat4f::scaling({-2, 2, 1}), Color::rgb(255, 80, 40), 99999};
+                    batch.update(5599, {&moved, 1});
+                }
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0.2f * float(frame), 7, 25}, {0, 1, 0}, 65);
+                scene.camera.z_far = 100;
+                scene.cull = frame != 5;
+                scene.lights.shadow_area = {{-80, -2, -80}, {80, 8, 80}};
+                scene.lights.shadow_resolution = 256;
+                scene.lights.shadow_cascades = 4;
+                scene.lights.sun.direction = {0.4f, 1, 0.2f};
+                scene.lights.local_shadow_resolution = 256;
+                if (frame != 5) {
+                    kin::PointLight point{.position = {10, 8, 8}, .color = {10, 10, 10}, .radius = 35};
+                    point.shadow.enabled = true; scene.add_light(point);
+                    kin::SpotLight spot{.position = {0, 15, 0}, .direction = {0, -1, 0}, .color = {10, 10, 10}, .radius = 35};
+                    spot.shadow.enabled = true; scene.add_spot_light(spot);
+                    scene.lights.fill = {.direction = {-0.4f, 1, -0.5f}, .color = {0.2f, 0.3f, 0.4f}};
+                    scene.lights.fill_shadow.enabled = true;
+                    scene.lights.fill_shadow.cascades = 3;
+                    scene.lights.fill_shadow.resolution = 256;
+                } else scene.lights.sun.color = {};
+                scene.taa.enabled = frame == 3;
+                scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                const kin::Material3D dynamic_material{.color = Color::rgb(140, 90, 40), .double_sided = true};
+                for (int i = 0; i < 3; ++i) scene.draw(mesh, Mat4f::translation({float(i) * 3 - 8, 1, 8}), dynamic_material, kin::colors::white, 20000 + i);
+                kin::Material3D material{.double_sided = true, .blend = frame == 4 ? kin::Blend3D::Alpha : kin::Blend3D::Mask, .texture = texture};
+                if (frame >= 2) material.color = Color::rgb(150, 230, 200);
+                if (retained) scene.draw_instanced(batch, material);
+                else for (const auto& g : batch.groups()) scene.draw_instanced_group(mesh, batch.instances().subspan(g.first, g.count), g.world_bounds, material);
+                // Uncached ranges on both sides of a cached range, with a noncaster gap:
+                // local gathering must use compact sphere offsets, not _visible's offsets.
+                scene.draw(mesh, Mat4f::translation({1, 1, 10}), {.unlit = true, .casts_shadow = false});
+                for (int i = 0; i < 3; ++i) scene.draw(mesh, Mat4f::translation({float(i) * 3 + 5, 1, 8}), dynamic_material, kin::colors::white, 30000 + i);
+                images.push_back(shoot_view(renderer, r3d, view, scene));
+                const auto stats = r3d.stats(); counts.push_back(stats);
+                if (retained && cached) {
+                    assert(stats.bounds_cache_instances == 5600 && stats.bounds_cache_bytes == 5600 * 16);
+                    const kin::u64 rebuilt = frame == 0 || frame == 1 || frame == 3 ? 5600 : 0;
+                    assert(stats.bounds_cache_rebuilt == rebuilt && stats.bounds_instance_tests <= rebuilt + 8);
+                    assert(stats.bounds_scratch_bytes < 4096 * 16); // old immediate sphere allocation was released
+                    if (frame == 3 || frame == 4) assert(stats.retained_instances == 0); // CPU bounds survive GPU fallback
+                }
+                for (int y = 20; y < 110; y += 25) for (int x = 20; x < 150; x += 25) {
+                    const auto hit = r3d.pick(view, {x, y}); ids.push_back(hit.hit ? hit.id : 0);
+                }
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+            return std::tuple{images, counts, ids};
+        };
+        const auto [images, counts, ids] = shoot(false, false);
+        for (const bool parallel : {false, true}) {
+            const auto [other, stats, picks] = shoot(true, parallel);
+            assert(ids == picks);
+            for (std::size_t f = 0; f < images.size(); ++f) {
+                assert(images[f].rgba == other[f].rgba);
+                const auto& a = counts[f]; const auto& b = stats[f];
+                assert(a.instances == b.instances && a.triangles == b.triangles && a.draws == b.draws && a.culled == b.culled);
+                assert(a.shadow_casters == b.shadow_casters && a.cascade_casters == b.cascade_casters);
+                assert(a.local_shadow_casters == b.local_shadow_casters && a.local_shadow_triangles == b.local_shadow_triangles);
+            }
+        }
+    });
+}
+
+// Independent original sphere predicates verify all four lane decisions, including
+// unordered comparisons and exact touching boundaries. No approximate culling.
+void test_local_shadow_spheres4() {
+    using kin::Vec4f;
+    using kin::gpu::sphere_cull4::Test;
+    const auto reference = [](const Vec4f* spheres, std::span<const Vec4f> planes, Vec3f centre, float radius, bool bounded) {
+        kin::u32 bits = 0;
+        for (kin::u32 i=0;i<4;++i) {
+            const Vec4f& sp=spheres[i];const Vec3f c{sp.x,sp.y,sp.z};
+            if (bounded) {
+                const Vec3f d=c-centre;const float reach=sp.w+radius;
+                if (kin::dot(d,d)>reach*reach) continue;
+            }
+            bool accepted=true;
+            for (const auto& p:planes)
+                if (p.x*c.x+p.y*c.y+p.z*c.z+p.w < -sp.w) { accepted=false;break; }
+            if (accepted) bits|=1u<<i;
+        }
+        return bits;
+    };
+    struct alignas(16) Offset { float pad; std::array<Vec4f,6> values; } storage{};
+    Vec4f* spheres=storage.values.data()+1; // unaligned SIMD loads, four valid records only
+    const float inf=std::numeric_limits<float>::infinity(),nan=std::numeric_limits<float>::quiet_NaN();
+    std::array<Vec4f,6> planes{{{1,0,0,0},{-1,0,0,10},{0,1,0,10},{0,-1,0,10},{0,0,1,10},{0,0,-1,10}}};
+    spheres[0]={-1,0,0,1};spheres[1]={std::nextafter(-1.0f,-inf),0,0,1};
+    spheres[2]={std::nextafter(-1.0f,inf),0,0,1};spheres[3]={nan,0,0,1};
+    const Test boundary{{planes.data(),1},{},0,false};assert(boundary.mask(spheres)==13);
+    spheres[0]={11,0,0,1};spheres[1]={std::nextafter(11.0f,inf),0,0,1};spheres[2]={0,0,0,0};spheres[3]={nan,0,0,1};
+    const Test radius{{},{},10,true};assert(radius.mask(spheres)==13);
+    std::mt19937 rng(94263);std::uniform_real_distribution<float> unit(-1,1);
+    kin::u32 mixed=0,empty=0,full=0;
+    for (int trial=0;trial<100000;++trial) {
+        const float scale=trial%3==0?0.01f:trial%3==1?100000.0f:1e20f;
+        for (auto& p:planes) {
+            const Vec3f n=kin::normalize(Vec3f{unit(rng),unit(rng),unit(rng)});
+            p={n.x,n.y,n.z,unit(rng)*20*scale};
+        }
+        for (int i=0;i<4;++i) spheres[i]={unit(rng)*30*scale,unit(rng)*30*scale,unit(rng)*30*scale,std::abs(unit(rng))*3*scale};
+        if (trial%19==0) spheres[trial%4].x=nan;
+        if (trial%23==0) spheres[trial%4].w=inf;
+        if (trial%29==0) spheres[trial%4].y=-inf;
+        if (trial%31==0) planes[0].w=nan;
+        if (trial%37==0) spheres[trial%4].w=-0.0f;
+        const Vec3f centre{unit(rng)*20*scale,unit(rng)*20*scale,unit(rng)*20*scale};
+        const float reach=std::abs(unit(rng))*30*scale;
+        const bool bounded=trial%2!=0;
+        const std::span<const Vec4f> clip{planes.data(),std::size_t(trial%7)};
+        const Test test{clip,centre,reach,bounded};
+        const kin::u32 expected=reference(spheres,clip,centre,reach,bounded),mask=test.mask(spheres);
+        assert(mask==expected);mixed+=mask!=0&&mask!=15;empty+=mask==0;full+=mask==15;
+    }
+    assert(mixed && empty && full);
+}
+
+// Compare against the independent, eager capsule predicate. Exact divisions,
+// touching planes, near-zero directions and nonfinite inputs matter here.
+void test_shadow_reach_proofs() {
+    using namespace kin::gpu::shadow_reach;
+    using kin::Vec4f;
+    const auto leave = [](const kin::Bounds3& box, Vec3f c, Vec3f d) {
+        const float from[]{c.x,c.y,c.z}, direction[]{d.x,d.y,d.z};
+        const float lo[]{box.min.x,box.min.y,box.min.z}, hi[]{box.max.x,box.max.y,box.max.z};
+        float t = 1e30f;
+        for (int k=0;k<3;++k) {
+            if (direction[k]>1e-6f) t=std::min(t,(hi[k]-from[k])/direction[k]);
+            else if (direction[k]<-1e-6f) t=std::min(t,(lo[k]-from[k])/direction[k]);
+        }
+        return std::max(t,0.0f);
+    };
+    const auto eager = [&](std::span<const Vec4f> planes, const kin::Bounds3& area, Vec3f c, float r, Vec3f d) {
+        const Vec3f e=c+d*(leave(area,c,d)+r);
+        for (const auto& p:planes)
+            if (p.x*c.x+p.y*c.y+p.z*c.z+p.w < -r && p.x*e.x+p.y*e.y+p.z*e.z+p.w < -r) return false;
+        return true;
+    };
+    const std::array<Vec4f,6> cube{{{1,0,0,10},{-1,0,0,10},{0,1,0,10},{0,-1,0,10},{0,0,1,10},{0,0,-1,10}}};
+    const kin::Bounds3 area{{-50,-50,-50},{50,50,50}};
+    // Outside starting cells must retain the plane: the shadow can enter it.
+    assert(pending_planes(cube,{{11,-1,-1},{13,1,1}})==2);
+    const Ray toward{area,{-1,0,0}};
+    Sweep swept{toward,{12,0,0},0}; assert(swept.reaches(cube) && swept.ready);
+    Sweep inside{toward,{},1}; assert(inside.reaches(cube) && !inside.ready);
+    const float nan=std::numeric_limits<float>::quiet_NaN(), inf=std::numeric_limits<float>::infinity();
+    for (const float edge:{-11.0f,std::nextafter(-11.0f,-inf),std::nextafter(-11.0f,inf),11.0f})
+        for (const Vec3f d:{Vec3f{},Vec3f{1e-6f,0,0},Vec3f{std::nextafter(1e-6f,inf),0,0},Vec3f{-1e-6f,0,0},Vec3f{std::nextafter(-1e-6f,-inf),0,0},Vec3f{nan,1,0},Vec3f{inf,-1,0}}) {
+            const Ray ray{area,d};const Vec3f c{edge,0,0};Sweep sweep{ray,c,1};
+            assert(ray.leave(c)==leave(area,c,d));assert(sweep.reaches(cube)==eager(cube,area,c,1,d));
+        }
+    std::mt19937 rng(48189);std::uniform_real_distribution<float> unit(0,1);
+    kin::u32 skipped=0, outside_starts=0;
+    for (int trial=0;trial<16000;++trial) {
+        const float scale=trial%3==0?100000:trial%3==1?0.01f:1;
+        const Vec3f mid{(unit(rng)-0.5f)*30*scale,(unit(rng)-0.5f)*30*scale,(unit(rng)-0.5f)*30*scale};
+        const Vec3f half{(0.2f+unit(rng)*3)*scale,(0.2f+unit(rng)*3)*scale,(0.2f+unit(rng)*3)*scale};
+        const kin::Bounds3 cell{mid-half,mid+half}, bounds{mid-half*10,mid+half*10};
+        Vec3f d=kin::normalize(Vec3f{unit(rng)-0.5f,unit(rng)-0.5f,unit(rng)-0.5f});
+        if (trial%7==0) d.x=0; if (trial%11==0) d.y=1e-6f; if (trial%13==0) d.z=-1e-6f;
+        const Ray ray{bounds,d};std::array<Vec4f,6> planes;
+        for (auto& p:planes) {
+            const Vec3f n=kin::normalize(Vec3f{unit(rng)-0.5f,unit(rng)-0.5f,unit(rng)-0.5f});
+            p={n.x,n.y,n.z,(unit(rng)-0.5f)*30*scale};
+        }
+        const std::span<const Vec4f> clip{planes.data(),trial%2?5u:6u};
+        const kin::u8 mask=pending_planes(clip,cell);std::array<Vec4f,6> subset;std::size_t n=0;
+        for (std::size_t k=0;k<clip.size();++k) if (mask&(1u<<k)) subset[n++]=clip[k];
+        skipped+=clip.size()-n;
+        for (int i=0;i<10;++i) {
+            const float r=i==0?0:std::min({half.x,half.y,half.z})*unit(rng)*0.8f;
+            const Vec3f room=half-Vec3f{r,r,r};
+            const Vec3f c=mid+Vec3f{(unit(rng)*1.98f-0.99f)*room.x,(unit(rng)*1.98f-0.99f)*room.y,(unit(rng)*1.98f-0.99f)*room.z};
+            assert(std::bit_cast<kin::u32>(ray.leave(c))==std::bit_cast<kin::u32>(leave(bounds,c,d)));
+            const bool expected=eager(clip,bounds,c,r,d);Sweep full{ray,c,r}, reduced{ray,c,r};
+            assert(full.reaches(clip)==expected);assert(reduced.reaches({subset.data(),n})==expected);
+            // Reuse the endpoint across several overlapping cascade slices.
+            assert(full.reaches(cube)==eager(cube,bounds,c,r,d));
+            outside_starts+=mask!=0;
+        }
+    }
+    assert(skipped && outside_starts);
+    assert(pending_planes(cube,{{-inf,-1,-1},{inf,1,1}})==63);
+}
+
+void test_local_shadow_cell_proofs() {
+    using namespace kin::gpu::shadow_cull;
+    using kin::Vec4f;
+    const std::array<Vec4f, 6> cube{{{1,0,0,10},{-1,0,0,10},{0,1,0,10},{0,-1,0,10},{0,0,1,10},{0,0,-1,10}}};
+    assert(pending_planes(cube, {{-1,-1,-1},{1,1,1}}) == 0);
+    assert(pending_planes(cube, {{9,-1,-1},{11,1,1}}) == 2);
+    assert(pending_planes(cube, {{10,-1,-1},{12,1,1}}) == 2); // touching cannot reject a cell
+    assert(pending_planes(cube, {{11,-1,-1},{12,1,1}}) == outside);
+    assert(inside_radius({{-1,-1,-1},{1,1,1}}, {}, 10));
+    assert(!inside_radius({{10,0,0},{10,0,0}}, {}, 10)); // strict margin at the boundary
+    assert(!inside_radius({{9.9999f,0,0},{9.9999f,0,0}}, {}, 10));
+    assert(!inside_radius({{-1,-1,-1},{1,1,1}}, {}, 0));
+    assert(!inside_radius({{-1,-1,-1},{1,1,1}}, {}, std::numeric_limits<float>::infinity()));
+    const float inf = std::numeric_limits<float>::infinity();
+    assert(pending_planes(cube, {{-inf,-1,-1},{inf,1,1}}) == 63);
+    const auto sphere = [](std::span<const Vec4f> planes, Vec3f c, float r, kin::u8 mask) {
+        for (std::size_t k = 0; k < planes.size(); ++k) if (mask & (1u << k)) {
+            const auto& p = planes[k];
+            if (p.x*c.x + p.y*c.y + p.z*c.z + p.w < -r) return false;
+        }
+        return true;
+    };
+    // Independent individual tests are the reference. Random planes/box sizes,
+    // zero radii and large coordinates stress rejection and skipped-plane proofs.
+    std::mt19937 rng(62391);
+    std::uniform_real_distribution<float> unit(0, 1);
+    kin::u32 outside_cells = 0, partial_cells = 0, inside_cells = 0, radius_inside = 0;
+    for (int trial = 0; trial < 12000; ++trial) {
+        const float scale = trial % 3 == 0 ? 100000 : trial % 3 == 1 ? 0.01f : 1.0f;
+        const Vec3f middle{(unit(rng)-0.5f)*30*scale,(unit(rng)-0.5f)*30*scale,(unit(rng)-0.5f)*30*scale};
+        const Vec3f half{(0.2f+unit(rng)*3)*scale,(0.2f+unit(rng)*3)*scale,(0.2f+unit(rng)*3)*scale};
+        const kin::Bounds3 box{middle-half,middle+half};
+        std::array<Vec4f, 6> planes;
+        for (auto& p : planes) {
+            const Vec3f n = kin::normalize(Vec3f{unit(rng)-0.5f,unit(rng)-0.5f,unit(rng)-0.5f});
+            p = {n.x,n.y,n.z,(unit(rng)-0.5f)*30*scale};
+        }
+        const std::span<const Vec4f> clip(planes.data(), trial % 2 ? 5 : 6); // infinite far plane too
+        const kin::u8 mask = pending_planes(clip, box), all = kin::u8((1u << clip.size())-1);
+        outside_cells += mask == outside; partial_cells += mask != outside && mask != 0; inside_cells += mask == 0;
+        const Vec3f light = middle + Vec3f{(unit(rng)-0.5f)*10*scale,(unit(rng)-0.5f)*10*scale,(unit(rng)-0.5f)*10*scale};
+        const float reach = (0.1f+unit(rng)*20)*scale;
+        const bool radius_proved = inside_radius(box, light, reach); radius_inside += radius_proved;
+        for (int copy = 0; copy < 10; ++copy) {
+            const float r = copy == 0 ? 0 : std::min({half.x,half.y,half.z}) * unit(rng) * 0.8f;
+            const Vec3f room = half - Vec3f{r,r,r};
+            const Vec3f c = middle + Vec3f{(unit(rng)*1.98f-0.99f)*room.x,(unit(rng)*1.98f-0.99f)*room.y,(unit(rng)*1.98f-0.99f)*room.z};
+            const bool reference = sphere(clip,c,r,all);
+            const bool refined = mask != outside && sphere(clip,c,r,mask);
+            assert(reference == refined);
+            if (radius_proved) { const Vec3f d = c-light; const float limit = r+reach; assert(kin::dot(d,d) <= limit*limit); }
+        }
+    }
+    assert(outside_cells && partial_cells && inside_cells && radius_inside);
+}
+
+void test_gpu_local_shadow_cell_ranges() {
+    const char* saved_env=std::getenv("KIN_SHADOW_REACH");
+    const bool had_env=saved_env!=nullptr;const std::string saved=saved_env?saved_env:"";
+    std::vector<Pixels> reference;std::vector<kin::Render3DStats> reference_counts;std::vector<kin::u32> reference_ids;
+    const char* saved_simd=std::getenv("KIN_LOCAL_SHADOW_SIMD");
+    const bool had_simd=saved_simd!=nullptr;const std::string simd=saved_simd?saved_simd:"";
+    const char* saved_ranges=std::getenv("KIN_CAMERA_RANGES");
+    const bool had_ranges=saved_ranges!=nullptr;const std::string ranges=saved_ranges?saved_ranges:"";
+    for (int mode=0;mode<8;++mode) {
+    setenv("KIN_CAMERA_RANGES",mode>=4?"1":"0",1);
+    setenv("KIN_SHADOW_REACH",mode%4>=2?"1":"0",1);
+    setenv("KIN_LOCAL_SHADOW_SIMD",mode%2?"1":"0",1);
+    with_gpu("test_gpu_local_shadow_cell_ranges", [&](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "local shadows")) return;
+        const auto mesh = make_box(r3d, {0.15f, 1, 0.15f});
+        const auto floor = make_box(r3d, {100, 0.2f, 100});
+        const kin::u8 texels[]{210,230,180,255,210,230,180,0};
+        const auto texture = renderer.create_texture_from_rgba(texels, {2,1});
+        const std::array<Vec3f,8> centres{{{-4,0,-4},{4,0,-4},{-4,0,4},{4,0,4},{9.6f,0,0},{20,0,18},{0,0,31},{35,0,-35}}};
+        std::vector<kin::MeshInstance> copies;
+        std::vector<kin::InstanceGroup3D> groups;
+        for (std::size_t cell = 0; cell < centres.size(); ++cell) {
+            const kin::u32 n=701+kin::u32(cell%3);
+            groups.push_back({kin::u32(copies.size()),n});
+            for (kin::u32 i = 0; i < n; ++i) copies.push_back({
+                Mat4f::translation(centres[cell]+Vec3f{float(i%25)*0.05f-0.6f,0.7f,float(i/25)*0.05f-0.7f}) *
+                    Mat4f::rotation_y(float(i)) * Mat4f::scaling({i%2 ? -0.8f : 1.2f,0.8f+float(i%3)*0.1f,0.9f}),
+                kin::colors::white, kin::u32(copies.size()+1)});
+        }
+        kin::InstanceBatch3D batch(mesh, copies, groups);
+        kin::JobSystem jobs{kin::JobSystemConfig{.workers=2}};
+        const bool fast = !std::getenv("KIN_LOCAL_SHADOW_CULLING") || std::string_view(std::getenv("KIN_LOCAL_SHADOW_CULLING")) != "0";
+        const bool spatial = !std::getenv("KIN_SPATIAL_CULLING") || std::string_view(std::getenv("KIN_SPATIAL_CULLING")) != "0";
+        const auto shoot = [&](int grouped, bool parallel) {
+            renderer.set_job_system(parallel ? &jobs : nullptr);
+            auto view = r3d.create_view({160,120},{.samples=1,.pick=true});
+            std::vector<Pixels> images;
+            std::vector<kin::Render3DStats> counts;
+            std::vector<kin::u32> ids;
+            for (int frame=0;frame<3;++frame) {
+                kin::Scene3D scene;
+                scene.camera=kin::Camera3D::look_at({float(frame)*0.3f,12,22},{0,0,0},65);
+                scene.camera.z_far=100;
+                scene.cull=frame!=1;
+                scene.lights.sun.direction={0.4f,1,0.2f};
+                scene.lights.shadow_area={{-50,-2,-50},{50,8,50}};
+                scene.lights.shadow_resolution=256;scene.lights.shadow_cascades=frame==0?1:4;
+                scene.lights.local_shadow_resolution=256;
+                scene.lights.fill={.direction={-0.4f,1,-0.5f},.color={0.2f,0.3f,0.4f}};
+                scene.lights.fill_shadow.enabled=true;scene.lights.fill_shadow.cascades=frame==0?1:3;scene.lights.fill_shadow.resolution=256;
+                kin::PointLight point{.position={0,10,0},.color={10,10,10},.radius=30};point.shadow.enabled=true;scene.add_light(point);
+                kin::SpotLight spot{.position={float(frame)*0.2f,10,0},.direction={0,-1,0},.color={10,10,10},.radius=40};
+                spot.shadow.enabled=true;scene.add_spot_light(spot);
+                scene.draw(floor,Mat4f::translation({0,-0.1f,0}));
+                const kin::Material3D material{.double_sided=true,.blend=kin::Blend3D::Mask,.texture=texture};
+                if (grouped==2) scene.draw_instanced(batch,material);
+                else if (grouped==1) for (const auto& g:batch.groups()) scene.draw_instanced_group(mesh,batch.instances().subspan(g.first,g.count),g.world_bounds,material);
+                else scene.draw_instanced(mesh,batch.instances(),material);
+                images.push_back(shoot_view(renderer,r3d,view,scene));const auto stats=r3d.stats();counts.push_back(stats);
+                if (grouped && fast && spatial) {
+                    assert(stats.local_group_accepted>0 && stats.local_instance_tests<stats.local_candidates);
+                    assert(stats.local_radius_tests<stats.local_candidates);
+                    assert(stats.local_bucket_bytes==stats.local_instance_tests);
+                    assert(stats.local_plane_budget<stats.local_candidates*6);
+                } else assert(stats.local_group_accepted==0 && stats.local_instance_tests==stats.local_candidates);
+                if (mode >= 4 && grouped == 2 && spatial && stats.bounds_cache_instances == copies.size() && frame == 0) assert(stats.camera_range_accepted > 0);
+                if (mode < 4 || !grouped || !spatial || frame != 0) assert(stats.camera_range_accepted == 0);
+                for (int y=20;y<110;y+=25) for (int x=20;x<150;x+=25) {const auto hit=r3d.pick(view,{x,y});ids.push_back(hit.hit?hit.id:0);}
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);return std::tuple{images,counts,ids};
+        };
+        const auto [images,counts,ids]=shoot(0,false);
+        if (!mode) { reference=images;reference_counts=counts;reference_ids=ids; }
+        else {
+            assert(ids==reference_ids);
+            for (std::size_t f=0;f<images.size();++f) {
+                assert(images[f].rgba==reference[f].rgba);const auto& a=counts[f];const auto& b=reference_counts[f];
+                assert(a.instances==b.instances && a.triangles==b.triangles && a.draws==b.draws && a.culled==b.culled);
+                assert(a.shadow_casters==b.shadow_casters && a.cascade_casters==b.cascade_casters);
+                assert(a.local_shadow_casters==b.local_shadow_casters && a.local_shadow_triangles==b.local_shadow_triangles && a.local_shadow_draws==b.local_shadow_draws);
+            }
+        }
+        for (int grouped:{1,2}) for (bool parallel:{false,true}) {
+            const auto [other,stats,picks]=shoot(grouped,parallel);assert(ids==picks);
+            for (std::size_t f=0;f<images.size();++f) {
+                assert(images[f].rgba==other[f].rgba);const auto& a=counts[f];const auto& b=stats[f];
+                assert(a.instances==b.instances && a.triangles==b.triangles && a.draws==b.draws && a.culled==b.culled);
+                assert(a.shadow_casters==b.shadow_casters && a.cascade_casters==b.cascade_casters);
+                assert(a.local_shadow_casters==b.local_shadow_casters && a.local_shadow_triangles==b.local_shadow_triangles && a.local_shadow_draws==b.local_shadow_draws);
+            }
+        }
+    });
+    }
+    if (had_env) setenv("KIN_SHADOW_REACH",saved.c_str(),1);else unsetenv("KIN_SHADOW_REACH");
+    if (had_simd) setenv("KIN_LOCAL_SHADOW_SIMD",simd.c_str(),1);else unsetenv("KIN_LOCAL_SHADOW_SIMD");
+    if (had_ranges) setenv("KIN_CAMERA_RANGES",ranges.c_str(),1);else unsetenv("KIN_CAMERA_RANGES");
+}
+
+// Packing preserves source order through mixed resident/streamed draws, multi-level
+// buckets, cluster cuts, partially cached views and a retained -> TAA -> retained transition.
+void test_gpu_local_shadow_packing() {
+    const char* saved_env = std::getenv("KIN_LOCAL_SHADOW_PACKING");
+    const bool had_env = saved_env != nullptr;
+    const std::string saved = saved_env ? saved_env : "";
+    std::vector<Pixels> reference;
+    std::vector<kin::Render3DStats> reference_stats;
+    const char* simd_env=std::getenv("KIN_LOCAL_SHADOW_SIMD");
+    const bool had_simd=simd_env!=nullptr;const std::string simd=simd_env?simd_env:"";
+    const char* ranges_env=std::getenv("KIN_CAMERA_RANGES");
+    const bool had_ranges=ranges_env!=nullptr;const std::string ranges=ranges_env?ranges_env:"";
+    for (int mode = 0; mode < 10; ++mode) {
+        const int variant = mode % 5;
+        setenv("KIN_CAMERA_RANGES", mode >= 5 ? "1" : "0", 1);
+        setenv("KIN_LOCAL_SHADOW_PACKING", variant >= 2 ? "1" : "0", 1);
+        setenv("KIN_LOCAL_SHADOW_SIMD", variant == 1 || variant >= 3 ? "1" : "0", 1);
+        with_gpu("test_gpu_local_shadow_packing", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            if (lacks(r3d.capabilities().local_shadows && r3d.capabilities().temporal_aa, "local shadows and TAA")) return;
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers=2}};
+            renderer.set_job_system(variant == 4 ? &jobs : nullptr);
+            const auto mesh = make_box(r3d, {0.15f,1,0.15f});
+            const auto floor = make_box(r3d, {100,0.2f,100});
+            const auto lod = r3d.create_mesh(kin::meshes::sphere(0.5f,24,12), {.levels=3});
+            const auto clustered = r3d.create_mesh(kin::meshes::torus(0.8f,0.3f,32,16), {.clusters=true});
+            assert(lod.level_count() > 1 && clustered.has_clusters());
+            std::vector<kin::MeshInstance> copies;
+            for (int i=0;i<9000;++i) copies.push_back({Mat4f::translation({float(i%100)*0.12f-6,0.5f,float(i/100)*0.12f-5}),kin::colors::white,kin::u32(i+1)});
+            kin::InstanceBatch3D batch(mesh,std::move(copies),{{0,9000}});
+            auto view = r3d.create_view({160,120},{.samples=1});
+            for (int frame=0;frame<7;++frame) {
+                if (frame==4) {const kin::MeshInstance moved{Mat4f::translation({8,2,0}),kin::colors::white,9000};batch.update(8999,{&moved,1});}
+                kin::Scene3D scene;
+                scene.camera=kin::Camera3D::look_at({0,12,22},{0,0,0},65);scene.camera.z_far=100;
+                scene.lod={.enabled=true,.error_pixels=1.5f};
+                scene.taa.enabled=frame==3;
+                scene.lights.cache_shadows=frame!=3; // force streamed shadow upload while TAA disables retention
+                scene.lights.shadow_area={{-50,-2,-50},{50,8,50}};
+                scene.lights.shadow_resolution=256;scene.lights.shadow_cascades=3;
+                scene.lights.local_shadow_resolution=256;
+                scene.lights.fill={.direction={-0.4f,1,-0.5f},.color={0.2f,0.3f,0.4f}};
+                scene.lights.fill_shadow.enabled=true;scene.lights.fill_shadow.cascades=2;scene.lights.fill_shadow.resolution=256;
+                kin::PointLight point{.position={0,10,0},.color={10,10,10},.radius=30};point.shadow.enabled=true;scene.add_light(point);
+                kin::SpotLight spot{.position={frame>=2?1.0f:0.0f,10,0},.direction={0,-1,0},.color={10,10,10},.radius=40};spot.shadow.enabled=true;scene.add_spot_light(spot);
+                scene.draw(floor,Mat4f::translation({0,-0.1f,0}));
+                scene.draw(lod,Mat4f::translation({-8,1,2}));
+                if (frame!=6) scene.draw_instanced(batch,{.double_sided=true});
+                std::array<Mat4f,21> rings;
+                for (kin::u32 i=0;i<rings.size();++i) rings[i]=Mat4f::translation({8+0.02f*float(i),2,-2});
+                scene.draw_instanced(clustered,rings);
+                // Multi-copy multi-level buckets and an uncached draw following the retained range.
+                std::array<Mat4f,21> balls;
+                for (kin::u32 i=0;i<balls.size();++i)
+                    balls[i]=Mat4f::translation({float(int(i%3)-1)*5,1,float(i%3==0?-8:i%3==1?-20:-35)});
+                scene.draw_instanced(lod,balls);
+                scene.draw(mesh,Mat4f::translation({9,1,4}));
+                const auto image=shoot_view(renderer,r3d,view,scene);const auto st=r3d.stats();
+                assert(st.local_task_bytes && st.local_copy_bytes);
+                if (frame==1) assert(st.local_shadow_cached==st.local_shadow_maps && st.local_shadow_drawn==0);
+                if (frame==2) assert(st.local_shadow_cached>0 && st.local_shadow_drawn>0);
+                const char* retention = std::getenv("KIN_RETAINED_INSTANCES");
+                if (variant >= 2 && (!retention || std::string_view(retention)!="0")) {
+                    if (frame==3) assert(st.retained_instances==0 && st.local_slot_bytes>=9000*4);
+                    if (frame==4) assert(st.retained_instances==9000 && st.local_slot_bytes<4096*4);
+                }
+                if (!mode) {reference.push_back(image);reference_stats.push_back(st);}
+                else {
+                    assert(reference[frame].rgba==image.rgba);const auto& a=reference_stats[frame];
+                    assert(a.draws==st.draws && a.instances==st.instances && a.triangles==st.triangles);
+                    assert(a.shadow_casters==st.shadow_casters && a.cascade_casters==st.cascade_casters);
+                    assert(a.local_shadow_casters==st.local_shadow_casters && a.local_shadow_triangles==st.local_shadow_triangles && a.local_shadow_draws==st.local_shadow_draws);
+                    assert(a.local_shadow_cached==st.local_shadow_cached && a.local_shadow_drawn==st.local_shadow_drawn);
+                    assert(a.instance_upload_bytes==st.instance_upload_bytes && a.retained_upload_bytes==st.retained_upload_bytes);
+                    assert(variant >= 2 ? st.local_task_bytes < a.local_task_bytes : st.local_task_bytes == a.local_task_bytes);
+                    if (frame!=3) assert(st.local_slot_bytes <= a.local_slot_bytes);
+                }
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+        });
+    }
+    if (had_env) setenv("KIN_LOCAL_SHADOW_PACKING",saved.c_str(),1);
+    else unsetenv("KIN_LOCAL_SHADOW_PACKING");
+    if (had_simd) setenv("KIN_LOCAL_SHADOW_SIMD",simd.c_str(),1);else unsetenv("KIN_LOCAL_SHADOW_SIMD");
+    if (had_ranges) setenv("KIN_CAMERA_RANGES",ranges.c_str(),1);else unsetenv("KIN_CAMERA_RANGES");
+}
+
+void test_gpu_instance_groups() {
+    with_gpu("test_gpu_instance_groups", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows, "local shadows")) return;
+        const kin::Mesh pole = make_box(r3d, {0.35f, 2, 0.35f});
+        const kin::Mesh floor = make_box(r3d, {160, 0.2f, 160});
+        const kin::u8 texels[]{200, 230, 180, 255, 200, 230, 180, 0};
+        const kin::Texture mask = renderer.create_texture_from_rgba(texels, {2, 1});
+        std::array<std::vector<kin::MeshInstance>, 16> cells;
+        std::array<kin::Bounds3, 16> bounds;
+        for (std::size_t c = 0; c < cells.size(); ++c) {
+            for (int i = 0; i < 600; ++i) {
+                const Vec3f p{static_cast<float>(int(c % 4) * 24 - 36) + static_cast<float>(i % 25) * 0.7f - 8,
+                              1, static_cast<float>(int(c / 4) * 24 - 36) + static_cast<float>(i / 25) * 0.7f - 8};
+                cells[c].push_back({.transform = Mat4f::translation(p) * Mat4f::rotation_y(static_cast<float>(i)) *
+                                                       Mat4f::scaling({i % 2 ? -0.8f : 1.2f, 0.7f + 0.1f * static_cast<float>(i % 5), 0.9f}),
+                                    .id = static_cast<kin::u32>(1 + c * 600 + i)});
+            }
+            bounds[c] = kin::instance_bounds(pole, cells[c]);
+        }
+        kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
+        for (int mode = 0; mode < 6; ++mode) {
+            if (mode == 3 && lacks(r3d.capabilities().temporal_aa, "TAA")) continue;
+            const auto shoot = [&](bool grouped, bool parallel) {
+                renderer.set_job_system(parallel ? &jobs : nullptr);
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+                Pixels pixels;
+                kin::Render3DStats stats;
+                for (int frame = 0; frame < (mode == 3 ? 4 : 1); ++frame) {
+                    kin::Scene3D scene;
+                    scene.camera = kin::Camera3D::look_at({0.2f * frame, 7, 25}, {0, 1, 0}, 65);
+                    scene.camera.z_far = 100;
+                    scene.cull = mode != 1;
+                    scene.lights.shadow_area = {{-80, -2, -80}, {80, 8, 80}};
+                    scene.lights.shadow_resolution = 256;
+                    if (mode == 1) scene.lights.sun.color = {};
+                    scene.lights.sun.direction = {0.4f, 1, 0.2f};
+                    scene.lights.ambient = {0.15f, 0.15f, 0.15f};
+                    scene.lights.shadow_cascades = mode == 2 ? 4 : 1;
+                    scene.lights.local_shadow_resolution = 256;
+                    kin::SpotLight spot{.position = {0, 15, 0}, .direction = {0, -1, 0}, .color = {10, 10, 10}, .radius = 35};
+                    spot.shadow.enabled = mode != 5;
+                    scene.add_spot_light(spot);
+                    kin::PointLight point{.position = {10, 8, 8}, .color = {10, 10, 10}, .radius = 26};
+                    point.shadow.enabled = mode != 5;
+                    scene.add_light(point);
+                    if (mode == 2) {
+                        scene.lights.fill = {.direction = {-0.4f, 1, -0.5f}, .color = {0.2f, 0.3f, 0.4f}};
+                        scene.lights.fill_shadow.enabled = true;
+                        scene.lights.fill_shadow.cascades = 3;
+                        scene.lights.fill_shadow.resolution = 256;
+                    }
+                    scene.taa.enabled = mode == 3;
+                    scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                    kin::Material3D mat{.double_sided = true, .blend = mode == 4 ? kin::Blend3D::Alpha : kin::Blend3D::Mask, .texture = mask};
+                    scene.draw(pole, Mat4f::translation({0, 2, 1}), mat, kin::colors::white, 10001);
+                    for (std::size_t c = 0; c < cells.size(); ++c) {
+                        if (grouped) scene.draw_instanced_group(pole, cells[c], bounds[c], mat);
+                        else scene.draw_instanced(pole, cells[c], mat);
+                        if (c == 7) scene.draw(pole, Mat4f::translation({3, 2, 1}), mat, kin::colors::white, 10002);
+                    }
+                    scene.draw(pole, Mat4f::translation({-3, 2, 1}), mat, kin::colors::white, 10003);
+                    assert(scene.draws().size() == 2); // cells add metadata, not draw calls
+                    pixels = shoot_view(renderer, r3d, view, scene);
+                    stats = r3d.stats();
+                    renderer.present();
+                }
+                std::vector<kin::u32> ids;
+                for (int y = 20; y < 110; y += 25) for (int x = 20; x < 150; x += 25) {
+                    const auto hit = r3d.pick(view, {x, y}); ids.push_back(hit.hit ? hit.id : 0);
+                }
+                renderer.set_job_system(nullptr);
+                return std::tuple{pixels, stats, ids};
+            };
+            const auto [reference, before, ids] = shoot(false, false);
+            for (const bool parallel : {false, true}) {
+                const auto [pixels, after, picked] = shoot(true, parallel);
+                assert(pixels.rgba == reference.rgba && picked == ids);
+                assert(before.draws == after.draws && before.instances == after.instances && before.culled == after.culled && before.triangles == after.triangles);
+                assert(before.shadow_draws == after.shadow_draws && before.shadow_casters == after.shadow_casters && before.cascade_casters == after.cascade_casters);
+                assert(before.local_shadow_casters == after.local_shadow_casters && before.local_shadow_triangles == after.local_shadow_triangles && before.local_shadow_draws == after.local_shadow_draws);
+                assert(after.spatial_groups == 16);
+                assert(after.camera_instance_tests < before.camera_instance_tests || mode == 1);
+                if (mode != 4 && mode != 5) assert(after.local_instance_tests < before.local_instance_tests && after.local_group_rejected > 0);
+                const bool ranges = !std::getenv("KIN_CAMERA_RANGES") || std::string_view(std::getenv("KIN_CAMERA_RANGES")) != "0";
+                if (mode == 5 && ranges) {
+                    assert(after.camera_range_accepted > 0);
+                    assert(after.bounds_instance_tests < before.bounds_instance_tests);
+                }
+            }
+        }
+    });
+}
+
+// Main depth must survive the cutout pass, including holes, overlapping cards,
+// foreground opaque occluders, tint/cutoff boundaries and a subsequent empty frame.
+void test_gpu_masked_depth_prepass() {
+    const char* old = std::getenv("KIN_MASKED_DEPTH_PREPASS");
+    const bool had = old != nullptr; const std::string saved = old ? old : "";
+    const char* old_retained = std::getenv("KIN_RETAINED_INSTANCES");
+    const bool had_retained = old_retained != nullptr; const std::string retained = old_retained ? old_retained : "";
+    std::vector<Pixels> reference;
+    std::vector<kin::Render3DStats> reference_stats;
+    std::vector<std::vector<kin::u32>> reference_ids;
+    for (int mode = 0; mode < 4; ++mode) {
+        setenv("KIN_MASKED_DEPTH_PREPASS", mode ? "1" : "0", 1);
+        if (mode == 3) setenv("KIN_RETAINED_INSTANCES", "0", 1);
+        else if (had_retained) setenv("KIN_RETAINED_INSTANCES", retained.c_str(), 1);
+        else unsetenv("KIN_RETAINED_INSTANCES");
+        with_gpu("test_gpu_masked_depth_prepass", [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
+            renderer.set_job_system(mode == 2 ? &jobs : nullptr);
+            auto data = uv_square(0.22f);
+            data.vertices[0].color.a = 100;
+            for (auto& v : data.vertices) { v.uv.x *= 2.5f; v.uv.y *= 2.5f; }
+            const auto leaf = r3d.create_mesh(data);
+            const auto wall = make_box(r3d, {0.7f, 1.4f, 0.1f});
+            const auto background = make_box(r3d, {6, 6, 0.1f});
+            const kin::u8 pixels[]{40,210,80,0,40,210,80,64,40,210,80,128,40,210,80,255};
+            const auto texture = renderer.create_texture_from_rgba(pixels, {4,1});
+            renderer.set_scale_mode(texture, kin::ScaleMode::Linear);
+            std::vector<kin::MeshInstance> copies;
+            for (kin::u32 i = 0; i < 2500; ++i) copies.push_back({
+                Mat4f::translation({float(i%50)*0.06f-1.5f,float(i/50)*0.06f-1.5f,-float(i%7)*0.03f}) *
+                    Mat4f::rotation_y(float(i%3)*12) * Mat4f::scaling({i%2 ? -1.0f : 1.0f,1,1}),
+                Color::rgba(255,255,255, i%3 ? 255 : 128), i+1});
+            kin::InstanceBatch3D batch(leaf, std::move(copies), {{0,2500}});
+            auto view = r3d.create_view({160,120},{.samples=1,.pick=true});
+            auto hdr = r3d.create_view({160,120},{.samples=1,.hdr=true,.pick=true});
+            auto msaa = r3d.create_view({160,120},{.samples=4,.pick=true});
+            for (int frame = 0; frame < 10; ++frame) {
+                if (frame == 6 && lacks(r3d.capabilities().temporal_aa, "TAA")) {
+                    if (!mode) { reference.emplace_back(); reference_stats.emplace_back(); reference_ids.emplace_back(); }
+                    continue;
+                }
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0.01f*frame,0.1f,5},{0,0,0},55);
+                if (frame == 3) scene.camera = flat_camera();
+                scene.lights.sun = {.direction={0.4f,0.8f,1},.color={0.8f,0.9f,1}};
+                scene.lights.ambient = {0.15f,0.12f,0.1f};
+                scene.taa.enabled = frame == 6;
+                kin::Material3D material{.double_sided=true,.blend=kin::Blend3D::Mask,.texture=texture};
+                material.wrap_u=material.wrap_v=kin::Wrap3D::Repeat;
+                material.alpha_cutoff = frame == 1 ? 128.0f/255 : frame == 2 ? 0.0f : frame == 3 ? -0.5f : 0.45f;
+                material.unlit = frame == 8;
+                if (frame != 4) scene.draw_instanced(batch,material);
+                scene.draw(background,Mat4f::translation({0,0,-0.8f}),{.color=Color::rgb(160,80,60)});
+                scene.draw(wall,Mat4f::translation({0.4f,0,0.4f}),{.color=Color::rgb(70,80,200)});
+                if (frame == 9) {
+                    auto& overlay=scene.overlay(); overlay.camera=scene.camera;
+                    overlay.draw(wall,Mat4f::translation({-0.4f,0,0.6f}),{.color=Color::rgb(200,160,20)});
+                }
+                auto& selected = frame == 5 ? hdr : frame == 7 ? msaa : view;
+                if (frame == 0) assert(r3d.warm_up(selected,scene));
+                const auto image=shoot_view(renderer,r3d,selected,scene); const auto st=r3d.stats();
+                if (frame == 0) assert(st.pipelines_made == 0);
+                std::vector<kin::u32> ids;
+                for (int y=15;y<115;y+=20) for (int x=15;x<155;x+=20) {
+                    const auto hit=r3d.pick(selected,{x,y}); ids.push_back(hit.hit ? hit.id : 0);
+                }
+                if (!mode) { reference.push_back(image); reference_stats.push_back(st); reference_ids.push_back(ids); }
+                else {
+                    assert(image.rgba==reference[frame].rgba && ids==reference_ids[frame]);
+                    const auto& a=reference_stats[frame];
+                    assert(st.draws==a.draws && st.instances==a.instances && st.triangles==a.triangles && st.culled==a.culled);
+                    assert(st.feature_bytes==a.feature_bytes);
+                    if (mode != 3) assert(st.retained_gpu_bytes==a.retained_gpu_bytes);
+                    const bool expected=frame!=4 && frame!=6 && frame!=8 && frame!=9 && selected.samples()==1;
+                    assert((st.masked_depth_draws>0)==expected);
+                    if (expected) assert(st.masked_depth_instances==2500);
+                }
+                if (!mode) assert(st.masked_depth_draws==0);
+                renderer.present();
+            }
+            renderer.set_job_system(nullptr);
+        });
+    }
+    if (had) setenv("KIN_MASKED_DEPTH_PREPASS",saved.c_str(),1);else unsetenv("KIN_MASKED_DEPTH_PREPASS");
+    if (had_retained) setenv("KIN_RETAINED_INSTANCES",retained.c_str(),1);else unsetenv("KIN_RETAINED_INSTANCES");
 }
 
 // The nearest hit of a ray with a sphere (the distance, or a negative number).
@@ -14371,6 +15473,8 @@ int main(int argc, char** argv) {
     RUN(test_mesh_lod_builder());
     RUN(test_mesh_validation_and_append());
     RUN(test_scene_merges_draws());
+    RUN(test_scene_instance_groups());
+    RUN(test_scene_retained_instances());
     RUN(test_cameras());
     RUN(test_cascade_splits());
     RUN(test_cascade_fit());
@@ -14388,11 +15492,13 @@ int main(int argc, char** argv) {
     RUN(test_gpu_blending());
     RUN(test_gpu_hdr_bloom());
     RUN(test_gpu_texture());
+    RUN(test_gpu_unlit_specialization());
     RUN(test_gpu_model());
     RUN(test_gpu_culling());
     RUN(test_gpu_interleaves_with_2d());
     RUN(test_gpu_linear_hdr());
     RUN(test_gpu_meshes_outlive_renderer());
+    RUN(test_gpu_shared_mesh_buffers());
     RUN(test_gpu_pick());
     RUN(test_gpu_wireframe());
     RUN(test_gpu_fill_and_ambient());
@@ -14465,6 +15571,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_metal_and_roughness());
     RUN(test_gpu_normal_map());
     RUN(test_gpu_alpha_mask());
+    RUN(test_gpu_masked_depth_prepass());
     RUN(test_gpu_inverse_square());
     RUN(test_gpu_model_materials());
     RUN(test_gpu_wrap_modes());
@@ -14528,6 +15635,15 @@ int main(int argc, char** argv) {
     RUN(test_gpu_spot_radius_fade());
     RUN(test_gpu_spot_shadow_position());
     RUN(test_gpu_spot_shadow_casters());
+    RUN(test_gpu_instance_groups());
+    RUN(test_gpu_retained_instances());
+    RUN(test_gpu_retained_limits());
+    RUN(test_gpu_cached_instance_bounds());
+    RUN(test_local_shadow_spheres4());
+    RUN(test_shadow_reach_proofs());
+    RUN(test_local_shadow_cell_proofs());
+    RUN(test_gpu_local_shadow_cell_ranges());
+    RUN(test_gpu_local_shadow_packing());
     RUN(test_gpu_spot_shadow_acne());
     RUN(test_gpu_spot_shadow_distance());
     RUN(test_gpu_spot_receives_shadow_flag());

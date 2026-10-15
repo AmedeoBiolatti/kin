@@ -1703,6 +1703,66 @@ void test_gpu_big_uploads() {
     }
 }
 
+// Staging shrinks after sustained small batches, regrows for a burst, and measures
+// aggregate occupancy when several individually small writes share a batch.
+void test_gpu_adaptive_upload_staging() {
+    constexpr std::string_view test_name = "test_gpu_adaptive_upload_staging";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        auto& window = app.create_window({.title="adaptive-staging",.width=64,.height=64,.hidden=true});
+        std::string reason;
+        auto renderer = try_create_gpu_renderer(window,reason);
+        if (!renderer) {skip_or_require_gpu_test(test_name,reason);return;}
+        gpu_ready = true;
+        const char* override = std::getenv("KIN_ADAPTIVE_STAGING");
+        const bool adaptive = !override || std::string_view(override)!="0";
+        constexpr kin::u64 mib = 1024*1024;
+        std::vector<kin::u8> pixels(4*mib);
+        for (std::size_t i=0;i<pixels.size();i+=4) {pixels[i]=211;pixels[i+1]=67;pixels[i+2]=29;pixels[i+3]=255;}
+        const auto big = renderer->create_texture_from_rgba(pixels.data(),{1024,1024});
+        std::array<kin::u8,16> tiny_pixels{};
+        const auto tiny = renderer->create_texture_from_rgba(tiny_pixels.data(),{2,2});
+        const auto check = [&](const kin::Texture& texture,kin::Color expected) {
+            auto target=renderer->create_render_target({64,64},kin::ScaleMode::Nearest);
+            auto bind=renderer->scoped_render_target(target);
+            renderer->clear(kin::colors::black);
+            renderer->draw_texture(texture,{0,0,64,64});
+            std::vector<kin::u8> image;kin::Vec2i size;
+            assert(renderer->read_rgba({0,0,64,64},image,size));
+            assert(pixel_near(image,size,32,32,expected,1));
+        };
+        renderer->present();
+        for (int f=0;f<260;++f) {
+            for (std::size_t i=0;i<tiny_pixels.size();i+=4) {tiny_pixels[i]=kin::u8(f);tiny_pixels[i+1]=81;tiny_pixels[i+2]=197;tiny_pixels[i+3]=255;}
+            assert(renderer->update_texture(tiny,{0,0},{2,2},tiny_pixels.data()));
+            renderer->clear(kin::colors::black);renderer->draw_texture(tiny,{0,0,64,64});renderer->present();
+        }
+        assert(renderer->backend_stats().upload_staging_bytes==(adaptive?mib:16*mib));
+        check(tiny,kin::Color::rgb(3,81,197));
+        check(big,kin::Color::rgb(211,67,29));
+        const auto allocations=renderer->backend_stats().upload_staging_allocations;
+        assert(renderer->update_texture(big,{0,0},{1024,1024},pixels.data()));
+        assert(renderer->backend_stats().upload_staging_bytes>=4*mib);
+        if (adaptive) assert(renderer->backend_stats().upload_staging_allocations>allocations);
+        check(big,kin::Color::rgb(211,67,29));renderer->present();
+        const std::array<kin::Texture,3> textures{{
+            renderer->create_texture_from_rgba(pixels.data(),{512,256}),
+            renderer->create_texture_from_rgba(pixels.data(),{512,256}),
+            renderer->create_texture_from_rgba(pixels.data(),{512,256})}};
+        for (int f=0;f<260;++f) {
+            for (const auto& texture:textures) assert(renderer->update_texture(texture,{0,0},{512,256},pixels.data()));
+            renderer->clear(kin::colors::black);renderer->draw_texture(textures[2],{0,0,64,64});renderer->present();
+        }
+        assert(renderer->backend_stats().upload_staging_bytes==(adaptive?2*mib:16*mib));
+        for (const auto& texture:textures) check(texture,kin::Color::rgb(211,67,29));
+        check(big,kin::Color::rgb(211,67,29));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) throw;
+        skip_or_require_gpu_test(test_name,e.what());
+    }
+}
+
 // gpu_scope() times named parts of a frame on the GPU, while timing is on.
 void test_gpu_scopes() {
     constexpr std::string_view test_name = "test_gpu_scopes";
@@ -3900,7 +3960,11 @@ void test_post_process_degrades_on_fake_backend() {
 } // namespace
 
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "upload_staging") {
+        test_gpu_adaptive_upload_staging();
+        return 0;
+    }
     test_facade_with_fake_backend();
     test_post_process_degrades_on_fake_backend();
     test_shader_surface_sources_on_fake_backend();
@@ -3956,6 +4020,7 @@ int main() {
     test_camera_zoom_and_rotation();
     test_gpu_scopes();
     test_gpu_big_uploads();
+    test_gpu_adaptive_upload_staging();
     test_gpu_empty_textures_are_clear();
     test_write_texture_on_software_backend();
     test_gpu_write_texture();
