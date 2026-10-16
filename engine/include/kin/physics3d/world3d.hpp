@@ -40,6 +40,21 @@
 #include <vector>
 
 namespace kin {
+class SceneQueries3D;
+namespace detail {
+// Internal typed access to caller-owned raw or scene-hit arrays. No temporary
+// result list is needed when the physics record is a member of a larger hit.
+template<class T> struct QueryOutput3D {
+    void* data=nullptr;std::size_t capacity=0;
+    T& (*at)(void*,std::size_t)=nullptr;
+    T& operator[](std::size_t i)const{return at(data,i);}
+};
+}
+struct BoundedQueryResult3D {
+    std::size_t count=0;
+    bool overflow=false;
+    bool valid=true; // false for invalid input or an unavailable scene endpoint
+};
 
 // A constraint between two bodies (or a body and the world): an index and a generation,
 // as Body3D is.
@@ -60,6 +75,12 @@ struct QueryFilter3D {
     // Sensor bodies (trigger volumes) are left out of queries unless this is set: a ray that
     // is for walls and floors should not stop at a trigger.
     bool sensors = false;
+    // Exclude every body carrying this nonzero user id (an ECS entity, including
+    // its character/ragdoll/rope bodies). Independent of collision groups.
+    u64 ignore_user_id = 0;
+    // Sweeps only: include initial convex overlap while moving outward and
+    // compute its penetration. False retains the legacy directional behavior.
+    bool initial_overlap = false;
 };
 
 // Where a ray met a body (Jolt reports the first hit on each body's surface; a ray that
@@ -77,6 +98,8 @@ struct RayHit3D {
     // For a compound: the index of the child that was hit, in the order the children were
     // given; 0 for any other shape.
     u32 sub_shape = 0;
+    // Opaque native sub-shape key used to break equal-distance ties.
+    u32 sub_shape_id = 0;
 };
 
 // A shape swept along a displacement: the first thing it meets.
@@ -105,6 +128,7 @@ struct OverlapHit3D {
     f32 penetration = 0.0f;
     Vec3f point{};
     Vec3f normal{};
+    u32 sub_shape_id = 0; // opaque key for equal-penetration ties
 };
 
 struct ClosestPoint3D {
@@ -418,6 +442,11 @@ public:
     // Every body the segment crosses (a convex body once, a mesh once for the nearest of its triangles on each
     // sub shape), nearest first, ties by body number then sub shape.
     std::vector<RayHit3D> raycast_all(Vec3f from, Vec3f to, const QueryFilter3D& filter = {}) const;
+    // No result-list allocation. Keep the nearest output.size() hits in the same
+    // order as raycast_all; overflow says more hits existed. Empty output probes
+    // for any hit. Only [0,count) is written; invalid input sets valid=false.
+    BoundedQueryResult3D raycast_all(Vec3f from, Vec3f to, std::span<RayHit3D> output,
+                                    const QueryFilter3D& filter = {}) const;
     // `shape` placed at `position` and `rotation` (its origin, as a body's) swept by `displacement`: the first
     // thing it meets, with the time of impact. Not for meshes or height fields. A shape that starts overlapping
     // reports fraction 0 and a penetration. Ties go to the lower body number.
@@ -426,6 +455,10 @@ public:
     // The bodies `shape` at `position` and `rotation` overlaps, sorted by body number (one entry for each).
     std::vector<OverlapHit3D> overlap(const Shape3D& shape, Vec3f position, Quatf rotation,
                                       const QueryFilter3D& filter = {}) const;
+    // Bounded, unique-body results: retain the lowest body numbers, with each
+    // body's deepest contact (ties by native sub-shape key). No result-list allocation.
+    BoundedQueryResult3D overlap(const Shape3D& shape, Vec3f position, Quatf rotation,
+                                std::span<OverlapHit3D> output, const QueryFilter3D& filter = {}) const;
     // The bodies whose solid contains `point`, by body number (a mesh or height field has no inside).
     std::vector<Body3D> point_inside(Vec3f point, const QueryFilter3D& filter = {}) const;
     // The nearest surface within `max_distance` of `point`; a point inside a solid is at distance 0 on it.
@@ -540,6 +573,7 @@ public:
     std::vector<RagdollHandle3D> ragdolls() const;
     // The bodies, by bone (invalid for a bone that was left out).
     std::vector<Body3D> ragdoll_bodies(RagdollHandle3D ragdoll) const;
+    bool ragdoll_has_body(RagdollHandle3D ragdoll, Body3D body) const;
     const RagdollDesc* ragdoll_desc(RagdollHandle3D ragdoll) const;
     // Where the clip puts the bones, in the world (a matrix a bone): what the kinematic bodies follow in the next step.
     void set_ragdoll_targets(RagdollHandle3D ragdoll, std::span<const Mat4f> bone_world);
@@ -637,6 +671,9 @@ public:
     bool restore_state(std::span<const u8> state);
 
 private:
+    friend class SceneQueries3D;
+    BoundedQueryResult3D raycast_into(Vec3f from,Vec3f to,detail::QueryOutput3D<RayHit3D> output,const QueryFilter3D& filter)const;
+    BoundedQueryResult3D overlap_into(const Shape3D& shape,Vec3f position,Quatf rotation,detail::QueryOutput3D<OverlapHit3D> output,const QueryFilter3D& filter)const;
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };

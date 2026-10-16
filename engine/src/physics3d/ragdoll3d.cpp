@@ -267,6 +267,9 @@ std::vector<Body3D> RagdollSet::bodies(RagdollHandle3D h) const {
     return s != nullptr ? s->bodies : std::vector<Body3D>{};
 }
 
+bool RagdollSet::has_body(RagdollHandle3D h,Body3D body)const {
+    const auto* slot=find(h);return slot&&std::ranges::find(slot->bodies,body)!=slot->bodies.end();
+}
 const RagdollDesc* RagdollSet::desc(RagdollHandle3D h) const {
     const Slot* s = find(h);
     return s != nullptr ? &s->desc : nullptr;

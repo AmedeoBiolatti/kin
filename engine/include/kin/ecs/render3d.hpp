@@ -33,6 +33,8 @@
 #include <kin/anim/state_machine.hpp>
 #include <kin/core/math3d.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/scene/joint_attachment3d.hpp>
+#include <kin/ecs/component.hpp>
 #include <kin/render3d/animation3d.hpp>
 #include <kin/render3d/ik.hpp>
 #include <kin/render3d/mesh.hpp>
@@ -69,12 +71,40 @@ struct WorldTransform3D {
     Vec3f position() const { return {matrix.m[12], matrix.m[13], matrix.m[14]}; }
 };
 
+// Optional world-space placement used only by collect(). Simulation, hierarchy,
+// animation/IK targets and particles continue to use WorldTransform3D. Does not
+// propagate to children; clear/disable it when no presentation override is needed.
+struct RenderTransform3D {
+    Mat4f matrix{};
+    bool enabled=false;
+};
+
 // A mesh drawn at the entity's WorldTransform3D.
 struct MeshRenderer {
     Mesh mesh;
     Material3D material{};
     Color tint = colors::white;
     bool visible = true;
+};
+
+// A complete static model, placed by Transform3D. `asset` is authored relative
+// to Assets3D::root(); resolve_render3d_assets binds it on the renderer thread.
+// `model` is runtime-only and may also be supplied directly from C++.
+struct ModelRenderer3D {
+    std::shared_ptr<const Model> model;
+    Color tint = colors::white;
+    bool visible = true;
+    u32 id = 0; // zero: use the entity's ID for every model part
+    ComponentAssetRef asset;
+};
+
+struct MaterialBinding3D;
+// Optional material patches for one static/skinned model. Only asset/variant
+// are authored; binding is immutable runtime data shared through Assets3D.
+struct ModelMaterials3D {
+    ComponentAssetRef asset;
+    std::string variant;
+    std::shared_ptr<const MaterialBinding3D> binding;
 };
 
 // A point light at the entity's WorldTransform3D (P3b; opt-in: no light components, no lights). WorldRenderState3D::collect
@@ -106,6 +136,10 @@ struct SpotLight3D {
 struct ParticleEmitter3D {
     ParticleSystem3D system{};
     bool enabled = true; // false: no births, and not drawn (the live particles are kept)
+    bool emitting = true; // false: stop births while existing particles finish visibly
+    ComponentAssetRef texture_asset; // empty: procedural disc, or a C++ texture
+    bool texture_nearest = false;
+    std::string bound_texture; // runtime-only; empty refs clear only authored bindings
 };
 
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the rest
@@ -119,6 +153,9 @@ struct SkinnedMeshRenderer {
     // What pick says of every part of it, and how its frames are matched for the velocity under temporal anti-aliasing.
     // 0: the entity's id (the low 32 bits of flecs's), so that pick names the entity and two characters do not swap histories.
     u32 id = 0;
+    // Optional authored reference; model stays runtime-only. Resolve before
+    // animation/physics setup. An empty reference leaves C++ models untouched.
+    ComponentAssetRef asset;
 };
 
 // What a constraint aims at: a point of the world, a point carried by another entity (its WorldTransform3D of the current
@@ -261,6 +298,13 @@ struct PoseOverride3D {
     }
 };
 
+// Shared, authored definitions. One playback slot per Animator3D; no action queue.
+struct CharacterAction3D {
+    std::string name, clip, mask_joint;
+    ActionPlayback3D playback; // mask_joint index is resolved from the name
+};
+using CharacterActions3D = std::vector<CharacterAction3D>;
+
 // What plays on a skinned entity, as data: a clip by name, or a state machine (kin/anim's AnimationStateMachine, driven by
 // `params`) that chooses it, with crossfades and 1D blends by a parameter; layers over it with masks. WorldRenderState3D::animate
 // steps it. A state `s` plays the blend space `blend_spaces[s]` if there is one, else the clip `machine->states[s]` (the
@@ -349,6 +393,12 @@ struct Animator3D {
     std::vector<Mat4f> ik_world;
     f32 ik_dt = 0.0f; // the time animate() has stepped since the constraints were last solved (smoothing uses it). Not for setting.
 
+    // Optional shared marker table; no per-entity string copies. Read after
+    // animate(), before the next step. Dispatch drains; unhandled channels expire.
+    std::shared_ptr<const CharacterActions3D> actions;
+    std::shared_ptr<const AnimationEventTracks3D> event_tracks;
+    AnimationEventBatch3D events;
+
     // Set by animate(): the player, and what it was bound to and plays. Not for setting.
     AnimationPlayer3D player;
     const Model* bound = nullptr;
@@ -356,10 +406,23 @@ struct Animator3D {
     std::vector<std::string> applied_layers;
 };
 
+// Assets must already be resolved. Works before the first animate() as well as
+// during ordinary fixed-step systems; invalid requests/busy slots return zero.
+// Restart the same definition with Replace. Base locomotion continues underneath.
+ActionToken3D play_action3d(EcsEntity actor, std::string_view name, ActionStart3D start = ActionStart3D::IfIdle);
+bool cancel_action3d(EcsEntity actor, ActionToken3D token, f32 fade_seconds = -1);
+ActionStatus3D action_status3d(EcsEntity actor, ActionToken3D token);
+
+class AnimationEventDispatch;
+// Consume once after animate(), e.g. in SystemPhase::Audio. Handlers receive the
+// animated entity. 3D markers do not resolve the 2D target/offset fields. Returns
+// the number of unhandled events; these are discarded, never kept in a queue.
+u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& dispatch);
+
 class WorldRenderState3D {
 public:
     explicit WorldRenderState3D(flecs::world& world);
-    explicit WorldRenderState3D(EcsWorld& world) : WorldRenderState3D(world.raw()) {}
+    explicit WorldRenderState3D(EcsWorld& world) : WorldRenderState3D(world.raw()) { _ecs=&world; }
 
     // Every WorldTransform3D from its Transform3D and its parent's, parents first.
     void propagate_transforms();
@@ -368,6 +431,9 @@ public:
     // their entities instances of it (in the order the world keeps them); and each SkinnedMeshRenderer's model in its
     // animator's pose (draw_skinned, one range of matrices for all its parts).
     void collect(Scene3D& scene);
+    // Release reusable mesh/material buckets after bulk removal. ECS-owned
+    // handles remain intact; the next collect rebuilds active buckets.
+    void clear_collection_cache();
     // Steps every Animator3D by `dt` seconds (call it once per fixed step, or per frame): binds it to its entity's model,
     // runs its state machine (one transition a step), crossfades, blends, advances the clips and layers, and moves the
     // entity by root motion if asked. Deterministic: the same dt, parameters and clips give the same poses, byte for byte.
@@ -398,15 +464,24 @@ private:
     // The clips' pose with the constraints solved and the override applied, in animator.ik_pose / ik_world.
     static void solve_pose(Animator3D& animator, const Skeleton& skeleton, const Pose& base, const Mat4f& world,
                            const flecs::world& ecs, u64 epoch);
+    void prepare_joint_attachments();
+    std::optional<Mat4f> draw_placement(flecs::entity entity,const WorldTransform3D& world,const RenderTransform3D* presentation)const;
+    bool attachment_pose_prepared(EcsId entity)const;
+    EcsWorld* _ecs=nullptr; // checked scene targets need the owning registry
+    flecs::query<JointAttachment3D> _attachments;
+    std::array<EcsId,max_joint_attachments3d> _attachment_poses{};
+    std::size_t _attachment_pose_count=0,_active_attachments=0;
+    u64 _attachment_frame=0;
     flecs::observer _transform_observer;
     flecs::query<WorldTransform3D, const Transform3D, const WorldTransform3D> _transforms;
-    flecs::query<const WorldTransform3D, const MeshRenderer> _meshes;
-    flecs::query<const SkinnedMeshRenderer, Animator3D, Transform3D*> _animators; // the transform is optional (a pointer)
-    flecs::query<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*> _skinned; // the animator is optional
+    flecs::query<const WorldTransform3D, const MeshRenderer, const RenderTransform3D*> _meshes;
+    flecs::query<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*> _models;
+    flecs::query<const SkinnedMeshRenderer*, Animator3D, Transform3D*> _animators; // optional skin/transform: clear stale events even after renderer removal
+    flecs::query<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*, const RenderTransform3D*> _skinned; // the animator is optional
     flecs::query<TimeOfDay3D> _time_of_day;
-    flecs::query<const WorldTransform3D, const PointLight3D> _point_lights;
-    flecs::query<const WorldTransform3D, const SpotLight3D> _spot_lights;
-    flecs::query<const WorldTransform3D, ParticleEmitter3D> _emitters;
+    flecs::query<const WorldTransform3D, const PointLight3D, const RenderTransform3D*> _point_lights;
+    flecs::query<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*> _spot_lights;
+    flecs::query<const WorldTransform3D, const ParticleEmitter3D> _emitters;
     flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
     struct Bucket {

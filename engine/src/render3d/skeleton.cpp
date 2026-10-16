@@ -13,15 +13,22 @@ PoseMask PoseMask::all(const Skeleton& skeleton, f32 weight) {
 }
 
 PoseMask PoseMask::subtree(const Skeleton& skeleton, i32 joint, f32 weight, bool include_root) {
-    PoseMask mask{std::vector<f32>(skeleton.joint_count(), 0.0f)};
-    if (joint < 0 || joint >= static_cast<i32>(skeleton.joint_count())) {
-        return mask;
-    }
-    const std::vector<u8> below = skeleton.subtree(joint);
-    for (std::size_t i = 0; i < below.size(); ++i) {
-        mask.weights[i] = below[i] && (include_root || static_cast<i32>(i) != joint) ? weight : 0.0f;
-    }
+    PoseMask mask;
+    mask.set_subtree(skeleton, joint, weight, include_root);
     return mask;
+}
+
+void PoseMask::set_subtree(const Skeleton& skeleton, i32 joint, f32 weight, bool include_root) {
+    weights.assign(skeleton.joint_count(), 0.0f);
+    if (joint < 0 || joint >= static_cast<i32>(weights.size())) return;
+    // Parent-before-child skeleton ordering; keep the root selected until its
+    // descendants are filled, then remove it if requested.
+    weights[joint] = weight;
+    for (size_t i = size_t(joint) + 1; i < weights.size(); ++i) {
+        const i32 parent = skeleton.parents[i];
+        if (parent >= 0) weights[i] = weights[parent];
+    }
+    if (!include_root) weights[joint] = 0;
 }
 
 PoseMask PoseMask::joints(const Skeleton& skeleton, std::span<const std::string_view> names, f32 weight) {

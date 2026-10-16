@@ -152,6 +152,21 @@ std::vector<u8> SummitLevel::bytes() const {
     w.v3(summit);
     w.f(summit_radius);
     w.f(kill_y);
+    if (expedition.enabled) {
+        w.u(0x4558504544495449ull);
+        if (expedition.dense_scenery) w.u(0x44454E53454C564Cull);
+        w.v3(expedition.briefing); w.v3(expedition.fork); w.v3(expedition.beacon); w.v3(expedition.extraction);
+        w.v3(expedition.shelter_centre); w.v3(expedition.shelter_half); w.q(expedition.rotation);
+        w.u(expedition.sheltered_route.size());
+        for (const Leg& l : expedition.sheltered_route) {
+            w.u(u64(l.kind)); w.v3(l.from); w.v3(l.to); w.v3(l.normal);
+            w.f(l.height); w.f(l.roof_height); w.f(l.shimmy); w.u(u64(l.rope)); w.u(u64(l.camp));
+        }
+        for (const auto* trail : {&expedition.direct_trail, &expedition.sheltered_trail}) {
+            w.u(trail->size());
+            for (Vec3f point : *trail) w.v3(point);
+        }
+    }
     return w.out;
 }
 
@@ -491,136 +506,6 @@ RoutePlan plan_route(const SummitLevel& level, const ClimbCosts& c) {
         plan.legs.push_back(p);
     }
     return plan;
-}
-
-// ---- render meshes --------------------------------------------------------------------------------------------------------
-
-namespace {
-
-u32 mix(u32 x) {
-    x ^= x >> 16;
-    x *= 0x7feb352dU;
-    x ^= x >> 15;
-    x *= 0x846ca68bU;
-    x ^= x >> 16;
-    return x;
-}
-
-// A value in 0..1 from three lattice coordinates and a seed.
-f32 lattice(i32 x, i32 y, i32 z, u32 seed) {
-    return f32(mix(u32(x) * 73856093u ^ u32(y) * 19349663u ^ u32(z) * 83492791u ^ seed) & 0xFFFFu) / 65535.0f;
-}
-
-// Smooth value noise at `p` (lattice cell `scale` metres).
-f32 value_noise(Vec3f p, f32 scale, u32 seed) {
-    const Vec3f q = p * (1.0f / scale);
-    const i32 x0 = i32(std::floor(q.x)), y0 = i32(std::floor(q.y)), z0 = i32(std::floor(q.z));
-    const f32 fx = q.x - f32(x0), fy = q.y - f32(y0), fz = q.z - f32(z0);
-    const auto s = [](f32 t) { return t * t * (3.0f - 2.0f * t); };
-    const f32 sx = s(fx), sy = s(fy), sz = s(fz);
-    f32 c[2][2][2];
-    for (i32 i = 0; i < 2; ++i)
-        for (i32 j = 0; j < 2; ++j)
-            for (i32 k = 0; k < 2; ++k) c[i][j][k] = lattice(x0 + i, y0 + j, z0 + k, seed);
-    const auto l = [](f32 a, f32 b, f32 t) { return a + (b - a) * t; };
-    return l(l(l(c[0][0][0], c[1][0][0], sx), l(c[0][1][0], c[1][1][0], sx), sy), l(l(c[0][0][1], c[1][0][1], sx), l(c[0][1][1], c[1][1][1], sx), sy), sz);
-}
-
-Color shade(Color c, f32 k) {
-    const auto f = [&](u8 v) { return u8(std::clamp(f32(v) * k, 0.0f, 255.0f)); };
-    return Color::rgb(f(c.r), f(c.g), f(c.b));
-}
-
-// One box of the level as faces cut into cells of about `cell` metres, the colours of its vertices from noise at the vertex's
-// place in the world: mottled, with strata (bands in y), so that a flat face is not a flat colour. The shape is the box's.
-void append_box(MeshData& out, const Piece& p, Color tint, u32 seed, f32 cell) {
-    const Mat4f m = Mat4f::trs(p.centre, p.rotation, {1.0f, 1.0f, 1.0f});
-    const Vec3f h = p.half;
-    // Each face: its normal axis (0 x, 1 y, 2 z), the sign, and the two axes it spans.
-    for (i32 axis = 0; axis < 3; ++axis) {
-        for (i32 sign = -1; sign <= 1; sign += 2) {
-            const i32 ua = (axis + 1) % 3, va = (axis + 2) % 3;
-            const f32 hs[3] = {h.x, h.y, h.z};
-            const i32 nu = std::clamp(i32(std::ceil(2.0f * hs[ua] / cell)), 1, 40);
-            const i32 nv = std::clamp(i32(std::ceil(2.0f * hs[va] / cell)), 1, 40);
-            Vec3f normal{};
-            (axis == 0 ? normal.x : axis == 1 ? normal.y : normal.z) = f32(sign);
-            const Vec3f wn = p.rotation.rotate(normal);
-            const u32 base = u32(out.vertices.size());
-            for (i32 j = 0; j <= nv; ++j) {
-                for (i32 i = 0; i <= nu; ++i) {
-                    f32 c[3];
-                    c[axis] = f32(sign) * hs[axis];
-                    c[ua] = -hs[ua] + 2.0f * hs[ua] * f32(i) / f32(nu);
-                    c[va] = -hs[va] + 2.0f * hs[va] * f32(j) / f32(nv);
-                    const Vec3f local{c[0], c[1], c[2]};
-                    const Vec3f world = m.apply(local);
-                    // Mottle, strata, a darker foot and a little grain.
-                    const f32 blotch = value_noise(world, 3.2f, seed) * 0.6f + value_noise(world, 1.1f, seed + 7u) * 0.4f;
-                    const f32 strata = lattice(0, i32(std::floor(world.y * 1.1f)), 0, seed + 13u);
-                    const f32 grain = lattice(i32(std::floor(world.x * 3.0f)), i32(std::floor(world.y * 3.0f)), i32(std::floor(world.z * 3.0f)), seed + 29u);
-                    const f32 k = 0.72f + 0.38f * blotch + 0.14f * (strata - 0.5f) + 0.06f * (grain - 0.5f);
-                    MeshVertex v;
-                    v.position = local;
-                    v.normal = normal;
-                    v.uv = {f32(i) / f32(nu), f32(j) / f32(nv)};
-                    v.color = shade(tint, k);
-                    out.vertices.push_back(v);
-                }
-            }
-            // Winding: counter-clockwise seen from outside, whichever way the axes' cross product points.
-            const Vec3f eu = axis == 0 ? Vec3f{0, 1, 0} : axis == 1 ? Vec3f{0, 0, 1} : Vec3f{1, 0, 0};
-            const Vec3f ev = axis == 0 ? Vec3f{0, 0, 1} : axis == 1 ? Vec3f{1, 0, 0} : Vec3f{0, 1, 0};
-            const bool flip = dot(cross(eu, ev), normal) < 0.0f;
-            for (i32 j = 0; j < nv; ++j) {
-                for (i32 i = 0; i < nu; ++i) {
-                    const u32 a = base + u32(j * (nu + 1) + i), b = a + 1, c2 = a + u32(nu + 1) + 1, d = a + u32(nu + 1);
-                    if (!flip) out.indices.insert(out.indices.end(), {a, b, c2, a, c2, d});
-                    else out.indices.insert(out.indices.end(), {a, c2, b, a, d, c2});
-                }
-            }
-            (void)wn;
-        }
-    }
-    // The vertices were made in the box's own space: move them to the world with the normals turned.
-    (void)m;
-}
-
-} // namespace
-
-std::vector<RenderMeshData> build_render_meshes(const SummitLevel& level) {
-    enum Class { Rock, Smooth, Roof, Hold, Lip, Ground, Count };
-    std::vector<RenderMeshData> out(Count);
-    const char* names[Count] = {"rock", "smooth", "roof", "hold", "lip", "ground"};
-    const Color tints[Count] = {Color::rgb(176, 160, 142), Color::rgb(176, 178, 186), Color::rgb(138, 128, 124), Color::rgb(232, 136, 66),
-                                Color::rgb(206, 186, 150), Color::rgb(152, 160, 124)};
-    for (i32 i = 0; i < Count; ++i) {
-        out[std::size_t(i)].name = names[i];
-        out[std::size_t(i)].material = {.color = colors::white, .roughness = 0.94f};
-    }
-    for (std::size_t i = 0; i < level.pieces.size(); ++i) {
-        const Piece& p = level.pieces[i];
-        Class c = Rock;
-        switch (p.kind) {
-        case PieceKind::Ground: c = Ground; break;
-        case PieceKind::Ramp: c = Ground; break;
-        case PieceKind::Cliff: c = Rock; break;
-        case PieceKind::Boulder: c = Rock; break;
-        case PieceKind::Roof: c = Roof; break;
-        case PieceKind::Smooth: c = Smooth; break;
-        case PieceKind::Hold: c = Hold; break;
-        case PieceKind::Lip: c = Lip; break;
-        case PieceKind::Post: c = Roof; break;
-        }
-        MeshData box;
-        append_box(box, p, tints[c], u32(level.seed) * 2654435761u + u32(i) * 40503u, c == Hold || c == Lip ? 0.25f : 1.6f);
-        out[std::size_t(c)].mesh.append(box, Mat4f::trs(p.centre, p.rotation, {1.0f, 1.0f, 1.0f}));
-    }
-    std::vector<RenderMeshData> kept;
-    for (RenderMeshData& m : out) {
-        if (!m.mesh.vertices.empty()) kept.push_back(std::move(m));
-    }
-    return kept;
 }
 
 } // namespace summit

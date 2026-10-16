@@ -1,0 +1,14 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "camp-crate",
+  "root": "crate",
+  "entities": [{
+    "id": "crate",
+    "components": {
+      "Transform3D": {"scale": [3, 3, 3]},
+      "ModelRenderer3D": {"asset": "kenney-survival/box.glb"},
+      "Collider3D": {"kind": "box", "half_extents": [0.125, 0.125, 0.125], "offset": [0, 0.125, 0]},
+      "RigidBody3D": {"motion": "dynamic", "mass": 3, "friction": 0.6}
+    }
+  }]
+}

@@ -427,8 +427,10 @@ private:
 class QueryBodyFilter final : public JPH::BodyFilter {
 public:
     QueryBodyFilter(JPH::BodyID ignore, bool sensors, u32 group = 0, const std::vector<CollisionRule>* rules = nullptr,
-                    const std::vector<BodyEntry>* entries = nullptr)
-        : _ignore(ignore), _sensors(sensors), _group(group), _rules(rules), _entries(entries) {}
+                    const std::vector<BodyEntry>* entries = nullptr, u64 ignore_user=0,
+                    const void* owner=nullptr,u64 (*user_of)(const void*,JPH::BodyID)=nullptr)
+        : _ignore(ignore), _sensors(sensors), _group(group), _rules(rules), _entries(entries),
+          _ignore_user(ignore_user),_owner(owner),_user_of(user_of) {}
     bool ShouldCollide(const JPH::BodyID& id) const override {
         if (id == _ignore) {
             return false;
@@ -441,7 +443,9 @@ public:
         }
         return true;
     }
-    bool ShouldCollideLocked(const JPH::Body& body) const override { return _sensors || !body.IsSensor(); }
+    bool ShouldCollideLocked(const JPH::Body& body) const override {
+        return (_sensors || !body.IsSensor())&&(!_ignore_user||!_user_of||_user_of(_owner,body.GetID())!=_ignore_user);
+    }
 
 private:
     JPH::BodyID _ignore;
@@ -449,6 +453,9 @@ private:
     u32 _group;
     const std::vector<CollisionRule>* _rules;
     const std::vector<BodyEntry>* _entries;
+    u64 _ignore_user;
+    const void* _owner;
+    u64 (*_user_of)(const void*,JPH::BodyID);
 };
 
 constexpr u32 state_magic = 0x33444B32u; // "1K D3"-ish tag; the content is what is checked
@@ -584,7 +591,10 @@ struct World3D::Impl {
         const Slot* s = find(filter.ignore);
         const u32 slot = s != nullptr ? static_cast<u32>(s - slots.data()) : UINT32_MAX;
         const u32 group = slot < rules.size() ? rules[slot].group : 0u;
-        return QueryBodyFilter(s != nullptr ? s->id : JPH::BodyID(), filter.sensors, group, &rules, &entries);
+        return QueryBodyFilter(s != nullptr ? s->id : JPH::BodyID(), filter.sensors, group, &rules, &entries,
+            filter.ignore_user_id,this,[](const void* owner,JPH::BodyID id) {
+                const auto* slot=static_cast<const Impl*>(owner)->slot_of(id);return slot?slot->user_id:u64{0};
+            });
     }
 
     // Turns the callbacks of the step just done into events, in a fixed order, and updates which pairs touch.
@@ -1486,7 +1496,7 @@ u32 child_index(const JPH::Shape* shape, JPH::SubShapeID id) {
 std::optional<RayHit3D> World3D::raycast(Vec3f from, Vec3f to, const QueryFilter3D& filter) const {
     const Impl& m = *_impl;
     const Vec3f d = to - from;
-    if (!finite(from) || !finite(to) || !(length(d) > 0.0f)) {
+    if (!finite(from) || !finite(to) || !std::isfinite(length(d)) || !(length(d) > 0.0f)) {
         return std::nullopt;
     }
     const JPH::RRayCast ray(to_jolt(from), to_jolt(d));
@@ -1513,6 +1523,7 @@ std::optional<RayHit3D> World3D::raycast(Vec3f from, Vec3f to, const QueryFilter
     out.fraction = hit.mFraction;
     out.distance = hit.mFraction * length(d);
     out.sub_shape = child_index(ts.mShape.GetPtr(), hit.mSubShapeID2);
+    out.sub_shape_id=hit.mSubShapeID2.GetValue();
     return out;
 }
 
@@ -1520,7 +1531,7 @@ std::vector<RayHit3D> World3D::raycast_all(Vec3f from, Vec3f to, const QueryFilt
     const Impl& m = *_impl;
     std::vector<RayHit3D> out;
     const Vec3f d = to - from;
-    if (!finite(from) || !finite(to) || !(length(d) > 0.0f)) {
+    if (!finite(from) || !finite(to) || !std::isfinite(length(d)) || !(length(d) > 0.0f)) {
         return out;
     }
     const JPH::RRayCast ray(to_jolt(from), to_jolt(d));
@@ -1551,7 +1562,7 @@ std::vector<RayHit3D> World3D::raycast_all(Vec3f from, Vec3f to, const QueryFilt
         k.hit.fraction = hit.mFraction;
         k.hit.distance = hit.mFraction * len;
         k.hit.sub_shape = child_index(ts.mShape.GetPtr(), hit.mSubShapeID2);
-        k.raw_sub = hit.mSubShapeID2.GetValue();
+        k.raw_sub = hit.mSubShapeID2.GetValue();k.hit.sub_shape_id=k.raw_sub;
         keyed.push_back(k);
     }
     std::ranges::sort(keyed, [](const Keyed& x, const Keyed& y) {
@@ -1564,6 +1575,42 @@ std::vector<RayHit3D> World3D::raycast_all(Vec3f from, Vec3f to, const QueryFilt
         out.push_back(k.hit);
     }
     return out;
+}
+
+BoundedQueryResult3D World3D::raycast_all(Vec3f from,Vec3f to,std::span<RayHit3D> output,const QueryFilter3D& filter)const {
+    return raycast_into(from,to,{output.data(),output.size(),[](void* data,std::size_t i)->RayHit3D&{return static_cast<RayHit3D*>(data)[i];}},filter);
+}
+BoundedQueryResult3D World3D::raycast_into(Vec3f from,Vec3f to,detail::QueryOutput3D<RayHit3D> output,const QueryFilter3D& filter)const {
+    const auto delta=to-from;const float distance=length(delta);
+    if(!finite(from)||!finite(to)||!std::isfinite(distance)||!(distance>0))return {.valid=false};
+    const auto& m=*_impl;const JPH::RRayCast ray(to_jolt(from),to_jolt(delta));
+    struct Collector final:JPH::CastRayCollector {
+        const Impl& world;const JPH::RRayCast& ray;float distance;
+        detail::QueryOutput3D<RayHit3D> output;BoundedQueryResult3D result;
+        Collector(const Impl& world,const JPH::RRayCast& ray,float distance,detail::QueryOutput3D<RayHit3D> output)
+            :world(world),ray(ray),distance(distance),output(output){}
+        void AddHit(const JPH::RayCastResult& raw)override {
+            const auto slot=world.slot_index(raw.mBodyID);if(slot==UINT32_MAX)return;
+            if(!output.capacity){result.overflow=true;ForceEarlyOut();return;}
+            RayHit3D hit;hit.body=world.handle(slot);hit.user_id=world.slots[slot].user_id;
+            const auto point=ray.GetPointOnRay(raw.mFraction);const auto shape=world.bi().GetTransformedShape(raw.mBodyID);
+            hit.point=from_jolt(point);hit.normal=from_jolt(shape.GetWorldSpaceSurfaceNormal(raw.mSubShapeID2,point));
+            hit.fraction=raw.mFraction;hit.distance=raw.mFraction*distance;
+            hit.sub_shape=child_index(shape.mShape.GetPtr(),raw.mSubShapeID2);hit.sub_shape_id=raw.mSubShapeID2.GetValue();
+            const auto less=[](const auto& a,const auto& b) {
+                if(a.fraction!=b.fraction)return a.fraction<b.fraction;
+                if(a.body.index!=b.body.index)return a.body.index<b.body.index;
+                return a.sub_shape_id<b.sub_shape_id;
+            };
+            std::size_t at=0;while(at<result.count&&!less(hit,output[at]))++at;
+            if(result.count==output.capacity){result.overflow=true;if(at==result.count)return;}
+            else ++result.count;
+            for(auto i=result.count-1;i>at;--i)output[i]=output[i-1];output[at]=hit;
+        }
+    } collector{m,ray,distance,output};
+    JPH::RayCastSettings settings;settings.mBackFaceModeTriangles=JPH::EBackFaceMode::CollideWithBackFaces;
+    m.system.GetNarrowPhaseQueryNoLock().CastRay(ray,settings,collector,{},MaskLayerFilter(filter.mask),m.query_filter(filter));
+    return collector.result;
 }
 
 std::optional<ShapeHit3D> World3D::shape_cast(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
@@ -1581,6 +1628,12 @@ std::optional<ShapeHit3D> World3D::shape_cast(const Shape3D& shape, Vec3f positi
         JPH::RMat44::sRotationTranslation(to_jolt(rotation.normalized()), to_jolt(position)), to_jolt(displacement));
     JPH::ShapeCastSettings settings;
     settings.mBackFaceModeTriangles = JPH::EBackFaceMode::CollideWithBackFaces;
+    // Opt-in camera sweeps include outward initial convex overlap and its
+    // penetration. Preserve legacy directional gameplay sweeps by default.
+    if (filter.initial_overlap) {
+        settings.mBackFaceModeConvex = JPH::EBackFaceMode::CollideWithBackFaces;
+        settings.mReturnDeepestPoint = true;
+    }
     JPH::ClosestHitCollisionCollector<JPH::CastShapeCollector> collector;
     m.system.GetNarrowPhaseQueryNoLock().CastShape(cast, settings, JPH::RVec3::sZero(), collector, {},
                                                    MaskLayerFilter(filter.mask),
@@ -1642,13 +1695,46 @@ std::vector<OverlapHit3D> World3D::overlap(const Shape3D& shape, Vec3f position,
             d.hit.penetration = r.mPenetrationDepth;
             d.hit.point = from_jolt(r.mContactPointOn2);
             d.hit.normal = normalize(-from_jolt(r.mPenetrationAxis));
-            d.raw_sub = raw_sub;
+            d.raw_sub = raw_sub;d.hit.sub_shape_id=raw_sub;
         }
     }
     for (auto& [slot, d] : by_body) {
         out.push_back(d.hit);
     }
     return out;
+}
+
+BoundedQueryResult3D World3D::overlap(const Shape3D& shape,Vec3f position,Quatf rotation,std::span<OverlapHit3D> output,const QueryFilter3D& filter)const {
+    return overlap_into(shape,position,rotation,{output.data(),output.size(),[](void* data,std::size_t i)->OverlapHit3D&{return static_cast<OverlapHit3D*>(data)[i];}},filter);
+}
+BoundedQueryResult3D World3D::overlap_into(const Shape3D& shape,Vec3f position,Quatf rotation,detail::QueryOutput3D<OverlapHit3D> output,const QueryFilter3D& filter)const {
+    if(!shape.valid()||!finite(position)||!finite(rotation))return {.valid=false};
+    const auto& m=*_impl;const auto* jolt=shape._data->shape.GetPtr();
+    const auto transform=JPH::RMat44::sRotationTranslation(to_jolt(rotation.normalized()),to_jolt(position)).PreTranslated(jolt->GetCenterOfMass());
+    struct Collector final:JPH::CollideShapeCollector {
+        const Impl& world;detail::QueryOutput3D<OverlapHit3D> output;BoundedQueryResult3D result;
+        Collector(const Impl& world,detail::QueryOutput3D<OverlapHit3D> output):world(world),output(output){}
+        void AddHit(const JPH::CollideShapeResult& raw)override {
+            const auto slot=world.slot_index(raw.mBodyID2);if(slot==UINT32_MAX)return;
+            if(!output.capacity){result.overflow=true;ForceEarlyOut();return;}
+            std::size_t at=0;while(at<result.count&&output[at].body.index<slot)++at;
+            const auto key=raw.mSubShapeID2.GetValue();
+            if(at<result.count&&output[at].body.index==slot) {
+                if(raw.mPenetrationDepth<output[at].penetration||
+                    (raw.mPenetrationDepth==output[at].penetration&&key>=output[at].sub_shape_id))return;
+            } else {
+                if(result.count==output.capacity){result.overflow=true;if(at==result.count)return;}
+                else ++result.count;
+                for(auto i=result.count-1;i>at;--i)output[i]=output[i-1];
+            }
+            auto& hit=output[at];hit.body=world.handle(slot);hit.user_id=world.slots[slot].user_id;
+            hit.penetration=raw.mPenetrationDepth;hit.point=from_jolt(raw.mContactPointOn2);
+            hit.normal=normalize(-from_jolt(raw.mPenetrationAxis));hit.sub_shape_id=key;
+        }
+    } collector{m,output};
+    JPH::CollideShapeSettings settings;settings.mBackFaceMode=JPH::EBackFaceMode::CollideWithBackFaces;
+    m.system.GetNarrowPhaseQueryNoLock().CollideShape(jolt,JPH::Vec3::sReplicate(1.f),transform,settings,JPH::RVec3::sZero(),collector,{},MaskLayerFilter(filter.mask),m.query_filter(filter));
+    return collector.result;
 }
 
 std::vector<Body3D> World3D::point_inside(Vec3f point, const QueryFilter3D& filter) const {
@@ -2222,6 +2308,7 @@ bool World3D::contains(RagdollHandle3D r) const { return _impl->ragdolls->contai
 i32 World3D::ragdoll_count() const { return _impl->ragdolls->count(); }
 std::vector<RagdollHandle3D> World3D::ragdolls() const { return _impl->ragdolls->list(); }
 std::vector<Body3D> World3D::ragdoll_bodies(RagdollHandle3D r) const { return _impl->ragdolls->bodies(r); }
+bool World3D::ragdoll_has_body(RagdollHandle3D r,Body3D body)const {return contains(body)&&_impl->ragdolls->has_body(r,body);}
 const RagdollDesc* World3D::ragdoll_desc(RagdollHandle3D r) const { return _impl->ragdolls->desc(r); }
 void World3D::set_ragdoll_targets(RagdollHandle3D r, std::span<const Mat4f> bone_world) { _impl->ragdolls->set_targets(r, bone_world); }
 void World3D::start_ragdoll(RagdollHandle3D r, const RagdollStart3D& start) { _impl->ragdolls->start(r, start); }

@@ -5036,7 +5036,7 @@ touching `Game`.
 | Planner against the run | seeds 1 to 4: the planner's least margin and the run's lowest stamina agree to about 10 units (the planner is the lower) |
 | Wall time of the run (CPU) | 1.0 s for 9769 steps: 100 microseconds a step including the bot (23 800 steps a second in the last run, a quiet machine) |
 | Scripted run with pictures, lavapipe, 480x270, 1 sample | 2.6 s wall, 7 pictures; NVIDIA 640x360 `fall`: 2.8 s, 8 pictures |
-| Hash, seed 1 climb | `c80d269809d52fb0` at step 9769 ("same machine" determinism) |
+| Hash, seed 1 climb | `c80d269809d52fb0` at step 9769 ("same machine" determinism; `65e783b36e5dea50` since the decor colliders of P4b's follow-up) |
 
 **Tests.** `kin-summit` (CPU, 12 s, 23 functions): level determinism and altitude over 20 seeds, colliders and meshes are one list (a body
 for each piece at its place, holds are holds, a ray down onto a ground piece and a mesh vertex on that face), the planner (30 seeds
@@ -5134,6 +5134,290 @@ the camera inside the chimney; the ground shows faint banding from the cell tria
 - Two test hooks (`debug_teleport`, `debug_set_health`) change the state outside commands: for tests only.
 - Memory and disk: `/mnt/windows` was down to 393 MB at the end (this build's objects and another project's); pictures were kept in the
   scratchpad and deleted.
+
+#### P4b — results
+
+Done 2026-10-12 on `exp/3d-rendering` (on top of P4a, working tree, not committed). The presentation of Summit: HUD, menu, sound,
+environment, look pass and settings. The simulation is untouched: `game.*`, `script.*` and the generator did not change (`git diff`
+shows only the render-mesh code leaving `level.cpp`), the scripted hashes are the same, and a test runs the whole presentation
+(HUD model, notices, cues, audio engine updates, environment curves, camera, menu) beside the climb and the fall and compares the hash.
+No engine change, no shader change (no gap found that needed one).
+
+**What was built.**
+
+| Piece | Where | Notes |
+|---|---|---|
+| HUD model, layout, menu | `summit/hud.*`, `hud_draw.*` | `HudModel` from the game state (stamina and tone, cap, hands, health and injury label, altitude and best, fall warning, camp notice, summit message with time and falls); `hud_layout` places it with ui2's `solve` (one 1280x720 design scaled by the smaller ratio: the same arrangement at 16:9, 4:3 and 320x180); `Menu` state machine on `MenuInput` edges (keyboard, pad, mouse), controls screen from `InputBindings` |
+| Sound | `summit/audio.*` | `CueGenerator` (events and state to a `SoundCue` list), the curves, and `SummitAudio` on `kin::AudioEngine`: 24 kHz mono clips synthesised at start (wind loop, footsteps on grass, rock and snow, grab, release, landing, impact, whoosh, breath, gasp, creak, fire loop, chimes, sting, UI ticks), 3D positions through `set_listener_3d`, master, effects and ambience buses; `--mute` or no device: the null backend |
+| Environment | `summit/environment.*`, `view.cpp` | `evaluate_environment`: fog and height fog thinning with altitude (x0.45 and x0.2), haze x0.68, sun x1.18, a snow line at 55 % of the height (band 14 %) that drives snow weather and the rock's snow tint, dust from the wind, the storm option, the clock (`--time-speed`, 0.25 game hours a minute; `--freeze-time`); camp fires (flames, sparks, smoke), a flickering point light and a lantern spot light that rise at dusk |
+| Look pass | `summit/rock.cpp`, `view.cpp` | chamfered, roughened rock (smooth normals, strata, rust, moss, lichen, snow by height and normal), a tiling procedural relief for rock and for grass (normal and albedo maps, 512 squared, made at start), buttresses and scree with no collider placed off the route, a ground and ranges out to 2.6 km, a climber with parts (jacket, trousers, boots, hat, pack, goggles, mitts, per-player colours, no tail), arm swing in the walk and run clips, a landing crouch (an additive layer), arms straightened to the holds, a camera that frames a lying body |
+| Settings | `summit/settings.*` | `SummitSettings` in the game's `SaveStore` settings file; read field by field (a damaged file, a wrong type, an out-of-range number or a bad bindings table gives the defaults) |
+
+**Decisions and deviations.**
+1. *Restart from camp* goes through the game's two test hooks (`debug_teleport`, `debug_set_health`) in `restart_from_camp`, for a
+   player who is alive. It is the one place presentation writes to the game, a deliberate act of the person, and not a command: P5
+   makes it one. A mutation (it keeps the health) is caught.
+2. *The look pass keeps to the colliders.* A visible face stays within 0.04 m of its box (a test checks a cliff's face plane), so the
+   hands do not float; the silhouette comes from separate meshes (buttresses at the ends of wide cliffs, scree: no collider here, given
+   convex hulls in "P4b follow-up: decor colliders") and the terrain. The bevels are small (0.12 m): a bigger one on a climbed top edge would show hands off the rock.
+3. *Shadows:* four cascades over 64 m (was three over 160 m). At 160 m the sun's map texels showed as stripes on a wall that the sun
+   grazes (the fixed bias of the sun's shadow has no knob); at 64 m they do not. Shadows beyond 64 m are gone (the fog hides it).
+4. *Textures tile only with `Wrap3D::Repeat`* (the default is clamp: the first pictures had one texel on a whole wall).
+5. The fog colour comes from the sky (as P4a), so the "colder with height" is the sky's own: clearer haze and a stronger sun; no
+   separate tint.
+6. *Audio is not heard here.* No speakers or device were used: the tests mix into the null backend and check the output is not
+   silent and that the buses scale it; what it sounds like was not listened to.
+7. Settings are not read by scripted or headless runs unless `--settings DIR` (a picture must not depend on the machine's file).
+8. A separate test program, `kin_summit_presentation_tests` (`kin-summit-presentation`), so that `kin-summit` is as it was.
+
+**Numbers.**
+
+| What | Measured |
+|---|---|
+| Rock, decor and terrain | about 198 000 triangles (seeds 1, 2, 7: 199 580 / 198 324 / 196 240) |
+| GPU frame, RTX 4080 Laptop, 1280x720, 4x MSAA, all effects on, 4 cascades, median of 82 frames | base camp at dusk 0.74 ms (4 lights, 60 particles); camp 6 (snow, plateau) 0.68 ms; camp 3 at night with storm 0.71 ms (6 lights, 195 particles). `KIN_LOG_FRAME_STATS`-style timing: `summit --camp N --look L --frames 400 --gpu-timing` (windowed) |
+| Scripted run with pictures, lavapipe, 1280x720, 1 sample | 18 pictures (with HUD, menu, controls) in under 10 s |
+| Scripted climb, seed 1 | step 9769, `c80d269809d52fb0` (unchanged); fall seed 1 `1200ac0ab8feca87` / 10513 (unchanged); seed 2 climb `b2d260ca3ee0ab2f` / 9854, seed 7 climb `2186e557fed8c927` / 9433 (unchanged); new references: fall seed 2 `612aac4f2012402e` / 10522, seed 7 `f692da67c0e66c8c` / 10178 |
+| Sound cues, climb seed 1 | footsteps 276, grabs 14 (= grip events), releases 2, breaths 2, rope creaks 13, camps 6, summit 1, no fall sounds |
+| Sound cues, fall seed 1 | footsteps 277, grabs 17, releases 5, fall 1, impact 1, hurt 1, got up 1, breaths 2, camps 6, summit 1 |
+| Footstep gap, flat | walk 0.385 s, sprint 0.299 s |
+
+**Tests.** `kin-summit-presentation` (CPU, 6 s, 21 functions): stamina tone and colour, fall warning thresholds and their order on a
+real drop, the HUD model along the climb (low and good tones, two hands, one hand, camps, best altitude monotone, the summit message
+with "2:42" and "0 falls"), which hand is held (a one-handed hang both ways), injury labels and cap, walking and sprinting status,
+notices (hurt flash, camp notice fade), the layout at seven sizes (everything inside the screen and none overlapping; the menu's
+rows inside its panel), the menu by keyboard, pad and click edges (focus wrap, look cycling, volume clamp, sensitivity, time of day,
+controls screen, quit, resume), the controls screen with rebinding, restart from camp (hanging, then at camp, alive; refused when
+knocked out), the audio curves (wind monotone in altitude and speed, cadence monotone in speed, breath, whoosh, thump), cues of the
+climb (grabs equal grip events, camps, summit, footsteps on grass, rope creaks, deterministic) and of the fall (fall, impact, hurt,
+got up, died on a 45 m drop, no soft landing under an impact), the audio engine (every cue plays, master volume 0 is silent, buses
+follow the volumes, wind louder at the summit, whoosh in a fall), the environment curves (fog and snow against altitude, effects off
+gives the look as it was, storm), the clock, settings (round trip, stable bytes, five kinds of damaged file, damaged fields, an
+unwritable directory), the camera framing a lying body, the look-pass meshes (finite, valid, budget, deterministic, off the route,
+terrain below the field and ranges above it, face planes, snow brighter than low rock), and the hash test above.
+`ctest`: 81 of 81 in `build` with `KIN_REQUIRE_GPU_TESTS=1` (79 before, plus `kin-summit-presentation` and `summit-script-shots-nohud`),
+65 of 65 in `build-no3d` (no Jolt, physics3d or summit in its `build.ninja`); `kin_render3d_tests` on lavapipe exit 0.
+
+**Mutation checks** (break a source, build, run `kin_summit_presentation_tests`, restore from a saved copy and `cmp`; 22 mutants, 22
+caught, all restored identical). One survived first: *the hands swapped in the model* (the bot takes hold with both at once, so the
+climb test could not tell them apart); a one-handed hang test was added and catches it (4 checks). The runner copied files back with
+their old times, so a rebuild had to `touch` them: noted because `ninja` would have kept the mutant's objects.
+
+| Mutation | Caught by |
+|---|---|
+| stamina bar colour always green | 4 |
+| knock-out warning threshold raised | 2 |
+| summit message without its title | 1 |
+| hands swapped in the model | 4 (after the new test) |
+| menu up key is the down key | 2 |
+| volume step not clamped | 3 |
+| restart keeps the health | 1 |
+| layout scale from the larger ratio | 6 |
+| footstep cadence constant | 26 |
+| wind ignores altitude | 11 |
+| no grab cue | 8 |
+| no impact thump | 9 |
+| no breathing | 9 |
+| every ground sounds like rock | 7 |
+| no snow line | 12 |
+| fog does not thin with altitude | 8 |
+| clock does not wrap | 9 |
+| volume not clamped on read | 10 |
+| bindings not written | 13 |
+| decor ignores the route | 16 |
+| no snow in the rock's colours | 16 |
+| lying camera never comes round | 18 |
+
+**Checks run.** `build` and `build-no3d` build clean; the sources of the scripted runs are untouched. Identity: `render def` and
+`render all` (120 frames, crowd, shadows, sponza, helmet, motion, spheres, cornell) equal byte for byte to `reference_out/p1a_base_def`
+and `p1a_base_all` (only `results.json` differs, excluded); `physics_character`, `physics_climb`, `physics_ragdoll`, `physics_rope`
+27 of 27 equal to `p2c`, `p2d`, `p2e`. No `.glsl` or engine file changed, so the .spv are HEAD's.
+
+**Pictures looked at** (1280x720 lavapipe and NVIDIA, 4x MSAA on NVIDIA; the scripted run's 9 moments, `fall`'s ragdoll, dusk, night,
+snow and storm looks at a camp, a first person view, a landing from the side, the 4:3 controls screen, 320x180). Base camp: green
+meadow with grass relief, the approach a big green wedge, scree and boulders, ranges with snow behind, a person in red with a yellow
+beanie and a blue pack, HUD at the corners. First wall and second pitch: a textured wall with a long shadow of the person, arms
+straight up to the holds. Chimney: the camera is close (a wider lens helps), arms straight. Overhang: a roof slab with snow on its
+lip. Rope: the blue-grey smooth wall, the rope, flakes. Summit: snow, cairn, boulders with snow caps, the summit panel. Ragdoll in
+the chimney: the whole body in the picture from above. Dusk and night camps: the tent lit by the fire and the lantern.
+
+**Ugly parts, plainly.**
+- The rock is still boxes: a face is a flat wall with a procedural polygon relief that reads as crazy paving or cracked mud at
+  close range (the fractures are the same everywhere; no bedding that follows the strata colours). The approach ramps are a big green
+  wedge and the mountain from the base is a block with wings. The climbing line is a flat wall: the shape of the climb is unchanged.
+- The person is still tubes and balls (thin limbs, black mitts, a stiff walk); the arms swing but nothing follows through; the
+  crouch is an additive layer and the feet slide a little at the landing.
+- Far ranges are low-poly with flat-ish colour; the terrain under the mountain is hidden by the field.
+- In the chimney the camera is a metre from the back of the person (no room); the lens is widened, not the space.
+- Sound was never listened to. Fire crackle and wind are noise shaped by simple filters.
+- Particles ghost under TAA (P3c's known limit) and are not lit by the camp lights.
+- Not exercised: a real keyboard, mouse, gamepad or speakers. The menu was driven by synthetic input edges and a headless picture;
+  clicks in the menu, the mouse capture round the menu, and the controller path were not run by hand. The windowed run on NVIDIA drew
+  and timed the frames and wrote no settings file (a picture run does not).
+
+#### P4b follow-up: oscillation
+
+A report from an interactive run: "the character oscillates at high frequency, especially looking sideways" (and the picture with it,
+standing, walking and hanging). Traced headless with the interactive loop's own arithmetic (`App::run`'s accumulator and alpha, the
+mouse motion used up by the first step of a frame) at 30, 60, 90 and 144 Hz frames over the 60 Hz step (presentation_tests'
+`trace`, `TRACE=1`, and `TRACE_CSV=dir` for a CSV of the steps and of the frames).
+
+**Cause: the sim was sound; the presentation sampled it badly (two things).**
+1. The person was drawn at the latest step's feet and facing, the camera between the last two steps (alpha). The person hopped
+   against the camera by up to a step's travel at the step rate, and plainest when the view is side on to the way it goes (along the
+   view axis it is invisible). Strafing with the look sweeping, 144 Hz: 0.067 m high-frequency lateral error, 599 direction
+   reversals in 6 s (about 100 a second); walking 0.008 m, 423 reversals. At 60 Hz it is constant, so it never shows on a 60 Hz run.
+2. The mouse motion went whole into the first step of a frame, so steps carried 1, 2, 1, 2... frames' worth of turn when frames
+   come faster than steps, and the camera's yaw (interpolated between steps) and the body that follows the look (move direction ->
+   facing) turned in jerks at the beat of the two rates. Standing, a steady 30 degrees a second at 144 Hz: 0.17 to 0.26 degrees a
+   frame against 0.208 (a quarter either way); second difference of the yaw 0.087 degrees (ideal 0), 0.222 at 90 Hz; a sweep
+   at 90 Hz 0.70 degrees (ideal 0.018). The same unevenness made the facing's second difference 2.1 degrees at 90 Hz.
+
+Not the cause (measured): the facing's 180 degree flip walking backwards (2 direction changes in a 6 s sweep, never more than
+`turn_rate*dt` a step, no ping-pong), the hanging normal (no flicker: 0 facing changes while hanging through a sweep), the 0.1
+move threshold, the arm's sphere cast (pulls in once at rock, nothing per frame), the sag (a first-order ease). Standing still and
+only looking: the person does not move; the camera's yaw was the whole of it.
+
+**Fix, presentation and input path only (no simulation change, all six scripted hashes identical).**
+- `CameraRig::person_position/person_facing(alpha)`: the person is drawn at the camera's instant (`SummitView::set_person_pose`).
+- `CameraRig::set_look_ahead`: the camera's yaw and pitch are the sim's as of the last step plus what the hand has turned that no
+  step has taken (not interpolated between steps). `input_map`: `look_of` (the device's look, shared with `map_input`) and
+  `LookFeed`, which gives each step half of the look still owed (even steps; the camera sees the remainder, so the view is not
+  delayed; the sim's yaw trails the hand by about two steps, 33 ms). Scripted runs feed nothing through it.
+- After: lateral error 0.000 m, 0 reversals at every rate; camera yaw second difference equal to the analytic one of the sweep
+  (0.164 / 0.041 / 0.018 / 0.007 degrees at 30 / 60 / 90 / 144 Hz); facing second difference 0.24 at 90 Hz, 0.10 at 144 Hz.
+
+Tests: `person and camera do not shake` (seven scenarios by four frame rates; the old behaviour, drawn through the same measure,
+is asserted to hop) and `look feed is even and loses nothing`, in `kin_summit_presentation_tests`. Mutants caught: person not
+interpolated, camera yaw interpolated between steps, look given whole, facing not interpolated, look-ahead ignored, feed losing a
+share. Not verified: the feel with a real mouse and keyboard at the real frame rates; the pad's stick path (extrapolated by the
+time since the last step) was reasoned, not run.
+
+#### P4b follow-up: inside-out climber
+
+A report from a windowed run: the climber's interior showed ("the wrong side"). **Cause:** the `tube` helper of `make_climber` wound
+its triangles clockwise seen from outside (the engine's convention, `meshes::sphere` and Summit's own `blob`, is anticlockwise), so
+torso, legs, arms and boots were culled from outside and their inner faces drawn, lit by the wrong normal. No test looked at winding.
+
+**Fix:** the index order of `tube` is `{a, b, c, a, c, e}`. The builder moved to `summit/climber.cpp` (`build_climber_meshes`, no
+renderer) so a CPU test can reach it. **Test:** `winding` in `kin_summit_presentation_tests` walks every CPU-built mesh (climber parts
+of the four styles, rock, decor and terrain of four seeds, the view's cylinder, cones, box and sphere) and requires that the
+geometric normal agrees with the vertex normals for every triangle with an area (double-sided materials skipped; the ground is
+held to "faces up" plus under 1% disagreeing, since its far triangles are hundreds of metres wide). With the old order it reports
+skin 15.5%, jacket 50.7%, trousers 100%, boots 100%, goggles 10.9% wrong in each style; with the fix, none. Pictures: the fix
+changes the climber's picture on purpose; the refactor alone is byte-identical.
+
+**Open ends:** once the winding was right, back-face culling let you look straight through the uncapped ends of the tubes (neck,
+shoulders, hips, wrists, ankles: holes in a picture from behind and above). `tube` now closes both ends with a flat fan over copies
+of the end ring (own normal, -d at p0 and +d at p1, the ring's joint weights), and `blob` closes a partial dome (the beanie, theta
+1.95) with a disc facing down. The `winding` test also counts boundary edges (used by one triangle, vertices welded within 1e-5) and
+requires zero for every climber part, nothing being open by design; with the p1 cap removed it reports 12 (skin), 36 (jacket) and 24
+(trousers) in style 0. Pictures from behind, in front, beside, above and below, and the hanging poses, show no gaps. Scripted hashes
+are unchanged (the sim does not see the mesh).
+
+#### P4b follow-up: decor colliders
+
+A report from an interactive run: "many rocks are not truly collidable" (the climber standing in a chamfered boulder on the base camp
+grass). **Cause: by design.** P4b made the buttresses, scree and boulders of `build_decor_meshes` separate meshes with no collider, so
+that the visible rock could never diverge from the collision. The price was rock you walk through. **The decision is reversed**: every
+decor chunk is a collider, and the divergence is closed by construction and by test instead of by leaving them out.
+
+**One list.** `decor_chunks(level)` (`level.hpp`, in `rock.cpp`) is a pure function of the level that yields each chunk's kind
+(`Buttress`, `Scree`, `Boulder`), centre, half extents, rotation, bevel, noise amplitude and seed (the colour class follows the
+kind). `build_decor_meshes` emits its triangles from the list, and `Game::build` makes its bodies from it: the two cannot place
+different rocks. The level's bytes and hash are unchanged (the chunks are derived, not stored).
+
+**Shape: the convex hull of the chunk's actual mesh vertices** (`Shape3D::convex_hull`, which physics3d already had: no engine
+change). `decor_chunk_points` runs the same emitter as the render mesh and keeps the distinct vertex positions (to a millimetre),
+which are the noise-roughened ones; `decor_shape` puts them in the body's space. A hull is a superset of a convex solid's roughened
+surface, so the mesh is inside the collider by construction; what could go wrong is the collider standing proud of a dip in the
+mesh. The noise was therefore cut to what a hull can follow: buttresses 0.020 to 0.035 m (were 0.30 to 0.55, lumpy: relief a hull
+cannot have), stones `min(0.04, 0.12 * size)` (were `0.25 * size`, up to 0.15 m). The silhouette of a buttress still comes from its
+chamfer (0.35 to 0.6 m), tilt and yaw jitter, which the hull follows exactly. Jolt rounds a hull's edges by at most 5 cm, inside
+the hull.
+
+**Tolerance, measured both ways** (`decor has colliders`, seeds 1, 2, 7, 19): the worst mesh vertex outside its collider is
+0.009 m (the edge rounding), and the worst point of a collider's surface (96 rays at each chunk) from the visible triangles is
+0.024 to 0.030 m; the test requires both at most 0.04 m, the rule P4a set for the boxes.
+
+**Surfaces.** A buttress has the Cliff's surface (Piece defaults: grippable, grip 1, no slip, drain 1, friction 0.8) so it can be
+grabbed like a cliff; stones have the ground's (the same defaults; neither is a hold). User ids are `pieces + 1 + index`, after the
+pieces', so `piece_body(i)` and the piece ids are as before. Static, layer Static (as the pieces).
+
+**Counts** (seed 1, 2, 7, 19): 32 / 30 / 31 / 31 buttress blocks, 71 / 83 / 57 / 71 stones and 13 / 11 / 25 / 13 boulders: 116 / 124 /
+113 / 115 bodies (the level has about 400 piece bodies). No stone is skipped for being small: the smallest of any seed is 0.18 m
+across before roughening (the half extents in the test are at least 0.08 m), and all collide. **Cost:** a scripted climb of seed 1
+takes 102 microseconds a step with the bot (1.00 s for 9769 steps) with and without the decor bodies (measured in turn, three runs
+each, `KIN_NO_DECOR`-style switch removed again); making the hulls adds about 0.06 s to `Game` construction.
+
+**Route.** The stone rule keeps its `route_distance` margin (size + 3.2 m); a buttress block is now dropped if its centre is within
+its largest half extent + 1.5 m of the route, a rule that never fires on seeds 1, 2, 7, 19 (the blocks stand outside the face's
+width) but keeps a future edit from walling the way (`route keeps decor out` asserts it with a leg drawn through each kind). Scripted
+climbs of seeds 1 to 60: all reach the summit, 0 falls, 0 knock-outs, 0 deaths. Walking over a small stone (0.05 to 0.3 m high, the
+controller's step is 0.4 m) goes over it on the ground with no vertical jump of more than 0.25 m in a step.
+
+**Hashes.** The world has more bodies; the bot never touches them, so the steps of the climbs are equal (the physics ids differ,
+and the hash changes):
+
+| Run | old | new |
+|---|---|---|
+| climb seed 1 | `c80d269809d52fb0` / 9769 | `65e783b36e5dea50` / 9769 |
+| climb seed 2 | `b2d260ca3ee0ab2f` / 9854 | `8ff5ddf0e6c15888` / 9854 |
+| climb seed 7 | `2186e557fed8c927` / 9433 | `3da2991b41caebde` / 9433 |
+| fall seed 1 | `1200ac0ab8feca87` / 10513 | `eb2927b7bed6afe2` / 10510 |
+| fall seed 2 | `612aac4f2012402e` / 10522 | `16cff43250edd212` / 10623 |
+| fall seed 7 | `f692da67c0e66c8c` / 10178 | `d2adc2a27bd3eaee` / 10179 |
+
+The fall steps move by 1 to 101: the fallen body meets a stone or a block that was not there. Stored in `summit_tests.cpp`,
+`presentation_tests.cpp` and `examples/CMakeLists.txt`.
+
+**Debug aid.** `summit --debug-colliders` draws the static colliders within 70 m of the camera as wireframes (level boxes grey,
+buttress hulls orange, stones and boulders cyan; `DebugDraw3D`, off by default), and `--on-decor boulder:N` (or `buttress:N`,
+`scree:N`) starts a single picture standing on the top of the N-th chunk of that kind.
+
+**Tests** (`kin_summit_tests`): `decor has colliders` (a body of each chunk, convex hull, static, ids, surface, both tolerances),
+`decor is stood on and blocks` (a dropped character stands on boulders and buttress tops with feet within 6 cm of the top; a capsule
+swept at a buttress's side meets it), `boulders stop a walker` (walks into a boulder 0.9 m or more above flat ground: stays a radius
+off, never on it), `route keeps decor out`, `small stones are stepped over`, `nothing of the route is inside decor` (camps, markers,
+every leg's line every 0.5 m, rope hangs: no overlap, four seeds). **Mutants** (10 and one test added; each restored with `cmp`): box
+instead of hull 469 checks; hull points not rotated into the body's space 11; ids not after the pieces 474; kinematic 469; stones
+dropped 1170; stone noise as before 4; buttress route guard removed (survived at first: 0 failing, the guard never fires on the
+seeds; `route keeps decor out` added, now 2); stones ignore the route 8; not grippable 468; half of the points 47.
+
+**Pictures looked at** (640x400, lavapipe): base camp with its stones, the hull wireframes over the same view (every stone and
+boulder of the meadow has cyan edges; the level's own boulders grey boxes), the character on a boulder top (feet on the top, the
+wireframe follows the chamfers), the end of a buttress with the character on its top (orange hull on the stepped blocks). Still
+odd: the stones are flat-faced chamfered boxes with very little relief now, nearer a block of cheese than a rock at a metre's
+distance; relief would need a non-convex collider (a compound of hulls or a mesh) or a normal map on the decor (the rock has one).
+Not verified: the feel of walking over scree with a real keyboard; the debug draw's frame cost on a real GPU.
+
+#### Summit follow-up — The Beacon expedition
+
+The first experience milestone adds a compact authored expedition as the interactive default. An orange direct face and a blue
+cave passage join at ridge camp; a shared final climb and snowy ridge lead to the beacon and extraction pad. The cave floor,
+inclined roof and walls are level pieces shared by drawing and collision. Standing still inside restores health/stamina, muffles
+the wind and suppresses precipitation. Gold trail markers, coloured branch signs, objective direction/distance and contextual
+hold prompts make the intended interactions visible.
+
+Progression is simulation state (`Player::expedition`): briefing, climbing, extraction, complete; start/finish steps, interrupted
+repair/extraction holds and shelter discovery. Reaching the summit alone does not complete the expedition: repair takes 120
+grounded, in-range held steps, extraction 60. These fields hash and snapshot with the player. Expedition snapshots use version 2;
+the classic simulation retains version 1 and its stored climb hash. Recorded logs distinguish maps, so replay constructs the right
+level. The briefing and completion overlays offer real ui2 Begin/Try again buttons, keyboard/pad controls and a fresh-world retry
+that releases the previous scene meshes, view target and renderer before rebuilding presentation.
+
+`expedition.cpp` owns the layout and mission rules, `--script expedition` and `--script shelter` exercise both branches through the
+normal command interface, and `kin-summit-expedition` checks route completion/replay, shelter recovery/collision, interrupted and
+out-of-range interactions, a snapshot restored during beacon repair, and HUD bounds. A GPU script captures briefing, fork, cave,
+final wall, beacon, extraction and completion. Scene reports expose the objective, phase, interaction progress, button bounds and
+simulation state for the existing agent interface. A live server check clicked Begin, walked to the beacon from the diagnostic
+snow-camp start, restored it, requested extraction, clicked Try again and began the new expedition; this GPU run peaked at
+242,480 KiB RSS, with one process at a time.
+
+The original 150 m course remains available with `--classic`; climb/fall/rope scripts and existing camp/decor diagnostic pictures
+retain that course. `--expedition --camp N` explicitly selects an expedition diagnostic start. This milestone does not add inventory,
+mechanical storms, imported content, an interactive save/continue screen or a moving obstacle; those remain later experience and
+engine-evaluation milestones.
 
 #### Blockfield — editable voxel workload
 
@@ -8272,3 +8556,1088 @@ rules in HANDOFF.md), and verified by the coordinator.
 6. **Multiplayer in the first slice**: one player, netcode-ready. *Decided 2026-10-10.*
 7. **Jolt Physics as a dependency** (stage P, P2): MIT, fetched like meshoptimizer, only
    with the experimental 3D option. *Decided: yes (2026-10-10).*
+
+## Summit dense expedition and full-frame capture (2026-10-16)
+
+The Summit executable defaults to a forested approach (`--scenery dense`), with a ground apron, rocks, trees and ground cover.
+Seed 1 has 8,025 scenery instances and 803,074 instance triangles before culling, compared with 56 / 7,424 in compact mode.
+These use the existing six mesh batches, shared atlas and two PBR material sets; no new textures or models were downloaded.
+Immutable instance records occupy 577,800 CPU bytes (0.55 MiB) and are grouped into 16 m cells. Rocks and trunks use the
+same placement catalogue for collision. Both route corridors and the starting camera clearing are kept open.
+The simulation API retains compact mode as its default; command logs and snapshot versions distinguish the two layouts.
+
+`examples/summit/run_benchmark.py` alternates three compact/dense pairs at 2560 × 1440, 4× MSAA. Each is a normal native
+uncapped game window, rendering every frame while the cave-route bot advances at real-time 60 Hz. CSV rows stream to disk
+with one pending sample in the application. Benchmark mode ignores live game controls: a smoke test exposed desktop key
+events opening the pause menu, so bot runs now bypass that input handler. Full start-to-start frame intervals include present/GPU waits; the narrower
+scene assembly and CPU render submission scopes are reported separately. Startup/asset setup and a two-second rendering
+warmup are separate from climbing/extraction p50/p95/p99. The whole level is preloaded, so this does not test streaming.
+
+The harness checks exact CPU replay hash/step count, route completion, no falls/deaths, resolution/AA, all imported assets,
+four shadow cascades, and real character skinning. The canonical skeleton has 25 joints; the mesh references the first 20,
+which is the actual submitted matrix count. Game processes are capped at 512 MiB RSS and 300 seconds; launches require at
+least 2 GiB available RAM and terminate below 1 GiB. Source/binary hashes and GPU telemetry are recorded. Competing GPU/build
+jobs cause a run to be discarded, with up to two retries after a quiet interval.
+
+The initial comparison attempts overlapped intermittent `portrait_mesh`, `atlas_dump` and shader-compilation jobs and were
+discarded. The user confirmed those jobs will keep running; the comparison was stopped. No uncontended p50/p95/p99 or
+compact-versus-dense performance conclusion is recorded. Artifacts are under `/home/bamedeo/kin-bench/summit-dense/measurement-v1`
+through `measurement-v4`; interrupted/rejected captures are diagnostic only. Re-run the harness into a fresh disk directory
+when the machine is idle. This content still shares a small texture/material set and does not exercise a large asset working set.
+
+Validation: serial build and 11/11 relevant CPU/asset/presentation/physics checks pass, including both dense routes on seeds
+1, 7 and 30, snapshot/log replay parity, and original classic-course hashes. Both seed-1 cave routes complete in 3,657 fixed
+steps. The dense trail was visually checked from the normal third-person camera and an overview camera.
+
+After isolating benchmark input, a guarded dense 1440p/4× MSAA smoke run completed the full seed-1 cave route in 3,657 steps,
+with no falls/deaths and an exact CPU replay hash match (`0a790d7096a319c9`). It captured 11,617 climbing/extraction frames;
+all validated cascade/skin work and route coverage. Peak process-tree RSS was **331.7 MiB**, below the 512 MiB guard.
+The dense map has **915 static prop bodies**. An Escape key sent directly to this Summit window without changing desktop
+focus did not pause or prevent completion. Artifacts: `/home/bamedeo/kin-bench/summit-dense/dense-1440-smoke-v2/`, including
+`validation.json` and `input-isolation.json`. This run deliberately permits the known competing jobs and is functional/RAM
+validation only; `performance_valid` is false and its timing percentiles are not used as performance evidence.
+
+### Summit traversal measurements after retrying
+
+Completed three compact/dense pairs at 2560 × 1440, 4× MSAA on the RTX 4080 Laptop GPU, Vulkan, Release `-O3 -DNDEBUG`.
+Each run rendered the full roughly 61-second cave-route traversal at normal 60 Hz simulation. Six accepted captures have no
+detected competing GPU/build job; one additional compact attempt was rejected when `fantasy_merchan…` started using the GPU.
+The first three accepted captures were preserved across that interruption. After the user said the other game would finish
+shortly, a scratch continuation completed the remaining three in the original C/D, D/C, C/D order, verifying all original
+source/binary hashes before and after. No engine, game or rendering-quality changes were made for these measurements.
+
+| Accepted run | p50 ms | p95 ms | p99 ms | Peak process RSS MiB |
+|---|---:|---:|---:|---:|
+| Compact 1 | 3.563 | 4.260 | 4.383 | 327.7 |
+| Dense 1 | 4.192 | 4.867 | 5.008 | 330.7 |
+| Dense 2 | 4.340 | 4.651 | 4.815 | 330.5 |
+| Compact 2, resumed | 4.048 | 4.798 | 5.010 | 327.6 |
+| Compact 3, resumed | 4.391 | 5.004 | 5.186 | 330.8 |
+| Dense 3, resumed | 4.702 | 5.027 | 5.394 | 330.7 |
+
+Medians of the three per-run percentiles: compact **4.048 / 4.798 / 5.010 ms**, dense **4.340 / 4.867 / 5.008 ms**
+(p50/p95/p99). Dense's median frame time corresponds to about **230 FPS**. Peak RSS is roughly **331 MiB** for either mode;
+this measurement does not resolve a reliable process-memory delta. The instance-record allocation remains exactly 0.55 MiB.
+Startup to the first completed frame was a median 774 ms compact / 895 ms dense; renderer/view asset setup was 324 / 380 ms.
+These are fresh processes with warm OS/driver caches, not cold-disk load measurements. There is no asset streaming.
+
+**Thermal limitation:** no competing process does not imply constant hardware speed. Telemetry shows up to **89°C**, GPU
+thermal slowdown active for 1/127, 72/128, 124/127, 81/127, 126/127 and 128/128 samples in the table's order. Median GPU clocks
+were 2310, 1965, 1605, 2010, 1425 and 1290 MHz respectively, including startup/warmup samples. Compact p50 itself drifted from
+3.56 to 4.39 ms. Paired dense p50 increases were 17.7%, 7.2% and 7.1%; paired p95 changes were +14.3%, -3.1% and +0.5%.
+Report the observed throughput and spread, but do not claim a precise density penalty or a meaningful p95/p99 tie from the
+aggregate medians. A tighter relative comparison requires more stable thermal conditions and clocks.
+
+Across 44,093 compact and 40,864 dense climbing/extraction frames, each run had exactly one interval above 16.67 ms, always at
+step 21 / leg 0 when briefing changes to climbing. Absolute maxima were 22.89 ms compact / 23.09 ms dense; none exceeded
+33.33 ms, and none hit the simulation's catch-up limit. This recurring transition is a concrete next hitch investigation;
+the current CPU scopes do not attribute its full cost. In the final dense run, logs place four first-use HUD font loads
+19, 14, 10 and 5 ms before that frame's post-UI capture timestamp, suggesting font initialization as a candidate to instrument
+and preload; this is correlation, not a measured attribution of the full interval. All runs completed with no falls/deaths, visited shelter and exactly
+matched their CPU replay hash/3,657 steps. Player feet matched exactly at all 3,636 common active physics steps in every pair.
+
+Actual main-pass triangle maxima were **70,142 compact / 547,024 dense**, rather than all 803,074 scenery instance triangles
+being visible throughout the route. Median draw counts remained 31 / 34; shadow draw maxima rose from 93 to 117, with up to
+5,481 dense shadow casters. The median of per-run camera/scene/animation CPU medians was about 2.43 / 2.40 ms; the wall-clock
+`Renderer3D::render` scope was 0.26 / 0.62 ms. These scopes are narrower than full frame time and do not identify GPU pass
+costs or prove the frame's bottleneck. Dense CPU scope measurements are also subject to the clock/thermal drift above.
+
+Artifacts: `/home/bamedeo/kin-bench/summit-dense/measurement-v5/`: `runs.json`, `summary.json`, `analysis.json`, original and
+continuation contention monitors, GPU telemetry, per-frame CSVs and CPU reference hashes. `continuation.json` records the
+interruption; `/home/bamedeo/kin-bench/summit-dense/complete-v5.py` preserves the completion procedure without changing the
+original workload manifest. The game remains a small shared-texture/mesh workload, not an engine-limit or streaming test.
+
+### First API ergonomics slice: shared art and model placement
+
+Following the decision to pause throughput work, add two reusable engine pieces and migrate Summit onto them:
+
+- `Assets3D` returns the existing `AssetHandle<Model>` type and shares models/dependent textures within one renderer-scoped
+  library. Weak references retain no resident models or textures; bounded LRU lookup metadata defaults to 128 models and
+  512 texture entries. Scene handles, batches and draws own the actual resources. Explicit `trim()`/`clear()` support lookup
+  cleanup/invalidation while live consumers remain valid. Model identity includes mesh-build options; texture identity
+  includes resolved path or owning embedded-image index, sRGB/data interpretation and filtering. Failed models are retried.
+- `Model::placement` provides authored/center/bottom-center pivots, fitted world size, rotation and additional scale.
+  Static `Scene3D::draw(model, matrix, tint, id)` now propagates a whole-object ID to all parts. `ModelBatch3D` expands static
+  model parts and optional material replacement into shared instance batches, grouping by model-transform origins in 16 m
+  cells by default. It exposes construction counts and preserves part transforms, copy IDs/tints and conservative bounds.
+
+Summit keeps its game-specific scatter rules, tints and collider checks, but no longer replaces duplicate atlas textures or
+implements its own mesh-part/cell expansion. All 14 prop models share one atlas with 13 cache reuses, and the survivor uses
+the same library through `.shared()` for the ECS animator. The dense scene still has 8,025 instances, 803,074 instance triangles,
+577,800 CPU record bytes and six mesh batches. Collision/simulation code and replay formats were not changed in this slice.
+
+Validation artifacts: `/home/bamedeo/kin-bench/summit-api/`. The focused CPU/GPU API checks pass, covering model/path/options
+identity, external image sharing with URI escapes, embedded-image ownership, filtering/color-space separation, dependency
+reuse, weak lifetimes, metadata eviction/disabled caches, explicit invalidation, failure recovery, packed content, pivots,
+invalid input and model-batch GPU pixel parity. The existing render3d `model` family and all eight Summit CPU/asset/presentation/
+script checks pass. The 960 × 540 dense trailhead screenshot is **byte-identical** before/after (`before.png`, `after.png`).
+
+A full native 2560 × 1440 / 4× MSAA cave-route acceptance run completed 3,657 steps with no falls/deaths, shelter visited,
+and exact CPU replay hash `0a790d7096a319c9`. It captured 13,840 climbing/extraction frames and peaked at **314.1 MiB RSS**
+under the 512 MiB application guard. This is a functional/replay/RAM acceptance run, not a new performance comparison.
+The standalone API test peaked at 193.5 MiB; the last serial build chunk peaked at 1,270.3 MiB under the 2 GiB build guard.
+The first full dependency rebuild reached the five-minute time guard and was resumed incrementally; no parallel build was used.
+
+Usage/ownership contracts are documented in `docs/rendering_3d.md`. Loading remains renderer-thread-only and synchronous;
+this reuses asset handles without registering GPU uploads on `AssetServer` workers. Async decode/upload scheduling,
+3D prefab serialization, per-part authored material variants and lifecycle orchestration remain subsequent slices.
+
+### Second API ergonomics slice: shared 3D scene and prefab authoring
+
+Extend the existing ECS metadata and scene/prefab utilities rather than introducing another format. `ComponentFieldValue`
+now supports finite `Vec3f` and unit `Quatf` values, with one JSON/schema/patch codec and matching Lua tables. Native asset
+references and reflected property adapters reuse the same registry; prefab-to-scene conversion now uses its canonical
+value-kind mapping. Lua `with`/`count` recognize shared registry components as well as explicit script bindings.
+
+The standard builtin registration includes 3D transforms, static/skinned model asset references, base animator settings,
+point/spot lights, primitive colliders and basic rigid bodies in experimental 3D builds. Existing `.kinscene`/`.kinprefab`
+loaders, hierarchy composition, overrides, editor play clones, serialization and packed-content reads handle them unchanged.
+Use ordinary `Transform3D` overrides to place instances; the legacy 2D spawn convenience keeps its existing meaning.
+
+`resolve_render3d_assets(world, assets)` explicitly binds runtime model pointers on the renderer thread after instantiation
+or edits. It shares the existing `Assets3D` handles, copies inherited components before mutation, excludes prefab definitions,
+keeps last-good models on failure and returns entity/component/path diagnostics. No new owning cache or per-entity map.
+Changing a skinned model resets animation/IK runtime state while retaining configuration. Live ragdolls still require rebuilds.
+`ModelRenderer3D` collects whole static models into the existing mesh/material buckets, preserving part transforms and object IDs.
+
+Summit now loads `content/prefabs/survivor.kinprefab` through these utilities. The prefab holds its transform, model reference,
+tint and base animation settings; game code supplies locomotion/IK and preserves the procedural fallback and canonical-rig checks.
+
+Validation: `/home/bamedeo/kin-bench/summit-prefab/`. The focused CPU/GPU suite passes JSON/schema validation, property rejection
+and rollback, instance isolation, inherited copy-on-write, scene/prefab round trips, editor clone, Lua get/patch/query, primitive
+body creation, asset retry/type rejection, packed dependencies, skinned refresh and model/mesh lifetime checks. Its GPU image
+comparison matches direct whole-model rendering. All 14 selected existing registry/editor/prefab/scene/Lua/Summit regressions
+pass, as does the shared-assets GPU suite. Core component, scene-loader and Lua translation units also pass syntax checks with
+`KIN_EXPERIMENTAL_3D` removed; this is an opt-out compile check, not a second full engine build/test run.
+
+The 960 × 540 Summit trailhead picture is byte-identical. A full native 2560 × 1440 / 4× MSAA run completed 3,657 steps,
+zero falls/deaths, shelter visited and exact CPU hash `0a790d7096a319c9`; peak RSS was 312.0 MiB under the 512 MiB guard.
+The final focused GPU suite peaked at 184.6 MiB; builds stayed serial and peaked around 1,291 MiB under the 2 GiB cap.
+These are functional/replay/RAM acceptance checks, not a throughput comparison.
+
+Limits are explicit in `docs/rendering_3d.md`: scene-wide environments/cameras, per-part material variants, particles, complex
+collider geometry and advanced animation/character/ragdoll/rope configuration remain C++. Binding after hot reload is a host
+step. The existing world snapshot saver flattens prefab instances; preserving editable prefab links and minimal override diffs
+remains shared scene-tooling work. Async scheduling and lifecycle orchestration are still subsequent API slices.
+
+### Authoring follow-up: linked saves, cameras/environments and animation resources
+
+Remove the three main authoring blockers from the preceding slice:
+
+- `build_scene_asset` is the checked world-save path. Scene-loaded instances retain prefab asset links and minimal field
+  differences against one shared immutable reflected baseline per source. The baseline has no runtime handles and saves need
+  no source-file reads or temporary worlds. Preserve scene headers, roots/parents, local/global entity references, stable
+  override ordering and later prefab-default inheritance. Honor the runtime-entity export option. Unsupported child structural
+  edits return diagnostics; explicit `preserve_prefabs=false` unpacks. The convenience snapshot function throws on failed
+  checked builds. Source-less programmatic prefabs remain ordinary snapshots. Scene loading resolves parents and references
+  after their targets exist, rejects parent cycles and rolls back newly created entities on failure.
+- `SceneCamera3D`, `SceneEnvironment3D` and the existing `TimeOfDay3D` are reflected components. Explicit
+  `apply_scene3d_settings` selects enabled settings by priority/ID, composes camera pose through the hierarchy and validates
+  projection ranges, finite transforms, environment budgets and view options before applying each component. Author procedural
+  sky/fog, sun/fill/ambient, shadows, AO/contact/TAA, HDR/exposure/bloom/MSAA. Infinite camera far planes use JSON zero. View
+  options still require recreating a view after edits; HDR panorama asset binding remains a C++ hook.
+- `AnimatorAsset3D` references a bounded `kin.animator3d/1` resource. Its machine uses the existing `.kinanim` parser;
+  configuration adds named blend spaces, layers, fades and basic IK chains/options. CPU tools can bind it separately, while
+  render asset resolution binds it after models. Check graph/clip/joint references and reject unknown fields/ranges/unsupported
+  push transitions. Preserve last-good data on failed replacements and playback progress for unchanged sources. Parsed
+  configurations are consumer-owned/shared, with no persistent owning lookup cache or per-frame reads. Configuration changes
+  reset playback/IK runtime, preserve gameplay parameters and retain ground callbacks by constraint name.
+
+Summit's survivor now consumes the authored locomotion graph, speed blend and three foot/hand constraints. Its imported model
+has Idle/Run/Jump/Walk/Fall and no Squash clip, so its layer list stays empty as before. Game code still supplies parameters,
+targets, raycasts and ragdoll poses; the procedural fallback retains its prior C++ setup. A log marker proves which path ran.
+
+Remaining authoring work is explicit: structural override operations (child removal/reparent/rename, rather than unpacking),
+per-part material variants, complex collider geometry, particle/character/rope/ragdoll descriptions, image environment binding
+and specialized IK/root-motion-axis tuning. Scene lifecycle orchestration and transactional GPU/physics hot-reload remain the
+next ergonomic layer; renderer internals and shader quality were unchanged here.
+
+Validation artifacts: `/home/bamedeo/kin-bench/scene-authoring/`. All 16 selected regression checks pass; final focused 3D
+checks also pass after tightening finite-transform/shadow/post-processing validation. Coverage includes minimal diffs and
+updated prefab defaults, shared baselines, local/global references, cross-prefab parenting, runtime export filtering, explicit
+unpacking, deletion/rename diagnostics, cycle rejection and failure rollback. CPU/GPU checks cover camera hierarchy/ranges,
+environment/view round trips, animation graph/blend/layer/fade/IK loading, unchanged-content playback, typo/clip failure recovery,
+inherited skin copy-on-write and resource release. The GPU test peaked at 185.2 MiB; serial object builds peaked at 795.7 MiB.
+Scene-loader and scripting translation units compile with 3D disabled (syntax-only, at most 926.7 MiB; not a full second build).
+
+Summit's authored-animator marker is present in both acceptance runs. The 960 × 540 trailhead image is byte-identical to the
+preceding implementation. The full native 2560 × 1440 / 4× MSAA traversal completed 3,657 steps with zero falls/deaths, shelter
+visited, exact CPU replay hash `0a790d7096a319c9` and 315.8 MiB peak RSS under the 512 MiB guard. This remains functional/replay/RAM
+acceptance, not a throughput comparison; no quiet-GPU timing claim is made.
+
+### C++ scene lifecycle orchestration completed
+
+`SceneSession3D` now owns a scene's isolated ECS world, render state/view and optional physics using the existing shared
+`SceneAssetRuntime`, prefab/component loaders, `Assets3D` and ECS bridges. `prepare` validates and stages one candidate;
+`activate` swaps at a caller-chosen frame boundary; `load`, `cancel`, `unload` and explicit reload polling cover the common
+lifecycle. Failed parsing, art/configuration binding, initialization, settings or body creation preserves the active world,
+simulation and view. Registration/initialization/composition hooks support game extensions without another asset format.
+
+Models record source paths and upload diagnostics without retaining geometry/source bytes. Changed models, external
+images/buffers and pack remounts invalidate dependent weak lookups while existing handles remain valid. Animator/machine
+sources and initialization's custom dependencies participate in explicit polling. Unchanged art/view targets are shared
+through preparation; physics is absent by default, with caller-set capacities when enabled. Authoring source/entity/watch
+budgets are configurable. Animator size checks now happen before reads. A real integration check found and fixed dynamic
+rigid-body writeback for inherited prefab transforms: it owns the instance's transform before writing simulation results.
+
+`examples/summit/content/scenes/camp.kinscene` combines the existing free props, survivor/animation prefab, camera,
+environment and a collider matching the scaled floor. The GPU check loads, steps, renders and captures it. Summit's
+expedition retains its specialized presentation loop. SceneSession3D deliberately rejects Lua-scripted scenes, which keep
+using ScriptScene and its context callbacks. Reload restores authored state; transferring gameplay state and integrating
+input/UI/audio or scene-stack callbacks remain game policies. Structural prefab operations and the richer authoring
+features listed above remain separate work.
+
+Validation artifacts: `/home/bamedeo/kin-bench/scene-session/`. All 18 selected regressions pass, covering shared ECS
+components/inspection/editor, prefabs, scene assets, Lua, 3D assets, physics ECS, lifecycle and Summit CPU/script checks.
+The final focused GPU rerun after correcting camp scale also passes. Lifecycle coverage includes staged swaps/cancel,
+failed-replacement retention, native game systems, inherited-body writeback, unchanged resource sharing, external
+image/buffer edits and deletion, animation/machine edits, corrupt content recovery, pack remounts, resource release,
+repeated load/unload, optional physics, source/entity/dependency limits and view resize. The captured camp was inspected.
+
+Serial builds peaked at 796.4 MiB RSS; the final focused GPU run used 193.3 MiB and the 18-test suite 211.6 MiB. Competing
+jobs temporarily prevented the normal 2 GiB-start guard from starting checks. Once compilation finished, runtime checks
+used a 1.5 GiB start threshold, a tighter 320 MiB process-tree cap and the same 1 GiB free-memory stop. Observed system
+headroom stayed above 1.52 GiB throughout the regression run. No other jobs were interrupted. These are functional and
+ownership checks, not new frame-time comparisons.
+
+### Material authoring and variants completed
+
+`ModelMaterials3D` now adds an authored asset reference and named variant to static/skinned renderers through the same
+component registry, scene/prefab overrides, save tools and explicit binding path. Its `.kinmaterials` source patches the
+existing `Material3D`: base color, metallic/roughness, emissive, transparency/masking, normal/occlusion controls, sampler
+wrapping, sidedness/shadows and five texture roles. Omitted values retain imported properties; null texture values clear
+maps. Base and variant layers can target an imported part's unique name or zero-based index. Unknown fields/ranges,
+ambiguous/missing/duplicate selectors, invalid variants and unavailable maps produce contextual diagnostics.
+
+`Assets3D::load_materials` returns the existing AssetHandle ownership style and weakly shares bindings for a file/model/
+variant. Its bounded metadata default is 128 entries. Per-part material values share texture handles and keep a weak model
+identity; no geometry is cloned or pinned. Imported and authored textures reuse the same path/filter/color-space cache.
+Only final merged texture references are resolved, with local sharing even when persistent weak lookup metadata is off.
+CPU parsing is available without a renderer and caps sources before reading at 1 MiB, with 128 variants/256 rules per
+layer; runtime bindings cap model parts at 4,096. Decoded-image/total GPU allocation budgets remain game policies.
+
+ECS collection uses the existing mesh/material batching and standard rendering passes; skinned draws accept per-part
+materials through a new overload. Old C++ drawing calls retain their signatures. Optional component registration happens
+before collection, supporting worlds that do not use authored schemas. Empty references clear overrides; invalid edits
+retain the last good binding. A binding for an obsolete model identity is ignored until rebinding, avoiding stale indices.
+SceneSession3D watches material files and selected texture dependencies, invalidates dependent weak lookups and retains
+the active scene on failed replacement. Material-only edits reuse model geometry. Mounted content packs use the same API.
+
+The camp instantiates one barrel prefab with brass and blue variants while sharing its model; the fire pit uses an ember
+variant. Existing free assets/licenses and the expedition's imported appearance are unchanged. A captured 640x360 camp
+was inspected. Richer collider/controller/particle/rope/ragdoll authoring, prefab structural operations and custom shader
+asset authoring remain separate work; this adds no shader graph or new rendering features.
+
+The broader regression run exposed a pre-existing linked-save issue: include_runtime_entities added synthetic aliases for
+already-authored entities, so unordered iteration could substitute a nonexistent ID in prefab membership. Runtime export
+now preserves canonical authored IDs. The existing linked-prefab/reference roundtrip regression verifies that path again.
+
+Validation artifacts: `/home/bamedeo/kin-bench/material-authoring/`. All 19 selected regression tests pass after the fix,
+including generic scene/prefab/component/editor/Lua checks, 3D assets/lifecycle, physics ECS and Summit CPU/script routes.
+Focused CPU/GPU material checks also pass: exact rendered instance colors, imported-material preservation, layer/part
+selection, emissive/blend/mask flags, glTF/authored texture sharing by role/filter, prefab isolation and save round trips,
+cache bounds/resource lifetime, material and image reload/failure/deletion/recovery, geometry identity across material
+edits, stale-binding fallback after a model replacement, packed content, direct C++ worlds and real skinned/camp assets.
+
+The final focused GPU check used 174.8 MiB RSS; the full 19-test run peaked at 205.5 MiB. Serial builds peaked at 806.9 MiB.
+The normal process-tree caps and 1 GiB system-reserve stop remained active; the first build was stopped when competing
+work reduced headroom, then resumed incrementally once RAM returned. No other workloads were stopped. These checks
+validate behavior/ownership; there is no new engine frame-time comparison in this change.
+
+## Physics authoring and playable scene host — 2026-10-16
+
+The shared registry now authors `Collider3D.asset`, rigid-body layers, character capsule/movement/grounding/jump settings
+and animation-link parameter/foot names. Existing scene/prefab parsing, field patches, Lua/editor inspection and checked
+saves carry those fields; runtime input/state/bindings/handles stay out of serialized content. Character creation now
+materializes inherited controller, transform and animator values before simulation writes, isolating prefab instances.
+
+`.kincollider` (`kin.collider3d/1`) recipes cover primitive shapes, compounds, convex hulls and explicit hollow triangle
+meshes. The CPU `PhysicsAssets3D` library reuses the bridge's native shape cooker and existing asset handles. It shares
+cooked shapes by normalized recipe path and effective scale, with 128 weak metadata entries by default and no owning
+shape/geometry cache. Cook-time positions/indices are discarded. Shapes remain valid for retained scene/body owners.
+The bounded CPU glTF geometry reader applies selected node transforms, reads no images/materials/animation/GPU data,
+records external buffers and rejects skinned/compressed geometry requiring a collision proxy.
+
+Defaults cap recipes at 1 MiB / 64 nodes / four tree levels, hulls at 256 unique input points, and recipe geometry at
+32,768 input vertices/triangles. Each source model and its declared aggregate buffers are capped separately at 16 MiB.
+Source sizes/accessor counts are checked before geometry allocation. These are authoring/cooking limits rather than
+a total retained physics/GPU allocator. See [physics_3d.md](physics_3d.md#authored-collision-and-characters) for scale,
+primitive radius and dynamic-mesh restrictions. Characters require unit world scale and compatible capsule dimensions.
+
+Physics-enabled `SceneSession3D` binds/cooks before body creation, watches recipe/model/buffer sources and invalidates
+weak lookups during reload. Bad edits retain the running simulation. Identical active/candidate recipes share shapes;
+old/new world allocations still overlap for transactional preparation. Direct users explicitly rebind/rebuild live
+bodies. Render-only sessions skip cooking. No background jobs or per-frame content reads were added.
+
+`camp_walk` is a small playable C++ host over `scenes/camp-play.kinscene`: compound floor, two prefab barrels sharing a
+convex hull, hollow mesh tent, animated player with authored capsule/controller settings, movement/jump/sprint/crouch,
+restart and reload. Its HUD/input remain game code; the campfire is decorative. Free assets/licenses and the Summit
+expedition's specialized collision catalogue are unchanged. `--demo --headless --frames=240` runs a checked route and
+exports movement, grounded/airborne, jump and crouch state through the normal run report. A 960×540 capture was inspected.
+
+Validation artifacts: `/home/bamedeo/kin-bench/physics-authoring/validation.json`, logs, camp report and capture. All
+27 selected tests passed in 37.0 s: shared component/editor/prefab/scene/Lua checks, rendering assets/materials/session
+lifecycle, native physics core/first-use/ECS/character/traversal/ragdoll/rope and Summit regression/script routes. New
+CPU tests check recipe/geometry budgets, missing/degenerate geometry, transformations, absent visual textures, static
+versus dynamic mesh rules, scale-specific sharing/weak lifetime/metadata eviction, external-buffer invalidation,
+packed content, camp grounding/movement/jump/landing, collision ray blocking, save round trips and prefab isolation.
+GPU lifecycle checks cover invisible collision-model dependencies and failed-edit/recovery transactions.
+
+The final demo reported 239 simulation steps, 184 grounded / 55 airborne, movement/jump/crouch all true and a final
+foot height within 0.1 mm of the floor. It used 215.8 MiB peak RSS (the initial run used 248.0 MiB); the 27-test run
+peaked at 210.1 MiB and serial builds at 810.6 MiB. Builds retained the 2 GiB process-tree cap, tests/apps 512 MiB,
+with the existing system-memory reserve guard. No other jobs were stopped. This is functional/ownership validation,
+not a new rendering-performance comparison.
+
+Remaining authoring work includes particles, ropes/ragdolls, traversal/hand details, custom shader/environment assets
+and prefab structural edits. Collision streaming/background cooking and total live-memory budgets are separate work.
+
+## Particle authoring and reusable effects — 2026-10-16
+
+The shared `ParticleEmitter3D` now exposes the existing system's descriptor through reflected properties: seed,
+shape/emission/capacity, ordered ranges, forces, lifetime curves, texture/atlas/blend/facing, soft particles, grounding
+and enabled/emitting flags. Normal scene/prefab overrides, inspection, Lua field patches and checked saves apply.
+Live particles, clocks/birth progress and GPU handles stay runtime-only. Simulation materializes inherited emitters
+before writing, outside query iteration; steady-state simulation adds no entity-list allocation. Instances own their
+state; definitions never simulate. `emitting=false` drains visibly; `enabled=false` also hides the batch. Existing
+burst/clear/system APIs remain in use.
+
+Texture references reuse `Assets3D::load_texture` and its bounded weak role/filter-aware cache. Matching glTF/material/
+particle maps share resources; different filtering or linear/sRGB roles remain distinct. Empty references clear authored
+bindings to procedural discs while leaving unreferenced C++ textures usable. Rebinding preserves simulation. Image
+decode exceptions become contextual binding diagnostics while retaining the old texture. SceneSession3D watches these
+sources and reloads transactionally; mounted packs work. No separate effect format, renderer/shader or owning cache.
+
+`ParticleLimits3D` defaults to 128 emitters / 20,000 configured particles per emitter / 65,536 summed capacity, including
+disabled/stopped emitters. CPU validation checks finite/ranged values, atlas/axis/enums, edited versus live capacity,
+representable birth counts and aggregate limits before texture binding and stock simulation/collection, including
+runtime session edits. Direct hosts can call the validator and pass limits to binding. These are configured capacity
+bounds, not decoded-texture, weather, arbitrary C++ allocation or total retained CPU/GPU-memory budgets.
+
+Both authored camps use `prefabs/campfire.kinprefab`: existing fire-pit model/material, flame/smoke/spark children and a
+point light, with a combined capacity of 208 (96/64/48). Procedural sprites need no new image assets/downloads. The
+inspected 960×540 camp demo shows the effects and nearby lighting. Movement/jump/crouch/grounding still pass. Its report
+contains three emitters, 58 live particles and capacity 208 after 239 simulation steps.
+
+Validation artifacts: `/home/bamedeo/kin-bench/particle-authoring/validation.json`, logs, report and capture. All 30
+selected regressions passed in 39.7 s: shared component/editor/prefab/scene/Lua, 2D particles, 3D asset/material/lifecycle/
+physics and Summit routes. New CPU/GPU checks cover instance isolation, parent transforms, stop/drain/burst/visibility,
+authored-only save round trips, invalid floats/ranges/enums/lifetime/atlas/axis, disabled/aggregate capacity enforcement,
+runtime budget edits/recovery, texture role/filter sharing, rebind progress, empty/missing/corrupt textures, transactional
+reload/recovery, oversized prefab edits, packed content, resource release, rendered sprites and the real campfire.
+
+Serial builds peaked at 811.0 MiB RSS, focused GPU checks at 207.2 MiB, the full selected regression run at 209.2 MiB,
+and the camp demo at 247.9 MiB. Existing 2 GiB build / 512 MiB app-test process-tree caps and the 1 GiB system-reserve
+guard remained active; no other jobs were stopped. These checks validate behavior/ownership, not renderer throughput.
+Remaining: prefab composition/structural overrides, rope/ragdoll/traversal/hand authoring, custom shader/environment
+assets and whole-game resource/streaming budgets.
+
+## Prefab composition and structural instance editing — 2026-10-16
+
+The existing `.kinprefab` schema accepts the same `prefabs` references and field overrides as scenes. A shared parser/
+writer handles both reference types. CPU loading resolves bounded nested graphs, namespaces child IDs (`effect/smoke`),
+remaps parent/local entity references and records every source. Writing preserves declared source links; document
+conversion exposes expanded content. Direct loading accepts an explicit content root, the default AssetManager loader
+uses its root, and folders/packs share the path. SceneAssetRuntime carries expanded-entity/source budgets through the
+graph, watches nested disk sources, and SceneSession3D includes them in transactional source/pack reloads.
+
+An optional `structure` block beside field overrides supports complete added-child recipes, subtree removal, component
+removal/reset, child names and internal parents. Parent edits precede subtree removal, allowing a child to be rescued.
+The pure CPU recipe editor rejects root edits, cycles, missing/duplicate targets, detached additions/reparenting, edits
+to removed members and dangling local references. Existing field patches add components; remove+patch recreates one
+with defaults. Instantiation still uses the existing registry, Flecs and rollback path, preserving 2D/3D behavior.
+
+Linked checked saves now diff supported structure as well as fields against shared reflected source baselines, without
+rereading files or creating temporary worlds. `link_prefab_entity` adopts an explicitly parented child with a stable
+local ID; unrelated scene children remain separate. `remove_prefab_component` materializes reflected native/data state,
+including native runtime ownership, detaches template inheritance and removes a component. Plain `remove<T>()` retains
+its existing "restore inherited defaults" semantics. Saves reject orphaned linked members, duplicate local IDs, changed
+instance authored IDs, excluded reference targets and unsupported external child parenting. Explicit unpacking remains.
+
+Compiler generations are now retained while live entities reference them, fixing the previous replacement behavior
+that could discard an active definition. Identical definitions/structural variants share templates; ordinary field-only
+instance overrides share their base. Unused generations/namespaces are reclaimed before new compilation, with a hard
+128-definition/variant limit per world, including ordinary sources. Templates contain authored defaults, not loaded GPU
+assets. Load defaults: 8 MiB per source, 10,000 expanded entities, eight composition levels, 128 sources; source-byte/
+entity zero limits remain available where documented. These bound authoring, not total engine allocator usage.
+
+The campfire source now composes `campfire-effect.kinprefab`. The static camp inherits its original three emitters; the
+playable scene structurally replaces `effect/smoke` with a smaller local plume. It retains three emitters, reduces total
+capacity from 208 to 176, and ends the checked route with 43 live particles. A new 960×540 capture was inspected; existing
+movement/jump/crouch/grounding and final player pose remain unchanged.
+
+Validation artifacts: `/home/bamedeo/kin-bench/prefab-structure/validation.json`, logs, camp report/capture. All 32 selected
+tests pass (36.0 s final run): prior game/physics/asset/material/particle/scene/editor/Lua regressions plus generic assets
+and the new structural suite. Coverage includes nested parsing/writing/expansion, root-relative AssetManager loading,
+packed content, local references/parents, subtree removal/reparenting, add/remove/replace/name/parent save round trips,
+instance isolation, stable repeated saves, native runtime/data-tag preservation during editor removal, orphan rejection/
+unpacking, source/depth/entity/count budgets, composition cycles, invalid edits, 128 live compiler generations/reclaim,
+and nested transactional reload failure/recovery. The final camp run passes its existing gameplay checks.
+
+Peak process-tree RSS: serial builds 818.8 MiB, new focused CPU suite about 20 MiB, focused GPU lifecycle 194.9 MiB,
+final 32-test run 208.3 MiB and final camp demo 200.8 MiB (initial demo 218.3 MiB). Existing 2 GiB build / 512 MiB app-test
+caps and the 1 GiB system-reserve guard stayed active; no other jobs were stopped. No rendering-throughput claim is made.
+
+Remaining limits: inner prefab instances are edited through outer-instance namespaced overrides, not independent inner
+records; composed declarations need reloading after editing. Direct live render/physics structure edits still require
+explicit rebinding/rebuild. Automatic live prefab sync, GUID ownership and Lua structural helpers remain separate work,
+alongside rope/ragdoll/traversal authoring and whole-game streaming/allocation budgets.
+
+## Live 3D field editing — 2026-10-16
+
+`SceneSession3D::edit` now stages bounded multi-field batches through the existing component registry, codecs and
+asset binders. The active registry routes loaded authored members' single-field patches through the same transaction,
+so inspectors receive ordinary diagnostics and change events. Prefab compilation/spawning retains its construction
+behavior; runtime-created entities opt in through the explicit edit API after binding/body setup. Register editable
+custom definitions in the existing registration callback, which also configures staging worlds without initialization.
+
+Only touched entities, transform descendants and transform-only ancestors are staged. Full native component copying
+preserves unreflected runtime ownership, while saved scenes remain reflected CPU values and ordinary linked overrides.
+Validation covers assets/material variants, camera/environment cross-field ranges, particles including untouched scene
+capacities, collision recipes and native body creation. Missing assets, invalid fields/shapes, exhausted budgets or spare
+body capacity reject the batch before active data/bindings/bodies change. Unrelated source stamps remain pending; new
+binding dependencies extend the bounded watch map. There is no per-frame polling or binding pass.
+
+The physics bridge prepares all replacement ordinary bodies before releasing any old body. Compatible pose, velocity
+and sleeping state survive; explicit pose/velocity edits take effect, and parent transforms update descendant colliders.
+Body handles change, requiring reacquisition. Constrained bodies and controller/ragdoll/rope configuration require reload;
+structural edits, disabled entities and raw/native direct mutations keep their explicit integration contract. A new view
+target is allocated before committing changed view options. No second physics world or scratch pool is allocated for
+field editing. Defaults: 256 fields, 64 affected entities including ancestors, 64 KiB names/string/reference text, plus
+existing source, particle and dependency bounds. Custom reflected setters must not mutate shared/external state.
+
+Camp walk's E action resizes/recolors a barrel and adjusts smoke in one transaction; the headless demo applies it while
+movement/animation continues. Its 240-frame report passes movement/jump/crouch/grounding plus immediate collision
+replacement and preservation of living particles. It ends with three emitters, 176 configured capacity and 50 live
+particles; the player pose and 184 grounded/55 airborne steps match the previous route. The new capture was inspected.
+
+All 34 selected regressions pass in 34.4 seconds, including Summit routes, shared scene/prefab/editor/Lua/assets and
+physics/material/particle suites. New checks cover registry policy/native runtime/data-tag copying, transactional field
+and mixed-entity failure, reference/texture failures, particle state and aggregate caps, camera batches, descendant
+collision updates, velocity/entity identity, spare-capacity/constraint refusal, prefab spawn compatibility, runtime
+entity editing, skinned animation sharing, linked saving, dependency watching, affected/text budgets and deferred/foreign
+world rejection. The material lifecycle test now expects immediate rejection of invalid session edits; standalone
+registry worlds retain their explicit binding behavior.
+
+Artifacts: `/home/bamedeo/kin-bench/live-editing/validation.json`, logs and camp report/capture. Peak process-tree RSS:
+211.0 MiB focused GPU checks, 210.0 MiB final suite, 201.9 MiB playable demo; largest successful serial build 1,291.0 MiB
+(final incremental build 712.3 MiB). The 2 GiB build / 512 MiB app-test caps and 1 GiB system reserve remained active.
+Scratch files stayed on the Linux disk; no other jobs were stopped. This is authoring validation, not a throughput result.
+
+## C++ runtime gameplay and prefab ownership — 2026-10-16
+
+The gameplay-facing step adds `SceneSession3D::spawn`/`despawn`, value `SceneEntity3D`/`ScenePrefab3D` handles and typed
+configuration. It reuses the shared prefab loader/compiler, existing ECS systems/native components, Assets3D and physics
+bridges. A constructor runs once on the supplied new entities before selected asset binding and native body creation.
+Plain native gameplay components require no inspector schema. Optional root position/rotation/scale preserve other
+prefab defaults; safe parent handles support dependent runtime instances. Models remain shared through existing handles.
+
+Session identity plus scene generation and ECS handles reject foreign/stale/reloaded entities without dereferencing
+old worlds. Bounded ownership records retain member identities; despawn removes complete member sets and dependent
+runtime instances, reconciles native physics immediately and refuses authored/unmanaged children before removal. Scene
+replacement releases the population. Runtime objects have no authored IDs and do not pollute ordinary authored saves.
+Native-only controllers, ragdolls and ropes can participate through the existing bridge. Bind failures, thrown constructors,
+invalid shapes, partial native creation and full physics capacity remove partial new objects and bindings. Constructors
+must confine changes to supplied entities; arbitrary external C++ side effects cannot be rolled back.
+
+Asset/animation/material/particle/collision binders now accept an optional entity-ID selection. The physics bridge adds
+selective reconciliation that preserves unrelated bodies, their runtime state and pending rebuild requests. The session
+checks full-scene particle budgets as well as selected object validity. Source loading and binding are explicit synchronous
+spawn work, with no frame polling or extra owning GPU cache. Default bounds: 64 entities/spawn, 1,024 owned runtime entities,
+128 runtime prefabs plus existing source/composition/scene/particle/dependency/physics limits. Camera/environment components
+belong to the level. Watch metadata remains bounded and old paths are pruned on scene reload. Lifecycle/configuration
+calls run between frames, outside deferred/readonly work and prepared replacements.
+
+`reconfigure<T>` lets C++ callers change reflected settings on a copy and uses the existing validated live transaction for
+changed fields. No-op changes do no binding/body rebuild. Per-frame input, impulses, animation parameters and arbitrary
+native game state use the existing APIs directly. Only reflected configuration fields are applied by this helper.
+
+Runtime teardown exposed an owning-cache issue in WorldRenderState3D: empty mesh/material buckets survived collection
+after their last entity disappeared. Collection now drops unused buckets, and owned despawn clears collected references.
+Weak-resource tests prove model and mesh release both after despawn and after direct entity removal followed by collection.
+Surviving ECS-owned handles remain intact. Repeated spawn/despawn checks keep entity, instance and native body counts stable.
+
+Camp walk now spawns three sensor supplies and a pushable crate using the existing free bottle/box models. A native Supply
+component/system rotates pickups without inspector metadata; E collects nearby supplies, F applies a native crate impulse,
+R resets the level, and F6 exercises typed prop/smoke configuration. The fixed demo resets once, rejects old handles, collects
+all three supplies and completes the objective, pushes/moves the crate, and ends with only that one owned runtime object.
+Movement/jump/crouch checks remain valid; final player pose matches the previous route. Settled startup and completion
+captures were inspected. No new art downloads or textures were added.
+
+Validation artifacts: `/home/bamedeo/kin-bench/runtime-gameplay/validation.json`, logs, captures and run reports. All 36 selected
+regressions pass, including the full renderer suite, Summit routes, physics/controller/ragdoll/rope and scene/prefab/asset/
+material/particle/editor/Lua tests (166.1 s, renderer 123.3 s). The final expanded runtime suite additionally passes partial
+native-creation cleanup, separate per-instance/entity/source/expanded-spawn limits, packed content, repeated ownership
+cycles, stale/cross-session/forged handles, typed/no-op/failure configuration, native-only state, model sharing, native
+system execution, foreign-child refusal, nested teardown, pending-rebuild preservation, capsule/rope/ragdoll lifetime and
+mesh release. The 240-frame camp demo passes all gameplay checks: three collected, one crate push, one reset, eight total
+runtime spawns, one runtime instance/entity remaining, 176 configured particles and 56 alive.
+
+Peak process-tree RSS: final camp demo 207.2 MiB, settled startup 201.4 MiB, final expanded runtime suite 201.4 MiB,
+full regression run 271.2 MiB. Largest serial build was 1,268.5 MiB. The 2 GiB build / 512 MiB test-app caps and 1 GiB
+system reserve remained active. Scratch stayed on the Linux disk and no unrelated jobs were stopped. No throughput
+comparison is claimed by this gameplay/API validation.
+
+### C++ systems own deferred prefab lifecycles (2026-10-16)
+
+Historical ordering below is superseded by “C++ gameplay phase boundaries” at the end of this log.
+
+Added a target-free `EcsCommandBuffer::defer` extension using the existing scheduler flush/error/discard behavior.
+`SceneCommands3D` is a weak, scene-generation endpoint available in scene initialization and from the active session.
+Systems submit bounded spawn/despawn requests through their supplied command buffers; flushing transfers ownership only.
+SceneSession3D drains them after all ECS systems and before native physics, reusing the existing selected binding,
+rollback, ownership and native cleanup paths. Constructors run on the scene thread and new bodies participate in the
+same step. Parallel task submission is supported; partitioned native Flecs callbacks retain their existing null-buffer
+contract. The ECS scheduler's named PostPhysics phase still precedes the session's native physics; game code reads the
+preceding step's contact singleton. No editor or separate gameplay scheduler was introduced.
+
+Checked tickets expose Pending/Succeeded/Failed/Cancelled and contain results only. Despawn accepts a checked instance
+or an earlier spawn ticket. Dropped buffers and failed systems cancel work; reload/unload cancels even unflushed requests
+and releases constructor captures. Duplicate/copy-buffer flushes cannot execute a ticket twice. Pending requests default
+to 64, counting both unflushed and transferred work. Two reused bounded vectors avoid allocations on idle drains. Failed
+requests report through their tickets and do not abort other requests or the frame. Requests are independent, not a
+multi-object transaction. Synchronous loading, already-resolved parent handles, programmer-bounded captures/result storage
+and the existing constructor side-effect contract remain explicit limitations; preload/pooling is not implemented.
+
+Added `projectile_range`: a barrel enemy fires rock projectiles at a three-hit crate target, with native sensor Begin
+contacts driving damage, owned teardown, missed-shot expiry and delayed target respawn. A single C++ task owns the loop
+and a fixed 16-slot projectile array. The host steps/renders and displays native singleton counters, so failed candidate
+preparation cannot replace active host gameplay state. Existing free models/textures are reused; no new art downloaded.
+R reloads the scene, resetting the complete game state. Startup and completion captures were inspected.
+
+Final validation: all 37 selected ECS/entity/lifecycle/component/event/inspection/editor/system, scene/prefab, asset,
+material/particle, physics/controller/traversal/ragdoll/rope, Lua and Summit regressions passed (34.3 s). New checks cover
+same-frame physics, post-system execution, native construction/rollback, stale/foreign handles and worlds, ticket-based
+and same-boundary despawn, queue exhaustion/reuse, parallel submissions, copied buffers, partial flush failure, failed
+systems, prepared replacements, reload/unload cancellation and capture release. The shared range game runs 900 fixed
+steps with bounded entity/native counts; the separate 900-frame rendered demo reports 33 shots, 24 hits, eight target
+destructions, seven respawns and seven expirations. The existing 240-frame camp demo still completes collection, pushing,
+movement/jump/crouch, reset and stale-handle checks with the same final pose and population.
+
+Final peaks: regression process tree 213.9 MiB, range demo 207.8 MiB, camp demo 205.5 MiB; final serial build 802.1 MiB.
+The 2 GiB build / 512 MiB test-app caps and 1 GiB reserve remained active, with scratch on the Linux disk and no unrelated
+jobs stopped. A stale cgltf build path was repaired from the pinned v1.14 archive with its existing SHA256 verified.
+Artifacts: `/home/bamedeo/kin-bench/deferred-gameplay/validation.json`, reports, JUnit results, logs and captures. This
+validates gameplay/API behavior; no rendering performance comparison is claimed and the full shader/render suite was
+not repeated because rendering code did not change.
+
+### Explicit prefab preloading and bounded pools (2026-10-16)
+
+SceneSession3D now exposes renderer-thread preload/release and prepared spawn overloads, reusing the existing loader,
+registry copy path, weak asset sharing and selected physics binding. A prepared resource owns a frozen CPU recipe and
+one disabled bound reference instance. It pins only its required art/collision/configuration through ordinary handles;
+there is no new GPU cache or second world. Prepared spawning performs no source/asset reads or rebinding, including
+after the prefab, model, material, texture and collision source files are removed. It preserves the prepared scale and
+asset configuration; changed resources require explicit preparation/reload. Source watches retain their existing bounds.
+
+Fixed-capacity pools allocate all ECS members at creation and never expand on exhaustion. Acquisition restores authored
+native/data components from the bound reference, remaps reflected internal entity references and runs game reset/setup
+callbacks. Return runs optional game-resource cleanup, disables members, tears down ordinary native bodies, restores
+stock state and renews the runtime lease. Checked root/child handles and completed tickets cannot resolve to the next
+occupant of the same ECS slot. SceneEntity3D also resolves directly against a system's live EcsWorld, using private scene
+identity and lease stamps. The queue accepts prepared/pool values using its existing request tickets and execution point.
+
+Native animation parameters/player/IK, particle counts/ages/time/seed/texture, renderer tint/bindings and physics pose/
+velocity/descriptors reset from the pristine reference. Plain C++ health/timers/owned resources use explicit pool reset/
+release callbacks. Pooling currently supports ordinary rigid bodies; controller/ragdoll/rope pools and pool parenting/
+nested runtime children are rejected. Native physics bodies are still recreated on acquisition, so this is ECS/asset
+pooling and not a zero-allocation or persistent-body guarantee. Native capacities must cover concurrent usage, even
+though warm-up is sequential. Failed reset/native capacity/asset changes leave inactive slots with stock state restored.
+Foreign children are refused before destruction. Explicit release can clean damaged slots after direct native deletion;
+there is no automatic replenishment. Prepared release refuses while a pool still references it. Scene replacement clears
+all slots/resources, stale endpoints fail safely, and outstanding values/tickets do not pin art.
+
+Default resource limits are 16 preloads and 16 pools. All reference and slot entities count toward existing runtime/scene
+budgets, including idle slots. Particle budget validation now includes disabled retained emitters. Active population
+counters are separate from reserved_entities() and pool_stats(), making retained storage explicit. Pool callbacks and
+per-game result collections remain programmer-bounded. Loading is synchronous and requires a temporary native body slot.
+
+The projectile range preloads target/projectile content during loading and reserves 16 projectile slots. Its game system
+resets Projectile state, returns leases through deferred despawn, and matches contact body handles rather than potentially
+reused ECS IDs. R reload performs explicit preparation again. A 900-frame render preserves the prior gameplay results:
+33 shots, 24 hits, eight target destructions, seven respawns, seven expirations; 29 pool reuses, no exhaustion, two active
+leases/three bodies and 18 reserved entities at completion. Startup and final captures were inspected. Visual review
+caught an initial derived-transform reset bug: removing WorldTransform3D bypassed its construction-only observer and hid
+reused objects from renderer/particle queries. Reset now preserves that component, with model and particle draw assertions.
+
+Final validation: all 38 selected ECS/entity/lifecycle/component/event/inspection/editor/system, scene/prefab, asset,
+material/particle, physics/controller/traversal/ragdoll/rope, Lua and Summit regressions passed (34.4 s). New pool checks
+cover exhaustion without growth, native/game/animation/particle/material resets, reflected reference remapping, inactive
+query exclusion, lease ABA protection, deferred reuse, reset errors, immutable prepared assets/scales, callback resource
+release, foreign-child refusal, explicit cleanup, packed content, missing-source reuse, reload invalidation, disabled
+particle budget rollback and native-capacity refusal/recovery. The existing camp demo still completes every prior check.
+
+Warm two-entity fixture, 10,000 measured cycles per path after 32 warm-up cycles, with geometry/material/texture art
+resident in all cases. Final p50/p95 acquisition in microseconds: normal path 115.801/123.115, prepared 61.063/64.656,
+pooled 16.385/16.811. Full acquire+return p95: 133.316, 74.471 and 27.117 microseconds respectively. The pooled p95
+acquisition is about 7.3x faster than path spawning on this fixture; this is a CPU lifecycle microbenchmark, not frame
+time or a renderer/engine comparison. Registered entities remain seven and idle native bodies one across all measured
+cycles. Sampled pooled process RSS stays exactly 172.99 MiB throughout its 10,000 cycles; another 1,000 cycles run with
+all object asset/source files temporarily absent. No new model/material/texture loads occur during warm measurement.
+
+Final process-tree peaks: pool benchmark 190.5 MiB, regression run 214.9 MiB, 900-frame range 211.6 MiB, camp 206.2 MiB;
+final serial build 802.7 MiB. The 2 GiB build / 512 MiB test-app caps and 1 GiB reserve remained active; scratch stays on
+the Linux disk, no art downloads or extra dependencies were added, and unrelated jobs were untouched. Artifacts:
+`/home/bamedeo/kin-bench/prefab-pooling/validation.json`, latency CSV/summary, JUnit results, run reports, logs and captures.
+The full shader/render suite was not repeated because renderer implementation did not change.
+
+
+### C++ gameplay phase boundaries (2026-10-16)
+
+SceneSession3D now interleaves native work with the existing ECS scheduler. Input through Physics run before queued
+lifecycle requests commit and native physics steps once. Fresh poses, propagated transforms and PhysicsContacts3D are
+available to PostPhysics systems immediately, including contacts for bodies created during the preceding phases.
+PostPhysics requests commit before Animation, allowing contact-driven teardown before animation and collection.
+Animation systems run before their lifecycle boundary and native animation, time/weather, transforms and particles.
+Audio through Editor then run, followed by a final lifecycle/transform gate. Bodies born after physics and particles
+born after animation first simulate on the next step; native simulations never replay to accommodate late births.
+
+Added SystemPhaseHooks to the shared full-frame scheduler rather than running separate phase schedules. The complete
+eligible graph is built and validated before any callback/native step, rate/interval accounting updates once, and full
+batch/statistics snapshots remain available. Hooks run even for empty phases on the caller thread, outside iteration,
+after workers have joined and staged/deferred commands have flushed. Reentrant scheduler execution/rebuild is rejected.
+Failures finish the current phase's existing batches, stop before the following host boundary, and cancel undrained
+scene requests. Earlier lifecycle commits/native physics remain applied. Plain run_frame without hooks preserves its
+prior continuation on errors; callers must not retry a failed scene step expecting a transaction rollback.
+
+The projectile range uses Update for firing/respawn and PostPhysics for current contact damage, lifetime and removal.
+It keeps the existing preloads, fixed pool, checked lease/body identities and memory budgets. No editor, separate task
+scheduler, hidden accumulator, new asset downloads or dependencies were introduced. The public lifecycle/scheduler
+and physics documentation now describes these phase boundaries.
+
+Validation: all 39 selected ECS/entity/lifecycle/component/event/inspection/editor/system, scene/prefab, asset,
+material/particle, physics/controller/traversal/ragdoll/rope, Lua and Summit regressions passed (35.7 s, no skips).
+Focused checks cover same-step Begin contacts/pose writeback, pre-physics births, contact-driven teardown before Animation,
+late births deferred to the next native step, empty phases/no-physics sessions, exactly-once body/particle simulation,
+whole-graph preflight before earlier systems run, rate/interval accounting and complete schedule statistics. Parallel
+boundary checks verify workers have joined, commands are visible and the real world is mutable on the caller thread.
+Failure tests verify pending cancellation before physics and preservation of earlier commits after PostPhysics errors.
+
+The 900-frame range report contains 899 simulation and PostPhysics steps, 34 shots, 25 hits, eight target destructions,
+eight respawns, seven expirations, 30 pool reuses and no exhaustion. Earlier contact handling changes the final population
+relative to the preceding run: three active prefabs/four bodies, two active projectile slots and 19 reserved entities.
+The 240-frame camp demo retains all movement/jump/crouch/collection/pushing/reset/live-edit/stale-handle checks, three
+collected supplies and 56 live particles out of 176 configured. Both reports are successful with no UI overflow; startup,
+range completion and camp completion captures were inspected.
+
+Peak process-tree RSS: full regressions 213.1 MiB, focused tests 214.4 MiB, range startup 212.3 MiB, 900-frame range
+208.5 MiB and camp 203.4 MiB. Largest serial build was 1,291.1 MiB. One attempted build was stopped by the system-memory
+reserve guard during unrelated memory pressure; the guarded retry completed. The 2 GiB build / 512 MiB test-app caps and
+1 GiB system reserve remained active; no unrelated processes were stopped. Scratch/logs/JUnit/reports/captures and source
+hashes are recorded at `/home/bamedeo/kin-bench/phase-pipeline/validation.json`. Renderer implementation and art did not
+change; no throughput comparison or new renderer benchmark is claimed.
+
+
+### C++ player commands and Camp gameplay systems (2026-10-16)
+
+Camp's player gameplay now lives in examples/camp_walk/gameplay.hpp instead of its Scene host. Example-local input.hpp
+maps existing InputMap keyboard/mouse actions and GamepadState snapshots to a trivially-copyable fixed-size PlayerCommand
+(move, look degrees, jump, crouch, sprint, interact, push). InputMapper retains only previous pad button bits plus small
+settings; keyboard/mouse use existing sticky fixed-step edges and named rebinding. Analog sticks have radial rescaled
+dead zones, combined movement is capped at unit magnitude, and mouse/right-stick look rotates the authored camp camera
+with bounded pitch. Default controls use keyboard/mouse or one pad; this does not extend InputMap's keyboard/mouse schema
+or add an engine-level device/action framework. Synthetic pad tests exercise mapping; physical pad hardware was not used.
+
+Game initialization registers native components and systems on the candidate only. Input consumes and clears a one-step
+mailbox; missing commands are neutral. PrePhysics writes the existing character controller input/facing and camera pose.
+PostPhysics reads current controller/body poses, selects a nearby owned pickup, queues deferred teardown, pushes the crate
+and updates gameplay progress/fall state. At the first Animation task, committed removals award their native Supply amount
+once; failed/cancelled removals stop with diagnostics and grant no credit. Pickup animation uses the existing native ECS
+system, after the collection acknowledgement. Three checked supply handles, three request slots and one crate bound the
+game-owned population. Scene command capacity is eight; native physics retains its 2 MiB scratch/single-thread capacities.
+
+The host now samples live/demo commands, handles explicit scene load/restart/configuration, steps/renders and draws UI.
+Restart carries chosen aggregate progress after successful replacement, resets command/round state and respawns four owned
+objects; stale scene-generation handles cannot resolve new entities. Falling requests replacement between steps. Existing
+configuration controls remain explicit host development operations. The demo produces the same PlayerCommand as devices,
+without a parallel host-side controller or collection loop. Named actions are exposed through collect_actions/list-actions.
+
+Validation: 41 selected ECS/entity/lifecycle/component/event/inspection/editor/system, scene/prefab, asset, material/particle,
+physics/controller/traversal/ragdoll/rope, Lua, Summit and new Camp regressions passed (38.8 s, no skips). The existing
+platform test also passed separately with its normal dummy headless driver (42 total). The first forced-GPU platform run
+segfaulted; the same binary exited normally under GDB and passed with normal headless configuration. This executable does
+not include Camp game code; no platform/SDL implementation changes were made. An initial collection ordering cycle was
+fixed by ordering its acknowledgement task before the earlier-registered native pickup system in the Animation phase.
+
+The new CPU tests cover named key rebinding and action discovery, normalized digital/analog movement, rescaled dead zones,
+keyboard step edges, one-shot pad edges, disconnect/reconnect history, configurable pad buttons, mouse gating/step deltas
+and invalid analog input. GPU checks run the same 239-step route from scripted, keyboard and synthetic-pad commands and
+compare exact final positions plus gameplay/phase counters. They also cover fresh-pose interaction after a teleport,
+native pickup amounts, missing-command neutrality, yaw-relative movement/pitch clamping, reset clearing pending actions,
+failed candidate isolation, fall-triggered restart and refused teardown granting no collection credit.
+
+The final 240-frame Camp demo reports 239 Input/PrePhysics/PostPhysics passes, three collected supplies, one round/reset,
+eight total runtime births, one crate push, stale-handle rejection and one remaining runtime prefab. All previous movement,
+jump/crouch, native collision-edit and living-particle preservation checks pass; 56 particles remain alive out of 176.
+A 300-frame neutral run has no collections and retains exactly four owned objects. All final reports succeed with no UI
+overflow. Startup, completion and idle captures were inspected; the HUD now shows RMB orbit or pad controls when connected.
+The action listing exposes all 14 named actions with valid keyboard/mouse bindings.
+
+Peak process-tree RSS: final regression 211.8 MiB, focused Camp checks 207.4 MiB, final demo 203.3 MiB, startup 200.7 MiB,
+idle 199.6 MiB and action listing 172.4 MiB; largest serial build 581.5 MiB. The 2 GiB build / 512 MiB test-app caps,
+1 GiB system reserve and Linux-disk scratch remain in effect. No new art, dependencies, extra resident world, editor or
+renderer implementation changes were introduced. Final reports, JUnit, logs, captures and source/binary hashes are at
+`/home/bamedeo/kin-bench/camp-systems/validation.json`; no throughput/renderer comparison is claimed.
+
+
+### Scene-aware bounded physics queries (2026-10-16)
+
+Added SceneQueries3D as a weak endpoint on SceneSession3D and SceneSession3DContext, reusing the generation's existing
+command-endpoint allocation. Closest rays/shape sweeps and bounded ray-all/overlap queries return existing native hit data
+plus checked scene entities. Mapping verifies the live ECS binding for rigid bodies, character capsules, ragdoll bones
+and rope segments, including native body generations. Merely copying an entity user id onto an unrelated native body
+cannot forge ownership. Native-only/unmapped bodies remain physical hits and can obstruct gameplay. Resolve rejects old
+scene generations, returned/reused pool leases, destroyed entities and bodies rebuilt on a still-live entity. Hit geometry
+is a captured snapshot; checking only hit.entity intentionally validates entity identity alone. No hit owns assets/worlds.
+
+The facade is available only after activation with physics, on the owning renderer thread; no implicit native sync/step
+is performed. Invalid, foreign or stale ignored-entity handles fail closed. Worker-thread calls reject before touching
+native/ECS state. Filters reuse layer masks/sensor opt-in, primary-body group exclusion and a new ignore_user_id option
+that excludes all bodies belonging to the ignored entity. Preparation failure leaves active endpoints usable; replacement,
+unload and destruction invalidate old weak endpoints without retaining their world or resource allocations.
+
+Added bounded raw ray-all and unique-body overlap overloads. Their collectors insert directly into typed caller-owned
+slots (raw or scene-hit records), with no hidden AllHit vector/map. Keep nearest rays ordered by fraction/body/native
+subshape and lowest-body-number overlaps with deepest contact, tied by native subshape. Report count/overflow/valid,
+including exact-fit and zero-capacity cases. No silent heap fallback, fixed internal result cap or per-query allocation is
+introduced; callers choose capacity. All contacts may still be visited, so this bounds result memory rather than CPU work.
+The existing vector APIs retain their behavior; exposed opaque sub_shape_id keys support deterministic tie handling.
+
+Camp reuses one reach sphere and eight stack result slots, checks player/camera lines of sight and highlights only a
+reachable visible supply. Native-only walls, ordinary scene props and saturated query results block collection. Crate
+pushing also requires an unobstructed ray. A hidden third bottle was moved from behind the campfire into clear view
+beside the crate; the old scripted path still completes. The final reports include selected_supply and query_overflows.
+
+Validation: all 43 selected game/ECS/scene/prefab/asset/material/particle/physics/Lua/Summit regressions pass (35.7 s,
+no skips), plus the normal dummy-driver platform test (44 total). Every selected binary was rebuilt/relinked against
+the extended native hit/filter headers. Added raw tests compare bounded prefixes with legacy vectors for 48-hit scenes,
+exact fit/overflow/zero capacity, sensor/layer/user-id exclusion, invalid input, compound deduplication/deepest contacts
+and deterministic native subshape ties. A warmed 1,000-iteration ray+overlap loop records zero C++ new allocations.
+The typed scene bridge also runs 1,000 iterations with caller-thread operator new failure enabled; neither query allocates
+on that path. These checks concern result storage/C++ allocations on the fixtures, not all Jolt or GPU allocator activity.
+
+Scene checks cover activation, unavailable/no-physics endpoints, initialized endpoint capture, checked entity filtering,
+foreign/partially malformed/stale ignore handles, exact typed hit/native ownership, native-only/spoofed-user obstacles,
+character exclusion, same-entity body rebuilds, pooled lease reuse, old endpoints/hits after reload/unload, failed candidate
+isolation and worker-thread rejection. Existing runtime lifecycle checks now verify rope-segment and ragdoll-body ownership
+through entity_of_body. Camp tests verify clear highlights, player-hand occlusion, camera-only occlusion, refusal through
+unmapped native walls, selection clearing on an eight-slot overflow and recovery after obstruction/overflow is removed.
+Scripted, keyboard and synthetic-pad routes still agree exactly on final player position and gameplay phase counts.
+
+Final Camp reports: 240 frames/239 simulation steps, three supplies, one round/reset, eight total runtime births, one
+crate push, one remaining runtime prefab, 56 live/176 configured particles, and zero query overflow. The 10,000-frame
+neutral run has 9,999 input/movement/interaction passes, exactly four runtime objects, no collections and zero overflow.
+The 900-frame range retains 34 shots, 25 hits, eight destructions/eight respawns, seven expirations and no pool exhaustion.
+All four final reports are successful with no UI overflow. Startup, completion, long-idle and range captures were inspected;
+the selected bottle has a distinct gold tint/light, and the repositioned third bottle is in clear view.
+
+Peak process-tree RSS: final regressions 215.5 MiB (earlier full pass 216.3), final Camp demo 205.4 MiB, startup 202.5 MiB,
+10,000-frame idle 202.0 MiB and range 210.0 MiB. Largest serial build was 820.8 MiB. The 2 GiB build / 512 MiB test-app
+caps, 1 GiB system reserve and Linux-disk scratch remained active; no unrelated processes were stopped. One own build
+was interrupted to correct the target list before running tests, then resumed incrementally. No art/dependency downloads,
+renderer implementation changes, extra resident world/cache or renderer throughput comparison were introduced. Final
+JUnit, run reports, allocation-test output, logs, captures and source/binary hashes are at
+`/home/bamedeo/kin-bench/scene-queries/validation.json`. The full shader/render suite was not repeated.
+
+
+### Native follow camera and presentation placement (2026-10-16)
+
+Add `CameraRig3D` as ordinary game state: a checked target handle, two fixed-step
+world TRS snapshots, clamped orbit angles and shared retained sphere probes. It
+returns an interpolated camera and target placement without writing authoritative
+transforms or advancing physics. Independent gameplay/render arm histories keep
+interaction visibility independent of render frequency. Teleport/scale changes and
+explicit resets discard history; missing targets, expired leases and replaced
+scenes yield no frame. Invalid configuration retains previous settings/history.
+
+Extract Summit's shoulder/arm collision and recovery into `SpringArm3D`; keep its
+climbing/death framing and look-ahead policy. Camp now follows its controller,
+records its view after fresh PostPhysics poses before interaction, and uses a
+native `RenderTransform3D` override to draw the player at the camera's interpolated
+instant. The override affects mesh/static/skinned roots and point/spot lights only;
+children, IK, animation, physics, ropes and particles remain authoritative. Pool
+restoration removes it. No inspector schema or editor workflow was added.
+
+Initial-overlap testing found that the native directional sweep could ignore a
+convex solid when starting inside and moving out. Changing all sweeps altered
+Summit's stored fall hash, caught by presentation regressions. Keep the old default
+and add `QueryFilter3D::initial_overlap` / the scene equivalent as an explicit
+camera opt-in, including deepest penetration. Spring arms opt in automatically.
+A focus already inside a wall is reported and the arm collapses; the camera does
+not attempt to depenetrate the focus or move the target. Zero-length arms skip the
+backward sweep. Positive pitch looks up; offsets are world-space. Degenerate,
+mirrored/sheared world transforms are unsupported. Small teleports need reset.
+
+Validation: 44 selected game/ECS/scene/prefab/asset/material/particle/physics/Lua/
+Summit regressions pass (51.0 s, no skips), plus the normal dummy-driver platform
+check: 45 total. All selected binaries were rebuilt/relinked. Summit's stored
+fall hash and presentation independence checks retain their original expectations.
+New tests cover clear/wall/shoulder/initial-overlap sweeps, immediate compression,
+rate-limited recovery, configuration failure, checked target/parent pose, yaw-wrap
+interpolation, teleport/reset/real-scale snaps, pool lease reuse, reload and worker
+endpoint rejection. A moving/rotating target regression prevents basis-length
+rounding from spuriously resetting history; scale comparison uses a small tolerance.
+Mesh/static/skinned-root and light placement overrides are checked without moving
+simulation transforms or children. Repeated render samples leave native hashes and
+ECS poses unchanged; independent arm states and extra Camp renders do not alter
+script/keyboard/pad routes. Warmed 1,000-frame raw-arm and scene-rig loops pass C++
+new allocation guards. This does not measure all Jolt malloc or GPU allocations.
+The rig's inline state is 360 bytes and each arm's is 64, plus retained shared shapes.
+
+Final Camp reports: 239 input/movement/physics-interaction/camera steps, three
+supplies, one round/reset, eight births, one push, one remaining runtime prefab,
+56/176 particles and zero query overflow. Its 10,000-frame idle run has 9,999 steps
+in every game phase, exactly four runtime prefabs, no collections and zero overflow.
+Range's 900-frame report retains 34 shots, 25 hits, eight deaths/respawns, seven
+expirations, 30 pool reuses and no exhaustion. Every report succeeds without UI
+overflow. Startup, completion, long-idle and range captures were inspected: the
+player remains centered as it moves, and the selected bottle remains visible.
+
+Peak process-tree RSS: selected regressions 198.9 MiB, platform 17.5, Camp startup
+197.8, demo 201.4, long idle 198.0 and range 185.1. Largest measured successful
+serial build: 821.4 MiB. Other CASMI evaluation jobs continued running throughout.
+The 2 GiB build / 512 MiB regression caps and 1 GiB system reserve remained active;
+the memory guard stopped only an own partial rebuild when external usage rose,
+then it resumed incrementally. Once the final build and 44 regressions passed,
+the remaining lightweight platform/apps used a tighter 256 MiB cap and 1.5 GiB
+start threshold, retaining the same 1 GiB running reserve. No unrelated processes
+were stopped. Scratch remained on Linux disk; no art/dependency download, extra
+resident world or renderer throughput claim was introduced. The full shader suite
+was not repeated. Final JUnit, reports, captures, logs and source/binary hashes:
+`/home/bamedeo/kin-bench/camera-rig/validation.json`.
+
+
+### Native skeletal sockets and prefab attachments (2026-10-16)
+
+Add `JointAttachment3D` on a runtime prefab root: a checked scene/lease target, a
+bounded joint name and a finite affine offset. Reuse skeleton/animation/IK maths,
+`Transform3D`, `RenderTransform3D` and existing collection. Extract the unchanged
+`SceneEntity3D` value handle into a small common header, retaining the session
+include path and resolution contract. No inspector schema, secondary world,
+owning asset cache or new animation graph is introduced.
+
+Preparation resolves at most 64 enabled roots each collection. Model identity is
+weakly cached; joint indices are resolved once per immutable model binding. Each
+binding is 320 inline bytes, with no private skeleton/pose vectors. A fixed 64-ID
+scratch array in the renderer tracks target IK poses prepared during this collect;
+the same final matrices drive attached objects and the character's skinning.
+Targets without IK use a bounded joint-ancestor chain. Their render root is the
+same interpolated root the character uses. Child meshes, static/skinned models and
+point/spot lights retain their local transforms beneath the attachment root.
+
+Only draw placement changes. Simulation transforms, physical bodies, ownership and
+ECS parenting remain explicit. Missing/hidden/disabled targets, missing joints and
+expired scene/pool identities hide the subtree, with a queryable status. Invalid
+root transforms fail closed. Returning a pooled attachment removes its runtime
+binding/cache; a renewed target lease requires explicit rebinding. Disabling or
+removing a binding restores ordinary world placement. A stale copied binding
+cannot follow a new scene. Binding graphs are single-level, use the first skeleton,
+and reject attached target ancestors/cycles; hierarchy traversal is capped at 64.
+World-space particles/physics/ropes require explicit game-side placement. Invalid
+attachment subtrees' particle batches are hidden. See rendering_3d.md for the API
+and full supported-subset contract.
+
+Camp spawns a four-entity cosmetic lantern from the already bundled bottle/box
+meshes, a shared material recipe and a warm point light. Its root grip is calibrated
+to the bundled survivor Idle pose; other clips retain their wrist motion. Assets
+remain shared, with no extra collision bodies or downloaded art. At rest Camp has
+five runtime prefabs/eight entities; after collecting supplies, two prefabs/five
+entities. Progress counts ten prefab births across the demo's restart.
+
+Validation: all 45 selected game/ECS/scene/prefab/asset/material/particle/physics/Lua/
+Summit checks pass (35.9 s, no skips), plus the normal dummy-driver platform check:
+46 total. Every selected binary was rebuilt/relinked against the new collection
+layout. New tests compare attached root/child/light placement with the joint
+matrices submitted for skinning, including animation, final IK, local offsets and
+a camera-interpolated root. They cover invalid configuration, missing root transform,
+foreign/missing/hidden/disabled targets, missing joints, model replacement and weak
+model expiry, rest-pose fallback, cycle rejection, target and attachment pool reuse,
+64-root overflow and copied bindings across scene replacement. A warmed 1,000-call
+collection loop runs with caller-thread C++ new failure enabled. Native physics
+hashes/body positions and authoritative transforms remain unchanged by collection.
+This does not measure all Jolt malloc, driver or GPU allocations. Scripted, keyboard
+and synthetic-pad routes still agree exactly and verify the held lantern binding.
+
+Final Camp reports succeed at startup, walking, crouch-input, completion and
+10,000-frame neutral idle, with no UI/query overflow and lantern_attached=true.
+The demo has 239 passes in every game phase, three supplies, one completed round,
+one restart, one crate push and 56/176 particles. Idle retains exactly five runtime
+prefabs/eight entities, no collections and 9,999 passes per phase. The range's
+900-frame check retains 34 shots, 25 hits, eight deaths/respawns, seven expirations,
+30 pool reuses and no exhaustion. All six captures were inspected; the lantern's
+grip adjustment is prefab data and no special wrist correction was added to the
+engine. These are functional checks, not a rendering throughput comparison.
+
+Peak process-tree RSS: regressions 212.8 MiB, platform 18.1; Camp startup 199.2,
+walking 203.1, crouch-input 203.3, completion 202.4, idle 198.0; range 207.8.
+Largest measured successful serial build: 818.7 MiB. Builds retained the 2 GiB cap
+and 2 GiB start threshold. Final tests/apps used the tighter 256 MiB cap and 1.5 GiB
+start threshold established during camera work, always retaining a 1 GiB system
+reserve. Guards interrupted only own partial compiles under external RAM pressure;
+work resumed incrementally. Other CASMI/asset jobs were left running. The desktop
+session restarted during work; only test-process X authorization was refreshed to
+the current session, without changing desktop settings. Scratch stayed on Linux
+disk. The full shader suite was not repeated. JUnit, reports, captures, allocation
+output, logs and source/binary hashes:
+`/home/bamedeo/kin-bench/joint-attachments/validation.json`.
+
+### Editor-free timed animation events
+
+Extend `.kinanimator` with shared per-clip normalized markers, using the existing
+`AnimationEvent` payload and `AnimationEventDispatch` handlers. `AnimationPlayer3D`
+collects crossings into a fixed 16-entry borrowed batch; no growing event queue.
+Overflow is counted analytically and saturates. `Animator3D` publishes only its
+latest fixed step, and `dispatch_animation_events3d` consumes once in Audio phase,
+discarding unhandled channels. Rendering never emits gameplay events.
+
+The incoming base owns crossfade events. Blend spaces use their dominant clip at
+shared phase, upper clip winning exact ties; pose layers remain silent. Forward,
+reverse, loops, seek/restart, pause and nonlooping endpoint rules are explicit in
+`docs/rendering_3d.md`. Asset reload clears pending references; malformed updates
+preserve the last good configuration. Limits: 64 clip tracks, 256 markers, 16
+crossings per step, plus existing 1 MiB asset limit. Payloads/table are shared;
+per-animator storage is 168 bytes on the current 64-bit build. Pending ECS batches
+retain their actual shared marker table across native replacements until drained
+or expired, without retaining a model or world. Removing a renderer also expires
+its animator's previous-step output.
+
+Camp uses Walk/Run contacts for grounded footsteps and three-particle puffs, with
+one 0.1-second synthesized mono clip, eight sound voices and 24 dust particles.
+The complete scene now budgets 200 particles. Effects use authoritative controller
+feet/facing; joint-specific contact placement and layer events remain future work.
+
+Validation: 52 selected regressions plus the separate platform check all pass
+(**53 total**, zero skips), including existing animation/skeleton behavior,
+marker crossing/loop/reverse/fade/blend/seek/overflow cases, malformed and unchanged
+asset reloads, native table replacement lifetime, missing/removed renderers,
+shared marker data and a 10,000-update C++ allocation guard. Camp command routes
+remain identical across scripted, keyboard and gamepad input, and extra render
+calls do not emit footsteps. Final serial rebuild was verified up to date.
+
+Four Camp captures (contact, movement, completed demo and 10,000-frame idle) and
+900 frames of the pooled projectile range pass and were visually inspected. Camp
+reports two footsteps/two audio requests in the complete demo, no dropped or
+unhandled events, and three live dust particles in the walking captures. Idle
+reports zero footsteps/audio/dust. Existing player positions, grounded/airborne
+counts, collection and prefab population match the prior validation exactly.
+Maximum Camp process RSS: **206.51 MiB**; selected regression process tree:
+**213.40 MiB**. Builds used `-j1` with a 2 GiB process-tree cap and 1 GiB system
+reserve; tests/apps used a 256 MiB cap. The five-minute build guard resumed one
+incremental rebuild. No unrelated workloads were stopped. Audio was validated
+through the headless/null backend; these timings are functional checks, not GPU
+performance measurements. Detailed results, captures, source/binary hashes and
+limits: `/home/bamedeo/kin-bench/animation-events/validation.json`. Uncommitted.
+
+### Editor-free one-shot character actions
+
+Add one action slot to the existing `AnimationPlayer3D`/`Animator3D` path. Shared
+`.kinanimator` definitions select a clip, mask subtree, speed, weight, fades,
+additive mode and base-marker policy; C++ uses `play_action3d`,
+`cancel_action3d`, and `action_status3d`. Standalone players expose equivalent
+methods. `IfIdle` rejects while busy; `Replace` restarts/cuts the old action and
+fades the new one from locomotion. There is no request, completion or pose-history
+queue. Completion follows the clip and its exit fade; cancellation revokes pending
+markers immediately. Playback tokens are process-local and never recycled by new
+requests; retain the actor's checked scene handle separately.
+
+The dedicated action layer runs after ordinary pose layers and before IK. Reuse
+`PoseMask`, its new in-place `set_subtree`, existing masked/additive blending,
+shared clip markers and `AnimationEventDispatch`. Marker `source` selects base,
+action or both; default remains base. Base and action events share the same
+16-entry cap in step-time order. Each occurrence carries its action token; the
+ECS dispatcher rechecks ownership before every callback, including when an earlier
+callback cancels or restarts the action. Model removal/rebinding stops even an
+already cancelling fade before a borrowed clip could expire. Final markers can
+be delivered after a large step completes playback; explicit cancellation still
+revokes an undelivered completed token. Reloads discard runtime playback.
+
+Limits: one slot, at most 32 authored definitions, 95-byte definition/clip/joint
+names, and existing 1 MiB configuration/256 marker/64 track limits. State adds
+88 inline bytes to the player and 128 bytes of token ownership to the event batch,
+plus a shared definition reference. The current player is 416 bytes and batch
+280 bytes. There is one reusable mask (25 floats for the bundled character), no
+private model or clip copy. A 10,000-restart/update C++ allocation guard passes
+after warm-up. Native clips and skeletons must satisfy the usual immutable model
+lifetime/validity contract; tokens are not serialization/network identities.
+
+Camp adds a small authored in-place Pickup reach over locomotion. The CC0 survivor
+asset grows by **7,696 bytes**, preserving its mesh, texture, skeleton and original
+five clips exactly (original BIN prefix verified). The stdlib-only
+`add_summit_pickup.py` regenerates it idempotently without Blender; the existing
+fetch pipeline invokes it and records its checksum in the source manifest.
+The illustrative reach does not automatically turn the character or use target IK.
+
+The button locks a checked supply handle and starts the action. Contact at phase
+0.4 rechecks that same target, grounded state, 1.25 m reach, hand/camera visibility
+and query overflow. It then submits the existing scene despawn command; the next
+Animation phase awards only its successful result. Jump, missing/out-of-reach/
+occluded target, replacement, restart and event/query overflow cannot award a
+stale pickup. Existing movement/camera/footstep/lantern paths continue normally.
+
+Validation: **62 checks**, zero skips/failures (61 selected regressions and the
+separate platform test). Includes base animation/skeleton regressions, mask and
+additive composition, fades/completion/overshoot, restart/cancel ownership,
+invalid and unchanged asset reloads, missing renderer, mixed marker ordering,
+10,000 warmed restarts, scripted/keyboard/gamepad parity, delayed contact/award,
+refused native teardown, and eight interruption/overflow cases. Extra rendering
+never emits gameplay contacts. Five Camp captures plus the 900-frame projectile
+range pass and were visually inspected; 10,000 idle frames produce no actions or
+footsteps. Complete demo: 3 started actions, 3 contacts, 3 successful awards,
+0 cancellations/overflows; previous player positions, ground counts, inventory,
+crate and prefab population match. Camp peak RSS **206.86 MiB**; final regression
+process-tree peak **220.14 MiB**.
+
+Serial builds used a 2 GiB cap with a 1 GiB system reserve; one build resumed at
+the five-minute guard. The initially combined GPU interruption test was stopped
+by its 256 MiB guard at 260.4 MiB; cases now run in isolated serial processes with
+the same assertions and unchanged cap. No unrelated jobs were stopped. Functional
+GPU/audio checks, not rendering throughput measurements. Records, captures,
+asset receipts and streamed source/binary hashes:
+`/home/bamedeo/kin-bench/character-actions/validation.json`. Uncommitted.
+
+### Native interaction queries (2026-10-16)
+
+Added `InteractionQuery3D` over the existing checked scene queries. Games return
+an optional world-space point and native nonzero verb ID from a read-only policy
+callback. Bounded discovery ranks eligible visible targets by distance, with a
+stable entity-ID tie break; saturation fails closed before policy callbacks run.
+Actor and optional fixed-camera sight use shared masks/sensor options and checked
+native hits, so unmapped obstacles remain blockers. No callback, prompt string,
+world, scheduler or candidate vector is retained.
+
+`InteractionFocus3D` is a checked target/verb snapshot. Contact revalidation
+recomputes current policy, point, range and sight without switching to a new
+nearest target. Games keep existing animation tokens alongside the focus and
+own grounded/action cancellation, effects and command acknowledgements. Candidate
+masks are broadphase-only; policy enforces current eligibility at contact. This
+is a synchronous owner-thread helper, not a multi-verb ability registry or an
+automatic animation/effect system. Discovery requires a native body overlapping
+the reach sphere; explicit known targets can validate directly.
+
+Camp now shares these rules for supply discovery, marker-time pickups and direct
+crate pushing. Native Collect/Push IDs map to keyboard/gamepad prompts. Inventory
+still changes only after successful deferred despawn, and push effects remain
+native physics impulses. Target ownership uses full checked handles. Separate
+query settings preserve supply camera visibility and crate hand visibility.
+
+Validation: **64 checks**, no failures/skips (63 selected regressions plus platform).
+Includes deterministic nearest selection, disabled/changed verbs, invalid input,
+independent hand/camera occlusion, native unmapped blockers, sensor opt-in,
+zero/truncated buffers, original-target retention, pooled lease rejection and
+scene replacement. **10,000 warmed selection/revalidation pairs** pass the C++
+allocation guard. Camp's three device/script routes, eight pickup interruptions,
+refused teardown and separate crate reach/occlusion/prompt checks pass. The query
+is 32 inline bytes plus its retained native sphere; each focus is 64 bytes.
+There is no hidden candidate vector or retained world.
+
+The 240-frame demo completes 3 starts/contacts/awards and 1 push, with no cancelled
+pickups or overflows. Player positions, grounded/airborne counts, inventory and
+runtime population match the previous action validation. The 10,000-frame idle
+run keeps 5 prefabs/8 entities with no pickups or footsteps; the 900-frame range
+run still produces 34 shots, 25 hits and 8 destroyed targets. All four captures
+were inspected. Camp peak RSS **208.68 MiB**; final regression process-tree peak
+**218.18 MiB**; serial build peak **691.93 MiB**. Builds used a 2 GiB cap, tests/apps
+256 MiB, with a 1 GiB system reserve throughout. Other jobs were left running.
+Functional checks only; the allocation guard does not measure all native/driver
+allocations. Records and source/binary hashes:
+`/home/bamedeo/kin-bench/interactions/validation.json`. Uncommitted.

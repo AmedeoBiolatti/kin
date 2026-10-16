@@ -1,0 +1,34 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "summit-survivor",
+  "root": "survivor",
+  "entities": [
+    {
+      "id": "survivor",
+      "name": "Survivor",
+      "components": {
+        "Transform3D": {
+          "position": [0, 0, 0],
+          "rotation": [0, 0, 0, 1],
+          "scale": [1, 1, 1]
+        },
+        "SkinnedMeshRenderer": {
+          "asset": "kenney-character/survivor.glb",
+          "visible": true,
+          "tint": [255, 255, 255, 255]
+        },
+        "Animator3D": {
+          "clip": "Idle",
+          "speed": 1,
+          "loop": true,
+          "playing": true,
+          "fade_seconds": 0.15,
+          "remove_root_motion": true
+        },
+        "AnimatorAsset3D": {
+          "asset": "animations/survivor.kinanimator"
+        }
+      }
+    }
+  ]
+}

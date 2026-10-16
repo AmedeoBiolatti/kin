@@ -13,6 +13,7 @@
 namespace summit {
 
 struct BotConfig {
+    bool sheltered_route = false;
     // Rests until this share of the stamina cap before a climb.
     f32 rest_to = 0.97f;
     // Gives up on a leg after this many steps without leaving it.
@@ -90,8 +91,8 @@ u64 replay(Game& game, const std::vector<PlayerCommand>& log);
 
 // A command log as a file (the same bytes on every machine): seed, count, then each command's numbers and flags. False when the
 // file cannot be written or read, is not a log, or is cut short.
-bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log);
-bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log);
+bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log, bool expedition = false, bool dense_scenery = false);
+bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log, bool* expedition = nullptr, bool* dense_scenery = nullptr);
 
 // The bot's settings for a scripted run by name: "climb" (walk and climb to the summit), "fall" (the same, but it lets go
 // near the top of the chimney once: a 5 m fall, a knock-out, a get-up, then it climbs on), "rope" (stops once it is over the

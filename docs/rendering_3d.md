@@ -885,6 +885,72 @@ not offered: draw into the view's texture with the 2D renderer's shaders.
 
 ## Models
 
+### Shared assets and whole-model placement
+
+For scene-owned art, `kin/render3d/assets3d.hpp` provides a renderer-scoped `Assets3D` library. Load once while creating the
+scene and keep the returned `AssetHandle<Model>` for as long as the scene needs it. The handle uses the existing asset
+ownership interface; `.shared()` also supplies the `shared_ptr<const Model>` expected by `SkinnedMeshRenderer`.
+
+```cpp
+kin::Assets3D art{r3d, kin::content_root()}; // r3d/Renderer2D outlive the art
+std::string error;
+auto tree = art.load_model("props/tree.glb", &error);
+if (!tree) { /* show/log error and choose a fallback */ }
+else {
+    const auto transform = tree->placement({
+        .position = {4, 0, -8},
+        .rotation = kin::Quatf::axis_angle({0, 1, 0}, 45),
+        .pivot = kin::ModelPivot3D::BottomCenter,
+        .size = 6, // longest model-bounds dimension in world units
+    });
+    scene.draw(*tree, transform, kin::colors::white, 42); // same ID for every part
+}
+```
+
+`Model::placement()` defaults to the authored origin and units. `Center` or `BottomCenter` positions that bounds-based pivot
+at `position`; positive `size` fits the whole model before the optional nonuniform/mirrored `scale`. Node transforms remain
+part of the model. Invalid sizes, unusable fitting bounds and non-finite resulting transforms throw `invalid_argument`.
+
+Repeated models with the same normalized path and `MeshOptions` reuse the same handle while it is alive. External texture
+dependencies are shared across models, keyed by resolved file, sRGB/data interpretation and nearest/mipmapped filtering.
+Embedded images additionally use their owning model and image index. This prevents a normal/ORM map from aliasing an sRGB
+colour map, or a nearest texture from changing another material's filtering. URI escapes and lexical `.`/`..` aliases are
+resolved; symlink aliases are not deduplicated. Paths work with content folders and mounted `.kinpak` files.
+
+The library holds **weak references only**. It owns no persistent decoded image copies and pins no model/texture resources.
+Release the scene's handles, batches and draws to unload their resources; the renderer may still retain in-flight GPU work
+under its usual lifetime rules. `trim()` removes expired lookup entries. `clear()` forgets all lookups so the next load reads
+fresh content, without invalidating existing consumers. File changes and pack remounts require this explicit invalidation.
+Invalid model loads return an empty handle and an error, and are retried on the next request.
+
+`Assets3D::Limits{.models = 128, .textures = 512}` bounds weak lookup metadata; oldest entries are forgotten when full, while
+live handles remain valid. These limits do **not** cap the assets a game chooses to keep alive or total GPU memory. Zero
+disables the corresponding lookup cache. `stats()` reports entry counts, load attempts and cache hits; expired entries can
+remain in the counts until `trim()` or the next load. Loading and cache operations run on the renderer thread. Do not
+register these GPU loaders with `AssetServer` background workers; asynchronous decode/upload scheduling is separate work.
+
+For many static copies, build a complete model batch once rather than expanding its mesh parts in game code:
+
+```cpp
+std::vector<kin::MeshInstance> trees;
+// Fill trees with model-to-world matrices, tints and stable object IDs.
+kin::ModelBatch3D forest{*tree, trees, {.cell_size = 16}};
+// Each frame, after scene.clear():
+scene.draw_instanced(forest);
+```
+
+`ModelBatch3D` preserves each glTF part's transform/material and every copy's tint/ID. It builds shared `InstanceBatch3D`
+records and conservative camera/shadow bounds, grouping by model-transform origins into world-space cells (default 16 units;
+zero disables grouping). `ModelBatchOptions3D::material` optionally replaces all parts' materials. The source model and input
+span need not outlive construction; scene submission retains handles rather than copying records every frame. `parts()`
+exposes read-only part batches for tools, and `instance_count()`, `triangle_count()` and `record_bytes()` report construction
+costs. Skinned parts are rejected; characters keep their animation/IK through `draw_skinned` or the ECS animation bridge.
+
+Summit uses these APIs for its shared prop atlas, survivor handle, bottom-aligned prop placement and dense scenery batches.
+Its game code retains the content-specific placements, collider checks and art tints.
+
+### Direct loading and reload
+
 `r3d.load_model("models/crate.glb")` reads a glTF 2.0 file (`.glb`, or
 `.gltf` with its buffers and images beside it) through the content folder or
 pack: each primitive a mesh, placed by its node, with its material's base
@@ -1203,7 +1269,190 @@ Without a machine, `Animator3D::clip` names the base clip (changing it crossfade
 `kin/anim`'s `AnimationStateMachine` and `AnimationParams`, evaluated with its own `evaluate()` (one transition a step, triggers
 consumed); no change to `kin/anim`. What is not bridged: `kin/anim` events and registered-property tracks (a skeletal clip is not
 one). `apply_root_motion` moves the entity's `Transform3D` by the base layer's root motion; `remove_root_motion` only holds the root
-(in place). Not yet serialised: the 3D components have no component schema or prefab support (neither does `Transform3D`).
+(in place). The base animator settings and model asset reference can be authored
+through the shared scene/prefab registry below. `AnimatorAsset3D` adds authored
+state machines, blend spaces, layers, fades and IK descriptions.
+
+### Authored scenes and prefabs
+
+`kin/ecs/scene3d.hpp` extends the existing ECS registry, `.kinscene` (`kin.scene/1`),
+`.kinprefab` (`kin.prefab/1`), overrides, editor play clones, inspection and Lua.
+There is one parser, field codec and instantiation pipeline for 2D and 3D.
+The standard `register_builtin_editor_components(world)` includes these registrations
+in experimental 3D builds; `register_render3d_components` and
+`register_physics3d_components` can also be called separately. Registration is idempotent.
+
+A static prop prefab can contain a root transform and complete model, plus children
+with local transforms, lights and primitive colliders:
+
+```json
+{
+  "schema": "kin.prefab/1", "id": "crate", "root": "root",
+  "entities": [{"id": "root", "components": {
+    "Transform3D": {"position": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]},
+    "ModelRenderer3D": {"asset": "props/crate.glb", "visible": true},
+    "Collider3D": {"kind": "box", "half_extents": [0.5, 0.5, 0.5]}
+  }}]
+}
+```
+
+```cpp
+#include <kin/ecs/scene3d.hpp>
+#include <kin/scene/scene_asset.hpp>
+
+kin::register_builtin_editor_components(world);
+auto loaded = kin::load_prefab_asset(content_root / "prefabs/crate.kinprefab", world.components());
+if (!loaded.ok()) { /* display loaded.diagnostics; do not instantiate */ }
+else {
+    kin::PrefabOverrideSet overrides;
+    overrides.entities["root"] = {{"Transform3D", {{"position", kin::Vec3f{3, 0, -2}}}}};
+    auto instance = kin::instantiate_prefab(world, *loaded.prefab, {}, world.components(), overrides);
+    // Check instance.ok()/diagnostics, then bind authored assets on the render thread:
+    auto errors = kin::resolve_render3d_assets(world, assets); // Assets3D{renderer3d, content_root}
+    // Display errors; failed replacements preserve their last good runtime model.
+}
+// WorldRenderState3D: animate(dt), propagate_transforms(), collect(scene) as usual.
+```
+
+The existing `load_scene_asset` / `instantiate_scene_asset` and `SceneAssetRuntime`
+use the same path. Scene prefab placement is an ordinary override:
+`"overrides":{"root":{"Transform3D":{"position":[3,0,-2]}}}`. Asset paths are
+relative to `Assets3D`'s content root, including models referenced by nested prefab files.
+Folders and mounted `.kinpak` archives work through the existing content utilities.
+Summit's `content/prefabs/survivor.kinprefab` exercises this pipeline for its skinned
+survivor; its animation graph and IK configuration are also authored. Gameplay supplies
+parameters, targets, raycasts and ragdoll poses.
+
+Initial registered authored fields:
+
+| Component | Fields |
+|---|---|
+| `Transform3D` | position, quaternion rotation, scale |
+| `ModelRenderer3D`, `SkinnedMeshRenderer` | asset, tint, visible, object id |
+| `ModelMaterials3D` | material override asset, named variant (static/skinned) |
+| `Animator3D` | clip, speed, loop, playing, fade seconds, apply/remove root motion |
+| `AnimatorAsset3D` | referenced animation/IK configuration |
+| `SceneCamera3D` | enabled/priority, projection, fov/height, near/far; pose from Transform3D |
+| `SceneEnvironment3D` | enabled/priority, sun/fill/ambient, shadow budgets/area, sky, fog, AO/contact/TAA, MSAA/HDR/exposure/bloom |
+| `TimeOfDay3D` | hours, day, latitude, axial tilt, moon phase, speed, shadows |
+| `PointLight3D`, `SpotLight3D` | linear colour, radius, size, enabled, shadows enabled; spot cone angles |
+| `Collider3D` | primitive dimensions or referenced compound/hull/mesh recipe; local offset/rotation/scale |
+| `RigidBody3D` | static/kinematic/dynamic motion, mass/density, friction/restitution/damping, gravity, sensor/sleep/CCD, initial velocities, layer |
+| `CharacterController3D` | capsule dimensions, movement/jump/grounding settings, layer/mask, up/facing |
+| `CharacterAnimationLink3D` | animation parameter names, foot constraint name, ground-query mask |
+| `ParticleEmitter3D` | seed/emission/capacity, shape/ranges/forces/lifetime curves, texture/atlas/blend/facing, enabled/emitting |
+
+Vectors accept arrays or `x/y/z` objects; rotations use `x/y/z/w` order and must be
+finite unit quaternions. Enum adapters reject unknown names through normal patches.
+`ModelRenderer3D` preserves imported part transforms/materials and batches compatible
+meshes/materials with other static entities; all parts use the entity ID unless an
+explicit nonzero `id` is authored. Skinned assets must contain a skin and skeleton;
+static model components reject them. Runtime `Model` pointers, mesh/texture handles,
+animation players and physics bodies are never serialized.
+
+Binding is explicit after instantiation, hot reload or an asset-reference edit.
+It performs synchronous loading on the render thread, with no per-frame filesystem
+polling or extra owning cache. It binds enabled runtime entities, copies inherited
+components before mutation, and leaves prefab definitions untouched. Empty references
+leave programmatically supplied models alone. Missing or incompatible assets produce
+entity/component/path diagnostics; fix the content and call again to retry.
+For changed content at the same path, call `assets.clear()` before resolving. Skinned
+model replacement resets animation/IK runtime state and retains authored settings;
+bind before animation/physics setup, and rebuild live ragdolls when skeletons change.
+Unload scenes through the existing lifecycle; clear submitted `Scene3D` draws and
+collect again to release render buckets. `Assets3D` itself keeps only weak resources.
+
+Per-part material variants use `ModelMaterials3D`; see
+[material authoring](#authored-material-overrides-and-variants).
+Ropes and ragdoll
+descriptions remain C++ configuration.
+Referenced collider recipes round-trip as asset paths; raw runtime mesh/shape handles
+remain C++ state. See [physics authoring](physics_3d.md#authored-collision-and-characters).
+Edits to live collider parameters use the existing physics `rebuild(entity)` contract.
+GPU resolution is an explicit host step after the existing scene hot-reload utilities.
+`build_scene_asset` now preserves scene-loaded prefab references and minimal overrides;
+see [linked instance saves](ecs_prefabs.md#saving-linked-instances). Explicit unpacking
+is available for unsupported edits. Composed references and structural overrides now
+support child/component additions/removals, renames and internal reparenting; see
+[prefab composition](ecs_prefabs.md#composition).
+
+### Authored camera and environment settings
+
+Add a `SceneCamera3D` and `Transform3D` to a camera entity. It looks down local -Z,
+including parent rotation and scale. Projection is `perspective` or `orthographic`;
+`fov` is vertical degrees, `height` is the orthographic world height, and `far: 0`
+represents infinity without writing nonfinite JSON. Add `SceneEnvironment3D` to an
+entity for scene-wide settings; it requires no transform. Fields are flat inspector
+properties, for example:
+
+```json
+{"SceneEnvironment3D": {
+  "sky_enabled": true, "sky_lights_scene": true, "sky_turbidity": 3,
+  "fog_enabled": true, "fog_density": 0.002, "fog_color_from_sky": true,
+  "shadow_min": [-100,-20,-100], "shadow_max": [100,100,100],
+  "shadow_cascades": 4, "shadow_distance": 100,
+  "hdr": true, "exposure": 1, "bloom": 0.1
+}}
+```
+
+After transform propagation, call `apply_scene3d_settings(world, scene, &view_options)`
+before collecting local lights/draws. Use the returned view options when creating
+the view. View options are fixed at creation in the current API: recreate the view
+after editing them. Camera/environment selection independently
+chooses the enabled entity with highest priority, then lowest ID. No matching
+component leaves host settings alone. Invalid projection ranges or environment
+budgets return diagnostics and leave that component's previous settings intact.
+Existing local light lists are retained. `WorldRenderState3D::apply_time_of_day`
+can then update sun/sky/fog from an authored `TimeOfDay3D`, after its clock is advanced.
+This subset authors procedural sky settings; HDR panorama asset binding remains C++.
+
+### Authored animation configuration
+
+`AnimatorAsset3D{"asset": "animations/hero.kinanimator"}` accompanies the usual
+`Animator3D` and `SkinnedMeshRenderer`. Its `kin.animator3d/1` JSON resource references
+the existing `.kinanim` machine format instead of introducing a second graph parser:
+
+```json
+{
+  "schema": "kin.animator3d/1",
+  "machine": {"asset": "animations/hero.kinanim", "name": "locomotion"},
+  "blend_spaces": {"ground": {"parameter": "speed", "entries": [
+    {"clip": "Idle", "position": 0}, {"clip": "Walk", "position": 1.6},
+    {"clip": "Run", "position": 4.2}
+  ]}},
+  "layers": [{"clip": "Wave", "mask_joint": "spine", "weight": 0.5, "additive": true}],
+  "fades": [{"from": "ground", "to": "air", "seconds": 0.15}],
+  "ik": [{"name": "hand", "kind": "two_bone",
+          "joints": ["shoulder_L", "elbow_L", "hand_L"], "weight": 0,
+          "fade_seconds": 0.12, "pole": [0.5,-0.7,-0.5], "max_stretch": 1.12}]
+}
+```
+
+Machine paths, like model paths, are relative to the common content root. A machine
+name is optional only when the file has exactly one machine. Skeletal machines use
+`replace` transitions; `push` is rejected because the 3D animator has no override stack.
+Blend entries are sorted and duplicate positions rejected. Layers also accept speed,
+loop and include_root; fades support empty-name wildcards. IK kinds are `two_bone`,
+`foot_placer`, `look_at`, `fabrik`; the initial schema covers named chains, weight/fade,
+model-direction poles, stretch, foot/toe heights, toe joints and foot smoothing/tilt.
+The complete working locomotion and foot/hand rig is in Summit's
+`content/animations/survivor.kinanimator` and `survivor.kinanim`.
+
+`resolve_render3d_assets` binds these after model loading. Tools can separately call
+`resolve_animator3d_assets(world, content_root)` with no renderer. Configuration and
+machine source reads are explicit, with a 1 MiB cap per source and bounded array sizes;
+there is no per-frame filesystem work or persistent owning lookup cache. Consumers
+share parsed configurations within a bind, including unchanged existing consumers.
+Unchanged content retains playback progress. Invalid JSON/fields, graph references,
+clips or joint names return contextual diagnostics and retain the previous configuration.
+Clip/joint compatibility is checked once a runtime model is available.
+
+Changed configuration resets playback/IK runtime while retaining base component
+settings and gameplay parameters. Game code supplies parameters, targets and physics
+queries; existing ground callbacks are retained by matching IK names during rebinding.
+Specialized solver tuning, root-motion axis settings and gameplay callbacks remain
+C++ hooks. Summit uses the authored machine, speed blend and three IK constraints;
+its procedural fallback keeps the previous C++ setup.
 
 ## First person
 
@@ -1364,3 +1613,1052 @@ and, with `stats_readback`, `clusters_first_pass`, `clusters_occluded`, `triangl
 where much more is hidden than that costs: see the plan's G3d for the numbers (a wall hiding 256 copies of a 100 thousand triangle clustered mesh:
 12 to 19% of the GPU time saved; the kiln and Sponza: nothing to save, 0.03 to 0.12 ms spent). Copies drawn from CPU instance lists
 (`draw_instanced` of meshes without clusters, the crowd) are not tested.
+
+### Owning a 3D scene session
+
+`<kin/scene/scene_session3d.hpp>` adds `SceneSession3D` over the existing
+`SceneAssetRuntime`, component registry, `Assets3D`, rendering and physics bridges.
+It owns one isolated ECS world, render state and view, plus an optional physics world.
+The renderer and its `Assets3D` must outlive the session and any retained resources.
+All operations run synchronously on the renderer thread.
+
+```cpp
+kin::Assets3D assets{renderer3d, content_root};
+kin::SceneSession3DOptions options;
+options.viewport = {960, 540};
+options.view.samples = 1;
+// Optional: no physics world or scratch pool exists by default.
+options.physics = kin::World3DConfig{
+    .max_bodies = 256, .max_body_pairs = 1024,
+    .max_contact_constraints = 1024, .temp_memory_bytes = 2 * 1024 * 1024};
+options.register_components = [](kin::EcsWorld& world) {
+    // Register the game's native/data components and systems here.
+};
+options.initialize = [](kin::SceneSession3DContext& context) {
+    // Assets are bound; add game state/controllers before physics bodies exist.
+    // context.instance maps authored IDs. context.dependencies can include custom files.
+};
+kin::SceneSession3D session{renderer3d, assets, options};
+if (!session.load("scenes/camp.kinscene")) {
+    // Display session.diagnostics(); the previous active scene remains usable.
+}
+// In the host's fixed-step loop: check session.step(fixed_dt).
+// In its render loop, composite only after a successful render:
+if (session.render())
+    renderer2d.draw_texture(session.view()->texture(), {0, 0, 960, 540});
+// Otherwise display session.diagnostics().
+```
+
+The complete camp scene lives in `examples/summit/content/scenes/camp.kinscene`.
+It combines existing free Kenney props, the animated survivor prefab, a camera,
+procedural environment and a primitive floor collider. It is a standalone loading
+example; Summit's expedition retains its game-specific presentation loop.
+
+`load` is `prepare` followed by `activate`. For a frame-boundary handoff, call them
+separately: preparation validates a candidate world, binds assets/configurations,
+runs initialization, validates settings and creates physics bodies before activation.
+Parse, dependency, texture/upload, initialization, settings and body-creation failures
+discard the candidate and retain the active world's simulation state and view.
+`cancel` releases the candidate; `unload` releases both worlds. At most one candidate
+is retained. A new preparation replaces any previous candidate.
+
+`generation()` changes on activation/unload. Entity handles and world/render/physics
+pointers from the old scene become invalid after the swap: reacquire entities with
+`entity(authored_id)`. Reload starts from authored state. Carrying player/save state
+between worlds is an explicit game policy implemented through initialization.
+Initialization must mutate the supplied candidate; external side effects are not
+rolled back. Throwing rejects preparation. `compose(context, scene)` adds game draws
+or settings after stock collection and also runs during preparation; keep it free of
+external side effects and create/bind entities in initialization instead.
+
+`step(dt)` interleaves one ECS frame with native simulation at phase boundaries:
+physics after Physics, fresh contacts in PostPhysics, then animation, time/weather
+clocks, transforms and particles after Animation. Each native simulation advances
+once. Lifecycle requests commit at the boundaries described below. `collect()` resets internal
+draws/settings, propagates transforms, applies authored camera/environment and clocks,
+collects local lights/models/ropes, then calls `compose`. `render()` collects and submits.
+Custom gameplay ordering can use `world()`, `bodies()` and `rendering()` directly instead
+of `step`. The host remains responsible for input, fixed-step scheduling, compositing,
+UI, audio and scene-stack enter/suspend/resume policies. A host `Scene::world()` can
+return `session.world()` for the existing inspection tools. Lua-authored scenes are
+explicitly rejected; continue using `ScriptScene` for its Lua context and callbacks.
+
+Hot reload is explicit: call `changed_sources()` or `reload_if_changed()` on a development
+timer, never implicitly in every render. It watches the loaded scene/prefabs, model
+sources, decoded external image/buffer paths, animator/machine files and initialization's
+custom dependencies. Deletions and mounted pack ownership changes are detected. Disk
+polling uses modification times and sizes, so manual `reload(true)` is available for
+edits that preserve both. Content packs must be reopened/remounted with the existing
+content utilities; the session does not alter global mounts. Failed reloads keep their
+old watch baseline and can be retried. Live field edits through `session.edit` or the
+active authored members' registry patches extend dependency watching automatically.
+Direct C++ mutations/structural changes still require explicit binding or a fresh reload.
+
+Only affected model/texture lookups are invalidated, through `Assets3D::invalidate`;
+existing consumers retain valid handles. Unchanged art and matching view targets are
+shared during preparation. New targets alone are warmed up; activation resets temporal
+history. Changing view size/options creates a replacement target, with temporary overlap.
+Scene-specific physics scratch/capacity allocations also overlap during preparation.
+To minimize peak memory when continuity is unnecessary, `unload` before `load`.
+Retaining model/view handles outside the session deliberately prolongs their lifetime.
+
+Defaults limit each scene/prefab source to 8 MiB, expanded authored entities to 10,000
+and watched files to 4,096; configure `limits`/`max_dependencies` for the game. Animator
+and machine sources are checked before reading against their separate 1 MiB caps.
+These are authoring budgets, not a total GPU/model-memory allocator. There are no worker
+uploads, resident scene caches, automatic reload jobs or hidden per-frame content reads.
+The lower-level shared `SceneAssetRuntime::load` accepts the same optional scene/prefab
+byte and expanded entity limits; its existing callers remain unlimited by default.
+
+Authored collision recipes and character settings use the same component registry;
+see [physics authoring](physics_3d.md#authored-collision-and-characters). Physics-enabled
+sessions cook these CPU assets before body creation, watch their sources, and retain
+the active world on failed reload. `camp_walk` hosts the playable authored camp.
+
+### C++ runtime prefab gameplay
+
+`SceneSession3D` can own runtime objects independently of the authored level. It
+uses the existing `.kinprefab` loader, native components, asset handles and physics
+bridge; gameplay components and systems do not require inspector field metadata.
+
+```cpp
+struct Pickup { int amount = 1; };
+
+// Register native systems through the existing options.register_components hook.
+// Their normal C++ component queries need no components().native<T>() schema.
+auto supply = session.spawn("prefabs/camp-supply.kinprefab", {
+    .position = kin::Vec3f{1, 0, 2},
+    .configure = [](kin::SceneSpawnContext3D& context) {
+        context.root.set(Pickup{2});
+        // context.entity("local-child-id") resolves a member of this instance.
+    }
+});
+if (!supply) { /* display session.diagnostics() */ }
+
+// Retain value handles; resolve when needed. Native runtime state stays native.
+if (auto entity = session.resolve(supply.root)) {
+    const auto* pickup = entity.get<Pickup>();
+    // Use pickup->amount for game rules, then release the complete object:
+    if (pickup) session.despawn(supply);
+}
+```
+
+Spawning returns only after new model/material/animation/particle bindings and native
+physics objects are ready. A missing asset, invalid shape, failed constructor or
+capacity limit removes partial new entities and physics bindings. The constructor
+runs once, before binding, and can add arbitrary native gameplay components. Keep
+it confined to the supplied entities: do not create/delete/reparent entities, mutate
+the existing level, register systems or perform external side effects. Those effects
+cannot be rolled back. Optional position/rotation/scale values replace only the given
+root fields, preserving other prefab defaults. `parent` is another `SceneEntity3D`;
+placement is local to it. Spawn a dependent object separately with that parent handle.
+Dynamic bodies retain world-level simulation; use native constraints for physical attachment.
+
+`SceneEntity3D` contains session identity, scene generation, the existing ECS handle
+and a runtime lease identity (zero for authored entities).
+`session.handle(session.entity("player"))` obtains one for an authored entity.
+`resolve` returns empty after destruction, reload/unload, or use with another session;
+it never dereferences a previous world's pointer. `entity(prefab, local_id)` returns a
+member handle. A handle's boolean conversion means it was initialized; use `resolve`
+or `alive(prefab)` for current liveness. Raw entity/component/body handles retain their
+existing lifetime rules. Inside a gameplay system, `handle.resolve(*context.world)`
+performs the same checks without capturing the session. Returning a pooled lease
+invalidates its root and child handles even when the ECS entity is reused later.
+
+`despawn` removes all members, including reparented members and dependent runtime
+prefabs below them, and reconciles physics immediately. Authored/unmanaged children
+cause a refusal before removal; detach them explicitly first. Use `despawn` for these
+owned objects. Direct native destruction invalidates handles but leaves bounded
+ownership bookkeeping until `despawn` or scene replacement. `runtime_prefabs()` and
+`runtime_entities()` report that ownership. Runtime entities have no authored IDs and
+stay out of ordinary level saves; explicit runtime snapshots remain an application
+policy. Reload/unload releases the complete runtime population.
+
+Reflected configuration also has a typed C++ entry point:
+
+```cpp
+session.reconfigure<kin::Collider3D>(object.root, [](auto& collider) {
+    collider.scale = {1.5f, 1, 1};
+});
+session.reconfigure<kin::ModelMaterials3D>(object.root, [](auto& material) {
+    material.variant = "blue";
+});
+```
+
+This mutates a temporary component and sends changed reflected fields through the
+same validated live-binding transaction described below. No-op changes do not rebuild
+bodies. Only reflected fields are applied; configure custom reflected definitions in
+the existing registration hook when needed. Per-frame input, velocities, game state,
+animation parameters and impulses use existing native APIs directly. This avoids a
+staging/binding pass for ordinary gameplay updates.
+
+Direct lifecycle/configuration calls are synchronous on the renderer thread, between
+steps/collection, outside deferred/readonly iteration and with no prepared scene
+replacement. Systems use the existing ECS command buffer to request runtime lifecycle
+work instead:
+
+```cpp
+options.initialize = [](kin::SceneSession3DContext& scene) {
+    const auto objects = scene.commands; // weak endpoint for this scene generation
+    scene.world.systems().register_task({.id = "game.fire"},
+        [objects](kin::SystemContext& context) {
+            auto shot = objects.spawn(*context.commands, "prefabs/range-projectile.kinprefab", {
+                .position = kin::Vec3f{-2.2f, .5f, 0},
+                .configure = [](kin::SceneSpawnContext3D& created) {
+                    // Add native game state before asset binding and physics.
+                }
+            });
+            // Store shot in bounded game-owned state to poll next frame.
+            // objects.despawn(*context.commands, shot) also accepts this ticket.
+        });
+};
+```
+
+Include `<kin/ecs/system.hpp>` for system/command-buffer definitions. `session.commands()`
+also returns the active endpoint between frames. Each system uses its own supplied
+buffer; parallel task systems are supported. Partitioned native Flecs worker callbacks
+retain their existing `context.commands == nullptr` contract: use a main-thread native
+system or a task system for lifecycle requests. The scheduler's normal flush
+order transfers requests to a bounded scene queue. `step()` runs one full-frame graph
+with host boundaries on the renderer thread:
+
+1. Input through Physics systems run, then queued births/removals commit. Native
+   physics advances once and propagates current transforms.
+2. PostPhysics systems read fresh `PhysicsContacts3D` and body poses from this step.
+   Their lifecycle requests commit before Animation, so contact-driven removals do
+   not reach animation or collection. Bodies born here first simulate next step.
+3. Animation systems run, their requests commit, and native animation, environment
+   clocks, transforms and particles advance once.
+4. Audio through Editor systems run. Remaining requests commit and transforms
+   propagate before collection; these late births first simulate on the next step.
+
+Empty phases still execute their host boundaries. Frame rates/intervals update once,
+and the complete graph is validated before any system or native simulation runs.
+`projectile_range` separates Update firing from PostPhysics contact damage/removal.
+Manually flushing a buffer or running a system only transfers requests; `step()` is
+required to execute them. No lifecycle loading/binding runs inside ECS iteration.
+Callers supply the timestep; `step()` does not introduce a second fixed-step loop.
+
+`SceneRequest3D::status()` is `Invalid` for a default ticket, then `Pending`, and finally
+`Succeeded`, `Failed` or `Cancelled`. `prefab()` returns a checked value handle only for
+a successful spawn; it may later become stale like any runtime handle. `error()` gives
+the failure/cancellation reason. A ticket never retains a world, assets or constructor
+captures. Despawn accepts an existing `ScenePrefab3D` or a spawn ticket; a ticket must
+have succeeded earlier in execution order. Parent placement currently requires an
+already resolved entity handle. Sequential requests are independent, not a transaction:
+a failed request reports through its ticket and the rest of the frame continues.
+Earlier successful requests remain committed. A failed system or host boundary stops
+later phases and cancels requests that have not reached a lifecycle boundary. Earlier
+commits and native physics cannot be rolled back; retrying `step()` advances a new
+step. Dropped/unflushed command buffers cancel their own requests.
+Reload, unload and destruction cancel all old requests, including unflushed ones.
+A prepared replacement cancels requests when a step attempts to execute them; activate
+or cancel the replacement before stepping gameplay. Direct recursive calls remain rejected.
+
+`max_pending_commands` defaults to 64 and counts accepted requests in both unflushed
+buffers and the scene queue. Capacity exhaustion fails immediately without appending
+another ECS command. Do not rely on which worker wins the last slot when parallel
+submission saturates the budget. Constructor captures are application-owned C++ memory:
+capture small values/handles, keep result collections bounded, and avoid retaining a
+whole level in a callback. Path-based source loading remains synchronous; use explicit
+preloading/pools below for repeated objects. A per-step spawn-time budget is not implemented.
+The target/projectile example keeps a fixed
+16-slot projectile array, consumes contact Begin events once, expires missed shots,
+and handles damage, destruction and respawn entirely in a C++ system.
+
+Default budgets are 64 entities per spawn, 1,024 runtime entities and
+128 runtime prefabs (`max_spawn_entities`, `max_runtime_entities`,
+`max_runtime_prefabs`), in addition to existing source, scene, particle, dependency and
+native physics capacities. Path-based source loading/binding happens at the explicit
+spawn call; there is no background upload or new implicit resident GPU cache. Hold deliberate
+`Assets3D` handles if a game needs assets kept ready across an empty population.
+Scene camera/environment settings belong to the level and are rejected in object
+prefabs. Dependency watches extend at spawn and are pruned by scene reload, preserving
+their bounded metadata and explicit polling contract.
+
+Binding functions accept an optional entity-ID span for construction of selected
+objects; an empty span retains their whole-world behavior. Particle validation for a
+selected span covers that subset, so the session also checks the full scene's particle
+budget. `WorldPhysicsState3D::sync_entities(ids)` reconciles only those IDs (including
+destroyed IDs), leaving unrelated bindings and rebuild requests intact; an empty span
+does no work. Mesh/material collection buckets retain only current draws and are cleared
+on owned despawn, so removed objects cannot become a hidden owning asset cache.
+
+`camp_walk` demonstrates the complete loop: spawn three supplies and a dynamic crate,
+rotate supplies with a native ECS system, collect with E, push with F, and reset with R.
+It uses the existing free bottle/box models and native character input/physics APIs.
+
+The example's `input.hpp` maps the existing `InputMap`/`GamepadState` to a fixed-size
+native `PlayerCommand`. Gameplay never reads a device: submit the value once per step
+as ordinary C++ state, then let the existing scheduler consume it in Input, set
+controller input in PrePhysics and perform interactions with current poses in
+PostPhysics. The command mailbox clears after consumption so missing input is neutral.
+Successful deferred removal is acknowledged before pickup animation; failed requests
+never grant collection credit. The same path accepts scripted test commands.
+
+```cpp
+// Level loading, once per scene generation:
+options.register_components = camp_walk::register_components;
+options.initialize = camp_walk::install;
+// After session.load(...), camp_walk::prepare(session) spawns four owned objects.
+
+// Each fixed step, from a device mapper, recording or test:
+camp_walk::submit(*session.world(), camp_walk::PlayerCommand{.move = {0, 1}});
+if (!session.step(dt)) { /* report session.diagnostics() */ }
+```
+
+This is example game code in `examples/camp_walk/gameplay.hpp`, built on existing
+session/controller/ECS APIs. The host owns level replacement and explicitly carries
+chosen progress counters after successful reload. Initialization modifies only the
+candidate world; it never changes active gameplay state or retains devices.
+
+### Scene-aware physics queries
+
+`SceneSession3D::queries()` returns a copyable weak `SceneQueries3D` endpoint; scene
+initialization receives it as `context.queries`. Capture it in main-thread ECS systems
+alongside `context.commands`. Queries become available on activation when the scene
+has physics. They read the last synchronized/stepped native world, with no implicit
+sync, simulation, asset loading or second world. Use PostPhysics for this step's poses.
+Calls from worker threads, inactive candidates, replaced/unloaded scenes or scenes
+without physics are unavailable. `bool(queries)` checks availability on the caller thread.
+
+```cpp
+const auto queries = session.queries();
+const auto player = queries.handle(session.entity("player"));
+if (auto hit = queries.raycast(from, to, {.ignore = player, .sensors = true})) {
+    auto entity = queries.resolve(*hit);
+    // hit->physics contains the existing body, point, normal, distance, etc.
+    // entity is empty for a native obstacle without a current scene binding.
+}
+
+std::array<kin::SceneOverlapHit3D, 8> hits;
+auto found = queries.overlap(reusable_sphere, center, {}, hits,
+    {.mask = kin::layer_bit(kin::layers3d::Sensor), .ignore = player, .sensors = true});
+if (found.valid && !found.overflow) {
+    for (std::size_t i = 0; i < found.count; ++i) {
+        auto entity = queries.resolve(hits[i]);
+        // Select/filter game-owned components here.
+    }
+}
+```
+
+The endpoint provides closest `raycast`, closest `shape_cast`, bounded `raycast_all`
+and bounded `overlap`. `SceneQueryFilter3D` exposes a layer mask, sensor opt-in and a
+checked entity to ignore. Ignoring an entity excludes all native bodies carrying its
+id, including character/ragdoll/rope bodies; the existing primary-body collision-group
+exclusion also applies. Stale, malformed and foreign ignore handles fail closed.
+Single-hit queries return no hit on unavailable/invalid input; bounded queries return
+`valid=false`, zero count and no overflow. See the [bounded physics contract](physics_3d.md#bounded-query-results)
+for deterministic ordering, truncation and zero-capacity probes. Scene wrappers write
+into the same caller slots as their raw physics records, without a hidden temporary list.
+
+`SceneRayHit3D`, `SceneShapeHit3D` and `SceneOverlapHit3D` hold a raw `physics` value
+plus a checked `entity` identity. `queries.resolve(hit)` verifies both the current
+scene/lease and native body binding. It rejects despawned/reloaded/reused leases and
+body rebuilds even if the ECS entity remains alive. The captured point/normal remain
+snapshots; resolve does not refresh geometry. Direct `hit.entity.resolve(world)` checks
+only entity identity. Hits and endpoints retain no world, models or GPU resources.
+A raw native obstacle remains a hit even when it cannot map to an entity, so it still
+blocks targeting. Native bodies with merely copied/forged entity user ids do not map.
+
+Camp uses an eight-slot sensor overlap for a 1.25 m reach volume, ranks owned supplies
+by distance, checks rays from the player and camera, and highlights only a visible
+candidate with a gold tint/light. Collection and crate pushing cannot pass through
+obstacles. Saturation clears selection and increments `query_overflows`; the example
+keeps three supplies and one crate. The third bottle was moved out from behind the
+campfire so the demo remains playable under the new visibility policy.
+
+### Preloaded prefabs and bounded pools
+
+Do loading explicitly on the renderer thread after loading the level, before starting
+its gameplay steps:
+
+```cpp
+struct Projectile { float remaining = 2; int damage = 1; };
+auto projectile = session.preload("prefabs/range-projectile.kinprefab");
+auto pool = session.create_pool(projectile, {
+    .capacity = 16,
+    .reset = [](kin::SceneSpawnContext3D& context) {
+        context.root.set(Projectile{}); // reset plain C++ health/timers/etc. here
+    },
+    .release = [](kin::SceneSpawnContext3D& context) {
+        context.root.set(Projectile{}); // optionally drop per-lease game resources
+    }
+});
+if (!projectile || !pool) { /* inspect session.diagnostics() */ }
+
+auto shot = session.spawn(pool, {.position = kin::Vec3f{-2.2f, .5f, 0}});
+if (shot) session.despawn(shot); // returns this lease to its pool
+auto stats = session.pool_stats(pool); // capacity/active/available/acquired/reused/exhausted
+
+session.release(pool);       // destroy active and inactive slots
+session.release(projectile); // release the bound preload reference
+```
+
+`preload` uses the shared prefab loader, binders and asset ownership. It retains a
+frozen CPU recipe plus one inactive bound reference instance, not a second world or
+new GPU cache. Geometry/materials/textures/collision recipes are shared through the
+existing handles. The reference does not render, simulate, produce contacts or enter
+ordinary gameplay queries. `spawn(projectile, options)` instantiates from this snapshot
+without reading prefab/model/material/animation/texture/collider files. Changes on disk
+require an explicit new preload or scene reload. Existing dependency watches still
+report changes when polled. Preloading validates native physics using a temporary body,
+so loading needs a spare native slot; it is loading work, not a background operation.
+
+`create_pool` allocates its complete capacity up front. It keeps disabled ECS members
+and bound resources for reuse, with no overflow allocation or automatic expansion.
+Acquisition restores all authored components from the pristine bound reference, then
+calls `reset` and the optional per-spawn `configure`. Internal reflected entity refs
+are remapped to the current slot, rather than the reference instance. Transform position
+and rotation can vary; scale, hierarchy, models/material bindings/animation assets,
+particle textures and collider shapes stay prepared. Engine state such as animator
+parameters/player/IK state, particle ages/time/seed, render tint and body descriptors
+returns to its authored baseline. Arbitrary native game components need an explicit
+reset callback; the engine cannot infer which health, timers, inventory or external
+handles belong to a new life. Remove/reset game components that should not persist.
+
+`despawn(lease)` runs optional release cleanup, disables the members, removes ordinary
+native bodies and clears collected references. It resets stock state and renews lease
+identity before reuse. Old value handles and completed request results cannot resolve
+to the next occupant. Raw ECS/component/body handles retain their normal lifetime rules;
+use checked value handles across leases. Idle entities retain component storage and
+asset handles deliberately. On acquisition the physics bridge recreates native bodies
+from reset descriptors: this is **ECS/asset pooling**, not persistent native-body pooling
+or a guarantee of zero allocations. Controllers, ragdolls and ropes currently use
+ordinary spawning; pool creation rejects them. Pool parenting and nested runtime children
+are unsupported; detach foreign children before returning or destroying a pool.
+Choose native physics capacities for the desired concurrent population: warm-up is
+sequential, and a later acquisition can still fail if other bodies fill the world.
+
+Pool callbacks configure only the supplied game-owned state and must preserve topology
+and prepared engine resources. Keep them nonthrowing where possible; a failed reset
+reports an error, removes partial native objects, restores stock configuration and leaves
+the slot inactive. Release cleanup also runs after a failed acquisition. A release callback
+failure leaves the lease active and reports failure. Explicit pool destruction refuses
+foreign children and can clean remaining owned members after direct native destruction;
+it does not silently replenish damaged slots. Reload/unload destroys every slot and reference.
+
+The existing `SceneCommands3D::spawn` overloads accept prepared and pool handles and return
+the same checked tickets. Deferred `despawn` returns a pooled lease. Execution uses
+the phase boundaries described above. A released/reloaded resource handle makes queued requests
+fail safely; outstanding handles/tickets do not pin resources. Both resource handles are
+session/generation scoped. Releasing a prepared prefab refuses while any pool references it;
+ordinary spawned instances retain their own art after its release.
+
+`max_preloaded_prefabs` and `max_prefab_pools` default to 16 each. Reference instances and
+all pool slots count against the existing entity/prefab/scene budgets, including idle slots.
+Disabled retained particle emitters count toward configured particle budgets too.
+`runtime_prefabs()` / `runtime_entities()` count active runtime ownership;
+`reserved_entities()` includes inactive slots and preload references. `pool_stats()` exposes
+fixed capacity and reuse/exhaustion counters. Keep pool capacities small and deliberate;
+release a pool/reference to release retained storage/assets, or reload the scene.
+
+`projectile_range` explicitly prepares target/projectile art during loading, preallocates
+16 projectile slots, and resets native Projectile state on every use. Gameplay compares
+native body handles in contact events, avoiding old contacts referring to a reused ECS ID.
+The host performs this loading setup again after R reloads the scene. The regression's
+optional `kin_prefab_pool3d_tests --benchmark` compares warm path/preloaded/pooled lifecycle
+latencies over 10,000 cycles each; `KIN_POOL_PROFILE` selects a CSV output path.
+
+### Live field editing
+
+An activated session routes its loaded authored members' ordinary
+`world.components().patch_field(...)` calls through transactional live editing. Existing
+inspectors use the same component descriptors, values, diagnostics and change events.
+For a batch with cross-field invariants, use:
+
+```cpp
+auto barrel = session.entity("brass-barrel");
+const kin::SceneFieldEdit3D changes[] = {
+    {barrel, "Transform3D", "scale", kin::Vec3f{3.5f, 3.5f, 3.5f}},
+    {barrel, "ModelMaterials3D", "variant", std::string("blue")}
+};
+if (!session.edit(changes)) { /* display session.diagnostics() */ }
+```
+
+Run edits on the renderer thread between steps/collection, outside deferred/readonly
+iteration and with no prepared scene replacement. The isolated staging world contains
+only affected entities, transform descendants and transform-only ancestors. It copies
+native runtime state through the shared registry, binds models/materials/animation/
+particle textures, validates settings and scene-wide particle capacity, cooks collision
+assets and prepares replacement bodies before committing. Failed validation, missing
+assets, invalid native shapes and exhausted body capacity leave active fields, bindings,
+body handles and field events unchanged. Successful batches publish the normal field
+events and derived binding changes. Scene/world identity and generation remain stable;
+the next stock collection reflects the edits. Existing checked scene saves retain the
+new values as ordinary prefab overrides.
+
+Unchanged model handles/geometry remain shared. Particle arrays retain living particles,
+emission progress and ages; reducing a cap below the live count is rejected. Compatible
+animation state is retained by the existing binder. Ordinary rigid-body edits preserve
+pose and velocity unless pose/velocity fields were explicitly changed; parent edits
+rebuild affected descendant colliders. New physics handles replace old ones, so reacquire
+them through `bodies()->body_of(...)`. Replacement requires spare capacity while both
+shapes/bodies exist; it does not allocate another physics world or scratch pool. View
+option changes prepare a replacement target before commit and briefly overlap targets.
+
+Defaults cap a batch at 256 fields and 64 affected entities including ancestors
+(`max_edit_fields`, `max_edit_entities`), plus 64 KiB total names/string/reference text.
+Native components must support staging by copy; noncopyable types return a diagnostic.
+Existing particle/source/dependency budgets
+still apply. New watches extend the existing bounded watch map without acknowledging
+unrelated source changes; old dependencies are pruned on scene reload. The registration
+callback also runs for staging worlds, so keep it free of external side effects.
+Register all editable custom component definitions there as well.
+
+This path edits existing fields. Structural changes, controller/ragdoll/rope physics
+configuration and constrained rigid bodies still need explicit integration or scene
+reload, as do edits to disabled entities. Body replacement invalidates external physics handles/contacts; it does not
+transfer custom constraints or grip ownership. New runtime entities can call `edit`
+explicitly after binding/physics setup; their construction and prefab compilation keep
+the normal registry behavior. Direct `get_mut`, raw Flecs mutations, and component
+add/remove/reparent calls bypass the policy. Standalone ECS worlds retain their existing
+explicit binding/rebuild contract. No per-frame polling or binding pass is added;
+the synchronous edit work runs only when one of these field-edit paths is requested.
+
+`camp_walk`: **F6** applies typed size/material/particle configuration while movement,
+animation and collisions continue. The headless demo performs these changes and reports
+immediate collision replacement and preservation of living particles.
+
+### Authored material overrides and variants
+
+`ModelMaterials3D` patches a static or skinned renderer's imported materials. It uses
+`Material3D`, the existing shared texture cache and the ordinary ECS component codecs:
+
+```json
+"ModelMaterials3D": {"asset": "materials/camp.kinmaterials", "variant": "blue"}
+```
+
+Add this component to a prefab once, then override its `asset` or `variant` using the
+usual scene/prefab field overrides, inspector or Lua patches. Only these two fields
+are serialized. Runtime bindings, textures and GPU resources are excluded from saves.
+`resolve_render3d_assets` binds materials after models; tools can explicitly call
+`resolve_materials3d_assets(world, assets)` after an edit. Empty `asset` clears the
+binding. SceneSession3D coordinates loading and transactional reload automatically
+when its explicit reload methods are called.
+
+A `.kinmaterials` file has schema `kin.materials3d/1`. Its base `material` patches all
+parts, `parts` patches selected parts, and a selected named variant adds another layer:
+
+```json
+{
+  "schema": "kin.materials3d/1",
+  "material": {"roughness": 0.8},
+  "parts": [{"part": "Canvas", "material": {"double_sided": true}}],
+  "variants": {
+    "blue": {"material": {"color": [35,100,200,255], "roughness": 0.65}},
+    "wet": {"parts": [{"part": 0, "material": {"roughness": 0.2}}]}
+  }
+}
+```
+
+The application order is imported material, base global patch, base part patch,
+variant global patch, variant part patch. Omitted fields preserve earlier values;
+`false` and zero are real overrides. An empty variant name selects only the base layer.
+An unknown variant, unknown part or ambiguous part name is an error. Names must be
+unique across imported model parts; otherwise use a zero-based index in `model.parts`.
+Two rules in the same layer cannot select the same part, including a name/index alias.
+Prefer names where possible because indices follow the imported part order.
+
+Fields correspond directly to `Material3D`: sRGB byte `color` (RGB/RGBA array or
+`{r,g,b,a}` object), metallic/roughness, emissive intensity, normal_scale,
+occlusion_strength, alpha_cutoff, unlit, double_sided, casts_shadow, receives_shadow,
+wireframe, blend and wrap_u/wrap_v. Blend values are `opaque`, `alpha`, `additive`,
+`mask`; wrapping is `clamp`, `repeat`, `mirror`. Metallic, roughness, occlusion strength
+and alpha cutoff are in [0,1], emissive in [0,1e6], normal scale in [0,100]. Unknown
+fields, non-finite values, invalid enums and out-of-range values return diagnostics.
+Shaders and shader parameters remain runtime/imported values; this format does not
+compile custom shaders or implement a shader graph.
+
+Texture fields are `texture`, `normal`, `metallic_roughness`, `occlusion` and
+`emissive_texture`. A string names a path relative to the common content root, a
+`null` explicitly clears the imported map, and an object selects sampling:
+
+```json
+"texture": {"asset": "textures/canvas.png", "filter": "mipmapped"},
+"normal": "textures/canvas-normal.png",
+"metallic_roughness": null
+```
+
+Filters are `mipmapped` (default) and `nearest`. Base color/emissive maps load as sRGB;
+normal, metallic-roughness (G roughness, B metallic) and occlusion (R) maps load as
+linear data. Identical paths/roles/filters share texture handles with imported glTF
+maps and other variants. Different sampling or color-space requirements have separate
+entries. Texture paths are file paths, not percent-encoded glTF URIs. Model UVs and
+tangents must suit the maps; the importer supplies the existing tangent generation.
+
+`Assets3D::load_materials(path, model, variant, &error)` returns an existing-style
+`AssetHandle<MaterialBinding3D>`. The binding owns one material value per part and
+shared texture handles, with a weak model identity. It never clones or pins geometry.
+Bindings for the same file/model/variant share a weak cache entry; its default metadata
+budget is 128 (`Assets3D::Limits::materials`). `trim`, `clear` and `invalidate` cover
+these entries too. Source files are capped at 1 MiB before reading, with at most 128
+variants, 256 part rules per layer and 4,096 bound model parts. These limits do not cap
+total decoded texture or GPU memory; retained consumer handles own their resources.
+
+Direct drawing can pass `binding->materials` to the per-part overloads of `Scene3D::draw`
+and `draw_skinned` (after tint and object ID). A nonempty array must exactly match the
+model's part count. ECS collection uses the binding only for its original model identity;
+if a model was replaced and rebinding failed, it falls back to the new model's imported
+materials rather than applying stale part indices.
+
+Invalid material/configuration/texture replacements retain the last good binding.
+Use `assets.invalidate(changed_source)` before manual rebinding; `SceneSession3D` does
+this for watched material files and their selected texture dependencies. A material-only
+edit keeps the same model/mesh; an image edit refreshes affected material bindings and
+textures. An image also used by the imported model can require that model to be rebound
+to update its original material handles. Existing consumers stay valid throughout.
+Folders and mounted content packs use the same loaders and relative paths.
+
+Summit's authored camp uses `prefabs/camp-barrel.kinprefab` twice: the default brass
+variant and a blue variant selected by a standard prefab override. Both share one
+barrel model. The fire pit selects the ember variant from the same material asset.
+The expedition's existing imported appearance remains unchanged.
+
+### Authored particle emitters
+
+`ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,
+Lua patches and checked saves as other 3D components. It exposes the existing
+`ParticleSystem3D` descriptor. A prefab can compose emitter, model and light children.
+`prefabs/campfire.kinprefab` does this for flames, smoke, sparks and a steady light;
+both authored camp scenes instantiate it.
+
+```json
+{
+  "id": "sparks", "parent": "campfire",
+  "components": {
+    "Transform3D": {"position": [0, 0.2, 0]},
+    "ParticleEmitter3D": {
+      "seed": 23, "shape": "cone", "extent": [0.12, 0, 0],
+      "cone_angle": 25, "rate": 14, "max_particles": 48,
+      "lifetime": [0.6, 1.1], "speed": [1.1, 2], "size": [0.018, 0.035],
+      "gravity": [0, -1.5, 0], "colour_start": [5, 1.2, 0.1],
+      "colour_end": [1, 0.15, 0.02], "blend": "additive",
+      "facing": "stretched", "stretch": 0.035, "sort": false
+    }
+  }
+}
+```
+
+Ranges `lifetime`, `speed`, `size`, `rotation` and `spin` use `[min,max]` (the Vec2
+codec also accepts `{x,y}`). Colours are linear RGB, permitting HDR values.
+Shapes: `point`, `box`, `sphere`, `cone`, `disc`; blends: `alpha`, `additive`,
+`premultiplied`; facings: `camera`, `stretched`, `axis`, `flat`.
+Other field names follow the native descriptor: `surface_only`, `spread`,
+`velocity_min/max`, `drag`, `wind_influence`, `size_start/mid/end`, `alpha_start/end`,
+`fade_in`, `colour_variation`, `frames_per_life`, `frame_random`, `ground`,
+`ground_height`, `bounce`, `axis`, `stretch_min`, `atlas_columns/rows/frames`,
+`blend_frames`, `softness`, `ring`, `soft`, `soft_distance`, `lit`, `fogged`, `sort`.
+The component also exposes `seed`, `rate_scale`, `enabled` and `emitting`.
+
+Optional `texture` is an asset reference relative to the common content root;
+`texture_nearest` selects nearest sampling instead of the default mipmapped filter.
+Textures load as sRGB through `Assets3D::load_texture`, sharing its role/filter cache
+with glTF and authored materials. Empty references restore procedural particles
+after an authored binding; untouched C++ textures remain usable. Failed texture
+replacement keeps the previous texture and returns diagnostics. Rebinding preserves
+particle ages, birth progress and time. Invalidate a changed source before rebinding;
+SceneSession3D watches these textures and handles transactional reloads automatically.
+Folders and mounted packs use identical references.
+
+Live state is owned per instance, materializing inherited emitters before simulation.
+Prefab definitions are never stepped. The seed, descriptor and flags serialize;
+live particles, clocks, birth progress, bound paths and GPU handles do not. Equal
+seeds/calls give equal effects placed by their own transforms; override seeds to vary
+instances. A transactional scene reload starts fresh simulations.
+
+Set `emitting=false` to stop automatic births while existing particles finish visibly;
+`enabled=false` also hides the batch (particles continue aging). Bursts/clears use
+`entity.get_mut<ParticleEmitter3D>()->system.burst(count)` / `.clear()`. Bursts respect
+the native `max_particles` cap, including while automatic emission is stopped.
+
+`ParticleLimits3D` defaults to 128 emitters, 20,000 configured particles per emitter
+and 65,536 across the scene. The sum includes disabled/stopped emitters. Configure
+`SceneSession3DOptions::particle_limits` for the game; the campfire reserves only 208
+particles in the base prefab; the playable camp's smaller-smoke override uses 176.
+These limits bound configured simulation capacity, not decoded texture
+bytes, weather, custom C++ draws or total retained CPU/GPU allocator memory.
+
+`validate_particles3d(world, limits)` is CPU-only: it checks ranges, finite values,
+enum/atlas/axis consistency, live count versus edited capacity and aggregate budgets.
+`resolve_particles3d_assets(world, assets, limits)` validates before loading textures;
+`resolve_render3d_assets` calls it too (optional third budget argument). Direct hosts
+validate after edits and before simulation/collection. SceneSession3D checks at load,
+after game systems before stock simulation, and before collection, including runtime
+edits. Rates are bounded to representable per-step birth counts. Source limits remain
+those of the shared scene/prefab loader; simulation does no content I/O.
+
+
+## Following a player without an editor
+
+`kin/scene/camera_rig3d.hpp` provides a native `CameraRig3D`, using the existing
+`Camera3D`, checked scene handles and physics queries. Keep it in game state;
+configure it during loading. It owns two pose snapshots and two small spring-arm
+states, sharing retained sphere shapes. No input device, asset cache or world is owned.
+
+```cpp
+CameraRig3D rig{CameraRig3DSettings{
+    .target_offset={0,1.2f,0}, .arm={.distance=5,.shoulder=.35f},
+    .pitch_min=-70, .pitch_max=25, .initial_pitch=-15}};
+rig.follow(session.handle(session.entity("player"))); // after scene activation
+
+// Input: right/up motion, in degrees for this fixed step.
+rig.orbit(command.look);
+// PostPhysics: after native physics has published current WorldTransform3D.
+rig.observe(*context.world);
+auto gameplay_view=rig.fixed_frame(queries,context.dt); // optional; once per step
+
+// Render: alpha=0 previous step, alpha=1 latest; real frame seconds for recovery.
+auto view=rig.frame(session.queries(),alpha,frame_seconds);
+if(view) {
+    player.get_mut<RenderTransform3D>()->matrix=view->target_transform;
+    player.get_mut<RenderTransform3D>()->enabled=true;
+    // Apply view->camera in SceneSession3DOptions::compose after collection.
+}
+```
+
+Add the native `RenderTransform3D` component once during setup. Its `enabled` flag
+is false by default; disable it when no frame is available. It overrides world-space
+placement during collection for meshes, static/skinned model roots and point/spot
+lights. It never writes local/world simulation transforms, changes a controller,
+propagates to children, or resamples animation, IK, ropes or world-space particles.
+For attachments, set their own presentation placements. Pool reuse clears the override.
+
+The rig interpolates target translation/rotation and the shortest yaw arc, with
+clamped pitch; target offsets are world-space. Positive pitch looks up. It accepts
+positive, nondegenerate world TRS transforms; shear, reflection and invalid values
+return no frame. Scale changes beyond floating-point tolerance snap. `reset()` preserves the target and angles but
+makes the next observation snap; movement beyond `teleport_distance` does this
+automatically. Small teleports need an explicit reset. `follow()` resets on target
+changes. Destroyed targets, released pool leases and replaced scenes return no
+frame; explicitly follow the new checked handle after respawning. Old endpoints
+retain no world. Calls belong on the scene owner thread and require scene physics.
+
+The fixed-step and render views have independent arm history. Repeated rendering
+cannot alter gameplay visibility. Both sphere-sweep against the latest synchronized
+physics world, immediately compress on obstruction and recover at `ease_out` metres
+per second. Sensor/layer filters are configurable and the checked target is ignored.
+An initial overlap is reported in `frame.arm.initial_overlap`; the arm collapses,
+but this solver does not depenetrate a focus point already inside solid geometry.
+Invalid configuration retains settings/history; invalid frame times return no frame.
+`initial_yaw`/`initial_pitch` are constructor defaults; reconfiguration preserves
+current angles, clamped to the new limits.
+
+Camp demonstrates this flow in `examples/camp_walk/gameplay.hpp`: the camera follows
+the controller, the player is drawn at the matching interpolated pose, and item LOS
+uses the fixed-step view. Its host only supplies alpha/frame time and composes the
+camera. Headless captures use alpha=1. Summit shares the lower-level `SpringArm3D`
+collision solver while retaining its climbing, death camera and look-ahead policies.
+
+
+## Joint sockets and prefab attachments
+
+`kin/scene/joint_attachment3d.hpp` adds native `JointAttachment3D` state on an
+actual prefab instance's root. The scene session supplies checked target identity;
+the renderer uses the existing skeleton, animator, IK and render placement.
+No editor schema or second animation/attachment graph is introduced.
+
+```cpp
+const auto player=session.handle(session.entity("player"));
+auto lantern=session.spawn("prefabs/camp-lantern.kinprefab",{
+    .configure=[player](SceneSpawnContext3D& spawned) {
+        spawned.root.set(JointAttachment3D{player,"hand_R",
+            Mat4f::translation({0,0.02f,0})});
+    }});
+// The next session.collect()/render() updates placement and status.
+```
+
+Placement is `target render root * final model-space joint * offset * prefab root
+Transform3D`. Child meshes, static/skinned models and point/spot lights keep their
+local transforms under that root. An attachment takes precedence over
+`RenderTransform3D` on its members. The target's render override is respected, so a
+camera-interpolated character and its held item stay together. Targets use the first
+skeleton and their final animation/layer/IK/pose-override result, or rest pose before
+an animator binds. Targets with IK are solved once for attachment preparation and
+that same pose is used for drawing, without advancing animation again.
+
+This is **presentation only**. It never reparents, writes `Transform3D` or
+`WorldTransform3D`, moves a collider/body, or assumes ownership of either entity.
+Use cosmetic prefabs; physics/character/ragdoll/rope ownership and gameplay motion
+remain explicit. World-space particle simulations do not follow a render override;
+place/burst those explicitly from a game pose. Invalid attachment subtrees' particle
+batches are hidden along with their geometry/lights. Camera/environment components
+are not driven by attachments.
+
+Missing, hidden/disabled or expired targets and missing joints hide the attached
+subtree rather than leaving it at a stale position. `status()` explains the last
+collection result; `placement()` returns its successful root matrix snapshot.
+Removing the component detaches; setting `enabled=false` restores ordinary world
+placement. Despawning the target does not despawn its accessories: the game owns
+those prefab handles. Scene replacement and renewed pool leases require explicit
+rebinding. Returning an attachment to a prefab pool clears its binding/cache.
+
+`configure(target,joint,offset)` validates a nonempty joint name of at most 95 bytes
+and a finite affine offset; failure retains the previous binding. Bind only actual
+instances, not prefab definitions. Joint indices are resolved once per immutable
+model identity; a weak model cache detects replacement without retaining old art.
+Changing a skeleton in place requires rebinding. The same bounded ancestor-chain
+math is used without copying a complete pose per attachment. Warm collection reuses
+existing scene/animator storage.
+
+At most `max_joint_attachments3d` (64) enabled roots are prepared per collection;
+excess roots fail closed with `LimitExceeded`. This bounds preparation state and
+unique-target scratch, not the world's total entity count or draw submissions.
+Hierarchy traversal is capped at 64 ancestors. Binding to a target that is itself
+attached (or inside an attached subtree) is unsupported, preventing recursive socket
+cycles. Nearest attachment roots control their subtrees. A root must have a
+`Transform3D`; targets need an owned runtime animator when one is present and a
+visible `SkinnedMeshRenderer`. Use `WorldRenderState3D(EcsWorld&)`, as SceneSession3D
+does, so checked scene targets resolve through the owning registry. The raw Flecs
+constructor has no checked scene registry and returns `MissingTarget` for bindings.
+
+Camp carries a lantern assembled from the existing bottle/box assets, with a small
+material override and warm point light. It adds one cosmetic prefab/four entities,
+uses `hand_R`, shares the loaded meshes/textures, and creates no collision bodies.
+
+## Timed 3D animation events
+
+Author markers alongside the existing machine, blends and IK in `.kinanimator`:
+
+```json
+"events": [
+  {"clip": "Walk", "markers": [
+    {"phase": 0.25, "channel": "game", "name": "footstep", "value": "right"},
+    {"phase": 0.75, "channel": "game", "name": "footstep", "value": "left"}
+  ]}
+]
+```
+
+`phase` is normalized clip time in `[0,1)`, independent of clip duration. Markers
+use the same `AnimationEvent` channel/name/value payload and `EventInterpreter`
+handlers as `kin/anim`. Imported models stay immutable; each animator shares its
+configuration's marker table. Native code can assign
+`std::shared_ptr<const AnimationEventTracks3D>` to `Animator3D::event_tracks`.
+There is no hidden asset I/O during playback.
+
+`SceneSession3D::step` emits at its Animation boundary. Consume in an Audio-phase
+system, which runs immediately afterwards even with no rendering:
+
+```cpp
+AnimationEventDispatch events;
+events.on("game", [](EcsEntity actor, const AnimationEvent& event) {
+    if (event.name == "footstep") { /* use this step's controller/world pose */ }
+});
+// Inside an Audio-phase task, after inspecting overflow counters:
+const u32 unhandled = dispatch_animation_events3d(world, events);
+```
+
+`dispatch_animation_events3d` drains each animator once, passes the animated
+entity to the existing handler, and discards unhandled channels. Calling it again
+before the next animation step emits nothing. It does not touch the general
+`AnimationEventQueue`, whose existing retention contract is unchanged. The 2D
+`AnimationEvent::target/offset` fields are not resolved by this bridge; authorable
+3D markers accept channel/name/value only. Direct dispatch to an already resolved
+entity is also available as `AnimationEventDispatch::dispatch`.
+
+The incoming base owns events immediately when a crossfade starts, including an
+interrupted fade. In a 1D blend, the dominant clip owns the entire step (the upper
+clip wins an exact 50/50 tie), at the shared phase and blended duration. Changing
+the blend parameter does not replay earlier markers. Outgoing clips and ordinary pose
+layers are silent; the dedicated action slot below has explicit marker ownership. Align contact phases across walk/run clips for smooth
+locomotion. One-shot action events use the dedicated action slot described below.
+
+Forward intervals are `(before,after]`; reverse-speed playback uses
+`[after,before)`. Loops cross phase zero normally. Play/restart and `set_time` do
+not emit markers at the initial time or replay skipped intervals. Non-looping
+clips stop emitting at their endpoint. Zero dt emits nothing but still samples
+the pose; negative/nonfinite dt clears output without advancing. Playback uses
+float clocks, as pose sampling does.
+
+Each `Animator3D::events` holds the earliest **16** crossings of its latest step
+in playback order. A larger step counts additional crossings analytically,
+without iterating over its loop count; `dropped` saturates at `UINT32_MAX`.
+Inspect `events.dropped` before dispatch, which clears the batch. Undrained output
+is replaced on the next step, including when paused or missing a model. Asset
+reload clears old references; invalid replacements retain the last good table
+and player. Assets allow at most 64 distinct clip tracks and 256 markers total,
+with bounded strings and the existing 1 MiB configuration ceiling.
+
+Standalone players use `update(dt, tracks, batch)`; the batch borrows pointers
+into `tracks`, which must remain alive and unchanged until consumed. ECS batches
+retain their actual source table until drained or replaced,
+including when native code replaces `event_tracks` before dispatch. The bridge
+keeps it alive through callbacks. The batch now occupies 280 bytes on this build (including action ownership tokens),
+plus a 16-byte shared marker table reference per animator; marker
+strings live once per configuration. Crossing collection itself needs no heap
+allocation; the surrounding pose/blend and callback code has its own costs.
+
+Camp demonstrates grounded movement events with three dust particles per footstep,
+a 24-particle emitter, one 0.1-second synthesized mono sound, and eight sound
+voices. Dust/sound positions use the fixed-step controller's feet and facing,
+not render-only sockets or interpolated placement. They approximate foot contact;
+the sample phases 0.25/0.75 were chosen from the bundled clips' lowest foot
+heights. Markers can be retimed in content without changing game code. Camp reports
+event,
+overflow, unhandled-channel and audio-request counts. Idle and airborne movement
+produce no footstep effects.
+
+## One-shot character actions
+
+`Animator3D` has one bounded action slot over its normal locomotion and pose
+layers, before IK. Definitions live in the same `.kinanimator` configuration:
+
+```json
+"actions": [
+  {"name": "pickup", "clip": "Pickup", "mask_joint": "spine",
+   "fade_in": 0.06, "fade_out": 0.08, "base_events": true}
+],
+"events": [
+  {"clip": "Pickup", "source": "action", "markers": [
+    {"phase": 0.4, "channel": "game", "name": "pickup_contact"}
+  ]}
+]
+```
+
+Start during a fixed-step game system, after assets resolve (including before the
+first animation update):
+
+```cpp
+const auto token = play_action3d(hero, "pickup"); // zero if busy/unknown/invalid
+// Explicit restart or interruption by another action:
+const auto next = play_action3d(hero, "pickup", ActionStart3D::Replace);
+// A matching current token is required; the default uses its authored fade-out.
+cancel_action3d(hero, next);
+const auto status = action_status3d(hero, next);
+```
+
+`IfIdle` rejects while an action plays or fades out; no requests accumulate.
+`Replace` cuts the previous action and fades the new one from the underlying
+locomotion/layers. Replacement does not retain a frozen pose of the prior action.
+The base and its root motion continue. Actions are in-place: no action root motion
+is moved onto the physics/controller entity. Use an empty mask name for all joints,
+or a subtree with optional `include_root: false`. Action weight is `(0,1]`, speed
+is positive, fades are finite nonnegative seconds; assets bound speed to
+`[0.001,1000]` and fade lengths to 3600 seconds. `additive: true` adds the change
+from the action's first frame using the existing additive-pose implementation.
+
+`Playing` advances the clip once; at its end `Finishing` holds its last pose and
+fades back to the underlying pose, then becomes `Completed`. Large steps consume
+the remaining clip time and fade time in one update. Cancellation holds the current
+action pose while fading out and revokes markers immediately; status remains
+`Cancelled` afterwards. A second cancel does not restart the fade. Passing zero
+fade time stops immediately. Cancelling a completed current token can still revoke
+undelivered markers from that update; already handled game effects are not undone.
+Pausing `Animator3D::playing` pauses all animation; changing its base `speed` does
+not change the action's independently authored speed.
+
+Tokens are opaque process-local playback identities, not entity handles, save data
+or network IDs. Retain the actor's checked `SceneEntity3D` separately. Only the most
+recent action result is retained: a replaced, reloaded or restored player's older
+tokens report `Superseded`; an invalid token reports `None`. Rebinding/removing a
+model cancels the current action, including an already cancelling fade. Tokens
+are not recycled by new play requests, including across actors and pooled reuse.
+Native snapshots/copies still require the owning entity handle to identify the
+actor. Define native actions with a shared `CharacterActions3D` table assigned to
+`Animator3D::actions`; standalone players expose equivalent `play_action`,
+`cancel_action`, `action_status`, `action_busy`, `action_time` and `action_weight`.
+
+Marker tracks accept `source: "base"` (the backward-compatible default),
+`"action"`, or `"both"`. Use action-only tracks for contact/gameplay effects.
+Normal pose layers remain silent. Masked actions can keep locomotion footsteps
+with `base_events: true`; false suppresses base events for every step in which the
+action slot is busy, including its exit fade. Action and base crossings share the
+same **16-event** cap, ordered by time within the step; base wins exact ties.
+Overflow still counts all dropped crossings. Native consumers can inspect
+`AnimationEventBatch3D::actions[i]`: zero means base, otherwise the owning token.
+Before dispatching a copied action occurrence, check `action_event_valid(token)`.
+`dispatch_animation_events3d` does this automatically before each callback, so a
+cancel/restart inside a handler suppresses later events from the old playback in
+that same batch. Final contact markers remain valid when a large step naturally
+completes the action before dispatch.
+
+There are at most 32 authored definitions; names/clip/joint strings are capped at
+95 bytes. Definitions and marker strings are shared. There is one reusable subtree
+mask per player's action, bounded by its validated skeleton size; `PoseMask::set_subtree`
+reuses its storage. Playback creates no private model, clip, pose history, action
+queue or completion queue. The current 64-bit build uses an 88-byte inline action
+state in the player and 128 extra bytes per event batch for token ownership, plus
+one shared definition reference per animator. The first use of a mask may allocate
+its joint weights; warmed play/restart/update needs no extra C++ allocation for
+this state. Ordinary blend/IK/handlers retain their own costs.
+
+Camp demonstrates an authored left-hand reach over locomotion. The small glTF
+Pickup clip is added by `tools/assets/add_summit_pickup.py`; its original mesh,
+texture, rig and prior animations are preserved. The button selects and locks a
+checked supply handle. The contact marker rechecks that same handle, grounded
+state, reach, visibility from player and fixed camera, and query saturation. A
+valid contact submits a checked scene despawn; the game awards supplies only once
+that command succeeds at the late boundary. Movement out of reach, new obstacles,
+despawn, jump, action replacement and scene restart cannot award a stale pickup.
+The award runs in the following Animation phase; extra rendering never advances
+an action or completes an interaction.
+
+## Native 3D interactions
+
+`<kin/scene/interaction3d.hpp>` shares target discovery and contact validation over
+`SceneQueries3D`. Games supply a read-only callback returning an optional
+`InteractionOffer3D`: a current world-space contact point and a nonzero native
+verb ID. Return no offer for objects the actor cannot currently use. Game code
+maps IDs to prompts, input, animations and effects; no inspector registration or
+central ability registry is required.
+
+```cpp
+constexpr InteractionVerb3D Collect = 1;
+// Construct once; retains one sphere, never a candidate vector.
+InteractionQuery3D interactions{{.reach=1.25f,
+    .candidates=layer_bit(layers3d::Sensor),
+    .candidate_sensors=true,.sight_sensors=true}};
+std::array<SceneOverlapHit3D,8> candidates;
+InteractionObserver3D observer{queries.handle(player), hand_position, camera_position};
+auto describe = [](EcsEntity entity) -> std::optional<InteractionOffer3D> {
+    if (!entity.has<MySupply>() || !entity.has<WorldTransform3D>()) return {};
+    return InteractionOffer3D{
+        entity.get<WorldTransform3D>()->matrix.apply({}) + Vec3f{0,.3f,0}, Collect};
+};
+auto selected = interactions.select(queries, observer, candidates, describe);
+if (selected) {
+    // Store alongside the actor's existing ActionToken3D when input starts use.
+    InteractionFocus3D locked = selected.focus;
+    // At contact: rebuild observer from the current fixed-step actor/camera pose,
+    // check the owning action token, and rerun current game eligibility.
+    auto contact = interactions.revalidate(queries, observer, locked, describe);
+    if (contact) { /* game callback submits its checked scene command */ }
+}
+```
+
+`select` checks native body identity, applies game eligibility, limits the contact
+point by reach and requires the first ray hit to be the candidate. An optional
+view adds a second independent sight ray; all actor bodies are ignored. Sensors
+and masks are separate for discovery and sight. Unknown native obstacles block
+sight. Exact distance ties choose the lower entity ID. Offers use world-space
+points: adding an offset after transforming the origin avoids scaling a hand
+height by the model's asset scale.
+
+Results distinguish `Ready`, `NoTarget`, `Overflow`, `Unavailable` and
+`InvalidObserver`. Saturated caller storage (including zero capacity) returns
+`Overflow` with no focus, before invoking eligibility callbacks. Callback work
+must be read-only and synchronous; the utility retains neither it nor its offers.
+Discovery requires the body's geometry to overlap the reach sphere as well as
+the contact point to be in range. Candidate masks apply only during discovery;
+`revalidate` reruns game policy directly on the original checked target and verb,
+so policy must enforce current eligibility. A changed verb, destroyed/recycled
+lease, old scene, invalid actor/point or failed sight/range check rejects contact.
+Revalidation never substitutes a newly nearest object. It does not require the
+old native body to persist: a current rebuilt body on the same live entity can
+still be usable if the current policy and sight checks pass.
+
+Settings are immutable after construction; invalid nonpositive/nonfinite reach
+throws. Set `require_sight=false` for pure proximity interactions. Otherwise a
+zero-length sight line fails closed because it cannot prove a first target hit.
+Run on the scene owner thread after physics synchronization. As with scene
+queries, no implicit synchronization, simulation or world ownership occurs.
+The utility does not own action tokens or effects. Check the actor's action token
+before contact, apply game conditions such as grounded state, and award only
+successful deferred scene commands. Keep overflow policy explicit when a game's
+ongoing interaction also depends on that step's discovery results.
+
+Camp uses this API for bounded supply discovery, marker-time checked pickup
+contact and direct known-target crate pushing. Its native verbs map to keyboard
+and gamepad prompts. Game inventory, impulses, action cancellation and command
+acknowledgement remain ordinary C++ systems. The utility itself performs no
+per-call C++ allocations after warm-up; game callbacks can impose their own costs.

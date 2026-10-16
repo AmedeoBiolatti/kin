@@ -20,6 +20,7 @@
 // and facing use std::sin and std::atan2, so cross-platform equality is Jolt's claim and not this file's.
 
 #include "level.hpp"
+#include "props.hpp"
 
 #include <kin/core/rng.hpp>
 #include <kin/physics3d/world3d.hpp>
@@ -97,6 +98,18 @@ enum class PlayerState : u8 {
     Dead,      // a ragdoll until it respawns
 };
 
+enum class ExpeditionPhase : u8 { Briefing, Climbing, Extraction, Complete };
+enum class ExpeditionInteraction : u8 { None, Begin, Beacon, Extract, Recover };
+inline constexpr i32 beacon_hold_steps = 120;
+inline constexpr i32 extraction_hold_steps = 60;
+
+struct ExpeditionState {
+    ExpeditionPhase phase = ExpeditionPhase::Briefing;
+    i32 start_step = -1, finish_step = -1;
+    i32 beacon_steps = 0, extraction_steps = 0;
+    bool shelter_visited = false;
+};
+
 struct Player {
     Character3D character{};
     RagdollHandle3D ragdoll{};
@@ -118,6 +131,7 @@ struct Player {
     bool pull_up_sent = false;  // the level sent last step (an edge is made by alternating it)
     f32 last_stamina_cap = 0.0f;
     PlayerCommand command{};    // the last one read
+    ExpeditionState expedition;
 };
 
 // Wind as state (nothing in the simulation depends on it yet: P4b's sound and snow read it).
@@ -144,6 +158,9 @@ enum class GameEventKind : u8 {
     Summit,
     Hurt,       // value: health lost
     PullUpBlocked, // value: why (MantleBlock3D: 0 no ledge, 1 no room, 2 tired)
+    ExpeditionStarted,
+    ShelterReached,
+    BeaconActivated,
 };
 
 struct GameEvent {
@@ -161,7 +178,13 @@ struct GameConfig {
     bool single_threaded = true;
     // Player i starts this far to the side of the camp, so that two do not share a place.
     f32 spawn_spacing = 1.2f;
+    bool expedition = false;
+    bool dense_scenery = false;
 };
+
+// A decor chunk's collider: the convex hull of its mesh's vertices, in the body's own space (origin at the chunk's centre, turned
+// with its rotation). Invalid only for a degenerate chunk.
+Shape3D decor_shape(const SummitLevel& level, const DecorChunk& chunk);
 
 class Game {
 public:
@@ -212,6 +235,11 @@ public:
     f32 altitude(i32 player) const;
     // The body of piece `i` and of the rope's `i`-th segment, for the view.
     Body3D piece_body(std::size_t i) const { return _piece_bodies[i]; }
+    // The decor chunks (decor_chunks(level)) and the static body of each, in the list's order. User id = pieces + 1 + index.
+    std::span<const DecorChunk> decor() const { return _decor; }
+    Body3D decor_body(std::size_t i) const { return _decor_bodies[i]; }
+    std::span<const PropPlacement> props() const { return _props; }
+    Body3D prop_body(std::size_t i) const { return _prop_bodies[i]; }
     std::span<const RopeHandle3D> ropes() const { return _ropes; }
     // The ragdoll's bones as the pose writer needs them (empty while it is animated).
     void ragdoll_pose(i32 player, std::vector<RagdollBonePose3D>& out) const;
@@ -219,12 +247,14 @@ public:
     std::span<const i32> ragdoll_joints() const { return _ragdoll_joints; }
     u32 skeleton_joints() const { return _skeleton_joints; }
     const std::vector<std::string>& skeleton_names() const { return _skeleton_names; }
+    ExpeditionInteraction interaction(i32 player = 0) const;
 
 private:
     struct Impl;
     void build();
     void step_player(i32 index, const PlayerCommand& command);
     void after_player(i32 index);
+    void step_expedition(i32 index);
     void begin_stun(i32 index, Vec3f velocity, bool dead);
     bool try_get_up(i32 index);
     void respawn(i32 index);
@@ -236,6 +266,10 @@ private:
     GameConfig _config;
     std::unique_ptr<World3D> _world;
     std::vector<Body3D> _piece_bodies;
+    std::vector<PropPlacement> _props;
+    std::vector<Body3D> _prop_bodies;
+    std::vector<DecorChunk> _decor;
+    std::vector<Body3D> _decor_bodies;
     std::vector<RopeHandle3D> _ropes;
     std::vector<Player> _players;
     RngKey _rng{};

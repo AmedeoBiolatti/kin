@@ -29,6 +29,7 @@
 #include <kin/render3d/skeleton.hpp>
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,17 @@
 namespace kin {
 
 class Renderer3D;
+
+enum class ModelPivot3D { Origin, Center, BottomCenter };
+struct ModelPlacement3D {
+    Vec3f position{};
+    Quatf rotation{};
+    Vec3f scale{1, 1, 1};
+    ModelPivot3D pivot = ModelPivot3D::Origin;
+    // Positive: fit the longest model-bounds dimension to this size before
+    // applying scale. Zero: keep authored units. Negative/non-finite is invalid.
+    f32 size = 0;
+};
 
 struct ModelPart {
     std::string name; // the glTF node's, or its mesh's
@@ -76,8 +88,47 @@ public:
     // The first clip called `name` for skeleton `skeleton`, or null.
     const AnimClip3D* find_clip(std::string_view name, u32 skeleton = 0) const;
 
+    // Place the chosen model-space pivot at position, retaining all glTF part
+    // transforms. A positive size requires finite, non-degenerate bounds.
+    // Throws invalid_argument for invalid size/bounds or non-finite transforms.
+    Mat4f placement(const ModelPlacement3D& options = {}) const;
+
     bool valid() const { return !parts.empty(); }
     explicit operator bool() const { return valid(); }
+
+    // Loader provenance for explicit reload/diagnostics; no source bytes or
+    // CPU geometry retained. Empty for programmatically constructed models.
+    std::vector<std::filesystem::path> source_files;
+    std::vector<std::string> asset_diagnostics;
+};
+
+struct ModelBatchOptions3D {
+    // World-space cell size. Zero: per-copy culling, no spatial groups.
+    // Positive: group by the model transforms' world origins. Negative/non-finite is invalid.
+    f32 cell_size = 16;
+    // Optional replacement for all parts' materials; per-copy tints/IDs remain.
+    std::optional<Material3D> material;
+};
+
+// Static copies of an entire model. Part transforms/materials and spatial
+// grouping are expanded once; scene.draw_instanced(batch) retains only handles
+// each frame. Cheap copies share the InstanceBatch3D records. The source Model
+// and input span need not outlive construction. Skinned models are rejected:
+// animated characters use draw_skinned or the ECS Animator3D bridge.
+class ModelBatch3D {
+public:
+    struct Part { InstanceBatch3D instances; Material3D material; };
+    ModelBatch3D() = default;
+    ModelBatch3D(const Model& model, std::span<const MeshInstance> instances, const ModelBatchOptions3D& options = {});
+    explicit operator bool() const { return !_parts.empty(); }
+    std::span<const Part> parts() const { return _parts; }
+    u32 instance_count() const { return _instances; }
+    u64 triangle_count() const { return _triangles; }
+    u64 record_bytes() const { return _record_bytes; }
+private:
+    std::vector<Part> _parts;
+    u32 _instances = 0;
+    u64 _triangles = 0, _record_bytes = 0;
 };
 
 // Reads the geometry, skins and animations of a glTF (.gltf with embedded buffers, or .glb) held in `bytes`; the files its

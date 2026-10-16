@@ -1,0 +1,10 @@
+{
+  "schema": "kin.prefab/1", "id": "range-projectile", "root": "projectile",
+  "entities": [{"id": "projectile", "components": {
+    "Transform3D": {"scale": [0.8, 0.8, 0.8]},
+    "ModelRenderer3D": {"asset": "kenney-survival/rock-a.glb"},
+    "Collider3D": {"kind": "sphere", "radius": 0.12},
+    "RigidBody3D": {"motion": "dynamic", "sensor": true, "gravity_factor": 0, "linear_velocity": [5, 0, 0], "allow_sleeping": false},
+    "PointLight3D": {"color": [0.1, 1.2, 0.3], "radius": 0.6}
+  }}]
+}

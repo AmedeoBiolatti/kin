@@ -272,6 +272,9 @@ function on_load(scene)
         local stats = entity:get("Stats")
         entity:patch("Stats", { hp = stats.hp + 3 })
     end)
+    assert(scene:count("Stats") == 1)
+    assert(#scene:with("Stats") == 1)
+    assert(scene:count("Stats", "MissingComponent") == 0)
 end
 )lua");
 

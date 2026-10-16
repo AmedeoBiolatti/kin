@@ -12,6 +12,8 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <list>
+#include "prefab_asset_json.hpp"
 
 namespace kin {
 namespace {
@@ -37,6 +39,8 @@ struct CompiledPrefab {
     EcsEntity root;
     std::vector<CompiledPrefabEntity> entities;
     std::unordered_map<std::string, EcsEntity> by_id;
+    EcsEntity scope;
+    std::shared_ptr<const SceneDocument> defaults;
 };
 
 class PrefabCompiler {
@@ -48,12 +52,19 @@ public:
         std::ostringstream serialized;
         write_prefab_asset(serialized, prefab);
         const std::string signature = serialized.str();
-        if (const auto found = _compiled.find(prefab.id);
-            found != _compiled.end() && found->second.signature == signature) {
-            return &found->second.prefab;
+        for(const auto& entry:_compiled)if(entry.signature==signature)return &entry.prefab;
+        // Keep generations referenced by live instances. Reclaim unused ones
+        // before compiling, with a fixed world-local metadata/template budget.
+        for(auto it=_compiled.begin();it!=_compiled.end();) {
+            bool used=false;
+            for(const auto& e:it->prefab.entities)if(e.prefab_entity&&world.raw().query_builder<>().with(flecs::IsA,e.prefab_entity.id()).build().count()){used=true;break;}
+            if(used)++it;else{destroy_template(it->prefab);it=_compiled.erase(it);}
         }
+        if(_compiled.size()>=128){diagnostics.push_back("world exceeds 128 live compiled prefab definitions/structural variants");return nullptr;}
 
         CompiledPrefab compiled{.generation = _next_generation++};
+        const auto scope="kin::prefab::"+prefab.id+"#"+std::to_string(compiled.generation);
+        compiled.scope=EcsEntity{world.raw().entity(scope.c_str())};
 
         for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
             const std::string name = "kin::prefab::" + prefab.id + "#" +
@@ -80,14 +91,13 @@ public:
                 }
             }
         }
-        if (auto found = _compiled.find(prefab.id); found != _compiled.end()) {
-            destroy_template(found->second.prefab);
-            _compiled.erase(found);
-        }
-        auto [stored, inserted] = _compiled.emplace(
-            prefab.id, CachedPrefab{.signature = signature, .prefab = std::move(compiled)});
-        (void)inserted;
-        return &stored->second.prefab;
+        auto defaults=std::make_shared<SceneDocument>();
+        for(const auto& e:prefab.entities){SceneEntityDocument entity{.id=e.id,.name=e.name.empty()?e.id:e.name,.parent=e.parent};
+            for(const auto& c:e.components)if(auto value=components.snapshot(compiled.by_id.at(e.id),c.name))entity.components.push_back({c.name,value->fields});
+            defaults->entities.push_back(std::move(entity));}
+        compiled.defaults=std::move(defaults);
+        _compiled.push_back({signature,std::move(compiled)});
+        return &_compiled.back().prefab;
     }
 
 private:
@@ -98,6 +108,7 @@ private:
                 entity.destroy();
             }
         }
+        if(compiled.scope){auto scope=compiled.scope;scope.destroy();}
     }
 
     struct CachedPrefab {
@@ -106,7 +117,7 @@ private:
     };
 
     u64 _next_generation = 1;
-    std::unordered_map<std::string, CachedPrefab> _compiled;
+    std::list<CachedPrefab> _compiled;
 };
 
 PrefabCompiler& prefab_compiler(EcsWorld& world) {
@@ -138,40 +149,6 @@ const PrefabComponentAsset* find_component(const std::vector<PrefabComponentAsse
     });
     return found == components.end() ? nullptr : &*found;
 }
-
-ComponentFieldKind field_kind_from_value(const ComponentFieldValue& value) {
-    return std::visit([](const auto& typed) {
-        using T = std::decay_t<decltype(typed)>;
-        if constexpr (std::is_same_v<T, bool>) {
-            return ComponentFieldKind::Bool;
-        } else if constexpr (std::is_same_v<T, i32>) {
-            return ComponentFieldKind::I32;
-        } else if constexpr (std::is_same_v<T, i64>) {
-            return ComponentFieldKind::I64;
-        } else if constexpr (std::is_same_v<T, u32>) {
-            return ComponentFieldKind::U32;
-        } else if constexpr (std::is_same_v<T, u64>) {
-            return ComponentFieldKind::U64;
-        } else if constexpr (std::is_same_v<T, f32>) {
-            return ComponentFieldKind::F32;
-        } else if constexpr (std::is_same_v<T, f64>) {
-            return ComponentFieldKind::F64;
-        } else if constexpr (std::is_same_v<T, std::string>) {
-            return ComponentFieldKind::String;
-        } else if constexpr (std::is_same_v<T, Vec2f>) {
-            return ComponentFieldKind::Vec2f;
-        } else if constexpr (std::is_same_v<T, Vec2i>) {
-            return ComponentFieldKind::Vec2i;
-        } else if constexpr (std::is_same_v<T, Color>) {
-            return ComponentFieldKind::Color;
-        } else if constexpr (std::is_same_v<T, ComponentEntityRef>) {
-            return ComponentFieldKind::EntityRef;
-        } else {
-            return ComponentFieldKind::AssetRef;
-        }
-    }, value);
-}
-
 std::string runtime_authored_id(const PrefabSpawn& spawn, std::string_view prefab_entity_id) {
     if (spawn.authored_id_prefix.empty()) {
         return {};
@@ -229,6 +206,10 @@ PrefabAsset parse_prefab_object(const JsonValue& root,
             }
         }
         prefab.entities.push_back(std::move(entity));
+    }
+    if(auto* refs=root.find("prefabs")) {
+        if(!refs->is_array())diagnostics.push_back("prefab prefabs must be an array");
+        else for(const auto& ref:refs->items())prefab.prefabs.push_back(prefab_json::reference(ref,components,diagnostics));
     }
     return prefab;
 }
@@ -424,11 +405,7 @@ bool set_runtime_name(EcsWorld& world, EcsEntity entity, std::string_view name) 
 
 PrefabLoadResult load_prefab_asset(const std::filesystem::path& path,
                                    const EcsComponentRegistry& components) {
-    const std::optional<std::string> text = read_content_text(path);
-    if (!text) {
-        return {.diagnostics = {"failed to open prefab '" + path.string() + "'"}};
-    }
-    return parse_prefab_asset(*text, components, path.string());
+    return load_prefab_asset(path,components,{});
 }
 
 PrefabLoadResult parse_prefab_asset(std::string_view text,
@@ -489,6 +466,7 @@ void write_prefab_asset(std::ostream& out, const PrefabAsset& prefab) {
         json.end_object();
     }
     json.end_array();
+    if(!prefab.prefabs.empty()){json.key("prefabs").begin_array();for(const auto& ref:prefab.prefabs)prefab_json::write_reference(json,ref);json.end_array();}
     json.end_object();
     out << '\n';
 }
@@ -520,9 +498,13 @@ std::vector<std::string> validate_prefab_asset(const PrefabAsset& prefab,
     if (!prefab.root.empty() && !ids.contains(prefab.root)) {
         diagnostics.push_back("prefab root '" + prefab.root + "' does not exist");
     }
+    for(const auto& ref:prefab.prefabs){
+        if(ref.id.empty()||ref.asset.empty()||!ids.insert(ref.id).second)diagnostics.push_back("invalid/duplicate prefab composition reference '"+ref.id+"'");
+    }
+    const auto known=[&](const std::string& id){if(ids.contains(id))return true;for(const auto& ref:prefab.prefabs)if(id.starts_with(ref.id+"/"))return true;return false;};
 
     for (const PrefabEntityAsset& entity : prefab.entities) {
-        if (!entity.parent.empty() && !ids.contains(entity.parent)) {
+        if (!entity.parent.empty() && !known(entity.parent)) {
             diagnostics.push_back("entity '" + entity.id + "' parent '" + entity.parent + "' does not exist");
         }
         if (entity.id == prefab.root && !entity.parent.empty()) {
@@ -534,22 +516,14 @@ std::vector<std::string> validate_prefab_asset(const PrefabAsset& prefab,
         std::vector<std::string> component_diagnostics = validate_components(entity.id, entity.components, components);
         diagnostics.insert(diagnostics.end(), component_diagnostics.begin(), component_diagnostics.end());
     }
+    for(const auto& ref:prefab.prefabs)if(!ref.parent.empty()&&!known(ref.parent))diagnostics.push_back("composed prefab parent does not exist: '"+ref.parent+"'");
     return diagnostics;
 }
 
 std::vector<std::string> validate_prefab_overrides(const PrefabAsset& prefab,
                                                    const PrefabOverrideSet& overrides,
                                                    const EcsComponentRegistry& components) {
-    std::vector<std::string> diagnostics;
-    for (const auto& [entity_id, component_overrides] : overrides.entities) {
-        if (!find_entity(prefab, entity_id)) {
-            diagnostics.push_back("override references unknown entity '" + entity_id + "'");
-            continue;
-        }
-        std::vector<std::string> component_diagnostics = validate_components(entity_id, component_overrides, components);
-        diagnostics.insert(diagnostics.end(), component_diagnostics.begin(), component_diagnostics.end());
-    }
-    return diagnostics;
+    return apply_prefab_overrides(prefab,overrides,components).diagnostics;
 }
 
 PrefabBuildResult prefab_asset_from_scene_document(const SceneDocument& document,
@@ -605,7 +579,8 @@ PrefabBuildResult prefab_asset_from_scene_document(const SceneDocument& document
     return {.prefab = std::move(prefab)};
 }
 
-SceneDocument scene_document_from_prefab_asset(const PrefabAsset& prefab) {
+SceneDocument scene_document_from_prefab_asset(const PrefabAsset& source) {
+    const auto& prefab=resolved_prefab_asset(source);
     SceneDocument document;
     document.entities.reserve(prefab.entities.size());
     for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
@@ -623,7 +598,7 @@ SceneDocument scene_document_from_prefab_asset(const PrefabAsset& prefab) {
             for (const PrefabFieldAsset& prefab_field : prefab_component.fields) {
                 scene_component.fields.push_back({
                     .name = prefab_field.name,
-                    .kind = field_kind_from_value(prefab_field.value),
+                    .kind = component_field_kind_from_value(prefab_field.value),
                     .value = prefab_field.value,
                 });
             }
@@ -635,13 +610,17 @@ SceneDocument scene_document_from_prefab_asset(const PrefabAsset& prefab) {
 }
 
 PrefabInstance instantiate_prefab(EcsWorld& world,
-                                  const PrefabAsset& prefab,
+                                  const PrefabAsset& source,
                                   const PrefabSpawn& spawn,
                                   EcsComponentRegistry& components,
                                   const PrefabOverrideSet& overrides) {
     PrefabInstance instance;
+    const auto& original=resolved_prefab_asset(source);
+    auto edited=apply_prefab_overrides(original,overrides,components,false);
+    if(!edited.ok()){instance.diagnostics=std::move(edited.diagnostics);return instance;}
+    const auto& prefab=*edited.prefab;
     instance.diagnostics = validate_prefab_asset(prefab, components);
-    std::vector<std::string> override_diagnostics = validate_prefab_overrides(prefab, overrides, components);
+    std::vector<std::string> override_diagnostics = validate_prefab_overrides(original, overrides, components);
     instance.diagnostics.insert(instance.diagnostics.end(), override_diagnostics.begin(), override_diagnostics.end());
     if (!spawn.authored_id_prefix.empty()) {
         for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
@@ -655,7 +634,10 @@ PrefabInstance instantiate_prefab(EcsWorld& world,
         return instance;
     }
 
-    const CompiledPrefab* compiled = prefab_compiler(world).compile(world, prefab, components, instance.diagnostics);
+    auto* baseline=prefab_compiler(world).compile(world,original,components,instance.diagnostics);
+    if(!baseline)return instance;
+    instance.source=baseline->defaults;
+    const CompiledPrefab* compiled = overrides.structural()?prefab_compiler(world).compile(world, prefab, components, instance.diagnostics):baseline;
     if (!compiled) {
         if (instance.diagnostics.empty()) {
             instance.diagnostics.push_back("failed to compile prefab backend for '" + prefab.id + "'");

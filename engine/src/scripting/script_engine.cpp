@@ -105,6 +105,7 @@ struct ScriptComponentFilter {
     ScriptComponentKind kind = ScriptComponentKind::Unknown;
     const ScriptComponentRegistry::ComponentEntry* custom = nullptr;
     std::string metadata_name;
+    ComponentId metadata_id = 0;
 };
 
 struct ScriptSystemAccessContext {
@@ -154,7 +155,7 @@ bool has_component(const EcsEntity& entity, const ScriptComponentFilter& filter)
         return filter.custom->has(entity);
     }
     if (!filter.metadata_name.empty()) {
-        return filter.kind == ScriptComponentKind::Unknown;
+        return entity.raw().has(filter.metadata_id);
     }
     return has_component(entity, filter.kind);
 }
@@ -236,6 +237,11 @@ sol::object component_value_to_lua(sol::this_state state, const ComponentFieldVa
             result["x"] = typed.x;
             result["y"] = typed.y;
             return result;
+        } else if constexpr (std::is_same_v<T, Vec3f> || std::is_same_v<T, Quatf>) {
+            sol::table result = lua.create_table();
+            result["x"] = typed.x; result["y"] = typed.y; result["z"] = typed.z;
+            if constexpr (std::is_same_v<T, Quatf>) result["w"] = typed.w;
+            return result;
         } else if constexpr (std::is_same_v<T, Vec2i>) {
             sol::table result = lua.create_table();
             result["x"] = typed.x;
@@ -297,6 +303,16 @@ std::optional<ComponentFieldValue> component_value_from_lua(ComponentFieldKind k
         if (object.get_type() == sol::type::table) {
             sol::table table = object.as<sol::table>();
             return ComponentFieldValue{Vec2i{table.get_or("x", 0), table.get_or("y", 0)}};
+        }
+        break;
+    case ComponentFieldKind::Vec3f:
+    case ComponentFieldKind::Quatf:
+        if (object.get_type() == sol::type::table) {
+            sol::table table = object.as<sol::table>();
+            ComponentFieldValue value = kind == ComponentFieldKind::Vec3f
+                ? ComponentFieldValue{Vec3f{table.get_or("x", 0.0f), table.get_or("y", 0.0f), table.get_or("z", 0.0f)}}
+                : ComponentFieldValue{Quatf{table.get_or("x", 0.0f), table.get_or("y", 0.0f), table.get_or("z", 0.0f), table.get_or("w", 1.0f)}};
+            if (detail::field_value_matches_kind(value, kind)) return value;
         }
         break;
     case ComponentFieldKind::Color:
@@ -1063,6 +1079,10 @@ private:
 
                 const ScriptComponentRegistry::ComponentEntry* entry = script_component_entry(scene, name);
                 if (!entry) {
+                    if (const auto* descriptor = scene->ecs().components().find(name)) {
+                        components.push_back({.kind = ScriptComponentKind::Unknown, .metadata_name = name, .metadata_id = descriptor->id});
+                        continue;
+                    }
                     components.clear();
                     components.push_back({.kind = ScriptComponentKind::Unknown});
                     return components;
@@ -1074,7 +1094,7 @@ private:
     }
 
     void collect_matching(const std::vector<ScriptComponentFilter>& components, auto&& callback) {
-        if (!components.empty() && components[0].kind == ScriptComponentKind::Unknown && !components[0].custom) {
+        if (!components.empty() && components[0].kind == ScriptComponentKind::Unknown && !components[0].custom && components[0].metadata_name.empty()) {
             return;
         }
 
@@ -1097,6 +1117,12 @@ private:
             for (EcsEntity entity : candidates) {
                 visit(entity);
             }
+            return;
+        }
+
+        if (!components[0].metadata_name.empty()) {
+            const auto plan = scene->ecs().build_query_plan({.all = {components[0].metadata_name}});
+            for (auto entity : scene->ecs().query_entities(plan)) visit(entity);
             return;
         }
 

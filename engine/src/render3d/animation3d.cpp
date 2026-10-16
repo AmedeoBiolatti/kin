@@ -1,7 +1,9 @@
 #include <kin/render3d/animation3d.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <limits>
 
 namespace kin {
 
@@ -268,6 +270,10 @@ AnimationPlayer3D::AnimationPlayer3D(const Skeleton* skeleton) {
 }
 
 void AnimationPlayer3D::set_skeleton(const Skeleton* skeleton) {
+    // Rebinding must also revoke a completed token and stop an already
+    // cancelling fade, whose borrowed clip may belong to the old model.
+    _action.clip = nullptr; _action.weight = 0;
+    _action.status = _action.token ? ActionStatus3D::Cancelled : ActionStatus3D::None;
     _skeleton = skeleton;
     _pose = skeleton ? skeleton->rest_pose() : Pose{};
 }
@@ -438,11 +444,147 @@ void AnimationPlayer3D::sample(const Playing& p, Pose& out) const {
     }
 }
 
+namespace {
+std::atomic<u64> next_action_token{1};
+ActionToken3D action_token() {
+    auto next = next_action_token.load(std::memory_order_relaxed);
+    while (next != std::numeric_limits<u64>::max())
+        if (next_action_token.compare_exchange_weak(next, next + 1, std::memory_order_relaxed)) return {next};
+    return {}; // never recycle an identity
+}
+}
+
+ActionToken3D AnimationPlayer3D::play_action(const AnimClip3D* clip, const ActionPlayback3D& o, ActionStart3D start) {
+    if (!_skeleton || !clip || !std::isfinite(clip->duration) || clip->duration <= 0 ||
+        !std::isfinite(o.speed) || o.speed <= 0 || !std::isfinite(o.weight) || o.weight <= 0 || o.weight > 1 ||
+        !std::isfinite(o.fade_in) || o.fade_in < 0 || !std::isfinite(o.fade_out) || o.fade_out < 0 ||
+        o.mask_joint < -1 || o.mask_joint >= i32(_skeleton->joint_count()) ||
+        (start == ActionStart3D::IfIdle && action_busy())) return {};
+    const auto token = action_token();
+    if (!token) return {};
+    if (o.mask_joint >= 0) _action.mask.set_subtree(*_skeleton, o.mask_joint, 1, o.include_root);
+    else _action.mask.weights.clear();
+    _action.clip = clip; _action.options = o; _action.token = token; _action.status = ActionStatus3D::Playing;
+    _action.time = _action.elapsed = _action.fade_elapsed = _action.fade_weight = 0;
+    _action.weight = o.fade_in > 0 ? 0 : o.weight;
+    return token;
+}
+
+bool AnimationPlayer3D::action_busy() const {
+    return _action.status == ActionStatus3D::Playing || _action.status == ActionStatus3D::Finishing ||
+        (_action.status == ActionStatus3D::Cancelled && _action.clip);
+}
+ActionStatus3D AnimationPlayer3D::action_status(ActionToken3D token) const {
+    if (!token) return ActionStatus3D::None;
+    return token == _action.token ? _action.status : ActionStatus3D::Superseded;
+}
+bool AnimationPlayer3D::action_event_valid(ActionToken3D token) const {
+    const auto status = action_status(token);
+    return status == ActionStatus3D::Playing || status == ActionStatus3D::Finishing || status == ActionStatus3D::Completed;
+}
+bool AnimationPlayer3D::cancel_action(ActionToken3D token, f32 seconds) {
+    if (token != _action.token || !token || _action.status == ActionStatus3D::None || !std::isfinite(seconds) || (seconds < 0 && seconds != -1) || _action.status == ActionStatus3D::Cancelled) return false;
+    if (seconds < 0) seconds = _action.options.fade_out;
+    _action.status = ActionStatus3D::Cancelled; _action.fade_elapsed = 0; _action.fade_weight = _action.weight;
+    _action.options.fade_out = seconds;
+    if (seconds <= 0 || _action.weight <= 0) { _action.weight = 0; _action.clip = nullptr; }
+    return true;
+}
+void AnimationPlayer3D::advance_action(f32 dt) {
+    if (!_action.clip) return;
+    auto& a = _action;
+    if (a.status == ActionStatus3D::Playing) {
+        const double remaining = std::max(0.0, double(a.clip->duration - a.time) / a.options.speed);
+        const f32 playing_dt = f32(std::min(double(dt), remaining));
+        a.time = std::min(a.clip->duration, a.time + playing_dt * a.options.speed);
+        a.elapsed += playing_dt;
+        a.weight = a.options.weight * (a.options.fade_in > 0 ? std::clamp(a.elapsed / a.options.fade_in, 0.f, 1.f) : 1.f);
+        if (double(dt) < remaining && a.time < a.clip->duration) return;
+        a.time = a.clip->duration; a.status = ActionStatus3D::Finishing;
+        a.fade_weight = a.weight; a.fade_elapsed = f32(std::max(0.0, double(dt) - remaining));
+    } else a.fade_elapsed += dt;
+    if (a.status == ActionStatus3D::Finishing || a.status == ActionStatus3D::Cancelled) {
+        const float fraction = a.options.fade_out > 0 ? std::clamp(a.fade_elapsed / a.options.fade_out, 0.f, 1.f) : 1.f;
+        a.weight = a.fade_weight * (1 - fraction);
+        if (fraction >= 1 || a.fade_weight <= 0) {
+            if (a.status == ActionStatus3D::Finishing) a.status = ActionStatus3D::Completed;
+            a.clip = nullptr; a.weight = 0;
+        }
+    }
+}
+
 void AnimationPlayer3D::update(f32 dt) {
+    AnimationEventBatch3D ignored;
+    update(dt, {}, ignored);
+}
+
+void AnimationPlayer3D::update(f32 dt, std::span<const ClipEventTrack3D> tracks, AnimationEventBatch3D& events) {
+    events.clear();
+    if (!std::isfinite(dt) || dt < 0 || !std::isfinite(_base.speed)) {
+        _delta = {};
+        return;
+    }
     if (!_skeleton) {
         return;
     }
     _delta = {};
+    std::array<double, AnimationEventBatch3D::capacity> distances{};
+    double total = 0;
+    const auto gather = [&](const AnimClip3D* source, double before, double after, double span, bool loop, ActionToken3D token) {
+        if (!source || !std::isfinite(before) || !std::isfinite(after) || span <= 0) return;
+        if (loop) { const double cycle = std::floor(before); before -= cycle; after -= cycle; }
+        else { before = std::clamp(before, 0.0, 1.0); after = std::clamp(after, 0.0, 1.0); }
+        const bool forward = after > before;
+        for (const auto& track : tracks) {
+            if (track.clip != source->name || (token ? track.source == MarkerSource3D::Base : track.source == MarkerSource3D::Action)) continue;
+            for (const auto& marker : track.markers) {
+                const double phase = marker.phase;
+                if (!std::isfinite(phase) || phase < 0 || phase >= 1 || after == before) continue;
+                double first = phase, count = 0;
+                if (loop) {
+                    first += forward ? std::floor(before - phase) + 1 : std::ceil(before - phase) - 1;
+                    count = forward ? std::floor(after - phase) - std::floor(before - phase)
+                                    : std::ceil(before - phase) - std::ceil(after - phase);
+                } else count = forward ? (phase > before && phase <= after) : (phase < before && phase >= after);
+                if (count <= 0) continue;
+                total += count;
+                for (u32 n = 0; n < AnimationEventBatch3D::capacity && double(n) < count; ++n) {
+                    const double distance = std::abs(first + (forward ? double(n) : -double(n)) - before) / span;
+                    u32 at = 0;
+                    while (at < events.count && distances[at] <= distance) ++at;
+                    if (at >= AnimationEventBatch3D::capacity) break;
+                    const u32 last = std::min(events.count, u32(AnimationEventBatch3D::capacity - 1));
+                    for (u32 i = last; i > at; --i) {
+                        events.entries[i] = events.entries[i-1]; events.actions[i] = events.actions[i-1]; distances[i] = distances[i-1];
+                    }
+                    events.entries[at] = &marker.event; events.actions[at] = token; distances[at] = distance;
+                    events.count = std::min(events.count + 1, u32(AnimationEventBatch3D::capacity));
+                }
+            }
+        }
+    };
+    const bool suppress_base = action_busy() && !_action.options.base_events;
+    if (!tracks.empty() && !suppress_base) {
+        const AnimClip3D* source = _base.clip;
+        double duration = source ? source->duration : 0;
+        const bool blend = !_base.blend.empty();
+        if (blend) { const auto pair = blend_pair(_base.blend, _base.parameter); source = pair.weight >= .5f ? pair.b : pair.a; duration = pair.duration; }
+        if (source && std::isfinite(duration) && duration > 0) {
+            const double scale = blend ? 1 : duration;
+            const double before = double(_base.time) / scale;
+            const f32 next = _base.time + dt * _base.speed / f32(duration / scale);
+            const double after = std::isfinite(next) ? double(next) / scale : before + double(dt) * _base.speed / duration;
+            gather(source, before, after, std::abs(after - before), _base.loop, {});
+        }
+    }
+    if (!tracks.empty() && _action.status == ActionStatus3D::Playing && _action.clip) {
+        const double duration = _action.clip->duration;
+        const double before = _action.time / duration;
+        const f32 next = _action.time + dt * _action.options.speed;
+        const double after = std::isfinite(next) ? double(next) / duration : before + double(dt) * _action.options.speed / duration;
+        gather(_action.clip, before, after, double(dt) * _action.options.speed / duration, false, _action.token);
+    }
+    events.dropped = u32(std::min(std::max(0.0, total - events.count), double(std::numeric_limits<u32>::max())));
     const f32 base_before = _base.time;
     const Playing from_before = _from;
     advance(_base, dt);
@@ -516,6 +658,14 @@ void AnimationPlayer3D::update(f32 dt) {
         } else {
             blend_masked(_pose, _scratch, layer.mask, layer.weight);
         }
+    }
+    advance_action(dt);
+    if (_action.clip && _action.weight > 0) {
+        sample_clip(*_action.clip, *_skeleton, _action.time, false, _scratch);
+        if (_action.options.additive) {
+            sample_clip(*_action.clip, *_skeleton, 0, false, _reference);
+            apply_additive(_pose, _scratch, _reference, _action.mask, _action.weight);
+        } else blend_masked(_pose, _scratch, _action.mask, _action.weight);
     }
 }
 

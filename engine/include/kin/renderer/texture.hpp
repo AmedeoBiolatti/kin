@@ -63,6 +63,7 @@ private:
     friend class SdlRenderer2DBackend;
     friend class GpuRenderer2DBackend;
     friend class gpu::GpuRenderer3D; // binds materials' textures
+    friend class Assets3D; // weak, renderer-scoped texture sharing
 
     const std::shared_ptr<ITextureBackend>& backend() const { return _backend; }
 

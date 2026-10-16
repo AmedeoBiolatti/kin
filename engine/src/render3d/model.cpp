@@ -1,4 +1,6 @@
 #include <kin/render3d/model.hpp>
+#include <kin/render3d/assets3d.hpp>
+#include <kin/render3d/model_geometry3d.hpp>
 
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
@@ -538,7 +540,9 @@ std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> parse_gltf(std::string_view b
 
 class Loader {
 public:
-    Loader(Renderer3D& r3d, std::filesystem::path path, const MeshOptions& options) : _r3d(r3d), _path(std::move(path)), _options(options) {}
+    using TextureResolver = std::function<Texture(const std::filesystem::path&, u32, bool, bool, const std::function<Texture()>&)>;
+    Loader(Renderer3D& r3d, std::filesystem::path path, const MeshOptions& options, TextureResolver resolver = {})
+        : _r3d(r3d), _path(std::move(path)), _options(options), _resolve_texture(std::move(resolver)) {}
 
     Model load(std::string& error) {
         const std::optional<std::string> bytes = read_content_file(_path);
@@ -552,16 +556,30 @@ public:
         }
         _data = owned.get();
         Model model;
+        model.source_files.push_back(_path.lexically_normal());
+        const auto dependency = [&](const char* uri) {
+            if (!uri || std::strncmp(uri, "data:", 5) == 0) return;
+            std::string decoded = uri;
+            cgltf_decode_uri(decoded.data());
+            decoded.resize(std::strlen(decoded.c_str()));
+            model.source_files.push_back((_path.parent_path() / decoded).lexically_normal());
+        };
+        for (cgltf_size i = 0; i < _data->buffers_count; ++i) dependency(_data->buffers[i].uri);
+        for (cgltf_size i = 0; i < _data->images_count; ++i) dependency(_data->images[i].uri);
+        std::ranges::sort(model.source_files);
+        model.source_files.erase(std::unique(model.source_files.begin(), model.source_files.end()), model.source_files.end());
         GltfReader reader{_data, _path.string()};
         ModelData read = reader.read([&](ModelPartData&& part, const cgltf_material* material) {
             Mesh mesh = _r3d.create_mesh(part.mesh, _options);
             if (!mesh.valid()) {
+                _issues.push_back("model mesh could not be uploaded: " + part.name);
                 return;
             }
             model.parts.push_back({part.name, std::move(mesh), this->material(material), part.transform, part.skin});
         });
         model.skeletons = std::move(read.skeletons);
         model.clips = std::move(read.clips);
+        model.asset_diagnostics = std::move(_issues);
         if (model.parts.empty()) {
             error = _path.string() + ": no triangles";
             return {};
@@ -649,27 +667,43 @@ private:
         if (const auto found = _textures.find(key); found != _textures.end()) {
             return found->second;
         }
-        Image decoded;
-        if (image->buffer_view) {
-            const auto* bytes = static_cast<const u8*>(cgltf_buffer_view_data(image->buffer_view));
-            if (bytes) decoded = decode_image({bytes, image->buffer_view->size}, image->name ? image->name : "texture");
-        } else if (image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
+        // External files share across models; embedded images are namespaced by
+        // their owning model and image index. Decode/upload only on a miss.
+        std::filesystem::path source = _path;
+        u32 embedded = static_cast<u32>(image - _data->images);
+        if (!image->buffer_view && image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
             std::string uri = image->uri;
             cgltf_decode_uri(uri.data());
             uri.resize(std::strlen(uri.c_str()));
-            if (const auto bytes = read_content_file(_path.parent_path() / uri)) {
-                decoded = decode_image({reinterpret_cast<const u8*>(bytes->data()), bytes->size()}, uri);
+            source = _path.parent_path() / uri;
+            embedded = ~0u;
+        }
+        const auto load = [&]() -> Texture {
+            Image decoded;
+            if (image->buffer_view) {
+                const auto* bytes = static_cast<const u8*>(cgltf_buffer_view_data(image->buffer_view));
+                if (bytes) decoded = decode_image({bytes, image->buffer_view->size}, image->name ? image->name : "texture");
+            } else if (image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
+                std::string uri = image->uri;
+                cgltf_decode_uri(uri.data());
+                uri.resize(std::strlen(uri.c_str()));
+                if (const auto bytes = read_content_file(_path.parent_path() / uri)) {
+                    decoded = decode_image({reinterpret_cast<const u8*>(bytes->data()), bytes->size()}, uri);
+                }
             }
-        }
-        Texture texture;
-        if (decoded.valid()) {
-            texture = srgb ? _r3d.renderer().create_texture_from_rgba(decoded.rgba.data(), decoded.size)
-                           : _r3d.renderer().create_texture(decoded.size, TextureFormat::Rgba8, decoded.rgba.data());
-            if (texture) _r3d.renderer().set_scale_mode(texture, nearest ? ScaleMode::Nearest : ScaleMode::Mipmapped);
-        } else {
-            KIN_LOG_WARN_F("render", "3D: a model's texture not read",
-                           (LogFields{{.name = "model", .value = _path.string()}, {.name = "image", .value = image->name ? image->name : ""}}));
-        }
+            Texture texture;
+            if (decoded.valid()) {
+                texture = srgb ? _r3d.renderer().create_texture_from_rgba(decoded.rgba.data(), decoded.size)
+                               : _r3d.renderer().create_texture(decoded.size, TextureFormat::Rgba8, decoded.rgba.data());
+                if (texture) _r3d.renderer().set_scale_mode(texture, nearest ? ScaleMode::Nearest : ScaleMode::Mipmapped);
+            } else {
+                KIN_LOG_WARN_F("render", "3D: a model's texture not read",
+                               (LogFields{{.name = "model", .value = _path.string()}, {.name = "image", .value = image->name ? image->name : ""}}));
+            }
+            return texture;
+        };
+        Texture texture = _resolve_texture ? _resolve_texture(source, embedded, nearest, srgb, load) : load();
+        if (!texture) _issues.push_back("required model texture could not be decoded/uploaded: " + source.string());
         _textures[key] = texture;
         return texture;
     }
@@ -677,12 +711,98 @@ private:
     Renderer3D& _r3d;
     std::filesystem::path _path;
     MeshOptions _options;
+    TextureResolver _resolve_texture;
     const cgltf_data* _data = nullptr;
+    std::vector<std::string> _issues;
     using Key = std::tuple<const cgltf_image*, bool, bool>; // image, nearest, sRGB
     std::map<Key, Texture> _textures;
 };
 
 } // namespace
+
+bool read_model_geometry3d(const std::filesystem::path& path, ModelGeometry3D& out, ModelGeometryLimits3D limits, std::string* error) {
+    const auto check=[](bool ok,const char* why) { if(!ok) throw std::runtime_error(why); };
+    try {
+        check(limits.vertices && limits.vertices<=UINT32_MAX && limits.triangles && limits.triangles<=UINT32_MAX/3 && limits.parts,
+              "invalid collision geometry budgets");
+        const auto size=content_file_size(path);
+        check(size && *size<=limits.source_bytes,"collision model source missing or exceeds byte budget");
+        auto bytes=read_content_file(path); check(bytes && bytes->size()<=limits.source_bytes,"cannot read bounded collision model");
+        struct Files { u64 remaining; std::vector<std::filesystem::path> sources; } files{limits.buffer_bytes,{path.lexically_normal()}};
+        cgltf_options options{};
+        options.file.user_data=&files;
+        options.file.read=[](const cgltf_memory_options* memory,const cgltf_file_options* options,const char* file,cgltf_size* size,void** data) {
+            auto& context=*static_cast<Files*>(options->user_data);
+            const auto bytes=content_file_size(file);
+            if(!bytes || *bytes>context.remaining) return cgltf_result_io_error;
+            context.remaining-=*bytes; context.sources.push_back(std::filesystem::path(file).lexically_normal());
+            return read_file(memory,options,file,size,data);
+        };
+        options.file.release=release_file;
+        cgltf_data* data=nullptr;
+        const auto result=cgltf_parse(&options,bytes->data(),bytes->size(),&data);
+        std::unique_ptr<cgltf_data,void(*)(cgltf_data*)> owned{data,cgltf_free};
+        check(result==cgltf_result_success,"invalid collision glTF");
+        check(data->nodes_count<=4096,"collision model node budget exceeded");
+        u64 buffers=0;
+        for(cgltf_size i=0;i<data->buffers_count;++i) {
+            check(data->buffers[i].size<=limits.buffer_bytes-buffers,"collision buffer byte budget exceeded"); buffers+=data->buffers[i].size;
+        }
+        for(cgltf_size i=0;i<data->buffer_views_count;++i) check(!data->buffer_views[i].has_meshopt_compression,"compressed collision buffers unsupported; use a collision proxy");
+        std::vector<const cgltf_node*> nodes;
+        std::vector<bool> visited(data->nodes_count);
+        const auto walk=[&](auto&& self,const cgltf_node* node,size_t depth)->void {
+            check(depth<64,"collision node hierarchy too deep");
+            const size_t index=node-data->nodes;
+            check(index<data->nodes_count && !visited[index],"invalid/cyclic collision node hierarchy"); visited[index]=true;
+            nodes.push_back(node);
+            for(cgltf_size i=0;i<node->children_count;++i) self(self,node->children[i],depth+1);
+        };
+        const auto* scene=data->scene ? data->scene : data->scenes_count ? &data->scenes[0] : nullptr;
+        if(scene) for(cgltf_size i=0;i<scene->nodes_count;++i) walk(walk,scene->nodes[i],0);
+        else for(cgltf_size i=0;i<data->nodes_count;++i) if(!data->nodes[i].parent) walk(walk,&data->nodes[i],0);
+        size_t vertices=0,triangles=0,parts=0;
+        const auto positions=[](const cgltf_primitive& primitive) -> const cgltf_accessor* {
+            for(cgltf_size i=0;i<primitive.attributes_count;++i) if(primitive.attributes[i].type==cgltf_attribute_type_position) return primitive.attributes[i].data;
+            return nullptr;
+        };
+        for(const auto* node:nodes) if(node->mesh) {
+            check(!node->skin,"skinned collision models unsupported; use an explicit proxy");
+            for(cgltf_size i=0;i<node->mesh->primitives_count;++i) {
+                const auto& p=node->mesh->primitives[i]; const auto* a=positions(p);
+                check(a && a->type==cgltf_type_vec3 && p.type==cgltf_primitive_type_triangles && !p.has_draco_mesh_compression,"collision model requires uncompressed triangle positions");
+                const auto count=p.indices ? p.indices->count : a->count;
+                check(count%3==0 && a->count<=limits.vertices-vertices && count/3<=limits.triangles-triangles && parts<limits.parts,"collision geometry budget exceeded");
+                vertices+=a->count;triangles+=count/3;++parts;
+            }
+            // cgltf's world transform follows parents; check that path too.
+            size_t depth=0;for(auto* p=node;p;p=p->parent) check(++depth<=64,"cyclic collision parent chain");
+        }
+        check(parts && vertices && triangles,"collision model contains no triangles");
+        check(cgltf_load_buffers(&options,data,path.string().c_str())==cgltf_result_success,"collision buffers missing or exceed byte budget");
+        check(cgltf_validate(data)==cgltf_result_success,"invalid collision geometry accessors");
+        ModelGeometry3D geometry; geometry.vertices.reserve(vertices);geometry.indices.reserve(triangles*3);
+        for(const auto* node:nodes) if(node->mesh) {
+            const auto transform=world_matrix(node);
+            for(cgltf_size i=0;i<node->mesh->primitives_count;++i) {
+                const auto& p=node->mesh->primitives[i];const auto* a=positions(p);const u32 first=u32(geometry.vertices.size());
+                for(cgltf_size j=0;j<a->count;++j) {
+                    float v[3];check(cgltf_accessor_read_float(a,j,v,3),"cannot read collision position");
+                    const auto point=transform.apply({v[0],v[1],v[2]});
+                    check(std::isfinite(point.x)&&std::isfinite(point.y)&&std::isfinite(point.z),"non-finite collision geometry");
+                    geometry.vertices.push_back(point);
+                }
+                const auto count=p.indices ? p.indices->count : a->count;
+                for(cgltf_size j=0;j<count;++j) {
+                    const auto index=p.indices ? cgltf_accessor_read_index(p.indices,j) : j;
+                    check(index<a->count,"collision index out of range");geometry.indices.push_back(first+u32(index));
+                }
+            }
+        }
+        std::ranges::sort(files.sources);files.sources.erase(std::unique(files.sources.begin(),files.sources.end()),files.sources.end());
+        geometry.source_files=std::move(files.sources);out=std::move(geometry);if(error) error->clear();return true;
+    } catch(const std::exception& failure) { if(error) *error=path.string()+": "+failure.what();return false; }
+}
 
 bool read_model_data(std::string_view bytes, const std::filesystem::path& path, ModelData& out, std::string* error) {
     std::string why;
@@ -712,12 +832,20 @@ Model Renderer3D::load_model(const std::filesystem::path& path, std::string* err
 }
 
 Model Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error) {
+    return load_model_shared(path, options, error, nullptr);
+}
+
+Model Renderer3D::load_model_shared(const std::filesystem::path& path, const MeshOptions& options, std::string* error, Assets3D* assets) {
     std::string why;
     Model model;
     if (!_backend) {
         why = "3D is not available";
     } else {
-        model = Loader{*this, path, options}.load(why);
+        Loader::TextureResolver resolver;
+        if (assets) resolver = [assets](const auto& source, u32 embedded, bool nearest, bool srgb, const auto& load) {
+            return assets->share_texture(source, embedded, nearest, srgb, load);
+        };
+        model = Loader{*this, path, options, std::move(resolver)}.load(why);
     }
     if (!model.valid()) {
         KIN_LOG_WARN_F("render", "3D: model not loaded", (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
@@ -728,9 +856,14 @@ Model Renderer3D::load_model(const std::filesystem::path& path, const MeshOption
     return model;
 }
 
-void Scene3D::draw(const Model& model, const Mat4f& transform, Color tint) {
-    for (const ModelPart& part : model.parts) {
-        draw(part.mesh, transform * part.transform, part.material, tint);
+void Scene3D::draw(const Model& model, const Mat4f& transform, Color tint, u32 id) {
+    draw(model, transform, tint, id, {});
+}
+void Scene3D::draw(const Model& model, const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials) {
+    if (!materials.empty() && materials.size() != model.parts.size()) throw std::invalid_argument("material count must match model parts");
+    for (size_t i = 0; i < model.parts.size(); ++i) {
+        const auto& part = model.parts[i];
+        draw(part.mesh, transform * part.transform, materials.empty() ? part.material : materials[i], tint, id);
     }
 }
 

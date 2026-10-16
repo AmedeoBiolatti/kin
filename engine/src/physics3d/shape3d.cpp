@@ -110,6 +110,8 @@ Shape3D Shape3D::convex_hull(std::span<const Vec3f> points) {
     if (points.size() < 4) {
         return out;
     }
+    // Jolt containers allocate before the shape is constructed, including when this is the first physics call.
+    physics3d_detail::ensure_jolt_runtime();
     JPH::Array<JPH::Vec3> jolt_points;
     jolt_points.reserve(points.size());
     Vec3f lo = points[0];
@@ -122,7 +124,6 @@ Shape3D Shape3D::convex_hull(std::span<const Vec3f> points) {
         hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
         jolt_points.push_back(to_jolt(p));
     }
-    physics3d_detail::ensure_jolt_runtime();
     // A rounded edge as wide as a quarter of the thinnest side, at most 5 cm.
     const Vec3f size = hi - lo;
     const f32 radius = std::min(max_convex_radius, 0.25f * std::min({size.x, size.y, size.z}));
@@ -141,6 +142,7 @@ Shape3D Shape3D::triangle_mesh(std::span<const Vec3f> vertices, std::span<const 
             return out;
         }
     }
+    physics3d_detail::ensure_jolt_runtime();
     JPH::VertexList verts;
     verts.reserve(vertices.size());
     for (const Vec3f& v : vertices) {
@@ -154,7 +156,6 @@ Shape3D Shape3D::triangle_mesh(std::span<const Vec3f> vertices, std::span<const 
     for (std::size_t i = 0; i < indices.size(); i += 3) {
         triangles.push_back(JPH::IndexedTriangle(indices[i], indices[i + 1], indices[i + 2]));
     }
-    physics3d_detail::ensure_jolt_runtime();
     JPH::MeshShapeSettings settings(std::move(verts), std::move(triangles));
     out._data = make_data(settings.Create(), Shape3DKind::TriangleMesh);
     return out;

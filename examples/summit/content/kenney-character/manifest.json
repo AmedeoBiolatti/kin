@@ -1,0 +1,18 @@
+{
+  "author": "Kenney",
+  "source": "https://kenney.nl/assets/animated-characters-survivors",
+  "download": "https://kenney.nl/media/pages/assets/animated-characters-survivors/27b16052a7-1774772958/kenney_animated-characters-survivors.zip",
+  "archive_sha256": "fdadced07a0454c9b7f0b46507be6144a072b4d03b4ffa37f225893c76c62845",
+  "license": "CC0-1.0",
+  "modifications": "Survivor Male B mesh fitted to Summit rig, weights collapsed to 25 joints; authored idle/run/jump rotations retargeted. Walk slows run; Fall holds the jump mid-pose. Flat normals recalculated. Texture embedded unchanged. Kin adds an authored in-place Pickup reach; original mesh, texture and existing clips are unchanged.",
+  "rig_source_sha256": "ef0af392b8745fc2a68534ddb1f6b5312b1ba4ca1146886a9c9a1b0da23b87b6",
+  "tool_sha256": "caf9c3f94ff755aaea03a9811ba2f074753109a048306e7dccf9a3e5b8c66cb9",
+  "blender_version": "Blender 5.2.2 LTS",
+  "files": {
+    "survivor.glb": {
+      "bytes": 388456,
+      "sha256": "b33369e172e7221e106495e124df38103fac2402b3d3a6f9f44b1d7e7dee5b67"
+    }
+  },
+  "pickup_tool_sha256": "37ba2a4278d1e374a8f312cea2aec191c3cdd026afcc075d4db9f62b5d114e04"
+}

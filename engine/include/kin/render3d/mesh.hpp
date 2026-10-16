@@ -109,6 +109,7 @@ struct MeshOptions {
     // triangles in a cluster (at most 128).
     bool clusters = false;
     u32 cluster_triangles = 128;
+    bool operator==(const MeshOptions&) const = default;
 };
 
 // What Mesh tells of its cluster hierarchy.

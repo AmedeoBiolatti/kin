@@ -992,6 +992,66 @@ void test_disabled_and_not_due_systems_are_excluded_from_parallel_analysis() {
     assert(!world.systems().snapshot("disabled.parallel").parallel_eligible);
 }
 
+void test_frame_hooks_preserve_full_schedule_and_rates() {
+    kin::EcsWorld world;std::vector<int> order;int rate=0,interval=0;
+    world.systems().register_task({.id="hook.input",.phase=kin::SystemPhase::Input},[&](auto& context){
+        order.push_back(1);context.commands->defer([&](kin::EcsWorld&,std::string&){order.push_back(2);return true;});
+    });
+    world.systems().register_task({.id="hook.post",.phase=kin::SystemPhase::PostPhysics,.rate=2},[&](auto&){++rate;order.push_back(4);});
+    world.systems().register_task({.id="hook.audio",.phase=kin::SystemPhase::Audio,.interval_seconds=.25f},[&](auto&){++interval;});
+    int before=0,after=0;
+    kin::SystemPhaseHooks hooks{
+        .before=[&](auto phase,std::string&){++before;if(phase==kin::SystemPhase::PostPhysics)order.push_back(3);return true;},
+        .after=[&](auto phase,std::string&){++after;if(phase==kin::SystemPhase::Input)assert((order==std::vector<int>{1,2}));return true;}};
+    assert(world.run_frame(.125f,hooks));assert((order==std::vector<int>{1,2,3,4}));
+    assert(before==13&&after==13&&rate==1&&interval==0);
+    assert(world.systems().schedule_snapshot().batches.size()==2);
+    order.clear();assert(world.run_frame(.125f,hooks));assert(rate==1&&interval==1);
+    order.clear();assert(world.run_frame(.125f,hooks));assert(rate==2&&interval==1&&before==39&&after==39);
+    assert(world.systems().snapshot("hook.input").stats.runs==3&&world.systems().snapshot("hook.post").stats.runs==2);
+}
+
+void test_frame_hooks_validate_and_stop_before_later_native_work() {
+    kin::EcsWorld world;int updates=0,boundaries=0,late=0;
+    world.systems().register_task({.id="hook.early"},[&](auto&){++updates;});
+    world.systems().register_task({.id="hook.a",.phase=kin::SystemPhase::PostPhysics,.before={"hook.b"}},[](auto&){});
+    world.systems().register_task({.id="hook.b",.phase=kin::SystemPhase::PostPhysics,.before={"hook.a"}},[](auto&){});
+    kin::SystemPhaseHooks hooks{.after=[&](auto,std::string&){++boundaries;return true;}};
+    assert(!world.run_frame(.1f,hooks)&&updates==0&&boundaries==0); // full graph preflight
+    assert(world.systems().remove("hook.a")&&world.systems().remove("hook.b"));
+    world.systems().register_task({.id="hook.late",.phase=kin::SystemPhase::PostPhysics},[&](auto&){++late;});
+    hooks.after=[&](auto phase,std::string& error){
+        if(phase==kin::SystemPhase::Physics){error="native physics refused";return false;}return true;};
+    assert(!world.run_frame(.1f,hooks)&&updates==1&&late==0);
+    assert(world.systems().last_error().find("after physics phase: native physics refused")!=std::string::npos);
+    hooks.after=[&](auto phase,std::string&)->bool{if(phase==kin::SystemPhase::Physics)throw std::runtime_error("hook exception");return true;};
+    assert(!world.run_frame(.1f,hooks)&&updates==2&&late==0&&world.systems().last_error().find("hook exception")!=std::string::npos);
+    hooks.after=[&](auto phase,std::string& error){
+        if(phase==kin::SystemPhase::Physics){assert(!world.run_frame(.1f));assert(!world.systems().rebuild_schedule());error="recursive execution rejected";return false;}return true;};
+    assert(!world.run_frame(.1f,hooks)&&updates==3&&late==0);
+    hooks.after=[](auto,std::string&){return true;};assert(world.run_frame(.1f,hooks)&&updates==4&&late==1);
+    world.systems().register_task({.id="hook.fail",.phase=kin::SystemPhase::PrePhysics},[](auto&){throw std::runtime_error("early failure");});
+    boundaries=0;hooks.after=[&](auto phase,std::string&){if(phase==kin::SystemPhase::Physics)++boundaries;return true;};
+    assert(!world.run_frame(.1f,hooks)&&boundaries==0&&late==1);
+    // Legacy callers keep their prior continuation behavior.
+    assert(!world.run_frame(.1f)&&late==2);
+}
+
+void test_extension_commands_obey_buffer_lifecycle() {
+    kin::EcsWorld world;kin::EcsCommandBuffer commands;std::string error;std::vector<int> order;
+    commands.defer([&](kin::EcsWorld& target,std::string&){assert(&target==&world);order.push_back(1);return true;});
+    auto entity=commands.create_entity();commands.set<Marker>(entity,Marker{7});
+    commands.defer([&](kin::EcsWorld& target,std::string&){assert(target.count<Marker>()==1);order.push_back(2);return true;});
+    assert(order.empty()&&commands.size()==4);
+    assert(commands.flush(world,error)&&commands.empty()&&(order==std::vector<int>{1,2}));
+    commands.defer([&](kin::EcsWorld&,std::string&){order.push_back(3);return true;});commands.clear();
+    assert(commands.flush(world,error)&&order.size()==2);
+    commands.defer([](kin::EcsWorld&,std::string& message){message="extension failed";return false;});
+    commands.defer([&](kin::EcsWorld&,std::string&){order.push_back(4);return true;});
+    assert(!commands.flush(world,error)&&error=="extension failed"&&order.size()==2);commands.clear();
+    commands.defer({});assert(!commands.flush(world,error)&&error=="empty deferred ECS command");commands.clear();
+}
+
 void test_serial_task_commands_create_deferred_entity_after_batch() {
     kin::EcsWorld world;
     register_components(world);
@@ -1060,7 +1120,18 @@ void test_parallel_task_commands_flush_in_system_order() {
         .execution_policy = kin::SystemExecutionPolicy::ParallelEligible,
     }, run(2));
 
-    assert(world.run_frame(0.0f, kin::SystemExecutionMode::ParallelBatches));
+    const auto caller=std::this_thread::get_id();int boundaries=0;
+    kin::SystemPhaseHooks hooks{.after=[&](auto phase,std::string&) {
+        assert(std::this_thread::get_id()==caller&&active.load()==0);
+        if(phase==kin::SystemPhase::Update) {
+            // Workers have joined, staged commands are visible and the host can
+            // mutate the real world before the next phase starts.
+            assert(world.count<Marker>()==2);world.entity("host.boundary").set(Position{9});++boundaries;
+        }
+        return true;
+    }};
+    assert(world.run_frame(0.0f,hooks,kin::SystemExecutionMode::ParallelBatches));
+    assert(boundaries==1&&world.count<Position>()==1);
     assert(max_active.load() > 1);
     const kin::SystemScheduleSnapshot& schedule = world.systems().schedule_snapshot();
     assert(schedule.effective_execution_mode == kin::SystemExecutionMode::ParallelBatches);
@@ -1378,6 +1449,9 @@ int main() {
     test_native_parallel_failure_restores_stage_state();
     test_native_parallel_callbacks_receive_isolated_context();
     test_disabled_and_not_due_systems_are_excluded_from_parallel_analysis();
+    test_extension_commands_obey_buffer_lifecycle();
+    test_frame_hooks_preserve_full_schedule_and_rates();
+    test_frame_hooks_validate_and_stop_before_later_native_work();
     test_serial_task_commands_create_deferred_entity_after_batch();
     test_parallel_task_commands_flush_in_system_order();
     test_command_buffer_entity_operations();

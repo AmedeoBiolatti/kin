@@ -11,6 +11,117 @@ Only kin's own types appear in the headers (`kin/physics3d/world3d.hpp`, `shape3
 header leaks. Units are metres, kilograms and seconds; right-handed, +Y up (see
 [3D rendering](rendering_3d.md)); rotations are `Quatf`.
 
+## Authored collision and characters
+
+The shared `.kinscene` / `.kinprefab` registry supports `Collider3D.asset`,
+`RigidBody3D`, `CharacterController3D` and `CharacterAnimationLink3D`. They use the
+same patches, prefab overrides, editor inspection, Lua fields and checked scene saves
+as other components. Runtime shapes, input, grounded state and body/controller handles
+are not serialized. Character simulation copies inherited transform/controller/animator
+state onto each instance before writing it.
+
+```json
+"Collider3D": {"asset": "colliders/barrel.kincollider"},
+"RigidBody3D": {"motion": "static", "friction": 0.6, "layer": 0}
+```
+
+A `.kincollider` file is a CPU collision recipe; paths use the common content root,
+including mounted content packs. Its schema is `kin.collider3d/1`:
+
+```json
+{
+  "schema": "kin.collider3d/1",
+  "shape": {
+    "kind": "compound",
+    "children": [
+      {"kind": "box", "half_extents": [0.5, 0.5, 0.5], "offset": [-1, 0, 0]},
+      {"kind": "convex_hull", "mesh": "models/barrel.glb", "offset": [1, 0, 0]}
+    ]
+  }
+}
+```
+
+Kinds: `box` (`half_extents`), `sphere` (`radius`), `capsule` / `cylinder`
+(`radius`, `half_height`), `convex_hull`, `triangle_mesh`, `compound` (`children`).
+Every node accepts `offset`, unit-quaternion `rotation` and positive `scale`.
+Capsule half-height describes its straight section; total height is
+`2 * (half_height + radius)`. Hull/mesh nodes choose either `mesh` or inline
+`points`; inline triangle meshes also require `indices` (three per triangle).
+Hulls deduplicate points and require non-coplanar volume. Meshes are hollow,
+double-sided surfaces, permitted for static/kinematic bodies only, including inside
+compounds. No rigid-body component means static. Body layer `255` selects the existing
+automatic static/dynamic choice; explicit layers are 0–31. Character layers are 1–31.
+
+```cpp
+#include <kin/physics3d/assets3d.hpp>
+#include <kin/ecs/physics3d.hpp>
+
+kin::PhysicsAssets3D collisions{content_root}; // CPU only, independent of Renderer3D
+auto diagnostics = kin::resolve_physics3d_assets(world, collisions);
+// Only create/rebuild bodies after diagnostics is empty.
+bodies.sync_bodies();
+```
+
+An asset reference takes precedence over the component's primitive/programmatic shape.
+`PhysicsAssets3D::load_collider(path, scale, &error)` returns an existing-style
+`AssetHandle<CookedCollider3D>`. The cache shares immutable cooked shapes by normalized
+path and effective world scale. It owns only bounded weak lookup metadata (128 entries
+by default); scene bindings and bodies own live resources. Temporary geometry is
+discarded after cooking. `clear`, `trim` and `invalidate(source)` do not invalidate
+retained handles. `cook_collider3d` also exposes the existing programmatic collider
+builder without a world.
+
+Default `ColliderAssetLimits3D` budgets: 1 MiB recipe, 64 nodes, four tree levels,
+256 unique input points per hull; each model source and aggregate declared buffers
+within one model are limited to 16 MiB, and each recipe to 32,768 input vertices /
+triangles. Each model allows 256 parts / 4,096 nodes / 64 hierarchy levels. These are
+authoring/cooking bounds, not a total live physics-memory budget. Configure them through
+the asset library or `SceneSession3DOptions::collision_limits`.
+
+`read_model_geometry3d` reads only model-space positions and indices, applying glTF
+node transforms. It loads no materials, images, animation or GPU objects. It preflights
+geometry counts and buffers before allocation, and records the model/external buffers
+as dependencies. Skinned models and compressed geometry need an explicit collision
+proxy. Prefer simple dedicated proxy meshes over detailed visual models.
+
+Authored asset colliders require positive, non-reflected world transforms without
+shear; rotated recipe nodes require uniform parent scale. Scaling a sphere/capsule
+uses the existing native primitive rules (maximum relevant radius axis), rather than
+creating an ellipsoid. Collider offset/rotation applies outside the cooked recipe.
+After changing an asset or scale on a live body, invalidate/rebind explicitly and
+call `bodies.rebuild(entity.raw())`; binding does not silently replace a live body.
+An invalid binding retains the previous shape and returns diagnostics.
+
+Activated `SceneSession3D` authored members can instead use normal registry field
+patches or `session.edit(...)`. That path binds/cooks the edited data and prepares
+ordinary rigid-body replacements while old bodies remain valid, committing only
+after all replacements succeed. It needs spare body capacity and rejects constrained
+bodies/controller/ragdoll/rope configuration edits. Compatible pose/velocity survives;
+body handles change. See [live field editing](rendering_3d.md#live-field-editing).
+The standalone resolver and direct C++ mutation contracts above remain explicit.
+
+Characters expose capsule dimensions (standing/crouching total heights), mass/push
+strength, slope/step/snap distances, movement speeds, acceleration/deceleration,
+friction/gravity, jump speed/buffer/coyote time, up vector/blending, layer/mask and
+facing. Dimensions are metres: use unit world scale and keep the visual scale on a
+child if necessary. Cross-field validation rejects incompatible heights/radius, mass,
+slope and layer before scene activation. Do not also put an asset collider on the
+controller entity: the character already owns its capsule. Input/state, traversal
+descriptions and hand IK lists remain C++ game concerns. `CharacterAnimationLink3D`
+authors parameter/foot-constraint names and ground-query mask.
+
+`SceneSession3D` binds/cooks these assets only when physics is enabled, watches their
+recipe/model/buffer dependencies, and keeps the running simulation if replacement
+fails. Transactional preparation temporarily overlaps old/new worlds; identical
+recipes/scales share cooked shapes. No background cooking or per-frame file polling
+is added.
+
+`camp_walk` is a small playable host using Summit's free assets and
+`scenes/camp-play.kinscene`: compound floor, shared convex barrel hulls, hollow mesh
+tent, animated player prefab, movement/jump/crouch, restart and transactional reload.
+The campfire is decorative. Its controls and headless demonstration are in
+[examples/README.md](../examples/README.md#camp-walk).
+
 ## A world and bodies
 
 ```cpp
@@ -109,9 +220,10 @@ world is used from one thread at a time.
 
 ## Queries
 
-All are `const`, return values (no callbacks) and take a `QueryFilter3D {mask, ignore, sensors}`: bodies whose layer is in the
-`Layer3DMask`, not the `ignore` body, and (unless `sensors`) not sensors. Sensors are left out by default so that a ray meant for
-floors and walls does not stop at a trigger volume.
+All are `const`, return values (no gameplay callbacks) and take `QueryFilter3D`: bodies whose layer is in `mask`,
+not the `ignore` body or its nonzero collision group, and (unless `sensors`) not sensors. `ignore_user_id` additionally
+excludes every body with that nonzero user id, independently of collision groups. Sensors are left out by default so
+that a ray meant for floors and walls does not stop at a trigger volume.
 
 | Call | Gives |
 |---|---|
@@ -124,6 +236,31 @@ floors and walls does not stop at a trigger volume.
 
 A ray that starts inside a convex solid hits it at fraction 0; a triangle mesh is hit from either side (its normal is its front's).
 Order never depends on pointers or hash maps: the same world answers the same in every run and on every worker count.
+
+### Bounded query results
+
+`raycast_all(from, to, std::span<RayHit3D>, filter)` and
+`overlap(shape, position, rotation, std::span<OverlapHit3D>, filter)` write directly into
+caller-owned storage. Their `BoundedQueryResult3D` contains `count`, `overflow` and `valid`.
+Use only `[0,count)`; the unused portion stays untouched. Invalid geometry/input gives
+`valid=false`, zero count and no overflow. Empty output is a valid existence probe:
+zero count with overflow means at least one accepted hit existed.
+
+Ray results keep the nearest hits, ties by body number then opaque `sub_shape_id`,
+matching the existing vector overload's prefix. Overlap results keep the lowest body
+numbers, one per body, with its deepest contact; equal penetration uses the lowest
+native sub-shape key. Overflow reports omitted hits/bodies, including when capacity
+is exactly zero; it does not report a total count. A full buffer with no omitted hit
+has `overflow=false`. Check saturation before using an overlap prefix as a nearest-object
+selection; its order is body number, not distance. The collectors allocate no result
+lists or per-hit maps. They can still visit all accepted contacts to preserve ordering;
+capacity limits retained memory, not query CPU work. Reuse query shapes across steps.
+
+For checked scene identities, use `SceneSession3D::queries()` or capture `context.queries`
+in a main-thread system. See [scene-aware queries](rendering_3d.md#scene-aware-physics-queries).
+`WorldPhysicsState3D::entity_of_body(body)` verifies the current native ownership of a
+rigid body, character capsule, ragdoll bone or rope segment; a matching user id alone
+is insufficient. It rejects stale/native-only bodies without creating a result list.
 
 ## Contact events
 
@@ -201,6 +338,8 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
 * Changing a live body's components does nothing until `rebuild(entity)`; changing `RigidBody3D::motion` rebuilds by itself.
 * The events of the last `step()` (all the steps of one `advance()`) are in `events()` and on the ECS world as the singleton
   `PhysicsContacts3D`. `body_of(entity)`, and the `PhysicsBody3D` component on the entity, name its body.
+  `SceneSession3D::step()` advances native physics after the Physics phase, so PostPhysics systems read contacts and
+  poses from that same step. Their queued removals finish before Animation; later births first simulate next step.
 * `collider_from_mesh(entity)`: the GPU `Mesh` keeps no triangles, so a mesh entity gives only a box about its bounds;
   `collider_hull_from_mesh_data` and `collider_triangles_from_mesh_data` make a hull or a static triangle mesh from the `MeshData` the
   mesh was made from.
@@ -575,3 +714,20 @@ and 0.004 ms asleep; a rope of 20 segments costs about 0.22 ms a step awake at t
 
 Active (motor-driven) ragdolls; soft bodies; ropes with twist stiffness; per-contact material callbacks; continuous collision
 between dynamic bodies beyond Jolt's linear cast; scaled or mutable shapes (swap with `set_shape`).
+
+
+`kin/physics3d/spring_arm3d.hpp` provides a fixed-size `SpringArm3D` for raw-world
+cameras. `frame(world, focus, rotation, seconds, filter)` sphere-sweeps the shoulder
+and backward arm, compresses immediately, and lengthens at a configured metres/sec.
+`reset()` forgets arm history. Probe shapes are retained; `configure()` only rebuilds
+them when radii change. The templated synchronous cast overload lets scene-aware
+cameras reuse the solver and their checked-entity filter without storing callbacks.
+A returned frame reports arm/shoulder obstruction and initial overlap. It cannot
+repair a focus already inside geometry. A zero-distance arm performs no backward
+sweep; invalid finite/range inputs return failure. Summit sets the shoulder probe
+scale to 0.6 to retain its existing shoulder clearance; the general default is 1.
+
+Set `QueryFilter3D::initial_overlap=true` (or the scene filter's equivalent) to
+report initial convex overlap even when a sweep moves outward, with penetration
+depth. This uses Jolt's deepest-point path for initial overlaps. The default
+preserves existing directional gameplay sweeps; spring arms opt in automatically.

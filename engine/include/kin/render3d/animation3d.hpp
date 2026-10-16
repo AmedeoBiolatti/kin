@@ -16,6 +16,9 @@
 #include <kin/core/types.hpp>
 #include <kin/render3d/skeleton.hpp>
 
+#include <kin/anim/event.hpp>
+#include <array>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -62,6 +65,54 @@ struct AnimClip3D {
 
     // The duration from the keys (the latest time of any track).
     f32 key_duration() const;
+};
+
+// One bounded action slot. Tokens identify a playback, never an entity/world;
+// retain the owning entity's checked handle separately. Only the latest token's
+// result is retained; older tokens report Superseded. No queue or history.
+struct ActionToken3D {
+    u64 value = 0;
+    explicit operator bool() const { return value != 0; }
+    friend bool operator==(ActionToken3D, ActionToken3D) = default;
+};
+enum class ActionStatus3D : u8 { None, Playing, Finishing, Completed, Cancelled, Superseded };
+enum class ActionStart3D : u8 { IfIdle, Replace };
+struct ActionPlayback3D {
+    f32 speed = 1, weight = 1, fade_in = .08f, fade_out = .08f;
+    i32 mask_joint = -1; // -1: all joints; otherwise subtree in this skeleton
+    bool include_root = true, additive = false, base_events = true;
+};
+enum class MarkerSource3D : u8 { Base, Action, Both };
+
+// Shared marker data, separate from immutable imported clips. Phases are [0,1),
+// independent of clip duration. Only the incoming base (dominant blend clip,
+// upper clip wins a 50/50 tie) emits; outgoing fades and pose layers stay silent.
+struct AnimationMarker3D {
+    f32 phase = 0;
+    AnimationEvent event;
+};
+struct ClipEventTrack3D {
+    std::string clip;
+    std::vector<AnimationMarker3D> markers;
+    MarkerSource3D source = MarkerSource3D::Base;
+};
+using AnimationEventTracks3D = std::vector<ClipEventTrack3D>;
+
+// Replaced on each update, never accumulated. References borrow the track data;
+// keep it alive until consumption. Earliest 16 crossings in playback order win.
+// dropped saturates at UINT32_MAX, including huge multi-loop steps.
+struct AnimationEventBatch3D {
+    static constexpr size_t capacity = 16;
+    std::array<const AnimationEvent*, capacity> entries{};
+    std::array<ActionToken3D, capacity> actions{}; // zero: base, else owning playback
+    u32 count = 0, dropped = 0;
+    std::span<const AnimationEvent* const> events() const { return {entries.data(), count}; }
+    void clear() { count = dropped = 0; _owner.reset(); }
+private:
+    // ECS batches retain only their small marker table, never the model/world.
+    // Standalone update() still borrows the caller's tracks.
+    std::shared_ptr<const AnimationEventTracks3D> _owner;
+    friend class WorldRenderState3D;
 };
 
 // A track's value at `time`, as glTF's spec has it: before the first key the first value, after the last the last; between
@@ -175,6 +226,20 @@ public:
     u32 layer_count() const { return static_cast<u32>(_layers.size()); }
     void clear_layers() { _layers.clear(); }
 
+    // --- one-shot action over base and pose layers (before IK)
+    // Clip/skeleton borrow the model. Positive speed, finite weights/fades and a
+    // valid subtree are required; failure leaves the current action untouched.
+    // Replace/restart cuts the old action and fades the new one from the base.
+    ActionToken3D play_action(const AnimClip3D* clip, const ActionPlayback3D& options = {},
+                              ActionStart3D start = ActionStart3D::IfIdle);
+    bool cancel_action(ActionToken3D token, f32 fade_seconds = -1); // -1: configured fade-out
+    ActionStatus3D action_status(ActionToken3D token) const;
+    ActionToken3D current_action() const { return _action.token; }
+    bool action_busy() const;
+    f32 action_time() const { return _action.time; }
+    f32 action_weight() const { return _action.weight; }
+    bool action_event_valid(ActionToken3D token) const;
+
     // --- root motion
     // With it on, the base layer's root joint is held at rest in the chosen axes, and the motion it would have made is
     // reported by root_motion() after each update.
@@ -187,6 +252,11 @@ public:
 
     // Advances every clip by `dt` seconds (times its speed) and makes the pose.
     void update(f32 dt);
+    // Crossing intervals: (before,after] forward, [after,before) backward.
+    // play/restart/seek do not emit skipped markers or a marker at the initial
+    // time. Loop boundaries can emit phase zero. Invalid/nonpositive dt freezes
+    // the player and clears output; negative speed plays events in reverse.
+    void update(f32 dt, std::span<const ClipEventTrack3D> tracks, AnimationEventBatch3D& events);
     // The pose of the last update (the rest pose before the first).
     const Pose& pose() const { return _pose; }
     // The matrices of that pose (compute_joint_matrices).
@@ -205,6 +275,16 @@ private:
     static void advance(Playing& p, f32 dt);
     void sample(const Playing& p, Pose& out) const;
     static void set_blend(Playing& p, std::span<const BlendPoint3D> points, f32 parameter);
+
+    struct Action {
+        const AnimClip3D* clip = nullptr;
+        ActionPlayback3D options;
+        ActionToken3D token;
+        ActionStatus3D status = ActionStatus3D::None;
+        f32 time = 0, elapsed = 0, weight = 0, fade_elapsed = 0, fade_weight = 0;
+        PoseMask mask;
+    } _action;
+    void advance_action(f32 dt);
 
     const Skeleton* _skeleton = nullptr;
     Playing _base;

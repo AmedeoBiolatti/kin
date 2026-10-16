@@ -1,0 +1,8 @@
+{
+  "schema": "kin.prefab/1", "id": "range-target", "root": "target",
+  "entities": [{"id": "target", "components": {
+    "Transform3D": {"scale": [3, 3, 3]},
+    "ModelRenderer3D": {"asset": "kenney-survival/box.glb"},
+    "Collider3D": {"half_extents": [0.125, 0.125, 0.125], "offset": [0, 0.125, 0]}
+  }}]
+}

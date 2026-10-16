@@ -20,6 +20,7 @@ public:
     bool contains(RagdollHandle3D h) const { return find(h) != nullptr; }
     i32 count() const { return _live; }
     std::vector<RagdollHandle3D> list() const;
+    bool has_body(RagdollHandle3D h,Body3D body)const;
     std::vector<Body3D> bodies(RagdollHandle3D h) const;
     const RagdollDesc* desc(RagdollHandle3D h) const;
 

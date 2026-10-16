@@ -22,7 +22,8 @@ f32 flat_distance(Vec3f a, Vec3f b) { return std::sqrt((a.x - b.x) * (a.x - b.x)
 } // namespace
 
 Bot::Bot(const Game& game, i32 player, BotConfig config)
-    : _game(&game), _player(player), _config(config), _route(game.level().route) {
+    : _game(&game), _player(player), _config(config),
+      _route(config.sheltered_route && game.level().expedition.enabled ? game.level().expedition.sheltered_route : game.level().route) {
     _last_feet = game.feet(player);
 }
 
@@ -70,6 +71,10 @@ PlayerCommand Bot::next() {
     const Player& p = _game->player(_player);
     if (p.state != PlayerState::Alive) {
         // Lying, getting up or dead: nothing to do but wait (and the leg may have to be redone after).
+        return c;
+    }
+    if (_game->config().expedition && p.expedition.phase == ExpeditionPhase::Briefing) {
+        c.interact = _game->step_count() >= 20;
         return c;
     }
     const CharacterState3D cs = _game->character_state(_player);
@@ -128,6 +133,13 @@ PlayerCommand Bot::next() {
         }
     };
 
+    if (_game->config().expedition && p.expedition.phase == ExpeditionPhase::Extraction) {
+        const Vec3f pad = _game->level().expedition.extraction;
+        if (flat_distance(feet, pad) < 1.0f) c.interact = true;
+        else to_point(pad);
+        return c;
+    }
+
     switch (L.kind) {
     case LegKind::Walk: {
         const Vec3f d = L.to - feet;
@@ -146,6 +158,7 @@ PlayerCommand Bot::next() {
         break;
     }
     case LegKind::Summit: {
+        if (_game->config().expedition) c.interact = true;
         break;
     }
     case LegKind::Climb:
@@ -455,6 +468,10 @@ namespace summit {
 
 bool script_config(const std::string& name, const SummitLevel& level, BotConfig& out) {
     out = {};
+    if (name == "expedition" || name == "shelter") {
+        out.sheltered_route = name == "shelter";
+        return level.expedition.enabled;
+    }
     if (name == "climb") return true;
     if (name == "rope") {
         for (std::size_t i = 0; i < level.route.size(); ++i) {
@@ -479,10 +496,10 @@ bool script_config(const std::string& name, const SummitLevel& level, BotConfig&
     return false;
 }
 
-bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log) {
+bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log, bool expedition, bool dense_scenery) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
     if (f == nullptr) return false;
-    const u32 magic = 0x474C4D53u; // "SMLG"
+    const u32 magic = expedition ? (dense_scenery ? 0x4E444D53u : 0x58454D53u) : 0x474C4D53u; // SMDN / SMEX / SMLG
     const u64 count = log.size();
     bool ok = std::fwrite(&magic, sizeof magic, 1, f) == 1 && std::fwrite(&seed, sizeof seed, 1, f) == 1 &&
               std::fwrite(&count, sizeof count, 1, f) == 1;
@@ -495,16 +512,16 @@ bool write_command_log(const std::string& path, u64 seed, const std::vector<Play
     return std::fclose(f) == 0 && ok;
 }
 
-bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log) {
+bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log, bool* expedition, bool* dense_scenery) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) return false;
     u32 magic = 0;
     u64 count = 0;
-    bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && magic == 0x474C4D53u && std::fread(&seed, sizeof seed, 1, f) == 1 &&
+    bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && (magic == 0x474C4D53u || magic == 0x58454D53u || magic == 0x4E444D53u) && std::fread(&seed, sizeof seed, 1, f) == 1 &&
               std::fread(&count, sizeof count, 1, f) == 1 && count < (u64{1} << 28);
     std::vector<PlayerCommand> out;
     for (u64 i = 0; ok && i < count; ++i) {
-        f32 v[4];
+        f32 v[4]{};
         u8 flags = 0;
         ok = std::fread(v, sizeof v, 1, f) == 1 && std::fread(&flags, 1, 1, f) == 1;
         PlayerCommand c;
@@ -520,7 +537,11 @@ bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerComm
         out.push_back(c);
     }
     std::fclose(f);
-    if (ok) log = std::move(out);
+    if (ok) {
+        log = std::move(out);
+        if (expedition) *expedition = magic != 0x474C4D53u;
+        if (dense_scenery) *dense_scenery = magic == 0x4E444D53u;
+    }
     return ok;
 }
 

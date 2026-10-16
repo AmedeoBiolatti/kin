@@ -73,6 +73,7 @@ struct InputBindings {
     f32 stick_look_speed = 150.0f;
     bool invert_y = false;
 
+    friend bool operator==(const InputBindings&, const InputBindings&) = default;
     static InputBindings defaults();
     // Replaces what the action was bound to.
     void set(Action a, std::vector<Binding> bindings) { table[static_cast<std::size_t>(a)] = std::move(bindings); }
@@ -88,6 +89,34 @@ struct InputBindings {
 
 // A stick through a radial dead zone: inside `dead_zone` zero, outside it rescaled so that full travel is still 1.
 Vec2f apply_dead_zone(Vec2f stick, f32 dead_zone);
+
+// The turn of the view the device asks for, in degrees as PlayerCommand::look (x to the right, y up): the mouse's motion times its
+// sensitivity, the sticks' rate for `dt` seconds. map_input's look; the camera also takes it for the motion the simulation has not
+// stepped yet (CameraRig::set_look_ahead).
+Vec2f look_of(const RawInput& raw, const InputBindings& bindings, f32 dt);
+
+// The hand's look on its way into the steps. Mouse motion arrives with the frame, and a frame holds 0, 1 or 2 steps: given whole to
+// the first step of a frame, steps would carry 1, 2, 1, 2... frames' worth of turn and the body that follows the look would turn in
+// jerks at the beat of the two rates. The feed keeps what has not been given yet (`pending`) and gives `follow` of it each step, so
+// the steps' turns are even; the camera shows the look as the steps have it plus `pending`, so that the view itself is not delayed.
+class LookFeed {
+public:
+    static constexpr f32 follow = 0.5f;
+    // Adds `look` (degrees, as PlayerCommand::look) and returns this step's share.
+    Vec2f take(Vec2f look) {
+        _pending.x += look.x;
+        _pending.y += look.y;
+        const Vec2f out{_pending.x * follow, _pending.y * follow};
+        _pending.x -= out.x;
+        _pending.y -= out.y;
+        return out;
+    }
+    Vec2f pending() const { return _pending; }
+    void reset() { _pending = {}; }
+
+private:
+    Vec2f _pending{};
+};
 
 // One step's command from the device state (`dt` is the step: the sticks turn the view at degrees a second).
 PlayerCommand map_input(const RawInput& raw, const InputBindings& bindings, f32 dt = fixed_step);

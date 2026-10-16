@@ -71,6 +71,8 @@ namespace kin {
 
 class Renderer3D;
 class Scene3D;
+class PhysicsAssets3D;
+struct CookedCollider3D;
 
 // What an entity collides as.
 struct Collider3D {
@@ -92,7 +94,16 @@ struct Collider3D {
     // A shape made already (a level's mesh, shared by many entities): used as it is, in place of everything above bar
     // offset and rotation. The scale is not applied to it.
     Shape3D shape;
+    // Authored recipe; binding is runtime-only and already scaled at bind time.
+    ComponentAssetRef asset;
+    std::shared_ptr<const CookedCollider3D> asset_binding;
 };
+
+// The same cooker used by the bridge; no world or renderer required.
+Shape3D cook_collider3d(const Collider3D& collider,Vec3f entity_scale={1,1,1});
+// Explicit binding/validation; use before sync_bodies, or rebuild changed live
+// bodies afterwards. Failures preserve last good bindings. No per-frame I/O.
+std::vector<std::string> resolve_physics3d_assets(EcsWorld& world,PhysicsAssets3D& assets,std::span<const EcsId> entities={});
 
 // An authored hold on an entity with a collider (the physics type's data, HoldDesc3D, as a component): the body is
 // grippable by itself, with its own quality; `snap` puts the hand on `anchor` (in the entity's space) whatever was aimed at.
@@ -337,6 +348,9 @@ public:
     // Makes and destroys bodies for the entities that gained or lost their components (ascending entity id).
     // step() does it itself first; call it to have the bodies before the first step (to query them).
     void sync_bodies();
+    // Reconcile only these entity IDs (including recently destroyed IDs).
+    // Keeps unrelated bindings/rebuild requests intact. Empty means no work.
+    void sync_entities(std::span<const EcsId> entities);
     // One fixed step of `dt`: sync_bodies, entities to bodies, World3D::step, bodies to entities, events.
     void step(f32 dt);
     // Steps for `frame_seconds` of time at the configured fixed step (carrying the remainder); returns the steps
@@ -350,6 +364,17 @@ public:
 
     // Destroys the entity's body and makes it again at the next sync from the components as they are now.
     void rebuild(flecs::entity entity);
+
+    struct BodyEdit {
+        flecs::entity target, source; // source may belong to an isolated staging ECS world
+        bool keep_pose = true, keep_linear_velocity = true, keep_angular_velocity = true;
+    };
+    // Prepare ALL replacements while old bodies remain alive. On refusal the
+    // commit callback is not run and old handles remain valid. On success call
+    // the non-throwing component commit, then exchange bodies. Needs spare body
+    // capacity; constrained bodies and characters/ragdolls/ropes are refused.
+    bool replace_bodies(std::span<const BodyEdit> edits, const std::function<void()>& commit,
+                        std::string* error = nullptr);
 
     // The contact events of the last step() (all the steps of one advance()), in the world's order, with the
     // entity ids in user_a and user_b.
@@ -390,6 +415,9 @@ public:
 
     // The entity a user id of an event is (invalid when it is gone).
     flecs::entity entity_of(u64 user_id) const;
+    // Verify the live native body belongs to the current binding, not merely a
+    // matching user id. Includes rigid bodies, characters, ragdolls and ropes.
+    flecs::entity entity_of_body(Body3D body) const;
     // The body of an entity (invalid when it has none yet).
     Body3D body_of(flecs::entity entity) const;
 
@@ -404,6 +432,9 @@ public:
     std::size_t body_count() const { return _bound.size(); }
 
 private:
+    bool sync_selected(EcsId id) const;
+    bool _selective_sync = false;
+    std::span<const EcsId> _sync_entities;
     struct Bound {
         flecs::entity_t entity = 0;
         Body3D body{};
@@ -418,7 +449,7 @@ private:
         bool rebuild = false;
     };
 
-    void create_body(flecs::entity entity, Bound& out);
+    void create_body(flecs::entity entity, Bound& out, u64 user_id = 0);
     void write_back(Bound& b, Vec3f position, Quatf rotation);
 
     struct BoundCharacter {

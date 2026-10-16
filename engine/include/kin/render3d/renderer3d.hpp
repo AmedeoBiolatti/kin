@@ -36,6 +36,7 @@
 namespace kin {
 
 class Renderer2D;
+class Assets3D;
 
 // A picture a 3D scene is drawn into (colour and depth), laid into the frame
 // with Renderer2D::draw_texture(view.texture(), rect). Cheap to copy (copies
@@ -143,6 +144,8 @@ public:
     const Render3DStats& stats() const { return _stats; }
 
 private:
+    friend class Assets3D;
+    Model load_model_shared(const std::filesystem::path& path, const MeshOptions& options, std::string* error, Assets3D* assets);
     Renderer2D* _renderer = nullptr;
     IRenderer3DBackend* _backend = nullptr;
     Render3DStats _stats{};

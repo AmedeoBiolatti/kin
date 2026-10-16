@@ -54,6 +54,7 @@ kin_add_test(kin_ecs_physics_tests kin-ecs-physics SOURCES ecs_physics_tests.cpp
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)
+kin_add_test(kin_prefab_structure_tests kin-prefab-structure SOURCES prefab_structure_tests.cpp)
 kin_add_test(kin_ecs_lifecycle_tests kin-ecs-lifecycle SOURCES ecs_lifecycle_tests.cpp)
 kin_add_test(kin_ui2_tests kin-ui2 SOURCES ui2_tests.cpp)
 kin_add_test(kin_ui2_text_edit_tests kin-ui2-text-edit SOURCES ui2_text_edit_tests.cpp)
@@ -108,9 +109,73 @@ if(KIN_GLSLC)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 if(KIN_EXPERIMENTAL_3D)
+    kin_add_test(kin_interaction3d_tests kin-interaction3d SOURCES interaction3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    set_tests_properties(kin-interaction3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_character_action3d_tests kin-character-actions3d SOURCES character_action3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    kin_add_test(kin_animation_event3d_tests kin-animation-events3d SOURCES animation_event3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    kin_add_test(kin_joint_attachment3d_tests kin-joint-attachment3d SOURCES joint_attachment3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    set_tests_properties(kin-joint-attachment3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_camera_rig3d_tests kin-camera-rig3d SOURCES camera_rig3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    set_tests_properties(kin-camera-rig3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_physics3d_query_tests kin-physics3d-queries SOURCES physics3d_query_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    kin_add_test(kin_scene_queries3d_tests kin-scene-queries3d SOURCES scene_queries3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    set_tests_properties(kin-scene-queries3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_camp_input_tests kin-camp-input SOURCES camp_input_tests.cpp)
+    kin_add_test(kin_camp_gameplay3d_tests kin-camp-gameplay3d SOURCES camp_gameplay3d_tests.cpp
+        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-camp-gameplay3d PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME kin-camp-push COMMAND kin_camp_gameplay3d_tests push)
+    set_tests_properties(kin-camp-push PROPERTIES SKIP_RETURN_CODE 77)
+    # Isolate GPU/Jolt setup/retirement between cases on RAM-constrained hosts.
+    foreach(_case RANGE 0 7)
+        add_test(NAME kin-camp-action-${_case} COMMAND kin_camp_gameplay3d_tests action ${_case})
+        set_tests_properties(kin-camp-action-${_case} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
+    kin_add_test(kin_scene_pipeline3d_tests kin-scene-pipeline3d SOURCES scene_pipeline3d_tests.cpp)
+    set_tests_properties(kin-scene-pipeline3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_prefab_pool3d_tests kin-prefab-pool3d SOURCES prefab_pool3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-prefab-pool3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_runtime_scene3d_tests kin-runtime-scene3d SOURCES runtime_scene3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-runtime-scene3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_particle_assets3d_tests kin-particle-assets3d SOURCES particle_assets3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    add_test(NAME kin-particle-assets3d-cpu COMMAND kin_particle_assets3d_tests cpu)
+    set_tests_properties(kin-particle-assets3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_physics3d_asset_tests kin-physics3d-assets SOURCES physics3d_asset_tests.cpp
+        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    kin_add_test(kin_material_assets3d_tests kin-material-assets3d SOURCES material_assets3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-material-assets3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_scene_session3d_tests kin-scene-session3d SOURCES scene_session3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-scene-session3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_scene3d_asset_tests kin-scene3d-assets SOURCES scene3d_asset_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-scene3d-assets PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_model_assets3d_tests kin-model-assets3d SOURCES model_assets3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    set_tests_properties(kin-model-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_mesh_cluster_tests kin-mesh-clusters SOURCES mesh_cluster_tests.cpp)
     kin_add_test(kin_skeleton_tests kin-skeleton SOURCES skeleton_tests.cpp)
     kin_add_test(kin_physics3d_tests kin-physics3d SOURCES physics3d_tests.cpp)
+    add_test(NAME kin-physics3d-first-hull COMMAND kin_physics3d_tests first-hull)
+    add_test(NAME kin-physics3d-first-mesh COMMAND kin_physics3d_tests first-mesh)
     kin_add_test(kin_physics3d_ecs_tests kin-physics3d-ecs SOURCES physics3d_ecs_tests.cpp)
     kin_add_test(kin_physics3d_character_tests kin-physics3d-character SOURCES physics3d_character_tests.cpp
         DEFINITIONS KIN_TEST_REFERENCE_SCENES="${PROJECT_SOURCE_DIR}/tests/reference/scenes")

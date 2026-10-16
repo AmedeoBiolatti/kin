@@ -1,4 +1,6 @@
+#include <kin/anim/events.hpp>
 #include <kin/ecs/render3d.hpp>
+#include <kin/render3d/material_asset3d.hpp>
 
 #include <algorithm>
 #include <array>
@@ -7,6 +9,14 @@
 namespace kin {
 
 namespace {
+
+void bind_animator(Animator3D& a, const Model& model) {
+    const auto& skeleton = model.skeletons[0];
+    if (a.bound == &model && a.player.skeleton() == &skeleton) return;
+    a.events.clear();
+    a.player.set_skeleton(&skeleton); a.player.play(nullptr); a.player.clear_layers();
+    a.bound = &model; a.applied.clear(); a.applied_layers.clear();
+}
 
 // The clip a state plays when it has no blend space: the machine's animation name for it, else its own name.
 std::string clip_of_state(const Animator3D& a, const std::string& state) {
@@ -39,7 +49,8 @@ struct Wanted {
 } // namespace
 
 WorldRenderState3D::WorldRenderState3D(flecs::world& world)
-    : _transform_observer(world.observer<Transform3D>("add_world_transform_3d")
+    : _attachments(world.query_builder<JointAttachment3D>().term_at(0).self().build()),
+      _transform_observer(world.observer<Transform3D>("add_world_transform_3d")
                               .event(flecs::OnAdd)
                               .yield_existing()
                               .each([](flecs::entity entity, Transform3D&) { entity.ensure<WorldTransform3D>(); })),
@@ -47,20 +58,33 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
                       .term_at(2).parent().cascade().optional()
                       .cached()
                       .build()),
-      _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer>().cached().build()),
-      _animators(world.query_builder<const SkinnedMeshRenderer, Animator3D, Transform3D*>().build()),
-      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*>().build()),
+      _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer, const RenderTransform3D*>().cached().build()),
+      _models(world.query_builder<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*>().cached().build()),
+      _animators(world.query_builder<const SkinnedMeshRenderer*, Animator3D, Transform3D*>().build()),
+      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*, const RenderTransform3D*>().build()),
       _time_of_day(world.query_builder<TimeOfDay3D>().build()),
-      _point_lights(world.query_builder<const WorldTransform3D, const PointLight3D>().build()),
-      _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D>().build()),
-      _emitters(world.query_builder<const WorldTransform3D, ParticleEmitter3D>().build()),
-      _weather(world.query_builder<Weather3D>().build()) {}
+      _point_lights(world.query_builder<const WorldTransform3D, const PointLight3D, const RenderTransform3D*>().build()),
+      _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*>().build()),
+      _emitters(world.query_builder<const WorldTransform3D, const ParticleEmitter3D>().build()),
+      _weather(world.query_builder<Weather3D>().build()) {
+    // Optional lookups during collection must not lazily register a component
+    // while a Flecs table is being iterated, including in non-authored worlds.
+    world.component<ModelMaterials3D>();
+}
 
 void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
-    _emitters.each([&](const WorldTransform3D& world, ParticleEmitter3D& emitter) {
-        emitter.system.transform = world.matrix;
-        emitter.system.emitting = emitter.enabled;
-        emitter.system.update(dt, wind);
+    // Copy inherited state before simulation, outside the query: a structural
+    // change can move Flecs tables and invalidate their component pointers.
+    std::vector<EcsEntity> entities;
+    _emitters.each([&](flecs::entity entity,const WorldTransform3D&,const ParticleEmitter3D&) {
+        if(!entity.owns<ParticleEmitter3D>())entities.emplace_back(entity);
+    });
+    for(auto entity:entities)entity.get_mut<ParticleEmitter3D>();
+    _emitters.each([&](flecs::entity entity,const WorldTransform3D& world,const ParticleEmitter3D&) {
+        auto* emitter=entity.get_mut<ParticleEmitter3D>(); // all owned now, no structural change
+        emitter->system.transform=world.matrix;
+        emitter->system.emitting=emitter->enabled&&emitter->emitting;
+        emitter->system.update(dt,wind);
     });
 }
 
@@ -95,22 +119,63 @@ bool WorldRenderState3D::apply_time_of_day(Scene3D& scene) const {
     return applied;
 }
 
+ActionToken3D play_action3d(EcsEntity actor, std::string_view name, ActionStart3D start) {
+    if (!actor) return {};
+    const auto* animator = actor.get<Animator3D>();
+    const auto* skin = actor.get<SkinnedMeshRenderer>();
+    if (!animator || !animator->actions || !skin || !skin->model || skin->model->skeletons.empty()) return {};
+    const auto definitions = animator->actions;
+    const auto found = std::find_if(definitions->begin(), definitions->end(), [&](const auto& d) { return d.name == name; });
+    if (found == definitions->end()) return {};
+    const auto* clip = skin->model->find_clip(found->clip);
+    auto options = found->playback;
+    options.mask_joint = found->mask_joint.empty() ? -1 : skin->model->skeletons[0].find(found->mask_joint);
+    if (!clip || (!found->mask_joint.empty() && options.mask_joint < 0)) return {};
+    auto* own = actor.get_mut<Animator3D>();
+    bind_animator(*own, *skin->model);
+    return own->player.play_action(clip, options, start);
+}
+bool cancel_action3d(EcsEntity actor, ActionToken3D token, f32 fade_seconds) {
+    if (!actor || !actor.has<Animator3D>()) return false;
+    return actor.get_mut<Animator3D>()->player.cancel_action(token, fade_seconds);
+}
+ActionStatus3D action_status3d(EcsEntity actor, ActionToken3D token) {
+    if (!actor || !actor.has<Animator3D>()) return token ? ActionStatus3D::Superseded : ActionStatus3D::None;
+    return actor.get<Animator3D>()->player.action_status(token);
+}
+
+u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& dispatch) {
+    u32 unhandled = 0;
+    world.raw().each([&](flecs::entity entity, Animator3D& animator) {
+        // The batch retains its actual source table, even after a native table
+        // replacement or a handler replacing the animator.
+        const auto batch = animator.events;
+        animator.events.clear();
+        for (u32 i = 0; i < batch.count; ++i) {
+            if (batch.actions[i]) {
+                const auto* current = entity.get<Animator3D>();
+                if (!current || !current->player.action_event_valid(batch.actions[i])) continue;
+            }
+            if (!dispatch.dispatch(EcsEntity{entity}, *batch.entries[i])) ++unhandled;
+        }
+    });
+    return unhandled;
+}
+
 void WorldRenderState3D::animate(f32 dt) {
     ++_epoch;
-    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer& renderer, Animator3D& a, Transform3D* own) {
-        const Model* model = renderer.model.get();
+    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer* renderer, Animator3D& a, Transform3D* own) {
+        a.events.clear();
+        const Model* model = renderer ? renderer->model.get() : nullptr;
         if (!model || model->skeletons.empty()) {
+            if (a.bound || a.player.skeleton()) {
+                a.player.set_skeleton(nullptr); a.player.play(nullptr); a.player.clear_layers();
+                a.bound = nullptr; a.applied.clear(); a.applied_layers.clear();
+            }
             return;
         }
         const Skeleton& skeleton = model->skeletons[0];
-        if (a.bound != model || a.player.skeleton() != &skeleton) {
-            // Bound to this model's skeleton (its first), whatever played before: the pose and the layers start afresh.
-            a.player.set_skeleton(&skeleton);
-            a.player.clear_layers();
-            a.bound = model;
-            a.applied.clear();
-            a.applied_layers.clear();
-        }
+        bind_animator(a, *model);
         // The state machine: one transition a step (kin/anim's evaluate, consuming matched triggers), never to the state it is in.
         Wanted want;
         f32 fade = a.fade_seconds;
@@ -176,7 +241,8 @@ void WorldRenderState3D::animate(f32 dt) {
             a.player.layer(static_cast<u32>(i)).clip = nullptr;
         }
         if (a.playing) {
-            a.player.update(dt);
+            a.player.update(dt, a.event_tracks ? std::span<const ClipEventTrack3D>{*a.event_tracks} : std::span<const ClipEventTrack3D>{}, a.events);
+            if (a.events.count) a.events._owner = a.event_tracks;
             if (a.apply_root_motion) {
                 const RootMotion& m = a.player.root_motion();
                 if (own) {
@@ -431,7 +497,7 @@ void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton& sk, const Pos
 }
 
 void WorldRenderState3D::apply_ik() {
-    _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator) {
+    _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator, const RenderTransform3D*) {
         const Model* model = renderer.model.get();
         if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || model->skeletons.empty()) {
             return;
@@ -465,7 +531,10 @@ void WorldRenderState3D::propagate_transforms() {
     });
 }
 
+void WorldRenderState3D::clear_collection_cache() { _buckets.clear(); }
+
 void WorldRenderState3D::collect(Scene3D& scene) {
+    prepare_joint_attachments();
     for (Bucket& bucket : _buckets) {
         bucket.instances.clear();
     }
@@ -473,6 +542,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         while (it.next()) {
             const auto world = it.field<const WorldTransform3D>(0);
             const auto renderers = it.field<const MeshRenderer>(1);
+            const auto presentation = it.field<const RenderTransform3D>(2);
             Bucket* last = nullptr; // entities of a table mostly share a mesh
             for (const auto i : it) {
                 const MeshRenderer& r = renderers[i];
@@ -491,40 +561,67 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                         last = &_buckets.emplace_back(Bucket{r.mesh, r.material, {}});
                     }
                 }
-                last->instances.push_back({world[i].matrix, r.tint});
+                const auto placement=draw_placement(it.entity(i),world[i],it.is_set(2)?&presentation[i]:nullptr);
+                if(placement)last->instances.push_back({*placement,r.tint});
             }
         }
     });
+    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer, const RenderTransform3D* presentation) {
+        if (!renderer.visible || !renderer.model) return;
+        const auto placement=draw_placement(entity,world,presentation);if(!placement)return;
+        const u32 id = renderer.id ? renderer.id : u32(entity.id() & 0xFFFFFFFFu);
+        const auto* overrides = entity.get<ModelMaterials3D>();
+        const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
+            overrides->binding->materials.size() == renderer.model->parts.size() ? overrides->binding.get() : nullptr;
+        for (size_t index = 0; index < renderer.model->parts.size(); ++index) {
+            const auto& part = renderer.model->parts[index];
+            const auto& material = binding ? binding->materials[index] : part.material;
+            if (!part.mesh || part.mesh.skinned() || part.skin >= 0) continue;
+            auto found = std::find_if(_buckets.begin(), _buckets.end(), [&](const auto& bucket) {
+                return bucket.mesh == part.mesh && bucket.material == material;
+            });
+            if (found == _buckets.end()) found = _buckets.emplace(_buckets.end(), Bucket{part.mesh, material, {}});
+            found->instances.push_back({*placement * part.transform, renderer.tint, id});
+        }
+    });
+    // A bucket is a reuse aid for live draws, never a resident asset cache.
+    std::erase_if(_buckets,[](const Bucket& bucket){return bucket.instances.empty();});
     for (const Bucket& bucket : _buckets) {
         scene.draw_instanced(bucket.mesh, bucket.instances, bucket.material);
     }
     // Lights (P3b): the entity's place, and for a spot its -Z axis; the entity's id names the light across frames.
-    _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light) {
+    _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light, const RenderTransform3D* presentation) {
+        const auto matrix=draw_placement(entity,world,presentation);if(!matrix)return;
+        const WorldTransform3D placement{*matrix};
         if (light.enabled) {
-            scene.add_light({.position = world.position(), .color = light.color, .radius = light.radius, .size = light.size, .shadow = light.shadow,
+            scene.add_light({.position = placement.position(), .color = light.color, .radius = light.radius, .size = light.size, .shadow = light.shadow,
                              .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
         }
     });
-    _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light) {
+    _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light, const RenderTransform3D* presentation) {
+        const auto matrix=draw_placement(entity,world,presentation);if(!matrix)return;
+        const WorldTransform3D placement{*matrix};
         if (light.enabled) {
-            const Vec3f axis = world.matrix.apply_vector({0.0f, 0.0f, -1.0f});
-            scene.add_spot_light({.position = world.position(), .direction = length_squared(axis) > 0.0f ? normalize(axis) : Vec3f{0.0f, -1.0f, 0.0f},
+            const Vec3f axis = placement.matrix.apply_vector({0.0f, 0.0f, -1.0f});
+            scene.add_spot_light({.position = placement.position(), .direction = length_squared(axis) > 0.0f ? normalize(axis) : Vec3f{0.0f, -1.0f, 0.0f},
                                   .color = light.color, .radius = light.radius, .size = light.size, .inner_angle = light.inner_angle,
                                   .outer_angle = light.outer_angle, .shadow = light.shadow, .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
         }
     });
     // Particles (P3c): each enabled emitter's live particles, as a batch with its desc's look.
-    _emitters.each([&](const WorldTransform3D&, ParticleEmitter3D& emitter) {
+    _emitters.each([&](flecs::entity entity,const WorldTransform3D& world, const ParticleEmitter3D& emitter) {
+        if(!draw_placement(entity,world,nullptr))return;
         if (emitter.enabled && emitter.system.count() > 0) {
             scene.draw_particles(emitter.system);
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
-    _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator) {
+    _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator, const RenderTransform3D* presentation) {
         const Model* model = renderer.model.get();
         if (!renderer.visible || !model || model->skeletons.empty()) {
             return;
         }
+        const auto placement=draw_placement(it.entity(row),world,presentation);if(!placement)return;
         const Skeleton& skeleton = model->skeletons[0];
         _pose_scratch.resize(skeleton.joint_count());
         if (animator && animator->bound == model && animator->player.skeleton() == &skeleton) {
@@ -537,7 +634,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             } else {
                 // The clips' pose with the constraints solved on it (and the physics override over that), in this frame's place
                 // of the entity.
-                solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
+                if(!attachment_pose_prepared(it.entity(row).id()))solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
                 world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
             }
         } else {
@@ -545,7 +642,11 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         }
         // The entity's id when none is given: pick names the entity, and the velocity matches the character by it.
         const u32 id = renderer.id != 0 ? renderer.id : static_cast<u32>(it.entity(row).id() & 0xffffffffu);
-        scene.draw_skinned(*model, _pose_scratch, world.matrix, renderer.tint, id);
+        const auto* overrides = it.entity(row).get<ModelMaterials3D>();
+        const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
+            overrides->binding->materials.size() == model->parts.size() ? overrides->binding.get() : nullptr;
+        scene.draw_skinned(*model, _pose_scratch, *placement, renderer.tint, id,
+            binding ? std::span<const Material3D>{binding->materials} : std::span<const Material3D>{});
     });
     // Meshes no longer drawn are let go.
     std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); });

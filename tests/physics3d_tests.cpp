@@ -15,6 +15,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -851,6 +852,11 @@ void test_shape_cast() {
         const auto hit = world.shape_cast(Shape3D::sphere(0.5f), {0, 0.2f, 0}, {}, {0, -1, 0});
         CHECK(hit && hit->fraction == 0.0f && hit->penetration > 0.1f);
     }
+    // Initial overlap must also be reported while moving out of a solid.
+    {
+        const auto hit = world.shape_cast(Shape3D::sphere(0.5f), {0, 0.2f, 0}, {}, {0, 2, 0}, {.initial_overlap = true});
+        CHECK(hit && hit->fraction == 0.0f && hit->penetration > 0.1f);
+    }
     // Meshes cannot be swept.
     const std::array<Vec3f, 3> tri = {Vec3f{0, 0, 0}, {1, 0, 0}, {0, 0, 1}};
     const std::array<u32, 3> idx = {0, 1, 2};
@@ -1684,7 +1690,21 @@ void test_set_shape() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    // Separate CTest processes: no World3D or primitive shape may initialise Jolt before these containers allocate.
+    if (argc == 2) {
+        const std::array<Vec3f, 4> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+        Shape3D shape;
+        if (std::string_view(argv[1]) == "first-hull") {
+            shape = Shape3D::convex_hull(points);
+            CHECK(shape.valid() && shape.kind() == Shape3DKind::ConvexHull);
+        } else if (std::string_view(argv[1]) == "first-mesh") {
+            const std::array<u32, 3> indices{0, 1, 2};
+            shape = Shape3D::triangle_mesh(points, indices);
+            CHECK(shape.valid() && shape.kind() == Shape3DKind::TriangleMesh);
+        } else return 2;
+        return failures ? 1 : 0;
+    }
     test_rest_and_sleep();
     test_free_fall_dt();
     test_gravity_parameter();

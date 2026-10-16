@@ -117,6 +117,13 @@ CharacterDesc3D make_desc(const PlayerRules& r, Vec3f feet, u64 user_id, f32 sta
 
 } // namespace
 
+Shape3D decor_shape(const SummitLevel& level, const DecorChunk& chunk) {
+    std::vector<Vec3f> pts = decor_chunk_points(level, chunk);
+    const Quatf inverse = chunk.rotation.conjugate();
+    for (Vec3f& p : pts) p = inverse.rotate(p - chunk.centre);
+    return Shape3D::convex_hull(pts);
+}
+
 Vec3f look_vector(f32 yaw, f32 pitch) { return Quatf::yaw_pitch(yaw, pitch).rotate({0.0f, 0.0f, -1.0f}); }
 
 struct Game::Impl {
@@ -126,7 +133,8 @@ struct Game::Impl {
     std::vector<Mat4f> bones;       // scratch
 };
 
-Game::Game(u64 seed, GameConfig config) : _level(generate_level(seed)), _config(std::move(config)) {
+Game::Game(u64 seed, GameConfig config)
+    : _level(config.expedition ? generate_expedition_level(seed, config.dense_scenery) : generate_level(seed)), _config(std::move(config)) {
     if (_config.players == 0) _config.players = 1;
     build();
 }
@@ -162,6 +170,47 @@ void Game::build() {
         if (p.hold) {
             _world->set_hold(b, {.quality = p.hold_quality});
         }
+    }
+
+    // The decor rock (buttresses, scree, boulders): a static convex hull of each chunk's mesh, after the pieces' ids. A buttress
+    // has the Cliff's surface, a stone the ground's (neither is a hold).
+    _decor = decor_chunks(_level);
+    _decor_bodies.reserve(_decor.size());
+    for (std::size_t i = 0; i < _decor.size(); ++i) {
+        const DecorChunk& c = _decor[i];
+        const Piece proto; // the defaults are what Cliff and Ground pieces use
+        Body3DDesc d;
+        d.shape = decor_shape(_level, c);
+        d.motion = Body3DMotion::Static;
+        d.position = c.centre;
+        d.rotation = c.rotation;
+        d.friction = proto.friction;
+        d.user_id = u64(_level.pieces.size()) + 1 + u64(i);
+        const Body3D b = _world->create_body(d);
+        _decor_bodies.push_back(b);
+        SurfaceMaterial3D m;
+        m.grippable = proto.grippable;
+        m.grip = proto.grip;
+        m.slip = proto.slip;
+        m.drain = proto.drain;
+        m.tag = proto.tag;
+        _world->set_surface_material(b, m);
+    }
+    _props = solid_props(_level);
+    for (std::size_t i = 0; i < _props.size(); ++i) {
+        const PropPlacement& p = _props[i];
+        Body3DDesc d;
+        d.shape = prop_shape(p);
+        d.motion = Body3DMotion::Static;
+        d.position = p.feet;
+        d.rotation = Quatf::axis_angle({0, 1, 0}, p.yaw);
+        d.user_id = 100000 + u64(i);
+        d.friction = 0.85f;
+        const Body3D body = _world->create_body(d);
+        _prop_bodies.push_back(body);
+        SurfaceMaterial3D surface;
+        surface.grippable = false;
+        _world->set_surface_material(body, surface);
     }
     _world->optimize_broad_phase();
 
@@ -306,7 +355,10 @@ void Game::step(std::span<const PlayerCommand> commands) {
     _world->step(fixed_step);
     _world->drain_events();
     _world->drain_constraint_events();
-    for (std::size_t i = 0; i < _players.size(); ++i) after_player(i32(i));
+    for (std::size_t i = 0; i < _players.size(); ++i) {
+        after_player(i32(i));
+        if (_config.expedition) step_expedition(i32(i));
+    }
     _world->drain_character_events();
     _world->drain_ragdoll_events();
     _world->drain_rope_events();
@@ -333,6 +385,10 @@ void Game::step_player(i32 index, const PlayerCommand& raw) {
     const f32 m = std::sqrt(c.move.x * c.move.x + c.move.y * c.move.y);
     if (m > 1.0f) c.move = {c.move.x / m, c.move.y / m};
     p.command = c;
+    if (_config.expedition && (p.expedition.phase == ExpeditionPhase::Briefing || p.expedition.phase == ExpeditionPhase::Complete)) {
+        c.move = {};
+        c.jump = c.sprint = c.grab_left = c.grab_right = c.pull_up = false;
+    }
 
     // Looking is always allowed (a camera that cannot turn while you lie there is worse than none).
     p.yaw = wrap_degrees(p.yaw - c.look.x);
@@ -539,7 +595,7 @@ void Game::after_player(i32 index) {
             }
             p.best_altitude = std::max(p.best_altitude, cs.position.y);
             // The top.
-            if (!p.summit) {
+            if (!p.summit && !_config.expedition) {
                 const Vec3f d = cs.position - _level.summit;
                 if (std::abs(d.x) < _level.summit_radius && std::abs(d.z) < _level.summit_radius && std::abs(d.y) < 4.0f) {
                     p.summit = true;
@@ -643,6 +699,12 @@ void Game::serialise(std::vector<u8>& bytes) const {
         o.put(p.command.look.y);
         o.put<u8>(u8((p.command.jump ? 1 : 0) | (p.command.sprint ? 2 : 0) | (p.command.grab_left ? 4 : 0) | (p.command.grab_right ? 8 : 0) |
                      (p.command.release ? 16 : 0) | (p.command.pull_up ? 32 : 0) | (p.command.interact ? 64 : 0)));
+        if (_config.expedition) {
+            o.put<u8>(u8(p.expedition.phase));
+            o.put(p.expedition.start_step); o.put(p.expedition.finish_step);
+            o.put(p.expedition.beacon_steps); o.put(p.expedition.extraction_steps);
+            o.put<u8>(p.expedition.shelter_visited ? 1 : 0);
+        }
     }
 }
 
@@ -658,7 +720,7 @@ std::vector<u8> Game::save() const {
     std::vector<u8> bytes;
     Out o{bytes};
     o.put(save_magic);
-    o.put(save_version);
+    o.put<u32>(_config.expedition ? (_level.expedition.dense_scenery ? 4 : 3) : save_version);
     o.put<u64>(_level.seed);
     serialise(bytes);
     o.blob(_world->save_state());
@@ -667,7 +729,8 @@ std::vector<u8> Game::save() const {
 
 bool Game::restore(std::span<const u8> bytes) {
     In in{bytes};
-    if (in.get<u32>() != save_magic || in.get<u32>() != save_version || in.get<u64>() != _level.seed || !in.ok) return false;
+    if (in.get<u32>() != save_magic || in.get<u32>() != (_config.expedition ? (_level.expedition.dense_scenery ? 4 : 3) : save_version) ||
+        in.get<u64>() != _level.seed || !in.ok) return false;
     const u64 step = in.get<u64>();
     RngKey rng;
     rng.lo = in.get<u32>();
@@ -710,6 +773,15 @@ bool Game::restore(std::span<const u8> bytes) {
         p.command.release = flags & 16;
         p.command.pull_up = flags & 32;
         p.command.interact = flags & 64;
+        if (_config.expedition) {
+            p.expedition.phase = ExpeditionPhase(in.get<u8>());
+            p.expedition.start_step = in.get<i32>(); p.expedition.finish_step = in.get<i32>();
+            p.expedition.beacon_steps = in.get<i32>(); p.expedition.extraction_steps = in.get<i32>();
+            p.expedition.shelter_visited = in.get<u8>() != 0;
+            if (u8(p.expedition.phase) > u8(ExpeditionPhase::Complete) || p.expedition.beacon_steps < 0 ||
+                p.expedition.beacon_steps >= beacon_hold_steps || p.expedition.extraction_steps < 0 ||
+                p.expedition.extraction_steps >= extraction_hold_steps) return false;
+        }
         if (u32(p.state) > u32(PlayerState::Dead)) return false;
     }
     const std::span<const u8> world = in.blob();

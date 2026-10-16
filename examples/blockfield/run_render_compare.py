@@ -29,7 +29,7 @@ def process_tree(pid):
         children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
         for child in children:
             result.extend(process_tree(int(child)))
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         pass
     return result
 
@@ -52,7 +52,7 @@ def bounded_run(command, label, root, env=None, rss_limit=1536):
                         for line in Path(f'/proc/{pid}/status').read_text().splitlines():
                             if line.startswith('VmRSS:'):
                                 rss += int(line.split()[1]) / 1024
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):
                         pass
                 peak = max(peak, rss)
                 if rss > rss_limit or available_mib() < 1024 or time.monotonic() - start > 300:

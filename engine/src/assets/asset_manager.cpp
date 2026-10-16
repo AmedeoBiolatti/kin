@@ -272,10 +272,10 @@ void register_default_asset_loaders(AssetManager& assets) {
         }
         return std::move(*result.document);
     });
-    assets.register_loader<PrefabAsset>([](const std::filesystem::path& path) {
+    assets.register_loader<PrefabAsset>([root=assets.root()](const std::filesystem::path& path) {
         EcsWorld validation_world;
         register_builtin_editor_components(validation_world);
-        PrefabLoadResult result = load_prefab_asset(path, validation_world.components());
+        PrefabLoadResult result = load_prefab_asset(path, validation_world.components(),{.content_root=root});
         if (!result.ok()) {
             std::ostringstream message;
             message << "failed to load prefab";

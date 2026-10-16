@@ -1,0 +1,8 @@
+{
+  "schema": "kin.materials3d/1",
+  "material": {"texture": null, "roughness": 0.4},
+  "variants": {
+    "glow": {"material": {"color": [255, 206, 96, 255], "emissive": 1.2, "casts_shadow": false}},
+    "frame": {"material": {"color": [65, 46, 26, 255], "metallic": 0.6}}
+  }
+}

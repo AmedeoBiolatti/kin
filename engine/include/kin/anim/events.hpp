@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/anim/track.hpp>
+#include <kin/anim/event.hpp>
 #include <kin/core/types.hpp>
 #include <kin/ecs/world.hpp>
 
@@ -10,14 +11,6 @@
 #include <vector>
 
 namespace kin {
-
-struct AnimationEvent {
-    std::string channel;
-    std::string name;
-    std::string value;
-    std::string target;
-    Vec2f offset{};
-};
 
 struct EventKey {
     f32 time = 0.0f;
@@ -52,6 +45,9 @@ public:
     // AnimationEventQueue) and leaves events on unregistered channels in place —
     // see the AnimationEventQueue draining contract above.
     void run(EcsWorld& world);
+    // Dispatch a single event to an already resolved target. No queue/retention;
+    // returns false for an unregistered channel. event.target is not resolved here.
+    bool dispatch(EcsEntity target, const AnimationEvent& event) const;
 
 private:
     std::unordered_map<std::string, EventInterpreter> _channels;

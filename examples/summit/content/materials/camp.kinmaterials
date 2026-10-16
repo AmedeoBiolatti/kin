@@ -1,0 +1,15 @@
+{
+  "schema": "kin.materials3d/1",
+  "material": {"unlit": false, "roughness": 0.8},
+  "variants": {
+    "brass": {"material": {
+      "texture": null, "color": [210, 160, 60, 255], "metallic": 0.85, "roughness": 0.3
+    }},
+    "blue": {"material": {
+      "texture": null, "color": [35, 100, 200, 255], "metallic": 0.1, "roughness": 0.65
+    }},
+    "ember": {"material": {
+      "color": [255, 130, 70, 255], "emissive": 0.5, "roughness": 1
+    }}
+  }
+}

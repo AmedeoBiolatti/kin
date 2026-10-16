@@ -45,6 +45,20 @@ The FreeType License asks that documentation for binary distributions credit it,
 for example: "Portions of this software are copyright © 2026 The FreeType
 Project (https://freetype.org). All rights reserved."
 
+## Bundled example assets
+
+Summit includes a selected subset of [Survival Kit 2.0 by Kenney](https://kenney.nl/assets/survival-kit), released under
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). The original license and a source/checksum manifest are in
+`examples/summit/content/kenney-survival/` and accompany the game's content package. These selected models and their shared
+colour atlas are unmodified. Summit also includes a fitted survivor mesh/skin and retargeted animations derived from
+[Kenney Animated Characters Survivors](https://kenney.nl/assets/animated-characters-survivors), CC0-1.0; its license and
+modification manifest are in `examples/summit/content/kenney-character/`.
+
+Summit's rock/ground materials derive from ambientCG's [Rock030](https://ambientcg.com/view?id=Rock030) and
+[Ground037](https://ambientcg.com/view?id=Ground037) by Lennart Demes, [CC0-1.0](https://docs.ambientcg.com/license/).
+The original colour/OpenGL normal JPEGs and derived packed AO/roughness maps are bundled with source manifests and a license
+notice in `examples/summit/content/ambientcg/`. See `examples/summit/content/README.md` for budgets and reproduction commands.
+
 ## Reference assets (fetched, never distributed)
 
 `tools/reference/fetch.py` downloads sample models into a developer's cache for the 3D reference scenes and tests; none of them is

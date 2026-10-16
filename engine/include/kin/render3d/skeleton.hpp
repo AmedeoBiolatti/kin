@@ -46,6 +46,8 @@ struct PoseMask {
     static PoseMask all(const Skeleton& skeleton, f32 weight = 1.0f);
     // `joint` and everything below it at `weight`, the rest at 0 (an arm; an upper body). `include_root` false leaves
     // `joint` itself out and takes only its descendants.
+    // Reuses weights storage; identical selection to subtree().
+    void set_subtree(const Skeleton& skeleton, i32 joint, f32 weight = 1.0f, bool include_root = true);
     static PoseMask subtree(const Skeleton& skeleton, i32 joint, f32 weight = 1.0f, bool include_root = true);
     // The named joints (not their children) at `weight`, the rest at 0. A name that is not a joint is ignored.
     static PoseMask joints(const Skeleton& skeleton, std::span<const std::string_view> names, f32 weight = 1.0f);

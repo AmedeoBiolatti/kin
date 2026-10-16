@@ -178,6 +178,11 @@ void Scene3D::draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matric
 }
 
 void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint, u32 id) {
+    draw_skinned(model, joint_matrices, transform, tint, id, {});
+}
+void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint, u32 id,
+                           std::span<const Material3D> materials) {
+    if (!materials.empty() && materials.size() != model.parts.size()) throw std::invalid_argument("material count must match model parts");
     // One range for the pose, as many matrices as the most any part uses (a part uses the first of them: its joints are the
     // skeleton's, in the skeleton's order).
     std::size_t need = 0;
@@ -188,7 +193,9 @@ void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matr
     }
     u32 first_joint = 0;
     bool copied = false;
-    for (const ModelPart& part : model.parts) {
+    for (size_t part_index = 0; part_index < model.parts.size(); ++part_index) {
+        const auto& part = model.parts[part_index];
+        const auto& material = materials.empty() ? part.material : materials[part_index];
         if (part.mesh.skinned()) {
             if (part.skin > 0) {
                 continue;
@@ -207,9 +214,9 @@ void Scene3D::draw_skinned(const Model& model, std::span<const Mat4f> joint_matr
                 first_joint = static_cast<u32>(_joints.size());
                 _joints.insert(_joints.end(), joint_matrices.begin(), joint_matrices.begin() + static_cast<std::ptrdiff_t>(need));
             }
-            add_skinned_copy(part.mesh, first_joint, transform, part.material, tint, id);
+            add_skinned_copy(part.mesh, first_joint, transform, material, tint, id);
         } else {
-            draw(part.mesh, transform * part.transform, part.material, tint, id);
+            draw(part.mesh, transform * part.transform, material, tint, id);
         }
     }
 }

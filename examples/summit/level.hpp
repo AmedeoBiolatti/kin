@@ -36,6 +36,7 @@ enum class PieceKind : u8 {
     Lip,     // the grippable edge on top of a smooth wall
     Boulder, // decoration with a collider
     Post,    // a rope's anchor beam
+    Equipment, // expedition fixtures: boxes shared by collision and the view, colour selected by tag
 };
 
 // What a hand finds. `grippable` false: no surface grip. `hold`: an authored hold (HoldDesc3D) of `hold_quality`.
@@ -91,6 +92,18 @@ struct Leg {
     std::string label;
 };
 
+// The expedition is an authored route with two ways through its first pitch. Both are kept as data so the bot, trail markers,
+// collision checks and presentation use the same places. The shelter is an oriented volume inside the cave, above its floor.
+struct ExpeditionLayout {
+    bool enabled = false;
+    bool dense_scenery = false;
+    Vec3f briefing{}, fork{}, beacon{}, extraction{};
+    Vec3f shelter_centre{}, shelter_half{};
+    Quatf rotation{};
+    std::vector<Leg> sheltered_route;
+    std::vector<Vec3f> direct_trail, sheltered_trail;
+};
+
 struct SummitLevel {
     u64 seed = 0;
     std::vector<Piece> pieces;
@@ -102,6 +115,7 @@ struct SummitLevel {
     f32 summit_radius = 3.0f;
     f32 kill_y = -40.0f;    // below it a body is lost
     Bounds3 bounds{};
+    ExpeditionLayout expedition;
 
     // The level as bytes in a fixed order (floats bit for bit), its FNV-1a hash, and the same of the render meshes.
     std::vector<u8> bytes() const;
@@ -111,6 +125,8 @@ struct SummitLevel {
 };
 
 SummitLevel generate_level(u64 seed);
+SummitLevel generate_expedition_level(u64 seed, bool dense_scenery = false);
+bool in_expedition_shelter(const SummitLevel& level, Vec3f feet);
 
 // What the planner counts with: the numbers of the player model, in one place (game.hpp's PlayerRules is these).
 struct ClimbCosts {
@@ -159,5 +175,31 @@ struct RenderMeshData {
     Material3D material;
 };
 std::vector<RenderMeshData> build_render_meshes(const SummitLevel& level);
+
+// The decor rock (P4b's look pass, given colliders in its follow-up): buttresses at the ends of the cliffs, scree and boulders on
+// the ground, placed off the route. The list is the one source of both the triangles (`build_decor_meshes`) and the colliders
+// (Game makes a static convex hull of each chunk's mesh vertices), so the two cannot differ. A pure function of the level; the
+// level's bytes and hash do not include it.
+enum class DecorKind : u8 {
+    Buttress, // leaning block at a cliff's end: rock you can grab (the Cliff's surface)
+    Scree,    // a small stone on the ground
+    Boulder,  // a big stone (0.7 m and up) on the ground
+};
+struct DecorChunk {
+    DecorKind kind = DecorKind::Scree;
+    Vec3f centre{};
+    Vec3f half{0.5f, 0.5f, 0.5f}; // of the chamfered box before the noise moves its vertices
+    Quatf rotation{};
+    f32 bevel = 0.1f;             // the chamfer (m)
+    f32 amp = 0.03f;              // the noise's displacement (m) at one unit
+    u32 seed = 0;                 // colour and noise
+};
+std::vector<DecorChunk> decor_chunks(const SummitLevel& level);
+// One chunk's triangles, and the distinct positions of their vertices (world space): what its collider is the hull of.
+MeshData decor_chunk_mesh(const SummitLevel& level, const DecorChunk& chunk);
+std::vector<Vec3f> decor_chunk_points(const SummitLevel& level, const DecorChunk& chunk);
+std::vector<RenderMeshData> build_decor_meshes(const SummitLevel& level);
+// The ground and the ranges round the mountain (a polar grid out to 2.6 km). No collider: nobody goes there.
+std::vector<RenderMeshData> build_terrain_meshes(const SummitLevel& level);
 
 } // namespace summit

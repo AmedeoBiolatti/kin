@@ -27,6 +27,7 @@
 namespace kin {
 
 class Model;
+class ModelBatch3D;
 
 // How a material's colour goes over what is behind it.
 enum class Blend3D : u8 {
@@ -469,7 +470,10 @@ public:
     void draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material = {},
               Color tint = colors::white, u32 id = 0);
     // Each part of `model` (model.hpp), placed by `transform`.
-    void draw(const Model& model, const Mat4f& transform, Color tint = colors::white);
+    void draw(const Model& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
+    // Optional per-part materials, indexed as model.parts. Empty uses imported
+    // materials; a nonempty span must match the part count (else throws).
+    void draw(const Model& model, const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials);
     // A skinned mesh (made from MeshData with a skin) in a pose: `joint_matrices` are the matrices of
     // compute_joint_matrices (kin/render3d/skeleton.hpp), at least Mesh::skin_joint_count() of them, copied into the scene
     // (they need not outlive the call; clear() takes them away). `transform` places the posed mesh: the matrices are in
@@ -486,12 +490,16 @@ public:
     // 59). `id` is what pick says of each part; it is also how a copy is matched across frames for the velocity.
     void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint = colors::white,
                       u32 id = 0);
+    void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint,
+                      u32 id, std::span<const Material3D> materials);
     // Many copies of `mesh`, in one draw.
     void draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material = {});
     void draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
     // Retain a handle; batch records need not be copied into instances(). The batch's groups
     // are read at render time, including bounds refreshed by update().
     void draw_instanced(const InstanceBatch3D& batch, const Material3D& material = {});
+    // Every part/material of a persistent static-model batch (model.hpp).
+    void draw_instanced(const ModelBatch3D& batch);
     // A spatial cell of plain instances. `world_bounds` must enclose every copy's culling sphere
     // (instance_bounds() computes it). Equal mesh/material cells still merge into one GPU draw;
     // their bounds stay separate for camera and shadow culling. Invalid bounds fall back to

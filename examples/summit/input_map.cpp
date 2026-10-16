@@ -170,6 +170,17 @@ Vec2f apply_dead_zone(Vec2f stick, f32 dead_zone) {
     return {stick.x / m * scaled, stick.y / m * scaled};
 }
 
+Vec2f look_of(const RawInput& raw, const InputBindings& b, f32 dt) {
+    const f32 flip = b.invert_y ? -1.0f : 1.0f;
+    Vec2f look{raw.mouse_delta.x * b.mouse_sensitivity, -raw.mouse_delta.y * b.mouse_sensitivity * flip};
+    if (raw.pad.connected) {
+        const Vec2f r = apply_dead_zone({raw.pad.right_x, raw.pad.right_y}, b.dead_zone);
+        look.x += r.x * b.stick_look_speed * dt;
+        look.y += r.y * b.stick_look_speed * dt * flip;
+    }
+    return look;
+}
+
 PlayerCommand map_input(const RawInput& raw, const InputBindings& b, f32 dt) {
     PlayerCommand c;
     Vec2f move{};
@@ -187,13 +198,7 @@ PlayerCommand map_input(const RawInput& raw, const InputBindings& b, f32 dt) {
     if (m > 1.0f) move = {move.x / m, move.y / m};
     c.move = move;
 
-    const f32 flip = b.invert_y ? -1.0f : 1.0f;
-    c.look = {raw.mouse_delta.x * b.mouse_sensitivity, -raw.mouse_delta.y * b.mouse_sensitivity * flip};
-    if (raw.pad.connected) {
-        const Vec2f r = apply_dead_zone({raw.pad.right_x, raw.pad.right_y}, b.dead_zone);
-        c.look.x += r.x * b.stick_look_speed * dt;
-        c.look.y += r.y * b.stick_look_speed * dt * flip;
-    }
+    c.look = look_of(raw, b, dt);
 
     c.jump = action_down(raw, b, Action::Jump);
     c.sprint = action_down(raw, b, Action::Sprint);

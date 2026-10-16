@@ -9,6 +9,99 @@ releases may change APIs.
 
 ### Added
 
+- Native 3D interaction queries with caller-bounded discovery, checked target/verb
+  locks, current contact revalidation and shared reach/visibility rules. Camp
+  pickups and crate pushing reuse the API with native keyboard/gamepad prompts.
+
+- One-shot 3D character actions with reusable masks, playback tokens, cancellation/completion, scoped markers and delayed checked Camp pickups.
+- Timed 3D animation markers in existing animator assets, bounded per-step events, shared event handlers, and Camp footsteps/dust.
+- Experimental 3D: checked-target joint attachments on prefab roots, with cached
+  joint lookup, final animation/IK/render placement, child mesh/light placement,
+  explicit failure states and bounded preparation. Clear bindings on pooled reuse;
+  demonstrate a held lantern in Camp using shared bundled assets.
+
+- Experimental 3D: native checked-target follow/orbit `CameraRig3D`, shared
+  `SpringArm3D` collision/recovery, independent gameplay/render views and
+  `RenderTransform3D` presentation placement. Camp follows its player; Summit
+  reuses the arm solver. No editor or simulation-pose mutation is required.
+  Add opt-in outward initial-overlap reporting for camera sweeps, preserving
+  legacy gameplay sweep behavior.
+
+- Add weak scene-generation physics queries with checked entity/native-body resolution, entity/layer/sensor filters,
+  closest ray/sweep and caller-bounded multi-ray/overlap results. Keep unmapped native obstacles as hits, reject stale
+  leases/rebuilt bodies, and collect directly into caller storage with explicit overflow. Use visible highlighted
+  supplies and occlusion-aware collection/pushing in Camp; add allocation, identity, filtering and gameplay tests.
+
+- Move Camp player movement, facing, camera orbit, interaction and collection into ordinary C++ ECS systems.
+  Feed a fixed-size per-step command from existing named input actions, gamepad snapshots or scripts; reuse
+  controller physics and deferred prefab teardown, acknowledge successful collection, and retain explicit
+  host scene replacement. Add mapper and shared-route gameplay/reset/failure tests.
+
+- Add full-frame ECS host phase hooks with whole-graph preflight, empty-phase callbacks,
+  unchanged rate/interval accounting and fail-stop boundaries. Run SceneSession3D native physics
+  before PostPhysics and animation/particles after Animation, each once per step. Commit
+  contact-driven removals before animation; move projectile_range contacts to PostPhysics.
+
+- Add explicit SceneSession3D prefab preloading and fixed-capacity ECS/asset pools over the shared loaders and bindings.
+  Reset authored animation/particle/render/physics state, remap internal refs, renew checked lease identities and expose
+  capacity/reuse counters. Keep idle slots out of simulation while counting retained storage against budgets. Use the
+  pools in projectile_range and add bounded lifecycle/latency/memory checks, including packed content and source removal.
+- Add generation-scoped SceneCommands3D endpoints over the existing ECS command buffer, bounded deferred prefab
+  spawn/despawn requests and checked result tickets. Execute at scene phase boundaries, cancel pending work on failed
+  systems/discard/replacement, and demonstrate a complete C++ projectile/contact-damage/destruction/respawn loop.
+- Add C++ SceneSession3D runtime prefab spawning/despawning with generation-checked session handles, bounded ownership,
+  selected asset/physics initialization, constructor rollback and typed configuration over existing live validation.
+  Native gameplay components need no inspector schema. Demonstrate supplies, collection, pushing and level reset in camp.
+  Release unused mesh/material collection buckets so despawned objects do not pin assets.
+- Add bounded transactional SceneSession3D field batches through the existing component registry/inspector path.
+  Rebind affected assets, validate particles/settings and replace ordinary rigid bodies before releasing old bodies;
+  preserve compatible runtime state, reject failed edits and extend dependency watches. Add live camp editing controls.
+- Compose prefab files with the shared scene reference/override format, bounded recursive resolution and namespaced
+  local IDs. Add structural instance overrides and linked save diffs for child/component additions/removals, names and
+  internal parents; add explicit child adoption/component-removal helpers. Preserve referenced compiler generations
+  with a bounded world-local cache, propagate nested source watches and reuse the default asset loader/content packs.
+  Split the campfire effect into a reusable nested prefab and exercise a smaller-smoke structural variant in camp_walk.
+- Author existing 3D particle emitters through shared scene/prefab fields, including referenced textures, seeded ranges,
+  forces, lifetime curves and sprite settings. Reuse Assets3D texture sharing and transactional dependency reloads;
+  isolate live state per prefab instance and validate per-emitter/scene capacity budgets before stock simulation/drawing.
+  Add a reusable campfire prefab with flames, smoke, sparks and a point light to both authored camp scenes.
+- Add CPU-only bounded `.kincollider` recipes for shared compound, convex hull and mesh collision through the existing
+  scene/prefab registry and native shape builders. Expose character-controller/animation-link settings and body layers;
+  isolate prefab character simulation state. Integrate collision dependency watching and transactional cooking into
+  physics-enabled SceneSession3D. Add `camp_walk`, a playable authored camp using existing free assets.
+- Add authored 3D material patches, named variants and per-part selectors through `ModelMaterials3D`, the existing
+  material/texture APIs and shared scene/prefab fields. Share weakly cached bindings and role/filter-aware textures without
+  cloning geometry; validate explicit rebinding and coordinate material/texture hot reload with SceneSession3D.
+  Preserve canonical authored IDs when exporting runtime entities with linked prefab instances.
+- Add renderer-thread `SceneSession3D` ownership over the shared scene/prefab loaders, assets, ECS rendering and optional
+  physics, with staged activation, transactional replacement, explicit dependency reloads, configurable authoring budgets
+  and weak asset invalidation. Include a complete authored camp using Summit's existing free assets. Fix dynamic-body
+  writeback for inherited prefab transforms and check animator source sizes before reading.
+- Preserve scene-loaded prefab links and minimal field overrides in checked world saves, with shared CPU baselines,
+  header/reference/parent round trips, explicit unpacking and diagnostics for unsupported structural edits. Roll back failed
+  scene instantiation. Add authored camera/environment/time-of-day components and explicit validated scene application.
+  Add referenced 3D animation configurations using the existing `.kinanim` graph parser, with blend spaces, layers, fades,
+  named IK, model compatibility checks and failure-safe explicit rebinding. Move Summit's locomotion and IK setup into content.
+- Extend the shared ECS component registry and scene/prefab utilities with finite `Vec3f`, unit `Quatf`, native asset refs
+  and reflected property adapters. Register authored 3D transforms, static/skinned model references, base animator settings,
+  local lights and primitive physics. Add explicit renderer-thread asset binding with contextual errors, safe prefab
+  inheritance and weak resource ownership. Summit's survivor now uses an ordinary `.kinprefab`.
+- Add renderer-scoped `Assets3D` model handles with weak, bounded lookup caches and automatic sharing of external/embedded
+  texture dependencies, preserving colour space and filtering. Add `Model::placement`, whole-object model IDs and persistent
+  `ModelBatch3D` part expansion/spatial grouping/material replacement. Migrate Summit's prop and survivor loading and scenery
+  submission onto these APIs, removing its manual atlas replacement and mesh-part batching. Cover ownership, invalidation,
+  content packs, dependency identity and GPU image parity.
+- Add a denser Summit forest approach using shared meshes, cell-grouped immutable instance batches and matching rock/trunk
+  collision. Keep the sparse layout selectable with `--scenery compact`, identify layouts in snapshots and command logs, and
+  cover both routes across three seeds. Add a disk-streamed full-frame traversal benchmark and a serial, RAM-bounded comparison
+  harness with replay validation and contention checks. Handle disappearing processes during benchmark RSS monitoring.
+- Dress Summit with selected CC0 Kenney props and a fitted survivor carrying authored idle/run/jump animation, plus two
+  1K ambientCG PBR materials. Share meshes, the prop atlas and packed AO/roughness textures; include pinned preparation tools,
+  licenses and manifests. Add 31 expedition prop colliders from shared placements, retaining hollow tents/fire pits and simple
+  trunk proxies; preserve classic-course physics and reject older expedition snapshots. Validate skin/rig/collider compatibility.
+- Initialise Jolt before allocating mesh/hull input arrays when those shape factories are the first physics call, fixing a
+  crash exposed by CPU asset validation. Add fresh-process mesh-first and hull-first regression checks.
+
 - Remeasure the Medium industrial yard against Godot 4.7.2 Forward+ with Kin point-light masks enabled: four guarded
   engine pairs at 720p/1440p, checked shared recipe/features/motion/skin/shadow work and continuous contention telemetry.
   Record frame p50/p95, RAM peaks and native shading/script limitations; no renderer or quality changes.
@@ -153,6 +246,11 @@ releases may change APIs.
   Jolt colliders near the player, one bounded background meshing job, distance-based eviction and a resident mesh budget. Its
   benchmark renders every frame while streaming and modifying terrain, exports bounded timing summaries and optional CSV metrics,
   and exposes counts and memory bounds through scene reports. CPU tests cover meshing/seams, editing, saves, picking and collision.
+- Summit's interactive default is now **The Beacon**, a compact expedition with an orange direct climbing route and a blue cave
+  passage that reconnect at camp, a collidable shelter with health/stamina recovery and quieter wind, objective/trail guidance,
+  a sustained beacon interaction, extraction, briefing and completion screens, and retry. `--classic` and the original climb/fall/rope
+  scripts retain the procedural course. Expedition progression participates in snapshots, hashing and map-aware replay; new CPU
+  tests cover both routes, interaction interruption and save/restore, with a full GPU screenshot run.
 - Summit, a one-player climbing game on the experimental 3D renderer and physics (`examples/summit`; see the plan's "P4" and the
   examples' README): a procedural mountain from a seed (pieces that make both the colliders and the render meshes, a route a bot
   follows and a stamina planner checks), a player model (stamina, grab and climb, falls, a knock-out with a ragdoll and a get-up,
@@ -162,6 +260,29 @@ releases may change APIs.
   with the sky, fog and weather of P3. Engine: `kin/platform/gamepad.hpp` (`Gamepads`, `GamepadState`: a polled controller, opt-in;
   `Input` is unchanged). A character's own movement no longer collides with a body set to collide with nothing (`set_no_collisions`,
   `Body3DDesc::ignore_all`: a parked ragdoll's bodies, a disabled character), which they did before.
+- Summit's presentation (`examples/summit`, the plan's "P4b"): a ui2 HUD (stamina bar that changes colour, the two hands, health and
+  injury, altitude and best, a fall warning, camp and summit messages) built from a plain `HudModel` and laid out by ui2's solver,
+  a pause menu with keyboard, pad and mouse and a controls screen, sound synthesised at start-up through `kin::AudioEngine` (wind by
+  altitude and gusts, footsteps by ground, grabs, breath, falls, rope, fires; a testable `SoundCue` list from the game's events),
+  an environment that changes with altitude and the clock (fog, haze, a snow line, camp fires and lights at dusk, dust and breath
+  puffs), a look pass (chamfered, roughened rock with strata, moss and snow and a tiling normal map, buttresses and scree, ground and
+  ranges, a climber with clothes and a pack, landing crouch, arms straight to the holds, a camera that frames a lying body), and a
+  settings file (look, camera, volumes, bindings). No engine change; the simulation's hashes are unchanged.
+- Summit: the person and the camera no longer shake when frames come faster than the 60 Hz step (90 or 144 Hz, worst looking
+  side on and turning the mouse). The person is drawn at the camera's instant between steps (`CameraRig::person_position`,
+  `person_facing`), the camera's look is the hand's (`CameraRig::set_look_ahead`; not interpolated between uneven steps) and the
+  mouse's turn goes into steps in even shares (`LookFeed`). Presentation and input path only; the scripted hashes are unchanged.
+- Summit: the climber's torso, limbs and boots were wound inside out (their inside showed from outside). Fixed, and a presentation test
+  (`winding`) now checks every CPU-built mesh Summit draws (the climber's parts in all four styles, rock, decor and ground of four
+  seeds, the view's primitives) for triangles facing against their normals. The climber's mesh data moved to `climber.cpp`, with no
+  renderer needed. Pictures and scripted hashes are otherwise unchanged. With the winding fixed, the open ends of the limb tubes
+  showed holes (neck, shoulders, limb ends): every tube now has flat end caps with the end ring's joint weights, the beanie's
+  dome has a disc under its rim, and a test requires every climber part to be a closed surface (no boundary edges).
+- Summit: every visible rock is a collider (buttresses at the cliffs' ends, scree, boulders). They were render-only meshes; they are
+  now static convex hulls of the same mesh vertices (`decor_chunks`, `decor_chunk_points`, `decor_shape`; one list makes both the
+  triangles and the bodies, tolerance 0.04 m both ways, tested), with the Cliff's surface on buttresses and the ground's on stones.
+  The decor's noise is smaller so a hull follows it. The level's bytes are unchanged; the scripted hashes change (climb seed 1
+  `65e783b36e5dea50`, 9769 steps), no fall on seeds 1 to 60. `summit --debug-colliders` and `--on-decor boulder:N` for looking.
 - 3D particles and weather (experimental; see [3D rendering](rendering_3d.md) "Particles and weather" and the plan's "P3c"):
   `kin/render3d/particles3d.hpp` (`ParticleSystem3D`: point, box, sphere, cone and disc emitters, ranges, gravity, drag, a shared `Wind3D`
   with gusts and turbulence, size, colour and alpha over life, a flipbook, a ground; a fixed-step deterministic simulation with `state_hash`,

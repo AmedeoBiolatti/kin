@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,7 +52,7 @@ using Clock = std::chrono::steady_clock;
 constexpr u64 test_seed = 1;
 // The final state hash of the scripted climb of seed 1 on this machine ("same machine" determinism: Jolt claims more, the look and
 // facing use std::sin and std::atan2), and the steps it takes.
-constexpr u64 expected_climb_hash = 0xc80d269809d52fb0ull;
+constexpr u64 expected_climb_hash = 0x65e783b36e5dea50ull;
 constexpr u64 expected_climb_steps = 9769;
 
 // ---- helpers ------------------------------------------------------------------------------------------------------------------
@@ -226,6 +227,7 @@ void test_colliders_and_meshes_are_one_list() {
         const Vec3f top = p.centre + p.rotation.rotate({0.0f, p.half.y, 0.0f});
         const auto hit = g.world().raycast(top + Vec3f{0.0f, 0.5f, 0.0f}, top - Vec3f{0.0f, 0.5f, 0.0f});
         if (!hit || hit->fraction <= 0.0f) continue; // (covered by something higher: the ray starts inside it)
+        if (hit->user_id > level.pieces.size()) continue; // (a stone sits there)
         ++rays;
         // Whichever ground piece covers that spot is hit first: a body of the list, at that height.
         CHECK(hit->user_id >= 1 && hit->user_id <= level.pieces.size());
@@ -1168,6 +1170,343 @@ void test_cost_of_a_step() {
     CHECK(s < 30.0);
 }
 
+// ---- the decor rock's colliders (P4b follow-up) ----------------------------------------------------------------------------------
+
+// Distance from `p` to the triangle abc (Ericson, Real-Time Collision Detection).
+f32 point_triangle_distance(Vec3f p, Vec3f a, Vec3f b, Vec3f c) {
+    const Vec3f ab = b - a, ac = c - a, ap = p - a;
+    const f32 d1 = dot(ab, ap), d2 = dot(ac, ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) return length(p - a);
+    const Vec3f bp = p - b;
+    const f32 d3 = dot(ab, bp), d4 = dot(ac, bp);
+    if (d3 >= 0.0f && d4 <= d3) return length(p - b);
+    const f32 vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return length(p - (a + ab * (d1 / (d1 - d3))));
+    const Vec3f cp = p - c;
+    const f32 d5 = dot(ab, cp), d6 = dot(ac, cp);
+    if (d6 >= 0.0f && d5 <= d6) return length(p - c);
+    const f32 vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return length(p - (a + ac * (d2 / (d2 - d6))));
+    const f32 va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const f32 w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return length(p - (b + (c - b) * w));
+    }
+    const f32 denom = 1.0f / (va + vb + vc);
+    return length(p - (a + ab * (vb * denom) + ac * (vc * denom)));
+}
+
+// How far the visible chunk and its collider part: the worst mesh vertex outside the hull, and the worst point of the hull's
+// surface (hit by rays from all round) away from the mesh's triangles.
+struct DecorGap {
+    f32 vertex_outside = 0.0f;
+    f32 collider_proud = 0.0f;
+    int vertices = 0;
+    int rays = 0;
+};
+
+DecorGap decor_gap(World3D& world, const SummitLevel& level, const DecorChunk& c) {
+    DecorGap gap;
+    Body3DDesc d;
+    d.shape = decor_shape(level, c);
+    d.motion = Body3DMotion::Static;
+    d.position = c.centre;
+    d.rotation = c.rotation;
+    const Body3D b = world.create_body(d);
+    const MeshData mesh = decor_chunk_mesh(level, c);
+    for (const MeshVertex& v : mesh.vertices) {
+        ++gap.vertices;
+        const auto hit = world.closest_point(v.position, 0.5f);
+        gap.vertex_outside = std::max(gap.vertex_outside, hit ? hit->distance : 0.5f);
+    }
+    // Rays at the centre from a Fibonacci sphere of directions.
+    const f32 reach = length(c.half) + 1.0f + 0.7f;
+    const int n = 96;
+    for (int i = 0; i < n; ++i) {
+        const f32 y = 1.0f - 2.0f * (f32(i) + 0.5f) / f32(n);
+        const f32 r = std::sqrt(std::max(0.0f, 1.0f - y * y));
+        const f32 a = f32(i) * 2.39996323f;
+        const Vec3f dir{r * std::cos(a), y, r * std::sin(a)};
+        const auto hit = world.raycast(c.centre + dir * reach, c.centre);
+        if (!hit) continue;
+        ++gap.rays;
+        f32 best = 1e9f;
+        for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            best = std::min(best, point_triangle_distance(hit->point, mesh.vertices[mesh.indices[t]].position,
+                                                          mesh.vertices[mesh.indices[t + 1]].position, mesh.vertices[mesh.indices[t + 2]].position));
+        }
+        gap.collider_proud = std::max(gap.collider_proud, best);
+    }
+    world.destroy_body(b);
+    return gap;
+}
+
+// The decor's tolerance (m): a visible vertex further than this outside its collider, or a collider's surface this far off the
+// visible rock, would be a rock you stand on that is not there, or fall through one that is.
+constexpr f32 decor_tolerance = 0.04f;
+
+void test_decor_has_colliders() {
+    World3DConfig cfg;
+    cfg.single_threaded = true;
+    World3D lone(cfg);
+    for (u64 seed : {1ull, 2ull, 7ull, 19ull}) {
+        Game g(seed);
+        const SummitLevel& level = g.level();
+        const std::vector<DecorChunk> chunks = decor_chunks(level);
+        // The list is a pure function of the level, and Game made a body of each chunk.
+        CHECK(chunks.size() > 30);
+        CHECK(g.decor().size() == chunks.size());
+        const std::vector<DecorChunk> again = decor_chunks(generate_level(seed));
+        CHECK(again.size() == chunks.size());
+        int buttresses = 0, stones = 0, boulders = 0;
+        f32 worst_vertex = 0.0f, worst_proud = 0.0f;
+        for (std::size_t j = 0; j < chunks.size() && j < again.size(); ++j) {
+            const DecorChunk& c = chunks[j];
+            CHECK(std::memcmp(&c.centre, &again[j].centre, sizeof c.centre) == 0 && c.seed == again[j].seed);
+            const Body3D b = g.decor_body(j);
+            CHECK(g.world().contains(b));
+            CHECK(g.world().shape(b).kind() == Shape3DKind::ConvexHull);
+            CHECK(g.world().motion(b) == Body3DMotion::Static);
+            CHECK(g.world().user_id(b) == level.pieces.size() + 1 + j);
+            CHECK(!g.world().is_hold(b));
+            CHECK(g.world().surface_material(b).grippable); // the Cliff's and the Ground's surface (Piece's defaults)
+            CHECK(length(g.world().position(b) - c.centre) < 1e-3f);
+            // Every stone is a collider whatever its size (the smallest is 0.18 m across before the roughening).
+            CHECK(std::min({c.half.x, c.half.y, c.half.z}) >= 0.08f);
+            (c.kind == DecorKind::Buttress ? buttresses : c.kind == DecorKind::Scree ? stones : boulders)++;
+            const DecorGap gap = decor_gap(lone, level, c);
+            CHECK(gap.rays > 20);
+            worst_vertex = std::max(worst_vertex, gap.vertex_outside);
+            worst_proud = std::max(worst_proud, gap.collider_proud);
+        }
+        if (verbose) {
+            std::printf("  seed %llu: %d buttresses, %d stones, %d boulders; vertex outside %.4f, collider proud %.4f\n", (unsigned long long)seed,
+                        buttresses, stones, boulders, double(worst_vertex), double(worst_proud));
+        }
+        CHECK(buttresses >= 8 && stones >= 20);
+        CHECK(worst_vertex <= decor_tolerance);
+        CHECK(worst_proud <= decor_tolerance);
+    }
+}
+
+// A downward ray's first hit on decor body `j`'s top, if that is what it hits.
+std::optional<RayHit3D> decor_top(const Game& g, std::size_t j) {
+    const DecorChunk& c = g.decor()[j];
+    const f32 up = length(c.half) + 2.0f;
+    const auto hit = g.world().raycast(c.centre + Vec3f{0.0f, up, 0.0f}, c.centre - Vec3f{0.0f, up, 0.0f});
+    if (!hit || hit->body != g.decor_body(j)) return std::nullopt;
+    return hit;
+}
+
+void test_decor_is_stood_on_and_blocks() {
+    Game g(test_seed);
+    const SummitLevel& level = g.level();
+    const u64 first_decor_id = level.pieces.size() + 1;
+    // A character dropped on the top of each kind stands on it, its feet at the top.
+    int stood_boulder = 0, stood_buttress = 0;
+    for (std::size_t j = 0; j < g.decor().size() && (stood_boulder < 2 || stood_buttress < 2); ++j) {
+        const DecorChunk& c = g.decor()[j];
+        const auto top = decor_top(g, j);
+        if (!top || top->normal.y < 0.97f) continue;
+        if (c.kind == DecorKind::Scree) continue;
+        int& count = c.kind == DecorKind::Buttress ? stood_buttress : stood_boulder;
+        if (count >= 2) continue;
+        g.debug_teleport(0, top->point + Vec3f{0.0f, 0.4f, 0.0f});
+        const PlayerCommand idle{};
+        hold(g, idle, 90);
+        const CharacterState3D cs = g.world().character(g.player(0).character);
+        CHECK(cs.ground == CharacterGround3D::OnGround);
+        CHECK(cs.ground_user_id == first_decor_id + j);
+        CHECK_NEAR(cs.position.y, top->point.y, 0.06f);
+        if (g.player(0).state == PlayerState::Alive && cs.ground == CharacterGround3D::OnGround) ++count;
+    }
+    CHECK(stood_boulder >= 1);
+    CHECK(stood_buttress >= 1);
+
+    // A buttress's side is solid: a capsule swept at it from outside meets it.
+    int swept = 0;
+    for (std::size_t j = 0; j < g.decor().size() && swept < 3; ++j) {
+        const DecorChunk& c = g.decor()[j];
+        if (c.kind != DecorKind::Buttress) continue;
+        const Vec3f out = c.rotation.rotate({1.0f, 0.0f, 0.0f});
+        for (f32 side : {1.0f, -1.0f}) {
+            const Vec3f start = c.centre + out * (side * (c.half.x + 2.0f));
+            const auto hit = g.world().shape_cast(Shape3D::capsule(0.65f, 0.3f), start, Quatf{}, out * (-side * (c.half.x + 2.0f)));
+            if (hit && hit->user_id >= first_decor_id) {
+                ++swept;
+                break;
+            }
+        }
+    }
+    CHECK(swept >= 2);
+}
+
+// Walking into the side of a boulder that stands a metre above its (flat) ground stops at it (the capsule's radius from the rock)
+// and does not climb it (0.4 m is the step). Tries the seeds' boulders until two have been walked at.
+void test_boulders_stop_a_walker() {
+    int bumped = 0;
+    for (u64 seed : {1ull, 2ull, 7ull, 19ull}) {
+        Game g(seed);
+        const SummitLevel& level = g.level();
+        for (std::size_t j = 0; j < g.decor().size() && bumped < 3; ++j) {
+            const DecorChunk& c = g.decor()[j];
+            if (c.kind != DecorKind::Boulder) continue;
+            const auto top = decor_top(g, j);
+            if (!top) continue;
+            // The way the player looks, flat: walk along it at the boulder from 3 m away.
+            Vec3f dir = look_vector(g.player(0).yaw, 0.0f);
+            dir.y = 0.0f;
+            dir = normalize(dir);
+            const Vec3f from = c.centre - dir * (length(c.half) + 3.0f);
+            const auto ground = g.world().raycast(from + Vec3f{0.0f, 2.0f, 0.0f}, from - Vec3f{0.0f, 3.0f, 0.0f});
+            if (!ground || ground->user_id > level.pieces.size() || ground->normal.y < 0.995f) continue;
+            if (top->point.y - ground->point.y < 0.9f) continue;
+            bool clear = true;
+            for (std::size_t k = 0; k < g.decor().size(); ++k) {
+                if (k != j && length(g.decor()[k].centre - c.centre) < length(c.half) + 4.0f) clear = false;
+            }
+            if (!clear) continue;
+            g.debug_teleport(0, ground->point + Vec3f{0.0f, 0.1f, 0.0f});
+            hold(g, PlayerCommand{}, 30);
+            PlayerCommand walk;
+            walk.move = {0.0f, 1.0f};
+            f32 highest = -1e9f, closest = 1e9f;
+            const MeshData mesh = decor_chunk_mesh(level, c);
+            for (int i = 0; i < 150; ++i) {
+                g.step({&walk, 1});
+                const Vec3f f = g.feet(0);
+                highest = std::max(highest, f.y);
+                // The capsule's axis at three heights against the visible rock's triangles.
+                for (f32 h : {0.4f, 0.6f, 0.8f}) {
+                    for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+                        const f32 d = point_triangle_distance(f + Vec3f{0.0f, h, 0.0f}, mesh.vertices[mesh.indices[t]].position,
+                                                              mesh.vertices[mesh.indices[t + 1]].position, mesh.vertices[mesh.indices[t + 2]].position);
+                        closest = std::min(closest, d);
+                    }
+                }
+            }
+            if (verbose) {
+                std::printf("  boulder %zu: highest +%.3f (rock %.2f), closest %.3f, ground n.y %.3f\n", j, double(highest - ground->point.y),
+                            double(top->point.y - ground->point.y), double(closest), double(ground->normal.y));
+            }
+            // Never into the rock (the radius is 0.3, rounded edges let the mesh's own bumps in by a centimetre or two) and it did
+            // meet it; the 0.4 m step does not carry it up a metre of rock.
+            CHECK(closest > 0.25f && closest < 0.36f);
+            CHECK(highest < top->point.y - 0.3f);
+            ++bumped;
+        }
+    }
+    CHECK(bumped >= 1);
+}
+
+// A route through a chunk takes the chunk out of the list (the clearance is part of the placement, so the collider cannot block
+// the way): a level with one more leg drawn through each kind loses exactly those chunks.
+void test_route_keeps_decor_out() {
+    const SummitLevel level = generate_level(test_seed);
+    const std::vector<DecorChunk> all = decor_chunks(level);
+    for (DecorKind kind : {DecorKind::Buttress, DecorKind::Scree, DecorKind::Boulder}) {
+        std::size_t pick = all.size();
+        for (std::size_t j = 0; j < all.size() && pick == all.size(); ++j) {
+            if (all[j].kind == kind) pick = j;
+        }
+        CHECK(pick < all.size());
+        if (pick == all.size()) continue;
+        SummitLevel blocked = level;
+        Leg l;
+        l.from = all[pick].centre - Vec3f{1.0f, 0.0f, 0.0f};
+        l.to = all[pick].centre + Vec3f{1.0f, 0.0f, 0.0f};
+        blocked.route.push_back(l);
+        const std::vector<DecorChunk> fewer = decor_chunks(blocked);
+        CHECK(fewer.size() < all.size());
+        for (const DecorChunk& c : fewer) {
+            CHECK(!(c.kind == kind && length(c.centre - all[pick].centre) < 1e-4f));
+        }
+    }
+}
+
+void test_small_stones_are_stepped_over() {
+    Game g(test_seed);
+    const SummitLevel& level = g.level();
+    int walked = 0;
+    for (std::size_t j = 0; j < g.decor().size() && walked < 3; ++j) {
+        const DecorChunk& c = g.decor()[j];
+        if (c.kind != DecorKind::Scree) continue;
+        Vec3f dir = look_vector(g.player(0).yaw, 0.0f);
+        dir.y = 0.0f;
+        dir = normalize(dir);
+        const Vec3f from = c.centre - dir * 3.0f, to = c.centre + dir * 3.0f;
+        const auto g0 = g.world().raycast(from + Vec3f{0.0f, 2.0f, 0.0f}, from - Vec3f{0.0f, 3.0f, 0.0f});
+        const auto g1 = g.world().raycast(to + Vec3f{0.0f, 2.0f, 0.0f}, to - Vec3f{0.0f, 3.0f, 0.0f});
+        if (!g0 || !g1 || g0->user_id > level.pieces.size() || g1->user_id > level.pieces.size()) continue;
+        // Nothing else of the decor on the line, and a stone the step can take.
+        bool clear = true;
+        for (std::size_t k = 0; k < g.decor().size(); ++k) {
+            if (k == j) continue;
+            const Vec3f d = g.decor()[k].centre - c.centre;
+            if (length(d) < length(g.decor()[k].half) + 4.0f) clear = false;
+        }
+        const auto top = decor_top(g, j);
+        if (!clear || !top || top->point.y - g0->point.y > 0.3f || top->point.y - g0->point.y < 0.05f) continue;
+        g.debug_teleport(0, g0->point + Vec3f{0.0f, 0.05f, 0.0f});
+        hold(g, PlayerCommand{}, 30);
+        PlayerCommand walk;
+        walk.move = {0.0f, 1.0f};
+        const Vec3f start = g.feet(0);
+        f32 worst_jump = 0.0f, prev_y = start.y;
+        for (int i = 0; i < 100; ++i) {
+            g.step({&walk, 1});
+            const f32 y = g.feet(0).y;
+            worst_jump = std::max(worst_jump, std::fabs(y - prev_y));
+            prev_y = y;
+        }
+        const Vec3f at = g.feet(0);
+        // Over it and on: further than the stone's far side, not in the air, no spike of more than a step.
+        CHECK(dot(at - c.centre, dir) > length(c.half));
+        CHECK(g.world().character(g.player(0).character).ground == CharacterGround3D::OnGround);
+        CHECK(worst_jump < 0.25f);
+        ++walked;
+    }
+    CHECK(walked >= 1);
+}
+
+void test_nothing_of_the_route_is_inside_decor() {
+    for (u64 seed : {1ull, 2ull, 7ull, 19ull}) {
+        Game g(seed);
+        const SummitLevel& level = g.level();
+        const u64 first_decor_id = level.pieces.size() + 1;
+        const Shape3D capsule = Shape3D::capsule(0.675f, 0.3f);
+        const auto in_decor = [&](Vec3f feet) {
+            for (const OverlapHit3D& h : g.world().overlap(capsule, feet + Vec3f{0.0f, 0.975f, 0.0f}, Quatf{})) {
+                if (h.user_id >= first_decor_id && h.user_id < 1000000u) return true;
+            }
+            return false;
+        };
+        int bad = 0;
+        for (const Camp& c : level.camps) {
+            if (in_decor(c.spawn)) ++bad;
+            if (in_decor(c.marker)) ++bad;
+        }
+        if (in_decor(level.start)) ++bad;
+        // The route's legs, a sample every 0.5 m (the climb's vertical ones included).
+        for (const Leg& l : level.route) {
+            const int n = std::max(1, int(length(l.to - l.from) / 0.5f));
+            for (int i = 0; i <= n; ++i) {
+                if (in_decor(l.from + (l.to - l.from) * (f32(i) / f32(n)))) ++bad;
+            }
+        }
+        // Rope: its anchor and the hang below.
+        for (const RopeSpec& r : level.ropes) {
+            const Shape3D bead = Shape3D::sphere(0.25f);
+            for (f32 d = 0.0f; d <= r.length; d += 0.25f) {
+                for (const OverlapHit3D& h : g.world().overlap(bead, r.anchor - Vec3f{0.0f, d, 0.0f}, Quatf{})) {
+                    if (h.user_id >= first_decor_id && h.user_id < 1000000u) ++bad;
+                }
+            }
+        }
+        CHECK(bad == 0);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1206,6 +1545,12 @@ int main(int argc, char** argv) {
     run("scripted fall", test_scripted_fall);
     run("authored holds are in reach", test_authored_holds_are_in_reach);
     run("hold line by hand over hand", test_hold_line_by_hand_over_hand);
+    run("decor has colliders", test_decor_has_colliders);
+    run("decor is stood on and blocks", test_decor_is_stood_on_and_blocks);
+    run("boulders stop a walker", test_boulders_stop_a_walker);
+    run("route keeps decor out", test_route_keeps_decor_out);
+    run("small stones are stepped over", test_small_stones_are_stepped_over);
+    run("nothing of the route is inside decor", test_nothing_of_the_route_is_inside_decor);
     run("cost of a step", test_cost_of_a_step);
     if (failures != 0) {
         std::fprintf(stderr, "summit_tests: %d check(s) failed\n", failures);

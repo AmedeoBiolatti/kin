@@ -43,6 +43,14 @@ enum class SystemPhase {
 // per-phase arrays in this header and in system.cpp.
 inline constexpr std::size_t system_phase_count = 13;
 
+// Host-owned simulation at phase boundaries. Called even for empty phases,
+// outside iteration, after command buffers have flushed. Returning false (or
+// throwing) stops the remaining frame. Callbacks must not rerun the scheduler.
+struct SystemPhaseHooks {
+    std::function<bool(SystemPhase, std::string&)> before;
+    std::function<bool(SystemPhase, std::string&)> after;
+};
+
 enum class SystemKind {
     Native,
     DataNative,
@@ -130,6 +138,10 @@ struct EcsDeferredEntity {
 
 class EcsCommandBuffer {
 public:
+    // Extension command, executed in scheduler flush order outside iteration.
+    // The callback must not append commands to this buffer. As with other
+    // commands, earlier successful operations are not rolled back on failure.
+    void defer(std::function<bool(EcsWorld&, std::string&)> apply);
     EcsDeferredEntity create_entity(std::string name = {});
     void destroy(EcsEntity entity);
     void destroy(EcsId entity);
@@ -645,6 +657,7 @@ public:
     bool run_phase(SystemPhase phase, f32 dt, SystemExecutionMode mode);
     bool run_frame(f32 dt = 0.0f);
     bool run_frame(f32 dt, SystemExecutionMode mode);
+    bool run_frame(f32 dt, const SystemPhaseHooks& hooks, SystemExecutionMode mode = SystemExecutionMode::SerialGraph);
 
     std::vector<SystemSnapshot> snapshots() const;
     SystemSnapshot snapshot(std::string_view id) const;
@@ -742,7 +755,11 @@ private:
     std::vector<SystemParallelDiagnostic> parallel_eligibility_reasons(const SystemRecord& record) const;
     SystemScheduleSnapshot build_schedule(const std::vector<SystemRecord*>& records,
                                           SystemExecutionMode requested_mode = SystemExecutionMode::SerialGraph) const;
-    bool run_schedule(SystemScheduleSnapshot& schedule, f32 dt);
+    bool run_schedule(SystemScheduleSnapshot& schedule, f32 dt, const SystemPhaseHooks* hooks = nullptr);
+    bool run_batch(SystemScheduleSnapshot& schedule, SystemBatch& batch, f32 dt);
+    bool invoke_phase_hook(const SystemPhaseHooks&, SystemPhase, bool before);
+    bool _inside_phase_hook = false;
+    friend class EcsWorld;
     bool run_parallel_batch(SystemScheduleSnapshot& schedule, SystemBatch& batch, f32 dt);
     bool collect_batch_records(const SystemBatch& batch, std::vector<SystemRecord*>& records, bool& has_native_system);
     void publish_parallel_results(SystemScheduleSnapshot& schedule,
