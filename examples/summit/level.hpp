@@ -1,23 +1,23 @@
 #pragma once
 
-// Summit's mountain (docs/3d_plan.md, P4): a procedural level made from a seed, as plain data. One list of `Piece`s (oriented
-// boxes with what a hand makes of their surface) is the whole geometry: `Game` makes a static body of each (the collider), and
-// `build_render_meshes` makes the triangles you see from the same list, so what is drawn is what is hit. Nothing here needs a
-// window, a GPU or a physics world: the level is generated, hashed and checked on the CPU.
+// Summit's mountain (docs/3d_plan.md, P4): a procedural level made from a seed, as plain data. One list of `Piece`s
+// (oriented boxes with what a hand makes of their surface) is the whole geometry: `Game` makes a static body of each
+// (the collider), and `build_render_meshes` makes the triangles you see from the same list, so what is drawn is what is
+// hit. Nothing here needs a window, a GPU or a physics world: the level is generated, hashed and checked on the CPU.
 //
 //     const summit::SummitLevel level = summit::generate_level(seed);
 //     level.hash();                                  // the same seed gives the same bytes
 //     const summit::RoutePlan plan = summit::plan_route(level, summit::PlayerRules{});   // is it climbable?
 //
-// The shape: a stack of cliffs and terraces rising along a wandering heading from base camp to the summit (about 150 m). A stage
-// is an approach (a ramp that can be walked) and an obstacle (a pitch to climb, a chimney, a roof to traverse under, a rope).
-// `route` lists the legs a bot (script.hpp) follows and the planner costs; the player is free to leave it.
+// The shape: a stack of cliffs and terraces rising along a wandering heading from base camp to the summit (about 150
+// m). A stage is an approach (a ramp that can be walked) and an obstacle (a pitch to climb, a chimney, a roof to
+// traverse under, a rope). `route` lists the legs a bot (script.hpp) follows and the planner costs; the player is free
+// to leave it.
 
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
-#include <kin/render3d/mesh.hpp>
+#include <kin/render3d/mesh3d.hpp>
 #include <kin/render3d/scene3d.hpp>
-
 #include <string>
 #include <vector>
 
@@ -27,15 +27,15 @@ using namespace kin;
 inline constexpr f32 pi = 3.14159265358979323846f;
 
 enum class PieceKind : u8 {
-    Ground,  // the field at base camp, terraces
-    Ramp,    // a walkable approach (a tilted box)
-    Cliff,   // a pitch's face and mass: climbed
-    Roof,    // an overhang slab: nothing can be climbed through it
-    Smooth,  // a face no hand can take hold of (holds on it are pieces of their own)
-    Hold,    // an authored hold
-    Lip,     // the grippable edge on top of a smooth wall
-    Boulder, // decoration with a collider
-    Post,    // a rope's anchor beam
+    Ground,    // the field at base camp, terraces
+    Ramp,      // a walkable approach (a tilted box)
+    Cliff,     // a pitch's face and mass: climbed
+    Roof,      // an overhang slab: nothing can be climbed through it
+    Smooth,    // a face no hand can take hold of (holds on it are pieces of their own)
+    Hold,      // an authored hold
+    Lip,       // the grippable edge on top of a smooth wall
+    Boulder,   // decoration with a collider
+    Post,      // a rope's anchor beam
     Equipment, // expedition fixtures: boxes shared by collision and the view, colour selected by tag
 };
 
@@ -57,7 +57,7 @@ struct Piece {
 
 struct Camp {
     i32 index = 0;
-    Vec3f spawn{};   // where a respawn puts the feet
+    Vec3f spawn{}; // where a respawn puts the feet
     f32 radius = 4.0f;
     f32 altitude = 0.0f;
     Vec3f marker{}; // where the tent and flag stand (beside the spawn, out of the way)
@@ -88,12 +88,13 @@ struct Leg {
     f32 roof_height = 0.0f;         // Overhang: how far up the roof is (m above `from`)
     f32 shimmy = 0.0f;              // Overhang: metres along +right (negative: left)
     i32 rope = -1;
-    i32 camp = -1;                  // Walk: the camp this leg ends at (-1 none)
+    i32 camp = -1; // Walk: the camp this leg ends at (-1 none)
     std::string label;
 };
 
-// The expedition is an authored route with two ways through its first pitch. Both are kept as data so the bot, trail markers,
-// collision checks and presentation use the same places. The shelter is an oriented volume inside the cave, above its floor.
+// The expedition is an authored route with two ways through its first pitch. Both are kept as data so the bot, trail
+// markers, collision checks and presentation use the same places. The shelter is an oriented volume inside the cave,
+// above its floor.
 struct ExpeditionLayout {
     bool enabled = false;
     bool dense_scenery = false;
@@ -110,11 +111,11 @@ struct SummitLevel {
     std::vector<Camp> camps;
     std::vector<RopeSpec> ropes;
     std::vector<Leg> route;
-    Vec3f start{};          // base camp's spawn (camp 0)
-    Vec3f summit{};         // the top (feet)
+    Vec3f start{};  // base camp's spawn (camp 0)
+    Vec3f summit{}; // the top (feet)
     f32 summit_radius = 3.0f;
-    f32 kill_y = -40.0f;    // below it a body is lost
-    Bounds3 bounds{};
+    f32 kill_y = -40.0f; // below it a body is lost
+    Bounds3D bounds{};
     ExpeditionLayout expedition;
 
     // The level as bytes in a fixed order (floats bit for bit), its FNV-1a hash, and the same of the render meshes.
@@ -159,27 +160,28 @@ struct LegPlan {
 struct RoutePlan {
     std::vector<LegPlan> legs;
     f32 total_seconds = 0.0f;
-    f32 worst_cost = 0.0f;       // the dearest leg
-    f32 least_margin = 0.0f;     // the smallest (max_stamina - cost) of a climb leg
+    f32 worst_cost = 0.0f;   // the dearest leg
+    f32 least_margin = 0.0f; // the smallest (max_stamina - cost) of a climb leg
     bool climbable = true;
 };
 
-// The route costed with the stamina model, resting to full before every climb leg and on every camp: each leg must be possible
-// from a full bar, so that a player who rests where the route says never runs dry.
+// The route costed with the stamina model, resting to full before every climb leg and on every camp: each leg must be
+// possible from a full bar, so that a player who rests where the route says never runs dry.
 RoutePlan plan_route(const SummitLevel& level, const ClimbCosts& costs = {});
 
-// Triangles from the pieces: one mesh a material class, vertices coloured by kind and a hash of the piece (no randomness).
+// Triangles from the pieces: one mesh a material class, vertices coloured by kind and a hash of the piece (no
+// randomness).
 struct RenderMeshData {
     std::string name;
-    MeshData mesh;
+    MeshData3D mesh;
     Material3D material;
 };
 std::vector<RenderMeshData> build_render_meshes(const SummitLevel& level);
 
-// The decor rock (P4b's look pass, given colliders in its follow-up): buttresses at the ends of the cliffs, scree and boulders on
-// the ground, placed off the route. The list is the one source of both the triangles (`build_decor_meshes`) and the colliders
-// (Game makes a static convex hull of each chunk's mesh vertices), so the two cannot differ. A pure function of the level; the
-// level's bytes and hash do not include it.
+// The decor rock (P4b's look pass, given colliders in its follow-up): buttresses at the ends of the cliffs, scree and
+// boulders on the ground, placed off the route. The list is the one source of both the triangles (`build_decor_meshes`)
+// and the colliders (Game makes a static convex hull of each chunk's mesh vertices), so the two cannot differ. A pure
+// function of the level; the level's bytes and hash do not include it.
 enum class DecorKind : u8 {
     Buttress, // leaning block at a cliff's end: rock you can grab (the Cliff's surface)
     Scree,    // a small stone on the ground
@@ -190,13 +192,13 @@ struct DecorChunk {
     Vec3f centre{};
     Vec3f half{0.5f, 0.5f, 0.5f}; // of the chamfered box before the noise moves its vertices
     Quatf rotation{};
-    f32 bevel = 0.1f;             // the chamfer (m)
-    f32 amp = 0.03f;              // the noise's displacement (m) at one unit
-    u32 seed = 0;                 // colour and noise
+    f32 bevel = 0.1f; // the chamfer (m)
+    f32 amp = 0.03f;  // the noise's displacement (m) at one unit
+    u32 seed = 0;     // colour and noise
 };
 std::vector<DecorChunk> decor_chunks(const SummitLevel& level);
 // One chunk's triangles, and the distinct positions of their vertices (world space): what its collider is the hull of.
-MeshData decor_chunk_mesh(const SummitLevel& level, const DecorChunk& chunk);
+MeshData3D decor_chunk_mesh(const SummitLevel& level, const DecorChunk& chunk);
 std::vector<Vec3f> decor_chunk_points(const SummitLevel& level, const DecorChunk& chunk);
 std::vector<RenderMeshData> build_decor_meshes(const SummitLevel& level);
 // The ground and the ranges round the mountain (a polar grid out to 2.6 km). No collider: nobody goes there.

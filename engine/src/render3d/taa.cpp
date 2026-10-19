@@ -1,6 +1,5 @@
-#include <kin/render3d/taa.hpp>
-
 #include <algorithm>
+#include <kin/render3d/taa3d.hpp>
 
 namespace kin {
 

@@ -191,3 +191,5 @@ and the [Code of Conduct](.github/CODE_OF_CONDUCT.md). Changes are recorded in t
 
 Kin is released under the [MIT License](LICENSE). Its dependencies are under
 their own permissive licenses; see [docs/third_party_notices.md](docs/third_party_notices.md).
+
+For a lean 2D-only build, use `cmake --preset 2d`, `cmake --build --preset 2d`, and `ctest --preset 2d`. The [3D API guide](docs/3d_api_migration.md) documents the naming/colour migration and the formatting check.

@@ -1,22 +1,22 @@
 #pragma once
 
-// Summit's input mapper (docs/3d_plan.md, P4a and P5a): raw device state in, a PlayerCommand out. Nothing else in the game reads a
-// device. A rebinding table, dead zones and sensitivities live here; the simulation only ever sees the command.
+// Summit's input mapper (docs/3d_plan.md, P4a and P5a): raw device state in, a PlayerCommand out. Nothing else in the
+// game reads a device. A rebinding table, dead zones and sensitivities live here; the simulation only ever sees the
+// command.
 //
 //     summit::RawInput raw = summit::read_raw_input(input, pad);       // once a fixed step
 //     const summit::PlayerCommand c = summit::map_input(raw, bindings);
 //
-// RawInput is plain data (a bitset of held keys, the mouse's motion, a GamepadState), so a test can make one, a recording can
-// keep it, and the same table maps a keyboard, a mouse and a controller: a stick pushed fully forward and the W key are the same
-// command.
+// RawInput is plain data (a bitset of held keys, the mouse's motion, a GamepadState), so a test can make one, a
+// recording can keep it, and the same table maps a keyboard, a mouse and a controller: a stick pushed fully forward and
+// the W key are the same command.
 
 #include "game.hpp"
 
-#include <kin/platform/gamepad.hpp>
-#include <kin/platform/input.hpp>
-
 #include <array>
 #include <bitset>
+#include <kin/platform/gamepad.hpp>
+#include <kin/platform/input.hpp>
 #include <string>
 #include <vector>
 
@@ -24,9 +24,9 @@ namespace summit {
 using namespace kin;
 
 struct RawInput {
-    std::bitset<128> keys;   // by kin::Key
-    std::bitset<8> mouse;    // by kin::MouseButton
-    Vec2f mouse_delta{};     // pixels since the last step (x right, y down)
+    std::bitset<128> keys; // by kin::Key
+    std::bitset<8> mouse;  // by kin::MouseButton
+    Vec2f mouse_delta{};   // pixels since the last step (x right, y down)
     GamepadState pad{};
 
     bool key(Key k) const { return keys.test(static_cast<std::size_t>(k)); }
@@ -45,7 +45,20 @@ struct RawInput {
 // What is held now (keys and buttons), and the mouse's motion since a fixed step last read it (Input::mouse_motion).
 RawInput read_raw_input(const Input& input, const GamepadState* pad = nullptr);
 
-enum class Action : u8 { Forward, Back, Left, Right, Jump, Sprint, GrabLeft, GrabRight, Release, PullUp, Interact, Count };
+enum class Action : u8 {
+    Forward,
+    Back,
+    Left,
+    Right,
+    Jump,
+    Sprint,
+    GrabLeft,
+    GrabRight,
+    Release,
+    PullUp,
+    Interact,
+    Count
+};
 inline constexpr std::size_t action_count = static_cast<std::size_t>(Action::Count);
 const char* action_name(Action a);
 
@@ -81,8 +94,8 @@ struct InputBindings {
     void add(Action a, Binding b) { table[static_cast<std::size_t>(a)].push_back(b); }
     void clear(Action a) { table[static_cast<std::size_t>(a)].clear(); }
     const std::vector<Binding>& bindings(Action a) const { return table[static_cast<std::size_t>(a)]; }
-    // "forward = key:W key:Up" a line each, then the numbers; from_text returns false (and changes nothing) for a name it does
-    // not know.
+    // "forward = key:W key:Up" a line each, then the numbers; from_text returns false (and changes nothing) for a name
+    // it does not know.
     std::string to_text() const;
     bool from_text(const std::string& text);
 };
@@ -90,15 +103,16 @@ struct InputBindings {
 // A stick through a radial dead zone: inside `dead_zone` zero, outside it rescaled so that full travel is still 1.
 Vec2f apply_dead_zone(Vec2f stick, f32 dead_zone);
 
-// The turn of the view the device asks for, in degrees as PlayerCommand::look (x to the right, y up): the mouse's motion times its
-// sensitivity, the sticks' rate for `dt` seconds. map_input's look; the camera also takes it for the motion the simulation has not
-// stepped yet (CameraRig::set_look_ahead).
+// The turn of the view the device asks for, in degrees as PlayerCommand::look (x to the right, y up): the mouse's
+// motion times its sensitivity, the sticks' rate for `dt` seconds. map_input's look; the camera also takes it for the
+// motion the simulation has not stepped yet (CameraRig::set_look_ahead).
 Vec2f look_of(const RawInput& raw, const InputBindings& bindings, f32 dt);
 
-// The hand's look on its way into the steps. Mouse motion arrives with the frame, and a frame holds 0, 1 or 2 steps: given whole to
-// the first step of a frame, steps would carry 1, 2, 1, 2... frames' worth of turn and the body that follows the look would turn in
-// jerks at the beat of the two rates. The feed keeps what has not been given yet (`pending`) and gives `follow` of it each step, so
-// the steps' turns are even; the camera shows the look as the steps have it plus `pending`, so that the view itself is not delayed.
+// The hand's look on its way into the steps. Mouse motion arrives with the frame, and a frame holds 0, 1 or 2 steps:
+// given whole to the first step of a frame, steps would carry 1, 2, 1, 2... frames' worth of turn and the body that
+// follows the look would turn in jerks at the beat of the two rates. The feed keeps what has not been given yet
+// (`pending`) and gives `follow` of it each step, so the steps' turns are even; the camera shows the look as the steps
+// have it plus `pending`, so that the view itself is not delayed.
 class LookFeed {
 public:
     static constexpr f32 follow = 0.5f;

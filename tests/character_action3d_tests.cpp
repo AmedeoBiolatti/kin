@@ -11,7 +11,7 @@ namespace {
 using namespace kin;
 void check(bool value,const char* why){if(!value)throw std::runtime_error(why);}
 bool close(float a,float b){return std::abs(a-b)<1e-5f;}
-Skeleton skeleton(){Skeleton s;s.names={"root","arm","hand"};s.parents={-1,0,1};s.rest.resize(3);s.rest[1].translation={0,1,0};s.inverse_bind.resize(3);return s;}
+Skeleton3D skeleton(){Skeleton3D s;s.names={"root","arm","hand"};s.parents={-1,0,1};s.rest.resize(3);s.rest[1].translation={0,1,0};s.inverse_bind.resize(3);return s;}
 AnimClip3D clip(std::string name,float duration){AnimClip3D c{.name=std::move(name),.duration=duration};c.channels.resize(3);return c;}
 AnimationMarker3D marker(float phase,std::string name){return {phase,{.channel="game",.name=std::move(name)}};}
 void player() {
@@ -55,7 +55,7 @@ void player() {
     tracks[1].markers={marker(.2f,"early"),marker(.5f,"contact")};p.update(.5f,tracks,batch);
     check(batch.count==3&&batch.entries[0]->name=="early"&&batch.entries[1]->name=="step"&&batch.entries[2]->name=="contact","mixed source events were not ordered in step time");
     p.set_skeleton(&sk);check(!p.action_event_valid(layered)&&p.action_status(layered)==ActionStatus3D::Cancelled,"rebind left action events active");
-    PoseMask mask;mask.set_subtree(sk,1,.7f,false);check(mask.weights==PoseMask::subtree(sk,1,.7f,false).weights&&mask.weights[1]==0&&mask.weights[2]==.7f,"reusable subtree differs from existing mask selection");
+    PoseMask3D mask;mask.set_subtree(sk,1,.7f,false);check(mask.weights==PoseMask3D::subtree(sk,1,.7f,false).weights&&mask.weights[1]==0&&mask.weights[2]==.7f,"reusable subtree differs from existing mask selection");
     AnimationPlayer3D scope{&sk};scope.play(&reach,false);scope.update(.25f,tracks,batch);
     check(batch.count==0,"action-only markers leaked through base clip");
     tracks[1].source=MarkerSource3D::Both;scope.set_time(0);scope.update(.25f,tracks,batch);
@@ -82,10 +82,10 @@ void assets_and_dispatch() {
     };
     constexpr auto config=R"([{"name":"pickup","clip":"reach","mask_joint":"arm","fade_in":0,"fade_out":0.05}])";
     write(config);kin::EcsWorld world;register_render3d_components(world);WorldRenderState3D state{world};
-    auto model=std::make_shared<Model>();model->skeletons.push_back(skeleton());model->clips={clip("base",1),clip("reach",.5f)};
+    auto model=std::make_shared<Model3D>();model->skeletons.push_back(skeleton());model->clips={clip("base",1),clip("reach",.5f)};
     Animator3D setup;setup.clip="base";
-    auto actor=world.entity().set(SkinnedMeshRenderer{.model=model}).set(setup).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
-    auto other=world.entity().set(SkinnedMeshRenderer{.model=model}).set(setup).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
+    auto actor=world.entity().set(SkinnedMeshRenderer3D{.model=model}).set(setup).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
+    auto other=world.entity().set(SkinnedMeshRenderer3D{.model=model}).set(setup).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
     check(resolve_animator3d_assets(world,scratch.path).empty(),"valid action asset rejected");
     check(actor.get<Animator3D>()->actions==other.get<Animator3D>()->actions,"action definitions copied per instance");
     const auto a=play_action3d(actor,"pickup");check(bool(a),"could not start before first animate");
@@ -107,7 +107,7 @@ void assets_and_dispatch() {
     write("[]");check(resolve_animator3d_assets(world,scratch.path).empty()&&!actor.get<Animator3D>()->actions&&action_status3d(actor,c)==ActionStatus3D::Superseded,"reload retained old action");
     write(config);check(resolve_animator3d_assets(world,scratch.path).empty(),"action config restore failed");
     const auto d=play_action3d(other,"pickup");check(bool(d)&&d!=c&&action_status3d(other,c)==ActionStatus3D::Superseded,"tokens aliased across actors");
-    state.animate(.25f);other.remove<SkinnedMeshRenderer>();state.animate(.1f);
+    state.animate(.25f);other.remove<SkinnedMeshRenderer3D>();state.animate(.1f);
     check(action_status3d(other,d)==ActionStatus3D::Cancelled&&other.get<Animator3D>()->events.count==0,"renderer removal left action alive");
     check(!play_action3d(actor,"missing")&&!play_action3d({},"pickup"),"unknown action/invalid actor accepted");
 }

@@ -1,5 +1,5 @@
 #version 450 core
-// kin's image-based light (render3d/environment.hpp): one level of an
+// kin's image-based light (render3d/environment3d.hpp): one level of an
 // environment's filtered copies, from the picture and its mips. Each texel of
 // the equirectangular result looks along its direction: the picture itself
 // (mode 0, the sharpest level), the picture blurred by a GGX lobe of the

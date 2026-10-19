@@ -24,7 +24,7 @@ session's spawn callback. No additional downloaded art or textures are required.
 The executable defaults to `--scenery dense`: a forested approach with a walkable ground apron, clustered rocks and ground cover.
 Seed 1 has 8,025 scenery instances and 803,074 instance triangles before visibility culling, using the same six shared mesh batches.
 Instance records occupy 577,800 CPU bytes (0.55 MiB); engine `ModelBatch3D` objects expand model parts and group them into
-16 m cells for culling. `Model::placement` handles fitted size and bottom alignment for props. No additional
+16 m cells for culling. `Model3D::placement` handles fitted size and bottom alignment for props. No additional
 textures or source meshes are loaded. Seed 1 has 915 static prop bodies. Trees and rocks receive matching solid colliders, while the marked routes and starting
 camera clearing remain open. Shared model tints harmonize the foliage and stones with the ground material.
 Use `--scenery compact` for the original sparse approach; the simulation API defaults to compact unless explicitly configured.

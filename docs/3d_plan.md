@@ -70,7 +70,7 @@ it.
 | Conventions | Right-handed, +Y up, -Z forward, metres; column-major matrices as GLSL reads them | glTF's, so imported models need no conversion. The studio's Blender Z-up export is turned once at load. Signal Siege's 2D plane (x right, y down, pixels) maps to x, z at 1/64 m a pixel: a 64-pixel cell is a metre. |
 | Depth | Reverse Z, D32_FLOAT (D24 where unsupported) | Precision held out to the far plane, which a shooter's long sight lines need. Formats checked with `SDL_GPUTextureSupportsFormat`. |
 | Colour | Lighting in linear; HDR views in a linear HDR scene | Glowing shots need light above white for bloom. A view's target has the 2D renderer's render-target format, so it is laid in on the existing premultiplied path; in a Gamma scene the fragment shader encodes instead. |
-| Model files | glTF 2.0 (`.glb`, `.gltf`) through cgltf, from M3 | A single MIT header, like stb and dr_libs. Not needed until the gun and props; the enemies are made in code. |
+| Model3D files | glTF 2.0 (`.glb`, `.gltf`) through cgltf, from M3 | A single MIT header, like stb and dr_libs. Not needed until the gun and props; the enemies are made in code. |
 | API style | Immediate: a draw list filled each frame | As Renderer2D and RenderQueue are. Meshes and textures are made once and kept on the GPU; transforms and per-draw data are uploaded each frame, instances in storage buffers. |
 | Where | `engine/include/kin/render3d/`; the game in `examples/signal_breach` | Built behind `KIN_EXPERIMENTAL_3D` (on in this branch, off on main until it is decided). The docs say the API may change in any release. |
 
@@ -80,8 +80,8 @@ it.
 #include <kin/render3d/renderer3d.hpp>
 
 kin::Renderer3D r3d{renderer};               // r3d.available(): false on SDL_Renderer
-kin::Mesh star = r3d.create_mesh(kin::meshes::star_prism(5, 0.4f, 0.2f, 0.15f));
-kin::Mesh shot = r3d.create_mesh(kin::meshes::sphere(0.08f, 8));
+kin::Mesh3D star = r3d.create_mesh(kin::meshes::star_prism(5, 0.4f, 0.2f, 0.15f));
+kin::Mesh3D shot = r3d.create_mesh(kin::meshes::sphere(0.08f, 8));
 kin::View3D view = r3d.create_view(renderer.output_size(), {.msaa = 4, .hdr = true});
 
 // each frame
@@ -109,7 +109,7 @@ second frame loop. Bloom runs on the view's HDR texture with the existing
 `pp_bloom_*` shaders, before the HUD is drawn, so the HUD doesn't bloom.
 
 The seam is one virtual on the backend, `IRenderer2DBackend::renderer_3d()`,
-which returns an `IRenderer3DBackend*` (null by default). The SDL_GPU backend
+which returns an `IRendererBackend3D*` (null by default). The SDL_GPU backend
 returns a `GpuRenderer3D` that shares its `GpuDevice` (uploads, staging,
 texture pool, retention until submit), its pipeline cache (with a key that
 grows depth test/write, cull mode and the mesh layouts) and its frame.
@@ -149,7 +149,7 @@ What was measured (RTX 4080 Laptop, Linux, Vulkan, Release; 2026-10-08):
 - **Studio baseline**: `ModelRaster::draw` (16 threads), min / median of
   five pictures turned 7° apart, after one to warm up:
 
-  | Model | Triangles | 1280x800 | 1280x800, 2x2 | 2560x1600 | 2560x1600, 2x2 |
+  | Model3D | Triangles | 1280x800 | 1280x800, 2x2 | 2560x1600 | 2560x1600, 2x2 |
   |---|---|---|---|---|---|
   | arm_head | 1,452 | 2.5 / 2.8 ms | 9.0 / 11.2 | 8.5 / 9.6 | 30.3 / 31.0 |
   | plant | 244,628 | 13.2 / 15.0 | 26.6 / 27.7 | 31.0 / 32.1 | 69.5 / 77.5 |
@@ -176,9 +176,9 @@ The plan as it was:
 
 What was built (the API: [3D rendering](rendering_3d.md)):
 
-- `MeshData` (validated), `Mesh` (vertex and index buffers uploaded once, with
+- `MeshData3D` (validated), `Mesh3D` (vertex and index buffers uploaded once, with
   the texture uploads), `kin::meshes`: box, plane, sphere, cylinder, cone,
-  torus, star prism, octahedron; `MeshData::append` to build shapes from
+  torus, star prism, octahedron; `MeshData3D::append` to build shapes from
   shapes. No submeshes yet: a mesh is drawn with one material.
 - `View3D`: colour, depth (reverse Z), MSAA resolved into the texture 2D
   draws sample, premultiplied; follows the 2D pipeline's colour format (gamma,
@@ -255,8 +255,8 @@ Signal Siege's simulation, unchanged, drawn in 3D from a chase camera behind
 and above the player: `signal_siege --view=3d`. No game design, a ready-made
 benchmark, and a screenshot test from the first week.
 
-- `MeshData` (positions, normals, UVs, colours, indices, submeshes)
-  validated; `Mesh`, static vertex and index buffers uploaded once.
+- `MeshData3D` (positions, normals, UVs, colours, indices, submeshes)
+  validated; `Mesh3D`, static vertex and index buffers uploaded once.
   `kin::meshes`: box, sphere, cylinder, torus, star prism, plane, made in
   code.
 - `View3D`: colour + depth, MSAA 1/2/4 resolved into the sampled texture,
@@ -291,9 +291,9 @@ What was built:
   frustum culling of every copy (its mesh's bounding sphere, moved and scaled
   with it) in the pass that fills the instances, on the job system for big
   scenes, then only the visible copies written (`Scene3D::cull`,
-  `Render3DStats::culled`); `meshes::wedge` for ramps; `kin/ecs/render3d.hpp`:
+  `RenderStats3D::culled`); `meshes::wedge` for ramps; `kin/ecs/render3d.hpp`:
   `Transform3D`, `WorldTransform3D` (composed through the flecs hierarchy as
-  2D's is), `MeshRenderer`, and `WorldRenderState3D` gathering them into
+  2D's is), `MeshRenderer3D`, and `WorldRenderState3D` gathering them into
   instanced draws.
 - **Signal Breach** (`examples/signal_breach`, `breach.*`, `breach_view.*`):
   its own simulation, with Signal Siege's three enemy kinds, colours, cores
@@ -302,7 +302,7 @@ What was built:
   m, walls 3 m, ramps between; the player walks, steps up to 0.45 m, jumps,
   dashes (Shift), falls off ledges, and fires along the view (rays against
   enemy spheres and the deck). Enemies are ECS entities (`Transform3D`,
-  `BreachEnemy`, a `MeshRenderer` given by the view); they fly in 3D over the
+  `BreachEnemy`, a `MeshRenderer3D` given by the view); they fly in 3D over the
   walls, not round them; plates and rings fire moving spheres when they see
   the player. Movement splits across threads above 16,384 enemies, firing and
   damage stay serial. The gun is the overlay (recoil, a bob, a muzzle flash);
@@ -379,7 +379,7 @@ stays as it is), sharing its enemies, spawning and scoring.
 - **Frustum culling** of instances and draws, on the job system.
 - Health bars and damage numbers placed with `Camera3D::project`.
 - **ECS**: `Transform3D`, `WorldTransform3D` (the flecs hierarchy, as 2D's)
-  and `MeshRenderer`, since enemies are entities already; shots and sparks
+  and `MeshRenderer3D`, since enemies are entities already; shots and sparks
   stay plain arrays, as in Signal Siege.
 - **Autopilot** aims in 3D, so headless runs, the benchmark and agents still
   play whole matches.
@@ -407,7 +407,7 @@ What was built:
 - **Transparency**: `Blend3D::Alpha` (premultiplied over, drawn after the
   opaque, draws and copies furthest first) and `Additive` (premultiplied
   add, any order); both depth-tested, not writing depth.
-- **HDR and bloom**: `View3DOptions::hdr`, `exposure`, `bloom`,
+- **HDR and bloom**: `ViewOptions3D::hdr`, `exposure`, `bloom`,
   `bloom_threshold`: the scene into a float target, a bright pass at half
   size, a 9-tap blur twice across and down (the second with taps twice as
   far), then `view_output.frag` adds the glow, exposes, tonemaps (ACES) and
@@ -421,7 +421,7 @@ What was built:
   folder or pack: primitives as meshes placed by their nodes, base colour and
   texture (mipmapped, or nearest when the sampler asks), emissive (and its
   strength), `BLEND`, double-sided, unlit; flat normals when a primitive has
-  none. `ModelFile` reloads on change. `decode_image()` reads images from
+  none. `ModelFile3D` reloads on change. `decode_image()` reads images from
   memory. `tools/models/glb.py` writes small .glb files with the standard
   library (the test model and Signal Breach's gun and crates are made by it).
 - **3D sound**: `AudioEngine::set_listener_3d()`, `set_position_3d()`,
@@ -497,11 +497,11 @@ The plan as it was:
 
 What was built, in kin:
 
-- **Picking**: `View3DOptions::pick` gives a view a second, single-sampled
+- **Picking**: `ViewOptions3D::pick` gives a view a second, single-sampled
   target (RGBA32F: the world point, and the id as the alpha's bits) drawn
   after the main pass by the scene's opaque and alpha meshes (`pick.frag`;
   not wireframes, additive glows or the overlay). The id is the draw's
-  (`Scene3D::draw(..., id)`, `MeshInstance::id`), carried in a spare float
+  (`Scene3D::draw(..., id)`, `MeshInstance3D::id`), carried in a spare float
   of each copy's normal matrix. `Renderer3D::pick(view, pixel)` submits what
   the frame has recorded and reads one texel back
   (`GpuDevice::read_texture_region`); 2D goes on in a new command buffer.
@@ -540,7 +540,7 @@ What was measured (`krs_model_view_check`, 1280x800, the raster at 2x2
 against 4x MSAA, the first of six orbits 7 degrees apart; RTX 4080 Laptop;
 the machine was busier than at M0, so the raster is timed again beside it):
 
-| Model | Triangles | CPU raster now, 1x / 2x2 (min / median ms) | M0 baseline 1x / 2x2 | GPU view, drawn and waited for | `render()` CPU |
+| Model3D | Triangles | CPU raster now, 1x / 2x2 (min / median ms) | M0 baseline 1x / 2x2 | GPU view, drawn and waited for | `render()` CPU |
 |---|---|---|---|---|---|
 | arm_head | 1,452 | 6.6 / 7.4, 20.7 / 21.9 | 2.5 / 2.8, 9.0 / 11.2 | 0.76-0.83 / 0.88-0.91 | 0.20 / 0.22 |
 | plant | 244,628 | 35.2 / 36.7, 70.1 / 72.1 | 13.2 / 15.0, 26.6 / 27.7 | 1.30 / 1.43 | 0.65 / 0.82 |
@@ -609,7 +609,7 @@ fine: 0.53): it is per copy.
   down the light to where it leaves the shadow area, reaches the camera's
   frustum. From mid-deck 21,536 casters became 8,778 and the shadows'
   GPU cost 0.85 ms became 0.25; fewer copies are written too.
-  `Render3DStats::shadow_casters` counts them.
+  `RenderStats3D::shadow_casters` counts them.
 - **The map is not cycled**: a frame that renders several views was handed
   a new map for each (7.3 ms a render at 4096 repeated, 2.2 without); at
   one render a frame the same either way (an interleaved A/B, five runs).
@@ -925,7 +925,7 @@ risk is casters drawn again for each).
 
 Built: `Lights3D::shadow_cascades` (1 to 4; 1 is the single map and the
 default) and `shadow_distance` (100 by default, clamped to the camera's far
-plane); `kin/render3d/shadow_cascades.hpp`, the splits and the fit as pure
+plane); `kin/render3d/shadow_cascades3d.hpp`, the splits and the fit as pure
 functions (`cascade_splits`, `fit_shadow_cascades`); a depth array of
 `shadow_cascades` layers (`GpuDevice::create_target_array`), one shadow pass
 a layer; `mesh.frag` picks, blends and filters.
@@ -958,7 +958,7 @@ a layer; `mesh.frag` picks, blends and filters.
   not another copy of the 128 B instance); `shadow.vert` and
   `shadow_mask.vert` read through it when `Draw::first.y` is not 0, and run as
   before (one run from `first.x`) when it is. Back-face culling and cut-out
-  casters work as before. `Render3DStats::shadow_cascades` and
+  casters work as before. `RenderStats3D::shadow_cascades` and
   `cascade_casters[4]` count them.
 - **Always an array.** `uShadow` is a `sampler2DArrayShadow` for either path
   (one layer is the single map; it samples the same). If the device can't make
@@ -1002,7 +1002,7 @@ as sharp as in the 16 m scene.
 block 60 m away seen by a 12 degree lens):* the shadow edge is 3 pixels wide
 with one map, 1 with four (lavapipe and the RTX 4080 alike).
 
-*Casters drawn (`Render3DStats`; copies counted once for each cascade they are
+*Casters drawn (`RenderStats3D`; copies counted once for each cascade they are
 drawn into):*
 
 | Picture | one map | 4 cascades, per cascade | 4 cascades, total |
@@ -1117,7 +1117,7 @@ pre-pass, GTAO and a blur in compute, and the lighting changes in
 - **Reference scenes.** `ambient_occlusion {enabled, radius, intensity,
   half_resolution}` in the scene JSON; `kin_reference --ao [--ao-radius R
   --ao-intensity I --ao-half]` for a whole run (labels of their own).
-- **Counters.** `Render3DStats::ao_draws`, `ao_instances`, `ao_dispatches`. No
+- **Counters.** `RenderStats3D::ao_draws`, `ao_instances`, `ao_dispatches`. No
   GPU scope inside `render()` (a scope splits the frame's command buffer);
   cost is read as the difference between runs with it on and off.
 
@@ -1235,7 +1235,7 @@ a few lines in `kin_material.inc.glsl` and the renderer.
 - **Shared pre-pass.** It is drawn when AO or contact shadows (or both) are on
   and never twice; the depth and normal targets are the same. Contact shadows
   work with AO off (a test: 2 pre-pass draws, 0 AO dispatches, 3 contact
-  dispatches). `Render3DStats::contact_dispatches` is new; `ao_draws` and
+  dispatches). `RenderStats3D::contact_dispatches` is new; `ao_draws` and
   `ao_instances` are now the pre-pass's, whoever asked for it.
 - **The march.** From the pixel's view-space position, pushed off the surface
   by a pixel or more (more where seen at a slant), toward the sun in view
@@ -1375,8 +1375,8 @@ likeliest to be cut if the cost or the fiddliness is too much.
 
 Built: `Scene3D::taa` (`TemporalAA3D {enabled = false, blend = 0.9, sharpness = 0,
 jitter_scale = 1, jitter_samples = 8, freeze_jitter = false}`), `View3D::reset_history()`,
-`kin/render3d/taa.hpp` (`taa_jitter`, `jitter_projection`: pure), the velocity
-pre-pass (`prepass_velocity.*`), `taa.comp`, `Render3DStats::{taa_dispatches,
+`kin/render3d/taa3d.hpp` (`taa_jitter`, `jitter_projection`: pure), the velocity
+pre-pass (`prepass_velocity.*`), `taa.comp`, `RenderStats3D::{taa_dispatches,
 taa_reset, taa_jitter, samples}`; docs/rendering_3d.md has the whole design. The
 decisions, short:
 
@@ -1566,10 +1566,10 @@ part cannot be coarse and the far part fine), build time at load.
 #### G3a — results
 
 Built: meshoptimizer 0.25 (MIT; `simplifier`, `vcacheoptimizer`, `indexgenerator`, `allocator` compiled into the
-engine under `KIN_EXPERIMENTAL_3D`; license in the third-party notices), `MeshOptions`
-(`Renderer3D::create_mesh(data, {.levels = n})`, `load_model(path, options)`), `Mesh::level_count()`,
+engine under `KIN_EXPERIMENTAL_3D`; license in the third-party notices), `MeshOptions3D`
+(`Renderer3D::create_mesh(data, {.levels = n})`, `load_model(path, options)`), `Mesh3D::level_count()`,
 `level_triangles()`, `level_error()`, `Scene3D::lod {enabled, error_pixels, bias, force_level}`,
-`Render3DStats::lod_copies_by_level`, `kin_reference --lod --lod-error --lod-bias --lod-force --lod-levels` (and
+`RenderStats3D::lod_copies_by_level`, `kin_reference --lod --lod-error --lod-bias --lod-force --lod-levels` (and
 `lod` / `models[].lod_levels` / `lod_levels` in scene files), Sponza Walk's "Levels of detail" section and
 `--preset lod`, `--lod-levels N` (default 4). Selection is on the CPU in the parallel cull; every pass uses the
 copy's one level; a draw becomes up to `levels` draws over one index buffer (levels are runs of it, over the one
@@ -1650,7 +1650,7 @@ levels' own vertices, 36 bytes a vertex of 12.8 M, are 0.45 GB and are also kept
 against 5.15 M). A first version that simplified the 14.9 M vertices with all nine attributes peaked at 6.6 GB and was
 killed by the OOM killer: the simplifier's per-vertex state with attributes and `Permissive` was the cause. A flat
 unindexed mesh is now welded by position, simplified on positions alone (no attribute state), and each level gets vertices
-of its own with the triangle's flat normal and the UV and colour of the corner it replaces (`MeshLodChain::extra_vertices`);
+of its own with the triangle's flat normal and the UV and colour of the corner it replaces (`MeshLodChain3D::extra_vertices`);
 level 0's vertices and indices are untouched. Sponza (103 meshes, 79 with levels): 1.3 to 1.8 s load, peak 562 MB; helmet 1.3 s
 (load with levels), the crowd's four meshes 2 ms.
 
@@ -1699,12 +1699,12 @@ cut and counts open edges), and the build's time and memory.
 
 Done, with the limits below. One huge mesh is cut per frame through a cluster hierarchy, on the CPU; G3c moves the cut to the GPU.
 
-**Built.** `engine/include/kin/render3d/mesh_clusters.hpp`, `engine/src/render3d/mesh_clusters.cpp`: `build_mesh_clusters` (pure CPU;
+**Built.** `engine/include/kin/render3d/mesh_clusters3d.hpp`, `engine/src/render3d/mesh_clusters.cpp`: `build_mesh_clusters` (pure CPU;
 meshoptimizer 0.25's `meshopt_buildMeshletsSpatial` for leaves of at most 128 triangles, `meshopt_partitionClusters` for groups of
 about 4, `meshopt_simplify` with `LockBorder | ErrorAbsolute` on each group, run on local vertex numbers so that it works on a few
 hundred vertices and not the mesh's millions; groups run on the job system; the sources `clusterizer` and `partition` were added),
-`select_clusters` (the cut: a template over a cull object, so the tests and the renderer run the same code), `ClusterCutTest`,
-`MeshOptions::clusters` (`levels` is then ignored for that mesh), `Mesh::cluster_count()` / `cluster_levels()` / `cluster_roots()` /
+`select_clusters` (the cut: a template over a cull object, so the tests and the renderer run the same code), `ClusterCutTest3D`,
+`MeshOptions3D::clusters` (`levels` is then ignored for that mesh), `Mesh3D::cluster_count()` / `cluster_levels()` / `cluster_roots()` /
 `leaf_triangles()` / `cluster_triangles()` / `flat_shaded()`. The hierarchy is a DAG as Nanite's: a group of clusters is merged,
 simplified to half with its outer border (and the mesh's open borders) locked, split into new clusters; a group's error is the largest
 input error plus the simplification's, its sphere holds its inputs' spheres, and all its outputs take its (error, sphere) as their own.
@@ -1836,13 +1836,13 @@ Done, with the limits below. Clustered meshes are cut, culled and compacted in c
 
 **Design, as built.** `engine/shaders/cluster_{cull,scan,args,gather}.comp.glsl`, `GpuRenderer3D::cut_clusters_gpu` / `cluster_pass_gpu`.
 `Scene3D::lod` gained `gpu_culling` (default on; the CPU cut of G3b is the fallback and the A/B), `max_cluster_triangles` (default 4 M triangles,
-48 MB of video memory) and `stats_readback`; `Renderer3DCapabilities::gpu_driven_clusters`.
+48 MB of video memory) and `stats_readback`; `RendererCapabilities3D::gpu_driven_clusters`.
 
 - *No traversal.* The cut test of a cluster is local (own error within the bound, parent's not), so one thread tests one (copy, cluster):
-  91 k clusters of the kiln in a dispatch a mesh. The test is the CPU's `ClusterCutTest` / `ClusterViews` written again in GLSL, same
+  91 k clusters of the kiln in a dispatch a mesh. The test is the CPU's `ClusterCutTest3D` / `ClusterViews` written again in GLSL, same
   expressions in the same order with `precise` (no fused multiply-add), the copy's scale taken from the CPU as a float so that it is the
   same bits. The frustum tests are the renderer's own (camera, each cascade and its slice, the single map; the cut's distance is the camera's).
-- *Mesh data in video memory, in shared chunks*: a table of 80 bytes a cluster (spheres, errors, depth, first index) and every cluster's indices as `u32`
+- *Mesh3D data in video memory, in shared chunks*: a table of 80 bytes a cluster (spheres, errors, depth, first index) and every cluster's indices as `u32`
   after the leaves' in the mesh's index range; the index buffer is also a storage buffer (so the leaves are not stored twice): kiln
   **+62 MB of indices for the upper levels and 7.3 MB of table** (the hierarchy takes 134 MB of video memory in all). Meshes are put in
   *chunks* (`GpuClusterChunk`: 16 MB of indices and a table of 16 thousand clusters, or a chunk of the size a bigger mesh needs; the mesh's draws bind the chunk's buffer
@@ -1861,7 +1861,7 @@ Done, with the limits below. Clustered meshes are cut, culled and compacted in c
   13 copies x 5 views x 5 M would be 3 GB. The scan already gives every run its place in one array, so the room is one number
   (`max_cluster_triangles`, clamped to at most the sum of the leaf triangles of the copies times the views, and to 100 M); a run
   that passes it is cut short at the room exactly (the draw's count is clamped; the gather writes no more than the room),
-  the clusters cut short or dropped are counted (`Render3DStats::cluster_overflow`, with `stats_readback`) and said once in the log.
+  the clusters cut short or dropped are counted (`RenderStats3D::cluster_overflow`, with `stats_readback`) and said once in the log.
   I did not take vertex pulling with a packed copy id: it would need new vertex shader variants for four passes and custom material
   shaders, and gives up the hardware vertex cache's index reuse for nothing the scan does not already give.
 - *Which passes*: main, pre-pass, velocity and pick share view 0 (the camera's); each cascade (or the single map) is a view of its own with its frustum
@@ -1942,7 +1942,7 @@ because it does pay where the content is dense and hidden (a wall hiding 256 hea
 the scenes the plan named, it only costs. The verdict and where it pays are at the end of this section.
 
 **Design, as built.** `Lod3D::occlusion {enabled, depth_margin, pixel_margin}` (off by default; needs `lod.enabled`, `gpu_culling`, a clustered mesh and
-`Renderer3DCapabilities::occlusion_culling`, else ignored with one line in the log). The standard two-pass method, with the first pass's depth made for it:
+`RendererCapabilities3D::occlusion_culling`, else ignored with one line in the log). The standard two-pass method, with the first pass's depth made for it:
 
 - *Which depth, and why.* Last frame's depth reprojected (a) was rejected before any code: a cluster that was hidden last frame and shows now (a door opening, the
   camera coming round a wall, a moving copy) would be culled for a frame, and an occluder that moved away would hide what it no longer hides. A coarse
@@ -2082,8 +2082,8 @@ Sponza 260 k triangles in 103 meshes; numbers from each step's results):
 
 | Step | Costs | Gains | Default | Use it for |
 |---|---|---|---|---|
-| **G3a** levels of detail (`MeshOptions::levels`, `Lod3D`) | build time (kiln 8 s for 4 levels) and memory (+1.1 GB resident, all levels' triangles on the GPU); a draw a level; the crowd with everything on is 8 to 11% slower | kiln 4.3 to 0.3 (6 levels) or 0.8 ms (4); the crowd 0.4 to 1.1 M of 1.5 to 2.6 M triangles, GPU level; picture within 0.1 to 0.2 mean levels | off; meshes keep one level unless asked | a big mesh seen from far (whole-mesh levels), many copies of meshes of thousands of triangles; not small meshes |
-| **G3b** clusters, CPU cut (`MeshOptions::clusters`) | 5 s and 1.5 GB at load for the kiln; the cut on the CPU 0.4 to 0.9 ms of `render()` | kiln 4.3 to 0.25 to 0.9 ms GPU: near parts fine, far parts coarse inside one mesh; no cracks | off | one huge mesh (hundreds of thousands to millions of triangles) seen near and far; not Sponza or a helmet |
+| **G3a** levels of detail (`MeshOptions3D::levels`, `Lod3D`) | build time (kiln 8 s for 4 levels) and memory (+1.1 GB resident, all levels' triangles on the GPU); a draw a level; the crowd with everything on is 8 to 11% slower | kiln 4.3 to 0.3 (6 levels) or 0.8 ms (4); the crowd 0.4 to 1.1 M of 1.5 to 2.6 M triangles, GPU level; picture within 0.1 to 0.2 mean levels | off; meshes keep one level unless asked | a big mesh seen from far (whole-mesh levels), many copies of meshes of thousands of triangles; not small meshes |
+| **G3b** clusters, CPU cut (`MeshOptions3D::clusters`) | 5 s and 1.5 GB at load for the kiln; the cut on the CPU 0.4 to 0.9 ms of `render()` | kiln 4.3 to 0.25 to 0.9 ms GPU: near parts fine, far parts coarse inside one mesh; no cracks | off | one huge mesh (hundreds of thousands to millions of triangles) seen near and far; not Sponza or a helmet |
 | **G3c** the cut in compute (`Lod3D::gpu_culling`) | 62 MB of indices and 7 MB of table for the kiln, the gathered buffer (48 MB), about 0.05 ms of GPU for six compute passes | `render()` 0.4 to 0.9 ms down to 0.03 to 0.08; GPU level with the CPU cut, cheaper with cascades; the picture is the CPU cut's byte for byte | on, wherever clusters and the selection are on and the device can | always with G3b |
 | **G3d** occlusion culling (`Lod3D::occlusion`) | 0.05 to 0.18 ms of GPU where little is hidden (0 to 0.07 with a pre-pass), 0.03 to 0.06 ms of CPU, +48 MB (the second gathered buffer) | 0.1 to 0.23 ms (12 to 19%) where a wall hides hundreds of heavy copies; the camera's triangles down 70 to 98% on the kiln and the dense scene; the picture is the one without it | off | hundreds of heavy clustered copies behind walls, with ambient occlusion or temporal anti-aliasing on; not the kiln, not Sponza |
 
@@ -2105,7 +2105,7 @@ or the rounding. The shaders were arranged so that `mesh.vert` and `mesh.frag` c
 
 With TAA on and nothing else that needs a pre-pass (no AO, no contact shadows, no occlusion culling, no opaque mesh with a custom shader), the main pass writes the velocity itself into a second
 colour target (`mesh_velocity.vert/.frag` = `mesh.vert/.frag` through `kin_mesh_vertex.inc.glsl` / `kin_mesh_fragment.inc.glsl` with `KIN_VELOCITY`), and the separate velocity pre-pass (a whole
-second geometry pass, with its own depth) is gone. `Render3DStats::ao_draws` is then 0 and `taa_main_velocity` is true.
+second geometry pass, with its own depth) is gone. `RenderStats3D::ao_draws` is then 0 and `taa_main_velocity` is true.
 
 - *Same bits.* The velocity expression is `kin_velocity()` moved to `kin_velocity.inc.glsl`, which both the pre-pass and the main pass include; the vertex shader copies `prepass_velocity.vert`'s
   four lines for `vCurrent`/`vPrevious`/`vFresh`. The target is the same RGBA16F texture the pre-pass wrote (`_ao_normals`; velocity in B and A, R and G are 0, nothing reads them in TAA-only), cleared
@@ -2139,7 +2139,7 @@ The CPU numbers on the crowd are dominated by the instance matching and the cull
 #### 2. One blur for ambient occlusion and contact shadows
 
 With both on and the occlusion not at half resolution, the two results have the same size and the same depth weights, so `ao_blur_both.comp` filters both inputs and writes both outputs in one dispatch a
-direction (2 dispatches where there were 4; `Render3DStats::blur_merged` = 2, and `ao_dispatches` and `contact_dispatches` still count the dispatches each feature is in, 3 each). The GTAO and
+direction (2 dispatches where there were 4; `RenderStats3D::blur_merged` = 2, and `ao_dispatches` and `contact_dispatches` still count the dispatches each feature is in, 3 each). The GTAO and
 the contact march run first, then the two blurs. Everything else keeps the separate path (half-resolution occlusion, one feature alone; `KIN_BLUR_SEPARATE=1`, read on each render, forces it, for the test and
 for timing). The weights are worked out once and applied to both sums, with the same operations in the same order as `ao_blur.comp`, and the results are **byte-identical** (every picture of
 `all`, `ao`, `cs` and the rest; and the new test compares the merged picture with `KIN_BLUR_SEPARATE=1`'s to the byte).
@@ -2196,14 +2196,14 @@ where much is hidden (the plan's verdict stands).
 
 #### 4. The shadow map kept when nothing changed
 
-`Lights3D::cache_shadows` (off by default, as every opt-in; the agent first built it on, and the default was turned off at commit; `Render3DStats::shadow_cached` says a render hit; `KIN_SHADOW_CACHE=0` turns it off for the whole renderer). The shadow pass (a single map or the cascades) is skipped when everything it
+`Lights3D::cache_shadows` (off by default, as every opt-in; the agent first built it on, and the default was turned off at commit; `RenderStats3D::shadow_cached` says a render hit; `KIN_SHADOW_CACHE=0` turns it off for the whole renderer). The shadow pass (a single map or the cascades) is skipped when everything it
 is a function of is as it was when the map was last drawn: the map itself (a generation counter, so a remade map never matches), its size and layers, the cascades' views and the camera's and the
 sun's frusta (what casts into view, and the cascades' fit, follow the **camera**), the levels of detail (the settings and the view they were chosen for), and for every caster its mesh (a serial number, not a pointer),
 `double_sided`, blend, and for a cut-out its cutoff, wrap modes and texture (identity and a version bumped by `update_texture`, `write_texture`, a new mip chain and a compute dispatch that writes it; a
-texture that is a render target is drawn into without a trace, so a cut-out caster with one is never cached), and its copies' `MeshInstance`s. All of it except the copies is a `key` of bytes compared exactly. The
+texture that is a render target is drawn into without a trace, so a cut-out caster with one is never cached), and its copies' `MeshInstance3D`s. All of it except the copies is a `key` of bytes compared exactly. The
 copies are compared in full (`memcmp`, stopping at the first difference) against a snapshot taken only after two renders in a row agreed on the key **and** on a cheap sample of the copies (up to eight a draw, spread, and the last),
 so a scene that moves never copies anything, and one that moves a little (a sample agreeing, the copies not) makes the cache wait eight renders before it copies again. It cannot give a wrong picture short of a
-change it does not see: a texture written by a route that does not pass through the 2D backend (none exists in kin), or an `MeshInstance` that changes and changes back between two renders.
+change it does not see: a texture written by a route that does not pass through the 2D backend (none exists in kin), or an `MeshInstance3D` that changes and changes back between two renders.
 
 *How often can it hit.* Only when the camera **and** everything in the shadow's reach are still: a paused game, a photo mode, a model viewer at rest, a level walked to a stop. Signal Breach (the crowd always moves) never hits;
 the Sponza Walk viewer hits whenever the user stops. It is not a general win, and nothing is lost where it misses (below).
@@ -2241,7 +2241,7 @@ Each feature's targets belong to a view; a group is released when it has not bee
 shadows', the pre-pass's depth, its normals (also the main pass's velocity), temporal anti-aliasing's (history, depth, float picture of an 8-bit view, sharpened picture, last velocity), occlusion culling's (pyramid, occluder depth, history)
 and, per renderer, its second gathered buffer of indices and job history (`GpuView3D::_idle_*`, `age_targets` at the end of `render()`). A group is "used" when its pass ran this render, so a feature toggled at
 least every 119 renders never lets go, and the targets are not made again. Temporal anti-aliasing used to release at once when it went off; it now drops its history at once (`suspend_taa`: valid = false, frame 0, the copy
-records cleared, so the next frames start afresh exactly as after a release or `reset_history()`) and releases the textures with the rest. The shadow map and the MSAA/HDR targets are untouched. `Render3DStats::feature_bytes` is what the groups hold
+records cleared, so the next frames start afresh exactly as after a release or `reset_history()`) and releases the textures with the rest. The shadow map and the MSAA/HDR targets are untouched. `RenderStats3D::feature_bytes` is what the groups hold
 and `targets_released` the groups given back that render.
 
 *Video memory, 1280 x 720, everything on, then 130 renders with it all off* (`kin_reference --vram-cycle`): by the renderer's own count (`feature_bytes`), **Sponza** (4 cascades, AO, contact shadows, TAA, 8-bit view) **45.7 MiB to 0**, **kiln_near** (the same with clusters and occlusion culling,
@@ -2277,11 +2277,11 @@ is made on first use is graphics pipelines (4 for AO, 4 for contact shadows, 13 
 
 ("Cold" is `__GL_SHADER_DISK_CACHE=0`, a player's first run; "warm" the second run of the same process, the cache filled. The 4 cascades' 4 ms is the 4-layer shadow map (64 MB) being made, which `warm_up` also does.)
 
-*`warm_up`.* `Renderer3D::warm_up(view, scene)` (`IRenderer3DBackend::warm_up`) makes what `setup_frame`, `prepass` and the passes would ask for on a first render of the scene: the targets of AO, contact shadows and TAA (the velocity target alone, or the pre-pass's, as
+*`warm_up`.* `Renderer3D::warm_up(view, scene)` (`IRendererBackend3D::warm_up`) makes what `setup_frame`, `prepass` and the passes would ask for on a first render of the scene: the targets of AO, contact shadows and TAA (the velocity target alone, or the pre-pass's, as
 the frame will need), the shadow map at the scene's size and cascades, the pyramid and occluder depth of occlusion culling, and pipelines (`pipeline()` makes the missing and keeps them) for each of the scene's draws (the pass its blend and wireframe put it in, culling from `double_sided`, its custom shader,
 the velocity variant when the main pass will write it) and, by the scene's settings, the shadow, pick, occluder, and cut-out variants. It records nothing and draws nothing. Nothing is warmed at start-up by default; Sponza Walk warms up with every
 feature on once the model is loaded, and again when a switch that needs it is turned (the shadow map's size, MSAA or HDR, the features).
-After it the first render makes **0 pipelines** (`Render3DStats::pipelines_made`) and its `render()` is 0.3 to 0.9 ms against 1.4 to 4.8 (warm cache) or 40 to 390 (cold) without; the CPU wall time of the first frame is within about 0.3 ms of
+After it the first render makes **0 pipelines** (`RenderStats3D::pipelines_made`) and its `render()` is 0.3 to 0.9 ms against 1.4 to 4.8 (warm cache) or 40 to 390 (cold) without; the CPU wall time of the first frame is within about 0.3 ms of
 steady in the runs above (the rest is machine noise: the table's loaded-machine cells).
 
 *Not warmed* (and said so): the cluster cut's buffers and occlusion culling's second gathered buffer and history (sized by the scene's clusters, made by the first cut: the 2 ms and 6 ms above), environment filtering, a mesh's first upload, pipelines of draws the scene gets
@@ -2596,10 +2596,10 @@ meshoptimizer, built only with `KIN_EXPERIMENTAL_3D`).
 
 What exists (so what the steps build on): the renderer (materials, shadows, lights, detail
 reduction for big scenes, pick, custom shaders), the ECS with `Transform3D` and
-`MeshRenderer` (`kin/ecs/render3d.hpp`), a deterministic fixed-timestep core, `kin/anim`
+`MeshRenderer3D` (`kin/ecs/render3d.hpp`), a deterministic fixed-timestep core, `kin/anim`
 (clips and state machines over registered properties: not skeletal), `kin/audio` with
 spatial sound, `kin/particles` (2D), ui2, scripting, saves, prefabs. What does not: skinned
-meshes (the glTF loader reads nodes and meshes, not skins or animations; `MeshVertex` has
+meshes (the glTF loader reads nodes and meshes, not skins or animations; `MeshVertex3D` has
 no joints), 3D physics (`kin/physics` is Box2D), gamepad input in `platform`, a sky,
 fog, spot lights, 3D particles and decals, a baked asset cache, and any networking
 (the only server in the engine is the agent interface).
@@ -2608,9 +2608,9 @@ fog, spot lights, 3D particles and decals, a baked asset cache, and any networki
 
 *P1a, skinned meshes and clips.* The loader reads skins (joints, inverse bind matrices) and
 animations (translation, rotation, scale channels; step, linear, cubic spline) and the
-`JOINTS_0` / `WEIGHTS_0` attributes; a `Model` gains a `Skeleton` and its clips. Skin
+`JOINTS_0` / `WEIGHTS_0` attributes; a `Model3D` gains a `Skeleton3D` and its clips. Skin
 data is a separate vertex stream (four joint indices, four weights), so a mesh without it
-is untouched and every existing picture stays byte for byte. At run time: a `Pose` (local
+is untouched and every existing picture stays byte for byte. At run time: a `Pose3D` (local
 translation, rotation, scale per joint), a player that samples a clip and blends two, with
 layers and masks (an upper-body layer over locomotion), additive clips, and root motion
 taken out; the joint matrices (world pose times inverse bind) are written per frame into a
@@ -2619,7 +2619,7 @@ storage buffer and a copy's offset into it is a small per-copy value in a buffer
 that draws meshes (main, shadow cascades, pre-pass, TAA velocity from the previous
 frame's joint matrices, pick); bounds for culling from the skeleton or a per-clip bound;
 skinned meshes are excluded from levels and clusters (G3), and say so.
-API: `Scene3D::draw_skinned(...)`, ECS `SkinnedMeshRenderer` and `Animator3D`; the existing
+API: `Scene3D::draw_skinned(...)`, ECS `SkinnedMeshRenderer3D` and `Animator3D`; the existing
 state machines choose clips and blend weights (a 1D blend by speed first).
 Checks: the glTF sample models (CesiumMan, Fox, BrainStem: fetched, not committed) load; the
 skinned picture equals a CPU skinning reference to a tolerance; blends, masks, additive
@@ -2643,10 +2643,10 @@ ambient occlusion, pick, the ECS `Animator3D`) is below, "P1a part 2 - results".
 
 | Piece | Where | Notes |
 |---|---|---|
-| `Skeleton`, `Pose`, `JointPose`, `PoseMask`, `compute_joint_matrices`, `skin_mesh` (CPU skinning reference), per-joint bounds (`compute_skin_bounds`, `skin_sphere`) | `kin/render3d/skeleton.hpp`, `src/render3d/skeleton.cpp` | CPU only. Parents come first (validated); at most 256 joints. |
+| `Skeleton3D`, `Pose3D`, `JointPose3D`, `PoseMask3D`, `compute_joint_matrices`, `skin_mesh` (CPU skinning reference), per-joint bounds (`compute_skin_bounds`, `skin_sphere`) | `kin/render3d/skeleton3d.hpp`, `src/render3d/skeleton.cpp` | CPU only. Parents come first (validated); at most 256 joints. |
 | `AnimClip3D`, `Track3D`, `sample_clip`, `blend_poses`, `blend_masked`, `apply_additive`, `extract_root_motion`, `remove_root_motion`, `AnimationPlayer3D` | `kin/render3d/animation3d.hpp`, `src/render3d/animation3d.cpp` | glTF's step / linear / cubic-spline exactly; slerp for rotations; the player has a base layer with crossfade, layers with masks and weights, additive layers and root motion. Does not touch `kin/anim`. |
-| glTF skins, `JOINTS_0` / `WEIGHTS_0`, animations | `src/render3d/model.cpp` (`GltfReader`), `Model::skeletons`, `Model::clips`, `ModelPart::skin`, `read_model_data` | Joints reordered parents-first with the vertices' indices remapped; weights renormalised; a mesh on a node under a joint becomes a rigid skinned part; morph channels and animations of non-joint nodes are logged and ignored; skins over 256 joints are rejected and their meshes drawn static. |
-| `MeshData::skin`, `Mesh::skinned()`, `Mesh::skin_joint_count()` | `mesh.hpp` | A parallel stream of 4 joints and 4 weights; `validate`/`append` know it; levels and clusters refused for a skinned mesh (logged). |
+| glTF skins, `JOINTS_0` / `WEIGHTS_0`, animations | `src/render3d/model.cpp` (`GltfReader`), `Model3D::skeletons`, `Model3D::clips`, `ModelPart3D::skin`, `read_model_data` | Joints reordered parents-first with the vertices' indices remapped; weights renormalised; a mesh on a node under a joint becomes a rigid skinned part; morph channels and animations of non-joint nodes are logged and ignored; skins over 256 joints are rejected and their meshes drawn static. |
+| `MeshData3D::skin`, `Mesh3D::skinned()`, `Mesh3D::skin_joint_count()` | `mesh.hpp` | A parallel stream of 4 joints and 4 weights; `validate`/`append` know it; levels and clusters refused for a skinned mesh (logged). |
 | `Scene3D::draw_skinned` (mesh and model), `joint_matrices()`, `skin_offsets()` | `scene3d.hpp` | Matrices copied into the scene; copies of one mesh and material one after another are one draw. |
 | GPU skinning, main and shadow passes | `gpu_renderer3d.cpp`; `mesh_skinned.vert`, `mesh_skinned_velocity.vert`, `shadow_skinned.vert`, `shadow_mask_skinned.vert`, `kin_skin.inc.glsl`; `GpuVertexLayout::SkinnedMeshVertices` | A second vertex buffer (8 B a vertex: 4 joint bytes, 4 unorm weight bytes summing to 255); the frame's matrices in one storage buffer, each copy's first matrix a `u32` in a buffer of its own, in the places the instances are (`GpuInstance3D` is still 128 B). |
 | Harness | `kin_reference`: `models[].animation {clip, time, loop, speed, root_motion}`, `grid {count, columns, spacing, time_step}`; `make_scenes.py`: `skinned_bend.glb`, `skinned_dense.glb`, `floor20.glb`; `fetch.py`: `cesium_man`, `fox`, `brainstem` (single `.glb`, pinned, locked; `--lock NAME` locks only the new ones) | Scenes `skinned_bend`, `skinned_cesium`, `skinned_fox` (these two `optional`), `skinned_crowd` (speed). |
@@ -2725,7 +2725,7 @@ reference above and by eye).
 **Honest limits (part 2 must do these).**
 1. **Velocity.** A skinned copy under TAA has the camera's velocity only (`mesh_skinned_velocity.vert` takes the copy as not having moved), so a
    moving pose ghosts slightly and a still pose under a moving camera is right. Part 2: keep last frame's joint matrices (a second buffer, matched by
-   `MeshInstance::id` or draw order as the copies' previous transforms are) and read them in a skinned `prepass_velocity.vert` and in the main-pass
+   `MeshInstance3D::id` or draw order as the copies' previous transforms are) and read them in a skinned `prepass_velocity.vert` and in the main-pass
    velocity variant. When ambient occlusion or contact shadows are on (the velocity is then written by the pre-pass, which has no skinned
    variant) a skinned pixel keeps the pre-pass's clear value, no motion at all, so it ghosts under camera motion as well.
 2. **Pre-pass, AO, contact shadows, occlusion culling's occluder depth.** Skinned copies are skipped there (they are not in AO, they do not
@@ -2741,7 +2741,7 @@ reference above and by eye).
    ordinary there); skins of more than 4 influences (the strongest four of `JOINTS_0` are used, `JOINTS_1` is ignored with a log line); sparse accessors in
    skinned primitives; morph targets; several skeletons in one model drawn with one call (`draw_skinned(model, ...)` poses skeleton 0 only;
    parts bound to another skeleton are skipped, draw those with the mesh overload).
-9. **Fit and bounds.** `Model::bounds` is the rest pose's; a character far from it needs its own bound for a fitted camera.
+9. **Fit and bounds.** `Model3D::bounds` is the rest pose's; a character far from it needs its own bound for a fitted camera.
 10. **Where this slots in part 2.** `AnimationPlayer3D` is a plain object; an ECS `Animator3D` component owns one (or a clip index and time) and a
     system calls `update`, `joint_matrices(span)` into the frame's scratch, and `draw_skinned`. `kin/anim` state machines choose the clips
     and weights: a parameter-driven 1D blend by speed can be a `crossfade_to` or two layers with weights.
@@ -2761,7 +2761,7 @@ and the checks below were re-run after it.)
 | 3 | Pick | `mesh_skinned.vert` as the pick vertex stage (it writes the `vWorld` and `vId` that `pick.frag` / `pick_mask.frag` read) | No new shader file was needed. |
 | 4 | Shadow cache | `shadow_unchanged` / `shadow_drawn` | A copy's matrices are in the sample (cheap key) and in the snapshot compared byte for byte; the mesh's serial (its skeleton) was already in the key. |
 | 5 | Shared joint range | `Scene3D::draw_skinned(model, ..., id)` | One range for all parts; BrainStem: 18 matrices uploaded (was 59 x 18 = 1,062). |
-| 6 | ECS | `kin/ecs/render3d.hpp`, `src/ecs/render3d.cpp` | `SkinnedMeshRenderer` (its own component, not an extension of `MeshRenderer`: mesh renderers merge into one instanced draw of one mesh, a character is several parts with its own pose and skeleton), `Animator3D`, `WorldRenderState3D::animate(dt)`. The state machine is `kin/anim`'s `AnimationStateMachine` and `AnimationParams`, run with its own `evaluate()`: no change to `kin/anim`, no adapter beyond the component. 1D blends and crossfades: `AnimationPlayer3D::play_blend`, `crossfade_to_blend`, `set_blend_parameter` (a blend's time is a phase 0 to 1 advanced by the blended duration; root motion of a blend is the mix of its clips'). |
+| 6 | ECS | `kin/ecs/render3d.hpp`, `src/ecs/render3d.cpp` | `SkinnedMeshRenderer3D` (its own component, not an extension of `MeshRenderer3D`: mesh renderers merge into one instanced draw of one mesh, a character is several parts with its own pose and skeleton), `Animator3D`, `WorldRenderState3D::animate(dt)`. The state machine is `kin/anim`'s `AnimationStateMachine` and `AnimationParams`, run with its own `evaluate()`: no change to `kin/anim`, no adapter beyond the component. 1D blends and crossfades: `AnimationPlayer3D::play_blend`, `crossfade_to_blend`, `set_blend_parameter` (a blend's time is a phase 0 to 1 advanced by the blended duration; root motion of a blend is the mix of its clips'). |
 | 7 | Harness and viewer | `kin_reference`: `models[].animation.blend {parameter, parameter_to, parameter_seconds, points[{clip, position}]}` and `animation.ecs`; scenes `skinned_blend` and `skinned_ecs`; Sponza Walk "Character (skinned)" section (`examples/sponza_walk/character.hpp`, a procedural 3-joint character with clips Sway, Bend, Wave and the blend), presets `character`, `character-all`, a skinned line in the stats | The panel's click path is untested (no display). |
 
 **Results.**
@@ -2833,12 +2833,12 @@ with five characters, AO, contact shadows, TAA and four cascades (the stats line
 3. A copy matched by order when the count of its mesh changes is a guess (the nearest within twice its size, else new): give moving characters an
    id. The ECS gives the entity's id.
 4. A custom material shader on a skinned copy works (the stock skinned vertex shader) but with a custom opaque shader TAA keeps the pre-pass, as for plain meshes.
-5. No prefab or component-schema support: Transform3D and MeshRenderer have none either (the 3D components are not registered anywhere), so "prefab round trip" is not applicable.
+5. No prefab or component-schema support: Transform3D and MeshRenderer3D have none either (the 3D components are not registered anywhere), so "prefab round trip" is not applicable.
 6. `kin/anim` events and registered-property tracks are not bridged to skeletal clips; `Animator3D` copies in a Sponza Walk row play in step (no time offset field).
 7. Non-uniform scale in a joint skins normals approximately; D3D12 and Metal untested; a skin of more than 4 influences is cut to 4.
 8. Sponza Walk's panel clicks were not exercised (no display); the section was run headless through `--preset`.
 
-**What P1b and P1c still need.** P1b (IK) works on a `Pose` after the player: `Animator3D` exposes `player.pose()` but has no hook between the clips and the
+**What P1b and P1c still need.** P1b (IK) works on a `Pose3D` after the player: `Animator3D` exposes `player.pose()` but has no hook between the clips and the
 matrices; it needs one (a callback or a list of IK targets by joint name, applied before `compute_joint_matrices`). P1c wants a time offset and a start
 phase on the animator, event keys on skeletal clips (footsteps) and the real model path in Sponza Walk (the viewer's character is procedural).
 
@@ -2851,12 +2851,12 @@ or renderer change. Opt-in: an `Animator3D` with no constraints is exactly what 
 
 | # | Piece | Where | Notes |
 |---|---|---|---|
-| 1a | `solve_two_bone` | `kin/render3d/ik.hpp`, `src/render3d/ik.cpp` | pole by direction or point, weight, soft stretch, minimum bend, end-orientation target, intermediate (twist) joints carried; solved in the root joint's parent space |
-| 1b | `solve_look_at` | same | chain with shared turn, per-joint yaw / pitch limits (ellipse), release toward forward past a limit, smoothing in a `LookAtState` (the function takes `dt`; the Animator keeps the state, in world space) |
+| 1a | `solve_two_bone` | `kin/render3d/ik3d.hpp`, `src/render3d/ik.cpp` | pole by direction or point, weight, soft stretch, minimum bend, end-orientation target, intermediate (twist) joints carried; solved in the root joint's parent space |
+| 1b | `solve_look_at` | same | chain with shared turn, per-joint yaw / pitch limits (ellipse), release toward forward past a limit, smoothing in a `LookAtState3D` (the function takes `dt`; the Animator keeps the state, in world space) |
 | 1c | `solve_chain_fabrik` | same | done: tolerance, iteration cap, fixed or free root; bone lengths kept |
-| 1d | `plan_foot_placement`, `apply_foot_placement` | same | `GroundQuery` = `std::function<optional<GroundHit>(Vec3f, Vec3f)>`; targets, orientation, pelvis offset, `FootPlacementState` (pelvis eased both ways, a foot eased down only) |
+| 1d | `plan_foot_placement`, `apply_foot_placement` | same | `GroundQuery3D` = `std::function<optional<GroundHit3D>(Vec3f, Vec3f)>`; targets, orientation, pelvis offset, `FootPlacementState3D` (pelvis eased both ways, a foot eased down only) |
 | 1 | partial matrix updates | `update_world_below`, `world_to_joint_matrices` | only the joints below a changed one are recomputed; the shader's matrices are one multiplication a joint from the world matrices |
-| 2 | ECS hook | `kin/ecs/render3d.hpp`, `src/ecs/render3d.cpp` | `IKConstraint`, `Animator3D::{ik_constraints, add_ik, ik(name), find_ik, ik_pose, ik_world}`, `WorldRenderState3D::apply_ik()`; targets: world point, entity (+ local offset), none; pole: world point or model direction; weight goal + fade (linear, smoothstep-shaped) |
+| 2 | ECS hook | `kin/ecs/render3d.hpp`, `src/ecs/render3d.cpp` | `IKConstraint3D`, `Animator3D::{ik_constraints, add_ik, ik(name), find_ik, ik_pose, ik_world}`, `WorldRenderState3D::apply_ik()`; targets: world point, entity (+ local offset), none; pole: world point or model direction; weight goal + fade (linear, smoothstep-shaped) |
 | 3 | bounds | none needed | the bound is made from the posed joint matrices, which include the IK: `test_gpu_ik_not_culled` |
 | 4 | harness, viewer | `tools/reference/kin_reference.cpp` (`animation.ik`), `make_scenes.py` (`skinned_biped.glb`, `ik_marker.glb`, `ik_step.glb`), scenes `skinned_ik`, `skinned_ik_look`; Sponza Walk "Character IK" section, presets `ik`, `ik-reach`, `ik-all` | procedural person (CesiumMan's joint names are not limbs a rig can name); the viewer's person is `make_person` in `character.hpp` |
 | 5 | tests | `tests/skeleton_tests.cpp` (16 CPU tests and a bench, `kin-skeleton`), `tests/render3d_tests.cpp` (5 GPU tests, `kin_render3d_tests test_gpu_ik`), `tests/skin_fixtures.hpp` (`make_biped`, `make_biped_body`, `make_joint_cube`) | see below |
@@ -3005,12 +3005,12 @@ picture and test of before is byte for byte (the identity check below).
 
 | # | Limit | What was done | Where |
 |---|---|---|---|
-| 1 | no joint limits | `TwoBoneOptions::max_bend_degrees` (the mid joint folds to that and no further), `hinge` / `hinge_axis` (the mid joint's own axis: a pure turn about it, the positive way, even from a straight pose or a hyperextended clip) and `max_twist_degrees` (the root's swing-twist twist about the bone, from what the clips did). A pole that asks a knee backward carries the hinge round by twisting the hip; the limit holds the twist, and eases to nothing at a half turn so the knee comes back to the clips' side without a flip. The twist limit turns the elbow's side about the target's axis (the end stays on target) by a bracketed bisection on the twist as a function of the side. | `ik.hpp`, `ik.cpp` `two_bone_pass` |
-| 2 | FABRIK not an ECS kind | `IKKind::Fabrik` (joints root to tip, target, pole, weight and fade like the others, `IKConstraint::fabrik`), and a pole in `FabrikOptions`: the solved chain is turned about the root-to-tip line (no end, no length moves) so its bulge faces the pole, fading out for a straight chain or a pole on the line. | `render3d.hpp`/`.cpp` (ECS), `ik.cpp` |
-| 3 | foot placement | the ground query once per leg per frame: it was once per leg per solve, and a second solve in a frame (`apply_ik()` then `collect()`, two views) asked again; the ECS now keeps the answers for the frame (an epoch advanced by `animate()` and `propagate_transforms()`, matched by segment). Foot locking (`lock_feet`: planted when the animated sole is within `lock_height`, held in the WORLD while the body moves, released at `lock_release_height` / `lock_release_distance`, eased back over `lock_replant_seconds`). Toes (`FootLeg::toe`: a second query under the animated toe, the toe turns to its normal, clamped to the foot's slope and `toe_max_tilt_degrees`, not in the air). | `ik.cpp` `plan_foot_placement`, `apply_foot_placement`; ECS `solve_ik` |
+| 1 | no joint limits | `TwoBoneOptions3D::max_bend_degrees` (the mid joint folds to that and no further), `hinge` / `hinge_axis` (the mid joint's own axis: a pure turn about it, the positive way, even from a straight pose or a hyperextended clip) and `max_twist_degrees` (the root's swing-twist twist about the bone, from what the clips did). A pole that asks a knee backward carries the hinge round by twisting the hip; the limit holds the twist, and eases to nothing at a half turn so the knee comes back to the clips' side without a flip. The twist limit turns the elbow's side about the target's axis (the end stays on target) by a bracketed bisection on the twist as a function of the side. | `ik.hpp`, `ik.cpp` `two_bone_pass` |
+| 2 | FABRIK not an ECS kind | `IKKind3D::Fabrik` (joints root to tip, target, pole, weight and fade like the others, `IKConstraint3D::fabrik`), and a pole in `FabrikOptions3D`: the solved chain is turned about the root-to-tip line (no end, no length moves) so its bulge faces the pole, fading out for a straight chain or a pole on the line. | `render3d.hpp`/`.cpp` (ECS), `ik.cpp` |
+| 3 | foot placement | the ground query once per leg per frame: it was once per leg per solve, and a second solve in a frame (`apply_ik()` then `collect()`, two views) asked again; the ECS now keeps the answers for the frame (an epoch advanced by `animate()` and `propagate_transforms()`, matched by segment). Foot locking (`lock_feet`: planted when the animated sole is within `lock_height`, held in the WORLD while the body moves, released at `lock_release_height` / `lock_release_distance`, eased back over `lock_replant_seconds`). Toes (`FootLeg3D::toe`: a second query under the animated toe, the toe turns to its normal, clamped to the foot's slope and `toe_max_tilt_degrees`, not in the air). | `ik.cpp` `plan_foot_placement`, `apply_foot_placement`; ECS `solve_ik` |
 | 4 | non-uniform scale on the root joint or between mid and end | exact now (hand within 4e-7 of 360 reachable targets, three scalings). A turn of the mid joint changes the forearm's drawn length when its parent's matrix is a non-uniform scale, so the rigid triangle is wrong however it is rotated. The mid joint is first turned about its hinge (the pose's plane, or the hinge) until the end is at the distance the target asks for (a scalar equation in the turn: 72 samples, then bisection), the rigid solve then sees the true lengths, and up to 8 passes from its own result (same side, same end orientation) finish to rounding and to the end orientation. A weight below 1 blends the solve with the pose. | `ik.cpp` `solve_two_bone` |
 | 5 | straight chain, no pole, goes to -Y | the rest pose's bend (the rest chain's bend direction, turned by the root's change from rest) when it has one (more than 1 degree), else the hinge's side, else -Y of the root's parent as before. Rigs with a straight rest (the biped fixtures) are unchanged. | `ik.cpp` |
-| 6 | the two singular cases | investigated: see "Singularities" below. A stateful treatment exists for the pole case (`bend_swing_degrees_per_second` with a `TwoBoneState`), implemented; the fold's centre is topologically inherent. | `ik.cpp`, ECS `bend_state` |
+| 6 | the two singular cases | investigated: see "Singularities" below. A stateful treatment exists for the pole case (`bend_swing_degrees_per_second` with a `TwoBoneState3D`), implemented; the fold's centre is topologically inherent. | `ik.cpp`, ECS `bend_state` |
 | 7 | not tested | CesiumMan: arms and legs reach targets made by turning their joints (400 targets, 4 limbs, hand within 3e-7, bones 8e-7 relative); Sponza Walk's panel logic factored into `examples/sponza_walk/ik_rig.hpp` (`person_rig`, `person_constraints`, `drive_person`, `person_ik(Settings)`) and driven by a unit test. | `tests/skeleton_tests.cpp` |
 
 **Singularities (item 6).** *A pole exactly behind the target* (the side across the target's axis is undefined where the pole is on it): for
@@ -3019,7 +3019,7 @@ nowhere-zero tangent field on a sphere does not exist (the hairy-ball theorem), 
 it the side turns over a few degrees of the target's travel; moving the zero (as the pull toward the pose's own bend does) cannot remove it.
 Stateless it stays: 8.3 degrees a step in a 120-frame sweep through the axis (0.005 of the reach a frame), 24.4 degrees in a 40-frame one.
 With memory it is a different problem, and it has a solution: the side may swing toward the one wanted at a bounded speed, whatever the
-target does (the end stays on the target the whole time: only the elbow lags). `TwoBoneState` + `bend_swing_degrees_per_second`: the same
+target does (the end stays on the target the whole time: only the elbow lags). `TwoBoneState3D` + `bend_swing_degrees_per_second`: the same
 sweeps give 6.0 and 6.1 degrees a step at 360 degrees a second (6 a frame), in the ECS 6.1 against 45.0 for the stateless 40-frame sweep.
 It is off by default (a state is something a caller must keep), a weight of 0 forgets it, and a second solve in a frame (dt 0) holds the side.
 *A target through the exact centre of a folded chain of equal bones*: every joint's place is continuous through it, but the upper bone's twist
@@ -3083,7 +3083,7 @@ the scene's `tail` camera, not the viewer's).
 **What remains.**
 1. *The fold's centre with equal bones*: a half turn of the upper bone in one step for a target through it exactly (inherent, above); a
    hand targeted at its own shoulder is a bug in the game.
-2. *A pole exactly behind the target stays a fast turn without a state*; with a `TwoBoneState` it is bounded, but the elbow then lags
+2. *A pole exactly behind the target stays a fast turn without a state*; with a `TwoBoneState3D` it is bounded, but the elbow then lags
    the pole by up to a few frames (it is the elbow's side only; the hand is always on target).
 3. *The twist limit needs a plane*: a hinge, or a pose that is bent; with a nearly straight pose and no hinge the limit fades with how bent
    it is, so a straight leg with no hinge can still be turned fully by a pole.
@@ -3102,7 +3102,7 @@ the scene's `tail` camera, not the viewer's).
    kin/anim events driving weights. P2's physics raycast is the one ground query still to plug in.
 
 **What P2 needs from this.**
-- *The ground query* is a physics raycast: `GroundQuery` is `(Vec3f from, Vec3f to) -> optional<GroundHit{position, normal}>` in world
+- *The ground query* is a physics raycast: `GroundQuery3D` is `(Vec3f from, Vec3f to) -> optional<GroundHit3D{position, normal}>` in world
   space, from the foot's place down by `ray_up + ray_down` metres; P2's `raycast(from, to)` returns that. One call per leg per frame (one more
   for each toe joint), however many times the constraints are solved in the frame; give it a layer mask for the level (not the character's own body).
 - *Grab*: a hold is an entity (or a point) with `WorldTransform3D`: `ik("right_hand").set_target(hold, grip_offset).set_target_rotation(
@@ -3327,10 +3327,10 @@ ropes are the next steps (P2c onward); the constraints they need are here.
     dynamic child; its Transform3D is rewritten as the place from the parent as it is now); a kinematic body follows the entity with
     parents; a dynamic entity moved by game code is taken there. flecs reuses entity ids, so "ascending id" means numeric order of the
     ids as flecs gives them (still a function of the order the world was built in, which is what matters).
-12. *Colliders from meshes.* The GPU `Mesh` keeps no CPU triangles (checked: `Mesh` holds a backend, counts and bounds; `Model` keeps
-    parts of `Mesh`), so `collider_from_mesh(entity)` is a box about the bounds; hulls and triangle meshes are made from the
-    `MeshData` the game still holds (`collider_hull_from_mesh_data`, `collider_triangles_from_mesh_data`) or a prebuilt `Shape3D`.
-    Not done: retaining triangles in `Mesh` (a memory cost on every mesh for a feature few use).
+12. *Colliders from meshes.* The GPU `Mesh3D` keeps no CPU triangles (checked: `Mesh3D` holds a backend, counts and bounds; `Model3D` keeps
+    parts of `Mesh3D`), so `collider_from_mesh(entity)` is a box about the bounds; hulls and triangle meshes are made from the
+    `MeshData3D` the game still holds (`collider_hull_from_mesh_data`, `collider_triangles_from_mesh_data`) or a prebuilt `Shape3D`.
+    Not done: retaining triangles in `Mesh3D` (a memory cost on every mesh for a feature few use).
 13. *Interpolation is an opt-in call* (`interpolate(alpha)`), not a mode: `step()` always leaves Transform3D at the last state.
 14. *Scale is not a shape operation*: shapes are built at their size (the ECS builds them at the entity's world scale);
     `set_shape` swaps a body's shape. No scaled or mutable shape is exposed.
@@ -3383,7 +3383,7 @@ Build: Jolt's debug draw was not enabled; the new sources compile in a few secon
   on 4 workers; interpolation (alpha 0, 0.5, 1; an interpolated pose is not read as a move); debug lines (counts per colour:
   12 / 12 / 48 ...; sleeping boxes in their colour; a sphere's lines all 0.5 from its centre; a ray and its hit; contacts and
   normals; constraints and a broken one in its colour; the line cap; mesh and height field triangle caps); foot placement over a
-  physics floor and a step (below); colliders from mesh bounds and from `MeshData` (hull and triangles), a dynamic mesh refused.
+  physics floor and a step (below); colliders from mesh bounds and from `MeshData3D` (hull and triangles), a dynamic mesh refused.
 - `test_gpu_physics_debug_lines` (`kin-render3d`, GPU): with the switch off the picture is the one without the physics state, byte
   for byte; on, 106 px of the awake colour and 426 of the static one, 0 without; after the box sleeps, 96 px of the sleeping
   colour and none of the awake one; a pixel of its colour at the projection of the box's top front edge; the ray and its hit show.
@@ -3896,7 +3896,7 @@ module; nothing in them knows about a game.
 | Ragdoll | `kin/physics3d/ragdoll3d.hpp`, `engine/src/physics3d/ragdoll3d.cpp` (`RagdollSet`, `auto_ragdoll_desc`), `World3D::create_ragdoll` ... | passive; states Animated, Ragdoll, Blend, GetUp; per-bone weights, partial subtree; events; in hash and saved state |
 | Rope | `kin/physics3d/rope3d.hpp`, `engine/src/physics3d/rope3d.cpp` (`RopeSet`, the grip provider) | capsules and ball joints; length, tension, sampling, break; `GripKind3D::Rope` |
 | World additions | `world3d.hpp` | `Body3DDesc::group`, `group_self_collision`, `ignore_static`, `ignore_all`, `velocity_steps`, `position_steps`; `set_motion`, `set_added_mass`, `set_group`, `set_no_collisions`, `set_constraint_anchor`, `constraint_impulse`, `Constraint3DDesc::velocity_steps`, `set_character_enabled` |
-| Pose side | `kin/ecs/render3d.hpp`, `engine/src/ecs/render3d.cpp` | `PoseOverride3D` on `Animator3D`; `WorldRenderState3D::solve_pose` applies it after the clips and IK and before the joint matrices |
+| Pose3D side | `kin/ecs/render3d.hpp`, `engine/src/ecs/render3d.cpp` | `PoseOverride3D` on `Animator3D`; `WorldRenderState3D::solve_pose` applies it after the clips and IK and before the joint matrices |
 | ECS | `kin/ecs/physics3d.hpp`, `engine/src/ecs/physics3d.cpp` | `Ragdoll3D`, `Rope3D`, events, `hand_over_to_ragdoll`, `recover_from_ragdoll`, `collect_ropes`, interpolation |
 | Harness, viewer | `kin_reference` scenes `physics_ragdoll`, `physics_rope`; Sponza Walk "Ragdoll and rope" section, `--preset ragdoll`, `--preset rope` | |
 | Tests, bench | `kin-physics3d-ragdoll`, `kin-physics3d-rope` (CPU), 3 GPU tests in `kin-render3d`; `kin_physics3d_bench ragdolls`, `ropes` | |
@@ -4163,7 +4163,7 @@ camera-following volumes, one instanced draw a batch, soft particles, fogged by 
   sun and moon direction/elevation/azimuth, sun colour, moonlight, ambient and ground ambient, fog colour and density suggestion,
   daylight), `apply()` (into `Lights3D`, `Sky3D`, `Fog3D`), `sun_times()`, `advance()`. ECS: a `TimeOfDay3D` component on an entity,
   `WorldRenderState3D::advance_time_of_day(dt)` and `apply_time_of_day(scene)`.
-- `Lights3D::sky_lights_scene`; `Render3DStats::{sky_drawn, fog_applied, sky_env_regenerated, sky_env_generations, sky_env_cpu_ms}`.
+- `Lights3D::sky_lights_scene`; `RenderStats3D::{sky_drawn, fog_applied, sky_env_regenerated, sky_env_generations, sky_env_cpu_ms}`.
 - Shaders: `kin_sky.inc.glsl` (the atmosphere), `kin_fog.inc.glsl` (fog, one include a particle pass will use), `kin_sky_pass.inc.glsl`
   with `sky.frag`, `sky_velocity.frag`, `sky_velocity_only.frag`, `sky_env.frag`; `mesh_fog.frag` and `mesh_velocity_fog.frag`
   (`#define KIN_FOG` before the one shared mesh fragment include); `view_output_dither.frag`. `kin_material.inc.glsl` gained
@@ -4345,16 +4345,16 @@ a sky texture or a hard-edged feature (a future cloud layer) would crawl against
 (2026-10-12, `exp/3d-rendering`, working tree on `bb03d7e`; not committed.)
 
 **What exists.**
-- `kin/render3d/scene3d.hpp`: `SpotLight` (position, direction, colour, radius, size, `inner_angle`, `outer_angle`, `shadow`, `id`), `LightShadow3D`
-  (`enabled`, `resolution`, `bias`, `normal_offset`, `near_plane`, `distance`, `softness`; also a member of `PointLight`, with an `id`),
+- `kin/render3d/scene3d.hpp`: `SpotLightSource3D` (position, direction, colour, radius, size, `inner_angle`, `outer_angle`, `shadow`, `id`), `LightShadow3D`
+  (`enabled`, `resolution`, `bias`, `normal_offset`, `near_plane`, `distance`, `softness`; also a member of `PointLightSource3D`, with an `id`),
   `DirectionalShadow3D` (the fill light's: `enabled`, `strength`, `cascades`, `resolution`, `distance`), `Lights3D::{spots, max_shadowed_spots (4),
   max_shadowed_points (2), local_shadow_resolution (1024), fill_shadow, sun_shadow_strength (1)}`, `Scene3D::add_spot_light`.
   `TimeOfDay3D::shadows` (opt-in; `apply()` then fades the sun's and the moon's strength by height). ECS `PointLight3D`, `SpotLight3D`
   (`collect()` adds them: the entity's place, a spot down its -Z, the entity's id as the light's name).
-- `kin/render3d/local_lights.hpp` / `local_lights.cpp`: the CPU's side, testable without a GPU: `spot_cone`, `spot_cone_factor`,
+- `kin/render3d/local_lights3d.hpp` / `local_lights.cpp`: the CPU's side, testable without a GPU: `spot_cone`, `spot_cone_factor`,
   `spot_attenuation`, `point_attenuation`, `spot_bounding_sphere`, `spot_shadow_view`, `cube_face_view`, `cube_face_of`, `shadow_importance`,
-  `assign_shadow_slots` (`ShadowSlots`, `ShadowRequest`, `shadow_hysteresis` 1.5).
-- `Renderer3DCapabilities::local_shadows`; `Render3DStats::{spots, spot_slot[], point_slot[], local_shadow_maps, local_shadow_drawn,
+  `assign_shadow_slots` (`ShadowSlots3D`, `ShadowRequest3D`, `shadow_hysteresis` 1.5).
+- `RendererCapabilities3D::local_shadows`; `RenderStats3D::{spots, spot_slot[], point_slot[], local_shadow_maps, local_shadow_drawn,
   local_shadow_cached, local_shadow_draws, local_shadow_casters, local_shadow_triangles, moon_cascades, local_shadow_bytes, lights_variant}`.
 - Shaders: four new .spv, the stock fragment shader with `#define KIN_LIGHTS`: `mesh_light.frag`, `mesh_light_fog.frag`,
   `mesh_velocity_light.frag`, `mesh_velocity_light_fog.frag` (with and without fog, with and without the TAA velocity: the same matrix as
@@ -4594,7 +4594,7 @@ sharpened the tests (below the table).
 
 The three first-run survivors (23, 26, 27): the distance fade is only seen on a ramp between the shadow and the light (the first test counted dark
 pixels); 26 showed that a test that returns when no map was drawn passes a renderer that draws none (the tests now ask
-`Renderer3DCapabilities::local_shadows` and assert maps); 27 that a cut count can agree by chance at one error. No equivalent mutant was
+`RendererCapabilities3D::local_shadows` and assert maps); 27 that a cut count can agree by chance at one error. No equivalent mutant was
 left standing except 07 against the GPU position test alone, as said; one more that is equivalent by construction and was not run: removing the
 sphere `bounded` pre-check of a view (the frustum's far plane makes it redundant).
 
@@ -4614,7 +4614,7 @@ sphere `bounded` pre-check of a view (the frustum's far plane makes it redundant
 - `Scene3D::draw_particles(look, sprites)` and `(system)`, `Scene3D::weather`, `particle_draws()`, `particle_sprites()`; ECS `ParticleEmitter3D`
   (a system on an entity, stepped by `WorldRenderState3D::simulate_particles(dt, wind)`, drawn by `collect()`), `Weather3D` as a component
   (`advance_weather`, `apply_weather(scene, base_fog)`).
-- `Renderer3DCapabilities::{particles, soft_particles}`, `Render3DStats::{particles_submitted, particles_drawn, particle_batches, particle_soft,
+- `RendererCapabilities3D::{particles, soft_particles}`, `RenderStats3D::{particles_submitted, particles_drawn, particle_batches, particle_soft,
   weather_particles, particles_dropped, particle_cpu_ms}`.
 - Shaders: three new .spv, `particle.vert` (the quad is built in the vertex shader from a storage buffer of sprites; fog is evaluated at each
   corner), `particle.frag` and `particle_soft.frag` (`#define KIN_SOFT`, both over `kin_particle_fragment.inc.glsl`). No old shader or include was
@@ -5473,7 +5473,7 @@ Five sequential runs at 1280×720, seed 1, fixed trajectory and 900 measured fra
 laptop GPU / Vulkan. Distance 16 used a 128 MiB cap; distances 24/32 used 256 MiB. Counts and triangles are at the final frame;
 GPU and CPU columns are p95 over measured frames. Process RSS excludes GPU allocations.
 
-| Distance | Vertical FOV | Resident columns / limit | Mesh MiB | Drawn triangles | GPU p95 ms | CPU submission p95 ms | Peak RSS MiB |
+| Distance | Vertical FOV | Resident columns / limit | Mesh3D MiB | Drawn triangles | GPU p95 ms | CPU submission p95 ms | Peak RSS MiB |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | 16 | 75 | 1,071 / 1,089 | 76.1 | 358,520 | 0.637 | 0.367 | 230 |
 | 16 | 90 | 1,071 / 1,089 | 76.1 | 402,612 | 0.632 | 0.441 | 230 |
@@ -5642,7 +5642,7 @@ square is budget-limited; this does not test all 4,225 requested columns at full
 
 Three additional 150-degree runs at distance 24 (2,461 warm-up + 900 measured frames) used 2,353 columns without reaching the cap:
 
-| Distance at FOV 150 | Mean drawn triangles | Mesh MiB | Shared page MiB | CPU submission p95 ms | GPU frame timer p95 ms |
+| Distance at FOV 150 | Mean drawn triangles | Mesh3D MiB | Shared page MiB | CPU submission p95 ms | GPU frame timer p95 ms |
 |---|---:|---:|---:|---:|---:|
 | 24 | 1,083,199 | 170.6 | 176.3 | 1.079 | 0.913 |
 | 32 | 1,494,771 | 256.0 | 259.0 | 1.303 | 1.038 |
@@ -5999,7 +5999,7 @@ stop. Debugger timings are discarded. The three instance/list uploads total **17
 | Local-shadow view indices | 172,484 × 4 | 689,936 |
 
 These are CPU upload payloads at one pose, not measured PCIe traffic or all GPU bandwidth. Geometry/textures are already
-resident. Every plant transform is static, yet the immediate scene API copies them into `MeshInstance` records, camera/sun
+resident. Every plant transform is static, yet the immediate scene API copies them into `MeshInstance3D` records, camera/sun
 culling computes world spheres and GPU records, and local shadows recompute those spheres and build another GPU record union.
 The local union zeroes full 128-byte records although the shadow shaders only need model/alpha. Existing shadow-map caching
 checks after caster preparation, and moving benchmark lights invalidate maps, so simply enabling that cache cannot remove
@@ -6126,7 +6126,7 @@ retained static GPU records remain the next architectural work; these changes do
 
 ### Grove — spatial cells through draw merging (2026-10-15)
 
-Added Kin's optional `draw_instanced_group(mesh, copies, world_bounds, material)` API, with transform and `MeshInstance`
+Added Kin's optional `draw_instanced_group(mesh, copies, world_bounds, material)` API, with transform and `MeshInstance3D`
 overloads, plus `instance_bounds()` to compute a conservative box around the renderer's transformed culling spheres.
 Applications cache bounds until the mesh/transforms change. Invalid/nonfinite boxes use per-copy culling. Plain instance
 groups stay separate as CPU metadata while equal mesh/material submissions retain their merged GPU draw and instance order.
@@ -7178,7 +7178,7 @@ mesh-command layout across renders of an unchanged `Scene3D`, reusing its existi
 Previously, 3,505 Grove references (mostly one-copy terrain draws) were reconstructed each frame, including their large
 fixed-size counter arrays and worker partitions, even though the sample already retained its scene commands.
 
-Scene commands now have an identity and revision. Mesh submissions and `clear()` increment a local revision; an atomic
+Scene commands now have an identity and revision. Mesh3D submissions and `clear()` increment a local revision; an atomic
 identity is assigned only on scene creation/moves, not per submitted draw. A move also invalidates its source. The renderer
 checks scene identity/revision, command and instance storage, and exact instance-batch revisions before accessing old raw
 draw pointers. It keeps no owning scene handles. Placement/address reuse, moves, append/merge operations, clear/rebuild
@@ -8203,8 +8203,8 @@ same images and work counters. Medians of the two per-run p50 values:
 | Native path | Frame ms | Scene-build ms | Renderer submit wall ms |
 |---|---:|---:|---:|
 | Full command resubmission (`--rebuild-scene`) | 6.642 | .863 | 5.721 |
-| Pose updates, layout reuse disabled | 5.806 | .038 | 5.716 |
-| Pose updates and layout reuse | 5.311 | .036 | 5.221 |
+| Pose3D updates, layout reuse disabled | 5.806 | .038 | 5.716 |
+| Pose3D updates and layout reuse | 5.311 | .036 | 5.221 |
 
 Avoiding command resubmission saves about **.83 ms** in this section; layout reuse saves another **.50 ms** in
 renderer submission. Those controls isolate the stages without changing the executable, geometry, animation or lighting.
@@ -8656,12 +8656,12 @@ original workload manifest. The game remains a small shared-texture/mesh workloa
 
 Following the decision to pause throughput work, add two reusable engine pieces and migrate Summit onto them:
 
-- `Assets3D` returns the existing `AssetHandle<Model>` type and shares models/dependent textures within one renderer-scoped
+- `Assets3D` returns the existing `AssetHandle<Model3D>` type and shares models/dependent textures within one renderer-scoped
   library. Weak references retain no resident models or textures; bounded LRU lookup metadata defaults to 128 models and
   512 texture entries. Scene handles, batches and draws own the actual resources. Explicit `trim()`/`clear()` support lookup
-  cleanup/invalidation while live consumers remain valid. Model identity includes mesh-build options; texture identity
+  cleanup/invalidation while live consumers remain valid. Model3D identity includes mesh-build options; texture identity
   includes resolved path or owning embedded-image index, sRGB/data interpretation and filtering. Failed models are retried.
-- `Model::placement` provides authored/center/bottom-center pivots, fitted world size, rotation and additional scale.
+- `Model3D::placement` provides authored/center/bottom-center pivots, fitted world size, rotation and additional scale.
   Static `Scene3D::draw(model, matrix, tint, id)` now propagates a whole-object ID to all parts. `ModelBatch3D` expands static
   model parts and optional material replacement into shared instance batches, grouping by model-transform origins in 16 m
   cells by default. It exposes construction counts and preserves part transforms, copy IDs/tints and conservative bounds.
@@ -9382,7 +9382,7 @@ rate-limited recovery, configuration failure, checked target/parent pose, yaw-wr
 interpolation, teleport/reset/real-scale snaps, pool lease reuse, reload and worker
 endpoint rejection. A moving/rotating target regression prevents basis-length
 rounding from spuriously resetting history; scale comparison uses a small tolerance.
-Mesh/static/skinned-root and light placement overrides are checked without moving
+Mesh3D/static/skinned-root and light placement overrides are checked without moving
 simulation transforms or children. Repeated render samples leave native hashes and
 ECS poses unchanged; independent arm states and extra Camp renders do not alter
 script/keyboard/pad routes. Warmed 1,000-frame raw-arm and scene-rig loops pass C++
@@ -9421,7 +9421,7 @@ bounded joint name and a finite affine offset. Reuse skeleton/animation/IK maths
 include path and resolution contract. No inspector schema, secondary world,
 owning asset cache or new animation graph is introduced.
 
-Preparation resolves at most 64 enabled roots each collection. Model identity is
+Preparation resolves at most 64 enabled roots each collection. Model3D identity is
 weakly cached; joint indices are resolved once per immutable model binding. Each
 binding is 320 inline bytes, with no private skeleton/pose vectors. A fixed 64-ID
 scratch array in the renderer tracks target IK poses prepared during this collect;
@@ -9546,12 +9546,12 @@ markers immediately. Playback tokens are process-local and never recycled by new
 requests; retain the actor's checked scene handle separately.
 
 The dedicated action layer runs after ordinary pose layers and before IK. Reuse
-`PoseMask`, its new in-place `set_subtree`, existing masked/additive blending,
+`PoseMask3D`, its new in-place `set_subtree`, existing masked/additive blending,
 shared clip markers and `AnimationEventDispatch`. Marker `source` selects base,
 action or both; default remains base. Base and action events share the same
 16-entry cap in step-time order. Each occurrence carries its action token; the
 ECS dispatcher rechecks ownership before every callback, including when an earlier
-callback cancels or restarts the action. Model removal/rebinding stops even an
+callback cancels or restarts the action. Model3D removal/rebinding stops even an
 already cancelling fade before a borrowed clip could expire. Final markers can
 be delivered after a large step completes playback; explicit cancellation still
 revokes an undelivered completed token. Reloads discard runtime playback.

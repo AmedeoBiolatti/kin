@@ -14,8 +14,9 @@
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
 //                 [--bake-cache DIR]
 //
-// --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR (Renderer3D::set_bake_cache),
-// and reads them back on the next run with the same DIR instead of building them: the pictures are the same.
+// --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR
+// (Renderer3D::set_bake_cache), and reads them back on the next run with the same DIR instead of building them: the
+// pictures are the same.
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -39,60 +40,51 @@
 // time, which is 0 at the picture and negative before it (so every run's picture shows
 // the same moment, and --repeat is 1 for it: the frames are the animation); a camera's
 // `pan` is units a frame it has moved, arriving at its `eye` at the picture. --supersample N
-// writes <camera>_ss.png too (--samples N sets the view's MSAA for a whole run): the same picture drawn at N x the size with 4x MSAA, with TAA
-// off, and averaged down in linear light (the still picture to judge static parts by).
-// Levels of detail (G3a): a scene file may have `lod: {enabled, error_pixels, bias, force_level}` and a
-// model's entry `lod_levels: N` (a scene's own `lod_levels` is for its procedural meshes): meshes are then
-// made with N levels. --lod-levels N builds N levels for every mesh of a run, and --lod turns the selection
-// on for every scene (with --lod-error, --lod-bias and --lod-force), each a label of its own. The levels'
-// build time and memory are printed with the load.
-// Clusters (G3b): a model's entry `clusters: true`, or --lod-clusters for every model of a run (not the
+// writes <camera>_ss.png too (--samples N sets the view's MSAA for a whole run): the same picture drawn at N x the size
+// with 4x MSAA, with TAA off, and averaged down in linear light (the still picture to judge static parts by). Levels of
+// detail (G3a): a scene file may have `lod: {enabled, error_pixels, bias, force_level}` and a model's entry
+// `lod_levels: N` (a scene's own `lod_levels` is for its procedural meshes): meshes are then made with N levels.
+// --lod-levels N builds N levels for every mesh of a run, and --lod turns the selection on for every scene (with
+// --lod-error, --lod-bias and --lod-force), each a label of its own. The levels' build time and memory are printed with
+// the load. Clusters (G3b): a model's entry `clusters: true`, or --lod-clusters for every model of a run (not the
 // procedural meshes), builds a hierarchy of clusters of about 128 triangles for each of its meshes (which then
 // take no levels); with the selection on, each copy is cut through its hierarchy by the error bound
 // (--lod-force N is then the depth of the cut, 0 the leaves). The hierarchy's build time, the process's peak
-// resident memory so far, and each camera's cut (copies, clusters tested and drawn, bytes uploaded, CPU time) are printed.
-// The cut on the GPU (G3c): the default where the device can (Scene3D::debug.gpu_culling); --lod-cpu cuts on the CPU, --lod-gpu on the GPU (a
-// device that cannot falls back, and the run says which cut it made). --readback reads the GPU cut's counts back for the picture's render
-// (clusters drawn, triangles, clusters dropped) -- never in the timed frames, which would wait for the GPU. --lod-room N sets
-// Lod3D::max_cluster_triangles.
-// Occlusion culling (G3d): a scene's `lod: {occlusion: true}` (or `{enabled, depth_margin, pixel_margin}`), or --lod-occlusion
-// for every scene (it turns the selection on too): clusters behind others are not drawn. With --readback each camera also prints
-// the clusters of the first pass, those occluded and those drawn for nothing. `procedural: "hidden"` builds a wall, a floor, a
-// few objects in front of it and 64 copies of a 100,000-triangle torus (`clusters: true`) behind it, the scene it is judged on.
-// Sky, fog and time of day (P3a): a scene file may have `sky: {enabled, mode: "procedural"|"image", turbidity, sun_intensity, intensity,
-// ground_color, sun_size, sun_disc, stars, star_brightness, moon: {enabled, direction, size, light, color}, night_color,
-// light_threshold, light_interval}`, `fog: {enabled, density, height_density, height_falloff, base_height, start, max_opacity, color,
-// color_from_sky, sun_scatter, sun_anisotropy}`, `lights.sky_lights_scene`, and `time_of_day: {hours, day_of_year, latitude, axial_tilt,
-// moon_phase}` (applied to the sun, the moon's fill light, the ambient light, the moon of the sky and the fog's colour); a camera may
-// say `hours` (its own time of day: tod_sweep). `procedural: "landscape"` builds a 6 km valley: a height-field, 2500 cone trees
-// and six red pillars at 50 m to 4 km. --sky, --no-sky, --fog D, --no-fog, --sky-light and --time H set or remove them for every scene.
-// Spot lights and local shadows (P3b): `lights.spots: [{position, direction | target, color, radius, size, inner, outer, shadow, attach}]`
-// (`shadow: true` or `{enabled, resolution, bias, normal_offset, near, distance, softness}`; `attach: {offset: [right, up, forward], yaw,
-// pitch}` carries the light with each camera: a flashlight), `lights.points[].shadow` and `.size`, `lights.max_shadowed_spots`,
-// `max_shadowed_points`, `local_shadow_resolution`, `fill_shadow: {enabled, strength, cascades, resolution, distance}`, `sun_shadow_strength`,
-// `time_of_day.shadows`. `procedural: "stage"` builds a floor, walls (or a closed `room`), and the scene's `stage: {pillars, poles, lamps,
-// trees, benches}` as [[x, z], ...] ([x, z, height] for lamps). --spots N / --spot-shadows M / --point-lights N / --point-shadows M put lights
-// in front of every scene's camera (the cost tables), --moon-shadow and --moon-cascades N make the fill light cast, --local-res N sets their maps' side.
-// Particles and weather (P3c): `weather: {rain, snow, dust, mist: intensity or {intensity, max, box, above, fall_speed, wind_influence, flutter,
-// size: [a, b], alpha, color, splash, splash_size, soft, soft_distance, lit}, wind: {direction, speed, gust, gust_period, gust_length,
-// turbulence, turbulence_length}, ground: y, time, seed, apply}` (`apply`: the weather dims the sun and ambient light and thickens the fog) and
-// `particles: [{name, seed, simulate, position, rotation, shape, extent, cone_angle, spread, rate, max, burst, lifetime, speed, size,
-// gravity, drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance, lit, softness, ring, sort, fog}}]` (each
-// system is stepped `simulate` seconds at load: the pictures show that moment). --rain I, --snow I, --wind S (m/s), --no-weather,
+// resident memory so far, and each camera's cut (copies, clusters tested and drawn, bytes uploaded, CPU time) are
+// printed. The cut on the GPU (G3c): the default where the device can (Scene3D::debug.gpu_culling); --lod-cpu cuts on
+// the CPU, --lod-gpu on the GPU (a device that cannot falls back, and the run says which cut it made). --readback reads
+// the GPU cut's counts back for the picture's render (clusters drawn, triangles, clusters dropped) -- never in the
+// timed frames, which would wait for the GPU. --lod-room N sets Lod3D::max_cluster_triangles. Occlusion culling (G3d):
+// a scene's `lod: {occlusion: true}` (or `{enabled, depth_margin, pixel_margin}`), or --lod-occlusion for every scene
+// (it turns the selection on too): clusters behind others are not drawn. With --readback each camera also prints the
+// clusters of the first pass, those occluded and those drawn for nothing. `procedural: "hidden"` builds a wall, a
+// floor, a few objects in front of it and 64 copies of a 100,000-triangle torus (`clusters: true`) behind it, the scene
+// it is judged on. Sky, fog and time of day (P3a): a scene file may have `sky: {enabled, mode: "procedural"|"image",
+// turbidity, sun_intensity, intensity, ground_color, sun_size, sun_disc, stars, star_brightness, moon: {enabled,
+// direction, size, light, color}, night_color, light_threshold, light_interval}`, `fog: {enabled, density,
+// height_density, height_falloff, base_height, start, max_opacity, color, color_from_sky, sun_scatter,
+// sun_anisotropy}`, `lights.sky_lights_scene`, and `time_of_day: {hours, day_of_year, latitude, axial_tilt,
+// moon_phase}` (applied to the sun, the moon's fill light, the ambient light, the moon of the sky and the fog's
+// colour); a camera may say `hours` (its own time of day: tod_sweep). `procedural: "landscape"` builds a 6 km valley: a
+// height-field, 2500 cone trees and six red pillars at 50 m to 4 km. --sky, --no-sky, --fog D, --no-fog, --sky-light
+// and --time H set or remove them for every scene. Spot lights and local shadows (P3b): `lights.spots: [{position,
+// direction | target, color, radius, size, inner, outer, shadow, attach}]`
+// (`shadow: true` or `{enabled, resolution, bias, normal_offset, near, distance, softness}`; `attach: {offset: [right,
+// up, forward], yaw, pitch}` carries the light with each camera: a flashlight), `lights.points[].shadow` and `.size`,
+// `lights.max_shadowed_spots`, `max_shadowed_points`, `local_shadow_resolution`, `fill_shadow: {enabled, strength,
+// cascades, resolution, distance}`, `sun_shadow_strength`, `time_of_day.shadows`. `procedural: "stage"` builds a floor,
+// walls (or a closed `room`), and the scene's `stage: {pillars, poles, lamps, trees, benches}` as [[x, z], ...] ([x, z,
+// height] for lamps). --spots N / --spot-shadows M / --point-lights N / --point-shadows M put lights in front of every
+// scene's camera (the cost tables), --moon-shadow and --moon-cascades N make the fill light cast, --local-res N sets
+// their maps' side. Particles and weather (P3c): `weather: {rain, snow, dust, mist: intensity or {intensity, max, box,
+// above, fall_speed, wind_influence, flutter, size: [a, b], alpha, color, splash, splash_size, soft, soft_distance,
+// lit}, wind: {direction, speed, gust, gust_period, gust_length, turbulence, turbulence_length}, ground: y, time, seed,
+// apply}` (`apply`: the weather dims the sun and ambient light and thickens the fog) and `particles: [{name, seed,
+// simulate, position, rotation, shape, extent, cone_angle, spread, rate, max, burst, lifetime, speed, size, gravity,
+// drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance, lit, softness, ring, sort,
+// fog}}]` (each system is stepped `simulate` seconds at load: the pictures show that moment). --rain I, --snow I,
+// --wind S (m/s), --no-weather,
 // --no-particles, --soft 0|1, --particles N (a system of N live particles in the middle of the scene: the cost tables).
-
-#include <kin/assets/bake_cache.hpp>
-#include <kin/assets/image.hpp>
-#include <kin/core/json_value.hpp>
-#include <kin/core/jobs.hpp>
-#include <kin/ecs/physics3d.hpp>
-#include <kin/ecs/render3d.hpp>
-#include <kin/ecs/world.hpp>
-#include <kin/platform/app.hpp>
-#include <kin/render3d/renderer3d.hpp>
-#include <kin/render3d/timeofday3d.hpp>
-#include <kin/render3d/taa.hpp>
-#include <kin/renderer/renderer2d.hpp>
 
 #include "character_level.hpp"
 #include "climb_level.hpp"
@@ -105,6 +97,18 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <kin/assets/bake_cache.hpp>
+#include <kin/assets/image.hpp>
+#include <kin/core/jobs.hpp>
+#include <kin/core/json_value.hpp>
+#include <kin/ecs/physics3d.hpp>
+#include <kin/ecs/render3d.hpp>
+#include <kin/ecs/world.hpp>
+#include <kin/platform/app.hpp>
+#include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/taa3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
+#include <kin/renderer/renderer2d.hpp>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -125,7 +129,8 @@ Vec3f vec3(const kin::JsonValue* v, Vec3f fallback = {}) {
         return fallback;
     }
     const auto& a = v->items();
-    return {static_cast<float>(a[0].as_number()), static_cast<float>(a[1].as_number()), static_cast<float>(a[2].as_number())};
+    return {static_cast<float>(a[0].as_number()), static_cast<float>(a[1].as_number()),
+            static_cast<float>(a[2].as_number())};
 }
 
 kin::Color colour(const kin::JsonValue* v, kin::Color fallback) {
@@ -147,13 +152,16 @@ Summary summarize(std::vector<double> v) {
         return {};
     }
     std::sort(v.begin(), v.end());
-    const auto at = [&](double q) { return v[std::min(v.size() - 1, static_cast<std::size_t>(q * static_cast<double>(v.size())))]; };
+    const auto at = [&](double q) {
+        return v[std::min(v.size() - 1, static_cast<std::size_t>(q * static_cast<double>(v.size())))];
+    };
     return {at(0.5), at(0.1), at(0.9), v.front()};
 }
 
 std::string json_summary(const Summary& s) {
     char buffer[160];
-    std::snprintf(buffer, sizeof buffer, "{\"median\": %.4f, \"p10\": %.4f, \"p90\": %.4f, \"min\": %.4f}", s.median, s.p10, s.p90, s.min);
+    std::snprintf(buffer, sizeof buffer, "{\"median\": %.4f, \"p10\": %.4f, \"p90\": %.4f, \"min\": %.4f}", s.median,
+                  s.p10, s.p90, s.min);
     return buffer;
 }
 
@@ -177,29 +185,30 @@ std::string quoted(const std::string& s) {
     return out + "\"";
 }
 
-
-// `animation: {ecs: true, ik: [...]}` (docs/rendering_3d.md, Inverse kinematics): the entity's IK constraints, in order. Each:
+// `animation: {ecs: true, ik: [...]}` (docs/rendering_3d.md, Inverse kinematics): the entity's IK constraints, in
+// order. Each:
 //   {name, kind: "two_bone" | "look_at" | "foot_placer" | "fabrik", joints: [...], weight, fade,
-//    target: [x, y, z] (the world; none: no target), pole_direction: [x, y, z] (model) | pole_position: [x, y, z] (world),
-//    max_stretch, min_bend, max_bend, hinge_axis: [x, y, z] (the mid joint's own axis: a hinge), max_twist (degrees),
-//    bend_swing (degrees a second), target_rotation: {axis, degrees} (world),
-//    fabrik: max_iterations, tolerance, fix_root (the pole is the one above),
-//    look_at: weights: [...], max_yaw: [...], max_pitch_up: [...], max_pitch_down: [...] (per joint), smooth, release, aim: [..], up: [..],
-//    foot_placer: foot_heights: [...], up, max_tilt, max_pelvis_drop, max_pelvis_raise, smooth, toes: [joint names, "" for none],
+//    target: [x, y, z] (the world; none: no target), pole_direction: [x, y, z] (model) | pole_position: [x, y, z]
+//    (world), max_stretch, min_bend, max_bend, hinge_axis: [x, y, z] (the mid joint's own axis: a hinge), max_twist
+//    (degrees), bend_swing (degrees a second), target_rotation: {axis, degrees} (world), fabrik: max_iterations,
+//    tolerance, fix_root (the pole is the one above), look_at: weights: [...], max_yaw: [...], max_pitch_up: [...],
+//    max_pitch_down: [...] (per joint), smooth, release, aim: [..], up: [..], foot_placer: foot_heights: [...], up,
+//    max_tilt, max_pelvis_drop, max_pelvis_raise, smooth, toes: [joint names, "" for none],
 //      toe_heights: [...], toe_max_tilt, lock: {height, release_height, release_distance, replant} (foot locking),
 //      ground: {floor: y, boxes: [{min: [..], max: [..]}], slope: {point, normal},
-//               ramps: [{x_min, x_max, z_start, degrees}] (a ramp rising along +z from z_start, up from the floor at y = 0)}
+//               ramps: [{x_min, x_max, z_start, degrees}] (a ramp rising along +z from z_start, up from the floor at y
+//               = 0)}
 //      (what the query hits first, in the world)}
-std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
-    std::vector<kin::IKConstraint> out;
+std::vector<kin::IKConstraint3D> parse_ik(const kin::JsonValue& list) {
+    std::vector<kin::IKConstraint3D> out;
     for (const kin::JsonValue& j : list.items()) {
-        kin::IKConstraint k;
+        kin::IKConstraint3D k;
         k.name = j.string_at("name");
         const std::string kind = j.string_at("kind");
-        k.kind = kind == "look_at" ? kin::IKKind::LookAt
-                 : kind == "foot_placer" ? kin::IKKind::FootPlacer
-                 : kind == "fabrik"      ? kin::IKKind::Fabrik
-                                         : kin::IKKind::TwoBone;
+        k.kind = kind == "look_at"       ? kin::IKKind3D::LookAt
+                 : kind == "foot_placer" ? kin::IKKind3D::FootPlacer
+                 : kind == "fabrik"      ? kin::IKKind3D::Fabrik
+                                         : kin::IKKind3D::TwoBone;
         if (const kin::JsonValue* joints = j.find("joints")) {
             for (const kin::JsonValue& n : joints->items()) {
                 k.joints.push_back(n.as_string());
@@ -224,13 +233,14 @@ std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
             k.two_bone.hinge = true;
             k.two_bone.hinge_axis = vec3(hinge, {1, 0, 0});
         }
-        if (k.kind == kin::IKKind::Fabrik) {
+        if (k.kind == kin::IKKind3D::Fabrik) {
             k.fabrik.max_iterations = static_cast<kin::u32>(j.number_at("max_iterations", 16.0));
             k.fabrik.tolerance = static_cast<float>(j.number_at("tolerance", 1e-4));
             k.fabrik.fix_root = j.number_at("fix_root", 1.0) != 0.0;
         }
         if (const kin::JsonValue* r = j.find("target_rotation")) {
-            k.set_target_rotation(kin::Quatf::axis_angle(vec3(r->find("axis"), {0, 1, 0}), static_cast<float>(r->number_at("degrees", 0.0))),
+            k.set_target_rotation(kin::Quatf::axis_angle(vec3(r->find("axis"), {0, 1, 0}),
+                                                         static_cast<float>(r->number_at("degrees", 0.0))),
                                   static_cast<float>(r->number_at("weight", 1.0)));
         }
         const auto numbers = [&](const char* key, std::vector<float>& into) {
@@ -240,14 +250,14 @@ std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
                 }
             }
         };
-        if (k.kind == kin::IKKind::LookAt) {
+        if (k.kind == kin::IKKind3D::LookAt) {
             std::vector<float> w, yaw, up, down;
             numbers("weights", w);
             numbers("max_yaw", yaw);
             numbers("max_pitch_up", up);
             numbers("max_pitch_down", down);
             for (std::size_t i = 0; i < k.joints.size(); ++i) {
-                kin::LookAtJoint l;
+                kin::LookAtJoint3D l;
                 l.weight = i < w.size() ? w[i] : 1.0f;
                 l.max_yaw_degrees = i < yaw.size() ? yaw[i] : 180.0f;
                 l.max_pitch_up_degrees = i < up.size() ? up[i] : 180.0f;
@@ -259,7 +269,7 @@ std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
             k.look_at.aim_axis = vec3(j.find("aim"), k.look_at.aim_axis);
             k.look_at.up_axis = vec3(j.find("up"), k.look_at.up_axis);
         }
-        if (k.kind == kin::IKKind::FootPlacer) {
+        if (k.kind == kin::IKKind3D::FootPlacer) {
             numbers("foot_heights", k.foot_heights);
             k.foot.max_tilt_degrees = static_cast<float>(j.number_at("max_tilt", 30.0));
             k.foot.max_pelvis_drop = static_cast<float>(j.number_at("max_pelvis_drop", 0.5));
@@ -295,21 +305,25 @@ std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
                 std::vector<Ramp> ramps;
                 if (const kin::JsonValue* r = g->find("ramps")) {
                     for (const kin::JsonValue& item : r->items()) {
-                        ramps.push_back({static_cast<float>(item.number_at("x_min", -1e9)), static_cast<float>(item.number_at("x_max", 1e9)),
-                                         static_cast<float>(item.number_at("z_start", 0.0)),
-                                         std::tan(static_cast<float>(item.number_at("degrees", 0.0)) * 3.14159265f / 180.0f)});
+                        ramps.push_back(
+                            {static_cast<float>(item.number_at("x_min", -1e9)),
+                             static_cast<float>(item.number_at("x_max", 1e9)),
+                             static_cast<float>(item.number_at("z_start", 0.0)),
+                             std::tan(static_cast<float>(item.number_at("degrees", 0.0)) * 3.14159265f / 180.0f)});
                     }
                 }
                 const bool has_floor = g->find("floor") != nullptr;
                 const float floor_y = static_cast<float>(g->number_at("floor", 0.0));
                 const bool has_slope = g->find("slope") != nullptr;
                 const Vec3f slope_point = has_slope ? vec3(g->find("slope")->find("point")) : Vec3f{};
-                const Vec3f slope_normal = has_slope ? normalize(vec3(g->find("slope")->find("normal"), {0, 1, 0})) : Vec3f{0, 1, 0};
+                const Vec3f slope_normal =
+                    has_slope ? normalize(vec3(g->find("slope")->find("normal"), {0, 1, 0})) : Vec3f{0, 1, 0};
                 // The first hit along the segment: the nearest of the boxes' faces, the slope plane and the floor.
-                k.ground = [boxes, ramps, has_floor, floor_y, has_slope, slope_point, slope_normal](Vec3f from, Vec3f to) -> std::optional<kin::GroundHit> {
+                k.ground = [boxes, ramps, has_floor, floor_y, has_slope, slope_point,
+                            slope_normal](Vec3f from, Vec3f to) -> std::optional<kin::GroundHit3D> {
                     const Vec3f d = to - from;
                     float best = 2.0f;
-                    kin::GroundHit hit;
+                    kin::GroundHit3D hit;
                     const auto plane = [&](Vec3f point, Vec3f n) {
                         const float denom = dot(d, n);
                         if (denom >= -1e-9f) {
@@ -327,7 +341,8 @@ std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
                     if (has_slope) {
                         plane(slope_point, slope_normal);
                     }
-                    // A ramp: a plane through (x, 0, z_start) that rises with z, only where the hit lies over it (x in range, z past the start).
+                    // A ramp: a plane through (x, 0, z_start) that rises with z, only where the hit lies over it (x in
+                    // range, z past the start).
                     for (const Ramp& r : ramps) {
                         const Vec3f n = normalize(Vec3f{0.0f, 1.0f, -r.tan});
                         const float denom = dot(d, n);
@@ -385,12 +400,12 @@ std::vector<kin::IKConstraint> parse_ik(const kin::JsonValue& list) {
 
 // A model placed in the scene.
 struct Placed {
-    kin::Model model;
+    kin::Model3D model;
     Mat4f transform = Mat4f::identity();
-    // A skinned model's pose (the model's entry `animation: {clip, time, loop, speed}`; docs/rendering_3d.md, Skinned meshes): the
-    // clip (a name or an index, the first by default) sampled at `time` seconds when that is given, else at the frame's time
-    // (frame N at N / 60 s, 0 at the picture) times `speed`; `loop` (on by default) wraps, else it holds the last key.
-    // `root_motion: "remove"` holds the root joint at rest, so the character animates in place.
+    // A skinned model's pose (the model's entry `animation: {clip, time, loop, speed}`; docs/rendering_3d.md, Skinned
+    // meshes): the clip (a name or an index, the first by default) sampled at `time` seconds when that is given, else
+    // at the frame's time (frame N at N / 60 s, 0 at the picture) times `speed`; `loop` (on by default) wraps, else it
+    // holds the last key. `root_motion: "remove"` holds the root joint at rest, so the character animates in place.
     bool animated = false;
     std::size_t clip = 0;
     bool fixed_time = false;
@@ -398,9 +413,9 @@ struct Placed {
     bool loop = true;
     double speed = 1.0;
     bool remove_root_motion = false;
-    // A 1D blend in place of the one clip (`animation: {blend: {parameter, parameter_to, parameter_seconds, points: [{clip, position}]}}`):
-    // the clips of the points (indices into the model's) blended by the parameter, which runs from `parameter` to `parameter_to` over
-    // `parameter_seconds` of the frames (a constant without `parameter_to`).
+    // A 1D blend in place of the one clip (`animation: {blend: {parameter, parameter_to, parameter_seconds, points:
+    // [{clip, position}]}}`): the clips of the points (indices into the model's) blended by the parameter, which runs
+    // from `parameter` to `parameter_to` over `parameter_seconds` of the frames (a constant without `parameter_to`).
     struct BlendPoint {
         std::size_t clip = 0;
         float position = 0.0f;
@@ -408,12 +423,13 @@ struct Placed {
     std::vector<BlendPoint> blend;
     double parameter = 0.0, parameter_to = 0.0, parameter_seconds = 2.0;
     bool ramp = false;
-    // `animation: {ecs: true}`: the model is an entity with SkinnedMeshRenderer and Animator3D, stepped by WorldRenderState3D::animate
-    // at 60 steps a second (250 of them before the picture, the frame's index after), and drawn by its collect(): what a game does.
+    // `animation: {ecs: true}`: the model is an entity with SkinnedMeshRenderer3D and Animator3D, stepped by
+    // WorldRenderState3D::animate at 60 steps a second (250 of them before the picture, the frame's index after), and
+    // drawn by its collect(): what a game does.
     bool ecs = false;
     Vec3f position{};
     float rotation_y = 0.0f, uniform_scale = 1.0f;
-    std::shared_ptr<const kin::Model> shared;
+    std::shared_ptr<const kin::Model3D> shared;
     flecs::entity entity;
     kin::Animator3D animator; // the entity's at the start
 };
@@ -421,14 +437,15 @@ struct Placed {
 // Signal Breach's deck (48 x 32 tiles) and `count` enemies over it, three
 // meshes instanced, as kin_draw_bench's shadows mode has them.
 struct Crowd {
-    kin::Mesh tile;
-    std::array<kin::Mesh, 3> enemy;
-    std::vector<kin::MeshInstance> tiles;
-    std::array<std::vector<kin::MeshInstance>, 3> enemies;
+    kin::Mesh3D tile;
+    std::array<kin::Mesh3D, 3> enemy;
+    std::vector<kin::MeshInstance3D> tiles;
+    std::array<std::vector<kin::MeshInstance3D>, 3> enemies;
 
-    void make(kin::Renderer3D& r3d, int count, const kin::MeshOptions& options) {
+    void make(kin::Renderer3D& r3d, int count, const kin::MeshOptions3D& options) {
         tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}), options);
-        enemy = {r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f), options), r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6), options),
+        enemy = {r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f), options),
+                 r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6), options),
                  r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8), options)};
         for (int z = 0; z < 32; ++z) {
             for (int x = 0; x < 48; ++x) {
@@ -443,7 +460,8 @@ struct Crowd {
         for (int i = 0; i < count; ++i) {
             const Vec3f at{next() * 48.0f, 0.6f + next() * 2.0f, next() * 32.0f};
             enemies[static_cast<std::size_t>(i % 3)].push_back(
-                {Mat4f::translation(at) * Mat4f::rotation_y(static_cast<float>(i) * 37.0f), kin::Color::rgb(255, 255, 255)});
+                {Mat4f::translation(at) * Mat4f::rotation_y(static_cast<float>(i) * 37.0f),
+                 kin::Color::rgb(255, 255, 255)});
         }
     }
 
@@ -453,8 +471,9 @@ struct Crowd {
             scene.draw_instanced(enemy[k], enemies[k], {.color = kin::Color::rgb(200, 120, 80)});
         }
     }
-    // The enemies drifting (`--crowd-move`): each a little from where it was, a pure function of `time` (frames), as a game's moves them.
-    void draw_moving(kin::Scene3D& scene, int time, std::array<std::vector<kin::MeshInstance>, 3>& moved) const {
+    // The enemies drifting (`--crowd-move`): each a little from where it was, a pure function of `time` (frames), as a
+    // game's moves them.
+    void draw_moving(kin::Scene3D& scene, int time, std::array<std::vector<kin::MeshInstance3D>, 3>& moved) const {
         scene.draw_instanced(tile, tiles);
         for (std::size_t k = 0; k < 3; ++k) {
             moved[k] = enemies[k];
@@ -473,9 +492,9 @@ struct Crowd {
 // a way that is a pure function of time: a bar orbiting, a cross turning, a block going to
 // and fro, a bright pole sliding in front of the fence. Time is in frames; 0 is the picture.
 struct Motion {
-    kin::Mesh floor, wall, post, rail, wire, pole, block, bar, cross_bar, ball;
+    kin::Mesh3D floor, wall, post, rail, wire, pole, block, bar, cross_bar, ball;
 
-    void make(kin::Renderer3D& r3d, const kin::MeshOptions& options) {
+    void make(kin::Renderer3D& r3d, const kin::MeshOptions3D& options) {
         floor = r3d.create_mesh(kin::meshes::box({16.0f, 0.2f, 12.0f}), options);
         wall = r3d.create_mesh(kin::meshes::box({16.0f, 4.0f, 0.2f}), options);
         post = r3d.create_mesh(kin::meshes::box({0.035f, 1.2f, 0.035f}), options);
@@ -494,7 +513,8 @@ struct Motion {
         const kin::Material3D bright{.color = kin::Color::rgb(245, 245, 240), .roughness = 0.6f};
         const kin::Material3D warm{.color = kin::Color::rgb(255, 150, 60), .roughness = 0.5f};
         const kin::Material3D unlit_white{.color = kin::Color::rgb(255, 255, 255), .unlit = true};
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = kin::Color::rgb(70, 74, 82), .roughness = 0.9f});
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                   {.color = kin::Color::rgb(70, 74, 82), .roughness = 0.9f});
         scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.0f}), dark);
         // A fence: 60 posts every 6.5 cm, two rails (white against the dark wall).
         for (int i = 0; i < 60; ++i) {
@@ -505,11 +525,18 @@ struct Motion {
         // A wire across, and poles at three depths.
         scene.draw(wire, Mat4f::translation({0.0f, 1.9f, -2.0f}) * Mat4f::rotation_z(4.0f), unlit_white);
         for (int i = 0; i < 3; ++i) {
-            scene.draw(pole, Mat4f::translation({2.2f + 0.5f * static_cast<float>(i), 1.2f, -2.5f + 1.2f * static_cast<float>(i)}), bright);
+            scene.draw(
+                pole,
+                Mat4f::translation({2.2f + 0.5f * static_cast<float>(i), 1.2f, -2.5f + 1.2f * static_cast<float>(i)}),
+                bright);
         }
-        // Moving: a bar orbiting on a circle at 3 degrees a frame, a cross turning at 4, a block going to and fro, a pole sliding.
+        // Moving: a bar orbiting on a circle at 3 degrees a frame, a cross turning at 4, a block going to and fro, a
+        // pole sliding.
         const float orbit = time * 3.0f * 3.14159265f / 180.0f;
-        scene.draw(bar, Mat4f::translation({-2.6f + 0.6f * std::cos(orbit), 1.0f + 0.6f * std::sin(orbit), -0.4f}) * Mat4f::rotation_z(time * 3.0f + 90.0f), warm);
+        scene.draw(bar,
+                   Mat4f::translation({-2.6f + 0.6f * std::cos(orbit), 1.0f + 0.6f * std::sin(orbit), -0.4f}) *
+                       Mat4f::rotation_z(time * 3.0f + 90.0f),
+                   warm);
         const Mat4f turn = Mat4f::translation({-3.6f, 0.9f, -0.4f}) * Mat4f::rotation_y(time * 4.0f);
         scene.draw(cross_bar, turn, warm);
         scene.draw(cross_bar, turn * Mat4f::rotation_y(90.0f), warm);
@@ -520,13 +547,13 @@ struct Motion {
     }
 };
 
-// A valley, for the sky and the fog (`procedural: "landscape"`, P3a): a height-field 6 km long and 6 km wide with the valley's
-// walls and mountains at the far end (vertices spaced finer near the camera), 2500 cone trees on its floor and slopes, and
-// six red pillars 40 m tall at 50, 200, 500, 1000, 2000 and 4000 m down the valley (their colour against the fog tells the
-// distance). The ground is coloured by height and slope: grass, rock, snow.
+// A valley, for the sky and the fog (`procedural: "landscape"`, P3a): a height-field 6 km long and 6 km wide with the
+// valley's walls and mountains at the far end (vertices spaced finer near the camera), 2500 cone trees on its floor and
+// slopes, and six red pillars 40 m tall at 50, 200, 500, 1000, 2000 and 4000 m down the valley (their colour against
+// the fog tells the distance). The ground is coloured by height and slope: grass, rock, snow.
 struct Landscape {
-    kin::Mesh terrain, tree, pillar;
-    std::vector<kin::MeshInstance> trees;
+    kin::Mesh3D terrain, tree, pillar;
+    std::vector<kin::MeshInstance3D> trees;
 
     static float smooth(float a, float b, float x) {
         const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
@@ -534,8 +561,8 @@ struct Landscape {
     }
     static float height(float x, float z) {
         const float ax = std::abs(x);
-        const float rolling = 14.0f * std::sin(x * 0.0045f + 0.7f) * std::cos(z * 0.0031f) + 7.0f * std::sin(x * 0.011f - z * 0.0067f) +
-                              3.0f * std::sin(x * 0.031f + z * 0.027f);
+        const float rolling = 14.0f * std::sin(x * 0.0045f + 0.7f) * std::cos(z * 0.0031f) +
+                              7.0f * std::sin(x * 0.011f - z * 0.0067f) + 3.0f * std::sin(x * 0.031f + z * 0.027f);
         const float walls = 260.0f * std::pow(smooth(120.0f, 1500.0f, ax), 1.4f);
         const float far = 950.0f * smooth(1400.0f, 5600.0f, -z) * (0.65f + 0.35f * std::sin(x * 0.0021f + 1.1f));
         return rolling * (0.3f + 0.7f * smooth(0.0f, 400.0f, ax)) + walls + far;
@@ -543,7 +570,7 @@ struct Landscape {
 
     void make(kin::Renderer3D& r3d, const kin::JsonValue& doc) {
         constexpr int nx = 255, nz = 400;
-        kin::MeshData grid;
+        kin::MeshData3D grid;
         grid.vertices.reserve(static_cast<std::size_t>(nx) * nz);
         const auto at = [&](int i, int j) {
             const float s = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(nx - 1);
@@ -557,25 +584,32 @@ struct Landscape {
                 const auto [x, z] = at(i, j);
                 const float y = height(x, z);
                 const float e = 2.0f;
-                const Vec3f n = kin::normalize({height(x - e, z) - height(x + e, z), 2.0f * e, height(x, z - e) - height(x, z + e)});
+                const Vec3f n = kin::normalize(
+                    {height(x - e, z) - height(x + e, z), 2.0f * e, height(x, z - e) - height(x, z + e)});
                 // Grass low and flat, rock steep, snow high.
                 const float rock = smooth(0.78f, 0.55f, n.y);
                 const float snow = smooth(520.0f, 700.0f, y + 40.0f * (n.y - 0.7f));
                 const float grass = 1.0f - rock;
-                float r = 0.20f * grass + 0.42f * rock, g = 0.36f * grass + 0.38f * rock, b = 0.14f * grass + 0.33f * rock;
+                float r = 0.20f * grass + 0.42f * rock, g = 0.36f * grass + 0.38f * rock,
+                      b = 0.14f * grass + 0.33f * rock;
                 r += (0.9f - r) * snow;
                 g += (0.92f - g) * snow;
                 b += (0.95f - b) * snow;
-                grid.vertices.push_back({.position = {x, y, z}, .normal = n, .uv = {x * 0.01f, z * 0.01f},
-                                         .color = kin::Color::rgb(static_cast<kin::u8>(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f),
-                                                                  static_cast<kin::u8>(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f),
-                                                                  static_cast<kin::u8>(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f))});
+                grid.vertices.push_back(
+                    {.position = {x, y, z},
+                     .normal = n,
+                     .uv = {x * 0.01f, z * 0.01f},
+                     .color = kin::Color::rgb(static_cast<kin::u8>(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f),
+                                              static_cast<kin::u8>(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f),
+                                              static_cast<kin::u8>(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f))});
             }
         }
         for (int j = 0; j + 1 < nz; ++j) {
             for (int i = 0; i + 1 < nx; ++i) {
-                const kin::u32 a = static_cast<kin::u32>(j * nx + i), b = a + 1, c = a + static_cast<kin::u32>(nx), d = c + 1;
-                // Counter-clockwise seen from above (+y): rows run toward -z (up the picture seen from above), columns toward +x.
+                const kin::u32 a = static_cast<kin::u32>(j * nx + i), b = a + 1, c = a + static_cast<kin::u32>(nx),
+                               d = c + 1;
+                // Counter-clockwise seen from above (+y): rows run toward -z (up the picture seen from above), columns
+                // toward +x.
                 grid.indices.insert(grid.indices.end(), {a, b, c, b, d, c});
             }
         }
@@ -595,14 +629,17 @@ struct Landscape {
             const float z = 100.0f - 3200.0f * random() * random();
             const float y = height(x, z);
             const float e = 2.0f;
-            const float slope = kin::normalize({height(x - e, z) - height(x + e, z), 2.0f * e, height(x, z - e) - height(x, z + e)}).y;
+            const float slope =
+                kin::normalize({height(x - e, z) - height(x + e, z), 2.0f * e, height(x, z - e) - height(x, z + e)}).y;
             if (slope < 0.8f || y > 160.0f || (std::abs(x - 12.0f) < 14.0f)) {
                 continue; // none on steep ground, high up, or in the lane the pillars stand in
             }
             const float scale = 0.6f + 1.0f * random();
-            trees.push_back({.transform = Mat4f::trs({x, y, z}, kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 360.0f * random()),
-                                                     {scale, scale * (0.9f + 0.4f * random()), scale}),
-                             .tint = kin::Color::rgb(static_cast<kin::u8>(40 + 40 * random()), static_cast<kin::u8>(80 + 50 * random()), 40)});
+            trees.push_back(
+                {.transform = Mat4f::trs({x, y, z}, kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 360.0f * random()),
+                                         {scale, scale * (0.9f + 0.4f * random()), scale}),
+                 .tint = kin::Color::rgb(static_cast<kin::u8>(40 + 40 * random()),
+                                         static_cast<kin::u8>(80 + 50 * random()), 40)});
         }
     }
 
@@ -616,17 +653,18 @@ struct Landscape {
     }
 };
 
-// Occlusion culling's scene (`procedural: "hidden"`): a floor, a wall 20 m wide and 8 high across the way, 8 tori in front
-// of it, and behind it 64 more (8 x 8, turned every which way), each of 100,352 triangles, made with clusters when the
-// scene says `clusters: true` (G3d). Seen from in front of the wall, the 64 are hidden; from the side, some show past its
-// end; from behind the grid, nothing is hidden by the wall.
+// Occlusion culling's scene (`procedural: "hidden"`): a floor, a wall 20 m wide and 8 high across the way, 8 tori in
+// front of it, and behind it 64 more (8 x 8, turned every which way), each of 100,352 triangles, made with clusters
+// when the scene says `clusters: true` (G3d). Seen from in front of the wall, the 64 are hidden; from the side, some
+// show past its end; from behind the grid, nothing is hidden by the wall.
 struct Hidden {
-    kin::Mesh floor, wall, torus;
-    std::vector<kin::MeshInstance> behind, front;
+    kin::Mesh3D floor, wall, torus;
+    std::vector<kin::MeshInstance3D> behind, front;
     Vec3f extent{12.0f, 8.0f, 21.0f}; // the scene's bounds: +-x, up to y, to z
 
-    // `doc` may set `grid: [nx, nz]` (8 x 8), `spacing: [dx, dz]` (3, 2.4) and `segments` (224: 100,352 triangles a torus).
-    void make(kin::Renderer3D& r3d, kin::MeshOptions options, const kin::JsonValue& doc) {
+    // `doc` may set `grid: [nx, nz]` (8 x 8), `spacing: [dx, dz]` (3, 2.4) and `segments` (224: 100,352 triangles a
+    // torus).
+    void make(kin::Renderer3D& r3d, kin::MeshOptions3D options, const kin::JsonValue& doc) {
         int nx = 8, nz = 8;
         float dx = 3.0f, dz = 2.4f;
         if (const kin::JsonValue* grid = doc.find("grid"); grid && grid->items().size() == 2) {
@@ -641,34 +679,40 @@ struct Hidden {
         const float half = dx * static_cast<float>(nx) * 0.5f;
         const float wall_width = std::max(20.0f, 2.0f * half);
         extent = {wall_width * 0.6f + 2.0f, 8.0f, 3.5f + dz * static_cast<float>(nz) + 2.0f};
-        floor = r3d.create_mesh(kin::meshes::box({extent.x * 2.0f + 40.0f, 0.2f, extent.z + 60.0f}), kin::MeshOptions{.levels = options.levels});
-        wall = r3d.create_mesh(kin::meshes::box({wall_width, 8.0f, 0.4f}), kin::MeshOptions{.levels = options.levels});
+        floor = r3d.create_mesh(kin::meshes::box({extent.x * 2.0f + 40.0f, 0.2f, extent.z + 60.0f}),
+                                kin::MeshOptions3D{.levels = options.levels});
+        wall =
+            r3d.create_mesh(kin::meshes::box({wall_width, 8.0f, 0.4f}), kin::MeshOptions3D{.levels = options.levels});
         torus = r3d.create_mesh(kin::meshes::torus(0.8f, 0.3f, segments, segments), options);
         for (int j = 0; j < nz; ++j) {
             for (int i = 0; i < nx; ++i) {
                 const Vec3f at{-half + 0.5f * dx + dx * static_cast<float>(i), 1.1f, 3.5f + dz * static_cast<float>(j)};
-                behind.push_back({Mat4f::translation(at) * Mat4f::rotation_y(static_cast<float>(i * 8 + j) * 29.0f) * Mat4f::rotation_x(static_cast<float>(i + 3 * j) * 17.0f),
-                                  kin::Color::rgb(static_cast<kin::u8>(120 + 16 * (i % 8)), static_cast<kin::u8>(200 - 12 * j), 150)});
+                behind.push_back({Mat4f::translation(at) * Mat4f::rotation_y(static_cast<float>(i * 8 + j) * 29.0f) *
+                                      Mat4f::rotation_x(static_cast<float>(i + 3 * j) * 17.0f),
+                                  kin::Color::rgb(static_cast<kin::u8>(120 + 16 * (i % 8)),
+                                                  static_cast<kin::u8>(200 - 12 * j), 150)});
             }
         }
         for (int i = 0; i < 8; ++i) {
-            front.push_back({Mat4f::translation({-9.1f + 2.6f * static_cast<float>(i), 1.1f, -4.0f - 1.2f * static_cast<float>(i % 3)}) *
+            front.push_back({Mat4f::translation({-9.1f + 2.6f * static_cast<float>(i), 1.1f,
+                                                 -4.0f - 1.2f * static_cast<float>(i % 3)}) *
                                  Mat4f::rotation_y(static_cast<float>(i) * 41.0f),
                              kin::Color::rgb(230, 170, static_cast<kin::u8>(60 + 15 * i))});
         }
     }
 
     void draw(kin::Scene3D& scene) const {
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = kin::Color::rgb(96, 100, 108), .roughness = 0.9f});
-        scene.draw(wall, Mat4f::translation({0.0f, 4.0f, 0.0f}), {.color = kin::Color::rgb(190, 186, 176), .roughness = 0.8f});
+        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                   {.color = kin::Color::rgb(96, 100, 108), .roughness = 0.9f});
+        scene.draw(wall, Mat4f::translation({0.0f, 4.0f, 0.0f}),
+                   {.color = kin::Color::rgb(190, 186, 176), .roughness = 0.8f});
         scene.draw_instanced(torus, behind, {.roughness = 0.45f});
         scene.draw_instanced(torus, front, {.roughness = 0.45f});
     }
 };
 
-
-// `procedural: "physics_pile"` (docs/physics_3d.md): boxes and spheres dropped into a walled yard of kin/physics3d, at a
-// fixed step from a fixed recipe, drawn as meshes with the physics debug lines over them (the shapes in the colour of
+// `procedural: "physics_pile"` (docs/physics_3d.md): boxes and spheres dropped into a walled yard of kin/physics3d, at
+// a fixed step from a fixed recipe, drawn as meshes with the physics debug lines over them (the shapes in the colour of
 // awake and sleeping, the contacts and their normals). The picture of frame f is the world 150 + f steps in; a frame
 // asked for out of order starts the world again, so every frame is the same whatever order the run takes them in.
 struct PhysicsPile {
@@ -679,7 +723,7 @@ struct PhysicsPile {
         kin::Color colour;
     };
     static constexpr int lead = 150;
-    kin::Mesh box_mesh, ball_mesh, debug_mesh;
+    kin::Mesh3D box_mesh, ball_mesh, debug_mesh;
     std::unique_ptr<kin::World3D> world;
     std::vector<Item> items;
     std::vector<kin::ContactEvent3D> last_events;
@@ -697,7 +741,10 @@ struct PhysicsPile {
         last_events.clear();
         stepped = 0;
         const auto wall = [&](Vec3f half, Vec3f at) {
-            world->create_body({.shape = kin::Shape3D::box(half), .motion = kin::Body3DMotion::Static, .position = at, .friction = 0.6f});
+            world->create_body({.shape = kin::Shape3D::box(half),
+                                .motion = kin::Body3DMotion::Static,
+                                .position = at,
+                                .friction = 0.6f});
         };
         wall({yard + 0.3f, 0.25f, yard + 0.3f}, {0.0f, -0.25f, 0.0f});
         wall({0.15f, 0.75f, yard + 0.3f}, {-yard - 0.15f, 0.75f, 0.0f});
@@ -711,15 +758,24 @@ struct PhysicsPile {
         };
         for (int i = 0; i < count; ++i) {
             const int column = i % 5, row = (i / 5) % 4, layer = i / 20;
-            const Vec3f at{(static_cast<float>(column) - 2.0f) * 1.0f + (next() - 0.5f) * 0.3f, 1.2f + static_cast<float>(layer) * 1.05f,
+            const Vec3f at{(static_cast<float>(column) - 2.0f) * 1.0f + (next() - 0.5f) * 0.3f,
+                           1.2f + static_cast<float>(layer) * 1.05f,
                            (static_cast<float>(row) - 1.5f) * 1.0f + (next() - 0.5f) * 0.3f};
             const kin::Quatf q = kin::Quatf::axis_angle({next() + 0.1f, next(), next()}, next() * 360.0f);
             Item item;
             item.ball = i % 3 == 0;
-            item.half = item.ball ? Vec3f{0.32f, 0.32f, 0.32f} : Vec3f{0.35f + 0.1f * next(), 0.25f + 0.1f * next(), 0.3f};
-            item.colour = item.ball ? kin::Color::rgb(220, 90, 70) : kin::Color::rgb(static_cast<kin::u8>(90 + 20 * (i % 4)), 150, static_cast<kin::u8>(200 - 15 * (i % 5)));
-            item.body = world->create_body({.shape = item.ball ? kin::Shape3D::sphere(item.half.x) : kin::Shape3D::box(item.half),
-                                            .position = at, .rotation = q, .friction = 0.5f, .restitution = 0.15f, .user_id = static_cast<kin::u64>(i)});
+            item.half =
+                item.ball ? Vec3f{0.32f, 0.32f, 0.32f} : Vec3f{0.35f + 0.1f * next(), 0.25f + 0.1f * next(), 0.3f};
+            item.colour = item.ball ? kin::Color::rgb(220, 90, 70)
+                                    : kin::Color::rgb(static_cast<kin::u8>(90 + 20 * (i % 4)), 150,
+                                                      static_cast<kin::u8>(200 - 15 * (i % 5)));
+            item.body = world->create_body(
+                {.shape = item.ball ? kin::Shape3D::sphere(item.half.x) : kin::Shape3D::box(item.half),
+                 .position = at,
+                 .rotation = q,
+                 .friction = 0.5f,
+                 .restitution = 0.15f,
+                 .user_id = static_cast<kin::u64>(i)});
             items.push_back(item);
         }
         world->optimize_broad_phase();
@@ -747,12 +803,21 @@ struct PhysicsPile {
     void draw(kin::Renderer3D& r3d, kin::Scene3D& scene, int time) {
         advance_to(lead + std::max(0, time));
         const kin::Material3D stone{.color = kin::Color::rgb(150, 146, 140), .roughness = 0.9f};
-        scene.draw(box_mesh, Mat4f::translation({0.0f, -0.25f, 0.0f}) * Mat4f::scaling({2 * yard + 0.6f, 0.5f, 2 * yard + 0.6f}), stone);
-        scene.draw(box_mesh, Mat4f::translation({-yard - 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}), stone);
-        scene.draw(box_mesh, Mat4f::translation({yard + 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}), stone);
-        scene.draw(box_mesh, Mat4f::translation({0.0f, 0.75f, -yard - 0.15f}) * Mat4f::scaling({2 * yard + 0.6f, 1.5f, 0.3f}), stone);
+        scene.draw(box_mesh,
+                   Mat4f::translation({0.0f, -0.25f, 0.0f}) * Mat4f::scaling({2 * yard + 0.6f, 0.5f, 2 * yard + 0.6f}),
+                   stone);
+        scene.draw(box_mesh,
+                   Mat4f::translation({-yard - 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}),
+                   stone);
+        scene.draw(box_mesh,
+                   Mat4f::translation({yard + 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}),
+                   stone);
+        scene.draw(box_mesh,
+                   Mat4f::translation({0.0f, 0.75f, -yard - 0.15f}) * Mat4f::scaling({2 * yard + 0.6f, 1.5f, 0.3f}),
+                   stone);
         for (const Item& item : items) {
-            const Mat4f m = Mat4f::trs(world->position(item.body), world->rotation(item.body), item.half * (item.ball ? 1.0f : 2.0f));
+            const Mat4f m = Mat4f::trs(world->position(item.body), world->rotation(item.body),
+                                       item.half * (item.ball ? 1.0f : 2.0f));
             scene.draw(item.ball ? ball_mesh : box_mesh, m, {.color = item.colour, .roughness = 0.5f});
         }
         if (debug) {
@@ -767,16 +832,16 @@ struct PhysicsPile {
     }
 };
 
-
 // `procedural: "physics_character"` (docs/physics_3d.md, "Character controller"): the controller's test level
-// (tests/character_level.hpp: ramps, stairs, a hump, a ledge, a tunnel, boxes, platforms, a trigger) with a skinned person
+// (tests/character_level.hpp: ramps, stairs, a hump, a ledge, a tunnel, boxes, platforms, a trigger) with a skinned
+// person
 // (`made/skinned_biped_walk.glb`) driven through it by the scripted route of the scene file, by the ECS system
 // (CharacterController3D, a locomotion Animator3D, the foot placer on the physics floor). The picture of frame f is the
 // world `lead + f` fixed steps in; a frame asked for out of order starts the world again, so every frame is the same
 // whatever order the run takes them in. The debug lines show every body, the character's capsule and its contacts.
 struct PhysicsCharacter {
-    kin::Mesh box_mesh, ball_mesh, debug_mesh;
-    std::shared_ptr<const kin::Model> person;
+    kin::Mesh3D box_mesh, ball_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model3D> person;
     std::unique_ptr<kin::World3D> world;
     std::unique_ptr<kin::EcsWorld> ecs;
     std::unique_ptr<kin::WorldPhysicsState3D> bodies;
@@ -808,21 +873,22 @@ struct PhysicsCharacter {
         controller.input.forward = {1.0f, 0.0f, 0.0f};
         kin::LocomotionClips3D clips;
         kin::Animator3D animator = kin::locomotion_animator(clips);
-        kin::IKConstraint feet_ik;
+        kin::IKConstraint3D feet_ik;
         feet_ik.name = "feet";
-        feet_ik.kind = kin::IKKind::FootPlacer;
+        feet_ik.kind = kin::IKKind3D::FootPlacer;
         feet_ik.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
         feet_ik.foot_heights = {0.05f, 0.05f};
-        feet_ik.pole = kin::IKConstraint::Pole::ModelDirection;
+        feet_ik.pole = kin::IKConstraint3D::Pole::ModelDirection;
         feet_ik.pole_vector = {0.0f, 0.0f, 1.0f};
         feet_ik.two_bone.max_stretch = 1.1f;
         feet_ik.foot.smooth_seconds = 0.08f;
         feet_ik.fade_seconds = 0.12f;
         animator.add_ik(feet_ik);
-        hero = ecs->raw().entity()
+        hero = ecs->raw()
+                   .entity()
                    .set(kin::Transform3D{.position = route.start})
                    .set(controller)
-                   .set(kin::SkinnedMeshRenderer{.model = person})
+                   .set(kin::SkinnedMeshRenderer3D{.model = person})
                    .set(static_cast<const kin::Animator3D&>(animator))
                    .set(kin::CharacterAnimationLink3D{});
         stepped = 0;
@@ -837,12 +903,13 @@ struct PhysicsCharacter {
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16));
         std::string error;
-        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
         if (!model) {
-            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
+                         error.c_str());
             return;
         }
-        person = std::make_shared<const kin::Model>(std::move(model));
+        person = std::make_shared<const kin::Model3D>(std::move(model));
         loaded = true;
         reset();
     }
@@ -855,12 +922,18 @@ struct PhysicsCharacter {
             if (k.frame != n) {
                 continue;
             }
-            if (k.has_move) c->input.move = k.move;
-            if (k.has_forward) c->input.forward = k.forward;
-            if (k.has_jump) c->input.jump = k.jump;
-            if (k.has_crouch) c->input.crouch = k.crouch;
-            if (k.has_sprint) c->input.sprint = k.sprint;
-            if (k.has_teleport) hero.get_mut<kin::Transform3D>()->position = k.teleport;
+            if (k.has_move)
+                c->input.move = k.move;
+            if (k.has_forward)
+                c->input.forward = k.forward;
+            if (k.has_jump)
+                c->input.jump = k.jump;
+            if (k.has_crouch)
+                c->input.crouch = k.crouch;
+            if (k.has_sprint)
+                c->input.sprint = k.sprint;
+            if (k.has_teleport)
+                hero.get_mut<kin::Transform3D>()->position = k.teleport;
         }
         // It faces the way it was told to go (the model faces +Z).
         const Vec3f f = c->input.forward;
@@ -871,7 +944,8 @@ struct PhysicsCharacter {
         bodies->step(1.0f / 60.0f);
         // The person has no crouch clip: while the capsule is crouched the model is squashed to its height.
         const kin::CharacterController3D* done = hero.get<kin::CharacterController3D>();
-        hero.get_mut<kin::Transform3D>()->scale.y = done->state.height > 0.0f ? done->state.height / done->desc.height : 1.0f;
+        hero.get_mut<kin::Transform3D>()->scale.y =
+            done->state.height > 0.0f ? done->state.height / done->desc.height : 1.0f;
         render->animate(1.0f / 60.0f);
         ++stepped;
     }
@@ -894,19 +968,32 @@ struct PhysicsCharacter {
         using character_level::Kind;
         const auto colour_of = [](Kind k) {
             switch (k) {
-            case Kind::Floor: return kin::Color::rgb(112, 120, 108);
-            case Kind::Ramp: return kin::Color::rgb(214, 150, 80);
-            case Kind::Plateau: return kin::Color::rgb(196, 176, 140);
-            case Kind::Hump: return kin::Color::rgb(120, 170, 120);
-            case Kind::Step: return kin::Color::rgb(176, 170, 160);
-            case Kind::Ledge: return kin::Color::rgb(170, 120, 120);
-            case Kind::Wall: return kin::Color::rgb(150, 160, 180);
-            case Kind::Ceiling: return kin::Color::rgb(130, 140, 160);
-            case Kind::Box: return kin::Color::rgb(220, 190, 90);
-            case Kind::HeavyBox: return kin::Color::rgb(90, 70, 60);
-            case Kind::Platform: return kin::Color::rgb(80, 140, 220);
-            case Kind::Spinner: return kin::Color::rgb(80, 200, 190);
-            case Kind::Sensor: return kin::Color::rgb(240, 220, 90);
+            case Kind::Floor:
+                return kin::Color::rgb(112, 120, 108);
+            case Kind::Ramp:
+                return kin::Color::rgb(214, 150, 80);
+            case Kind::Plateau:
+                return kin::Color::rgb(196, 176, 140);
+            case Kind::Hump:
+                return kin::Color::rgb(120, 170, 120);
+            case Kind::Step:
+                return kin::Color::rgb(176, 170, 160);
+            case Kind::Ledge:
+                return kin::Color::rgb(170, 120, 120);
+            case Kind::Wall:
+                return kin::Color::rgb(150, 160, 180);
+            case Kind::Ceiling:
+                return kin::Color::rgb(130, 140, 160);
+            case Kind::Box:
+                return kin::Color::rgb(220, 190, 90);
+            case Kind::HeavyBox:
+                return kin::Color::rgb(90, 70, 60);
+            case Kind::Platform:
+                return kin::Color::rgb(80, 140, 220);
+            case Kind::Spinner:
+                return kin::Color::rgb(80, 200, 190);
+            case Kind::Sensor:
+                return kin::Color::rgb(240, 220, 90);
             }
             return kin::Color::rgb(200, 200, 200);
         };
@@ -938,25 +1025,26 @@ struct PhysicsCharacter {
             const kin::Character3D c = bodies->character_of(hero);
             for (const kin::CharacterContact3D& k : world->character_contacts(c)) {
                 lines.cross(k.point, k.sensor ? kin::Color::rgb(255, 220, 60) : kin::Color::rgb(255, 60, 60));
-                lines.line(k.point, k.point + k.normal * 0.4f, k.walkable ? kin::Color::rgb(60, 255, 120) : kin::Color::rgb(255, 120, 0));
+                lines.line(k.point, k.point + k.normal * 0.4f,
+                           k.walkable ? kin::Color::rgb(60, 255, 120) : kin::Color::rgb(255, 120, 0));
             }
             debug_mesh = kin::draw_debug_lines(r3d, scene, lines.lines());
         }
     }
 };
 
-
-// `procedural: "physics_climb"` (docs/physics_3d.md, "Grab and climb"): the climb level (tests/climb_level.hpp: a 4 m wall with a
-// ledge, an overhang, a smooth wall with holds, a platform that moves, a crate on a pedestal, ice, a ledge under a low roof) with
-// the skinned person of `physics_character` driven through it by the scripted route of the scene file (grab and release by
-// hand, reach, climb, pull up, jump off, drop), through the ECS system (CharacterController3D with traversal on, the locomotion
-// Animator3D with the hands' IK on the anchors). The picture of frame f is the world `lead + f` fixed steps in; a frame asked
-// for out of order starts the world again, so every frame is the same whatever order the run takes them in. The debug lines
-// show every body, the grips (a cross at each anchor, its surface's normal and frame, a line to the body), the hang place and,
-// for a hand that has the command and holds nothing, what its probe sees.
+// `procedural: "physics_climb"` (docs/physics_3d.md, "Grab and climb"): the climb level (tests/climb_level.hpp: a 4 m
+// wall with a ledge, an overhang, a smooth wall with holds, a platform that moves, a crate on a pedestal, ice, a ledge
+// under a low roof) with the skinned person of `physics_character` driven through it by the scripted route of the scene
+// file (grab and release by hand, reach, climb, pull up, jump off, drop), through the ECS system (CharacterController3D
+// with traversal on, the locomotion Animator3D with the hands' IK on the anchors). The picture of frame f is the world
+// `lead + f` fixed steps in; a frame asked for out of order starts the world again, so every frame is the same whatever
+// order the run takes them in. The debug lines show every body, the grips (a cross at each anchor, its surface's normal
+// and frame, a line to the body), the hang place and, for a hand that has the command and holds nothing, what its probe
+// sees.
 struct PhysicsClimb {
-    kin::Mesh box_mesh, debug_mesh;
-    std::shared_ptr<const kin::Model> person;
+    kin::Mesh3D box_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model3D> person;
     std::unique_ptr<kin::World3D> world;
     std::unique_ptr<kin::EcsWorld> ecs;
     std::unique_ptr<kin::WorldPhysicsState3D> bodies;
@@ -976,7 +1064,8 @@ struct PhysicsClimb {
     }
 
     void reset() {
-        // What refers to the ECS world and the physics world goes first (a frame earlier than the last one asked for starts again).
+        // What refers to the ECS world and the physics world goes first (a frame earlier than the last one asked for
+        // starts again).
         render.reset();
         bodies.reset();
         hero = {};
@@ -996,12 +1085,12 @@ struct PhysicsClimb {
         controller.facing = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 180.0f);
         kin::LocomotionClips3D clips;
         kin::Animator3D animator = kin::locomotion_animator(clips);
-        kin::IKConstraint feet_ik;
+        kin::IKConstraint3D feet_ik;
         feet_ik.name = "feet";
-        feet_ik.kind = kin::IKKind::FootPlacer;
+        feet_ik.kind = kin::IKKind3D::FootPlacer;
         feet_ik.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
         feet_ik.foot_heights = {0.05f, 0.05f};
-        feet_ik.pole = kin::IKConstraint::Pole::ModelDirection;
+        feet_ik.pole = kin::IKConstraint3D::Pole::ModelDirection;
         feet_ik.pole_vector = {0.0f, 0.0f, 1.0f};
         feet_ik.two_bone.max_stretch = 1.1f;
         feet_ik.foot.smooth_seconds = 0.08f;
@@ -1009,13 +1098,13 @@ struct PhysicsClimb {
         animator.add_ik(feet_ik);
         // The hands: a two-bone arm each, the elbows out, down and back; on the anchors while a limb reaches or holds.
         for (const char* side : {"L", "R"}) {
-            kin::IKConstraint hand;
+            kin::IKConstraint3D hand;
             hand.name = std::string("hand_") + side;
-            hand.kind = kin::IKKind::TwoBone;
+            hand.kind = kin::IKKind3D::TwoBone;
             hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
             hand.weight = 0.0f;
             hand.fade_seconds = 0.12f;
-            hand.pole = kin::IKConstraint::Pole::ModelDirection;
+            hand.pole = kin::IKConstraint3D::Pole::ModelDirection;
             hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
             hand.two_bone.max_stretch = 1.05f;
             animator.add_ik(hand);
@@ -1023,10 +1112,11 @@ struct PhysicsClimb {
         kin::CharacterAnimationLink3D link;
         link.hands = {"hand_L", "hand_R"};
         link.hand_clearance = 0.05f;
-        hero = ecs->raw().entity()
+        hero = ecs->raw()
+                   .entity()
                    .set(kin::Transform3D{.position = route.start})
                    .set(controller)
-                   .set(kin::SkinnedMeshRenderer{.model = person})
+                   .set(kin::SkinnedMeshRenderer3D{.model = person})
                    .set(static_cast<const kin::Animator3D&>(animator))
                    .set(link);
         stepped = 0;
@@ -1042,12 +1132,13 @@ struct PhysicsClimb {
         }
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         std::string error;
-        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
         if (!model) {
-            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
+                         error.c_str());
             return;
         }
-        person = std::make_shared<const kin::Model>(std::move(model));
+        person = std::make_shared<const kin::Model3D>(std::move(model));
         loaded = true;
         reset();
     }
@@ -1065,7 +1156,8 @@ struct PhysicsClimb {
         if (applied.stamina) {
             world->set_traversal_resource(bodies->character_of(hero), applied.stamina_value);
         }
-        // While walking it faces the way it was told to go (the model faces +Z); hanging, the system turns it to the wall.
+        // While walking it faces the way it was told to go (the model faces +Z); hanging, the system turns it to the
+        // wall.
         const Vec3f f = c->input.forward;
         if (c->state.traversal_mode == kin::TraversalMode3D::Walking && (f.x != 0.0f || f.z != 0.0f)) {
             c->facing = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, std::atan2(f.x, f.z) * 57.29578f);
@@ -1093,18 +1185,30 @@ struct PhysicsClimb {
         using climb_level::Kind;
         const auto colour_of = [](Kind k) {
             switch (k) {
-            case Kind::Floor: return kin::Color::rgb(112, 120, 108);
-            case Kind::Wall: return kin::Color::rgb(186, 160, 130);
-            case Kind::Lip: return kin::Color::rgb(210, 190, 150);
-            case Kind::Roof: return kin::Color::rgb(130, 140, 160);
-            case Kind::SmoothWall: return kin::Color::rgb(150, 156, 170);
-            case Kind::Hold: return kin::Color::rgb(230, 130, 70);
-            case Kind::Platform: return kin::Color::rgb(80, 140, 220);
-            case Kind::Pedestal: return kin::Color::rgb(176, 170, 160);
-            case Kind::Crate: return kin::Color::rgb(220, 190, 90);
-            case Kind::IceWall: return kin::Color::rgb(150, 205, 235);
-            case Kind::LowRoof: return kin::Color::rgb(110, 110, 125);
-            case Kind::Ledge: return kin::Color::rgb(170, 120, 120);
+            case Kind::Floor:
+                return kin::Color::rgb(112, 120, 108);
+            case Kind::Wall:
+                return kin::Color::rgb(186, 160, 130);
+            case Kind::Lip:
+                return kin::Color::rgb(210, 190, 150);
+            case Kind::Roof:
+                return kin::Color::rgb(130, 140, 160);
+            case Kind::SmoothWall:
+                return kin::Color::rgb(150, 156, 170);
+            case Kind::Hold:
+                return kin::Color::rgb(230, 130, 70);
+            case Kind::Platform:
+                return kin::Color::rgb(80, 140, 220);
+            case Kind::Pedestal:
+                return kin::Color::rgb(176, 170, 160);
+            case Kind::Crate:
+                return kin::Color::rgb(220, 190, 90);
+            case Kind::IceWall:
+                return kin::Color::rgb(150, 205, 235);
+            case Kind::LowRoof:
+                return kin::Color::rgb(110, 110, 125);
+            case Kind::Ledge:
+                return kin::Color::rgb(170, 120, 120);
             }
             return kin::Color::rgb(200, 200, 200);
         };
@@ -1138,7 +1242,8 @@ struct PhysicsClimb {
                 }
                 kin::GripProbeDesc3D probe;
                 const Vec3f sh = desc.traversal.limbs[h].shoulder;
-                const Vec3f facing = t.mode == kin::TraversalMode3D::Walking ? Vec3f{0.0f, 0.0f, -1.0f} : -normalize(t.surface_normal);
+                const Vec3f facing =
+                    t.mode == kin::TraversalMode3D::Walking ? Vec3f{0.0f, 0.0f, -1.0f} : -normalize(t.surface_normal);
                 const Vec3f right = normalize(kin::cross(facing, s.up));
                 probe.origin = s.position + right * sh.x + s.up * sh.y + facing * sh.z;
                 probe.direction = length(applied.traversal.reach) > 0.0f ? applied.traversal.reach : facing;
@@ -1155,22 +1260,23 @@ struct PhysicsClimb {
     }
 };
 
-// `procedural: "physics_ragdoll"` (docs/physics_3d.md, "Ragdolls"): five skinned people (`made/skinned_biped_walk.glb`) made
-// ragdolls by the ECS system (Ragdoll3D from their skeleton, `auto_ragdoll_desc`), on a recipe of the scene's own: one dropped 4 m
-// onto a ramp, one standing whose left arm only is a ragdoll and is knocked, one that blends into a ragdoll when struck, lies, and
-// gets up again (placed where the pelvis lies, the clip blended back), one thrown at a wall, and one struck by a ball (the contact
-// event starts its ragdoll with the impulse at the bone that was hit). The pose is written into each Animator3D after the clips
-// and before the joint matrices, so that the skinned draw is the bodies'. The picture of frame f is the world `lead + f` fixed
-// steps in; a frame asked for out of order starts the world again, so every frame is the same whatever order the run takes them
-// in. The debug lines show the bodies (the capsules of the bones) in the colours of awake and sleeping.
+// `procedural: "physics_ragdoll"` (docs/physics_3d.md, "Ragdolls"): five skinned people (`made/skinned_biped_walk.glb`)
+// made ragdolls by the ECS system (Ragdoll3D from their skeleton, `auto_ragdoll_desc`), on a recipe of the scene's own:
+// one dropped 4 m onto a ramp, one standing whose left arm only is a ragdoll and is knocked, one that blends into a
+// ragdoll when struck, lies, and gets up again (placed where the pelvis lies, the clip blended back), one thrown at a
+// wall, and one struck by a ball (the contact event starts its ragdoll with the impulse at the bone that was hit). The
+// pose is written into each Animator3D after the clips and before the joint matrices, so that the skinned draw is the
+// bodies'. The picture of frame f is the world `lead + f` fixed steps in; a frame asked for out of order starts the
+// world again, so every frame is the same whatever order the run takes them in. The debug lines show the bodies (the
+// capsules of the bones) in the colours of awake and sleeping.
 struct PhysicsRagdoll {
     struct Block {
         Vec3f centre, half;
         kin::Quatf rotation;
         kin::Color colour;
     };
-    kin::Mesh box_mesh, ball_mesh, debug_mesh;
-    std::shared_ptr<const kin::Model> person;
+    kin::Mesh3D box_mesh, ball_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model3D> person;
     std::unique_ptr<kin::World3D> world;
     std::unique_ptr<kin::EcsWorld> ecs;
     std::unique_ptr<kin::WorldPhysicsState3D> bodies;
@@ -1188,7 +1294,7 @@ struct PhysicsRagdoll {
     int bone_of(flecs::entity e, const char* joint) const {
         const kin::RagdollHandle3D r = bodies->ragdoll_of(e);
         const kin::RagdollDesc* d = world->ragdoll_desc(r);
-        const kin::SkinnedMeshRenderer* sk = e.get<kin::SkinnedMeshRenderer>();
+        const kin::SkinnedMeshRenderer3D* sk = e.get<kin::SkinnedMeshRenderer3D>();
         if (d == nullptr || sk == nullptr) {
             return -1;
         }
@@ -1214,25 +1320,32 @@ struct PhysicsRagdoll {
         blocks.clear();
         const auto add = [&](Vec3f centre, Vec3f half, kin::Quatf rotation, kin::Color colour) {
             blocks.push_back({centre, half, rotation, colour});
-            world->create_body({.shape = kin::Shape3D::box(half), .motion = kin::Body3DMotion::Static, .position = centre,
-                                .rotation = rotation, .friction = 0.7f});
+            world->create_body({.shape = kin::Shape3D::box(half),
+                                .motion = kin::Body3DMotion::Static,
+                                .position = centre,
+                                .rotation = rotation,
+                                .friction = 0.7f});
         };
         add({0.0f, -0.5f, 0.0f}, {14.0f, 0.5f, 8.0f}, {}, kin::Color::rgb(118, 124, 112));
-        add({-4.0f, 1.2f, 0.0f}, {2.0f, 0.15f, 2.5f}, kin::Quatf::axis_angle({0, 0, 1}, 22.0f), kin::Color::rgb(214, 150, 80));
+        add({-4.0f, 1.2f, 0.0f}, {2.0f, 0.15f, 2.5f}, kin::Quatf::axis_angle({0, 0, 1}, 22.0f),
+            kin::Color::rgb(214, 150, 80));
         add({6.4f, 1.5f, 0.0f}, {0.2f, 1.5f, 3.5f}, {}, kin::Color::rgb(170, 120, 120));
         bodies = std::make_unique<kin::WorldPhysicsState3D>(*ecs, *world);
         render = std::make_unique<kin::WorldRenderState3D>(*ecs);
-        const Vec3f at[5] = {{-4.2f, 4.0f, 0.0f}, {-1.4f, 0.0f, 0.0f}, {1.6f, 0.0f, 0.0f}, {4.0f, 1.0f, 1.5f}, {-8.0f, 0.0f, 2.5f}};
+        const Vec3f at[5] = {
+            {-4.2f, 4.0f, 0.0f}, {-1.4f, 0.0f, 0.0f}, {1.6f, 0.0f, 0.0f}, {4.0f, 1.0f, 1.5f}, {-8.0f, 0.0f, 2.5f}};
         const float yaw[5] = {0.0f, 0.0f, 25.0f, 90.0f, 90.0f};
         for (int i = 0; i < 5; ++i) {
             kin::Animator3D animator;
             animator.clip = "idle";
             animator.loop = true;
-            actors[static_cast<std::size_t>(i)] = ecs->raw().entity()
-                .set(kin::Transform3D{.position = at[i], .rotation = kin::Quatf::axis_angle({0, 1, 0}, yaw[i])})
-                .set(kin::SkinnedMeshRenderer{.model = person})
-                .set(static_cast<const kin::Animator3D&>(animator))
-                .set(kin::Ragdoll3D{});
+            actors[static_cast<std::size_t>(i)] =
+                ecs->raw()
+                    .entity()
+                    .set(kin::Transform3D{.position = at[i], .rotation = kin::Quatf::axis_angle({0, 1, 0}, yaw[i])})
+                    .set(kin::SkinnedMeshRenderer3D{.model = person})
+                    .set(static_cast<const kin::Animator3D&>(animator))
+                    .set(kin::Ragdoll3D{});
         }
         bodies->sync_bodies();
         ball = {};
@@ -1246,12 +1359,13 @@ struct PhysicsRagdoll {
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12));
         std::string error;
-        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
         if (!model) {
-            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
+                         error.c_str());
             return;
         }
-        person = std::make_shared<const kin::Model>(std::move(model));
+        person = std::make_shared<const kin::Model3D>(std::move(model));
         loaded = true;
         reset();
     }
@@ -1265,21 +1379,31 @@ struct PhysicsRagdoll {
             bodies->start_ragdoll(fall(0), {.set_velocity = true, .velocity = {1.2f, 0.0f, 0.0f}});
         }
         if (n == 30) {
-            bodies->start_ragdoll(fall(1), {.impulse_bone = bone_of(fall(1), "hand_L"), .impulse = {0.0f, 55.0f, 40.0f}});
+            bodies->start_ragdoll(fall(1),
+                                  {.impulse_bone = bone_of(fall(1), "hand_L"), .impulse = {0.0f, 55.0f, 40.0f}});
         }
         if (n == 20) {
-            bodies->start_ragdoll(fall(3), {.blend_seconds = 0.1f, .set_velocity = true, .velocity = {7.0f, 2.5f, 0.0f}});
+            bodies->start_ragdoll(fall(3),
+                                  {.blend_seconds = 0.1f, .set_velocity = true, .velocity = {7.0f, 2.5f, 0.0f}});
         }
         if (n == 60) {
-            bodies->start_ragdoll(fall(2), {.blend_seconds = 0.4f, .impulse_bone = bone_of(fall(2), "chest"), .impulse = {70.0f, 10.0f, -40.0f}});
+            bodies->start_ragdoll(
+                fall(2),
+                {.blend_seconds = 0.4f, .impulse_bone = bone_of(fall(2), "chest"), .impulse = {70.0f, 10.0f, -40.0f}});
         }
         if (n == 90) {
-            ball = world->create_body({.shape = kin::Shape3D::sphere(0.2f), .motion = kin::Body3DMotion::Dynamic,
-                                       .position = {-12.0f, 1.3f, 2.5f}, .linear_velocity = {16.0f, 0.5f, 0.0f}, .mass = 6.0f,
-                                       .friction = 0.5f, .gravity_factor = 0.3f, .continuous = true});
+            ball = world->create_body({.shape = kin::Shape3D::sphere(0.2f),
+                                       .motion = kin::Body3DMotion::Dynamic,
+                                       .position = {-12.0f, 1.3f, 2.5f},
+                                       .linear_velocity = {16.0f, 0.5f, 0.0f},
+                                       .mass = 6.0f,
+                                       .friction = 0.5f,
+                                       .gravity_factor = 0.3f,
+                                       .continuous = true});
         }
         if (n == 330) {
-            // Gets up where it lies: the character is put at the pelvis's ground point, facing by it, and the clip is blended in.
+            // Gets up where it lies: the character is put at the pelvis's ground point, facing by it, and the clip is
+            // blended in.
             const kin::RagdollPlace3D place = world->ragdoll_get_up_place(bodies->ragdoll_of(fall(2)));
             if (place.found) {
                 kin::Transform3D* t = fall(2).get_mut<kin::Transform3D>();
@@ -1289,15 +1413,21 @@ struct PhysicsRagdoll {
             bodies->ragdoll_get_up(fall(2), 1.0f);
         }
         bodies->step(1.0f / 60.0f);
-        // The ball's first contact with the person it was fired at: that ragdoll starts, with the ball's momentum at the bone.
+        // The ball's first contact with the person it was fired at: that ragdoll starts, with the ball's momentum at
+        // the bone.
         if (ball.valid() && !ball_hit) {
             const std::vector<kin::Body3D> mine = world->ragdoll_bodies(bodies->ragdoll_of(fall(4)));
             for (const kin::ContactEvent3D& e : bodies->events()) {
                 const kin::Body3D other = e.a == ball ? e.b : (e.b == ball ? e.a : kin::Body3D{});
-                if (other.valid() && std::find(mine.begin(), mine.end(), other) != mine.end() && e.kind == kin::ContactKind3D::Begin) {
-                    const std::size_t bone = static_cast<std::size_t>(std::find(mine.begin(), mine.end(), other) - mine.begin());
-                    bodies->start_ragdoll(fall(4), {.blend_seconds = 0.05f, .impulse_bone = static_cast<int>(bone),
-                                                    .impulse = world->linear_velocity(ball) * 2.5f, .impulse_point = e.point, .point_given = true});
+                if (other.valid() && std::find(mine.begin(), mine.end(), other) != mine.end() &&
+                    e.kind == kin::ContactKind3D::Begin) {
+                    const std::size_t bone =
+                        static_cast<std::size_t>(std::find(mine.begin(), mine.end(), other) - mine.begin());
+                    bodies->start_ragdoll(fall(4), {.blend_seconds = 0.05f,
+                                                    .impulse_bone = static_cast<int>(bone),
+                                                    .impulse = world->linear_velocity(ball) * 2.5f,
+                                                    .impulse_point = e.point,
+                                                    .point_given = true});
                     ball_hit = true;
                     break;
                 }
@@ -1322,7 +1452,8 @@ struct PhysicsRagdoll {
         }
         advance_to(base + std::max(0, time));
         for (const Block& b : blocks) {
-            scene.draw(box_mesh, Mat4f::trs(b.centre, b.rotation, b.half * 2.0f), {.color = b.colour, .roughness = 0.85f});
+            scene.draw(box_mesh, Mat4f::trs(b.centre, b.rotation, b.half * 2.0f),
+                       {.color = b.colour, .roughness = 0.85f});
         }
         if (ball.valid()) {
             scene.draw(ball_mesh, Mat4f::trs(world->position(ball), world->rotation(ball), {0.2f, 0.2f, 0.2f}),
@@ -1340,21 +1471,20 @@ struct PhysicsRagdoll {
     }
 };
 
-
-// `procedural: "physics_rope"` (docs/physics_3d.md, "Ropes"): chains of capsules with ball joints (Rope3D, drawn as tubes by
-// WorldPhysicsState3D::collect_ropes): a hanging rope from a beam; a bridge of three ropes between two posts with a box on it
-// (between low walls); a rope that swings with the skinned person on it (made out from the vertical, the person takes hold with
-// both hands, climbs, and lets go: through the ECS system, CharacterController3D with traversal on, the hands' IK on the
-// anchors); and a rope that a winch reels in with a crate on its end. The picture of frame f is the world `lead + f` fixed
-// steps in (a frame asked for out of order starts the world again).
+// `procedural: "physics_rope"` (docs/physics_3d.md, "Ropes"): chains of capsules with ball joints (Rope3D, drawn as
+// tubes by WorldPhysicsState3D::collect_ropes): a hanging rope from a beam; a bridge of three ropes between two posts
+// with a box on it (between low walls); a rope that swings with the skinned person on it (made out from the vertical,
+// the person takes hold with both hands, climbs, and lets go: through the ECS system, CharacterController3D with
+// traversal on, the hands' IK on the anchors); and a rope that a winch reels in with a crate on its end. The picture of
+// frame f is the world `lead + f` fixed steps in (a frame asked for out of order starts the world again).
 struct PhysicsRope {
     struct Block {
         Vec3f centre, half;
         kin::Color colour;
         flecs::entity entity; // a dynamic one is drawn where its entity is
     };
-    kin::Mesh box_mesh, debug_mesh;
-    std::shared_ptr<const kin::Model> person;
+    kin::Mesh3D box_mesh, debug_mesh;
+    std::shared_ptr<const kin::Model3D> person;
     std::unique_ptr<kin::World3D> world;
     std::unique_ptr<kin::EcsWorld> ecs;
     std::unique_ptr<kin::WorldPhysicsState3D> bodies;
@@ -1399,7 +1529,8 @@ struct PhysicsRope {
             return e;
         };
         block({10.0f, -0.5f, 0.0f}, {22.0f, 0.5f, 10.0f}, kin::Color::rgb(118, 124, 112));
-        // The hanging rope's beam, and a rope from it with a ball of weight at its end (a free rope with nothing on it).
+        // The hanging rope's beam, and a rope from it with a ball of weight at its end (a free rope with nothing on
+        // it).
         block({0.0f, 6.1f, 0.0f}, {0.4f, 0.1f, 0.4f}, kin::Color::rgb(120, 100, 80));
         // The bridge: two posts and low walls beside it, three ropes between, a box.
         block({-5.0f, 2.0f, 0.0f}, {0.25f, 2.0f, 1.2f}, kin::Color::rgb(130, 110, 90));
@@ -1446,7 +1577,8 @@ struct PhysicsRope {
             rope.render = true;
             winch_rope = w.entity().set(kin::Transform3D{}).set(rope);
         }
-        // The person on the swing: the character (traversal on, stamina to spare), the locomotion animator, hands on the anchors.
+        // The person on the swing: the character (traversal on, stamina to spare), the locomotion animator, hands on
+        // the anchors.
         bodies->sync_bodies();
         const kin::Rope3D* sr = swing_rope.get<kin::Rope3D>();
         (void)sr;
@@ -1458,13 +1590,13 @@ struct PhysicsRope {
         kin::LocomotionClips3D clips;
         kin::Animator3D animator = kin::locomotion_animator(clips);
         for (const char* side : {"L", "R"}) {
-            kin::IKConstraint hand;
+            kin::IKConstraint3D hand;
             hand.name = std::string("hand_") + side;
-            hand.kind = kin::IKKind::TwoBone;
+            hand.kind = kin::IKKind3D::TwoBone;
             hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
             hand.weight = 0.0f;
             hand.fade_seconds = 0.12f;
-            hand.pole = kin::IKConstraint::Pole::ModelDirection;
+            hand.pole = kin::IKConstraint3D::Pole::ModelDirection;
             hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
             hand.two_bone.max_stretch = 1.05f;
             animator.add_ik(hand);
@@ -1478,7 +1610,7 @@ struct PhysicsRope {
         hero = w.entity()
                    .set(kin::Transform3D{.position = end + Vec3f{0.0f, -1.5f, 0.45f}})
                    .set(controller)
-                   .set(kin::SkinnedMeshRenderer{.model = person})
+                   .set(kin::SkinnedMeshRenderer3D{.model = person})
                    .set(static_cast<const kin::Animator3D&>(animator))
                    .set(link);
         stepped = 0;
@@ -1489,12 +1621,13 @@ struct PhysicsRope {
         lead = static_cast<int>(doc.number_at("lead", 0));
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         std::string error;
-        kin::Model model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
         if (!model) {
-            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n", error.c_str());
+            std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
+                         error.c_str());
             return;
         }
-        person = std::make_shared<const kin::Model>(std::move(model));
+        person = std::make_shared<const kin::Model3D>(std::move(model));
         loaded = true;
         reset();
     }
@@ -1565,27 +1698,31 @@ struct PhysicsRope {
     }
 };
 
-// A stage for the light scenes (`procedural: "stage"`, P3b): a floor 24 m by 22, a back wall and a left wall 6 m tall, and what the
-// scene file's `stage` places on it: `pillars` [[x, z], ...] (0.6 x 4 x 0.6 m), `poles` [[x, z], ...] (a thin 8 cm post 3 m
-// tall: its shadow is the check of where a shadow lands), `lamps` [[x, z, height], ...] (a post and a glowing bulb that casts
-// nothing; the light itself is the scene's own spot), `trees` [[x, z], ...] (two crossed quads, a leafy alpha texture, cut-out:
-// the cut-out caster), `benches` [[x, z], ...] (a slab on two blocks). Everything stands on the floor at y = 0.
+// A stage for the light scenes (`procedural: "stage"`, P3b): a floor 24 m by 22, a back wall and a left wall 6 m tall,
+// and what the scene file's `stage` places on it: `pillars` [[x, z], ...] (0.6 x 4 x 0.6 m), `poles` [[x, z], ...] (a
+// thin 8 cm post 3 m tall: its shadow is the check of where a shadow lands), `lamps` [[x, z, height], ...] (a post and
+// a glowing bulb that casts nothing; the light itself is the scene's own spot), `trees` [[x, z], ...] (two crossed
+// quads, a leafy alpha texture, cut-out: the cut-out caster), `benches` [[x, z], ...] (a slab on two blocks).
+// Everything stands on the floor at y = 0.
 struct Stage {
-    kin::Mesh floor, wall_back, wall_side, pillar, pole, post, bulb, quad, slab, block;
+    kin::Mesh3D floor, wall_back, wall_side, pillar, pole, post, bulb, quad, slab, block;
     kin::Texture leaf;
     std::vector<Vec3f> pillars, poles, lamps, trees, benches;
     bool walls = true, floor_on = true, room = false; // `room`: the right and front walls and a ceiling at 6 m too
 
-    static kin::MeshData square(float half) {
-        kin::MeshData m;
-        m.vertices = {{{-half, 0, 0}, {0, 0, 1}, {0, 1}}, {{half, 0, 0}, {0, 0, 1}, {1, 1}}, {{half, 2.0f * half, 0}, {0, 0, 1}, {1, 0}},
+    static kin::MeshData3D square(float half) {
+        kin::MeshData3D m;
+        m.vertices = {{{-half, 0, 0}, {0, 0, 1}, {0, 1}},
+                      {{half, 0, 0}, {0, 0, 1}, {1, 1}},
+                      {{half, 2.0f * half, 0}, {0, 0, 1}, {1, 0}},
                       {{-half, 2.0f * half, 0}, {0, 0, 1}, {0, 0}}};
         m.indices = {0, 1, 2, 0, 2, 3};
         return m;
     }
 
     void make(kin::Renderer3D& r3d, kin::Renderer2D& renderer, const kin::JsonValue& doc) {
-        // `stage.ground: [width, depth]` makes the floor larger (for the rain, which falls in a volume of 36 m), centred where the 24 x 22 one is.
+        // `stage.ground: [width, depth]` makes the floor larger (for the rain, which falls in a volume of 36 m),
+        // centred where the 24 x 22 one is.
         float ground_w = 24.0f, ground_d = 22.0f;
         if (const kin::JsonValue* stage = doc.find("stage")) {
             if (const kin::JsonValue* g = stage->find("ground")) {
@@ -1605,7 +1742,8 @@ struct Stage {
         quad = r3d.create_mesh(square(1.6f));
         slab = r3d.create_mesh(kin::meshes::box({2.0f, 0.12f, 0.6f}));
         block = r3d.create_mesh(kin::meshes::box({0.3f, 0.45f, 0.5f}));
-        // The leaf texture: green discs in a grid on a transparent ground, a trunk in the lower middle (nearest, so the holes are hard).
+        // The leaf texture: green discs in a grid on a transparent ground, a trunk in the lower middle (nearest, so the
+        // holes are hard).
         constexpr int n = 64;
         std::vector<kin::u8> texels(static_cast<std::size_t>(n) * n * 4, 0);
         for (int y = 0; y < n; ++y) {
@@ -1634,7 +1772,8 @@ struct Stage {
                 if (const kin::JsonValue* items = stage->find(key)) {
                     for (const kin::JsonValue& item : items->items()) {
                         const auto& v = item.items();
-                        out.push_back({v.size() > 0 ? static_cast<float>(v[0].as_number()) : 0.0f, v.size() > 2 ? static_cast<float>(v[2].as_number()) : 0.0f,
+                        out.push_back({v.size() > 0 ? static_cast<float>(v[0].as_number()) : 0.0f,
+                                       v.size() > 2 ? static_cast<float>(v[2].as_number()) : 0.0f,
                                        v.size() > 1 ? static_cast<float>(v[1].as_number()) : 0.0f});
                     }
                 }
@@ -1677,38 +1816,49 @@ struct Stage {
             scene.draw(pole, Mat4f::translation({p.x, 1.5f, p.z}), white);
         }
         for (const Vec3f& p : lamps) {
-            // The post stops a quarter metre under the bulb: a light right at a post's top would sit in a shadow of the post's own cap.
+            // The post stops a quarter metre under the bulb: a light right at a post's top would sit in a shadow of the
+            // post's own cap.
             const float h = p.y > 0.0f ? p.y : 4.0f;
             const float post_h = h - 0.25f;
-            scene.draw(post, Mat4f::trs({p.x, post_h * 0.5f, p.z}, kin::Quatf{}, {0.7f, post_h, 0.7f}), {.color = kin::Color::rgb(60, 62, 66), .metallic = 0.6f, .roughness = 0.5f});
+            scene.draw(post, Mat4f::trs({p.x, post_h * 0.5f, p.z}, kin::Quatf{}, {0.7f, post_h, 0.7f}),
+                       {.color = kin::Color::rgb(60, 62, 66), .metallic = 0.6f, .roughness = 0.5f});
             scene.draw(bulb, Mat4f::translation({p.x, h + 0.1f, p.z}),
-                       {.color = kin::Color::rgb(255, 236, 190), .emissive = 3.0f, .unlit = true, .casts_shadow = false, .receives_shadow = false});
+                       {.color = kin::Color::rgb(255, 236, 190),
+                        .emissive = 3.0f,
+                        .unlit = true,
+                        .casts_shadow = false,
+                        .receives_shadow = false});
         }
-        const kin::Material3D leaf_material{.color = kin::Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf,
+        const kin::Material3D leaf_material{.color = kin::Color::rgb(255, 255, 255),
+                                            .double_sided = true,
+                                            .blend = kin::Blend3D::Mask,
+                                            .texture = leaf,
                                             .alpha_cutoff = 0.5f};
         for (const Vec3f& p : trees) {
             scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}), leaf_material);
             scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}) * Mat4f::rotation_y(90.0f), leaf_material);
         }
         for (const Vec3f& p : benches) {
-            scene.draw(slab, Mat4f::translation({p.x, 0.51f, p.z}), {.color = kin::Color::rgb(150, 100, 60), .roughness = 0.7f});
+            scene.draw(slab, Mat4f::translation({p.x, 0.51f, p.z}),
+                       {.color = kin::Color::rgb(150, 100, 60), .roughness = 0.7f});
             scene.draw(block, Mat4f::translation({p.x - 0.7f, 0.225f, p.z}), stone);
             scene.draw(block, Mat4f::translation({p.x + 0.7f, 0.225f, p.z}), stone);
         }
     }
 };
 
-kin::Bounds3 bounds_of(const std::vector<Placed>& placed) {
+kin::Bounds3D bounds_of(const std::vector<Placed>& placed) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const Placed& p : placed) {
-        const kin::Bounds3& b = p.model.bounds;
+        const kin::Bounds3D& b = p.model.bounds;
         for (int i = 0; i < 8; ++i) {
-            const Vec3f c = p.transform.apply({(i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z});
+            const Vec3f c = p.transform.apply(
+                {(i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z});
             lo = {std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
             hi = {std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
         }
     }
-    return placed.empty() ? kin::Bounds3{} : kin::Bounds3{lo, hi};
+    return placed.empty() ? kin::Bounds3D{} : kin::Bounds3D{lo, hi};
 }
 
 } // namespace
@@ -1732,29 +1882,39 @@ struct Overrides {
     bool readback = false;
     long lod_room = 0;
     bool lod_occlusion = false;
-    int flicker = 0; // --flicker N: after each camera's picture, N more frames read back, the largest and mean frame-to-frame difference printed (temporal shimmer)
+    int flicker = 0; // --flicker N: after each camera's picture, N more frames read back, the largest and mean
+                     // frame-to-frame difference printed (temporal shimmer)
     bool gpu_pass_markers = false; // labels for external GPU profilers
-    std::string hitch; // --hitch <feature>: the first renders after switching it on at runtime, timed (then the process ends)
-    bool warm_up = false; // with --hitch: Renderer3D::warm_up before the feature goes on
-    bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on and after (see Render3DDebugStats::feature_bytes)
-    bool crowd_move = false; // the crowd's enemies drift each frame (a game's crowd always moves): the scene is posed per frame
-    bool sky = false, no_sky = false;    // --sky: the procedural sky on for every scene; --no-sky: the scene's own off (to time its cost)
-    bool no_fog = false;                  // --no-fog
-    double fog = 0.0;                     // --fog D: distance and height fog of density D, coloured by the sky, on every scene
-    bool sky_light = false;               // --sky-light: Lights3D::sky_lights_scene
-    bool sky_light_every = false;         // --sky-light-every: with it, the panorama is made again every render (to time that)
-    bool fog_fixed = false;               // --fog-fixed: with --fog, a fixed colour (the cheaper path) instead of the sky's
-    double time_hours = -1.0;             // --time H: the time of day (solar hours) of every scene, with its date and latitude
-    int spots = 0, spot_shadows = 0;        // --spots N, --spot-shadows M: N spot lights in front of the camera, the first M with a shadow map (cost tables)
+    std::string
+        hitch; // --hitch <feature>: the first renders after switching it on at runtime, timed (then the process ends)
+    bool warm_up = false;    // with --hitch: Renderer3D::warm_up before the feature goes on
+    bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on
+                             // and after (see RenderDebugStats3D::feature_bytes)
+    bool crowd_move =
+        false; // the crowd's enemies drift each frame (a game's crowd always moves): the scene is posed per frame
+    bool sky = false,
+         no_sky =
+             false; // --sky: the procedural sky on for every scene; --no-sky: the scene's own off (to time its cost)
+    bool no_fog = false;          // --no-fog
+    double fog = 0.0;             // --fog D: distance and height fog of density D, coloured by the sky, on every scene
+    bool sky_light = false;       // --sky-light: Lights3D::sky_lights_scene
+    bool sky_light_every = false; // --sky-light-every: with it, the panorama is made again every render (to time that)
+    bool fog_fixed = false;       // --fog-fixed: with --fog, a fixed colour (the cheaper path) instead of the sky's
+    double time_hours = -1.0;     // --time H: the time of day (solar hours) of every scene, with its date and latitude
+    int spots = 0, spot_shadows = 0; // --spots N, --spot-shadows M: N spot lights in front of the camera, the first M
+                                     // with a shadow map (cost tables)
     int point_lights = 0, point_shadows = 0; // --point-lights N, --point-shadows M
-    bool moon_shadow = false;                // --moon-shadow: the fill light (a moon if the scene has none) casts, with --moon-cascades N (2)
+    bool moon_shadow =
+        false; // --moon-shadow: the fill light (a moon if the scene has none) casts, with --moon-cascades N (2)
     int moon_cascades = 2;
-    int local_res = 0;                       // --local-res N: the local shadow maps' side for every light
-    double rain = -1.0, snow = -1.0, wind = -1.0; // --rain I, --snow I, --wind S: the weather's intensities and wind speed for every scene (-1: the scene's)
+    int local_res = 0;                            // --local-res N: the local shadow maps' side for every light
+    double rain = -1.0, snow = -1.0, wind = -1.0; // --rain I, --snow I, --wind S: the weather's intensities and wind
+                                                  // speed for every scene (-1: the scene's)
     bool no_weather = false, no_particles = false;
-    int soft = -1;               // --soft 0|1: every particle batch's soft flag
-    long particles = 0;          // --particles N: a system with N live particles in the scene's middle
-    bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and the shadow pass would be timed once
+    int soft = -1;             // --soft 0|1: every particle batch's soft flag
+    long particles = 0;        // --particles N: a system with N live particles in the scene's middle
+    bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and
+                               // the shadow pass would be timed once
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -1818,7 +1978,7 @@ void merge_taa(kin::TemporalAA3D& taa, const kin::JsonValue* doc, const Override
     }
 }
 
-void merge_lod(kin::Lod3D& lod, kin::Render3DDebugOptions& debug, const kin::JsonValue* doc, const Overrides& over) {
+void merge_lod(kin::Lod3D& lod, kin::RenderDebugOptions3D& debug, const kin::JsonValue* doc, const Overrides& over) {
     if (doc) {
         lod.enabled = doc->bool_at("enabled", true);
         lod.error_pixels = static_cast<float>(doc->number_at("error_pixels", lod.error_pixels));
@@ -1826,8 +1986,10 @@ void merge_lod(kin::Lod3D& lod, kin::Render3DDebugOptions& debug, const kin::Jso
         debug.force_level = static_cast<kin::i32>(doc->number_at("force_level", debug.force_level));
         if (const kin::JsonValue* occlusion = doc->find("occlusion")) {
             lod.occlusion.enabled = occlusion->is_bool() ? occlusion->as_bool() : occlusion->bool_at("enabled", true);
-            lod.occlusion.depth_margin = static_cast<float>(occlusion->number_at("depth_margin", lod.occlusion.depth_margin));
-            lod.occlusion.pixel_margin = static_cast<kin::u32>(occlusion->number_at("pixel_margin", lod.occlusion.pixel_margin));
+            lod.occlusion.depth_margin =
+                static_cast<float>(occlusion->number_at("depth_margin", lod.occlusion.depth_margin));
+            lod.occlusion.pixel_margin =
+                static_cast<kin::u32>(occlusion->number_at("pixel_margin", lod.occlusion.pixel_margin));
         }
     }
     if (over.lod_occlusion) {
@@ -1855,8 +2017,8 @@ void merge_lod(kin::Lod3D& lod, kin::Render3DDebugOptions& debug, const kin::Jso
 }
 
 // The process's resident memory, in MB (Linux; 0 elsewhere).
-// The GPU's memory in use (MiB), from nvidia-smi: the whole device, so only differences mean anything (this process is nearly alone on it); -1 without.
-// The sky, fog and time of day (P3a): the scene file's, then the command line's.
+// The GPU's memory in use (MiB), from nvidia-smi: the whole device, so only differences mean anything (this process is
+// nearly alone on it); -1 without. The sky, fog and time of day (P3a): the scene file's, then the command line's.
 void merge_sky(kin::Sky3D& sky, const kin::JsonValue* doc, const Overrides& over) {
     if (doc) {
         sky.enabled = doc->bool_at("enabled", true);
@@ -1918,7 +2080,8 @@ void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over
     }
 }
 
-// A light's shadow (`shadow: true`, or `{enabled, resolution, bias, normal_offset, near, distance, softness}`); `resolution` overrides (--local-res).
+// A light's shadow (`shadow: true`, or `{enabled, resolution, bias, normal_offset, near, distance, softness}`);
+// `resolution` overrides (--local-res).
 kin::LightShadow3D shadow_of(const kin::JsonValue* doc, int resolution) {
     kin::LightShadow3D s;
     if (!doc) {
@@ -1950,7 +2113,8 @@ bool merge_time_of_day(kin::TimeOfDay3D& time, const kin::JsonValue* doc, double
         time.latitude = static_cast<float>(doc->number_at("latitude", time.latitude));
         time.axial_tilt = static_cast<float>(doc->number_at("axial_tilt", time.axial_tilt));
         time.moon_phase = static_cast<float>(doc->number_at("moon_phase", time.moon_phase));
-        time.shadows = doc->bool_at("shadows", time.shadows); // P3b: the sun's and the moon's shadow strength follow the time of day
+        time.shadows = doc->bool_at(
+            "shadows", time.shadows); // P3b: the sun's and the moon's shadow strength follow the time of day
         set = true;
     }
     if (hours_override >= 0.0) {
@@ -1974,13 +2138,18 @@ kin::ParticleRange3D range_of(const kin::JsonValue* v, kin::ParticleRange3D fall
 }
 
 kin::ParticleBlend3D blend_of(const std::string& s, kin::ParticleBlend3D fallback) {
-    return s == "additive" ? kin::ParticleBlend3D::Additive : s == "premultiplied" ? kin::ParticleBlend3D::Premultiplied
-         : s == "alpha" ? kin::ParticleBlend3D::Alpha : fallback;
+    return s == "additive"        ? kin::ParticleBlend3D::Additive
+           : s == "premultiplied" ? kin::ParticleBlend3D::Premultiplied
+           : s == "alpha"         ? kin::ParticleBlend3D::Alpha
+                                  : fallback;
 }
 
 kin::ParticleFacing3D facing_of(const std::string& s, kin::ParticleFacing3D fallback) {
-    return s == "stretched" ? kin::ParticleFacing3D::Stretched : s == "axis" ? kin::ParticleFacing3D::Axis : s == "flat" ? kin::ParticleFacing3D::Flat
-         : s == "camera" ? kin::ParticleFacing3D::Camera : fallback;
+    return s == "stretched" ? kin::ParticleFacing3D::Stretched
+           : s == "axis"    ? kin::ParticleFacing3D::Axis
+           : s == "flat"    ? kin::ParticleFacing3D::Flat
+           : s == "camera"  ? kin::ParticleFacing3D::Camera
+                            : fallback;
 }
 
 void merge_look(kin::ParticleLook3D& look, const kin::JsonValue* d, const Overrides& over) {
@@ -2004,7 +2173,8 @@ void merge_look(kin::ParticleLook3D& look, const kin::JsonValue* d, const Overri
 }
 
 // A weather layer's numbers (see the header): a bare number is the intensity.
-void merge_layer(kin::WeatherLayer3D& layer, const kin::JsonValue* d, const Overrides& over, double override_intensity) {
+void merge_layer(kin::WeatherLayer3D& layer, const kin::JsonValue* d, const Overrides& over,
+                 double override_intensity) {
     if (d) {
         if (d->is_number()) {
             layer.intensity = static_cast<float>(d->as_number());
@@ -2048,7 +2218,7 @@ struct SceneParticles {
     bool apply_weather = false;
     double weather_time = 0.0;
 
-    void make(const kin::JsonValue& doc, const Overrides& over, const kin::Bounds3& bounds) {
+    void make(const kin::JsonValue& doc, const Overrides& over, const kin::Bounds3D& bounds) {
         if (const kin::JsonValue* w = doc.find("weather")) {
             merge_layer(weather.rain, w->find("rain"), over, over.rain);
             merge_layer(weather.snow, w->find("snow"), over, over.snow);
@@ -2061,7 +2231,8 @@ struct SceneParticles {
                 weather.wind.gust_period = static_cast<float>(wind->number_at("gust_period", weather.wind.gust_period));
                 weather.wind.gust_length = static_cast<float>(wind->number_at("gust_length", weather.wind.gust_length));
                 weather.wind.turbulence = static_cast<float>(wind->number_at("turbulence", weather.wind.turbulence));
-                weather.wind.turbulence_length = static_cast<float>(wind->number_at("turbulence_length", weather.wind.turbulence_length));
+                weather.wind.turbulence_length =
+                    static_cast<float>(wind->number_at("turbulence_length", weather.wind.turbulence_length));
             }
             if (const kin::JsonValue* g = w->find("ground")) {
                 weather.has_ground = true;
@@ -2092,8 +2263,11 @@ struct SceneParticles {
             e.system.set_seed(static_cast<kin::u64>(d.number_at("seed", 1.0)));
             kin::ParticleDesc3D& p = e.system.desc;
             const std::string shape = d.string_at("shape", "point");
-            p.shape = shape == "box" ? kin::ParticleShape3D::Box : shape == "sphere" ? kin::ParticleShape3D::Sphere
-                    : shape == "cone" ? kin::ParticleShape3D::Cone : shape == "disc" ? kin::ParticleShape3D::Disc : kin::ParticleShape3D::Point;
+            p.shape = shape == "box"      ? kin::ParticleShape3D::Box
+                      : shape == "sphere" ? kin::ParticleShape3D::Sphere
+                      : shape == "cone"   ? kin::ParticleShape3D::Cone
+                      : shape == "disc"   ? kin::ParticleShape3D::Disc
+                                          : kin::ParticleShape3D::Point;
             p.extent = vec3(d.find("extent"), p.extent);
             p.surface_only = d.bool_at("surface", false);
             p.cone_angle = static_cast<float>(d.number_at("cone_angle", p.cone_angle));
@@ -2128,7 +2302,8 @@ struct SceneParticles {
             e.wind = d.bool_at("wind", true);
             const Vec3f at = vec3(d.find("position"));
             const Vec3f turn = vec3(d.find("rotation"));
-            e.system.transform = Mat4f::translation(at) * Mat4f::rotation_y(turn.y) * Mat4f::rotation_x(turn.x) * Mat4f::rotation_z(turn.z);
+            e.system.transform = Mat4f::translation(at) * Mat4f::rotation_y(turn.y) * Mat4f::rotation_x(turn.x) *
+                                 Mat4f::rotation_z(turn.z);
             const kin::Wind3D* wind = e.wind ? &weather.wind : nullptr;
             if (d.number_at("burst", 0.0) > 0.0) {
                 e.system.burst(static_cast<kin::u32>(d.number_at("burst", 0.0)));
@@ -2145,7 +2320,8 @@ struct SceneParticles {
             }
         }
         if (over.particles > 0) {
-            // N live particles drifting in the middle of the scene: a soft smoke, alpha-blended and sorted (the cost tables).
+            // N live particles drifting in the middle of the scene: a soft smoke, alpha-blended and sorted (the cost
+            // tables).
             Emitter e;
             e.name = "budget";
             e.system.set_seed(77);
@@ -2232,16 +2408,20 @@ kin::Image supersample_average(const kin::Image& large, kin::Vec2i size, int sup
             float sum[3] = {0, 0, 0};
             for (int sy = 0; sy < supersample; ++sy) {
                 for (int sx = 0; sx < supersample; ++sx) {
-                    const std::size_t i = (static_cast<std::size_t>(y * supersample + sy) * static_cast<std::size_t>(large.size.x) +
-                                           static_cast<std::size_t>(x * supersample + sx)) * 4;
+                    const std::size_t i =
+                        (static_cast<std::size_t>(y * supersample + sy) * static_cast<std::size_t>(large.size.x) +
+                         static_cast<std::size_t>(x * supersample + sx)) *
+                        4;
                     for (int ch = 0; ch < 3; ++ch) {
                         sum[ch] += decode_srgb(large.rgba[i + static_cast<std::size_t>(ch)]);
                     }
                 }
             }
-            const std::size_t o = (static_cast<std::size_t>(y) * static_cast<std::size_t>(size.x) + static_cast<std::size_t>(x)) * 4;
+            const std::size_t o =
+                (static_cast<std::size_t>(y) * static_cast<std::size_t>(size.x) + static_cast<std::size_t>(x)) * 4;
             for (int ch = 0; ch < 3; ++ch) {
-                small.rgba[o + static_cast<std::size_t>(ch)] = encode_srgb(sum[ch] / static_cast<float>(supersample * supersample));
+                small.rgba[o + static_cast<std::size_t>(ch)] =
+                    encode_srgb(sum[ch] / static_cast<float>(supersample * supersample));
             }
             small.rgba[o + 3] = 255;
         }
@@ -2262,7 +2442,7 @@ int main(int argc, char** argv) {
     double distance_override = 0.0;
     Overrides over;
     int taa_frames = 32, supersample = 1, samples_override = 0; // 0: the scene's
-    fs::path bake_dir; // --bake-cache DIR
+    fs::path bake_dir;                                          // --bake-cache DIR
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -2415,13 +2595,16 @@ int main(int argc, char** argv) {
         }
     }
     if (scenes.empty()) {
-        std::fprintf(stderr, "usage: kin_reference <scene.json>... --out DIR [--cache DIR] [--frames N] [--warmup N] [--repeat N]\n");
+        std::fprintf(
+            stderr,
+            "usage: kin_reference <scene.json>... --out DIR [--cache DIR] [--frames N] [--warmup N] [--repeat N]\n");
         return 2;
     }
     fs::create_directories(out);
 
     kin::App app{};
-    kin::Window& window = app.create_window({.title = "kin-reference", .width = width, .height = height, .hidden = true});
+    kin::Window& window =
+        app.create_window({.title = "kin-reference", .width = width, .height = height, .hidden = true});
     std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
     if (!backend || backend->name() != "SDL_GPU") {
         std::fprintf(stderr, "SDL_GPU is not available\n");
@@ -2440,9 +2623,10 @@ int main(int argc, char** argv) {
     const auto wait_for_gpu = [&] { renderer.read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, pixel, pixel_size); };
 
     std::ostringstream report;
-    report << "{\n \"renderer\": " << quoted(std::string{renderer.backend_name()}) << ",\n \"vulkan_icd\": "
-           << quoted(std::getenv("VK_ICD_FILENAMES") ? std::getenv("VK_ICD_FILENAMES") : "") << ",\n \"size\": [" << width << ", "
-           << height << "],\n \"frames\": " << frames << ", \"repeat\": " << repeat << ",\n \"scenes\": [";
+    report << "{\n \"renderer\": " << quoted(std::string{renderer.backend_name()})
+           << ",\n \"vulkan_icd\": " << quoted(std::getenv("VK_ICD_FILENAMES") ? std::getenv("VK_ICD_FILENAMES") : "")
+           << ",\n \"size\": [" << width << ", " << height << "],\n \"frames\": " << frames
+           << ", \"repeat\": " << repeat << ",\n \"scenes\": [";
     bool first_scene = true;
     int failures = 0;
     for (const fs::path& file : scenes) {
@@ -2462,13 +2646,15 @@ int main(int argc, char** argv) {
         const auto load_start = std::chrono::steady_clock::now();
         const double resident_before = resident_mb();
         const auto levels_of = [&](const kin::JsonValue& entry) {
-            kin::MeshOptions options;
-            options.levels = over.lod_levels > 0 ? static_cast<kin::u32>(over.lod_levels)
-                                                 : static_cast<kin::u32>(std::clamp(entry.number_at("lod_levels", 1.0), 1.0, static_cast<double>(kin::max_mesh_levels)));
+            kin::MeshOptions3D options;
+            options.levels = over.lod_levels > 0
+                                 ? static_cast<kin::u32>(over.lod_levels)
+                                 : static_cast<kin::u32>(std::clamp(entry.number_at("lod_levels", 1.0), 1.0,
+                                                                    static_cast<double>(kin::max_mesh_levels)));
             return options;
         };
         const auto model_options_of = [&](const kin::JsonValue& entry) {
-            kin::MeshOptions options = levels_of(entry);
+            kin::MeshOptions3D options = levels_of(entry);
             options.clusters = over.lod_clusters || entry.bool_at("clusters");
             return options;
         };
@@ -2483,16 +2669,17 @@ int main(int argc, char** argv) {
                     break;
                 }
                 std::string error;
-                kin::Model model = r3d.load_model(path, model_options_of(m), &error);
+                kin::Model3D model = r3d.load_model(path, model_options_of(m), &error);
                 if (!model) {
                     std::fprintf(stderr, "  %s: %s\n", path.string().c_str(), error.c_str());
                     missing = true;
                     break;
                 }
                 const float scale = static_cast<float>(m.number_at("scale", 1.0));
-                placed.push_back({std::move(model), Mat4f::translation(vec3(m.find("position"))) *
-                                                        Mat4f::rotation_y(static_cast<float>(m.number_at("rotation_y", 0.0))) *
-                                                        Mat4f::scaling({scale, scale, scale})});
+                placed.push_back(
+                    {std::move(model), Mat4f::translation(vec3(m.find("position"))) *
+                                           Mat4f::rotation_y(static_cast<float>(m.number_at("rotation_y", 0.0))) *
+                                           Mat4f::scaling({scale, scale, scale})});
                 placed.back().position = vec3(m.find("position"));
                 placed.back().rotation_y = static_cast<float>(m.number_at("rotation_y", 0.0));
                 placed.back().uniform_scale = scale;
@@ -2503,7 +2690,8 @@ int main(int argc, char** argv) {
                 if (const kin::JsonValue* a = m.find("animation")) {
                     Placed& back = placed.back();
                     if (back.model.skeletons.empty() || back.model.clips.empty()) {
-                        std::fprintf(stderr, "  %s: has an animation entry but no skeleton or clips\n", path.string().c_str());
+                        std::fprintf(stderr, "  %s: has an animation entry but no skeleton or clips\n",
+                                     path.string().c_str());
                     } else {
                         back.animated = true;
                         const std::string wanted = a->string_at("clip");
@@ -2511,13 +2699,16 @@ int main(int argc, char** argv) {
                             const kin::AnimClip3D* found = back.model.find_clip(wanted);
                             if (!found) {
                                 std::string names;
-                                for (const kin::AnimClip3D& c : back.model.clips) names += " " + c.name;
-                                std::fprintf(stderr, "  %s: no clip called %s (it has:%s)\n", path.string().c_str(), wanted.c_str(), names.c_str());
+                                for (const kin::AnimClip3D& c : back.model.clips)
+                                    names += " " + c.name;
+                                std::fprintf(stderr, "  %s: no clip called %s (it has:%s)\n", path.string().c_str(),
+                                             wanted.c_str(), names.c_str());
                                 return 1;
                             }
                             back.clip = static_cast<std::size_t>(found - back.model.clips.data());
                         } else {
-                            back.clip = std::min<std::size_t>(static_cast<std::size_t>(a->number_at("index", 0.0)), back.model.clips.size() - 1);
+                            back.clip = std::min<std::size_t>(static_cast<std::size_t>(a->number_at("index", 0.0)),
+                                                              back.model.clips.size() - 1);
                         }
                         back.fixed_time = a->find("time") != nullptr;
                         back.time = a->number_at("time", 0.0);
@@ -2533,10 +2724,12 @@ int main(int argc, char** argv) {
                                 for (const kin::JsonValue& point : points->items()) {
                                     const kin::AnimClip3D* found = back.model.find_clip(point.string_at("clip"));
                                     if (!found) {
-                                        std::fprintf(stderr, "  %s: blend point: no clip called %s\n", path.string().c_str(), point.string_at("clip").c_str());
+                                        std::fprintf(stderr, "  %s: blend point: no clip called %s\n",
+                                                     path.string().c_str(), point.string_at("clip").c_str());
                                         return 1;
                                     }
-                                    back.blend.push_back({static_cast<std::size_t>(found - back.model.clips.data()), static_cast<float>(point.number_at("position", 0.0))});
+                                    back.blend.push_back({static_cast<std::size_t>(found - back.model.clips.data()),
+                                                          static_cast<float>(point.number_at("position", 0.0))});
                                 }
                             }
                             back.parameter = blend->number_at("parameter", 0.0);
@@ -2545,22 +2738,26 @@ int main(int argc, char** argv) {
                             back.parameter_seconds = blend->number_at("parameter_seconds", 2.0);
                         }
                         const kin::AnimClip3D& clip = back.model.clips[back.clip];
-                        std::printf("  animation: %s, %.2f s, %zu clips, %u joints\n", clip.name.c_str(), static_cast<double>(clip.duration),
-                                    back.model.clips.size(), back.model.skeletons[0].joint_count());
+                        std::printf("  animation: %s, %.2f s, %zu clips, %u joints\n", clip.name.c_str(),
+                                    static_cast<double>(clip.duration), back.model.clips.size(),
+                                    back.model.skeletons[0].joint_count());
                     }
                 }
                 if (grid) {
                     const int count = std::max(1, static_cast<int>(grid->number_at("count", 1.0)));
                     const int columns = std::max(1, static_cast<int>(grid->number_at("columns", 10.0)));
-                    const float sx = static_cast<float>(grid->find("spacing") ? grid->find("spacing")->items()[0].as_number(2.0) : 2.0);
-                    const float sz = static_cast<float>(grid->find("spacing") ? grid->find("spacing")->items()[1].as_number(2.0) : 2.0);
+                    const float sx = static_cast<float>(
+                        grid->find("spacing") ? grid->find("spacing")->items()[0].as_number(2.0) : 2.0);
+                    const float sz = static_cast<float>(
+                        grid->find("spacing") ? grid->find("spacing")->items()[1].as_number(2.0) : 2.0);
                     const double time_step = grid->number_at("time_step", 0.0);
                     const Placed first = placed[base_index];
                     placed.pop_back();
                     for (int i = 0; i < count; ++i) {
                         Placed copy = first;
                         const float x = (static_cast<float>(i % columns) - static_cast<float>(columns - 1) * 0.5f) * sx;
-                        const float z = (static_cast<float>(i / columns) - static_cast<float>((count - 1) / columns) * 0.5f) * sz;
+                        const float z =
+                            (static_cast<float>(i / columns) - static_cast<float>((count - 1) / columns) * 0.5f) * sz;
                         copy.transform = Mat4f::translation({x, 0.0f, z}) * first.transform;
                         copy.position = first.position + Vec3f{x, 0.0f, z};
                         copy.time += time_step * i;
@@ -2576,7 +2773,8 @@ int main(int argc, char** argv) {
             }
             continue;
         }
-        // `animation: {ecs: true}` models: an entity each, in a world of its own. The picture (frame 0) is 250 steps (4.17 s) in.
+        // `animation: {ecs: true}` models: an entity each, in a world of its own. The picture (frame 0) is 250 steps
+        // (4.17 s) in.
         constexpr int ecs_lead = 250;
         kin::EcsWorld ecs_world;
         kin::WorldRenderState3D ecs_state{ecs_world};
@@ -2586,7 +2784,7 @@ int main(int argc, char** argv) {
                 continue;
             }
             any_ecs = true;
-            p.shared = std::make_shared<const kin::Model>(p.model);
+            p.shared = std::make_shared<const kin::Model3D>(p.model);
             kin::Animator3D& a = p.animator;
             if (!p.blend.empty()) {
                 auto machine = std::make_shared<kin::AnimationStateMachine>();
@@ -2606,10 +2804,12 @@ int main(int argc, char** argv) {
             a.speed = static_cast<float>(p.speed);
             a.loop = p.loop;
             a.remove_root_motion = p.remove_root_motion;
-            p.entity = ecs_world.raw().entity()
-                           .set(kin::Transform3D{.position = p.position, .rotation = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, p.rotation_y),
+            p.entity = ecs_world.raw()
+                           .entity()
+                           .set(kin::Transform3D{.position = p.position,
+                                                 .rotation = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, p.rotation_y),
                                                  .scale = {p.uniform_scale, p.uniform_scale, p.uniform_scale}})
-                           .set(kin::SkinnedMeshRenderer{.model = p.shared})
+                           .set(kin::SkinnedMeshRenderer3D{.model = p.shared})
                            .set(static_cast<const kin::Animator3D&>(a)); // const: flecs moves from a non-const lvalue
         }
         Crowd crowd;
@@ -2683,18 +2883,20 @@ int main(int argc, char** argv) {
             }
         }
         const bool animated = doc.bool_at("animated") || (over.crowd_move && doc.string_at("procedural") == "crowd");
-        std::array<std::vector<kin::MeshInstance>, 3> crowd_moved;
+        std::array<std::vector<kin::MeshInstance3D>, 3> crowd_moved;
         const double load_ms = ms_since(load_start);
         if (bake) {
             const kin::BakeCacheStats b = bake->stats();
-            std::printf("  loaded in %.0f ms with the bake cache: %llu hits, %llu misses, %llu writes so far (%.1f MB read, %.1f MB written)\n", load_ms,
-                        static_cast<unsigned long long>(b.hits), static_cast<unsigned long long>(b.misses), static_cast<unsigned long long>(b.writes),
-                        static_cast<double>(b.bytes_read) / 1048576.0, static_cast<double>(b.bytes_written) / 1048576.0);
+            std::printf("  loaded in %.0f ms with the bake cache: %llu hits, %llu misses, %llu writes so far (%.1f MB "
+                        "read, %.1f MB written)\n",
+                        load_ms, static_cast<unsigned long long>(b.hits), static_cast<unsigned long long>(b.misses),
+                        static_cast<unsigned long long>(b.writes), static_cast<double>(b.bytes_read) / 1048576.0,
+                        static_cast<double>(b.bytes_written) / 1048576.0);
         }
         {
             std::size_t meshes = 0, with_levels = 0, level_triangles = 0, base_triangles = 0;
             for (const Placed& p : placed) {
-                for (const kin::ModelPart& part : p.model.parts) {
+                for (const kin::ModelPart3D& part : p.model.parts) {
                     ++meshes;
                     with_levels += part.mesh.level_count() > 1 ? 1 : 0;
                     base_triangles += part.mesh.level_triangles(0);
@@ -2707,7 +2909,7 @@ int main(int argc, char** argv) {
             std::uint64_t cluster_triangles = 0;
             kin::u32 deepest = 0;
             for (const Placed& p : placed) {
-                for (const kin::ModelPart& part : p.model.parts) {
+                for (const kin::ModelPart3D& part : p.model.parts) {
                     with_clusters += part.mesh.has_clusters() ? 1 : 0;
                     clusters += part.mesh.cluster_count();
                     leaf_triangles += part.mesh.has_clusters() ? part.mesh.leaf_triangles() : 0;
@@ -2716,33 +2918,43 @@ int main(int argc, char** argv) {
                 }
             }
             if (with_clusters > 0) {
-                std::printf("  loaded in %.0f ms with clusters: %zu meshes, %zu with clusters (%zu clusters, up to %u levels deep, %zu leaf triangles, %llu in all), +%.0f MB resident, peak %.0f MB\n",
-                            load_ms, meshes, with_clusters, clusters, deepest, leaf_triangles, static_cast<unsigned long long>(cluster_triangles),
-                            resident_mb() - resident_before, peak_mb());
+                std::printf("  loaded in %.0f ms with clusters: %zu meshes, %zu with clusters (%zu clusters, up to %u "
+                            "levels deep, %zu leaf triangles, %llu in all), +%.0f MB resident, peak %.0f MB\n",
+                            load_ms, meshes, with_clusters, clusters, deepest, leaf_triangles,
+                            static_cast<unsigned long long>(cluster_triangles), resident_mb() - resident_before,
+                            peak_mb());
                 if (r3d.capabilities().gpu_driven_clusters) {
-                    // The video memory the hierarchy takes for the cut in compute: the cluster table (80 bytes a cluster) and every cluster's indices.
-                    std::printf("  GPU hierarchy: %.1f MB (%.1f MB of indices for all levels, %.1f MB table), against %.1f MB of leaf indices before G3c\n",
-                                (static_cast<double>(clusters) * 80.0 + static_cast<double>(cluster_triangles) * 12.0) / 1048576.0,
-                                static_cast<double>(cluster_triangles) * 12.0 / 1048576.0, static_cast<double>(clusters) * 80.0 / 1048576.0,
+                    // The video memory the hierarchy takes for the cut in compute: the cluster table (80 bytes a
+                    // cluster) and every cluster's indices.
+                    std::printf("  GPU hierarchy: %.1f MB (%.1f MB of indices for all levels, %.1f MB table), against "
+                                "%.1f MB of leaf indices before G3c\n",
+                                (static_cast<double>(clusters) * 80.0 + static_cast<double>(cluster_triangles) * 12.0) /
+                                    1048576.0,
+                                static_cast<double>(cluster_triangles) * 12.0 / 1048576.0,
+                                static_cast<double>(clusters) * 80.0 / 1048576.0,
                                 static_cast<double>(leaf_triangles) * 12.0 / 1048576.0);
                 }
             }
             if (with_levels > 0 || over.lod_levels > 1) {
-                std::printf("  loaded in %.0f ms with levels of detail: %zu meshes, %zu with levels, %zu triangles (%zu with all their levels), +%.0f MB resident\n",
-                            load_ms, meshes, with_levels, base_triangles, level_triangles, resident_mb() - resident_before);
+                std::printf("  loaded in %.0f ms with levels of detail: %zu meshes, %zu with levels, %zu triangles "
+                            "(%zu with all their levels), +%.0f MB resident\n",
+                            load_ms, meshes, with_levels, base_triangles, level_triangles,
+                            resident_mb() - resident_before);
             }
         }
-        const kin::Bounds3 bounds = is_crowd    ? kin::Bounds3{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
-                                    : is_motion ? kin::Bounds3{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
-                                    : is_landscape ? kin::Bounds3{{-3000.0f, -60.0f, -6000.0f}, {3000.0f, 1000.0f, 120.0f}}
-                                    : is_stage  ? kin::Bounds3{{-12.0f, -0.2f, -14.0f}, {12.0f, 7.0f, 8.0f}}
-                                    : is_hidden ? kin::Bounds3{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
-                                    : is_pile   ? kin::Bounds3{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
-                                    : is_walker ? kin::Bounds3{{-2.0f, -0.5f, -30.0f}, {70.0f, 5.0f, 30.0f}}
-                                    : is_climber ? kin::Bounds3{{-4.0f, -0.5f, -2.0f}, {64.0f, 7.0f, 6.0f}}
-                                    : is_ragdoll ? kin::Bounds3{{-14.0f, -0.5f, -8.0f}, {14.0f, 5.0f, 8.0f}}
-                                    : is_ropes   ? kin::Bounds3{{-6.0f, -0.5f, -4.0f}, {18.0f, 10.0f, 4.0f}}
-                                                : bounds_of(placed);
+        const kin::Bounds3D bounds =
+            is_crowd       ? kin::Bounds3D{{0.0f, -1.0f, 0.0f}, {48.0f, 3.0f, 32.0f}}
+            : is_motion    ? kin::Bounds3D{{-8.0f, -0.2f, -6.0f}, {8.0f, 4.0f, 6.0f}}
+            : is_landscape ? kin::Bounds3D{{-3000.0f, -60.0f, -6000.0f}, {3000.0f, 1000.0f, 120.0f}}
+            : is_stage     ? kin::Bounds3D{{-12.0f, -0.2f, -14.0f}, {12.0f, 7.0f, 8.0f}}
+            : is_hidden
+                ? kin::Bounds3D{{-hidden.extent.x, -0.2f, -8.0f}, {hidden.extent.x, hidden.extent.y, hidden.extent.z}}
+            : is_pile    ? kin::Bounds3D{{-3.3f, -0.5f, -3.3f}, {3.3f, 4.0f, 3.3f}}
+            : is_walker  ? kin::Bounds3D{{-2.0f, -0.5f, -30.0f}, {70.0f, 5.0f, 30.0f}}
+            : is_climber ? kin::Bounds3D{{-4.0f, -0.5f, -2.0f}, {64.0f, 7.0f, 6.0f}}
+            : is_ragdoll ? kin::Bounds3D{{-14.0f, -0.5f, -8.0f}, {14.0f, 5.0f, 8.0f}}
+            : is_ropes   ? kin::Bounds3D{{-6.0f, -0.5f, -4.0f}, {18.0f, 10.0f, 4.0f}}
+                         : bounds_of(placed);
 
         scene_particles.make(doc, over, bounds);
 
@@ -2757,7 +2969,9 @@ int main(int argc, char** argv) {
                                           .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
                                           .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
         };
-        kin::View3D view = make_view({width, height}, static_cast<kin::u32>(samples_override > 0 ? samples_override : view_doc.number_at("samples", 4)));
+        kin::View3D view =
+            make_view({width, height}, static_cast<kin::u32>(samples_override > 0 ? samples_override
+                                                                                  : view_doc.number_at("samples", 4)));
 
         // The lights, the same every frame; an environment (an .hdr in the cache) loaded once.
         kin::Environment3D environment;
@@ -2774,8 +2988,8 @@ int main(int argc, char** argv) {
         }
 
         kin::Scene3D scene;
-        // Lights carried with the camera (a flashlight): which light, its offset in the camera's frame (right, up, forward), and a turn from
-        // the camera's axis; applied once the frame's camera is set.
+        // Lights carried with the camera (a flashlight): which light, its offset in the camera's frame (right, up,
+        // forward), and a turn from the camera's axis; applied once the frame's camera is set.
         struct Attached {
             bool spot;
             std::size_t index;
@@ -2784,26 +2998,32 @@ int main(int argc, char** argv) {
         };
         std::vector<Attached> attached;
         double camera_hours = -1.0; // the current camera's own time of day (< 0: the scene's)
+        const auto light_color = [](const kin::JsonValue* value, Vec3f fallback = {}) {
+            const Vec3f rgb = vec3(value, fallback);
+            return kin::LinearRgb{rgb.x, rgb.y, rgb.z};
+        };
         const auto fill_scene = [&](int time) {
             scene.clear();
             const kin::JsonValue* l = doc.find("lights");
             const kin::JsonValue& lights = l ? *l : none;
             if (const kin::JsonValue* sun = lights.find("sun")) {
-                scene.lights.sun = {.direction = vec3(sun->find("direction"), {0, 1, 0}), .color = vec3(sun->find("color"))};
+                scene.lights.sun = {.direction = vec3(sun->find("direction"), {0, 1, 0}),
+                                    .color = light_color(sun->find("color"))};
             } else {
                 scene.lights.sun.color = {};
             }
             if (const kin::JsonValue* fill = lights.find("fill")) {
-                scene.lights.fill = {.direction = vec3(fill->find("direction"), {0, 1, 0}), .color = vec3(fill->find("color"))};
+                scene.lights.fill = {.direction = vec3(fill->find("direction"), {0, 1, 0}),
+                                     .color = light_color(fill->find("color"))};
             }
-            scene.lights.ambient = vec3(lights.find("ambient"));
+            scene.lights.ambient = light_color(lights.find("ambient"));
             scene.lights.environment = environment;
             if (const kin::JsonValue* env = lights.find("environment")) {
                 scene.lights.environment_intensity = static_cast<float>(env->number_at("intensity", 1.0));
                 scene.lights.environment_rotation = static_cast<float>(env->number_at("rotation", 0.0));
             }
             if (const kin::JsonValue* ground = lights.find("ground_ambient")) {
-                scene.lights.ground_ambient = vec3(ground);
+                scene.lights.ground_ambient = light_color(ground);
             }
             if (const kin::JsonValue* area = lights.find("shadow_area")) {
                 if (area->is_string() && area->as_string() == "auto") {
@@ -2813,7 +3033,8 @@ int main(int argc, char** argv) {
                 }
                 scene.lights.shadow_resolution = static_cast<kin::u32>(lights.number_at("shadow_resolution", 2048));
                 scene.lights.shadow_cascades = static_cast<kin::u32>(lights.number_at("shadow_cascades", 1));
-                scene.lights.shadow_distance = static_cast<float>(lights.number_at("shadow_distance", scene.lights.shadow_distance));
+                scene.lights.shadow_distance =
+                    static_cast<float>(lights.number_at("shadow_distance", scene.lights.shadow_distance));
                 if (cascades_override > 0) {
                     scene.lights.shadow_cascades = static_cast<kin::u32>(cascades_override);
                 }
@@ -2832,22 +3053,28 @@ int main(int argc, char** argv) {
             attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
-                    scene.add_light({.position = vec3(p.find("position")), .color = vec3(p.find("color")),
-                                     .radius = static_cast<float>(p.number_at("radius", 1.0)), .size = static_cast<float>(p.number_at("size", 0.01)),
-                                     .shadow = shadow_of(p.find("shadow"), over.local_res), .id = static_cast<kin::u32>(scene.lights.points.size() + 1)});
+                    scene.add_light({.position = vec3(p.find("position")),
+                                     .color = light_color(p.find("color")),
+                                     .radius = static_cast<float>(p.number_at("radius", 1.0)),
+                                     .size = static_cast<float>(p.number_at("size", 0.01)),
+                                     .shadow = shadow_of(p.find("shadow"), over.local_res),
+                                     .id = static_cast<kin::u32>(scene.lights.points.size() + 1)});
                     if (const kin::JsonValue* a = p.find("attach")) {
-                        attached.push_back({false, scene.lights.points.size() - 1, vec3(a->find("offset")), 0.0f, 0.0f});
+                        attached.push_back(
+                            {false, scene.lights.points.size() - 1, vec3(a->find("offset")), 0.0f, 0.0f});
                     }
                 }
             }
-            // Spot lights (P3b): `position` and `direction` (or `target`), `attach: {offset: [right, up, forward], yaw, pitch}` carries one with
-            // the camera (a flashlight: the offsets are in the camera's frame, `yaw` and `pitch` turn it from the camera's axis).
+            // Spot lights (P3b): `position` and `direction` (or `target`), `attach: {offset: [right, up, forward], yaw,
+            // pitch}` carries one with the camera (a flashlight: the offsets are in the camera's frame, `yaw` and
+            // `pitch` turn it from the camera's axis).
             if (const kin::JsonValue* spots = lights.find("spots")) {
                 for (const kin::JsonValue& sp : spots->items()) {
-                    kin::SpotLight l;
+                    kin::SpotLightSource3D l;
                     l.position = vec3(sp.find("position"));
-                    l.direction = sp.find("target") ? vec3(sp.find("target")) - l.position : vec3(sp.find("direction"), {0.0f, -1.0f, 0.0f});
-                    l.color = vec3(sp.find("color"), {1.0f, 1.0f, 1.0f});
+                    l.direction = sp.find("target") ? vec3(sp.find("target")) - l.position
+                                                    : vec3(sp.find("direction"), {0.0f, -1.0f, 0.0f});
+                    l.color = light_color(sp.find("color"), {1.0f, 1.0f, 1.0f});
                     l.radius = static_cast<float>(sp.number_at("radius", 10.0));
                     l.size = static_cast<float>(sp.number_at("size", 0.01));
                     l.inner_angle = static_cast<float>(sp.number_at("inner", 20.0));
@@ -2856,14 +3083,18 @@ int main(int argc, char** argv) {
                     l.id = static_cast<kin::u32>(scene.lights.spots.size() + 1);
                     scene.add_spot_light(l);
                     if (const kin::JsonValue* a = sp.find("attach")) {
-                        attached.push_back({true, scene.lights.spots.size() - 1, vec3(a->find("offset")), static_cast<float>(a->number_at("yaw", 0.0)),
+                        attached.push_back({true, scene.lights.spots.size() - 1, vec3(a->find("offset")),
+                                            static_cast<float>(a->number_at("yaw", 0.0)),
                                             static_cast<float>(a->number_at("pitch", 0.0))});
                     }
                 }
             }
-            scene.lights.max_shadowed_spots = static_cast<kin::u32>(std::max<double>(lights.number_at("max_shadowed_spots", 4), over.spot_shadows));
-            scene.lights.max_shadowed_points = static_cast<kin::u32>(std::max<double>(lights.number_at("max_shadowed_points", 2), over.point_shadows));
-            scene.lights.local_shadow_resolution = static_cast<kin::u32>(over.local_res > 0 ? over.local_res : lights.number_at("local_shadow_resolution", 1024));
+            scene.lights.max_shadowed_spots =
+                static_cast<kin::u32>(std::max<double>(lights.number_at("max_shadowed_spots", 4), over.spot_shadows));
+            scene.lights.max_shadowed_points =
+                static_cast<kin::u32>(std::max<double>(lights.number_at("max_shadowed_points", 2), over.point_shadows));
+            scene.lights.local_shadow_resolution = static_cast<kin::u32>(
+                over.local_res > 0 ? over.local_res : lights.number_at("local_shadow_resolution", 1024));
             scene.lights.sun_shadow_strength = static_cast<float>(lights.number_at("sun_shadow_strength", 1.0));
             if (const kin::JsonValue* fs = lights.find("fill_shadow")) {
                 scene.lights.fill_shadow.enabled = fs->bool_at("enabled", true);
@@ -2877,13 +3108,14 @@ int main(int argc, char** argv) {
             if (over.moon_shadow) {
                 scene.lights.fill_shadow.enabled = true;
                 scene.lights.fill_shadow.cascades = static_cast<kin::u32>(std::max(1, over.moon_cascades));
-                if (scene.lights.fill.color.x + scene.lights.fill.color.y + scene.lights.fill.color.z <= 0.0f) {
+                if (scene.lights.fill.color.r + scene.lights.fill.color.g + scene.lights.fill.color.b <= 0.0f) {
                     scene.lights.fill = {.direction = {0.3f, 0.8f, 0.5f}, .color = {0.25f, 0.3f, 0.45f}};
                 }
             }
-            // The command line's lights (for the cost tables): in front of the camera, set once it is known (see `attach`).
+            // The command line's lights (for the cost tables): in front of the camera, set once it is known (see
+            // `attach`).
             for (int i = 0; i < over.spots; ++i) {
-                kin::SpotLight l;
+                kin::SpotLightSource3D l;
                 l.color = {2.0f, 1.9f, 1.7f};
                 l.radius = std::clamp(static_cast<float>(bounds.radius()) * 0.6f, 8.0f, 60.0f);
                 l.inner_angle = 18.0f;
@@ -2892,20 +3124,27 @@ int main(int argc, char** argv) {
                 l.id = static_cast<kin::u32>(1000 + i);
                 scene.add_spot_light(l);
                 const float across = static_cast<float>(i) - 0.5f * static_cast<float>(over.spots - 1);
-                attached.push_back({true, scene.lights.spots.size() - 1, {across * 2.5f, 0.6f, 0.5f}, across * 7.0f, -4.0f});
+                attached.push_back(
+                    {true, scene.lights.spots.size() - 1, {across * 2.5f, 0.6f, 0.5f}, across * 7.0f, -4.0f});
             }
             for (int i = 0; i < over.point_lights; ++i) {
-                kin::PointLight l;
+                kin::PointLightSource3D l;
                 l.color = {3.0f, 2.8f, 2.4f};
                 l.radius = std::clamp(static_cast<float>(bounds.radius()) * 0.5f, 8.0f, 40.0f);
                 l.shadow.enabled = i < over.point_shadows;
                 l.id = static_cast<kin::u32>(2000 + i);
                 scene.add_light(l);
-                attached.push_back({false, scene.lights.points.size() - 1, {(static_cast<float>(i) - 0.5f * static_cast<float>(over.point_lights - 1)) * 6.0f, 1.5f, -(l.radius * 0.4f + 2.0f)}, 0.0f, 0.0f});
+                attached.push_back({false,
+                                    scene.lights.points.size() - 1,
+                                    {(static_cast<float>(i) - 0.5f * static_cast<float>(over.point_lights - 1)) * 6.0f,
+                                     1.5f, -(l.radius * 0.4f + 2.0f)},
+                                    0.0f,
+                                    0.0f});
             }
             if (any_ecs) {
-                // The entities start again and take the steps the frame's index stands for (60 a second, 240 before the picture, which
-                // is the frame 0, `ecs_lead` steps in): every frame is the same whatever order the run asks for them in.
+                // The entities start again and take the steps the frame's index stands for (60 a second, 240 before the
+                // picture, which is the frame 0, `ecs_lead` steps in): every frame is the same whatever order the run
+                // asks for them in.
                 const int steps = std::max(0, time + ecs_lead);
                 for (Placed& p : placed) {
                     if (p.entity) {
@@ -2916,8 +3155,10 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < steps; ++i) {
                     for (Placed& p : placed) {
                         if (p.entity && p.ramp) {
-                            const double t = std::min(1.0, static_cast<double>(i) / 60.0 / std::max(p.parameter_seconds, 1e-6));
-                            p.entity.get_mut<kin::Animator3D>()->params.set_float("speed", static_cast<float>(p.parameter + (p.parameter_to - p.parameter) * t));
+                            const double t =
+                                std::min(1.0, static_cast<double>(i) / 60.0 / std::max(p.parameter_seconds, 1e-6));
+                            p.entity.get_mut<kin::Animator3D>()->params.set_float(
+                                "speed", static_cast<float>(p.parameter + (p.parameter_to - p.parameter) * t));
                         }
                     }
                     ecs_state.animate(1.0f / 60.0f);
@@ -2930,18 +3171,23 @@ int main(int argc, char** argv) {
                     continue; // an entity: collected above
                 }
                 if (p.animated) {
-                    const kin::Skeleton& skeleton = p.model.skeletons[0];
+                    const kin::Skeleton3D& skeleton = p.model.skeletons[0];
                     const double seconds = p.fixed_time ? p.time : static_cast<double>(time) / 60.0 * p.speed + p.time;
-                    kin::Pose pose;
+                    kin::Pose3D pose;
                     if (!p.blend.empty()) {
-                        // A 1D blend: a player at the parameter's value for the frame, run for the seconds (its phase wraps).
+                        // A 1D blend: a player at the parameter's value for the frame, run for the seconds (its phase
+                        // wraps).
                         std::vector<kin::BlendPoint3D> points;
                         for (const Placed::BlendPoint& point : p.blend) {
                             points.push_back({&p.model.clips[point.clip], point.position});
                         }
-                        const double ramp = p.ramp ? std::clamp((static_cast<double>(time) + ecs_lead) / 60.0 / std::max(p.parameter_seconds, 1e-6), 0.0, 1.0) : 0.0;
+                        const double ramp = p.ramp ? std::clamp((static_cast<double>(time) + ecs_lead) / 60.0 /
+                                                                    std::max(p.parameter_seconds, 1e-6),
+                                                                0.0, 1.0)
+                                                   : 0.0;
                         kin::AnimationPlayer3D player{&skeleton};
-                        player.play_blend(points, static_cast<float>(p.parameter + (p.parameter_to - p.parameter) * ramp), p.loop);
+                        player.play_blend(
+                            points, static_cast<float>(p.parameter + (p.parameter_to - p.parameter) * ramp), p.loop);
                         player.update(static_cast<float>(seconds));
                         pose = player.pose();
                     } else {
@@ -2991,7 +3237,8 @@ int main(int argc, char** argv) {
             if (is_stage) {
                 stage.draw(scene);
             }
-            // The sky, fog and time of day last, so that a time of day's sun and ambient replace the scene's own lights.
+            // The sky, fog and time of day last, so that a time of day's sun and ambient replace the scene's own
+            // lights.
             scene.sky = {};
             merge_sky(scene.sky, doc.find("sky"), over);
             scene.fog = {};
@@ -3010,9 +3257,9 @@ int main(int argc, char** argv) {
             report << ",";
         }
         first_scene = false;
-        report << "\n  {\"name\": " << quoted(name) << ", \"load_ms\": " << load_ms << ", \"peak_mb\": " << peak_mb() << ", \"bounds\": [[" << bounds.min.x << ", "
-               << bounds.min.y << ", " << bounds.min.z << "], [" << bounds.max.x << ", " << bounds.max.y << ", " << bounds.max.z
-               << "]], \"cameras\": [";
+        report << "\n  {\"name\": " << quoted(name) << ", \"load_ms\": " << load_ms << ", \"peak_mb\": " << peak_mb()
+               << ", \"bounds\": [[" << bounds.min.x << ", " << bounds.min.y << ", " << bounds.min.z << "], ["
+               << bounds.max.x << ", " << bounds.max.y << ", " << bounds.max.z << "]], \"cameras\": [";
         bool first_camera = true;
         const kin::JsonValue* cameras = doc.find("cameras");
         for (const kin::JsonValue& c : cameras ? cameras->items() : kin::JsonValue::Array{}) {
@@ -3024,17 +3271,21 @@ int main(int argc, char** argv) {
                 // Framed round the scene's bounds, from yaw (round +Y, from +Z) and pitch.
                 target = bounds.center();
                 const float radius = std::max(0.01f, bounds.radius());
-                const float distance = radius / std::sin(fov * 3.14159265f / 360.0f) * static_cast<float>(fit->number_at("margin", 1.05));
+                const float distance =
+                    radius / std::sin(fov * 3.14159265f / 360.0f) * static_cast<float>(fit->number_at("margin", 1.05));
                 const float yaw = static_cast<float>(fit->number_at("yaw", 0.0)) * 3.14159265f / 180.0f;
                 const float pitch = static_cast<float>(fit->number_at("pitch", 30.0)) * 3.14159265f / 180.0f;
-                eye = target + Vec3f{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * distance;
+                eye =
+                    target +
+                    Vec3f{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)} * distance;
             }
             // `at_sun` / `at_moon`: look toward the sun (or moon) of the camera's time of day, plus `target_offset`.
             if (c.bool_at("at_sun") || c.bool_at("at_moon")) {
                 kin::TimeOfDay3D day;
                 merge_time_of_day(day, doc.find("time_of_day"), camera_hours >= 0.0 ? camera_hours : over.time_hours);
                 const kin::SkyState3D state = kin::evaluate(day);
-                target = eye + (c.bool_at("at_sun") ? state.sun_direction : state.moon_direction) * 100.0f + vec3(c.find("target_offset"));
+                target = eye + (c.bool_at("at_sun") ? state.sun_direction : state.moon_direction) * 100.0f +
+                         vec3(c.find("target_offset"));
             }
             // The scene at `time` (frames; 0 is the picture, earlier is negative), the camera
             // having panned `pan` units a frame to reach `eye` at 0.
@@ -3051,11 +3302,13 @@ int main(int argc, char** argv) {
             const auto attach = [&] {
                 const kin::Camera3D& cam = scene.camera;
                 for (const Attached& a : attached) {
-                    const Vec3f position = cam.position + cam.right() * a.offset.x + cam.up() * a.offset.y + cam.forward() * a.offset.z;
+                    const Vec3f position =
+                        cam.position + cam.right() * a.offset.x + cam.up() * a.offset.y + cam.forward() * a.offset.z;
                     if (a.spot) {
-                        kin::SpotLight& l = scene.lights.spots[a.index];
+                        kin::SpotLightSource3D& l = scene.lights.spots[a.index];
                         l.position = position;
-                        const kin::Quatf turn = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, a.yaw) * kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, a.pitch);
+                        const kin::Quatf turn = kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, a.yaw) *
+                                                kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, a.pitch);
                         l.direction = cam.rotation.rotate(turn.rotate({0.0f, 0.0f, -1.0f}));
                     } else {
                         scene.lights.points[a.index].position = position;
@@ -3069,7 +3322,8 @@ int main(int argc, char** argv) {
                     // `follow: {eye, target}`: offsets from the character's feet (the camera goes where it goes).
                     if (const kin::JsonValue* follow = c.find("follow")) {
                         const Vec3f feet = is_walker ? walker.feet() : climber.feet();
-                        scene.camera = kin::Camera3D::look_at(feet + vec3(follow->find("eye")), feet + vec3(follow->find("target")), fov);
+                        scene.camera = kin::Camera3D::look_at(feet + vec3(follow->find("eye")),
+                                                              feet + vec3(follow->find("target")), fov);
                         scene.camera.z_near = static_cast<float>(c.number_at("near", 0.05));
                         attach();
                         return;
@@ -3080,9 +3334,10 @@ int main(int argc, char** argv) {
                 attach();
             };
             if (!over.hitch.empty()) {
-                // The first renders after a feature goes on at runtime: pipelines and targets made on first use. Steady state first (the
-                // scene as it is, 40 renders), then the feature on, each of the next renders timed alone: wall time of render + draw + present
-                // on the CPU, render()'s own, and the time until the GPU has finished it. Then 40 more, the steady cost with it on.
+                // The first renders after a feature goes on at runtime: pipelines and targets made on first use. Steady
+                // state first (the scene as it is, 40 renders), then the feature on, each of the next renders timed
+                // alone: wall time of render + draw + present on the CPU, render()'s own, and the time until the GPU
+                // has finished it. Then 40 more, the steady cost with it on.
                 const std::string& feature = over.hitch;
                 const auto apply = [&](bool on) {
                     if (feature == "ao") {
@@ -3136,7 +3391,9 @@ int main(int argc, char** argv) {
                     timed(f, false);
                 }
                 made = 0;
-                std::printf("  hitch %s %s: first renders with it on (ms: CPU wall of render+present, render(), until the GPU is done):", name.c_str(), feature.c_str());
+                std::printf("  hitch %s %s: first renders with it on (ms: CPU wall of render+present, render(), until "
+                            "the GPU is done):",
+                            name.c_str(), feature.c_str());
                 for (int f = 0; f < 3; ++f) {
                     const auto t = timed(40 + f, true);
                     std::printf("  [%.2f %.2f %.2f]", t[0], t[1], t[2]);
@@ -3149,8 +3406,8 @@ int main(int argc, char** argv) {
                     own.push_back(t[1]);
                     done.push_back(t[2]);
                 }
-                std::printf("   steady with it on: median [%.2f %.2f %.2f]\n", summarize(wall).median, summarize(own).median,
-                            summarize(done).median);
+                std::printf("   steady with it on: median [%.2f %.2f %.2f]\n", summarize(wall).median,
+                            summarize(own).median, summarize(done).median);
                 std::exit(0);
             }
             // A temporal history starts afresh at each camera, and runs long enough to settle.
@@ -3184,11 +3441,9 @@ int main(int argc, char** argv) {
                     cut_ms.push_back(r3d.debug_stats().cluster_ms);
                     cut_upload_ms.push_back(r3d.debug_stats().cluster_upload_ms);
                     gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
-
                 }
             }
             wait_for_gpu();
-
 
             // The picture.
             pose(0);
@@ -3196,7 +3451,7 @@ int main(int argc, char** argv) {
             scene.debug.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
             r3d.render(view, scene);
             scene.debug.stats_readback = false;
-            const kin::Render3DDebugStats stats = r3d.debug_stats();
+            const kin::RenderDebugStats3D stats = r3d.debug_stats();
             renderer.draw_texture(view.texture(), full);
             kin::Image image;
             if (!renderer.read_rgba(full, image.rgba, image.size)) {
@@ -3210,7 +3465,8 @@ int main(int argc, char** argv) {
             const fs::path png = out / name / (camera_name + ".png");
             kin::save_image(image, png);
             if (over.flicker > 0) {
-                // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change from one to the next?
+                // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change from
+                // one to the next?
                 std::vector<kin::u8> previous = image.rgba;
                 double sum_mean = 0, worst = 0, over8 = 0;
                 for (int k = 1; k <= over.flicker; ++k) {
@@ -3238,7 +3494,8 @@ int main(int argc, char** argv) {
                     }
                     previous = next_image.rgba;
                 }
-                std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(), sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
+                std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(),
+                            sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
             }
             if (over.vram_cycle) {
                 const double on_mb = gpu_used_mb();
@@ -3257,9 +3514,11 @@ int main(int argc, char** argv) {
                     released += r3d.debug_stats().targets_released;
                 }
                 wait_for_gpu();
-                std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
+                std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with "
+                            "them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
                             name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
-                            static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0, static_cast<unsigned long long>(released));
+                            static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0,
+                            static_cast<unsigned long long>(released));
                 pose(0);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 r3d.render(view, scene);
@@ -3277,7 +3536,8 @@ int main(int argc, char** argv) {
                     renderer.push_render_target(target);
                     renderer.clear(kin::Color::rgb(0, 0, 0));
                     r3d.render(big, scene);
-                    const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x), static_cast<float>(big_size.y)};
+                    const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x),
+                                              static_cast<float>(big_size.y)};
                     renderer.draw_texture(big.texture(), big_rect);
                     renderer.read_rgba(big_rect, large.rgba, large.size);
                     renderer.pop_render_target();
@@ -3291,48 +3551,62 @@ int main(int argc, char** argv) {
                 }
             }
             const Summary cpu_s = summarize(cpu), gpu_s = summarize(gpu);
-            std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u shadow casters (%u cascades)\n",
+            std::printf("  %-14s render() %7.3f ms  GPU %7.3f ms  (p10-p90 %.3f-%.3f)  %u draws, %llu triangles, %u "
+                        "shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
             if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
-                std::printf("                 lights: %u spots, %u shadow maps (%u drawn, %u cached) with %u draws of %u casters, %u moon cascades, %.1f MB of maps%s\n",
-                            stats.spots, stats.local_shadow_maps, stats.local_shadow_drawn, stats.local_shadow_cached, stats.local_shadow_draws,
-                            stats.local_shadow_casters, stats.moon_cascades, static_cast<double>(stats.local_shadow_bytes) / 1048576.0,
+                std::printf("                 lights: %u spots, %u shadow maps (%u drawn, %u cached) with %u draws of "
+                            "%u casters, %u moon cascades, %.1f MB of maps%s\n",
+                            stats.spots, stats.local_shadow_maps, stats.local_shadow_drawn, stats.local_shadow_cached,
+                            stats.local_shadow_draws, stats.local_shadow_casters, stats.moon_cascades,
+                            static_cast<double>(stats.local_shadow_bytes) / 1048576.0,
                             stats.lights_variant ? ", light shaders" : "");
             }
             if (stats.particles_submitted > 0) {
-                std::printf("                 particles: %u submitted (%u weather), %u drawn, %u batches (%u soft), %u dropped, CPU %.3f ms\n",
-                            stats.particles_submitted, stats.weather_particles, stats.particles_drawn, stats.particle_batches, stats.particle_soft,
-                            stats.particles_dropped, stats.particle_cpu_ms);
+                std::printf("                 particles: %u submitted (%u weather), %u drawn, %u batches (%u soft), %u "
+                            "dropped, CPU %.3f ms\n",
+                            stats.particles_submitted, stats.weather_particles, stats.particles_drawn,
+                            stats.particle_batches, stats.particle_soft, stats.particles_dropped,
+                            stats.particle_cpu_ms);
             }
             if (stats.skinned_copies > 0) {
-                std::printf("                 skinned: %u copies seen in %u draws, %u joint matrices uploaded, %u copies culled\n", stats.skinned_copies,
-                            stats.skinned_draws, stats.skin_matrices, stats.culled);
+                std::printf("                 skinned: %u copies seen in %u draws, %u joint matrices uploaded, %u "
+                            "copies culled\n",
+                            stats.skinned_copies, stats.skinned_draws, stats.skin_matrices, stats.culled);
             }
             if (stats.cluster_copies > 0 && stats.cluster_gpu) {
                 const Summary cut_s = summarize(cut_ms);
-                std::printf("                 clusters (GPU cut): %u copies, %llu clusters tested, %u compute dispatches, %.3f MB handed over, CPU set-up %.3f ms (render() %.3f)",
-                            stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested), stats.cluster_dispatches,
-                            static_cast<double>(stats.cluster_upload_bytes) / 1048576.0, cut_s.median, cpu_s.median);
+                std::printf("                 clusters (GPU cut): %u copies, %llu clusters tested, %u compute "
+                            "dispatches, %.3f MB handed over, CPU set-up %.3f ms (render() %.3f)",
+                            stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested),
+                            stats.cluster_dispatches, static_cast<double>(stats.cluster_upload_bytes) / 1048576.0,
+                            cut_s.median, cpu_s.median);
                 if (over.readback) {
-                    std::printf("; read back: %u clusters drawn, %llu triangles in the camera's cut, %llu gathered for all passes, %u clusters dropped",
+                    std::printf("; read back: %u clusters drawn, %llu triangles in the camera's cut, %llu gathered for "
+                                "all passes, %u clusters dropped",
                                 stats.clusters_drawn, static_cast<unsigned long long>(stats.triangles),
                                 static_cast<unsigned long long>(stats.cluster_triangles_all), stats.cluster_overflow);
                     if (stats.occlusion) {
-                        std::printf("; occlusion: %u clusters in the first pass, %u occluded (%llu triangles), %u drawn for nothing (%llu triangles)",
-                                    stats.clusters_first_pass, stats.clusters_occluded, static_cast<unsigned long long>(stats.triangles_occluded),
-                                    stats.clusters_wasted, static_cast<unsigned long long>(stats.triangles_wasted));
+                        std::printf("; occlusion: %u clusters in the first pass, %u occluded (%llu triangles), %u "
+                                    "drawn for nothing (%llu triangles)",
+                                    stats.clusters_first_pass, stats.clusters_occluded,
+                                    static_cast<unsigned long long>(stats.triangles_occluded), stats.clusters_wasted,
+                                    static_cast<unsigned long long>(stats.triangles_wasted));
                     }
                 }
                 if (stats.occlusion) {
-                    std::printf("; occlusion on (%u pyramid levels, %u dispatches to build it)", stats.occlusion_levels, stats.occlusion_dispatches);
+                    std::printf("; occlusion on (%u pyramid levels, %u dispatches to build it)", stats.occlusion_levels,
+                                stats.occlusion_dispatches);
                 }
                 std::printf("\n");
             } else if (stats.cluster_copies > 0) {
                 const Summary cut_s = summarize(cut_ms);
-                std::printf("                 clusters: %u copies cut, %llu tested, %u drawn, %.2f MB of indices uploaded, cut %.3f ms (of which compacting and uploading %.3f; render() %.3f)\n",
-                            stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested), stats.clusters_drawn,
-                            static_cast<double>(stats.cluster_upload_bytes) / 1048576.0, cut_s.median, summarize(cut_upload_ms).median, cpu_s.median);
+                std::printf("                 clusters: %u copies cut, %llu tested, %u drawn, %.2f MB of indices "
+                            "uploaded, cut %.3f ms (of which compacting and uploading %.3f; render() %.3f)\n",
+                            stats.cluster_copies, static_cast<unsigned long long>(stats.clusters_tested),
+                            stats.clusters_drawn, static_cast<double>(stats.cluster_upload_bytes) / 1048576.0,
+                            cut_s.median, summarize(cut_upload_ms).median, cpu_s.median);
             } else if (scene.lod.enabled) {
                 std::printf("                 lod copies by level:");
                 for (kin::u32 l = 0; l < kin::max_mesh_levels; ++l) {
@@ -3346,37 +3620,52 @@ int main(int argc, char** argv) {
                 report << ",";
             }
             first_camera = false;
-            report << "\n   {\"name\": " << quoted(camera_name) << ", \"png\": " << quoted(fs::relative(png, out).generic_string())
-                   << ", \"eye\": [" << eye.x << ", " << eye.y << ", " << eye.z << "], \"target\": [" << target.x << ", " << target.y
-                   << ", " << target.z << "], \"fov\": " << fov
-                   << ", \"first_ms\": " << first_ms << ", \"cpu_ms\": " << json_summary(cpu_s) << ", \"gpu_ms\": " << json_summary(gpu_s)
-                   << ", \"draws\": " << stats.draws << ", \"instances\": " << stats.instances << ", \"culled\": " << stats.culled
-                   << ", \"triangles\": " << stats.triangles << ", \"shadow_draws\": " << stats.shadow_draws
-                   << ", \"shadow_casters\": " << stats.shadow_casters << ", \"shadow_cascades\": " << stats.shadow_cascades
-                   << ", \"cascade_casters\": " << json_list(stats.cascade_casters) << ", \"ao_draws\": " << stats.ao_draws
-                   << ", \"ao_instances\": " << stats.ao_instances
-                   << ", \"ao_dispatches\": " << stats.ao_dispatches << ", \"contact_dispatches\": " << stats.contact_dispatches
+            report << "\n   {\"name\": " << quoted(camera_name)
+                   << ", \"png\": " << quoted(fs::relative(png, out).generic_string()) << ", \"eye\": [" << eye.x
+                   << ", " << eye.y << ", " << eye.z << "], \"target\": [" << target.x << ", " << target.y << ", "
+                   << target.z << "], \"fov\": " << fov << ", \"first_ms\": " << first_ms
+                   << ", \"cpu_ms\": " << json_summary(cpu_s) << ", \"gpu_ms\": " << json_summary(gpu_s)
+                   << ", \"draws\": " << stats.draws << ", \"instances\": " << stats.instances
+                   << ", \"culled\": " << stats.culled << ", \"triangles\": " << stats.triangles
+                   << ", \"shadow_draws\": " << stats.shadow_draws << ", \"shadow_casters\": " << stats.shadow_casters
+                   << ", \"shadow_cascades\": " << stats.shadow_cascades
+                   << ", \"cascade_casters\": " << json_list(stats.cascade_casters)
+                   << ", \"ao_draws\": " << stats.ao_draws << ", \"ao_instances\": " << stats.ao_instances
+                   << ", \"ao_dispatches\": " << stats.ao_dispatches
+                   << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
             if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
-                report << ", \"spots\": " << stats.spots << ", \"local_shadow_maps\": " << stats.local_shadow_maps << ", \"local_shadow_drawn\": "
-                       << stats.local_shadow_drawn << ", \"local_shadow_cached\": " << stats.local_shadow_cached << ", \"local_shadow_draws\": "
-                       << stats.local_shadow_draws << ", \"local_shadow_casters\": " << stats.local_shadow_casters << ", \"moon_cascades\": "
-                       << stats.moon_cascades << ", \"local_shadow_mb\": " << static_cast<double>(stats.local_shadow_bytes) / 1048576.0;
+                report << ", \"spots\": " << stats.spots << ", \"local_shadow_maps\": " << stats.local_shadow_maps
+                       << ", \"local_shadow_drawn\": " << stats.local_shadow_drawn
+                       << ", \"local_shadow_cached\": " << stats.local_shadow_cached
+                       << ", \"local_shadow_draws\": " << stats.local_shadow_draws
+                       << ", \"local_shadow_casters\": " << stats.local_shadow_casters
+                       << ", \"moon_cascades\": " << stats.moon_cascades
+                       << ", \"local_shadow_mb\": " << static_cast<double>(stats.local_shadow_bytes) / 1048576.0;
             }
             if (stats.particles_submitted > 0) {
-                report << ", \"particles_submitted\": " << stats.particles_submitted << ", \"particles_drawn\": " << stats.particles_drawn
-                       << ", \"particle_batches\": " << stats.particle_batches << ", \"particle_soft\": " << stats.particle_soft
-                       << ", \"weather_particles\": " << stats.weather_particles << ", \"particle_cpu_ms\": " << stats.particle_cpu_ms;
+                report << ", \"particles_submitted\": " << stats.particles_submitted
+                       << ", \"particles_drawn\": " << stats.particles_drawn
+                       << ", \"particle_batches\": " << stats.particle_batches
+                       << ", \"particle_soft\": " << stats.particle_soft
+                       << ", \"weather_particles\": " << stats.weather_particles
+                       << ", \"particle_cpu_ms\": " << stats.particle_cpu_ms;
             }
             if (stats.cluster_copies > 0) {
-                report << ", \"cluster_gpu\": " << (stats.cluster_gpu ? "true" : "false") << ", \"cluster_dispatches\": " << stats.cluster_dispatches
-                       << ", \"cluster_overflow\": " << stats.cluster_overflow << ", \"cluster_copies\": " << stats.cluster_copies << ", \"clusters_tested\": " << stats.clusters_tested
-                       << ", \"clusters_drawn\": " << stats.clusters_drawn << ", \"cluster_upload_bytes\": " << stats.cluster_upload_bytes
+                report << ", \"cluster_gpu\": " << (stats.cluster_gpu ? "true" : "false")
+                       << ", \"cluster_dispatches\": " << stats.cluster_dispatches
+                       << ", \"cluster_overflow\": " << stats.cluster_overflow
+                       << ", \"cluster_copies\": " << stats.cluster_copies
+                       << ", \"clusters_tested\": " << stats.clusters_tested
+                       << ", \"clusters_drawn\": " << stats.clusters_drawn
+                       << ", \"cluster_upload_bytes\": " << stats.cluster_upload_bytes
                        << ", \"cluster_ms\": " << json_summary(summarize(cut_ms))
                        << ", \"cluster_upload_ms\": " << json_summary(summarize(cut_upload_ms));
                 if (stats.occlusion) {
-                    report << ", \"occlusion\": true, \"clusters_first_pass\": " << stats.clusters_first_pass << ", \"clusters_occluded\": " << stats.clusters_occluded
-                           << ", \"triangles_occluded\": " << stats.triangles_occluded << ", \"clusters_wasted\": " << stats.clusters_wasted
+                    report << ", \"occlusion\": true, \"clusters_first_pass\": " << stats.clusters_first_pass
+                           << ", \"clusters_occluded\": " << stats.clusters_occluded
+                           << ", \"triangles_occluded\": " << stats.triangles_occluded
+                           << ", \"clusters_wasted\": " << stats.clusters_wasted
                            << ", \"triangles_wasted\": " << stats.triangles_wasted;
                 }
             }

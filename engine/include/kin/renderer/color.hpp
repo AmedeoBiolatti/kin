@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <kin/core/types.hpp>
 
 namespace kin {
@@ -12,13 +13,9 @@ struct Color {
 
     friend constexpr bool operator==(Color, Color) = default;
 
-    static constexpr Color rgb(u8 red, u8 green, u8 blue) {
-        return {red, green, blue, 255};
-    }
+    static constexpr Color rgb(u8 red, u8 green, u8 blue) { return {red, green, blue, 255}; }
 
-    static constexpr Color rgba(u8 red, u8 green, u8 blue, u8 alpha) {
-        return {red, green, blue, alpha};
-    }
+    static constexpr Color rgba(u8 red, u8 green, u8 blue, u8 alpha) { return {red, green, blue, alpha}; }
 };
 
 namespace colors {
@@ -67,6 +64,36 @@ struct LinearColor {
 
 LinearColor to_linear(Color c);
 Color to_srgb(LinearColor c); // clamped to 0..1 and rounded
+
+// RGB radiance/albedo in linear light, without alpha. Unlike a position or
+// direction this adds as light; values above 1 preserve HDR energy. No implicit
+// conversion from Color, LinearColor or a geometry vector.
+struct LinearRgb {
+    f32 r = 0.0f;
+    f32 g = 0.0f;
+    f32 b = 0.0f;
+
+    friend constexpr bool operator==(LinearRgb, LinearRgb) = default;
+    friend constexpr LinearRgb operator+(LinearRgb a, LinearRgb b) { return {a.r + b.r, a.g + b.g, a.b + b.b}; }
+    friend constexpr LinearRgb operator-(LinearRgb a, LinearRgb b) { return {a.r - b.r, a.g - b.g, a.b - b.b}; }
+    friend constexpr LinearRgb operator*(LinearRgb c, f32 scale) { return {c.r * scale, c.g * scale, c.b * scale}; }
+    friend constexpr LinearRgb operator*(f32 scale, LinearRgb c) { return c * scale; }
+    friend constexpr LinearRgb operator*(LinearRgb a, LinearRgb b) { return {a.r * b.r, a.g * b.g, a.b * b.b}; }
+    constexpr LinearColor with_alpha(f32 alpha = 1.0f) const { return {r, g, b, alpha}; }
+};
+
+constexpr LinearRgb linear_rgb(LinearColor c) {
+    return {c.r, c.g, c.b};
+}
+inline LinearRgb to_linear_rgb(Color c) {
+    return linear_rgb(to_linear(c));
+}
+// Deduction keeps untyped RGB brace triples on the existing Color overload.
+template <typename T>
+    requires std::same_as<T, LinearRgb>
+constexpr LinearRgb mix(T a, T b, f32 t) {
+    return a + (b - a) * t;
+}
 
 // OKLab (Björn Ottosson): lightness `l` (0 black, 1 white) and two opponent
 // axes, `a` green to red, `b` blue to yellow. Even steps in it look even.

@@ -482,7 +482,7 @@ int climbing() {
 
 
 struct RagdollRig {
-    Skeleton skeleton = skin_fixtures::make_biped();
+    Skeleton3D skeleton = skin_fixtures::make_biped();
     RagdollDesc desc;
     std::vector<Mat4f> model_world;
     RagdollRig() {

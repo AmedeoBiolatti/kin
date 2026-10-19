@@ -163,7 +163,7 @@ if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
 if(KIN_EXPERIMENTAL_3D)
-    # glTF 2.0 models (kin/render3d/model.hpp). A single C header, MIT.
+    # glTF 2.0 models (kin/render3d/model3d.hpp). A single C header, MIT.
     FetchContent_Declare(cgltf
         URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.14.tar.gz
         URL_HASH SHA256=2f3c97a6b989943f50e7d7f228688f6558fe37b1411c13a350e3560d061707d8
@@ -175,7 +175,7 @@ if(KIN_EXPERIMENTAL_3D)
     endif()
     target_include_directories(kin_engine SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
-    # Levels of detail (kin/render3d/mesh_lod.hpp) and clusters (mesh_clusters.hpp): the simplifier, the vertex-cache
+    # Levels of detail (kin/render3d/mesh_lod3d.hpp) and clusters (mesh_clusters3d.hpp): the simplifier, the vertex-cache
     # optimiser, the meshlet builder and the cluster partitioner of meshoptimizer (MIT), compiled into the engine;
     # its other sources (codecs, rasteriser, stripifier) are not used.
     FetchContent_Declare(meshoptimizer
@@ -281,35 +281,15 @@ target_link_libraries(kin_engine PRIVATE kin_audio_codecs)
 # the engine (kin_embed_files), so a game needs no shader files beside it.
 # Without glslc the engine still builds; the GPU backend then has no shaders and
 # kin falls back to SDL_Renderer. Shipping builds require them (KIN_REQUIRE_GPU_SHADERS).
-set(_kin_gpu_shader_sources)
-foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader_geometry.vert
-              overdraw_count.frag overdraw_heat.frag shape.frag shape.vert sdf_shape.frag sdf_shape.vert
-              distance_field.frag mask_composite.frag mask_stencil.frag color_output.frag
-              pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
-              pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
-              transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
-              transition_iris.frag transition_crossfade.frag mesh_indexed.vert mesh_unlit_indexed.vert mesh_unlit_textured_indexed.vert prepass_indexed.vert mesh.vert mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag
-              mesh_unlit.vert mesh_unlit_textured.vert mesh_unlit.frag mesh_unlit_textured.frag mesh_unlit_mask.frag mesh_unlit_textured_mask.frag
-              fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp
-              prepass.vert prepass.frag prepass_mask.frag gtao.comp gtao_chain.comp ao_depth_chain.comp ao_blur.comp ao_blur_chain.comp ao_blur_both.comp ao_blur_both_chain.comp contact.comp
-              prepass_velocity.vert prepass_velocity.frag prepass_velocity_mask.frag taa.comp mesh_velocity.vert mesh_velocity.frag
-              cluster_cull.comp cluster_cull_occ.comp cluster_scan.comp cluster_args.comp cluster_gather.comp
-              hiz_depth.comp hiz_reduce.comp
-              mesh_skinned.vert mesh_skinned_velocity.vert shadow_skinned.vert shadow_mask_skinned.vert
-              prepass_skinned.vert prepass_velocity_skinned.vert
-              mesh_fog.frag mesh_velocity_fog.frag mesh_light.frag mesh_light_fog.frag mesh_velocity_light.frag mesh_velocity_light_fog.frag sky.frag sky_velocity.frag sky_velocity_only.frag sky_env.frag view_output_dither.frag
-
-              particle.vert particle.frag particle_soft.frag)
-    list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
-endforeach()
+include(kin_gpu_shaders)
 # The .spv files stay in the build too, for tests that read every engine shader.
-kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${_kin_gpu_shader_sources})
+kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${KIN_GPU_SHADER_SOURCES})
 kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
 if(KIN_GLSLC AND NOT KIN_SHIPPING)
     # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
     target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
 endif()
-list(LENGTH _kin_gpu_shader_sources _kin_gpu_wanted)
+list(LENGTH KIN_GPU_SHADER_SOURCES _kin_gpu_wanted)
 list(LENGTH _kin_gpu_spv _kin_gpu_built)
 if(NOT _kin_gpu_built EQUAL _kin_gpu_wanted)
     if(KIN_REQUIRE_GPU_SHADERS)

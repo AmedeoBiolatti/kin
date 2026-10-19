@@ -2,9 +2,9 @@
 
 #include "props.hpp"
 
-#include <kin/render3d/model.hpp>
-#include <kin/render3d/assets3d.hpp>
 #include <array>
+#include <kin/render3d/assets3d.hpp>
+#include <kin/render3d/model3d.hpp>
 #include <vector>
 
 namespace summit {
@@ -23,7 +23,7 @@ public:
     u64 instance_record_bytes() const { return _instance_record_bytes; }
 
 private:
-    std::array<kin::AssetHandle<kin::Model>, PropCount> _models;
+    std::array<kin::AssetHandle<kin::Model3D>, PropCount> _models;
     std::vector<kin::ModelBatch3D> _batches;
     u32 _scenery_instances = 0;
     u64 _scenery_triangles = 0, _instance_record_bytes = 0;

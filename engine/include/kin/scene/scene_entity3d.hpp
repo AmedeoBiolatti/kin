@@ -10,7 +10,7 @@ struct SceneEntity3D {
     EcsEntityHandle entity;
     u64 instance = 0; // runtime lease; changes when a pooled slot is recycled
     explicit operator bool() const { return session && entity.id; }
-    EcsEntity resolve(EcsWorld& world)const; // checked within a system's live world
+    EcsEntity resolve(EcsWorld& world) const; // checked within a system's live world
     friend bool operator==(const SceneEntity3D&, const SceneEntity3D&) = default;
 };
 } // namespace kin

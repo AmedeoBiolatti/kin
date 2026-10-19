@@ -1,16 +1,15 @@
 #pragma once
 
-// Procedural skinned characters for Sponza Walk (docs/3d_plan.md, P1a and P1b), made in code so that the viewer needs no
-// download: make_character, a tube bound to a chain of three joints with three clips (P1a); and make_person, a person on 18
-// joints (a leg and an arm each side, arms out, 1.95 m, facing +Z) with the same clip names (and Walk, Run and Fall, which the
-// character controller section blends by speed, P2c), which the inverse kinematics section poses (P1b). P1c extends them
-// (a real model).
-#include <kin/render3d/ik.hpp>
-#include <kin/render3d/model.hpp>
-#include <kin/render3d/renderer3d.hpp>
-
+// Procedural skinned characters for Sponza Walk (docs/3d_plan.md, P1a and P1b), made in code so that the viewer needs
+// no download: make_character, a tube bound to a chain of three joints with three clips (P1a); and make_person, a
+// person on 18 joints (a leg and an arm each side, arms out, 1.95 m, facing +Z) with the same clip names (and Walk, Run
+// and Fall, which the character controller section blends by speed, P2c), which the inverse kinematics section poses
+// (P1b). P1c extends them (a real model).
 #include <algorithm>
 #include <cmath>
+#include <kin/render3d/ik3d.hpp>
+#include <kin/render3d/model3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
 #include <memory>
 #include <optional>
 #include <string>
@@ -19,16 +18,17 @@
 namespace sponza_walk {
 using namespace kin;
 
-inline std::shared_ptr<const Model> make_character(Renderer3D& r3d, float length = 1.8f, float radius = 0.16f) {
+inline std::shared_ptr<const Model3D> make_character(Renderer3D& r3d, float length = 1.8f, float radius = 0.16f) {
     constexpr int rings = 33, segments = 16;
     const float third = length / 3.0f;
-    MeshData mesh;
+    MeshData3D mesh;
     for (int r = 0; r < rings; ++r) {
         const float y = length * float(r) / float(rings - 1);
         for (int s = 0; s <= segments; ++s) {
             const float a = 2.0f * 3.14159265f * float(s) / float(segments);
             const Vec3f n{std::cos(a), 0.0f, -std::sin(a)};
-            mesh.vertices.push_back({{n.x * radius, y, n.z * radius}, n, {float(s) / float(segments), float(r) / float(rings - 1)}});
+            mesh.vertices.push_back(
+                {{n.x * radius, y, n.z * radius}, n, {float(s) / float(segments), float(r) / float(rings - 1)}});
             float w[3];
             float sum = 0.0f;
             for (int j = 0; j < 3; ++j) {
@@ -39,7 +39,7 @@ inline std::shared_ptr<const Model> make_character(Renderer3D& r3d, float length
                 w[0] = w[1] = 0.0f;
                 w[2] = sum = 1.0f;
             }
-            MeshSkinVertex k;
+            MeshSkinVertex3D k;
             k.joints = {0, 1, 2, 0};
             k.weights = {w[0] / sum, w[1] / sum, w[2] / sum, 0.0f};
             mesh.skin.push_back(k);
@@ -52,14 +52,15 @@ inline std::shared_ptr<const Model> make_character(Renderer3D& r3d, float length
             mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
         }
     }
-    auto model = std::make_shared<Model>();
-    Skeleton sk;
+    auto model = std::make_shared<Model3D>();
+    Skeleton3D sk;
     sk.names = {"hips", "spine", "head"};
     sk.parents = {-1, 0, 1};
     sk.rest.resize(3);
     sk.rest[1].translation = {0.0f, third, 0.0f};
     sk.rest[2].translation = {0.0f, third, 0.0f};
-    sk.inverse_bind = {Mat4f{}, Mat4f::translation({0.0f, -third, 0.0f}), Mat4f::translation({0.0f, -2.0f * third, 0.0f})};
+    sk.inverse_bind = {Mat4f{}, Mat4f::translation({0.0f, -third, 0.0f}),
+                       Mat4f::translation({0.0f, -2.0f * third, 0.0f})};
     sk.root_transform = Mat4f{};
     const auto swing = [&](const char* name, float duration, float a1, float a2) {
         AnimClip3D c;
@@ -76,8 +77,9 @@ inline std::shared_ptr<const Model> make_character(Renderer3D& r3d, float length
         return c;
     };
     model->skeletons.push_back(sk);
-    model->clips = {swing("Sway", 2.0f, 20.0f, 15.0f), swing("Bend", 1.2f, 45.0f, -35.0f), swing("Wave", 0.6f, 25.0f, 60.0f)};
-    ModelPart part;
+    model->clips = {swing("Sway", 2.0f, 20.0f, 15.0f), swing("Bend", 1.2f, 45.0f, -35.0f),
+                    swing("Wave", 0.6f, 25.0f, 60.0f)};
+    ModelPart3D part;
     part.name = "tube";
     part.mesh = r3d.create_mesh(mesh);
     part.material = {.color = Color::rgb(215, 130, 90), .roughness = 0.6f};
@@ -86,12 +88,12 @@ inline std::shared_ptr<const Model> make_character(Renderer3D& r3d, float length
     return model;
 }
 
-// What the person's constraints see of the ground, in the person's own (model) space: the floor at y = 0 and, optionally, a step
-// (a box on it). The first thing the segment meets.
-inline std::optional<GroundHit> floor_and_step(Vec3f from, Vec3f to, bool with_step, Vec3f step_lo, Vec3f step_hi) {
+// What the person's constraints see of the ground, in the person's own (model) space: the floor at y = 0 and,
+// optionally, a step (a box on it). The first thing the segment meets.
+inline std::optional<GroundHit3D> floor_and_step(Vec3f from, Vec3f to, bool with_step, Vec3f step_lo, Vec3f step_hi) {
     const Vec3f d = to - from;
     float best = 2.0f;
-    GroundHit hit;
+    GroundHit3D hit;
     if (d.y < -1e-9f) {
         const float t = -from.y / d.y;
         if (t >= 0.0f && t <= 1.0f) {
@@ -136,11 +138,11 @@ inline std::optional<GroundHit> floor_and_step(Vec3f from, Vec3f to, bool with_s
 }
 
 // The person's skeleton and clips, with no GPU: 18 joints named pelvis, spine, chest, neck, head, hip/knee/ankle and
-// shoulder/elbow/hand _L and _R (under a root), then toe_L and toe_R (on the ankles) and a tail of five joints (tail_1 to
-// tail_5, hanging straight back from the pelvis). Clips Sway (the spine), Bend (a bow) and Wave (the right arm), named as
-// make_character's so that the viewer's animator drives either. `world` is each joint's place at rest.
+// shoulder/elbow/hand _L and _R (under a root), then toe_L and toe_R (on the ankles) and a tail of five joints (tail_1
+// to tail_5, hanging straight back from the pelvis). Clips Sway (the spine), Bend (a bow) and Wave (the right arm),
+// named as make_character's so that the viewer's animator drives either. `world` is each joint's place at rest.
 struct PersonRig {
-    Skeleton skeleton;
+    Skeleton3D skeleton;
     std::vector<AnimClip3D> clips;
     std::vector<Vec3f> world;
 };
@@ -152,28 +154,47 @@ inline PersonRig person_rig() {
         Vec3f at;
     };
     const Def defs[] = {
-        {"root", -1, {0, 0, 0}},          {"pelvis", 0, {0, 1.0f, 0}},       {"spine", 1, {0, 0.2f, 0}},        {"chest", 2, {0, 0.25f, 0}},
-        {"neck", 3, {0, 0.25f, 0}},       {"head", 4, {0, 0.1f, 0}},         {"hip_L", 1, {0.1f, 0, 0}},        {"knee_L", 6, {0, -0.5f, 0}},
-        {"ankle_L", 7, {0, -0.45f, 0}},   {"hip_R", 1, {-0.1f, 0, 0}},       {"knee_R", 9, {0, -0.5f, 0}},      {"ankle_R", 10, {0, -0.45f, 0}},
-        {"shoulder_L", 3, {0.2f, 0.2f, 0}}, {"elbow_L", 12, {0.5f, 0, 0}},  {"hand_L", 13, {0.45f, 0, 0}},     {"shoulder_R", 3, {-0.2f, 0.2f, 0}},
-        {"elbow_R", 15, {-0.5f, 0, 0}},   {"hand_R", 16, {-0.45f, 0, 0}},
-        // Appended, so that the indices above are what they were: the ball of each foot, and a tail that hangs straight back.
-        {"toe_L", 8, {0, -0.03f, 0.12f}}, {"toe_R", 11, {0, -0.03f, 0.12f}},
-        {"tail_1", 1, {0, -0.05f, -0.1f}}, {"tail_2", 20, {0, 0, -0.18f}}, {"tail_3", 21, {0, 0, -0.18f}}, {"tail_4", 22, {0, 0, -0.18f}},
+        {"root", -1, {0, 0, 0}},
+        {"pelvis", 0, {0, 1.0f, 0}},
+        {"spine", 1, {0, 0.2f, 0}},
+        {"chest", 2, {0, 0.25f, 0}},
+        {"neck", 3, {0, 0.25f, 0}},
+        {"head", 4, {0, 0.1f, 0}},
+        {"hip_L", 1, {0.1f, 0, 0}},
+        {"knee_L", 6, {0, -0.5f, 0}},
+        {"ankle_L", 7, {0, -0.45f, 0}},
+        {"hip_R", 1, {-0.1f, 0, 0}},
+        {"knee_R", 9, {0, -0.5f, 0}},
+        {"ankle_R", 10, {0, -0.45f, 0}},
+        {"shoulder_L", 3, {0.2f, 0.2f, 0}},
+        {"elbow_L", 12, {0.5f, 0, 0}},
+        {"hand_L", 13, {0.45f, 0, 0}},
+        {"shoulder_R", 3, {-0.2f, 0.2f, 0}},
+        {"elbow_R", 15, {-0.5f, 0, 0}},
+        {"hand_R", 16, {-0.45f, 0, 0}},
+        // Appended, so that the indices above are what they were: the ball of each foot, and a tail that hangs straight
+        // back.
+        {"toe_L", 8, {0, -0.03f, 0.12f}},
+        {"toe_R", 11, {0, -0.03f, 0.12f}},
+        {"tail_1", 1, {0, -0.05f, -0.1f}},
+        {"tail_2", 20, {0, 0, -0.18f}},
+        {"tail_3", 21, {0, 0, -0.18f}},
+        {"tail_4", 22, {0, 0, -0.18f}},
         {"tail_5", 23, {0, 0, -0.18f}},
     };
     PersonRig rig;
-    Skeleton& sk = rig.skeleton;
+    Skeleton3D& sk = rig.skeleton;
     std::vector<Vec3f>& world = rig.world;
     for (const Def& d : defs) {
         sk.names.emplace_back(d.name);
         sk.parents.push_back(d.parent);
-        JointPose r;
+        JointPose3D r;
         r.translation = d.at;
         sk.rest.push_back(r);
         world.push_back(d.at + (d.parent >= 0 ? world[std::size_t(d.parent)] : Vec3f{}));
     }
-    for (const Vec3f& w : world) sk.inverse_bind.push_back(Mat4f::translation({-w.x, -w.y, -w.z}));
+    for (const Vec3f& w : world)
+        sk.inverse_bind.push_back(Mat4f::translation({-w.x, -w.y, -w.z}));
     const u32 count = sk.joint_count();
     const auto clip = [&](const char* name, float duration, auto&& fill) {
         AnimClip3D c;
@@ -202,15 +223,17 @@ inline PersonRig person_rig() {
     rig.clips.push_back(clip("Wave", 1.0f, [&](AnimClip3D& c) {
         Track3D<Quatf>& up = c.channels[std::size_t(sk.find("shoulder_R"))].rotation;
         up.times = {0.0f, 0.5f, 1.0f};
-        up.values = {Quatf::axis_angle({0, 0, 1}, -70.0f), Quatf::axis_angle({0, 0, 1}, -85.0f), Quatf::axis_angle({0, 0, 1}, -70.0f)};
+        up.values = {Quatf::axis_angle({0, 0, 1}, -70.0f), Quatf::axis_angle({0, 0, 1}, -85.0f),
+                     Quatf::axis_angle({0, 0, 1}, -70.0f)};
         Track3D<Quatf>& fore = c.channels[std::size_t(sk.find("elbow_R"))].rotation;
         fore.times = {0.0f, 0.25f, 0.5f, 0.75f, 1.0f};
-        fore.values = {Quatf::axis_angle({0, 1, 0}, 0.0f), Quatf::axis_angle({0, 1, 0}, 35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f),
-                       Quatf::axis_angle({0, 1, 0}, -35.0f), Quatf::axis_angle({0, 1, 0}, 0.0f)};
+        fore.values = {Quatf::axis_angle({0, 1, 0}, 0.0f), Quatf::axis_angle({0, 1, 0}, 35.0f),
+                       Quatf::axis_angle({0, 1, 0}, 0.0f), Quatf::axis_angle({0, 1, 0}, -35.0f),
+                       Quatf::axis_angle({0, 1, 0}, 0.0f)};
     }));
-    // Locomotion for the character controller section (P2c): "Walk" (a 1.0 s cycle), "Run" (0.6 s) and "Fall" (a held pose). Legs
-    // swing about their own X (a negative angle swings a foot forward, +Z), the knee folds the shank back as the leg comes
-    // through, the arms swing against the legs about Y, the spine leans. Eight keys a cycle.
+    // Locomotion for the character controller section (P2c): "Walk" (a 1.0 s cycle), "Run" (0.6 s) and "Fall" (a held
+    // pose). Legs swing about their own X (a negative angle swings a foot forward, +Z), the knee folds the shank back
+    // as the leg comes through, the arms swing against the legs about Y, the spine leans. Eight keys a cycle.
     const auto gait = [&](const char* name, float period, float hip, float knee, float arm, float lean) {
         return clip(name, period, [&](AnimClip3D& c) {
             constexpr int keys = 8;
@@ -252,13 +275,13 @@ inline PersonRig person_rig() {
 }
 
 // A person: tubes (weights ramping to the next joint over the last 40% of a bone) and balls, on person_rig()'s joints.
-inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
+inline std::shared_ptr<const Model3D> make_person(Renderer3D& r3d) {
     const PersonRig rig = person_rig();
-    const Skeleton& sk = rig.skeleton;
+    const Skeleton3D& sk = rig.skeleton;
     const std::vector<Vec3f>& world = rig.world;
     const auto joint = [&](const char* name) { return sk.find(name); };
 
-    MeshData mesh;
+    MeshData3D mesh;
     const auto tube = [&](Vec3f p0, Vec3f p1, float r0, float r1, int ja, int jb, int rings = 8, float ramp = 0.6f) {
         constexpr int segments = 10;
         const Vec3f d = normalize(p1 - p0);
@@ -273,8 +296,9 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
             for (int s = 0; s <= segments; ++s) {
                 const float a = 6.2831853f * float(s) / float(segments);
                 const Vec3f n = u * std::cos(a) + v * std::sin(a);
-                mesh.vertices.push_back({lerp(p0, p1, t) + n * (r0 + (r1 - r0) * t), n, {float(s) / float(segments), t}});
-                MeshSkinVertex k;
+                mesh.vertices.push_back(
+                    {lerp(p0, p1, t) + n * (r0 + (r1 - r0) * t), n, {float(s) / float(segments), t}});
+                MeshSkinVertex3D k;
                 k.joints = {u8(ja), u8(jb), 0, 0};
                 k.weights = {1.0f - w, w, 0.0f, 0.0f};
                 mesh.skin.push_back(k);
@@ -296,8 +320,9 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
             for (int s = 0; s <= segments; ++s) {
                 const float phi = 6.2831853f * float(s) / float(segments);
                 const Vec3f n{std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi)};
-                mesh.vertices.push_back({centre + n * radius, n, {float(s) / float(segments), float(r) / float(rings)}});
-                MeshSkinVertex k;
+                mesh.vertices.push_back(
+                    {centre + n * radius, n, {float(s) / float(segments), float(r) / float(rings)}});
+                MeshSkinVertex3D k;
                 k.joints = {u8(j), 0, 0, 0};
                 k.weights = {1.0f, 0.0f, 0.0f, 0.0f};
                 mesh.skin.push_back(k);
@@ -319,7 +344,8 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
     bone("chest", "neck", 0.13f, 0.05f);
     bone("neck", "head", 0.05f, 0.045f);
     ball(world[std::size_t(joint("head"))] + Vec3f{0, 0.07f, 0}, 0.105f, joint("head"));
-    ball(world[std::size_t(joint("head"))] + Vec3f{0, 0.06f, 0.115f}, 0.032f, joint("head")); // a nose: which way the head faces
+    ball(world[std::size_t(joint("head"))] + Vec3f{0, 0.06f, 0.115f}, 0.032f,
+         joint("head")); // a nose: which way the head faces
     for (const char* side : {"L", "R"}) {
         const std::string s = side;
         bone("pelvis", ("hip_" + s).c_str(), 0.08f, 0.075f);
@@ -328,8 +354,10 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
         const Vec3f ankle = world[std::size_t(joint(("ankle_" + s).c_str()))];
         // The foot: heel to ball on the ankle, ball to tip on the toe joint.
         const Vec3f toe_at = world[std::size_t(joint(("toe_" + s).c_str()))];
-        tube(ankle + Vec3f{0, -0.03f, -0.05f}, toe_at, 0.04f, 0.038f, joint(("ankle_" + s).c_str()), joint(("ankle_" + s).c_str()), 2);
-        tube(toe_at, ankle + Vec3f{0, -0.03f, 0.14f}, 0.038f, 0.034f, joint(("toe_" + s).c_str()), joint(("toe_" + s).c_str()), 2);
+        tube(ankle + Vec3f{0, -0.03f, -0.05f}, toe_at, 0.04f, 0.038f, joint(("ankle_" + s).c_str()),
+             joint(("ankle_" + s).c_str()), 2);
+        tube(toe_at, ankle + Vec3f{0, -0.03f, 0.14f}, 0.038f, 0.034f, joint(("toe_" + s).c_str()),
+             joint(("toe_" + s).c_str()), 2);
         bone("chest", ("shoulder_" + s).c_str(), 0.05f, 0.05f);
         bone(("shoulder_" + s).c_str(), ("elbow_" + s).c_str(), 0.05f, 0.04f);
         bone(("elbow_" + s).c_str(), ("hand_" + s).c_str(), 0.04f, 0.032f);
@@ -340,15 +368,16 @@ inline std::shared_ptr<const Model> make_person(Renderer3D& r3d) {
     {
         const char* names[] = {"pelvis", "tail_1", "tail_2", "tail_3", "tail_4", "tail_5"};
         for (int i = 0; i + 1 < 6; ++i) {
-            tube(world[std::size_t(joint(names[i]))], world[std::size_t(joint(names[i + 1]))], 0.045f - 0.007f * float(i), 0.045f - 0.007f * float(i + 1),
-                 joint(names[i]), joint(names[i + 1]), 6, 0.5f);
+            tube(world[std::size_t(joint(names[i]))], world[std::size_t(joint(names[i + 1]))],
+                 0.045f - 0.007f * float(i), 0.045f - 0.007f * float(i + 1), joint(names[i]), joint(names[i + 1]), 6,
+                 0.5f);
         }
     }
 
-    auto model = std::make_shared<Model>();
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(sk);
     model->clips = rig.clips;
-    ModelPart part;
+    ModelPart3D part;
     part.name = "person";
     part.mesh = r3d.create_mesh(mesh);
     part.material = {.color = Color::rgb(215, 150, 110), .roughness = 0.65f};

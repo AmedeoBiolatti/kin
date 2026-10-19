@@ -18,8 +18,9 @@ f32 smoothstep(f32 a, f32 b, f32 x) {
 } // namespace
 
 const char* cue_name(CueKind k) {
-    static const char* const names[cue_kind_count] = {"footstep", "jump", "land", "grab", "release", "impact", "fall", "breath",
-                                                      "exhausted", "rope_creak", "hurt", "died", "got_up", "camp", "summit"};
+    static const char* const names[cue_kind_count] = {"footstep", "jump", "land",   "grab",      "release",
+                                                      "impact",   "fall", "breath", "exhausted", "rope_creak",
+                                                      "hurt",     "died", "got_up", "camp",      "summit"};
     return names[std::size_t(k)];
 }
 
@@ -29,26 +30,37 @@ f32 wind_gain(f32 altitude, f32 height, f32 wind_speed) {
     return (0.10f + 0.50f * t) * (0.35f + 0.65f * s);
 }
 
-f32 wind_pitch(f32 wind_speed) { return 0.85f + 0.25f * std::clamp(wind_speed / 11.0f, 0.0f, 1.0f); }
+f32 wind_pitch(f32 wind_speed) {
+    return 0.85f + 0.25f * std::clamp(wind_speed / 11.0f, 0.0f, 1.0f);
+}
 
-f32 fall_whoosh_gain(f32 speed_down) { return 0.9f * smoothstep(3.0f, 20.0f, speed_down); }
+f32 fall_whoosh_gain(f32 speed_down) {
+    return 0.9f * smoothstep(3.0f, 20.0f, speed_down);
+}
 
-f32 fall_whoosh_pitch(f32 speed_down) { return 0.8f + 0.6f * smoothstep(3.0f, 25.0f, speed_down); }
+f32 fall_whoosh_pitch(f32 speed_down) {
+    return 0.8f + 0.6f * smoothstep(3.0f, 25.0f, speed_down);
+}
 
 f32 footstep_cadence(f32 ground_speed) {
-    if (ground_speed < 0.5f) return 0.0f;
+    if (ground_speed < 0.5f)
+        return 0.0f;
     return 1.6f + 0.25f * ground_speed;
 }
 
 f32 breath_interval(f32 usable_fraction, bool exhausted) {
-    if (exhausted) return 0.9f;
+    if (exhausted)
+        return 0.9f;
     constexpr f32 tired = 0.4f;
-    if (usable_fraction >= tired) return 0.0f;
+    if (usable_fraction >= tired)
+        return 0.0f;
     const f32 k = 1.0f - std::max(0.0f, usable_fraction) / tired;
     return 3.2f + (1.0f - 3.2f) * k;
 }
 
-f32 impact_gain(f32 damage) { return 0.35f + 0.65f * std::clamp(damage / 60.0f, 0.0f, 1.0f); }
+f32 impact_gain(f32 damage) {
+    return 0.35f + 0.65f * std::clamp(damage / 60.0f, 0.0f, 1.0f);
+}
 
 SurfaceSound surface_under(const Game& game, i32 player) {
     const CharacterState3D cs = game.character_state(player);
@@ -70,7 +82,8 @@ Vec3f camp_fire_position(const Camp& camp) {
     return camp.marker + Vec3f{1.6f, 0.15f, 0.0f};
 }
 
-// ---- cues ---------------------------------------------------------------------------------------------------------------------
+// ---- cues
+// ---------------------------------------------------------------------------------------------------------------------
 
 void CueGenerator::observe(const Game& game, i32 player, std::vector<SoundCue>& out) {
     const Player& p = game.player(player);
@@ -83,39 +96,62 @@ void CueGenerator::observe(const Game& game, i32 player, std::vector<SoundCue>& 
 
     bool hurt_now = false;
     for (const GameEvent& e : game.events()) {
-        if (e.player == player && e.kind == GameEventKind::Hurt) hurt_now = true;
+        if (e.player == player && e.kind == GameEventKind::Hurt)
+            hurt_now = true;
     }
     for (const GameEvent& e : game.events()) {
-        if (e.player != player) continue;
+        if (e.player != player)
+            continue;
         switch (e.kind) {
-        case GameEventKind::Jumped: add(CueKind::Jump, e.point, 0.5f); break;
+        case GameEventKind::Jumped:
+            add(CueKind::Jump, e.point, 0.5f);
+            break;
         case GameEventKind::Landed:
             // Damage has its own thump: no second, softer landing under it.
-            if (e.value >= 2.0f && !hurt_now) add(CueKind::Land, e.point, std::clamp(e.value / 9.0f, 0.2f, 1.0f), 1.1f - 0.02f * e.value);
+            if (e.value >= 2.0f && !hurt_now)
+                add(CueKind::Land, e.point, std::clamp(e.value / 9.0f, 0.2f, 1.0f), 1.1f - 0.02f * e.value);
             break;
-        case GameEventKind::Gripped: add(CueKind::Grab, e.point, 0.8f, e.value > 0.5f ? 1.06f : 1.0f, e.value > 0.5f ? 1 : 0); break;
+        case GameEventKind::Gripped:
+            add(CueKind::Grab, e.point, 0.8f, e.value > 0.5f ? 1.06f : 1.0f, e.value > 0.5f ? 1 : 0);
+            break;
         case GameEventKind::Released: {
             // Reason numbers are GripRelease3D's: the pull-up's own end and a vanished body are not heard.
             const GripRelease3D why = GripRelease3D(i32(e.value));
             if (why != GripRelease3D::Mantle && why != GripRelease3D::Lost) {
-                add(CueKind::Release, e.point, why == GripRelease3D::Exhausted || why == GripRelease3D::Slipped ? 0.9f : 0.5f);
+                add(CueKind::Release, e.point,
+                    why == GripRelease3D::Exhausted || why == GripRelease3D::Slipped ? 0.9f : 0.5f);
             }
             break;
         }
-        case GameEventKind::Fell: add(CueKind::FallStart, e.point, 0.8f); break;
-        case GameEventKind::Exhausted: add(CueKind::Exhausted, e.point, 0.9f); break;
+        case GameEventKind::Fell:
+            add(CueKind::FallStart, e.point, 0.8f);
+            break;
+        case GameEventKind::Exhausted:
+            add(CueKind::Exhausted, e.point, 0.9f);
+            break;
         case GameEventKind::Hurt:
             add(CueKind::Impact, e.point, impact_gain(e.value), 1.0f - 0.004f * e.value);
             add(CueKind::Hurt, e.point, std::clamp(0.4f + e.value / 60.0f, 0.4f, 1.0f));
             break;
-        case GameEventKind::Died: add(CueKind::Died, e.point, 1.0f); break;
-        case GameEventKind::GotUp: add(CueKind::GotUp, e.point, 0.6f); break;
-        case GameEventKind::Camp: add(CueKind::Camp, e.point, 0.8f); break;
+        case GameEventKind::Died:
+            add(CueKind::Died, e.point, 1.0f);
+            break;
+        case GameEventKind::GotUp:
+            add(CueKind::GotUp, e.point, 0.6f);
+            break;
+        case GameEventKind::Camp:
+            add(CueKind::Camp, e.point, 0.8f);
+            break;
         case GameEventKind::ExpeditionStarted:
         case GameEventKind::ShelterReached:
-        case GameEventKind::BeaconActivated: add(CueKind::Camp, e.point, 0.8f); break;
-        case GameEventKind::Summit: add(CueKind::Summit, e.point, 1.0f); break;
-        default: break;
+        case GameEventKind::BeaconActivated:
+            add(CueKind::Camp, e.point, 0.8f);
+            break;
+        case GameEventKind::Summit:
+            add(CueKind::Summit, e.point, 1.0f);
+            break;
+        default:
+            break;
         }
     }
 
@@ -144,11 +180,13 @@ void CueGenerator::observe(const Game& game, i32 player, std::vector<SoundCue>& 
     const f32 breath = alive ? breath_interval(usable, ts.resource.exhausted) : 0.0f;
     if (breath > 0.0f) {
         // The first breath comes soon after the bar drops under the line (the timer starts most of the way there).
-        if (_breath_timer < 0.0f) _breath_timer = breath * 0.7f;
+        if (_breath_timer < 0.0f)
+            _breath_timer = breath * 0.7f;
         _breath_timer += fixed_step;
         if (_breath_timer >= breath) {
             _breath_timer = 0.0f;
-            add(CueKind::Breath, game.head(player), 0.35f + 0.5f * (1.0f - std::min(1.0f, usable / 0.4f)), 0.95f + 0.1f * usable);
+            add(CueKind::Breath, game.head(player), 0.35f + 0.5f * (1.0f - std::min(1.0f, usable / 0.4f)),
+                0.95f + 0.1f * usable);
         }
     } else {
         _breath_timer = -1.0f;
@@ -157,10 +195,13 @@ void CueGenerator::observe(const Game& game, i32 player, std::vector<SoundCue>& 
     // A rope creaks under a climber: faster while it moves.
     bool on_rope = false;
     for (std::size_t i = 0; i < ts.grips.size(); ++i) {
-        if (ts.grips[i].kind == GripKind3D::Rope && ts.grips[i].phase == GripPhase3D::Held) on_rope = true;
+        if (ts.grips[i].kind == GripKind3D::Rope && ts.grips[i].phase == GripPhase3D::Held)
+            on_rope = true;
     }
     if (alive && on_rope && ts.mode == TraversalMode3D::Hanging) {
-        const f32 moving = std::sqrt(cs.velocity.x * cs.velocity.x + cs.velocity.y * cs.velocity.y + cs.velocity.z * cs.velocity.z) / fixed_step;
+        const f32 moving =
+            std::sqrt(cs.velocity.x * cs.velocity.x + cs.velocity.y * cs.velocity.y + cs.velocity.z * cs.velocity.z) /
+            fixed_step;
         _rope_timer += fixed_step;
         const f32 interval = moving > 0.15f ? 0.6f : 1.8f;
         if (_rope_timer >= interval) {
@@ -173,7 +214,8 @@ void CueGenerator::observe(const Game& game, i32 player, std::vector<SoundCue>& 
     _was_on_ground = cs.ground == CharacterGround3D::OnGround;
 }
 
-// ---- synthesis ----------------------------------------------------------------------------------------------------------------
+// ---- synthesis
+// ----------------------------------------------------------------------------------------------------------------
 
 namespace {
 
@@ -220,16 +262,21 @@ struct Bandpass {
 std::vector<f32> make(f32 seconds, const std::function<f32(f32)>& signal) {
     const int n = int(seconds * f32(rate));
     std::vector<f32> out(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) out[std::size_t(i)] = std::clamp(signal(f32(i) / f32(rate)), -1.0f, 1.0f);
+    for (int i = 0; i < n; ++i)
+        out[std::size_t(i)] = std::clamp(signal(f32(i) / f32(rate)), -1.0f, 1.0f);
     return out;
 }
 
-f32 attack(f32 t, f32 s = 0.004f) { return std::min(1.0f, t / s); }
+f32 attack(f32 t, f32 s = 0.004f) {
+    return std::min(1.0f, t / s);
+}
 
-// Makes the first `fade` seconds blend into the tail: the clip's end continues into its start, so that it loops without a click.
+// Makes the first `fade` seconds blend into the tail: the clip's end continues into its start, so that it loops without
+// a click.
 std::vector<f32> loop_crossfade(std::vector<f32> in, f32 fade) {
     const std::size_t n = in.size(), f = std::size_t(fade * f32(rate));
-    if (f * 2 >= n) return in;
+    if (f * 2 >= n)
+        return in;
     std::vector<f32> out(in.begin(), in.begin() + std::ptrdiff_t(n - f));
     for (std::size_t i = 0; i < f; ++i) {
         const f32 k = f32(i) / f32(f);
@@ -382,7 +429,8 @@ std::vector<f32> fire_clip() {
     Lowpass rumble(170.0f), hiss(2800.0f);
     f32 pop = 0.0f;
     auto raw = make(5.0f, [&](f32) {
-        if (c.uni() > 0.9985f) pop = 0.5f + 0.5f * c.uni();
+        if (c.uni() > 0.9985f)
+            pop = 0.5f + 0.5f * c.uni();
         pop *= 0.9930f;
         const f32 click = pop * c.next();
         return (rumble(n.next()) * 1.4f + hiss(n.next()) * 0.10f + click * 0.9f) * 0.8f;
@@ -397,8 +445,10 @@ std::vector<f32> chord(std::initializer_list<f32> notes, f32 stagger, f32 second
         f32 v = 0.0f;
         for (std::size_t i = 0; i < freqs.size(); ++i) {
             const f32 local = t - stagger * f32(i);
-            if (local <= 0.0f) continue;
-            v += (std::sin(tau * freqs[i] * local) + 0.35f * std::sin(tau * freqs[i] * 2.0f * local) + 0.12f * std::sin(tau * freqs[i] * 3.01f * local)) *
+            if (local <= 0.0f)
+                continue;
+            v += (std::sin(tau * freqs[i] * local) + 0.35f * std::sin(tau * freqs[i] * 2.0f * local) +
+                  0.12f * std::sin(tau * freqs[i] * 3.01f * local)) *
                  std::exp(-local * decay) * attack(local, 0.006f);
         }
         return 0.26f * v;
@@ -428,7 +478,8 @@ std::vector<f32> jump_clip() {
 }
 
 std::vector<f32> tick(f32 hz, f32 seconds) {
-    return make(seconds, [=](f32 t) { return 0.4f * std::sin(tau * hz * t) * std::exp(-t * 80.0f) * attack(t, 0.001f); });
+    return make(seconds,
+                [=](f32 t) { return 0.4f * std::sin(tau * hz * t) * std::exp(-t * 80.0f) * attack(t, 0.001f); });
 }
 
 std::unique_ptr<IAudioBackend> backend(bool muted) {
@@ -446,7 +497,9 @@ AudioEngine make_engine(bool muted) {
 } // namespace
 
 SummitAudio::SummitAudio(bool muted) : _engine(make_engine(muted)) {
-    const auto clip = [&](const std::string& id, std::vector<f32> samples) { _engine.add_clip(id, make_memory_audio_clip(id, std::move(samples), 1, rate)); };
+    const auto clip = [&](const std::string& id, std::vector<f32> samples) {
+        _engine.add_clip(id, make_memory_audio_clip(id, std::move(samples), 1, rate));
+    };
     clip("wind", wind_clip());
     for (u32 v = 0; v < 2; ++v) {
         const std::string tag = std::to_string(v);
@@ -476,11 +529,20 @@ SummitAudio::SummitAudio(bool muted) : _engine(make_engine(muted)) {
     _catalog.add_bus({.id = "sfx", .parent = "master"});
     _catalog.add_bus({.id = "ambient", .parent = "master", .volume = 0.7f});
     _catalog.add_bus({.id = "ui", .parent = "master"});
-    const auto effect = [&](const char* id, std::vector<std::string> clips, f32 volume, i32 max, f32 variance, bool spatial, i32 priority,
-                            f32 near_m = 3.0f, f32 far_m = 70.0f) {
-        _catalog.add_cue({.id = id, .clips = std::move(clips), .category = AudioCategory::Effect, .bus = "sfx", .volume = volume,
-                          .pitch_variance = variance, .priority = priority, .max_instances = max, .spatial = spatial, .min_distance = near_m,
-                          .max_distance = far_m, .rolloff = AudioRolloff::Inverse});
+    const auto effect = [&](const char* id, std::vector<std::string> clips, f32 volume, i32 max, f32 variance,
+                            bool spatial, i32 priority, f32 near_m = 3.0f, f32 far_m = 70.0f) {
+        _catalog.add_cue({.id = id,
+                          .clips = std::move(clips),
+                          .category = AudioCategory::Effect,
+                          .bus = "sfx",
+                          .volume = volume,
+                          .pitch_variance = variance,
+                          .priority = priority,
+                          .max_instances = max,
+                          .spatial = spatial,
+                          .min_distance = near_m,
+                          .max_distance = far_m,
+                          .rolloff = AudioRolloff::Inverse});
     };
     effect("step_grass", {"step_grass0", "step_grass1"}, 0.55f, 4, 0.08f, true, 3);
     effect("step_rock", {"step_rock0", "step_rock1"}, 0.6f, 4, 0.08f, true, 3);
@@ -497,15 +559,38 @@ SummitAudio::SummitAudio(bool muted) : _engine(make_engine(muted)) {
     effect("jump", {"jump"}, 0.4f, 2, 0.06f, false, 3);
     effect("fall", {"fall"}, 0.6f, 1, 0.04f, false, 8);
     for (const char* id : {"sting", "camp"}) {
-        _catalog.add_cue({.id = id, .clips = {id}, .category = AudioCategory::Ui, .bus = "sfx", .volume = 0.7f, .priority = 20});
+        _catalog.add_cue(
+            {.id = id, .clips = {id}, .category = AudioCategory::Ui, .bus = "sfx", .volume = 0.7f, .priority = 20});
     }
     for (const char* id : {"ui_move", "ui_select"}) {
-        _catalog.add_cue({.id = id, .clips = {id}, .category = AudioCategory::Ui, .bus = "ui", .volume = 0.7f, .priority = 30});
+        _catalog.add_cue(
+            {.id = id, .clips = {id}, .category = AudioCategory::Ui, .bus = "ui", .volume = 0.7f, .priority = 30});
     }
-    _catalog.add_cue({.id = "wind", .clips = {"wind"}, .category = AudioCategory::Ambient, .bus = "ambient", .volume = 0.8f, .max_instances = 1, .loop = true});
-    _catalog.add_cue({.id = "whoosh", .clips = {"whoosh"}, .category = AudioCategory::Ambient, .bus = "ambient", .volume = 0.9f, .max_instances = 1, .loop = true});
-    _catalog.add_cue({.id = "fire", .clips = {"fire"}, .category = AudioCategory::Ambient, .bus = "ambient", .volume = 0.9f, .max_instances = 0,
-                      .loop = true, .spatial = true, .min_distance = 2.0f, .max_distance = 28.0f, .rolloff = AudioRolloff::Inverse});
+    _catalog.add_cue({.id = "wind",
+                      .clips = {"wind"},
+                      .category = AudioCategory::Ambient,
+                      .bus = "ambient",
+                      .volume = 0.8f,
+                      .max_instances = 1,
+                      .loop = true});
+    _catalog.add_cue({.id = "whoosh",
+                      .clips = {"whoosh"},
+                      .category = AudioCategory::Ambient,
+                      .bus = "ambient",
+                      .volume = 0.9f,
+                      .max_instances = 1,
+                      .loop = true});
+    _catalog.add_cue({.id = "fire",
+                      .clips = {"fire"},
+                      .category = AudioCategory::Ambient,
+                      .bus = "ambient",
+                      .volume = 0.9f,
+                      .max_instances = 0,
+                      .loop = true,
+                      .spatial = true,
+                      .min_distance = 2.0f,
+                      .max_distance = 28.0f,
+                      .rolloff = AudioRolloff::Inverse});
     set_volumes(_volumes);
     _wind = _engine.play(_catalog, {.cue = "wind", .volume = 0.0f});
     _whoosh = _engine.play(_catalog, {.cue = "whoosh", .volume = 0.0f});
@@ -533,30 +618,66 @@ void SummitAudio::play(const SoundCue& cue) {
         _engine.play(_catalog, r);
     };
     switch (cue.kind) {
-    case CueKind::Footstep: at(cue.variant == i32(SurfaceSound::Snow) ? "step_snow" : cue.variant == i32(SurfaceSound::Rock) ? "step_rock" : "step_grass"); break;
-    case CueKind::Jump: at("jump", false); break;
-    case CueKind::Land: at("land"); break;
-    case CueKind::Grab: at("grab"); break;
-    case CueKind::Release: at("release"); break;
-    case CueKind::Impact: at("impact"); break;
-    case CueKind::FallStart: at("fall", false); break;
-    case CueKind::Breath: at("breath", false); break;
-    case CueKind::Exhausted: at("gasp", false); break;
-    case CueKind::RopeCreak: at("creak"); break;
-    case CueKind::Hurt: at("hurt", false); break;
-    case CueKind::Died: at("died", false); break;
-    case CueKind::GotUp: at("breath", false); break;
-    case CueKind::Camp: at("camp", false); break;
-    case CueKind::Summit: at("sting", false); break;
-    case CueKind::Count: break;
+    case CueKind::Footstep:
+        at(cue.variant == i32(SurfaceSound::Snow)   ? "step_snow"
+           : cue.variant == i32(SurfaceSound::Rock) ? "step_rock"
+                                                    : "step_grass");
+        break;
+    case CueKind::Jump:
+        at("jump", false);
+        break;
+    case CueKind::Land:
+        at("land");
+        break;
+    case CueKind::Grab:
+        at("grab");
+        break;
+    case CueKind::Release:
+        at("release");
+        break;
+    case CueKind::Impact:
+        at("impact");
+        break;
+    case CueKind::FallStart:
+        at("fall", false);
+        break;
+    case CueKind::Breath:
+        at("breath", false);
+        break;
+    case CueKind::Exhausted:
+        at("gasp", false);
+        break;
+    case CueKind::RopeCreak:
+        at("creak");
+        break;
+    case CueKind::Hurt:
+        at("hurt", false);
+        break;
+    case CueKind::Died:
+        at("died", false);
+        break;
+    case CueKind::GotUp:
+        at("breath", false);
+        break;
+    case CueKind::Camp:
+        at("camp", false);
+        break;
+    case CueKind::Summit:
+        at("sting", false);
+        break;
+    case CueKind::Count:
+        break;
     }
 }
 
-void SummitAudio::play_ui(const char* name) { _engine.play(_catalog, {.cue = name}); }
+void SummitAudio::play_ui(const char* name) {
+    _engine.play(_catalog, {.cue = name});
+}
 
 i32 SummitAudio::played_total() const {
     i32 n = 0;
-    for (i32 v : _played) n += v;
+    for (i32 v : _played)
+        n += v;
     return n;
 }
 
@@ -570,28 +691,33 @@ void SummitAudio::update(const Game& game, i32 player, const AudioListener3D& li
     _engine.set_pitch(_wind, wind_pitch(game.wind().speed));
 
     const TraversalState3D ts = game.traversal(player);
-    const f32 down = game.player(player).state == PlayerState::Alive && ts.mode == TraversalMode3D::Walking && cs.ground == CharacterGround3D::InAir
+    const f32 down = game.player(player).state == PlayerState::Alive && ts.mode == TraversalMode3D::Walking &&
+                             cs.ground == CharacterGround3D::InAir
                          ? std::max(0.0f, -cs.vertical_speed)
                          : 0.0f;
     _whoosh_level = fall_whoosh_gain(down);
     _engine.set_volume(_whoosh, _whoosh_level, 0.05f);
     _engine.set_pitch(_whoosh, fall_whoosh_pitch(down));
 
-    // Each camp's fire is a voice at the fire (the engine fades it with distance and culls what is out of earshot at the start,
-    // so a fire is started when the listener comes within range of it, spread through the clip).
+    // Each camp's fire is a voice at the fire (the engine fades it with distance and culls what is out of earshot at
+    // the start, so a fire is started when the listener comes within range of it, spread through the clip).
     const std::vector<Camp>& camps = game.level().camps;
-    if (_fires.size() != camps.size()) _fires.assign(camps.size(), {});
+    if (_fires.size() != camps.size())
+        _fires.assign(camps.size(), {});
     for (std::size_t i = 0; i < camps.size(); ++i) {
-        if (_fires[i] && _engine.playing(_fires[i])) continue;
+        if (_fires[i] && _engine.playing(_fires[i]))
+            continue;
         const Vec3f at = camp_fire_position(camps[i]);
         const Vec3f d = at - listener.position;
-        if (length(d) > 26.0f) continue;
+        if (length(d) > 26.0f)
+            continue;
         AudioPlayRequest r;
         r.cue = "fire";
         r.position_3d = at;
         r.has_position_3d = true;
         _fires[i] = _engine.play(_catalog, r);
-        if (_fires[i]) _engine.seek(_fires[i], 0.7f * f32(i));
+        if (_fires[i])
+            _engine.seek(_fires[i], 0.7f * f32(i));
     }
     if (paused != _paused) {
         _paused = paused;

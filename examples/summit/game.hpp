@@ -1,32 +1,32 @@
 #pragma once
 
-// Summit's simulation (docs/3d_plan.md, P4a and P5a): everything that decides what happens, with no window, no clock and no
-// renderer. A `Game` advances by one fixed step (60 Hz) per call to step(), from plain-data commands, one per player:
+// Summit's simulation (docs/3d_plan.md, P4a and P5a): everything that decides what happens, with no window, no clock
+// and no renderer. A `Game` advances by one fixed step (60 Hz) per call to step(), from plain-data commands, one per
+// player:
 //
 //     summit::Game game(seed);
 //     std::array<summit::PlayerCommand, 1> commands;       // from summit::InputMapper, a bot, a replay or the network
 //     game.step(commands);
 //     game.state_hash(); game.save(); game.restore(bytes);
 //
-// What step() reads is the commands and the state; what it writes is the state (and the events of that step). It reads no clock,
-// no device, no global random number (the one RNG is a key in the state) and nothing of rendering. A view (the example's scene,
-// the camera, the HUD of P4b, the sound) reads the state through the const accessors and writes nothing back: look direction
-// enters as commands.
+// What step() reads is the commands and the state; what it writes is the state (and the events of that step). It reads
+// no clock, no device, no global random number (the one RNG is a key in the state) and nothing of rendering. A view
+// (the example's scene, the camera, the HUD of P4b, the sound) reads the state through the const accessors and writes
+// nothing back: look direction enters as commands.
 //
-// The state is a World3D (Jolt: bodies, the characters, ropes and ragdolls), `std::vector<Player>`, the RNG key, the wind and the
-// step counter; state_hash(), save() and restore() cover all of it.
+// The state is a World3D (Jolt: bodies, the characters, ropes and ragdolls), `std::vector<Player>`, the RNG key, the
+// wind and the step counter; state_hash(), save() and restore() cover all of it.
 //
-// Determinism: the same level seed, the same commands, the same bits (checked on this machine, one thread or a pool). The look
-// and facing use std::sin and std::atan2, so cross-platform equality is Jolt's claim and not this file's.
+// Determinism: the same level seed, the same commands, the same bits (checked on this machine, one thread or a pool).
+// The look and facing use std::sin and std::atan2, so cross-platform equality is Jolt's claim and not this file's.
 
 #include "level.hpp"
 #include "props.hpp"
 
-#include <kin/core/rng.hpp>
-#include <kin/physics3d/world3d.hpp>
-
 #include <algorithm>
 #include <cmath>
+#include <kin/core/rng.hpp>
+#include <kin/physics3d/world3d.hpp>
 #include <memory>
 #include <span>
 #include <vector>
@@ -38,15 +38,15 @@ inline constexpr f32 fixed_step = 1.0f / 60.0f;
 
 // What a player asks of the game in one step. Plain data, held by whoever makes it.
 struct PlayerCommand {
-    Vec2f move{};   // x right, y forward, each -1 to 1 (the view's frame)
-    Vec2f look{};   // degrees turned this step: x to the right, y up
-    bool jump = false;       // a level; also jumps off a grip
+    Vec2f move{};      // x right, y forward, each -1 to 1 (the view's frame)
+    Vec2f look{};      // degrees turned this step: x to the right, y up
+    bool jump = false; // a level; also jumps off a grip
     bool sprint = false;
-    bool grab_left = false;  // a level: held, the hand holds; released, it lets go
+    bool grab_left = false; // a level: held, the hand holds; released, it lets go
     bool grab_right = false;
-    bool release = false;    // let go of everything
-    bool pull_up = false;    // up and over a lip (also done by itself when both hands are on one and forward is pressed)
-    bool interact = false;   // rest at a camp
+    bool release = false;  // let go of everything
+    bool pull_up = false;  // up and over a lip (also done by itself when both hands are on one and forward is pressed)
+    bool interact = false; // rest at a camp
 
     friend bool operator==(const PlayerCommand&, const PlayerCommand&) = default;
 };
@@ -57,10 +57,10 @@ struct PlayerRules {
     f32 walk_speed = 4.0f;
     f32 sprint_speed = 7.0f;
     f32 jump_speed = 5.0f;
-    f32 turn_rate = 720.0f;  // degrees a second the body turns to face the way it goes
+    f32 turn_rate = 720.0f; // degrees a second the body turns to face the way it goes
     // Stamina.
     f32 max_stamina = 150.0f;
-    f32 regen_rate = 25.0f;  // units a second, after `regen_delay` seconds without spending
+    f32 regen_rate = 25.0f; // units a second, after `regen_delay` seconds without spending
     f32 regen_delay = 1.0f;
     f32 drain_sprint = 15.0f;
     f32 jump_cost = 6.0f;
@@ -76,15 +76,15 @@ struct PlayerRules {
     f32 pull_up_min = 8.0f;
     // Health and falls.
     f32 max_health = 100.0f;
-    f32 safe_landing = 7.0f;        // m/s: a landing at or under it costs nothing
-    f32 damage_per_speed = 7.0f;    // health for each m/s above it
-    f32 stun_speed = 9.0f;          // m/s (a drop of about 4 m): knocked out
-    f32 stun_seconds = 1.5f;        // the least it lies
+    f32 safe_landing = 7.0f;     // m/s: a landing at or under it costs nothing
+    f32 damage_per_speed = 7.0f; // health for each m/s above it
+    f32 stun_speed = 9.0f;       // m/s (a drop of about 4 m): knocked out
+    f32 stun_seconds = 1.5f;     // the least it lies
     f32 get_up_seconds = 0.8f;
-    f32 stun_timeout = 12.0f;       // it lies no longer than this (no room, or no ground)
-    f32 respawn_seconds = 2.0f;     // dead, before it is at the camp again
-    f32 health_regen = 0.5f;        // a second, standing still on the ground
-    f32 camp_health_regen = 10.0f;  // a second, in a camp
+    f32 stun_timeout = 12.0f;        // it lies no longer than this (no room, or no ground)
+    f32 respawn_seconds = 2.0f;      // dead, before it is at the camp again
+    f32 health_regen = 0.5f;         // a second, standing still on the ground
+    f32 camp_health_regen = 10.0f;   // a second, in a camp
     f32 injury_stamina_floor = 0.5f; // the stamina cap at 0 health, as a share of max_stamina
     // Looking.
     f32 pitch_min = -80.0f;
@@ -114,29 +114,29 @@ struct Player {
     Character3D character{};
     RagdollHandle3D ragdoll{};
     PlayerState state = PlayerState::Alive;
-    f32 state_time = 0.0f;      // seconds in the state
-    f32 yaw = 0.0f;             // where it looks, degrees about +Y (0 looks along -Z), pitch up positive
+    f32 state_time = 0.0f; // seconds in the state
+    f32 yaw = 0.0f;        // where it looks, degrees about +Y (0 looks along -Z), pitch up positive
     f32 pitch = 0.0f;
-    f32 facing_yaw = 0.0f;      // which way the body faces (the person model faces +Z at 0)
+    f32 facing_yaw = 0.0f; // which way the body faces (the person model faces +Z at 0)
     f32 health = 100.0f;
-    i32 camp = 0;               // the last camp reached: where a respawn puts it
-    i32 falls = 0;              // times it let go and fell (any distance)
+    i32 camp = 0;  // the last camp reached: where a respawn puts it
+    i32 falls = 0; // times it let go and fell (any distance)
     i32 stuns = 0;
     i32 deaths = 0;
     bool summit = false;
-    i32 summit_step = -1;       // the step it first stood on the top
-    f32 air_speed = 0.0f;       // fastest it fell in this fall (m/s, positive down): for the ragdoll's start
-    Vec3f air_velocity{};       // its velocity the step before it landed
+    i32 summit_step = -1; // the step it first stood on the top
+    f32 air_speed = 0.0f; // fastest it fell in this fall (m/s, positive down): for the ragdoll's start
+    Vec3f air_velocity{}; // its velocity the step before it landed
     f32 best_altitude = 0.0f;
-    bool pull_up_sent = false;  // the level sent last step (an edge is made by alternating it)
+    bool pull_up_sent = false; // the level sent last step (an edge is made by alternating it)
     f32 last_stamina_cap = 0.0f;
-    PlayerCommand command{};    // the last one read
+    PlayerCommand command{}; // the last one read
     ExpeditionState expedition;
 };
 
 // Wind as state (nothing in the simulation depends on it yet: P4b's sound and snow read it).
 struct Wind {
-    f32 speed = 3.0f;   // m/s
+    f32 speed = 3.0f;     // m/s
     f32 direction = 0.0f; // degrees about +Y
     f32 target_speed = 3.0f;
     f32 target_direction = 0.0f;
@@ -144,19 +144,19 @@ struct Wind {
 
 enum class GameEventKind : u8 {
     Jumped,
-    Landed,     // value: the speed (m/s)
+    Landed, // value: the speed (m/s)
     Gripped,
     Released,
-    Fell,       // lost its grips and fell
+    Fell, // lost its grips and fell
     Exhausted,
-    Mantled,    // pulled up over a lip
+    Mantled, // pulled up over a lip
     Stunned,
     GotUp,
     Died,
     Respawned,
-    Camp,       // value: the camp's number
+    Camp, // value: the camp's number
     Summit,
-    Hurt,       // value: health lost
+    Hurt,          // value: health lost
     PullUpBlocked, // value: why (MantleBlock3D: 0 no ledge, 1 no room, 2 tired)
     ExpeditionStarted,
     ShelterReached,
@@ -182,8 +182,8 @@ struct GameConfig {
     bool dense_scenery = false;
 };
 
-// A decor chunk's collider: the convex hull of its mesh's vertices, in the body's own space (origin at the chunk's centre, turned
-// with its rotation). Invalid only for a degenerate chunk.
+// A decor chunk's collider: the convex hull of its mesh's vertices, in the body's own space (origin at the chunk's
+// centre, turned with its rotation). Invalid only for a degenerate chunk.
 Shape3D decor_shape(const SummitLevel& level, const DecorChunk& chunk);
 
 class Game {
@@ -235,7 +235,8 @@ public:
     f32 altitude(i32 player) const;
     // The body of piece `i` and of the rope's `i`-th segment, for the view.
     Body3D piece_body(std::size_t i) const { return _piece_bodies[i]; }
-    // The decor chunks (decor_chunks(level)) and the static body of each, in the list's order. User id = pieces + 1 + index.
+    // The decor chunks (decor_chunks(level)) and the static body of each, in the list's order. User id = pieces + 1 +
+    // index.
     std::span<const DecorChunk> decor() const { return _decor; }
     Body3D decor_body(std::size_t i) const { return _decor_bodies[i]; }
     std::span<const PropPlacement> props() const { return _props; }
@@ -283,8 +284,8 @@ private:
     u32 _skeleton_joints = 0;
 };
 
-// Frame times in, whole fixed steps out: what the app loop does, as arithmetic, so that a test can feed one command log through
-// 30, 60 and 144 frames a second and get the same game.
+// Frame times in, whole fixed steps out: what the app loop does, as arithmetic, so that a test can feed one command log
+// through 30, 60 and 144 frames a second and get the same game.
 class FrameStepper {
 public:
     // Steps that are due after a frame of `frame_seconds` (the remainder is kept).

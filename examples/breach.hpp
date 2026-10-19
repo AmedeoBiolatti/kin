@@ -9,14 +9,12 @@
 
 #include "example_common.hpp"
 
+#include <array>
 #include <kin/core/jobs.hpp>
 #include <kin/core/math3d.hpp>
 #include <kin/core/rng.hpp>
-#include <kin/ecs/world.hpp>
-
 #include <kin/ecs/render3d.hpp>
-
-#include <array>
+#include <kin/ecs/world.hpp>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -59,7 +57,7 @@ private:
 };
 
 struct BreachInput {
-    Vec2f move{};            // x right, y forward, each -1..1
+    Vec2f move{};             // x right, y forward, each -1..1
     float yaw = 0, pitch = 0; // the view, degrees (Quatf::yaw_pitch: yaw 0 looks along -z)
     bool fire = false, jump = false, dash = false;
 };
@@ -71,15 +69,21 @@ struct BreachEnemy {
     int slot = 0, kind = 0;
     float hp = 1, cooldown = 0, spin = 0;
 };
-struct BreachShot { Vec3f pos{}, velocity{}; float life = 0; };
-struct BreachPickup { Vec3f pos{}; float life = 15; };
+struct BreachShot {
+    Vec3f pos{}, velocity{};
+    float life = 0;
+};
+struct BreachPickup {
+    Vec3f pos{};
+    float life = 15;
+};
 
 // Cues for what draws it (the simulation never reads them).
 struct BreachEvent {
     enum class Kind : u8 { Hit, Kill, Pickup, Hurt, Fire, EnemyFire, Jump };
     Kind kind = Kind::Hit;
-    Vec3f pos{};      // where (a shot: the muzzle)
-    Vec3f to{};       // a shot: where it hit
+    Vec3f pos{}; // where (a shot: the muzzle)
+    Vec3f to{};  // a shot: where it hit
     int enemy_kind = 0;
 };
 
@@ -95,7 +99,7 @@ public:
     u64 checksum() const;
 
     kin::EcsWorld world;
-    Vec3f player{};          // the feet
+    Vec3f player{}; // the feet
     Vec3f velocity{};
     float yaw = 0, pitch = 0; // the view the last step used
     bool grounded = true;
@@ -122,16 +126,17 @@ public:
     static float enemy_max_hp(int kind) { return kind == 1 ? 3.0f : 1.0f; }
     JobSystem* jobs() const { return _jobs.get(); }
 
-    // Gives every enemy a MeshRenderer of its kind's mesh and material, for
+    // Gives every enemy a MeshRenderer3D of its kind's mesh and material, for
     // WorldRenderState3D to draw.
-    void use_enemy_meshes(const std::array<Mesh, 3>& meshes, const std::array<Material3D, 3>& materials);
+    void use_enemy_meshes(const std::array<Mesh3D, 3>& meshes, const std::array<Material3D, 3>& materials);
     WorldRenderState3D& render_state() { return _render; }
 
 private:
     float random(float lo, float hi);
     void respawn(kin::EcsEntity entity);
     void event(BreachEvent::Kind kind, Vec3f pos, int enemy_kind = 0, Vec3f to = {}) {
-        if (events.size() < 1024) events.push_back({kind, pos, to, enemy_kind});
+        if (events.size() < 1024)
+            events.push_back({kind, pos, to, enemy_kind});
     }
     void move_player(float dt, const BreachInput& input);
     void fire(const BreachInput& input);

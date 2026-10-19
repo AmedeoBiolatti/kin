@@ -1,10 +1,9 @@
 #pragma once
 
-// The climber's look and its CPU mesh data, apart from the renderer so that a test can walk the triangles (winding, finiteness)
-// without a GPU. SummitView uploads the parts and binds them to the skeleton.
+// The climber's look and its CPU mesh data, apart from the renderer so that a test can walk the triangles (winding,
+// finiteness) without a GPU. SummitView uploads the parts and binds them to the skeleton.
 
-#include <kin/render3d/mesh.hpp>
-
+#include <kin/render3d/mesh3d.hpp>
 #include <string>
 #include <vector>
 
@@ -22,7 +21,7 @@ struct ClimberPart {
     std::string name;
     Color colour;
     f32 roughness = 0.7f;
-    MeshData mesh;
+    MeshData3D mesh;
     f32 metallic = 0.0f;
 };
 // The parts with triangles, in drawing order. No renderer, no GPU.

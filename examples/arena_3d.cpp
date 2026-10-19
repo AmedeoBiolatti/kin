@@ -1,21 +1,22 @@
 #include "arena_3d.hpp"
 
 #if defined(KIN_EXPERIMENTAL_3D)
-#include <kin/core/profile.hpp>
-
 #include <algorithm>
 #include <cmath>
+#include <kin/core/profile.hpp>
 
 namespace examples {
 namespace {
 
 constexpr float ppm = ArenaPainter3D::pixels_per_metre;
 constexpr float arena_w = 3072 / ppm, arena_d = 2048 / ppm; // 48 x 32 m
-constexpr float fly_height = 0.45f;                          // where ships, enemies and shots fly
+constexpr float fly_height = 0.45f;                         // where ships, enemies and shots fly
 constexpr float tile = 2.0f;
 
 // The arena's 2D point at `height` metres.
-Vec3f ground(Vec2f p, float height = 0.0f) { return {p.x / ppm, height, p.y / ppm}; }
+Vec3f ground(Vec2f p, float height = 0.0f) {
+    return {p.x / ppm, height, p.y / ppm};
+}
 
 // The chase camera looking at `target`: behind and above it.
 Camera3D chase(Vec3f target) {
@@ -40,11 +41,12 @@ Vec3f keep_over_deck(Vec3f target, Rectf view) {
             clamp(target.z, top - margin, arena_d - bottom + margin)};
 }
 
-constexpr std::array<Color, 3> enemy_colors{Color::rgb(241, 99, 103), Color::rgb(241, 182, 92), Color::rgb(161, 127, 237)};
+constexpr std::array<Color, 3> enemy_colors{Color::rgb(241, 99, 103), Color::rgb(241, 182, 92),
+                                            Color::rgb(161, 127, 237)};
 
 // The player's ship: a dart pointing down -Z with two fins.
-MeshData make_ship() {
-    MeshData ship;
+MeshData3D make_ship() {
+    MeshData3D ship;
     ship.append(meshes::cone(0.22f, 0.8f, 16), Mat4f::rotation_x(-90.0f));
     ship.append(meshes::box({0.75f, 0.06f, 0.25f}), Mat4f::translation({0.0f, 0.0f, 0.22f}));
     ship.append(meshes::box({0.06f, 0.22f, 0.2f}), Mat4f::translation({0.0f, 0.12f, 0.28f}));
@@ -52,7 +54,9 @@ MeshData make_ship() {
 }
 
 // A hexagonal plate, like the 2D brute.
-MeshData make_plate() { return meshes::cylinder(0.3f, 0.14f, 6); }
+MeshData3D make_plate() {
+    return meshes::cylinder(0.3f, 0.14f, 6);
+}
 
 // Turned `degrees` about +Y, then moved to `at`: written out, as there may be
 // tens of thousands a frame.
@@ -96,8 +100,11 @@ void ArenaPainter3D::init(Renderer2D& renderer) {
         for (int x = 0; x < static_cast<int>(arena_w / tile); ++x) {
             const std::uint32_t h = hash(x, z);
             const u8 shade = static_cast<u8>(70 + h % 14);
-            _tiles.push_back({Mat4f::translation({(static_cast<float>(x) + 0.5f) * tile, -0.05f, (static_cast<float>(z) + 0.5f) * tile}),
-                              h % 23 == 0 ? Color::rgb(64, 96, 104) : Color::rgb(shade, static_cast<u8>(shade + 8), static_cast<u8>(shade + 16))});
+            _tiles.push_back({Mat4f::translation({(static_cast<float>(x) + 0.5f) * tile, -0.05f,
+                                                  (static_cast<float>(z) + 0.5f) * tile}),
+                              h % 23 == 0
+                                  ? Color::rgb(64, 96, 104)
+                                  : Color::rgb(shade, static_cast<u8>(shade + 8), static_cast<u8>(shade + 16))});
         }
     }
     const float height = 0.8f, thick = 0.5f;
@@ -110,10 +117,12 @@ void ArenaPainter3D::init(Renderer2D& renderer) {
     wall({arena_w + thick / 2, height / 2, arena_d / 2}, {thick, height, arena_d});
 }
 
-bool ArenaPainter3D::available() const { return _r3d && _r3d->available(); }
+bool ArenaPainter3D::available() const {
+    return _r3d && _r3d->available();
+}
 
-const Render3DStats& ArenaPainter3D::stats() const {
-    static const Render3DStats none{};
+const RenderStats3D& ArenaPainter3D::stats() const {
+    static const RenderStats3D none{};
     return _r3d ? _r3d->stats() : none;
 }
 
@@ -152,7 +161,9 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
 
     // The player's ship, turned to face where it aims.
     const Vec2f f = arena.facing();
-    const Color body = arena.hurt() ? Color::rgb(255, 150, 140) : arena.dashing() ? Color::rgb(220, 255, 255) : Color::rgb(90, 220, 235);
+    const Color body = arena.hurt()      ? Color::rgb(255, 150, 140)
+                       : arena.dashing() ? Color::rgb(220, 255, 255)
+                                         : Color::rgb(90, 220, 235);
     _scene.draw(_ship, Mat4f::translation(player) * Mat4f::rotation(Quatf::look_rotation({f.x, 0.0f, f.y})),
                 {.emissive = 0.2f}, body);
 
@@ -161,7 +172,8 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
     for (const Shot& s : arena.shots) {
         friendly += s.hostile ? 0 : 1;
     }
-    auto ours = _scene.add_instances(_shot, friendly, {.color = Color::rgb(150, 245, 255), .emissive = 1.5f, .unlit = true});
+    auto ours =
+        _scene.add_instances(_shot, friendly, {.color = Color::rgb(150, 245, 255), .emissive = 1.5f, .unlit = true});
     std::size_t i = 0;
     for (const Shot& s : arena.shots) {
         if (!s.hostile) {
@@ -173,25 +185,30 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
     i = 0;
     for (const Shot& s : arena.shots) {
         if (s.hostile) {
-            theirs[i++] = {Mat4f::translation(ground(s.pos, fly_height)) * Mat4f::scaling({1.3f, 1.3f, 1.3f}), kin::colors::white};
+            theirs[i++] = {Mat4f::translation(ground(s.pos, fly_height)) * Mat4f::scaling({1.3f, 1.3f, 1.3f}),
+                           kin::colors::white};
         }
     }
     // Cores to pick up, spinning; sparks and impacts as glowing bits.
-    auto cores = _scene.add_instances(_core, arena.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 0.8f});
+    auto cores =
+        _scene.add_instances(_core, arena.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 0.8f});
     for (std::size_t k = 0; k < arena.pickups.size(); ++k) {
         const Pickup& p = arena.pickups[k];
         cores[k] = {Mat4f::translation(ground(p.pos, 0.35f + 0.08f * std::sin(t * 3.0f + static_cast<float>(k)))) *
                         Mat4f::rotation_y(t * 90.0f + static_cast<float>(k) * 40.0f),
                     kin::colors::white};
     }
-    auto sparks = _scene.add_instances(_spark, arena.sparks.size(), {.color = Color::rgb(255, 200, 120), .emissive = 1.2f, .unlit = true});
+    auto sparks = _scene.add_instances(_spark, arena.sparks.size(),
+                                       {.color = Color::rgb(255, 200, 120), .emissive = 1.2f, .unlit = true});
     for (std::size_t k = 0; k < arena.sparks.size(); ++k) {
         const Spark& s = arena.sparks[k];
         const float size = std::clamp(s.life * 3.0f, 0.2f, 1.0f);
-        sparks[k] = {Mat4f::translation(ground(s.pos, fly_height)) * Mat4f::scaling({size, size, size}), kin::colors::white};
+        sparks[k] = {Mat4f::translation(ground(s.pos, fly_height)) * Mat4f::scaling({size, size, size}),
+                     kin::colors::white};
     }
     const auto& impacts = arena.impacts();
-    auto flashes = _scene.add_instances(_shot, impacts.size(), {.color = Color::rgb(255, 230, 200), .emissive = 2.0f, .unlit = true});
+    auto flashes = _scene.add_instances(_shot, impacts.size(),
+                                        {.color = Color::rgb(255, 230, 200), .emissive = 2.0f, .unlit = true});
     for (std::size_t k = 0; k < impacts.size(); ++k) {
         const float grow = 1.0f + (0.3f - impacts[k].life) * 12.0f;
         flashes[k] = {Mat4f::translation(ground(impacts[k].pos, fly_height)) * Mat4f::scaling({grow, grow, grow}),

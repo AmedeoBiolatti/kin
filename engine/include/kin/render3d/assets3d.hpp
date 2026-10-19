@@ -1,12 +1,10 @@
 #pragma once
-#include <kin/render3d/errors3d.hpp>
-
-#include <kin/assets/asset_handle.hpp>
-#include <kin/render3d/model.hpp>
-#include <kin/render3d/material_asset3d.hpp>
-
 #include <filesystem>
 #include <functional>
+#include <kin/assets/asset_handle.hpp>
+#include <kin/render3d/errors3d.hpp>
+#include <kin/render3d/material_asset3d.hpp>
+#include <kin/render3d/model3d.hpp>
 #include <memory>
 
 namespace kin {
@@ -54,20 +52,23 @@ public:
     Assets3D& operator=(const Assets3D&) = delete;
 
     // Without 3D (Renderer3D::available() false: a headless session, a server) a CPU-only model: its parts' names,
-    // transforms and skins, each with an empty mesh handle that keeps its vertex/index counts, bounds and joint count, and
-    // the model's skeletons, clips and bounds. No GPU memory; parts keep the default material, and only the model's own
-    // file is a source (its images are not decoded).
-    AssetHandle<Model> load_model(const std::filesystem::path& path, std::string* error = nullptr);
-    AssetHandle<Model> load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error = nullptr);
+    // transforms and skins, each with an empty mesh handle that keeps its vertex/index counts, bounds and joint count,
+    // and the model's skeletons, clips and bounds. No GPU memory; parts keep the default material, and only the model's
+    // own file is a source (its images are not decoded).
+    AssetHandle<Model3D> load_model(const std::filesystem::path& path, std::string* error = nullptr);
+    AssetHandle<Model3D> load_model(const std::filesystem::path& path, const MeshOptions3D& options,
+                                    std::string* error = nullptr);
     // Shares the same role/filter-aware texture cache as imported glTF maps.
-    Texture load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true, std::string* error = nullptr);
-    // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials naming
-    // a shader still bind.
+    Texture load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true,
+                         std::string* error = nullptr);
+    // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials
+    // naming a shader still bind.
     MaterialShader3D load_material_shader(const std::filesystem::path& path, std::string* error = nullptr);
     // Patches imported materials without cloning any model/mesh. Empty variant
     // selects the base layer. Invalidate changed sources explicitly before rebinding.
-    AssetHandle<MaterialBinding3D> load_materials(const std::filesystem::path& path, const std::shared_ptr<const Model>& model,
-                                                std::string_view variant = {}, std::string* error = nullptr);
+    AssetHandle<MaterialBinding3D> load_materials(const std::filesystem::path& path,
+                                                  const std::shared_ptr<const Model3D>& model,
+                                                  std::string_view variant = {}, std::string* error = nullptr);
     // Forget expired weak entries; no live resource is unloaded.
     void trim();
     // Forget all model/texture lookups. Existing handles, batches and scenes
@@ -88,11 +89,12 @@ private:
                           const std::function<Texture()>& load);
     struct Data;
     std::unique_ptr<Data> _data;
-    AssetHandle<Model> load_model_impl(const std::filesystem::path&, const MeshOptions&, std::string*);
+    AssetHandle<Model3D> load_model_impl(const std::filesystem::path&, const MeshOptions3D&, std::string*);
     Texture load_texture_impl(const std::filesystem::path&, bool, bool, std::string*);
     MaterialShader3D load_material_shader_impl(const std::filesystem::path&, std::string*);
-    AssetHandle<MaterialBinding3D> load_materials_impl(const std::filesystem::path&, const std::shared_ptr<const Model>&,
-                                                     std::string_view, std::string*);
+    AssetHandle<MaterialBinding3D> load_materials_impl(const std::filesystem::path&,
+                                                       const std::shared_ptr<const Model3D>&, std::string_view,
+                                                       std::string*);
 };
 
 } // namespace kin

@@ -1,25 +1,23 @@
-#include <kin/render3d/model.hpp>
-#include <kin/render3d/assets3d.hpp>
-#include <kin/render3d/model_geometry3d.hpp>
-
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/assets3d.hpp>
+#include <kin/render3d/model3d.hpp>
+#include <kin/render3d/model_geometry3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
 #define CGLTF_IMPLEMENTATION
-#include <cgltf.h>
-
 #include <algorithm>
+#include <cgltf.h>
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
-#include <map>
 #include <tuple>
 #include <utility>
 
@@ -50,17 +48,28 @@ void release_file(const cgltf_memory_options*, const cgltf_file_options*, void* 
 
 const char* describe(cgltf_result result) {
     switch (result) {
-    case cgltf_result_success: return "success";
-    case cgltf_result_data_too_short: return "data too short";
-    case cgltf_result_unknown_format: return "not glTF";
-    case cgltf_result_invalid_json: return "invalid JSON";
-    case cgltf_result_invalid_gltf: return "invalid glTF";
-    case cgltf_result_invalid_options: return "invalid options";
-    case cgltf_result_file_not_found: return "a file it names was not found";
-    case cgltf_result_io_error: return "read error";
-    case cgltf_result_out_of_memory: return "out of memory";
-    case cgltf_result_legacy_gltf: return "glTF 1.0 (2.0 is read)";
-    default: return "error";
+    case cgltf_result_success:
+        return "success";
+    case cgltf_result_data_too_short:
+        return "data too short";
+    case cgltf_result_unknown_format:
+        return "not glTF";
+    case cgltf_result_invalid_json:
+        return "invalid JSON";
+    case cgltf_result_invalid_gltf:
+        return "invalid glTF";
+    case cgltf_result_invalid_options:
+        return "invalid options";
+    case cgltf_result_file_not_found:
+        return "a file it names was not found";
+    case cgltf_result_io_error:
+        return "read error";
+    case cgltf_result_out_of_memory:
+        return "out of memory";
+    case cgltf_result_legacy_gltf:
+        return "glTF 1.0 (2.0 is read)";
+    default:
+        return "error";
     }
 }
 
@@ -69,8 +78,8 @@ Color to_color(const cgltf_float* rgba) {
 }
 
 // The local placing of a node, as translation, rotation and scale (a matrix is taken apart).
-JointPose local_pose(const cgltf_node* node) {
-    JointPose p;
+JointPose3D local_pose(const cgltf_node* node) {
+    JointPose3D p;
     if (node->has_matrix) {
         Mat4f m;
         std::memcpy(m.m, node->matrix, sizeof(m.m));
@@ -105,9 +114,12 @@ JointPose local_pose(const cgltf_node* node) {
         }
         return p;
     }
-    if (node->has_translation) p.translation = {node->translation[0], node->translation[1], node->translation[2]};
-    if (node->has_rotation) p.rotation = Quatf{node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]}.normalized();
-    if (node->has_scale) p.scale = {node->scale[0], node->scale[1], node->scale[2]};
+    if (node->has_translation)
+        p.translation = {node->translation[0], node->translation[1], node->translation[2]};
+    if (node->has_rotation)
+        p.rotation = Quatf{node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]}.normalized();
+    if (node->has_scale)
+        p.scale = {node->scale[0], node->scale[1], node->scale[2]};
     return p;
 }
 
@@ -117,11 +129,12 @@ Mat4f world_matrix(const cgltf_node* node) {
     return world;
 }
 
-// How deep nodes may nest: the reader walks them by recursion, so a file may go no deeper (the collision reader's bound).
-// A chain of the 256 joints a skin may have, under an armature, is legitimate, so the bound sits well above it.
+// How deep nodes may nest: the reader walks them by recursion, so a file may go no deeper (the collision reader's
+// bound). A chain of the 256 joints a skin may have, under an armature, is legitimate, so the bound sits well above it.
 constexpr std::size_t max_node_depth = 512;
 
-// A path as kin's content functions compare paths: absolute and lexically normal, a folder without its trailing separator.
+// A path as kin's content functions compare paths: absolute and lexically normal, a folder without its trailing
+// separator.
 std::filesystem::path normalized_path(const std::filesystem::path& path) {
     std::error_code error;
     const std::filesystem::path full = std::filesystem::absolute(path, error);
@@ -138,14 +151,16 @@ bool within(const std::filesystem::path& path, const std::filesystem::path& root
     return !relative.empty() && *relative.begin() != "..";
 }
 
-// Whether a file the glTF at `model` names (its URI, not yet decoded) is out of bounds, and so not read: an absolute path,
-// or, for a model in a mounted pack or under the content root, one whose ".." takes it out of there (a pack's own files
-// stop at its mount point). A loose model elsewhere keeps "..": the developer chose that file and what lies about it.
+// Whether a file the glTF at `model` names (its URI, not yet decoded) is out of bounds, and so not read: an absolute
+// path, or, for a model in a mounted pack or under the content root, one whose ".." takes it out of there (a pack's own
+// files stop at its mount point). A loose model elsewhere keeps "..": the developer chose that file and what lies about
+// it.
 bool outside_content(const std::filesystem::path& model, const char* uri) {
     std::string decoded = uri;
     cgltf_decode_uri(decoded.data());
     decoded.resize(std::strlen(decoded.c_str()));
-    if (!decoded.empty() && (decoded.front() == '/' || decoded.front() == '\\' || std::filesystem::path{decoded}.has_root_path())) {
+    if (!decoded.empty() &&
+        (decoded.front() == '/' || decoded.front() == '\\' || std::filesystem::path{decoded}.has_root_path())) {
         return true;
     }
     const std::filesystem::path from = normalized_path(model), file = normalized_path(model.parent_path() / decoded);
@@ -159,7 +174,8 @@ bool outside_content(const std::filesystem::path& model, const char* uri) {
     return false;
 }
 
-// The bytes of a base64 data: URI ("data:image/png;base64,..."), decoded as cgltf decodes a buffer's; empty when it is not one.
+// The bytes of a base64 data: URI ("data:image/png;base64,..."), decoded as cgltf decodes a buffer's; empty when it is
+// not one.
 std::vector<u8> data_uri_bytes(const char* uri) {
     const char* comma = std::strchr(uri, ',');
     if (!comma || comma - uri < 7 || std::strncmp(comma - 7, ";base64", 7) != 0) {
@@ -180,8 +196,8 @@ std::vector<u8> data_uri_bytes(const char* uri) {
     return out;
 }
 
-// Why cgltf cannot read an accessor's elements one by one, or null. Its reads decode neither sparse accessors nor meshopt
-// compression, and an accessor with no data (a Draco-compressed one, or one of zeros) reads as zeros.
+// Why cgltf cannot read an accessor's elements one by one, or null. Its reads decode neither sparse accessors nor
+// meshopt compression, and an accessor with no data (a Draco-compressed one, or one of zeros) reads as zeros.
 const char* unreadable(const cgltf_accessor* accessor) {
     if (accessor->is_sparse) {
         return "a sparse accessor is not read";
@@ -195,17 +211,18 @@ const char* unreadable(const cgltf_accessor* accessor) {
     return nullptr;
 }
 
-// Reads a glTF's nodes, meshes, skins and animations into ModelData (no GPU): the loader for a renderer (Loader, below) and
-// read_model_data share it. A primitive's triangles are handed to `sink` as they are read, so a big model is not held whole.
+// Reads a glTF's nodes, meshes, skins and animations into ModelData3D (no GPU): the loader for a renderer (Loader,
+// below) and read_model_data share it. A primitive's triangles are handed to `sink` as they are read, so a big model is
+// not held whole.
 class GltfReader {
 public:
-    using Sink = std::function<void(ModelPartData&&, const cgltf_material*)>;
+    using Sink = std::function<void(ModelPartData3D&&, const cgltf_material*)>;
 
     // `issues`, when given, collects the primitives left out (a model's asset diagnostics).
     GltfReader(const cgltf_data* data, std::string label, std::vector<std::string>* issues = nullptr)
         : _data(data), _label(std::move(label)), _issues(issues) {}
 
-    ModelData read(const Sink& sink) {
+    ModelData3D read(const Sink& sink) {
         _sink = &sink;
         build_skins();
         const cgltf_scene* scene = _data->scene ? _data->scene : _data->scenes_count ? &_data->scenes[0] : nullptr;
@@ -216,12 +233,14 @@ public:
             }
         } else {
             for (cgltf_size i = 0; i < _data->nodes_count; ++i) {
-                if (!_data->nodes[i].parent) add_node(&_data->nodes[i]);
+                if (!_data->nodes[i].parent)
+                    add_node(&_data->nodes[i]);
             }
         }
         if (_out.node_skeleton >= 0 && _node_parts == 0) {
-            // No part hangs from the animated nodes (BrainStem's moves the node above its skin's joints, which carries no mesh
-            // of its own): nothing for a pose of them to move, and the file reads as it did before nodes were animated.
+            // No part hangs from the animated nodes (BrainStem's moves the node above its skin's joints, which carries
+            // no mesh of its own): nothing for a pose of them to move, and the file reads as it did before nodes were
+            // animated.
             _out.skeletons.pop_back();
             _out.node_skeleton = -1;
             _node_joint.clear();
@@ -238,7 +257,8 @@ private:
     };
 
     void note(const char* what, const std::string& detail) const {
-        KIN_LOG_WARN_F("render", what, (LogFields{{.name = "model", .value = _label}, {.name = "detail", .value = detail}}));
+        KIN_LOG_WARN_F("render", what,
+                       (LogFields{{.name = "model", .value = _label}, {.name = "detail", .value = detail}}));
     }
 
     // --- skins
@@ -256,13 +276,14 @@ private:
             const cgltf_accessor* binds = skin.inverse_bind_matrices;
             if (const char* why = !binds ? nullptr : binds->type != cgltf_type_mat4 ? "not MAT4" : unreadable(binds)) {
                 note("3D: a skin is not used (its meshes are drawn static)",
-                     std::string{skin.name ? skin.name : "skin"} + ": its inverse bind matrices cannot be read (" + why + ")");
+                     std::string{skin.name ? skin.name : "skin"} + ": its inverse bind matrices cannot be read (" +
+                         why + ")");
                 continue;
             }
-            // The joint above each, among the skin's own: the nearest ancestor node that is one. A plain node between two
-            // joints (an offset an exporter left in) is kept as a joint that no vertex is bound to, so the joints below it
-            // rest where their inverse bind matrices were made. Its placing cannot go into the child's rest pose instead: a
-            // clip's track replaces all of a joint's placing.
+            // The joint above each, among the skin's own: the nearest ancestor node that is one. A plain node between
+            // two joints (an offset an exporter left in) is kept as a joint that no vertex is bound to, so the joints
+            // below it rest where their inverse bind matrices were made. Its placing cannot go into the child's rest
+            // pose instead: a clip's track replaces all of a joint's placing.
             std::map<const cgltf_node*, std::size_t> index;
             for (std::size_t j = 0; j < n; ++j) {
                 index[skin.joints[j]] = j;
@@ -301,8 +322,8 @@ private:
                     }
                 }
             }
-            // Parents first (the joints of a file come in any order); the vertices' joint indices follow the file's, so a
-            // table takes them over.
+            // Parents first (the joints of a file come in any order); the vertices' joint indices follow the file's, so
+            // a table takes them over.
             std::vector<u32> order;
             std::vector<u8> placed(count, 0);
             order.reserve(count);
@@ -328,7 +349,7 @@ private:
                 place[order[k]] = static_cast<u32>(k);
             }
             info.remap.assign(place.begin(), place.begin() + static_cast<std::ptrdiff_t>(n));
-            Skeleton sk;
+            Skeleton3D sk;
             sk.names.resize(count);
             sk.parents.resize(count);
             sk.rest.resize(count);
@@ -336,12 +357,14 @@ private:
             for (std::size_t k = 0; k < count; ++k) {
                 const std::size_t j = order[k];
                 const cgltf_node* node = nodes[j];
-                sk.names[k] = node->name ? node->name : j < n ? "joint" + std::to_string(j) : "node" + std::to_string(node - _data->nodes);
+                sk.names[k] = node->name ? node->name
+                              : j < n    ? "joint" + std::to_string(j)
+                                         : "node" + std::to_string(node - _data->nodes);
                 sk.parents[k] = parent_of[j] < 0 ? -1 : static_cast<i32>(place[static_cast<std::size_t>(parent_of[j])]);
                 sk.rest[k] = local_pose(node);
                 if (j >= n) {
-                    // A node between joints has no inverse bind matrix: the one that makes its matrix the identity at rest
-                    // (nothing is bound to it, but it must be finite).
+                    // A node between joints has no inverse bind matrix: the one that makes its matrix the identity at
+                    // rest (nothing is bound to it, but it must be finite).
                     const Mat4f inverse = world_matrix(node).inverse();
                     if (std::all_of(inverse.m, inverse.m + 16, [](f32 x) { return std::isfinite(x); })) {
                         sk.inverse_bind[k] = inverse;
@@ -356,14 +379,16 @@ private:
             // Where the roots hang: the nodes above them (the first root's parent; the others should agree).
             bool first_root = true;
             for (std::size_t k = 0; k < count; ++k) {
-                if (sk.parents[k] >= 0) continue;
+                if (sk.parents[k] >= 0)
+                    continue;
                 const cgltf_node* above = nodes[order[k]]->parent;
                 const Mat4f world = above ? world_matrix(above) : Mat4f{};
                 if (first_root) {
                     sk.root_transform = world;
                     first_root = false;
                 } else if (std::memcmp(world.m, sk.root_transform.m, sizeof(world.m)) != 0) {
-                    note("3D: a skin's roots hang from different places: the first root's is used for all", skin.name ? skin.name : "skin");
+                    note("3D: a skin's roots hang from different places: the first root's is used for all",
+                         skin.name ? skin.name : "skin");
                 }
             }
             info.ok = true;
@@ -374,13 +399,15 @@ private:
     }
 
     // --- animated nodes
-    // The node skeleton: the plain nodes (no joint of a skin in use) that an animation moves in the scene read, and every node
-    // above them, parents first. Made before the nodes are read, so that each part knows the joint it hangs from.
+    // The node skeleton: the plain nodes (no joint of a skin in use) that an animation moves in the scene read, and
+    // every node above them, parents first. Made before the nodes are read, so that each part knows the joint it hangs
+    // from.
     void build_node_skeleton(const cgltf_scene* scene) {
         const std::size_t count = _data->nodes_count;
         std::vector<u8> listed(count, scene ? 0 : 1), moved(count, 0);
         if (scene) {
-            for (cgltf_size i = 0; i < scene->nodes_count; ++i) listed[static_cast<std::size_t>(scene->nodes[i] - _data->nodes)] = 1;
+            for (cgltf_size i = 0; i < scene->nodes_count; ++i)
+                listed[static_cast<std::size_t>(scene->nodes[i] - _data->nodes)] = 1;
         }
         std::size_t marked = 0;
         for (cgltf_size ai = 0; ai < _data->animations_count; ++ai) {
@@ -391,10 +418,13 @@ private:
                 if (!node || channel.target_path == cgltf_animation_path_type_weights || _joint_of.count(node)) {
                     continue; // a morph weight, or a skin's joint: its skeleton's to move
                 }
-                bool drawn = false; // under a node of the scene read (a channel of another scene's nodes moves nothing here)
-                for (const cgltf_node* up = node; up && !drawn; up = up->parent) drawn = listed[static_cast<std::size_t>(up - _data->nodes)] != 0;
+                bool drawn =
+                    false; // under a node of the scene read (a channel of another scene's nodes moves nothing here)
+                for (const cgltf_node* up = node; up && !drawn; up = up->parent)
+                    drawn = listed[static_cast<std::size_t>(up - _data->nodes)] != 0;
                 // The node and those above it; a marked node's are marked already.
-                for (const cgltf_node* up = node; drawn && up && !moved[static_cast<std::size_t>(up - _data->nodes)]; up = up->parent) {
+                for (const cgltf_node* up = node; drawn && up && !moved[static_cast<std::size_t>(up - _data->nodes)];
+                     up = up->parent) {
                     moved[static_cast<std::size_t>(up - _data->nodes)] = 1;
                     ++marked;
                 }
@@ -408,9 +438,9 @@ private:
                  std::to_string(marked) + " nodes with those above them, more than " + std::to_string(max_skin_joints));
             return;
         }
-        // Parents first: from each root down, in the file's order of children (marked nodes are closed upward, so a node that
-        // is not marked has none below it).
-        Skeleton sk;
+        // Parents first: from each root down, in the file's order of children (marked nodes are closed upward, so a
+        // node that is not marked has none below it).
+        Skeleton3D sk;
         std::vector<const cgltf_node*> order;
         order.reserve(marked);
         const auto place = [&](auto&& self, const cgltf_node* node, i32 parent) -> void {
@@ -418,11 +448,13 @@ private:
             order.push_back(node);
             sk.parents.push_back(parent);
             for (cgltf_size i = 0; i < node->children_count; ++i) {
-                if (moved[static_cast<std::size_t>(node->children[i] - _data->nodes)]) self(self, node->children[i], joint);
+                if (moved[static_cast<std::size_t>(node->children[i] - _data->nodes)])
+                    self(self, node->children[i], joint);
             }
         };
         for (std::size_t i = 0; i < count; ++i) {
-            if (moved[i] && !_data->nodes[i].parent) place(place, &_data->nodes[i], -1);
+            if (moved[i] && !_data->nodes[i].parent)
+                place(place, &_data->nodes[i], -1);
         }
         for (std::size_t k = 0; k < order.size(); ++k) {
             const cgltf_node* node = order[k];
@@ -441,8 +473,8 @@ private:
         if (node->mesh) {
             const Mat4f world = world_matrix(node);
             const char* name = node->name ? node->name : node->mesh->name ? node->mesh->name : "";
-            // The node skeleton's joint the mesh hangs from (its own node or the nearest above it), and its placing below it:
-            // the local placings on the way, multiplied as cgltf multiplies a world matrix.
+            // The node skeleton's joint the mesh hangs from (its own node or the nearest above it), and its placing
+            // below it: the local placings on the way, multiplied as cgltf multiplies a world matrix.
             i32 hang = -1;
             Mat4f below{};
             for (const cgltf_node* up = node; up && !_node_joint.empty(); up = up->parent) {
@@ -461,7 +493,8 @@ private:
             if (!own) {
                 for (const cgltf_node* up = node; up && attached.first < 0; up = up->parent) {
                     const auto found = _joint_of.find(up);
-                    if (found != _joint_of.end()) attached = found->second;
+                    if (found != _joint_of.end())
+                        attached = found->second;
                 }
             }
             for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
@@ -471,21 +504,23 @@ private:
                 }
                 const bool bound = own_info && own_info->ok && attribute(primitive, cgltf_attribute_type_joints) &&
                                    attribute(primitive, cgltf_attribute_type_weights);
-                MeshData data = mesh_data(primitive, bound ? own_info : nullptr, name);
+                MeshData3D data = mesh_data(primitive, bound ? own_info : nullptr, name);
                 if (data.vertices.empty()) {
                     continue;
                 }
-                ModelPartData part{name, {}, world, -1};
+                ModelPartData3D part{name, {}, world, -1};
                 if (bound) {
                     part.transform = Mat4f{}; // the node's placing is ignored for a skinned mesh
                     part.skin = static_cast<i32>(own_info->skeleton);
                     part.mesh = std::move(data);
                 } else if (attached.first >= 0 && _skins[static_cast<std::size_t>(attached.first)].ok) {
-                    // Rigid on a joint: its vertices in the space the joints' inverse bind matrices start from (the world at
-                    // rest), all of their weight on the joint.
+                    // Rigid on a joint: its vertices in the space the joints' inverse bind matrices start from (the
+                    // world at rest), all of their weight on the joint.
                     const SkinInfo& info = _skins[static_cast<std::size_t>(attached.first)];
                     part.mesh.append(data, world);
-                    part.mesh.skin.assign(part.mesh.vertices.size(), MeshSkinVertex{{static_cast<u8>(attached.second), 0, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
+                    part.mesh.skin.assign(
+                        part.mesh.vertices.size(),
+                        MeshSkinVertex3D{{static_cast<u8>(attached.second), 0, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
                     part.transform = Mat4f{};
                     part.skin = static_cast<i32>(info.skeleton);
                 } else {
@@ -514,9 +549,10 @@ private:
     }
 
     // JOINTS_0 and WEIGHTS_0 of a primitive as a skin stream (one entry a vertex of the accessors): the joints taken
-    // through `info`'s table, the weights renormalised; a vertex with no usable influence goes to joint 0. False when cgltf
-    // cannot read them.
-    bool read_skin(const cgltf_primitive& primitive, const SkinInfo& info, std::size_t count, const char* name, std::vector<MeshSkinVertex>& out) const {
+    // through `info`'s table, the weights renormalised; a vertex with no usable influence goes to joint 0. False when
+    // cgltf cannot read them.
+    bool read_skin(const cgltf_primitive& primitive, const SkinInfo& info, std::size_t count, const char* name,
+                   std::vector<MeshSkinVertex3D>& out) const {
         const cgltf_accessor* joints = attribute(primitive, cgltf_attribute_type_joints);
         const cgltf_accessor* weights = attribute(primitive, cgltf_attribute_type_weights);
         out.assign(count, {});
@@ -524,8 +560,10 @@ private:
             return true;
         }
         // Normalised integers are read as fractions; a file that forgot to say so is read as the spec means them.
-        const f32 scale = weights->normalized ? 1.0f : weights->component_type == cgltf_component_type_r_8u ? 1.0f / 255.0f
-                        : weights->component_type == cgltf_component_type_r_16u ? 1.0f / 65535.0f : 1.0f;
+        const f32 scale = weights->normalized                                     ? 1.0f
+                          : weights->component_type == cgltf_component_type_r_8u  ? 1.0f / 255.0f
+                          : weights->component_type == cgltf_component_type_r_16u ? 1.0f / 65535.0f
+                                                                                  : 1.0f;
         std::size_t none = 0, bad = 0;
         for (std::size_t i = 0; i < count; ++i) {
             cgltf_uint j[4] = {0, 0, 0, 0};
@@ -533,11 +571,12 @@ private:
             if (!cgltf_accessor_read_uint(joints, i, j, 4) || !cgltf_accessor_read_float(weights, i, w, 4)) {
                 return false;
             }
-            MeshSkinVertex v;
+            MeshSkinVertex3D v;
             f32 sum = 0.0f;
             for (std::size_t k = 0; k < 4; ++k) {
                 f32 wk = w[k] * (weights->normalized ? 1.0f : scale);
-                if (!std::isfinite(wk) || wk < 0.0f) wk = 0.0f;
+                if (!std::isfinite(wk) || wk < 0.0f)
+                    wk = 0.0f;
                 if (wk > 0.0f && j[k] >= info.remap.size()) {
                     ++bad; // an index past the skin's joints: that influence is dropped
                     wk = 0.0f;
@@ -547,7 +586,8 @@ private:
                 sum += wk;
             }
             if (sum > 0.0f) {
-                for (f32& wk : v.weights) wk /= sum;
+                for (f32& wk : v.weights)
+                    wk /= sum;
             } else {
                 ++none;
                 v.joints = {0, 0, 0, 0};
@@ -556,8 +596,10 @@ private:
             out[i] = v;
         }
         if (none > 0 || bad > 0) {
-            note("3D: a skinned mesh has vertices with no usable weights or joints past the skin: bound to joint 0 or dropped",
-                 std::string{name} + ": " + std::to_string(none) + " vertices without weights, " + std::to_string(bad) + " influences past the joints");
+            note("3D: a skinned mesh has vertices with no usable weights or joints past the skin: bound to joint 0 or "
+                 "dropped",
+                 std::string{name} + ": " + std::to_string(none) + " vertices without weights, " + std::to_string(bad) +
+                     " influences past the joints");
         }
         return true;
     }
@@ -572,11 +614,17 @@ private:
         const cgltf_accessor* normals = attribute(primitive, cgltf_attribute_type_normal);
         const cgltf_accessor* uvs = attribute(primitive, cgltf_attribute_type_texcoord);
         const cgltf_accessor* colors = attribute(primitive, cgltf_attribute_type_color);
-        if (positions->type != cgltf_type_vec3 || (normals && normals->type != cgltf_type_vec3) || (uvs && uvs->type != cgltf_type_vec2) ||
+        if (positions->type != cgltf_type_vec3 || (normals && normals->type != cgltf_type_vec3) ||
+            (uvs && uvs->type != cgltf_type_vec2) ||
             (colors && colors->type != cgltf_type_vec3 && colors->type != cgltf_type_vec4)) {
-            return "an attribute has the wrong number of components (POSITION and NORMAL are VEC3, TEXCOORD_0 VEC2, COLOR_0 VEC3 or VEC4)";
+            return "an attribute has the wrong number of components (POSITION and NORMAL are VEC3, TEXCOORD_0 VEC2, "
+                   "COLOR_0 VEC3 or VEC4)";
         }
-        const cgltf_accessor* used[] = {positions, normals, uvs, colors, primitive.indices,
+        const cgltf_accessor* used[] = {positions,
+                                        normals,
+                                        uvs,
+                                        colors,
+                                        primitive.indices,
                                         skinned ? attribute(primitive, cgltf_attribute_type_joints) : nullptr,
                                         skinned ? attribute(primitive, cgltf_attribute_type_weights) : nullptr};
         for (const cgltf_accessor* accessor : used) {
@@ -595,8 +643,8 @@ private:
         }
     }
 
-    MeshData mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name) const {
-        MeshData data;
+    MeshData3D mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name) const {
+        MeshData3D data;
         const cgltf_accessor* positions = attribute(primitive, cgltf_attribute_type_position);
         if (!positions) {
             return data;
@@ -611,10 +659,12 @@ private:
         data.vertices.resize(positions->count);
         bool read = true;
         for (cgltf_size i = 0; i < positions->count; ++i) {
-            MeshVertex& v = data.vertices[i];
+            MeshVertex3D& v = data.vertices[i];
             read = cgltf_accessor_read_float(positions, i, &v.position.x, 3) && read;
-            if (normals) read = cgltf_accessor_read_float(normals, i, &v.normal.x, 3) && read;
-            if (uvs) read = cgltf_accessor_read_float(uvs, i, &v.uv.x, 2) && read;
+            if (normals)
+                read = cgltf_accessor_read_float(normals, i, &v.normal.x, 3) && read;
+            if (uvs)
+                read = cgltf_accessor_read_float(uvs, i, &v.uv.x, 2) && read;
             if (colors) {
                 cgltf_float c[4] = {1, 1, 1, 1};
                 read = cgltf_accessor_read_float(colors, i, c, cgltf_num_components(colors->type)) && read;
@@ -624,7 +674,9 @@ private:
         if (skin) {
             read = read_skin(primitive, *skin, data.vertices.size(), name, data.skin) && read;
             if (attribute_index(primitive, cgltf_attribute_type_joints, 1)) {
-                note("3D: a skinned mesh has more than four influences a vertex: the strongest four of JOINTS_0 are used", name);
+                note("3D: a skinned mesh has more than four influences a vertex: the strongest four of JOINTS_0 are "
+                     "used",
+                     name);
             }
         }
         // cgltf_accessor_read_index has no failure to report: refusal() has seen that the indices' data is there.
@@ -640,31 +692,34 @@ private:
         }
         if (!normals) {
             // Flat: each triangle its own vertices, facing its own way.
-            MeshData flat;
+            MeshData3D flat;
             const std::size_t count = data.indices.empty() ? data.vertices.size() : data.indices.size();
             for (std::size_t t = 0; t + 2 < count; t += 3) {
-                MeshVertex v[3];
+                MeshVertex3D v[3];
                 std::size_t at[3];
                 for (int k = 0; k < 3; ++k) {
-                    at[k] = data.indices.empty() ? t + static_cast<std::size_t>(k) : data.indices[t + static_cast<std::size_t>(k)];
+                    at[k] = data.indices.empty() ? t + static_cast<std::size_t>(k)
+                                                 : data.indices[t + static_cast<std::size_t>(k)];
                     v[k] = data.vertices[at[k]];
                 }
                 const Vec3f n = normalize(cross(v[1].position - v[0].position, v[2].position - v[0].position));
                 for (int k = 0; k < 3; ++k) {
                     v[k].normal = n;
                     flat.vertices.push_back(v[k]);
-                    if (skin) flat.skin.push_back(data.skin[at[k]]);
+                    if (skin)
+                        flat.skin.push_back(data.skin[at[k]]);
                 }
             }
             return flat;
         }
-        for (MeshVertex& v : data.vertices) {
+        for (MeshVertex3D& v : data.vertices) {
             v.normal = normalize(v.normal);
         }
         return data;
     }
 
-    static const cgltf_accessor* attribute_index(const cgltf_primitive& primitive, cgltf_attribute_type type, cgltf_int index) {
+    static const cgltf_accessor* attribute_index(const cgltf_primitive& primitive, cgltf_attribute_type type,
+                                                 cgltf_int index) {
         for (cgltf_size i = 0; i < primitive.attributes_count; ++i) {
             if (primitive.attributes[i].type == type && primitive.attributes[i].index == index) {
                 return primitive.attributes[i].data;
@@ -720,7 +775,7 @@ private:
                     _out.clips.push_back(std::move(clip));
                     it = clip_of.emplace(info.skeleton, _out.clips.size() - 1).first;
                 }
-                JointChannels& channels = _out.clips[it->second].channels[joint];
+                JointChannels3D& channels = _out.clips[it->second].channels[joint];
                 read_channel(channel, channels);
             }
             for (const auto& [skeleton, at] : clip_of) {
@@ -744,11 +799,12 @@ private:
         }
     }
 
-    void read_channel(const cgltf_animation_channel& channel, JointChannels& out) const {
+    void read_channel(const cgltf_animation_channel& channel, JointChannels3D& out) const {
         const cgltf_animation_sampler& sampler = *channel.sampler;
-        const Interpolation3D mode = sampler.interpolation == cgltf_interpolation_type_step           ? Interpolation3D::Step
-                                   : sampler.interpolation == cgltf_interpolation_type_cubic_spline ? Interpolation3D::CubicSpline
-                                                                                                     : Interpolation3D::Linear;
+        const Interpolation3D mode = sampler.interpolation == cgltf_interpolation_type_step ? Interpolation3D::Step
+                                     : sampler.interpolation == cgltf_interpolation_type_cubic_spline
+                                         ? Interpolation3D::CubicSpline
+                                         : Interpolation3D::Linear;
         const std::size_t keys = sampler.input->count;
         const std::size_t per_key = mode == Interpolation3D::CubicSpline ? 3 : 1;
         if (sampler.output->count < keys * per_key) {
@@ -777,7 +833,8 @@ private:
                 track.values[k] = Quatf{q[0], q[1], q[2], q[3]};
             }
         } else {
-            Track3D<Vec3f>& track = channel.target_path == cgltf_animation_path_type_translation ? out.translation : out.scale;
+            Track3D<Vec3f>& track =
+                channel.target_path == cgltf_animation_path_type_translation ? out.translation : out.scale;
             track.interpolation = mode;
             track.times = std::move(times);
             track.values.resize(values);
@@ -793,23 +850,25 @@ private:
     std::string _label;
     std::vector<std::string>* _issues = nullptr;
     const Sink* _sink = nullptr;
-    ModelData _out;
+    ModelData3D _out;
     std::vector<SkinInfo> _skins;
-    std::map<const cgltf_node*, std::pair<i32, i32>> _joint_of; // a joint node: its skin (the file's) and its index in it
-    std::map<const cgltf_node*, i32> _node_joint;               // a node of the node skeleton: its joint
-    std::size_t _node_parts = 0;                                // parts that hang from one
+    std::map<const cgltf_node*, std::pair<i32, i32>>
+        _joint_of;                                // a joint node: its skin (the file's) and its index in it
+    std::map<const cgltf_node*, i32> _node_joint; // a node of the node skeleton: its joint
+    std::size_t _node_parts = 0;                  // parts that hang from one
 };
 
 // Parses glTF bytes (and loads the buffers they name) into cgltf's data; null with `error` set when it does not read.
-std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> parse_gltf(std::string_view bytes, const std::filesystem::path& path, std::string& error) {
+std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> parse_gltf(std::string_view bytes, const std::filesystem::path& path,
+                                                              std::string& error) {
     cgltf_options options{};
     options.file.read = read_file;
     options.file.release = release_file;
     cgltf_data* data = nullptr;
     cgltf_result result = cgltf_parse(&options, bytes.data(), bytes.size(), &data);
     std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> owned{data, cgltf_free};
-    // Refused before a buffer is read: nodes nested deeper than the reader may recurse, and a buffer outside the model's
-    // content (outside_content; as a missing buffer would, the model does not load).
+    // Refused before a buffer is read: nodes nested deeper than the reader may recurse, and a buffer outside the
+    // model's content (outside_content; as a missing buffer would, the model does not load).
     std::string refused;
     if (result == cgltf_result_success) {
         for (cgltf_size i = 0; i < data->nodes_count && refused.empty(); ++i) {
@@ -843,11 +902,12 @@ std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> parse_gltf(std::string_view b
 
 class Loader {
 public:
-    using TextureResolver = std::function<Texture(const std::filesystem::path&, u32, bool, bool, const std::function<Texture()>&)>;
-    Loader(Renderer3D& r3d, std::filesystem::path path, const MeshOptions& options, TextureResolver resolver = {})
+    using TextureResolver =
+        std::function<Texture(const std::filesystem::path&, u32, bool, bool, const std::function<Texture()>&)>;
+    Loader(Renderer3D& r3d, std::filesystem::path path, const MeshOptions3D& options, TextureResolver resolver = {})
         : _r3d(r3d), _path(std::move(path)), _options(options), _resolve_texture(std::move(resolver)) {}
 
-    Model load(std::string& error) {
+    Model3D load(std::string& error) {
         const std::optional<std::string> bytes = read_content_file(_path);
         if (!bytes) {
             error = "cannot read " + _path.string();
@@ -858,27 +918,32 @@ public:
             return {};
         }
         _data = owned.get();
-        Model model;
+        Model3D model;
         model.source_files.push_back(_path.lexically_normal());
         const auto dependency = [&](const char* uri) {
-            if (!uri || std::strncmp(uri, "data:", 5) == 0 || outside_content(_path, uri)) return; // not read: see texture()
+            if (!uri || std::strncmp(uri, "data:", 5) == 0 || outside_content(_path, uri))
+                return; // not read: see texture()
             std::string decoded = uri;
             cgltf_decode_uri(decoded.data());
             decoded.resize(std::strlen(decoded.c_str()));
             model.source_files.push_back((_path.parent_path() / decoded).lexically_normal());
         };
-        for (cgltf_size i = 0; i < _data->buffers_count; ++i) dependency(_data->buffers[i].uri);
-        for (cgltf_size i = 0; i < _data->images_count; ++i) dependency(_data->images[i].uri);
+        for (cgltf_size i = 0; i < _data->buffers_count; ++i)
+            dependency(_data->buffers[i].uri);
+        for (cgltf_size i = 0; i < _data->images_count; ++i)
+            dependency(_data->images[i].uri);
         std::ranges::sort(model.source_files);
-        model.source_files.erase(std::unique(model.source_files.begin(), model.source_files.end()), model.source_files.end());
+        model.source_files.erase(std::unique(model.source_files.begin(), model.source_files.end()),
+                                 model.source_files.end());
         GltfReader reader{_data, _path.string(), &_issues};
-        ModelData read = reader.read([&](ModelPartData&& part, const cgltf_material* material) {
-            Mesh mesh = _r3d.create_mesh(part.mesh, _options);
+        ModelData3D read = reader.read([&](ModelPartData3D&& part, const cgltf_material* material) {
+            Mesh3D mesh = _r3d.create_mesh(part.mesh, _options);
             if (!mesh.valid()) {
                 _issues.push_back("model mesh could not be uploaded: " + part.name);
                 return;
             }
-            model.parts.push_back({part.name, std::move(mesh), this->material(material), part.transform, part.skin, part.node, part.node_offset});
+            model.parts.push_back({part.name, std::move(mesh), this->material(material), part.transform, part.skin,
+                                   part.node, part.node_offset});
         });
         model.skeletons = std::move(read.skeletons);
         model.clips = std::move(read.clips);
@@ -889,15 +954,17 @@ public:
             return {};
         }
         bool first = true;
-        for (const ModelPart& part : model.parts) {
-            const Bounds3& b = part.mesh.bounds();
+        for (const ModelPart3D& part : model.parts) {
+            const Bounds3D& b = part.mesh.bounds();
             for (int i = 0; i < 8; ++i) {
-                const Vec3f p = part.transform.apply({(i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y,
-                                                      (i & 4) ? b.max.z : b.min.z});
-                model.bounds.min = first ? p : Vec3f{std::min(model.bounds.min.x, p.x), std::min(model.bounds.min.y, p.y),
-                                                     std::min(model.bounds.min.z, p.z)};
-                model.bounds.max = first ? p : Vec3f{std::max(model.bounds.max.x, p.x), std::max(model.bounds.max.y, p.y),
-                                                     std::max(model.bounds.max.z, p.z)};
+                const Vec3f p = part.transform.apply(
+                    {(i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z});
+                model.bounds.min = first ? p
+                                         : Vec3f{std::min(model.bounds.min.x, p.x), std::min(model.bounds.min.y, p.y),
+                                                 std::min(model.bounds.min.z, p.z)};
+                model.bounds.max = first ? p
+                                         : Vec3f{std::max(model.bounds.max.x, p.x), std::max(model.bounds.max.y, p.y),
+                                                 std::max(model.bounds.max.z, p.z)};
                 first = false;
             }
         }
@@ -932,18 +999,22 @@ private:
         out.unlit = m->unlit;
         out.double_sided = m->double_sided;
         out.blend = m->alpha_mode == cgltf_alpha_mode_blend  ? Blend3D::Alpha
-                  : m->alpha_mode == cgltf_alpha_mode_mask ? Blend3D::Mask
-                                                           : Blend3D::Opaque;
+                    : m->alpha_mode == cgltf_alpha_mode_mask ? Blend3D::Mask
+                                                             : Blend3D::Opaque;
         out.alpha_cutoff = m->alpha_cutoff;
         // One sampler's wrap modes for all its maps: the base colour's, else the first map's.
-        const cgltf_texture* first = m->has_pbr_metallic_roughness ? m->pbr_metallic_roughness.base_color_texture.texture : nullptr;
-        for (const cgltf_texture* t : {m->pbr_metallic_roughness.metallic_roughness_texture.texture, m->normal_texture.texture,
-                                       m->occlusion_texture.texture, m->emissive_texture.texture}) {
+        const cgltf_texture* first =
+            m->has_pbr_metallic_roughness ? m->pbr_metallic_roughness.base_color_texture.texture : nullptr;
+        for (const cgltf_texture* t :
+             {m->pbr_metallic_roughness.metallic_roughness_texture.texture, m->normal_texture.texture,
+              m->occlusion_texture.texture, m->emissive_texture.texture}) {
             first = first ? first : t;
         }
         if (first) {
             const auto wrap = [](cgltf_int mode) {
-                return mode == 33071 ? Wrap3D::Clamp : mode == 33648 ? Wrap3D::Mirror : Wrap3D::Repeat; // REPEAT (10497) the default
+                return mode == 33071   ? Wrap3D::Clamp
+                       : mode == 33648 ? Wrap3D::Mirror
+                                       : Wrap3D::Repeat; // REPEAT (10497) the default
             };
             out.wrap_u = first->sampler ? wrap(first->sampler->wrap_s) : Wrap3D::Repeat;
             out.wrap_v = first->sampler ? wrap(first->sampler->wrap_t) : Wrap3D::Repeat;
@@ -961,7 +1032,9 @@ private:
         // Pixel art asks for its texels as they are (a NEAREST sampler);
         // anything else is mipmapped. KHR_texture_basisu's KTX2 is read only
         // where there is no other image (it needs a transcoder: said as it fails).
-        return texture(t->image ? t->image : t->has_basisu ? t->basisu_image : nullptr,
+        return texture(t->image        ? t->image
+                       : t->has_basisu ? t->basisu_image
+                                       : nullptr,
                        t->sampler && t->sampler->mag_filter == 9728, srgb);
     }
 
@@ -986,8 +1059,9 @@ private:
             embedded = ~0u;
             outside = outside_content(_path, image->uri);
             if (outside) {
-                KIN_LOG_WARN_F("render", "3D: a model names a file outside its content: not read",
-                               (LogFields{{.name = "model", .value = _path.string()}, {.name = "uri", .value = image->uri}}));
+                KIN_LOG_WARN_F(
+                    "render", "3D: a model names a file outside its content: not read",
+                    (LogFields{{.name = "model", .value = _path.string()}, {.name = "uri", .value = image->uri}}));
             }
         }
         const auto load = [&]() -> Texture {
@@ -997,14 +1071,17 @@ private:
             std::string name = image->name ? image->name : "texture";
             if (image->buffer_view) {
                 const auto* data = static_cast<const u8*>(cgltf_buffer_view_data(image->buffer_view));
-                if (data) bytes = {data, image->buffer_view->size};
+                if (data)
+                    bytes = {data, image->buffer_view->size};
             } else if (image->uri && std::strncmp(image->uri, "data:", 5) != 0) {
                 name = image->uri;
                 cgltf_decode_uri(name.data());
                 name.resize(std::strlen(name.c_str()));
                 // A file outside the model's content is not read: the texture is missing.
-                if (!outside) file = read_content_file(_path.parent_path() / name);
-                if (file) bytes = {reinterpret_cast<const u8*>(file->data()), file->size()};
+                if (!outside)
+                    file = read_content_file(_path.parent_path() / name);
+                if (file)
+                    bytes = {reinterpret_cast<const u8*>(file->data()), file->size()};
             } else if (image->uri) {
                 // An image inside the file as a base64 data: URI (Blender's "glTF Embedded" export).
                 inline_bytes = data_uri_bytes(image->uri);
@@ -1013,43 +1090,52 @@ private:
             Texture texture;
             std::string why;
             if (is_compressed_image(bytes)) {
-                // KTX2 (image/ktx2, as KHR_texture_basisu names it) or DDS: compressed texels and their mip chain, uploaded
-                // as they are. The file's format says whether they are colour; a map that wants the other is told once.
+                // KTX2 (image/ktx2, as KHR_texture_basisu names it) or DDS: compressed texels and their mip chain,
+                // uploaded as they are. The file's format says whether they are colour; a map that wants the other is
+                // told once.
                 if (const auto compressed = decode_compressed_image(bytes, &why)) {
                     if (compressed->srgb() != srgb) {
-                        KIN_LOG_WARN_F("render", srgb ? "3D: a model's colour texture holds linear (UNORM) texels: sampled as stored"
-                                                      : "3D: a model's data texture holds sRGB colour: sampled decoded",
-                                       (LogFields{{.name = "model", .value = _path.string()}, {.name = "image", .value = name}}));
+                        KIN_LOG_WARN_F(
+                            "render",
+                            srgb ? "3D: a model's colour texture holds linear (UNORM) texels: sampled as stored"
+                                 : "3D: a model's data texture holds sRGB colour: sampled decoded",
+                            (LogFields{{.name = "model", .value = _path.string()}, {.name = "image", .value = name}}));
                     }
                     texture = _r3d.renderer().create_texture_compressed(*compressed);
-                    if (!texture) why = "its format cannot be sampled here";
+                    if (!texture)
+                        why = "its format cannot be sampled here";
                 }
             } else if (!bytes.empty()) {
                 const Image decoded = decode_image(bytes, name);
                 if (decoded.valid()) {
-                    texture = srgb ? _r3d.renderer().create_texture_from_rgba(decoded.rgba.data(), decoded.size)
-                                   : _r3d.renderer().create_texture(decoded.size, TextureFormat::Rgba8, decoded.rgba.data());
+                    texture =
+                        srgb ? _r3d.renderer().create_texture_from_rgba(decoded.rgba.data(), decoded.size)
+                             : _r3d.renderer().create_texture(decoded.size, TextureFormat::Rgba8, decoded.rgba.data());
                 }
             }
             if (texture) {
                 _r3d.renderer().set_scale_mode(texture, nearest ? ScaleMode::Nearest : ScaleMode::Mipmapped);
             } else {
-                LogFields fields{{.name = "model", .value = _path.string()}, {.name = "image", .value = image->name ? image->name : ""}};
-                if (!why.empty()) fields.push_back({.name = "reason", .value = why});
+                LogFields fields{{.name = "model", .value = _path.string()},
+                                 {.name = "image", .value = image->name ? image->name : ""}};
+                if (!why.empty())
+                    fields.push_back({.name = "reason", .value = why});
                 KIN_LOG_WARN_F("render", "3D: a model's texture not read", (std::move(fields)));
             }
             return texture;
         };
         // A file outside the content is not looked for among the shared ones either.
-        Texture texture = _resolve_texture && !outside ? _resolve_texture(source, embedded, nearest, srgb, load) : load();
-        if (!texture) _issues.push_back("required model texture could not be decoded/uploaded: " + source.string());
+        Texture texture =
+            _resolve_texture && !outside ? _resolve_texture(source, embedded, nearest, srgb, load) : load();
+        if (!texture)
+            _issues.push_back("required model texture could not be decoded/uploaded: " + source.string());
         _textures[key] = texture;
         return texture;
     }
 
     Renderer3D& _r3d;
     std::filesystem::path _path;
-    MeshOptions _options;
+    MeshOptions3D _options;
     TextureResolver _resolve_texture;
     const cgltf_data* _data = nullptr;
     std::vector<std::string> _issues;
@@ -1059,107 +1145,161 @@ private:
 
 } // namespace
 
-bool read_model_geometry3d(const std::filesystem::path& path, ModelGeometry3D& out, ModelGeometryLimits3D limits, std::string* error) {
-    const auto check=[](bool ok,const char* why) { if(!ok) throw std::runtime_error(why); };
+bool read_model_geometry3d(const std::filesystem::path& path, ModelGeometry3D& out, ModelGeometryLimits3D limits,
+                           std::string* error) {
+    const auto check = [](bool ok, const char* why) {
+        if (!ok)
+            throw std::runtime_error(why);
+    };
     try {
-        check(limits.vertices && limits.vertices<=UINT32_MAX && limits.triangles && limits.triangles<=UINT32_MAX/3 && limits.parts,
+        check(limits.vertices && limits.vertices <= UINT32_MAX && limits.triangles &&
+                  limits.triangles <= UINT32_MAX / 3 && limits.parts,
               "invalid collision geometry budgets");
-        const auto size=content_file_size(path);
-        check(size && *size<=limits.source_bytes,"collision model source missing or exceeds byte budget");
-        auto bytes=read_content_file(path); check(bytes && bytes->size()<=limits.source_bytes,"cannot read bounded collision model");
-        struct Files { u64 remaining; std::vector<std::filesystem::path> sources; } files{limits.buffer_bytes,{path.lexically_normal()}};
+        const auto size = content_file_size(path);
+        check(size && *size <= limits.source_bytes, "collision model source missing or exceeds byte budget");
+        auto bytes = read_content_file(path);
+        check(bytes && bytes->size() <= limits.source_bytes, "cannot read bounded collision model");
+        struct Files {
+            u64 remaining;
+            std::vector<std::filesystem::path> sources;
+        } files{limits.buffer_bytes, {path.lexically_normal()}};
         cgltf_options options{};
-        options.file.user_data=&files;
-        options.file.read=[](const cgltf_memory_options* memory,const cgltf_file_options* options,const char* file,cgltf_size* size,void** data) {
-            auto& context=*static_cast<Files*>(options->user_data);
-            const auto bytes=content_file_size(file);
-            if(!bytes || *bytes>context.remaining) return cgltf_result_io_error;
-            context.remaining-=*bytes; context.sources.push_back(std::filesystem::path(file).lexically_normal());
-            return read_file(memory,options,file,size,data);
+        options.file.user_data = &files;
+        options.file.read = [](const cgltf_memory_options* memory, const cgltf_file_options* options, const char* file,
+                               cgltf_size* size, void** data) {
+            auto& context = *static_cast<Files*>(options->user_data);
+            const auto bytes = content_file_size(file);
+            if (!bytes || *bytes > context.remaining)
+                return cgltf_result_io_error;
+            context.remaining -= *bytes;
+            context.sources.push_back(std::filesystem::path(file).lexically_normal());
+            return read_file(memory, options, file, size, data);
         };
-        options.file.release=release_file;
-        cgltf_data* data=nullptr;
-        const auto result=cgltf_parse(&options,bytes->data(),bytes->size(),&data);
-        std::unique_ptr<cgltf_data,void(*)(cgltf_data*)> owned{data,cgltf_free};
-        check(result==cgltf_result_success,"invalid collision glTF");
-        check(data->nodes_count<=4096,"collision model node budget exceeded");
-        u64 buffers=0;
-        for(cgltf_size i=0;i<data->buffers_count;++i) {
-            check(data->buffers[i].size<=limits.buffer_bytes-buffers,"collision buffer byte budget exceeded"); buffers+=data->buffers[i].size;
-            const char* uri=data->buffers[i].uri;
-            check(!uri || std::strncmp(uri,"data:",5)==0 || !outside_content(path,uri),"collision buffer outside the model's content");
+        options.file.release = release_file;
+        cgltf_data* data = nullptr;
+        const auto result = cgltf_parse(&options, bytes->data(), bytes->size(), &data);
+        std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> owned{data, cgltf_free};
+        check(result == cgltf_result_success, "invalid collision glTF");
+        check(data->nodes_count <= 4096, "collision model node budget exceeded");
+        u64 buffers = 0;
+        for (cgltf_size i = 0; i < data->buffers_count; ++i) {
+            check(data->buffers[i].size <= limits.buffer_bytes - buffers, "collision buffer byte budget exceeded");
+            buffers += data->buffers[i].size;
+            const char* uri = data->buffers[i].uri;
+            check(!uri || std::strncmp(uri, "data:", 5) == 0 || !outside_content(path, uri),
+                  "collision buffer outside the model's content");
         }
-        for(cgltf_size i=0;i<data->buffer_views_count;++i) check(!data->buffer_views[i].has_meshopt_compression,"compressed collision buffers unsupported; use a collision proxy");
+        for (cgltf_size i = 0; i < data->buffer_views_count; ++i)
+            check(!data->buffer_views[i].has_meshopt_compression,
+                  "compressed collision buffers unsupported; use a collision proxy");
         std::vector<const cgltf_node*> nodes;
         std::vector<bool> visited(data->nodes_count);
-        const auto walk=[&](auto&& self,const cgltf_node* node,size_t depth)->void {
-            check(depth<64,"collision node hierarchy too deep");
-            const size_t index=node-data->nodes;
-            check(index<data->nodes_count && !visited[index],"invalid/cyclic collision node hierarchy"); visited[index]=true;
+        const auto walk = [&](auto&& self, const cgltf_node* node, size_t depth) -> void {
+            check(depth < 64, "collision node hierarchy too deep");
+            const size_t index = node - data->nodes;
+            check(index < data->nodes_count && !visited[index], "invalid/cyclic collision node hierarchy");
+            visited[index] = true;
             nodes.push_back(node);
-            for(cgltf_size i=0;i<node->children_count;++i) self(self,node->children[i],depth+1);
+            for (cgltf_size i = 0; i < node->children_count; ++i)
+                self(self, node->children[i], depth + 1);
         };
-        const auto* scene=data->scene ? data->scene : data->scenes_count ? &data->scenes[0] : nullptr;
-        if(scene) for(cgltf_size i=0;i<scene->nodes_count;++i) walk(walk,scene->nodes[i],0);
-        else for(cgltf_size i=0;i<data->nodes_count;++i) if(!data->nodes[i].parent) walk(walk,&data->nodes[i],0);
-        size_t vertices=0,triangles=0,parts=0;
-        const auto positions=[](const cgltf_primitive& primitive) -> const cgltf_accessor* {
-            for(cgltf_size i=0;i<primitive.attributes_count;++i) if(primitive.attributes[i].type==cgltf_attribute_type_position) return primitive.attributes[i].data;
+        const auto* scene = data->scene ? data->scene : data->scenes_count ? &data->scenes[0] : nullptr;
+        if (scene)
+            for (cgltf_size i = 0; i < scene->nodes_count; ++i)
+                walk(walk, scene->nodes[i], 0);
+        else
+            for (cgltf_size i = 0; i < data->nodes_count; ++i)
+                if (!data->nodes[i].parent)
+                    walk(walk, &data->nodes[i], 0);
+        size_t vertices = 0, triangles = 0, parts = 0;
+        const auto positions = [](const cgltf_primitive& primitive) -> const cgltf_accessor* {
+            for (cgltf_size i = 0; i < primitive.attributes_count; ++i)
+                if (primitive.attributes[i].type == cgltf_attribute_type_position)
+                    return primitive.attributes[i].data;
             return nullptr;
         };
-        for(const auto* node:nodes) if(node->mesh) {
-            check(!node->skin,"skinned collision models unsupported; use an explicit proxy");
-            for(cgltf_size i=0;i<node->mesh->primitives_count;++i) {
-                const auto& p=node->mesh->primitives[i]; const auto* a=positions(p);
-                check(a && a->type==cgltf_type_vec3 && p.type==cgltf_primitive_type_triangles && !p.has_draco_mesh_compression,"collision model requires uncompressed triangle positions");
-                const auto count=p.indices ? p.indices->count : a->count;
-                check(count%3==0 && a->count<=limits.vertices-vertices && count/3<=limits.triangles-triangles && parts<limits.parts,"collision geometry budget exceeded");
-                vertices+=a->count;triangles+=count/3;++parts;
-            }
-            // cgltf's world transform follows parents; check that path too.
-            size_t depth=0;for(auto* p=node;p;p=p->parent) check(++depth<=64,"cyclic collision parent chain");
-        }
-        check(parts && vertices && triangles,"collision model contains no triangles");
-        check(cgltf_load_buffers(&options,data,path.string().c_str())==cgltf_result_success,"collision buffers missing or exceed byte budget");
-        check(cgltf_validate(data)==cgltf_result_success,"invalid collision geometry accessors");
-        ModelGeometry3D geometry; geometry.vertices.reserve(vertices);geometry.indices.reserve(triangles*3);
-        for(const auto* node:nodes) if(node->mesh) {
-            const auto transform=world_matrix(node);
-            for(cgltf_size i=0;i<node->mesh->primitives_count;++i) {
-                const auto& p=node->mesh->primitives[i];const auto* a=positions(p);const u32 first=u32(geometry.vertices.size());
-                for(cgltf_size j=0;j<a->count;++j) {
-                    float v[3];check(cgltf_accessor_read_float(a,j,v,3),"cannot read collision position");
-                    const auto point=transform.apply({v[0],v[1],v[2]});
-                    check(std::isfinite(point.x)&&std::isfinite(point.y)&&std::isfinite(point.z),"non-finite collision geometry");
-                    geometry.vertices.push_back(point);
+        for (const auto* node : nodes)
+            if (node->mesh) {
+                check(!node->skin, "skinned collision models unsupported; use an explicit proxy");
+                for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
+                    const auto& p = node->mesh->primitives[i];
+                    const auto* a = positions(p);
+                    check(a && a->type == cgltf_type_vec3 && p.type == cgltf_primitive_type_triangles &&
+                              !p.has_draco_mesh_compression,
+                          "collision model requires uncompressed triangle positions");
+                    const auto count = p.indices ? p.indices->count : a->count;
+                    check(count % 3 == 0 && a->count <= limits.vertices - vertices &&
+                              count / 3 <= limits.triangles - triangles && parts < limits.parts,
+                          "collision geometry budget exceeded");
+                    vertices += a->count;
+                    triangles += count / 3;
+                    ++parts;
                 }
-                const auto count=p.indices ? p.indices->count : a->count;
-                for(cgltf_size j=0;j<count;++j) {
-                    const auto index=p.indices ? cgltf_accessor_read_index(p.indices,j) : j;
-                    check(index<a->count,"collision index out of range");geometry.indices.push_back(first+u32(index));
+                // cgltf's world transform follows parents; check that path too.
+                size_t depth = 0;
+                for (auto* p = node; p; p = p->parent)
+                    check(++depth <= 64, "cyclic collision parent chain");
+            }
+        check(parts && vertices && triangles, "collision model contains no triangles");
+        check(cgltf_load_buffers(&options, data, path.string().c_str()) == cgltf_result_success,
+              "collision buffers missing or exceed byte budget");
+        check(cgltf_validate(data) == cgltf_result_success, "invalid collision geometry accessors");
+        ModelGeometry3D geometry;
+        geometry.vertices.reserve(vertices);
+        geometry.indices.reserve(triangles * 3);
+        for (const auto* node : nodes)
+            if (node->mesh) {
+                const auto transform = world_matrix(node);
+                for (cgltf_size i = 0; i < node->mesh->primitives_count; ++i) {
+                    const auto& p = node->mesh->primitives[i];
+                    const auto* a = positions(p);
+                    const u32 first = u32(geometry.vertices.size());
+                    for (cgltf_size j = 0; j < a->count; ++j) {
+                        float v[3];
+                        check(cgltf_accessor_read_float(a, j, v, 3), "cannot read collision position");
+                        const auto point = transform.apply({v[0], v[1], v[2]});
+                        check(std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z),
+                              "non-finite collision geometry");
+                        geometry.vertices.push_back(point);
+                    }
+                    const auto count = p.indices ? p.indices->count : a->count;
+                    for (cgltf_size j = 0; j < count; ++j) {
+                        const auto index = p.indices ? cgltf_accessor_read_index(p.indices, j) : j;
+                        check(index < a->count, "collision index out of range");
+                        geometry.indices.push_back(first + u32(index));
+                    }
                 }
             }
-        }
-        std::ranges::sort(files.sources);files.sources.erase(std::unique(files.sources.begin(),files.sources.end()),files.sources.end());
-        geometry.source_files=std::move(files.sources);out=std::move(geometry);if(error) error->clear();return true;
-    } catch(const std::exception& failure) { if(error) *error=path.string()+": "+failure.what();return false; }
+        std::ranges::sort(files.sources);
+        files.sources.erase(std::unique(files.sources.begin(), files.sources.end()), files.sources.end());
+        geometry.source_files = std::move(files.sources);
+        out = std::move(geometry);
+        if (error)
+            error->clear();
+        return true;
+    } catch (const std::exception& failure) {
+        if (error)
+            *error = path.string() + ": " + failure.what();
+        return false;
+    }
 }
 
-bool read_model_data(std::string_view bytes, const std::filesystem::path& path, ModelData& out, std::string* error) {
+bool read_model_data(std::string_view bytes, const std::filesystem::path& path, ModelData3D& out, std::string* error) {
     std::string why;
     const auto owned = parse_gltf(bytes, path, why);
     if (!owned) {
-        if (error) *error = why;
+        if (error)
+            *error = why;
         return false;
     }
-    ModelData parts;
+    ModelData3D parts;
     GltfReader reader{owned.get(), path.string()};
-    out = reader.read([&](ModelPartData&& part, const cgltf_material*) { parts.parts.push_back(std::move(part)); });
+    out = reader.read([&](ModelPartData3D&& part, const cgltf_material*) { parts.parts.push_back(std::move(part)); });
     out.parts = std::move(parts.parts);
     return true;
 }
 
-const AnimClip3D* Model::find_clip(std::string_view name, u32 skeleton) const {
+const AnimClip3D* Model3D::find_clip(std::string_view name, u32 skeleton) const {
     for (const AnimClip3D& clip : clips) {
         if (clip.skeleton == skeleton && clip.name == name) {
             return &clip;
@@ -1168,49 +1308,54 @@ const AnimClip3D* Model::find_clip(std::string_view name, u32 skeleton) const {
     return nullptr;
 }
 
-Mat4f Model::part_transform(std::size_t part, std::span<const Mat4f> node_matrices) const {
+Mat4f Model3D::part_transform(std::size_t part, std::span<const Mat4f> node_matrices) const {
     if (part >= parts.size()) {
         return {};
     }
-    const ModelPart& p = parts[part];
+    const ModelPart3D& p = parts[part];
     if (p.node < 0 || static_cast<std::size_t>(p.node) >= node_matrices.size()) {
         return p.transform;
     }
     return node_matrices[static_cast<std::size_t>(p.node)] * p.node_offset;
 }
 
-Model Renderer3D::load_model(const std::filesystem::path& path, std::string* error) {
-    return load_model(path, MeshOptions{}, error);
+Model3D Renderer3D::load_model(const std::filesystem::path& path, std::string* error) {
+    return load_model(path, MeshOptions3D{}, error);
 }
 
-Model Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error) {
+Model3D Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error) {
     _errors.clear();
     std::string why;
     auto result = load_model_shared(path, options, &why, nullptr);
     if (!result) {
         fail3d(_errors, "Renderer3D::load_model(" + path.string() + ")", why.empty() ? "model load failed" : why);
         result = {};
-    }
-    else _errors.clear();
-    if (error) *error = diagnostics3d_text(_errors);
+    } else
+        _errors.clear();
+    if (error)
+        *error = diagnostics3d_text(_errors);
     return result;
 }
 
-Model Renderer3D::load_model_shared(const std::filesystem::path& path, const MeshOptions& options, std::string* error, Assets3D* assets) {
+Model3D Renderer3D::load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options,
+                                      std::string* error, Assets3D* assets) {
     std::string why;
-    Model model;
+    Model3D model;
     if (!_backend) {
         why = "3D is not available";
     } else {
         Loader::TextureResolver resolver;
-        if (assets) resolver = [assets](const auto& source, u32 embedded, bool nearest, bool srgb, const auto& load) {
-            return assets->share_texture(source, embedded, nearest, srgb, load);
-        };
+        if (assets)
+            resolver = [assets](const auto& source, u32 embedded, bool nearest, bool srgb, const auto& load) {
+                return assets->share_texture(source, embedded, nearest, srgb, load);
+            };
         model = Loader{*this, path, options, std::move(resolver)}.load(why);
     }
     if (!model.valid()) {
-        if (!model.asset_diagnostics.empty()) why = diagnostics3d_text(model.asset_diagnostics);
-        KIN_LOG_WARN_F("render", "3D: model not loaded", (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
+        if (!model.asset_diagnostics.empty())
+            why = diagnostics3d_text(model.asset_diagnostics);
+        KIN_LOG_WARN_F("render", "3D: model not loaded",
+                       (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
     }
     if (error) {
         *error = why;
@@ -1218,14 +1363,18 @@ Model Renderer3D::load_model_shared(const std::filesystem::path& path, const Mes
     return model;
 }
 
-bool Scene3D::draw(const Model& model, const Mat4f& transform, Color tint, u32 id) {
-    if (!_errors.empty()) return false;
+bool Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id) {
+    if (!_errors.empty())
+        return false;
     draw(model, transform, tint, id, {});
     return _errors.empty();
 }
-bool Scene3D::draw(const Model& model, const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials) {
-    if (!_errors.empty()) return false;
-    if (!materials.empty() && materials.size() != model.parts.size()) return fail_submission("material count must match model parts");
+bool Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
+                   std::span<const Material3D> materials) {
+    if (!_errors.empty())
+        return false;
+    if (!materials.empty() && materials.size() != model.parts.size())
+        return fail_submission("material count must match model parts");
     if (model.parts.size() > std::numeric_limits<u32>::max() ||
         _instances.size() > std::numeric_limits<u32>::max() - model.parts.size())
         return fail_submission("model submission exceeds the draw index range");
@@ -1236,15 +1385,15 @@ bool Scene3D::draw(const Model& model, const Mat4f& transform, Color tint, u32 i
     return _errors.empty();
 }
 
-ModelFile::ModelFile(Renderer3D& renderer, std::filesystem::path path, const MeshOptions& options)
+ModelFile3D::ModelFile3D(Renderer3D& renderer, std::filesystem::path path, const MeshOptions3D& options)
     : _renderer(&renderer), _path(std::move(path)), _options(options) {
     load();
 }
 
-bool ModelFile::load() {
+bool ModelFile3D::load() {
     std::error_code ec;
     _time = std::filesystem::last_write_time(_path, ec);
-    Model model = _renderer->load_model(_path, _options);
+    Model3D model = _renderer->load_model(_path, _options);
     if (!model.valid()) {
         _errors = _renderer->diagnostics();
         return false;
@@ -1254,15 +1403,17 @@ bool ModelFile::load() {
     return true;
 }
 
-bool ModelFile::poll() {
+bool ModelFile3D::poll() {
     std::error_code ec;
     const auto time = std::filesystem::last_write_time(_path, ec);
     if (ec) {
         // Packed content is immutable and has no filesystem modification time.
-        if (content_file_exists(_path)) return false;
-        return fail3d(_errors, "ModelFile::poll(" + _path.string() + ")", ec.message());
+        if (content_file_exists(_path))
+            return false;
+        return fail3d(_errors, "ModelFile3D::poll(" + _path.string() + ")", ec.message());
     }
-    if (time == _time) return false; // no new load attempted; keep the last load's diagnostic
+    if (time == _time)
+        return false; // no new load attempted; keep the last load's diagnostic
     return load();
 }
 

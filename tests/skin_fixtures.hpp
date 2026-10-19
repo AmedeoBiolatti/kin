@@ -1,13 +1,13 @@
 #pragma once
 
 // Skinned meshes and glTF files made in code, so that no test of skinning depends on a download: a tube that bends over
-// three joints (MeshData + Skeleton), and a tiny .gltf with embedded base64 buffers (a skinned strip, a skin, clips) whose
+// three joints (MeshData3D + Skeleton3D), and a tiny .gltf with embedded base64 buffers (a skinned strip, a skin, clips) whose
 // accessor types and skin size the test chooses.
 
 #include <kin/core/math3d.hpp>
 #include <kin/render3d/animation3d.hpp>
-#include <kin/render3d/mesh.hpp>
-#include <kin/render3d/skeleton.hpp>
+#include <kin/render3d/mesh3d.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 
 #include <algorithm>
 #include <array>
@@ -28,8 +28,8 @@ using kin::Vec3f;
 // root. The skeleton rests straight: local translations (0, 0, 0), (0, length / 3, 0) twice; inverse binds the matching
 // translations down.
 struct Tube {
-    kin::MeshData mesh;
-    kin::Skeleton skeleton;
+    kin::MeshData3D mesh;
+    kin::Skeleton3D skeleton;
     float length = 3.0f;
 };
 
@@ -37,7 +37,7 @@ inline Tube make_tube(int rings = 25, int segments = 12, float length = 3.0f, fl
     Tube tube;
     tube.length = length;
     const float third = length / 3.0f;
-    kin::MeshData& m = tube.mesh;
+    kin::MeshData3D& m = tube.mesh;
     for (int r = 0; r < rings; ++r) {
         const float y = length * static_cast<float>(r) / static_cast<float>(rings - 1);
         const float v = static_cast<float>(r) / static_cast<float>(rings - 1);
@@ -51,7 +51,7 @@ inline Tube make_tube(int rings = 25, int segments = 12, float length = 3.0f, fl
                 w[static_cast<std::size_t>(j)] = std::max(0.0f, 1.0f - std::fabs(y - third * static_cast<float>(j)) / third);
                 sum += w[static_cast<std::size_t>(j)];
             }
-            kin::MeshSkinVertex k;
+            kin::MeshSkinVertex3D k;
             if (y > 2.0f * third) {
                 w = {0.0f, 0.0f, 1.0f};
                 sum = 1.0f;
@@ -71,7 +71,7 @@ inline Tube make_tube(int rings = 25, int segments = 12, float length = 3.0f, fl
     }
     // Wound counter-clockwise seen from outside? The ring runs from +x toward -z (as meshes::cylinder), going up: a, b, c with
     // b the next around and c above it is anticlockwise from outside.
-    kin::Skeleton& sk = tube.skeleton;
+    kin::Skeleton3D& sk = tube.skeleton;
     sk.names = {"base", "middle", "top"};
     sk.parents = {-1, 0, 1};
     sk.rest.resize(3);
@@ -82,8 +82,8 @@ inline Tube make_tube(int rings = 25, int segments = 12, float length = 3.0f, fl
 }
 
 // A pose bending the tube: the middle joint turned `a` degrees about Z, the top `b` about Z, and the base moved by `base`.
-inline kin::Pose bent(const Tube& tube, float a, float b, Vec3f base = {}) {
-    kin::Pose pose = tube.skeleton.rest_pose();
+inline kin::Pose3D bent(const Tube& tube, float a, float b, Vec3f base = {}) {
+    kin::Pose3D pose = tube.skeleton.rest_pose();
     pose.joints[0].translation = base;
     pose.joints[1].rotation = kin::Quatf::axis_angle({0.0f, 0.0f, 1.0f}, a);
     pose.joints[2].rotation = kin::Quatf::axis_angle({0.0f, 0.0f, 1.0f}, b);
@@ -335,8 +335,8 @@ enum : int {
 inline constexpr int toe_l = 18, toe_r = 19;
 } // namespace biped
 
-inline kin::Skeleton make_biped() {
-    kin::Skeleton sk;
+inline kin::Skeleton3D make_biped() {
+    kin::Skeleton3D sk;
     struct J {
         const char* name;
         int parent;
@@ -352,7 +352,7 @@ inline kin::Skeleton make_biped() {
     for (const J& j : joints) {
         sk.names.emplace_back(j.name);
         sk.parents.push_back(j.parent);
-        kin::JointPose r;
+        kin::JointPose3D r;
         r.translation = j.at;
         sk.rest.push_back(r);
     }
@@ -365,12 +365,12 @@ inline kin::Skeleton make_biped() {
 }
 
 // make_biped() with a toe on each foot appended (toe_L and toe_R, joints 18 and 19): the indices of the biped are unchanged.
-inline kin::Skeleton make_biped_toes() {
-    kin::Skeleton sk = make_biped();
+inline kin::Skeleton3D make_biped_toes() {
+    kin::Skeleton3D sk = make_biped();
     for (const auto& [name, parent] : {std::pair{"toe_L", biped::ankle_l}, std::pair{"toe_R", biped::ankle_r}}) {
         sk.names.emplace_back(name);
         sk.parents.push_back(parent);
-        kin::JointPose r;
+        kin::JointPose3D r;
         r.translation = {0.0f, -0.05f, 0.15f};
         sk.rest.push_back(r);
     }
@@ -385,7 +385,7 @@ inline kin::Skeleton make_biped_toes() {
 
 // A skinned body for the biped: a box along each bone (from the parent joint to the joint, the end at the parent bound to the
 // parent and the end at the joint bound to the joint), `radius` thick, and, separately, a cube round one joint (a hand marker).
-inline void append_box(kin::MeshData& m, Vec3f p0, Vec3f p1, float radius, int joint0, int joint1) {
+inline void append_box(kin::MeshData3D& m, Vec3f p0, Vec3f p1, float radius, int joint0, int joint1) {
     const Vec3f d = kin::normalize(p1 - p0);
     const Vec3f helper = std::fabs(d.y) < 0.9f ? Vec3f{0, 1, 0} : Vec3f{1, 0, 0};
     const Vec3f u = kin::normalize(kin::cross(helper, d)); // so that (d, u, v) is right-handed: cross(d, u) = v
@@ -407,7 +407,7 @@ inline void append_box(kin::MeshData& m, Vec3f p0, Vec3f p1, float radius, int j
         for (int c = 0; c < 4; ++c) {
             const Vec3f pos = centre + face.e1 * sx[c] + face.e2 * sy[c];
             m.vertices.push_back({pos, face.normal, {sx[c] * 0.5f + 0.5f, sy[c] * 0.5f + 0.5f}});
-            kin::MeshSkinVertex k;
+            kin::MeshSkinVertex3D k;
             k.joints = {static_cast<std::uint8_t>(kin::dot(pos - p0, d) > half ? joint1 : joint0), 0, 0, 0};
             m.skin.push_back(k);
         }
@@ -416,8 +416,8 @@ inline void append_box(kin::MeshData& m, Vec3f p0, Vec3f p1, float radius, int j
 }
 
 // The boxes of every bone but those of the root and the pelvis (their bone is the spine's beginning).
-inline kin::MeshData make_biped_body(const kin::Skeleton& sk, float radius = 0.045f) {
-    kin::MeshData m;
+inline kin::MeshData3D make_biped_body(const kin::Skeleton3D& sk, float radius = 0.045f) {
+    kin::MeshData3D m;
     std::vector<Mat4f> world;
     kin::compute_world_matrices(sk, sk.rest_pose(), world);
     const auto at = [&](std::size_t j) { return Vec3f{world[j].m[12], world[j].m[13], world[j].m[14]}; };
@@ -430,8 +430,8 @@ inline kin::MeshData make_biped_body(const kin::Skeleton& sk, float radius = 0.0
     return m;
 }
 
-inline kin::MeshData make_joint_cube(const kin::Skeleton& sk, int joint, float radius = 0.07f) {
-    kin::MeshData m;
+inline kin::MeshData3D make_joint_cube(const kin::Skeleton3D& sk, int joint, float radius = 0.07f) {
+    kin::MeshData3D m;
     std::vector<Mat4f> world;
     kin::compute_world_matrices(sk, sk.rest_pose(), world);
     const Mat4f& w = world[static_cast<std::size_t>(joint)];

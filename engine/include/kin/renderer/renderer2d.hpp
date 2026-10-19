@@ -187,7 +187,7 @@ public:
     std::string_view backend_name() const;
     RendererBackendCapabilities capabilities() const;
     // The backend's 3D part (kin/render3d/renderer3d.hpp), null without one.
-    IRenderer3DBackend* renderer_3d() { return _backend->renderer_3d(); }
+    IRendererBackend3D* renderer_3d() { return _backend->renderer_3d(); }
     RendererBackendStats backend_stats() const;
     void reset_backend_stats();
     // GPU time per frame in backend_stats().last_gpu_frame_ms (SDL_GPU only; off

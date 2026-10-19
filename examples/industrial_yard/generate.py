@@ -31,7 +31,7 @@ def transform(p=(0,0,0), scale=(1,1,1), yaw=0):
     return [c*scale[0],0,-s*scale[0],0, 0,scale[1],0,0,
             s*scale[2],0,c*scale[2],0, *p,1]
 
-class Mesh:
+class Mesh3D:
     def __init__(self, skin=False): self.vertices=[]; self.indices=[]; self.skin=skin
     def vertex(self, p, n, uv, joint=0):
         self.vertices.append((p,n,uv,joint)); return len(self.vertices)-1
@@ -91,35 +91,35 @@ class Mesh:
         return out
 
 def meshes():
-    out=[];m=Mesh();m.box();out.append(m)
-    m=Mesh();m.cylinder(.44,1.15)
+    out=[];m=Mesh3D();m.box();out.append(m)
+    m=Mesh3D();m.cylinder(.44,1.15)
     for y in [-.48,0,.48]:m.torus(.44,.035,(0,y,0),rings=24,sides=8)
     out.append(m)
-    m=Mesh();m.box((.9,.55,.75),(0,.15,0));m.cylinder(.27,.9,(0,.6,0))
+    m=Mesh3D();m.box((.9,.55,.75),(0,.15,0));m.cylinder(.27,.9,(0,.6,0))
     for x in [-.38,.38]:m.box((.12,.18,1.1),(x,-.25,0))
     m.torus(.28,.075,(.55,.2,0),fraction=.75,rings=24);out.append(m)
-    m=Mesh();m.cylinder(.36,.95)
+    m=Mesh3D();m.cylinder(.36,.95)
     for i in range(10):m.box((.9,.035,.9),(0,-.4+i*.09,0))
     m.box((1.1,.12,.85),(0,-.55,0));out.append(m)
-    m=Mesh();m.torus(.55,.18,fraction=.25,rings=24,sides=16);m.cylinder(.23,.12,(.55,0,0));out.append(m)
-    m=Mesh()
+    m=Mesh3D();m.torus(.55,.18,fraction=.25,rings=24,sides=16);m.cylinder(.23,.12,(.55,0,0));out.append(m)
+    m=Mesh3D()
     for i in range(7):m.box((1.4,.08,.12),(0,.13,i*.18-.54))
     for x in [-.5,0,.5]:m.box((.12,.2,1.3),(x,0,0))
     out.append(m)
-    m=Mesh();m.torus(.42,.08,rings=32,sides=12);m.cylinder(.13,.22)
+    m=Mesh3D();m.torus(.42,.08,rings=32,sides=12);m.cylinder(.13,.22)
     m.box((.9,.06,.07));m.box((.07,.06,.9));out.append(m)
-    m=Mesh();m.box((.75,.8,.75))
+    m=Mesh3D();m.box((.75,.8,.75))
     for y in [-.32,.32]:
         for x in [-.4,.4]:m.box((.1,.13,.95),(x,y,0))
         for z in [-.4,.4]:m.box((.95,.13,.1),(0,y,z))
     out.append(m)
-    m=Mesh(True)
+    m=Mesh3D(True)
     for size,centre,j in [((.8,.9,.5),(0,1.3,0),0),((.65,.5,.55),(0,2.05,0),1),
                           ((.25,.9,.3),(-.65,1.15,0),2),((.25,.9,.3),(.65,1.15,0),3),
                           ((.28,.8,.4),(-.22,.4,0),4),((.28,.8,.4),(.22,.4,0),5)]:m.box(size,centre,j)
     for x,j in [(-.65,2),(.65,3)]:m.cylinder(.18,.24,(x,1.6,0),16,j)
     out.append(m)
-    m=Mesh();m.quad([(-.5,0,0),(.5,0,0),(.5,1,0),(-.5,1,0)],(0,0,1));out.append(m)
+    m=Mesh3D();m.quad([(-.5,0,0),(.5,0,0),(.5,1,0),(-.5,1,0)],(0,0,1));out.append(m)
     return out
 
 KEYS=[((-32,5,28),(-6,2,0)),((-10,3,16),(0,3,-15)),((0,3,-14),(6,2,-25)),

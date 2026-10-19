@@ -1,11 +1,9 @@
-#include <kin/render3d/particles3d.hpp>
-
-#include <kin/core/rng.hpp>
-#include <kin/render3d/scene3d.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <kin/core/rng.hpp>
+#include <kin/render3d/particles3d.hpp>
+#include <kin/render3d/scene3d.hpp>
 #include <optional>
 #include <span>
 
@@ -59,8 +57,8 @@ f32 smooth(f32 x) {
 }
 
 // The wind's gusts: three sines, weights summing to 1 (so g is in [-1, 1]), their periods and lengths ratios of the
-// settings'. The turbulence: two sines for each of three components. All in one table so that velocity and the closed-form
-// displacement are the same sums.
+// settings'. The turbulence: two sines for each of three components. All in one table so that velocity and the
+// closed-form displacement are the same sums.
 struct GustTerm {
     f32 weight, period, length, phase;
 };
@@ -114,7 +112,9 @@ Vec3f Wind3D::velocity(Vec3f position, f64 time) const {
         for (int k = 0; k < 3; ++k) {
             f64 sum = 0.0;
             for (const TurbulenceTerm& term : turbulence_terms[k]) {
-                const f64 arg = two_pi * (static_cast<f64>(term.frequency) * time + static_cast<f64>(dot(position, term.wave)) / length) + term.phase;
+                const f64 arg = two_pi * (static_cast<f64>(term.frequency) * time +
+                                          static_cast<f64>(dot(position, term.wave)) / length) +
+                                term.phase;
                 sum += std::sin(arg);
             }
             c[k] = static_cast<f32>(0.5 * sum) * turbulence;
@@ -161,8 +161,9 @@ Vec3f Wind3D::displacement(Vec3f position, f64 t0, f64 t1) const {
 // ---- Small shared functions ----
 
 Vec3f particle_light_tint(const Lights3D& lights) {
-    const Vec3f ground = lights.ground_ambient.value_or(lights.ambient);
-    return (lights.ambient + ground) * 0.5f + lights.sun.color * 0.5f + lights.fill.color * 0.5f;
+    const LinearRgb ground = lights.ground_ambient.value_or(lights.ambient);
+    const LinearRgb light = (lights.ambient + ground) * 0.5f + lights.sun.color * 0.5f + lights.fill.color * 0.5f;
+    return {light.r, light.g, light.b};
 }
 
 f32 soft_particle_fade(f32 gap, f32 distance) {
@@ -276,7 +277,9 @@ enum Purpose : u32 {
     PRandom,
 };
 
-constexpr f32 lerp_f(f32 a, f32 b, f32 t) { return a + (b - a) * t; }
+constexpr f32 lerp_f(f32 a, f32 b, f32 t) {
+    return a + (b - a) * t;
+}
 
 // A direction in the cone of half-angle `degrees` round +Y, uniform over its solid angle.
 Vec3f cone_direction(f32 degrees, f32 u, f32 v) {
@@ -289,15 +292,17 @@ Vec3f cone_direction(f32 degrees, f32 u, f32 v) {
 
 // ---- The wind at many particles ----
 //
-// Wind3D::velocity is nine sines in f64 for a place and a time, and a system of 20,000 particles takes it for every particle at
-// every 1/120 s step. WindStep is the same field with all that does not depend on the place done once a step (the unit direction,
-// the clock's share of each sine's phase), and the sines, in f32 turns, run 32 places at a time in loops the compiler makes
-// vector code of. The polynomial is arithmetic only, so a sine is the same bits on every machine (libm's are not); it is within
-// 1e-6 of the exact one, and the field within 1e-5 of Wind3D::velocity's near the origin (the sines' arguments are f32 turn counts, so the
-// error grows with the distance from it: about 1e-3 of the turbulence at 10 km; tests/render3d_cpu_tests.cpp asserts 2e-3 over a 36 m box).
+// Wind3D::velocity is nine sines in f64 for a place and a time, and a system of 20,000 particles takes it for every
+// particle at every 1/120 s step. WindStep is the same field with all that does not depend on the place done once a
+// step (the unit direction, the clock's share of each sine's phase), and the sines, in f32 turns, run 32 places at a
+// time in loops the compiler makes vector code of. The polynomial is arithmetic only, so a sine is the same bits on
+// every machine (libm's are not); it is within 1e-6 of the exact one, and the field within 1e-5 of Wind3D::velocity's
+// near the origin (the sines' arguments are f32 turn counts, so the error grows with the distance from it: about 1e-3
+// of the turbulence at 10 km; tests/render3d_cpu_tests.cpp asserts 2e-3 over a 36 m box).
 
-// sin(2 pi t) for t in turns: reduced to [-1/2, 1/2] by adding and taking away 1.5 * 2^23 (which rounds to a whole number), folded
-// to [-1/4, 1/4] (sin(pi - x) = sin x), and an odd polynomial of degree 9 fitted to the sine there (error 3e-9: below f32's own).
+// sin(2 pi t) for t in turns: reduced to [-1/2, 1/2] by adding and taking away 1.5 * 2^23 (which rounds to a whole
+// number), folded to [-1/4, 1/4] (sin(pi - x) = sin x), and an odd polynomial of degree 9 fitted to the sine there
+// (error 3e-9: below f32's own).
 inline f32 sin_turns(f32 t) {
     constexpr f32 magic = 12582912.0f;
     const f32 r = t - ((t + magic) - magic);
@@ -308,18 +313,21 @@ inline f32 sin_turns(f32 t) {
 }
 
 constexpr std::size_t wind_lanes = 32;
-struct WindLanes { f32 x[wind_lanes], y[wind_lanes], z[wind_lanes]; }; // places in, the air's velocity there out
+struct WindLanes {
+    f32 x[wind_lanes], y[wind_lanes], z[wind_lanes];
+}; // places in, the air's velocity there out
 
 struct WindStep {
-    Vec3f d{};                  // the wind's unit direction
+    Vec3f d{}; // the wind's unit direction
     f32 speed = 0.0f, gust_strength = 0.0f, turbulence = 0.0f, influence = 1.0f;
     bool gusts = false, swirls = false;
-    f32 gust_offset[3]{}, gust_slope[3]{};  // a gust sine's turns: offset + slope * (place along d)
-    f32 swirl_offset[3][2]{};               // a turbulence sine's turns: offset + dot(place, swirl_wave)
+    f32 gust_offset[3]{}, gust_slope[3]{}; // a gust sine's turns: offset + slope * (place along d)
+    f32 swirl_offset[3][2]{};              // a turbulence sine's turns: offset + dot(place, swirl_wave)
     Vec3f swirl_wave[3][2]{};
 
-    WindStep(const Wind3D& w, f64 time, f32 influence_) : d(wind_unit(w)), speed(w.speed), gust_strength(w.gust_strength),
-                                                          turbulence(w.turbulence), influence(influence_) {
+    WindStep(const Wind3D& w, f64 time, f32 influence_)
+        : d(wind_unit(w)), speed(w.speed), gust_strength(w.gust_strength), turbulence(w.turbulence),
+          influence(influence_) {
         const auto fraction = [](f64 x) { return static_cast<f32>(x - std::floor(x)); };
         gusts = w.gust_strength != 0.0f && w.speed != 0.0f;
         for (int k = 0; k < 3; ++k) {
@@ -333,16 +341,18 @@ struct WindStep {
         for (int k = 0; k < 3; ++k) {
             for (int j = 0; j < 2; ++j) {
                 const TurbulenceTerm& term = turbulence_terms[k][j];
-                swirl_offset[k][j] = fraction(static_cast<f64>(term.frequency) * time + static_cast<f64>(term.phase) / two_pi);
+                swirl_offset[k][j] =
+                    fraction(static_cast<f64>(term.frequency) * time + static_cast<f64>(term.phase) / two_pi);
                 swirl_wave[k][j] = term.wave * inv_length;
             }
         }
     }
 
-    // The air's velocity (times the influence) at the `wind_lanes` places in `at`, put in their place. (One struct of arrays, and
-    // locals for the rest, so that the compiler can see that no two of them alias.)
+    // The air's velocity (times the influence) at the `wind_lanes` places in `at`, put in their place. (One struct of
+    // arrays, and locals for the rest, so that the compiler can see that no two of them alias.)
     void sample(WindLanes& at) const {
-        const f32 dx = d.x, dy = d.y, dz = d.z, base_speed = speed, scale = influence; // (the stores to `at` could alias members)
+        const f32 dx = d.x, dy = d.y, dz = d.z, base_speed = speed,
+                  scale = influence; // (the stores to `at` could alias members)
         f32 factor[wind_lanes];
         if (gusts) {
             for (std::size_t i = 0; i < wind_lanes; ++i) {
@@ -353,7 +363,8 @@ struct WindStep {
                 factor[i] = 1.0f + gust_strength * g;
             }
         } else {
-            for (std::size_t i = 0; i < wind_lanes; ++i) factor[i] = 1.0f;
+            for (std::size_t i = 0; i < wind_lanes; ++i)
+                factor[i] = 1.0f;
         }
         f32 swirl[3][wind_lanes];
         for (int k = 0; k < 3; ++k) {
@@ -361,10 +372,13 @@ struct WindStep {
             const f32 o0 = swirl_offset[k][0], o1 = swirl_offset[k][1];
             if (swirls) {
                 for (std::size_t i = 0; i < wind_lanes; ++i)
-                    swirl[k][i] = 0.5f * (sin_turns(o0 + (at.x[i] * w0.x + at.y[i] * w0.y + at.z[i] * w0.z)) +
-                                          sin_turns(o1 + (at.x[i] * w1.x + at.y[i] * w1.y + at.z[i] * w1.z))) * turbulence;
+                    swirl[k][i] = 0.5f *
+                                  (sin_turns(o0 + (at.x[i] * w0.x + at.y[i] * w0.y + at.z[i] * w0.z)) +
+                                   sin_turns(o1 + (at.x[i] * w1.x + at.y[i] * w1.y + at.z[i] * w1.z))) *
+                                  turbulence;
             } else {
-                for (std::size_t i = 0; i < wind_lanes; ++i) swirl[k][i] = 0.0f;
+                for (std::size_t i = 0; i < wind_lanes; ++i)
+                    swirl[k][i] = 0.0f;
             }
         }
         for (std::size_t i = 0; i < wind_lanes; ++i) {
@@ -376,15 +390,17 @@ struct WindStep {
     }
 };
 
-// What a step needs of the desc (copied, so that the compiler knows that writing a particle changes none of it), and of the drag's
-// relaxation that is the same for every particle: it depends on the drag and the step alone.
+// What a step needs of the desc (copied, so that the compiler knows that writing a particle changes none of it), and of
+// the drag's relaxation that is the same for every particle: it depends on the drag and the step alone.
 struct Forces {
     bool drag_on, ground;
     Vec3f gravity;
     f32 ground_height, bounce;
     f32 e = 0.0f, gain = 0.0f; // exp(-k h) and (1 - e) / k
     Vec3f gravity_over_k{};
-    Forces(const ParticleDesc3D& d, f32 h) : drag_on(d.drag > 0.0f), ground(d.ground), gravity(d.gravity), ground_height(d.ground_height), bounce(d.bounce) {
+    Forces(const ParticleDesc3D& d, f32 h)
+        : drag_on(d.drag > 0.0f), ground(d.ground), gravity(d.gravity), ground_height(d.ground_height),
+          bounce(d.bounce) {
         if (drag_on) {
             e = std::exp(-d.drag * h);
             gain = (1.0f - e) / d.drag;
@@ -393,14 +409,16 @@ struct Forces {
     }
 };
 
-// Every particle of `particles` one step of `dt` seconds on, in the wind (null: none) as it blows at `time`. The air acts only through
-// the drag, so without drag (or influence) it is not looked for; else the wind is found 32 places at a time.
+// Every particle of `particles` one step of `dt` seconds on, in the wind (null: none) as it blows at `time`. The air
+// acts only through the drag, so without drag (or influence) it is not looked for; else the wind is found 32 places at
+// a time.
 void advance_all(std::span<Particle3D> particles, const ParticleDesc3D& desc, f64 time, f64 dt, const Wind3D* wind) {
     const f32 h = static_cast<f32>(dt);
     const Forces f(desc, h);
     const bool windy = wind && f.drag_on && desc.wind_influence != 0.0f;
     std::optional<WindStep> air;
-    if (windy) air.emplace(*wind, time, desc.wind_influence);
+    if (windy)
+        air.emplace(*wind, time, desc.wind_influence);
     WindLanes lanes;
     for (std::size_t base = 0; base < particles.size(); base += wind_lanes) {
         const std::size_t n = std::min(wind_lanes, particles.size() - base);
@@ -408,14 +426,17 @@ void advance_all(std::span<Particle3D> particles, const ParticleDesc3D& desc, f6
         if (windy) {
             for (std::size_t i = 0; i < wind_lanes; ++i) { // the last block is filled up with its first place
                 const Vec3f at = block[i < n ? i : 0].position;
-                lanes.x[i] = at.x; lanes.y[i] = at.y; lanes.z[i] = at.z;
+                lanes.x[i] = at.x;
+                lanes.y[i] = at.y;
+                lanes.z[i] = at.z;
             }
             air->sample(lanes);
         }
         for (std::size_t i = 0; i < n; ++i) {
             Particle3D& p = block[i];
             if (f.drag_on) {
-                // Velocity relaxes toward the terminal one (the air's, with gravity's pull balanced by the drag): exact for a step.
+                // Velocity relaxes toward the terminal one (the air's, with gravity's pull balanced by the drag): exact
+                // for a step.
                 const Vec3f wind_here = windy ? Vec3f{lanes.x[i], lanes.y[i], lanes.z[i]} : Vec3f{};
                 const Vec3f terminal = wind_here + f.gravity_over_k;
                 p.position += terminal * h + (p.velocity - terminal) * f.gain;
@@ -449,8 +470,7 @@ struct Hasher {
             h = (h ^ p[i]) * fnv_prime;
         }
     }
-    template <typename T>
-    void value(T v) {
+    template <typename T> void value(T v) {
         if constexpr (std::is_floating_point_v<T>) {
             if (v != v) {
                 v = std::numeric_limits<T>::quiet_NaN();
@@ -497,14 +517,16 @@ f32 ParticleSystem3D::alpha_over_life(const ParticleDesc3D& d, f32 t) {
 }
 
 void ParticleSystem3D::advance(Particle3D& p, f64 dt, const Wind3D* wind) const {
-    // A birth part-way through a step: one particle in the same code that steps the rest, so that it is carried as they are.
+    // A birth part-way through a step: one particle in the same code that steps the rest, so that it is carried as they
+    // are.
     advance_all({&p, 1}, desc, _time, dt, wind);
 }
 
 void ParticleSystem3D::spawn(u32 count, bool at_point, Vec3f point, const Wind3D* wind, f64 sub_step) {
     for (u32 n = 0; n < count; ++n) {
         if (_particles.size() >= desc.max_particles) {
-            // Full: the births still to come are dropped (counted, and their numbers used) without being made one by one.
+            // Full: the births still to come are dropped (counted, and their numbers used) without being made one by
+            // one.
             _dropped += count - n;
             _next_index += count - n;
             return;
@@ -614,7 +636,8 @@ void ParticleSystem3D::update(f64 dt, const Wind3D* wind) {
 
 void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
     const f32 acc = static_cast<f32>(std::max(_accumulated, 0.0));
-    const u32 frames = desc.look.atlas_frames > 0 ? desc.look.atlas_frames : std::max(1u, desc.look.atlas_columns * desc.look.atlas_rows);
+    const u32 frames = desc.look.atlas_frames > 0 ? desc.look.atlas_frames
+                                                  : std::max(1u, desc.look.atlas_columns * desc.look.atlas_rows);
     out.reserve(out.size() + _particles.size());
     for (const Particle3D& p : _particles) {
         const f32 t = std::clamp(p.age / p.lifetime, 0.0f, 1.0f);
@@ -627,7 +650,8 @@ void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
         s.alpha = alpha_over_life(desc, t);
         s.velocity = p.velocity;
         if (desc.frames_per_life > 0.0f && frames > 1) {
-            f32 f = t * desc.frames_per_life * static_cast<f32>(frames) + (desc.frame_random ? p.random * static_cast<f32>(frames) : 0.0f);
+            f32 f = t * desc.frames_per_life * static_cast<f32>(frames) +
+                    (desc.frame_random ? p.random * static_cast<f32>(frames) : 0.0f);
             f = std::fmod(f, static_cast<f32>(frames));
             s.frame = f;
         } else if (desc.frame_random && frames > 1) {
@@ -643,13 +667,14 @@ u64 ParticleSystem3D::state_hash() const {
     h.value(_next_index);
     h.value(_dropped);
     h.value(_carry);
-    // The time given and not yet stepped, to a nanosecond: the same total time cut into frames differently leaves a few ulps.
+    // The time given and not yet stepped, to a nanosecond: the same total time cut into frames differently leaves a few
+    // ulps.
     h.value(static_cast<i64>(std::llround(_accumulated * 1e9)));
     h.value(static_cast<i64>(std::llround(_time * 1e9)));
     h.value(static_cast<u64>(_particles.size()));
     for (const Particle3D& p : _particles) {
-        for (const f32 v : {p.position.x, p.position.y, p.position.z, p.velocity.x, p.velocity.y, p.velocity.z, p.age, p.lifetime, p.size,
-                            p.rotation, p.spin, p.random}) {
+        for (const f32 v : {p.position.x, p.position.y, p.position.z, p.velocity.x, p.velocity.y, p.velocity.z, p.age,
+                            p.lifetime, p.size, p.rotation, p.spin, p.random}) {
             h.value(v);
         }
         h.value(p.index);
@@ -703,7 +728,8 @@ bool ParticleSystem3D::restore(std::span<const u8> bytes) {
     take(&accumulated, 8);
     take(&time, 8);
     take(&count, 4);
-    if (magic != save_magic || version != save_version || bytes.size() != header + static_cast<std::size_t>(count) * sizeof(Particle3D)) {
+    if (magic != save_magic || version != save_version ||
+        bytes.size() != header + static_cast<std::size_t>(count) * sizeof(Particle3D)) {
         return false;
     }
     _seed = seed;
@@ -843,8 +869,9 @@ f64 positive_mod(f64 x, f64 m) {
     return x - m * std::floor(x / m);
 }
 
-// What every particle of the weather shares at one clock: the wind's drift since time 0 and its velocity, at the world's origin
-// (the gusts' and the turbulence's variation with place is left out of the drift: the volume is small beside a gust).
+// What every particle of the weather shares at one clock: the wind's drift since time 0 and its velocity, at the
+// world's origin (the gusts' and the turbulence's variation with place is left out of the drift: the volume is small
+// beside a gust).
 struct WeatherWind {
     Vec3f drift;
     Vec3f velocity;
@@ -861,19 +888,24 @@ struct WeatherBox {
 
 WeatherBox weather_box(const WeatherLayer3D& layer, Vec3f eye) {
     const f64 w = static_cast<f64>(layer.box.x), h = static_cast<f64>(layer.box.y), d = static_cast<f64>(layer.box.z);
-    return {static_cast<f64>(eye.x) - 0.5 * w, static_cast<f64>(eye.y) - (1.0 - static_cast<f64>(layer.above)) * h, static_cast<f64>(eye.z) - 0.5 * d,
-            w, h, d};
+    return {static_cast<f64>(eye.x) - 0.5 * w,
+            static_cast<f64>(eye.y) - (1.0 - static_cast<f64>(layer.above)) * h,
+            static_cast<f64>(eye.z) - 0.5 * d,
+            w,
+            h,
+            d};
 }
 
-// One particle's drop, and its splash, from its number and the clock. Both outputs are optional; each returns whether it is shown.
+// One particle's drop, and its splash, from its number and the clock. Both outputs are optional; each returns whether
+// it is shown.
 struct WeatherResult {
     bool drop = false;
     bool splash = false;
 };
 
-WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer, u32 kind, u32 i, Vec3f eye, const WeatherBox& box,
-                          const WeatherWind& wind, ParticleSprite3D* drop, ParticleSprite3D* splash, Vec3f* unwrapped,
-                          const SphereTest* in_view = nullptr) {
+WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer, u32 kind, u32 i, Vec3f eye,
+                          const WeatherBox& box, const WeatherWind& wind, ParticleSprite3D* drop,
+                          ParticleSprite3D* splash, Vec3f* unwrapped, const SphereTest3D* in_view = nullptr) {
     WeatherResult result;
     const f32 wanted = static_cast<f32>(layer.max_particles) * std::clamp(layer.intensity, 0.0f, 1.0f);
     const f32 share = std::clamp(wanted - static_cast<f32>(i), 0.0f, 1.0f);
@@ -894,7 +926,8 @@ WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer,
     if (layer.flutter != 0.0f) {
         const f32 p1 = h3.fx(), p2 = h3.fy();
         const f64 rate = static_cast<f64>(layer.flutter_rate) * (0.7 + 0.6 * static_cast<f64>(k));
-        // The phase's whole turns are taken out in double (an hour in, a float would have no fraction left), the sine in float.
+        // The phase's whole turns are taken out in double (an hour in, a float would have no fraction left), the sine
+        // in float.
         const f64 a = rate * t + static_cast<f64>(p1), b = rate * 0.83 * t + static_cast<f64>(p2);
         x += static_cast<f64>(layer.flutter * std::sin(6.2831853f * static_cast<f32>(a - std::floor(a))));
         z += static_cast<f64>(layer.flutter * std::sin(6.2831853f * static_cast<f32>(b - std::floor(b))));
@@ -908,7 +941,9 @@ WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer,
     const f32 yf = static_cast<f32>(wy);
     const f32 edge = std::max(layer.edge_fade, 1e-3f);
     const f32 up = static_cast<f32>((wy - box.lo_y) / box.h);
-    const f32 near_start = 0.4f, near_range = 1.6f; // nothing at the lens, whole from two metres: a flake at the lens is a blob across the picture
+    const f32 near_start = 0.4f,
+              near_range =
+                  1.6f; // nothing at the lens, whole from two metres: a flake at the lens is a blob across the picture
     if (weather.has_ground && yf < weather.ground_height) {
         // Under the ground: hidden; and for the splash, how long it has been since it met it.
         if (splash && layer.splash > 0.0f && fall > 1e-3f && h3.fz() < layer.splash) {
@@ -927,7 +962,8 @@ WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer,
                 splash->size = layer.splash_size * (0.25f + 0.75f * life);
                 splash->rotation = 0.0f;
                 splash->colour = layer.colour * 1.25f; // a ring catches the light: brighter than the drop
-                splash->alpha = std::min(1.0f, layer.alpha * 2.5f) * (1.0f - life) * (1.0f - life) * smooth(ex / edge) * smooth(ez / edge) * near;
+                splash->alpha = std::min(1.0f, layer.alpha * 2.5f) * (1.0f - life) * (1.0f - life) * smooth(ex / edge) *
+                                smooth(ez / edge) * near;
                 splash->velocity = {};
                 splash->frame = 0.0f;
                 result.splash = splash->alpha > 0.0f;
@@ -950,8 +986,8 @@ WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer,
             return result;
         }
     }
-    // Fading across the volume's sides and top (and its bottom, unless the ground is what ends it), so that nothing pops where
-    // a particle wraps.
+    // Fading across the volume's sides and top (and its bottom, unless the ground is what ends it), so that nothing
+    // pops where a particle wraps.
     const f32 ex = 1.0f - std::abs(2.0f * static_cast<f32>(wx - static_cast<f64>(eye.x)) / layer.box.x);
     const f32 ez = 1.0f - std::abs(2.0f * static_cast<f32>(wz - static_cast<f64>(eye.z)) / layer.box.z);
     f32 fade = smooth(ex / edge) * smooth(ez / edge) * smooth((1.0f - up) / edge);
@@ -974,16 +1010,22 @@ WeatherResult weather_one(const Weather3D& weather, const WeatherLayer3D& layer,
 
 } // namespace
 
-bool weather_particle(const Weather3D& weather, const WeatherLayer3D& layer, u32 kind, u32 i, Vec3f eye, ParticleSprite3D& out, Vec3f* unwrapped) {
-    return weather_one(weather, layer, kind, i, eye, weather_box(layer, eye), weather_wind(weather), &out, nullptr, unwrapped).drop;
+bool weather_particle(const Weather3D& weather, const WeatherLayer3D& layer, u32 kind, u32 i, Vec3f eye,
+                      ParticleSprite3D& out, Vec3f* unwrapped) {
+    return weather_one(weather, layer, kind, i, eye, weather_box(layer, eye), weather_wind(weather), &out, nullptr,
+                       unwrapped)
+        .drop;
 }
 
-bool weather_splash(const Weather3D& weather, const WeatherLayer3D& layer, u32 kind, u32 i, Vec3f eye, ParticleSprite3D& out) {
-    return weather_one(weather, layer, kind, i, eye, weather_box(layer, eye), weather_wind(weather), nullptr, &out, nullptr).splash;
+bool weather_splash(const Weather3D& weather, const WeatherLayer3D& layer, u32 kind, u32 i, Vec3f eye,
+                    ParticleSprite3D& out) {
+    return weather_one(weather, layer, kind, i, eye, weather_box(layer, eye), weather_wind(weather), nullptr, &out,
+                       nullptr)
+        .splash;
 }
 
 void weather_sprites(const Weather3D& weather, const Camera3D& camera, std::vector<ParticleSprite3D>& sprites,
-                     std::vector<WeatherBatch3D>& batches, const ParallelFor& parallel, const SphereTest& in_view) {
+                     std::vector<WeatherBatch3D>& batches, const ParallelFor3D& parallel, const SphereTest3D& in_view) {
     const std::array<const WeatherLayer3D*, 4> layers{&weather.rain, &weather.snow, &weather.dust, &weather.mist};
     const WeatherWind wind = weather_wind(weather);
     constexpr u32 chunk = 2048;
@@ -996,8 +1038,10 @@ void weather_sprites(const Weather3D& weather, const Camera3D& camera, std::vect
         if (layer.intensity <= 0.0f || layer.max_particles == 0) {
             continue;
         }
-        constexpr u32 most = 1u << 20; // a layer is at most a million particles (a bad number must not take a minute to make)
-        const u32 count = std::min({static_cast<u32>(std::ceil(static_cast<f32>(layer.max_particles) * std::clamp(layer.intensity, 0.0f, 1.0f))),
+        constexpr u32 most =
+            1u << 20; // a layer is at most a million particles (a bad number must not take a minute to make)
+        const u32 count = std::min({static_cast<u32>(std::ceil(static_cast<f32>(layer.max_particles) *
+                                                               std::clamp(layer.intensity, 0.0f, 1.0f))),
                                     layer.max_particles, most});
         const WeatherBox box = weather_box(layer, camera.position);
         const bool want_splash = layer.splash > 0.0f && weather.has_ground;
@@ -1010,8 +1054,9 @@ void weather_sprites(const Weather3D& weather, const Camera3D& camera, std::vect
             ParticleSprite3D drop, splash;
             const u32 end = std::min(count, (static_cast<u32>(k) + 1) * chunk);
             for (u32 i = static_cast<u32>(k) * chunk; i < end; ++i) {
-                const WeatherResult r = weather_one(weather, layer, kind, i, camera.position, box, wind, &drop, want_splash ? &splash : nullptr, nullptr,
-                                                    in_view ? &in_view : nullptr);
+                const WeatherResult r =
+                    weather_one(weather, layer, kind, i, camera.position, box, wind, &drop,
+                                want_splash ? &splash : nullptr, nullptr, in_view ? &in_view : nullptr);
                 if (r.drop) {
                     piece.drops.push_back(drop);
                 }

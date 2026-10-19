@@ -5,7 +5,7 @@
 
 #include "bytes3d.hpp"
 
-#include <kin/render3d/skeleton.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -868,7 +868,7 @@ Quatf y_to(Vec3f dir) {
 
 } // namespace
 
-RagdollDesc auto_ragdoll_desc(const Skeleton& skeleton, const Pose& pose, const AutoRagdollOptions& o) {
+RagdollDesc auto_ragdoll_desc(const Skeleton3D& skeleton, const Pose3D& pose, const AutoRagdollOptions& o) {
     RagdollDesc desc;
     desc.layer = o.layer;
     desc.self_collision = o.self_collision;

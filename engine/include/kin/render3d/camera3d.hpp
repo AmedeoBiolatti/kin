@@ -5,7 +5,6 @@
 
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
-
 #include <limits>
 #include <optional>
 
@@ -20,9 +19,9 @@ struct Camera3D {
     Vec3f position{0.0f, 0.0f, 5.0f};
     Quatf rotation{};
     Projection3D projection = Projection3D::Perspective;
-    f32 fov = 60.0f;     // perspective: degrees, top to bottom of the view
-    f32 height = 10.0f;  // orthographic: world units, top to bottom of the view
-    f32 z_near = 0.1f;   // nothing nearer is drawn
+    f32 fov = 60.0f;                                  // perspective: degrees, top to bottom of the view
+    f32 height = 10.0f;                               // orthographic: world units, top to bottom of the view
+    f32 z_near = 0.1f;                                // nothing nearer is drawn
     f32 z_far = std::numeric_limits<f32>::infinity(); // nor further (infinity: no limit)
 
     // At `eye`, looking at `target`.

@@ -1,18 +1,10 @@
-// Skeletons, clips, poses and the glTF skin reader (kin/render3d/skeleton.hpp, animation3d.hpp, model.hpp), without a GPU:
-// keyframe sampling against hand-computed glTF values, blends, additive clips, masks, joint matrices of a known chain, root
-// motion, the player's crossfade, bounds that no posed vertex leaves, and the loader on glTF files made in code.
+// Skeletons, clips, poses and the glTF skin reader (kin/render3d/skeleton3d.hpp, animation3d.hpp, model.hpp), without a
+// GPU: keyframe sampling against hand-computed glTF values, blends, additive clips, masks, joint matrices of a known
+// chain, root motion, the player's crossfade, bounds that no posed vertex leaves, and the loader on glTF files made in
+// code.
 
-#include "skin_fixtures.hpp"
 #include "../examples/sponza_walk/ik_rig.hpp"
-
-#include <kin/assets/content.hpp>
-#include <kin/ecs/render3d.hpp>
-#include <kin/ecs/world.hpp>
-#include <kin/platform/log.hpp>
-#include <kin/render3d/animation3d.hpp>
-#include <kin/render3d/ik.hpp>
-#include <kin/render3d/model.hpp>
-#include <kin/render3d/skeleton.hpp>
+#include "skin_fixtures.hpp"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +17,14 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <kin/assets/content.hpp>
+#include <kin/ecs/render3d.hpp>
+#include <kin/ecs/world.hpp>
+#include <kin/platform/log.hpp>
+#include <kin/render3d/animation3d.hpp>
+#include <kin/render3d/ik3d.hpp>
+#include <kin/render3d/model3d.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 #include <random>
 #include <span>
 
@@ -33,18 +33,27 @@ namespace {
 using namespace kin;
 using skin_fixtures::GltfOptions;
 
-bool close(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps; }
-bool close(Vec3f a, Vec3f b, float eps = 1e-5f) { return close(a.x, b.x, eps) && close(a.y, b.y, eps) && close(a.z, b.z, eps); }
+bool close(float a, float b, float eps = 1e-5f) {
+    return std::fabs(a - b) <= eps;
+}
+bool close(Vec3f a, Vec3f b, float eps = 1e-5f) {
+    return close(a.x, b.x, eps) && close(a.y, b.y, eps) && close(a.z, b.z, eps);
+}
 bool close(Quatf a, Quatf b, float eps = 1e-5f) {
     // The same rotation whichever sign.
     const float d = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
     return std::fabs(std::fabs(d) - 1.0f) <= eps;
 }
-float length_of(Quatf q) { return std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w); }
+float length_of(Quatf q) {
+    return std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+}
 
-Quatf rz(float degrees) { return Quatf::axis_angle({0, 0, 1}, degrees); }
+Quatf rz(float degrees) {
+    return Quatf::axis_angle({0, 0, 1}, degrees);
+}
 
-// --- sampling --------------------------------------------------------------------------------------------------------------
+// --- sampling
+// --------------------------------------------------------------------------------------------------------------
 
 void test_sampling_linear_and_step() {
     Track3D<Vec3f> t;
@@ -53,7 +62,7 @@ void test_sampling_linear_and_step() {
     t.values = {{0, 0, 0}, {2, 4, 6}, {2, 0, 0}};
     const Vec3f fallback{9, 9, 9};
     assert(close(sample_track(t, 0.5f, fallback), {1, 2, 3}));
-    assert(close(sample_track(t, 2.0f, fallback), {2, 2, 3})); // halfway between keys 1 and 3 s
+    assert(close(sample_track(t, 2.0f, fallback), {2, 2, 3}));  // halfway between keys 1 and 3 s
     assert(close(sample_track(t, -1.0f, fallback), {0, 0, 0})); // before the first key: the first value
     assert(close(sample_track(t, 3.0f, fallback), {2, 0, 0}));  // at and after the last: the last value
     assert(close(sample_track(t, 100.0f, fallback), {2, 0, 0}));
@@ -85,24 +94,26 @@ void test_sampling_linear_and_step() {
 void test_sampling_cubic_spline() {
     // glTF's spline between keys k and k + 1 (spec, appendix C): with s = (t - t_k) / dt,
     //   p = (2s^3 - 3s^2 + 1) v_k + (s^3 - 2s^2 + s) dt b_k + (-2s^3 + 3s^2) v_k+1 + (s^3 - s^2) dt a_k+1
-    // each key stored as in-tangent a, value v, out-tangent b. Worked by hand for dt = 1, s = 0.5: the weights are 0.5, 0.125,
-    // 0.5, -0.125.
+    // each key stored as in-tangent a, value v, out-tangent b. Worked by hand for dt = 1, s = 0.5: the weights are 0.5,
+    // 0.125, 0.5, -0.125.
     Track3D<Vec3f> t;
     t.interpolation = Interpolation3D::CubicSpline;
     t.times = {0.0f, 1.0f};
-    t.values = {{7, 7, 7}, {0, 0, 0}, {1, 2, 0},   // key 0: in (unused), value, out
-                {0, 0, 4}, {2, 4, 6}, {7, 7, 7}};  // key 1: in, value, out (unused)
+    t.values = {{7, 7, 7}, {0, 0, 0}, {1, 2, 0},  // key 0: in (unused), value, out
+                {0, 0, 4}, {2, 4, 6}, {7, 7, 7}}; // key 1: in, value, out (unused)
     Vec3f p = sample_track(t, 0.5f, {});
     // x: 0.5*0 + 0.125*1 + 0.5*2 + (-0.125)*0 = 1.125; y: 0 + 0.25 + 2 + 0 = 2.25; z: 0 + 0 + 3 + (-0.125*4) = 2.5
     assert(close(p, {1.125f, 2.25f, 2.5f}));
     // On the keys: the values (not the tangents).
     assert(close(sample_track(t, 0.0f, {}), {0, 0, 0}) && close(sample_track(t, 1.0f, {}), {2, 4, 6}));
     assert(close(sample_track(t, -3.0f, {}), {0, 0, 0}) && close(sample_track(t, 9.0f, {}), {2, 4, 6}));
-    // dt scales the tangents: the same keys over two seconds, sampled at the middle (s = 0.5): tangent terms twice as big.
+    // dt scales the tangents: the same keys over two seconds, sampled at the middle (s = 0.5): tangent terms twice as
+    // big.
     t.times = {0.0f, 2.0f};
     p = sample_track(t, 1.0f, {});
     assert(close(p, {0.125f * 2 * 1 + 1.0f, 0.125f * 2 * 2 + 2.0f, 3.0f - 0.125f * 2 * 4}));
-    // s = 0.25: h00 = 2/64 - 3/16 + 1 = 0.84375, h10 = 1/64 - 2/16 + 1/4 = 0.140625, h01 = 0.15625, h11 = 1/64 - 1/16 = -0.046875.
+    // s = 0.25: h00 = 2/64 - 3/16 + 1 = 0.84375, h10 = 1/64 - 2/16 + 1/4 = 0.140625, h01 = 0.15625, h11 = 1/64 - 1/16 =
+    // -0.046875.
     t.times = {0.0f, 1.0f};
     p = sample_track(t, 0.25f, {});
     assert(close(p.x, 0.140625f * 1 + 0.15625f * 2));
@@ -155,7 +166,8 @@ void test_slerp_properties() {
 void test_clip_time() {
     AnimClip3D clip;
     clip.duration = 2.0f;
-    assert(close(clip_time(clip, 0.5f, true), 0.5f) && close(clip_time(clip, 2.5f, true), 0.5f) && close(clip_time(clip, 4.0f, true), 0.0f));
+    assert(close(clip_time(clip, 0.5f, true), 0.5f) && close(clip_time(clip, 2.5f, true), 0.5f) &&
+           close(clip_time(clip, 4.0f, true), 0.0f));
     assert(close(clip_time(clip, -0.5f, true), 1.5f));
     assert(close(clip_time(clip, 2.5f, false), 2.0f) && close(clip_time(clip, -1.0f, false), 0.0f));
     clip.duration = 0.0f;
@@ -164,8 +176,9 @@ void test_clip_time() {
     assert(clip_time(clip, std::nanf(""), true) == 0.0f);
 }
 
-// A clip of the tube's three joints: the middle joint's rotation 0, 90, 0 degrees over two seconds; the base slides along x.
-AnimClip3D make_clip(const Skeleton& sk) {
+// A clip of the tube's three joints: the middle joint's rotation 0, 90, 0 degrees over two seconds; the base slides
+// along x.
+AnimClip3D make_clip(const Skeleton3D& sk) {
     AnimClip3D clip;
     clip.name = "bend";
     clip.channels.resize(sk.joint_count());
@@ -181,13 +194,14 @@ void test_sample_clip() {
     const auto tube = skin_fixtures::make_tube();
     const AnimClip3D clip = make_clip(tube.skeleton);
     assert(close(clip.duration, 2.0f) && close(AnimClip3D{}.key_duration(), 0.0f));
-    Pose pose;
+    Pose3D pose;
     sample_clip(clip, tube.skeleton, 0.5f, true, pose);
     assert(pose.joints.size() == 3);
     assert(close(pose.joints[1].rotation, rz(45)));
     assert(close(pose.joints[0].translation, {1, 0.25f, 0.5f}));
     // A joint with no tracks keeps its rest value (the top joint, and the rest translation of the middle one).
-    assert(close(pose.joints[2].translation, tube.skeleton.rest[2].translation) && close(pose.joints[1].translation, tube.skeleton.rest[1].translation));
+    assert(close(pose.joints[2].translation, tube.skeleton.rest[2].translation) &&
+           close(pose.joints[1].translation, tube.skeleton.rest[1].translation));
     sample_clip(clip, tube.skeleton, 2.5f, true, pose); // wrapped to 0.5
     assert(close(pose.joints[1].rotation, rz(45)));
     sample_clip(clip, tube.skeleton, 2.5f, false, pose); // held at the end
@@ -207,34 +221,37 @@ void test_sample_clip() {
     assert(close(pose.joints[2].translation, {5, 5, 5}));
 }
 
-// --- combining -------------------------------------------------------------------------------------------------------------
+// --- combining
+// -------------------------------------------------------------------------------------------------------------
 
 void test_blend_masks_and_additive() {
     const auto tube = skin_fixtures::make_tube();
-    const Skeleton& sk = tube.skeleton;
-    Pose a = sk.rest_pose(), b = sk.rest_pose();
+    const Skeleton3D& sk = tube.skeleton;
+    Pose3D a = sk.rest_pose(), b = sk.rest_pose();
     a.joints[0].translation = {0, 0, 0};
     b.joints[0].translation = {4, 0, 0};
     a.joints[1].rotation = rz(0);
     b.joints[1].rotation = rz(90);
     a.joints[2].scale = {1, 1, 1};
     b.joints[2].scale = {3, 1, 1};
-    const Pose half = blend_poses(a, b, 0.5f);
-    assert(close(half.joints[0].translation, {2, 0, 0}) && close(half.joints[1].rotation, rz(45)) && close(half.joints[2].scale, {2, 1, 1}));
-    assert(close(blend_poses(a, b, 0.0f).joints[0].translation, {0, 0, 0}) && close(blend_poses(a, b, 1.0f).joints[0].translation, {4, 0, 0}));
+    const Pose3D half = blend_poses(a, b, 0.5f);
+    assert(close(half.joints[0].translation, {2, 0, 0}) && close(half.joints[1].rotation, rz(45)) &&
+           close(half.joints[2].scale, {2, 1, 1}));
+    assert(close(blend_poses(a, b, 0.0f).joints[0].translation, {0, 0, 0}) &&
+           close(blend_poses(a, b, 1.0f).joints[0].translation, {4, 0, 0}));
 
     // Masks.
-    const PoseMask arm = PoseMask::subtree(sk, 1);
+    const PoseMask3D arm = PoseMask3D::subtree(sk, 1);
     assert(arm.weights == (std::vector<float>{0, 1, 1}));
-    assert(PoseMask::subtree(sk, 1, 1.0f, false).weights == (std::vector<float>{0, 0, 1}));
-    assert(PoseMask::subtree(sk, 0, 0.5f).weights == (std::vector<float>{0.5f, 0.5f, 0.5f}));
-    assert(PoseMask::subtree(sk, 7).weights == (std::vector<float>{0, 0, 0}));
+    assert(PoseMask3D::subtree(sk, 1, 1.0f, false).weights == (std::vector<float>{0, 0, 1}));
+    assert(PoseMask3D::subtree(sk, 0, 0.5f).weights == (std::vector<float>{0.5f, 0.5f, 0.5f}));
+    assert(PoseMask3D::subtree(sk, 7).weights == (std::vector<float>{0, 0, 0}));
     const std::string_view names[] = {"top", "nothing"};
-    assert(PoseMask::joints(sk, names).weights == (std::vector<float>{0, 0, 1}));
-    PoseMask both = PoseMask::joints(sk, names);
-    both.add(PoseMask::subtree(sk, 1));
+    assert(PoseMask3D::joints(sk, names).weights == (std::vector<float>{0, 0, 1}));
+    PoseMask3D both = PoseMask3D::joints(sk, names);
+    both.add(PoseMask3D::subtree(sk, 1));
     assert(both.weights == (std::vector<float>{0, 1, 1}));
-    Pose base = a;
+    Pose3D base = a;
     blend_masked(base, b, arm, 1.0f);
     assert(close(base.joints[0].translation, {0, 0, 0})); // outside the mask: untouched
     assert(close(base.joints[1].rotation, rz(90)) && close(base.joints[2].scale, {3, 1, 1}));
@@ -245,40 +262,43 @@ void test_blend_masks_and_additive() {
     blend_masked(base, b, {}, 1.0f); // an empty mask is every joint
     assert(close(base.joints[0].translation, {4, 0, 0}));
     base = a;
-    blend_masked(base, b, PoseMask{{0.0f, 0.25f}}, 1.0f); // a short mask: the rest are 0
+    blend_masked(base, b, PoseMask3D{{0.0f, 0.25f}}, 1.0f); // a short mask: the rest are 0
     assert(close(base.joints[1].rotation, rz(22.5f), 1e-4f) && close(base.joints[2].scale, {1, 1, 1}));
 
     // Additive: the change of `add` from `reference`, put on a base that is somewhere else.
-    Pose reference = sk.rest_pose();
-    Pose add = reference;
+    Pose3D reference = sk.rest_pose();
+    Pose3D add = reference;
     add.joints[0].translation = {1, 2, 3};
     add.joints[1].rotation = rz(90);
     add.joints[2].scale = {2, 1, 1};
-    Pose target = sk.rest_pose();
+    Pose3D target = sk.rest_pose();
     target.joints[0].translation = {10, 0, 0};
     target.joints[1].rotation = rz(30);
     target.joints[2].scale = {1.5f, 1, 1};
-    Pose out = target;
+    Pose3D out = target;
     apply_additive(out, add, reference, {}, 1.0f);
     assert(close(out.joints[0].translation, {11, 2, 3}));
     assert(close(out.joints[1].rotation, rz(120)));
     assert(close(out.joints[2].scale, {2.5f, 1, 1}));
     out = target;
     apply_additive(out, add, reference, {}, 0.5f);
-    assert(close(out.joints[0].translation, {10.5f, 1, 1.5f}) && close(out.joints[1].rotation, rz(75), 1e-4f) && close(out.joints[2].scale, {2.0f, 1, 1}));
+    assert(close(out.joints[0].translation, {10.5f, 1, 1.5f}) && close(out.joints[1].rotation, rz(75), 1e-4f) &&
+           close(out.joints[2].scale, {2.0f, 1, 1}));
     out = target;
     apply_additive(out, add, reference, arm, 1.0f);
     assert(close(out.joints[0].translation, {10, 0, 0}) && close(out.joints[1].rotation, rz(120)));
     out = target;
     apply_additive(out, reference, reference, {}, 1.0f); // the reference on itself adds nothing
-    assert(close(out.joints[0].translation, target.joints[0].translation) && close(out.joints[1].rotation, target.joints[1].rotation));
+    assert(close(out.joints[0].translation, target.joints[0].translation) &&
+           close(out.joints[1].rotation, target.joints[1].rotation));
 }
 
-// --- joint matrices --------------------------------------------------------------------------------------------------------
+// --- joint matrices
+// --------------------------------------------------------------------------------------------------------
 
 void test_joint_matrices() {
     const auto tube = skin_fixtures::make_tube(25, 12, 3.0f);
-    const Skeleton& sk = tube.skeleton;
+    const Skeleton3D& sk = tube.skeleton;
     std::string why;
     assert(sk.validate(&why));
     // At rest every matrix is the identity: a skinned mesh draws as modelled.
@@ -290,15 +310,17 @@ void test_joint_matrices() {
             assert(close(mat.m[i], Mat4f{}.m[i], 1e-6f));
         }
     }
-    // The middle joint turned 90 degrees about Z: the joint at (0, 1, 0) stays; the top joint's origin, (0, 2, 0) in the mesh,
-    // goes to (0, 1, 0) + Rz90 (0, 1, 0) = (-1, 1, 0); and a vertex at (0, 3, 0), bound to the top, to (-2, 1, 0).
-    Pose pose = skin_fixtures::bent(tube, 90.0f, 0.0f);
+    // The middle joint turned 90 degrees about Z: the joint at (0, 1, 0) stays; the top joint's origin, (0, 2, 0) in
+    // the mesh, goes to (0, 1, 0) + Rz90 (0, 1, 0) = (-1, 1, 0); and a vertex at (0, 3, 0), bound to the top, to (-2,
+    // 1, 0).
+    Pose3D pose = skin_fixtures::bent(tube, 90.0f, 0.0f);
     compute_joint_matrices(sk, pose, m);
     assert(close(m[1].apply({0, 1, 0}), {0, 1, 0}, 1e-5f));
     assert(close(m[2].apply({0, 2, 0}), {-1, 1, 0}, 1e-5f));
     assert(close(m[2].apply({0, 3, 0}), {-2, 1, 0}, 1e-5f));
     assert(close(m[0].apply({0, 3, 0}), {0, 3, 0}));
-    // The top turned as well, 90 degrees more: (0, 3, 0) is one up from the top joint, rotated by 180: (-1, 0, 0) from (-1, 1, 0).
+    // The top turned as well, 90 degrees more: (0, 3, 0) is one up from the top joint, rotated by 180: (-1, 0, 0) from
+    // (-1, 1, 0).
     pose = skin_fixtures::bent(tube, 90.0f, 90.0f);
     compute_joint_matrices(sk, pose, m);
     // Rz(180) (0, 1, 0) = (0, -1, 0): from (-1, 1, 0) that is (-1, 0, 0).
@@ -310,36 +332,38 @@ void test_joint_matrices() {
         assert(close(mat.apply({1, 2, 3}), {6, 2, 3}, 1e-5f));
     }
     // A root transform (the file's nodes above the joints) is part of every world matrix.
-    Skeleton moved = sk;
+    Skeleton3D moved = sk;
     moved.root_transform = Mat4f::translation({0, 0, 7});
     compute_joint_matrices(moved, moved.rest_pose(), m);
     assert(close(m[2].apply({0, 0, 0}), {0, 0, 7}));
     // Into room the caller keeps, and a pose that is short: the rest pose fills in.
     std::vector<Mat4f> room(3);
-    Pose short_pose;
+    Pose3D short_pose;
     short_pose.joints = {pose.joints[0]};
     compute_joint_matrices(sk, short_pose, std::span<Mat4f>{room});
     assert(close(room[2].apply({0, 0, 0}), {5, 0, 0}));
     // Validation: a parent must come first; too many joints are refused.
-    Skeleton bad = sk;
+    Skeleton3D bad = sk;
     bad.parents = {1, 0, 1};
     assert(!bad.validate(&why) && !why.empty());
-    Skeleton big;
+    Skeleton3D big;
     big.parents.assign(257, -1);
     big.rest.resize(257);
     big.inverse_bind.resize(257);
     assert(!big.validate(&why));
-    assert(!Skeleton{}.validate(&why));
+    assert(!Skeleton3D{}.validate(&why));
     // depth, find, subtree
-    assert(sk.find("top") == 2 && sk.find("nope") == -1 && sk.depth(2) == 2 && sk.depth(0) == 0 && sk.root_joint() == 0);
+    assert(sk.find("top") == 2 && sk.find("nope") == -1 && sk.depth(2) == 2 && sk.depth(0) == 0 &&
+           sk.root_joint() == 0);
     assert(sk.subtree(1) == (std::vector<u8>{0, 1, 1}));
 }
 
-// --- root motion -----------------------------------------------------------------------------------------------------------
+// --- root motion
+// -----------------------------------------------------------------------------------------------------------
 
 void test_root_motion() {
     const auto tube = skin_fixtures::make_tube();
-    const Skeleton& sk = tube.skeleton;
+    const Skeleton3D& sk = tube.skeleton;
     // The root moves 2 m/s in x along a wobble in y, and turns 90 degrees over the 2-second clip.
     AnimClip3D clip;
     clip.channels.resize(3);
@@ -348,20 +372,20 @@ void test_root_motion() {
     clip.channels[0].rotation.times = {0.0f, 2.0f};
     clip.channels[0].rotation.values = {rz(0), rz(90)};
     clip.duration = 2.0f;
-    RootMotion m = extract_root_motion(clip, sk, 0.0f, 1.0f, true);
+    RootMotion3D m = extract_root_motion(clip, sk, 0.0f, 1.0f, true);
     assert(close(m.translation, {2, 0, 0})); // y is not carried by default
     m = extract_root_motion(clip, sk, 0.5f, 1.5f, true, {.x = true, .y = true, .z = false, .rotation = true});
     assert(close(m.translation, {2, 0.0f, 0}, 1e-5f)); // 1 -> 3 in x; y: 0.5 -> 0.5
     assert(close(m.rotation, rz(45), 1e-4f));
     // Across the end of a looping clip: the end's motion from `from`, then the start's to `to`.
     m = extract_root_motion(clip, sk, 1.5f, 2.5f, true, {.x = true, .y = false, .z = true, .rotation = true});
-    assert(close(m.translation, {2.0f, 0, 0}, 1e-5f));          // 3 -> 4 (1) and 0 -> 1 (1)
-    assert(close(m.rotation, rz(45), 1e-4f));                  // 67.5 -> 90, then 0 -> 22.5
+    assert(close(m.translation, {2.0f, 0, 0}, 1e-5f)); // 3 -> 4 (1) and 0 -> 1 (1)
+    assert(close(m.rotation, rz(45), 1e-4f));          // 67.5 -> 90, then 0 -> 22.5
     // Backwards across the start (a negative speed): the start's motion from `from`, then the end's to `to`, not the
     // whole clip's travel forwards.
     m = extract_root_motion(clip, sk, 0.5f, -0.5f, true, {.x = true, .y = false, .z = true, .rotation = true});
-    assert(close(m.translation, {-2.0f, 0, 0}, 1e-5f));         // 1 -> 0 (-1) and 4 -> 3 (-1)
-    assert(close(m.rotation, rz(-45), 1e-4f));                  // 22.5 -> 0, then 90 -> 67.5
+    assert(close(m.translation, {-2.0f, 0, 0}, 1e-5f)); // 1 -> 0 (-1) and 4 -> 3 (-1)
+    assert(close(m.rotation, rz(-45), 1e-4f));          // 22.5 -> 0, then 90 -> 67.5
     // Not looping: held at the end, no motion past it.
     m = extract_root_motion(clip, sk, 1.5f, 3.0f, false);
     assert(close(m.translation, {1.0f, 0, 0}));
@@ -376,7 +400,7 @@ void test_root_motion() {
     // A clip with no duration moves nothing.
     assert(close(extract_root_motion(AnimClip3D{}, sk, 0, 1, true).translation, {0, 0, 0}));
     // Removing it from the pose: the root is held at rest in the chosen axes, others untouched.
-    Pose pose;
+    Pose3D pose;
     sample_clip(clip, sk, 1.0f, true, pose);
     pose.joints[1].rotation = rz(10);
     remove_root_motion(pose, sk);
@@ -386,9 +410,10 @@ void test_root_motion() {
     assert(close(pose.joints[0].translation, {0, 0, 0}) && close(pose.joints[0].rotation, Quatf{}));
 }
 
-// --- the player ------------------------------------------------------------------------------------------------------------
+// --- the player
+// ------------------------------------------------------------------------------------------------------------
 
-AnimClip3D constant_clip(const Skeleton& sk, Vec3f where, float duration = 1.0f) {
+AnimClip3D constant_clip(const Skeleton3D& sk, Vec3f where, float duration = 1.0f) {
     AnimClip3D clip;
     clip.channels.resize(sk.joint_count());
     clip.channels[0].translation.times = {0.0f};
@@ -399,13 +424,14 @@ AnimClip3D constant_clip(const Skeleton& sk, Vec3f where, float duration = 1.0f)
 
 void test_player_crossfade() {
     const auto tube = skin_fixtures::make_tube();
-    const Skeleton& sk = tube.skeleton;
+    const Skeleton3D& sk = tube.skeleton;
     const AnimClip3D a = constant_clip(sk, {0, 0, 0}), b = constant_clip(sk, {10, 0, 0});
     AnimationPlayer3D player{&sk};
     assert(player.pose().joints.size() == 3 && !player.finished());
     player.play(&a);
     player.update(0.1f);
-    assert(close(player.pose().joints[0].translation, {0, 0, 0}) && player.clip() == &a && player.fading_from() == nullptr);
+    assert(close(player.pose().joints[0].translation, {0, 0, 0}) && player.clip() == &a &&
+           player.fading_from() == nullptr);
     player.crossfade_to(&b, 1.0f);
     assert(player.clip() == &b && player.fading_from() == &a && close(player.fade_progress(), 0.0f));
     player.update(0.25f);
@@ -413,7 +439,8 @@ void test_player_crossfade() {
     player.update(0.25f);
     assert(close(player.pose().joints[0].translation, {5, 0, 0}));
     player.update(0.5f); // done: all of b, and a is dropped
-    assert(close(player.pose().joints[0].translation, {10, 0, 0}) && player.fading_from() == nullptr && close(player.fade_progress(), 1.0f));
+    assert(close(player.pose().joints[0].translation, {10, 0, 0}) && player.fading_from() == nullptr &&
+           close(player.fade_progress(), 1.0f));
     player.update(0.5f);
     assert(close(player.pose().joints[0].translation, {10, 0, 0}));
     // A fade begun in the middle of another fades from the picture then: no jump.
@@ -464,7 +491,7 @@ void test_player_crossfade() {
 
 void test_player_layers_and_root_motion() {
     const auto tube = skin_fixtures::make_tube();
-    const Skeleton& sk = tube.skeleton;
+    const Skeleton3D& sk = tube.skeleton;
     AnimClip3D base_clip = constant_clip(sk, {1, 0, 0});
     AnimClip3D wave;
     wave.channels.resize(3);
@@ -477,11 +504,11 @@ void test_player_layers_and_root_motion() {
     player.play(&base_clip);
     AnimationPlayer3D::Layer& layer = player.layer(0);
     layer.clip = &wave;
-    layer.mask = PoseMask::subtree(sk, 1);
+    layer.mask = PoseMask3D::subtree(sk, 1);
     layer.weight = 0.5f;
     player.update(0.5f);
     assert(player.layer_count() == 1);
-    assert(close(player.pose().joints[0].translation, {1, 0, 0})); // the mask keeps the base's root
+    assert(close(player.pose().joints[0].translation, {1, 0, 0}));  // the mask keeps the base's root
     assert(close(player.pose().joints[1].rotation, rz(20), 1e-4f)); // 40 degrees at half weight
     // Additive: the clip's change from its first frame.
     player.clear_layers();
@@ -490,7 +517,8 @@ void test_player_layers_and_root_motion() {
     add.additive = true;
     add.loop = false;
     player.update(1.0f);
-    assert(close(player.pose().joints[1].rotation, rz(80), 1e-4f) && close(player.pose().joints[0].translation, {1, 0, 0}));
+    assert(close(player.pose().joints[1].rotation, rz(80), 1e-4f) &&
+           close(player.pose().joints[0].translation, {1, 0, 0}));
 
     // Root motion in the player: the root joint is held, the motion reported.
     AnimClip3D walk;
@@ -527,17 +555,18 @@ void test_player_layers_and_root_motion() {
     assert(close(back, -7.5f, 1e-3f));
 }
 
-// --- bounds ----------------------------------------------------------------------------------------------------------------
+// --- bounds
+// ----------------------------------------------------------------------------------------------------------------
 
 void test_skin_bounds_hold_the_posed_vertices() {
     const auto tube = skin_fixtures::make_tube();
-    const std::vector<SkinBound> bounds = compute_skin_bounds(tube.mesh, 3);
+    const std::vector<SkinBound3D> bounds = compute_skin_bounds(tube.mesh, 3);
     assert(bounds.size() == 3 && bounds[0].radius >= 0.0f && bounds[1].radius >= 0.0f && bounds[2].radius >= 0.0f);
     std::mt19937 rng{1234};
     std::uniform_real_distribution<float> angle(-170.0f, 170.0f), move(-3.0f, 3.0f);
     std::vector<Mat4f> m;
     for (int trial = 0; trial < 500; ++trial) {
-        Pose pose = skin_fixtures::bent(tube, angle(rng), angle(rng), {move(rng), move(rng), move(rng)});
+        Pose3D pose = skin_fixtures::bent(tube, angle(rng), angle(rng), {move(rng), move(rng), move(rng)});
         if (trial % 3 == 0) {
             pose.joints[1].scale = {1.0f + std::fabs(move(rng)) * 0.3f, 0.5f, 1.5f}; // non-uniform scale is allowed for
         }
@@ -545,12 +574,12 @@ void test_skin_bounds_hold_the_posed_vertices() {
         Vec3f c{};
         float r = 0.0f;
         assert(skin_sphere(bounds, m, c, r));
-        const MeshData posed = skin_mesh(tube.mesh, m, /*gpu_weights=*/false);
-        for (const MeshVertex& v : posed.vertices) {
+        const MeshData3D posed = skin_mesh(tube.mesh, m, /*gpu_weights=*/false);
+        for (const MeshVertex3D& v : posed.vertices) {
             assert(length(v.position - c) <= r + 1e-4f);
         }
-        const MeshData posed_gpu = skin_mesh(tube.mesh, m, /*gpu_weights=*/true);
-        for (const MeshVertex& v : posed_gpu.vertices) {
+        const MeshData3D posed_gpu = skin_mesh(tube.mesh, m, /*gpu_weights=*/true);
+        for (const MeshVertex3D& v : posed_gpu.vertices) {
             assert(length(v.position - c) <= r + 1e-4f);
         }
     }
@@ -559,24 +588,26 @@ void test_skin_bounds_hold_the_posed_vertices() {
     Vec3f c{};
     float r = 0.0f;
     assert(skin_sphere(bounds, m, c, r));
-    const Bounds3 box = tube.mesh.bounds();
+    const Bounds3D box = tube.mesh.bounds();
     assert(r < box.radius() * 1.5f);
     // An arm swung out of the rest bound is inside the posed one: the case a rest bound would cull.
-    const Pose out = skin_fixtures::bent(tube, 90.0f, 0.0f, {20.0f, 0, 0});
+    const Pose3D out = skin_fixtures::bent(tube, 90.0f, 0.0f, {20.0f, 0, 0});
     compute_joint_matrices(tube.skeleton, out, m);
     assert(skin_sphere(bounds, m, c, r) && c.x > 15.0f);
     // No bounds, no joints used: nothing to bound.
     assert(!skin_sphere({}, m, c, r));
     // stretch_bound: 1 for a rotation, the largest scale for a scale, never below the true stretch.
-    assert(close(stretch_bound(Mat4f::rotation(rz(33))), 1.0f, 1e-5f) && close(stretch_bound(Mat4f::scaling({2, 3, 1})), 3.0f, 1e-5f));
+    assert(close(stretch_bound(Mat4f::rotation(rz(33))), 1.0f, 1e-5f) &&
+           close(stretch_bound(Mat4f::scaling({2, 3, 1})), 3.0f, 1e-5f));
     assert(stretch_bound(Mat4f::rotation(rz(30)) * Mat4f::scaling({1, 4, 2})) >= 4.0f - 1e-5f);
 }
 
-// Every joint that pulls on a vertex bounds it, not only the strongest: a vertex held 40% by a joint that stays and 30% each by two that
-// swing half a turn about the origin ends up inside the spheres only if the joints it is merely shared with count its place too.
+// Every joint that pulls on a vertex bounds it, not only the strongest: a vertex held 40% by a joint that stays and 30%
+// each by two that swing half a turn about the origin ends up inside the spheres only if the joints it is merely shared
+// with count its place too.
 void test_skin_bounds_count_every_influence() {
-    MeshData m;
-    m.vertices.assign(3, MeshVertex{});
+    MeshData3D m;
+    m.vertices.assign(3, MeshVertex3D{});
     m.vertices[0].position = {0, 0, 0};
     m.vertices[1].position = {0, 0, 0};
     m.vertices[2].position = {10, 0, 0};
@@ -586,17 +617,18 @@ void test_skin_bounds_count_every_influence() {
     m.skin[1] = {{1, 0, 0, 0}, {1, 0, 0, 0}};
     m.skin[2] = {{0, 1, 2, 0}, {0.4f, 0.3f, 0.3f, 0.0f}};
     assert(m.validate());
-    const std::vector<SkinBound> bounds = compute_skin_bounds(m, 3);
-    assert(bounds[2].radius >= 0.0f && close(bounds[2].center, {10, 0, 0})); // joint 2 pulls on one vertex only, and still has a bound
+    const std::vector<SkinBound3D> bounds = compute_skin_bounds(m, 3);
+    assert(bounds[2].radius >= 0.0f &&
+           close(bounds[2].center, {10, 0, 0})); // joint 2 pulls on one vertex only, and still has a bound
     assert(close(bounds[1].center, {5, 0, 0}) && bounds[1].radius >= 5.0f);
     const Mat4f half_turn = Mat4f::rotation(Quatf::axis_angle({0, 0, 1}, 180.0f));
     const std::vector<Mat4f> matrices = {Mat4f{}, half_turn, half_turn};
-    const MeshData posed = skin_mesh(m, matrices, false);
+    const MeshData3D posed = skin_mesh(m, matrices, false);
     assert(close(posed.vertices[2].position, {-2.0f, 0.0f, 0.0f}, 1e-4f));
     Vec3f c{};
     float r = 0.0f;
     assert(skin_sphere(bounds, matrices, c, r));
-    for (const MeshVertex& v : posed.vertices) {
+    for (const MeshVertex3D& v : posed.vertices) {
         assert(length(v.position - c) <= r + 1e-4f);
     }
 }
@@ -606,26 +638,28 @@ void test_cpu_skinning() {
     std::vector<Mat4f> m;
     // At rest, skinning changes nothing.
     compute_joint_matrices(tube.skeleton, tube.skeleton.rest_pose(), m);
-    const MeshData same = skin_mesh(tube.mesh, m);
+    const MeshData3D same = skin_mesh(tube.mesh, m);
     for (std::size_t i = 0; i < same.vertices.size(); ++i) {
-        assert(close(same.vertices[i].position, tube.mesh.vertices[i].position, 1e-5f) && close(same.vertices[i].normal, tube.mesh.vertices[i].normal, 1e-5f));
+        assert(close(same.vertices[i].position, tube.mesh.vertices[i].position, 1e-5f) &&
+               close(same.vertices[i].normal, tube.mesh.vertices[i].normal, 1e-5f));
     }
     assert(!same.skinned() && same.indices == tube.mesh.indices);
     // Bent 90 degrees over the middle joint: the top ring is at (-2, 1, 0) + the radius.
     compute_joint_matrices(tube.skeleton, skin_fixtures::bent(tube, 90.0f, 0.0f), m);
-    const MeshData bent = skin_mesh(tube.mesh, m);
-    // The last ring is bound to the top joint alone: its vertices (x, 3, z) go to (-2, 1 + x, z) (worked by hand in test_joint_matrices).
+    const MeshData3D bent = skin_mesh(tube.mesh, m);
+    // The last ring is bound to the top joint alone: its vertices (x, 3, z) go to (-2, 1 + x, z) (worked by hand in
+    // test_joint_matrices).
     for (std::size_t i = bent.vertices.size() - 13; i < bent.vertices.size(); ++i) {
         const Vec3f at = tube.mesh.vertices[i].position;
         assert(close(bent.vertices[i].position, {-2.0f, 1.0f + at.x, at.z}, 1e-4f));
     }
-    for (const MeshVertex& v : bent.vertices) {
+    for (const MeshVertex3D& v : bent.vertices) {
         assert(std::isfinite(v.position.x) && close(length(v.normal), 1.0f, 1e-4f));
     }
 }
 
 void test_mesh_skin_data() {
-    MeshData mesh = meshes::box({1, 1, 1});
+    MeshData3D mesh = meshes::box({1, 1, 1});
     assert(!mesh.skinned() && mesh.skin_joint_count() == 0);
     mesh.skin.assign(mesh.vertices.size(), {});
     std::string why;
@@ -647,21 +681,29 @@ void test_mesh_skin_data() {
     mesh.skin[0] = {};
     assert(mesh.validate(&why));
     // append keeps the skin parallel, binding what has none to joint 0.
-    MeshData a = meshes::box({1, 1, 1});
-    MeshData b = meshes::box({1, 1, 1});
-    b.skin.assign(b.vertices.size(), MeshSkinVertex{{3, 0, 0, 0}, {1, 0, 0, 0}});
+    MeshData3D a = meshes::box({1, 1, 1});
+    MeshData3D b = meshes::box({1, 1, 1});
+    b.skin.assign(b.vertices.size(), MeshSkinVertex3D{{3, 0, 0, 0}, {1, 0, 0, 0}});
     const std::size_t av = a.vertices.size();
     a.append(b, Mat4f::translation({5, 0, 0}));
-    assert(a.skin.size() == a.vertices.size() && a.skin[0].joints[0] == 0 && a.skin[av].joints[0] == 3 && a.validate(&why));
-    MeshData c = b;
+    assert(a.skin.size() == a.vertices.size() && a.skin[0].joints[0] == 0 && a.skin[av].joints[0] == 3 &&
+           a.validate(&why));
+    MeshData3D c = b;
     c.append(meshes::box({1, 1, 1}));
-    assert(c.skin.size() == c.vertices.size() && c.skin.front().joints[0] == 3 && c.skin.back().joints[0] == 0 && c.validate(&why));
-    MeshData plain = meshes::box({1, 1, 1});
+    assert(c.skin.size() == c.vertices.size() && c.skin.front().joints[0] == 3 && c.skin.back().joints[0] == 0 &&
+           c.validate(&why));
+    MeshData3D plain = meshes::box({1, 1, 1});
     plain.append(meshes::box({2, 2, 2}));
     assert(!plain.skinned());
     // Weights as the GPU holds them: bytes that sum to exactly 255.
-    const std::array<float, 4> cases[] = {{1, 0, 0, 0}, {0.5f, 0.5f, 0, 0}, {1.0f / 3, 1.0f / 3, 1.0f / 3, 0}, {0.25f, 0.25f, 0.25f, 0.25f}, {0.7f, 0.2f, 0.07f, 0.03f},
-                                         {2, 2, 0, 0}, {0, 0, 0, 0}, {0.001f, 0.999f, 0, 0}};
+    const std::array<float, 4> cases[] = {{1, 0, 0, 0},
+                                          {0.5f, 0.5f, 0, 0},
+                                          {1.0f / 3, 1.0f / 3, 1.0f / 3, 0},
+                                          {0.25f, 0.25f, 0.25f, 0.25f},
+                                          {0.7f, 0.2f, 0.07f, 0.03f},
+                                          {2, 2, 0, 0},
+                                          {0, 0, 0, 0},
+                                          {0.001f, 0.999f, 0, 0}};
     for (const auto& w : cases) {
         const std::array<u8, 4> q = quantise_skin_weights(w);
         assert(int(q[0]) + q[1] + q[2] + q[3] == 255);
@@ -671,10 +713,11 @@ void test_mesh_skin_data() {
     assert(quantise_skin_weights({0.5f, 0.5f, 0, 0})[0] + quantise_skin_weights({0.5f, 0.5f, 0, 0})[1] == 255);
 }
 
-// --- the loader ------------------------------------------------------------------------------------------------------------
+// --- the loader
+// ------------------------------------------------------------------------------------------------------------
 
-ModelData read(const skin_fixtures::Gltf& gltf) {
-    ModelData data;
+ModelData3D read(const skin_fixtures::Gltf& gltf) {
+    ModelData3D data;
     std::string error;
     const bool ok = read_model_data(gltf.json, "memory.gltf", data, &error);
     if (!ok) {
@@ -685,9 +728,9 @@ ModelData read(const skin_fixtures::Gltf& gltf) {
 }
 
 // The weights of joint 0 and joint 1 of each vertex of the first part, as the loader made them.
-std::array<std::array<float, 2>, 6> weights_of(const ModelData& data) {
+std::array<std::array<float, 2>, 6> weights_of(const ModelData3D& data) {
     std::array<std::array<float, 2>, 6> out{};
-    const MeshData& mesh = data.parts[0].mesh;
+    const MeshData3D& mesh = data.parts[0].mesh;
     assert(mesh.skin.size() == 6);
     for (std::size_t v = 0; v < 6; ++v) {
         for (std::size_t k = 0; k < 4; ++k) {
@@ -697,7 +740,8 @@ std::array<std::array<float, 2>, 6> weights_of(const ModelData& data) {
             }
         }
         float sum = 0.0f;
-        for (float w : mesh.skin[v].weights) sum += w;
+        for (float w : mesh.skin[v].weights)
+            sum += w;
         assert(close(sum, 1.0f, 1e-5f));
     }
     return out;
@@ -715,9 +759,9 @@ void test_loader_skins_and_clips() {
                 o.weights = wt;
                 o.reversed = reversed;
                 const auto gltf = skin_fixtures::make_gltf(o);
-                const ModelData data = read(gltf);
+                const ModelData3D data = read(gltf);
                 assert(data.parts.size() == 1 && data.skeletons.size() == 1 && data.clips.size() == 1);
-                const ModelPartData& part = data.parts[0];
+                const ModelPartData3D& part = data.parts[0];
                 assert(part.skin == 0 && part.mesh.vertices.size() == 6 && part.mesh.skinned() && part.mesh.validate());
                 // The skinned part's node placing is ignored.
                 assert(part.transform.m[12] == 0.0f && part.transform.m[13] == 0.0f);
@@ -725,8 +769,9 @@ void test_loader_skins_and_clips() {
                 for (std::size_t v = 0; v < 6; ++v) {
                     assert(close(w[v][0], gltf.weight[v][0], 0.004f) && close(w[v][1], gltf.weight[v][1], 0.004f));
                 }
-                // The skeleton: two joints, root first whatever order the file listed them in; the inverse binds follow.
-                const Skeleton& sk = data.skeletons[0];
+                // The skeleton: two joints, root first whatever order the file listed them in; the inverse binds
+                // follow.
+                const Skeleton3D& sk = data.skeletons[0];
                 assert(sk.joint_count() == 2 && sk.validate() && sk.parents[0] == -1 && sk.parents[1] == 0);
                 assert(sk.names[0] == "joint0" && sk.names[1] == "joint1");
                 assert(close(sk.rest[1].translation, {0, 1, 0}) && close(sk.inverse_bind[1].m[13], -1.0f));
@@ -737,27 +782,33 @@ void test_loader_skins_and_clips() {
     }
     // The clip.
     const auto gltf = skin_fixtures::make_gltf();
-    const ModelData data = read(gltf);
-    const Skeleton& sk = data.skeletons[0];
+    const ModelData3D data = read(gltf);
+    const Skeleton3D& sk = data.skeletons[0];
     const AnimClip3D& clip = data.clips[0];
     assert(clip.name == "bend" && close(clip.duration, 2.0f) && clip.skeleton == 0 && clip.channels.size() == 2);
-    assert(clip.channels[1].rotation.times.size() == 3 && clip.channels[1].rotation.interpolation == Interpolation3D::Linear);
-    assert(clip.channels[0].translation.interpolation == Interpolation3D::CubicSpline && clip.channels[0].translation.values.size() == 6);
+    assert(clip.channels[1].rotation.times.size() == 3 &&
+           clip.channels[1].rotation.interpolation == Interpolation3D::Linear);
+    assert(clip.channels[0].translation.interpolation == Interpolation3D::CubicSpline &&
+           clip.channels[0].translation.values.size() == 6);
     assert(clip.channels[1].translation.interpolation == Interpolation3D::Step);
-    Pose pose;
+    Pose3D pose;
     sample_clip(clip, sk, 0.5f, false, pose);
     assert(close(pose.joints[1].rotation, rz(45), 1e-5f));
-    assert(close(pose.joints[0].translation, {1.125f, 0, 0}, 1e-5f)); // the spline by hand: see test_sampling_cubic_spline
+    assert(
+        close(pose.joints[0].translation, {1.125f, 0, 0}, 1e-5f)); // the spline by hand: see test_sampling_cubic_spline
     assert(close(pose.joints[1].translation, {0, 1, 0}));
     sample_clip(clip, sk, 1.0f, false, pose);
-    assert(close(pose.joints[1].translation, {0, 2, 0}) && close(pose.joints[1].rotation, rz(90), 1e-5f) && close(pose.joints[0].translation, {2, 0, 0}));
+    assert(close(pose.joints[1].translation, {0, 2, 0}) && close(pose.joints[1].rotation, rz(90), 1e-5f) &&
+           close(pose.joints[0].translation, {2, 0, 0}));
     sample_clip(clip, sk, 1.75f, false, pose);
     assert(close(pose.joints[1].translation, {0, 2, 0}) && close(pose.joints[1].rotation, rz(22.5f), 1e-4f));
-    Model model;
+    Model3D model;
     model.clips = data.clips;
-    assert(model.find_clip("bend") == &model.clips[0] && model.find_clip("nope") == nullptr && model.find_clip("bend", 1) == nullptr);
+    assert(model.find_clip("bend") == &model.clips[0] && model.find_clip("nope") == nullptr &&
+           model.find_clip("bend", 1) == nullptr);
 
-    // Weights that do not sum to 1 are made to; a vertex with none goes to joint 0; an index past the skin's joints is dropped.
+    // Weights that do not sum to 1 are made to; a vertex with none goes to joint 0; an index past the skin's joints is
+    // dropped.
     GltfOptions o;
     o.unnormalised = true;
     auto w = weights_of(read(skin_fixtures::make_gltf(o)));
@@ -772,18 +823,22 @@ void test_loader_skins_and_clips() {
     w = weights_of(read(skin_fixtures::make_gltf(o)));
     assert(close(w[5][0], 1.0f) && close(w[5][1], 0.0f)); // the index 200 influence is dropped, the rest renormalised
 
-    // Morph target weights channels are ignored (logged); the joints' clip is kept. A node that is no joint, moved by the same
-    // animation, is the node skeleton's (after the skin), and its channel a second clip of the same name after the skin's.
+    // Morph target weights channels are ignored (logged); the joints' clip is kept. A node that is no joint, moved by
+    // the same animation, is the node skeleton's (after the skin), and its channel a second clip of the same name after
+    // the skin's.
     o = {};
     o.morph_channel = true;
     o.node_animation = true;
     auto data3 = read(skin_fixtures::make_gltf(o));
-    assert(data3.clips.size() == 2 && data3.clips[0].channels.size() == 2 && data3.clips[0].channels[1].rotation.times.size() == 3);
+    assert(data3.clips.size() == 2 && data3.clips[0].channels.size() == 2 &&
+           data3.clips[0].channels[1].rotation.times.size() == 3);
     assert(data3.clips[0].skeleton == 0 && data3.skeletons.size() == 2 && data3.node_skeleton == 1);
     assert(data3.clips[1].name == "bend" && data3.clips[1].skeleton == 1 && data3.clips[1].channels.size() == 1);
     assert(data3.clips[1].channels[0].translation.times.size() == 3 && close(data3.clips[1].duration, 2.0f));
-    assert(data3.skeletons[1].names == std::vector<std::string>{"loose"} && data3.skeletons[1].parents == std::vector<i32>{-1});
-    // The loose mesh (a node that is no joint) is a static part at its node's placing, hanging from it; the strip is skinned.
+    assert(data3.skeletons[1].names == std::vector<std::string>{"loose"} &&
+           data3.skeletons[1].parents == std::vector<i32>{-1});
+    // The loose mesh (a node that is no joint) is a static part at its node's placing, hanging from it; the strip is
+    // skinned.
     assert(data3.parts.size() == 2 && data3.parts[0].skin == 0 && data3.parts[1].skin == -1);
     assert(data3.parts[0].node == -1 && data3.parts[1].node == 0);
 
@@ -793,15 +848,19 @@ void test_loader_skins_and_clips() {
     o.joint_count = 3;
     auto data4 = read(skin_fixtures::make_gltf(o));
     assert(data4.parts.size() == 2);
-    const ModelPartData* hat = nullptr;
-    for (const auto& part : data4.parts) hat = part.name == "hat" ? &part : hat;
-    assert(hat && hat->skin == 0 && hat->mesh.skinned() && hat->mesh.skin[0].joints[0] == 1 && hat->mesh.skin[0].weights[0] == 1.0f);
-    // The hat's vertices are in the world at rest: the strip's y 0..2 placed at the hat node (0, 0.5) under joint1 (0, 1): 1.5 .. 3.5, x from the armature (2).
-    assert(close(hat->mesh.bounds().min.y, 1.5f, 1e-5f) && close(hat->mesh.bounds().max.y, 3.5f, 1e-5f) && close(hat->mesh.bounds().min.x, 2.0f - 0.5f, 1e-5f));
+    const ModelPartData3D* hat = nullptr;
+    for (const auto& part : data4.parts)
+        hat = part.name == "hat" ? &part : hat;
+    assert(hat && hat->skin == 0 && hat->mesh.skinned() && hat->mesh.skin[0].joints[0] == 1 &&
+           hat->mesh.skin[0].weights[0] == 1.0f);
+    // The hat's vertices are in the world at rest: the strip's y 0..2 placed at the hat node (0, 0.5) under joint1 (0,
+    // 1): 1.5 .. 3.5, x from the armature (2).
+    assert(close(hat->mesh.bounds().min.y, 1.5f, 1e-5f) && close(hat->mesh.bounds().max.y, 3.5f, 1e-5f) &&
+           close(hat->mesh.bounds().min.x, 2.0f - 0.5f, 1e-5f));
     assert(hat->transform.m[12] == 0.0f && hat->transform.m[13] == 0.0f);
 
     // A file with no skin reads as before: no skeleton, no clips, parts not skinned.
-    ModelData plain;
+    ModelData3D plain;
     std::string error;
     {
         // The strip's mesh 1 alone (no JOINTS): drop the skin from the file.
@@ -814,10 +873,11 @@ void test_loader_skins_and_clips() {
         const std::size_t anims = json.find("\"animations\":");
         json.erase(anims, json.find("}],\"buffers\"", anims) + 3 - anims);
         assert(read_model_data(json, "plain.gltf", plain, &error));
-        assert(plain.skeletons.empty() && plain.clips.empty() && plain.parts.size() == 1 && plain.parts[0].skin == -1 && !plain.parts[0].mesh.skinned());
+        assert(plain.skeletons.empty() && plain.clips.empty() && plain.parts.size() == 1 && plain.parts[0].skin == -1 &&
+               !plain.parts[0].mesh.skinned());
     }
     // Not glTF at all: refused, with why.
-    ModelData none;
+    ModelData3D none;
     assert(!read_model_data("this is not a model", "x.gltf", none, &error) && !error.empty());
 }
 
@@ -826,7 +886,8 @@ void test_loader_skin_limits() {
     GltfOptions o;
     o.joint_count = 256;
     auto data = read(skin_fixtures::make_gltf(o));
-    assert(data.skeletons.size() == 1 && data.skeletons[0].joint_count() == 256 && data.skeletons[0].validate() && data.parts[0].mesh.skinned());
+    assert(data.skeletons.size() == 1 && data.skeletons[0].joint_count() == 256 && data.skeletons[0].validate() &&
+           data.parts[0].mesh.skinned());
     assert(data.clips.size() == 1);
     o.joint_count = 257;
     data = read(skin_fixtures::make_gltf(o));
@@ -839,20 +900,25 @@ void test_loader_skin_limits() {
 // `values` appended to `buffer` (from a multiple of four bytes): their buffer view, as {offset, length}.
 template <class T>
 std::pair<std::size_t, std::size_t> append_values(std::vector<std::uint8_t>& buffer, const std::vector<T>& values) {
-    while (buffer.size() % 4 != 0) buffer.push_back(0);
+    while (buffer.size() % 4 != 0)
+        buffer.push_back(0);
     const std::size_t offset = buffer.size();
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(values.data());
     buffer.insert(buffer.end(), bytes, bytes + values.size() * sizeof(T));
     return {offset, values.size() * sizeof(T)};
 }
 
-// A .gltf of `rest` (its nodes, meshes, accessors and so on), with `buffer` embedded as buffer 0 and `views` its buffer views.
-std::string test_gltf(const std::vector<std::uint8_t>& buffer, const std::vector<std::pair<std::size_t, std::size_t>>& views, const std::string& rest) {
+// A .gltf of `rest` (its nodes, meshes, accessors and so on), with `buffer` embedded as buffer 0 and `views` its buffer
+// views.
+std::string test_gltf(const std::vector<std::uint8_t>& buffer,
+                      const std::vector<std::pair<std::size_t, std::size_t>>& views, const std::string& rest) {
     std::ostringstream j;
     j << "{\"asset\":{\"version\":\"2.0\"}," << rest << ",\"buffers\":[{\"byteLength\":" << buffer.size()
-      << ",\"uri\":\"data:application/octet-stream;base64," << skin_fixtures::base64(buffer) << "\"}],\"bufferViews\":[";
+      << ",\"uri\":\"data:application/octet-stream;base64," << skin_fixtures::base64(buffer)
+      << "\"}],\"bufferViews\":[";
     for (std::size_t i = 0; i < views.size(); ++i) {
-        j << (i ? "," : "") << "{\"buffer\":0,\"byteOffset\":" << views[i].first << ",\"byteLength\":" << views[i].second << "}";
+        j << (i ? "," : "") << "{\"buffer\":0,\"byteOffset\":" << views[i].first
+          << ",\"byteLength\":" << views[i].second << "}";
     }
     j << "]}";
     return j.str();
@@ -861,24 +927,27 @@ std::string test_gltf(const std::vector<std::uint8_t>& buffer, const std::vector
 // Whether a warning `message` with a detail holding `detail` was logged.
 bool logged(const std::vector<LogEvent>& events, std::string_view message, std::string_view detail) {
     return std::any_of(events.begin(), events.end(), [&](const LogEvent& event) {
-        return event.message == message && std::any_of(event.fields.begin(), event.fields.end(), [&](const LogField& field) {
+        return event.message == message &&
+               std::any_of(event.fields.begin(), event.fields.end(), [&](const LogField& field) {
                    return field.name == "detail" && field.value.find(detail) != std::string::npos;
                });
     });
 }
 
 void test_loader_refuses_unreadable_geometry() {
-    // One triangle three ways: plainly, with its POSITION sparse (a corner replaced), and with its POSITION read as VEC2. cgltf
-    // reads neither of the last two element by element (it hands back nothing, or a z of 0): they are left out and logged, not
-    // drawn as a heap of vertices at the origin.
+    // One triangle three ways: plainly, with its POSITION sparse (a corner replaced), and with its POSITION read as
+    // VEC2. cgltf reads neither of the last two element by element (it hands back nothing, or a z of 0): they are left
+    // out and logged, not drawn as a heap of vertices at the origin.
     std::vector<std::uint8_t> buffer;
     const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
     const auto sparse_index = append_values(buffer, std::vector<std::uint16_t>{1});
     const auto sparse_value = append_values(buffer, std::vector<float>{5, 5, 5});
-    const std::string json = test_gltf(buffer, {corners, sparse_index, sparse_value},
+    const std::string json = test_gltf(
+        buffer, {corners, sparse_index, sparse_value},
         "\"scene\":0,\"scenes\":[{\"nodes\":[0,1,2]}],"
         "\"nodes\":[{\"name\":\"plain\",\"mesh\":0},{\"name\":\"sparse\",\"mesh\":1},{\"name\":\"flat\",\"mesh\":2}],"
-        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]},{\"primitives\":[{\"attributes\":{\"POSITION\":1}}]},"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]},{\"primitives\":[{\"attributes\":{"
+        "\"POSITION\":1}}]},"
         "{\"primitives\":[{\"attributes\":{\"POSITION\":2}}]}],"
         "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
         "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"sparse\":{\"count\":1,"
@@ -887,7 +956,7 @@ void test_loader_refuses_unreadable_geometry() {
     std::vector<LogEvent> events;
     const LoggerConfig before = logger_config();
     set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
-    ModelData data;
+    ModelData3D data;
     std::string error;
     const bool ok = read_model_data(json, "refusals.gltf", data, &error);
     set_logger_config(before);
@@ -900,12 +969,14 @@ void test_loader_refuses_unreadable_geometry() {
 }
 
 void test_loader_keeps_nodes_between_joints() {
-    // Hips (a joint) -> SpineOffset (a plain node, moved and turned) -> Spine (a joint), under an Armature moved 2 in x. The
-    // inverse bind matrices are the joints' world matrices inverted, as an exporter makes them, so every joint matrix is the
-    // identity at rest only when the offset is in the skeleton (without it Spine rests 0.5 too low and unturned).
+    // Hips (a joint) -> SpineOffset (a plain node, moved and turned) -> Spine (a joint), under an Armature moved 2 in
+    // x. The inverse bind matrices are the joints' world matrices inverted, as an exporter makes them, so every joint
+    // matrix is the identity at rest only when the offset is in the skeleton (without it Spine rests 0.5 too low and
+    // unturned).
     const Quatf turn = Quatf{0.0f, 0.0f, 0.70710678f, 0.70710678f}.normalized(); // 90 degrees about Z
     const Mat4f hips_world = Mat4f::translation({2, 0, 0}) * Mat4f::translation({0, 1, 0});
-    const Mat4f spine_world = hips_world * Mat4f::trs({0, 0.5f, 0}, turn, {1, 1, 1}) * Mat4f::translation({0, 0.25f, 0});
+    const Mat4f spine_world =
+        hips_world * Mat4f::trs({0, 0.5f, 0}, turn, {1, 1, 1}) * Mat4f::translation({0, 0.25f, 0});
     std::vector<float> binds;
     for (const Mat4f& world : {hips_world, spine_world}) {
         const Mat4f inverse = world.inverse();
@@ -914,46 +985,53 @@ void test_loader_keeps_nodes_between_joints() {
     const Quatf bow = Quatf::axis_angle({1, 0, 0}, 30);
     std::vector<std::uint8_t> buffer;
     const auto corners = append_values(buffer, std::vector<float>{-0.5f, 1.5f, 0, 0.5f, 1.5f, 0, 0, 2, 0});
-    const auto joints = append_values(buffer, std::vector<std::uint8_t>{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0}); // the file's joint 1: Spine
+    const auto joints = append_values(
+        buffer, std::vector<std::uint8_t>{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0}); // the file's joint 1: Spine
     const auto weights = append_values(buffer, std::vector<float>{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0});
     const auto inverse_binds = append_values(buffer, binds);
     const auto times = append_values(buffer, std::vector<float>{0, 1});
     const auto rotations = append_values(buffer, std::vector<float>{0, 0, 0, 1, bow.x, bow.y, bow.z, bow.w});
-    const std::string json = test_gltf(buffer, {corners, joints, weights, inverse_binds, times, rotations},
-        "\"scene\":0,\"scenes\":[{\"nodes\":[0,4]}],"
-        "\"nodes\":[{\"name\":\"Armature\",\"translation\":[2,0,0],\"children\":[1]},"
-        "{\"name\":\"Hips\",\"translation\":[0,1,0],\"children\":[2]},"
-        "{\"name\":\"SpineOffset\",\"translation\":[0,0.5,0],\"rotation\":[0,0,0.70710678,0.70710678],\"children\":[3]},"
-        "{\"name\":\"Spine\",\"translation\":[0,0.25,0]},"
-        "{\"name\":\"body\",\"mesh\":0,\"skin\":0}],"
-        "\"skins\":[{\"inverseBindMatrices\":3,\"joints\":[1,3]}],"
-        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2}}]}],"
-        "\"animations\":[{\"name\":\"bow\",\"samplers\":[{\"input\":4,\"output\":5}],"
-        "\"channels\":[{\"sampler\":0,\"target\":{\"node\":3,\"path\":\"rotation\"}}]}],"
-        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
-        "{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
-        "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
-        "{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"},"
-        "{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
-        "{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}]");
-    ModelData data;
+    const std::string json =
+        test_gltf(buffer, {corners, joints, weights, inverse_binds, times, rotations},
+                  "\"scene\":0,\"scenes\":[{\"nodes\":[0,4]}],"
+                  "\"nodes\":[{\"name\":\"Armature\",\"translation\":[2,0,0],\"children\":[1]},"
+                  "{\"name\":\"Hips\",\"translation\":[0,1,0],\"children\":[2]},"
+                  "{\"name\":\"SpineOffset\",\"translation\":[0,0.5,0],\"rotation\":[0,0,0.70710678,0.70710678],"
+                  "\"children\":[3]},"
+                  "{\"name\":\"Spine\",\"translation\":[0,0.25,0]},"
+                  "{\"name\":\"body\",\"mesh\":0,\"skin\":0}],"
+                  "\"skins\":[{\"inverseBindMatrices\":3,\"joints\":[1,3]}],"
+                  "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2}}]}],"
+                  "\"animations\":[{\"name\":\"bow\",\"samplers\":[{\"input\":4,\"output\":5}],"
+                  "\"channels\":[{\"sampler\":0,\"target\":{\"node\":3,\"path\":\"rotation\"}}]}],"
+                  "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+                  "{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
+                  "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+                  "{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"},"
+                  "{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
+                  "{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}]");
+    ModelData3D data;
     std::string error;
     assert(read_model_data(json, "between.gltf", data, &error));
     assert(data.skeletons.size() == 1 && data.parts.size() == 1 && data.parts[0].skin == 0);
-    const Skeleton& sk = data.skeletons[0];
+    const Skeleton3D& sk = data.skeletons[0];
     const i32 hips = sk.find("Hips"), offset = sk.find("SpineOffset"), spine = sk.find("Spine");
     assert(sk.joint_count() == 3 && sk.validate() && hips >= 0 && offset >= 0 && spine >= 0);
-    assert(sk.parents[static_cast<std::size_t>(offset)] == hips && sk.parents[static_cast<std::size_t>(spine)] == offset);
+    assert(sk.parents[static_cast<std::size_t>(offset)] == hips &&
+           sk.parents[static_cast<std::size_t>(spine)] == offset);
     assert(close(sk.root_transform.m[12], 2.0f));
     std::vector<Mat4f> matrices;
     compute_joint_matrices(sk, sk.rest_pose(), matrices);
     for (const Mat4f& m : matrices) {
         const Mat4f identity{};
-        for (int i = 0; i < 16; ++i) assert(close(m.m[i], identity.m[i], 1e-5f));
+        for (int i = 0; i < 16; ++i)
+            assert(close(m.m[i], identity.m[i], 1e-5f));
     }
-    // The vertices, bound to the file's joint 1, are bound to Spine in the skeleton's order; the clip moves Spine, not the offset.
+    // The vertices, bound to the file's joint 1, are bound to Spine in the skeleton's order; the clip moves Spine, not
+    // the offset.
     assert(data.parts[0].mesh.skin.size() == 3);
-    for (const MeshSkinVertex& v : data.parts[0].mesh.skin) assert(v.joints[0] == static_cast<u8>(spine) && close(v.weights[0], 1.0f));
+    for (const MeshSkinVertex3D& v : data.parts[0].mesh.skin)
+        assert(v.joints[0] == static_cast<u8>(spine) && close(v.weights[0], 1.0f));
     assert(data.clips.size() == 1 && data.clips[0].channels.size() == 3);
     assert(data.clips[0].channels[static_cast<std::size_t>(spine)].rotation.times.size() == 2);
     assert(data.clips[0].channels[static_cast<std::size_t>(offset)].rotation.times.empty());
@@ -962,26 +1040,32 @@ void test_loader_keeps_nodes_between_joints() {
 void test_loader_refuses_hostile_files() {
     std::vector<std::uint8_t> buffer;
     const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
-    const std::string triangle = "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
-                                 "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]";
+    const std::string triangle =
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]";
     // Nodes nested `depth` deep, the triangle on the deepest: 512 are read (a 256-joint chain must); more are refused,
     // for the reader recurses.
     const auto nested = [&](int depth) {
         std::string nodes = "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[";
-        for (int i = 0; i + 1 < depth; ++i) nodes += "{\"children\":[" + std::to_string(i + 1) + "]},";
+        for (int i = 0; i + 1 < depth; ++i)
+            nodes += "{\"children\":[" + std::to_string(i + 1) + "]},";
         return test_gltf(buffer, {corners}, nodes + "{\"mesh\":0}]," + triangle);
     };
-    ModelData data;
+    ModelData3D data;
     std::string error;
     assert(read_model_data(nested(512), "nested.gltf", data, &error) && data.parts.size() == 1);
-    assert(!read_model_data(nested(520), "nested.gltf", data, &error) && error.find("nest more than 512 deep") != std::string::npos);
+    assert(!read_model_data(nested(520), "nested.gltf", data, &error) &&
+           error.find("nest more than 512 deep") != std::string::npos);
 
-    // A model under the content root may name a buffer up a folder ("../"), but not one that ".." takes out of the root, nor
-    // an absolute path, even when the file is there: that model does not load. A loose model outside any root keeps "..".
-    const std::filesystem::path folder = std::filesystem::temp_directory_path() /
+    // A model under the content root may name a buffer up a folder ("../"), but not one that ".." takes out of the
+    // root, nor an absolute path, even when the file is there: that model does not load. A loose model outside any root
+    // keeps "..".
+    const std::filesystem::path folder =
+        std::filesystem::temp_directory_path() /
         ("kin-skeleton-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(folder / "content" / "models");
-    std::filesystem::create_directories(folder / "loose"); // "loose/../triangle.bin" needs the folder to exist for the OS to resolve ".."
+    std::filesystem::create_directories(
+        folder / "loose"); // "loose/../triangle.bin" needs the folder to exist for the OS to resolve ".."
     for (const std::filesystem::path& file : {folder / "triangle.bin", folder / "content" / "triangle.bin"}) {
         std::ofstream out{file, std::ios::binary};
         out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
@@ -996,7 +1080,8 @@ void test_loader_refuses_hostile_files() {
         return read_model_data(naming(uri), model, data, &error) && data.parts.size() == 1;
     };
     char program[] = "skeleton-tests";
-    std::string root_arg = "--content=" + (folder / "content").string(), none_arg = "--content=" + (folder / "nowhere").string();
+    std::string root_arg = "--content=" + (folder / "content").string(),
+                none_arg = "--content=" + (folder / "nowhere").string();
     char* root_argv[] = {program, root_arg.data()};
     char* none_argv[] = {program, none_arg.data()};
     const bool rooted = !find_content_root({}, 2, root_argv).empty();
@@ -1004,7 +1089,8 @@ void test_loader_refuses_hostile_files() {
     const bool up_inside = reads("../triangle.bin", folder / "content" / "models" / "climbs.gltf");
     const bool up_out = reads("../../triangle.bin", folder / "content" / "models" / "escapes.gltf");
     const std::string up_out_error = error;
-    const bool absolute = reads((folder / "content" / "triangle.bin").generic_string(), folder / "content" / "absolute.gltf");
+    const bool absolute =
+        reads((folder / "content" / "triangle.bin").generic_string(), folder / "content" / "absolute.gltf");
     const bool loose = reads("../triangle.bin", folder / "loose" / "loose.gltf");
     find_content_root({}, 2, none_argv); // no root again: content_root() is empty
     std::error_code ignored;
@@ -1015,9 +1101,10 @@ void test_loader_refuses_hostile_files() {
     assert(!absolute);
 }
 
-// The CPU cost of animating one character a frame, printed (no assertion: a machine's speed is not a test): a clip sampled and its joint
-// matrices made, and a crossfade (two clips sampled, blended, then the matrices) through the player. The synthetic skeleton has 24 joints
-// with three tracks of 30 keys each, as a game's character might; the Fox from the reference cache is timed too when it is there.
+// The CPU cost of animating one character a frame, printed (no assertion: a machine's speed is not a test): a clip
+// sampled and its joint matrices made, and a crossfade (two clips sampled, blended, then the matrices) through the
+// player. The synthetic skeleton has 24 joints with three tracks of 30 keys each, as a game's character might; the Fox
+// from the reference cache is timed too when it is there.
 void bench_animation() {
     const auto per_call = [](int iterations, const auto& body) {
         const auto start = std::chrono::steady_clock::now();
@@ -1026,7 +1113,7 @@ void bench_animation() {
         }
         return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / iterations;
     };
-    Skeleton sk;
+    Skeleton3D sk;
     const int n = 24;
     sk.parents.resize(n);
     sk.names.resize(n);
@@ -1037,20 +1124,21 @@ void bench_animation() {
     for (int j = 0; j < n; ++j) {
         sk.parents[j] = j == 0 ? -1 : (j - 1) / 2;
         sk.rest[j].translation = {0.0f, 0.2f, 0.0f};
-        JointChannels& c = clip.channels[j];
+        JointChannels3D& c = clip.channels[j];
         for (int k = 0; k < 30; ++k) {
             const float t = static_cast<float>(k) / 29.0f;
             c.translation.times.push_back(t);
             c.translation.values.push_back({0.0f, 0.2f + 0.01f * std::sin(t * 6.0f), 0.0f});
             c.rotation.times.push_back(t);
-            c.rotation.values.push_back(Quatf::axis_angle({0, 0, 1}, 30.0f * std::sin(t * 6.0f + static_cast<float>(j))));
+            c.rotation.values.push_back(
+                Quatf::axis_angle({0, 0, 1}, 30.0f * std::sin(t * 6.0f + static_cast<float>(j))));
             c.scale.times.push_back(t);
             c.scale.values.push_back({1, 1, 1});
         }
     }
     clip.duration = 1.0f;
     float sink = 0.0f;
-    Pose pose;
+    Pose3D pose;
     std::vector<Mat4f> matrices;
     const double sample = per_call(20000, [&](int i) {
         sample_clip(clip, sk, static_cast<float>(i % 100) * 0.0101f, true, pose);
@@ -1076,25 +1164,30 @@ void bench_animation() {
         fading.joint_matrices(matrices);
         sink += matrices[7].m[12];
     });
-    std::cerr << "animation, a 24-joint character (3 tracks of 30 keys a joint): sample_clip " << sample << " us, joint matrices " << matrices_only
-              << " us, player update + matrices " << single << " us, with a crossfade " << faded << " us (a frame at 60 Hz is 16,667 us) [" << sink << "]\n";
+    std::cerr << "animation, a 24-joint character (3 tracks of 30 keys a joint): sample_clip " << sample
+              << " us, joint matrices " << matrices_only << " us, player update + matrices " << single
+              << " us, with a crossfade " << faded << " us (a frame at 60 Hz is 16,667 us) [" << sink << "]\n";
     // The real Fox, when the reference cache has it.
     const char* cache = std::getenv("KIN_REFERENCE_CACHE");
-    const std::filesystem::path fox = (cache ? std::filesystem::path{cache} : std::filesystem::path{std::getenv("HOME") ? std::getenv("HOME") : "."} / ".cache/kin/reference") / "fox/Fox.glb";
+    const std::filesystem::path fox =
+        (cache ? std::filesystem::path{cache}
+               : std::filesystem::path{std::getenv("HOME") ? std::getenv("HOME") : "."} / ".cache/kin/reference") /
+        "fox/Fox.glb";
     std::ifstream in(fox, std::ios::binary);
     if (!in) {
-        std::cerr << "animation: the Fox is not in the reference cache (tools/reference/fetch.py): its clips not timed\n";
+        std::cerr
+            << "animation: the Fox is not in the reference cache (tools/reference/fetch.py): its clips not timed\n";
         return;
     }
     const std::string bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-    ModelData data;
+    ModelData3D data;
     std::string error;
     if (!read_model_data(bytes, fox, data, &error)) {
         std::cerr << "animation: " << error << "\n";
         return;
     }
     assert(data.skeletons.size() == 1 && data.clips.size() == 3);
-    const Skeleton& fsk = data.skeletons[0];
+    const Skeleton3D& fsk = data.skeletons[0];
     AnimationPlayer3D fp{&fsk};
     fp.play(&data.clips[1]);
     const double fox_us = per_call(20000, [&](int) {
@@ -1110,14 +1203,16 @@ void bench_animation() {
         fx.joint_matrices(matrices);
         sink += matrices[3].m[12];
     });
-    std::cerr << "animation, the real Fox (" << fsk.joint_count() << " joints, Walk clip " << data.clips[1].duration << " s): player update + matrices " << fox_us
-              << " us, Walk to Run crossfade " << fox_fade << " us [" << sink << "]\n";
+    std::cerr << "animation, the real Fox (" << fsk.joint_count() << " joints, Walk clip " << data.clips[1].duration
+              << " s): player update + matrices " << fox_us << " us, Walk to Run crossfade " << fox_fade << " us ["
+              << sink << "]\n";
 }
 
-// --- P1a part 2: 1D blends in the player, a shared pose in the scene, the ECS animator ----------------------------------------
+// --- P1a part 2: 1D blends in the player, a shared pose in the scene, the ECS animator
+// ----------------------------------------
 
 // A clip that swings `joint` about Z by `degrees` and back over `duration` seconds.
-AnimClip3D swing_clip(const Skeleton& sk, const char* name, float duration, float degrees, u32 joint = 1) {
+AnimClip3D swing_clip(const Skeleton3D& sk, const char* name, float duration, float degrees, u32 joint = 1) {
     AnimClip3D clip;
     clip.name = name;
     clip.duration = duration;
@@ -1140,12 +1235,13 @@ float max_difference(std::span<const Mat4f> a, std::span<const Mat4f> b) {
     return worst;
 }
 
-float max_difference(const Pose& a, const Pose& b) {
+float max_difference(const Pose3D& a, const Pose3D& b) {
     assert(a.joints.size() == b.joints.size());
     float worst = 0.0f;
     for (std::size_t i = 0; i < a.joints.size(); ++i) {
         const Vec3f t = a.joints[i].translation - b.joints[i].translation, s = a.joints[i].scale - b.joints[i].scale;
-        worst = std::max({worst, std::fabs(t.x), std::fabs(t.y), std::fabs(t.z), std::fabs(s.x), std::fabs(s.y), std::fabs(s.z)});
+        worst = std::max(
+            {worst, std::fabs(t.x), std::fabs(t.y), std::fabs(t.z), std::fabs(s.x), std::fabs(s.y), std::fabs(s.z)});
         const Quatf q = a.joints[i].rotation, p = b.joints[i].rotation;
         const float d = std::fabs(q.x * p.x + q.y * p.y + q.z * p.z + q.w * p.w);
         worst = std::max(worst, 1.0f - std::min(d, 1.0f));
@@ -1153,12 +1249,14 @@ float max_difference(const Pose& a, const Pose& b) {
     return worst;
 }
 
-// --- animated nodes --------------------------------------------------------------------------------------------------------
+// --- animated nodes
+// --------------------------------------------------------------------------------------------------------
 
-// A small crane in a glTF: "base" (a triangle, at x 1) carries "arm" (2 up), which carries "tip" (a triangle 1 out in z, twice
-// the size); "ground" (a triangle at x 5) hangs from nothing that moves, and "marker" carries no mesh. The animation "swing"
-// moves the arm (2 to 3 up, and a turn of 90 degrees about Y, over a second), the marker, and "elsewhere", a mesh of another
-// scene. Without `animated` there is no animation; with `meshless` only the marker moves.
+// A small crane in a glTF: "base" (a triangle, at x 1) carries "arm" (2 up), which carries "tip" (a triangle 1 out in
+// z, twice the size); "ground" (a triangle at x 5) hangs from nothing that moves, and "marker" carries no mesh. The
+// animation "swing" moves the arm (2 to 3 up, and a turn of 90 degrees about Y, over a second), the marker, and
+// "elsewhere", a mesh of another scene. Without `animated` there is no animation; with `meshless` only the marker
+// moves.
 std::string crane_gltf(bool animated = true, bool meshless = false) {
     std::vector<std::uint8_t> buffer;
     const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
@@ -1166,24 +1264,24 @@ std::string crane_gltf(bool animated = true, bool meshless = false) {
     const auto moves = append_values(buffer, std::vector<float>{0, 2, 0, 0, 3, 0});
     const Quatf turn = Quatf::axis_angle({0, 1, 0}, 90);
     const auto turns = append_values(buffer, std::vector<float>{0, 0, 0, 1, turn.x, turn.y, turn.z, turn.w});
-    std::string json =
-        "\"scene\":0,\"scenes\":[{\"nodes\":[0,3,5]},{\"nodes\":[4]}],"
-        "\"nodes\":[{\"name\":\"base\",\"mesh\":0,\"translation\":[1,0,0],\"children\":[1]},"
-        "{\"name\":\"arm\",\"translation\":[0,2,0],\"children\":[2]},"
-        "{\"name\":\"tip\",\"mesh\":0,\"translation\":[0,0,1],\"scale\":[2,2,2]},"
-        "{\"name\":\"ground\",\"mesh\":0,\"translation\":[5,0,0]},"
-        "{\"name\":\"elsewhere\",\"mesh\":0},"
-        "{\"name\":\"marker\",\"translation\":[0,0,-3]}],"
-        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],";
+    std::string json = "\"scene\":0,\"scenes\":[{\"nodes\":[0,3,5]},{\"nodes\":[4]}],"
+                       "\"nodes\":[{\"name\":\"base\",\"mesh\":0,\"translation\":[1,0,0],\"children\":[1]},"
+                       "{\"name\":\"arm\",\"translation\":[0,2,0],\"children\":[2]},"
+                       "{\"name\":\"tip\",\"mesh\":0,\"translation\":[0,0,1],\"scale\":[2,2,2]},"
+                       "{\"name\":\"ground\",\"mesh\":0,\"translation\":[5,0,0]},"
+                       "{\"name\":\"elsewhere\",\"mesh\":0},"
+                       "{\"name\":\"marker\",\"translation\":[0,0,-3]}],"
+                       "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],";
     if (animated && meshless) {
         json += "\"animations\":[{\"name\":\"idle\",\"samplers\":[{\"input\":1,\"output\":2}],"
                 "\"channels\":[{\"sampler\":0,\"target\":{\"node\":5,\"path\":\"translation\"}}]}],";
     } else if (animated) {
-        json += "\"animations\":[{\"name\":\"swing\",\"samplers\":[{\"input\":1,\"output\":2},{\"input\":1,\"output\":3}],"
-                "\"channels\":[{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"translation\"}},"
-                "{\"sampler\":1,\"target\":{\"node\":1,\"path\":\"rotation\"}},"
-                "{\"sampler\":0,\"target\":{\"node\":4,\"path\":\"translation\"}},"
-                "{\"sampler\":0,\"target\":{\"node\":5,\"path\":\"translation\"}}]}],";
+        json +=
+            "\"animations\":[{\"name\":\"swing\",\"samplers\":[{\"input\":1,\"output\":2},{\"input\":1,\"output\":3}],"
+            "\"channels\":[{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"translation\"}},"
+            "{\"sampler\":1,\"target\":{\"node\":1,\"path\":\"rotation\"}},"
+            "{\"sampler\":0,\"target\":{\"node\":4,\"path\":\"translation\"}},"
+            "{\"sampler\":0,\"target\":{\"node\":5,\"path\":\"translation\"}}]}],";
     }
     json += "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
             "{\"bufferView\":1,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
@@ -1192,13 +1290,18 @@ std::string crane_gltf(bool animated = true, bool meshless = false) {
     return test_gltf(buffer, {corners, times, moves, turns}, json);
 }
 
-// The crane read with a fake mesh for each part (no GPU): a Model to pose and draw on the CPU.
-std::shared_ptr<Model> crane_model(const ModelData& data) {
-    struct FakeMesh final : IMeshBackend {};
-    auto model = std::make_shared<Model>();
-    for (const ModelPartData& part : data.parts) {
-        model->parts.push_back({part.name, Mesh{std::make_shared<FakeMesh>(), 3, 3, part.mesh.bounds()}, {}, part.transform, part.skin,
-                                part.node, part.node_offset});
+// The crane read with a fake mesh for each part (no GPU): a Model3D to pose and draw on the CPU.
+std::shared_ptr<Model3D> crane_model(const ModelData3D& data) {
+    struct FakeMesh final : IMeshBackend3D {};
+    auto model = std::make_shared<Model3D>();
+    for (const ModelPartData3D& part : data.parts) {
+        model->parts.push_back({part.name,
+                                Mesh3D{std::make_shared<FakeMesh>(), 3, 3, part.mesh.bounds()},
+                                {},
+                                part.transform,
+                                part.skin,
+                                part.node,
+                                part.node_offset});
     }
     model->skeletons = data.skeletons;
     model->clips = data.clips;
@@ -1208,18 +1311,24 @@ std::shared_ptr<Model> crane_model(const ModelData& data) {
 
 bool close(const Mat4f& a, const Mat4f& b, float eps = 1e-5f) {
     for (int i = 0; i < 16; ++i) {
-        if (!close(a.m[i], b.m[i], eps)) return false;
+        if (!close(a.m[i], b.m[i], eps))
+            return false;
     }
     return true;
 }
-bool same(const Mat4f& a, const Mat4f& b) { return std::memcmp(a.m, b.m, sizeof(a.m)) == 0; }
+bool same(const Mat4f& a, const Mat4f& b) {
+    return std::memcmp(a.m, b.m, sizeof(a.m)) == 0;
+}
 
-const ModelPart& part_called(const Model& model, std::string_view name) {
-    const auto found = std::find_if(model.parts.begin(), model.parts.end(), [&](const ModelPart& p) { return p.name == name; });
+const ModelPart3D& part_called(const Model3D& model, std::string_view name) {
+    const auto found =
+        std::find_if(model.parts.begin(), model.parts.end(), [&](const ModelPart3D& p) { return p.name == name; });
     assert(found != model.parts.end());
     return *found;
 }
-std::size_t index_of(const Model& model, std::string_view name) { return static_cast<std::size_t>(&part_called(model, name) - model.parts.data()); }
+std::size_t index_of(const Model3D& model, std::string_view name) {
+    return static_cast<std::size_t>(&part_called(model, name) - model.parts.data());
+}
 
 // Where the crane's tip is in the model at `t` seconds of "swing": base, the arm moved and turned, the tip below it.
 Mat4f crane_tip_at(float t) {
@@ -1227,15 +1336,16 @@ Mat4f crane_tip_at(float t) {
            Mat4f::trs({0, 0, 1}, Quatf{}, {2, 2, 2});
 }
 
-// The plain nodes a glTF animation moves are a skeleton of the model, its node skeleton: the moved nodes and those above them,
-// parents first, the nodes' names and rest placings, identity inverse binds; its clip has the nodes' channels; each part that is
-// not skinned hangs from its nearest node in it, and a pose places it at that node's matrix times its placing below. A file
-// without the animation reads exactly as before, and nodes the model draws nothing below, or of another scene, are not animated.
+// The plain nodes a glTF animation moves are a skeleton of the model, its node skeleton: the moved nodes and those
+// above them, parents first, the nodes' names and rest placings, identity inverse binds; its clip has the nodes'
+// channels; each part that is not skinned hangs from its nearest node in it, and a pose places it at that node's matrix
+// times its placing below. A file without the animation reads exactly as before, and nodes the model draws nothing
+// below, or of another scene, are not animated.
 void test_loader_node_animation() {
     std::vector<LogEvent> events;
     const LoggerConfig before = logger_config();
     set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
-    ModelData data, plain, meshless;
+    ModelData3D data, plain, meshless;
     std::string error;
     const bool read_crane = read_model_data(crane_gltf(), "crane.gltf", data, &error);
     const bool read_plain = read_model_data(crane_gltf(false), "plain.gltf", plain, &error);
@@ -1243,36 +1353,47 @@ void test_loader_node_animation() {
     set_logger_config(before);
     assert(read_crane && read_plain && read_meshless);
 
-    // The node skeleton: base and arm (the arm's parent), then the marker, a root of its own; "elsewhere" is another scene's.
+    // The node skeleton: base and arm (the arm's parent), then the marker, a root of its own; "elsewhere" is another
+    // scene's.
     assert(data.skeletons.size() == 1 && data.node_skeleton == 0);
-    const Skeleton& sk = data.skeletons[0];
-    assert(sk.validate() && (sk.names == std::vector<std::string>{"base", "arm", "marker"}) && (sk.parents == std::vector<i32>{-1, 0, -1}));
-    assert(close(sk.rest[0].translation, {1, 0, 0}) && close(sk.rest[1].translation, {0, 2, 0}) && close(sk.rest[2].translation, {0, 0, -3}));
-    for (const Mat4f& m : sk.inverse_bind) assert(same(m, Mat4f{}));
+    const Skeleton3D& sk = data.skeletons[0];
+    assert(sk.validate() && (sk.names == std::vector<std::string>{"base", "arm", "marker"}) &&
+           (sk.parents == std::vector<i32>{-1, 0, -1}));
+    assert(close(sk.rest[0].translation, {1, 0, 0}) && close(sk.rest[1].translation, {0, 2, 0}) &&
+           close(sk.rest[2].translation, {0, 0, -3}));
+    for (const Mat4f& m : sk.inverse_bind)
+        assert(same(m, Mat4f{}));
     assert(same(sk.root_transform, Mat4f{}));
     assert(data.clips.size() == 1);
     const AnimClip3D& swing = data.clips[0];
     assert(swing.name == "swing" && swing.skeleton == 0 && swing.channels.size() == 3 && close(swing.duration, 1.0f));
     assert(swing.channels[0].translation.empty() && swing.channels[0].rotation.empty());
-    assert(swing.channels[1].translation.times.size() == 2 && swing.channels[1].rotation.times.size() == 2 && swing.channels[1].scale.empty());
+    assert(swing.channels[1].translation.times.size() == 2 && swing.channels[1].rotation.times.size() == 2 &&
+           swing.channels[1].scale.empty());
     assert(swing.channels[2].translation.times.size() == 2);
-    assert(logged(events, "3D: an animation moves nodes no part of the model hangs from: those channels are ignored", "swing"));
+    assert(logged(events, "3D: an animation moves nodes no part of the model hangs from: those channels are ignored",
+                  "swing"));
 
-    // The parts: the base hangs from its own node, the tip from the arm (its placing below it kept), the ground from nothing.
-    const std::shared_ptr<Model> crane = crane_model(data);
+    // The parts: the base hangs from its own node, the tip from the arm (its placing below it kept), the ground from
+    // nothing.
+    const std::shared_ptr<Model3D> crane = crane_model(data);
     assert(crane->parts.size() == 3);
-    const ModelPart& base = part_called(*crane, "base");
-    const ModelPart& tip = part_called(*crane, "tip");
-    const ModelPart& ground = part_called(*crane, "ground");
-    assert(base.node == 0 && same(base.node_offset, Mat4f{}) && tip.node == 1 && ground.node == -1 && same(ground.node_offset, Mat4f{}));
-    assert(close(tip.node_offset, Mat4f::trs({0, 0, 1}, Quatf{}, {2, 2, 2})) && close(tip.transform, crane_tip_at(0.0f)));
+    const ModelPart3D& base = part_called(*crane, "base");
+    const ModelPart3D& tip = part_called(*crane, "tip");
+    const ModelPart3D& ground = part_called(*crane, "ground");
+    assert(base.node == 0 && same(base.node_offset, Mat4f{}) && tip.node == 1 && ground.node == -1 &&
+           same(ground.node_offset, Mat4f{}));
+    assert(close(tip.node_offset, Mat4f::trs({0, 0, 1}, Quatf{}, {2, 2, 2})) &&
+           close(tip.transform, crane_tip_at(0.0f)));
 
-    // Posed: the player's joint matrices are the nodes' world matrices (identity inverse binds), and part_transform places each.
+    // Posed: the player's joint matrices are the nodes' world matrices (identity inverse binds), and part_transform
+    // places each.
     AnimationPlayer3D player{&crane->skeletons[0]};
     player.play(crane->find_clip("swing"), false);
     std::vector<Mat4f> nodes, world;
     player.joint_matrices(nodes);
-    for (std::size_t i = 0; i < crane->parts.size(); ++i) assert(close(crane->part_transform(i, nodes), crane->parts[i].transform, 1e-6f));
+    for (std::size_t i = 0; i < crane->parts.size(); ++i)
+        assert(close(crane->part_transform(i, nodes), crane->parts[i].transform, 1e-6f));
     player.update(0.5f);
     player.joint_matrices(nodes);
     compute_world_matrices(crane->skeletons[0], player.pose(), world);
@@ -1280,24 +1401,32 @@ void test_loader_node_animation() {
     assert(close(crane->part_transform(index_of(*crane, "tip"), nodes), crane_tip_at(0.5f)));
     assert(close(crane->part_transform(index_of(*crane, "base"), nodes), base.transform));
     assert(same(crane->part_transform(index_of(*crane, "ground"), nodes), ground.transform));
-    assert(close(nodes[2].apply({0, 0, 0}), {0, 2.5f, 0.0f})); // the marker moves too (its track replaces its rest), carrying nothing
+    assert(close(nodes[2].apply({0, 0, 0}),
+                 {0, 2.5f, 0.0f})); // the marker moves too (its track replaces its rest), carrying nothing
     // Too few matrices, or a part past the parts: at rest, and the identity.
     assert(same(crane->part_transform(index_of(*crane, "tip"), std::span<const Mat4f>{nodes}.first(1)), tip.transform));
     assert(same(crane->part_transform(99, nodes), Mat4f{}));
 
-    // Without the animation: no node skeleton, no clip, every part as it was (its placing to the bit, hanging from nothing).
-    assert(plain.skeletons.empty() && plain.clips.empty() && plain.node_skeleton == -1 && plain.parts.size() == data.parts.size());
+    // Without the animation: no node skeleton, no clip, every part as it was (its placing to the bit, hanging from
+    // nothing).
+    assert(plain.skeletons.empty() && plain.clips.empty() && plain.node_skeleton == -1 &&
+           plain.parts.size() == data.parts.size());
     for (std::size_t i = 0; i < plain.parts.size(); ++i) {
-        const ModelPartData& a = plain.parts[i];
-        const ModelPartData& b = data.parts[i];
-        assert(a.name == b.name && same(a.transform, b.transform) && a.skin == -1 && a.node == -1 && same(a.node_offset, Mat4f{}));
+        const ModelPartData3D& a = plain.parts[i];
+        const ModelPartData3D& b = data.parts[i];
+        assert(a.name == b.name && same(a.transform, b.transform) && a.skin == -1 && a.node == -1 &&
+               same(a.node_offset, Mat4f{}));
         assert(a.mesh.vertices.size() == b.mesh.vertices.size() &&
-               std::memcmp(a.mesh.vertices.data(), b.mesh.vertices.data(), a.mesh.vertices.size() * sizeof(MeshVertex)) == 0);
+               std::memcmp(a.mesh.vertices.data(), b.mesh.vertices.data(),
+                           a.mesh.vertices.size() * sizeof(MeshVertex3D)) == 0);
     }
-    // Only a node that carries no mesh moves: nothing to pose, so no node skeleton, and the animation is left out (said so).
+    // Only a node that carries no mesh moves: nothing to pose, so no node skeleton, and the animation is left out (said
+    // so).
     assert(meshless.skeletons.empty() && meshless.clips.empty() && meshless.node_skeleton == -1);
-    assert(logged(events, "3D: an animation moves no joint of a skin and no node a part hangs from: it is left out", "idle"));
-    for (const ModelPartData& part : meshless.parts) assert(part.node == -1);
+    assert(logged(events, "3D: an animation moves no joint of a skin and no node a part hangs from: it is left out",
+                  "idle"));
+    for (const ModelPartData3D& part : meshless.parts)
+        assert(part.node == -1);
 
     // More moved nodes (with those above them) than a skeleton may have: not animated, said so, the parts at rest.
     {
@@ -1306,42 +1435,50 @@ void test_loader_node_animation() {
         const auto times = append_values(buffer, std::vector<float>{0, 1});
         const auto moves = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0});
         std::string nodes_json = "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[";
-        for (int i = 0; i < 299; ++i) nodes_json += "{\"children\":[" + std::to_string(i + 1) + "]},";
-        const std::string json = test_gltf(buffer, {corners, times, moves}, nodes_json + "{\"mesh\":0}],"
-            "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
-            "\"animations\":[{\"name\":\"slide\",\"samplers\":[{\"input\":1,\"output\":2}],"
-            "\"channels\":[{\"sampler\":0,\"target\":{\"node\":299,\"path\":\"translation\"}}]}],"
-            "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
-            "{\"bufferView\":1,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
-            "{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}]");
+        for (int i = 0; i < 299; ++i)
+            nodes_json += "{\"children\":[" + std::to_string(i + 1) + "]},";
+        const std::string json = test_gltf(
+            buffer, {corners, times, moves},
+            nodes_json +
+                "{\"mesh\":0}],"
+                "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+                "\"animations\":[{\"name\":\"slide\",\"samplers\":[{\"input\":1,\"output\":2}],"
+                "\"channels\":[{\"sampler\":0,\"target\":{\"node\":299,\"path\":\"translation\"}}]}],"
+                "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+                "{\"bufferView\":1,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
+                "{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}]");
         events.clear();
         set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
-        ModelData deep;
+        ModelData3D deep;
         const bool ok = read_model_data(json, "deep.gltf", deep, &error);
         set_logger_config(before);
-        assert(ok && deep.parts.size() == 1 && deep.parts[0].node == -1 && deep.skeletons.empty() && deep.clips.empty());
-        assert(logged(events, "3D: animations move more nodes than a skeleton can have: those nodes are not animated", "300 nodes"));
+        assert(ok && deep.parts.size() == 1 && deep.parts[0].node == -1 && deep.skeletons.empty() &&
+               deep.clips.empty());
+        assert(logged(events, "3D: animations move more nodes than a skeleton can have: those nodes are not animated",
+                      "300 nodes"));
     }
 }
 
-// Drawing the crane's pose: Scene3D::draw(model, transform, node_matrices) places the parts that hang from a node by it and the
-// others as draw(model) does (to the bit), at rest for a pose that lacks a part's matrix (said once); draw_skinned with node
-// matrices poses a skinned model's animated props alongside its skin. An entity with a ModelRenderer3D and an Animator3D plays the
-// clip on the nodes; one without an animator (or before its first animate) draws exactly what it drew before.
+// Drawing the crane's pose: Scene3D::draw(model, transform, node_matrices) places the parts that hang from a node by it
+// and the others as draw(model) does (to the bit), at rest for a pose that lacks a part's matrix (said once);
+// draw_skinned with node matrices poses a skinned model's animated props alongside its skin. An entity with a
+// ModelRenderer3D and an Animator3D plays the clip on the nodes; one without an animator (or before its first animate)
+// draws exactly what it drew before.
 void test_node_animation_draws() {
-    ModelData data;
+    ModelData3D data;
     std::string error;
     assert(read_model_data(crane_gltf(), "crane.gltf", data, &error));
-    const std::shared_ptr<Model> crane = crane_model(data);
-    const Skeleton& sk = crane->skeletons[static_cast<std::size_t>(crane->node_skeleton)];
-    Pose pose;
+    const std::shared_ptr<Model3D> crane = crane_model(data);
+    const Skeleton3D& sk = crane->skeletons[static_cast<std::size_t>(crane->node_skeleton)];
+    Pose3D pose;
     sample_clip(*crane->find_clip("swing"), sk, 0.5f, false, pose);
     std::vector<Mat4f> nodes;
     compute_world_matrices(sk, pose, nodes);
     const Mat4f placed = Mat4f::translation({0, 0, -2});
-    const auto transform_of = [](const Scene3D& scene, const Mesh& mesh) {
+    const auto transform_of = [](const Scene3D& scene, const Mesh3D& mesh) {
         for (const Scene3D::Draw& draw : scene.draws()) {
-            if (draw.mesh == mesh) return scene.instances()[draw.first].transform;
+            if (draw.mesh == mesh)
+                return scene.instances()[draw.first].transform;
         }
         assert(false);
         return Mat4f{};
@@ -1352,7 +1489,8 @@ void test_node_animation_draws() {
         still.draw(*crane, placed, colors::white, 9);
         assert(scene.draws().size() == 3 && scene.instances().size() == 3 && scene.instances()[0].id == 9);
         assert(close(transform_of(scene, part_called(*crane, "tip").mesh), placed * crane_tip_at(0.5f)));
-        assert(same(transform_of(scene, part_called(*crane, "ground").mesh), transform_of(still, part_called(*crane, "ground").mesh)));
+        assert(same(transform_of(scene, part_called(*crane, "ground").mesh),
+                    transform_of(still, part_called(*crane, "ground").mesh)));
         // A pose of one matrix: the tip has none, so it is at rest; said once.
         std::vector<LogEvent> events;
         const LoggerConfig before = logger_config();
@@ -1361,20 +1499,28 @@ void test_node_animation_draws() {
         short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
         short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
         set_logger_config(before);
-        assert(same(short_pose.instances()[index_of(*crane, "tip")].transform, placed * part_called(*crane, "tip").transform));
-        assert(std::count_if(events.begin(), events.end(), [](const LogEvent& e) { return e.message.find("node pose") != std::string::npos; }) == 1);
+        assert(same(short_pose.instances()[index_of(*crane, "tip")].transform,
+                    placed * part_called(*crane, "tip").transform));
+        assert(std::count_if(events.begin(), events.end(),
+                             [](const LogEvent& e) { return e.message.find("node pose") != std::string::npos; }) == 1);
     }
     {
-        // A skinned strip with an animated loose mesh: one call poses both; without node matrices the loose mesh is at rest.
+        // A skinned strip with an animated loose mesh: one call poses both; without node matrices the loose mesh is at
+        // rest.
         GltfOptions o;
         o.node_animation = true;
-        const ModelData both = read(skin_fixtures::make_gltf(o));
-        struct FakeMesh final : IMeshBackend {};
-        Model model;
-        for (const ModelPartData& part : both.parts) {
-            model.parts.push_back({part.name, part.skin >= 0 ? Mesh{std::make_shared<FakeMesh>(), 6, 12, {}, {}, {}, 2}
-                                                             : Mesh{std::make_shared<FakeMesh>(), 6, 12, {}},
-                                   {}, part.transform, part.skin, part.node, part.node_offset});
+        const ModelData3D both = read(skin_fixtures::make_gltf(o));
+        struct FakeMesh final : IMeshBackend3D {};
+        Model3D model;
+        for (const ModelPartData3D& part : both.parts) {
+            model.parts.push_back({part.name,
+                                   part.skin >= 0 ? Mesh3D{std::make_shared<FakeMesh>(), 6, 12, {}, {}, {}, 2}
+                                                  : Mesh3D{std::make_shared<FakeMesh>(), 6, 12, {}},
+                                   {},
+                                   part.transform,
+                                   part.skin,
+                                   part.node,
+                                   part.node_offset});
         }
         model.skeletons = both.skeletons;
         model.clips = both.clips;
@@ -1382,7 +1528,7 @@ void test_node_animation_draws() {
         assert(model.node_skeleton == 1 && model.parts[1].node == 0);
         std::vector<Mat4f> joints, loose;
         compute_joint_matrices(model.skeletons[0], model.skeletons[0].rest_pose(), joints);
-        Pose moved;
+        Pose3D moved;
         sample_clip(*model.find_clip("bend", 1), model.skeletons[1], 1.0f, false, moved);
         compute_world_matrices(model.skeletons[1], moved, loose);
         Scene3D scene, rest;
@@ -1393,7 +1539,8 @@ void test_node_animation_draws() {
         assert(same(rest.instances()[1].transform, model.parts[1].transform));
         assert(max_difference(scene.joint_matrices(), rest.joint_matrices()) == 0.0f);
     }
-    // The ECS: two cranes, one animated. The still one, and the animated one before its first animate(), draw what they drew before.
+    // The ECS: two cranes, one animated. The still one, and the animated one before its first animate(), draw what they
+    // drew before.
     kin::EcsWorld world;
     WorldRenderState3D state{world};
     auto& w = world.raw();
@@ -1403,18 +1550,22 @@ void test_node_animation_draws() {
         a.loop = false;
         return a;
     }();
-    const flecs::entity moving = w.entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane}).set(swinging);
-    const flecs::entity still = w.entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane});
+    const flecs::entity moving =
+        w.entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane}).set(swinging);
+    const flecs::entity still =
+        w.entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane});
     const auto collected = [&](const flecs::entity& e, std::string_view part) {
         Scene3D scene;
         state.propagate_transforms();
         state.collect(scene);
-        const Mesh& mesh = part_called(*crane, part).mesh;
+        const Mesh3D& mesh = part_called(*crane, part).mesh;
         const u32 id = static_cast<u32>(e.id() & 0xffffffffu);
         for (const Scene3D::Draw& draw : scene.draws()) {
-            if (!(draw.mesh == mesh)) continue;
+            if (!(draw.mesh == mesh))
+                continue;
             for (u32 i = draw.first; i < draw.first + draw.count; ++i) {
-                if (scene.instances()[i].id == id) return scene.instances()[i].transform;
+                if (scene.instances()[i].id == id)
+                    return scene.instances()[i].transform;
             }
         }
         assert(false);
@@ -1438,8 +1589,13 @@ void test_node_animation_draws() {
     assert(close(collected(moving, "tip"), entity * crane_tip_at(1.0f)));
     kin::EcsWorld again;
     WorldRenderState3D again_state{again};
-    const flecs::entity twin = again.raw().entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane}).set(swinging);
-    for (const float dt : {0.25f, 0.25f, 1.0f}) again_state.animate(dt);
+    const flecs::entity twin = again.raw()
+                                   .entity()
+                                   .set(Transform3D{.position = {0, 0, -2}})
+                                   .set(ModelRenderer3D{.model = crane})
+                                   .set(swinging);
+    for (const float dt : {0.25f, 0.25f, 1.0f})
+        again_state.animate(dt);
     Scene3D twin_scene;
     again_state.propagate_transforms();
     again_state.collect(twin_scene);
@@ -1447,13 +1603,15 @@ void test_node_animation_draws() {
     assert(same(twin_tip, collected(moving, "tip")) && twin.get<Animator3D>()->player.finished());
 }
 
-// A one-dimensional blend in the player: the clips of the two points either side of the parameter, each at the same phase of its own
-// length, blended by how far the parameter is between them; the phase advances by the time over the duration blended at the parameter
-// now (so a change of the parameter never jumps the phase); a parameter outside the points is held at the end; a fade to and from a blend.
+// A one-dimensional blend in the player: the clips of the two points either side of the parameter, each at the same
+// phase of its own length, blended by how far the parameter is between them; the phase advances by the time over the
+// duration blended at the parameter now (so a change of the parameter never jumps the phase); a parameter outside the
+// points is held at the end; a fade to and from a blend.
 void test_player_blend_1d() {
     const auto tube = skin_fixtures::make_tube();
-    const Skeleton& sk = tube.skeleton;
-    const AnimClip3D walk = swing_clip(sk, "walk", 1.0f, 40.0f, 1), run = swing_clip(sk, "run", 0.6f, -70.0f, 2), jog = swing_clip(sk, "jog", 0.8f, 20.0f, 1);
+    const Skeleton3D& sk = tube.skeleton;
+    const AnimClip3D walk = swing_clip(sk, "walk", 1.0f, 40.0f, 1), run = swing_clip(sk, "run", 0.6f, -70.0f, 2),
+                     jog = swing_clip(sk, "jog", 0.8f, 20.0f, 1);
     // Out of order on purpose (sorted by position), and a null clip, which is dropped.
     const BlendPoint3D points[] = {{&run, 4.5f}, {nullptr, 3.0f}, {&walk, 1.5f}, {&jog, 3.0f}};
     AnimationPlayer3D player{&sk};
@@ -1461,7 +1619,7 @@ void test_player_blend_1d() {
     assert(player.blending() && player.clip() == nullptr && close(player.time(), 0.0f));
     // At 3.0 exactly: the jog alone (weight 1 on the point), at phase 0.
     player.update(0.0f);
-    Pose expected;
+    Pose3D expected;
     sample_clip(jog, sk, 0.0f, true, expected);
     assert(max_difference(player.pose(), expected) < 1e-6f);
     // Between walk (1.5) and jog (3.0): parameter 2.1 is 0.4 of the way; durations 1.0 and 0.8 give 0.92 s.
@@ -1472,14 +1630,15 @@ void test_player_blend_1d() {
         phase += 0.02f / duration;
         phase -= std::floor(phase);
         player.update(0.02f);
-        Pose a, b;
+        Pose3D a, b;
         sample_clip(walk, sk, phase * 1.0f, true, a);
         sample_clip(jog, sk, phase * 0.8f, true, b);
         expected = blend_poses(a, b, 0.4f);
         assert(max_difference(player.pose(), expected) < 1e-4f);
         assert(close(player.time(), phase, 1e-4f));
     }
-    // The parameter moves while it plays: the phase carries on from where it is (it advances at the speed of the new duration).
+    // The parameter moves while it plays: the phase carries on from where it is (it advances at the speed of the new
+    // duration).
     const float before = player.time();
     player.set_blend_parameter(4.0f); // between jog (3.0) and run (4.5): 2/3 of the way; durations 0.8 and 0.6
     player.update(0.05f);
@@ -1494,7 +1653,8 @@ void test_player_blend_1d() {
     player.update(0.0f);
     sample_clip(run, sk, player.time() * 0.6f, true, expected);
     assert(max_difference(player.pose(), expected) < 1e-5f);
-    // A fade from a plain clip to a blend, and from the blend to a clip, is the blend of the two pictures at the fade's progress.
+    // A fade from a plain clip to a blend, and from the blend to a clip, is the blend of the two pictures at the fade's
+    // progress.
     AnimationPlayer3D fade{&sk};
     fade.play(&walk);
     fade.update(0.1f);
@@ -1502,7 +1662,7 @@ void test_player_blend_1d() {
     fade.crossfade_to_blend(two, 0.25f, 0.5f);
     fade.update(0.1f); // alpha 0.2
     {
-        Pose from, a, b;
+        Pose3D from, a, b;
         sample_clip(walk, sk, 0.2f, true, from);
         const float d = 1.0f + (0.6f - 1.0f) * 0.25f;
         const float ph = 0.1f / d;
@@ -1514,53 +1674,63 @@ void test_player_blend_1d() {
     assert(fade.blending() && fade.fading_from() == &walk); // the plain clip fades out
 }
 
-// Scene3D::draw_skinned(model): one range of matrices for all the skinned parts, each copy's offset the same; plain parts are drawn as before.
+// Scene3D::draw_skinned(model): one range of matrices for all the skinned parts, each copy's offset the same; plain
+// parts are drawn as before.
 void test_scene_shared_pose() {
     const auto tube = skin_fixtures::make_tube();
-    struct FakeMesh final : IMeshBackend {};
-    Model model;
+    struct FakeMesh final : IMeshBackend3D {};
+    Model3D model;
     model.skeletons.push_back(tube.skeleton);
     for (int i = 0; i < 4; ++i) {
-        ModelPart part;
-        part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, i == 3 ? 2u : 3u}; // the last uses two joints only
-        part.skin = i == 2 ? -1 : 0;                                                       // and one is not skinned (a rigid prop)
+        ModelPart3D part;
+        part.mesh =
+            Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, i == 3 ? 2u : 3u}; // the last uses two joints only
+        part.skin = i == 2 ? -1 : 0; // and one is not skinned (a rigid prop)
         if (i == 2) {
-            part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
+            part.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}};
         }
         model.parts.push_back(part);
     }
     std::vector<Mat4f> pose;
     compute_joint_matrices(tube.skeleton, tube.skeleton.rest_pose(), pose);
     Scene3D scene;
-    scene.draw_skinned(model, pose, Mat4f::identity(), colors::white, 17);
+    assert(scene.draw_skinned(model, pose, Mat4f::identity(), colors::white, 17));
     // Three skinned copies (0, 1, 3), one plain (2); the pose held once, of the most any part uses (3 joints).
     assert(scene.draws().size() == 4 && scene.instances().size() == 4);
     assert(scene.joint_matrices().size() == 3 && scene.skin_offsets().size() == 3);
     assert(scene.skin_offsets()[0] == 0 && scene.skin_offsets()[1] == 0 && scene.skin_offsets()[2] == 0);
     assert(scene.instances()[0].id == 17 && scene.instances()[2].id == 17);
     // A second character after it: its own range.
-    scene.draw_skinned(model, pose, Mat4f::translation({1, 0, 0}));
-    assert(scene.joint_matrices().size() == 6 && scene.skin_offsets().size() == 6 && scene.skin_offsets()[3] == 3 && scene.skin_offsets()[5] == 3);
-    // Too few matrices: nothing skinned drawn (and the plain part is).
+    assert(scene.draw_skinned(model, pose, Mat4f::translation({1, 0, 0})));
+    assert(scene.joint_matrices().size() == 6 && scene.skin_offsets().size() == 6 && scene.skin_offsets()[3] == 3 &&
+           scene.skin_offsets()[5] == 3);
+    // Invalid poses reject the complete submission, including its rigid parts,
+    // and preserve already submitted commands until clear() resets the error.
     Scene3D few;
-    few.draw_skinned(model, std::span<const Mat4f>{pose}.first(2), Mat4f::identity());
-    assert(few.instances().size() == 1 && few.joint_matrices().empty());
+    assert(few.draw(model.parts[2].mesh, Mat4f::identity(), {}, colors::white, 91));
+    assert(!few.draw_skinned(model, std::span<const Mat4f>{pose}.first(2), Mat4f::identity()));
+    assert(few.draws().size() == 1 && few.instances().size() == 1 && few.instances()[0].id == 91);
+    assert(few.joint_matrices().empty() && few.skin_offsets().empty() && few.diagnostics().size() == 1);
+    assert(!few.draw_skinned(model, pose, Mat4f::identity()));
+    few.clear();
+    assert(few.diagnostics().empty() && few.draw_skinned(model, pose, Mat4f::identity()));
+    assert(few.draws().size() == 4 && few.joint_matrices().size() == 3);
 }
 
 // --- the ECS animator ---
 
 struct Character {
-    std::shared_ptr<const Model> model;
-    const Skeleton* skeleton = nullptr;
+    std::shared_ptr<const Model3D> model;
+    const Skeleton3D* skeleton = nullptr;
     const AnimClip3D* clip(const char* name) const { return model->find_clip(name); }
 };
 
 Character make_character() {
     const auto tube = skin_fixtures::make_tube();
-    struct FakeMesh final : IMeshBackend {};
-    auto model = std::make_shared<Model>();
+    struct FakeMesh final : IMeshBackend3D {};
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(tube.skeleton);
-    const Skeleton& sk = model->skeletons[0];
+    const Skeleton3D& sk = model->skeletons[0];
     model->clips.push_back(swing_clip(sk, "idle", 1.0f, 10.0f, 1));
     model->clips.push_back(swing_clip(sk, "walk", 1.0f, 40.0f, 1));
     model->clips.push_back(swing_clip(sk, "run", 0.6f, -70.0f, 2));
@@ -1573,9 +1743,9 @@ Character make_character() {
     root_walk.channels[0].translation.times = {0.0f, 1.0f};
     root_walk.channels[0].translation.values = {{0, 0, 0}, {2, 0, 0}};
     model->clips.push_back(root_walk);
-    ModelPart part;
+    ModelPart3D part;
     part.name = "tube";
-    part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, 3};
+    part.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, 3};
     part.skin = 0;
     model->parts.push_back(part);
     Character c;
@@ -1584,7 +1754,7 @@ Character make_character() {
     return c;
 }
 
-std::vector<Mat4f> matrices_of(const Pose& pose, const Skeleton& sk) {
+std::vector<Mat4f> matrices_of(const Pose3D& pose, const Skeleton3D& sk) {
     std::vector<Mat4f> m;
     compute_joint_matrices(sk, pose, m);
     return m;
@@ -1605,8 +1775,9 @@ u64 hash_bytes(u64 h, const void* data, std::size_t bytes) {
     return h;
 }
 
-// An entity with Animator3D plays its clip by name: the joint matrices at every step are those of the CPU maths (the clip sampled at the
-// accumulated time, at the speed given), the draw is the model in that pose with the entity's id, and two runs agree to the byte.
+// An entity with Animator3D plays its clip by name: the joint matrices at every step are those of the CPU maths (the
+// clip sampled at the accumulated time, at the speed given), the draw is the model in that pose with the entity's id,
+// and two runs agree to the byte.
 void test_ecs_animator_clip() {
     const Character hero = make_character();
     const float dt = 1.0f / 60.0f;
@@ -1615,7 +1786,10 @@ void test_ecs_animator_clip() {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
         auto& w = world.raw();
-        const flecs::entity e = w.entity().set(Transform3D{.position = {1, 2, 3}}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "walk", .speed = 1.5f});
+        const flecs::entity e = w.entity()
+                                    .set(Transform3D{.position = {1, 2, 3}})
+                                    .set(SkinnedMeshRenderer3D{.model = hero.model})
+                                    .set(Animator3D{.clip = "walk", .speed = 1.5f});
         float t = 0.0f;
         u64 h = 1469598103934665603ull;
         for (int step = 0; step < 90; ++step) {
@@ -1627,13 +1801,15 @@ void test_ecs_animator_clip() {
                 state.propagate_transforms();
                 state.collect(scene);
                 assert(scene.draws().size() == 1 && scene.draws()[0].skinned && scene.instances().size() == 1);
-                assert(scene.instances()[0].id == static_cast<u32>(e.id() & 0xffffffffu) && scene.instances()[0].id != 0);
-                const Vec3f at{scene.instances()[0].transform.m[12], scene.instances()[0].transform.m[13], scene.instances()[0].transform.m[14]};
+                assert(scene.instances()[0].id == static_cast<u32>(e.id() & 0xffffffffu) &&
+                       scene.instances()[0].id != 0);
+                const Vec3f at{scene.instances()[0].transform.m[12], scene.instances()[0].transform.m[13],
+                               scene.instances()[0].transform.m[14]};
                 assert(close(at, {1, 2, 3}));
                 got.assign(scene.joint_matrices().begin(), scene.joint_matrices().end());
             }
             if (check) {
-                Pose pose;
+                Pose3D pose;
                 sample_clip(walk, *hero.skeleton, t, true, pose);
                 assert(max_difference(got, matrices_of(pose, *hero.skeleton)) < 1e-5f);
             }
@@ -1658,7 +1834,11 @@ void test_ecs_animator_clip() {
     // Not playing: held.
     kin::EcsWorld world;
     WorldRenderState3D state{world};
-    world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "walk"});
+    world.raw()
+        .entity()
+        .set(Transform3D{})
+        .set(SkinnedMeshRenderer3D{.model = hero.model})
+        .set(Animator3D{.clip = "walk"});
     state.animate(0.25f);
     const std::vector<Mat4f> at_quarter = collected_matrices(state);
     world.raw().query<Animator3D>().each([](Animator3D& a) { a.playing = false; });
@@ -1667,22 +1847,28 @@ void test_ecs_animator_clip() {
     // Before its first animate(): the rest pose, drawn.
     kin::EcsWorld fresh;
     WorldRenderState3D fresh_state{fresh};
-    fresh.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "walk"});
-    assert(max_difference(collected_matrices(fresh_state), matrices_of(hero.skeleton->rest_pose(), *hero.skeleton)) < 1e-6f);
+    fresh.raw()
+        .entity()
+        .set(Transform3D{})
+        .set(SkinnedMeshRenderer3D{.model = hero.model})
+        .set(Animator3D{.clip = "walk"});
+    assert(max_difference(collected_matrices(fresh_state), matrices_of(hero.skeleton->rest_pose(), *hero.skeleton)) <
+           1e-6f);
     // A renderer with no animator is drawn at rest, and an invisible one is not drawn.
     kin::EcsWorld bare;
     WorldRenderState3D bare_state{bare};
-    bare.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model});
-    bare.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model, .visible = false});
+    bare.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = hero.model});
+    bare.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = hero.model, .visible = false});
     assert(collected_matrices(bare_state).size() == 3);
 }
 
-// A state machine (kin/anim's) drives the animator: parameters choose the state, a transition crossfades over the length the animator has for
-// it, a state with a blend space plays the 1D blend by its parameter, a trigger is consumed by the transition that takes it. The pose
-// in the middle of a fade is the blend of the two pictures at its progress, to float rounding, as the CPU maths gives it.
+// A state machine (kin/anim's) drives the animator: parameters choose the state, a transition crossfades over the
+// length the animator has for it, a state with a blend space plays the 1D blend by its parameter, a trigger is consumed
+// by the transition that takes it. The pose in the middle of a fade is the blend of the two pictures at its progress,
+// to float rounding, as the CPU maths gives it.
 void test_ecs_animator_state_machine() {
     const Character hero = make_character();
-    const Skeleton& sk = *hero.skeleton;
+    const Skeleton3D& sk = *hero.skeleton;
     const float dt = 1.0f / 60.0f;
     auto machine = std::make_shared<AnimationStateMachine>();
     machine->initial = "idle";
@@ -1701,7 +1887,11 @@ void test_ecs_animator_state_machine() {
     animator.params.set_bool("grounded", true);
     kin::EcsWorld world;
     WorldRenderState3D state{world};
-    world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(static_cast<const Animator3D&>(animator));
+    world.raw()
+        .entity()
+        .set(Transform3D{})
+        .set(SkinnedMeshRenderer3D{.model = hero.model})
+        .set(static_cast<const Animator3D&>(animator));
     const auto animator_of = [&]() -> Animator3D& {
         static thread_local Animator3D* found = nullptr;
         world.raw().query<Animator3D>().each([&](Animator3D& a) { found = &a; });
@@ -1718,12 +1908,13 @@ void test_ecs_animator_state_machine() {
         idle_t = clip_time(idle, idle_t + dt, true);
     }
     {
-        Pose p;
+        Pose3D p;
         sample_clip(idle, sk, idle_t, true, p);
         assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
         assert(animator_of().state == "idle" && animator_of().player.fading_from() == nullptr);
     }
-    // Speed 3.0: to locomotion at this step (the fade is 0.25 s); the blend is walk at 1.5 and run at 4.5, w = 0.5, duration 0.8.
+    // Speed 3.0: to locomotion at this step (the fade is 0.25 s); the blend is walk at 1.5 and run at 4.5, w = 0.5,
+    // duration 0.8.
     animator_of().params.set_float("speed", 3.0f);
     float phase = 0.0f;
     for (int k = 1; k <= 8; ++k) {
@@ -1733,11 +1924,11 @@ void test_ecs_animator_state_machine() {
         phase -= std::floor(phase);
         assert(animator_of().state == "locomotion");
         const float alpha = std::min(1.0f, static_cast<float>(k) * dt / 0.25f);
-        Pose from, a, b;
+        Pose3D from, a, b;
         sample_clip(idle, sk, idle_t, true, from);
         sample_clip(walk, sk, phase * 1.0f, true, a);
         sample_clip(run, sk, phase * 0.6f, true, b);
-        const Pose expected = blend_poses(from, blend_poses(a, b, 0.5f), alpha);
+        const Pose3D expected = blend_poses(from, blend_poses(a, b, 0.5f), alpha);
         assert(max_difference(collected_matrices(state), matrices_of(expected, sk)) < 2e-4f);
     }
     // The fade is over at 0.25 s (15 steps): from then on it is the blend alone, following the parameter.
@@ -1748,7 +1939,7 @@ void test_ecs_animator_state_machine() {
     }
     assert(animator_of().player.fading_from() == nullptr);
     {
-        Pose a, b;
+        Pose3D a, b;
         sample_clip(walk, sk, phase * 1.0f, true, a);
         sample_clip(run, sk, phase * 0.6f, true, b);
         assert(max_difference(collected_matrices(state), matrices_of(blend_poses(a, b, 0.5f), sk)) < 3e-4f);
@@ -1757,30 +1948,32 @@ void test_ecs_animator_state_machine() {
     animator_of().params.set_float("speed", 1.5f);
     state.animate(0.0f);
     {
-        Pose p;
+        Pose3D p;
         sample_clip(walk, sk, animator_of().player.time() * 1.0f, true, p);
         assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
     }
     animator_of().params.set_float("speed", 4.5f);
     state.animate(0.0f);
     {
-        Pose p;
+        Pose3D p;
         sample_clip(run, sk, animator_of().player.time() * 0.6f, true, p);
         assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
     }
-    // A trigger: to jump from anywhere at once (0.1 s fade), consumed; another transition does not fire in the same step.
+    // A trigger: to jump from anywhere at once (0.1 s fade), consumed; another transition does not fire in the same
+    // step.
     animator_of().params.set_bool("grounded", false);
     animator_of().params.set_trigger("jump");
     state.animate(dt);
     assert(animator_of().state == "jump" && !animator_of().params.triggers.contains("jump"));
-    assert(animator_of().player.fading_from() == nullptr); // the fade is from a blend (fading_from names a plain clip, or none)
+    assert(animator_of().player.fading_from() ==
+           nullptr); // the fade is from a blend (fading_from names a plain clip, or none)
     assert(close(animator_of().player.fade_progress(), dt / 0.1f, 1e-4f));
     for (int i = 0; i < 8; ++i) {
         state.animate(dt); // 9 steps of 1/60 s: past the fade
     }
     assert(close(animator_of().player.fade_progress(), 1.0f));
     {
-        Pose p;
+        Pose3D p;
         sample_clip(jump, sk, animator_of().player.time(), true, p);
         assert(max_difference(collected_matrices(state), matrices_of(p, sk)) < 1e-5f);
     }
@@ -1792,7 +1985,11 @@ void test_ecs_animator_state_machine() {
     const auto replay = [&] {
         kin::EcsWorld w;
         WorldRenderState3D s{w};
-        w.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(static_cast<const Animator3D&>(animator));
+        w.raw()
+            .entity()
+            .set(Transform3D{})
+            .set(SkinnedMeshRenderer3D{.model = hero.model})
+            .set(static_cast<const Animator3D&>(animator));
         u64 h = 1469598103934665603ull;
         for (int step = 0; step < 200; ++step) {
             w.raw().query<Animator3D>().each([&](Animator3D& a) {
@@ -1811,10 +2008,11 @@ void test_ecs_animator_state_machine() {
     assert(replay() == replay());
 }
 
-// Layers as data (a clip on a joint's subtree over the base, by weight), additive layers and root motion moved onto the entity.
+// Layers as data (a clip on a joint's subtree over the base, by weight), additive layers and root motion moved onto the
+// entity.
 void test_ecs_animator_layers_and_root_motion() {
     const Character hero = make_character();
-    const Skeleton& sk = *hero.skeleton;
+    const Skeleton3D& sk = *hero.skeleton;
     const float dt = 1.0f / 60.0f;
     {
         Animator3D a;
@@ -1822,55 +2020,64 @@ void test_ecs_animator_layers_and_root_motion() {
         a.layers = {{.clip = "wave", .mask_joint = "middle", .include_root = true, .weight = 0.75f}};
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(a);
+        world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = hero.model}).set(a);
         float t_base = 0.0f, t_layer = 0.0f;
         for (int i = 0; i < 20; ++i) {
             state.animate(dt);
             t_base = clip_time(*hero.clip("walk"), t_base + dt, true);
             t_layer = clip_time(*hero.clip("wave"), t_layer + dt, true);
         }
-        Pose base, layer;
+        Pose3D base, layer;
         sample_clip(*hero.clip("walk"), sk, t_base, true, base);
         sample_clip(*hero.clip("wave"), sk, t_layer, true, layer);
-        blend_masked(base, layer, PoseMask::subtree(sk, sk.find("middle"), 1.0f, true), 0.75f);
+        blend_masked(base, layer, PoseMask3D::subtree(sk, sk.find("middle"), 1.0f, true), 0.75f);
         assert(max_difference(collected_matrices(state), matrices_of(base, sk)) < 1e-5f);
     }
     {
-        // Root motion: 2 m a second along the entity's own x; the entity turned a quarter about Y goes along -z. The root joint stays at rest.
+        // Root motion: 2 m a second along the entity's own x; the entity turned a quarter about Y goes along -z. The
+        // root joint stays at rest.
         Animator3D a;
         a.clip = "root_walk";
         a.apply_root_motion = true;
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{.position = {5, 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 90.0f)})
-                                    .set(SkinnedMeshRenderer{.model = hero.model}).set(a);
+        const flecs::entity e =
+            world.raw()
+                .entity()
+                .set(Transform3D{.position = {5, 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 90.0f)})
+                .set(SkinnedMeshRenderer3D{.model = hero.model})
+                .set(a);
         for (int i = 0; i < 30; ++i) {
             state.animate(dt);
         }
         const Transform3D* t = e.get<Transform3D>();
         assert(close(t->position, {5.0f, 0.0f, -1.0f}, 1e-3f));
-        Pose p;
+        Pose3D p;
         p = e.get<Animator3D>()->player.pose();
         assert(close(p.joints[0].translation.x, 0.0f, 1e-6f)); // held at rest in x
     }
 }
 
-// --- inverse kinematics (kin/render3d/ik.hpp), CPU only --------------------------------------------------------------------
+// --- inverse kinematics (kin/render3d/ik3d.hpp), CPU only
+// --------------------------------------------------------------------
 
 namespace biped = skin_fixtures::biped;
 
 // A skeleton, its local pose and the world matrices the solvers keep in step.
 struct Rig {
-    Skeleton sk;
-    Pose pose;
+    Skeleton3D sk;
+    Pose3D pose;
     std::vector<Mat4f> world;
 
-    explicit Rig(Skeleton s = skin_fixtures::make_biped()) : sk(std::move(s)) {
+    explicit Rig(Skeleton3D s = skin_fixtures::make_biped()) : sk(std::move(s)) {
         pose = sk.rest_pose();
         refresh();
     }
     void refresh() { compute_world_matrices(sk, pose, world); }
-    Vec3f at(int j) const { return {world[static_cast<std::size_t>(j)].m[12], world[static_cast<std::size_t>(j)].m[13], world[static_cast<std::size_t>(j)].m[14]}; }
+    Vec3f at(int j) const {
+        return {world[static_cast<std::size_t>(j)].m[12], world[static_cast<std::size_t>(j)].m[13],
+                world[static_cast<std::size_t>(j)].m[14]};
+    }
     float bone(int a, int b) const { return length(at(a) - at(b)); }
     Quatf rotation(int j) const { return rotation_of(world[static_cast<std::size_t>(j)]); }
 };
@@ -1879,15 +2086,18 @@ float angle_degrees(Quatf a, Quatf b) {
     const float d = std::min(1.0f, std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w));
     return 2.0f * std::acos(d) * 180.0f / 3.14159265f;
 }
-float angle_degrees(Vec3f a, Vec3f b) { return std::atan2(length(cross(a, b)), dot(a, b)) * 180.0f / 3.14159265f; }
+float angle_degrees(Vec3f a, Vec3f b) {
+    return std::atan2(length(cross(a, b)), dot(a, b)) * 180.0f / 3.14159265f;
+}
 
-const TwoBoneChain left_arm{biped::shoulder_l, biped::elbow_l, biped::hand_l};
-const TwoBoneChain left_leg{biped::hip_l, biped::knee_l, biped::ankle_l};
+const TwoBoneChain3D left_arm{biped::shoulder_l, biped::elbow_l, biped::hand_l};
+const TwoBoneChain3D left_leg{biped::hip_l, biped::knee_l, biped::ankle_l};
 
 // The arm bent a little and turned, so that it has a bend plane and nothing is aligned with an axis.
 Rig bent_arm_rig() {
     Rig rig;
-    rig.pose.joints[biped::shoulder_l].rotation = Quatf::axis_angle({0, 0, 1}, 12.0f) * Quatf::axis_angle({0, 1, 0}, 20.0f);
+    rig.pose.joints[biped::shoulder_l].rotation =
+        Quatf::axis_angle({0, 0, 1}, 12.0f) * Quatf::axis_angle({0, 1, 0}, 20.0f);
     rig.pose.joints[biped::elbow_l].rotation = Quatf::axis_angle({0.2f, 1, 0.1f}, -55.0f);
     rig.refresh();
     return rig;
@@ -1911,7 +2121,7 @@ struct Lcg {
     }
 };
 
-void check_only_chain_changed(const Pose& before, const Pose& after, std::initializer_list<int> rotated) {
+void check_only_chain_changed(const Pose3D& before, const Pose3D& after, std::initializer_list<int> rotated) {
     for (std::size_t i = 0; i < before.joints.size(); ++i) {
         assert(before.joints[i].translation == after.joints[i].translation);
         assert(before.joints[i].scale == after.joints[i].scale);
@@ -1925,25 +2135,27 @@ void check_only_chain_changed(const Pose& before, const Pose& after, std::initia
     }
 }
 
-// Reachable targets in every direction: the hand arrives, the bones keep their lengths, and nothing but the two rotations changed.
+// Reachable targets in every direction: the hand arrives, the bones keep their lengths, and nothing but the two
+// rotations changed.
 void test_ik_two_bone_reach() {
     Lcg rng;
-    for (const TwoBoneChain chain : {left_arm, left_leg}) {
+    for (const TwoBoneChain3D chain : {left_arm, left_leg}) {
         const Rig base = bent_arm_rig();
         const float l1 = base.bone(chain.root, chain.mid), l2 = base.bone(chain.mid, chain.end);
         for (int i = 0; i < 400; ++i) {
             Rig rig = base;
-            const Pose before = rig.pose;
+            const Pose3D before = rig.pose;
             const Vec3f root = rig.at(chain.root);
             const float d = (0.12f + 0.86f * (rng.next() * 0.5f + 0.5f)) * (l1 + l2);
             const Vec3f target = root + rng.direction() * d;
-            TwoBoneOptions o;
-            o.pole_mode = PoleMode::Direction;
+            TwoBoneOptions3D o;
+            o.pole_mode = PoleMode3D::Direction;
             o.pole = rng.direction();
-            const TwoBoneResult r = solve_two_bone(rig.sk, rig.pose, rig.world, chain, target, o);
+            const TwoBoneResult3D r = solve_two_bone(rig.sk, rig.pose, rig.world, chain, target, o);
             assert(r.solved && r.reached);
             assert(close(rig.at(chain.end), target, 2e-4f));
-            assert(close(rig.bone(chain.root, chain.mid), l1, 1e-5f) && close(rig.bone(chain.mid, chain.end), l2, 1e-5f));
+            assert(close(rig.bone(chain.root, chain.mid), l1, 1e-5f) &&
+                   close(rig.bone(chain.mid, chain.end), l2, 1e-5f));
             check_only_chain_changed(before, rig.pose, {chain.root, chain.mid});
             // The matrices kept in step are the pose's own.
             std::vector<Mat4f> again;
@@ -1954,8 +2166,8 @@ void test_ik_two_bone_reach() {
     }
 }
 
-// Out of reach: the arm is straight at the target; with a stretch it lengthens softly toward the limit and never beyond; a
-// minimum bend keeps the elbow from locking.
+// Out of reach: the arm is straight at the target; with a stretch it lengthens softly toward the limit and never
+// beyond; a minimum bend keeps the elbow from locking.
 void test_ik_two_bone_out_of_reach() {
     const Rig base = bent_arm_rig();
     const float reach = base.bone(biped::shoulder_l, biped::elbow_l) + base.bone(biped::elbow_l, biped::hand_l);
@@ -1963,10 +2175,10 @@ void test_ik_two_bone_out_of_reach() {
     const Vec3f dir = normalize({0.3f, 0.5f, -0.7f});
     {
         Rig rig = base;
-        TwoBoneOptions o;
-        o.pole_mode = PoleMode::Direction;
+        TwoBoneOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 1, 0};
-        const TwoBoneResult r = solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, root + dir * 2.0f, o);
+        const TwoBoneResult3D r = solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, root + dir * 2.0f, o);
         assert(r.solved && !r.reached);
         assert(close(rig.at(biped::hand_l), root + dir * reach, 1e-4f));
         const Vec3f e = rig.at(biped::elbow_l) - root;
@@ -1975,24 +2187,26 @@ void test_ik_two_bone_out_of_reach() {
     }
     {
         // A stretch of 1.3: monotonic and continuous in the target's distance, tends to 1.3 and stays under it.
-        TwoBoneOptions o;
+        TwoBoneOptions3D o;
         o.max_stretch = 1.3f;
-        o.pole_mode = PoleMode::Direction;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 1, 0};
         float last = 0.5f * reach;
         for (int i = 0; i <= 600; ++i) {
             const float d = 0.5f * reach + 0.004f * static_cast<float>(i) * reach;
             Rig rig = base;
-            const TwoBoneResult r = solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, root + dir * d, o);
+            const TwoBoneResult3D r = solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, root + dir * d, o);
             const float got = length(rig.at(biped::hand_l) - root);
             assert(got <= 1.3f * reach + 1e-4f && got >= last - 1e-5f && got - last < 0.004f * reach * 1.02f + 1e-5f);
             if (d <= reach) {
                 assert(close(got, d, 2e-4f) && r.stretch < 1.0001f);
             } else {
                 assert(r.stretch > 1.0f - 1e-6f && r.stretch <= 1.3f);
-                assert(close(rig.bone(biped::shoulder_l, biped::elbow_l) + rig.bone(biped::elbow_l, biped::hand_l), reach * r.stretch, 1e-4f));
+                assert(close(rig.bone(biped::shoulder_l, biped::elbow_l) + rig.bone(biped::elbow_l, biped::hand_l),
+                             reach * r.stretch, 1e-4f));
                 // Out of reach, the hand is at the end of the stretched chain, on the line to the target.
-                assert(close(got, reach * r.stretch, 2e-4f) && length(cross(rig.at(biped::hand_l) - root, dir)) < 2e-4f);
+                assert(close(got, reach * r.stretch, 2e-4f) &&
+                       length(cross(rig.at(biped::hand_l) - root, dir)) < 2e-4f);
             }
             last = got;
         }
@@ -2001,33 +2215,33 @@ void test_ik_two_bone_out_of_reach() {
     {
         // A minimum bend of 10 degrees: the hand stops short of full reach, on the line, with that much bend.
         Rig rig = base;
-        TwoBoneOptions o;
+        TwoBoneOptions3D o;
         o.min_bend_degrees = 10.0f;
-        o.pole_mode = PoleMode::Direction;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 1, 0};
-        const TwoBoneResult r = solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, root + dir * 2.0f, o);
+        const TwoBoneResult3D r = solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, root + dir * 2.0f, o);
         assert(close(r.bend_degrees, 10.0f, 1e-2f));
         const Vec3f h = rig.at(biped::hand_l) - root;
         assert(length(cross(h, dir)) < 1e-4f && length(h) < reach && length(h) > 0.98f * reach);
     }
 }
 
-// The elbow goes to the pole's side; opposite poles mirror the bend across the line from the shoulder to the hand; a pole given
-// as a point is the same as a direction to it.
+// The elbow goes to the pole's side; opposite poles mirror the bend across the line from the shoulder to the hand; a
+// pole given as a point is the same as a direction to it.
 void test_ik_two_bone_pole() {
     const Rig base = bent_arm_rig();
     const Vec3f root = base.at(biped::shoulder_l);
     const Vec3f target = root + Vec3f{0.35f, -0.2f, 0.4f};
-    const auto solve = [&](Vec3f pole, PoleMode mode) {
+    const auto solve = [&](Vec3f pole, PoleMode3D mode) {
         Rig rig = base;
-        TwoBoneOptions o;
+        TwoBoneOptions3D o;
         o.pole_mode = mode;
         o.pole = pole;
         solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, target, o);
         return rig;
     };
-    const Rig up = solve({0, 1, 0}, PoleMode::Direction);
-    const Rig down = solve({0, -1, 0}, PoleMode::Direction);
+    const Rig up = solve({0, 1, 0}, PoleMode3D::Direction);
+    const Rig down = solve({0, -1, 0}, PoleMode3D::Direction);
     assert(up.at(biped::elbow_l).y > root.y && down.at(biped::elbow_l).y < root.y);
     // Mirrored about the axis: the midpoint of the two elbows lies on the line root-target.
     const Vec3f axis = normalize(target - root);
@@ -2035,10 +2249,10 @@ void test_ik_two_bone_pole() {
     assert(length(cross(mid, axis)) < 1e-4f);
     assert(close(length(up.at(biped::elbow_l) - root), length(down.at(biped::elbow_l) - root), 1e-5f));
     // Toward the front (+Z) and the back.
-    assert(solve({0, 0, 1}, PoleMode::Direction).at(biped::elbow_l).z > root.z);
-    assert(solve({0, 0, -1}, PoleMode::Direction).at(biped::elbow_l).z < root.z);
+    assert(solve({0, 0, 1}, PoleMode3D::Direction).at(biped::elbow_l).z > root.z);
+    assert(solve({0, 0, -1}, PoleMode3D::Direction).at(biped::elbow_l).z < root.z);
     // A point: seen from the shoulder.
-    const Rig by_point = solve(root + Vec3f{0, 3, 0}, PoleMode::Position);
+    const Rig by_point = solve(root + Vec3f{0, 3, 0}, PoleMode3D::Position);
     assert(close(by_point.at(biped::elbow_l), up.at(biped::elbow_l), 1e-5f));
 }
 
@@ -2046,13 +2260,14 @@ void test_ik_two_bone_pole() {
 void test_ik_two_bone_weight() {
     const Rig base = bent_arm_rig();
     const Vec3f target = base.at(biped::shoulder_l) + Vec3f{0.1f, -0.5f, 0.45f};
-    TwoBoneOptions o;
-    o.pole_mode = PoleMode::Direction;
+    TwoBoneOptions3D o;
+    o.pole_mode = PoleMode3D::Direction;
     o.pole = {0, 1, 0};
     Rig none = base;
     o.weight = 0.0f;
     assert(!solve_two_bone(none.sk, none.pose, none.world, left_arm, target, o).solved);
-    assert(std::memcmp(none.pose.joints.data(), base.pose.joints.data(), base.pose.joints.size() * sizeof(JointPose)) == 0);
+    assert(std::memcmp(none.pose.joints.data(), base.pose.joints.data(),
+                       base.pose.joints.size() * sizeof(JointPose3D)) == 0);
     assert(std::memcmp(none.world.data(), base.world.data(), base.world.size() * sizeof(Mat4f)) == 0);
     Rig full = base, half = base;
     o.weight = 1.0f;
@@ -2063,8 +2278,10 @@ void test_ik_two_bone_weight() {
     assert(h < start && h > 0.01f);
     // Each rotation is half way (as an angle) from the pose's to the solved one.
     for (int j : {biped::shoulder_l, biped::elbow_l}) {
-        const float whole = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation, full.pose.joints[static_cast<std::size_t>(j)].rotation);
-        const float part = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation, half.pose.joints[static_cast<std::size_t>(j)].rotation);
+        const float whole = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation,
+                                          full.pose.joints[static_cast<std::size_t>(j)].rotation);
+        const float part = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation,
+                                         half.pose.joints[static_cast<std::size_t>(j)].rotation);
         assert(whole > 5.0f && close(part, whole * 0.5f, 0.05f));
     }
     // A weight over 1 is 1; tiny weights are tiny.
@@ -2079,15 +2296,15 @@ void test_ik_two_bone_idempotent() {
     for (const bool with_pole : {true, false}) {
         Rig rig = bent_arm_rig();
         const Vec3f target = rig.at(biped::shoulder_l) + Vec3f{0.3f, 0.1f, 0.5f};
-        TwoBoneOptions o;
+        TwoBoneOptions3D o;
         o.max_stretch = 1.2f;
         o.min_bend_degrees = 3.0f;
         if (with_pole) {
-            o.pole_mode = PoleMode::Direction;
+            o.pole_mode = PoleMode3D::Direction;
             o.pole = {0.2f, 1, -0.3f};
         }
         solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, target, o);
-        const Pose once = rig.pose;
+        const Pose3D once = rig.pose;
         const std::vector<Mat4f> once_world = rig.world;
         solve_two_bone(rig.sk, rig.pose, rig.world, left_arm, target, o);
         assert(max_difference(once_world, rig.world) < 2e-5f);
@@ -2104,35 +2321,37 @@ void test_ik_two_bone_idempotent() {
     }
 }
 
-// The largest change of the chain's pose (the angle of either rotation, and the elbow's direction from the shoulder) between
-// two consecutive solves.
+// The largest change of the chain's pose (the angle of either rotation, and the elbow's direction from the shoulder)
+// between two consecutive solves.
 struct PoseStep {
     float root_degrees = 0.0f, mid_degrees = 0.0f, elbow_degrees = 0.0f;
     float worst() const { return std::max({root_degrees, mid_degrees, elbow_degrees}); }
 };
-PoseStep pose_step(const Rig& a, const Rig& b, const TwoBoneChain& c) {
+PoseStep pose_step(const Rig& a, const Rig& b, const TwoBoneChain3D& c) {
     PoseStep s;
-    s.root_degrees = angle_degrees(a.pose.joints[static_cast<std::size_t>(c.root)].rotation, b.pose.joints[static_cast<std::size_t>(c.root)].rotation);
-    s.mid_degrees = angle_degrees(a.pose.joints[static_cast<std::size_t>(c.mid)].rotation, b.pose.joints[static_cast<std::size_t>(c.mid)].rotation);
+    s.root_degrees = angle_degrees(a.pose.joints[static_cast<std::size_t>(c.root)].rotation,
+                                   b.pose.joints[static_cast<std::size_t>(c.root)].rotation);
+    s.mid_degrees = angle_degrees(a.pose.joints[static_cast<std::size_t>(c.mid)].rotation,
+                                  b.pose.joints[static_cast<std::size_t>(c.mid)].rotation);
     s.elbow_degrees = angle_degrees(a.at(c.mid) - a.at(c.root), b.at(c.mid) - b.at(c.root));
     return s;
 }
 
-// A target sweeping through the cases where a solver flips: through the root, along the chain's axis, round and through the pole.
-// The change from one step to the next stays small (proportional to the step), the pose never jumps.
+// A target sweeping through the cases where a solver flips: through the root, along the chain's axis, round and through
+// the pole. The change from one step to the next stays small (proportional to the step), the pose never jumps.
 void test_ik_two_bone_continuity() {
-    // Steps of `steps` over u in [0, 1]; `jumps_allowed` is how many steps may turn a joint more than `max_step_degrees` (the
-    // twist at a fold's very centre: 180 degrees with the joints in the same places); the elbow and hand never move more than
-    // `max_move` in one step.
-    const auto sweep = [&](const char* what, Rig start, const TwoBoneChain& chain, TwoBoneOptions o, int steps, auto target_at, float max_step_degrees,
-                           int jumps_allowed = 0, float max_move = 0.02f) {
+    // Steps of `steps` over u in [0, 1]; `jumps_allowed` is how many steps may turn a joint more than
+    // `max_step_degrees` (the twist at a fold's very centre: 180 degrees with the joints in the same places); the elbow
+    // and hand never move more than `max_move` in one step.
+    const auto sweep = [&](const char* what, Rig start, const TwoBoneChain3D& chain, TwoBoneOptions3D o, int steps,
+                           auto target_at, float max_step_degrees, int jumps_allowed = 0, float max_move = 0.02f) {
         Rig previous;
         float worst = 0.0f, worst_move = 0.0f;
         int jumps = 0;
         for (int i = 0; i <= steps; ++i) {
             Rig rig = start;
             const Vec3f target = target_at(static_cast<float>(i) / static_cast<float>(steps));
-            const TwoBoneResult r = solve_two_bone(rig.sk, rig.pose, rig.world, chain, target, o);
+            const TwoBoneResult3D r = solve_two_bone(rig.sk, rig.pose, rig.world, chain, target, o);
             assert(r.solved);
             for (const Mat4f& m : rig.world) {
                 for (float v : m.m) {
@@ -2146,66 +2365,94 @@ void test_ik_two_bone_continuity() {
                 } else {
                     worst = std::max(worst, st.worst());
                 }
-                worst_move = std::max({worst_move, length(rig.at(chain.mid) - previous.at(chain.mid)), length(rig.at(chain.end) - previous.at(chain.end))});
+                worst_move = std::max({worst_move, length(rig.at(chain.mid) - previous.at(chain.mid)),
+                                       length(rig.at(chain.end) - previous.at(chain.end))});
             }
             previous = std::move(rig);
         }
-        std::cout << "  ik continuity (" << what << "): worst step " << worst << " degrees, " << jumps << " jump(s) over " << max_step_degrees
-                  << ", elbow/hand move at most " << worst_move << " a step" << std::endl;
+        std::cout << "  ik continuity (" << what << "): worst step " << worst << " degrees, " << jumps
+                  << " jump(s) over " << max_step_degrees << ", elbow/hand move at most " << worst_move << " a step"
+                  << std::endl;
         assert(jumps <= jumps_allowed && worst_move <= max_move);
     };
     const Rig base = bent_arm_rig();
     const Vec3f root = base.at(biped::shoulder_l);
-    TwoBoneOptions pole;
-    pole.pole_mode = PoleMode::Direction;
+    TwoBoneOptions3D pole;
+    pole.pole_mode = PoleMode3D::Direction;
     pole.pole = {0, 1, 0};
-    // Through the root, equal bones (a fold flat on itself is the only pose there): continuous. (Not sampled at the root's very
-    // point, where every direction is as good as another and the solver keeps the chain's own.)
+    // Through the root, equal bones (a fold flat on itself is the only pose there): continuous. (Not sampled at the
+    // root's very point, where every direction is as good as another and the solver keeps the chain's own.)
     Rig equal = base;
     equal.pose.joints[biped::hand_l].translation = {0.5f, 0, 0};
     equal.refresh();
     const Vec3f line = normalize({0.4f, 0.1f, 0.5f});
-    sweep("through the root, equal bones", equal, left_arm, pole, 1999, [&](float u) { return root + line * (u * 1.6f - 0.8f); }, 6.0f, 1);
+    sweep(
+        "through the root, equal bones", equal, left_arm, pole, 1999,
+        [&](float u) { return root + line * (u * 1.6f - 0.8f); }, 6.0f, 1);
     // The same with no pole at all (the pose's own bend plane).
-    sweep("through the root, no pole", equal, left_arm, {}, 1999, [&](float u) { return root + line * (u * 1.6f - 0.8f); }, 6.0f, 1);
-    // Along the arm's own axis, to well out of reach, straight through the full extension (the elbow's angle goes with the
-    // square root of the distance short of it, so a step of 0.1% of the reach turns it a few degrees: that is the bound).
+    sweep(
+        "through the root, no pole", equal, left_arm, {}, 1999,
+        [&](float u) { return root + line * (u * 1.6f - 0.8f); }, 6.0f, 1);
+    // Along the arm's own axis, to well out of reach, straight through the full extension (the elbow's angle goes with
+    // the square root of the distance short of it, so a step of 0.1% of the reach turns it a few degrees: that is the
+    // bound).
     const Vec3f axis = normalize(base.at(biped::hand_l) - root);
-    sweep("along the axis, past full reach", base, left_arm, pole, 2000, [&](float u) { return root + axis * (u * 2.1f + 0.1f); }, 6.0f);
-    // Through the root of an arm whose bones differ (a hole of 5 cm round the shoulder where the hand cannot be): the chain
-    // turns end over end within those 5 cm, steeply (a step of 0.8 mm there is about 1 degree per 0.01 of the hole's radius) but
-    // without a jump.
-    sweep("through the root, unequal bones", base, left_arm, pole, 1999, [&](float u) { return root + line * (u * 1.6f - 0.8f); }, 15.0f, 0, 0.1f);
-    sweep("along the axis, past full reach, stretch", base, left_arm, [&] { TwoBoneOptions o = pole; o.max_stretch = 1.25f; return o; }(), 2000,
-          [&](float u) { return root + axis * (u * 2.1f + 0.1f); }, 6.0f);
+    sweep(
+        "along the axis, past full reach", base, left_arm, pole, 2000,
+        [&](float u) { return root + axis * (u * 2.1f + 0.1f); }, 6.0f);
+    // Through the root of an arm whose bones differ (a hole of 5 cm round the shoulder where the hand cannot be): the
+    // chain turns end over end within those 5 cm, steeply (a step of 0.8 mm there is about 1 degree per 0.01 of the
+    // hole's radius) but without a jump.
+    sweep(
+        "through the root, unequal bones", base, left_arm, pole, 1999,
+        [&](float u) { return root + line * (u * 1.6f - 0.8f); }, 15.0f, 0, 0.1f);
+    sweep(
+        "along the axis, past full reach, stretch", base, left_arm,
+        [&] {
+            TwoBoneOptions3D o = pole;
+            o.max_stretch = 1.25f;
+            return o;
+        }(),
+        2000, [&](float u) { return root + axis * (u * 2.1f + 0.1f); }, 6.0f);
     // A straight chain (the rest pose: no bend plane of its own) with no pole: still finite and continuous.
     Rig straight;
-    sweep("straight chain, no pole", straight, left_arm, {}, 2000, [&](float u) { return root + Vec3f{0.3f + 0.4f * std::cos(u * 6.2831853f), 0.4f * std::sin(u * 6.2831853f), 0.2f}; }, 4.0f);
+    sweep(
+        "straight chain, no pole", straight, left_arm, {}, 2000,
+        [&](float u) {
+            return root + Vec3f{0.3f + 0.4f * std::cos(u * 6.2831853f), 0.4f * std::sin(u * 6.2831853f), 0.2f};
+        },
+        4.0f);
     // Round the pole: the target on a cone about the pole's direction, wide and narrow.
     for (const float half_angle : {40.0f, 8.0f, 2.0f}) {
         const float c = std::cos(half_angle * 3.14159265f / 180.0f), s = std::sin(half_angle * 3.14159265f / 180.0f);
-        sweep("round the pole", base, left_arm, pole, 3000,
-              [&](float u) { return root + Vec3f{s * std::cos(u * 6.2831853f), c, s * std::sin(u * 6.2831853f)} * 0.7f; }, 3.0f);
+        sweep(
+            "round the pole", base, left_arm, pole, 3000,
+            [&](float u) { return root + Vec3f{s * std::cos(u * 6.2831853f), c, s * std::sin(u * 6.2831853f)} * 0.7f; },
+            3.0f);
     }
-    // Through the pole's axis, straight across it. The elbow has to swing to the other side; the pull toward the pose's own bend
-    // makes it a turn over a few degrees of the target's travel, not a jump.
+    // Through the pole's axis, straight across it. The elbow has to swing to the other side; the pull toward the pose's
+    // own bend makes it a turn over a few degrees of the target's travel, not a jump.
     for (const Vec3f across : {Vec3f{1, 0, 0}, Vec3f{0.6f, 0, 0.8f}, Vec3f{0, 0, 1}}) {
-        sweep("through the pole's axis", base, left_arm, pole, 4000, [&](float u) { return root + Vec3f{0, 0.7f, 0} + across * (u * 0.6f - 0.3f); }, 12.0f);
+        sweep(
+            "through the pole's axis", base, left_arm, pole, 4000,
+            [&](float u) { return root + Vec3f{0, 0.7f, 0} + across * (u * 0.6f - 0.3f); }, 12.0f);
     }
 }
 
-// A scaled, turned model and a scaled joint above the chain: the maths is done in the space of the root's parent, so the hand
-// still arrives and the bones keep the lengths they are drawn at there.
+// A scaled, turned model and a scaled joint above the chain: the maths is done in the space of the root's parent, so
+// the hand still arrives and the bones keep the lengths they are drawn at there.
 void test_ik_two_bone_scaled_and_turned() {
     Rig rig = bent_arm_rig();
-    rig.sk.root_transform = Mat4f::trs({1.0f, 2.0f, -3.0f}, Quatf::axis_angle({0.3f, 1, 0.2f}, 70.0f), {1.5f, 0.6f, 2.0f});
+    rig.sk.root_transform =
+        Mat4f::trs({1.0f, 2.0f, -3.0f}, Quatf::axis_angle({0.3f, 1, 0.2f}, 70.0f), {1.5f, 0.6f, 2.0f});
     rig.pose.joints[biped::chest].scale = {1.3f, 0.8f, 1.1f};
     rig.pose.joints[biped::spine].rotation = Quatf::axis_angle({0, 0, 1}, 15.0f);
     rig.refresh();
     const Mat4f parent = rig.world[biped::chest];
     const Mat4f inverse = parent.inverse();
     const auto lengths_in_parent = [&](const Rig& r) {
-        const Vec3f a = inverse.apply(r.at(biped::shoulder_l)), b = inverse.apply(r.at(biped::elbow_l)), c = inverse.apply(r.at(biped::hand_l));
+        const Vec3f a = inverse.apply(r.at(biped::shoulder_l)), b = inverse.apply(r.at(biped::elbow_l)),
+                    c = inverse.apply(r.at(biped::hand_l));
         return std::array<float, 2>{length(b - a), length(c - b)};
     };
     const auto before = lengths_in_parent(rig);
@@ -2213,12 +2460,13 @@ void test_ik_two_bone_scaled_and_turned() {
     for (int i = 0; i < 200; ++i) {
         Rig r = rig;
         // A target inside the reach, as the parent's space sees it.
-        const Vec3f local = inverse.apply(r.at(biped::shoulder_l)) + rng.direction() * (0.1f + 0.8f * (rng.next() * 0.5f + 0.5f)) * (before[0] + before[1]);
+        const Vec3f local = inverse.apply(r.at(biped::shoulder_l)) +
+                            rng.direction() * (0.1f + 0.8f * (rng.next() * 0.5f + 0.5f)) * (before[0] + before[1]);
         const Vec3f target = parent.apply(local);
-        TwoBoneOptions o;
-        o.pole_mode = PoleMode::Direction;
+        TwoBoneOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = rng.direction();
-        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
+        const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
         assert(res.solved && res.reached);
         assert(close(r.at(biped::hand_l), target, 1e-3f));
         const auto after = lengths_in_parent(r);
@@ -2229,14 +2477,14 @@ void test_ik_two_bone_scaled_and_turned() {
     }
 }
 
-// The end joint is turned to a given orientation (a hand to a hold's surface), by `rotation_weight`; without it the hand only
-// rides on the forearm.
+// The end joint is turned to a given orientation (a hand to a hold's surface), by `rotation_weight`; without it the
+// hand only rides on the forearm.
 void test_ik_two_bone_orientation() {
     const Rig base = bent_arm_rig();
     const Vec3f target = base.at(biped::shoulder_l) + Vec3f{0.3f, -0.2f, 0.5f};
     const Quatf want = Quatf::axis_angle({0.4f, 1, -0.3f}, 110.0f);
-    TwoBoneOptions o;
-    o.pole_mode = PoleMode::Direction;
+    TwoBoneOptions3D o;
+    o.pole_mode = PoleMode3D::Direction;
     o.pole = {0, 1, 0};
     Rig plain = base;
     solve_two_bone(plain.sk, plain.pose, plain.world, left_arm, target, o);
@@ -2245,7 +2493,7 @@ void test_ik_two_bone_orientation() {
     o.match_rotation = true;
     o.end_rotation = want;
     Rig matched = base;
-    const TwoBoneResult r = solve_two_bone(matched.sk, matched.pose, matched.world, left_arm, target, o);
+    const TwoBoneResult3D r = solve_two_bone(matched.sk, matched.pose, matched.world, left_arm, target, o);
     assert(r.reached && close(matched.at(biped::hand_l), target, 1e-4f));
     assert(angle_degrees(matched.rotation(biped::hand_l), want) < 0.05f);
     // Half the rotation weight: half way (as an angle) from the plain hand's orientation.
@@ -2258,10 +2506,12 @@ void test_ik_two_bone_orientation() {
     assert(close(half.at(biped::hand_l), target, 1e-4f));
 }
 
-// A look-at turns the head's aim axis to the target; the weights share the turn, limits hold, the weight scales it, a target
-// going round behind never flips the head, and smoothing approaches.
+// A look-at turns the head's aim axis to the target; the weights share the turn, limits hold, the weight scales it, a
+// target going round behind never flips the head, and smoothing approaches.
 void test_ik_look_at() {
-    const std::vector<LookAtJoint> chain = {{.joint = biped::spine, .weight = 0.2f}, {.joint = biped::neck, .weight = 0.3f}, {.joint = biped::head, .weight = 0.5f}};
+    const std::vector<LookAtJoint3D> chain = {{.joint = biped::spine, .weight = 0.2f},
+                                              {.joint = biped::neck, .weight = 0.3f},
+                                              {.joint = biped::head, .weight = 0.5f}};
     const Rig base;
     const Vec3f head = base.at(biped::head);
     const auto aim_of = [](const Rig& r) { return normalize(r.world[biped::head].apply_vector({0, 0, 1})); };
@@ -2272,14 +2522,15 @@ void test_ik_look_at() {
     {
         Rig r = base;
         const Vec3f target = head + normalize(Vec3f{3, 0.8f, 2}) * 4.0f;
-        const LookAtResult res = solve_look_at(r.sk, r.pose, r.world, chain, target);
+        const LookAtResult3D res = solve_look_at(r.sk, r.pose, r.world, chain, target);
         assert(res.solved);
         assert(angle_degrees(aim_of(r), normalize(target - head)) < 0.05f);
         // A pure yaw (target level with the eyes): the three joints turned 20%, 30%, 50% of it.
         Rig level = base;
         const Vec3f level_target = head + normalize(Vec3f{1, 0, 1}) * 4.0f;
         solve_look_at(level.sk, level.pose, level.world, chain, level_target);
-        const float total = angle_degrees(Quatf{}, level.pose.joints[biped::spine].rotation) + angle_degrees(Quatf{}, level.pose.joints[biped::neck].rotation) +
+        const float total = angle_degrees(Quatf{}, level.pose.joints[biped::spine].rotation) +
+                            angle_degrees(Quatf{}, level.pose.joints[biped::neck].rotation) +
                             angle_degrees(Quatf{}, level.pose.joints[biped::head].rotation);
         assert(close(total, 45.0f, 0.05f));
         assert(close(angle_degrees(Quatf{}, level.pose.joints[biped::spine].rotation), 9.0f, 0.05f));
@@ -2292,23 +2543,41 @@ void test_ik_look_at() {
     }
     // Limits: a head with 25 degrees of yaw, a neck 15, a spine 5 turns 45 at most, and each stays inside its own.
     {
-        const std::vector<LookAtJoint> limited = {{.joint = biped::spine, .weight = 0.2f, .max_yaw_degrees = 5.0f, .max_pitch_up_degrees = 5.0f, .max_pitch_down_degrees = 5.0f},
-                                                  {.joint = biped::neck, .weight = 0.3f, .max_yaw_degrees = 15.0f, .max_pitch_up_degrees = 15.0f, .max_pitch_down_degrees = 15.0f},
-                                                  {.joint = biped::head, .weight = 0.5f, .max_yaw_degrees = 25.0f, .max_pitch_up_degrees = 25.0f, .max_pitch_down_degrees = 25.0f}};
+        const std::vector<LookAtJoint3D> limited = {{.joint = biped::spine,
+                                                     .weight = 0.2f,
+                                                     .max_yaw_degrees = 5.0f,
+                                                     .max_pitch_up_degrees = 5.0f,
+                                                     .max_pitch_down_degrees = 5.0f},
+                                                    {.joint = biped::neck,
+                                                     .weight = 0.3f,
+                                                     .max_yaw_degrees = 15.0f,
+                                                     .max_pitch_up_degrees = 15.0f,
+                                                     .max_pitch_down_degrees = 15.0f},
+                                                    {.joint = biped::head,
+                                                     .weight = 0.5f,
+                                                     .max_yaw_degrees = 25.0f,
+                                                     .max_pitch_up_degrees = 25.0f,
+                                                     .max_pitch_down_degrees = 25.0f}};
         Rig r = base;
-        LookAtOptions o;
+        LookAtOptions3D o;
         o.release_degrees = 0.0f;
         solve_look_at(r.sk, r.pose, r.world, limited, head + Vec3f{4, 0, 0}, o); // 90 degrees to the side
         assert(close(angle_degrees(Quatf{}, r.pose.joints[biped::spine].rotation), 5.0f, 0.05f));
         assert(close(angle_degrees(Quatf{}, r.pose.joints[biped::neck].rotation), 15.0f, 0.05f));
         assert(close(angle_degrees(Quatf{}, r.pose.joints[biped::head].rotation), 25.0f, 0.05f));
         assert(close(yaw_of(aim_of(r)), 45.0f, 0.1f));
-        // Pitch: 10 degrees up and 10 down of a chain whose joints take 5, 15 and 25 are all inside the limits: reached.
+        // Pitch: 10 degrees up and 10 down of a chain whose joints take 5, 15 and 25 are all inside the limits:
+        // reached.
         Rig up = base;
-        solve_look_at(up.sk, up.pose, up.world, limited, head + Vec3f{0, std::tan(10.0f * 3.14159265f / 180.0f) * 4, 4});
+        solve_look_at(up.sk, up.pose, up.world, limited,
+                      head + Vec3f{0, std::tan(10.0f * 3.14159265f / 180.0f) * 4, 4});
         assert(close(pitch_of(aim_of(up)), 10.0f, 0.05f));
         // A joint with different limits up and down.
-        const std::vector<LookAtJoint> asym = {{.joint = biped::head, .weight = 1.0f, .max_yaw_degrees = 60.0f, .max_pitch_up_degrees = 10.0f, .max_pitch_down_degrees = 40.0f}};
+        const std::vector<LookAtJoint3D> asym = {{.joint = biped::head,
+                                                  .weight = 1.0f,
+                                                  .max_yaw_degrees = 60.0f,
+                                                  .max_pitch_up_degrees = 10.0f,
+                                                  .max_pitch_down_degrees = 40.0f}};
         Rig u = base, d = base;
         solve_look_at(u.sk, u.pose, u.world, asym, head + Vec3f{0, 4, 1}, o);
         solve_look_at(d.sk, d.pose, d.world, asym, head + Vec3f{0, -4, 1}, o);
@@ -2317,22 +2586,32 @@ void test_ik_look_at() {
     // Weight: 0 is bit for bit, 0.5 half the turn; the eye offset moves the point looking.
     {
         Rig none = base, half = base, full = base;
-        LookAtOptions o;
+        LookAtOptions3D o;
         o.weight = 0.0f;
         const Vec3f target = head + Vec3f{3, 1, 3};
         assert(!solve_look_at(none.sk, none.pose, none.world, chain, target, o).solved);
-        assert(std::memcmp(none.pose.joints.data(), base.pose.joints.data(), base.pose.joints.size() * sizeof(JointPose)) == 0);
+        assert(std::memcmp(none.pose.joints.data(), base.pose.joints.data(),
+                           base.pose.joints.size() * sizeof(JointPose3D)) == 0);
         solve_look_at(full.sk, full.pose, full.world, chain, target);
         o.weight = 0.5f;
         solve_look_at(half.sk, half.pose, half.world, chain, target, o);
-        assert(close(angle_degrees(aim_of(base), aim_of(half)), angle_degrees(aim_of(base), aim_of(full)) * 0.5f, 0.1f));
+        assert(
+            close(angle_degrees(aim_of(base), aim_of(half)), angle_degrees(aim_of(base), aim_of(full)) * 0.5f, 0.1f));
     }
-    // Round behind: a target circling the head at eye height. The aim follows to the limit, is eased back to forward as the
-    // target goes behind, and comes round the other side without a jump: no step of the aim bigger than a little over the
-    // target's own.
+    // Round behind: a target circling the head at eye height. The aim follows to the limit, is eased back to forward as
+    // the target goes behind, and comes round the other side without a jump: no step of the aim bigger than a little
+    // over the target's own.
     {
-        const std::vector<LookAtJoint> neck = {{.joint = biped::neck, .weight = 0.4f, .max_yaw_degrees = 50.0f, .max_pitch_up_degrees = 30.0f, .max_pitch_down_degrees = 30.0f},
-                                               {.joint = biped::head, .weight = 0.6f, .max_yaw_degrees = 70.0f, .max_pitch_up_degrees = 40.0f, .max_pitch_down_degrees = 40.0f}};
+        const std::vector<LookAtJoint3D> neck = {{.joint = biped::neck,
+                                                  .weight = 0.4f,
+                                                  .max_yaw_degrees = 50.0f,
+                                                  .max_pitch_up_degrees = 30.0f,
+                                                  .max_pitch_down_degrees = 30.0f},
+                                                 {.joint = biped::head,
+                                                  .weight = 0.6f,
+                                                  .max_yaw_degrees = 70.0f,
+                                                  .max_pitch_up_degrees = 40.0f,
+                                                  .max_pitch_down_degrees = 40.0f}};
         Vec3f previous{};
         float worst = 0.0f, behind = 360.0f;
         const int steps = 720;
@@ -2352,15 +2631,15 @@ void test_ik_look_at() {
             }
             previous = aim;
         }
-        std::cout << "  ik look-at round behind: worst step of the aim " << worst << " degrees (the target moves 0.5), at the back " << behind
-                  << " from forward" << std::endl;
+        std::cout << "  ik look-at round behind: worst step of the aim " << worst
+                  << " degrees (the target moves 0.5), at the back " << behind << " from forward" << std::endl;
         assert(worst < 3.0f && behind < 1.0f);
     }
     // Smoothing: toward a fixed target the aim approaches monotonically and arrives; the speed cap holds; dt 0 holds.
     {
-        LookAtOptions o;
+        LookAtOptions3D o;
         o.smooth_seconds = 0.2f;
-        LookAtState state;
+        LookAtState3D state;
         const Vec3f target = head + Vec3f{3, 0, 3};
         float last = 360.0f;
         for (int i = 0; i < 180; ++i) {
@@ -2371,8 +2650,9 @@ void test_ik_look_at() {
             last = err;
         }
         assert(last < 0.5f);
-        // The time constant: after one step the aim has hardly moved, after 0.2 s (the constant) a fraction 1 / e of the way is left.
-        LookAtState timed;
+        // The time constant: after one step the aim has hardly moved, after 0.2 s (the constant) a fraction 1 / e of
+        // the way is left.
+        LookAtState3D timed;
         float start = 0.0f, after_one = 0.0f, after_constant = 0.0f;
         for (int i = 0; i <= 12; ++i) {
             Rig r = base;
@@ -2384,9 +2664,9 @@ void test_ik_look_at() {
         }
         assert(after_one > 0.9f * start && after_one < start);
         assert(close(after_constant / start, std::exp(-1.0f), 0.02f));
-        LookAtOptions capped;
+        LookAtOptions3D capped;
         capped.max_speed_degrees = 90.0f;
-        LookAtState s2;
+        LookAtState3D s2;
         Rig first = base;
         solve_look_at(first.sk, first.pose, first.world, chain, target, capped, &s2, 0.0f);
         assert(angle_degrees(aim_of(first), aim_of(base)) < 1e-3f); // the first call starts from the head's own aim
@@ -2405,8 +2685,8 @@ struct FakeGround {
     Vec3f normal{0, 1, 0};
     int casts = 0;
 
-    GroundQuery query() {
-        return [this](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+    GroundQuery3D query() {
+        return [this](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
             ++casts;
             // March down the segment to the first sample under the surface, then bisect.
             const auto below = [&](float t) {
@@ -2414,7 +2694,7 @@ struct FakeGround {
                 return p.y <= height(p.x, p.z);
             };
             if (below(0.0f)) {
-                return GroundHit{from, normal};
+                return GroundHit3D{from, normal};
             }
             if (!below(1.0f)) {
                 return std::nullopt;
@@ -2425,27 +2705,29 @@ struct FakeGround {
                 (below(mid) ? hi : lo) = mid;
             }
             const Vec3f p = from + (to - from) * hi;
-            return GroundHit{{p.x, height(p.x, p.z), p.z}, normal};
+            return GroundHit3D{{p.x, height(p.x, p.z), p.z}, normal};
         };
     }
 };
 
-// Foot placement on a fake ground: flat ground moves nothing; a step down lowers the pelvis by the drop and puts the foot on it;
-// a slope tilts the foot to the normal up to the clamp; the pelvis offset eases and a foot rising onto a step is not eased.
+// Foot placement on a fake ground: flat ground moves nothing; a step down lowers the pelvis by the drop and puts the
+// foot on it; a slope tilts the foot to the normal up to the clamp; the pelvis offset eases and a foot rising onto a
+// step is not eased.
 void test_ik_foot_placement() {
     const Rig base;
-    const std::array<FootLeg, 2> legs = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}, FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
-    TwoBoneOptions knee;
-    knee.pole_mode = PoleMode::Direction;
+    const std::array<FootLeg3D, 2> legs = {FootLeg3D{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f},
+                                           FootLeg3D{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
+    TwoBoneOptions3D knee;
+    knee.pole_mode = PoleMode3D::Direction;
     knee.pole = {0, 0, 1};
-    FootPlacementOptions options;
+    FootPlacementOptions3D options;
     options.smooth_seconds = 0.0f;
 
     // Flat: nothing moves, to rounding, and the pelvis stays.
     {
         FakeGround ground{[](float, float) { return 0.0f; }};
         Rig r = base;
-        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
+        const FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
         assert(ground.casts == 2 && plan.pelvis_offset == 0.0f);
         for (std::size_t i = 0; i < 2; ++i) {
             assert(plan.feet[i].grounded && close(plan.feet[i].target, r.at(legs[i].leg.end), 1e-5f));
@@ -2454,43 +2736,48 @@ void test_ik_foot_placement() {
         apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, knee);
         assert(max_difference(r.world, base.world) < 1e-4f);
     }
-    // A step down under the left foot (x > 0): the pelvis goes down by the drop, the left foot lands on it, the right stays.
+    // A step down under the left foot (x > 0): the pelvis goes down by the drop, the left foot lands on it, the right
+    // stays.
     {
         FakeGround ground{[](float x, float) { return x > 0.0f ? -0.2f : 0.0f; }};
         Rig r = base;
-        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
+        const FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
         assert(close(plan.pelvis_offset, -0.2f, 1e-5f));
         assert(close(plan.feet[0].target.y, 0.05f - 0.2f, 1e-5f) && close(plan.feet[1].target.y, 0.05f, 1e-5f));
         apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, knee);
         assert(close(r.at(biped::pelvis).y, 0.8f, 1e-5f));
-        assert(close(r.at(biped::ankle_l), plan.feet[0].target, 2e-4f) && close(r.at(biped::ankle_r), plan.feet[1].target, 2e-4f));
+        assert(close(r.at(biped::ankle_l), plan.feet[0].target, 2e-4f) &&
+               close(r.at(biped::ankle_r), plan.feet[1].target, 2e-4f));
         // The leg that was long enough stays straight; the other bends, its knee forward (+Z, the pole).
         assert(r.at(biped::knee_r).z > base.at(biped::knee_r).z + 0.01f);
         // Bones kept their lengths.
-        assert(close(r.bone(biped::hip_l, biped::knee_l), 0.5f, 1e-5f) && close(r.bone(biped::knee_r, biped::ankle_r), 0.45f, 1e-5f));
+        assert(close(r.bone(biped::hip_l, biped::knee_l), 0.5f, 1e-5f) &&
+               close(r.bone(biped::knee_r, biped::ankle_r), 0.45f, 1e-5f));
     }
-    // A step up under the left foot: the pelvis stays (a raise is off by default), the foot is lifted onto it; with a raise
-    // allowed the pelvis takes the lowest rise.
+    // A step up under the left foot: the pelvis stays (a raise is off by default), the foot is lifted onto it; with a
+    // raise allowed the pelvis takes the lowest rise.
     {
         FakeGround ground{[](float x, float) { return x > 0.0f ? 0.15f : 0.0f; }};
         Rig r = base;
-        FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
+        FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
         assert(plan.pelvis_offset == 0.0f && close(plan.feet[0].target.y, 0.2f, 1e-5f));
         FakeGround both{[](float, float) { return 0.1f; }};
-        FootPlacementOptions raise = options;
+        FootPlacementOptions3D raise = options;
         raise.max_pelvis_raise = 0.3f;
         plan = plan_foot_placement(r.sk, r.pose, r.world, legs, both.query(), raise);
         assert(close(plan.pelvis_offset, 0.1f, 1e-5f));
     }
-    // A slope of 20 degrees (normal tilted toward +X): the foot's up follows the normal; a slope of 50 is clamped to 30.
+    // A slope of 20 degrees (normal tilted toward +X): the foot's up follows the normal; a slope of 50 is clamped
+    // to 30.
     for (const float degrees : {20.0f, 50.0f}) {
         const float rad = degrees * 3.14159265f / 180.0f;
         const Vec3f normal{std::sin(rad), std::cos(rad), 0};
         FakeGround ground{[&](float x, float) { return -std::tan(rad) * x; }, normal};
         Rig r = base;
-        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
-        // (The tilted foot's ankle sits a little off the straight-down place: a leg at its full length wants a little stretch.)
-        TwoBoneOptions stretchy = knee;
+        const FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
+        // (The tilted foot's ankle sits a little off the straight-down place: a leg at its full length wants a little
+        // stretch.)
+        TwoBoneOptions3D stretchy = knee;
         stretchy.max_stretch = 1.5f;
         apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, stretchy);
         const float expect = std::min(degrees, options.max_tilt_degrees);
@@ -2499,16 +2786,16 @@ void test_ik_foot_placement() {
         assert(close(angle_degrees(foot_up, normal), degrees - expect, 0.1f));
         assert(close(r.at(biped::ankle_l), plan.feet[0].target, 2e-4f));
     }
-    // The pelvis eases to its offset: a drop is snapped to on the first call, then the ground comes back and the offset rises by
-    // the time constant; a foot that falls away eases down, one that rises is lifted at once.
+    // The pelvis eases to its offset: a drop is snapped to on the first call, then the ground comes back and the offset
+    // rises by the time constant; a foot that falls away eases down, one that rises is lifted at once.
     {
-        FootPlacementOptions eased = options;
+        FootPlacementOptions3D eased = options;
         eased.smooth_seconds = 0.1f;
-        FootPlacementState state;
+        FootPlacementState3D state;
         float x_drop = 1.0f;
         FakeGround ground{[&](float x, float) { return x > 0.0f ? -0.2f * x_drop : 0.0f; }};
         Rig r = base;
-        FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), eased, &state, 1.0f / 60.0f);
+        FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), eased, &state, 1.0f / 60.0f);
         assert(close(plan.pelvis_offset, -0.2f, 1e-5f));
         x_drop = 0.0f;
         float last = plan.pelvis_offset;
@@ -2517,9 +2804,10 @@ void test_ik_foot_placement() {
             assert(plan.pelvis_offset > last - 1e-6f && plan.pelvis_offset <= 0.0f);
             last = plan.pelvis_offset;
         }
-        assert(last > -0.2f * std::exp(-20.0f / 60.0f / 0.1f) - 1e-3f && last < -0.2f * std::exp(-20.0f / 60.0f / 0.1f) + 1e-3f);
+        assert(last > -0.2f * std::exp(-20.0f / 60.0f / 0.1f) - 1e-3f &&
+               last < -0.2f * std::exp(-20.0f / 60.0f / 0.1f) + 1e-3f);
         // The foot: ground at 0, then it falls away to -0.2 (eases), then returns (at once).
-        FootPlacementState fs;
+        FootPlacementState3D fs;
         float drop = 0.0f;
         FakeGround g2{[&](float, float) { return drop; }};
         plan_foot_placement(r.sk, r.pose, r.world, legs, g2.query(), eased, &fs, 1.0f / 60.0f);
@@ -2534,13 +2822,14 @@ void test_ik_foot_placement() {
     {
         FakeGround ground{[](float x, float) { return x > 0.0f ? -5.0f : 0.0f; }};
         Rig r = base;
-        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
+        const FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), options);
         assert(!plan.feet[0].grounded && plan.feet[1].grounded && plan.pelvis_offset == 0.0f);
         assert(close(plan.feet[0].target, r.at(biped::ankle_l), 1e-6f));
     }
 }
 
-// FABRIK: the tip reaches, bones keep their lengths, out of reach the chain is straight at the target, a free root follows.
+// FABRIK: the tip reaches, bones keep their lengths, out of reach the chain is straight at the target, a free root
+// follows.
 void test_ik_fabrik() {
     const std::array<i32, 5> spine = {biped::pelvis, biped::spine, biped::chest, biped::neck, biped::head};
     Rig base;
@@ -2556,7 +2845,7 @@ void test_ik_fabrik() {
     for (int i = 0; i < 100; ++i) {
         Rig r = base;
         const Vec3f target = root + rng.direction() * (0.2f + 0.75f * (rng.next() * 0.5f + 0.5f)) * reach;
-        const FabrikResult res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target);
+        const FabrikResult3D res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target);
         assert(res.solved && res.reached);
         assert(close(r.at(biped::head), target, 1e-3f));
         assert(close(r.at(biped::pelvis), root, 1e-5f));
@@ -2570,17 +2859,17 @@ void test_ik_fabrik() {
     {
         Rig r = base;
         const Vec3f dir = normalize({1, 0.5f, -0.4f});
-        const FabrikResult res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, root + dir * 3.0f);
+        const FabrikResult3D res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, root + dir * 3.0f);
         assert(res.solved && !res.reached);
         assert(close(r.at(biped::head), root + dir * reach, 1e-3f));
         assert(length(cross(r.at(biped::neck) - root, dir)) < 1e-3f);
     }
     {
         Rig r = base;
-        FabrikOptions o;
+        FabrikOptions3D o;
         o.fix_root = false;
         const Vec3f target = root + Vec3f{2.0f, 1.0f, 0.0f};
-        const FabrikResult res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
+        const FabrikResult3D res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
         assert(res.reached && close(r.at(biped::head), target, 1e-3f));
         assert(length(r.at(biped::pelvis) - root) > 0.5f);
         for (std::size_t k = 0; k + 1 < spine.size(); ++k) {
@@ -2589,30 +2878,33 @@ void test_ik_fabrik() {
     }
     {
         Rig r = base;
-        FabrikOptions o;
+        FabrikOptions3D o;
         o.weight = 0.0f;
         assert(!solve_chain_fabrik(r.sk, r.pose, r.world, spine, root + Vec3f{0.3f, 0.3f, 0.3f}, o).solved);
-        assert(std::memcmp(r.pose.joints.data(), base.pose.joints.data(), base.pose.joints.size() * sizeof(JointPose)) == 0);
+        assert(std::memcmp(r.pose.joints.data(), base.pose.joints.data(),
+                           base.pose.joints.size() * sizeof(JointPose3D)) == 0);
     }
 }
 
-// Solvers in order, each on what the one before made: a second solve of the same chain wins, a foot placer and an arm see the
-// pelvis where the first put it; and bad input does nothing and says so.
+// Solvers in order, each on what the one before made: a second solve of the same chain wins, a foot placer and an arm
+// see the pelvis where the first put it; and bad input does nothing and says so.
 void test_ik_order_and_bad_input() {
     const Rig base = bent_arm_rig();
-    const Vec3f a = base.at(biped::shoulder_l) + Vec3f{0.4f, 0.1f, 0.3f}, b = base.at(biped::shoulder_l) + Vec3f{0.2f, -0.5f, 0.4f};
+    const Vec3f a = base.at(biped::shoulder_l) + Vec3f{0.4f, 0.1f, 0.3f},
+                b = base.at(biped::shoulder_l) + Vec3f{0.2f, -0.5f, 0.4f};
     for (const bool a_first : {true, false}) {
         Rig r = base;
         solve_two_bone(r.sk, r.pose, r.world, left_arm, a_first ? a : b);
         solve_two_bone(r.sk, r.pose, r.world, left_arm, a_first ? b : a);
         assert(close(r.at(biped::hand_l), a_first ? b : a, 2e-4f));
     }
-    // Pelvis lowered, then an arm reaching a fixed point: the arm's shoulder has moved with the pelvis and the hand still arrives.
+    // Pelvis lowered, then an arm reaching a fixed point: the arm's shoulder has moved with the pelvis and the hand
+    // still arrives.
     {
         Rig r = base;
-        const std::array<FootLeg, 1> legs = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}};
+        const std::array<FootLeg3D, 1> legs = {FootLeg3D{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}};
         FakeGround ground{[](float, float) { return -0.15f; }};
-        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), {});
+        const FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), {});
         apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan);
         assert(close(r.at(biped::shoulder_l).y, base.at(biped::shoulder_l).y - 0.15f, 1e-5f));
         const Vec3f hold = base.at(biped::shoulder_l) + Vec3f{0.3f, 0.4f, 0.3f};
@@ -2621,8 +2913,10 @@ void test_ik_order_and_bad_input() {
     }
     // Bad chains: nothing happens.
     Rig r = base;
-    assert(!solve_two_bone(r.sk, r.pose, r.world, {biped::hand_l, biped::elbow_l, biped::shoulder_l}, {1, 1, 1}).solved);
-    assert(!solve_two_bone(r.sk, r.pose, r.world, {biped::shoulder_l, biped::shoulder_l, biped::hand_l}, {1, 1, 1}).solved);
+    assert(
+        !solve_two_bone(r.sk, r.pose, r.world, {biped::hand_l, biped::elbow_l, biped::shoulder_l}, {1, 1, 1}).solved);
+    assert(!solve_two_bone(r.sk, r.pose, r.world, {biped::shoulder_l, biped::shoulder_l, biped::hand_l}, {1, 1, 1})
+                .solved);
     assert(!solve_two_bone(r.sk, r.pose, r.world, {-1, 3, 4}, {1, 1, 1}).solved);
     assert(!solve_two_bone(r.sk, r.pose, r.world, {0, 1, 99}, {1, 1, 1}).solved);
     // A zero-length bone.
@@ -2634,16 +2928,17 @@ void test_ik_order_and_bad_input() {
 // --- IK in the ECS animator ---
 
 struct BipedCharacter {
-    std::shared_ptr<const Model> model;
-    const Skeleton* skeleton = nullptr;
-    std::vector<Mat4f> rest_world; // the joints' world matrices at rest (a joint matrix times these is the world matrix)
+    std::shared_ptr<const Model3D> model;
+    const Skeleton3D* skeleton = nullptr;
+    std::vector<Mat4f>
+        rest_world; // the joints' world matrices at rest (a joint matrix times these is the world matrix)
 };
 
 BipedCharacter make_biped_character() {
-    struct FakeMesh final : IMeshBackend {};
-    auto model = std::make_shared<Model>();
+    struct FakeMesh final : IMeshBackend3D {};
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(skin_fixtures::make_biped());
-    const Skeleton& sk = model->skeletons[0];
+    const Skeleton3D& sk = model->skeletons[0];
     // A clip that sways the spine, so that the pose the IK sees is not the rest pose.
     AnimClip3D sway;
     sway.name = "sway";
@@ -2652,9 +2947,9 @@ BipedCharacter make_biped_character() {
     sway.channels[biped::spine].rotation.times = {0.0f, 0.5f, 1.0f};
     sway.channels[biped::spine].rotation.values = {Quatf{}, Quatf::axis_angle({0, 0, 1}, 15.0f), Quatf{}};
     model->clips.push_back(sway);
-    ModelPart part;
+    ModelPart3D part;
     part.name = "body";
-    part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, sk.joint_count()};
+    part.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, sk.joint_count()};
     part.skin = 0;
     model->parts.push_back(part);
     BipedCharacter c;
@@ -2670,20 +2965,24 @@ std::vector<Mat4f> ik_frame(WorldRenderState3D& state, float dt) {
     return collected_matrices(state);
 }
 
-Vec3f world_position_of(const BipedCharacter& c, std::span<const Mat4f> joint_matrices, int joint, const Mat4f& entity) {
-    return entity.apply((joint_matrices[static_cast<std::size_t>(joint)] * c.rest_world[static_cast<std::size_t>(joint)]).apply({0, 0, 0}));
+Vec3f world_position_of(const BipedCharacter& c, std::span<const Mat4f> joint_matrices, int joint,
+                        const Mat4f& entity) {
+    return entity.apply(
+        (joint_matrices[static_cast<std::size_t>(joint)] * c.rest_world[static_cast<std::size_t>(joint)])
+            .apply({0, 0, 0}));
 }
 
-IKConstraint hand_constraint(float fade = 0.0f) {
-    IKConstraint k;
+IKConstraint3D hand_constraint(float fade = 0.0f) {
+    IKConstraint3D k;
     k.name = "hand";
-    k.kind = IKKind::TwoBone;
+    k.kind = IKKind3D::TwoBone;
     k.joints = {"shoulder_L", "elbow_L", "hand_L"};
     k.fade_seconds = fade;
     return k;
 }
 
-// A hand reaches a target given in the world, for an entity that is moved, turned and scaled; the matrices drawn are the IK pose's.
+// A hand reaches a target given in the world, for an entity that is moved, turned and scaled; the matrices drawn are
+// the IK pose's.
 void test_ecs_ik_reaches_world_target() {
     const BipedCharacter hero = make_biped_character();
     for (const float scale : {1.0f, 1.7f}) {
@@ -2691,14 +2990,17 @@ void test_ecs_ik_reaches_world_target() {
         WorldRenderState3D state{world};
         auto& w = world.raw();
         const flecs::entity e = w.entity()
-                                    .set(Transform3D{.position = {2, 0, 5}, .rotation = Quatf::axis_angle({0, 1, 0}, 70.0f), .scale = {scale, scale, scale}})
-                                    .set(SkinnedMeshRenderer{.model = hero.model})
+                                    .set(Transform3D{.position = {2, 0, 5},
+                                                     .rotation = Quatf::axis_angle({0, 1, 0}, 70.0f),
+                                                     .scale = {scale, scale, scale}})
+                                    .set(SkinnedMeshRenderer3D{.model = hero.model})
                                     .set(Animator3D{.clip = "sway"});
         Animator3D& a = *e.get_mut<Animator3D>();
         a.add_ik(hand_constraint());
         // A point in front of the character's left shoulder, in the world.
         const Mat4f entity_matrix = e.get<Transform3D>()->matrix();
-        const Vec3f shoulder = entity_matrix.apply(hero.skeleton->rest[biped::shoulder_l].translation + Vec3f{0, 1.45f, 0});
+        const Vec3f shoulder =
+            entity_matrix.apply(hero.skeleton->rest[biped::shoulder_l].translation + Vec3f{0, 1.45f, 0});
         const Vec3f target = shoulder + Vec3f{0.0f, 0.1f, 0.5f * scale};
         a.ik("hand").set_target(target).set_pole_direction({0, 0, -1});
         std::vector<Mat4f> got;
@@ -2709,18 +3011,24 @@ void test_ecs_ik_reaches_world_target() {
         // The same pose is what the animator keeps for the game.
         const Animator3D& after = *e.get<Animator3D>();
         assert(after.ik_world.size() == hero.skeleton->joint_count());
-        assert(close(entity_matrix.apply(Vec3f{after.ik_world[biped::hand_l].m[12], after.ik_world[biped::hand_l].m[13], after.ik_world[biped::hand_l].m[14]}), target, 2e-4f * scale));
+        assert(close(entity_matrix.apply(Vec3f{after.ik_world[biped::hand_l].m[12], after.ik_world[biped::hand_l].m[13],
+                                               after.ik_world[biped::hand_l].m[14]}),
+                     target, 2e-4f * scale));
         // The entity moved and turned: the hand stays on the target in the world (the target is a world point).
-        e.set(Transform3D{.position = {2.2f, 0, 5.1f}, .rotation = Quatf::axis_angle({0, 1, 0}, 85.0f), .scale = {scale, scale, scale}});
+        e.set(Transform3D{.position = {2.2f, 0, 5.1f},
+                          .rotation = Quatf::axis_angle({0, 1, 0}, 85.0f),
+                          .scale = {scale, scale, scale}});
         const Mat4f moved = e.get<Transform3D>()->matrix();
         got = ik_frame(state, 1.0f / 60.0f);
         const Vec3f shoulder_now = world_position_of(hero, got, biped::shoulder_l, moved);
         if (length(target - shoulder_now) < 0.9f * scale) {
             assert(close(world_position_of(hero, got, biped::hand_l, moved), target, 2e-4f * scale));
         }
-        // The elbow is on the pole's side: the pole was model -Z, so the elbow is behind the line shoulder-hand in the model.
+        // The elbow is on the pole's side: the pole was model -Z, so the elbow is behind the line shoulder-hand in the
+        // model.
         const Mat4f inv = moved.inverse();
-        const Vec3f s = inv.apply(world_position_of(hero, got, biped::shoulder_l, moved)), el = inv.apply(world_position_of(hero, got, biped::elbow_l, moved)),
+        const Vec3f s = inv.apply(world_position_of(hero, got, biped::shoulder_l, moved)),
+                    el = inv.apply(world_position_of(hero, got, biped::elbow_l, moved)),
                     h = inv.apply(world_position_of(hero, got, biped::hand_l, moved));
         const Vec3f axis = normalize(h - s);
         const Vec3f off = (el - s) - axis * dot(el - s, axis);
@@ -2728,19 +3036,21 @@ void test_ecs_ik_reaches_world_target() {
     }
 }
 
-// An entity as the target follows it; the entity going away is safe and lets go over the fade (from the last place it was);
-// a fade in takes its time and a set_weight(0) lets go.
+// An entity as the target follows it; the entity going away is safe and lets go over the fade (from the last place it
+// was); a fade in takes its time and a set_weight(0) lets go.
 void test_ecs_ik_entity_target_and_fades() {
     const BipedCharacter hero = make_biped_character();
     kin::EcsWorld world;
     WorldRenderState3D state{world};
     auto& w = world.raw();
     const flecs::entity hold = w.entity().set(Transform3D{.position = {0.5f, 1.45f, 0.5f}});
-    const flecs::entity e = w.entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "sway"});
+    const flecs::entity e =
+        w.entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = hero.model}).set(Animator3D{.clip = "sway"});
     Animator3D& a = *e.get_mut<Animator3D>();
     a.add_ik(hand_constraint(0.5f)).set_target(hold, {0, 0.05f, 0}).set_pole_direction({0, 0, -1});
     const float dt = 0.1f;
-    const Vec3f rest_hand = world_position_of(hero, matrices_of(hero.skeleton->rest_pose(), *hero.skeleton), biped::hand_l, Mat4f{});
+    const Vec3f rest_hand =
+        world_position_of(hero, matrices_of(hero.skeleton->rest_pose(), *hero.skeleton), biped::hand_l, Mat4f{});
     // Fade in over half a second: the hand is between at 0.25 s and on the hold at 0.5 s and later.
     std::vector<Mat4f> got;
     Vec3f target = hold.get<Transform3D>()->position + Vec3f{0, 0.05f, 0};
@@ -2764,8 +3074,8 @@ void test_ecs_ik_entity_target_and_fades() {
     target = Vec3f{0.4f, 1.25f, 0.6f};
     got = ik_frame(state, dt);
     assert(close(world_position_of(hero, got, biped::hand_l, Mat4f{}), target, 3e-4f));
-    // Destroyed: safe, and the hand lets go from where the hold was, over the fade (the weight falls steadily, the hand is
-    // still on the old place at first and then on the clips' pose).
+    // Destroyed: safe, and the hand lets go from where the hold was, over the fade (the weight falls steadily, the hand
+    // is still on the old place at first and then on the clips' pose).
     hold.destruct();
     float weight = 1.0f;
     for (int i = 0; i < 8; ++i) {
@@ -2781,8 +3091,9 @@ void test_ecs_ik_entity_target_and_fades() {
     // Nothing left of the weight: the animated pose (the hand where the clips have it).
     const Animator3D& after = *e.get<Animator3D>();
     assert(after.ik_constraints[0].current == 0.0f);
-    Pose clip_pose = after.player.pose();
-    assert(close(world_position_of(hero, got, biped::hand_l, Mat4f{}), world_position_of(hero, matrices_of(clip_pose, *hero.skeleton), biped::hand_l, Mat4f{}), 1e-4f));
+    Pose3D clip_pose = after.player.pose();
+    assert(close(world_position_of(hero, got, biped::hand_l, Mat4f{}),
+                 world_position_of(hero, matrices_of(clip_pose, *hero.skeleton), biped::hand_l, Mat4f{}), 1e-4f));
     // set_weight: up and down with a fade again, with a world point.
     Animator3D& b = *e.get_mut<Animator3D>();
     b.ik("hand").set_target(Vec3f{0.3f, 1.4f, 0.5f}).set_weight(1.0f);
@@ -2794,26 +3105,32 @@ void test_ecs_ik_entity_target_and_fades() {
     for (int i = 0; i < 7; ++i) {
         got = ik_frame(state, dt);
     }
-    assert(close(world_position_of(hero, got, biped::hand_l, Mat4f{}), world_position_of(hero, matrices_of(e.get<Animator3D>()->player.pose(), *hero.skeleton), biped::hand_l, Mat4f{}), 1e-4f));
+    assert(close(world_position_of(hero, got, biped::hand_l, Mat4f{}),
+                 world_position_of(hero, matrices_of(e.get<Animator3D>()->player.pose(), *hero.skeleton), biped::hand_l,
+                                   Mat4f{}),
+                 1e-4f));
 }
 
-// Constraints run in list order, each on the pose the one before left; an animator with none is exactly what it was (the
-// matrices are those of the player's pose, to the bit, and no IK pose is kept).
+// Constraints run in list order, each on the pose the one before left; an animator with none is exactly what it was
+// (the matrices are those of the player's pose, to the bit, and no IK pose is kept).
 void test_ecs_ik_order_and_off_path() {
     const BipedCharacter hero = make_biped_character();
     const auto run = [&](bool with_ik, bool swapped) {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
         auto& w = world.raw();
-        const flecs::entity e = w.entity().set(Transform3D{.position = {1, 0, 0}}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "sway"});
+        const flecs::entity e = w.entity()
+                                    .set(Transform3D{.position = {1, 0, 0}})
+                                    .set(SkinnedMeshRenderer3D{.model = hero.model})
+                                    .set(Animator3D{.clip = "sway"});
         if (with_ik) {
             Animator3D& a = *e.get_mut<Animator3D>();
-            IKConstraint first = hand_constraint();
+            IKConstraint3D first = hand_constraint();
             first.name = "first";
-            first.target = {IKTarget::Kind::World, {1.4f, 1.5f, 0.4f}, 0};
-            IKConstraint second = hand_constraint();
+            first.target = {IKTarget3D::Kind::World, {1.4f, 1.5f, 0.4f}, 0};
+            IKConstraint3D second = hand_constraint();
             second.name = "second";
-            second.target = {IKTarget::Kind::World, {1.2f, 1.1f, 0.5f}, 0};
+            second.target = {IKTarget3D::Kind::World, {1.2f, 1.1f, 0.5f}, 0};
             if (swapped) {
                 a.add_ik(second);
                 a.add_ik(first);
@@ -2834,7 +3151,11 @@ void test_ecs_ik_order_and_off_path() {
     {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "sway"});
+        const flecs::entity e = world.raw()
+                                    .entity()
+                                    .set(Transform3D{})
+                                    .set(SkinnedMeshRenderer3D{.model = hero.model})
+                                    .set(Animator3D{.clip = "sway"});
         const auto got = ik_frame(state, 1.0f / 60.0f);
         std::vector<Mat4f> direct;
         e.get<Animator3D>()->player.joint_matrices(direct);
@@ -2858,23 +3179,30 @@ void test_ecs_ik_deterministic_and_unresolved() {
         auto& w = world.raw();
         u64 h = 1469598103934665603ull;
         for (int n = 0; n < 6; ++n) {
-            const flecs::entity e = w.entity().set(Transform3D{.position = {static_cast<float>(n), 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 20.0f * static_cast<float>(n))})
-                                        .set(SkinnedMeshRenderer{.model = hero.model})
-                                        .set(Animator3D{.clip = "sway"});
+            const flecs::entity e =
+                w.entity()
+                    .set(Transform3D{.position = {static_cast<float>(n), 0, 0},
+                                     .rotation = Quatf::axis_angle({0, 1, 0}, 20.0f * static_cast<float>(n))})
+                    .set(SkinnedMeshRenderer3D{.model = hero.model})
+                    .set(Animator3D{.clip = "sway"});
             Animator3D& a = *e.get_mut<Animator3D>();
-            a.add_ik(hand_constraint(0.2f)).set_target(Vec3f{static_cast<float>(n) + 0.3f, 1.4f, 0.5f}).set_pole_direction({0, 0, -1});
-            IKConstraint look;
+            a.add_ik(hand_constraint(0.2f))
+                .set_target(Vec3f{static_cast<float>(n) + 0.3f, 1.4f, 0.5f})
+                .set_pole_direction({0, 0, -1});
+            IKConstraint3D look;
             look.name = "look";
-            look.kind = IKKind::LookAt;
+            look.kind = IKKind3D::LookAt;
             look.joints = {"neck", "head"};
             look.look_links = {{.weight = 0.4f}, {.weight = 0.6f, .max_yaw_degrees = 70.0f}};
             look.look_at.smooth_seconds = 0.15f;
-            look.target = {IKTarget::Kind::World, {static_cast<float>(n) + 2.0f, 1.7f, 1.0f}, 0};
+            look.target = {IKTarget3D::Kind::World, {static_cast<float>(n) + 2.0f, 1.7f, 1.0f}, 0};
             a.add_ik(look);
         }
         for (int i = 0; i < 40; ++i) {
             const auto m = ik_frame(state, 1.0f / 60.0f);
-            h = (h ^ std::hash<std::string_view>{}(std::string_view{reinterpret_cast<const char*>(m.data()), m.size() * sizeof(Mat4f)})) * 1099511628211ull;
+            h = (h ^ std::hash<std::string_view>{}(
+                         std::string_view{reinterpret_cast<const char*>(m.data()), m.size() * sizeof(Mat4f)})) *
+                1099511628211ull;
         }
         return h;
     };
@@ -2882,8 +3210,12 @@ void test_ecs_ik_deterministic_and_unresolved() {
     // Joints that do not exist: no effect (and no crash), the plain pose.
     kin::EcsWorld world;
     WorldRenderState3D state{world};
-    const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "sway"});
-    IKConstraint bad = hand_constraint();
+    const flecs::entity e = world.raw()
+                                .entity()
+                                .set(Transform3D{})
+                                .set(SkinnedMeshRenderer3D{.model = hero.model})
+                                .set(Animator3D{.clip = "sway"});
+    IKConstraint3D bad = hand_constraint();
     bad.joints = {"shoulder_L", "no_such_joint", "hand_L"};
     e.get_mut<Animator3D>()->add_ik(bad).set_target(Vec3f{1, 1, 1});
     const auto with = ik_frame(state, 0.1f);
@@ -2892,7 +3224,8 @@ void test_ecs_ik_deterministic_and_unresolved() {
     assert(max_difference(with, direct) < 1e-6f);
 }
 
-// --- the fixes to P1b's known limits: joint limits, rest-bend fallback, scaled chains, the bend's swing, FABRIK in the ECS, foot locking ---
+// --- the fixes to P1b's known limits: joint limits, rest-bend fallback, scaled chains, the bend's swing, FABRIK in the
+// ECS, foot locking ---
 
 // The twist of a rotation about `axis` (its swing-twist decomposition), in degrees, signed.
 float twist_degrees(Quatf q, Vec3f axis) {
@@ -2911,7 +3244,7 @@ Vec3f side_of(Vec3f p, Vec3f from, Vec3f to) {
 
 // A rig whose rest pose has `joint` turned (so that the rest chain is bent), pose at rest.
 Rig rig_with_rest_turn(int joint, Quatf turn) {
-    Skeleton sk = skin_fixtures::make_biped();
+    Skeleton3D sk = skin_fixtures::make_biped();
     sk.rest[static_cast<std::size_t>(joint)].rotation = turn;
     std::vector<Mat4f> w;
     compute_world_matrices(sk, sk.rest_pose(), w);
@@ -2928,53 +3261,60 @@ void test_ik_joint_limits() {
     const Vec3f hip = base.at(biped::hip_l);
     const float l1 = base.bone(biped::hip_l, biped::knee_l), l2 = base.bone(biped::knee_l, biped::ankle_l);
 
-    // A maximum bend: a target near the hip makes the knee fold as far as the limit lets it and no further; the foot then stands at
-    // the chord of that fold, toward the target (as near it as a hole round the root, as with unequal bones, lets).
+    // A maximum bend: a target near the hip makes the knee fold as far as the limit lets it and no further; the foot
+    // then stands at the chord of that fold, toward the target (as near it as a hole round the root, as with unequal
+    // bones, lets).
     for (const float most : {150.0f, 100.0f}) {
         Rig r = base;
-        TwoBoneOptions o;
-        o.pole_mode = PoleMode::Direction;
+        TwoBoneOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 0, 1};
         o.max_bend_degrees = most;
         const Vec3f target = hip + normalize(Vec3f{0.2f, -0.3f, 0.5f}) * 0.12f;
-        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+        const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
         assert(res.solved && !res.reached && close(res.bend_degrees, most, 0.05f));
         const float chord = std::sqrt(l1 * l1 + l2 * l2 + 2.0f * l1 * l2 * std::cos(most * 3.14159265f / 180.0f));
         assert(close(length(r.at(biped::ankle_l) - hip), chord, 2e-4f));
-        assert(dot(normalize(r.at(biped::ankle_l) - hip), normalize(target - hip)) > 0.3f); // toward it (not on the line: the hole's aim)
-        assert(close(r.bone(biped::hip_l, biped::knee_l), l1, 1e-5f) && close(r.bone(biped::knee_l, biped::ankle_l), l2, 1e-5f));
-        // A target further out than the fold's chord is not changed by the limit: the pose is the unlimited one's, bit for bit.
+        assert(dot(normalize(r.at(biped::ankle_l) - hip), normalize(target - hip)) >
+               0.3f); // toward it (not on the line: the hole's aim)
+        assert(close(r.bone(biped::hip_l, biped::knee_l), l1, 1e-5f) &&
+               close(r.bone(biped::knee_l, biped::ankle_l), l2, 1e-5f));
+        // A target further out than the fold's chord is not changed by the limit: the pose is the unlimited one's, bit
+        // for bit.
         Rig far_limited = base, far_free = base;
         const Vec3f far_target = hip + Vec3f{0.1f, -0.7f, 0.3f};
         solve_two_bone(far_limited.sk, far_limited.pose, far_limited.world, left_leg, far_target, o);
         o.max_bend_degrees = 180.0f;
         solve_two_bone(far_free.sk, far_free.pose, far_free.world, left_leg, far_target, o);
-        assert(std::memcmp(far_limited.pose.joints.data(), far_free.pose.joints.data(), far_free.pose.joints.size() * sizeof(JointPose)) == 0);
+        assert(std::memcmp(far_limited.pose.joints.data(), far_free.pose.joints.data(),
+                           far_free.pose.joints.size() * sizeof(JointPose3D)) == 0);
     }
 
-    // The hinge: with the knee's X as the axis, every reachable target and every pole leave the knee's local rotation a pure turn
-    // about X by the bend, the positive way. (A straight leg has no plane of its own: it is the hinge's.)
+    // The hinge: with the knee's X as the axis, every reachable target and every pole leave the knee's local rotation a
+    // pure turn about X by the bend, the positive way. (A straight leg has no plane of its own: it is the hinge's.)
     {
         Lcg rng;
         int pure = 0, free_pure = 0;
         for (int i = 0; i < 300; ++i) {
             Rig r = base, f = base;
             const Vec3f target = hip + rng.direction() * (0.2f + 0.7f * (rng.next() * 0.5f + 0.5f)) * (l1 + l2);
-            TwoBoneOptions o;
-            o.pole_mode = PoleMode::Direction;
+            TwoBoneOptions3D o;
+            o.pole_mode = PoleMode3D::Direction;
             o.pole = rng.direction();
-            const TwoBoneResult free_res = solve_two_bone(f.sk, f.pose, f.world, left_leg, target, o);
+            const TwoBoneResult3D free_res = solve_two_bone(f.sk, f.pose, f.world, left_leg, target, o);
             Quatf fq = f.pose.joints[biped::knee_l].rotation;
             free_pure += std::fabs(fq.y) < 1e-3f && std::fabs(fq.z) < 1e-3f ? 1 : 0;
             o.hinge = true;
             o.hinge_axis = {1, 0, 0};
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
             assert(res.solved && res.reached && close(r.at(biped::ankle_l), target, 2e-4f));
-            // The same place for the knee and foot (the hinge changes the twist of the bones, not where the joints are).
-            // (A pole near the target's axis leans on the pose's own side a little, which the hinge gives differently: not compared.)
+            // The same place for the knee and foot (the hinge changes the twist of the bones, not where the joints
+            // are). (A pole near the target's axis leans on the pose's own side a little, which the hinge gives
+            // differently: not compared.)
             const Vec3f axis = normalize(target - hip);
             if (length(o.pole - axis * dot(o.pole, axis)) > 0.5f) {
-                assert(close(r.at(biped::knee_l), f.at(biped::knee_l), 1e-4f) && close(res.bend_degrees, free_res.bend_degrees, 1e-3f));
+                assert(close(r.at(biped::knee_l), f.at(biped::knee_l), 1e-4f) &&
+                       close(res.bend_degrees, free_res.bend_degrees, 1e-3f));
             }
             Quatf q = r.pose.joints[biped::knee_l].rotation;
             if (q.w < 0.0f) {
@@ -2984,12 +3324,13 @@ void test_ik_joint_limits() {
             assert(q.x > -1e-4f && close(twist_degrees(q, {1, 0, 0}), res.bend_degrees, 0.1f));
             ++pure;
         }
-        std::cout << "  ik hinge: " << pure << " of 300 knees are pure hinges with it, " << free_pure << " without" << std::endl;
+        std::cout << "  ik hinge: " << pure << " of 300 knees are pure hinges with it, " << free_pure << " without"
+                  << std::endl;
         assert(free_pure < 150);
     }
 
-    // A knee that a clip hyperextended (bent backward, about X by -25 degrees) is brought to bend the right way by the hinge, to the
-    // same angle and with the foot where it was; without the hinge the solver keeps the clip's side.
+    // A knee that a clip hyperextended (bent backward, about X by -25 degrees) is brought to bend the right way by the
+    // hinge, to the same angle and with the foot where it was; without the hinge the solver keeps the clip's side.
     {
         Rig bent = base;
         bent.pose.joints[biped::knee_l].rotation = Quatf::axis_angle({1, 0, 0}, -25.0f);
@@ -2997,10 +3338,10 @@ void test_ik_joint_limits() {
         const Vec3f target = bent.at(biped::ankle_l);
         const auto knee_forward = [&](bool hinge) {
             Rig r = bent;
-            TwoBoneOptions o;
+            TwoBoneOptions3D o;
             o.hinge = hinge;
             o.hinge_axis = {1, 0, 0};
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
             assert(res.reached && close(r.at(biped::ankle_l), target, 2e-4f) && close(res.bend_degrees, 25.0f, 0.2f));
             return side_of(r.at(biped::knee_l), hip, target).z;
         };
@@ -3008,28 +3349,31 @@ void test_ik_joint_limits() {
         assert(knee_forward(true) > 0.01f);
     }
 
-    // The twist limit: a pole behind a leg that has to bend forward. Without a limit the hip turns half way round to put the knee
-    // behind; with 30 degrees it turns 30 and the knee is mostly forward, the foot still on the target.
+    // The twist limit: a pole behind a leg that has to bend forward. Without a limit the hip turns half way round to
+    // put the knee behind; with 30 degrees it turns 30 and the knee is mostly forward, the foot still on the target.
     {
         const Vec3f target = hip + Vec3f{0.05f, -0.8f, 0.25f};
         const auto solve = [&](float limit, Vec3f pole) {
             Rig r = base;
-            TwoBoneOptions o;
+            TwoBoneOptions3D o;
             o.hinge = true;
             o.hinge_axis = {1, 0, 0};
-            o.pole_mode = PoleMode::Direction;
+            o.pole_mode = PoleMode3D::Direction;
             o.pole = pole;
             o.max_twist_degrees = limit;
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
             assert(res.reached && close(r.at(biped::ankle_l), target, 2e-4f));
-            const Quatf delta = (r.pose.joints[biped::hip_l].rotation * base.pose.joints[biped::hip_l].rotation.conjugate()).normalized();
+            const Quatf delta =
+                (r.pose.joints[biped::hip_l].rotation * base.pose.joints[biped::hip_l].rotation.conjugate())
+                    .normalized();
             return std::pair{r, std::fabs(twist_degrees(delta, {0, -1, 0}))};
         };
         const auto [free_rig, free_twist] = solve(180.0f, {0, 0, -1});
         assert(free_twist > 120.0f && side_of(free_rig.at(biped::knee_l), hip, target).z < -0.01f);
         const auto [held, held_twist] = solve(30.0f, {0, 0, -1});
         assert(held_twist < 30.05f);
-        // Still bent the way the hinge allows: the knee is on the forward side (the clips' side), though the pole says back.
+        // Still bent the way the hinge allows: the knee is on the forward side (the clips' side), though the pole says
+        // back.
         assert(side_of(held.at(biped::knee_l), hip, target).z > 0.0f);
         // Pole to the side (out): 30 degrees of twist is not enough to reach it from the front, so it is partway.
         const auto [part, part_twist] = solve(30.0f, {1, 0, 0});
@@ -3040,8 +3384,9 @@ void test_ik_joint_limits() {
         assert(close(near.at(biped::knee_l), near_free.at(biped::knee_l), 1e-5f) && close(near_twist, nf_twist, 1e-3f));
     }
 
-    // Continuity: the pole goes all the way round the leg (720 steps, 0.5 degrees each) with a limit of 30: the knee moves smoothly,
-    // by about as much as the pole does (its elbow-to-pole gain is at most a few), never a jump, and the foot is always on target.
+    // Continuity: the pole goes all the way round the leg (720 steps, 0.5 degrees each) with a limit of 30: the knee
+    // moves smoothly, by about as much as the pole does (its elbow-to-pole gain is at most a few), never a jump, and
+    // the foot is always on target.
     for (const float limit : {30.0f, 90.0f, 180.0f}) {
         const Vec3f target = hip + Vec3f{0.05f, -0.8f, 0.25f};
         Rig previous;
@@ -3049,28 +3394,32 @@ void test_ik_joint_limits() {
         for (int i = 0; i <= 720; ++i) {
             Rig r = base;
             const float a = static_cast<float>(i) * 0.5f * 3.14159265f / 180.0f;
-            TwoBoneOptions o;
+            TwoBoneOptions3D o;
             o.hinge = true;
             o.hinge_axis = {1, 0, 0};
-            o.pole_mode = PoleMode::Direction;
+            o.pole_mode = PoleMode3D::Direction;
             o.pole = {std::sin(a), 0.2f, std::cos(a)};
             o.max_twist_degrees = limit;
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
+            const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_leg, target, o);
             assert(res.reached && close(r.at(biped::ankle_l), target, 2e-4f));
             if (i > 0) {
-                worst = std::max(worst, angle_degrees(side_of(r.at(biped::knee_l), hip, target), side_of(previous.at(biped::knee_l), hip, target)));
+                worst = std::max(worst, angle_degrees(side_of(r.at(biped::knee_l), hip, target),
+                                                      side_of(previous.at(biped::knee_l), hip, target)));
             }
             previous = std::move(r);
         }
-        std::cout << "  ik twist limit " << limit << ": pole round the leg in 0.5 degree steps, worst step of the knee " << worst << " degrees" << std::endl;
+        std::cout << "  ik twist limit " << limit << ": pole round the leg in 0.5 degree steps, worst step of the knee "
+                  << worst << " degrees" << std::endl;
         assert(worst < 4.0f);
     }
 }
 
-// Item 5: a straight chain with no pole bends the way the rest pose is bent (what the rig's author built), not toward -Y.
+// Item 5: a straight chain with no pole bends the way the rest pose is bent (what the rig's author built), not toward
+// -Y.
 void test_ik_rest_bend_fallback() {
-    // An arm (along +X) whose elbow is built bent (a turn of 30 degrees about Y in its rest pose: the forearm toward -Z, the elbow
-    // pointing forward, +Z); a pose that has the forearm straight on the upper arm (the elbow's own turn undone).
+    // An arm (along +X) whose elbow is built bent (a turn of 30 degrees about Y in its rest pose: the forearm toward
+    // -Z, the elbow pointing forward, +Z); a pose that has the forearm straight on the upper arm (the elbow's own turn
+    // undone).
     const Quatf built = Quatf::axis_angle({0, 1, 0}, 30.0f);
     Rig rig = rig_with_rest_turn(biped::elbow_l, built);
     const Vec3f shoulder = rig.at(biped::shoulder_l);
@@ -3081,12 +3430,13 @@ void test_ik_rest_bend_fallback() {
     const Vec3f target = shoulder + Vec3f{0.25f, -0.2f, 0.1f};
     const auto elbow_side = [&](const Rig& base_rig) {
         Rig r = base_rig;
-        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target);
+        const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target);
         assert(res.reached && close(r.at(biped::hand_l), target, 2e-4f));
         return side_of(r.at(biped::elbow_l), shoulder, target);
     };
     const Vec3f side = elbow_side(rig);
-    // The rest elbow's side (from the line shoulder-hand): the solver's elbow lies on that side, whichever way it is (not down).
+    // The rest elbow's side (from the line shoulder-hand): the solver's elbow lies on that side, whichever way it is
+    // (not down).
     Rig at_rest = rig_with_rest_turn(biped::elbow_l, built);
     const Vec3f rest_side = side_of(at_rest.at(biped::elbow_l), shoulder, at_rest.at(biped::hand_l));
     assert(length(rest_side) > 0.02f);
@@ -3100,7 +3450,7 @@ void test_ik_rest_bend_fallback() {
         Rig leg = straight_rig;
         const Vec3f hip = leg.at(biped::hip_l);
         const Vec3f t = hip + Vec3f{0.05f, -0.75f, 0.1f};
-        TwoBoneOptions o;
+        TwoBoneOptions3D o;
         o.hinge = true;
         o.hinge_axis = {1, 0, 0};
         solve_two_bone(leg.sk, leg.pose, leg.world, left_leg, t, o);
@@ -3109,7 +3459,8 @@ void test_ik_rest_bend_fallback() {
         solve_two_bone(no_hinge.sk, no_hinge.pose, no_hinge.world, left_leg, t);
         assert(side_of(no_hinge.at(biped::knee_l), hip, t).y < side_of(leg.at(biped::knee_l), hip, t).y);
     }
-    // Continuity: a sweep of the straight pose's target round the root (no pole) keeps small steps with the rest bend as the default.
+    // Continuity: a sweep of the straight pose's target round the root (no pole) keeps small steps with the rest bend
+    // as the default.
     {
         Rig previous;
         float worst = 0.0f;
@@ -3117,7 +3468,7 @@ void test_ik_rest_bend_fallback() {
             Rig r = rig;
             const float u = static_cast<float>(i) / 2000.0f * 6.2831853f;
             const Vec3f t = shoulder + Vec3f{0.3f + 0.4f * std::cos(u), 0.4f * std::sin(u), 0.2f};
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, t);
+            const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_arm, t);
             assert(res.solved);
             if (i > 0) {
                 worst = std::max(worst, pose_step(previous, r, left_arm).worst());
@@ -3129,8 +3480,9 @@ void test_ik_rest_bend_fallback() {
     }
 }
 
-// Item 4: a non-uniform scale on the root joint itself, on the mid joint, and on both: the hand lands on targets that are reachable
-// (made by turning the joints of a scaled arm), the pose matches a full recompute, a second solve changes nothing.
+// Item 4: a non-uniform scale on the root joint itself, on the mid joint, and on both: the hand lands on targets that
+// are reachable (made by turning the joints of a scaled arm), the pose matches a full recompute, a second solve changes
+// nothing.
 void test_ik_two_bone_nonuniform_scale() {
     struct Case {
         const char* what;
@@ -3152,15 +3504,19 @@ void test_ik_two_bone_nonuniform_scale() {
             truth.refresh();
             // A reachable target: the hand of this arm turned at random.
             Rig made = truth;
-            made.pose.joints[biped::shoulder_l].rotation = Quatf::axis_angle(rng.direction(), 40.0f * (rng.next() * 0.5f + 0.5f)) * truth.pose.joints[biped::shoulder_l].rotation;
-            made.pose.joints[biped::elbow_l].rotation = Quatf::axis_angle({0.1f, 1, 0.2f}, -10.0f - 90.0f * (rng.next() * 0.5f + 0.5f));
+            made.pose.joints[biped::shoulder_l].rotation =
+                Quatf::axis_angle(rng.direction(), 40.0f * (rng.next() * 0.5f + 0.5f)) *
+                truth.pose.joints[biped::shoulder_l].rotation;
+            made.pose.joints[biped::elbow_l].rotation =
+                Quatf::axis_angle({0.1f, 1, 0.2f}, -10.0f - 90.0f * (rng.next() * 0.5f + 0.5f));
             made.refresh();
             const Vec3f target = made.at(biped::hand_l);
             Rig r = truth;
-            TwoBoneOptions o;
-            o.pole_mode = PoleMode::Direction;
-            o.pole = normalize(side_of(made.at(biped::elbow_l), made.at(biped::shoulder_l), made.at(biped::hand_l))); // the side it was made with
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
+            TwoBoneOptions3D o;
+            o.pole_mode = PoleMode3D::Direction;
+            o.pole = normalize(side_of(made.at(biped::elbow_l), made.at(biped::shoulder_l),
+                                       made.at(biped::hand_l))); // the side it was made with
+            const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
             assert(res.solved);
             worst_hand = std::max(worst_hand, length(r.at(biped::hand_l) - target));
             // The matrices kept in step are the pose's own.
@@ -3171,15 +3527,18 @@ void test_ik_two_bone_nonuniform_scale() {
             const std::vector<Mat4f> once = r.world;
             solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
             assert(max_difference(once, r.world) < 5e-5f);
-            // Bones: the upper bone is what it was; the forearm is the length it is drawn at, which depends on how the scaled joints turn
-            // it, so it is not asserted equal (no rotation can keep it).
-            worst_length = std::max(worst_length, std::fabs(r.bone(biped::shoulder_l, biped::elbow_l) - truth.bone(biped::shoulder_l, biped::elbow_l)));
+            // Bones: the upper bone is what it was; the forearm is the length it is drawn at, which depends on how the
+            // scaled joints turn it, so it is not asserted equal (no rotation can keep it).
+            worst_length = std::max(worst_length, std::fabs(r.bone(biped::shoulder_l, biped::elbow_l) -
+                                                            truth.bone(biped::shoulder_l, biped::elbow_l)));
             ++solved;
         }
-        std::cout << "  ik scaled chain, " << c.what << ": hand within " << worst_hand << " of 120 reachable targets, upper bone off by at most " << worst_length << "" << std::endl;
+        std::cout << "  ik scaled chain, " << c.what << ": hand within " << worst_hand
+                  << " of 120 reachable targets, upper bone off by at most " << worst_length << "" << std::endl;
         assert(solved == 120 && worst_hand < 2e-4f && worst_length < 1e-4f);
     }
-    // The end orientation on a chain whose mid joint is scaled: the matrices' own rotation of the hand reaches the goal.
+    // The end orientation on a chain whose mid joint is scaled: the matrices' own rotation of the hand reaches the
+    // goal.
     {
         Rig r = bent_arm_rig();
         r.pose.joints[biped::elbow_l].scale = {0.7f, 1.4f, 1.1f};
@@ -3187,65 +3546,72 @@ void test_ik_two_bone_nonuniform_scale() {
         r.refresh();
         const Vec3f target = r.at(biped::shoulder_l) + Vec3f{0.3f, -0.15f, 0.35f};
         const Quatf want = Quatf::axis_angle({0.4f, 1, -0.3f}, 110.0f);
-        TwoBoneOptions o;
-        o.pole_mode = PoleMode::Direction;
+        TwoBoneOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 0, -1};
         o.match_rotation = true;
         o.end_rotation = want;
-        const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
+        const TwoBoneResult3D res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o);
         assert(res.solved);
         const float angle = angle_degrees(r.rotation(biped::hand_l), want);
-        std::cout << "  ik scaled chain, orientation: hand " << length(r.at(biped::hand_l) - target) << " from the target, " << angle << " degrees from the goal" << std::endl;
+        std::cout << "  ik scaled chain, orientation: hand " << length(r.at(biped::hand_l) - target)
+                  << " from the target, " << angle << " degrees from the goal" << std::endl;
         assert(angle < 0.05f && length(r.at(biped::hand_l) - target) < 2e-4f);
     }
-    // A weight of 0.5 on a scaled chain is half way (as an angle) between the pose and the full solve, for both rotations.
+    // A weight of 0.5 on a scaled chain is half way (as an angle) between the pose and the full solve, for both
+    // rotations.
     {
         Rig base = bent_arm_rig();
         base.pose.joints[biped::shoulder_l].scale = {1.5f, 0.6f, 2.0f};
         base.refresh();
         const Vec3f target = base.at(biped::shoulder_l) + Vec3f{0.2f, -0.3f, 0.4f};
-        TwoBoneOptions o;
-        o.pole_mode = PoleMode::Direction;
+        TwoBoneOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 1, 0};
         Rig full = base, half = base;
         solve_two_bone(full.sk, full.pose, full.world, left_arm, target, o);
         o.weight = 0.5f;
         solve_two_bone(half.sk, half.pose, half.world, left_arm, target, o);
         for (int j : {biped::shoulder_l, biped::elbow_l}) {
-            const float whole = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation, full.pose.joints[static_cast<std::size_t>(j)].rotation);
-            const float part = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation, half.pose.joints[static_cast<std::size_t>(j)].rotation);
+            const float whole = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation,
+                                              full.pose.joints[static_cast<std::size_t>(j)].rotation);
+            const float part = angle_degrees(base.pose.joints[static_cast<std::size_t>(j)].rotation,
+                                             half.pose.joints[static_cast<std::size_t>(j)].rotation);
             assert(whole > 3.0f && close(part, whole * 0.5f, 0.1f));
         }
     }
 }
 
-// Item 6: the elbow's side through the pole's axis, and the fold's centre. Statelessly the side has to turn over a few degrees of the
-// target's travel (the hairy-ball theorem: no tangent field on the sphere of target directions is without a zero), over time with
-// a TwoBoneState it turns at a bounded speed.
+// Item 6: the elbow's side through the pole's axis, and the fold's centre. Statelessly the side has to turn over a few
+// degrees of the target's travel (the hairy-ball theorem: no tangent field on the sphere of target directions is
+// without a zero), over time with a TwoBoneState3D it turns at a bounded speed.
 void test_ik_bend_swing_and_singularities() {
     const Rig base = bent_arm_rig();
     const Vec3f root = base.at(biped::shoulder_l);
-    TwoBoneOptions pole;
-    pole.pole_mode = PoleMode::Direction;
+    TwoBoneOptions3D pole;
+    pole.pole_mode = PoleMode3D::Direction;
     pole.pole = {0, 1, 0};
-    // A target crossing the pole's axis at the rate of a hand across the top of the head, in 120 frames at 60 Hz (2 s): the stateless
-    // side turns over a handful of frames; with a swing speed it is limited.
+    // A target crossing the pole's axis at the rate of a hand across the top of the head, in 120 frames at 60 Hz (2 s):
+    // the stateless side turns over a handful of frames; with a swing speed it is limited.
     const Vec3f across_dir = normalize(Vec3f{1.0f, 0.0f, 0.6f});
     const auto run = [&](float speed_degrees, int steps) {
-        TwoBoneState state;
+        TwoBoneState3D state;
         Rig previous;
         float worst_side = 0.0f, worst_hand_err = 0.0f;
         for (int i = 0; i <= steps; ++i) {
             Rig r = base;
             const float u = static_cast<float>(i) / static_cast<float>(steps);
             const Vec3f target = root + Vec3f{0, 0.7f, 0} + across_dir * (u * 0.6f - 0.3f);
-            TwoBoneOptions o = pole;
+            TwoBoneOptions3D o = pole;
             o.bend_swing_degrees_per_second = speed_degrees;
-            const TwoBoneResult res = solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o, &state, 1.0f / 60.0f);
+            const TwoBoneResult3D res =
+                solve_two_bone(r.sk, r.pose, r.world, left_arm, target, o, &state, 1.0f / 60.0f);
             assert(res.solved && res.reached);
             worst_hand_err = std::max(worst_hand_err, length(r.at(biped::hand_l) - target));
             if (i > 0) {
-                worst_side = std::max(worst_side, angle_degrees(side_of(r.at(biped::elbow_l), root, r.at(biped::hand_l)), side_of(previous.at(biped::elbow_l), root, previous.at(biped::hand_l))));
+                worst_side = std::max(
+                    worst_side, angle_degrees(side_of(r.at(biped::elbow_l), root, r.at(biped::hand_l)),
+                                              side_of(previous.at(biped::elbow_l), root, previous.at(biped::hand_l))));
             }
             previous = std::move(r);
         }
@@ -3255,8 +3621,9 @@ void test_ik_bend_swing_and_singularities() {
     for (const int frames : {120, 40}) {
         const float free_worst = run(0.0f, frames);
         const float limited = run(360.0f, frames);
-        std::cout << "  ik pole-axis crossing in " << frames << " frames: worst step of the elbow's side " << free_worst << " degrees stateless, " << limited
-                  << " with a swing of 360 degrees a second (6 a frame)" << std::endl;
+        std::cout << "  ik pole-axis crossing in " << frames << " frames: worst step of the elbow's side " << free_worst
+                  << " degrees stateless, " << limited << " with a swing of 360 degrees a second (6 a frame)"
+                  << std::endl;
         assert(limited < 6.0f + 0.5f);
         if (frames == 40) {
             assert(free_worst > 15.0f);
@@ -3264,10 +3631,10 @@ void test_ik_bend_swing_and_singularities() {
     }
     // And it gets where the stateless side is, given time: hold the last target for a second.
     {
-        TwoBoneState state;
+        TwoBoneState3D state;
         const Vec3f end_target = root + Vec3f{0.3f, 0.7f, 0.18f};
         Rig r = base, free = base;
-        TwoBoneOptions o = pole;
+        TwoBoneOptions3D o = pole;
         o.bend_swing_degrees_per_second = 360.0f;
         solve_two_bone(r.sk, r.pose, r.world, left_arm, root + Vec3f{-0.3f, 0.7f, -0.18f}, o, &state, 1.0f / 60.0f);
         for (int i = 0; i < 60; ++i) {
@@ -3279,8 +3646,8 @@ void test_ik_bend_swing_and_singularities() {
     }
     // dt of 0 holds the side it was on (a second solve in the frame is the first's).
     {
-        TwoBoneState state;
-        TwoBoneOptions o = pole;
+        TwoBoneState3D state;
+        TwoBoneOptions3D o = pole;
         o.bend_swing_degrees_per_second = 90.0f;
         Rig a = base, b = base;
         const Vec3f t1 = root + Vec3f{0.2f, 0.6f, 0.3f}, t2 = root + Vec3f{-0.2f, 0.6f, -0.3f};
@@ -3293,10 +3660,10 @@ void test_ik_bend_swing_and_singularities() {
         (void)b;
     }
 
-    // The fold's centre: equal bones, a target passing through the root. The joints are in the same places on both sides (the pose is
-    // continuous); the upper bone's twist about its own axis goes 180 degrees in one step AT the centre, and for a target that
-    // passes at a distance d from it, over the steps within about d of it. Worst step of the root's rotation for passes at
-    // 0, 2 mm and 20 mm, 2,000 steps over 1.6 m.
+    // The fold's centre: equal bones, a target passing through the root. The joints are in the same places on both
+    // sides (the pose is continuous); the upper bone's twist about its own axis goes 180 degrees in one step AT the
+    // centre, and for a target that passes at a distance d from it, over the steps within about d of it. Worst step of
+    // the root's rotation for passes at 0, 2 mm and 20 mm, 2,000 steps over 1.6 m.
     {
         Rig equal = base;
         equal.pose.joints[biped::hand_l].translation = {0.5f, 0, 0};
@@ -3310,18 +3677,22 @@ void test_ik_bend_swing_and_singularities() {
             float worst = 0.0f, move = 0.0f;
             for (int i = 0; i <= 2000; ++i) {
                 Rig r = equal;
-                const Vec3f target = root + line * ((static_cast<float>(i) / 2000.0f) * 1.6f - 0.8f) + offset * distance;
+                const Vec3f target =
+                    root + line * ((static_cast<float>(i) / 2000.0f) * 1.6f - 0.8f) + offset * distance;
                 solve_two_bone(r.sk, r.pose, r.world, left_arm, target, pole);
                 if (i > 0) {
-                    worst = std::max(worst, angle_degrees(previous.pose.joints[biped::shoulder_l].rotation, r.pose.joints[biped::shoulder_l].rotation));
+                    worst = std::max(worst, angle_degrees(previous.pose.joints[biped::shoulder_l].rotation,
+                                                          r.pose.joints[biped::shoulder_l].rotation));
                     move = std::max(move, length(r.at(biped::elbow_l) - previous.at(biped::elbow_l)));
                 }
                 previous = std::move(r);
             }
-            std::cout << "  ik fold centre, pass at " << distance * 1000.0f << " mm: worst step of the shoulder " << worst << " degrees, elbow moves at most " << move << " a step" << std::endl;
+            std::cout << "  ik fold centre, pass at " << distance * 1000.0f << " mm: worst step of the shoulder "
+                      << worst << " degrees, elbow moves at most " << move << " a step" << std::endl;
             worst_for[k++] = worst;
         }
-        // Through it exactly: the half turn in one step. A pass 2 cm off turns the shoulder over some steps, each of them well under that.
+        // Through it exactly: the half turn in one step. A pass 2 cm off turns the shoulder over some steps, each of
+        // them well under that.
         assert(worst_for[0] > 90.0f);
         assert(worst_for[2] < 20.0f);
     }
@@ -3352,11 +3723,12 @@ void test_ik_fabrik_pole() {
     solve_chain_fabrik(plain.sk, plain.pose, plain.world, spine, target);
     for (const Vec3f pole : {Vec3f{0, 0, 1}, Vec3f{0, 0, -1}, Vec3f{-1, 0, 0}}) {
         Rig r = base;
-        FabrikOptions o;
-        o.pole_mode = PoleMode::Direction;
+        FabrikOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = pole;
-        const FabrikResult res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
-        assert(res.solved && res.reached && close(r.at(biped::head), target, 1e-3f) && close(r.at(biped::pelvis), root, 1e-5f));
+        const FabrikResult3D res = solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
+        assert(res.solved && res.reached && close(r.at(biped::head), target, 1e-3f) &&
+               close(r.at(biped::pelvis), root, 1e-5f));
         for (std::size_t k = 0; k + 1 < spine.size(); ++k) {
             assert(close(r.bone(spine[k], spine[k + 1]), base.bone(spine[k], spine[k + 1]), 1e-4f));
         }
@@ -3371,71 +3743,78 @@ void test_ik_fabrik_pole() {
     // A pole as a point equals the direction to it from the first joint.
     {
         Rig a = base, b = base;
-        FabrikOptions o;
-        o.pole_mode = PoleMode::Direction;
+        FabrikOptions3D o;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = normalize(Vec3f{-1, 0.2f, 0.5f});
         solve_chain_fabrik(a.sk, a.pose, a.world, spine, target, o);
-        o.pole_mode = PoleMode::Position;
+        o.pole_mode = PoleMode3D::Position;
         o.pole = root + Vec3f{-1, 0.2f, 0.5f} * 3.0f;
         solve_chain_fabrik(b.sk, b.pose, b.world, spine, target, o);
         assert(close(a.at(biped::chest), b.at(biped::chest), 1e-4f));
     }
-    // Continuity: the pole turning all the way round the axis (360 steps): the chain turns with it, a step at most the pole's own plus a
-    // little; a pole along the axis fades out (no jump) rather than flips.
+    // Continuity: the pole turning all the way round the axis (360 steps): the chain turns with it, a step at most the
+    // pole's own plus a little; a pole along the axis fades out (no jump) rather than flips.
     {
         Rig previous;
         float worst = 0.0f;
         for (int i = 0; i <= 720; ++i) {
             Rig r = base;
             const float a = static_cast<float>(i) * 0.5f * 3.14159265f / 180.0f;
-            FabrikOptions o;
-            o.pole_mode = PoleMode::Direction;
+            FabrikOptions3D o;
+            o.pole_mode = PoleMode3D::Direction;
             o.pole = {std::sin(a), 0.1f, std::cos(a)};
             solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o);
             if (i > 0) {
-                worst = std::max(worst, angle_degrees(side_of(r.at(biped::chest), root, r.at(biped::head)), side_of(previous.at(biped::chest), root, previous.at(biped::head))));
+                worst =
+                    std::max(worst, angle_degrees(side_of(r.at(biped::chest), root, r.at(biped::head)),
+                                                  side_of(previous.at(biped::chest), root, previous.at(biped::head))));
             }
             previous = std::move(r);
         }
-        std::cout << "  ik fabrik pole round the axis in 0.5 degree steps: worst step of the bulge " << worst << " degrees" << std::endl;
+        std::cout << "  ik fabrik pole round the axis in 0.5 degree steps: worst step of the bulge " << worst
+                  << " degrees" << std::endl;
         assert(worst < 3.0f);
     }
     // Weight 0 leaves it, bit for bit.
     {
         Rig r = base;
-        FabrikOptions o;
+        FabrikOptions3D o;
         o.weight = 0.0f;
-        o.pole_mode = PoleMode::Direction;
+        o.pole_mode = PoleMode3D::Direction;
         o.pole = {0, 0, 1};
         assert(!solve_chain_fabrik(r.sk, r.pose, r.world, spine, target, o).solved);
-        assert(std::memcmp(r.pose.joints.data(), base.pose.joints.data(), base.pose.joints.size() * sizeof(JointPose)) == 0);
+        assert(std::memcmp(r.pose.joints.data(), base.pose.joints.data(),
+                           base.pose.joints.size() * sizeof(JointPose3D)) == 0);
     }
 }
 
-// Item 3: a foot planted in the world stays there while the body moves over it, lets go at the threshold and eases back; the toe turns
-// to its own ground; the ground query is called once for a leg (and once for a toe).
+// Item 3: a foot planted in the world stays there while the body moves over it, lets go at the threshold and eases
+// back; the toe turns to its own ground; the ground query is called once for a leg (and once for a toe).
 void test_ik_foot_locking_and_toes() {
-    const Skeleton toes = skin_fixtures::make_biped_toes();
+    const Skeleton3D toes = skin_fixtures::make_biped_toes();
     const Rig base{toes};
-    const std::array<FootLeg, 2> legs = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f, biped::toe_l, 0.0f},
-                                         FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f, biped::toe_r, 0.0f}};
-    TwoBoneOptions knee;
-    knee.pole_mode = PoleMode::Direction;
+    const std::array<FootLeg3D, 2> legs = {
+        FootLeg3D{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f, biped::toe_l, 0.0f},
+        FootLeg3D{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f, biped::toe_r, 0.0f}};
+    TwoBoneOptions3D knee;
+    knee.pole_mode = PoleMode3D::Direction;
     knee.pole = {0, 0, 1};
     knee.max_stretch = 1.3f;
     const float dt = 1.0f / 60.0f;
 
-    // Locking: the body (model_to_world) moves 1 cm a frame along +Z over feet that stand on the ground in the animation.
+    // Locking: the body (model_to_world) moves 1 cm a frame along +Z over feet that stand on the ground in the
+    // animation.
     const auto run = [&](bool lock, std::vector<Vec3f>* ankle_world, std::vector<bool>* locked) {
-        FootPlacementOptions o;
+        FootPlacementOptions3D o;
         o.smooth_seconds = 0.0f;
         o.lock_feet = lock;
-        FootPlacementState state;
+        FootPlacementState3D state;
         FakeGround ground{[](float, float) { return 0.0f; }};
         for (int i = 0; i < 60; ++i) {
             Rig r = base;
             const Mat4f to_world = Mat4f::translation({0.0f, 0.0f, 0.01f * static_cast<float>(i)});
-            const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &to_world);
+            const FootPlan3D plan =
+                plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &to_world);
             apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, knee);
             ankle_world->push_back(to_world.apply(r.at(biped::ankle_l)));
             locked->push_back(plan.feet[0].locked);
@@ -3447,9 +3826,9 @@ void test_ik_foot_locking_and_toes() {
     run(false, &free_run, &free_flags);
     // Unlocked: the ankle goes with the body, 1 cm a frame.
     assert(close(free_run[59].z - free_run[0].z, 0.59f, 1e-4f));
-    // Locked: the ankle stays at its place in the world until the animated foot is 15 cm from it (frame 15), then eases back over
-    // 0.15 s to the animated ankle (which has gone on), by steps no bigger than the smoothstep's (1.5 x 15 cm / 9 frames = 2.5 cm) and
-    // the body's own 1 cm.
+    // Locked: the ankle stays at its place in the world until the animated foot is 15 cm from it (frame 15), then eases
+    // back over 0.15 s to the animated ankle (which has gone on), by steps no bigger than the smoothstep's (1.5 x 15 cm
+    // / 9 frames = 2.5 cm) and the body's own 1 cm.
     for (int i = 1; i < 15; ++i) {
         assert(held_flags[static_cast<std::size_t>(i)] && close(held[static_cast<std::size_t>(i)], held[0], 2e-4f));
     }
@@ -3457,7 +3836,8 @@ void test_ik_foot_locking_and_toes() {
     for (int i = 1; i < 60; ++i) {
         worst = std::max(worst, length(held[static_cast<std::size_t>(i)] - held[static_cast<std::size_t>(i - 1)]));
     }
-    std::cout << "  ik foot lock: held to " << length(held[14] - held[0]) << " m over 14 frames, worst step of the ankle in the world " << worst
+    std::cout << "  ik foot lock: held to " << length(held[14] - held[0])
+              << " m over 14 frames, worst step of the ankle in the world " << worst
               << " m (the body moves 0.01 a frame)" << std::endl;
     assert(worst < 0.04f);
     // After the release the foot catches up and plants again: later frames hold still again.
@@ -3468,14 +3848,14 @@ void test_ik_foot_locking_and_toes() {
     assert(still >= 12);
     // The held foot is not a different foot: bones keep their lengths and the matrices are the pose's own.
     {
-        FootPlacementOptions o;
+        FootPlacementOptions3D o;
         o.smooth_seconds = 0.0f;
         o.lock_feet = true;
-        FootPlacementState state;
+        FootPlacementState3D state;
         FakeGround ground{[](float, float) { return 0.0f; }};
         Rig r = base;
         const Mat4f first = Mat4f::translation({0, 0, 0});
-        FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &first);
+        FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &first);
         Rig r2 = base;
         const Mat4f later = Mat4f::translation({0, 0, 0.08f});
         plan = plan_foot_placement(r2.sk, r2.pose, r2.world, legs, ground.query(), o, &state, dt, &later);
@@ -3485,24 +3865,25 @@ void test_ik_foot_locking_and_toes() {
         compute_world_matrices(r2.sk, r2.pose, again);
         assert(max_difference(again, r2.world) < 1e-4f);
     }
-    // A foot that lifts in the animation lets go at once (the hip swings the foot forward and up); weight of the lock is easing.
+    // A foot that lifts in the animation lets go at once (the hip swings the foot forward and up); weight of the lock
+    // is easing.
     {
-        FootPlacementOptions o;
+        FootPlacementOptions3D o;
         o.smooth_seconds = 0.0f;
         o.lock_feet = true;
-        FootPlacementState state;
+        FootPlacementState3D state;
         FakeGround ground{[](float, float) { return 0.0f; }};
         const Mat4f id{};
         Rig r = base;
-        FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &id);
+        FootPlan3D plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o, &state, dt, &id);
         assert(plan.feet[0].locked && state.locks[0].planted);
         Rig lifted = base;
         lifted.pose.joints[biped::hip_l].rotation = Quatf::axis_angle({1, 0, 0}, -40.0f);
         lifted.refresh();
         plan = plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, ground.query(), o, &state, dt, &id);
         assert(!state.locks[0].planted); // let go...
-        const FootTarget& first = plan.feet[0];
-        assert(first.locked);            // ...and easing, not snapped
+        const FootTarget3D& first = plan.feet[0];
+        assert(first.locked); // ...and easing, not snapped
         for (int i = 0; i < 12; ++i) {
             plan = plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, ground.query(), o, &state, dt, &id);
         }
@@ -3513,20 +3894,22 @@ void test_ik_foot_locking_and_toes() {
     {
         FakeGround ground{[](float, float) { return 0.0f; }};
         Rig r = base;
-        FootPlacementOptions o;
+        FootPlacementOptions3D o;
         plan_foot_placement(r.sk, r.pose, r.world, legs, ground.query(), o);
         assert(ground.casts == 4); // two legs, each with a toe
         ground.casts = 0;
-        const std::array<FootLeg, 2> no_toes = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}, FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
+        const std::array<FootLeg3D, 2> no_toes = {FootLeg3D{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f},
+                                                  FootLeg3D{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
         plan_foot_placement(r.sk, r.pose, r.world, no_toes, ground.query(), o);
         assert(ground.casts == 2);
     }
 
-    // Toes: ground rising at 20 degrees from z = 0.1 (under the toe, 0.15 forward of the ankle; the ankle's own ground is flat). The toe
-    // turns to the slope's normal; clamped by toe_max_tilt_degrees and by the foot's slope clamp; none while the foot is high.
+    // Toes: ground rising at 20 degrees from z = 0.1 (under the toe, 0.15 forward of the ankle; the ankle's own ground
+    // is flat). The toe turns to the slope's normal; clamped by toe_max_tilt_degrees and by the foot's slope clamp;
+    // none while the foot is high.
     {
         const auto ground_with_slope = [](float degrees, int* casts) {
-            return [degrees, casts](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            return [degrees, casts](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
                 ++*casts;
                 const float rad = degrees * 3.14159265f / 180.0f;
                 const auto height = [&](float z) { return z > 0.1f ? (z - 0.1f) * std::tan(rad) : 0.0f; };
@@ -3535,16 +3918,18 @@ void test_ik_foot_locking_and_toes() {
                 if (from.y < h || to.y > h) {
                     return std::nullopt;
                 }
-                return GroundHit{{from.x, h, from.z}, n};
+                return GroundHit3D{{from.x, h, from.z}, n};
             };
         };
-        for (const auto& [slope, toe_max, expect] : {std::tuple{20.0f, 40.0f, 20.0f}, std::tuple{50.0f, 40.0f, 30.0f}, std::tuple{20.0f, 8.0f, 8.0f}}) {
+        for (const auto& [slope, toe_max, expect] :
+             {std::tuple{20.0f, 40.0f, 20.0f}, std::tuple{50.0f, 40.0f, 30.0f}, std::tuple{20.0f, 8.0f, 8.0f}}) {
             int casts = 0;
             Rig r = base;
-            FootPlacementOptions o;
+            FootPlacementOptions3D o;
             o.smooth_seconds = 0.0f;
             o.toe_max_tilt_degrees = toe_max;
-            const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, legs, ground_with_slope(slope, &casts), o);
+            const FootPlan3D plan =
+                plan_foot_placement(r.sk, r.pose, r.world, legs, ground_with_slope(slope, &casts), o);
             assert(casts == 4 && plan.feet[0].toe_grounded && plan.feet[0].grounded);
             apply_foot_placement(r.sk, r.pose, r.world, biped::pelvis, legs, plan, knee);
             const Vec3f toe_up = normalize(r.world[biped::toe_l].apply_vector({0, 1, 0}));
@@ -3555,26 +3940,30 @@ void test_ik_foot_locking_and_toes() {
             // Which way: the toe's up leans back (toward -Z) on a slope that rises ahead.
             assert(toe_up.z < 0.0f);
         }
-        // A foot in the air (the hip swung forward and up) does not follow the ground under its toe: the toe is turned with the foot only.
+        // A foot in the air (the hip swung forward and up) does not follow the ground under its toe: the toe is turned
+        // with the foot only.
         {
             Rig lifted = base;
             lifted.pose.joints[biped::hip_l].rotation = Quatf::axis_angle({1, 0, 0}, -40.0f);
             lifted.refresh();
-            FootPlacementOptions o;
+            FootPlacementOptions3D o;
             o.smooth_seconds = 0.0f;
-            // A ramp that is under the lifted toe too (the ground rises everywhere ahead of z = -1): the toe would tilt on it if it were on the ground.
-            const auto tilted_everywhere = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            // A ramp that is under the lifted toe too (the ground rises everywhere ahead of z = -1): the toe would tilt
+            // on it if it were on the ground.
+            const auto tilted_everywhere = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
                 const float t = std::tan(25.0f * 3.14159265f / 180.0f);
                 const float h = (from.z + 1.0f) * t;
                 if (from.y < h || to.y > h) {
                     return std::nullopt;
                 }
-                return GroundHit{{from.x, h, from.z}, normalize(Vec3f{0, 1, -t})};
+                return GroundHit3D{{from.x, h, from.z}, normalize(Vec3f{0, 1, -t})};
             };
-            const FootPlan plan = plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, tilted_everywhere, o);
+            const FootPlan3D plan =
+                plan_foot_placement(lifted.sk, lifted.pose, lifted.world, legs, tilted_everywhere, o);
             Rig placed = lifted;
             apply_foot_placement(placed.sk, placed.pose, placed.world, biped::pelvis, legs, plan, knee);
-            // The toe's up against the ankle's up: the same (the toe's own animated turn was none), whatever the ground there says.
+            // The toe's up against the ankle's up: the same (the toe's own animated turn was none), whatever the ground
+            // there says.
             const Vec3f toe_up = normalize(placed.world[biped::toe_l].apply_vector({0, 1, 0}));
             const Vec3f ankle_up = normalize(placed.world[biped::ankle_l].apply_vector({0, 1, 0}));
             assert(plan.feet[0].grounded && plan.feet[0].toe_grounded);
@@ -3583,17 +3972,20 @@ void test_ik_foot_locking_and_toes() {
         // No toe joint named: the foot is as it was.
         int casts = 0;
         Rig r = base;
-        FootPlacementOptions o;
+        FootPlacementOptions3D o;
         o.smooth_seconds = 0.0f;
-        const std::array<FootLeg, 2> no_toes = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}, FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
-        const FootPlan plan = plan_foot_placement(r.sk, r.pose, r.world, no_toes, ground_with_slope(20.0f, &casts), o);
+        const std::array<FootLeg3D, 2> no_toes = {FootLeg3D{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f},
+                                                  FootLeg3D{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
+        const FootPlan3D plan =
+            plan_foot_placement(r.sk, r.pose, r.world, no_toes, ground_with_slope(20.0f, &casts), o);
         assert(casts == 2 && !plan.feet[0].toe_grounded);
         // Weight 0 of the leg options leaves the toe too.
-        TwoBoneOptions zero = knee;
+        TwoBoneOptions3D zero = knee;
         zero.weight = 0.5f;
         Rig half = base, full = base;
         int c2 = 0;
-        const FootPlan plan2 = plan_foot_placement(half.sk, half.pose, half.world, legs, ground_with_slope(20.0f, &c2), o);
+        const FootPlan3D plan2 =
+            plan_foot_placement(half.sk, half.pose, half.world, legs, ground_with_slope(20.0f, &c2), o);
         apply_foot_placement(half.sk, half.pose, half.world, biped::pelvis, legs, plan2, zero);
         apply_foot_placement(full.sk, full.pose, full.world, biped::pelvis, legs, plan2, knee);
         const float whole = angle_degrees(normalize(full.world[biped::toe_l].apply_vector({0, 1, 0})), {0, 1, 0});
@@ -3602,22 +3994,22 @@ void test_ik_foot_locking_and_toes() {
     }
 }
 
-// The ECS: a FABRIK constraint (reach, pole, fade), the ground query once a frame per leg however many solves, foot locking in the world,
-// the limits through an IKConstraint, bend-swing state.
+// The ECS: a FABRIK constraint (reach, pole, fade), the ground query once a frame per leg however many solves, foot
+// locking in the world, the limits through an IKConstraint3D, bend-swing state.
 void test_ecs_ik_fabrik_locking_and_limits() {
     // A model with toes.
-    struct FakeMesh final : IMeshBackend {};
-    auto model = std::make_shared<Model>();
+    struct FakeMesh final : IMeshBackend3D {};
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(skin_fixtures::make_biped_toes());
-    const Skeleton& sk = model->skeletons[0];
+    const Skeleton3D& sk = model->skeletons[0];
     AnimClip3D idle;
     idle.name = "idle";
     idle.duration = 1.0f;
     idle.channels.resize(sk.joint_count());
     model->clips.push_back(idle);
-    ModelPart part;
+    ModelPart3D part;
     part.name = "body";
-    part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, sk.joint_count()};
+    part.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, sk.joint_count()};
     part.skin = 0;
     model->parts.push_back(part);
     std::vector<Mat4f> rest_world;
@@ -3628,15 +4020,17 @@ void test_ecs_ik_fabrik_locking_and_limits() {
     };
     const float dt = 1.0f / 60.0f;
 
-    // FABRIK: the head of the spine chain reaches a world target; the pole turns the bulge; the fade takes its time; 0 lets go.
+    // FABRIK: the head of the spine chain reaches a world target; the pole turns the bulge; the fade takes its time; 0
+    // lets go.
     {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
         const Transform3D placed{.position = {1, 0, 2}, .rotation = Quatf::axis_angle({0, 1, 0}, 40.0f)};
-        const flecs::entity e = world.raw().entity().set(placed).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
-        IKConstraint k;
+        const flecs::entity e =
+            world.raw().entity().set(placed).set(SkinnedMeshRenderer3D{.model = model}).set(Animator3D{.clip = "idle"});
+        IKConstraint3D k;
         k.name = "spine";
-        k.kind = IKKind::Fabrik;
+        k.kind = IKKind3D::Fabrik;
         k.joints = {"pelvis", "spine", "chest", "neck", "head"};
         k.fade_seconds = 0.5f;
         e.get_mut<Animator3D>()->add_ik(k);
@@ -3664,11 +4058,13 @@ void test_ecs_ik_fabrik_locking_and_limits() {
         const float arrived = length(joint_at(*a, biped::head, m) - target);
         assert(partway > 0.05f && arrived < 2e-3f);
         // The pole in the model's space: the bulge (the chest off the line pelvis-head) faces it.
-        const Vec3f bulge_front = side_of(joint_at(*a, biped::chest, m), joint_at(*a, biped::pelvis, m), joint_at(*a, biped::head, m));
+        const Vec3f bulge_front =
+            side_of(joint_at(*a, biped::chest, m), joint_at(*a, biped::pelvis, m), joint_at(*a, biped::head, m));
         for (int i = 0; i < 40; ++i) {
             a = frame(1.0f, {0, 0, -1});
         }
-        const Vec3f bulge_back = side_of(joint_at(*a, biped::chest, m), joint_at(*a, biped::pelvis, m), joint_at(*a, biped::head, m));
+        const Vec3f bulge_back =
+            side_of(joint_at(*a, biped::chest, m), joint_at(*a, biped::pelvis, m), joint_at(*a, biped::head, m));
         assert(length(joint_at(*a, biped::head, m) - target) < 2e-3f);
         assert(dot(normalize(bulge_front), normalize(m.apply_vector({0, 0, 1}))) > 0.5f);
         assert(dot(normalize(bulge_back), normalize(m.apply_vector({0, 0, 1}))) < -0.5f);
@@ -3679,26 +4075,31 @@ void test_ecs_ik_fabrik_locking_and_limits() {
         assert(close(joint_at(*a, biped::head, m), m.apply(rest_world[biped::head].apply({0, 0, 0})), 1e-4f));
     }
 
-    // The ground query: once a frame per leg (and toe), however often the constraints are solved in it (apply_ik, then collect).
+    // The ground query: once a frame per leg (and toe), however often the constraints are solved in it (apply_ik, then
+    // collect).
     {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
-        IKConstraint feet;
+        const flecs::entity e = world.raw()
+                                    .entity()
+                                    .set(Transform3D{})
+                                    .set(SkinnedMeshRenderer3D{.model = model})
+                                    .set(Animator3D{.clip = "idle"});
+        IKConstraint3D feet;
         feet.name = "feet";
-        feet.kind = IKKind::FootPlacer;
+        feet.kind = IKKind3D::FootPlacer;
         feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
         feet.foot_heights = {0.05f, 0.05f};
-        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.pole = IKConstraint3D::Pole::ModelDirection;
         feet.pole_vector = {0, 0, 1};
         int casts = 0;
-        feet.ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+        feet.ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
             ++casts;
             const float t = (from.y - 0.0f) / std::max(from.y - to.y, 1e-6f);
             if (t < 0.0f || t > 1.0f) {
                 return std::nullopt;
             }
-            return GroundHit{{from.x, 0.0f, from.z}, {0, 1, 0}};
+            return GroundHit3D{{from.x, 0.0f, from.z}, {0, 1, 0}};
         };
         e.get_mut<Animator3D>()->add_ik(feet);
         for (int frame = 1; frame <= 3; ++frame) {
@@ -3714,14 +4115,16 @@ void test_ecs_ik_fabrik_locking_and_limits() {
         casts = 0;
         e.get_mut<Animator3D>()->ik("feet").toe_joints = {"toe_L", "toe_R"};
         e.get_mut<Animator3D>()->ik("feet").toe_heights = {0.0f, 0.0f};
-        e.get_mut<Animator3D>()->ik("feet").resolved_for = nullptr; // (a game sets toes when it builds the constraint; re-bind here)
+        e.get_mut<Animator3D>()->ik("feet").resolved_for =
+            nullptr; // (a game sets toes when it builds the constraint; re-bind here)
         state.animate(dt);
         state.propagate_transforms();
         state.apply_ik();
         Scene3D s;
         state.collect(s);
         assert(casts == 4);
-        // The ground moved between two solves in one frame (a different segment): asked again, not served from the frame's answers.
+        // The ground moved between two solves in one frame (a different segment): asked again, not served from the
+        // frame's answers.
         casts = 0;
         state.animate(dt);
         state.propagate_transforms();
@@ -3732,26 +4135,31 @@ void test_ecs_ik_fabrik_locking_and_limits() {
         assert(casts == 8);
     }
 
-    // Foot locking in the world: the entity walks along z at 1 m/s; the planted foot stays in the world; unlocked it goes along.
+    // Foot locking in the world: the entity walks along z at 1 m/s; the planted foot stays in the world; unlocked it
+    // goes along.
     for (const bool lock : {true, false}) {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
-        IKConstraint feet;
+        const flecs::entity e = world.raw()
+                                    .entity()
+                                    .set(Transform3D{})
+                                    .set(SkinnedMeshRenderer3D{.model = model})
+                                    .set(Animator3D{.clip = "idle"});
+        IKConstraint3D feet;
         feet.name = "feet";
-        feet.kind = IKKind::FootPlacer;
+        feet.kind = IKKind3D::FootPlacer;
         feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
         feet.foot_heights = {0.05f, 0.05f};
-        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.pole = IKConstraint3D::Pole::ModelDirection;
         feet.pole_vector = {0, 0, 1};
         feet.two_bone.max_stretch = 1.3f;
         feet.foot.smooth_seconds = 0.0f;
         feet.foot.lock_feet = lock;
-        feet.ground = [](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+        feet.ground = [](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
             if (from.y < 0.0f || to.y > 0.0f) {
                 return std::nullopt;
             }
-            return GroundHit{{from.x, 0.0f, from.z}, {0, 1, 0}};
+            return GroundHit3D{{from.x, 0.0f, from.z}, {0, 1, 0}};
         };
         e.get_mut<Animator3D>()->add_ik(feet);
         Vec3f first{};
@@ -3769,17 +4177,22 @@ void test_ecs_ik_fabrik_locking_and_limits() {
             }
             drift = std::max(drift, length(ankle - first));
         }
-        std::cout << "  ik foot lock in the ECS, " << (lock ? "locked" : "unlocked") << ": the ankle drifts " << drift << " m in the world over 11 cm of walking" << std::endl;
+        std::cout << "  ik foot lock in the ECS, " << (lock ? "locked" : "unlocked") << ": the ankle drifts " << drift
+                  << " m in the world over 11 cm of walking" << std::endl;
         assert(lock ? drift < 1e-3f : drift > 0.1f);
     }
 
-    // Limits through the constraint: a maximum bend on an arm; a knee hinge and twist limit on the foot placer's legs (the knee does
-    // not go behind however the pole asks).
+    // Limits through the constraint: a maximum bend on an arm; a knee hinge and twist limit on the foot placer's legs
+    // (the knee does not go behind however the pole asks).
     {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
-        IKConstraint hand = hand_constraint();
+        const flecs::entity e = world.raw()
+                                    .entity()
+                                    .set(Transform3D{})
+                                    .set(SkinnedMeshRenderer3D{.model = model})
+                                    .set(Animator3D{.clip = "idle"});
+        IKConstraint3D hand = hand_constraint();
         hand.two_bone.max_bend_degrees = 60.0f;
         e.get_mut<Animator3D>()->add_ik(hand).set_target(Vec3f{0.35f, 1.62f, 0.05f}).set_pole_direction({0, 0, -1});
         state.animate(dt);
@@ -3787,22 +4200,28 @@ void test_ecs_ik_fabrik_locking_and_limits() {
         state.propagate_transforms();
         state.collect(scene);
         const Animator3D& a = *e.get<Animator3D>();
-        const Vec3f sh = joint_at(a, biped::shoulder_l, Mat4f{}), el = joint_at(a, biped::elbow_l, Mat4f{}), ha = joint_at(a, biped::hand_l, Mat4f{});
+        const Vec3f sh = joint_at(a, biped::shoulder_l, Mat4f{}), el = joint_at(a, biped::elbow_l, Mat4f{}),
+                    ha = joint_at(a, biped::hand_l, Mat4f{});
         const float bend = angle_degrees(el - sh, ha - el);
         assert(bend < 60.05f && length(ha - Vec3f{0.35f, 1.62f, 0.05f}) > 0.05f);
     }
-    // The knee through a foot placer, a pole pointing back and the left foot on a 0.2 m step: without limits the knee goes behind
-    // (z < the hip's), with a hinge about X and 25 degrees of hip twist it stays in front; the foot is on the step either way.
+    // The knee through a foot placer, a pole pointing back and the left foot on a 0.2 m step: without limits the knee
+    // goes behind (z < the hip's), with a hinge about X and 25 degrees of hip twist it stays in front; the foot is on
+    // the step either way.
     for (const bool limited : {false, true}) {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
-        IKConstraint feet;
+        const flecs::entity e = world.raw()
+                                    .entity()
+                                    .set(Transform3D{})
+                                    .set(SkinnedMeshRenderer3D{.model = model})
+                                    .set(Animator3D{.clip = "idle"});
+        IKConstraint3D feet;
         feet.name = "feet";
-        feet.kind = IKKind::FootPlacer;
+        feet.kind = IKKind3D::FootPlacer;
         feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
         feet.foot_heights = {0.05f, 0.05f};
-        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.pole = IKConstraint3D::Pole::ModelDirection;
         feet.pole_vector = {0, 0, -1};
         feet.foot.smooth_seconds = 0.0f;
         if (limited) {
@@ -3811,35 +4230,43 @@ void test_ecs_ik_fabrik_locking_and_limits() {
             feet.two_bone.max_twist_degrees = 25.0f;
             feet.two_bone.max_bend_degrees = 150.0f;
         }
-        feet.ground = [](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+        feet.ground = [](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
             const float h = from.x > 0.0f ? 0.2f : 0.0f;
             if (from.y < h || to.y > h) {
                 return std::nullopt;
             }
-            return GroundHit{{from.x, h, from.z}, {0, 1, 0}};
+            return GroundHit3D{{from.x, h, from.z}, {0, 1, 0}};
         };
         e.get_mut<Animator3D>()->add_ik(feet);
         state.animate(dt);
         state.propagate_transforms();
         state.apply_ik();
         const Animator3D& a = *e.get<Animator3D>();
-        const Vec3f hip = joint_at(a, biped::hip_l, Mat4f{}), knee = joint_at(a, biped::knee_l, Mat4f{}), ankle = joint_at(a, biped::ankle_l, Mat4f{});
+        const Vec3f hip = joint_at(a, biped::hip_l, Mat4f{}), knee = joint_at(a, biped::knee_l, Mat4f{}),
+                    ankle = joint_at(a, biped::ankle_l, Mat4f{});
         assert(close(ankle.y, 0.25f, 1e-3f));
         const float side = side_of(knee, hip, ankle).z;
-        std::cout << "  ik knee through the foot placer, pole back, " << (limited ? "hinge + 25 degrees of hip twist" : "no limits") << ": knee " << side
+        std::cout << "  ik knee through the foot placer, pole back, "
+                  << (limited ? "hinge + 25 degrees of hip twist" : "no limits") << ": knee " << side
                   << " m in front of the line hip-ankle" << std::endl;
         assert(limited ? side > 0.02f : side < -0.02f);
     }
-    // The elbow's side swings at the constraint's bounded speed: the state is kept by the constraint (a target through the pole's axis, 40 frames).
+    // The elbow's side swings at the constraint's bounded speed: the state is kept by the constraint (a target through
+    // the pole's axis, 40 frames).
     for (const float swing : {0.0f, 360.0f}) {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
-        const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
-        IKConstraint hand = hand_constraint();
+        const flecs::entity e = world.raw()
+                                    .entity()
+                                    .set(Transform3D{})
+                                    .set(SkinnedMeshRenderer3D{.model = model})
+                                    .set(Animator3D{.clip = "idle"});
+        IKConstraint3D hand = hand_constraint();
         hand.two_bone.bend_swing_degrees_per_second = swing;
         hand.set_pole_direction({0, 1, 0});
         e.get_mut<Animator3D>()->add_ik(hand);
-        const Vec3f shoulder{rest_world[biped::shoulder_l].m[12], rest_world[biped::shoulder_l].m[13], rest_world[biped::shoulder_l].m[14]};
+        const Vec3f shoulder{rest_world[biped::shoulder_l].m[12], rest_world[biped::shoulder_l].m[13],
+                             rest_world[biped::shoulder_l].m[14]};
         const Vec3f across = normalize(Vec3f{1.0f, 0.0f, 0.6f});
         Vec3f previous_side{};
         float worst = 0.0f;
@@ -3850,30 +4277,33 @@ void test_ecs_ik_fabrik_locking_and_limits() {
             state.propagate_transforms();
             state.apply_ik();
             const Animator3D& a = *e.get<Animator3D>();
-            const Vec3f side = side_of(joint_at(a, biped::elbow_l, Mat4f{}), joint_at(a, biped::shoulder_l, Mat4f{}), joint_at(a, biped::hand_l, Mat4f{}));
+            const Vec3f side = side_of(joint_at(a, biped::elbow_l, Mat4f{}), joint_at(a, biped::shoulder_l, Mat4f{}),
+                                       joint_at(a, biped::hand_l, Mat4f{}));
             assert(length(joint_at(a, biped::hand_l, Mat4f{}) - target) < 3e-4f);
             if (i > 0) {
                 worst = std::max(worst, angle_degrees(side, previous_side));
             }
             previous_side = side;
         }
-        std::cout << "  ik bend swing in the ECS, " << swing << " degrees a second: worst step of the elbow's side " << worst << " degrees" << std::endl;
+        std::cout << "  ik bend swing in the ECS, " << swing << " degrees a second: worst step of the elbow's side "
+                  << worst << " degrees" << std::endl;
         assert(swing == 0.0f ? worst > 15.0f : worst < 6.5f);
     }
 }
 
-// Item 7: Sponza Walk's IK panel logic with no window: Settings to the person's constraints, the panel's fields to what they do.
-// (What stays untested here: the control table's widgets, the pictures, the marker and step meshes, the keyboard.)
+// Item 7: Sponza Walk's IK panel logic with no window: Settings to the person's constraints, the panel's fields to what
+// they do. (What stays untested here: the control table's widgets, the pictures, the marker and step meshes, the
+// keyboard.)
 void test_sponza_walk_ik_panel() {
     using namespace sponza_walk;
     const PersonRig rig = person_rig();
     assert(rig.skeleton.joint_count() == 25 && rig.skeleton.find("toe_L") == 18 && rig.skeleton.find("tail_5") == 24);
     // Every joint a constraint names exists.
-    auto model = std::make_shared<Model>();
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(rig.skeleton);
     model->clips = rig.clips;
-    const GroundQuery floor_only = [](Vec3f from, Vec3f to) { return floor_and_step(from, to, false, {}, {}); };
-    for (const IKConstraint& k : person_constraints(floor_only)) {
+    const GroundQuery3D floor_only = [](Vec3f from, Vec3f to) { return floor_and_step(from, to, false, {}, {}); };
+    for (const IKConstraint3D& k : person_constraints(floor_only)) {
         for (const std::string& n : k.joints) {
             assert(rig.skeleton.find(n) >= 0);
         }
@@ -3891,20 +4321,21 @@ void test_sponza_walk_ik_panel() {
             world.reset();
         }
     };
-    const auto make = [&](const GroundQuery& ground, const Transform3D& at) {
+    const auto make = [&](const GroundQuery3D& ground, const Transform3D& at) {
         auto placed = std::make_unique<Placed>();
         placed->world = std::make_unique<kin::EcsWorld>();
         placed->state = std::make_unique<WorldRenderState3D>(*placed->world);
         Animator3D a;
         a.clip = "Sway";
-        for (const IKConstraint& k : person_constraints(ground)) {
+        for (const IKConstraint3D& k : person_constraints(ground)) {
             a.add_ik(k);
         }
-        placed->e = placed->world->raw().entity().set(at).set(SkinnedMeshRenderer{.model = model}).set(a);
+        placed->e = placed->world->raw().entity().set(at).set(SkinnedMeshRenderer3D{.model = model}).set(a);
         return placed;
     };
     const float dt = 1.0f / 60.0f;
-    const auto settle = [&](WorldRenderState3D& state, flecs::entity e, const PersonIk& panel, const Mat4f& base, int frames) {
+    const auto settle = [&](WorldRenderState3D& state, flecs::entity e, const PersonIk& panel, const Mat4f& base,
+                            int frames) {
         for (int i = 0; i < frames; ++i) {
             drive_person(*e.get_mut<Animator3D>(), panel, base, {0.0f, 1.7f, 4.0f});
             state.animate(dt);
@@ -4005,21 +4436,23 @@ void test_sponza_walk_ik_panel() {
     // Feet and the step: the left foot is lifted onto a 0.2 m step when the switch is on, and nothing moves when off.
     {
         const auto ground_of = [&](bool step, float height) {
-            return GroundQuery{[=](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            return GroundQuery3D{[=](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
                 const Mat4f inverse = base.inverse();
-                const auto hit = floor_and_step(inverse.apply(from), inverse.apply(to), step, {0.0f, 0.0f, -0.4f}, {0.6f, height, 0.4f});
+                const auto hit = floor_and_step(inverse.apply(from), inverse.apply(to), step, {0.0f, 0.0f, -0.4f},
+                                                {0.6f, height, 0.4f});
                 if (!hit) {
                     return std::nullopt;
                 }
-                return GroundHit{base.apply(hit->position), normalize(inverse.transposed().apply_vector(hit->normal))};
+                return GroundHit3D{base.apply(hit->position),
+                                   normalize(inverse.transposed().apply_vector(hit->normal))};
             }};
         };
         for (const bool on : {false, true}) {
             auto placed_person = make(ground_of(true, 0.2f), placed);
-        WorldRenderState3D* state = placed_person->state.get();
-        flecs::entity e = placed_person->e;
-        kin::EcsWorld* world = placed_person->world.get();
-        (void)world;
+            WorldRenderState3D* state = placed_person->state.get();
+            flecs::entity e = placed_person->e;
+            kin::EcsWorld* world = placed_person->world.get();
+            (void)world;
             PersonIk panel;
             panel.feet = on;
             panel.fade = 0.0f;
@@ -4027,8 +4460,8 @@ void test_sponza_walk_ik_panel() {
             const float pelvis_y = (base.inverse().apply(at(*a, "pelvis"))).y;
             const float left_y = (base.inverse().apply(at(*a, "ankle_L"))).y;
             if (on) {
-                // Standing on the floor with the left foot lifted onto the step: the pelvis stays (a raise is off), the left ankle is
-                // the step's height up.
+                // Standing on the floor with the left foot lifted onto the step: the pelvis stays (a raise is off), the
+                // left ankle is the step's height up.
                 assert(close(pelvis_y, 1.0f, 5e-3f) && close(left_y, 0.25f, 5e-3f));
             } else {
                 assert(close(pelvis_y, 1.0f, 1e-4f) && close(left_y, 0.05f, 1e-4f));
@@ -4057,25 +4490,25 @@ void test_sponza_walk_ik_panel() {
         // Bones kept: the tail's five joints are 0.18 apart.
         assert(close(length(at(*a, "tail_3") - at(*a, "tail_2")), 0.18f, 1e-3f));
     }
-    // Limits, lock, toes: the knee stays forward with a pole that would push it back (the limits switch makes the foot placer's
-    // knees hinges); a locked foot stays while the person walks; the toes tilt on a slope.
+    // Limits, lock, toes: the knee stays forward with a pole that would push it back (the limits switch makes the foot
+    // placer's knees hinges); a locked foot stays while the person walks; the toes tilt on a slope.
     {
-        const auto flat = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+        const auto flat = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
             const Mat4f inverse = base.inverse();
             const auto hit = floor_and_step(inverse.apply(from), inverse.apply(to), false, {}, {});
             if (!hit) {
                 return std::nullopt;
             }
-            return GroundHit{base.apply(hit->position), base.apply_vector({0, 1, 0})};
+            return GroundHit3D{base.apply(hit->position), base.apply_vector({0, 1, 0})};
         };
         Vec3f first{};
         float drift_locked = 0.0f, drift_free = 0.0f;
         for (const bool lock : {true, false}) {
             auto placed_person = make(flat, placed);
-        WorldRenderState3D* state = placed_person->state.get();
-        flecs::entity e = placed_person->e;
-        kin::EcsWorld* world = placed_person->world.get();
-        (void)world;
+            WorldRenderState3D* state = placed_person->state.get();
+            flecs::entity e = placed_person->e;
+            kin::EcsWorld* world = placed_person->world.get();
+            (void)world;
             PersonIk panel;
             panel.feet = true;
             panel.fade = 0.0f;
@@ -4085,7 +4518,8 @@ void test_sponza_walk_ik_panel() {
             float drift = 0.0f;
             for (int i = 0; i < 12; ++i) {
                 // The person drifts 1 cm a frame along its own x.
-                e.get_mut<Transform3D>()->position = placed.position + base.apply_vector({0.01f * static_cast<float>(i), 0, 0});
+                e.get_mut<Transform3D>()->position =
+                    placed.position + base.apply_vector({0.01f * static_cast<float>(i), 0, 0});
                 drive_person(*e.get_mut<Animator3D>(), panel, base, {0.0f, 1.7f, 4.0f});
                 state->animate(dt);
                 state->propagate_transforms();
@@ -4100,7 +4534,8 @@ void test_sponza_walk_ik_panel() {
             }
             (lock ? drift_locked : drift_free) = drift;
         }
-        std::cout << "  sponza walk panel: right ankle drifts " << drift_locked << " m locked, " << drift_free << " m unlocked, over 11 cm of drift" << std::endl;
+        std::cout << "  sponza walk panel: right ankle drifts " << drift_locked << " m locked, " << drift_free
+                  << " m unlocked, over 11 cm of drift" << std::endl;
         assert(drift_locked < 2e-3f && drift_free > 0.08f);
     }
     // The settings struct maps field for field.
@@ -4116,32 +4551,37 @@ void test_sponza_walk_ik_panel() {
         s.ik_pole = 3;
         s.ik_step_height = 0.31f;
         const PersonIk p = person_ik(s);
-        assert(p.on && p.hand_x == 0.1f && p.tail && p.lock && p.toes && p.limits && p.walk && p.pole == 3 && p.step_height == 0.31f);
+        assert(p.on && p.hand_x == 0.1f && p.tail && p.lock && p.toes && p.limits && p.walk && p.pole == 3 &&
+               p.step_height == 0.31f);
         assert(person_walk_offset(0.0f) == 0.0f && std::fabs(person_walk_offset(1.7f)) > 0.1f);
     }
 }
 
-// Item 7: CesiumMan (the Khronos sample, from the reference cache when it is there): an arm and a leg reach targets made by turning
-// their joints. Its joint names are not a rig's: "Skeleton_arm_joint_R" to "Skeleton_arm_joint_R__3_" is the right arm, the leg_joint_R_1,
-// _2, _3 the right leg; found by name, solved in the model's own (Z-up, rotated) space.
+// Item 7: CesiumMan (the Khronos sample, from the reference cache when it is there): an arm and a leg reach targets
+// made by turning their joints. Its joint names are not a rig's: "Skeleton_arm_joint_R" to "Skeleton_arm_joint_R__3_"
+// is the right arm, the leg_joint_R_1, _2, _3 the right leg; found by name, solved in the model's own (Z-up, rotated)
+// space.
 void test_ik_cesium_man() {
     const char* cache = std::getenv("KIN_REFERENCE_CACHE");
     const std::filesystem::path path =
-        (cache ? std::filesystem::path{cache} : std::filesystem::path{std::getenv("HOME") ? std::getenv("HOME") : "."} / ".cache/kin/reference") / "cesium_man/CesiumMan.glb";
+        (cache ? std::filesystem::path{cache}
+               : std::filesystem::path{std::getenv("HOME") ? std::getenv("HOME") : "."} / ".cache/kin/reference") /
+        "cesium_man/CesiumMan.glb";
     std::ifstream in(path, std::ios::binary);
     if (!in) {
-        std::cerr << "ik: CesiumMan is not in the reference cache (tools/reference/fetch.py): its IK test is skipped" << std::endl;
+        std::cerr << "ik: CesiumMan is not in the reference cache (tools/reference/fetch.py): its IK test is skipped"
+                  << std::endl;
         return;
     }
     const std::string bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-    ModelData data;
+    ModelData3D data;
     std::string error;
     if (!read_model_data(bytes, path, data, &error)) {
         std::cerr << "ik: " << error << "" << std::endl;
         assert(false);
     }
     assert(data.skeletons.size() == 1 && !data.clips.empty());
-    Skeleton sk = data.skeletons[0];
+    Skeleton3D sk = data.skeletons[0];
     struct Limb {
         const char* name;
         const char* names[3];
@@ -4155,36 +4595,50 @@ void test_ik_cesium_man() {
     const AnimClip3D& clip = data.clips[0];
     int total = 0;
     for (const Limb& limb : limbs) {
-        const TwoBoneChain chain{sk.find(limb.names[0]), sk.find(limb.names[1]), sk.find(limb.names[2])};
+        const TwoBoneChain3D chain{sk.find(limb.names[0]), sk.find(limb.names[1]), sk.find(limb.names[2])};
         assert(chain.root >= 0 && chain.mid >= 0 && chain.end >= 0);
         float worst = 0.0f, worst_len = 0.0f;
         int count = 0;
         Lcg rng;
         for (const float time : {0.0f, 0.3f, 0.7f, 1.1f}) {
-            Pose pose = sk.rest_pose();
+            Pose3D pose = sk.rest_pose();
             sample_clip(clip, sk, time, true, pose);
             std::vector<Mat4f> world;
             compute_world_matrices(sk, pose, world);
-            const auto point = [&](const std::vector<Mat4f>& w, i32 j) { return Vec3f{w[static_cast<std::size_t>(j)].m[12], w[static_cast<std::size_t>(j)].m[13], w[static_cast<std::size_t>(j)].m[14]}; };
-            const float l1 = length(point(world, chain.mid) - point(world, chain.root)), l2 = length(point(world, chain.end) - point(world, chain.mid));
+            const auto point = [&](const std::vector<Mat4f>& w, i32 j) {
+                return Vec3f{w[static_cast<std::size_t>(j)].m[12], w[static_cast<std::size_t>(j)].m[13],
+                             w[static_cast<std::size_t>(j)].m[14]};
+            };
+            const float l1 = length(point(world, chain.mid) - point(world, chain.root)),
+                        l2 = length(point(world, chain.end) - point(world, chain.mid));
             for (int i = 0; i < 25; ++i) {
-                // A reachable target: this pose's hand with the shoulder and elbow turned a little (the pose itself, by FK).
-                Pose goal = pose;
-                goal.joints[static_cast<std::size_t>(chain.root)].rotation = (Quatf::axis_angle(rng.direction(), 35.0f * (rng.next() * 0.5f + 0.5f)) * goal.joints[static_cast<std::size_t>(chain.root)].rotation).normalized();
-                goal.joints[static_cast<std::size_t>(chain.mid)].rotation = (Quatf::axis_angle(rng.direction(), 30.0f * (rng.next() * 0.5f + 0.5f)) * goal.joints[static_cast<std::size_t>(chain.mid)].rotation).normalized();
+                // A reachable target: this pose's hand with the shoulder and elbow turned a little (the pose itself, by
+                // FK).
+                Pose3D goal = pose;
+                goal.joints[static_cast<std::size_t>(chain.root)].rotation =
+                    (Quatf::axis_angle(rng.direction(), 35.0f * (rng.next() * 0.5f + 0.5f)) *
+                     goal.joints[static_cast<std::size_t>(chain.root)].rotation)
+                        .normalized();
+                goal.joints[static_cast<std::size_t>(chain.mid)].rotation =
+                    (Quatf::axis_angle(rng.direction(), 30.0f * (rng.next() * 0.5f + 0.5f)) *
+                     goal.joints[static_cast<std::size_t>(chain.mid)].rotation)
+                        .normalized();
                 std::vector<Mat4f> goal_world;
                 compute_world_matrices(sk, goal, goal_world);
                 const Vec3f target = point(goal_world, chain.end);
-                Pose p = pose;
+                Pose3D p = pose;
                 std::vector<Mat4f> w = world;
-                TwoBoneOptions o;
-                o.pole_mode = PoleMode::Position;
-                o.pole = point(goal_world, chain.mid); // the elbow where the goal had it (any pole would do for the hand)
-                const TwoBoneResult res = solve_two_bone(sk, p, w, chain, target, o);
+                TwoBoneOptions3D o;
+                o.pole_mode = PoleMode3D::Position;
+                o.pole =
+                    point(goal_world, chain.mid); // the elbow where the goal had it (any pole would do for the hand)
+                const TwoBoneResult3D res = solve_two_bone(sk, p, w, chain, target, o);
                 assert(res.solved);
                 worst = std::max(worst, length(point(w, chain.end) - target));
-                // The bones keep their lengths (in the root's parent's space: the model has its own scale, uniform here).
-                worst_len = std::max(worst_len, std::fabs(length(point(w, chain.mid) - point(w, chain.root)) - l1) / l1);
+                // The bones keep their lengths (in the root's parent's space: the model has its own scale, uniform
+                // here).
+                worst_len =
+                    std::max(worst_len, std::fabs(length(point(w, chain.mid) - point(w, chain.root)) - l1) / l1);
                 worst_len = std::max(worst_len, std::fabs(length(point(w, chain.end) - point(w, chain.mid)) - l2) / l2);
                 std::vector<Mat4f> again;
                 compute_world_matrices(sk, p, again);
@@ -4192,8 +4646,9 @@ void test_ik_cesium_man() {
                 ++count;
             }
         }
-        std::cout << "  ik CesiumMan " << limb.name << " (" << limb.names[0] << " ...): " << count << " targets, hand within " << worst << " of them, bones kept to "
-                  << worst_len << " (relative)" << std::endl;
+        std::cout << "  ik CesiumMan " << limb.name << " (" << limb.names[0] << " ...): " << count
+                  << " targets, hand within " << worst << " of them, bones kept to " << worst_len << " (relative)"
+                  << std::endl;
         assert(worst < 5e-4f && worst_len < 1e-4f);
         total += count;
     }
@@ -4210,59 +4665,70 @@ void bench_ik() {
         }
         return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / reps;
     };
-    // The pure maths on a 18-joint biped: world matrices, a two-bone arm, a look-at of three joints, a foot placer on two legs.
+    // The pure maths on a 18-joint biped: world matrices, a two-bone arm, a look-at of three joints, a foot placer on
+    // two legs.
     Rig rig;
-    const std::array<FootLeg, 2> legs = {FootLeg{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f}, FootLeg{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
-    const std::array<LookAtJoint, 3> chain = {LookAtJoint{.joint = biped::spine, .weight = 0.2f}, LookAtJoint{.joint = biped::neck, .weight = 0.3f},
-                                              LookAtJoint{.joint = biped::head, .weight = 0.5f}};
-    const GroundQuery ground = [](Vec3f from, Vec3f) -> std::optional<GroundHit> { return GroundHit{{from.x, -0.1f, from.z}, {0, 1, 0}}; };
-    FootPlacementState fps;
-    LookAtState las;
+    const std::array<FootLeg3D, 2> legs = {FootLeg3D{{biped::hip_l, biped::knee_l, biped::ankle_l}, 0.05f},
+                                           FootLeg3D{{biped::hip_r, biped::knee_r, biped::ankle_r}, 0.05f}};
+    const std::array<LookAtJoint3D, 3> chain = {LookAtJoint3D{.joint = biped::spine, .weight = 0.2f},
+                                                LookAtJoint3D{.joint = biped::neck, .weight = 0.3f},
+                                                LookAtJoint3D{.joint = biped::head, .weight = 0.5f}};
+    const GroundQuery3D ground = [](Vec3f from, Vec3f) -> std::optional<GroundHit3D> {
+        return GroundHit3D{{from.x, -0.1f, from.z}, {0, 1, 0}};
+    };
+    FootPlacementState3D fps;
+    LookAtState3D las;
     volatile float sink = 0.0f;
-    const double maths = time_us([&] {
-        Pose pose = rig.pose;
-        compute_world_matrices(rig.sk, pose, rig.world);
-        TwoBoneOptions arm;
-        arm.pole_mode = PoleMode::Direction;
-        arm.pole = {0, 0, -1};
-        solve_two_bone(rig.sk, pose, rig.world, left_arm, {0.5f, 1.4f, 0.4f}, arm);
-        LookAtOptions look;
-        look.smooth_seconds = 0.1f;
-        solve_look_at(rig.sk, pose, rig.world, chain, {1, 1.7f, 2}, look, &las, 1.0f / 60.0f);
-        const FootPlan plan = plan_foot_placement(rig.sk, pose, rig.world, legs, ground, {}, &fps, 1.0f / 60.0f);
-        TwoBoneOptions leg;
-        leg.pole_mode = PoleMode::Direction;
-        leg.pole = {0, 0, 1};
-        apply_foot_placement(rig.sk, pose, rig.world, biped::pelvis, legs, plan, leg);
-        std::vector<Mat4f> m(rig.sk.joint_count());
-        world_to_joint_matrices(rig.sk, rig.world, m);
-        sink = sink + m[0].m[0];
-    }, 20000);
+    const double maths = time_us(
+        [&] {
+            Pose3D pose = rig.pose;
+            compute_world_matrices(rig.sk, pose, rig.world);
+            TwoBoneOptions3D arm;
+            arm.pole_mode = PoleMode3D::Direction;
+            arm.pole = {0, 0, -1};
+            solve_two_bone(rig.sk, pose, rig.world, left_arm, {0.5f, 1.4f, 0.4f}, arm);
+            LookAtOptions3D look;
+            look.smooth_seconds = 0.1f;
+            solve_look_at(rig.sk, pose, rig.world, chain, {1, 1.7f, 2}, look, &las, 1.0f / 60.0f);
+            const FootPlan3D plan = plan_foot_placement(rig.sk, pose, rig.world, legs, ground, {}, &fps, 1.0f / 60.0f);
+            TwoBoneOptions3D leg;
+            leg.pole_mode = PoleMode3D::Direction;
+            leg.pole = {0, 0, 1};
+            apply_foot_placement(rig.sk, pose, rig.world, biped::pelvis, legs, plan, leg);
+            std::vector<Mat4f> m(rig.sk.joint_count());
+            world_to_joint_matrices(rig.sk, rig.world, m);
+            sink = sink + m[0].m[0];
+        },
+        20000);
     // The whole system: 500 animators with a hand, a look-at and a foot placer each.
     kin::EcsWorld world;
     WorldRenderState3D state{world};
     auto& w = world.raw();
     for (int n = 0; n < 500; ++n) {
-        const flecs::entity e = w.entity().set(Transform3D{.position = {static_cast<float>(n % 25) * 2.0f, 0, static_cast<float>(n / 25) * 2.0f}})
-                                    .set(SkinnedMeshRenderer{.model = hero.model})
-                                    .set(Animator3D{.clip = "sway"});
+        const flecs::entity e =
+            w.entity()
+                .set(Transform3D{.position = {static_cast<float>(n % 25) * 2.0f, 0, static_cast<float>(n / 25) * 2.0f}})
+                .set(SkinnedMeshRenderer3D{.model = hero.model})
+                .set(Animator3D{.clip = "sway"});
         Animator3D& a = *e.get_mut<Animator3D>();
         a.add_ik(hand_constraint()).set_target(Vec3f{0.3f, 1.4f, 0.5f}).set_pole_direction({0, 0, -1});
-        IKConstraint look;
+        IKConstraint3D look;
         look.name = "look";
-        look.kind = IKKind::LookAt;
+        look.kind = IKKind3D::LookAt;
         look.joints = {"spine", "neck", "head"};
         look.look_links = {{.weight = 0.2f}, {.weight = 0.3f}, {.weight = 0.5f}};
         look.look_at.smooth_seconds = 0.1f;
-        look.target = {IKTarget::Kind::World, {5, 1.7f, 5}, 0};
+        look.target = {IKTarget3D::Kind::World, {5, 1.7f, 5}, 0};
         a.add_ik(look);
-        IKConstraint feet;
+        IKConstraint3D feet;
         feet.name = "feet";
-        feet.kind = IKKind::FootPlacer;
+        feet.kind = IKKind3D::FootPlacer;
         feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
         feet.foot_heights = {0.05f, 0.05f};
-        feet.ground = [](Vec3f from, Vec3f) -> std::optional<GroundHit> { return GroundHit{{from.x, -0.05f, from.z}, {0, 1, 0}}; };
-        feet.pole = IKConstraint::Pole::ModelDirection;
+        feet.ground = [](Vec3f from, Vec3f) -> std::optional<GroundHit3D> {
+            return GroundHit3D{{from.x, -0.05f, from.z}, {0, 1, 0}};
+        };
+        feet.pole = IKConstraint3D::Pole::ModelDirection;
         feet.pole_vector = {0, 0, 1};
         a.add_ik(feet);
     }
@@ -4279,7 +4745,11 @@ void bench_ik() {
     kin::EcsWorld plain_world;
     WorldRenderState3D plain_state{plain_world};
     for (int n = 0; n < 500; ++n) {
-        plain_world.raw().entity().set(Transform3D{.position = {static_cast<float>(n), 0, 0}}).set(SkinnedMeshRenderer{.model = hero.model}).set(Animator3D{.clip = "sway"});
+        plain_world.raw()
+            .entity()
+            .set(Transform3D{.position = {static_cast<float>(n), 0, 0}})
+            .set(SkinnedMeshRenderer3D{.model = hero.model})
+            .set(Animator3D{.clip = "sway"});
     }
     const auto plain_frame = [&] {
         plain_state.animate(1.0f / 60.0f);
@@ -4289,25 +4759,31 @@ void bench_ik() {
     };
     plain_frame();
     const double plain_per_frame = time_us(plain_frame, 60);
-    std::cout << "ik, 18-joint biped: arm + look-at (3 joints) + two feet + matrices " << maths << " us a character; 500 animators with 3 constraints: animate + collect "
-              << per_frame / 1000.0 << " ms a frame (" << per_frame / 500.0 << " us each; the same 500 without constraints " << plain_per_frame / 1000.0 << " ms)" << std::endl;
+    std::cout << "ik, 18-joint biped: arm + look-at (3 joints) + two feet + matrices " << maths
+              << " us a character; 500 animators with 3 constraints: animate + collect " << per_frame / 1000.0
+              << " ms a frame (" << per_frame / 500.0 << " us each; the same 500 without constraints "
+              << plain_per_frame / 1000.0 << " ms)" << std::endl;
 }
 
 // --- the 3D ECS bridge: a model replaced under an animator, a mesh entity's id, a model with a second skin ---
 
-// An animator rebinds when its entity's model is replaced, even by one that lands at the old one's address (a freed model's place
-// taken again). The address is forced here: two shared_ptrs that own nothing, over one Model that is changed in place between them,
-// so a comparison of addresses sees no change and only the owner differs.
+// An animator rebinds when its entity's model is replaced, even by one that lands at the old one's address (a freed
+// model's place taken again). The address is forced here: two shared_ptrs that own nothing, over one Model3D that is
+// changed in place between them, so a comparison of addresses sees no change and only the owner differs.
 void test_ecs_animator_rebinds_to_a_replaced_model() {
     const BipedCharacter hero = make_biped_character();
-    Model storage = *hero.model;
-    const std::shared_ptr<const Model> first{&storage, [](const Model*) {}};
-    const std::shared_ptr<const Model> second{&storage, [](const Model*) {}};
+    Model3D storage = *hero.model;
+    const std::shared_ptr<const Model3D> first{&storage, [](const Model3D*) {}};
+    const std::shared_ptr<const Model3D> second{&storage, [](const Model3D*) {}};
     assert(first.get() == second.get() && (first.owner_before(second) || second.owner_before(first)));
 
     kin::EcsWorld world;
     WorldRenderState3D state{world};
-    const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = first}).set(Animator3D{.clip = "sway"});
+    const flecs::entity e = world.raw()
+                                .entity()
+                                .set(Transform3D{})
+                                .set(SkinnedMeshRenderer3D{.model = first})
+                                .set(Animator3D{.clip = "sway"});
     e.get_mut<Animator3D>()->add_ik(hand_constraint()).set_target(Vec3f{0.3f, 1.4f, 0.5f});
     const float dt = 0.1f;
     ik_frame(state, dt);
@@ -4316,28 +4792,31 @@ void test_ecs_animator_rebinds_to_a_replaced_model() {
     assert(close(e.get<Animator3D>()->player.time(), 2.0f * dt) && e.get<Animator3D>()->bound_to(first));
     assert(resolved() == (std::vector<i32>{biped::shoulder_l, biped::elbow_l, biped::hand_l}));
 
-    // The same Model under a new owner, with the left and right arms' names swapped in it, as another file's would be.
-    Skeleton& sk = storage.skeletons[0];
+    // The same Model3D under a new owner, with the left and right arms' names swapped in it, as another file's would
+    // be.
+    Skeleton3D& sk = storage.skeletons[0];
     for (int j = 0; j < 3; ++j) {
-        std::swap(sk.names[static_cast<std::size_t>(biped::shoulder_l + j)], sk.names[static_cast<std::size_t>(biped::shoulder_r + j)]);
+        std::swap(sk.names[static_cast<std::size_t>(biped::shoulder_l + j)],
+                  sk.names[static_cast<std::size_t>(biped::shoulder_r + j)]);
     }
-    e.get_mut<SkinnedMeshRenderer>()->model = second;
+    e.get_mut<SkinnedMeshRenderer3D>()->model = second;
     ik_frame(state, dt);
-    assert(close(e.get<Animator3D>()->player.time(), dt));     // played again from the start: a new binding
-    assert(resolved() == (std::vector<i32>{biped::shoulder_r, biped::elbow_r, biped::hand_r})); // looked up again in what it holds now
+    assert(close(e.get<Animator3D>()->player.time(), dt)); // played again from the start: a new binding
+    assert(resolved() == (std::vector<i32>{biped::shoulder_r, biped::elbow_r,
+                                           biped::hand_r})); // looked up again in what it holds now
     assert(e.get<Animator3D>()->bound_to(second) && !e.get<Animator3D>()->bound_to(first));
 }
 
-// A MeshRenderer entity is named in the scene as the model and character entities are: by its own `id` when it gives one, else by
-// the entity's (its low 32 bits), which is what pick reports for it.
+// A MeshRenderer3D entity is named in the scene as the model and character entities are: by its own `id` when it gives
+// one, else by the entity's (its low 32 bits), which is what pick reports for it.
 void test_ecs_mesh_renderer_id() {
-    struct FakeMesh final : IMeshBackend {};
-    const Mesh mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
+    struct FakeMesh final : IMeshBackend3D {};
+    const Mesh3D mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
     kin::EcsWorld world;
     WorldRenderState3D state{world};
     auto& w = world.raw();
-    const flecs::entity plain = w.entity().set(Transform3D{}).set(MeshRenderer{.mesh = mesh});
-    w.entity().set(Transform3D{}).set(MeshRenderer{.mesh = mesh, .id = 7});
+    const flecs::entity plain = w.entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = mesh});
+    w.entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = mesh, .id = 7});
     state.propagate_transforms();
     Scene3D scene;
     state.collect(scene);
@@ -4345,30 +4824,30 @@ void test_ecs_mesh_renderer_id() {
     const u32 plain_id = static_cast<u32>(plain.id() & 0xffffffffu);
     assert(plain_id != 0 && plain_id != 7);
     bool saw_plain = false, saw_given = false;
-    for (const MeshInstance& instance : scene.instances()) {
+    for (const MeshInstance3D& instance : scene.instances()) {
         saw_plain = saw_plain || instance.id == plain_id;
         saw_given = saw_given || instance.id == 7;
     }
     assert(saw_plain && saw_given);
 }
 
-// draw_skinned(Model) is given the pose of the first skeleton: the parts on a second skin are not drawn (the limit, pinned), and
-// that is said in the log, once for each model.
+// draw_skinned(Model3D) is given the pose of the first skeleton: the parts on a second skin are not drawn (the limit,
+// pinned), and that is said in the log, once for each model.
 void test_draw_skinned_poses_the_first_skin_only() {
-    struct FakeMesh final : IMeshBackend {};
+    struct FakeMesh final : IMeshBackend3D {};
     const auto make = [] {
-        auto model = std::make_unique<Model>();
+        auto model = std::make_unique<Model3D>();
         model->skeletons = {skin_fixtures::make_tube().skeleton, skin_fixtures::make_tube().skeleton};
         for (const i32 skin : {0, 1}) {
-            ModelPart part;
+            ModelPart3D part;
             part.name = skin ? "second" : "first";
-            part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, 3};
+            part.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, 3};
             part.skin = skin;
             model->parts.push_back(part);
         }
-        ModelPart still;
+        ModelPart3D still;
         still.name = "still";
-        still.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
+        still.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, {}};
         model->parts.push_back(still);
         return model;
     };
@@ -4396,10 +4875,11 @@ void test_draw_skinned_poses_the_first_skin_only() {
     reset_logger_config_from_environment();
 }
 
-// The CPU cost of the player's other states, printed (no assertion): the base a 1D blend of three clips (a locomotion state), a
-// crossfade out of that blend into a clip, a fade begun in the middle of another (the held picture fades out), and a base clip under two
-// layers (one masked, one additive). Each is an update and the joint matrices of a 24-joint character; the blends and fades combine two
-// poses a frame, which is where a player that allocates for each shows.
+// The CPU cost of the player's other states, printed (no assertion): the base a 1D blend of three clips (a locomotion
+// state), a crossfade out of that blend into a clip, a fade begun in the middle of another (the held picture fades
+// out), and a base clip under two layers (one masked, one additive). Each is an update and the joint matrices of a
+// 24-joint character; the blends and fades combine two poses a frame, which is where a player that allocates for each
+// shows.
 void bench_animation_states() {
     const auto per_call = [](int iterations, const auto& body) {
         const auto start = std::chrono::steady_clock::now();
@@ -4408,7 +4888,7 @@ void bench_animation_states() {
         }
         return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / iterations;
     };
-    Skeleton sk;
+    Skeleton3D sk;
     const int n = 24;
     sk.parents.resize(n);
     sk.names.resize(n);
@@ -4423,13 +4903,14 @@ void bench_animation_states() {
         AnimClip3D clip;
         clip.channels.resize(n);
         for (int j = 0; j < n; ++j) {
-            JointChannels& c = clip.channels[j];
+            JointChannels3D& c = clip.channels[j];
             for (int k = 0; k < 30; ++k) {
                 const float t = static_cast<float>(k) / 29.0f;
                 c.translation.times.push_back(t);
                 c.translation.values.push_back({0.0f, 0.2f + 0.01f * std::sin(t * 6.0f + phase), 0.0f});
                 c.rotation.times.push_back(t);
-                c.rotation.values.push_back(Quatf::axis_angle({0, 0, 1}, 30.0f * std::sin(t * 6.0f + static_cast<float>(j) + phase)));
+                c.rotation.values.push_back(
+                    Quatf::axis_angle({0, 0, 1}, 30.0f * std::sin(t * 6.0f + static_cast<float>(j) + phase)));
                 c.scale.times.push_back(t);
                 c.scale.values.push_back({1, 1, 1});
             }
@@ -4464,7 +4945,7 @@ void bench_animation_states() {
     {
         AnimationPlayer3D::Layer& upper = layered.layer(0);
         upper.clip = &run;
-        upper.mask = PoseMask::subtree(sk, 2, 1.0f);
+        upper.mask = PoseMask3D::subtree(sk, 2, 1.0f);
         upper.weight = 0.7f;
         AnimationPlayer3D::Layer& add = layered.layer(1);
         add.clip = &idle;
@@ -4472,11 +4953,13 @@ void bench_animation_states() {
         add.weight = 0.5f;
     }
     const double layers = per_call(20000, [&](int) { frame(layered); });
-    std::cerr << "animation, a 24-joint character: 1D blend of three clips " << blended << " us, the blend crossfaded into a clip " << blend_fade
-              << " us, a fade begun in the middle of another " << held << " us, a clip under a masked and an additive layer " << layers
-              << " us (update + matrices) [" << sink << "]\n";
-    // The ECS animators: 200 characters in a machine's locomotion state (a 1D blend) with one layer, WorldRenderState3D::animate a frame.
-    // Each frame an animator asks which state it is in and which layer clips it plays; that is a string it should not have to build.
+    std::cerr << "animation, a 24-joint character: 1D blend of three clips " << blended
+              << " us, the blend crossfaded into a clip " << blend_fade << " us, a fade begun in the middle of another "
+              << held << " us, a clip under a masked and an additive layer " << layers << " us (update + matrices) ["
+              << sink << "]\n";
+    // The ECS animators: 200 characters in a machine's locomotion state (a 1D blend) with one layer,
+    // WorldRenderState3D::animate a frame. Each frame an animator asks which state it is in and which layer clips it
+    // plays; that is a string it should not have to build.
     {
         const Character hero = make_character();
         auto machine = std::make_shared<AnimationStateMachine>();
@@ -4490,14 +4973,18 @@ void bench_animation_states() {
         kin::EcsWorld world;
         WorldRenderState3D state{world};
         for (int i = 0; i < 200; ++i) {
-            world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(static_cast<const Animator3D&>(animator));
+            world.raw()
+                .entity()
+                .set(Transform3D{})
+                .set(SkinnedMeshRenderer3D{.model = hero.model})
+                .set(static_cast<const Animator3D&>(animator));
         }
         for (int i = 0; i < 120; ++i) {
             state.animate(1.0f / 60.0f); // settled: the machine has made its transition, the fade is over
         }
         const double animate_us = per_call(2000, [&](int) { state.animate(1.0f / 60.0f); });
-        std::cerr << "animation, WorldRenderState3D::animate for 200 characters in a blend state with a layer: " << animate_us << " us a frame ("
-                  << animate_us / 200.0 << " us a character)\n";
+        std::cerr << "animation, WorldRenderState3D::animate for 200 characters in a blend state with a layer: "
+                  << animate_us << " us a frame (" << animate_us / 200.0 << " us a character)\n";
     }
 }
 

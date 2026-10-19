@@ -122,7 +122,7 @@ the comparison explicitly selects Vulkan Forward+ and fails on another renderer.
 - Robots use actual six-joint GPU skinning, not separate rigid limb draws. Kin
   consumes the baked palette; Godot uses `Skeleton3D`, `Skin` and inverse binds.
   Godot validates baked skeleton vertices against the native palette at startup
-  **and after animation advances**, with a 1e-4 tolerance. Pose notification updates
+  **and after animation advances**, with a 1e-4 tolerance. Pose3D notification updates
   complete before the manually forced render. See [Skin](https://docs.godotengine.org/en/4.7/classes/class_skin.html)
   and [Skeleton3D](https://docs.godotengine.org/en/4.7/classes/class_skeleton3d.html).
   These are simple 200-triangle robots: six independent root joints and one full

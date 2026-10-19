@@ -1,23 +1,21 @@
-#include <kin/render3d/mesh_lod.hpp>
-
 #include "mesh_bake.hpp"
-
-#include <meshoptimizer.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <kin/render3d/mesh_lod3d.hpp>
+#include <meshoptimizer.h>
 
 namespace kin {
 
-static_assert(offsetof(MeshVertex, position) == 0 && sizeof(Vec3f) == 3 * sizeof(f32), "meshoptimizer reads positions at the vertex's start");
+static_assert(offsetof(MeshVertex3D, position) == 0 && sizeof(Vec3f) == 3 * sizeof(f32),
+              "meshoptimizer reads positions at the vertex's start");
 
 namespace {
 
 // The largest extent of the positions that `indices` use (what meshopt_simplifyScale gives for them): the simplifier's
 // errors, with Sparse, are relative to it. No copy of the positions is made.
-template <typename Position>
-f32 extent_of(const std::vector<u32>& indices, const Position& position_of) {
+template <typename Position> f32 extent_of(const std::vector<u32>& indices, const Position& position_of) {
     Vec3f lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
     for (const u32 i : indices) {
         const Vec3f p = position_of(i);
@@ -30,7 +28,7 @@ f32 extent_of(const std::vector<u32>& indices, const Position& position_of) {
 // Whether a mesh with no indices is flat-shaded: every corner's normal is its triangle's own (what a model with no
 // normals is read as). Its triangles then share no vertex, and a level is better made over welded positions, with its
 // own vertices (with no normal: the shader makes the face's).
-bool is_flat_soup(const MeshData& data) {
+bool is_flat_soup(const MeshData3D& data) {
     std::size_t flat = 0, counted = 0;
     for (std::size_t t = 0; t + 2 < data.vertices.size(); t += 3) {
         const Vec3f a = data.vertices[t].position, b = data.vertices[t + 1].position, c = data.vertices[t + 2].position;
@@ -51,8 +49,8 @@ bool is_flat_soup(const MeshData& data) {
 
 } // namespace
 
-MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options) {
-    MeshLodChain chain;
+MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& options) {
+    MeshLodChain3D chain;
     const std::size_t vertex_count = data.vertices.size();
     const std::size_t triangles = data.triangle_count();
     chain.levels.push_back({static_cast<u32>(triangles), 0.0f, {}});
@@ -72,20 +70,22 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
     // Too little gained, or too little left: this is as far as the chain goes.
     const auto stops = [&](std::size_t kept_triangles, std::size_t current_triangles) {
         return kept_triangles < options.min_triangles ||
-               static_cast<f64>(kept_triangles) > static_cast<f64>(current_triangles) * (1.0 - static_cast<f64>(options.min_reduction));
+               static_cast<f64>(kept_triangles) >
+                   static_cast<f64>(current_triangles) * (1.0 - static_cast<f64>(options.min_reduction));
     };
 
-    // A flat-shaded mesh with no indices (a model with no normals; the kiln's 15 M vertices): welded by position, simplified
-    // on positions alone (cheap: the 9 attributes of 15 M vertices took gigabytes). The levels index vertices of the chain's
-    // own: each welded position they use, once, with the UV and colour of the mesh's first corner there and a zero normal,
-    // which the shader takes for flat and replaces with the face's (from the derivatives of the position, as for flat
-    // clusters). A vertex for each corner of each level, to carry its triangle's normal, took the kiln's 4 levels 12.8 M
-    // vertices; these are at most the first level's (a level only drops vertices of the one before). The mesh's vertices
-    // are not touched.
+    // A flat-shaded mesh with no indices (a model with no normals; the kiln's 15 M vertices): welded by position,
+    // simplified on positions alone (cheap: the 9 attributes of 15 M vertices took gigabytes). The levels index
+    // vertices of the chain's own: each welded position they use, once, with the UV and colour of the mesh's first
+    // corner there and a zero normal, which the shader takes for flat and replaces with the face's (from the
+    // derivatives of the position, as for flat clusters). A vertex for each corner of each level, to carry its
+    // triangle's normal, took the kiln's 4 levels 12.8 M vertices; these are at most the first level's (a level only
+    // drops vertices of the one before). The mesh's vertices are not touched.
     if (data.indices.empty() && is_flat_soup(data)) {
         std::vector<u32> current(vertex_count);
-        const meshopt_Stream stream{&data.vertices[0].position, 3 * sizeof(f32), sizeof(MeshVertex)};
-        const std::size_t unique = meshopt_generateVertexRemapMulti(current.data(), nullptr, vertex_count, vertex_count, &stream, 1);
+        const meshopt_Stream stream{&data.vertices[0].position, 3 * sizeof(f32), sizeof(MeshVertex3D)};
+        const std::size_t unique =
+            meshopt_generateVertexRemapMulti(current.data(), nullptr, vertex_count, vertex_count, &stream, 1);
         std::vector<u32> from(unique, ~0u); // a corner of the mesh for each welded position
         for (std::size_t i = vertex_count; i-- > 0;) {
             from[current[i]] = static_cast<u32>(i);
@@ -101,7 +101,7 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
         std::vector<u32> simplified, ordered;
         std::vector<u32> slot; // each welded position's place in extra_vertices (~0u: none yet)
         const auto own_vertex = [&](u32 w) {
-            MeshVertex v = data.vertices[from[w]];
+            MeshVertex3D v = data.vertices[from[w]];
             v.normal = {};
             return v;
         };
@@ -111,8 +111,9 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
             const f32 scale = extent_of(current, position_of);
             simplified.resize(current.size());
             f32 relative = 0.0f;
-            const std::size_t kept = meshopt_simplify(simplified.data(), current.data(), current.size(), positions.data(), unique, 3 * sizeof(f32),
-                                                      target_of(current_triangles), max_error, flags, &relative);
+            const std::size_t kept =
+                meshopt_simplify(simplified.data(), current.data(), current.size(), positions.data(), unique,
+                                 3 * sizeof(f32), target_of(current_triangles), max_error, flags, &relative);
             if (stops(kept / 3, current_triangles)) {
                 break;
             }
@@ -137,7 +138,7 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
                     }
                 }
             }
-            MeshLodLevel out{static_cast<u32>(kept / 3), error, {}};
+            MeshLodLevel3D out{static_cast<u32>(kept / 3), error, {}};
             out.indices.resize(kept);
             for (std::size_t i = 0; i < kept; ++i) {
                 const u32 w = ordered[i];
@@ -159,8 +160,8 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
     std::vector<u32> current;
     if (data.indices.empty()) {
         std::vector<u32> remap(vertex_count);
-        const std::size_t unique = meshopt_generateVertexRemap(remap.data(), nullptr, vertex_count, data.vertices.data(), vertex_count,
-                                                               sizeof(MeshVertex));
+        const std::size_t unique = meshopt_generateVertexRemap(
+            remap.data(), nullptr, vertex_count, data.vertices.data(), vertex_count, sizeof(MeshVertex3D));
         std::vector<u32> first(unique, ~0u);
         for (std::size_t i = 0; i < vertex_count; ++i) {
             first[remap[i]] = std::min(first[remap[i]], static_cast<u32>(i));
@@ -175,8 +176,8 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
 
     // What the simplifier minds besides where the surface is: normals, UVs, vertex colours.
     const float weights[9] = {options.normal_weight, options.normal_weight, options.normal_weight,
-                              options.uv_weight,     options.uv_weight,
-                              options.color_weight,  options.color_weight, options.color_weight, options.color_weight};
+                              options.uv_weight,     options.uv_weight,     options.color_weight,
+                              options.color_weight,  options.color_weight,  options.color_weight};
     std::size_t attribute_count = 0;
     for (const float w : weights) {
         attribute_count += w > 0.0f ? 1 : 0;
@@ -185,12 +186,17 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
     if (attribute_count > 0) {
         attributes.resize(vertex_count * 9);
         for (std::size_t i = 0; i < vertex_count; ++i) {
-            const MeshVertex& v = data.vertices[i];
+            const MeshVertex3D& v = data.vertices[i];
             f32* a = &attributes[i * 9];
-            a[0] = v.normal.x; a[1] = v.normal.y; a[2] = v.normal.z;
-            a[3] = v.uv.x;     a[4] = v.uv.y;
-            a[5] = static_cast<f32>(v.color.r) / 255.0f; a[6] = static_cast<f32>(v.color.g) / 255.0f;
-            a[7] = static_cast<f32>(v.color.b) / 255.0f; a[8] = static_cast<f32>(v.color.a) / 255.0f;
+            a[0] = v.normal.x;
+            a[1] = v.normal.y;
+            a[2] = v.normal.z;
+            a[3] = v.uv.x;
+            a[4] = v.uv.y;
+            a[5] = static_cast<f32>(v.color.r) / 255.0f;
+            a[6] = static_cast<f32>(v.color.g) / 255.0f;
+            a[7] = static_cast<f32>(v.color.b) / 255.0f;
+            a[8] = static_cast<f32>(v.color.a) / 255.0f;
         }
     }
 
@@ -203,11 +209,14 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
         simplified.resize(current.size());
         const f32 scale = extent_of(current, position_of);
         f32 relative = 0.0f;
-        const std::size_t kept = attribute_count > 0
-            ? meshopt_simplifyWithAttributes(simplified.data(), current.data(), current.size(), positions, vertex_count, sizeof(MeshVertex),
-                                             attributes.data(), 9 * sizeof(f32), weights, 9, nullptr, target_of(current_triangles), max_error, flags, &relative)
-            : meshopt_simplify(simplified.data(), current.data(), current.size(), positions, vertex_count, sizeof(MeshVertex),
-                               target_of(current_triangles), max_error, flags, &relative);
+        const std::size_t kept =
+            attribute_count > 0
+                ? meshopt_simplifyWithAttributes(simplified.data(), current.data(), current.size(), positions,
+                                                 vertex_count, sizeof(MeshVertex3D), attributes.data(), 9 * sizeof(f32),
+                                                 weights, 9, nullptr, target_of(current_triangles), max_error, flags,
+                                                 &relative)
+                : meshopt_simplify(simplified.data(), current.data(), current.size(), positions, vertex_count,
+                                   sizeof(MeshVertex3D), target_of(current_triangles), max_error, flags, &relative);
         if (stops(kept / 3, current_triangles)) {
             break;
         }
@@ -225,24 +234,28 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
 // chain from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
 constexpr u32 levels_bake_version = 1;
 
-u64 mesh_levels_bake_key(const MeshData& data, const MeshOptions& options) {
+u64 mesh_levels_bake_key(const MeshData3D& data, const MeshOptions3D& options) {
     BakeKey key{"kin.mesh_levels", levels_bake_version};
-    key.value(max_mesh_levels).value(options.levels).value(options.target_ratio).value(options.min_reduction).value(options.min_triangles);
+    key.value(max_mesh_levels)
+        .value(options.levels)
+        .value(options.target_ratio)
+        .value(options.min_reduction)
+        .value(options.min_triangles);
     key.value(options.max_error).value(options.normal_weight).value(options.uv_weight).value(options.color_weight);
     key.value<u8>(options.lock_border ? 1 : 0);
     mesh_bake::add_mesh(key, data);
     return key.hash();
 }
 
-std::vector<u8> save_mesh_levels(const MeshLodChain& chain) {
+std::vector<u8> save_mesh_levels(const MeshLodChain3D& chain) {
     BakeWriter w;
     std::size_t size = 16 + chain.extra_vertices.size() * mesh_bake::vertex_bytes;
-    for (const MeshLodLevel& level : chain.levels) {
+    for (const MeshLodLevel3D& level : chain.levels) {
         size += 16 + level.indices.size() * 4;
     }
     w.reserve(size);
     w.value<u64>(chain.levels.size());
-    for (const MeshLodLevel& level : chain.levels) {
+    for (const MeshLodLevel3D& level : chain.levels) {
         w.value(level.triangles);
         w.value(level.error);
         w.array(std::span<const u32>{level.indices});
@@ -251,16 +264,16 @@ std::vector<u8> save_mesh_levels(const MeshLodChain& chain) {
     return std::move(w.bytes());
 }
 
-bool restore_mesh_levels(std::span<const u8> bytes, const MeshData& data, MeshLodChain& out) {
+bool restore_mesh_levels(std::span<const u8> bytes, const MeshData3D& data, MeshLodChain3D& out) {
     out = {};
-    MeshLodChain chain;
+    MeshLodChain3D chain;
     BakeReader r{bytes};
     u64 count = 0;
     if (!r.count(count, 16) || count < 1 || count > max_mesh_levels) {
         return false;
     }
     chain.levels.resize(static_cast<std::size_t>(count));
-    for (MeshLodLevel& level : chain.levels) {
+    for (MeshLodLevel3D& level : chain.levels) {
         r.value(level.triangles);
         r.value(level.error);
         r.array(level.indices);
@@ -269,13 +282,13 @@ bool restore_mesh_levels(std::span<const u8> bytes, const MeshData& data, MeshLo
         return false;
     }
     // Level 0 is the mesh itself; the others are whole triangles over its vertices and the chain's own.
-    const MeshLodLevel& first = chain.levels[0];
+    const MeshLodLevel3D& first = chain.levels[0];
     if (first.triangles != data.triangle_count() || first.error != 0.0f || !first.indices.empty()) {
         return false;
     }
     const u64 vertices = static_cast<u64>(data.vertices.size()) + chain.extra_vertices.size();
     for (std::size_t l = 1; l < chain.levels.size(); ++l) {
-        const MeshLodLevel& level = chain.levels[l];
+        const MeshLodLevel3D& level = chain.levels[l];
         if (level.indices.size() != static_cast<std::size_t>(level.triangles) * 3 ||
             !std::all_of(level.indices.begin(), level.indices.end(), [&](u32 i) { return i < vertices; })) {
             return false;

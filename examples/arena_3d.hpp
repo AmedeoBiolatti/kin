@@ -4,7 +4,6 @@
 
 #if defined(KIN_EXPERIMENTAL_3D)
 #include <kin/render3d/renderer3d.hpp>
-
 #include <memory>
 #include <optional>
 #include <vector>
@@ -34,7 +33,7 @@ public:
     // Where an arena point shows on the screen, at `height` metres.
     std::optional<Vec2f> world_to_screen(Vec2f world, float height = 0.0f) const;
 
-    const Render3DStats& stats() const;
+    const RenderStats3D& stats() const;
     bool available() const;
 
 private:
@@ -44,9 +43,9 @@ private:
     View3D _view;
     Scene3D _scene;
     Rectf _playfield{};
-    Mesh _tile, _wall, _ship, _star, _plate, _ring, _shot, _core, _spark;
-    std::vector<MeshInstance> _tiles, _walls;
-    std::array<std::vector<MeshInstance>, 3> _enemies;
+    Mesh3D _tile, _wall, _ship, _star, _plate, _ring, _shot, _core, _spark;
+    std::vector<MeshInstance3D> _tiles, _walls;
+    std::array<std::vector<MeshInstance3D>, 3> _enemies;
 };
 
 } // namespace examples

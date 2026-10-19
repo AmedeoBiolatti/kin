@@ -11,9 +11,11 @@ namespace {
 
 f32 clamped(const JsonValue& v, const char* key, f32 fallback, f32 lo, f32 hi) {
     const JsonValue* n = v.find(key);
-    if (n == nullptr || !n->is_number()) return fallback;
+    if (n == nullptr || !n->is_number())
+        return fallback;
     const f64 x = n->as_number();
-    if (!std::isfinite(x)) return fallback;
+    if (!std::isfinite(x))
+        return fallback;
     return f32(std::clamp(x, f64(lo), f64(hi)));
 }
 
@@ -48,9 +50,11 @@ void write_settings(JsonWriter& json, const SummitSettings& s) {
 }
 
 bool read_settings(const JsonValue& v, SummitSettings& out) {
-    if (!v.is_object()) return false;
+    if (!v.is_object())
+        return false;
     SummitSettings s = out;
-    if (const JsonValue* look = v.find("look"); look != nullptr && look->is_string() && find_look(look->as_string()) != nullptr) {
+    if (const JsonValue* look = v.find("look");
+        look != nullptr && look->is_string() && find_look(look->as_string()) != nullptr) {
         s.look = look->as_string();
     }
     s.first_person = flag(v, "first_person", s.first_person);
@@ -76,8 +80,10 @@ bool read_settings(const JsonValue& v, SummitSettings& out) {
         if (next.from_text(b->as_string())) {
             next.dead_zone = std::clamp(next.dead_zone, 0.0f, 0.9f);
             next.trigger_threshold = std::clamp(next.trigger_threshold, 0.05f, 0.95f);
-            next.mouse_sensitivity = std::clamp(std::isfinite(next.mouse_sensitivity) ? next.mouse_sensitivity : 0.10f, 0.01f, 2.0f);
-            next.stick_look_speed = std::clamp(std::isfinite(next.stick_look_speed) ? next.stick_look_speed : 150.0f, 20.0f, 720.0f);
+            next.mouse_sensitivity =
+                std::clamp(std::isfinite(next.mouse_sensitivity) ? next.mouse_sensitivity : 0.10f, 0.01f, 2.0f);
+            next.stick_look_speed =
+                std::clamp(std::isfinite(next.stick_look_speed) ? next.stick_look_speed : 150.0f, 20.0f, 720.0f);
             s.bindings = std::move(next);
         }
     }
@@ -95,10 +101,13 @@ SaveStore make_settings_store(const std::filesystem::path& root) {
 
 SummitSettings load_settings(const SaveStore& store, bool* found) {
     SummitSettings s;
-    if (found != nullptr) *found = false;
+    if (found != nullptr)
+        *found = false;
     const SaveLoadResult loaded = store.read_settings();
-    if (!loaded.result.ok) return s;
-    if (read_settings(loaded.payload, s) && found != nullptr) *found = true;
+    if (!loaded.result.ok)
+        return s;
+    if (read_settings(loaded.payload, s) && found != nullptr)
+        *found = true;
     return s;
 }
 

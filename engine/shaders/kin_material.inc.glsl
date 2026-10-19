@@ -283,7 +283,7 @@ float moonlight(vec3 offset_normal) {
 }
 #endif
 
-// Where the equirectangular environment shows a direction (render3d/environment.hpp).
+// Where the equirectangular environment shows a direction (render3d/environment3d.hpp).
 vec2 environment_uv(vec3 d) {
     d = mat3(frame.environment_matrix) * d;
     return vec2(0.5 + atan(d.z, d.x) / (2.0 * PI), 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI);

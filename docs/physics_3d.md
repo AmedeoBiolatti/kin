@@ -322,7 +322,7 @@ bodies.advance(frame_seconds);               // or bodies.step(fixed_dt) from th
 for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.entity_of(e.user_a); }
 ```
 
-* `Collider3D`: `Box`, `Sphere`, `Capsule`, `Cylinder`, `ConvexHull` and `TriangleMesh` (from a shared `MeshData`), `Compound`
+* `Collider3D`: `Box`, `Sphere`, `Capsule`, `Cylinder`, `ConvexHull` and `TriangleMesh` (from a shared `MeshData3D`), `Compound`
   (`children`, each with its own offset and rotation); `offset`, `rotation`, `scale`; or a ready `Shape3D` shared between entities.
   `RigidBody3D`: motion, mass or density, friction, restitution, damping, gravity factor, layer, sensor, sleeping, continuous,
   initial velocities. An entity with Transform3D and Collider3D has a body: a static one without RigidBody3D.
@@ -340,10 +340,10 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
   `PhysicsContacts3D`. `body_of(entity)`, and the `PhysicsBody3D` component on the entity, name its body.
   `SceneSession3D::step()` advances native physics after the Physics phase, so PostPhysics systems read contacts and
   poses from that same step. Their queued removals finish before Animation; later births first simulate next step.
-* `collider_from_mesh(entity)`: the GPU `Mesh` keeps no triangles, so a mesh entity gives only a box about its bounds;
-  `collider_hull_from_mesh_data` and `collider_triangles_from_mesh_data` make a hull or a static triangle mesh from the `MeshData` the
+* `collider_from_mesh(entity)`: the GPU `Mesh3D` keeps no triangles, so a mesh entity gives only a box about its bounds;
+  `collider_hull_from_mesh_data` and `collider_triangles_from_mesh_data` make a hull or a static triangle mesh from the `MeshData3D` the
   mesh was made from.
-* `ground_query_from_world(world, mask, ignore)` is a `GroundQuery` for foot placement (`IKConstraint::ground`): a raycast.
+* `ground_query_from_world(world, mask, ignore)` is a `GroundQuery3D` for foot placement (`IKConstraint3D::ground`): a raycast.
 
 ## Character controller
 
@@ -577,7 +577,7 @@ world.ragdoll_get_up(r, 0.8f);                          // blend back to the cli
 
 ### Entities and the pose
 
-An entity with `Transform3D`, `SkinnedMeshRenderer` and `Ragdoll3D` gets a ragdoll, made at the next sync after the bodies and the
+An entity with `Transform3D`, `SkinnedMeshRenderer3D` and `Ragdoll3D` gets a ragdoll, made at the next sync after the bodies and the
 characters in ascending entity id order, from the model's skeleton at its rest pose (`Ragdoll3D::desc` with bones is used as given,
 `auto_options` otherwise), at the entity's place and scale; an `Animator3D` is added if there is none. Each step the system sets the
 targets from the animator's clip pose (IK is the renderer's, solved at draw time, and is not followed by the kinematic bodies), steps,

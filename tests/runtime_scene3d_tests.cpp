@@ -118,8 +118,8 @@ void runtime(Renderer2D& renderer) {
     std::filesystem::copy_file(scratch.path/"parts.glb",scratch.path/"unique.glb");
     const auto unique=session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<ModelRenderer3D>()->asset.id="unique.glb";}});
     ok(bool(unique),"unique mesh fixture failed");
-    std::weak_ptr<const Model> model_weak=session.resolve(unique.root).get<ModelRenderer3D>()->model;
-    std::weak_ptr<IMeshBackend> mesh_weak=session.resolve(unique.root).get<ModelRenderer3D>()->model->parts[0].mesh.backend();
+    std::weak_ptr<const Model3D> model_weak=session.resolve(unique.root).get<ModelRenderer3D>()->model;
+    std::weak_ptr<IMeshBackend3D> mesh_weak=session.resolve(unique.root).get<ModelRenderer3D>()->model->parts[0].mesh.backend();
     renderer.clear();ok(session.render(),"unique mesh render failed");renderer.present();
     ok(session.despawn(unique),"unique mesh despawn failed");
     check(model_weak.expired()&&mesh_weak.expired(),"despawn retained model/mesh through collection buckets");

@@ -1,4 +1,4 @@
-# cmake -DOUTPUT_DIR=<dir> [-DGLSLC=<glslc>] [-DSOURCES=<file or folder>;...] -P cmake/kin_spirv.cmake
+# cmake -DOUTPUT_DIR=<dir> [-DGLSLC=<glslc>] [-DKIN_EXPERIMENTAL_3D=OFF] [-DSOURCES=<file or folder>;...] -P cmake/kin_spirv.cmake
 #
 # Compiles kin's shaders (the engine's and its demos') and any SOURCES to SPIR-V
 # in OUTPUT_DIR, named as kin_compile_glsl names them. SPIR-V is the same on
@@ -16,7 +16,12 @@ if(NOT GLSLC)
 endif()
 
 get_filename_component(root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-file(GLOB sources "${root}/engine/shaders/*.glsl" "${root}/games/*/shaders/*.glsl")
+if(NOT DEFINED KIN_EXPERIMENTAL_3D)
+    set(KIN_EXPERIMENTAL_3D ON)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/kin_gpu_shaders.cmake")
+file(GLOB game_sources "${root}/games/*/shaders/*.glsl")
+set(sources ${KIN_GPU_SHADER_SOURCES} ${game_sources})
 foreach(source IN LISTS SOURCES)
     if(IS_DIRECTORY "${source}")
         file(GLOB more "${source}/*.glsl")

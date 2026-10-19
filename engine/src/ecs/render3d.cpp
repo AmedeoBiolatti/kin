@@ -1,29 +1,32 @@
-#include <kin/anim/events.hpp>
-#include <kin/ecs/render3d.hpp>
-#include <kin/render3d/material_asset3d.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <initializer_list>
+#include <kin/anim/events.hpp>
+#include <kin/ecs/render3d.hpp>
+#include <kin/render3d/material_asset3d.hpp>
 #include <string_view>
 
 namespace kin {
 
 namespace {
 
-// Whether skeletons[0] is a skin: a model's node skeleton comes after its skins, so it is the first only when there are none.
-bool has_skin(const Model& model) { return !model.skeletons.empty() && model.node_skeleton != 0; }
+// Whether skeletons[0] is a skin: a model's node skeleton comes after its skins, so it is the first only when there are
+// none.
+bool has_skin(const Model3D& model) {
+    return !model.skeletons.empty() && model.node_skeleton != 0;
+}
 
-// What an animator poses: the first skin of its entity's SkinnedMeshRenderer, else the node skeleton of its ModelRenderer3D (the
-// plain nodes the model's animations move). Null model: neither.
+// What an animator poses: the first skin of its entity's SkinnedMeshRenderer3D, else the node skeleton of its
+// ModelRenderer3D (the plain nodes the model's animations move). Null model: neither.
 struct Animated {
-    const std::shared_ptr<const Model>* model = nullptr;
+    const std::shared_ptr<const Model3D>* model = nullptr;
     u32 skeleton = 0;
 };
-Animated animated(const SkinnedMeshRenderer* skin, const ModelRenderer3D* rigid) {
-    if (skin && skin->model && has_skin(*skin->model)) return {&skin->model, 0};
+Animated animated(const SkinnedMeshRenderer3D* skin, const ModelRenderer3D* rigid) {
+    if (skin && skin->model && has_skin(*skin->model))
+        return {&skin->model, 0};
     if (rigid && rigid->model && rigid->model->node_skeleton >= 0 &&
         static_cast<std::size_t>(rigid->model->node_skeleton) < rigid->model->skeletons.size()) {
         return {&rigid->model, static_cast<u32>(rigid->model->node_skeleton)};
@@ -31,18 +34,25 @@ Animated animated(const SkinnedMeshRenderer* skin, const ModelRenderer3D* rigid)
     return {};
 }
 
-void bind_animator(Animator3D& a, const std::shared_ptr<const Model>& model, u32 index) {
+void bind_animator(Animator3D& a, const std::shared_ptr<const Model3D>& model, u32 index) {
     const auto& skeleton = model->skeletons[index];
-    if (a.bound_to(model) && a.player.skeleton() == &skeleton) return;
+    if (a.bound_to(model) && a.player.skeleton() == &skeleton)
+        return;
     a.events.clear();
-    a.player.set_skeleton(&skeleton); a.player.play(nullptr); a.player.clear_layers();
-    a.bound = model.get(); a.bound_model = model; a.applied.clear(); a.applied_layers.clear();
+    a.player.set_skeleton(&skeleton);
+    a.player.play(nullptr);
+    a.player.clear_layers();
+    a.bound = model.get();
+    a.bound_model = model;
+    a.applied.clear();
+    a.applied_layers.clear();
     // The constraints' joints were looked up in the old skeleton, whose address a new one can take.
-    for (IKConstraint& k : a.ik_constraints) k.resolved_for = nullptr;
+    for (IKConstraint3D& k : a.ik_constraints)
+        k.resolved_for = nullptr;
 }
 
-// Whether `key` is `parts` end to end: what the animators ask every frame, without building the string (the key is made only when it
-// changes).
+// Whether `key` is `parts` end to end: what the animators ask every frame, without building the string (the key is made
+// only when it changes).
 bool key_is(const std::string& key, std::initializer_list<std::string_view> parts) {
     std::size_t at = 0;
     for (const std::string_view part : parts) {
@@ -74,8 +84,8 @@ f32 fade_for(const Animator3D& a, const std::string& from, const std::string& to
     return a.fade_seconds;
 }
 
-// What the base layer should be playing: the machine's state (stepped by one transition), or the clip named. `kind` and `name`
-// make the key that identifies it (a change of key crossfades); `blend` is the state's blend space, if any.
+// What the base layer should be playing: the machine's state (stepped by one transition), or the clip named. `kind` and
+// `name` make the key that identifies it (a change of key crossfades); `blend` is the state's blend space, if any.
 struct Wanted {
     std::string_view kind;
     const std::string* name = nullptr;
@@ -92,15 +102,28 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
                               .yield_existing()
                               .each([](flecs::entity entity, Transform3D&) { entity.ensure<WorldTransform3D>(); })),
       _transforms(world.query_builder<WorldTransform3D, const Transform3D, const WorldTransform3D>()
-                      .term_at(2).parent().cascade().optional()
+                      .term_at(2)
+                      .parent()
+                      .cascade()
+                      .optional()
                       .cached()
                       .build()),
-      _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer, const RenderTransform3D*>().cached().build()),
-      _models(world.query_builder<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*, Animator3D*>().cached().build()),
-      _animators(world.query_builder<const SkinnedMeshRenderer*, const ModelRenderer3D*, Animator3D, Transform3D*>().build()),
-      _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*, const RenderTransform3D*>().build()),
+      _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer3D, const RenderTransform3D*>()
+                  .cached()
+                  .build()),
+      _models(
+          world.query_builder<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*, Animator3D*>()
+              .cached()
+              .build()),
+      _animators(world.query_builder<const SkinnedMeshRenderer3D*, const ModelRenderer3D*, Animator3D, Transform3D*>()
+                     .build()),
+      _skinned(world
+                   .query_builder<const WorldTransform3D, const SkinnedMeshRenderer3D, Animator3D*,
+                                  const RenderTransform3D*>()
+                   .build()),
       _time_of_day(world.query_builder<TimeOfDay3D>().build()),
-      _point_lights(world.query_builder<const WorldTransform3D, const PointLight3D, const RenderTransform3D*>().build()),
+      _point_lights(
+          world.query_builder<const WorldTransform3D, const PointLight3D, const RenderTransform3D*>().build()),
       _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*>().build()),
       _emitters(world.query_builder<const WorldTransform3D, const ParticleEmitter3D>().build()),
       _weather(world.query_builder<Weather3D>().build()) {
@@ -113,15 +136,17 @@ void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
     // Copy inherited state before simulation, outside the query: a structural
     // change can move Flecs tables and invalidate their component pointers.
     std::vector<EcsEntity> entities;
-    _emitters.each([&](flecs::entity entity,const WorldTransform3D&,const ParticleEmitter3D&) {
-        if(!entity.owns<ParticleEmitter3D>())entities.emplace_back(entity);
+    _emitters.each([&](flecs::entity entity, const WorldTransform3D&, const ParticleEmitter3D&) {
+        if (!entity.owns<ParticleEmitter3D>())
+            entities.emplace_back(entity);
     });
-    for(auto entity:entities)entity.get_mut<ParticleEmitter3D>();
-    _emitters.each([&](flecs::entity entity,const WorldTransform3D& world,const ParticleEmitter3D&) {
-        auto* emitter=entity.get_mut<ParticleEmitter3D>(); // all owned now, no structural change
-        emitter->system.transform=world.matrix;
-        emitter->system.emitting=emitter->enabled&&emitter->emitting;
-        emitter->system.update(dt,wind);
+    for (auto entity : entities)
+        entity.get_mut<ParticleEmitter3D>();
+    _emitters.each([&](flecs::entity entity, const WorldTransform3D& world, const ParticleEmitter3D&) {
+        auto* emitter = entity.get_mut<ParticleEmitter3D>(); // all owned now, no structural change
+        emitter->system.transform = world.matrix;
+        emitter->system.emitting = emitter->enabled && emitter->emitting;
+        emitter->system.update(dt, wind);
     });
 }
 
@@ -157,28 +182,35 @@ bool WorldRenderState3D::apply_time_of_day(Scene3D& scene) const {
 }
 
 ActionToken3D play_action3d(EcsEntity actor, std::string_view name, ActionStart3D start) {
-    if (!actor) return {};
+    if (!actor)
+        return {};
     const auto* animator = actor.get<Animator3D>();
-    const Animated target = animated(actor.get<SkinnedMeshRenderer>(), actor.get<ModelRenderer3D>());
-    if (!animator || !animator->actions || !target.model) return {};
-    const std::shared_ptr<const Model>& model = *target.model;
+    const Animated target = animated(actor.get<SkinnedMeshRenderer3D>(), actor.get<ModelRenderer3D>());
+    if (!animator || !animator->actions || !target.model)
+        return {};
+    const std::shared_ptr<const Model3D>& model = *target.model;
     const auto definitions = animator->actions;
-    const auto found = std::find_if(definitions->begin(), definitions->end(), [&](const auto& d) { return d.name == name; });
-    if (found == definitions->end()) return {};
+    const auto found =
+        std::find_if(definitions->begin(), definitions->end(), [&](const auto& d) { return d.name == name; });
+    if (found == definitions->end())
+        return {};
     const auto* clip = model->find_clip(found->clip, target.skeleton);
     auto options = found->playback;
     options.mask_joint = found->mask_joint.empty() ? -1 : model->skeletons[target.skeleton].find(found->mask_joint);
-    if (!clip || (!found->mask_joint.empty() && options.mask_joint < 0)) return {};
+    if (!clip || (!found->mask_joint.empty() && options.mask_joint < 0))
+        return {};
     auto* own = actor.get_mut<Animator3D>();
     bind_animator(*own, model, target.skeleton);
     return own->player.play_action(clip, options, start);
 }
 bool cancel_action3d(EcsEntity actor, ActionToken3D token, f32 fade_seconds) {
-    if (!actor || !actor.has<Animator3D>()) return false;
+    if (!actor || !actor.has<Animator3D>())
+        return false;
     return actor.get_mut<Animator3D>()->player.cancel_action(token, fade_seconds);
 }
 ActionStatus3D action_status3d(EcsEntity actor, ActionToken3D token) {
-    if (!actor || !actor.has<Animator3D>()) return token ? ActionStatus3D::Superseded : ActionStatus3D::None;
+    if (!actor || !actor.has<Animator3D>())
+        return token ? ActionStatus3D::Superseded : ActionStatus3D::None;
     return actor.get<Animator3D>()->player.action_status(token);
 }
 
@@ -192,9 +224,11 @@ u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& d
         for (u32 i = 0; i < batch.count; ++i) {
             if (batch.actions[i]) {
                 const auto* current = entity.get<Animator3D>();
-                if (!current || !current->player.action_event_valid(batch.actions[i])) continue;
+                if (!current || !current->player.action_event_valid(batch.actions[i]))
+                    continue;
             }
-            if (!dispatch.dispatch(EcsEntity{entity}, *batch.entries[i])) ++unhandled;
+            if (!dispatch.dispatch(EcsEntity{entity}, *batch.entries[i]))
+                ++unhandled;
         }
     });
     return unhandled;
@@ -202,21 +236,28 @@ u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& d
 
 void WorldRenderState3D::animate(f32 dt) {
     ++_epoch;
-    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer* renderer, const ModelRenderer3D* rigid, Animator3D& a, Transform3D* own) {
+    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer3D* renderer, const ModelRenderer3D* rigid,
+                        Animator3D& a, Transform3D* own) {
         a.events.clear();
         const Animated target = animated(renderer, rigid);
-        const Model* model = target.model ? target.model->get() : nullptr;
+        const Model3D* model = target.model ? target.model->get() : nullptr;
         if (!model) {
             if (a.bound || a.player.skeleton()) {
-                a.player.set_skeleton(nullptr); a.player.play(nullptr); a.player.clear_layers();
-                a.bound = nullptr; a.bound_model.reset(); a.applied.clear(); a.applied_layers.clear();
+                a.player.set_skeleton(nullptr);
+                a.player.play(nullptr);
+                a.player.clear_layers();
+                a.bound = nullptr;
+                a.bound_model.reset();
+                a.applied.clear();
+                a.applied_layers.clear();
             }
             return;
         }
-        const u32 index = target.skeleton; // 0, the first skin, for a SkinnedMeshRenderer
-        const Skeleton& skeleton = model->skeletons[index];
+        const u32 index = target.skeleton; // 0, the first skin, for a SkinnedMeshRenderer3D
+        const Skeleton3D& skeleton = model->skeletons[index];
         bind_animator(a, *target.model, index);
-        // The state machine: one transition a step (kin/anim's evaluate, consuming matched triggers), never to the state it is in.
+        // The state machine: one transition a step (kin/anim's evaluate, consuming matched triggers), never to the
+        // state it is in.
         Wanted want;
         f32 fade = a.fade_seconds;
         if (a.machine) {
@@ -271,7 +312,8 @@ void WorldRenderState3D::animate(f32 dt) {
                 layer.clip = config.clip.empty() ? nullptr : model->find_clip(config.clip, index);
                 layer.time = 0.0f;
                 const i32 joint = config.mask_joint.empty() ? -1 : skeleton.find(config.mask_joint);
-                layer.mask = joint >= 0 ? PoseMask::subtree(skeleton, joint, 1.0f, config.include_root) : PoseMask{};
+                layer.mask =
+                    joint >= 0 ? PoseMask3D::subtree(skeleton, joint, 1.0f, config.include_root) : PoseMask3D{};
             }
             layer.weight = config.weight;
             layer.speed = config.speed;
@@ -282,13 +324,19 @@ void WorldRenderState3D::animate(f32 dt) {
             a.player.layer(static_cast<u32>(i)).clip = nullptr;
         }
         if (a.playing) {
-            a.player.update(dt, a.event_tracks ? std::span<const ClipEventTrack3D>{*a.event_tracks} : std::span<const ClipEventTrack3D>{}, a.events);
-            if (a.events.count) a.events._owner = a.event_tracks;
+            a.player.update(dt,
+                            a.event_tracks ? std::span<const ClipEventTrack3D>{*a.event_tracks}
+                                           : std::span<const ClipEventTrack3D>{},
+                            a.events);
+            if (a.events.count)
+                a.events._owner = a.event_tracks;
             if (a.apply_root_motion) {
-                const RootMotion& m = a.player.root_motion();
+                const RootMotion3D& m = a.player.root_motion();
                 if (own) {
                     // The motion is in the root's parent space (the model's): turned and scaled as the entity is.
-                    own->position += own->rotation.rotate(Vec3f{m.translation.x * own->scale.x, m.translation.y * own->scale.y, m.translation.z * own->scale.z});
+                    own->position +=
+                        own->rotation.rotate(Vec3f{m.translation.x * own->scale.x, m.translation.y * own->scale.y,
+                                                   m.translation.z * own->scale.z});
                     if (a.root_motion_axes.rotation) {
                         own->rotation = (own->rotation * m.rotation).normalized();
                     }
@@ -300,15 +348,17 @@ void WorldRenderState3D::animate(f32 dt) {
             // collect(), when the entity's WorldTransform3D of this frame is known.
             a.ik_dt += dt;
             const flecs::world ecs = it.world();
-            for (IKConstraint& k : a.ik_constraints) {
+            for (IKConstraint3D& k : a.ik_constraints) {
                 k.target_valid = false;
-                if (k.target.kind == IKTarget::Kind::World) {
+                if (k.target.kind == IKTarget3D::Kind::World) {
                     k.target_valid = true;
-                } else if (k.target.kind == IKTarget::Kind::Entity) {
-                    k.target_valid = ecs.is_alive(k.target.entity) && ecs.entity(k.target.entity).get<WorldTransform3D>() != nullptr;
+                } else if (k.target.kind == IKTarget3D::Kind::Entity) {
+                    k.target_valid =
+                        ecs.is_alive(k.target.entity) && ecs.entity(k.target.entity).get<WorldTransform3D>() != nullptr;
                 }
-                // A target that is gone (or was never given) lets go: the goal is 0, and the fade runs from where it was.
-                const bool needs_target = k.kind != IKKind::FootPlacer;
+                // A target that is gone (or was never given) lets go: the goal is 0, and the fade runs from where it
+                // was.
+                const bool needs_target = k.kind != IKKind3D::FootPlacer;
                 const f32 want = needs_target && !k.target_valid ? 0.0f : std::clamp(k.weight, 0.0f, 1.0f);
                 if (k.fade_seconds > 0.0f) {
                     const f32 step = dt / k.fade_seconds;
@@ -321,13 +371,13 @@ void WorldRenderState3D::animate(f32 dt) {
     });
 }
 
-void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose& base, const Mat4f& entity_matrix, const flecs::world& ecs,
-                                  u64 epoch) {
+void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pose3D& base, const Mat4f& entity_matrix,
+                                  const flecs::world& ecs, u64 epoch) {
     a.ik_pose = base;
     compute_world_matrices(sk, a.ik_pose, a.ik_world);
     const Mat4f to_model = entity_matrix.inverse();
     const f32 dt = a.ik_dt;
-    for (IKConstraint& k : a.ik_constraints) {
+    for (IKConstraint3D& k : a.ik_constraints) {
         const f32 c = std::clamp(k.current, 0.0f, 1.0f);
         const f32 w = c * c * (3.0f - 2.0f * c);
         if (k.resolved_for != &sk) {
@@ -345,7 +395,8 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
             if (k.resolved.size() < count) {
                 return false;
             }
-            return std::none_of(k.resolved.begin(), k.resolved.begin() + static_cast<std::ptrdiff_t>(count), [](i32 j) { return j < 0; });
+            return std::none_of(k.resolved.begin(), k.resolved.begin() + static_cast<std::ptrdiff_t>(count),
+                                [](i32 j) { return j < 0; });
         };
         if (w <= 0.0f) {
             k.look_state.valid = false;
@@ -357,11 +408,11 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
         // left from the point it was last at (the weight is fading out).
         Vec3f target_world{};
         bool has_target = false;
-        if (k.kind != IKKind::FootPlacer) {
-            if (k.target.kind == IKTarget::Kind::World) {
+        if (k.kind != IKKind3D::FootPlacer) {
+            if (k.target.kind == IKTarget3D::Kind::World) {
                 target_world = k.target.position;
                 has_target = true;
-            } else if (k.target.kind == IKTarget::Kind::Entity && ecs.is_alive(k.target.entity)) {
+            } else if (k.target.kind == IKTarget3D::Kind::Entity && ecs.is_alive(k.target.entity)) {
                 if (const WorldTransform3D* t = ecs.entity(k.target.entity).get<WorldTransform3D>()) {
                     target_world = t->matrix.apply(k.target.position);
                     has_target = true;
@@ -379,27 +430,27 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
             }
         }
         const Vec3f target = to_model.apply(target_world);
-        const auto pole_mode = [&](TwoBoneOptions& o) {
+        const auto pole_mode = [&](TwoBoneOptions3D& o) {
             switch (k.pole) {
-            case IKConstraint::Pole::WorldPosition:
-                o.pole_mode = PoleMode::Position;
+            case IKConstraint3D::Pole::WorldPosition:
+                o.pole_mode = PoleMode3D::Position;
                 o.pole = to_model.apply(k.pole_vector);
                 break;
-            case IKConstraint::Pole::ModelDirection:
-                o.pole_mode = PoleMode::Direction;
+            case IKConstraint3D::Pole::ModelDirection:
+                o.pole_mode = PoleMode3D::Direction;
                 o.pole = k.pole_vector;
                 break;
-            case IKConstraint::Pole::None:
-                o.pole_mode = PoleMode::None;
+            case IKConstraint3D::Pole::None:
+                o.pole_mode = PoleMode3D::None;
                 break;
             }
         };
         switch (k.kind) {
-        case IKKind::TwoBone: {
+        case IKKind3D::TwoBone: {
             if (!resolved(3)) {
                 break;
             }
-            TwoBoneOptions o = k.two_bone;
+            TwoBoneOptions3D o = k.two_bone;
             o.weight = w;
             pole_mode(o);
             if (k.match_rotation) {
@@ -407,58 +458,60 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
                 o.end_rotation = (rotation_of(to_model) * k.target_rotation).normalized();
                 o.rotation_weight = k.rotation_weight;
             }
-            solve_two_bone(sk, a.ik_pose, a.ik_world, {k.resolved[0], k.resolved[1], k.resolved[2]}, target, o, &k.bend_state, dt);
+            solve_two_bone(sk, a.ik_pose, a.ik_world, {k.resolved[0], k.resolved[1], k.resolved[2]}, target, o,
+                           &k.bend_state, dt);
             break;
         }
-        case IKKind::Fabrik: {
+        case IKKind3D::Fabrik: {
             if (k.resolved.size() < 2 || !resolved(k.resolved.size())) {
                 break;
             }
-            FabrikOptions o = k.fabrik;
+            FabrikOptions3D o = k.fabrik;
             o.weight = k.fabrik.weight * w;
             switch (k.pole) {
-            case IKConstraint::Pole::WorldPosition:
-                o.pole_mode = PoleMode::Position;
+            case IKConstraint3D::Pole::WorldPosition:
+                o.pole_mode = PoleMode3D::Position;
                 o.pole = to_model.apply(k.pole_vector);
                 break;
-            case IKConstraint::Pole::ModelDirection:
-                o.pole_mode = PoleMode::Direction;
+            case IKConstraint3D::Pole::ModelDirection:
+                o.pole_mode = PoleMode3D::Direction;
                 o.pole = k.pole_vector;
                 break;
-            case IKConstraint::Pole::None:
-                o.pole_mode = PoleMode::None;
+            case IKConstraint3D::Pole::None:
+                o.pole_mode = PoleMode3D::None;
                 break;
             }
             solve_chain_fabrik(sk, a.ik_pose, a.ik_world, k.resolved, target, o);
             break;
         }
-        case IKKind::LookAt: {
+        case IKKind3D::LookAt: {
             if (!resolved(1) || !resolved(k.resolved.size())) {
                 break;
             }
-            std::array<LookAtJoint, 8> chain{};
+            std::array<LookAtJoint3D, 8> chain{};
             const std::size_t n = std::min<std::size_t>(k.resolved.size(), chain.size());
             for (std::size_t i = 0; i < n; ++i) {
-                chain[i] = i < k.look_links.size() ? k.look_links[i] : LookAtJoint{};
+                chain[i] = i < k.look_links.size() ? k.look_links[i] : LookAtJoint3D{};
                 chain[i].joint = k.resolved[i];
             }
-            LookAtOptions o = k.look_at;
+            LookAtOptions3D o = k.look_at;
             o.weight = k.look_at.weight * w;
-            LookAtState state = k.look_state;
+            LookAtState3D state = k.look_state;
             if (state.valid) {
                 state.direction = normalize(to_model.apply_vector(state.direction));
             }
-            solve_look_at(sk, a.ik_pose, a.ik_world, std::span<const LookAtJoint>{chain.data(), n}, target, o, &state, dt);
+            solve_look_at(sk, a.ik_pose, a.ik_world, std::span<const LookAtJoint3D>{chain.data(), n}, target, o, &state,
+                          dt);
             k.look_state.direction = normalize(entity_matrix.apply_vector(state.direction));
             k.look_state.valid = state.valid;
             break;
         }
-        case IKKind::FootPlacer: {
+        case IKKind3D::FootPlacer: {
             const std::size_t legs = k.resolved.size() >= 4 ? (k.resolved.size() - 1) / 3 : 0;
             if (legs == 0 || !k.ground || !resolved(1 + legs * 3)) {
                 break;
             }
-            std::array<FootLeg, 4> feet{};
+            std::array<FootLeg3D, 4> feet{};
             const std::size_t n = std::min<std::size_t>(legs, feet.size());
             for (std::size_t i = 0; i < n; ++i) {
                 feet[i].leg = {k.resolved[1 + i * 3], k.resolved[2 + i * 3], k.resolved[3 + i * 3]};
@@ -466,32 +519,35 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
                 feet[i].toe = i < k.resolved_toes.size() ? k.resolved_toes[i] : -1;
                 feet[i].toe_height = i < k.toe_heights.size() ? k.toe_heights[i] : 0.03f;
             }
-            const std::span<const FootLeg> leg_span{feet.data(), n};
-            // The game's query is in the world: the segment goes out, the hit comes back into the model's space. Its answers are
-            // kept for the frame (the epoch: animate() and propagate_transforms() advance it) by the order they were asked in, for
-            // the same segment: a second solve in the frame (collect() after apply_ik(), two views) does not ask again.
+            const std::span<const FootLeg3D> leg_span{feet.data(), n};
+            // The game's query is in the world: the segment goes out, the hit comes back into the model's space. Its
+            // answers are kept for the frame (the epoch: animate() and propagate_transforms() advance it) by the order
+            // they were asked in, for the same segment: a second solve in the frame (collect() after apply_ik(), two
+            // views) does not ask again.
             std::size_t asked = 0;
-            const GroundQuery model_ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+            const GroundQuery3D model_ground = [&](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
                 const Vec3f world_from = entity_matrix.apply(from), world_to = entity_matrix.apply(to);
                 if (k.ground_cache.size() <= asked) {
                     k.ground_cache.resize(asked + 1);
                 }
-                IKConstraint::GroundCache& cached = k.ground_cache[asked++];
+                IKConstraint3D::GroundCache& cached = k.ground_cache[asked++];
                 if (cached.epoch != epoch || !(cached.from == world_from) || !(cached.to == world_to)) {
                     cached.hit = k.ground(world_from, world_to);
                     cached.epoch = epoch;
                     cached.from = world_from;
                     cached.to = world_to;
                 }
-                const std::optional<GroundHit>& hit = cached.hit;
+                const std::optional<GroundHit3D>& hit = cached.hit;
                 if (!hit) {
                     return std::nullopt;
                 }
-                return GroundHit{to_model.apply(hit->position), normalize(entity_matrix.transposed().apply_vector(hit->normal))};
+                return GroundHit3D{to_model.apply(hit->position),
+                                   normalize(entity_matrix.transposed().apply_vector(hit->normal))};
             };
-            FootPlan plan = plan_foot_placement(sk, a.ik_pose, a.ik_world, leg_span, model_ground, k.foot, &k.foot_state, dt, &entity_matrix);
+            FootPlan3D plan = plan_foot_placement(sk, a.ik_pose, a.ik_world, leg_span, model_ground, k.foot,
+                                                  &k.foot_state, dt, &entity_matrix);
             plan.pelvis_offset *= w;
-            TwoBoneOptions o = k.two_bone;
+            TwoBoneOptions3D o = k.two_bone;
             o.weight = w;
             pole_mode(o);
             apply_foot_placement(sk, a.ik_pose, a.ik_world, k.resolved[0], leg_span, plan, o, k.foot.up);
@@ -502,7 +558,7 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton& sk, const Pose&
     a.ik_dt = 0.0f;
 }
 
-void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton& sk, const Pose& base, const Mat4f& entity_matrix,
+void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton3D& sk, const Pose3D& base, const Mat4f& entity_matrix,
                                     const flecs::world& ecs, u64 epoch) {
     if (!a.ik_constraints.empty()) {
         solve_ik(a, sk, base, entity_matrix, ecs, epoch);
@@ -516,18 +572,20 @@ void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton& sk, const Pos
         return;
     }
     const Mat4f to_model = entity_matrix.inverse();
-    // Parent first. A joint with a share takes the body's rotation (more or less of it), and the body's place when its parent
-    // has less share than it does: the top of the ragdolled part. The rest of the part keeps the pose's bone lengths.
+    // Parent first. A joint with a share takes the body's rotation (more or less of it), and the body's place when its
+    // parent has less share than it does: the top of the ragdolled part. The rest of the part keeps the pose's bone
+    // lengths.
     for (u32 j = 0; j < n; ++j) {
         const i32 parent = sk.parents[j];
         const Mat4f parent_world = parent >= 0 ? a.ik_world[static_cast<std::size_t>(parent)] : sk.root_transform;
         const f32 w = std::clamp(o.weights[j], 0.0f, 1.0f);
-        JointPose& jp = a.ik_pose.joints[j];
+        JointPose3D& jp = a.ik_pose.joints[j];
         if (w > 0.0f) {
             const Mat4f body = to_model * Mat4f::trs(o.position[j], o.rotation[j]);
             const Mat4f local = parent_world.inverse() * body;
             const Quatf target = rotation_of(local);
-            const f32 parent_w = parent >= 0 ? std::clamp(o.weights[static_cast<std::size_t>(parent)], 0.0f, 1.0f) : 0.0f;
+            const f32 parent_w =
+                parent >= 0 ? std::clamp(o.weights[static_cast<std::size_t>(parent)], 0.0f, 1.0f) : 0.0f;
             if (parent_w < w) {
                 jp.translation = lerp(jp.translation, Vec3f{local.m[12], local.m[13], local.m[14]}, w - parent_w);
             }
@@ -538,24 +596,27 @@ void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton& sk, const Pos
 }
 
 void WorldRenderState3D::apply_ik() {
-    _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator, const RenderTransform3D*) {
-        const Model* model = renderer.model.get();
-        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || !has_skin(*model)) {
+    _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer3D& renderer,
+                      Animator3D* animator, const RenderTransform3D*) {
+        const Model3D* model = renderer.model.get();
+        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model ||
+            !has_skin(*model)) {
             return;
         }
-        const Skeleton& skeleton = model->skeletons[0];
+        const Skeleton3D& skeleton = model->skeletons[0];
         if (animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
             solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
         }
     });
     // Models whose animated nodes an animator plays, with constraints on those nodes (a turret's look-at).
-    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer, const RenderTransform3D*, Animator3D* animator) {
-        const Model* model = renderer.model.get();
-        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || model->node_skeleton < 0 ||
-            static_cast<std::size_t>(model->node_skeleton) >= model->skeletons.size()) {
+    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer,
+                     const RenderTransform3D*, Animator3D* animator) {
+        const Model3D* model = renderer.model.get();
+        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model ||
+            model->node_skeleton < 0 || static_cast<std::size_t>(model->node_skeleton) >= model->skeletons.size()) {
             return;
         }
-        const Skeleton& skeleton = model->skeletons[static_cast<std::size_t>(model->node_skeleton)];
+        const Skeleton3D& skeleton = model->skeletons[static_cast<std::size_t>(model->node_skeleton)];
         if (animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
             solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, entity.world(), _epoch);
         }
@@ -584,7 +645,9 @@ void WorldRenderState3D::propagate_transforms() {
     });
 }
 
-void WorldRenderState3D::clear_collection_cache() { _buckets.clear(); }
+void WorldRenderState3D::clear_collection_cache() {
+    _buckets.clear();
+}
 
 void WorldRenderState3D::collect(Scene3D& scene) {
     prepare_joint_attachments();
@@ -594,11 +657,11 @@ void WorldRenderState3D::collect(Scene3D& scene) {
     _meshes.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto world = it.field<const WorldTransform3D>(0);
-            const auto renderers = it.field<const MeshRenderer>(1);
+            const auto renderers = it.field<const MeshRenderer3D>(1);
             const auto presentation = it.field<const RenderTransform3D>(2);
             Bucket* last = nullptr; // entities of a table mostly share a mesh
             for (const auto i : it) {
-                const MeshRenderer& r = renderers[i];
+                const MeshRenderer3D& r = renderers[i];
                 if (!r.visible || !r.mesh.valid()) {
                     continue;
                 }
@@ -614,26 +677,35 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                         last = &_buckets.emplace_back(Bucket{r.mesh, r.material, {}, {}});
                     }
                 }
-                const auto placement=draw_placement(it.entity(i),world[i],it.is_set(2)?&presentation[i]:nullptr);
-                // The entity's id when none is given, as for models: pick names the entity and TAA matches its frames by it.
-                if(placement)last->instances.push_back({*placement,r.tint,r.id?r.id:u32(it.entity(i).id()&0xFFFFFFFFu)});
+                const auto placement =
+                    draw_placement(it.entity(i), world[i], it.is_set(2) ? &presentation[i] : nullptr);
+                // The entity's id when none is given, as for models: pick names the entity and TAA matches its frames
+                // by it.
+                if (placement)
+                    last->instances.push_back({*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu)});
             }
         }
     });
-    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer, const RenderTransform3D* presentation,
-                     Animator3D* animator) {
-        if (!renderer.visible || !renderer.model) return;
-        const auto placement=draw_placement(entity,world,presentation);if(!placement)return;
+    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer,
+                     const RenderTransform3D* presentation, Animator3D* animator) {
+        if (!renderer.visible || !renderer.model)
+            return;
+        const auto placement = draw_placement(entity, world, presentation);
+        if (!placement)
+            return;
         const u32 id = renderer.id ? renderer.id : u32(entity.id() & 0xFFFFFFFFu);
         const auto* overrides = entity.get<ModelMaterials3D>();
         const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
-            overrides->binding->materials.size() == renderer.model->parts.size() ? overrides->binding.get() : nullptr;
-        // The animator's pose of the model's animated nodes (their world matrices), once animate() has bound it to them. None:
-        // every part at rest, exactly as without an animator.
+                                      overrides->binding->materials.size() == renderer.model->parts.size()
+                                  ? overrides->binding.get()
+                                  : nullptr;
+        // The animator's pose of the model's animated nodes (their world matrices), once animate() has bound it to
+        // them. None: every part at rest, exactly as without an animator.
         std::span<const Mat4f> nodes;
-        const Model& model = *renderer.model;
-        if (animator && model.node_skeleton >= 0 && static_cast<std::size_t>(model.node_skeleton) < model.skeletons.size()) {
-            const Skeleton& skeleton = model.skeletons[static_cast<std::size_t>(model.node_skeleton)];
+        const Model3D& model = *renderer.model;
+        if (animator && model.node_skeleton >= 0 &&
+            static_cast<std::size_t>(model.node_skeleton) < model.skeletons.size()) {
+            const Skeleton3D& skeleton = model.skeletons[static_cast<std::size_t>(model.node_skeleton)];
             if (animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
                 if (animator->ik_constraints.empty() && animator->pose_override.empty()) {
                     compute_world_matrices(skeleton, animator->player.pose(), _pose_scratch);
@@ -643,7 +715,8 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                     }
                     nodes = _pose_scratch;
                 } else {
-                    if (!attachment_pose_prepared(entity.id())) solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, entity.world(), _epoch);
+                    if (!attachment_pose_prepared(entity.id()))
+                        solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, entity.world(), _epoch);
                     nodes = animator->ik_world;
                 }
             }
@@ -651,16 +724,20 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         for (size_t index = 0; index < model.parts.size(); ++index) {
             const auto& part = model.parts[index];
             const auto& material = binding ? binding->materials[index] : part.material;
-            if (!part.mesh || part.mesh.skinned() || part.skin >= 0) continue;
+            if (!part.mesh || part.mesh.skinned() || part.skin >= 0)
+                continue;
             auto found = std::find_if(_buckets.begin(), _buckets.end(), [&](const auto& bucket) {
                 return bucket.mesh == part.mesh && bucket.material == material;
             });
-            if (found == _buckets.end()) found = _buckets.emplace(_buckets.end(), Bucket{part.mesh, material, {}, {}});
-            found->instances.push_back({*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint, id});
+            if (found == _buckets.end())
+                found = _buckets.emplace(_buckets.end(), Bucket{part.mesh, material, {}, {}});
+            found->instances.push_back(
+                {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint,
+                 id});
         }
     });
     // A bucket is a reuse aid for live draws, never a resident asset cache.
-    std::erase_if(_buckets,[](const Bucket& bucket){return bucket.instances.empty();});
+    std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); });
     // Keep the authoring path cheap for small buckets. Larger eligible buckets reuse
     // fixed CPU records instead of copying them into Scene3D every frame. This cap
     // covers the extra live records, independent of the renderer's GPU table budget.
@@ -669,11 +746,11 @@ void WorldRenderState3D::collect(Scene3D& scene) {
     std::size_t retained_bytes = 0, retained_batches = 0;
     for (Bucket& bucket : _buckets) {
         const auto& material = bucket.material;
-        const std::size_t bytes = bucket.instances.size() * sizeof(MeshInstance);
+        const std::size_t bytes = bucket.instances.size() * sizeof(MeshInstance3D);
         const bool eligible = bucket.instances.size() >= min_records && !bucket.mesh.skinned() &&
-            (material.blend == Blend3D::Opaque || material.blend == Blend3D::Mask) &&
-            !material.wireframe && !material.shader.backend() && retained_batches < max_batches &&
-            bytes <= record_budget - retained_bytes;
+                              (material.blend == Blend3D::Opaque || material.blend == Blend3D::Mask) &&
+                              !material.wireframe && !material.shader.backend() && retained_batches < max_batches &&
+                              bytes <= record_budget - retained_bytes;
         if (!eligible) {
             bucket.batch = {};
             scene.draw_instanced(bucket.mesh, bucket.instances, material);
@@ -688,7 +765,8 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             if (bucket.instances.size() >= 2 * group_size) {
                 groups.reserve((bucket.instances.size() + group_size - 1) / group_size);
                 for (std::size_t first = 0; first < bucket.instances.size(); first += group_size)
-                    groups.push_back({static_cast<u32>(first), static_cast<u32>(std::min(group_size, bucket.instances.size() - first))});
+                    groups.push_back({static_cast<u32>(first),
+                                      static_cast<u32>(std::min(group_size, bucket.instances.size() - first))});
             }
             bucket.batch = InstanceBatch3D(bucket.mesh, bucket.instances, std::move(groups));
         };
@@ -698,55 +776,85 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             const auto previous = bucket.batch.instances();
             const bool shared = bucket.batch.lifetime().use_count() > 1;
             const auto changed = [&](std::size_t i) {
-                const auto& a = previous[i]; const auto& b = bucket.instances[i];
-                return a.tint != b.tint || a.id != b.id || std::memcmp(a.transform.m, b.transform.m, sizeof(a.transform.m)) != 0;
+                const auto& a = previous[i];
+                const auto& b = bucket.instances[i];
+                return a.tint != b.tint || a.id != b.id ||
+                       std::memcmp(a.transform.m, b.transform.m, sizeof(a.transform.m)) != 0;
             };
             for (std::size_t i = 0; i < previous.size();) {
-                if (!changed(i)) { ++i; continue; }
+                if (!changed(i)) {
+                    ++i;
+                    continue;
+                }
                 // A separately collected scene must keep its snapshot. The usual
                 // clear/collect/render loop owns no old handle and edits in place.
-                if (shared) { rebuild(); break; }
+                if (shared) {
+                    rebuild();
+                    break;
+                }
                 const std::size_t first = i++;
-                while (i < previous.size() && changed(i)) ++i;
-                bucket.batch.update(static_cast<u32>(first), std::span<const MeshInstance>(bucket.instances).subspan(first, i - first));
+                while (i < previous.size() && changed(i))
+                    ++i;
+                bucket.batch.update(static_cast<u32>(first),
+                                    std::span<const MeshInstance3D>(bucket.instances).subspan(first, i - first));
             }
         }
         scene.draw_instanced(bucket.batch, material);
     }
     // Lights (P3b): the entity's place, and for a spot its -Z axis; the entity's id names the light across frames.
-    _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light, const RenderTransform3D* presentation) {
-        const auto matrix=draw_placement(entity,world,presentation);if(!matrix)return;
+    _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light,
+                           const RenderTransform3D* presentation) {
+        const auto matrix = draw_placement(entity, world, presentation);
+        if (!matrix)
+            return;
         const WorldTransform3D placement{*matrix};
         if (light.enabled) {
-            scene.add_light({.position = placement.position(), .color = light.color, .radius = light.radius, .size = light.size, .shadow = light.shadow,
+            scene.add_light({.position = placement.position(),
+                             .color = light.color,
+                             .radius = light.radius,
+                             .size = light.size,
+                             .shadow = light.shadow,
                              .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
         }
     });
-    _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light, const RenderTransform3D* presentation) {
-        const auto matrix=draw_placement(entity,world,presentation);if(!matrix)return;
+    _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light,
+                          const RenderTransform3D* presentation) {
+        const auto matrix = draw_placement(entity, world, presentation);
+        if (!matrix)
+            return;
         const WorldTransform3D placement{*matrix};
         if (light.enabled) {
             const Vec3f axis = placement.matrix.apply_vector({0.0f, 0.0f, -1.0f});
-            scene.add_spot_light({.position = placement.position(), .direction = length_squared(axis) > 0.0f ? normalize(axis) : Vec3f{0.0f, -1.0f, 0.0f},
-                                  .color = light.color, .radius = light.radius, .size = light.size, .inner_angle = light.inner_angle,
-                                  .outer_angle = light.outer_angle, .shadow = light.shadow, .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+            scene.add_spot_light({.position = placement.position(),
+                                  .direction = length_squared(axis) > 0.0f ? normalize(axis) : Vec3f{0.0f, -1.0f, 0.0f},
+                                  .color = light.color,
+                                  .radius = light.radius,
+                                  .size = light.size,
+                                  .inner_angle = light.inner_angle,
+                                  .outer_angle = light.outer_angle,
+                                  .shadow = light.shadow,
+                                  .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
         }
     });
     // Particles (P3c): each enabled emitter's live particles, as a batch with its desc's look.
-    _emitters.each([&](flecs::entity entity,const WorldTransform3D& world, const ParticleEmitter3D& emitter) {
-        if(!draw_placement(entity,world,nullptr))return;
+    _emitters.each([&](flecs::entity entity, const WorldTransform3D& world, const ParticleEmitter3D& emitter) {
+        if (!draw_placement(entity, world, nullptr))
+            return;
         if (emitter.enabled && emitter.system.count() > 0) {
             scene.draw_particles(emitter.system);
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
-    _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator, const RenderTransform3D* presentation) {
-        const Model* model = renderer.model.get();
+    _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer3D& renderer,
+                      Animator3D* animator, const RenderTransform3D* presentation) {
+        const Model3D* model = renderer.model.get();
         if (!renderer.visible || !model || !has_skin(*model)) {
             return;
         }
-        const auto placement=draw_placement(it.entity(row),world,presentation);if(!placement)return;
-        const Skeleton& skeleton = model->skeletons[0];
+        const auto placement = draw_placement(it.entity(row), world, presentation);
+        if (!placement)
+            return;
+        const Skeleton3D& skeleton = model->skeletons[0];
         _pose_scratch.resize(skeleton.joint_count());
         if (animator && animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
             if (animator->ik_constraints.empty() && animator->pose_override.empty()) {
@@ -756,9 +864,10 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                     animator->ik_pose.joints.clear();
                 }
             } else {
-                // The clips' pose with the constraints solved on it (and the physics override over that), in this frame's place
-                // of the entity.
-                if(!attachment_pose_prepared(it.entity(row).id()))solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
+                // The clips' pose with the constraints solved on it (and the physics override over that), in this
+                // frame's place of the entity.
+                if (!attachment_pose_prepared(it.entity(row).id()))
+                    solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
                 world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
             }
         } else {
@@ -769,9 +878,11 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         const u32 id = renderer.id != 0 ? renderer.id : static_cast<u32>(it.entity(row).id() & 0xffffffffu);
         const auto* overrides = it.entity(row).get<ModelMaterials3D>();
         const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
-            overrides->binding->materials.size() == model->parts.size() ? overrides->binding.get() : nullptr;
+                                      overrides->binding->materials.size() == model->parts.size()
+                                  ? overrides->binding.get()
+                                  : nullptr;
         scene.draw_skinned(*model, _pose_scratch, *placement, renderer.tint, id,
-            binding ? std::span<const Material3D>{binding->materials} : std::span<const Material3D>{});
+                           binding ? std::span<const Material3D>{binding->materials} : std::span<const Material3D>{});
     });
     // Meshes no longer drawn are let go.
     std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); });

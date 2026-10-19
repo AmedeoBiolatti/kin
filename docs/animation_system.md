@@ -43,7 +43,7 @@ sample_animation_players(world)
 animation_events.run(world)
 ```
 
-## Node Model
+## Node Model3D
 
 An `Animation` root is one of:
 

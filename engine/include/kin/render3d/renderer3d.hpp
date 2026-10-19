@@ -6,7 +6,7 @@
 // with KIN_EXPERIMENTAL_3D (a CMake option).
 //
 //     kin::Renderer3D r3d{renderer};
-//     kin::Mesh cube = r3d.create_mesh(kin::meshes::box({1, 1, 1}));
+//     kin::Mesh3D cube = r3d.create_mesh(kin::meshes::box({1, 1, 1}));
 //     kin::View3D view = r3d.create_view({640, 360});
 //     ...each frame:
 //     kin::Scene3D scene;
@@ -22,13 +22,12 @@
 #error "kin's 3D rendering is experimental: configure kin with -DKIN_EXPERIMENTAL_3D=ON"
 #endif
 
+#include <filesystem>
 #include <kin/render3d/backend3d.hpp>
 #include <kin/render3d/camera3d.hpp>
-#include <kin/render3d/mesh.hpp>
-#include <kin/render3d/model.hpp>
+#include <kin/render3d/mesh3d.hpp>
+#include <kin/render3d/model3d.hpp>
 #include <kin/render3d/scene3d.hpp>
-
-#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -46,7 +45,7 @@ class BakeCache;
 class View3D {
 public:
     View3D() = default;
-    explicit View3D(std::shared_ptr<IView3DBackend> backend) : _backend(std::move(backend)) {}
+    explicit View3D(std::shared_ptr<IViewBackend3D> backend) : _backend(std::move(backend)) {}
 
     bool valid() const { return _backend != nullptr; }
     explicit operator bool() const { return valid(); }
@@ -58,7 +57,7 @@ public:
         const Vec2i s = size();
         return s.y > 0 ? static_cast<f32>(s.x) / static_cast<f32>(s.y) : 1.0f;
     }
-    IView3DBackend* backend() const { return _backend.get(); }
+    IViewBackend3D* backend() const { return _backend.get(); }
     // Drops the history Scene3D::taa blends in, so that the next frame does
     // not show the one before: call it when the camera cuts to somewhere
     // else, or the scene is replaced. (A resize does it by itself.)
@@ -69,7 +68,7 @@ public:
     }
 
 private:
-    std::shared_ptr<IView3DBackend> _backend;
+    std::shared_ptr<IViewBackend3D> _backend;
 };
 
 class Renderer3D {
@@ -81,17 +80,17 @@ public:
     // doesn't).
     bool available() const { return _backend != nullptr; }
     // What views can have; all defaults where 3D isn't available.
-    Renderer3DCapabilities capabilities() const;
+    RendererCapabilities3D capabilities() const;
     Renderer2D& renderer() const { return *_renderer; }
 
     // `data` kept on the GPU. Empty when 3D isn't available or the data is
-    // not valid (MeshData::validate); diagnostics() explains the failure.
-    Mesh create_mesh(const MeshData& data);
-    // The same with levels of detail (MeshOptions::levels): simpler versions of
+    // not valid (MeshData3D::validate); diagnostics() explains the failure.
+    Mesh3D create_mesh(const MeshData3D& data);
+    // The same with levels of detail (MeshOptions3D::levels): simpler versions of
     // the mesh that Scene3D::lod draws copies far from the camera with. Level 0
     // is `data` itself, so the picture without Scene3D::lod is the same. Takes
     // time to build (about a second for a million triangles).
-    Mesh create_mesh(const MeshData& data, const MeshOptions& options);
+    Mesh3D create_mesh(const MeshData3D& data, const MeshOptions3D& options);
     // Where create_mesh keeps what it builds for levels of detail and clusters (kin/assets/bake_cache.hpp), and
     // reads it back on a later run instead of building again: the same bytes, so the same mesh and pictures. Keyed by
     // the mesh's bytes and the options the build reads (mesh_clusters_bake_key, mesh_levels_bake_key); meshes too
@@ -101,14 +100,14 @@ public:
     BakeCache* bake_cache() const { return _bake_cache; }
     // A view `size` pixels (at least 1 x 1). Where 3D isn't available, a
     // render target that render() fills with the background.
-    View3D create_view(Vec2i size, const View3DOptions& options = {});
+    View3D create_view(Vec2i size, const ViewOptions3D& options = {});
     // A glTF 2.0 model (.glb or .gltf, read through the content folder or
     // pack): its meshes, materials and textures (mipmapped). Empty with diagnostics()
     // when it can't be read or 3D isn't available. `error` is a legacy report snapshot.
-    Model load_model(const std::filesystem::path& path, std::string* error = nullptr);
+    Model3D load_model(const std::filesystem::path& path, std::string* error = nullptr);
     // The same, each of its meshes made with `options` (levels of detail).
-    Model load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error = nullptr);
-    // An environment (render3d/environment.hpp) from a picture: `size` pixels
+    Model3D load_model(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error = nullptr);
+    // An environment (render3d/environment3d.hpp) from a picture: `size` pixels
     // of linear RGB floats, rows top to bottom, 2:1 equirectangular. Filtered
     // on the GPU (with compute) the first time a render uses it; empty where
     // 3D or compute isn't available.
@@ -129,42 +128,45 @@ public:
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     bool render(View3D& view, const Scene3D& scene);
-    // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines of its draws and of the
-    // passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion, contact shadows, temporal anti-aliasing,
-    // occlusion culling), and those features' targets for the view. For a loading screen, or the moment a game turns a feature on, so that
-    // the first frame with it does not hitch (pipeline creation is tens of milliseconds a pipeline on a cold driver cache; `stats().pipelines_made`
-    // is 0 for a render after it). Nothing is made at start-up: call it for the scenes and settings you will use. False where there is
-    // nothing to make (no 3D). Cost: the same as the first render's, in memory too, and the targets are given back after 120 unused renders as ever.
+    // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
+    // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
+    // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a
+    // loading screen, or the moment a game turns a feature on, so that the first frame with it does not hitch (pipeline
+    // creation is tens of milliseconds a pipeline on a cold driver cache; `stats().pipelines_made` is 0 for a render
+    // after it). Nothing is made at start-up: call it for the scenes and settings you will use. False where there is
+    // nothing to make (no 3D). Cost: the same as the first render's, in memory too, and the targets are given back
+    // after 120 unused renders as ever.
     bool warm_up(View3D& view, const Scene3D& scene);
     // What `pixel` (the view's own pixels, from its top left) showed when
     // `view` was last rendered: the copy there and the point of it. Needs a
-    // view made with View3DOptions::pick. It waits for the GPU to finish
+    // view made with ViewOptions3D::pick. It waits for the GPU to finish
     // what is recorded so far (submitting it): ask when something calls for
     // it (a click, the pointer moving), not every frame.
-    PickResult pick(View3D& view, Vec2i pixel);
-    // The clusters the last render's GPU cut chose (Scene3D::lod, Scene3D::debug.gpu_culling), for tests and tools; waits for
-    // the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion the second pass's
-    // clusters (view 0, the camera's) follow the first pass's.
-    bool read_cluster_picks(View3D& view, std::vector<ClusterPick>& out);
-    // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the second
-    // pass's (the camera's view only) follow.
-    bool read_cluster_draws(View3D& view, std::vector<ClusterDraw>& out);
+    PickResult3D pick(View3D& view, Vec2i pixel);
+    // The clusters the last render's GPU cut chose (Scene3D::lod, Scene3D::debug.gpu_culling), for tests and tools;
+    // waits for the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion
+    // the second pass's clusters (view 0, the camera's) follow the first pass's.
+    bool read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& out);
+    // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the
+    // second pass's (the camera's view only) follow.
+    bool read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out);
     // Compact, nonblocking summary of the last render().
-    const Render3DStats& stats() const { return _stats; }
+    const RenderStats3D& stats() const { return _stats; }
     // Detailed implementation counters for profilers/tools. Reading this never
     // waits; GPU-only counts require Scene3D::debug.stats_readback during render.
-    const Render3DDebugStats& debug_stats() const { return _stats; }
+    const RenderDebugStats3D& debug_stats() const { return _stats; }
     // Last runtime operation's failure. Success clears it; capability/stat
     // queries do not. Optional legacy error strings mirror this same report.
     const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:
     friend class Assets3D;
-    Model load_model_shared(const std::filesystem::path& path, const MeshOptions& options, std::string* error, Assets3D* assets);
+    Model3D load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error,
+                              Assets3D* assets);
     void warn_refused_bake(bool restored);
     Renderer2D* _renderer = nullptr;
-    IRenderer3DBackend* _backend = nullptr;
-    Render3DDebugStats _stats{};
+    IRendererBackend3D* _backend = nullptr;
+    RenderDebugStats3D _stats{};
     Diagnostics3D _errors;
     BakeCache* _bake_cache = nullptr;
     bool _warned = false;

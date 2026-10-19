@@ -440,7 +440,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
 }
 
 #if defined(KIN_EXPERIMENTAL_3D)
-IRenderer3DBackend* GpuRenderer2DBackend::renderer_3d() {
+IRendererBackend3D* GpuRenderer2DBackend::renderer_3d() {
     if (!_renderer_3d && gpu::GpuRenderer3D::supported(_device.handle())) {
         _renderer_3d = std::make_unique<gpu::GpuRenderer3D>(*this, _device);
     }

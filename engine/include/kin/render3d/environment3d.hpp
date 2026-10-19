@@ -13,15 +13,14 @@
 // Lights3D::environment_rotation turns it about +y.
 
 #include <kin/core/types.hpp>
-
 #include <memory>
 
 namespace kin {
 
 // The backend's copy of an environment, with its filtered versions.
-class IEnvironmentBackend {
+class IEnvironmentBackend3D {
 public:
-    virtual ~IEnvironmentBackend() = default;
+    virtual ~IEnvironmentBackend3D() = default;
 };
 
 // An environment on the GPU; cheap to copy (copies share it). Empty where 3D
@@ -29,18 +28,19 @@ public:
 class Environment3D {
 public:
     Environment3D() = default;
-    Environment3D(std::shared_ptr<IEnvironmentBackend> backend, Vec2i size) : _backend(std::move(backend)), _size(size) {}
+    Environment3D(std::shared_ptr<IEnvironmentBackend3D> backend, Vec2i size)
+        : _backend(std::move(backend)), _size(size) {}
 
     bool valid() const { return _backend != nullptr; }
     explicit operator bool() const { return valid(); }
     // The picture's size in pixels.
     Vec2i size() const { return _size; }
-    const std::shared_ptr<IEnvironmentBackend>& backend() const { return _backend; }
+    const std::shared_ptr<IEnvironmentBackend3D>& backend() const { return _backend; }
 
     friend bool operator==(const Environment3D& a, const Environment3D& b) { return a._backend == b._backend; }
 
 private:
-    std::shared_ptr<IEnvironmentBackend> _backend;
+    std::shared_ptr<IEnvironmentBackend3D> _backend;
     Vec2i _size{};
 };
 

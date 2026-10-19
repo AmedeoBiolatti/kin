@@ -26,10 +26,10 @@ struct TimeOfDay3D {
     // A game clock (advance(), and WorldRenderState3D::advance_time_of_day): game seconds that pass each real second
     // (60: a game hour a real minute; 0: it stands still).
     f32 speed = 0.0f;
-    // With it (P3b), apply() also drives the shadows of the two lights: the sun's strength fades to nothing between 1 degree
-    // above the horizon and 2 below it, and the moon casts (Lights3D::fill_shadow, its cascades and resolution as the
-    // game set them) once it is above the horizon and bright enough, its strength fading in over its first 8 degrees and
-    // with its light. Off, apply() leaves them as they are (the sun casts while it shines, the moon never).
+    // With it (P3b), apply() also drives the shadows of the two lights: the sun's strength fades to nothing between 1
+    // degree above the horizon and 2 below it, and the moon casts (Lights3D::fill_shadow, its cascades and resolution
+    // as the game set them) once it is above the horizon and bright enough, its strength fading in over its first 8
+    // degrees and with its light. Off, apply() leaves them as they are (the sun casts while it shines, the moon never).
     bool shadows = false;
 };
 
@@ -39,25 +39,25 @@ struct SkyState3D {
     f32 sun_elevation = 90.0f;             // degrees above the horizon
     f32 sun_azimuth = 180.0f;              // degrees from north (-z) through east (+x)
     f32 declination = 0.0f;                // the sun's, degrees
-    Vec3f sun_color{};                     // its light on the ground (Lights3D::sun.color), 0 below the horizon
+    LinearRgb sun_color{};                 // its light on the ground (Lights3D::sun.color), 0 below the horizon
     Vec3f moon_direction{0.0f, -1.0f, 0.0f};
     f32 moon_elevation = -90.0f;
-    f32 moon_illumination = 0.0f;          // 0 new, 1 full
-    f32 moon_light = 0.0f;                 // its strength (Sky3D::moon_light): 0.1 at full moon high up, 0 below the horizon
-    Vec3f moon_color{};                    // its light on the ground (the fill light): a bluish white times moon_light
-    Vec3f ambient{};                       // the sky's light from above (Lights3D::ambient), over pi
-    Vec3f ground_ambient{};                // and the ground's from below
-    Vec3f fog_color{};                     // the sky's colour at the horizon away from the sun
-    f32 fog_density = 0.0f;                // a suggestion for Fog3D::density: a visibility of 24 km over the haze
-    f32 daylight = 1.0f;                   // 0 at night to 1 by day (the sun's light on the ground, as a fraction of its noon)
+    f32 moon_illumination = 0.0f; // 0 new, 1 full
+    f32 moon_light = 0.0f;        // its strength (Sky3D::moon_light): 0.1 at full moon high up, 0 below the horizon
+    LinearRgb moon_color{};       // its light on the ground (the fill light): a bluish white times moon_light
+    LinearRgb ambient{};          // the sky's light from above (Lights3D::ambient), over pi
+    LinearRgb ground_ambient{};   // and the ground's from below
+    Vec3f fog_color{};            // the sky's colour at the horizon away from the sun
+    f32 fog_density = 0.0f;       // a suggestion for Fog3D::density: a visibility of 24 km over the haze
+    f32 daylight = 1.0f;          // 0 at night to 1 by day (the sun's light on the ground, as a fraction of its noon)
 };
 
 // The sun and the moon, and what they and the sky make of the light, for `time`, with `sky`'s haze and sun intensity.
 SkyState3D evaluate(const TimeOfDay3D& time, const Sky3D& sky = {});
 // Puts it into the scene's settings: lights.sun (direction and colour), lights.fill (the moon's light; its shadow when
-// TimeOfDay3D::shadows asks), the ambient and ground ambient, sky.moon_direction and moon_light and `moon` (on while the
-// moon is up), and fog.colour.
-// Leaves what is a look (the sky's haze and intensity, the fog's density, the stars) as it is. Returns the state.
+// TimeOfDay3D::shadows asks), the ambient and ground ambient, sky.moon_direction and moon_light and `moon` (on while
+// the moon is up), and fog.colour. Leaves what is a look (the sky's haze and intensity, the fog's density, the stars)
+// as it is. Returns the state.
 SkyState3D apply(const TimeOfDay3D& time, Lights3D& lights, Sky3D& sky, Fog3D& fog);
 // The solar hour (0 to 24) the sun's upper limb rises and sets, with 0.833 degrees of refraction and size; nothing
 // (a polar day or night: -1 and -1 for night, 0 and 24 for day) when it does not.
@@ -68,7 +68,8 @@ struct SunTimes3D {
     bool polar_night = false;
 };
 SunTimes3D sun_times(const TimeOfDay3D& time);
-// Steps the clock by `dt` real seconds: `speed` game seconds each, hours wrapping at 24 into the next day (365 days a year).
+// Steps the clock by `dt` real seconds: `speed` game seconds each, hours wrapping at 24 into the next day (365 days a
+// year).
 void advance(TimeOfDay3D& time, f32 dt);
 
 } // namespace kin

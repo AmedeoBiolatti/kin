@@ -27,7 +27,7 @@
 namespace kin {
 
 class JobSystem;
-class IRenderer3DBackend;
+class IRendererBackend3D;
 struct CompressedImage;
 
 // Mirroring a sprite within its rectangle, left-right (X) and/or upside
@@ -463,7 +463,7 @@ public:
     virtual void set_job_system(JobSystem*) {}
     // The backend's 3D part (capabilities().rendering_3d), owned by it; null
     // where it draws no 3D.
-    virtual IRenderer3DBackend* renderer_3d() { return nullptr; }
+    virtual IRendererBackend3D* renderer_3d() { return nullptr; }
 
     virtual void set_viewport(Rectf rect) = 0;
     virtual void reset_viewport() = 0;

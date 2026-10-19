@@ -4,18 +4,17 @@
 // (IRenderer2DBackend::renderer_3d(); SDL_GPU only). Experimental: see
 // docs/3d_plan.md.
 
+#include <array>
 #include <kin/core/types.hpp>
 #include <kin/render3d/debug_stats3d.hpp>
-#include <kin/render3d/mesh.hpp>
-#include <kin/render3d/mesh_clusters.hpp>
-#include <kin/render3d/local_lights.hpp>
-#include <kin/render3d/mesh_lod.hpp>
+#include <kin/render3d/local_lights3d.hpp>
+#include <kin/render3d/mesh3d.hpp>
+#include <kin/render3d/mesh_clusters3d.hpp>
+#include <kin/render3d/mesh_lod3d.hpp>
 #include <kin/render3d/scene3d.hpp>
-#include <kin/render3d/shadow_cascades.hpp>
+#include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
-
-#include <array>
 #include <memory>
 #include <span>
 #include <vector>
@@ -23,7 +22,7 @@
 namespace kin {
 
 // What 3D views can have on this device.
-struct Renderer3DCapabilities {
+struct RendererCapabilities3D {
     // The depth buffer views draw with: 32-bit float where the device has it,
     // else 24 or 16-bit fixed point (less precise far away).
     u32 depth_bits = 0;
@@ -38,23 +37,26 @@ struct Renderer3DCapabilities {
     bool ambient_occlusion = false;
     bool contact_shadows = false;
     bool temporal_aa = false;
-    // Whether Scene3D::lod's cluster cut can run in compute (Scene3D::debug.gpu_culling): compute with storage buffers read and
-    // written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
+    // Whether Scene3D::lod's cluster cut can run in compute (Scene3D::debug.gpu_culling): compute with storage buffers
+    // read and written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
     bool gpu_driven_clusters = false;
     // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
     bool occlusion_culling = false;
-    // Whether spot lights, the shadows of lights that are not the sun and the fill light's shadow can work (the light shaders and a depth
-    // format that can be sampled; P3b); where not, they are off and a line in the log says so the first time one is asked for.
+    // Whether spot lights, the shadows of lights that are not the sun and the fill light's shadow can work (the light
+    // shaders and a depth format that can be sampled; P3b); where not, they are off and a line in the log says so the
+    // first time one is asked for.
     bool local_shadows = false;
-    // Whether particles and weather can be drawn (P3c: the billboard shaders could be made), and whether soft particles can (the
-    // depth-reading variant and the pre-pass's targets); where not, they are not drawn and a line in the log says so once.
+    // Whether particles and weather can be drawn (P3c: the billboard shaders could be made), and whether soft particles
+    // can (the depth-reading variant and the pre-pass's targets); where not, they are not drawn and a line in the log
+    // says so once.
     bool particles = false;
     bool soft_particles = false;
-    // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not drawn.
+    // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not
+    // drawn.
     bool skinning = false;
 };
 
-struct View3DOptions {
+struct ViewOptions3D {
     // Samples a pixel (MSAA: smooth edges), 1, 2, 4 or 8; fewer where the
     // device has fewer.
     u32 samples = 4;
@@ -77,15 +79,15 @@ struct View3DOptions {
 };
 
 // What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
-// camera there (its MeshInstance::id) and the point of it the pixel shows.
-struct PickResult {
+// camera there (its MeshInstance3D::id) and the point of it the pixel shows.
+struct PickResult3D {
     bool hit = false; // false: nothing but background there
     u32 id = 0;
     Vec3f position{};
 };
 
-// One cluster the GPU's cut chose, for tests and tools (IRenderer3DBackend::read_cluster_picks).
-struct ClusterPick {
+// One cluster the GPU's cut chose, for tests and tools (IRendererBackend3D::read_cluster_picks).
+struct ClusterPick3D {
     u32 scene = 0; // 0 the scene, 1 its overlay
     u32 draw = 0;  // index in Scene3D::draws()
     u32 copy = 0;  // the copy within the draw
@@ -93,9 +95,9 @@ struct ClusterPick {
     u32 cluster = 0;
 };
 
-// One indirect draw of the GPU cut, as the GPU holds it (IRenderer3DBackend::read_cluster_draws).
-struct ClusterDraw {
-    u32 view = 0;        // as ClusterPick::view
+// One indirect draw of the GPU cut, as the GPU holds it (IRendererBackend3D::read_cluster_draws).
+struct ClusterDraw3D {
+    u32 view = 0;        // as ClusterPick3D::view
     u32 job = 0;         // the copy's place among those cut this render
     u32 index_count = 0; // 0: nothing is drawn
     u32 first_index = 0;
@@ -103,9 +105,9 @@ struct ClusterDraw {
 };
 
 // A view's targets on the backend.
-class IView3DBackend {
+class IViewBackend3D {
 public:
-    virtual ~IView3DBackend() = default;
+    virtual ~IViewBackend3D() = default;
     // The picture, premultiplied, to draw with Renderer2D::draw_texture.
     virtual Texture texture() const = 0;
     virtual Vec2i size() const = 0;
@@ -115,38 +117,43 @@ public:
     virtual void reset_history() {}
 };
 
-class IRenderer3DBackend {
+class IRendererBackend3D {
 public:
-    virtual ~IRenderer3DBackend() = default;
+    virtual ~IRendererBackend3D() = default;
 
-    virtual Renderer3DCapabilities capabilities() const = 0;
+    virtual RendererCapabilities3D capabilities() const = 0;
     // Null when the data can't be uploaded (validated already). `chain`, when
     // not null, holds the levels of detail to keep with it (level 0 of it is `data`).
-    // `clusters`, when not null, is the mesh's cluster hierarchy (MeshOptions::clusters), to keep for the cut: `data`
-    // is then its welded vertices and its leaves' triangles (MeshClusterBuild::vertices, MeshClusters::leaf_indices),
-    // which the hierarchy does not hold, and `chain` is null.
-    virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain,
-                                                      std::shared_ptr<const MeshClusters> clusters) = 0;
+    // `clusters`, when not null, is the mesh's cluster hierarchy (MeshOptions3D::clusters), to keep for the cut: `data`
+    // is then its welded vertices and its leaves' triangles (MeshClusterBuild3D::vertices,
+    // MeshClusters3D::leaf_indices), which the hierarchy does not hold, and `chain` is null.
+    virtual std::shared_ptr<IMeshBackend3D> create_mesh(const MeshData3D& data, const MeshLodChain3D* chain,
+                                                        std::shared_ptr<const MeshClusters3D> clusters) = 0;
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
     // each, rows top to bottom; its filtered copies are made on the first
     // render that uses it. Null when it can't be made (no compute).
-    virtual std::shared_ptr<IEnvironmentBackend> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
+    virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
     // Null when the SPIR-V can't be made into a fragment shader.
-    virtual std::shared_ptr<IMaterialShaderBackend> create_material_shader(std::span<const u8> spirv) = 0;
-    virtual std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) = 0;
-    virtual bool resize_view(IView3DBackend& view, Vec2i size) = 0;
+    virtual std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) = 0;
+    virtual std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) = 0;
+    virtual bool resize_view(IViewBackend3D& view, Vec2i size) = 0;
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
-    virtual bool render(IView3DBackend& view, const Scene3D& scene, Render3DDebugStats& stats) = 0;
+    virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
     // What `pixel` of the view's last render shows; waits for the GPU.
-    virtual PickResult pick(IView3DBackend& view, Vec2i pixel) = 0;
-    // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False where there is nothing to make.
-    virtual bool warm_up(IView3DBackend& view, const Scene3D& scene) { static_cast<void>(view); static_cast<void>(scene); return false; }
+    virtual PickResult3D pick(IViewBackend3D& view, Vec2i pixel) = 0;
+    // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False
+    // where there is nothing to make.
+    virtual bool warm_up(IViewBackend3D& view, const Scene3D& scene) {
+        static_cast<void>(view);
+        static_cast<void>(scene);
+        return false;
+    }
     // The clusters the last render's GPU cut chose, in every pass, for tests and tools; waits for the GPU. False when
     // that render cut on the CPU (or not at all).
-    virtual bool read_cluster_picks(IView3DBackend&, std::vector<ClusterPick>&) { return false; }
+    virtual bool read_cluster_picks(IViewBackend3D&, std::vector<ClusterPick3D>&) { return false; }
     // The indirect draws of the last render's GPU cut, a (view, copy) each; waits for the GPU.
-    virtual bool read_cluster_draws(IView3DBackend&, std::vector<ClusterDraw>&) { return false; }
+    virtual bool read_cluster_draws(IViewBackend3D&, std::vector<ClusterDraw3D>&) { return false; }
 };
 
 } // namespace kin

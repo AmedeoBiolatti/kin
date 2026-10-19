@@ -41,7 +41,7 @@
 //    MantleStarted, MantleFinished, MantleBlocked, Fell) come with the character events, with entity ids in `user_id` and
 //    `body_user_id`. With a CharacterAnimationLink3D that names hand constraints, the hands of the model are put on the
 //    anchors by IK (weight fades while they reach, hold and let go) and the character faces what it hangs from.
-//  * Ragdolls (kin/physics3d/ragdoll3d.hpp): an entity with Transform3D, SkinnedMeshRenderer and Ragdoll3D gets a ragdoll,
+//  * Ragdolls (kin/physics3d/ragdoll3d.hpp): an entity with Transform3D, SkinnedMeshRenderer3D and Ragdoll3D gets a ragdoll,
 //    made after the characters in ascending entity id order, from the model's skeleton (auto_ragdoll_desc) at its rest pose
 //    placed by the entity. Its bodies are kinematic and follow the animator's clip pose until `start_ragdoll`; the
 //    pose of the bodies is then written into the Animator3D's `pose_override` after each step (and by `interpolate`), which
@@ -58,8 +58,8 @@
 #include <kin/ecs/render3d.hpp>
 #include <kin/physics3d/debug_draw3d.hpp>
 #include <kin/physics3d/world3d.hpp>
-#include <kin/render3d/ik.hpp>
-#include <kin/render3d/mesh.hpp>
+#include <kin/render3d/ik3d.hpp>
+#include <kin/render3d/mesh3d.hpp>
 
 #include <memory>
 #include <optional>
@@ -81,9 +81,9 @@ struct Collider3D {
     Vec3f half_extents{0.5f, 0.5f, 0.5f}; // Box
     f32 radius = 0.5f;                    // Sphere, Capsule, Cylinder
     f32 half_height = 0.5f;               // Capsule (its straight part's half), Cylinder: along the shape's Y
-    // ConvexHull (the points are its vertices) and TriangleMesh: triangles on the CPU. The GPU's Mesh keeps none
-    // (collider_from_mesh_data builds one from a MeshData). TriangleMesh is for static and kinematic bodies.
-    std::shared_ptr<const MeshData> mesh;
+    // ConvexHull (the points are its vertices) and TriangleMesh: triangles on the CPU. The GPU's Mesh3D keeps none
+    // (collider_from_mesh_data builds one from a MeshData3D). TriangleMesh is for static and kinematic bodies.
+    std::shared_ptr<const MeshData3D> mesh;
     // Compound: each child places itself with its own offset and rotation.
     std::vector<Collider3D> children;
     // Where the shape sits in the entity's space (the entity's scale applies to it).
@@ -177,7 +177,7 @@ struct CharacterEvents3D {
 // Maps a character's state to an Animator3D on the same entity each step (set it up with `locomotion_animator`, or
 // make your own machine that reads the same parameters): `speed` the ground speed in m/s, `airborne` true when not on
 // the ground (a jump, a fall, a slide), `crouching`, `vertical` the speed up. The foot placer constraint `feet` (an
-// IKKind::FootPlacer) is given the physics world as its ground, ignoring the character's own capsule, and its weight is
+// IKKind3D::FootPlacer) is given the physics world as its ground, ignoring the character's own capsule, and its weight is
 // 1 on the ground and 0 in the air (it fades by the constraint's own fade_seconds). Names that are empty are not set.
 struct CharacterAnimationLink3D {
     std::string speed = "speed";
@@ -387,7 +387,7 @@ public:
     std::size_t character_count() const { return _characters.size(); }
     // The limbs and resource of an entity's character as the last step left them (a default state for none).
     TraversalState3D traversal_of(flecs::entity entity) const;
-    // --- ragdolls (the entity needs Ragdoll3D, a SkinnedMeshRenderer with a model and Transform3D; these return false for
+    // --- ragdolls (the entity needs Ragdoll3D, a SkinnedMeshRenderer3D with a model and Transform3D; these return false for
     // an entity that has no ragdoll yet: step() or sync_bodies() makes it)
     RagdollHandle3D ragdoll_of(flecs::entity entity) const;
     bool start_ragdoll(flecs::entity entity, const RagdollStart3D& start = {});
@@ -500,7 +500,7 @@ private:
     WorldPhysicsState3DConfig _config;
     flecs::query<const Transform3D, const Collider3D, const RigidBody3D*> _query;
     flecs::query<const Transform3D, const CharacterController3D> _character_query;
-    flecs::query<const Transform3D, const SkinnedMeshRenderer, const Ragdoll3D> _ragdoll_query;
+    flecs::query<const Transform3D, const SkinnedMeshRenderer3D, const Ragdoll3D> _ragdoll_query;
     flecs::query<const Rope3D> _rope_query;
     std::vector<Bound> _bound; // ascending entity id
     std::vector<BoundCharacter> _characters; // ascending entity id
@@ -510,11 +510,11 @@ private:
     std::vector<BoundRope> _ropes;       // ascending entity id
     std::vector<RagdollEvent3D> _ragdoll_events;
     std::vector<RopeEvent3D> _rope_events;
-    std::vector<Mesh> _rope_meshes;      // the tubes of the last collect_ropes
+    std::vector<Mesh3D> _rope_meshes;      // the tubes of the last collect_ropes
     std::vector<Mat4f> _pose_scratch;
     f32 _accumulator = 0.0f;
     DebugDraw3D _debug;
-    Mesh _debug_mesh; // the lines of the last collect_debug, kept so the GPU is done with them before they go
+    Mesh3D _debug_mesh; // the lines of the last collect_debug, kept so the GPU is done with them before they go
 };
 
 // An Animator3D for a character: a machine with `ground` (a 1D blend over `speed`: `idle` at 0, `walk` at walk_speed,
@@ -546,21 +546,21 @@ void drive_character_animator(Animator3D& animator, const CharacterState3D& stat
 void drive_traversal_animator(Animator3D& animator, const TraversalState3D& traversal, const CharacterAnimationLink3D& link,
                               Vec3f up);
 
-// A ground query for foot placement (kin/render3d/ik.hpp) over a World3D: the first surface along the segment, in the
+// A ground query for foot placement (kin/render3d/ik3d.hpp) over a World3D: the first surface along the segment, in the
 // world's space, by raycast. `ignore` is the character's own body. The world must outlive the query.
-GroundQuery ground_query_from_world(const World3D& world, Layer3DMask mask = all_layers3d, Body3D ignore = {});
+GroundQuery3D ground_query_from_world(const World3D& world, Layer3DMask mask = all_layers3d, Body3D ignore = {});
 
 // Colliders from what a mesh entity has. The GPU mesh keeps no triangles, so from the entity alone only its bounds are
-// known: a box about them (offset to their centre). With the mesh's MeshData, a hull or the triangles.
+// known: a box about them (offset to their centre). With the mesh's MeshData3D, a hull or the triangles.
 std::optional<Collider3D> collider_from_mesh(flecs::entity entity);
-Collider3D collider_from_bounds(const Bounds3& bounds);
-Collider3D collider_hull_from_mesh_data(std::shared_ptr<const MeshData> mesh);
-Collider3D collider_triangles_from_mesh_data(std::shared_ptr<const MeshData> mesh);
+Collider3D collider_from_bounds(const Bounds3D& bounds);
+Collider3D collider_hull_from_mesh_data(std::shared_ptr<const MeshData3D> mesh);
+Collider3D collider_triangles_from_mesh_data(std::shared_ptr<const MeshData3D> mesh);
 
 // Debug lines drawn as a wireframe (an unlit, depth tested line mesh, one draw): makes a mesh of them with
 // `renderer`, which the caller keeps until the frame is drawn (WorldPhysicsState3D keeps its own). An empty list draws
 // nothing and returns an invalid mesh. Each line is a sliver triangle of the wireframe material, its ends moved a hair toward
 // the eye (same pixel, nearer) so it wins against the face it edges.
-Mesh draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const DebugLine3D> lines);
+Mesh3D draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const DebugLine3D> lines);
 
 } // namespace kin

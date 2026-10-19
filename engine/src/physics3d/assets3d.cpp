@@ -119,7 +119,7 @@ struct Cook {
                 require(geometry.vertices.size()>=4&&geometry.vertices.size()<=limits.hull_points,"convex hull point budget exceeded (or fewer than four points)");
                 require(volumetric(geometry.vertices),"convex hull points must enclose volume");
             }
-            auto mesh=std::make_shared<MeshData>();mesh->vertices.resize(geometry.vertices.size());
+            auto mesh=std::make_shared<MeshData3D>();mesh->vertices.resize(geometry.vertices.size());
             for(size_t i=0;i<geometry.vertices.size();++i) mesh->vertices[i].position=geometry.vertices[i];
             if(result.kind==Collider3D::Kind::TriangleMesh) mesh->indices=std::move(geometry.indices);
             result.mesh=std::move(mesh);

@@ -2,12 +2,11 @@
 
 #include "../sponza_walk/character.hpp"
 
-#include <kin/render3d/skeleton.hpp>
-#include <kin/runtime/state_hash.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <kin/render3d/skeleton3d.hpp>
+#include <kin/runtime/state_hash.hpp>
 
 namespace summit {
 
@@ -19,8 +18,7 @@ constexpr u32 save_version = 1;
 // A tiny writer and reader for the state's bytes (little endian on every machine kin runs on; floats bit for bit).
 struct Out {
     std::vector<u8>& bytes;
-    template <class T>
-    void put(const T& v) {
+    template <class T> void put(const T& v) {
         const u8* b = reinterpret_cast<const u8*>(&v);
         bytes.insert(bytes.end(), b, b + sizeof(T));
     }
@@ -39,8 +37,7 @@ struct In {
     std::span<const u8> bytes;
     std::size_t at = 0;
     bool ok = true;
-    template <class T>
-    T get() {
+    template <class T> T get() {
         T v{};
         if (!ok || at + sizeof(T) > bytes.size()) {
             ok = false;
@@ -71,14 +68,19 @@ struct In {
 
 f32 wrap_degrees(f32 d) {
     d = std::fmod(d + 180.0f, 360.0f);
-    if (d < 0.0f) d += 360.0f;
+    if (d < 0.0f)
+        d += 360.0f;
     return d - 180.0f;
 }
 
-bool finite(Vec2f v) { return std::isfinite(v.x) && std::isfinite(v.y); }
+bool finite(Vec2f v) {
+    return std::isfinite(v.x) && std::isfinite(v.y);
+}
 
 // The yaw (degrees) a person model faces when it looks along `d` (the model faces +Z at 0).
-f32 facing_of(Vec3f d) { return std::atan2(d.x, d.z) * 180.0f / pi; }
+f32 facing_of(Vec3f d) {
+    return std::atan2(d.x, d.z) * 180.0f / pi;
+}
 
 // The controller as the rules ask for it.
 CharacterDesc3D make_desc(const PlayerRules& r, Vec3f feet, u64 user_id, f32 stamina_cap) {
@@ -120,22 +122,27 @@ CharacterDesc3D make_desc(const PlayerRules& r, Vec3f feet, u64 user_id, f32 sta
 Shape3D decor_shape(const SummitLevel& level, const DecorChunk& chunk) {
     std::vector<Vec3f> pts = decor_chunk_points(level, chunk);
     const Quatf inverse = chunk.rotation.conjugate();
-    for (Vec3f& p : pts) p = inverse.rotate(p - chunk.centre);
+    for (Vec3f& p : pts)
+        p = inverse.rotate(p - chunk.centre);
     return Shape3D::convex_hull(pts);
 }
 
-Vec3f look_vector(f32 yaw, f32 pitch) { return Quatf::yaw_pitch(yaw, pitch).rotate({0.0f, 0.0f, -1.0f}); }
+Vec3f look_vector(f32 yaw, f32 pitch) {
+    return Quatf::yaw_pitch(yaw, pitch).rotate({0.0f, 0.0f, -1.0f});
+}
 
 struct Game::Impl {
-    Skeleton skeleton;
+    Skeleton3D skeleton;
     RagdollDesc desc;
     std::vector<Mat4f> model_world; // the rest pose, joint by joint, in the model's space
     std::vector<Mat4f> bones;       // scratch
 };
 
 Game::Game(u64 seed, GameConfig config)
-    : _level(config.expedition ? generate_expedition_level(seed, config.dense_scenery) : generate_level(seed)), _config(std::move(config)) {
-    if (_config.players == 0) _config.players = 1;
+    : _level(config.expedition ? generate_expedition_level(seed, config.dense_scenery) : generate_level(seed)),
+      _config(std::move(config)) {
+    if (_config.players == 0)
+        _config.players = 1;
     build();
 }
 
@@ -144,8 +151,8 @@ Game::~Game() = default;
 void Game::build() {
     World3DConfig cfg;
     cfg.single_threaded = _config.single_threaded;
-    // Nothing here reads the world's contact events (the game's own come from the character, ragdoll and rope events), so none are
-    // recorded: each costs a callback under a lock, and the pile of a step has hundreds.
+    // Nothing here reads the world's contact events (the game's own come from the character, ragdoll and rope events),
+    // so none are recorded: each costs a callback under a lock, and the pile of a step has hundreds.
     cfg.contact_events = false;
     cfg.persist_events = false;
     _world = std::make_unique<World3D>(cfg);
@@ -175,8 +182,8 @@ void Game::build() {
         }
     }
 
-    // The decor rock (buttresses, scree, boulders): a static convex hull of each chunk's mesh, after the pieces' ids. A buttress
-    // has the Cliff's surface, a stone the ground's (neither is a hold).
+    // The decor rock (buttresses, scree, boulders): a static convex hull of each chunk's mesh, after the pieces' ids. A
+    // buttress has the Cliff's surface, a stone the ground's (neither is a hold).
     _decor = decor_chunks(_level);
     _decor_bodies.reserve(_decor.size());
     for (std::size_t i = 0; i < _decor.size(); ++i) {
@@ -239,7 +246,8 @@ void Game::build() {
         compute_world_matrices(_impl->skeleton, _impl->skeleton.rest_pose(), _impl->model_world);
         _skeleton_joints = _impl->skeleton.joint_count();
         _skeleton_names = _impl->skeleton.names;
-        for (const RagdollBoneDesc3D& b : _impl->desc.bones) _ragdoll_joints.push_back(b.joint);
+        for (const RagdollBoneDesc3D& b : _impl->desc.bones)
+            _ragdoll_joints.push_back(b.joint);
     }
 
     // The players: a character and a ragdoll each, made in player order.
@@ -270,8 +278,8 @@ void Game::build() {
         desc.user_id = 2000000u + i;
         const std::vector<Mat4f> bones = rest_bones(_world->character(p.character).position, p.facing_yaw);
         p.ragdoll = _world->create_ragdoll(desc, bones);
-        // Parked (no collisions, no cost) until it is needed: made Animated its bodies are kinematic at the T pose, where another
-        // player's capsule would meet an arm.
+        // Parked (no collisions, no cost) until it is needed: made Animated its bodies are kinematic at the T pose,
+        // where another player's capsule would meet an arm.
         _world->animate_ragdoll(p.ragdoll);
         const std::vector<Body3D> bodies = _world->ragdoll_bodies(p.ragdoll);
         if (!bodies.empty() && bodies[0].valid()) {
@@ -310,12 +318,21 @@ void Game::debug_set_health(i32 player, f32 health) {
     _players[std::size_t(player)].health = std::clamp(health, 0.0f, _config.rules.max_health);
 }
 
-// ---- reading ----------------------------------------------------------------------------------------------------------
+// ---- reading
+// ----------------------------------------------------------------------------------------------------------
 
-CharacterState3D Game::character_state(i32 player) const { return _world->character(_players[std::size_t(player)].character); }
-TraversalState3D Game::traversal(i32 player) const { return _world->traversal(_players[std::size_t(player)].character); }
-f32 Game::stamina(i32 player) const { return traversal(player).resource.value; }
-f32 Game::stamina_cap(i32 player) const { return traversal(player).resource.max; }
+CharacterState3D Game::character_state(i32 player) const {
+    return _world->character(_players[std::size_t(player)].character);
+}
+TraversalState3D Game::traversal(i32 player) const {
+    return _world->traversal(_players[std::size_t(player)].character);
+}
+f32 Game::stamina(i32 player) const {
+    return traversal(player).resource.value;
+}
+f32 Game::stamina_cap(i32 player) const {
+    return traversal(player).resource.max;
+}
 
 Vec3f Game::feet(i32 player) const {
     const Player& p = _players[std::size_t(player)];
@@ -329,7 +346,8 @@ Vec3f Game::head(i32 player) const {
         // The pelvis is the root bone: 0.2 above the ground point of the place when it stands; a lying body is lower.
         const std::vector<Body3D> bodies = _world->ragdoll_bodies(p.ragdoll);
         for (const Body3D b : bodies) {
-            if (b.valid()) return _world->position(b) + Vec3f{0.0f, 0.4f, 0.0f};
+            if (b.valid())
+                return _world->position(b) + Vec3f{0.0f, 0.4f, 0.0f};
         }
         return place.position + Vec3f{0.0f, 0.5f, 0.0f};
     }
@@ -341,13 +359,16 @@ Vec3f Game::look_direction(i32 player) const {
     return look_vector(p.yaw, p.pitch);
 }
 
-f32 Game::altitude(i32 player) const { return feet(player).y - _level.start.y; }
+f32 Game::altitude(i32 player) const {
+    return feet(player).y - _level.start.y;
+}
 
 void Game::ragdoll_pose(i32 player, std::vector<RagdollBonePose3D>& out) const {
     _world->ragdoll_pose(_players[std::size_t(player)].ragdoll, out);
 }
 
-// ---- the step ---------------------------------------------------------------------------------------------------------
+// ---- the step
+// ---------------------------------------------------------------------------------------------------------
 
 void Game::step(std::span<const PlayerCommand> commands) {
     _events.clear();
@@ -359,7 +380,8 @@ void Game::step(std::span<const PlayerCommand> commands) {
     _world->drain_constraint_events();
     for (std::size_t i = 0; i < _players.size(); ++i) {
         after_player(i32(i));
-        if (_config.expedition) step_expedition(i32(i));
+        if (_config.expedition)
+            step_expedition(i32(i));
     }
     _world->drain_character_events();
     _world->drain_ragdoll_events();
@@ -382,12 +404,16 @@ void Game::step_player(i32 index, const PlayerCommand& raw) {
     Player& p = _players[std::size_t(index)];
     const PlayerRules& r = _config.rules;
     PlayerCommand c = raw;
-    if (!finite(c.move)) c.move = {};
-    if (!finite(c.look)) c.look = {};
+    if (!finite(c.move))
+        c.move = {};
+    if (!finite(c.look))
+        c.look = {};
     const f32 m = std::sqrt(c.move.x * c.move.x + c.move.y * c.move.y);
-    if (m > 1.0f) c.move = {c.move.x / m, c.move.y / m};
+    if (m > 1.0f)
+        c.move = {c.move.x / m, c.move.y / m};
     p.command = c;
-    if (_config.expedition && (p.expedition.phase == ExpeditionPhase::Briefing || p.expedition.phase == ExpeditionPhase::Complete)) {
+    if (_config.expedition &&
+        (p.expedition.phase == ExpeditionPhase::Briefing || p.expedition.phase == ExpeditionPhase::Complete)) {
         c.move = {};
         c.jump = c.sprint = c.grab_left = c.grab_right = c.pull_up = false;
     }
@@ -408,10 +434,12 @@ void Game::step_player(i32 index, const PlayerCommand& raw) {
         t.reach = look_vector(p.yaw, p.pitch);
         t.jump_off = c.jump;
         t.drop = c.release;
-        // Up and over by itself: both hands on a lip and forward pressed (the level alternates, so that each is an edge).
+        // Up and over by itself: both hands on a lip and forward pressed (the level alternates, so that each is an
+        // edge).
         const TraversalState3D ts = _world->traversal(p.character);
         bool want = c.pull_up;
-        if (!want && ts.mode == TraversalMode3D::Hanging && ts.held == 2 && c.move.y > 0.3f && ts.grips[0].ledge && ts.grips[1].ledge) {
+        if (!want && ts.mode == TraversalMode3D::Hanging && ts.held == 2 && c.move.y > 0.3f && ts.grips[0].ledge &&
+            ts.grips[1].ledge) {
             want = true;
         }
         t.pull_up = want && !p.pull_up_sent;
@@ -423,15 +451,17 @@ void Game::step_player(i32 index, const PlayerCommand& raw) {
     _world->set_traversal_input(p.character, t);
 
     // Injury lowers the cap on stamina; the descriptor's number is live.
-    const f32 cap = r.injury_stamina_floor + (1.0f - r.injury_stamina_floor) * std::clamp(p.health / r.max_health, 0.0f, 1.0f);
+    const f32 cap =
+        r.injury_stamina_floor + (1.0f - r.injury_stamina_floor) * std::clamp(p.health / r.max_health, 0.0f, 1.0f);
     if (cap != p.last_stamina_cap) {
         CharacterDesc3D d = make_desc(r, {}, 0, cap);
-        // Only the numbers that are live matter to set_character_desc, but it takes a whole descriptor: start from the ones
-        // the controller has been given.
+        // Only the numbers that are live matter to set_character_desc, but it takes a whole descriptor: start from the
+        // ones the controller has been given.
         _world->set_character_desc(p.character, d);
         p.last_stamina_cap = cap;
         const f32 value = _world->traversal(p.character).resource.value;
-        if (value > d.traversal.resource.max) _world->set_traversal_resource(p.character, d.traversal.resource.max);
+        if (value > d.traversal.resource.max)
+            _world->set_traversal_resource(p.character, d.traversal.resource.max);
     }
 }
 
@@ -466,18 +496,23 @@ void Game::begin_stun(i32 index, Vec3f velocity, bool dead) {
 
 bool Game::try_get_up(i32 index) {
     Player& p = _players[std::size_t(index)];
-    const RagdollPlace3D place = _world->ragdoll_get_up_place(p.ragdoll, {0.0f, 1.0f, 0.0f}, all_layers3d & ~layer_bit(layers3d::Character), 3.0f);
-    if (!place.found) return false;
+    const RagdollPlace3D place = _world->ragdoll_get_up_place(p.ragdoll, {0.0f, 1.0f, 0.0f},
+                                                              all_layers3d & ~layer_bit(layers3d::Character), 3.0f);
+    if (!place.found)
+        return false;
     // The standing capsule must fit there, against everything that is not the ragdoll's own or the capsule's.
     const std::vector<Body3D> own = _world->ragdoll_bodies(p.ragdoll);
     QueryFilter3D filter;
     filter.mask = all_layers3d & ~layer_bit(layers3d::Character) & ~layer_bit(layers3d::Sensor);
     filter.ignore = _world->character(p.character).body;
     const Shape3D capsule = Shape3D::capsule(0.5f * (1.95f - 0.6f), 0.3f);
-    const std::vector<OverlapHit3D> hits = _world->overlap(capsule, place.position + Vec3f{0.0f, 0.5f * 1.95f + 0.02f, 0.0f}, Quatf{}, filter);
+    const std::vector<OverlapHit3D> hits =
+        _world->overlap(capsule, place.position + Vec3f{0.0f, 0.5f * 1.95f + 0.02f, 0.0f}, Quatf{}, filter);
     for (const OverlapHit3D& h : hits) {
-        if (std::find(own.begin(), own.end(), h.body) != own.end()) continue;
-        if (h.penetration > 0.01f) return false;
+        if (std::find(own.begin(), own.end(), h.body) != own.end())
+            continue;
+        if (h.penetration > 0.01f)
+            return false;
     }
     // Where it lies, facing by the pelvis; the clip (standing) blends in.
     const Vec3f fwd = place.rotation.rotate({0.0f, 0.0f, 1.0f});
@@ -525,7 +560,8 @@ void Game::after_player(i32 index) {
         bool landed = false;
         f32 land_speed = 0.0f;
         for (const CharacterEvent3D& e : _world->character_events()) {
-            if (e.user_id != user) continue;
+            if (e.user_id != user)
+                continue;
             switch (e.kind) {
             case CharacterEventKind3D::Landed:
                 landed = true;
@@ -533,18 +569,30 @@ void Game::after_player(i32 index) {
                 emit(index, GameEventKind::Landed, cs.position, land_speed);
                 break;
             case CharacterEventKind3D::LeftGround:
-                if (e.jumped) emit(index, GameEventKind::Jumped, cs.position, 0.0f);
+                if (e.jumped)
+                    emit(index, GameEventKind::Jumped, cs.position, 0.0f);
                 break;
-            case CharacterEventKind3D::Gripped: emit(index, GameEventKind::Gripped, e.point, f32(e.hand)); break;
-            case CharacterEventKind3D::GripReleased: emit(index, GameEventKind::Released, e.point, f32(e.reason)); break;
-            case CharacterEventKind3D::Exhausted: emit(index, GameEventKind::Exhausted, cs.position, 0.0f); break;
-            case CharacterEventKind3D::MantleBlocked: emit(index, GameEventKind::PullUpBlocked, e.point, f32(e.reason)); break;
-            case CharacterEventKind3D::MantleFinished: emit(index, GameEventKind::Mantled, cs.position, 0.0f); break;
+            case CharacterEventKind3D::Gripped:
+                emit(index, GameEventKind::Gripped, e.point, f32(e.hand));
+                break;
+            case CharacterEventKind3D::GripReleased:
+                emit(index, GameEventKind::Released, e.point, f32(e.reason));
+                break;
+            case CharacterEventKind3D::Exhausted:
+                emit(index, GameEventKind::Exhausted, cs.position, 0.0f);
+                break;
+            case CharacterEventKind3D::MantleBlocked:
+                emit(index, GameEventKind::PullUpBlocked, e.point, f32(e.reason));
+                break;
+            case CharacterEventKind3D::MantleFinished:
+                emit(index, GameEventKind::Mantled, cs.position, 0.0f);
+                break;
             case CharacterEventKind3D::Fell:
                 ++p.falls;
                 emit(index, GameEventKind::Fell, cs.position, 0.0f);
                 break;
-            default: break;
+            default:
+                break;
             }
         }
         // A jump costs stamina (it also restarts the regeneration delay).
@@ -572,9 +620,11 @@ void Game::after_player(i32 index) {
             } else if (speed >= r.stun_speed) {
                 begin_stun(index, {p.air_velocity.x, 0.0f, p.air_velocity.z}, false);
             }
-            if (p.state == PlayerState::Alive) p.air_speed = 0.0f;
+            if (p.state == PlayerState::Alive)
+                p.air_speed = 0.0f;
         } else if (cs.ground == CharacterGround3D::OnGround || ts.hanging()) {
-            if (cs.ground == CharacterGround3D::OnGround) p.air_speed = 0.0f;
+            if (cs.ground == CharacterGround3D::OnGround)
+                p.air_speed = 0.0f;
         }
         if (p.state == PlayerState::Alive) {
             // Health comes back slowly standing still, and fast in a camp.
@@ -591,7 +641,8 @@ void Game::after_player(i32 index) {
                 }
             }
             if (in_camp && cs.ground == CharacterGround3D::OnGround) {
-                p.health = std::min(r.max_health, p.health + r.camp_health_regen * dt * (p.command.interact ? 2.0f : 1.0f));
+                p.health =
+                    std::min(r.max_health, p.health + r.camp_health_regen * dt * (p.command.interact ? 2.0f : 1.0f));
             } else if (still) {
                 p.health = std::min(r.max_health, p.health + r.health_regen * dt);
             }
@@ -599,7 +650,8 @@ void Game::after_player(i32 index) {
             // The top.
             if (!p.summit && !_config.expedition) {
                 const Vec3f d = cs.position - _level.summit;
-                if (std::abs(d.x) < _level.summit_radius && std::abs(d.z) < _level.summit_radius && std::abs(d.y) < 4.0f) {
+                if (std::abs(d.x) < _level.summit_radius && std::abs(d.z) < _level.summit_radius &&
+                    std::abs(d.y) < 4.0f) {
                     p.summit = true;
                     p.summit_step = i32(_step);
                     emit(index, GameEventKind::Summit, cs.position, 0.0f);
@@ -617,7 +669,8 @@ void Game::after_player(i32 index) {
             if (ts.hanging()) {
                 Vec3f n = ts.surface_normal;
                 n.y = 0.0f;
-                if (length(n) > 0.1f) p.facing_yaw = facing_of(-n);
+                if (length(n) > 0.1f)
+                    p.facing_yaw = facing_of(-n);
             } else {
                 const Vec3f fwd = look_vector(p.yaw, 0.0f);
                 const Vec3f right{-fwd.z, 0.0f, fwd.x};
@@ -632,8 +685,10 @@ void Game::after_player(i32 index) {
         }
     } else if (p.state == PlayerState::Stunned || p.state == PlayerState::Dead) {
         // The capsule follows the pelvis's ground point (the camera and the feet read it).
-        const RagdollPlace3D place = _world->ragdoll_get_up_place(p.ragdoll, {0.0f, 1.0f, 0.0f}, all_layers3d & ~layer_bit(layers3d::Character), 6.0f);
-        if (place.found) _world->teleport_character(p.character, place.position);
+        const RagdollPlace3D place = _world->ragdoll_get_up_place(p.ragdoll, {0.0f, 1.0f, 0.0f},
+                                                                  all_layers3d & ~layer_bit(layers3d::Character), 6.0f);
+        if (place.found)
+            _world->teleport_character(p.character, place.position);
         const Vec3f where = place.found ? place.position : _world->character(p.character).position;
         if (where.y < _level.kill_y) {
             if (p.state == PlayerState::Stunned) {
@@ -642,7 +697,8 @@ void Game::after_player(i32 index) {
             }
             respawn(index);
         } else if (p.state == PlayerState::Dead) {
-            if (p.state_time >= r.respawn_seconds) respawn(index);
+            if (p.state_time >= r.respawn_seconds)
+                respawn(index);
         } else {
             const RagdollState3D rs = _world->ragdoll_state(p.ragdoll);
             const bool calm = rs.settled || rs.max_speed < 0.4f;
@@ -665,7 +721,8 @@ void Game::after_player(i32 index) {
     }
 }
 
-// ---- state, hash, save --------------------------------------------------------------------------------------------------
+// ---- state, hash, save
+// --------------------------------------------------------------------------------------------------
 
 void Game::serialise(std::vector<u8>& bytes) const {
     Out o{bytes};
@@ -699,12 +756,15 @@ void Game::serialise(std::vector<u8>& bytes) const {
         o.put(p.command.move.y);
         o.put(p.command.look.x);
         o.put(p.command.look.y);
-        o.put<u8>(u8((p.command.jump ? 1 : 0) | (p.command.sprint ? 2 : 0) | (p.command.grab_left ? 4 : 0) | (p.command.grab_right ? 8 : 0) |
-                     (p.command.release ? 16 : 0) | (p.command.pull_up ? 32 : 0) | (p.command.interact ? 64 : 0)));
+        o.put<u8>(u8((p.command.jump ? 1 : 0) | (p.command.sprint ? 2 : 0) | (p.command.grab_left ? 4 : 0) |
+                     (p.command.grab_right ? 8 : 0) | (p.command.release ? 16 : 0) | (p.command.pull_up ? 32 : 0) |
+                     (p.command.interact ? 64 : 0)));
         if (_config.expedition) {
             o.put<u8>(u8(p.expedition.phase));
-            o.put(p.expedition.start_step); o.put(p.expedition.finish_step);
-            o.put(p.expedition.beacon_steps); o.put(p.expedition.extraction_steps);
+            o.put(p.expedition.start_step);
+            o.put(p.expedition.finish_step);
+            o.put(p.expedition.beacon_steps);
+            o.put(p.expedition.extraction_steps);
             o.put<u8>(p.expedition.shelter_visited ? 1 : 0);
         }
     }
@@ -731,8 +791,10 @@ std::vector<u8> Game::save() const {
 
 bool Game::restore(std::span<const u8> bytes) {
     In in{bytes};
-    if (in.get<u32>() != save_magic || in.get<u32>() != (_config.expedition ? (_level.expedition.dense_scenery ? 4 : 3) : save_version) ||
-        in.get<u64>() != _level.seed || !in.ok) return false;
+    if (in.get<u32>() != save_magic ||
+        in.get<u32>() != (_config.expedition ? (_level.expedition.dense_scenery ? 4 : 3) : save_version) ||
+        in.get<u64>() != _level.seed || !in.ok)
+        return false;
     const u64 step = in.get<u64>();
     RngKey rng;
     rng.lo = in.get<u32>();
@@ -743,7 +805,8 @@ bool Game::restore(std::span<const u8> bytes) {
     wind.target_speed = in.get<f32>();
     wind.target_direction = in.get<f32>();
     const u32 count = in.get<u32>();
-    if (!in.ok || count != _players.size()) return false;
+    if (!in.ok || count != _players.size())
+        return false;
     std::vector<Player> players = _players;
     for (Player& p : players) {
         p.state = static_cast<PlayerState>(in.get<u32>());
@@ -777,18 +840,24 @@ bool Game::restore(std::span<const u8> bytes) {
         p.command.interact = flags & 64;
         if (_config.expedition) {
             p.expedition.phase = ExpeditionPhase(in.get<u8>());
-            p.expedition.start_step = in.get<i32>(); p.expedition.finish_step = in.get<i32>();
-            p.expedition.beacon_steps = in.get<i32>(); p.expedition.extraction_steps = in.get<i32>();
+            p.expedition.start_step = in.get<i32>();
+            p.expedition.finish_step = in.get<i32>();
+            p.expedition.beacon_steps = in.get<i32>();
+            p.expedition.extraction_steps = in.get<i32>();
             p.expedition.shelter_visited = in.get<u8>() != 0;
             if (u8(p.expedition.phase) > u8(ExpeditionPhase::Complete) || p.expedition.beacon_steps < 0 ||
                 p.expedition.beacon_steps >= beacon_hold_steps || p.expedition.extraction_steps < 0 ||
-                p.expedition.extraction_steps >= extraction_hold_steps) return false;
+                p.expedition.extraction_steps >= extraction_hold_steps)
+                return false;
         }
-        if (u32(p.state) > u32(PlayerState::Dead)) return false;
+        if (u32(p.state) > u32(PlayerState::Dead))
+            return false;
     }
     const std::span<const u8> world = in.blob();
-    if (!in.ok || in.at != bytes.size()) return false;
-    if (!_world->restore_state(world)) return false;
+    if (!in.ok || in.at != bytes.size())
+        return false;
+    if (!_world->restore_state(world))
+        return false;
     _step = step;
     _rng = rng;
     _wind = wind;

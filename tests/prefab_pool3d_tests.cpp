@@ -140,7 +140,7 @@ void pooling(Renderer2D& renderer,bool benchmark) {
     auto pending=session.commands().spawn(commands,pool);check(session.reload(),"pool reload failed");
     check(pending.status()==SceneRequestStatus3D::Cancelled&&!session.spawn(pool)&&!session.spawn(ready)&&session.reserved_entities()==0,"reload retained pool/preload ownership");commands.clear();
     ready=session.preload("object.kinprefab");pool=session.create_pool(ready,options);ok(bool(pool),"release fixture failed");
-    auto active=session.spawn(pool);std::weak_ptr<const Model> model=session.resolve(active.root).get<ModelRenderer3D>()->model;
+    auto active=session.spawn(pool);std::weak_ptr<const Model3D> model=session.resolve(active.root).get<ModelRenderer3D>()->model;
     ok(session.release(pool),"explicit pool release failed");check(!session.resolve(active.root)&&session.reserved_entities()==2&&!model.expired(),"pool release left slots or dropped prepared art");
     pool=session.create_pool(ready,options);active=session.spawn(pool);ok(bool(active),"damaged pool fixture failed");
     session.world()->entities().destroy(session.resolve(active.root));

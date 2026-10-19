@@ -9,8 +9,8 @@ releases may change APIs.
 
 ### Added
 
-- Separate the compact 20-field `Render3DStats` game summary from explicit
-  `Render3DDebugStats` implementation instrumentation via `debug_stats()`.
+- Separate the compact 20-field `RenderStats3D` game summary from explicit
+  `RenderDebugStats3D` implementation instrumentation via `debug_stats()`.
   Move forced LOD, CPU/GPU cluster comparison, blocking readback and frozen TAA
   jitter into `Scene3D::debug`, outside visual quality settings. Mark partial
   triangle counts without GPU readback; keep default diagnostics lightweight
@@ -29,8 +29,8 @@ releases may change APIs.
   and Summit reuse it. 2D-only builds reject the explicit 3D opt-in.
 
 - Rigid node animation for glTF models: animations of plain nodes (doors, fans, crane arms) play through a
-  per-model node skeleton (`Model::node_skeleton`, `ModelPart::node`/`node_offset`), with
-  `Scene3D::draw(model, transform, node_matrices)`, `Model::part_transform`, a `draw_skinned` overload that
+  per-model node skeleton (`Model3D::node_skeleton`, `ModelPart3D::node`/`node_offset`), with
+  `Scene3D::draw(model, transform, node_matrices)`, `Model3D::part_transform`, a `draw_skinned` overload that
   poses a skin and animated props together, and an `Animator3D` beside a `ModelRenderer3D` driving clips,
   blends, layers, actions, events and IK on those nodes. Models without node animation load and draw unchanged.
 - `SceneSession3D` runs headless over a renderer without 3D: loading, spawning, pools, edits, physics,
@@ -128,7 +128,7 @@ releases may change APIs.
   local lights and primitive physics. Add explicit renderer-thread asset binding with contextual errors, safe prefab
   inheritance and weak resource ownership. Summit's survivor now uses an ordinary `.kinprefab`.
 - Add renderer-scoped `Assets3D` model handles with weak, bounded lookup caches and automatic sharing of external/embedded
-  texture dependencies, preserving colour space and filtering. Add `Model::placement`, whole-object model IDs and persistent
+  texture dependencies, preserving colour space and filtering. Add `Model3D::placement`, whole-object model IDs and persistent
   `ModelBatch3D` part expansion/spatial grouping/material replacement. Migrate Summit's prop and survivor loading and scenery
   submission onto these APIs, removing its manual atlas replacement and mesh-part batching. Cover ownership, invalidation,
   content packs, dependency identity and GPU image parity.
@@ -265,7 +265,7 @@ releases may change APIs.
   render-resolution sampling test. Input-driven smoke tests exercise each playable preset and verify its GPU features.
 - Kin's unlit main pass now selects colour-only or base-textured shaders, with separate cut-out variants, removing unused vertex
   work and lighting bindings. Colour conversion, emission, blending, HDR and MSAA are preserved; fog, skinning, TAA and custom
-  shaders retain the general path. Warm-up selects these pipelines too. `Render3DStats` reports specialized draws, and
+  shaders retain the general path. Warm-up selects these pipelines too. `RenderStats3D` reports specialized draws, and
   `KIN_UNLIT_SHADERS=0` permits same-binary comparisons. Full-frame GPU equivalence tests cover the variants and resource switches.
 - Blockfield's Kin/Godot rendering comparison now includes a RAM-bounded 1×/5×/10×/20×/100× triangle sweep. Disjoint terrain
   tiles share mesh buffers and use instanced draws; a full-field camera and exact per-frame counters ensure both engines submit
@@ -330,8 +330,8 @@ releases may change APIs.
   `save` and `restore`; `Weather3D`: rain with splashes, snow, dust and mist as camera-following volumes in world space, a pure function of a
   clock; `Weather3D::apply` dims the light and thickens the fog; the CPU's twins `particle_quad`, `soft_particle_fade`, `particle_light_tint`,
   `weather_particle`), `Scene3D::draw_particles` and `Scene3D::weather`, ECS `ParticleEmitter3D` and a `Weather3D` component
-  (`simulate_particles`, `advance_weather`, `apply_weather`), `Renderer3DCapabilities::{particles, soft_particles}` and
-  `Render3DStats::{particles_submitted, particles_drawn, particle_batches, particle_soft, weather_particles, particles_dropped,
+  (`simulate_particles`, `advance_weather`, `apply_weather`), `RendererCapabilities3D::{particles, soft_particles}` and
+  `RenderStats3D::{particles_submitted, particles_drawn, particle_batches, particle_soft, weather_particles, particles_dropped,
   particle_cpu_ms}`. One instanced draw a batch from a CPU-written storage buffer: camera-facing, stretched, axis-locked and flat quads;
   texture, atlas or procedural disc; alpha, additive and premultiplied; depth-tested and not written; sorted back to front by a radix sort;
   soft particles reading the pre-pass's depth; fogged by `kin_fog.inc.glsl` in the vertex shader and lit by a one-colour tint of the sun,
@@ -340,13 +340,13 @@ releases may change APIs.
   `--no-weather`, `--no-particles`, `--soft`, `--particles`; scenes `rain_street`, `snow_valley`, `particles_soft`, `particles_blend`,
   `particles_budget`; Sponza Walk "Particles and weather" section (F drops a fire) and `--preset rain|snow|storm|fire`.
 - Spot lights and the shadows of lights that are not the sun (experimental; see [3D rendering](rendering_3d.md) "Spot lights and shadows
-  from lights that are not the sun" and the plan's "P3b"): `SpotLight` (position, direction, colour, radius, size, inner and outer cone
+  from lights that are not the sun" and the plan's "P3b"): `SpotLightSource3D` (position, direction, colour, radius, size, inner and outer cone
   angle with glTF's squared step in the cosine), `LightShadow3D` (a per-light shadow map's resolution, bias, normal offset, near plane,
-  distance, softness; also on `PointLight`, whose map is a cube of six faces), `Lights3D::{spots, max_shadowed_spots, max_shadowed_points,
+  distance, softness; also on `PointLightSource3D`, whose map is a cube of six faces), `Lights3D::{spots, max_shadowed_spots, max_shadowed_points,
   local_shadow_resolution, fill_shadow, sun_shadow_strength}`, `DirectionalShadow3D` (the fill light, the moon, casting through cascades of its
   own), `Scene3D::add_spot_light`, `TimeOfDay3D::shadows` (`apply()` fades the sun's and the moon's shadow strength with their height),
-  `kin/render3d/local_lights.hpp` (the CPU twin of the falloff, the maps' views, the importance and the slot assignment with its
-  hysteresis), ECS `PointLight3D` and `SpotLight3D`, `Renderer3DCapabilities::local_shadows` and `Render3DStats::{spots, spot_slot,
+  `kin/render3d/local_lights3d.hpp` (the CPU twin of the falloff, the maps' views, the importance and the slot assignment with its
+  hysteresis), ECS `PointLight3D` and `SpotLight3D`, `RendererCapabilities3D::local_shadows` and `RenderStats3D::{spots, spot_slot,
   point_slot, local_shadow_*, moon_cascades, lights_variant}`. Up to 16 spots a frame, up to 8 spot maps and 2 point cubes (the most
   important ones, with a hysteresis so the choice does not flip), shared in one depth array of the largest side asked for; casters are
   culled by the cone (a face of a cube only if a visible surface can fall in), include cut-out, skinned, instanced and clustered meshes (cut
@@ -360,7 +360,7 @@ releases may change APIs.
   `kin/render3d/sky3d.hpp` (`Sky3D`, `Fog3D`, `Scene3D::sky`, `Scene3D::fog`, and the CPU's `sky_radiance`, `sky_color`, `sky_sun_light`,
   `sky_irradiance`, `fog_optical_depth`, `fog_opacity`, `fog_apply`), `kin/render3d/timeofday3d.hpp` (`TimeOfDay3D`, `evaluate`, `apply`,
   `sun_times`, `advance`; an ECS component with `WorldRenderState3D::advance_time_of_day` and `apply_time_of_day`),
-  `Lights3D::sky_lights_scene`, `Render3DStats::{sky_drawn, fog_applied, sky_env_regenerated, sky_env_generations, sky_env_cpu_ms}`.
+  `Lights3D::sky_lights_scene`, `RenderStats3D::{sky_drawn, fog_applied, sky_env_regenerated, sky_env_generations, sky_env_cpu_ms}`.
   A procedural single-scattering sky (Rayleigh, Mie, ozone; sun disc, stars, moon, ground below the horizon, or the environment's
   panorama) drawn in the main pass after the opaque meshes, jitter- and velocity-correct under TAA; exponential distance and height fog
   integrated exactly along the view ray, coloured by the sky with the sun's lobe, applied to opaque, cut-out, skinned, instanced,
@@ -440,37 +440,37 @@ releases may change APIs.
 - 3D, inverse kinematics, the known limits fixed (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b follow-up"):
   joint limits for `solve_two_bone` (`max_bend_degrees`, `hinge` / `hinge_axis`, `max_twist_degrees`: a knee that bends one way about its own
   axis and whose hip turns no more than a limit, with no flip as the pole goes round behind); FABRIK as an ECS constraint kind
-  (`IKKind::Fabrik`) with a pole; foot locking (a planted foot held in the world while the body moves, released and eased back), toes
-  (`FootLeg::toe`, `IKConstraint::toe_joints`) that lie on the ground under them, and the ground query called once a frame per leg however
+  (`IKKind3D::Fabrik`) with a pole; foot locking (a planted foot held in the world while the body moves, released and eased back), toes
+  (`FootLeg3D::toe`, `IKConstraint3D::toe_joints`) that lie on the ground under them, and the ground query called once a frame per leg however
   often the constraints are solved; a non-uniform scale on the root joint or between the mid and end joints is now exact (it was approximate);
-  a straight chain with no pole bends the way the rest pose is bent (else the hinge's side, else -Y as before); `TwoBoneState` and
+  a straight chain with no pole bends the way the rest pose is bent (else the hinge's side, else -Y as before); `TwoBoneState3D` and
   `bend_swing_degrees_per_second` for the elbow's side to swing at a bounded speed where a pole passes through the target's axis.
   Everything is off by default and the pictures of before are byte for byte. `kin_reference`: `fabrik`, `max_bend`, `hinge_axis`,
   `max_twist`, `bend_swing`, `toes`, `lock`, ground `ramps`; the scene `skinned_ik_limits`; Sponza Walk's person has toes and a tail, and
-  `--preset ik-tail`, `ik-walk`. Fixed: `TwoBoneResult::reached` was true for a target inside the hole round the root. Docs: the stale
+  `--preset ik-tail`, `ik-walk`. Fixed: `TwoBoneResult3D::reached` was true for a target inside the hole round the root. Docs: the stale
   "Not yet: skinned meshes" line of the 3D guide.
-- 3D, inverse kinematics (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b"): `kin/render3d/ik.hpp`:
+- 3D, inverse kinematics (experimental; see [3D rendering](rendering_3d.md) "Inverse kinematics" and the plan's "P1b"): `kin/render3d/ik3d.hpp`:
   `solve_two_bone` (an arm to a hold, a leg to the ground: pole by direction or point, soft stretch, minimum bend, an end orientation
   target, a weight; exact under scaled and turned models), `solve_look_at` (a head or a spine-neck-head chain with shared turn, yaw and
   pitch limits, released toward forward past a limit so a target behind does not flip it, smoothing in a state object),
-  `solve_chain_fabrik`, and `plan_foot_placement` / `apply_foot_placement` (a `GroundQuery` the game supplies, the foot lifted to the hit
+  `solve_chain_fabrik`, and `plan_foot_placement` / `apply_foot_placement` (a `GroundQuery3D` the game supplies, the foot lifted to the hit
   and tilted to the clamped normal, the pelvis lowered for the lowest foot, eased). CPU only: no shader changes. ECS: `Animator3D::ik_constraints`
-  (`IKConstraint`, `animator.ik("name").set_target(...).set_weight(...)`, targets as a world point or another entity, weight fades),
+  (`IKConstraint3D`, `animator.ik("name").set_target(...).set_weight(...)`, targets as a world point or another entity, weight fades),
   solved after the clips and before the joint matrices in `WorldRenderState3D::collect()` (or `apply_ik()`); an animator with none, and every
   existing picture, is byte for byte as before. `kin_reference` `animation.ik` and the scene `skinned_ik` (a procedural person,
   `skinned_biped.glb`); Sponza Walk's "Character IK" section (`--preset ik`).
 - 3D, skinned meshes and clips, part 2 (experimental; see [3D rendering](rendering_3d.md) "Skinned meshes" and the plan's "P1a part 2"): a skinned
   copy is now in every pass: the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's occluders), the temporal velocity of a
-  moving pose (last frame's joint matrices matched to the copy by `MeshInstance::id` or order), cut-outs, and pick; the shadow cache keeps the
+  moving pose (last frame's joint matrices matched to the copy by `MeshInstance3D::id` or order), cut-outs, and pick; the shadow cache keeps the
   map for a still pose and redraws for a moved one; `draw_skinned(model, ...)` shares one range of matrices among a model's parts and takes an
-  `id`. `AnimationPlayer3D::play_blend` / `crossfade_to_blend` / `set_blend_parameter` (1D blends by phase). ECS: `SkinnedMeshRenderer`,
+  `id`. `AnimationPlayer3D::play_blend` / `crossfade_to_blend` / `set_blend_parameter` (1D blends by phase). ECS: `SkinnedMeshRenderer3D`,
   `Animator3D` (clip by name, a `kin/anim` state machine with blend spaces, fades, masked and additive layers as data, root motion) and
   `WorldRenderState3D::animate`. `kin_reference` scenes `skinned_blend` and `skinned_ecs` (`models[].animation.blend` / `.ecs`); Sponza
   Walk has a "Character (skinned)" section (`--preset character`). Scenes without skinned copies are byte for byte, and cost the same, as before.
 - 3D, skinned meshes and clips, part 1 (experimental; see [3D rendering](rendering_3d.md) "Skinned meshes" and the plan's "P1a"):
-  `Skeleton`, `Pose`, `PoseMask`, `AnimClip3D` (step, linear and cubic-spline keyframes as glTF has them), `AnimationPlayer3D`
+  `Skeleton3D`, `Pose3D`, `PoseMask3D`, `AnimClip3D` (step, linear and cubic-spline keyframes as glTF has them), `AnimationPlayer3D`
   (crossfades, masked and additive layers, root motion), `compute_joint_matrices`; the glTF reader takes skins, `JOINTS_0` and
-  `WEIGHTS_0`, and animations (`Model::skeletons`, `Model::clips`); `MeshData::skin`; `Scene3D::draw_skinned`; GPU skinning in the main and
+  `WEIGHTS_0`, and animations (`Model3D::skeletons`, `Model3D::clips`); `MeshData3D::skin`; `Scene3D::draw_skinned`; GPU skinning in the main and
   shadow passes (new vertex shader variants; a mesh with no skin and a scene with no skinned copy are byte for byte, and cost the same, as before).
   Not yet: ambient occlusion, contact shadows, the temporal velocity of a moving pose, and pick for skinned copies. `kin_reference` scenes
   `skinned_bend`, `skinned_cesium`, `skinned_fox` (the last two fetch CesiumMan and Fox) and `skinned_crowd`; `fetch.py --lock NAME` locks new
@@ -478,15 +478,15 @@ releases may change APIs.
 - 3D, speed of the opt-in features, phase 2 (small picture changes within stated bounds; see the plan's "Opt-in speedups, phase 2"): in views of 1.5 million pixels
   or more, ambient occlusion reads a linear depth chain (one dispatch, five R32F levels) and costs 15 to 30% less (1080p: 0.2 to 0.5 ms, 4K: 2 to 4.6 ms);
   contact shadows blurred on their own get one blur pass (-0.03 ms at 720p). Everything else (and every view under 1.5 million pixels) is as before.
-  `KIN_AO_CLASSIC=1` / `KIN_AO_CHAIN=1` / `KIN_CONTACT_CLASSIC=1` pick the old or new path (read on each render), `Render3DStats::ao_chain_built` says which ran;
+  `KIN_AO_CLASSIC=1` / `KIN_AO_CHAIN=1` / `KIN_CONTACT_CLASSIC=1` pick the old or new path (read on each render), `RenderStats3D::ao_chain_built` says which ran;
   `kin_reference` has `--ab NAME[:A:B]` (A and B timed in blocks of frames of one run, drift-proof) and `--flicker N` (frame-to-frame change under TAA). The
   plan also records what was tried and dropped (a checkerboard, one slice, a cheaper contact march, half-resolution contact shadows).
 - 3D, speed of the opt-in features (byte-identical pictures; see the plan's "Opt-in speedups, phase 1"): temporal anti-aliasing no longer draws a
   velocity pre-pass when nothing else needs one (the main pass writes the velocity: the kiln's TAA cost fell by 2.2 ms), ambient occlusion and contact
   shadows share one blur dispatch, and the shadow map is kept while nothing it depends on changes (`Lights3D::cache_shadows`,
-  `Render3DStats::shadow_cached`). Targets of ambient occlusion, contact shadows, the pre-pass, temporal anti-aliasing and occlusion culling are given
-  back after 120 renders unused (`Render3DStats::feature_bytes`, `targets_released`). `Renderer3D::warm_up(view, scene)` makes the pipelines and
-  targets a scene's first render would, so that turning a feature on does not hitch (`Render3DStats::pipelines_made`). `kin_reference` has
+  `RenderStats3D::shadow_cached`). Targets of ambient occlusion, contact shadows, the pre-pass, temporal anti-aliasing and occlusion culling are given
+  back after 120 renders unused (`RenderStats3D::feature_bytes`, `targets_released`). `Renderer3D::warm_up(view, scene)` makes the pipelines and
+  targets a scene's first render would, so that turning a feature on does not hitch (`RenderStats3D::pipelines_made`). `kin_reference` has
   `--shadow-cache`, `--crowd-move`, `--hitch <feature>`, `--warm-up` and `--vram-cycle`; Sponza Walk has a "Keep the map while nothing moves" switch,
   warms up at start and shows the new numbers in its stats.
 - Experimental 3D drawn inside the 2D frame (the `KIN_EXPERIMENTAL_3D` CMake
@@ -505,7 +505,7 @@ releases may change APIs.
 - 3D: the scene's overlay (a first-person gun, always in front), frustum
   culling of every copy (on the job system for big scenes), ramps
   (`meshes::wedge`), and entities (`Transform3D`, `WorldTransform3D` through
-  the flecs hierarchy, `MeshRenderer`, `WorldRenderState3D`).
+  the flecs hierarchy, `MeshRenderer3D`, `WorldRenderState3D`).
 - Mouse look: `Input::mouse_motion()` and `frame_mouse_motion()` (relative
   motion, whether or not the pointer moves), `Input::set_mouse_motion()`,
   `Input::last_mouse_motion_event_time_ns()`, and
@@ -519,7 +519,7 @@ releases may change APIs.
   shadow over an area (one shadow map, filtered), alpha-blended and additive
   materials, textures on meshes, HDR views tonemapped on their way to 2D with
   bloom of their own, and glTF 2.0 models (`Renderer3D::load_model`,
-  `ModelFile` for hot reload) read with cgltf (a new dependency, with
+  `ModelFile3D` for hot reload) read with cgltf (a new dependency, with
   `KIN_EXPERIMENTAL_3D`).
 - 3D (experimental): levels of detail for meshes (`create_mesh(data, {.levels = n})`, `Scene3D::lod`), built with
   meshoptimizer (a new dependency, with `KIN_EXPERIMENTAL_3D`); off by default.
@@ -538,7 +538,7 @@ releases may change APIs.
 - Signal Breach: shadows, muzzle-flash and explosion lights, glowing shots,
   additive sparks and tracers, a glTF gun and crates, sound in 3D;
   `--no-shadows`, `--no-bloom`, `--no-lights` to measure each.
-- 3D picking (`View3DOptions::pick`, `Renderer3D::pick`: the id given with a
+- 3D picking (`ViewOptions3D::pick`, `Renderer3D::pick`: the id given with a
   draw and the world point under a pixel), wireframe materials (also lines
   from degenerate triangles), a fill light, ambient light from below
   (`Lights3D::ground_ambient`) and `Material3D::receives_shadow`. Large meshes
@@ -554,7 +554,7 @@ releases may change APIs.
   only (a lone quad facing away from the sun casts nothing: make it
   double-sided), the shadow pass has its own vertex shader, and the map is
   no longer cycled. At 20,000 enemies Signal Breach's shadows take about a
-  fifth of the GPU time they did. `Render3DStats::shadow_casters`.
+  fifth of the GPU time they did. `RenderStats3D::shadow_casters`.
 - 3D materials are glTF's metallic-roughness (G1a of the plan):
   `Material3D::metallic`, `roughness`, `metallic_roughness`, `normal` (and
   `normal_scale`), `occlusion` (and `occlusion_strength`) and
@@ -564,7 +564,7 @@ releases may change APIs.
   are drawn, picked and shadowed cut out. `Renderer3D::load_model` reads all
   of it (data maps as linear data, not sRGB colour), and alpha `MASK`.
   Point lights now fall off with the square of the distance, windowed to
-  nothing at `radius`: `PointLight::color` is the light a unit away. Signal
+  nothing at `radius`: `PointLightSource3D::color` is the light a unit away. Signal
   Breach's flashes and the Cornell reference scene's lamp are rescaled.
   Surfaces now have the specular of a rough dielectric by default
   (`roughness` 1, `metallic` 0): a little more light than before.
@@ -580,6 +580,8 @@ releases may change APIs.
   `ibl_spheres` and `ibl_helmet` with Poly Haven's Kloofendal sky (CC0).
 
 ### Changed
+
+- Give experimental 3D public types and headers consistent 3D suffixes, including Mesh3D/Model3D, ViewOptions3D and RenderStats3D. Light inputs use explicit LinearRgb channels with the existing sRGB conversion helpers; scene/prefab RGB triples keep their linear/HDR meaning. Add a 2D build preset that excludes 3D shaders, and a shared clang-format policy with a check for rendering/authoring sources. See docs/3d_api_migration.md.
 
 - Make normal ECS collection retain large opaque/masked mesh/model buckets automatically, with changed-run updates,
   conservative range bounds, snapshot isolation and bounded CPU records. Reuse renderer layouts after exact structural
@@ -597,7 +599,7 @@ releases may change APIs.
   absolute paths and `..` that leaves the content root or the mounted pack, nodes nested over
   512 deep. `data:` images are decoded. A plain node between two of a skin's joints is kept as
   a joint instead of breaking the chain.
-- ECS: `MeshRenderer` entities have a pick id (the entity id, or `MeshRenderer::id`), so
+- ECS: `MeshRenderer3D` entities have a pick id (the entity id, or `MeshRenderer3D::id`), so
   `Renderer3D::pick` names them; it returned 0 for every one.
 
 - Experimental 3D performance round (measured before/after, interleaved, medians):
@@ -606,7 +608,7 @@ releases may change APIs.
     without a device-wide wait, evict least-recently-used tables when the 128-table / 32 MiB
     budget is full (one upgrade per frame, so the largest batches win and nothing thrashes),
     and upload only the edited records of a batch (grove with 2,000 moving instances: 256 KB
-    instead of 1.28 MB a frame, frame time -11%). New `Render3DDebugStats` counters
+    instead of 1.28 MB a frame, frame time -11%). New `RenderDebugStats3D` counters
     `retained_evictions`, `retained_refused`, `device_waits`.
   - The adaptive upload staging buffer grows after a batch it had to split, up to 64 MiB
     (streaming 17 MiB a frame: one submission instead of 1.8, fence time -25%).
@@ -625,8 +627,8 @@ releases may change APIs.
     per update; the wind field agrees with `Wind3D::velocity` to 1.4e-5 m/s).
   - Animation blends in place into the player's scratch poses and caches the animator's
     state/layer keys (five times fewer allocations in the skeleton tests).
-  - Clustered meshes release their welded CPU vertices after upload (`MeshClusterBuild`
-    holds them only while a mesh is made; `MeshClusters` is the hierarchy alone), and flat
+  - Clustered meshes release their welded CPU vertices after upload (`MeshClusterBuild3D`
+    holds them only while a mesh is made; `MeshClusters3D` is the hierarchy alone), and flat
     unindexed meshes' LOD levels index shared zero-normal vertices instead of three per
     triangle per level (a 2 M-triangle soup with 4 levels: -168 MB resident, -325 MB peak;
     the levels then ignore a normal map, as flat clusters do). Benchmarks
@@ -646,7 +648,7 @@ releases may change APIs.
   black where a history sample was NaN; the environment filter spread a NaN texel.
 - Experimental 3D animation: root motion wrapped the wrong way at negative speed; a model with
   several skins drew only the first skin's parts (the rest pose and one warning now); an
-  `Animator3D` kept pointing at a model that `ModelFile::poll` had replaced.
+  `Animator3D` kept pointing at a model that `ModelFile3D::poll` had replaced.
 - Experimental 3D: `SceneSession3D`'s error for a lifecycle request made while a replacement
   scene is prepared says the request is cancelled, not held.
 

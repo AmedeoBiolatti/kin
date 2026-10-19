@@ -1,6 +1,5 @@
-#include <kin/render3d/camera3d.hpp>
-
 #include <cmath>
+#include <kin/render3d/camera3d.hpp>
 
 namespace kin {
 

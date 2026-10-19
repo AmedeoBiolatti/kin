@@ -1,7 +1,7 @@
 #pragma once
 // CPU-only directional shadow reach. Keep the reference float arithmetic:
 // reciprocal multiplication can change membership at a frustum boundary.
-#include <kin/render3d/mesh.hpp>
+#include <kin/render3d/mesh3d.hpp>
 #include <algorithm>
 #include <cmath>
 #include <span>
@@ -11,7 +11,7 @@ struct Ray {
     Vec3f down{}, exit{};
     u8 axes = 0;
     Ray() = default;
-    Ray(const Bounds3& box, Vec3f direction) : down(direction) {
+    Ray(const Bounds3D& box, Vec3f direction) : down(direction) {
         const f32 d[]{down.x, down.y, down.z}, lo[]{box.min.x, box.min.y, box.min.z}, hi[]{box.max.x, box.max.y, box.max.z};
         f32 ends[3]{};
         for (u32 k = 0; k < 3; ++k) {
@@ -54,7 +54,7 @@ struct Sweep {
 
 // Only skip planes proven inside for every sphere enclosed by this cell.
 // An outside starting box cannot reject its swept shadows: they may enter view.
-inline u8 pending_planes(std::span<const Vec4f> planes, const Bounds3& box) {
+inline u8 pending_planes(std::span<const Vec4f> planes, const Bounds3D& box) {
     const Vec3f c = box.center(), h = box.size() * 0.5f;
     const f32 margin = 1e-5f * (1 + std::max({std::abs(c.x), std::abs(c.y), std::abs(c.z), h.x, h.y, h.z}));
     if (!std::isfinite(margin) || !std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z))

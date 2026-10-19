@@ -1,9 +1,9 @@
 #pragma once
 
-// Summit's presentation (docs/3d_plan.md, P4a minimum and P4b's look): the level's rock with its textures, the ground and ranges,
-// the person (a skinned climber driven from the game's state), the rope, camps with tents, fires and lanterns, the sky, fog,
-// weather and light by altitude and time, and the dust and breath puffs. It reads a `Game` and writes a Scene3D; it never writes
-// the game.
+// Summit's presentation (docs/3d_plan.md, P4a minimum and P4b's look): the level's rock with its textures, the ground
+// and ranges, the person (a skinned climber driven from the game's state), the rope, camps with tents, fires and
+// lanterns, the sky, fog, weather and light by altitude and time, and the dust and breath puffs. It reads a `Game` and
+// writes a Scene3D; it never writes the game.
 //
 //     summit::SummitView view(r3d, game.level());
 //     view.set_look("afternoon");
@@ -21,7 +21,6 @@
 #include <kin/ecs/world.hpp>
 #include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
-
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,15 +41,15 @@ public:
     void set_effects(const EffectSettings& effects, f32 time_hours_per_minute);
     const EffectSettings& effects() const { return _effects; }
     // The view's options the look wants (HDR, exposure, bloom); the size and samples are the caller's.
-    View3DOptions view_options(u32 samples) const;
+    ViewOptions3D view_options(u32 samples) const;
 
     // Once a fixed step after Game::step(): what happened (a landing's dust, a camp reached) for the frames to draw.
     void on_step(const Game& game, i32 player = 0);
 
     // Clears `scene` and fills it for `player`: camera, lights, sky, fog, weather, the mountain, the person, the rope.
     // `dt` is the frame's time (the person's clips, the fires and the puffs advance by it: presentation only).
-    // Where the person is drawn instead of where the last step left it (CameraRig::person_position / person_facing at the frame's
-    // alpha, the same instant as the camera); unset, the step's. Held until changed.
+    // Where the person is drawn instead of where the last step left it (CameraRig::person_position / person_facing at
+    // the frame's alpha, the same instant as the camera); unset, the step's. Held until changed.
     void set_person_pose(Vec3f feet, f32 facing_yaw) {
         _pose_feet = feet;
         _pose_facing = facing_yaw;
@@ -62,8 +61,8 @@ public:
     const EnvironmentState& environment() const { return _env; }
     u32 lights_added() const { return _lights_added; }
     u32 particles_alive() const;
-    // Draws the colliders within `radius` m of the camera as wireframes (a debug aid, off by default): the level's boxes grey, the
-    // decor's hulls orange (buttresses) and cyan (stones).
+    // Draws the colliders within `radius` m of the camera as wireframes (a debug aid, off by default): the level's
+    // boxes grey, the decor's hulls orange (buttresses) and cyan (stones).
     void set_show_colliders(bool on, f32 radius = 70.0f) {
         _show_colliders = on;
         _collider_radius = radius;
@@ -90,21 +89,21 @@ private:
     EffectSettings _effects{};
     f32 _time_speed = 0.25f;
     f32 _start_hours = -1.0f;
-    Bounds3 _bounds;
+    Bounds3D _bounds;
     f32 _level_height = 150.0f;
     struct Part {
-        Mesh mesh;
+        Mesh3D mesh;
         Material3D material;
     };
     std::vector<Part> _rock, _decor, _terrain;
     bool _show_colliders = false;
     f32 _collider_radius = 70.0f;
-    Mesh _collider_mesh;
+    Mesh3D _collider_mesh;
     u64 _static_triangles = 0;
-    Mesh _cylinder, _cone, _box, _sphere, _cone4;
+    Mesh3D _cylinder, _cone, _box, _sphere, _cone4;
     Texture _rock_albedo, _rock_normal, _grass_albedo, _grass_normal;
     Texture _rock_orm, _grass_orm;
-    std::shared_ptr<const Model> _person_model;
+    std::shared_ptr<const Model3D> _person_model;
     std::unique_ptr<::kin::EcsWorld> _ecs;
     std::unique_ptr<WorldRenderState3D> _state;
     flecs::entity _person;
@@ -118,9 +117,9 @@ private:
     std::vector<Fire> _fires;
     ParticleSystem3D _dust{11}, _breath{12};
     f32 _breath_timer = 0.0f;
-    f32 _squash = 0.0f;      // the landing's crouch, 1 to 0
-    f32 _hang_sag = 0.0f;    // how far the body hangs below where the capsule is, to straighten the arms (m)
-    f64 _clock = 0.0;        // presentation time (the fires' flicker)
+    f32 _squash = 0.0f;               // the landing's crouch, 1 to 0
+    f32 _hang_sag = 0.0f;             // how far the body hangs below where the capsule is, to straighten the arms (m)
+    f64 _clock = 0.0;                 // presentation time (the fires' flicker)
     std::vector<Vec3f> _pending_dust; // places of landings waiting for a frame
     std::vector<f32> _pending_dust_size;
     EnvironmentState _env{};

@@ -1,14 +1,14 @@
 #include "breach_view.hpp"
-#include "breach_shader.hpp"
 
-#include <kin/assets/content.hpp>
-#include <kin/core/profile.hpp>
-#include <kin/l10n/localization.hpp>
-#include <kin/ui2/widgets.hpp>
+#include "breach_shader.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <kin/assets/content.hpp>
+#include <kin/core/profile.hpp>
+#include <kin/l10n/localization.hpp>
+#include <kin/ui2/widgets.hpp>
 
 namespace examples {
 namespace {
@@ -20,7 +20,8 @@ constexpr Color glass = Color::rgba(8, 14, 22, 205);
 constexpr Color rim = Color::rgba(90, 200, 190, 80);
 constexpr Color track = Color::rgba(30, 40, 50, 230);
 constexpr float shell_life = 0.35f; // seconds a shield shows
-constexpr std::array<Color, 3> enemy_colors{Color::rgb(241, 99, 103), Color::rgb(241, 182, 92), Color::rgb(161, 127, 237)};
+constexpr std::array<Color, 3> enemy_colors{Color::rgb(241, 99, 103), Color::rgb(241, 182, 92),
+                                            Color::rgb(161, 127, 237)};
 
 float rand(RngKey& key, float lo, float hi) {
     const auto [next, value] = split(key);
@@ -29,12 +30,14 @@ float rand(RngKey& key, float lo, float hi) {
 }
 
 // The gun, in the overlay camera's space (it looks along -z from the origin).
-MeshData make_gun() {
-    MeshData gun;
+MeshData3D make_gun() {
+    MeshData3D gun;
     gun.append(meshes::box({0.08f, 0.1f, 0.36f}));
-    gun.append(meshes::box({0.05f, 0.12f, 0.07f}), Mat4f::translation({0.0f, -0.09f, 0.1f}) * Mat4f::rotation_x(-15.0f));
+    gun.append(meshes::box({0.05f, 0.12f, 0.07f}),
+               Mat4f::translation({0.0f, -0.09f, 0.1f}) * Mat4f::rotation_x(-15.0f));
     gun.append(meshes::box({0.025f, 0.025f, 0.1f}), Mat4f::translation({0.0f, 0.065f, -0.02f}));
-    gun.append(meshes::cylinder(0.022f, 0.3f, 12), Mat4f::translation({0.0f, 0.02f, -0.32f}) * Mat4f::rotation_x(-90.0f));
+    gun.append(meshes::cylinder(0.022f, 0.3f, 12),
+               Mat4f::translation({0.0f, 0.02f, -0.32f}) * Mat4f::rotation_x(-90.0f));
     return gun;
 }
 
@@ -44,8 +47,8 @@ void BreachView::init(Renderer2D& renderer, Breach& breach, const BreachViewOpti
     _options = options;
     _r3d = std::make_unique<Renderer3D>(renderer);
     if (_r3d->available() && !content_root().empty()) {
-        _gun = std::make_unique<ModelFile>(*_r3d, content_root() / "models" / "gun.glb");
-        _crate = std::make_unique<ModelFile>(*_r3d, content_root() / "models" / "crate.glb");
+        _gun = std::make_unique<ModelFile3D>(*_r3d, content_root() / "models" / "gun.glb");
+        _crate = std::make_unique<ModelFile3D>(*_r3d, content_root() / "models" / "crate.glb");
     }
     _box = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
     _wedge = _r3d->create_mesh(meshes::wedge({1.0f, 1.0f, 1.0f}));
@@ -67,8 +70,8 @@ void BreachView::init(Renderer2D& renderer, Breach& breach, const BreachViewOpti
     build_level(breach.level());
 }
 
-const Render3DStats& BreachView::stats() const {
-    static const Render3DStats none{};
+const RenderStats3D& BreachView::stats() const {
+    static const RenderStats3D none{};
     return _r3d ? _r3d->stats() : none;
 }
 
@@ -78,8 +81,9 @@ void BreachView::build_level(const BreachLevel& level) {
     for (int z = 0; z < BreachLevel::depth; z += 2) {
         for (int x = 0; x < BreachLevel::width; x += 2) {
             const u8 shade = static_cast<u8>(66 + ((x * 7 + z * 13) % 11));
-            _tiles.push_back({Mat4f::translation({float(x) + 1, -0.05f, float(z) + 1}) * Mat4f::scaling({1.94f, 0.1f, 1.94f}),
-                              Color::rgb(shade, static_cast<u8>(shade + 8), static_cast<u8>(shade + 18))});
+            _tiles.push_back(
+                {Mat4f::translation({float(x) + 1, -0.05f, float(z) + 1}) * Mat4f::scaling({1.94f, 0.1f, 1.94f}),
+                 Color::rgb(shade, static_cast<u8>(shade + 8), static_cast<u8>(shade + 18))});
         }
     }
     for (int z = 0; z < BreachLevel::depth; ++z) {
@@ -122,7 +126,9 @@ void BreachView::update(Breach& breach, float dt) {
             // what the flashes were before (brighter close by, dimmer far off).
             _flashes.push_back({e.pos, {16.0f, 11.5f, 5.0f}, 7.0f, 0.06f, 0.06f, 0.8f});
             for (int i = 0; i < 3; ++i) {
-                _sparks.push_back({e.to, {rand(_rng, -2, 2), rand(_rng, 0, 3), rand(_rng, -2, 2)}, rand(_rng, .1f, .25f),
+                _sparks.push_back({e.to,
+                                   {rand(_rng, -2, 2), rand(_rng, 0, 3), rand(_rng, -2, 2)},
+                                   rand(_rng, .1f, .25f),
                                    Color::rgb(255, 220, 160)});
             }
             break;
@@ -131,7 +137,8 @@ void BreachView::update(Breach& breach, float dt) {
             const bool kill = e.kind == BreachEvent::Kind::Kill;
             const Color c = enemy_colors[static_cast<std::size_t>(std::clamp(e.enemy_kind, 0, 2))];
             for (int i = 0; i < (kill ? 16 : 6); ++i) {
-                _sparks.push_back({e.pos, {rand(_rng, -4, 4), rand(_rng, -1, 5), rand(_rng, -4, 4)}, rand(_rng, .2f, .5f), c});
+                _sparks.push_back(
+                    {e.pos, {rand(_rng, -4, 4), rand(_rng, -1, 5), rand(_rng, -4, 4)}, rand(_rng, .2f, .5f), c});
             }
             _numbers.push_back({e.pos, 0.7f, kill});
             if (!kill && _shield) {
@@ -139,13 +146,15 @@ void BreachView::update(Breach& breach, float dt) {
             }
             if (kill) {
                 const LinearColor l = to_linear(c);
-                _flashes.push_back({e.pos, Vec3f{l.r, l.g, l.b} * 8.0f, 5.0f, 0.25f, 0.25f, 1.2f}); // a fireball
+                _flashes.push_back({e.pos, linear_rgb(l) * 8.0f, 5.0f, 0.25f, 0.25f, 1.2f}); // a fireball
             }
             break;
         }
         case BreachEvent::Kind::Pickup:
             for (int i = 0; i < 8; ++i) {
-                _sparks.push_back({e.pos, {rand(_rng, -2, 2), rand(_rng, 0, 3), rand(_rng, -2, 2)}, rand(_rng, .2f, .4f),
+                _sparks.push_back({e.pos,
+                                   {rand(_rng, -2, 2), rand(_rng, 0, 3), rand(_rng, -2, 2)},
+                                   rand(_rng, .2f, .4f),
                                    Color::rgb(140, 255, 190)});
             }
             break;
@@ -163,9 +172,12 @@ void BreachView::update(Breach& breach, float dt) {
         s.pos += s.velocity * dt;
         s.life -= dt;
     }
-    for (Tracer& t : _tracers) t.life -= dt;
-    for (Flash& f : _flashes) f.life -= dt;
-    for (Shell& s : _shells) s.life -= dt;
+    for (Tracer& t : _tracers)
+        t.life -= dt;
+    for (Flash& f : _flashes)
+        f.life -= dt;
+    for (Shell& s : _shells)
+        s.life -= dt;
     std::erase_if(_shells, [](const Shell& s) { return s.life <= 0; });
     std::erase_if(_flashes, [](const Flash& f) { return f.life <= 0; });
     for (Number& n : _numbers) {
@@ -175,10 +187,12 @@ void BreachView::update(Breach& breach, float dt) {
     std::erase_if(_sparks, [](const Spark& s) { return s.life <= 0; });
     std::erase_if(_tracers, [](const Tracer& t) { return t.life <= 0; });
     std::erase_if(_numbers, [](const Number& n) { return n.life <= 0; });
-    if (_sparks.size() > 4096) _sparks.erase(_sparks.begin(), _sparks.begin() + static_cast<std::ptrdiff_t>(_sparks.size() - 4096));
+    if (_sparks.size() > 4096)
+        _sparks.erase(_sparks.begin(), _sparks.begin() + static_cast<std::ptrdiff_t>(_sparks.size() - 4096));
     _flash_time = std::max(0.0f, _flash_time - dt);
     _recoil = std::max(0.0f, _recoil - dt * 9.0f);
-    _walked += std::sqrt(breach.velocity.x * breach.velocity.x + breach.velocity.z * breach.velocity.z) * dt * (breach.grounded ? 1.0f : 0.0f);
+    _walked += std::sqrt(breach.velocity.x * breach.velocity.x + breach.velocity.z * breach.velocity.z) * dt *
+               (breach.grounded ? 1.0f : 0.0f);
 }
 
 void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
@@ -191,11 +205,13 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     _scene.lights.sun = {.direction = {-0.4f, 1.0f, 0.25f}, .color = {1.0f, 0.97f, 0.92f}};
     _scene.lights.ambient = {0.25f, 0.28f, 0.35f};
     // The sun's shadows over the whole deck, a little above the walls.
-    _scene.lights.shadow_area = _options.shadows ? Bounds3{{0.0f, -0.2f, 0.0f}, {float(BreachLevel::width), 4.0f, float(BreachLevel::depth)}}
-                                                 : Bounds3{};
+    _scene.lights.shadow_area =
+        _options.shadows ? Bounds3D{{0.0f, -0.2f, 0.0f}, {float(BreachLevel::width), 4.0f, float(BreachLevel::depth)}}
+                         : Bounds3D{};
     if (_options.lights) {
         for (const Flash& f : _flashes) {
-            _scene.add_light({.position = f.pos, .color = f.color * (f.life / f.length), .radius = f.radius, .size = f.size});
+            _scene.add_light(
+                {.position = f.pos, .color = f.color * (f.life / f.length), .radius = f.radius, .size = f.size});
         }
     }
 
@@ -216,20 +232,23 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
         breach.render_state().propagate_transforms();
         breach.render_state().collect(_scene);
     }
-    auto shots = _scene.add_instances(_shot, breach.shots.size(),
-                                      {.color = Color::rgb(255, 110, 190), .emissive = 2.5f, .unlit = true, .casts_shadow = false});
+    auto shots = _scene.add_instances(
+        _shot, breach.shots.size(),
+        {.color = Color::rgb(255, 110, 190), .emissive = 2.5f, .unlit = true, .casts_shadow = false});
     for (std::size_t i = 0; i < breach.shots.size(); ++i) {
         shots[i] = {Mat4f::translation(breach.shots[i].pos), kin::colors::white};
     }
     const float t = breach.elapsed;
-    auto cores = _scene.add_instances(_core, breach.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 1.2f});
+    auto cores =
+        _scene.add_instances(_core, breach.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 1.2f});
     for (std::size_t i = 0; i < breach.pickups.size(); ++i) {
         cores[i] = {Mat4f::translation(breach.pickups[i].pos + Vec3f{0.0f, 0.1f * std::sin(t * 3 + float(i)), 0.0f}) *
                         Mat4f::rotation_y(t * 90.0f + float(i) * 40.0f),
                     kin::colors::white};
     }
     // Sparks and tracers add light: additive, in any order, never hiding anything.
-    auto sparks = _scene.add_instances(_spark, _sparks.size(), {.emissive = 2.0f, .unlit = true, .blend = Blend3D::Additive});
+    auto sparks =
+        _scene.add_instances(_spark, _sparks.size(), {.emissive = 2.0f, .unlit = true, .blend = Blend3D::Additive});
     for (std::size_t i = 0; i < _sparks.size(); ++i) {
         const float size = std::clamp(_sparks[i].life * 4.0f, 0.3f, 1.0f);
         sparks[i] = {Mat4f::translation(_sparks[i].pos) * Mat4f::scaling({size, size, size}), _sparks[i].color};
@@ -237,20 +256,24 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     // Shields: a hit enemy's shell, flashing and fading, its lines climbing.
     for (const Shell& shell : _shells) {
         const float strength = shell.life / shell_life;
-        Material3D material{.color = shell.color, .double_sided = true, .blend = Blend3D::Additive, .casts_shadow = false,
+        Material3D material{.color = shell.color,
+                            .double_sided = true,
+                            .blend = Blend3D::Additive,
+                            .casts_shadow = false,
                             .shader = _shield};
         material.shader_params = {breach.elapsed, strength * strength, 6.0f, 0.8f};
         _scene.draw(_shell, Mat4f::translation(shell.pos) * Mat4f::scaling({0.62f, 0.62f, 0.62f}), material);
     }
     // Tracers: thin boxes from the muzzle to where the shot hit, thinning out.
-    auto tracers = _scene.add_instances(_box, _tracers.size(),
-                                        {.color = Color::rgb(170, 250, 255), .emissive = 3.0f, .unlit = true, .blend = Blend3D::Additive});
+    auto tracers = _scene.add_instances(
+        _box, _tracers.size(),
+        {.color = Color::rgb(170, 250, 255), .emissive = 3.0f, .unlit = true, .blend = Blend3D::Additive});
     for (std::size_t i = 0; i < _tracers.size(); ++i) {
         const Vec3f d = _tracers[i].to - _tracers[i].from;
         const float len = std::max(0.01f, length(d));
         const float w = 0.025f * std::clamp(_tracers[i].life / 0.07f, 0.2f, 1.0f);
-        tracers[i] = {Mat4f::translation((_tracers[i].from + _tracers[i].to) * 0.5f) * Mat4f::rotation(Quatf::look_rotation(d)) *
-                          Mat4f::scaling({w, w, len}),
+        tracers[i] = {Mat4f::translation((_tracers[i].from + _tracers[i].to) * 0.5f) *
+                          Mat4f::rotation(Quatf::look_rotation(d)) * Mat4f::scaling({w, w, len}),
                       kin::colors::white};
     }
 
@@ -283,13 +306,18 @@ void BreachView::draw(Renderer2D& renderer, Breach& breach, Input& input, const 
                        std::max(1, static_cast<int>(std::lround(_playfield.h * fit)))};
     if (!_view.valid()) {
         // HDR with bloom: shots, sparks and flashes past white glow.
-        _view = _r3d->create_view(pixels, {.samples = 4, .background = Color::rgb(18, 26, 36), .hdr = _options.bloom,
-                                           .bloom = _options.bloom ? 0.5f : 0.0f, .bloom_threshold = 1.0f});
+        _view = _r3d->create_view(pixels, {.samples = 4,
+                                           .background = Color::rgb(18, 26, 36),
+                                           .hdr = _options.bloom,
+                                           .bloom = _options.bloom ? 0.5f : 0.0f,
+                                           .bloom_threshold = 1.0f});
     } else if (_view.size() != pixels) {
         _r3d->resize(_view, pixels);
     }
-    if (_gun) _gun->poll();
-    if (_crate) _crate->poll();
+    if (_gun)
+        _gun->poll();
+    if (_crate)
+        _crate->poll();
     {
         KIN_PROFILE_SCOPE("example.breach.scene");
         fill_scene(breach, state);
@@ -302,7 +330,8 @@ void BreachView::draw(Renderer2D& renderer, Breach& breach, Input& input, const 
     draw_hud(renderer, breach, input, state, dt);
 }
 
-void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& input, const BreachHudState& state, float dt) {
+void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& input, const BreachHudState& state,
+                          float dt) {
     const Camera3D& camera = _scene.camera;
     // Damaged plates' health over them, nearest first, at most 48.
     std::vector<std::pair<float, int>> damaged;
@@ -316,9 +345,11 @@ void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& inp
     std::sort(damaged.begin(), damaged.end());
     damaged.resize(std::min<std::size_t>(damaged.size(), 48));
     for (const auto& [d2, slot] : damaged) {
-        if (d2 > 30 * 30) break;
+        if (d2 > 30 * 30)
+            break;
         const auto at = camera.project(positions[static_cast<std::size_t>(slot)] + Vec3f{0.0f, 0.6f, 0.0f}, _playfield);
-        if (!at) continue;
+        if (!at)
+            continue;
         const float w = std::clamp(600.0f / std::sqrt(d2), 16.0f, 60.0f);
         const float share = breach.enemy_hp(slot) / Breach::enemy_max_hp(Breach::enemy_kind(slot));
         renderer.fill_rect({at->pos.x - w / 2 - 1, at->pos.y - 3, w + 2, 6}, Color::rgba(10, 14, 20, 200));
@@ -335,7 +366,8 @@ void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& inp
     // Text, at the display's resolution (as Signal Siege's HUD).
     const auto native = renderer.scoped_native_coordinates();
     const Vec2i output = renderer.output_size();
-    if (output.x <= 0 || output.y <= 0) return;
+    if (output.x <= 0 || output.y <= 0)
+        return;
     const float fit = std::min(output.x / 1280.0f, output.y / 800.0f);
     const Rectf area{(output.x - 1280 * fit) * .5f, (output.y - 800 * fit) * .5f, 1280 * fit, 800 * fit};
     const auto viewport = renderer.scoped_viewport(area);
@@ -369,16 +401,21 @@ void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& inp
     // Damage numbers where hits landed.
     for (const Number& n : _numbers) {
         const auto at = camera.project(n.pos, _playfield);
-        if (!at) continue;
-        const Color color = n.kill ? Color::rgba(255, 220, 140, static_cast<u8>(std::clamp(n.life / .7f, 0.0f, 1.0f) * 255))
-                                   : Color::rgba(255, 255, 255, static_cast<u8>(std::clamp(n.life / .7f, 0.0f, 1.0f) * 230));
+        if (!at)
+            continue;
+        const Color color =
+            n.kill ? Color::rgba(255, 220, 140, static_cast<u8>(std::clamp(n.life / .7f, 0.0f, 1.0f) * 255))
+                   : Color::rgba(255, 255, 255, static_cast<u8>(std::clamp(n.life / .7f, 0.0f, 1.0f) * 230));
         text(n.kill ? "+1" : "1", at->pos.x * scale - 4, at->pos.y * scale - 10, n.kill ? 15 : 12, color);
     }
     panel({16, 16, 300, 64});
     text(tr("breach.name"), 30, 23, 13, teal);
     text(tr("hud.hull"), 30, 46, 11, muted);
     const float hull = std::clamp(float(breach.health) / 100.0f, 0.0f, 1.0f);
-    bar({78, 50, 188, 9}, hull, hull > .5f ? Color::rgb(102, 210, 163) : hull > .25f ? Color::rgb(236, 190, 90) : Color::rgb(240, 96, 90));
+    bar({78, 50, 188, 9}, hull,
+        hull > .5f    ? Color::rgb(102, 210, 163)
+        : hull > .25f ? Color::rgb(236, 190, 90)
+                      : Color::rgb(240, 96, 90));
     text(std::to_string(std::max(0, breach.health)), 276, 45, 12, ink);
 
     panel({w * .5f - 130, 12, 260, 74});
@@ -395,11 +432,13 @@ void BreachView::draw_hud(Renderer2D& renderer, const Breach& breach, Input& inp
     text(std::to_string(breach.collected), w - 120, 22, 26, Color::rgb(120, 255, 170));
     text(tr("hud.cores"), w - 120, 54, 10, muted);
 
-    const std::string line = tr(state.autoplay ? "hud.stats_autoplay" : "hud.stats",
-                                {{"enemies", breach.enemy_count()}, {"shots", int(breach.shots.size())}, {"draws", int(stats().draws)}});
+    const std::string line =
+        tr(state.autoplay ? "hud.stats_autoplay" : "hud.stats",
+           {{"enemies", breach.enemy_count()}, {"shots", int(breach.shots.size())}, {"draws", int(stats().draws)}});
     text(line, w - width(line, 10) - 20, h - 24, 10, muted);
     if (breach.over()) {
-        centered(tr(breach.health > 0 ? "results.secured" : "results.lost"), h * .42f, 30, breach.health > 0 ? teal : Color::rgb(240, 96, 90));
+        centered(tr(breach.health > 0 ? "results.secured" : "results.lost"), h * .42f, 30,
+                 breach.health > 0 ? teal : Color::rgb(240, 96, 90));
     } else if (state.paused) {
         centered(tr("hud.paused"), h * .42f, 30, ink);
         centered(tr("breach.paused_hint"), h * .42f + 44, 12, muted);

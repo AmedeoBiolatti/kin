@@ -4,35 +4,34 @@
 // that it can be tested: where the view's depth range is cut, and for each
 // slice an orthographic view from the sun that holds it.
 
+#include <array>
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
 #include <kin/render3d/camera3d.hpp>
-#include <kin/render3d/mesh.hpp>
-
-#include <array>
+#include <kin/render3d/mesh3d.hpp>
 
 namespace kin {
 
 constexpr u32 max_shadow_cascades = 4;
 
 // One cascade: the slice of the camera's view it covers, and the sun's view of it.
-struct ShadowCascade {
+struct ShadowCascade3D {
     Mat4f view_projection{}; // world to the cascade's clip space (reverse Z, as the camera's)
     f32 slice_near = 0.0f;   // the view depths it covers: from the end of the one before, less its blend
     f32 slice_far = 0.0f;
-    f32 blend_from = 0.0f;   // from here to slice_far it fades into the next cascade
-    f32 texel_world = 0.0f;  // a texel's side in world units (the larger of its two)
-    f32 depth_range = 1.0f;  // world units from the near plane to the far one
+    f32 blend_from = 0.0f;  // from here to slice_far it fades into the next cascade
+    f32 texel_world = 0.0f; // a texel's side in world units (the larger of its two)
+    f32 depth_range = 1.0f; // world units from the near plane to the far one
 };
 
-struct ShadowCascades {
+struct ShadowCascades3D {
     u32 count = 0; // 0: none (no area, no sun)
-    std::array<ShadowCascade, max_shadow_cascades> cascade{};
+    std::array<ShadowCascade3D, max_shadow_cascades> cascade{};
 };
 
 // The sun's view over `area` and what holds it, for a shadow map: the area's
 // corners in the view (lo, hi) and the depth range that spans them with a margin.
-struct SunBox {
+struct SunBox3D {
     Mat4f light_view{};
     Vec3f lo{}, hi{};
     f32 z_near = 0.01f, z_far = 1.0f;
@@ -40,7 +39,7 @@ struct SunBox {
 
 // `to_sun`: unit, toward the sun. Both the single shadow map and the cascades
 // use it, so that their boxes are the same.
-SunBox fit_sun_box(const Bounds3& area, Vec3f to_sun);
+SunBox3D fit_sun_box(const Bounds3D& area, Vec3f to_sun);
 
 // The depths where `count` cascades end, between `near` and `far`: a blend
 // of the logarithmic split (a share of the view for each doubling of the
@@ -56,8 +55,8 @@ std::array<f32, max_shadow_cascades + 1> cascade_splits(f32 near, f32 far, u32 c
 // as the camera turns, snapped to whole texels in the sun's space so that
 // edges don't shimmer as it moves. `area` limits it, and is what the
 // depth range spans: whatever casts into the slice from the sun's side.
-ShadowCascades fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_sun, const Bounds3& area, u32 cascades,
-                                   f32 distance, u32 resolution);
+ShadowCascades3D fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_sun, const Bounds3D& area,
+                                     u32 cascades, f32 distance, u32 resolution);
 
 // The view of `camera` cut to the depths [near, far], for the cascade's slice.
 Camera3D slice_of(const Camera3D& camera, f32 near, f32 far);

@@ -1,20 +1,18 @@
 #include "view.hpp"
 
-#include "audio.hpp" // camp_fire_position
-
 #include "../sponza_walk/character.hpp"
 #include "../sponza_walk/ik_rig.hpp"
-
-#include <kin/assets/content.hpp>
-#include <kin/assets/image.hpp>
-#include <kin/ecs/scene3d.hpp>
-#include <kin/scene/scene_asset.hpp>
-#include <kin/render3d/timeofday3d.hpp>
-#include <kin/renderer/renderer2d.hpp>
+#include "audio.hpp" // camp_fire_position
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <kin/assets/content.hpp>
+#include <kin/assets/image.hpp>
+#include <kin/ecs/scene3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
+#include <kin/renderer/renderer2d.hpp>
+#include <kin/scene/scene_asset.hpp>
 
 namespace summit {
 
@@ -23,8 +21,10 @@ namespace {
 // A rotation taking +Y to the unit vector `d`.
 Quatf from_up_to(Vec3f d) {
     const f32 c = std::clamp(d.y, -1.0f, 1.0f);
-    if (c > 0.99999f) return {};
-    if (c < -0.99999f) return Quatf::axis_angle({1.0f, 0.0f, 0.0f}, 180.0f);
+    if (c > 0.99999f)
+        return {};
+    if (c < -0.99999f)
+        return Quatf::axis_angle({1.0f, 0.0f, 0.0f}, 180.0f);
     const Vec3f axis = cross({0.0f, 1.0f, 0.0f}, d);
     return Quatf::axis_angle(axis, std::acos(c) * 180.0f / pi);
 }
@@ -43,7 +43,8 @@ u32 hash32(u32 x) {
     return x;
 }
 
-// ---- procedural textures --------------------------------------------------------------------------------------------------------
+// ---- procedural textures
+// --------------------------------------------------------------------------------------------------------
 
 // Value noise on a lattice of `period` cells that wraps: a texture that tiles.
 f32 periodic_noise(f32 x, f32 y, i32 period, u32 seed) {
@@ -58,8 +59,8 @@ f32 periodic_noise(f32 x, f32 y, i32 period, u32 seed) {
     return (a + (b - a) * sx) * (1.0f - sy) + (c + (d - c) * sx) * sy;
 }
 
-// Tileable cellular noise: the distance to the nearest and second nearest of one random point a cell, `period` cells a side
-// (with the nearest cell's number for a per-block offset).
+// Tileable cellular noise: the distance to the nearest and second nearest of one random point a cell, `period` cells a
+// side (with the nearest cell's number for a per-block offset).
 struct Cells {
     f32 f1 = 0.0f, f2 = 0.0f;
     u32 id = 0;
@@ -88,8 +89,8 @@ Cells cellular(f32 x, f32 y, i32 period_x, i32 period_y, u32 seed) {
     return c;
 }
 
-// The rock's relief and fractures as a height 0..1 over one tile: broad lumps, blocks (cells with their own height) split by
-// grooves, and grain.
+// The rock's relief and fractures as a height 0..1 over one tile: broad lumps, blocks (cells with their own height)
+// split by grooves, and grain.
 f32 rock_height(f32 u, f32 v, u32 seed) {
     f32 h = 0.0f, amp = 0.5f, norm = 0.0f;
     for (i32 o = 0; o < 5; ++o) {
@@ -122,19 +123,20 @@ f32 grass_height(f32 u, f32 v, u32 seed) {
     return h / norm;
 }
 
+// ---- the climber
+// ------------------------------------------------------------------------------------------------------------
 
-// ---- the climber ------------------------------------------------------------------------------------------------------------
-
-// The person: the parts from build_climber_meshes (climber.cpp, no renderer) uploaded, on person_rig()'s skeleton and clips.
-std::shared_ptr<const Model> make_climber(Renderer3D& r3d, const ClimberStyle& style) {
+// The person: the parts from build_climber_meshes (climber.cpp, no renderer) uploaded, on person_rig()'s skeleton and
+// clips.
+std::shared_ptr<const Model3D> make_climber(Renderer3D& r3d, const ClimberStyle& style) {
     const sponza_walk::PersonRig rig = sponza_walk::person_rig();
-    const Skeleton& sk = rig.skeleton;
+    const Skeleton3D& sk = rig.skeleton;
 
-    auto model = std::make_shared<Model>();
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(sk);
     model->clips = rig.clips;
     for (const ClimberPart& p : build_climber_meshes(style)) {
-        ModelPart part;
+        ModelPart3D part;
         part.name = p.name;
         part.mesh = r3d.create_mesh(p.mesh);
         part.material = {.color = p.colour, .roughness = p.roughness};
@@ -146,10 +148,11 @@ std::shared_ptr<const Model> make_climber(Renderer3D& r3d, const ClimberStyle& s
     return model;
 }
 
-// Replaces what the fixture's clips get wrong for a person whose arms hang: the walk and run swing the arms about Y with the arms
-// out (a T), and the idle needs the arms down; a `Squash` layer for landings (additive: a crouch from rest) and the fall's flail.
-void make_climber_clips(Model& model) {
-    const Skeleton& sk = model.skeletons[0];
+// Replaces what the fixture's clips get wrong for a person whose arms hang: the walk and run swing the arms about Y
+// with the arms out (a T), and the idle needs the arms down; a `Squash` layer for landings (additive: a crouch from
+// rest) and the fall's flail.
+void make_climber_clips(Model3D& model) {
+    const Skeleton3D& sk = model.skeletons[0];
     const u32 n = sk.joint_count();
     const auto quat = [](Vec3f axis, f32 degrees) { return Quatf::axis_angle(axis, degrees); };
     const f32 down = 74.0f; // the arm's drop from the T pose (about Z, mirrored)
@@ -200,7 +203,8 @@ void make_climber_clips(Model& model) {
         idle.channels.resize(n);
         const auto track = [&](const char* joint, auto&& value) {
             const i32 j = sk.find(joint);
-            if (j < 0) return;
+            if (j < 0)
+                return;
             Track3D<Quatf>& t = idle.channels[std::size_t(j)].rotation;
             t.times = {0.0f, 2.0f, 4.0f};
             t.values = {value(0.0f), value(1.0f), value(0.0f)};
@@ -213,8 +217,9 @@ void make_climber_clips(Model& model) {
         track("head", [&](f32 k) { return quat({0, 1, 0}, 3.0f * k); });
         model.clips.push_back(std::move(idle));
     }
-    // Squash: the first key is the rest pose, the second (after a millisecond) the crouch, and it stays: as an additive layer its
-    // weight is how deep the crouch is. The pelvis goes down, thighs forward, knees bent, the spine leaning, the arms out for balance.
+    // Squash: the first key is the rest pose, the second (after a millisecond) the crouch, and it stays: as an additive
+    // layer its weight is how deep the crouch is. The pelvis goes down, thighs forward, knees bent, the spine leaning,
+    // the arms out for balance.
     {
         AnimClip3D sq;
         sq.name = "Squash";
@@ -222,7 +227,8 @@ void make_climber_clips(Model& model) {
         sq.channels.resize(n);
         const auto rot = [&](const char* joint, Vec3f axis, f32 degrees) {
             const i32 j = sk.find(joint);
-            if (j < 0) return;
+            if (j < 0)
+                return;
             Track3D<Quatf>& t = sq.channels[std::size_t(j)].rotation;
             t.times = {0.0f, 0.001f, sq.duration};
             t.values = {Quatf{}, quat(axis, degrees), quat(axis, degrees)};
@@ -248,11 +254,13 @@ void make_climber_clips(Model& model) {
 
 } // namespace
 
-// ---- the view ---------------------------------------------------------------------------------------------------------------------
+// ---- the view
+// ---------------------------------------------------------------------------------------------------------------------
 
 namespace {
 
-Material3D rock_material(const RenderMeshData& m, const Texture& albedo, const Texture& normal, f32 normal_scale, const Texture& orm = {}) {
+Material3D rock_material(const RenderMeshData& m, const Texture& albedo, const Texture& normal, f32 normal_scale,
+                         const Texture& orm = {}) {
     Material3D mat = m.material;
     mat.texture = albedo;
     mat.normal = normal;
@@ -275,13 +283,16 @@ void SummitView::make_textures(bool external_assets) {
     if (external_assets && !content_root().empty()) {
         const auto load = [&](const char* name, bool srgb) {
             const auto path = content_root() / "ambientcg" / name;
-            if (!content_file_exists(path)) return Texture{};
+            if (!content_file_exists(path))
+                return Texture{};
             const Image image = load_image(path);
-            if (!image.valid() || image.size != Vec2i{1024, 1024}) return Texture{};
+            if (!image.valid() || image.size != Vec2i{1024, 1024})
+                return Texture{};
             Renderer2D& r = _r3d->renderer();
             Texture t = srgb ? r.create_texture_from_rgba(image.rgba.data(), image.size)
                              : r.create_texture(image.size, TextureFormat::Rgba8, image.rgba.data());
-            if (t) r.set_scale_mode(t, ScaleMode::Mipmapped);
+            if (t)
+                r.set_scale_mode(t, ScaleMode::Mipmapped);
             return t;
         };
         _rock_albedo = load("Rock030-Color.jpg", true);
@@ -299,7 +310,8 @@ void SummitView::make_textures(bool external_assets) {
     constexpr i32 size = 512;
     std::vector<f32> h(std::size_t(size) * std::size_t(size));
     for (i32 y = 0; y < size; ++y) {
-        for (i32 x = 0; x < size; ++x) h[std::size_t(y * size + x)] = rock_height(f32(x) / f32(size), f32(y) / f32(size), 1234u);
+        for (i32 x = 0; x < size; ++x)
+            h[std::size_t(y * size + x)] = rock_height(f32(x) / f32(size), f32(y) / f32(size), 1234u);
     }
     std::vector<u8> normal(std::size_t(size) * std::size_t(size) * 4), albedo(normal.size());
     const auto at = [&](i32 x, i32 y) { return h[std::size_t(((y + size) % size) * size + ((x + size) % size))]; };
@@ -325,7 +337,8 @@ void SummitView::make_textures(bool external_assets) {
     {
         std::vector<f32> g(h.size());
         for (i32 y = 0; y < size; ++y) {
-            for (i32 x = 0; x < size; ++x) g[std::size_t(y * size + x)] = grass_height(f32(x) / f32(size), f32(y) / f32(size), 777u);
+            for (i32 x = 0; x < size; ++x)
+                g[std::size_t(y * size + x)] = grass_height(f32(x) / f32(size), f32(y) / f32(size), 777u);
         }
         std::vector<u8> gn(normal.size()), ga(normal.size());
         const auto gat = [&](i32 x, i32 y) { return g[std::size_t(((y + size) % size) * size + ((x + size) % size))]; };
@@ -348,24 +361,32 @@ void SummitView::make_textures(bool external_assets) {
         Renderer2D& rg = _r3d->renderer();
         _grass_albedo = rg.create_texture_from_rgba(ga.data(), {size, size});
         _grass_normal = rg.create_texture(Vec2i{size, size}, TextureFormat::Rgba8, gn.data());
-        if (_grass_albedo) rg.set_scale_mode(_grass_albedo, ScaleMode::Mipmapped);
-        if (_grass_normal) rg.set_scale_mode(_grass_normal, ScaleMode::Mipmapped);
+        if (_grass_albedo)
+            rg.set_scale_mode(_grass_albedo, ScaleMode::Mipmapped);
+        if (_grass_normal)
+            rg.set_scale_mode(_grass_normal, ScaleMode::Mipmapped);
     }
     Renderer2D& r = _r3d->renderer();
     _rock_albedo = r.create_texture_from_rgba(albedo.data(), {size, size});
     _rock_normal = r.create_texture(Vec2i{size, size}, TextureFormat::Rgba8, normal.data());
-    if (_rock_albedo) r.set_scale_mode(_rock_albedo, ScaleMode::Mipmapped);
-    if (_rock_normal) r.set_scale_mode(_rock_normal, ScaleMode::Mipmapped);
+    if (_rock_albedo)
+        r.set_scale_mode(_rock_albedo, ScaleMode::Mipmapped);
+    if (_rock_normal)
+        r.set_scale_mode(_rock_normal, ScaleMode::Mipmapped);
 }
 
 SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_assets)
-    : _r3d(&r3d), _assets(r3d, content_root()), _external_assets(_assets, level, external_assets), _look(&looks().front()), _bounds(level.bounds), _level_height(level.height()) {
+    : _r3d(&r3d), _assets(r3d, content_root()), _external_assets(_assets, level, external_assets),
+      _look(&looks().front()), _bounds(level.bounds), _level_height(level.height()) {
     make_textures(external_assets);
-    const auto upload = [&](std::vector<RenderMeshData> data, std::vector<Part>& into, bool textured, f32 normal_scale) {
+    const auto upload = [&](std::vector<RenderMeshData> data, std::vector<Part>& into, bool textured,
+                            f32 normal_scale) {
         for (const RenderMeshData& m : data) {
             const bool grass = m.name == "ground" || m.name == "terrain";
-            Material3D mat = grass ? rock_material(m, _grass_albedo, _grass_normal, _grass_orm ? 0.65f : 0.8f, _grass_orm)
-                                   : textured ? rock_material(m, _rock_albedo, _rock_normal, _rock_orm ? 0.75f : normal_scale, _rock_orm) : m.material;
+            Material3D mat =
+                grass      ? rock_material(m, _grass_albedo, _grass_normal, _grass_orm ? 0.65f : 0.8f, _grass_orm)
+                : textured ? rock_material(m, _rock_albedo, _rock_normal, _rock_orm ? 0.75f : normal_scale, _rock_orm)
+                           : m.material;
             into.push_back({r3d.create_mesh(m.mesh), mat});
             _static_triangles += m.mesh.triangle_count();
         }
@@ -380,7 +401,9 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
     _sphere = r3d.create_mesh(meshes::sphere(1.0f, 12, 8));
     _camps = level.camps;
     _summit = level.summit;
-    for (const Piece& p : level.pieces) if (p.kind == PieceKind::Equipment) _equipment.push_back(p);
+    for (const Piece& p : level.pieces)
+        if (p.kind == PieceKind::Equipment)
+            _equipment.push_back(p);
     _fires.resize(_camps.size());
     for (std::size_t i = 0; i < _fires.size(); ++i) {
         Fire& f = _fires[i];
@@ -488,39 +511,46 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
     if (r3d.capabilities().skinning) {
         _ecs = std::make_unique<::kin::EcsWorld>();
         register_builtin_editor_components(*_ecs);
-        std::shared_ptr<const Model> imported;
+        std::shared_ptr<const Model3D> imported;
         if (external_assets && !content_root().empty()) {
             const auto prefab = load_prefab_asset(content_root() / "prefabs/survivor.kinprefab", _ecs->components());
-            for (const auto& error : prefab.diagnostics) std::fprintf(stderr, "summit: %s\n", error.c_str());
+            for (const auto& error : prefab.diagnostics)
+                std::fprintf(stderr, "summit: %s\n", error.c_str());
             if (prefab.ok()) {
                 auto instance = instantiate_prefab(*_ecs, *prefab.prefab, {}, _ecs->components());
-                for (const auto& error : instance.diagnostics) std::fprintf(stderr, "summit: %s\n", error.c_str());
+                for (const auto& error : instance.diagnostics)
+                    std::fprintf(stderr, "summit: %s\n", error.c_str());
                 const auto errors = resolve_render3d_assets(*_ecs, _assets);
-                for (const auto& error : errors) std::fprintf(stderr, "summit: %s\n", error.c_str());
-                const auto* renderer = instance.root.get<SkinnedMeshRenderer>();
+                for (const auto& error : errors)
+                    std::fprintf(stderr, "summit: %s\n", error.c_str());
+                const auto* renderer = instance.root.get<SkinnedMeshRenderer3D>();
                 auto model = renderer ? renderer->model : nullptr;
-                const Skeleton canonical = sponza_walk::person_rig().skeleton;
-                // The offline fit keeps the exact game rig. Reject an incompatible replacement rather than breaking IK or ragdolls.
-                if (model && model->valid() && model->skeletons.size() == 1 && model->skeletons[0].names == canonical.names &&
-                    model->skeletons[0].parents == canonical.parents && model->find_clip("Idle") && model->find_clip("Walk") &&
-                    model->find_clip("Run") && model->find_clip("Fall")) {
+                const Skeleton3D canonical = sponza_walk::person_rig().skeleton;
+                // The offline fit keeps the exact game rig. Reject an incompatible replacement rather than breaking IK
+                // or ragdolls.
+                if (model && model->valid() && model->skeletons.size() == 1 &&
+                    model->skeletons[0].names == canonical.names && model->skeletons[0].parents == canonical.parents &&
+                    model->find_clip("Idle") && model->find_clip("Walk") && model->find_clip("Run") &&
+                    model->find_clip("Fall")) {
                     imported = std::move(model);
                     _person = instance.root.raw();
                 } else {
-                    std::fprintf(stderr, "summit: survivor prefab unavailable or incompatible; using procedural climber\n");
-                    for (auto entity : instance.entities) if (entity.alive()) entity.raw().destruct();
+                    std::fprintf(stderr,
+                                 "summit: survivor prefab unavailable or incompatible; using procedural climber\n");
+                    for (auto entity : instance.entities)
+                        if (entity.alive())
+                            entity.raw().destruct();
                 }
             }
         }
         if (imported) {
             std::printf("summit: authored survivor loaded, canonical 25-joint rig, five clips\n");
             _person_model = std::move(imported);
-        } else
-        {
-            auto model = std::make_shared<Model>(*make_climber(r3d, style_for_player(0)));
+        } else {
+            auto model = std::make_shared<Model3D>(*make_climber(r3d, style_for_player(0)));
             make_climber_clips(*model);
             _person_model = std::move(model);
-            _person = _ecs->raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = _person_model});
+            _person = _ecs->raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = _person_model});
         }
         _state = std::make_unique<WorldRenderState3D>(*_ecs);
         const auto* rig_asset = _person.get<AnimatorAsset3D>();
@@ -528,9 +558,9 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
         Animator3D animator = locomotion_animator({.idle = "Idle", .walk = "Walk", .run = "Run", .fall = "Fall"});
         if (authored_rig) {
             animator = *_person.get<Animator3D>();
-            std::printf("summit: authored animator loaded, shared kinanim machine, speed blend, three IK constraints\n");
-        }
-        else {
+            std::printf(
+                "summit: authored animator loaded, shared kinanim machine, speed blend, three IK constraints\n");
+        } else {
             if (const auto* authored = _person.get<Animator3D>()) {
                 animator.clip = authored->clip;
                 animator.speed = authored->speed;
@@ -540,17 +570,18 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
                 animator.apply_root_motion = authored->apply_root_motion;
                 animator.remove_root_motion = authored->remove_root_motion;
             }
-            IKConstraint feet = sponza_walk::person_constraints(nullptr)[0];
+            IKConstraint3D feet = sponza_walk::person_constraints(nullptr)[0];
             feet.fade_seconds = 0.12f;
             animator.add_ik(feet);
             for (const char* side : {"L", "R"}) {
-                IKConstraint hand;
+                IKConstraint3D hand;
                 hand.name = std::string("hand_") + side;
-                hand.kind = IKKind::TwoBone;
-                hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
+                hand.kind = IKKind3D::TwoBone;
+                hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side,
+                               std::string("hand_") + side};
                 hand.weight = 0.0f;
                 hand.fade_seconds = 0.12f;
-                hand.pole = IKConstraint::Pole::ModelDirection;
+                hand.pole = IKConstraint3D::Pole::ModelDirection;
                 hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
                 hand.two_bone.max_stretch = 1.12f;
                 animator.add_ik(hand);
@@ -560,7 +591,8 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
             squash.weight = 0.0f;
             squash.additive = true;
             squash.loop = true;
-            if (_person_model->find_clip("Squash")) animator.layers.push_back(squash);
+            if (_person_model->find_clip("Squash"))
+                animator.layers.push_back(squash);
         }
         _person.set(static_cast<const Animator3D&>(animator));
         _person_ok = true;
@@ -569,7 +601,8 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
 
 bool SummitView::set_look(const std::string& name) {
     const Look* l = find_look(name);
-    if (l == nullptr) return false;
+    if (l == nullptr)
+        return false;
     _look = l;
     return true;
 }
@@ -579,21 +612,27 @@ void SummitView::set_effects(const EffectSettings& effects, f32 time_hours_per_m
     _time_speed = time_hours_per_minute;
 }
 
-View3DOptions SummitView::view_options(u32 samples) const {
-    return {.samples = samples, .background = Color::rgb(120, 150, 190), .hdr = true, .exposure = _look->exposure, .bloom = _look->bloom,
+ViewOptions3D SummitView::view_options(u32 samples) const {
+    return {.samples = samples,
+            .background = Color::rgb(120, 150, 190),
+            .hdr = true,
+            .exposure = _look->exposure,
+            .bloom = _look->bloom,
             .bloom_threshold = 1.0f};
 }
 
 u32 SummitView::particles_alive() const {
     std::size_t n = _dust.count() + _breath.count();
-    for (const Fire& f : _fires) n += f.flames.count() + f.smoke.count() + f.sparks.count();
+    for (const Fire& f : _fires)
+        n += f.flames.count() + f.smoke.count() + f.sparks.count();
     return u32(n);
 }
 
 void SummitView::on_step(const Game& game, i32 player) {
     const CharacterState3D cs = game.character_state(player);
     for (const GameEvent& e : game.events()) {
-        if (e.player != player) continue;
+        if (e.player != player)
+            continue;
         if (e.kind == GameEventKind::Landed && e.value >= 2.5f) {
             if (_pending_dust.size() < 8) {
                 _pending_dust.push_back(e.point + Vec3f{0.0f, 0.1f, 0.0f});
@@ -608,25 +647,28 @@ void SummitView::on_step(const Game& game, i32 player) {
 }
 
 void SummitView::drive_person(const Game& game, i32 player, f32 dt) {
-    if (!_person_ok || !_person.is_alive()) return;
+    if (!_person_ok || !_person.is_alive())
+        return;
     const Player& p = game.player(player);
     const CharacterState3D cs = game.character_state(player);
     const TraversalState3D ts = game.traversal(player);
     Transform3D* t = _person.get_mut<Transform3D>();
-    // Between steps the person is drawn where the camera's instant puts it (a person at the latest step against a camera between
-    // two jumps sideways by a step's travel at the step rate).
+    // Between steps the person is drawn where the camera's instant puts it (a person at the latest step against a
+    // camera between two jumps sideways by a step's travel at the step rate).
     const Vec3f feet_now = _pose_set ? _pose_feet : cs.position;
     t->position = feet_now;
     t->rotation = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, _pose_set ? _pose_facing : p.facing_yaw);
-    // While it hangs free the body sags below the capsule until its arms are straight to the holds (the arm is 0.95 m; a hold
-    // nearer than that bends it). With feet on the ground nothing moves.
+    // While it hangs free the body sags below the capsule until its arms are straight to the holds (the arm is 0.95 m;
+    // a hold nearer than that bends it). With feet on the ground nothing moves.
     f32 sag_target = 0.0f;
-    if (p.state == PlayerState::Alive && ts.mode == TraversalMode3D::Hanging && cs.ground != CharacterGround3D::OnGround) {
+    if (p.state == PlayerState::Alive && ts.mode == TraversalMode3D::Hanging &&
+        cs.ground != CharacterGround3D::OnGround) {
         f32 want = 0.0f;
         i32 n = 0;
         for (std::size_t h = 0; h < 2; ++h) {
             const GripState3D& g = ts.grips[h];
-            if (g.phase != GripPhase3D::Held && g.phase != GripPhase3D::Slipping) continue;
+            if (g.phase != GripPhase3D::Held && g.phase != GripPhase3D::Slipping)
+                continue;
             const f32 side = h == 0 ? 0.2f : -0.2f;
             const Vec3f shoulder = t->position + t->rotation.rotate({side, 1.65f, 0.0f});
             const Vec3f hold = g.point + g.normal * 0.05f;
@@ -644,7 +686,8 @@ void SummitView::drive_person(const Game& game, i32 player, f32 dt) {
             QueryFilter3D filter;
             filter.mask = layer_bit(layers3d::Static);
             const Vec3f feet = feet_now;
-            if (const auto hit = game.world().raycast(feet + Vec3f{0.0f, 0.1f, 0.0f}, feet - Vec3f{0.0f, 0.8f, 0.0f}, filter)) {
+            if (const auto hit =
+                    game.world().raycast(feet + Vec3f{0.0f, 0.1f, 0.0f}, feet - Vec3f{0.0f, 0.8f, 0.0f}, filter)) {
                 sag_target = std::min(sag_target, std::max(0.0f, hit->fraction * 0.9f - 0.12f));
             }
         }
@@ -661,12 +704,14 @@ void SummitView::drive_person(const Game& game, i32 player, f32 dt) {
     // The landing's crouch (an additive layer): decays over about a third of a second; none while it hangs or lies.
     _squash = std::max(0.0f, _squash - dt * 2.6f);
     const bool crouch_ok = p.state == PlayerState::Alive && ts.mode == TraversalMode3D::Walking;
-    if (!a->layers.empty()) a->layers[0].weight = crouch_ok ? _squash : 0.0f;
+    if (!a->layers.empty())
+        a->layers[0].weight = crouch_ok ? _squash : 0.0f;
     // The ragdoll's pose over the clips while it is the body (and while it blends back).
     game.ragdoll_pose(player, _bones);
     PoseOverride3D& o = a->pose_override;
     bool any = false;
-    for (const RagdollBonePose3D& b : _bones) any = any || b.weight > 0.0f;
+    for (const RagdollBonePose3D& b : _bones)
+        any = any || b.weight > 0.0f;
     if (!any) {
         o.clear();
     } else {
@@ -690,7 +735,9 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
     const bool online = game.player(0).expedition.phase >= ExpeditionPhase::Extraction;
     const Color gold = Color::rgb(236, 185, 60), blue = Color::rgb(65, 179, 224), orange = Color::rgb(235, 105, 48);
     for (const Piece& p : _equipment) {
-        Material3D mat{.color = p.tag == 1 ? Color::rgb(104, 75, 48) : p.tag == 3 ? Color::rgb(36, 62, 74) : Color::rgb(72, 83, 96),
+        Material3D mat{.color = p.tag == 1   ? Color::rgb(104, 75, 48)
+                                : p.tag == 3 ? Color::rgb(36, 62, 74)
+                                             : Color::rgb(72, 83, 96),
                        .roughness = p.tag == 2 ? 0.35f : 0.8f};
         mat.metallic = p.tag == 2 ? 0.7f : 0.0f;
         scene.draw(_box, Mat4f::trs(p.centre, p.rotation, p.half * 2.0f), mat);
@@ -699,7 +746,8 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
         for (std::size_t i = 1; i < points.size(); ++i) {
             const Vec3f d = points[i] - points[i - 1];
             // A steep climb has no painted walking line through its wall.
-            if (std::abs(d.y) > 0.7f * std::sqrt(d.x * d.x + d.z * d.z)) continue;
+            if (std::abs(d.y) > 0.7f * std::sqrt(d.x * d.x + d.z * d.z))
+                continue;
             const int n = std::max(1, int(length(d) / 2.5f));
             for (int j = 0; j <= n; ++j) {
                 const Vec3f point = points[i - 1] + d * (f32(j) / f32(n));
@@ -711,16 +759,18 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
     trail(e.direct_trail, orange);
     trail(e.sheltered_trail, blue);
     for (const Leg& l : game.level().route) {
-        if (l.kind != LegKind::Walk || (l.to.y < 18 && l.to != e.fork)) continue;
-        if (l.from.y >= 18 || l.from == game.level().start) trail({l.from, l.to}, gold);
+        if (l.kind != LegKind::Walk || (l.to.y < 18 && l.to != e.fork))
+            continue;
+        if (l.from.y >= 18 || l.from == game.level().start)
+            trail({l.from, l.to}, gold);
     }
     // A gold approach leads out of base camp to the fork.
     trail({game.level().start, game.level().route[0].to, e.fork}, gold);
     // Trailhead signs: coloured slats at the fork and at both cave openings, away from the walk lines.
-    for (const auto& [point, colour] : std::vector<std::pair<Vec3f, Color>>{
-             {e.fork + e.rotation.rotate({-2, 0, 0}), orange},
-             {e.sheltered_trail[1] + e.rotation.rotate({3, 0, 0}), blue},
-             {e.sheltered_trail[4] + e.rotation.rotate({3, 0, 0}), blue}}) {
+    for (const auto& [point, colour] :
+         std::vector<std::pair<Vec3f, Color>>{{e.fork + e.rotation.rotate({-2, 0, 0}), orange},
+                                              {e.sheltered_trail[1] + e.rotation.rotate({3, 0, 0}), blue},
+                                              {e.sheltered_trail[4] + e.rotation.rotate({3, 0, 0}), blue}}) {
         scene.draw(_box, Mat4f::trs(point + Vec3f{0, 1.4f, 0}, e.rotation, {1.4f, 0.24f, 0.05f}),
                    Material3D{.color = colour, .emissive = 0.15f, .roughness = 0.75f});
         scene.draw(_cylinder, Mat4f::trs(point + Vec3f{0, 0.7f, 0}, {}, {0.035f, 1.4f, 0.035f}),
@@ -729,20 +779,29 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
     const Vec3f lamp = e.shelter_centre + e.rotation.rotate({-3.2f, 0.3f, 0});
     scene.draw(_sphere, Mat4f::trs(lamp, {}, {0.12f, 0.18f, 0.12f}),
                Material3D{.color = Color::rgb(250, 205, 121), .emissive = 3.0f, .roughness = 0.4f});
-    PointLight cave_light;
+    PointLightSource3D cave_light;
     cave_light.position = lamp;
-    cave_light.color = {8.0f, 5.0f, 2.5f}; cave_light.radius = 12; cave_light.size = 0.2f; cave_light.id = 3000;
+    cave_light.color = {8.0f, 5.0f, 2.5f};
+    cave_light.radius = 12;
+    cave_light.size = 0.2f;
+    cave_light.id = 3000;
     scene.add_light(cave_light);
     const Vec3f signal = e.beacon + e.rotation.rotate({1.9f, 5.6f, 0});
     const Color signal_colour = online ? Color::rgb(93, 237, 158) : gold;
     scene.draw(_sphere, Mat4f::trs(signal, {}, {0.22f, 0.22f, 0.22f}),
                Material3D{.color = signal_colour, .emissive = online ? 4.0f : 1.0f, .roughness = 0.4f});
     // The extraction pad's cross and perimeter switch on only after the beacon is restored.
-    const Material3D pad{.color = online ? Color::rgb(93, 237, 158) : Color::rgb(130, 144, 152), .emissive = online ? 0.8f : 0.0f, .roughness = 0.8f};
+    const Material3D pad{.color = online ? Color::rgb(93, 237, 158) : Color::rgb(130, 144, 152),
+                         .emissive = online ? 0.8f : 0.0f,
+                         .roughness = 0.8f};
     for (Vec3f size : {Vec3f{3.0f, 0.025f, 0.4f}, Vec3f{0.4f, 0.025f, 3.0f}})
         scene.draw(_box, Mat4f::trs(e.extraction + Vec3f{0, 0.09f, 0}, e.rotation, size), pad);
-    for (int x : {-1, 1}) for (int z : {-1, 1})
-        scene.draw(_sphere, Mat4f::trs(e.extraction + e.rotation.rotate({f32(x) * 2.6f, 0.12f, f32(z) * 2.6f}), {}, {0.08f, 0.08f, 0.08f}), pad);
+    for (int x : {-1, 1})
+        for (int z : {-1, 1})
+            scene.draw(_sphere,
+                       Mat4f::trs(e.extraction + e.rotation.rotate({f32(x) * 2.6f, 0.12f, f32(z) * 2.6f}), {},
+                                  {0.08f, 0.08f, 0.08f}),
+                       pad);
     ++_lights_added;
 }
 
@@ -753,7 +812,8 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     Lights3D& l = scene.lights;
     l = Lights3D{};
     Look k = *_look;
-    if (_start_hours >= 0.0f) k.hours = _start_hours;
+    if (_start_hours >= 0.0f)
+        k.hours = _start_hours;
     const Wind& wind = game.wind();
 
     EnvironmentInput in;
@@ -767,16 +827,29 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     _env = evaluate_environment(in);
     const EnvironmentState& e = _env;
 
-    scene.sky = {.enabled = true, .turbidity = e.turbidity, .sun_intensity = e.sun_intensity, .intensity = 1.0f, .sun_size = 1.0f,
-                 .sun_disc = 30.0f, .stars = k.stars, .moon = false};
-    scene.fog = {.enabled = true, .density = e.fog_density, .height_density = e.fog_height_density, .height_falloff = 0.02f,
-                 .base_height = game.level().start.y, .colour_from_sky = true, .sun_scatter = 0.25f, .sun_anisotropy = 0.6f};
+    scene.sky = {.enabled = true,
+                 .turbidity = e.turbidity,
+                 .sun_intensity = e.sun_intensity,
+                 .intensity = 1.0f,
+                 .sun_size = 1.0f,
+                 .sun_disc = 30.0f,
+                 .stars = k.stars,
+                 .moon = false};
+    scene.fog = {.enabled = true,
+                 .density = e.fog_density,
+                 .height_density = e.fog_height_density,
+                 .height_falloff = 0.02f,
+                 .base_height = game.level().start.y,
+                 .colour_from_sky = true,
+                 .sun_scatter = 0.25f,
+                 .sun_anisotropy = 0.6f};
     l.sky_lights_scene = true;
-    const SkyState3D sky_state = kin::apply({.hours = e.hours, .day_of_year = 172.0f, .latitude = 46.0f}, l, scene.sky, scene.fog);
+    const SkyState3D sky_state =
+        kin::apply({.hours = e.hours, .day_of_year = 172.0f, .latitude = 46.0f}, l, scene.sky, scene.fog);
     l.shadow_area = _bounds;
     l.shadow_resolution = 2048;
-    // Four cascades over 64 m: the climber's wall is a few metres away and the sun often grazes it; wider maps show the texels as
-    // stripes on such a face.
+    // Four cascades over 64 m: the climber's wall is a few metres away and the sun often grazes it; wider maps show the
+    // texels as stripes on such a face.
     l.shadow_cascades = 4;
     l.shadow_distance = 64.0f;
     Weather3D& w = scene.weather;
@@ -799,9 +872,12 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         w.apply(l, scene.fog, base);
     }
 
-    for (const Part& p : _terrain) scene.draw(p.mesh, Mat4f::identity(), p.material);
-    for (const Part& p : _rock) scene.draw(p.mesh, Mat4f::identity(), p.material);
-    for (const Part& p : _decor) scene.draw(p.mesh, Mat4f::identity(), p.material);
+    for (const Part& p : _terrain)
+        scene.draw(p.mesh, Mat4f::identity(), p.material);
+    for (const Part& p : _rock)
+        scene.draw(p.mesh, Mat4f::identity(), p.material);
+    for (const Part& p : _decor)
+        scene.draw(p.mesh, Mat4f::identity(), p.material);
     _external_assets.draw_scenery(scene);
 
     // Camps: a tent, a groundsheet, a flag, a fire ring with logs; the fire's light, a lantern, flames and smoke.
@@ -823,11 +899,15 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         const Quatf q = Quatf::axis_angle({0, 1, 0}, yaw);
         // Authored camp props, with the original primitive tent as a missing-content fallback.
         if (!_external_assets.draw(scene, ExternalAssets::Tent, c, 2.3f, yaw)) {
-            scene.draw(_cone4, Mat4f::trs(c + Vec3f{0.0f, 0.62f, 0.0f}, q * Quatf::axis_angle({0, 1, 0}, 45.0f), {1.55f, 1.25f, 1.55f}), tent);
+            scene.draw(_cone4,
+                       Mat4f::trs(c + Vec3f{0.0f, 0.62f, 0.0f}, q * Quatf::axis_angle({0, 1, 0}, 45.0f),
+                                  {1.55f, 1.25f, 1.55f}),
+                       tent);
             scene.draw(_box, Mat4f::trs(c + Vec3f{0.0f, 0.03f, 0.0f}, q, {2.3f, 0.06f, 2.3f}), tent_dark);
         }
         for (const PropPlacement& prop : camp_props(_camps[i], i)) {
-            if (prop.kind == Tent || prop.kind == Firepit) continue;
+            if (prop.kind == Tent || prop.kind == Firepit)
+                continue;
             _external_assets.draw(scene, prop.kind, prop.feet, prop.span, prop.yaw);
         }
         scene.draw(_cylinder, Mat4f::trs(c + Vec3f{-1.7f, 1.3f, 0.0f}, {}, {0.035f, 2.6f, 0.035f}), pole);
@@ -837,10 +917,20 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         if (!imported_fire) {
             for (i32 s = 0; s < 8; ++s) {
                 const f32 ang = f32(s) * 0.7853982f + 0.2f * f32(i);
-                scene.draw(_sphere, Mat4f::trs(fire + Vec3f{std::cos(ang) * 0.42f, 0.06f, std::sin(ang) * 0.42f}, {}, {0.13f, 0.09f, 0.12f}), stone);
+                scene.draw(_sphere,
+                           Mat4f::trs(fire + Vec3f{std::cos(ang) * 0.42f, 0.06f, std::sin(ang) * 0.42f}, {},
+                                      {0.13f, 0.09f, 0.12f}),
+                           stone);
             }
-            scene.draw(_cylinder, Mat4f::trs(fire + Vec3f{0.0f, 0.1f, 0.0f}, q * Quatf::axis_angle({0, 0, 1}, 80.0f), {0.06f, 0.8f, 0.06f}), log_mat);
-            scene.draw(_cylinder, Mat4f::trs(fire + Vec3f{0.0f, 0.13f, 0.0f}, q * Quatf::axis_angle({0, 1, 0}, 70.0f) * Quatf::axis_angle({0, 0, 1}, 84.0f), {0.055f, 0.7f, 0.055f}), log_mat);
+            scene.draw(_cylinder,
+                       Mat4f::trs(fire + Vec3f{0.0f, 0.1f, 0.0f}, q * Quatf::axis_angle({0, 0, 1}, 80.0f),
+                                  {0.06f, 0.8f, 0.06f}),
+                       log_mat);
+            scene.draw(_cylinder,
+                       Mat4f::trs(fire + Vec3f{0.0f, 0.13f, 0.0f},
+                                  q * Quatf::axis_angle({0, 1, 0}, 70.0f) * Quatf::axis_angle({0, 0, 1}, 84.0f),
+                                  {0.055f, 0.7f, 0.055f}),
+                       log_mat);
         }
         scene.draw(_sphere, Mat4f::trs(fire + Vec3f{0.0f, 0.06f, 0.0f}, {}, {0.18f, 0.05f, 0.18f}), ember);
         // A lantern on the flag's pole.
@@ -852,7 +942,8 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         f.flames.emitting = f.smoke.emitting = f.sparks.emitting = _effects.fires && near;
         if (_effects.fires && near) {
             Wind3D air = w.wind;
-            f.flames.transform = f.smoke.transform = f.sparks.transform = Mat4f::translation(fire + Vec3f{0.0f, 0.12f, 0.0f});
+            f.flames.transform = f.smoke.transform = f.sparks.transform =
+                Mat4f::translation(fire + Vec3f{0.0f, 0.12f, 0.0f});
             f.smoke.transform = Mat4f::translation(fire + Vec3f{0.0f, 0.65f, 0.0f});
             f.flames.update(f64(dt), &air);
             f.smoke.update(f64(dt), &air);
@@ -865,18 +956,19 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             // A flicker from a few sines, so that no two fires beat together.
             const f32 t = f32(_clock);
             const f32 ph = f32(i) * 1.7f;
-            const f32 flicker = 1.0f + 0.10f * std::sin(t * 11.0f + ph) + 0.07f * std::sin(t * 17.3f + ph * 2.0f) + 0.05f * std::sin(t * 5.1f + ph * 0.5f);
-            PointLight pl;
+            const f32 flicker = 1.0f + 0.10f * std::sin(t * 11.0f + ph) + 0.07f * std::sin(t * 17.3f + ph * 2.0f) +
+                                0.05f * std::sin(t * 5.1f + ph * 0.5f);
+            PointLightSource3D pl;
             pl.position = fire + Vec3f{0.0f, 0.7f, 0.0f};
-            pl.color = Vec3f{1.0f, 0.52f, 0.2f} * (14.0f * fire_strength * flicker);
+            pl.color = kin::LinearRgb{1.0f, 0.52f, 0.2f} * (14.0f * fire_strength * flicker);
             pl.radius = 16.0f;
             pl.size = 0.3f;
             pl.id = u32(1000 + i);
             scene.add_light(pl);
-            SpotLight sl;
+            SpotLightSource3D sl;
             sl.position = c + Vec3f{-1.7f, 1.7f, -0.12f};
             sl.direction = {0.55f, -0.8f, 0.1f};
-            sl.color = Vec3f{1.0f, 0.78f, 0.5f} * (9.0f * fire_strength);
+            sl.color = kin::LinearRgb{1.0f, 0.78f, 0.5f} * (9.0f * fire_strength);
             sl.radius = 9.0f;
             sl.size = 0.1f;
             sl.inner_angle = 28.0f;
@@ -886,17 +978,22 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             _lights_added += 2;
         }
     }
-    if (game.config().expedition) draw_expedition(scene, game);
+    if (game.config().expedition)
+        draw_expedition(scene, game);
     else {
-    scene.draw(_cylinder, Mat4f::trs(_summit + Vec3f{0.0f, 2.0f, 0.0f}, {}, {0.06f, 4.0f, 0.06f}), pole);
-    scene.draw(_box, Mat4f::trs(_summit + Vec3f{0.0f, 3.4f, 0.55f}, {}, {0.03f, 0.7f, 1.1f}),
-               Material3D{.color = Color::rgb(220, 40, 40), .double_sided = true, .roughness = 0.7f});
-    // A cairn of stones under the pole.
-    for (i32 s = 0; s < 5; ++s) {
-        const f32 ang = f32(s) * 1.2566f;
-        const f32 r = s == 0 ? 0.0f : 0.5f;
-        scene.draw(_sphere, Mat4f::trs(_summit + Vec3f{std::cos(ang) * r, 0.18f + (s == 0 ? 0.25f : 0.0f), std::sin(ang) * r}, {}, {0.4f, 0.28f, 0.38f}), stone);
-    }
+        scene.draw(_cylinder, Mat4f::trs(_summit + Vec3f{0.0f, 2.0f, 0.0f}, {}, {0.06f, 4.0f, 0.06f}), pole);
+        scene.draw(_box, Mat4f::trs(_summit + Vec3f{0.0f, 3.4f, 0.55f}, {}, {0.03f, 0.7f, 1.1f}),
+                   Material3D{.color = Color::rgb(220, 40, 40), .double_sided = true, .roughness = 0.7f});
+        // A cairn of stones under the pole.
+        for (i32 s = 0; s < 5; ++s) {
+            const f32 ang = f32(s) * 1.2566f;
+            const f32 r = s == 0 ? 0.0f : 0.5f;
+            scene.draw(
+                _sphere,
+                Mat4f::trs(_summit + Vec3f{std::cos(ang) * r, 0.18f + (s == 0 ? 0.25f : 0.0f), std::sin(ang) * r}, {},
+                           {0.4f, 0.28f, 0.38f}),
+                stone);
+        }
     }
 
     // The rope(s): a cylinder to each segment.
@@ -906,8 +1003,12 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         for (const RopeSegment3D& s : game.world().rope_segments(r)) {
             const Vec3f d = s.b - s.a;
             const f32 len = length(d);
-            if (len < 1e-4f) continue;
-            scene.draw(_cylinder, Mat4f::trs((s.a + s.b) * 0.5f, from_up_to(d * (1.0f / len)), {radius * 1.3f, len + radius * 2.0f, radius * 1.3f}), rope);
+            if (len < 1e-4f)
+                continue;
+            scene.draw(_cylinder,
+                       Mat4f::trs((s.a + s.b) * 0.5f, from_up_to(d * (1.0f / len)),
+                                  {radius * 1.3f, len + radius * 2.0f, radius * 1.3f}),
+                       rope);
         }
     }
 
@@ -949,17 +1050,19 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     } else {
         // Without skinning: a capsule's worth of box where it stands.
         const Vec3f f = game.feet(player);
-        scene.draw(_box, Mat4f::trs(f + Vec3f{0.0f, 0.95f, 0.0f}, {}, {0.5f, 1.9f, 0.4f}), Material3D{.color = Color::rgb(215, 150, 110)});
+        scene.draw(_box, Mat4f::trs(f + Vec3f{0.0f, 0.95f, 0.0f}, {}, {0.5f, 1.9f, 0.4f}),
+                   Material3D{.color = Color::rgb(215, 150, 110)});
     }
 
     // Colliders, when asked for: the static bodies near the camera as wireframes (the same bodies the physics uses).
-    _collider_mesh = Mesh{};
+    _collider_mesh = Mesh3D{};
     if (_show_colliders) {
         DebugDraw3D lines;
         const Vec3f eye = scene.camera.position;
         const World3D& world = game.world();
         const auto add = [&](Body3D b, f32 reach, Color colour) {
-            if (length(world.position(b) - eye) > _collider_radius + reach) return;
+            if (length(world.position(b) - eye) > _collider_radius + reach)
+                return;
             lines.shape(world.shape(b), world.position(b), world.rotation(b), colour);
         };
         const SummitLevel& level = game.level();
@@ -968,7 +1071,8 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         }
         for (std::size_t j = 0; j < game.decor().size(); ++j) {
             const DecorChunk& c = game.decor()[j];
-            add(game.decor_body(j), length(c.half), c.kind == DecorKind::Buttress ? Color::rgb(255, 150, 40) : Color::rgb(60, 220, 255));
+            add(game.decor_body(j), length(c.half),
+                c.kind == DecorKind::Buttress ? Color::rgb(255, 150, 40) : Color::rgb(60, 220, 255));
         }
         for (std::size_t j = 0; j < game.props().size(); ++j)
             add(game.prop_body(j), game.props()[j].span, Color::rgb(110, 240, 130));

@@ -1,10 +1,9 @@
 #include "level.hpp"
 
-#include <kin/runtime/state_hash.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <kin/runtime/state_hash.hpp>
 
 namespace summit {
 
@@ -13,8 +12,8 @@ namespace {
 // splitmix64: integer arithmetic only, so a seed gives the same numbers on every machine.
 struct Rand {
     u64 s;
-    // The seed is mixed first: the generator's stream steps by a constant, so seeds a constant's multiple apart would otherwise
-    // be the same stream shifted.
+    // The seed is mixed first: the generator's stream steps by a constant, so seeds a constant's multiple apart would
+    // otherwise be the same stream shifted.
     explicit Rand(u64 seed) : s(mix64(seed + 0x1234567ull)) {}
     static u64 mix64(u64 z) {
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
@@ -38,7 +37,8 @@ struct Frame {
     Quatf q{};
 
     Frame() = default;
-    Frame(Vec3f o, f32 yaw_degrees) : origin(o), yaw(yaw_degrees), q(Quatf::axis_angle({0.0f, 1.0f, 0.0f}, yaw_degrees)) {}
+    Frame(Vec3f o, f32 yaw_degrees)
+        : origin(o), yaw(yaw_degrees), q(Quatf::axis_angle({0.0f, 1.0f, 0.0f}, yaw_degrees)) {}
     Vec3f dir() const { return q.rotate({0.0f, 0.0f, -1.0f}); }
     Vec3f right() const { return q.rotate({1.0f, 0.0f, 0.0f}); }
     // `u` is height above the origin's.
@@ -47,7 +47,8 @@ struct Frame {
 
 struct Builder {
     SummitLevel& level;
-    // A box from f0 to f1 forward, r0 to r1 right and u0 to u1 up (u from the frame origin's height), turned with the frame.
+    // A box from f0 to f1 forward, r0 to r1 right and u0 to u1 up (u from the frame origin's height), turned with the
+    // frame.
     Piece& add(PieceKind kind, const Frame& frame, f32 f0, f32 f1, f32 r0, f32 r1, f32 u0, f32 u1) {
         Piece p;
         p.kind = kind;
@@ -57,7 +58,8 @@ struct Builder {
         level.pieces.push_back(p);
         return level.pieces.back();
     }
-    // A tilted slab: its top surface runs from (f0, u0) to (f1, u1) in the frame (u relative to the origin), `thick` deep.
+    // A tilted slab: its top surface runs from (f0, u0) to (f1, u1) in the frame (u relative to the origin), `thick`
+    // deep.
     Piece& ramp(const Frame& frame, f32 f0, f32 f1, f32 u0, f32 u1, f32 r0, f32 r1, f32 thick) {
         const f32 df = f1 - f0, du = u1 - u0;
         const f32 length = std::sqrt(df * df + du * du);
@@ -79,7 +81,8 @@ struct Builder {
 
 } // namespace
 
-// ---- bytes and hash -------------------------------------------------------------------------------------------------------
+// ---- bytes and hash
+// -------------------------------------------------------------------------------------------------------
 
 namespace {
 struct Writer {
@@ -154,17 +157,31 @@ std::vector<u8> SummitLevel::bytes() const {
     w.f(kill_y);
     if (expedition.enabled) {
         w.u(0x4558504544495449ull);
-        if (expedition.dense_scenery) w.u(0x44454E53454C564Cull);
-        w.v3(expedition.briefing); w.v3(expedition.fork); w.v3(expedition.beacon); w.v3(expedition.extraction);
-        w.v3(expedition.shelter_centre); w.v3(expedition.shelter_half); w.q(expedition.rotation);
+        if (expedition.dense_scenery)
+            w.u(0x44454E53454C564Cull);
+        w.v3(expedition.briefing);
+        w.v3(expedition.fork);
+        w.v3(expedition.beacon);
+        w.v3(expedition.extraction);
+        w.v3(expedition.shelter_centre);
+        w.v3(expedition.shelter_half);
+        w.q(expedition.rotation);
         w.u(expedition.sheltered_route.size());
         for (const Leg& l : expedition.sheltered_route) {
-            w.u(u64(l.kind)); w.v3(l.from); w.v3(l.to); w.v3(l.normal);
-            w.f(l.height); w.f(l.roof_height); w.f(l.shimmy); w.u(u64(l.rope)); w.u(u64(l.camp));
+            w.u(u64(l.kind));
+            w.v3(l.from);
+            w.v3(l.to);
+            w.v3(l.normal);
+            w.f(l.height);
+            w.f(l.roof_height);
+            w.f(l.shimmy);
+            w.u(u64(l.rope));
+            w.u(u64(l.camp));
         }
         for (const auto* trail : {&expedition.direct_trail, &expedition.sheltered_trail}) {
             w.u(trail->size());
-            for (Vec3f point : *trail) w.v3(point);
+            for (Vec3f point : *trail)
+                w.v3(point);
         }
     }
     return w.out;
@@ -175,7 +192,8 @@ u64 SummitLevel::hash() const {
     return hash_bytes(b.data(), b.size());
 }
 
-// ---- the generator ------------------------------------------------------------------------------------------------------
+// ---- the generator
+// ------------------------------------------------------------------------------------------------------
 
 SummitLevel generate_level(u64 seed) {
     SummitLevel level;
@@ -216,8 +234,8 @@ SummitLevel generate_level(u64 seed) {
     };
     Vec3f position = base; // where the route has got to (the end of the last leg)
 
-    // An approach and a bench in front of the face: new heading, landing, ramp, bench. Returns the frame at the foot of the
-    // face (origin there, forward into the rock) and the route's lateral place.
+    // An approach and a bench in front of the face: new heading, landing, ramp, bench. Returns the frame at the foot of
+    // the face (origin there, forward into the rock) and the route's lateral place.
     const auto approach = [&](f32 turn, f32 rise, f32 bench, f32 angle_degrees, const char* label) {
         yaw += turn;
         Frame f(cursor, yaw);
@@ -227,7 +245,8 @@ SummitLevel generate_level(u64 seed) {
         const f32 length = rise / std::tan(angle_degrees * pi / 180.0f);
         const f32 f0 = 10.0f - 0.5f;
         build.ramp(f, f0, f0 + length, -0.03f, rise, -9.0f, 9.0f, rise + 5.0f);
-        build.add(PieceKind::Ground, f, f0 + length - 0.2f, f0 + length + bench, -13.0f, 13.0f, rise - 18.0f, rise - 0.03f);
+        build.add(PieceKind::Ground, f, f0 + length - 0.2f, f0 + length + bench, -13.0f, 13.0f, rise - 18.0f,
+                  rise - 0.03f);
         // The walk: from where the route is to the foot of the ramp's top.
         const Vec3f top_of_ramp = f.at(f0 + length + 1.0f, 0.0f, rise);
         leg(LegKind::Walk, position, top_of_ramp, label);
@@ -251,12 +270,14 @@ SummitLevel generate_level(u64 seed) {
     };
 
     // The face: a block of rock from the foot of the face (`ub`: the height there) up `h`, deep behind it.
-    const auto cliff = [&](const Frame& f, f32 ub, f32 h, f32 width, f32 depth, PieceKind kind = PieceKind::Cliff) -> Piece& {
+    const auto cliff = [&](const Frame& f, f32 ub, f32 h, f32 width, f32 depth,
+                           PieceKind kind = PieceKind::Cliff) -> Piece& {
         const f32 rel = ub - f.origin.y;
         return build.add(kind, f, 0.0f, depth, -width, width, rel - 14.0f, rel + h);
     };
 
-    // The face's route line: the foot point a standing player takes (0.95 m off the rock, hands then reach it) and the top.
+    // The face's route line: the foot point a standing player takes (0.95 m off the rock, hands then reach it) and the
+    // top.
     const auto climb_leg = [&](const Frame& f, f32 lateral, f32 h, const char* label) -> Leg& {
         const Vec3f foot = f.at(-0.95f, lateral, 0.0f);
         const Vec3f top = f.at(1.2f, lateral, h);
@@ -271,7 +292,8 @@ SummitLevel generate_level(u64 seed) {
 
     // Stage 1: the scramble. A 24 to 28 degree approach and a wall of 4 to 5.5 m.
     {
-        Frame f = approach(rng.range(-8.0f, 8.0f), rng.range(19.0f, 25.0f), 5.0f, rng.range(24.0f, 28.0f), "scramble up the approach");
+        Frame f = approach(rng.range(-8.0f, 8.0f), rng.range(19.0f, 25.0f), 5.0f, rng.range(24.0f, 28.0f),
+                           "scramble up the approach");
         const f32 h = rng.range(4.0f, 5.5f);
         const f32 lateral = rng.range(-3.0f, 3.0f);
         const f32 ub = f.origin.y;
@@ -280,9 +302,11 @@ SummitLevel generate_level(u64 seed) {
         camp_on(f, h, lateral);
     }
 
-    // Stage 2: the face. Two pitches with a bench between, and on the second a smooth slab with holds beside the cracks.
+    // Stage 2: the face. Two pitches with a bench between, and on the second a smooth slab with holds beside the
+    // cracks.
     {
-        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(14.0f, 18.0f), 5.0f, rng.range(24.0f, 28.0f), "approach the face");
+        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(14.0f, 18.0f), 5.0f, rng.range(24.0f, 28.0f),
+                           "approach the face");
         const f32 h1 = rng.range(5.0f, 6.5f);
         const f32 ub = f.origin.y;
         const f32 lateral = rng.range(-3.0f, 3.0f);
@@ -295,7 +319,8 @@ SummitLevel generate_level(u64 seed) {
         const f32 h2 = rng.range(6.0f, 7.5f);
         cliff(g, g.origin.y, h2, 14.0f, 30.0f);
         const f32 lateral2 = std::clamp(lateral + rng.range(-3.0f, 3.0f), -5.0f, 4.0f);
-        // The holds line: a smooth slab 0.1 m proud of the face, holds on it every 0.45 m up, alternating, a lip on top.
+        // The holds line: a smooth slab 0.1 m proud of the face, holds on it every 0.45 m up, alternating, a lip on
+        // top.
         {
             const f32 r0 = 6.0f, r1 = 10.5f;
             Piece& slab = build.add(PieceKind::Smooth, g, -0.12f, 0.0f, r0, r1, 0.0f, h2);
@@ -314,10 +339,11 @@ SummitLevel generate_level(u64 seed) {
         camp_on(g, h2, lateral2);
     }
 
-    // Stage 3: the chimney. Two walls 1.5 m apart, wedged: cheaper to climb (drain x0.6). The front wall is a separate block
-    // you walk round to get in.
+    // Stage 3: the chimney. Two walls 1.5 m apart, wedged: cheaper to climb (drain x0.6). The front wall is a separate
+    // block you walk round to get in.
     {
-        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(15.0f, 19.0f), 6.5f, rng.range(24.0f, 28.0f), "approach the chimney");
+        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(15.0f, 19.0f), 6.5f, rng.range(24.0f, 28.0f),
+                           "approach the chimney");
         const f32 h = rng.range(7.0f, 8.5f);
         const f32 ub = f.origin.y;
         const f32 lateral = rng.range(-1.5f, 1.5f);
@@ -325,7 +351,8 @@ SummitLevel generate_level(u64 seed) {
         back.drain = 0.6f;
         // The front wall: its back face 1.5 m from the main one, 5 m wide, as high.
         const f32 rel = ub - f.origin.y;
-        Piece& front = build.add(PieceKind::Cliff, f, -4.5f, -1.5f, lateral - 3.5f, lateral + 3.5f, rel - 14.0f, rel + h);
+        Piece& front =
+            build.add(PieceKind::Cliff, f, -4.5f, -1.5f, lateral - 3.5f, lateral + 3.5f, rel - 14.0f, rel + h);
         front.drain = 0.6f;
         // The chimney's floor is the bench: you step in from the sides. The foot is in the gap.
         const Vec3f foot = f.at(-0.75f, lateral, 0.0f);
@@ -343,10 +370,11 @@ SummitLevel generate_level(u64 seed) {
         camp_on(f, h, lateral);
     }
 
-    // Stage 4: the overhang. A wall with a roof slab 3.6 m up that reaches 1.6 m out, over the first 8 m of it from the left: the
-    // climb goes up to the roof, along under it to its end, and on up. It takes most of a bar.
+    // Stage 4: the overhang. A wall with a roof slab 3.6 m up that reaches 1.6 m out, over the first 8 m of it from the
+    // left: the climb goes up to the roof, along under it to its end, and on up. It takes most of a bar.
     {
-        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(14.0f, 18.0f), 6.0f, rng.range(24.0f, 28.0f), "approach the overhang");
+        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(14.0f, 18.0f), 6.0f, rng.range(24.0f, 28.0f),
+                           "approach the overhang");
         const f32 h = rng.range(5.2f, 5.8f);
         const f32 ub = f.origin.y;
         cliff(f, ub, h, 14.0f, 30.0f);
@@ -354,10 +382,11 @@ SummitLevel generate_level(u64 seed) {
         const f32 roof_y = rng.range(3.5f, 3.8f);
         const f32 r_end = rng.range(1.0f, 3.0f);
         const f32 shimmy = rng.range(4.0f, 5.0f);
-        Piece& roof = build.add(PieceKind::Roof, f, -1.6f, 0.0f, r_end - 8.0f, r_end, rel + roof_y, rel + roof_y + 0.4f);
+        Piece& roof =
+            build.add(PieceKind::Roof, f, -1.6f, 0.0f, r_end - 8.0f, r_end, rel + roof_y, rel + roof_y + 0.4f);
         roof.drain = 1.0f;
-        const f32 start_r = r_end - shimmy;           // under the roof here
-        const f32 end_r = r_end + 0.9f;               // and on up clear of its end
+        const f32 start_r = r_end - shimmy; // under the roof here
+        const f32 end_r = r_end + 0.9f;     // and on up clear of its end
         const Vec3f foot = f.at(-0.95f, start_r, 0.0f);
         const Vec3f top = f.at(1.2f, end_r, h);
         leg(LegKind::Walk, position, foot, "to the foot under the roof");
@@ -372,7 +401,8 @@ SummitLevel generate_level(u64 seed) {
 
     // Stage 5: the rope. A smooth wall of 6 m with a lip, a rope hanging 0.6 m out from it from a beam on a pole.
     {
-        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(16.0f, 21.0f), 6.0f, rng.range(24.0f, 28.0f), "approach the rope");
+        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(16.0f, 21.0f), 6.0f, rng.range(24.0f, 28.0f),
+                           "approach the rope");
         const f32 h = rng.range(5.8f, 6.4f);
         const f32 ub = f.origin.y;
         const f32 lateral = rng.range(-2.0f, 2.0f);
@@ -380,8 +410,8 @@ SummitLevel generate_level(u64 seed) {
         mass.grippable = false;
         mass.kind = PieceKind::Smooth;
         const f32 rel = ub - f.origin.y;
-        // The lip stands 0.2 m out of the wall along the top (a grippable thing flush behind a smooth wall is not seen by a
-        // cast that stops at the first thing it meets).
+        // The lip stands 0.2 m out of the wall along the top (a grippable thing flush behind a smooth wall is not seen
+        // by a cast that stops at the first thing it meets).
         build.add(PieceKind::Lip, f, -0.2f, 1.5f, lateral - 4.0f, lateral + 4.0f, rel + h - 0.25f, rel + h + 0.02f);
         // A pole behind the lip with a beam out over it: the rope hangs from the beam's underside.
         build.add(PieceKind::Post, f, 0.3f, 0.8f, lateral + 0.9f, lateral + 1.3f, rel + h, rel + h + 2.5f);
@@ -404,14 +434,16 @@ SummitLevel generate_level(u64 seed) {
 
     // Stage 6: the plateau (camp 6), then a last ramp and the summit flat with boulders on it.
     {
-        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(14.0f, 18.0f), 8.0f, rng.range(24.0f, 27.0f), "up to the plateau");
+        Frame f = approach(rng.range(-14.0f, 14.0f), rng.range(14.0f, 18.0f), 8.0f, rng.range(24.0f, 27.0f),
+                           "up to the plateau");
         // The plateau is wide.
         build.add(PieceKind::Ground, f, 0.0f, 24.0f, -18.0f, 18.0f, -14.0f, -0.03f);
         camp_on(f, 0.0f, 0.0f);
         const f32 rise2 = rng.range(10.0f, 13.0f);
         const f32 len2 = rise2 / std::tan(26.0f * pi / 180.0f);
         build.ramp(f, 14.0f, 14.0f + len2, -0.03f, rise2, -7.0f, 7.0f, rise2 + 4.0f);
-        build.add(PieceKind::Ground, f, 14.0f + len2 - 0.2f, 14.0f + len2 + 10.0f, -9.0f, 9.0f, rise2 - 14.0f, rise2 - 0.03f);
+        build.add(PieceKind::Ground, f, 14.0f + len2 - 0.2f, 14.0f + len2 + 10.0f, -9.0f, 9.0f, rise2 - 14.0f,
+                  rise2 - 0.03f);
         const Vec3f top = f.at(14.0f + len2 + 6.0f, 0.0f, rise2);
         leg(LegKind::Walk, position, f.at(14.0f, 0.0f, 0.0f), "the plateau");
         leg(LegKind::Walk, f.at(14.0f, 0.0f, 0.0f), top, "the last ramp");
@@ -420,7 +452,8 @@ SummitLevel generate_level(u64 seed) {
             const f32 s = rng.range(0.6f, 1.2f);
             const f32 rr = (i % 2 ? 1.0f : -1.0f) * rng.range(3.5f, 6.0f);
             const f32 ff = 14.0f + len2 + rng.range(1.0f, 8.0f);
-            Piece& p = build.add(PieceKind::Boulder, f, ff - s, ff + s, rr - s, rr + s, rise2 - 0.03f, rise2 + s * 1.3f);
+            Piece& p =
+                build.add(PieceKind::Boulder, f, ff - s, ff + s, rr - s, rr + s, rise2 - 0.03f, rise2 + s * 1.3f);
             p.rotation = f.q * Quatf::axis_angle({0.0f, 1.0f, 0.0f}, rng.range(0.0f, 90.0f));
         }
         level.summit = top;
@@ -434,7 +467,8 @@ SummitLevel generate_level(u64 seed) {
         // The box's extent in the world: the sum of its axes' absolute components.
         const Vec3f ax = p.rotation.rotate({p.half.x, 0.0f, 0.0f}), ay = p.rotation.rotate({0.0f, p.half.y, 0.0f}),
                     az = p.rotation.rotate({0.0f, 0.0f, p.half.z});
-        const Vec3f e{std::abs(ax.x) + std::abs(ay.x) + std::abs(az.x), std::abs(ax.y) + std::abs(ay.y) + std::abs(az.y),
+        const Vec3f e{std::abs(ax.x) + std::abs(ay.x) + std::abs(az.x),
+                      std::abs(ax.y) + std::abs(ay.y) + std::abs(az.y),
                       std::abs(ax.z) + std::abs(ay.z) + std::abs(az.z)};
         lo = {std::min(lo.x, p.centre.x - e.x), std::min(lo.y, p.centre.y - e.y), std::min(lo.z, p.centre.z - e.z)};
         hi = {std::max(hi.x, p.centre.x + e.x), std::max(hi.y, p.centre.y + e.y), std::max(hi.z, p.centre.z + e.z)};
@@ -444,7 +478,8 @@ SummitLevel generate_level(u64 seed) {
     return level;
 }
 
-// ---- the planner --------------------------------------------------------------------------------------------------------
+// ---- the planner
+// --------------------------------------------------------------------------------------------------------
 
 RoutePlan plan_route(const SummitLevel& level, const ClimbCosts& c) {
     RoutePlan plan;
@@ -464,8 +499,9 @@ RoutePlan plan_route(const SummitLevel& level, const ClimbCosts& c) {
             break;
         }
         case LegKind::Climb: {
-            // The hands take hold about 2 m up (the head's height, the reach) with the feet on the ground, which costs nothing
-            // (standing is rest): the climb that costs is from there to the lip, then the settling and the pull-up.
+            // The hands take hold about 2 m up (the head's height, the reach) with the feet on the ground, which costs
+            // nothing (standing is rest): the climb that costs is from there to the lip, then the settling and the
+            // pull-up.
             const f32 t = std::max(0.0f, l.height - c.first_hold_height) / c.climb_speed + c.settle_seconds;
             p.seconds = t + 0.7f;
             p.cost = 2.0f * c.grab_cost + hang * t + c.pull_up_cost;
@@ -473,14 +509,16 @@ RoutePlan plan_route(const SummitLevel& level, const ClimbCosts& c) {
             break;
         }
         case LegKind::Overhang: {
-            const f32 t = std::max(0.0f, l.height - c.first_hold_height) / c.climb_speed + std::abs(l.shimmy) / c.shimmy_speed + c.settle_seconds;
+            const f32 t = std::max(0.0f, l.height - c.first_hold_height) / c.climb_speed +
+                          std::abs(l.shimmy) / c.shimmy_speed + c.settle_seconds;
             p.seconds = t + 0.7f;
             p.cost = 2.0f * c.grab_cost + hang * t + c.pull_up_cost;
             at = l.to;
             break;
         }
         case LegKind::Rope: {
-            const f32 t = std::max(0.0f, l.height + 0.35f - c.first_hold_height) / c.rope_speed + c.settle_seconds + 1.5f;
+            const f32 t =
+                std::max(0.0f, l.height + 0.35f - c.first_hold_height) / c.rope_speed + c.settle_seconds + 1.5f;
             p.seconds = t + 2.0f;
             // Two grabs on the rope, then a hand at a time to the lip (two more), the pull-up.
             p.cost = 4.0f * c.grab_cost + hang * t + c.pull_up_cost;

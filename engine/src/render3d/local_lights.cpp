@@ -1,7 +1,6 @@
-#include <kin/render3d/local_lights.hpp>
-
 #include <algorithm>
 #include <cmath>
+#include <kin/render3d/local_lights3d.hpp>
 
 namespace kin {
 
@@ -20,8 +19,8 @@ Vec3f up_for(Vec3f axis) {
 
 } // namespace
 
-SpotCone spot_cone(const SpotLight& light) {
-    SpotCone cone;
+SpotCone3D spot_cone(const SpotLightSource3D& light) {
+    SpotCone3D cone;
     cone.axis = unit_or(light.direction, {0.0f, -1.0f, 0.0f});
     const f32 outer = std::clamp(light.outer_angle, 0.1f, 89.0f);
     const f32 inner = std::clamp(light.inner_angle, 0.0f, outer);
@@ -31,7 +30,7 @@ SpotCone spot_cone(const SpotLight& light) {
     return cone;
 }
 
-f32 spot_cone_factor(const SpotCone& cone, f32 cos_angle) {
+f32 spot_cone_factor(const SpotCone3D& cone, f32 cos_angle) {
     const f32 t = std::clamp((cos_angle - cone.cos_outer) * cone.scale, 0.0f, 1.0f);
     return t * t;
 }
@@ -45,16 +44,16 @@ f32 point_attenuation(Vec3f position, f32 radius, f32 size, Vec3f point) {
     return window * window / std::max(d2, s * s);
 }
 
-f32 spot_attenuation(const SpotLight& light, Vec3f point) {
-    const SpotCone cone = spot_cone(light);
+f32 spot_attenuation(const SpotLightSource3D& light, Vec3f point) {
+    const SpotCone3D cone = spot_cone(light);
     const Vec3f from_light = point - light.position;
     const f32 d = length(from_light);
     const f32 cos_angle = d > 1e-8f ? dot(from_light, cone.axis) / d : 1.0f;
     return point_attenuation(light.position, light.radius, light.size, point) * spot_cone_factor(cone, cos_angle);
 }
 
-void spot_bounding_sphere(const SpotLight& light, Vec3f& centre, f32& radius) {
-    const SpotCone cone = spot_cone(light);
+void spot_bounding_sphere(const SpotLightSource3D& light, Vec3f& centre, f32& radius) {
+    const SpotCone3D cone = spot_cone(light);
     const f32 reach = std::max(light.radius, 0.0f);
     if (cone.cos_outer <= 0.7071068f) {
         // Wider than a right angle's half: the ball round the apex is the smaller.
@@ -62,7 +61,8 @@ void spot_bounding_sphere(const SpotLight& light, Vec3f& centre, f32& radius) {
         radius = reach;
         return;
     }
-    // The sphere through the apex and the rim of the cone's cap: centre reach / (2 cos) along the axis, that far in radius.
+    // The sphere through the apex and the rim of the cone's cap: centre reach / (2 cos) along the axis, that far in
+    // radius.
     const f32 r = reach / (2.0f * cone.cos_outer);
     centre = light.position + cone.axis * r;
     radius = r;
@@ -72,9 +72,9 @@ f32 local_shadow_far(const LightShadow3D& shadow, f32 radius) {
     return shadow.distance > 0.0f ? std::min(shadow.distance, radius) : radius;
 }
 
-LocalShadowView spot_shadow_view(const SpotLight& light, u32 resolution) {
-    LocalShadowView v;
-    const SpotCone cone = spot_cone(light);
+LocalShadowView3D spot_shadow_view(const SpotLightSource3D& light, u32 resolution) {
+    LocalShadowView3D v;
+    const SpotCone3D cone = spot_cone(light);
     const f32 res = static_cast<f32>(std::max(resolution, 16u));
     const f32 outer = std::acos(cone.cos_outer);
     v.tan_half = std::tan(outer) * (res + 2.0f * shadow_guard_texels) / res;
@@ -97,9 +97,9 @@ u32 cube_face_of(Vec3f d) {
     return d.z < 0.0f ? 5u : 4u;
 }
 
-LocalShadowView cube_face_view(const PointLight& light, u32 face, u32 resolution) {
+LocalShadowView3D cube_face_view(const PointLightSource3D& light, u32 face, u32 resolution) {
     static const Vec3f axes[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-    LocalShadowView v;
+    LocalShadowView3D v;
     const f32 res = static_cast<f32>(std::max(resolution, 16u));
     v.tan_half = (res + 2.0f * shadow_guard_texels) / res; // a right angle's half (tan 45 = 1) and the guard band
     v.near_plane = std::max(light.shadow.near_plane, 1e-3f);
@@ -119,7 +119,8 @@ f32 shadow_importance(f32 intensity, f32 reach, Vec3f centre, f32 sphere_radius,
     return std::max(intensity, 0.0f) * std::max(reach, 0.0f) * coverage * coverage;
 }
 
-void assign_shadow_slots(ShadowSlots& slots, std::span<const ShadowRequest> requests, f32 hysteresis, std::vector<i32>& slot_of) {
+void assign_shadow_slots(ShadowSlots3D& slots, std::span<const ShadowRequest3D> requests, f32 hysteresis,
+                         std::vector<i32>& slot_of) {
     const std::size_t count = slots.held.size();
     slot_of.assign(requests.size(), -1);
     // Importance, times the hysteresis for a light that holds a slot already; the first request wins a tie.

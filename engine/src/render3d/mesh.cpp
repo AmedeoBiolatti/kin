@@ -1,7 +1,6 @@
-#include <kin/render3d/mesh.hpp>
-
 #include <algorithm>
 #include <cmath>
+#include <kin/render3d/mesh3d.hpp>
 #include <string>
 
 namespace kin {
@@ -10,7 +9,9 @@ namespace {
 
 constexpr f32 pi = 3.14159265358979323846f;
 
-bool finite(Vec3f v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+bool finite(Vec3f v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
 
 // The cofactor matrix of `m`'s linear part: turns normals as `m` turns the
 // shape (the inverse transpose times the determinant, here made positive so
@@ -31,7 +32,7 @@ Mat4f normal_matrix(const Mat4f& m) {
 }
 
 // A flat quad (two triangles) a, b, c, d counter-clockwise from the front.
-void quad(MeshData& mesh, Vec3f a, Vec3f b, Vec3f c, Vec3f d) {
+void quad(MeshData3D& mesh, Vec3f a, Vec3f b, Vec3f c, Vec3f d) {
     const Vec3f n = normalize(cross(b - a, c - a));
     const u32 base = static_cast<u32>(mesh.vertices.size());
     mesh.vertices.push_back({a, n, {0.0f, 1.0f}});
@@ -42,7 +43,7 @@ void quad(MeshData& mesh, Vec3f a, Vec3f b, Vec3f c, Vec3f d) {
 }
 
 // A flat triangle, counter-clockwise from the front.
-void triangle(MeshData& mesh, Vec3f a, Vec3f b, Vec3f c) {
+void triangle(MeshData3D& mesh, Vec3f a, Vec3f b, Vec3f c) {
     const Vec3f n = normalize(cross(b - a, c - a));
     const u32 base = static_cast<u32>(mesh.vertices.size());
     mesh.vertices.push_back({a, n, {0.0f, 0.0f}});
@@ -53,7 +54,7 @@ void triangle(MeshData& mesh, Vec3f a, Vec3f b, Vec3f c) {
 
 // A flat polygon round the Y axis at height `y` (`up`: facing +Y), from
 // `points` (anticlockwise seen from +Y), fanned from its centre.
-void cap(MeshData& mesh, const std::vector<Vec2f>& points, f32 y, bool up) {
+void cap(MeshData3D& mesh, const std::vector<Vec2f>& points, f32 y, bool up) {
     const Vec3f n{0.0f, up ? 1.0f : -1.0f, 0.0f};
     const u32 centre = static_cast<u32>(mesh.vertices.size());
     mesh.vertices.push_back({{0.0f, y, 0.0f}, n, {0.5f, 0.5f}});
@@ -86,7 +87,7 @@ std::vector<Vec2f> circle(f32 radius, i32 count) {
 
 } // namespace
 
-bool MeshData::validate(std::string* error) const {
+bool MeshData3D::validate(std::string* error) const {
     const auto fail = [&](std::string why) {
         if (error) {
             *error = std::move(why);
@@ -113,7 +114,8 @@ bool MeshData::validate(std::string* error) const {
     }
     if (!skin.empty()) {
         if (skin.size() != vertices.size()) {
-            return fail("the skin has " + std::to_string(skin.size()) + " entries for " + std::to_string(vertices.size()) + " vertices");
+            return fail("the skin has " + std::to_string(skin.size()) + " entries for " +
+                        std::to_string(vertices.size()) + " vertices");
         }
         for (std::size_t i = 0; i < skin.size(); ++i) {
             f32 sum = 0.0f;
@@ -131,12 +133,12 @@ bool MeshData::validate(std::string* error) const {
     return true;
 }
 
-u32 MeshData::skin_joint_count() const {
+u32 MeshData3D::skin_joint_count() const {
     if (skin.empty()) {
         return 0;
     }
     u32 count = 1;
-    for (const MeshSkinVertex& v : skin) {
+    for (const MeshSkinVertex3D& v : skin) {
         for (int k = 0; k < 4; ++k) {
             if (v.weights[static_cast<std::size_t>(k)] > 0.0f) {
                 count = std::max(count, static_cast<u32>(v.joints[static_cast<std::size_t>(k)]) + 1u);
@@ -165,23 +167,24 @@ std::array<u8, 4> quantise_skin_weights(const std::array<f32, 4>& weights) {
         }
     }
     // The largest takes what rounding left over, so the four always sum to 255.
-    out[static_cast<std::size_t>(largest)] = static_cast<u8>(std::clamp(static_cast<int>(out[static_cast<std::size_t>(largest)]) + 255 - total, 0, 255));
+    out[static_cast<std::size_t>(largest)] =
+        static_cast<u8>(std::clamp(static_cast<int>(out[static_cast<std::size_t>(largest)]) + 255 - total, 0, 255));
     return out;
 }
 
-Bounds3 MeshData::bounds() const {
+Bounds3D MeshData3D::bounds() const {
     if (vertices.empty()) {
         return {};
     }
-    Bounds3 b{vertices.front().position, vertices.front().position};
-    for (const MeshVertex& v : vertices) {
+    Bounds3D b{vertices.front().position, vertices.front().position};
+    for (const MeshVertex3D& v : vertices) {
         b.min = {std::min(b.min.x, v.position.x), std::min(b.min.y, v.position.y), std::min(b.min.z, v.position.z)};
         b.max = {std::max(b.max.x, v.position.x), std::max(b.max.y, v.position.y), std::max(b.max.z, v.position.z)};
     }
     return b;
 }
 
-void MeshData::append(const MeshData& other, const Mat4f& transform) {
+void MeshData3D::append(const MeshData3D& other, const Mat4f& transform) {
     // The result is indexed: unindexed vertices so far get indices first.
     if (indices.empty() && !vertices.empty()) {
         for (u32 i = 0; i < static_cast<u32>(vertices.size()); ++i) {
@@ -201,7 +204,7 @@ void MeshData::append(const MeshData& other, const Mat4f& transform) {
     const Mat4f normals = normal_matrix(transform);
     // A mirroring transform turns the triangles over: keep them counter-clockwise.
     const bool mirrored = transform.determinant() < 0.0f;
-    for (MeshVertex v : other.vertices) {
+    for (MeshVertex3D v : other.vertices) {
         v.position = transform.apply(v.position);
         v.normal = normalize(normals.apply_vector(v.normal));
         vertices.push_back(v);
@@ -225,9 +228,9 @@ void MeshData::append(const MeshData& other, const Mat4f& transform) {
 
 namespace meshes {
 
-MeshData box(Vec3f size) {
+MeshData3D box(Vec3f size) {
     const Vec3f h = size * 0.5f;
-    MeshData m;
+    MeshData3D m;
     m.vertices.reserve(24);
     m.indices.reserve(36);
     quad(m, {-h.x, -h.y, h.z}, {h.x, -h.y, h.z}, {h.x, h.y, h.z}, {-h.x, h.y, h.z});     // +Z
@@ -239,9 +242,9 @@ MeshData box(Vec3f size) {
     return m;
 }
 
-MeshData plane(Vec2f size, i32 cells) {
+MeshData3D plane(Vec2f size, i32 cells) {
     cells = std::max(1, cells);
-    MeshData m;
+    MeshData3D m;
     const u32 row = static_cast<u32>(cells) + 1;
     for (i32 z = 0; z <= cells; ++z) {
         for (i32 x = 0; x <= cells; ++x) {
@@ -261,10 +264,10 @@ MeshData plane(Vec2f size, i32 cells) {
     return m;
 }
 
-MeshData sphere(f32 radius, i32 segments, i32 rings) {
+MeshData3D sphere(f32 radius, i32 segments, i32 rings) {
     segments = std::max(3, segments);
     rings = std::max(2, rings);
-    MeshData m;
+    MeshData3D m;
     for (i32 r = 0; r <= rings; ++r) {
         const f32 v = static_cast<f32>(r) / static_cast<f32>(rings);
         const f32 polar = pi * v; // 0 at +Y
@@ -291,9 +294,9 @@ MeshData sphere(f32 radius, i32 segments, i32 rings) {
     return m;
 }
 
-MeshData cylinder(f32 radius, f32 height, i32 segments) {
+MeshData3D cylinder(f32 radius, f32 height, i32 segments) {
     segments = std::max(3, segments);
-    MeshData m;
+    MeshData3D m;
     const f32 h = height * 0.5f;
     for (i32 s = 0; s <= segments; ++s) {
         const f32 u = static_cast<f32>(s) / static_cast<f32>(segments);
@@ -312,9 +315,9 @@ MeshData cylinder(f32 radius, f32 height, i32 segments) {
     return m;
 }
 
-MeshData cone(f32 radius, f32 height, i32 segments) {
+MeshData3D cone(f32 radius, f32 height, i32 segments) {
     segments = std::max(3, segments);
-    MeshData m;
+    MeshData3D m;
     const f32 h = height * 0.5f;
     const f32 slope = radius / height; // the side's normal leans up by this
     for (i32 s = 0; s < segments; ++s) {
@@ -333,10 +336,10 @@ MeshData cone(f32 radius, f32 height, i32 segments) {
     return m;
 }
 
-MeshData torus(f32 radius, f32 tube, i32 segments, i32 sides) {
+MeshData3D torus(f32 radius, f32 tube, i32 segments, i32 sides) {
     segments = std::max(3, segments);
     sides = std::max(3, sides);
-    MeshData m;
+    MeshData3D m;
     for (i32 s = 0; s <= segments; ++s) {
         const f32 u = static_cast<f32>(s) / static_cast<f32>(segments);
         const f32 a = 2.0f * pi * u;
@@ -358,9 +361,9 @@ MeshData torus(f32 radius, f32 tube, i32 segments, i32 sides) {
     return m;
 }
 
-MeshData star_prism(i32 points, f32 outer, f32 inner, f32 height) {
+MeshData3D star_prism(i32 points, f32 outer, f32 inner, f32 height) {
     points = std::max(3, points);
-    MeshData m;
+    MeshData3D m;
     const f32 h = height * 0.5f;
     std::vector<Vec2f> outline;
     for (i32 i = 0; i < points * 2; ++i) {
@@ -380,19 +383,19 @@ MeshData star_prism(i32 points, f32 outer, f32 inner, f32 height) {
     return m;
 }
 
-MeshData wedge(Vec3f size) {
+MeshData3D wedge(Vec3f size) {
     const Vec3f h = size * 0.5f;
-    MeshData m;
-    quad(m, {-h.x, -h.y, h.z}, {h.x, -h.y, h.z}, {h.x, h.y, -h.z}, {-h.x, h.y, -h.z});     // the slope
-    quad(m, {h.x, -h.y, -h.z}, {-h.x, -h.y, -h.z}, {-h.x, h.y, -h.z}, {h.x, h.y, -h.z});   // the back, -Z
-    quad(m, {-h.x, -h.y, -h.z}, {h.x, -h.y, -h.z}, {h.x, -h.y, h.z}, {-h.x, -h.y, h.z});   // the floor, -Y
-    triangle(m, {h.x, -h.y, h.z}, {h.x, -h.y, -h.z}, {h.x, h.y, -h.z});                    // +X side
-    triangle(m, {-h.x, -h.y, -h.z}, {-h.x, -h.y, h.z}, {-h.x, h.y, -h.z});                 // -X side
+    MeshData3D m;
+    quad(m, {-h.x, -h.y, h.z}, {h.x, -h.y, h.z}, {h.x, h.y, -h.z}, {-h.x, h.y, -h.z});   // the slope
+    quad(m, {h.x, -h.y, -h.z}, {-h.x, -h.y, -h.z}, {-h.x, h.y, -h.z}, {h.x, h.y, -h.z}); // the back, -Z
+    quad(m, {-h.x, -h.y, -h.z}, {h.x, -h.y, -h.z}, {h.x, -h.y, h.z}, {-h.x, -h.y, h.z}); // the floor, -Y
+    triangle(m, {h.x, -h.y, h.z}, {h.x, -h.y, -h.z}, {h.x, h.y, -h.z});                  // +X side
+    triangle(m, {-h.x, -h.y, -h.z}, {-h.x, -h.y, h.z}, {-h.x, h.y, -h.z});               // -X side
     return m;
 }
 
-MeshData octahedron(f32 radius) {
-    MeshData m;
+MeshData3D octahedron(f32 radius) {
+    MeshData3D m;
     const Vec3f top{0.0f, radius, 0.0f}, bottom{0.0f, -radius, 0.0f};
     const Vec3f ring[4] = {{radius, 0.0f, 0.0f}, {0.0f, 0.0f, -radius}, {-radius, 0.0f, 0.0f}, {0.0f, 0.0f, radius}};
     for (int i = 0; i < 4; ++i) {

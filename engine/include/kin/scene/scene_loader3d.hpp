@@ -21,6 +21,6 @@ struct SceneBindingOptions3D {
 // Rejects scripted scenes; use ScriptScene for Lua lifecycle. Renderer thread.
 // False reports the failure through source.diagnostics(), like load/instantiate.
 bool instantiate_scene3d(SceneAssetRuntime& source, EcsWorld& world, Assets3D& assets,
-                                             const SceneBindingOptions3D& options = {});
+                         const SceneBindingOptions3D& options = {});
 
 } // namespace kin

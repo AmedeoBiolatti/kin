@@ -19,7 +19,8 @@ inline bool fail3d(Diagnostics3D& errors, std::string_view operation, std::strin
 inline std::string diagnostics3d_text(const Diagnostics3D& errors) {
     std::string text;
     for (const auto& error : errors) {
-        if (!text.empty()) text += '\n';
+        if (!text.empty())
+            text += '\n';
         text += error;
     }
     return text;

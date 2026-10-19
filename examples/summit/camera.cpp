@@ -9,13 +9,15 @@ namespace {
 
 f32 wrap_angle(f32 a) {
     f32 d = std::fmod(a + 180.0f, 360.0f);
-    if (d < 0.0f) d += 360.0f;
+    if (d < 0.0f)
+        d += 360.0f;
     return d - 180.0f;
 }
 
 f32 lerp_angle(f32 a, f32 b, f32 t) {
     f32 d = std::fmod(b - a + 180.0f, 360.0f);
-    if (d < 0.0f) d += 360.0f;
+    if (d < 0.0f)
+        d += 360.0f;
     return a + (d - 180.0f) * t;
 }
 
@@ -77,22 +79,23 @@ CameraView CameraRig::frame(const World3D& world, f32 alpha, f32 dt) {
     v.fov = settings.fov;
     const f32 t = std::clamp(alpha, 0.0f, 1.0f);
     Vec3f head = lerp(_prev_head, _head, t);
-    // The look is the player's hand as of this frame: the sim's angles as the last step left them, and the motion since that
-    // the sim has not stepped yet. It is not interpolated between steps: a step takes the motion of the frame it runs in, so
-    // that steps are uneven in what they carry (1, 2, 1... frames' worth when frames come faster than steps), and an angle
-    // interpolated between them shudders at the step rate. The angle of the latest step plus the leftover is the integral of
-    // the hand itself.
+    // The look is the player's hand as of this frame: the sim's angles as the last step left them, and the motion since
+    // that the sim has not stepped yet. It is not interpolated between steps: a step takes the motion of the frame it
+    // runs in, so that steps are uneven in what they carry (1, 2, 1... frames' worth when frames come faster than
+    // steps), and an angle interpolated between them shudders at the step rate. The angle of the latest step plus the
+    // leftover is the integral of the hand itself.
     const f32 yaw = wrap_angle(_yaw - _look_ahead.x);
     const f32 pitch = std::clamp(_pitch + _look_ahead.y, _pitch_min, _pitch_max);
     // The hanging view eases to one side (presentation: the player's own look, and so the hands' reach, are the sim's).
     _swing += ((_hanging ? 1.0f : 0.0f) - _swing) * std::min(1.0f, dt * 3.0f);
-    // A body on the ground is framed whole: the pivot above it, the view tipped down, the arm longer (presentation only).
+    // A body on the ground is framed whole: the pivot above it, the view tipped down, the arm longer (presentation
+    // only).
     _lie += ((_down ? 1.0f : 0.0f) - _lie) * std::min(1.0f, dt * 2.5f);
     if (!_down) {
         _lie_pick = true;
     } else if (_lie_pick && !settings.first_person) {
-        // The camera for a body on the ground: the way round it that is clearest of rock (the body may lie in a chimney or at a
-        // wall's foot), chosen once when it goes down so that the view does not hop about.
+        // The camera for a body on the ground: the way round it that is clearest of rock (the body may lie in a chimney
+        // or at a wall's foot), chosen once when it goes down so that the view does not hop about.
         _lie_pick = false;
         QueryFilter3D f;
         f.mask = layer_bit(layers3d::Static);
@@ -102,7 +105,8 @@ CameraView CameraRig::frame(const World3D& world, f32 alpha, f32 dt) {
         for (const f32 off : {0.0f, 45.0f, -45.0f, 90.0f, -90.0f, 135.0f, -135.0f, 180.0f}) {
             const Quatf q = Quatf::yaw_pitch(yaw + off, settings.lie_pitch);
             const Vec3f back = q.rotate({0.0f, 0.0f, 1.0f});
-            const auto hit = world.shape_cast(Shape3D::sphere(settings.probe_radius), pivot, {}, back * settings.lie_distance, f);
+            const auto hit =
+                world.shape_cast(Shape3D::sphere(settings.probe_radius), pivot, {}, back * settings.lie_distance, f);
             const f32 free = hit ? hit->fraction * settings.lie_distance : settings.lie_distance;
             const f32 score = std::min(free, settings.lie_distance) - 0.004f * std::fabs(off);
             if (score > best_score) {
@@ -124,13 +128,22 @@ CameraView CameraRig::frame(const World3D& world, f32 alpha, f32 dt) {
         v.arm = 0.0f;
         return v;
     }
-    if (_lie > 0.0f) head.y += settings.lie_height * _lie;
+    if (_lie > 0.0f)
+        head.y += settings.lie_height * _lie;
     const f32 want = settings.distance + (settings.lie_distance - settings.distance) * _lie;
-    if (!_spring_arm.configure({.distance=want,.shoulder=settings.shoulder,.probe_radius=settings.probe_radius,
-        .margin=settings.margin,.ease_out=settings.ease_out,.shoulder_radius_scale=.6f})) return v;
-    QueryFilter3D filter;filter.mask=layer_bit(layers3d::Static);filter.ignore=_ignore;
-    const auto solved=_spring_arm.frame(world,head,v.rotation,dt,filter);
-    if (!solved) return v;
+    if (!_spring_arm.configure({.distance = want,
+                                .shoulder = settings.shoulder,
+                                .probe_radius = settings.probe_radius,
+                                .margin = settings.margin,
+                                .ease_out = settings.ease_out,
+                                .shoulder_radius_scale = .6f}))
+        return v;
+    QueryFilter3D filter;
+    filter.mask = layer_bit(layers3d::Static);
+    filter.ignore = _ignore;
+    const auto solved = _spring_arm.frame(world, head, v.rotation, dt, filter);
+    if (!solved)
+        return v;
     v.arm = solved->length;
     v.obstructed = solved->obstructed;
     v.fov = settings.fov + settings.tight_fov_boost * std::clamp((2.4f - v.arm) / 1.6f, 0.0f, 1.0f);

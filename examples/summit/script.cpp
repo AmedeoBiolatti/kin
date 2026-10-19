@@ -10,20 +10,26 @@ namespace {
 
 f32 wrap(f32 d) {
     d = std::fmod(d + 180.0f, 360.0f);
-    if (d < 0.0f) d += 360.0f;
+    if (d < 0.0f)
+        d += 360.0f;
     return d - 180.0f;
 }
 
 // The yaw (degrees; 0 looks along -Z) that looks along the horizontal part of `d`.
-f32 yaw_to(Vec3f d) { return std::atan2(-d.x, -d.z) * 180.0f / pi; }
+f32 yaw_to(Vec3f d) {
+    return std::atan2(-d.x, -d.z) * 180.0f / pi;
+}
 
-f32 flat_distance(Vec3f a, Vec3f b) { return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z)); }
+f32 flat_distance(Vec3f a, Vec3f b) {
+    return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.z - b.z) * (a.z - b.z));
+}
 
 } // namespace
 
 Bot::Bot(const Game& game, i32 player, BotConfig config)
     : _game(&game), _player(player), _config(config),
-      _route(config.sheltered_route && game.level().expedition.enabled ? game.level().expedition.sheltered_route : game.level().route) {
+      _route(config.sheltered_route && game.level().expedition.enabled ? game.level().expedition.sheltered_route
+                                                                       : game.level().route) {
     _last_feet = game.feet(player);
 }
 
@@ -39,7 +45,9 @@ void Bot::advance_leg() {
     _leg_steps = _sub_steps = 0;
 }
 
-f32 Bot::yaw_error(f32 yaw) const { return wrap(yaw - _game->player(_player).yaw); }
+f32 Bot::yaw_error(f32 yaw) const {
+    return wrap(yaw - _game->player(_player).yaw);
+}
 
 void Bot::aim(PlayerCommand& c, f32 yaw, f32 pitch) const {
     const Player& p = _game->player(_player);
@@ -49,25 +57,30 @@ void Bot::aim(PlayerCommand& c, f32 yaw, f32 pitch) const {
 }
 
 const char* Bot::phase() const {
-    static const char* subs[] = {"start", "rest", "face", "approach", "climb", "shimmy", "climb2", "mantle", "rope", "handover", "step", "done"};
+    static const char* subs[] = {"start",  "rest",   "face", "approach", "climb", "shimmy",
+                                 "climb2", "mantle", "rope", "handover", "step",  "done"};
     return subs[int(_sub)];
 }
 
 std::string Bot::status() const {
-    static const char* subs[] = {"start", "rest", "face", "approach", "climb", "shimmy", "climb2", "mantle", "rope", "handover", "step", "done"};
-    if (finished()) return "finished";
+    static const char* subs[] = {"start",  "rest",   "face", "approach", "climb", "shimmy",
+                                 "climb2", "mantle", "rope", "handover", "step",  "done"};
+    if (finished())
+        return "finished";
     std::string out = "leg " + std::to_string(_leg) + " " + _route[std::size_t(_leg)].label + " / " + subs[int(_sub)];
     if (_sub == Sub::Handover) {
         const TraversalState3D ts = _game->traversal(_player);
-        out += " hand " + std::to_string(_hand) + " L" + std::to_string(int(ts.grips[0].phase)) + "k" + std::to_string(int(ts.grips[0].kind)) + " R" +
-               std::to_string(int(ts.grips[1].phase)) + "k" + std::to_string(int(ts.grips[1].kind));
+        out += " hand " + std::to_string(_hand) + " L" + std::to_string(int(ts.grips[0].phase)) + "k" +
+               std::to_string(int(ts.grips[0].kind)) + " R" + std::to_string(int(ts.grips[1].phase)) + "k" +
+               std::to_string(int(ts.grips[1].kind));
     }
     return out;
 }
 
 PlayerCommand Bot::next() {
     PlayerCommand c;
-    if (finished()) return c;
+    if (finished())
+        return c;
     const Player& p = _game->player(_player);
     if (p.state != PlayerState::Alive) {
         // Lying, getting up or dead: nothing to do but wait (and the leg may have to be redone after).
@@ -93,8 +106,10 @@ PlayerCommand Bot::next() {
     }
     // A scripted fall: nothing is asked of the hands until it lands.
     if (_falling) {
-        if (cs.ground == CharacterGround3D::OnGround && !ts.hanging()) _falling = false;
-        else return c;
+        if (cs.ground == CharacterGround3D::OnGround && !ts.hanging())
+            _falling = false;
+        else
+            return c;
     }
     if (_leg == _config.drop_leg && !_dropped && ts.hanging() && feet.y >= L.from.y + _config.drop_height) {
         _dropped = true;
@@ -104,10 +119,12 @@ PlayerCommand Bot::next() {
     }
 
     // Fallen below where the leg starts: go back to a leg that is at this height (after a fall, a respawn).
-    if (cs.ground == CharacterGround3D::OnGround && !ts.hanging() && L.kind != LegKind::Summit && feet.y < L.from.y - 2.5f) {
+    if (cs.ground == CharacterGround3D::OnGround && !ts.hanging() && L.kind != LegKind::Summit &&
+        feet.y < L.from.y - 2.5f) {
         i32 j = _leg;
-        while (j > 0 && !((_route[std::size_t(j)].kind == LegKind::Walk || _route[std::size_t(j)].kind == LegKind::Rest) &&
-                          _route[std::size_t(j)].to.y <= feet.y + 1.5f)) {
+        while (j > 0 &&
+               !((_route[std::size_t(j)].kind == LegKind::Walk || _route[std::size_t(j)].kind == LegKind::Rest) &&
+                 _route[std::size_t(j)].to.y <= feet.y + 1.5f)) {
             --j;
         }
         ++_restarts;
@@ -124,7 +141,8 @@ PlayerCommand Bot::next() {
         c.sprint = sprint && e < 10.0f;
         // Not getting anywhere: a hop.
         if (_leg_steps % 90 == 0) {
-            if (flat_distance(feet, _last_feet) < 0.25f && cs.ground == CharacterGround3D::OnGround) _stuck = 12;
+            if (flat_distance(feet, _last_feet) < 0.25f && cs.ground == CharacterGround3D::OnGround)
+                _stuck = 12;
             _last_feet = feet;
         }
         if (_stuck > 0) {
@@ -135,8 +153,10 @@ PlayerCommand Bot::next() {
 
     if (_game->config().expedition && p.expedition.phase == ExpeditionPhase::Extraction) {
         const Vec3f pad = _game->level().expedition.extraction;
-        if (flat_distance(feet, pad) < 1.0f) c.interact = true;
-        else to_point(pad);
+        if (flat_distance(feet, pad) < 1.0f)
+            c.interact = true;
+        else
+            to_point(pad);
         return c;
     }
 
@@ -158,7 +178,8 @@ PlayerCommand Bot::next() {
         break;
     }
     case LegKind::Summit: {
-        if (_game->config().expedition) c.interact = true;
+        if (_game->config().expedition)
+            c.interact = true;
         break;
     }
     case LegKind::Climb:
@@ -267,7 +288,8 @@ PlayerCommand Bot::next() {
                 c.grab_left = c.grab_right = false;
                 c.move.y = 1.0f;
                 aim(c, yaw_to(L.to - feet), 0.0f);
-                if (flat_distance(feet, L.to) < 1.0f && cs.ground == CharacterGround3D::OnGround) advance_leg();
+                if (flat_distance(feet, L.to) < 1.0f && cs.ground == CharacterGround3D::OnGround)
+                    advance_leg();
             } else {
                 c.move.y = 1.0f;
             }
@@ -345,25 +367,30 @@ PlayerCommand Bot::next() {
             break;
         }
         if (_sub == Sub::Handover) {
-            // The lip is a little to the left of the rope (and a hand at a time lets go of the rope and takes it): aimed that
-            // way, the probe finds only the lip. `_hand` counts the phase: 0 the left lets go, 1 takes the lip, 2 the right
-            // lets go, 3 takes it, 4 both are on it.
-            // A grip on the lip's face (not its top) cannot be pulled up from: another try, aimed higher or lower.
+            // The lip is a little to the left of the rope (and a hand at a time lets go of the rope and takes it):
+            // aimed that way, the probe finds only the lip. `_hand` counts the phase: 0 the left lets go, 1 takes the
+            // lip, 2 the right lets go, 3 takes it, 4 both are on it. A grip on the lip's face (not its top) cannot be
+            // pulled up from: another try, aimed higher or lower.
             static const f32 pitches[3] = {5.0f, 28.0f, -12.0f};
             static const f32 yaws[3] = {32.0f, 48.0f, 18.0f};
             aim(c, wall_yaw + yaws[(_retry / 3) % 3], pitches[_retry % 3]);
             const GripState3D& gl = ts.grips[0];
             const GripState3D& gr = ts.grips[1];
-            const auto on_lip = [](const GripState3D& g) { return g.phase == GripPhase3D::Held && g.kind != GripKind3D::Rope; };
+            const auto on_lip = [](const GripState3D& g) {
+                return g.phase == GripPhase3D::Held && g.kind != GripKind3D::Rope;
+            };
             c.grab_left = c.grab_right = true;
             switch (_hand) {
             case 0:
                 c.grab_left = false;
-                if (gl.phase == GripPhase3D::Free) _hand = 1;
+                if (gl.phase == GripPhase3D::Free)
+                    _hand = 1;
                 break;
             case 1:
-                if (on_lip(gl)) _hand = 2;
-                else if (gl.phase == GripPhase3D::Held) _hand = 0; // took the rope again: let go and aim again
+                if (on_lip(gl))
+                    _hand = 2;
+                else if (gl.phase == GripPhase3D::Held)
+                    _hand = 0; // took the rope again: let go and aim again
                 else if (gl.phase == GripPhase3D::Free && ++_hand_steps > 40) {
                     ++_retry; // nothing in reach that way: another aim
                     _hand_steps = 0;
@@ -371,11 +398,14 @@ PlayerCommand Bot::next() {
                 break;
             case 2:
                 c.grab_right = false;
-                if (gr.phase == GripPhase3D::Free) _hand = 3;
+                if (gr.phase == GripPhase3D::Free)
+                    _hand = 3;
                 break;
             case 3:
-                if (on_lip(gr)) _hand = 4;
-                else if (gr.phase == GripPhase3D::Held) _hand = 2;
+                if (on_lip(gr))
+                    _hand = 4;
+                else if (gr.phase == GripPhase3D::Held)
+                    _hand = 2;
                 else if (gr.phase == GripPhase3D::Free && ++_hand_steps > 40) {
                     ++_retry;
                     _hand_steps = 0;
@@ -406,7 +436,8 @@ PlayerCommand Bot::next() {
             if (ts.mode == TraversalMode3D::Walking) {
                 c.move.y = 1.0f;
                 aim(c, yaw_to(L.to - feet), 0.0f);
-                if (flat_distance(feet, L.to) < 1.0f && cs.ground == CharacterGround3D::OnGround) advance_leg();
+                if (flat_distance(feet, L.to) < 1.0f && cs.ground == CharacterGround3D::OnGround)
+                    advance_leg();
             } else {
                 c.move.y = 1.0f;
             }
@@ -432,7 +463,8 @@ RunReport run_bot(Game& game, Bot& bot, u64 max_steps, bool stop_at_summit) {
         game.step(commands);
         const Player& p = game.player(0);
         const Vec3f f = game.feet(0);
-        if (!std::isfinite(f.x) || !std::isfinite(f.y) || !std::isfinite(f.z)) r.non_finite = true;
+        if (!std::isfinite(f.x) || !std::isfinite(f.y) || !std::isfinite(f.z))
+            r.non_finite = true;
         r.min_stamina = std::min(r.min_stamina, game.stamina(0));
         r.highest = std::max(r.highest, f.y - game.level().start.y);
         if (p.summit && stop_at_summit) {
@@ -472,7 +504,8 @@ bool script_config(const std::string& name, const SummitLevel& level, BotConfig&
         out.sheltered_route = name == "shelter";
         return level.expedition.enabled;
     }
-    if (name == "climb") return true;
+    if (name == "climb")
+        return true;
     if (name == "rope") {
         for (std::size_t i = 0; i < level.route.size(); ++i) {
             if (level.route[i].kind == LegKind::Rope) {
@@ -483,7 +516,8 @@ bool script_config(const std::string& name, const SummitLevel& level, BotConfig&
         return false;
     }
     if (name == "fall") {
-        // The first climb of 6.9 m or more (the chimney): it lets go near the top, a drop of about 5 m (9.7 m/s: a knock-out).
+        // The first climb of 6.9 m or more (the chimney): it lets go near the top, a drop of about 5 m (9.7 m/s: a
+        // knock-out).
         for (std::size_t i = 0; i < level.route.size(); ++i) {
             if (level.route[i].kind == LegKind::Climb && level.route[i].height >= 6.9f) {
                 out.drop_leg = i32(i);
@@ -496,29 +530,35 @@ bool script_config(const std::string& name, const SummitLevel& level, BotConfig&
     return false;
 }
 
-bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log, bool expedition, bool dense_scenery) {
+bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log, bool expedition,
+                       bool dense_scenery) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (f == nullptr) return false;
+    if (f == nullptr)
+        return false;
     const u32 magic = expedition ? (dense_scenery ? 0x4E444D53u : 0x58454D53u) : 0x474C4D53u; // SMDN / SMEX / SMLG
     const u64 count = log.size();
     bool ok = std::fwrite(&magic, sizeof magic, 1, f) == 1 && std::fwrite(&seed, sizeof seed, 1, f) == 1 &&
               std::fwrite(&count, sizeof count, 1, f) == 1;
     for (const PlayerCommand& c : log) {
         const f32 v[4] = {c.move.x, c.move.y, c.look.x, c.look.y};
-        const u8 flags = u8((c.jump ? 1 : 0) | (c.sprint ? 2 : 0) | (c.grab_left ? 4 : 0) | (c.grab_right ? 8 : 0) | (c.release ? 16 : 0) |
-                            (c.pull_up ? 32 : 0) | (c.interact ? 64 : 0));
+        const u8 flags = u8((c.jump ? 1 : 0) | (c.sprint ? 2 : 0) | (c.grab_left ? 4 : 0) | (c.grab_right ? 8 : 0) |
+                            (c.release ? 16 : 0) | (c.pull_up ? 32 : 0) | (c.interact ? 64 : 0));
         ok = ok && std::fwrite(v, sizeof v, 1, f) == 1 && std::fwrite(&flags, 1, 1, f) == 1;
     }
     return std::fclose(f) == 0 && ok;
 }
 
-bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log, bool* expedition, bool* dense_scenery) {
+bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log, bool* expedition,
+                      bool* dense_scenery) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (f == nullptr) return false;
+    if (f == nullptr)
+        return false;
     u32 magic = 0;
     u64 count = 0;
-    bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && (magic == 0x474C4D53u || magic == 0x58454D53u || magic == 0x4E444D53u) && std::fread(&seed, sizeof seed, 1, f) == 1 &&
-              std::fread(&count, sizeof count, 1, f) == 1 && count < (u64{1} << 28);
+    bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 &&
+              (magic == 0x474C4D53u || magic == 0x58454D53u || magic == 0x4E444D53u) &&
+              std::fread(&seed, sizeof seed, 1, f) == 1 && std::fread(&count, sizeof count, 1, f) == 1 &&
+              count < (u64{1} << 28);
     std::vector<PlayerCommand> out;
     for (u64 i = 0; ok && i < count; ++i) {
         f32 v[4]{};
@@ -539,11 +579,12 @@ bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerComm
     std::fclose(f);
     if (ok) {
         log = std::move(out);
-        if (expedition) *expedition = magic != 0x474C4D53u;
-        if (dense_scenery) *dense_scenery = magic == 0x4E444D53u;
+        if (expedition)
+            *expedition = magic != 0x474C4D53u;
+        if (dense_scenery)
+            *dense_scenery = magic == 0x4E444D53u;
     }
     return ok;
 }
-
 
 } // namespace summit

@@ -201,7 +201,7 @@ public:
         json.field("view", _siege->options.view_3d ? "3d" : "2d");
 #if defined(KIN_EXPERIMENTAL_3D)
         if (_siege->options.view_3d) {
-            const Render3DStats& s = _painter3d.stats();
+            const RenderStats3D& s = _painter3d.stats();
             json.field("draws_3d", u64(s.draws)).field("instances_3d", u64(s.instances)).field("triangles_3d", s.triangles)
                 .field("drawn_3d", _painter3d.available());
         }

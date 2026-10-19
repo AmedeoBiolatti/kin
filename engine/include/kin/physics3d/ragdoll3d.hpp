@@ -37,8 +37,8 @@
 
 namespace kin {
 
-class Skeleton;
-struct Pose;
+class Skeleton3D;
+struct Pose3D;
 
 // A ragdoll in a World3D: an index and a generation, as Body3D is.
 struct RagdollHandle3D {
@@ -185,7 +185,7 @@ struct AutoRagdollOptions {
 // continues its direction; the longest for a root), a short capsule for a leaf, radius from length by `radius_ratio`, swing-twist
 // joints with the default limits and hinges where a name matches an override. The pose is the ragdoll's rest: build the
 // ragdoll with the bones' world matrices of the same pose. `bone` i of the result keeps its skeleton joint in `joint`.
-RagdollDesc auto_ragdoll_desc(const Skeleton& skeleton, const Pose& pose, const AutoRagdollOptions& options = {});
+RagdollDesc auto_ragdoll_desc(const Skeleton3D& skeleton, const Pose3D& pose, const AutoRagdollOptions& options = {});
 
 enum class RagdollMode3D : u8 { Animated, Ragdoll, Blend, GetUp };
 

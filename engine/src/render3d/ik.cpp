@@ -1,8 +1,7 @@
-#include <kin/render3d/ik.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <kin/render3d/ik3d.hpp>
 
 namespace kin {
 
@@ -12,7 +11,9 @@ constexpr f32 pi = 3.14159265358979323846f;
 constexpr f32 to_radians = pi / 180.0f;
 constexpr f32 to_degrees = 180.0f / pi;
 
-Vec3f translation_of(const Mat4f& m) { return {m.m[12], m.m[13], m.m[14]}; }
+Vec3f translation_of(const Mat4f& m) {
+    return {m.m[12], m.m[13], m.m[14]};
+}
 
 // A unit vector perpendicular to `v`, the same one for the same input (the axis it is least along is crossed out).
 Vec3f perpendicular(Vec3f v) {
@@ -27,7 +28,9 @@ Quatf axis_angle_radians(Vec3f axis, f32 radians) {
     return {axis.x * s, axis.y * s, axis.z * s, std::cos(half)};
 }
 
-f32 angle_between(Vec3f a, Vec3f b) { return std::atan2(length(cross(a, b)), dot(a, b)); }
+f32 angle_between(Vec3f a, Vec3f b) {
+    return std::atan2(length(cross(a, b)), dot(a, b));
+}
 
 // `a` turned toward `b` (both unit) by `angle` radians along the short way; `b` itself when the angle covers it.
 Vec3f rotate_toward(Vec3f a, Vec3f b, f32 angle) {
@@ -49,12 +52,14 @@ Quatf blend_rotation(Quatf a, Quatf b, f32 t) {
     if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0.0f) {
         b = {-b.x, -b.y, -b.z, -b.w};
     }
-    return Quatf{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t}.normalized();
+    return Quatf{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t}
+        .normalized();
 }
 
-bool is_below(const Skeleton& sk, i32 joint, i32 ancestor) {
+bool is_below(const Skeleton3D& sk, i32 joint, i32 ancestor) {
     const i32 n = static_cast<i32>(sk.joint_count());
-    for (i32 j = joint >= 0 && joint < n ? sk.parents[static_cast<std::size_t>(joint)] : -1; j >= 0; j = sk.parents[static_cast<std::size_t>(j)]) {
+    for (i32 j = joint >= 0 && joint < n ? sk.parents[static_cast<std::size_t>(joint)] : -1; j >= 0;
+         j = sk.parents[static_cast<std::size_t>(j)]) {
         if (j == ancestor) {
             return true;
         }
@@ -62,23 +67,25 @@ bool is_below(const Skeleton& sk, i32 joint, i32 ancestor) {
     return false;
 }
 
-const Mat4f& parent_world(const Skeleton& sk, std::span<const Mat4f> world, i32 joint) {
+const Mat4f& parent_world(const Skeleton3D& sk, std::span<const Mat4f> world, i32 joint) {
     const i32 p = sk.parents[static_cast<std::size_t>(joint)];
     return p < 0 ? sk.root_transform : world[static_cast<std::size_t>(p)];
 }
 
 // Whether the arrays are the size the skeleton says and `joint` is one of its joints.
-bool usable(const Skeleton& sk, const Pose& pose, std::span<const Mat4f> world) {
+bool usable(const Skeleton3D& sk, const Pose3D& pose, std::span<const Mat4f> world) {
     const std::size_t n = sk.joint_count();
     return n > 0 && pose.joints.size() >= n && world.size() >= n;
 }
-bool is_joint(const Skeleton& sk, i32 j) { return j >= 0 && j < static_cast<i32>(sk.joint_count()); }
+bool is_joint(const Skeleton3D& sk, i32 j) {
+    return j >= 0 && j < static_cast<i32>(sk.joint_count());
+}
 
-// Rotates `joint` by `r`, a rotation of the model's space, about the joint's own origin; in the joint's local rotation that
-// is  Rp^-1 r Rp q  with Rp its parent's rotation. `world` follows.
-void rotate_joint(const Skeleton& sk, Pose& pose, std::span<Mat4f> world, i32 joint, Quatf r) {
+// Rotates `joint` by `r`, a rotation of the model's space, about the joint's own origin; in the joint's local rotation
+// that is  Rp^-1 r Rp q  with Rp its parent's rotation. `world` follows.
+void rotate_joint(const Skeleton3D& sk, Pose3D& pose, std::span<Mat4f> world, i32 joint, Quatf r) {
     const Quatf rp = rotation_of(parent_world(sk, world, joint));
-    JointPose& jp = pose.joints[static_cast<std::size_t>(joint)];
+    JointPose3D& jp = pose.joints[static_cast<std::size_t>(joint)];
     jp.rotation = (rp.conjugate() * r * rp * jp.rotation).normalized();
     update_world_below(sk, pose, world, joint);
 }
@@ -88,10 +95,10 @@ f32 smoothstep01(f32 x) {
     return x * x * (3.0f - 2.0f * x);
 }
 
-// The side a bend goes to, across the unit axis `t`: `want` (any length up to 1) taken across the axis, with a small pull
-// toward `alt` that only matters when `want` is nearly along the axis (or nearly nothing), so that the side stays continuous
-// as `want` goes through the axis instead of being undefined there. `zone` is how short a `want` across the axis must be
-// for the pull to act, `strength` its size.
+// The side a bend goes to, across the unit axis `t`: `want` (any length up to 1) taken across the axis, with a small
+// pull toward `alt` that only matters when `want` is nearly along the axis (or nearly nothing), so that the side stays
+// continuous as `want` goes through the axis instead of being undefined there. `zone` is how short a `want` across the
+// axis must be for the pull to act, `strength` its size.
 Vec3f side_across(Vec3f want, Vec3f alt, Vec3f t, f32 zone, f32 strength) {
     const Vec3f across = want - t * dot(want, t);
     const Vec3f alt_across = alt - t * dot(alt, t);
@@ -105,9 +112,10 @@ Vec3f side_across(Vec3f want, Vec3f alt, Vec3f t, f32 zone, f32 strength) {
 
 } // namespace
 
-// --- matrices ------------------------------------------------------------------------------------------------------------
+// --- matrices
+// ------------------------------------------------------------------------------------------------------------
 
-void update_world_below(const Skeleton& skeleton, const Pose& pose, std::span<Mat4f> world, i32 joint) {
+void update_world_below(const Skeleton3D& skeleton, const Pose3D& pose, std::span<Mat4f> world, i32 joint) {
     const std::size_t n = std::min<std::size_t>(skeleton.joint_count(), world.size());
     if (joint < 0 || static_cast<std::size_t>(joint) >= n) {
         return;
@@ -130,7 +138,7 @@ void update_world_below(const Skeleton& skeleton, const Pose& pose, std::span<Ma
     }
 }
 
-void world_to_joint_matrices(const Skeleton& skeleton, std::span<const Mat4f> world, std::span<Mat4f> out) {
+void world_to_joint_matrices(const Skeleton3D& skeleton, std::span<const Mat4f> world, std::span<Mat4f> out) {
     const std::size_t n = std::min({static_cast<std::size_t>(skeleton.joint_count()), world.size(), out.size()});
     for (std::size_t i = 0; i < n; ++i) {
         out[i] = world[i] * skeleton.inverse_bind[i];
@@ -183,24 +191,28 @@ Quatf rotation_between(Vec3f from, Vec3f to) {
     return Quatf{c.x, c.y, c.z, 1.0f + d}.normalized();
 }
 
-// --- two bones -----------------------------------------------------------------------------------------------------------
+// --- two bones
+// -----------------------------------------------------------------------------------------------------------
 
 namespace {
 
-// Whether the linear part of `m` is a rotation times one scale (to rounding): then a turn in the space of the frame `m` leads
-// to is a turn of the joint's local rotation, exactly. A non-uniform scale (or shear) makes it not so.
+// Whether the linear part of `m` is a rotation times one scale (to rounding): then a turn in the space of the frame `m`
+// leads to is a turn of the joint's local rotation, exactly. A non-uniform scale (or shear) makes it not so.
 bool is_similarity(const Mat4f& m) {
     const Vec3f c0{m.m[0], m.m[1], m.m[2]}, c1{m.m[4], m.m[5], m.m[6]}, c2{m.m[8], m.m[9], m.m[10]};
     const f32 l0 = length(c0), l1 = length(c1), l2 = length(c2);
     const f32 tol = 1e-4f * std::max(l0, 1e-9f);
-    return std::fabs(l0 - l1) <= tol && std::fabs(l0 - l2) <= tol && std::fabs(dot(c0, c1)) <= tol * l0 && std::fabs(dot(c0, c2)) <= tol * l0 &&
-           std::fabs(dot(c1, c2)) <= tol * l0;
+    return std::fabs(l0 - l1) <= tol && std::fabs(l0 - l2) <= tol && std::fabs(dot(c0, c1)) <= tol * l0 &&
+           std::fabs(dot(c0, c2)) <= tol * l0 && std::fabs(dot(c1, c2)) <= tol * l0;
 }
 
-f32 signed_angle(Vec3f from, Vec3f to, Vec3f axis) { return std::atan2(dot(cross(from, to), axis), dot(from, to)); }
+f32 signed_angle(Vec3f from, Vec3f to, Vec3f axis) {
+    return std::atan2(dot(cross(from, to), axis), dot(from, to));
+}
 
-// Where `joint` (below `root`) is at rest, in the space of the root joint's parent: the rest matrices composed down the chain.
-Vec3f rest_point(const Skeleton& sk, i32 root, i32 joint) {
+// Where `joint` (below `root`) is at rest, in the space of the root joint's parent: the rest matrices composed down the
+// chain.
+Vec3f rest_point(const Skeleton3D& sk, i32 root, i32 joint) {
     std::array<i32, max_skin_joints> path{};
     std::size_t n = 0;
     for (i32 j = joint; j >= 0 && n < path.size(); j = sk.parents[static_cast<std::size_t>(j)]) {
@@ -216,29 +228,31 @@ Vec3f rest_point(const Skeleton& sk, i32 root, i32 joint) {
     return translation_of(m);
 }
 
-// What one pass of the solver leaves for the passes after it (a scaled chain is solved by repeating, see solve_two_bone).
+// What one pass of the solver leaves for the passes after it (a scaled chain is solved by repeating, see
+// solve_two_bone).
 struct TwoBonePass {
-    Vec3f goal{};        // where the end joint is meant to be, in the space of the root's parent
-    Vec3f bend{};        // the side the elbow was put on
-    Quatf end_goal{};    // the orientation the end joint is meant to have, in the same space
+    Vec3f goal{};     // where the end joint is meant to be, in the space of the root's parent
+    Vec3f bend{};     // the side the elbow was put on
+    Quatf end_goal{}; // the orientation the end joint is meant to have, in the same space
     bool has_end_goal = false;
-    bool rigid = true;   // the joints' parents' matrices are rotation times a uniform scale: one pass is exact
+    bool rigid = true; // the joints' parents' matrices are rotation times a uniform scale: one pass is exact
 };
 
-// One solve at weight `w` of the pose given. `forced_bend` and `forced_end` (later passes of a scaled chain) take the side of the
-// elbow and the end orientation of an earlier pass instead of working them out again.
-TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> world, const TwoBoneChain& chain, Vec3f target,
-                            const TwoBoneOptions& o, f32 w, TwoBoneState* state, f32 dt, const Vec3f* forced_bend, const Quatf* forced_end,
-                            TwoBonePass& pass) {
-    TwoBoneResult res;
-    // Everything in the space of the root joint's parent (F): there a rotation of the root is a rotation, whatever scale or
-    // turn the model and its ancestors carry, and the bones are the lengths they are drawn at.
+// One solve at weight `w` of the pose given. `forced_bend` and `forced_end` (later passes of a scaled chain) take the
+// side of the elbow and the end orientation of an earlier pass instead of working them out again.
+TwoBoneResult3D two_bone_pass(const Skeleton3D& sk, Pose3D& pose, std::span<Mat4f> world, const TwoBoneChain3D& chain,
+                              Vec3f target, const TwoBoneOptions3D& o, f32 w, TwoBoneState3D* state, f32 dt,
+                              const Vec3f* forced_bend, const Quatf* forced_end, TwoBonePass& pass) {
+    TwoBoneResult3D res;
+    // Everything in the space of the root joint's parent (F): there a rotation of the root is a rotation, whatever
+    // scale or turn the model and its ancestors carry, and the bones are the lengths they are drawn at.
     const Mat4f F = parent_world(sk, world, chain.root);
     if (std::fabs(F.determinant()) < 1e-20f) {
         return res;
     }
     const Mat4f Fi = F.inverse();
-    const auto root = static_cast<std::size_t>(chain.root), mid = static_cast<std::size_t>(chain.mid), end = static_cast<std::size_t>(chain.end);
+    const auto root = static_cast<std::size_t>(chain.root), mid = static_cast<std::size_t>(chain.mid),
+               end = static_cast<std::size_t>(chain.end);
     const Vec3f A = Fi.apply(translation_of(world[root]));
     const Vec3f B = Fi.apply(translation_of(world[mid]));
     const Vec3f C = Fi.apply(translation_of(world[end]));
@@ -249,9 +263,9 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
     }
     const f32 L = l1 + l2;
 
-    // A soft stretch, measured against the skeleton's rest bone lengths (so that a pose that is stretched already, by a clip or by
-    // this solver on a pass before, is not stretched again: solving twice is solving once). It tracks the distance as the
-    // target passes the reach and tends to max_stretch, never beyond it.
+    // A soft stretch, measured against the skeleton's rest bone lengths (so that a pose that is stretched already, by a
+    // clip or by this solver on a pass before, is not stretched again: solving twice is solving once). It tracks the
+    // distance as the target passes the reach and tends to max_stretch, never beyond it.
     const Vec3f dvec = T - A;
     const f32 d = length(dvec);
     f32 held = 0.0f, rest_len = 0.0f;
@@ -264,7 +278,7 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
         rest_len += length(sk.rest[static_cast<std::size_t>(j)].translation);
     }
     const f32 stretched_already = rest_len > 1e-9f ? std::max(held / rest_len, 1.0f) : 1.0f;
-    f32 s = 1.0f;       // the factor applied to the pose's bones now
+    f32 s = 1.0f;                    // the factor applied to the pose's bones now
     f32 s_total = stretched_already; // and relative to the rest lengths
     if (o.max_stretch > 1.0f && d > L) {
         const f32 span = o.max_stretch - 1.0f;
@@ -276,19 +290,22 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
     }
     const f32 l1s = l1 * s, l2s = l2 * s;
     const f32 bend_floor = std::clamp(o.min_bend_degrees, 0.0f, 90.0f) * to_radians;
-    const f32 dmax = bend_floor <= 0.0f ? l1s + l2s : std::sqrt(std::max(l1s * l1s + l2s * l2s + 2.0f * l1s * l2s * std::cos(bend_floor), 0.0f));
+    const f32 dmax = bend_floor <= 0.0f
+                         ? l1s + l2s
+                         : std::sqrt(std::max(l1s * l1s + l2s * l2s + 2.0f * l1s * l2s * std::cos(bend_floor), 0.0f));
     f32 dmin = std::max(std::fabs(l1s - l2s), 1e-6f * L);
     if (o.max_bend_degrees < 180.0f) {
         // The chord at the most the mid joint may bend: nearer than that the chain stands as folded as it may.
         const f32 bend_ceiling = std::max(o.max_bend_degrees, 0.0f) * to_radians;
-        dmin = std::max(dmin, std::sqrt(std::max(l1s * l1s + l2s * l2s + 2.0f * l1s * l2s * std::cos(bend_ceiling), 0.0f)));
+        dmin = std::max(dmin,
+                        std::sqrt(std::max(l1s * l1s + l2s * l2s + 2.0f * l1s * l2s * std::cos(bend_ceiling), 0.0f)));
         dmin = std::min(dmin, dmax);
     }
     const f32 deff = std::clamp(d, std::min(dmin, dmax), dmax);
 
-    // The direction to the target. A target nearer the root than the folded chain can come (unequal bones leave a hole round
-    // the root) is aimed at through the point the chain's own axis adds to it, so that a target going through the root's
-    // place turns the chain smoothly instead of flipping it end to end.
+    // The direction to the target. A target nearer the root than the folded chain can come (unequal bones leave a hole
+    // round the root) is aimed at through the point the chain's own axis adds to it, so that a target going through the
+    // root's place turns the chain smoothly instead of flipping it end to end.
     const Vec3f axis_now = normalize(C - A);
     const Vec3f toward = length_squared(axis_now) > 0.0f ? axis_now : normalize(B - A);
     Vec3f aim = dvec;
@@ -300,11 +317,14 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
 
     const Vec3f u0 = normalize(B - A);
     const f32 a = (deff * deff + l1s * l1s - l2s * l2s) / (2.0f * deff);
-    // The height of the triangle by Heron's factors: near full reach (l1 + l2 - d tends to 0) this keeps the elbow on the line
-    // where l1^2 - a^2 would lose it to rounding.
-    const f32 h = std::sqrt(std::max((l1s + l2s + deff) * (l1s + l2s - deff) * (deff + l1s - l2s) * (deff - l1s + l2s), 0.0f)) / (2.0f * deff);
+    // The height of the triangle by Heron's factors: near full reach (l1 + l2 - d tends to 0) this keeps the elbow on
+    // the line where l1^2 - a^2 would lose it to rounding.
+    const f32 h =
+        std::sqrt(std::max((l1s + l2s + deff) * (l1s + l2s - deff) * (deff + l1s - l2s) * (deff - l1s + l2s), 0.0f)) /
+        (2.0f * deff);
 
-    // The plane the pose bends in, to carry onto the new one: the hinge's, as the mid joint is built, or the pose's own.
+    // The plane the pose bends in, to carry onto the new one: the hinge's, as the mid joint is built, or the pose's
+    // own.
     Vec3f n0{};
     f32 carry = 0.0f;
     bool hinged = false;
@@ -327,11 +347,11 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
         carry = smoothstep01(angle_now / (5.0f * to_radians));
     }
 
-    // Which way the elbow points. A pole gives it; with none (or on the target's axis, where a pole says nothing) it is the
-    // side the pose is bent to (the hinge's, when the mid joint is one), and a chain with no bend to speak of goes the way the
-    // rig was built to bend (the rest pose's bend, turned as the root is), else toward -Y of the root's parent (an elbow down,
-    // a knee forward by a pole of their own). Each falls back on the next by a pull that only acts near the degenerate case,
-    // never by a switch.
+    // Which way the elbow points. A pole gives it; with none (or on the target's axis, where a pole says nothing) it is
+    // the side the pose is bent to (the hinge's, when the mid joint is one), and a chain with no bend to speak of goes
+    // the way the rig was built to bend (the rest pose's bend, turned as the root is), else toward -Y of the root's
+    // parent (an elbow down, a knee forward by a pole of their own). Each falls back on the next by a pull that only
+    // acts near the degenerate case, never by a switch.
     Vec3f want_default{0.0f, -1.0f, 0.0f}, alt_default{0.0f, 0.0f, 1.0f};
     {
         const Vec3f Ar = translation_of(sk.rest[root].matrix());
@@ -341,7 +361,8 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
         const Vec3f rest_bend = rest_arm - rest_axis * dot(rest_arm, rest_axis);
         const f32 rest_l1 = length(rest_arm);
         if (length_squared(rest_axis) > 0.0f && rest_l1 > 1e-7f && length(rest_bend) > 0.02f * rest_l1) {
-            // The rest bend turned as the root's own turn has changed since rest: the limb's own side, wherever it points.
+            // The rest bend turned as the root's own turn has changed since rest: the limb's own side, wherever it
+            // points.
             const Quatf turned = (pose.joints[root].rotation * sk.rest[root].rotation.conjugate()).normalized();
             want_default = turned.rotate(normalize(rest_bend));
             alt_default = std::fabs(want_default.z) > 0.9f ? Vec3f{0.0f, -1.0f, 0.0f} : Vec3f{0.0f, 0.0f, 1.0f};
@@ -351,8 +372,8 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
     const Vec3f pose_side = hinged ? cross(t, n0) : (((B - A) - axis_now * dot(B - A, axis_now)) / l1);
     const Vec3f fallback = side_across(pose_side, default_side, t, 0.02f, 0.02f);
     Vec3f bend = fallback;
-    if (o.pole_mode != PoleMode::None) {
-        const Vec3f pole = o.pole_mode == PoleMode::Position ? Fi.apply(o.pole) - A : Fi.apply_vector(o.pole);
+    if (o.pole_mode != PoleMode3D::None) {
+        const Vec3f pole = o.pole_mode == PoleMode3D::Position ? Fi.apply(o.pole) - A : Fi.apply_vector(o.pole);
         const Vec3f pn = normalize(pole);
         if (length_squared(pn) > 0.0f) {
             bend = side_across(pn, fallback, t, 0.3f, 0.1f);
@@ -361,8 +382,8 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
     if (forced_bend) {
         bend = side_across(*forced_bend, bend, t, 1e-3f, 0.0f);
     } else {
-        // The side swings toward the one wanted at a bounded speed: a pole going through the target's axis (where the side must
-        // go over to the other one) is then a turn over time, not over a few degrees of the target's travel.
+        // The side swings toward the one wanted at a bounded speed: a pole going through the target's axis (where the
+        // side must go over to the other one) is then a turn over time, not over a few degrees of the target's travel.
         if (state && o.bend_swing_degrees_per_second > 0.0f && state->valid) {
             const Vec3f held_side = state->bend - t * dot(state->bend, t);
             if (length(held_side) > 1e-6f) {
@@ -382,9 +403,9 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
             state->bend = bend;
             state->valid = true;
         }
-        // The root's twist about its bone, from what the clips did, held to a limit: the elbow's side is turned about the target's
-        // axis (the end stays on the target) until the twist is the limit's; past it, as the pole goes round behind, the limit
-        // itself eases to nothing at a half turn, so that the side never flips.
+        // The root's twist about its bone, from what the clips did, held to a limit: the elbow's side is turned about
+        // the target's axis (the end stays on the target) until the twist is the limit's; past it, as the pole goes
+        // round behind, the limit itself eases to nothing at a half turn, so that the side never flips.
         const f32 limit = std::clamp(o.max_twist_degrees, 0.0f, 180.0f) * to_radians;
         if (limit < pi - 1e-4f && carry > 0.0f) {
             const auto twist_with = [&](Vec3f side) {
@@ -440,13 +461,13 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
     const Vec3f E = A + t * deff;
     pass.goal = E;
 
-    // The turn of the upper bone. The shortest turn of the bone leaves the plane of the bend wherever it lands; the arm's bend
-    // plane is information worth keeping (an elbow hinges one way), so as far as the pose is bent the turn carries the whole
-    // triangle shoulder-elbow-hand with it, plane included, onto the new triangle: then the forearm lies in the new plane and
-    // the elbow only hinges, with the twist taken up at the shoulder, continuously with the pole. A pose that is straight has
-    // no plane to carry (the turn is the shortest one), and in between the two turns, which differ by a twist about the bone,
-    // are mixed by how bent the pose is. The elbow's side is the pole's: the normal is not chosen by which turn is shorter,
-    // so an elbow never bends backwards.
+    // The turn of the upper bone. The shortest turn of the bone leaves the plane of the bend wherever it lands; the
+    // arm's bend plane is information worth keeping (an elbow hinges one way), so as far as the pose is bent the turn
+    // carries the whole triangle shoulder-elbow-hand with it, plane included, onto the new triangle: then the forearm
+    // lies in the new plane and the elbow only hinges, with the twist taken up at the shoulder, continuously with the
+    // pole. A pose that is straight has no plane to carry (the turn is the shortest one), and in between the two turns,
+    // which differ by a twist about the bone, are mixed by how bent the pose is. The elbow's side is the pole's: the
+    // normal is not chosen by which turn is shorter, so an elbow never bends backwards.
     const Vec3f Cs = A + (C - A) * s;
     const Vec3f u1 = normalize(M - A);
     Quatf R1 = rotation_between(u0, u1);
@@ -467,17 +488,17 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
         R1 = carry >= 1.0f ? carried : blend_rotation(R1, carried, carry);
     }
     const Vec3f C1 = A + R1.rotate(Cs - A);
-    // The forearm's shortest turn onto its new direction; in the plane that is the hinge about the plane's normal (its half
-    // turn, folded flat, about that normal too).
+    // The forearm's shortest turn onto its new direction; in the plane that is the hinge about the plane's normal (its
+    // half turn, folded flat, about that normal too).
     Quatf R2 = rotation_between(C1 - M, E - M);
     if (carry > 0.0f && dot(normalize(C1 - M), normalize(E - M)) < -0.999999f) {
         R2 = axis_angle_radians(n1, pi);
     }
 
     // Back to local rotations: each joint's turn is in F's frame, so its parent's frame conjugates it.
-    JointPose& jr = pose.joints[root];
-    JointPose& jm = pose.joints[mid];
-    JointPose& je = pose.joints[end];
+    JointPose3D& jr = pose.joints[root];
+    JointPose3D& jm = pose.joints[mid];
+    JointPose3D& je = pose.joints[end];
     const Quatf q0 = jr.rotation, q1 = jm.rotation, q2 = je.rotation;
     const Quatf q0n = (R1 * q0).normalized();
     const Mat4f mid_parent = Fi * parent_world(sk, world, chain.mid);
@@ -490,8 +511,8 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
         pass.rigid = pass.rigid && is_similarity(end_parent);
         const Quatf pe = R2 * R1 * rotation_of(end_parent);
         if (forced_end) {
-            // A later pass of a scaled chain: the end's orientation as it is now (from the matrices, which the shear of a
-            // non-uniform scale makes not the product of its parts) is corrected toward the goal of the first pass.
+            // A later pass of a scaled chain: the end's orientation as it is now (from the matrices, which the shear of
+            // a non-uniform scale makes not the product of its parts) is corrected toward the goal of the first pass.
             const Quatf actual = (R2 * R1 * rotation_of(Fi * world[end])).normalized();
             const Quatf err = (*forced_end * actual.conjugate()).normalized();
             q2n = (pe.conjugate() * err * pe * q2).normalized();
@@ -532,10 +553,10 @@ TwoBoneResult two_bone_pass(const Skeleton& sk, Pose& pose, std::span<Mat4f> wor
 
 } // namespace
 
-TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> world, const TwoBoneChain& chain, Vec3f target,
-                             const TwoBoneOptions& o, TwoBoneState* state, f32 dt) {
-    if (!(o.weight > 0.0f) || !usable(sk, pose, world) || !is_joint(sk, chain.root) || !is_joint(sk, chain.mid) || !is_joint(sk, chain.end) ||
-        !is_below(sk, chain.mid, chain.root) || !is_below(sk, chain.end, chain.mid)) {
+TwoBoneResult3D solve_two_bone(const Skeleton3D& sk, Pose3D& pose, std::span<Mat4f> world, const TwoBoneChain3D& chain,
+                               Vec3f target, const TwoBoneOptions3D& o, TwoBoneState3D* state, f32 dt) {
+    if (!(o.weight > 0.0f) || !usable(sk, pose, world) || !is_joint(sk, chain.root) || !is_joint(sk, chain.mid) ||
+        !is_joint(sk, chain.end) || !is_below(sk, chain.mid, chain.root) || !is_below(sk, chain.end, chain.mid)) {
         return {};
     }
     const f32 w = std::min(o.weight, 1.0f);
@@ -543,22 +564,27 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
     const Mat4f F = parent_world(sk, world, chain.root);
     const Mat4f mid_parent = F.inverse() * parent_world(sk, world, chain.mid);
     const bool nonrigid = std::fabs(F.determinant()) >= 1e-20f &&
-                          (!is_similarity(mid_parent) || (o.match_rotation && !is_similarity(F.inverse() * parent_world(sk, world, chain.end))));
+                          (!is_similarity(mid_parent) ||
+                           (o.match_rotation && !is_similarity(F.inverse() * parent_world(sk, world, chain.end))));
     if (!nonrigid) {
         // The common case: one pass at the weight given.
         return two_bone_pass(sk, pose, world, chain, target, o, w, state, dt, nullptr, nullptr, pass);
     }
 
-    // A scaled joint between the root and the mid joint (or the root itself): a turn of the mid joint changes the drawn length of
-    // the forearm (the parent's matrix is a rotation times a non-uniform scale, which moves the forearm's end along its own
-    // length as the joint turns), so the rigid triangle's lengths are not the chain's. Solved in three steps, all at weight 1 from the
-    // pose as it was, the result blended with that pose at the end by the weight:
-    //   1. turn the mid joint about its hinge (the plane the pose bends in, or the hinge's axis) until the end is at the distance
-    //      from the root the target asks for, which is a scalar equation in the turn, solved by bracketing and bisection;
-    //   2. the rigid solve then finds the lengths it sees are the chain's, and the triangle it makes is the chain's own;
+    // A scaled joint between the root and the mid joint (or the root itself): a turn of the mid joint changes the drawn
+    // length of the forearm (the parent's matrix is a rotation times a non-uniform scale, which moves the forearm's end
+    // along its own length as the joint turns), so the rigid triangle's lengths are not the chain's. Solved in three
+    // steps, all at weight 1 from the pose as it was, the result blended with that pose at the end by the weight:
+    //   1. turn the mid joint about its hinge (the plane the pose bends in, or the hinge's axis) until the end is at
+    //   the distance
+    //      from the root the target asks for, which is a scalar equation in the turn, solved by bracketing and
+    //      bisection;
+    //   2. the rigid solve then finds the lengths it sees are the chain's, and the triangle it makes is the chain's
+    //   own;
     //   3. a few passes of the same from its own result, to the end orientation and to rounding.
-    const std::size_t root = static_cast<std::size_t>(chain.root), mid = static_cast<std::size_t>(chain.mid), end = static_cast<std::size_t>(chain.end);
-    const JointPose before_root = pose.joints[root], before_mid = pose.joints[mid], before_end = pose.joints[end];
+    const std::size_t root = static_cast<std::size_t>(chain.root), mid = static_cast<std::size_t>(chain.mid),
+                      end = static_cast<std::size_t>(chain.end);
+    const JointPose3D before_root = pose.joints[root], before_mid = pose.joints[mid], before_end = pose.joints[end];
     // Translations along the chain (a stretch changes them): kept to blend with a weight below 1.
     std::array<std::pair<i32, Vec3f>, 16> kept{};
     std::size_t kept_count = 0;
@@ -587,7 +613,9 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
                 axis = perpendicular(y_forearm);
             }
         }
-        const auto chord = [&](f32 phi) { return length(u + mid_parent.apply_vector(axis_angle_radians(axis, phi).rotate(y_forearm))); };
+        const auto chord = [&](f32 phi) {
+            return length(u + mid_parent.apply_vector(axis_angle_radians(axis, phi).rotate(y_forearm)));
+        };
         const f32 want = length(T - A);
         constexpr int samples = 72;
         f32 values[samples + 1];
@@ -616,7 +644,8 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
                 if ((values[k] - want) * (values[k + 1] - want) > 0.0f) {
                     continue;
                 }
-                f32 x = 2.0f * pi * static_cast<f32>(k) / static_cast<f32>(samples), y = 2.0f * pi * static_cast<f32>(k + 1) / static_cast<f32>(samples);
+                f32 x = 2.0f * pi * static_cast<f32>(k) / static_cast<f32>(samples),
+                    y = 2.0f * pi * static_cast<f32>(k + 1) / static_cast<f32>(samples);
                 f32 gx = values[k] - want;
                 for (int it = 0; it < 30; ++it) {
                     const f32 m = 0.5f * (x + y);
@@ -638,11 +667,11 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
                 }
             }
         }
-        JointPose& jm = pose.joints[mid];
+        JointPose3D& jm = pose.joints[mid];
         jm.rotation = (axis_angle_radians(axis, phi) * jm.rotation).normalized();
         update_world_below(sk, pose, world, chain.mid);
     }
-    TwoBoneResult res = two_bone_pass(sk, pose, world, chain, target, o, 1.0f, state, dt, nullptr, nullptr, pass);
+    TwoBoneResult3D res = two_bone_pass(sk, pose, world, chain, target, o, 1.0f, state, dt, nullptr, nullptr, pass);
     if (!res.solved) {
         pose.joints[root] = before_root;
         pose.joints[mid] = before_mid;
@@ -654,7 +683,8 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
     const Vec3f goal = pass.goal;
     const Quatf end_goal = pass.end_goal;
     const bool has_end_goal = pass.has_end_goal;
-    const f32 reach = std::max(length(Fi.apply(translation_of(world[end])) - Fi.apply(translation_of(world[root]))), 1e-6f);
+    const f32 reach =
+        std::max(length(Fi.apply(translation_of(world[end])) - Fi.apply(translation_of(world[root]))), 1e-6f);
     f32 error = 0.0f;
     for (int it = 0; it < 8; ++it) {
         error = length(Fi.apply(translation_of(world[end])) - goal);
@@ -668,21 +698,22 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
             break;
         }
         TwoBonePass again;
-        const TwoBoneResult r = two_bone_pass(sk, pose, world, chain, target, o, 1.0f, nullptr, 0.0f, &forced_bend, has_end_goal ? &end_goal : nullptr, again);
+        const TwoBoneResult3D r = two_bone_pass(sk, pose, world, chain, target, o, 1.0f, nullptr, 0.0f, &forced_bend,
+                                                has_end_goal ? &end_goal : nullptr, again);
         if (!r.solved) {
             break;
         }
     }
     if (w < 1.0f) {
         // Weight: the solve blended with the pose it began from, bone by bone, the stretch by the same share.
-        JointPose& jr = pose.joints[root];
-        JointPose& jm = pose.joints[mid];
-        JointPose& je = pose.joints[end];
+        JointPose3D& jr = pose.joints[root];
+        JointPose3D& jm = pose.joints[mid];
+        JointPose3D& je = pose.joints[end];
         jr.rotation = blend_rotation(before_root.rotation, jr.rotation, w);
         jm.rotation = blend_rotation(before_mid.rotation, jm.rotation, w);
         je.rotation = o.match_rotation ? blend_rotation(before_end.rotation, je.rotation, w) : before_end.rotation;
         for (std::size_t i = 0; i < kept_count; ++i) {
-            JointPose& jp = pose.joints[static_cast<std::size_t>(kept[i].first)];
+            JointPose3D& jp = pose.joints[static_cast<std::size_t>(kept[i].first)];
             jp.translation = kept[i].second + (jp.translation - kept[i].second) * w;
         }
         update_world_below(sk, pose, world, chain.root);
@@ -691,16 +722,18 @@ TwoBoneResult solve_two_bone(const Skeleton& sk, Pose& pose, std::span<Mat4f> wo
     return res;
 }
 
-// --- look at -------------------------------------------------------------------------------------------------------------
+// --- look at
+// -------------------------------------------------------------------------------------------------------------
 
-LookAtResult solve_look_at(const Skeleton& sk, Pose& pose, std::span<Mat4f> world, std::span<const LookAtJoint> chain, Vec3f target,
-                           const LookAtOptions& o, LookAtState* state, f32 dt) {
-    LookAtResult res;
+LookAtResult3D solve_look_at(const Skeleton3D& sk, Pose3D& pose, std::span<Mat4f> world,
+                             std::span<const LookAtJoint3D> chain, Vec3f target, const LookAtOptions3D& o,
+                             LookAtState3D* state, f32 dt) {
+    LookAtResult3D res;
     if (chain.empty() || !usable(sk, pose, world)) {
         return res;
     }
     f32 total_weight = 0.0f;
-    for (const LookAtJoint& j : chain) {
+    for (const LookAtJoint3D& j : chain) {
         if (!is_joint(sk, j.joint)) {
             return res;
         }
@@ -759,7 +792,7 @@ LookAtResult solve_look_at(const Skeleton& sk, Pose& pose, std::span<Mat4f> worl
     const f32 cp = std::cos(phi), sp = std::sin(phi);
 
     f32 applied = 0.0f;
-    for (const LookAtJoint& j : chain) {
+    for (const LookAtJoint3D& j : chain) {
         const f32 share = std::max(j.weight, 0.0f) / total_weight;
         f32 angle = turn * share;
         const f32 yaw = std::max(j.max_yaw_degrees, 1e-3f) * to_radians;
@@ -780,11 +813,12 @@ LookAtResult solve_look_at(const Skeleton& sk, Pose& pose, std::span<Mat4f> worl
     return res;
 }
 
-// --- FABRIK --------------------------------------------------------------------------------------------------------------
+// --- FABRIK
+// --------------------------------------------------------------------------------------------------------------
 
-FabrikResult solve_chain_fabrik(const Skeleton& sk, Pose& pose, std::span<Mat4f> world, std::span<const i32> chain, Vec3f target,
-                                const FabrikOptions& o) {
-    FabrikResult res;
+FabrikResult3D solve_chain_fabrik(const Skeleton3D& sk, Pose3D& pose, std::span<Mat4f> world,
+                                  std::span<const i32> chain, Vec3f target, const FabrikOptions3D& o) {
+    FabrikResult3D res;
     const std::size_t n = chain.size();
     constexpr std::size_t max_chain = 64;
     if (n < 2 || n > max_chain || !(o.weight > 0.0f) || !usable(sk, pose, world)) {
@@ -838,14 +872,15 @@ FabrikResult solve_chain_fabrik(const Skeleton& sk, Pose& pose, std::span<Mat4f>
             }
         }
     }
-    if (o.pole_mode != PoleMode::None && n >= 3) {
-        // Turn the inner joints about the line from the first joint to the tip, so that the bulge of the chain faces the pole.
-        // Both ends are on the line and every joint turns by the same angle about it: lengths and reach are untouched.
+    if (o.pole_mode != PoleMode3D::None && n >= 3) {
+        // Turn the inner joints about the line from the first joint to the tip, so that the bulge of the chain faces
+        // the pole. Both ends are on the line and every joint turns by the same angle about it: lengths and reach are
+        // untouched.
         Vec3f axis = p[n - 1] - p[0];
         const f32 axis_len = length(axis);
         if (axis_len > 1e-6f * total) {
             axis = axis / axis_len;
-            const Vec3f pole = o.pole_mode == PoleMode::Position ? o.pole - p[0] : o.pole;
+            const Vec3f pole = o.pole_mode == PoleMode3D::Position ? o.pole - p[0] : o.pole;
             const Vec3f pole_across = pole - axis * dot(pole, axis);
             Vec3f bulge{};
             for (std::size_t i = 1; i + 1 < n; ++i) {
@@ -855,8 +890,10 @@ FabrikResult solve_chain_fabrik(const Skeleton& sk, Pose& pose, std::span<Mat4f>
             bulge = bulge / static_cast<f32>(n - 2);
             const f32 bulge_len = length(bulge), pole_len = length(pole), across_len = length(pole_across);
             if (bulge_len > 1e-9f && across_len > 1e-9f && pole_len > 0.0f) {
-                // Both fade out toward their degenerate cases (a straight chain, a pole on the line) rather than switch.
-                const f32 fade = smoothstep01(bulge_len / (0.05f * total)) * smoothstep01(across_len / (0.2f * pole_len));
+                // Both fade out toward their degenerate cases (a straight chain, a pole on the line) rather than
+                // switch.
+                const f32 fade =
+                    smoothstep01(bulge_len / (0.05f * total)) * smoothstep01(across_len / (0.2f * pole_len));
                 const f32 angle = signed_angle(bulge / bulge_len, pole_across / across_len, axis) * fade;
                 const Quatf turn = axis_angle_radians(axis, angle);
                 for (std::size_t i = 1; i + 1 < n; ++i) {
@@ -869,12 +906,13 @@ FabrikResult solve_chain_fabrik(const Skeleton& sk, Pose& pose, std::span<Mat4f>
     if (!o.fix_root) {
         // The start of the chain follows: its local translation moves by the same step (in its parent's frame).
         const Mat4f Fi = parent_world(sk, world, chain[0]).inverse();
-        JointPose& jp = pose.joints[static_cast<std::size_t>(chain[0])];
+        JointPose3D& jp = pose.joints[static_cast<std::size_t>(chain[0])];
         jp.translation += Fi.apply_vector(p[0] - root) * w;
         update_world_below(sk, pose, world, chain[0]);
     }
     for (std::size_t i = 0; i + 1 < n; ++i) {
-        const Vec3f now = translation_of(world[static_cast<std::size_t>(chain[i + 1])]) - translation_of(world[static_cast<std::size_t>(chain[i])]);
+        const Vec3f now = translation_of(world[static_cast<std::size_t>(chain[i + 1])]) -
+                          translation_of(world[static_cast<std::size_t>(chain[i])]);
         Quatf r = rotation_between(now, p[i + 1] - p[i]);
         if (w < 1.0f) {
             r = blend_rotation(Quatf{}, r, w);
@@ -888,18 +926,22 @@ FabrikResult solve_chain_fabrik(const Skeleton& sk, Pose& pose, std::span<Mat4f>
     return res;
 }
 
-// --- foot placement ------------------------------------------------------------------------------------------------------
+// --- foot placement
+// ------------------------------------------------------------------------------------------------------
 
-FootPlan plan_foot_placement(const Skeleton& sk, const Pose& pose, std::span<const Mat4f> world, std::span<const FootLeg> legs,
-                             const GroundQuery& ground, const FootPlacementOptions& o, FootPlacementState* state, f32 dt,
-                             const Mat4f* model_to_world) {
-    FootPlan plan;
+FootPlan3D plan_foot_placement(const Skeleton3D& sk, const Pose3D& pose, std::span<const Mat4f> world,
+                               std::span<const FootLeg3D> legs, const GroundQuery3D& ground,
+                               const FootPlacementOptions3D& o, FootPlacementState3D* state, f32 dt,
+                               const Mat4f* model_to_world) {
+    FootPlan3D plan;
     plan.feet.resize(legs.size());
     if (legs.empty() || !ground || !usable(sk, pose, world)) {
         return plan;
     }
     const Vec3f up = normalize(o.up);
-    const f32 k = o.smooth_seconds > 0.0f && state && state->valid ? (dt > 0.0f ? 1.0f - std::exp(-dt / o.smooth_seconds) : 0.0f) : 1.0f;
+    const f32 k = o.smooth_seconds > 0.0f && state && state->valid
+                      ? (dt > 0.0f ? 1.0f - std::exp(-dt / o.smooth_seconds) : 0.0f)
+                      : 1.0f;
     if (state && state->foot_offset.size() != legs.size()) {
         state->foot_offset.assign(legs.size(), 0.0f);
         state->valid = false;
@@ -927,13 +969,14 @@ FootPlan plan_foot_placement(const Skeleton& sk, const Pose& pose, std::span<con
         return n;
     };
     const auto tilt_amount = [&](f32 sole_above) {
-        return 1.0f - smoothstep01(o.tilt_blend_height > 0.0f ? sole_above / o.tilt_blend_height : (sole_above > 0.0f ? 1.0f : 0.0f));
+        return 1.0f - smoothstep01(o.tilt_blend_height > 0.0f ? sole_above / o.tilt_blend_height
+                                                              : (sole_above > 0.0f ? 1.0f : 0.0f));
     };
 
     f32 lowest = 0.0f;
     bool any = false;
     for (std::size_t i = 0; i < legs.size(); ++i) {
-        FootTarget& out = plan.feet[i];
+        FootTarget3D& out = plan.feet[i];
         const i32 end = legs[i].leg.end;
         if (!is_joint(sk, end)) {
             continue;
@@ -946,7 +989,7 @@ FootPlan plan_foot_placement(const Skeleton& sk, const Pose& pose, std::span<con
         const f32 sole_above = std::max(dot(ankle, up) - o.ground_level - foot_height, 0.0f);
         const Vec3f from = ankle + up * o.ray_up;
         const Vec3f to = ankle - up * (sole_above + foot_height + o.ray_down);
-        const std::optional<GroundHit> hit = ground(from, to);
+        const std::optional<GroundHit3D> hit = ground(from, to);
         f32 rise = 0.0f; // how far the ground there is above the floor the clips assume
         if (hit) {
             rise = dot(hit->position, up) - o.ground_level;
@@ -978,9 +1021,10 @@ FootPlan plan_foot_placement(const Skeleton& sk, const Pose& pose, std::span<con
         out.rotation_weight = 1.0f;
         f32 foot_rise = rise;
         if (locking) {
-            // Planted (the animated sole is on the ground): the target is held where it was put, in the world, while the body
-            // moves; it lets go when the animated foot lifts or has moved too far from the held place, and eases back.
-            FootPlacementState::Lock& lock = state->locks[i];
+            // Planted (the animated sole is on the ground): the target is held where it was put, in the world, while
+            // the body moves; it lets go when the animated foot lifts or has moved too far from the held place, and
+            // eases back.
+            FootPlacementState3D::Lock& lock = state->locks[i];
             const bool on_ground = sole_above <= o.lock_height;
             if (lock.planted) {
                 const f32 drift = length(to_model.apply(lock.point) - out.target);
@@ -996,25 +1040,28 @@ FootPlan plan_foot_placement(const Skeleton& sk, const Pose& pose, std::span<con
                 lock.normal = world_turn.rotate(follow);
                 lock.rise = rise;
             } else if (!lock.planted && lock.blend > 0.0f) {
-                lock.blend = o.lock_replant_seconds > 0.0f && dt > 0.0f ? std::max(lock.blend - dt / o.lock_replant_seconds, 0.0f) : 0.0f;
+                lock.blend = o.lock_replant_seconds > 0.0f && dt > 0.0f
+                                 ? std::max(lock.blend - dt / o.lock_replant_seconds, 0.0f)
+                                 : 0.0f;
             }
             if (lock.blend > 0.0f) {
                 const f32 share = lock.planted ? 1.0f : smoothstep01(lock.blend);
                 out.target = out.target + (to_model.apply(lock.point) - out.target) * share;
-                out.rotation = blend_rotation(out.rotation, (world_turn.conjugate() * lock.rotation).normalized(), share);
+                out.rotation =
+                    blend_rotation(out.rotation, (world_turn.conjugate() * lock.rotation).normalized(), share);
                 out.normal = normalize(out.normal + (world_turn.conjugate().rotate(lock.normal) - out.normal) * share);
                 foot_rise = rise + (lock.rise - rise) * share;
                 out.locked = true;
             }
         }
-        // The toe: the ground under it (a second query), its normal clamped like the foot's, followed only as far as the foot is on
-        // the ground.
+        // The toe: the ground under it (a second query), its normal clamped like the foot's, followed only as far as
+        // the foot is on the ground.
         const i32 toe = legs[i].toe;
         if (is_joint(sk, toe) && is_below(sk, toe, end)) {
             const Mat4f& tw = world[static_cast<std::size_t>(toe)];
             const Vec3f ball = translation_of(tw);
             const f32 toe_above = std::max(dot(ball, up) - o.ground_level - legs[i].toe_height, 0.0f);
-            const std::optional<GroundHit> toe_hit =
+            const std::optional<GroundHit3D> toe_hit =
                 ground(ball + up * o.ray_up, ball - up * (toe_above + legs[i].toe_height + o.ray_down));
             if (toe_hit) {
                 const Vec3f toe_n = clamp_normal(toe_hit->normal);
@@ -1038,32 +1085,34 @@ FootPlan plan_foot_placement(const Skeleton& sk, const Pose& pose, std::span<con
     return plan;
 }
 
-void apply_foot_placement(const Skeleton& sk, Pose& pose, std::span<Mat4f> world, i32 pelvis_joint, std::span<const FootLeg> legs, const FootPlan& plan,
-                          const TwoBoneOptions& leg_options, Vec3f up) {
+void apply_foot_placement(const Skeleton3D& sk, Pose3D& pose, std::span<Mat4f> world, i32 pelvis_joint,
+                          std::span<const FootLeg3D> legs, const FootPlan3D& plan, const TwoBoneOptions3D& leg_options,
+                          Vec3f up) {
     if (!usable(sk, pose, world)) {
         return;
     }
     if (plan.pelvis_offset != 0.0f && is_joint(sk, pelvis_joint)) {
         const Mat4f Fi = parent_world(sk, world, pelvis_joint).inverse();
-        pose.joints[static_cast<std::size_t>(pelvis_joint)].translation += Fi.apply_vector(normalize(up) * plan.pelvis_offset);
+        pose.joints[static_cast<std::size_t>(pelvis_joint)].translation +=
+            Fi.apply_vector(normalize(up) * plan.pelvis_offset);
         update_world_below(sk, pose, world, pelvis_joint);
     }
     for (std::size_t i = 0; i < legs.size() && i < plan.feet.size(); ++i) {
-        const FootTarget& foot = plan.feet[i];
+        const FootTarget3D& foot = plan.feet[i];
         if (!foot.grounded) {
             continue;
         }
-        TwoBoneOptions options = leg_options;
+        TwoBoneOptions3D options = leg_options;
         options.match_rotation = foot.rotation_weight > 0.0f;
         options.end_rotation = foot.rotation;
         options.rotation_weight = foot.rotation_weight;
         solve_two_bone(sk, pose, world, legs[i].leg, foot.target, options);
         const i32 toe = legs[i].toe;
         if (foot.toe_grounded && is_joint(sk, toe) && is_below(sk, toe, legs[i].leg.end)) {
-            // Seen after the leg has moved: the toe's world turn that lays it on the ground, as a change of its local turn, held
-            // to a number of degrees from the animated one and blended by the leg's weight.
+            // Seen after the leg has moved: the toe's world turn that lays it on the ground, as a change of its local
+            // turn, held to a number of degrees from the animated one and blended by the leg's weight.
             const Quatf parent_turn = rotation_of(parent_world(sk, world, toe));
-            JointPose& jp = pose.joints[static_cast<std::size_t>(toe)];
+            JointPose3D& jp = pose.joints[static_cast<std::size_t>(toe)];
             const Quatf animated = jp.rotation;
             const Quatf wanted = (parent_turn.conjugate() * foot.toe_rotation).normalized();
             Quatf delta = (wanted * animated.conjugate()).normalized();

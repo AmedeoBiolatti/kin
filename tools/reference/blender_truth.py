@@ -127,7 +127,7 @@ def world(above, below=None):
 
 
 def environment(path, intensity=1.0, rotation=0.0):
-    """kin's environment (render3d/environment.hpp) as the world: the same
+    """kin's environment (render3d/environment3d.hpp) as the world: the same
     equirectangular .hdr, Blender's own mapping of it (the centre is +x in
     kin's axes too, the top +y, going right turns toward +z: the same as
     kin's, checked by a mirror sphere), `intensity` times, turned about +y by

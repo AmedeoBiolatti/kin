@@ -36,7 +36,10 @@ SummitLevel generate_expedition_level(u64 seed, bool dense_scenery) {
     };
     const auto walk = [](Vec3f from, Vec3f to, const char* label, i32 camp = -1) {
         Leg l;
-        l.from = from; l.to = to; l.label = label; l.camp = camp;
+        l.from = from;
+        l.to = to;
+        l.label = label;
+        l.camp = camp;
         return l;
     };
     const auto climb = [&](Vec3f from, Vec3f to, f32 height, const char* label) {
@@ -48,7 +51,8 @@ SummitLevel generate_expedition_level(u64 seed, bool dense_scenery) {
     };
     const auto rest = [&](Vec3f point, const char* label) {
         Leg l = walk(point, point, label);
-        l.kind = LegKind::Rest; l.height = 1.0f;
+        l.kind = LegKind::Rest;
+        l.height = 1.0f;
         return l;
     };
 
@@ -59,7 +63,8 @@ SummitLevel generate_expedition_level(u64 seed, bool dense_scenery) {
     box(PieceKind::Cliff, 54, 68, -7, 7, 4, 18);
     box(PieceKind::Ground, 68, 82, -8, 8, 10, 18);
     box(PieceKind::Ground, 70, 82, 8, 22, 10, 18);
-    // The sheltered branch has actual walls, an inclined floor and an inclined ceiling, all in the same collider/mesh list.
+    // The sheltered branch has actual walls, an inclined floor and an inclined ceiling, all in the same collider/mesh
+    // list.
     ramp(53.8f, 70.2f, 12, 18, 10, 18);
     level.pieces.back().tag = 20; // the cave floor is bare stone rather than the approach's grass
     ramp(53.8f, 70.2f, 15.8f, 21.8f, 9, 19, PieceKind::Roof);
@@ -109,15 +114,16 @@ SummitLevel generate_expedition_level(u64 seed, bool dense_scenery) {
     level.route.push_back(finish);
     e.sheltered_route.assign(level.route.begin(), level.route.begin() + 2);
     const std::vector<Leg> cave = {walk(e.fork, at(49, 14, 12), "follow the blue trail"),
-                                 walk(at(49, 14, 12), at(55, 14, 12.45f), "enter the cave"),
-                                 walk(at(55, 14, 12.45f), at(62, 14, 15), "inside the shelter"),
-                                 rest(at(62, 14, 15), "recover in the shelter"),
-                                 walk(at(62, 14, 15), at(72, 14, 18), "leave the cave"),
-                                 walk(at(72, 14, 18), level.camps[1].spawn, "to the ridge camp", 1)};
+                                   walk(at(49, 14, 12), at(55, 14, 12.45f), "enter the cave"),
+                                   walk(at(55, 14, 12.45f), at(62, 14, 15), "inside the shelter"),
+                                   rest(at(62, 14, 15), "recover in the shelter"),
+                                   walk(at(62, 14, 15), at(72, 14, 18), "leave the cave"),
+                                   walk(at(72, 14, 18), level.camps[1].spawn, "to the ridge camp", 1)};
     e.sheltered_route.insert(e.sheltered_route.end(), cave.begin(), cave.end());
     e.sheltered_route.insert(e.sheltered_route.end(), level.route.begin() + 5, level.route.end());
     e.direct_trail = {e.fork, at(52, 0, 12), at(55.5f, 0, 18), level.camps[1].spawn};
-    e.sheltered_trail = {e.fork, at(49, 14, 12), at(55, 14, 12.45f), at(62, 14, 15), at(72, 14, 18), level.camps[1].spawn};
+    e.sheltered_trail = {e.fork,         at(49, 14, 12), at(55, 14, 12.45f),
+                         at(62, 14, 15), at(72, 14, 18), level.camps[1].spawn};
     const auto equipment = [&](u32 tag, f32 f0, f32 f1, f32 r0, f32 r1, f32 y0, f32 y1) {
         box(PieceKind::Equipment, f0, f1, r0, r1, y0, y1);
         level.pieces.back().tag = tag;
@@ -134,15 +140,19 @@ SummitLevel generate_expedition_level(u64 seed, bool dense_scenery) {
     box(PieceKind::Boulder, 86, 96, -13, -8, 15, 31);
     box(PieceKind::Boulder, 141, 151, 7, 13, 32, 47);
 
-    // A walkable forest apron surrounds the original trail rather than placing trees over the non-colliding distant terrain.
-    if (dense_scenery) box(PieceKind::Ground, -28, 48, -48, 48, -4, -0.25f);
+    // A walkable forest apron surrounds the original trail rather than placing trees over the non-colliding distant
+    // terrain.
+    if (dense_scenery)
+        box(PieceKind::Ground, -28, 48, -48, 48, -4, -0.25f);
     Vec3f lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
     for (const Piece& p : level.pieces) {
-        for (int x : {-1, 1}) for (int y : {-1, 1}) for (int z : {-1, 1}) {
-            const Vec3f v = p.centre + p.rotation.rotate({p.half.x * x, p.half.y * y, p.half.z * z});
-            lo = {std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)};
-            hi = {std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
-        }
+        for (int x : {-1, 1})
+            for (int y : {-1, 1})
+                for (int z : {-1, 1}) {
+                    const Vec3f v = p.centre + p.rotation.rotate({p.half.x * x, p.half.y * y, p.half.z * z});
+                    lo = {std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)};
+                    hi = {std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
+                }
     }
     level.bounds = {lo, hi};
     level.kill_y = -20;
@@ -151,32 +161,40 @@ SummitLevel generate_expedition_level(u64 seed, bool dense_scenery) {
 
 bool in_expedition_shelter(const SummitLevel& level, Vec3f feet) {
     const ExpeditionLayout& e = level.expedition;
-    if (!e.enabled) return false;
+    if (!e.enabled)
+        return false;
     const Vec3f v = e.rotation.conjugate().rotate(feet - e.shelter_centre);
     return std::abs(v.x) < e.shelter_half.x && std::abs(v.y) < e.shelter_half.y && std::abs(v.z) < e.shelter_half.z;
 }
 
 ExpeditionInteraction Game::interaction(i32 index) const {
-    if (!_config.expedition) return ExpeditionInteraction::None;
+    if (!_config.expedition)
+        return ExpeditionInteraction::None;
     const Player& p = player(index);
-    if (p.state != PlayerState::Alive || character_state(index).ground != CharacterGround3D::OnGround || traversal(index).hanging())
+    if (p.state != PlayerState::Alive || character_state(index).ground != CharacterGround3D::OnGround ||
+        traversal(index).hanging())
         return ExpeditionInteraction::None;
     const ExpeditionLayout& e = _level.expedition;
     const auto near = [&](Vec3f target) {
         const Vec3f d = feet(index) - target;
         return d.x * d.x + d.z * d.z < 2.5f * 2.5f && std::abs(d.y) < 1.0f;
     };
-    if (p.expedition.phase == ExpeditionPhase::Briefing && near(e.briefing)) return ExpeditionInteraction::Begin;
-    if (p.expedition.phase == ExpeditionPhase::Climbing && near(e.beacon)) return ExpeditionInteraction::Beacon;
-    if (p.expedition.phase == ExpeditionPhase::Extraction && near(e.extraction)) return ExpeditionInteraction::Extract;
-    if (p.expedition.phase != ExpeditionPhase::Complete && in_expedition_shelter(_level, feet(index))) return ExpeditionInteraction::Recover;
+    if (p.expedition.phase == ExpeditionPhase::Briefing && near(e.briefing))
+        return ExpeditionInteraction::Begin;
+    if (p.expedition.phase == ExpeditionPhase::Climbing && near(e.beacon))
+        return ExpeditionInteraction::Beacon;
+    if (p.expedition.phase == ExpeditionPhase::Extraction && near(e.extraction))
+        return ExpeditionInteraction::Extract;
+    if (p.expedition.phase != ExpeditionPhase::Complete && in_expedition_shelter(_level, feet(index)))
+        return ExpeditionInteraction::Recover;
     return ExpeditionInteraction::None;
 }
 
 void Game::step_expedition(i32 index) {
     Player& p = _players[std::size_t(index)];
     ExpeditionState& s = p.expedition;
-    if (s.phase == ExpeditionPhase::Complete) return;
+    if (s.phase == ExpeditionPhase::Complete)
+        return;
     const ExpeditionInteraction target = interaction(index);
     if (target == ExpeditionInteraction::Begin && p.command.interact) {
         s.phase = ExpeditionPhase::Climbing;
@@ -193,7 +211,8 @@ void Game::step_expedition(i32 index) {
         p.health = std::min(_config.rules.max_health, p.health + _config.rules.camp_health_regen * fixed_step);
         _world->set_traversal_resource(p.character, std::min(stamina_cap(index), stamina(index) + 20.0f * fixed_step));
     }
-    // Repairing or extracting requires a continuous hold on solid ground, in range. Leaving, releasing or falling resets it.
+    // Repairing or extracting requires a continuous hold on solid ground, in range. Leaving, releasing or falling
+    // resets it.
     s.beacon_steps = target == ExpeditionInteraction::Beacon && p.command.interact ? s.beacon_steps + 1 : 0;
     s.extraction_steps = target == ExpeditionInteraction::Extract && p.command.interact ? s.extraction_steps + 1 : 0;
     if (s.beacon_steps >= beacon_hold_steps) {

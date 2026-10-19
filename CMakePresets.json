@@ -1,6 +1,10 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "ship",
@@ -21,11 +25,54 @@
       "inherits": "ship",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "2d",
+      "displayName": "2D engine and samples",
+      "description": "Release build with the 2D GPU/software renderer and tests; no 3D engine, physics dependencies or shaders.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-2d",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "KIN_EXPERIMENTAL_3D": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "ship", "configurePreset": "ship", "configuration": "Release" },
-    { "name": "ship-vs", "configurePreset": "ship-vs", "configuration": "Release" }
+    {
+      "name": "ship",
+      "configurePreset": "ship",
+      "configuration": "Release"
+    },
+    {
+      "name": "ship-vs",
+      "configurePreset": "ship-vs",
+      "configuration": "Release"
+    },
+    {
+      "name": "2d",
+      "configurePreset": "2d",
+      "jobs": 1
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "2d",
+      "configurePreset": "2d",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 1
+      },
+      "environment": {
+        "KIN_RENDER_BACKEND": "sdl"
+      }
+    }
   ]
 }

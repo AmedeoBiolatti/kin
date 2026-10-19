@@ -179,7 +179,7 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   picture to the current directory, F2 prints the settings and a fragment for a
   reference scene (`tests/reference/scenes/*.json`).
 - The "Character (skinned)" section spawns a procedural skinned character (three joints; clips Sway, Bend, Wave and a 1D blend of Sway
-  and Wave by a slider) as ECS entities (`SkinnedMeshRenderer`, `Animator3D`) in a row in front of the camera (1 to 64), with speed and size;
+  and Wave by a slider) as ECS entities (`SkinnedMeshRenderer3D`, `Animator3D`) in a row in front of the camera (1 to 64), with speed and size;
   changing the clip is a state change, which crossfades. The stats show skinned copies, draws and joint matrices. `--preset character` and
   `--preset character-all` (with occlusion, contact shadows, TAA and four cascades). The panel's click path is untested here (no display).
 - The "Character IK" section (the Person rig: 25 joints, procedural, same clip names; toes and a tail among them) poses the same
@@ -730,7 +730,7 @@ The default `--scenery dense` adds a forested lower approach, rocks and ground c
 spatial groups; their CPU records total about 0.55 MiB. Trees and rocks have matching colliders. Use `--scenery compact`
 to retain the original sparse approach for comparisons.
 
-Summit's art integration now uses engine `Assets3D` handles, `Model::placement` and `ModelBatch3D`; atlas sharing, model-part
+Summit's art integration now uses engine `Assets3D` handles, `Model3D::placement` and `ModelBatch3D`; atlas sharing, model-part
 expansion and cell grouping are reusable engine services. See the [3D asset/placement API](../docs/rendering_3d.md#shared-assets-and-whole-model-placement)
 for scene-owned resource lifetimes, bounded weak caches and a minimal usage example.
 

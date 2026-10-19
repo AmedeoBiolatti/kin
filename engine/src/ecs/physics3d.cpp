@@ -3,7 +3,7 @@
 #include <kin/platform/log.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/scene3d.hpp>
-#include <kin/render3d/skeleton.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 #include <kin/physics3d/assets3d.hpp>
 
 #include <algorithm>
@@ -105,7 +105,7 @@ Shape3D build_shape(const Collider3D& c, Vec3f entity_scale, int depth = 0) {
             }
             std::vector<Vec3f> points;
             points.reserve(c.mesh->vertices.size());
-            for (const MeshVertex& v : c.mesh->vertices) {
+            for (const MeshVertex3D& v : c.mesh->vertices) {
                 points.push_back(v.position * s);
             }
             if (c.kind == Collider3D::Kind::ConvexHull) {
@@ -165,7 +165,7 @@ WorldPhysicsState3D::WorldPhysicsState3D(flecs::world& world, World3D& physics, 
     , _config(config)
     , _query(world.query_builder<const Transform3D, const Collider3D, const RigidBody3D*>().build())
     , _character_query(world.query_builder<const Transform3D, const CharacterController3D>().build())
-    , _ragdoll_query(world.query_builder<const Transform3D, const SkinnedMeshRenderer, const Ragdoll3D>().build())
+    , _ragdoll_query(world.query_builder<const Transform3D, const SkinnedMeshRenderer3D, const Ragdoll3D>().build())
     , _rope_query(world.query_builder<const Rope3D>().build())
     , _debug(config.debug) {}
 
@@ -776,7 +776,7 @@ RagdollHandle3D WorldPhysicsState3D::ragdoll_of(flecs::entity entity) const {
 
 void WorldPhysicsState3D::sync_ragdolls() {
     std::vector<flecs::entity> wanted;
-    const auto consider=[&](flecs::entity e,const SkinnedMeshRenderer& renderer) {
+    const auto consider=[&](flecs::entity e,const SkinnedMeshRenderer3D& renderer) {
         if (renderer.model && !renderer.model->skeletons.empty()) {
             wanted.push_back(e);
         }
@@ -784,8 +784,8 @@ void WorldPhysicsState3D::sync_ragdolls() {
     if(_selective_sync)for(auto id:_sync_entities) {
         flecs::entity e{_ecs,id};
         if(e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<Ragdoll3D>())
-            if(const auto* renderer=e.get<SkinnedMeshRenderer>())consider(e,*renderer);
-    } else _ragdoll_query.each([&](flecs::entity e,const Transform3D&,const SkinnedMeshRenderer& renderer,const Ragdoll3D&){consider(e,renderer);});
+            if(const auto* renderer=e.get<SkinnedMeshRenderer3D>())consider(e,*renderer);
+    } else _ragdoll_query.each([&](flecs::entity e,const Transform3D&,const SkinnedMeshRenderer3D& renderer,const Ragdoll3D&){consider(e,renderer);});
     std::ranges::sort(wanted, [](flecs::entity a, flecs::entity b) { return a.id() < b.id(); });
 
     std::vector<BoundRagdoll> kept;
@@ -816,11 +816,11 @@ void WorldPhysicsState3D::sync_ragdolls() {
     }
     for (const flecs::entity e : to_create) {
         const Ragdoll3D& component = *e.get<Ragdoll3D>();
-        const Model& model = *e.get<SkinnedMeshRenderer>()->model;
-        const Skeleton& skeleton = model.skeletons[0];
+        const Model3D& model = *e.get<SkinnedMeshRenderer3D>()->model;
+        const Skeleton3D& skeleton = model.skeletons[0];
         const Mat4f entity_matrix = world_matrix(e);
         const Placed placed = decompose(entity_matrix);
-        const Pose rest = skeleton.rest_pose();
+        const Pose3D rest = skeleton.rest_pose();
         RagdollDesc desc = component.desc;
         if (desc.bones.empty()) {
             desc = auto_ragdoll_desc(skeleton, rest, component.auto_options);
@@ -886,11 +886,11 @@ void WorldPhysicsState3D::ragdolls_to_world() {
         if (!e.is_alive() || !_physics.contains(r.ragdoll)) {
             continue;
         }
-        const SkinnedMeshRenderer* renderer = e.get<SkinnedMeshRenderer>();
+        const SkinnedMeshRenderer3D* renderer = e.get<SkinnedMeshRenderer3D>();
         if (renderer == nullptr || !renderer->model || renderer->model->skeletons.empty()) {
             continue;
         }
-        const Skeleton& skeleton = renderer->model->skeletons[0];
+        const Skeleton3D& skeleton = renderer->model->skeletons[0];
         const Animator3D* animator = e.get<Animator3D>();
         // Where the clip puts the bones now, in the world: what the kinematic bodies follow. (The clip's pose: constraints
         // are solved at draw time and are the renderer's.)
@@ -1008,7 +1008,7 @@ bool WorldPhysicsState3D::animate_ragdoll(flecs::entity entity) {
 
 bool WorldPhysicsState3D::set_ragdoll_subtree(flecs::entity entity, std::string_view joint_name, f32 weight) {
     const BoundRagdoll* r = bound_ragdoll(entity);
-    const SkinnedMeshRenderer* renderer = entity.get<SkinnedMeshRenderer>();
+    const SkinnedMeshRenderer3D* renderer = entity.get<SkinnedMeshRenderer3D>();
     if (r == nullptr || renderer == nullptr || !renderer->model || renderer->model->skeletons.empty()) {
         return false;
     }
@@ -1285,7 +1285,7 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
     struct Group {
         Material3D material;
         Color tint;
-        MeshData data;
+        MeshData3D data;
     };
     std::vector<Group> groups;
     for (const BoundRope& r : _ropes) {
@@ -1308,7 +1308,7 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
             groups.push_back({c->material, c->tint, {}});
             group = &groups.back();
         }
-        MeshData& data = group->data;
+        MeshData3D& data = group->data;
         const u32 sides = std::clamp<u32>(c->sides, 3u, 16u);
         const f32 radius = c->render_radius > 0.0f ? c->render_radius : c->radius;
         const std::vector<RopePoint3D>& pts = c->sampled;
@@ -1329,7 +1329,7 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
             for (u32 s = 0; s < sides; ++s) {
                 const f32 a = 6.2831853f * static_cast<f32>(s) / static_cast<f32>(sides);
                 const Vec3f out = normal * std::cos(a) + binormal * std::sin(a);
-                MeshVertex v;
+                MeshVertex3D v;
                 v.position = pts[k].position + out * radius;
                 v.normal = out;
                 v.uv = {static_cast<f32>(s) / static_cast<f32>(sides), along / std::max(6.2831853f * radius, 1.0e-3f)};
@@ -1360,7 +1360,7 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
         if (g.data.vertices.empty()) {
             continue;
         }
-        Mesh mesh = renderer.create_mesh(g.data);
+        Mesh3D mesh = renderer.create_mesh(g.data);
         if (mesh.valid()) {
             scene.draw(mesh, Mat4f{}, g.material);
             _rope_meshes.push_back(std::move(mesh));
@@ -1437,7 +1437,7 @@ void drive_character_animator(Animator3D& animator, const CharacterState3D& stat
         animator.params.set_bool(link.hanging, state.traversal_mode != TraversalMode3D::Walking);
     }
     if (!link.feet.empty()) {
-        if (IKConstraint* feet = animator.find_ik(link.feet)) {
+        if (IKConstraint3D* feet = animator.find_ik(link.feet)) {
             // The feet go where the physics world's floor is, never onto the character's own capsule; in the air the
             // clip's feet are the right ones (the weight fades by the constraint's own time).
             feet->ground = ground_query_from_world(world, link.ground_mask, state.body);
@@ -1451,7 +1451,7 @@ void drive_traversal_animator(Animator3D& animator, const TraversalState3D& trav
     (void)up;
     const u32 limbs = std::min<u32>(static_cast<u32>(link.hands.size()), max_grip_limbs3d);
     for (u32 h = 0; h < limbs; ++h) {
-        IKConstraint* hand = animator.find_ik(link.hands[h]);
+        IKConstraint3D* hand = animator.find_ik(link.hands[h]);
         if (hand == nullptr) {
             continue;
         }
@@ -1478,8 +1478,8 @@ void drive_traversal_animator(Animator3D& animator, const TraversalState3D& trav
     }
 }
 
-GroundQuery ground_query_from_world(const World3D& world, Layer3DMask mask, Body3D ignore) {
-    return [&world, mask, ignore](Vec3f from, Vec3f to) -> std::optional<GroundHit> {
+GroundQuery3D ground_query_from_world(const World3D& world, Layer3DMask mask, Body3D ignore) {
+    return [&world, mask, ignore](Vec3f from, Vec3f to) -> std::optional<GroundHit3D> {
         QueryFilter3D filter;
         filter.mask = mask;
         filter.ignore = ignore;
@@ -1487,11 +1487,11 @@ GroundQuery ground_query_from_world(const World3D& world, Layer3DMask mask, Body
         if (!hit) {
             return std::nullopt;
         }
-        return GroundHit{hit->point, hit->normal};
+        return GroundHit3D{hit->point, hit->normal};
     };
 }
 
-Collider3D collider_from_bounds(const Bounds3& bounds) {
+Collider3D collider_from_bounds(const Bounds3D& bounds) {
     Collider3D c;
     c.kind = Collider3D::Kind::Box;
     c.half_extents = bounds.size() * 0.5f;
@@ -1500,30 +1500,30 @@ Collider3D collider_from_bounds(const Bounds3& bounds) {
 }
 
 std::optional<Collider3D> collider_from_mesh(flecs::entity entity) {
-    if (const MeshRenderer* r = entity.get<MeshRenderer>(); r != nullptr && r->mesh.valid()) {
+    if (const MeshRenderer3D* r = entity.get<MeshRenderer3D>(); r != nullptr && r->mesh.valid()) {
         return collider_from_bounds(r->mesh.bounds());
     }
-    if (const SkinnedMeshRenderer* r = entity.get<SkinnedMeshRenderer>(); r != nullptr && r->model) {
+    if (const SkinnedMeshRenderer3D* r = entity.get<SkinnedMeshRenderer3D>(); r != nullptr && r->model) {
         return collider_from_bounds(r->model->bounds);
     }
     return std::nullopt;
 }
 
-Collider3D collider_hull_from_mesh_data(std::shared_ptr<const MeshData> mesh) {
+Collider3D collider_hull_from_mesh_data(std::shared_ptr<const MeshData3D> mesh) {
     Collider3D c;
     c.kind = Collider3D::Kind::ConvexHull;
     c.mesh = std::move(mesh);
     return c;
 }
 
-Collider3D collider_triangles_from_mesh_data(std::shared_ptr<const MeshData> mesh) {
+Collider3D collider_triangles_from_mesh_data(std::shared_ptr<const MeshData3D> mesh) {
     Collider3D c;
     c.kind = Collider3D::Kind::TriangleMesh;
     c.mesh = std::move(mesh);
     return c;
 }
 
-Mesh draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const DebugLine3D> lines) {
+Mesh3D draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const DebugLine3D> lines) {
     if (lines.empty()) {
         return {};
     }
@@ -1542,7 +1542,7 @@ Mesh draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const Debu
         const f32 shift = orthographic ? 0.004f : std::min(0.5f * distance, std::max(0.003f, 0.002f * distance));
         return p + to_eye * (shift / distance);
     };
-    MeshData data;
+    MeshData3D data;
     data.vertices.reserve(lines.size() * 3);
     data.indices.reserve(lines.size() * 3);
     for (const DebugLine3D& l : lines) {
@@ -1555,7 +1555,7 @@ Mesh draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const Debu
         Vec3f across = cross(b - a, to_eye);
         across = length(across) > 0.0f ? normalize(across) : Vec3f{0.0f, 1.0f, 0.0f};
         const f32 hair = std::max(0.002f, 0.0015f * length(camera.position - b));
-        MeshVertex va, vb, vc;
+        MeshVertex3D va, vb, vc;
         va.position = a;
         vb.position = b;
         vc.position = b + across * hair;
@@ -1567,7 +1567,7 @@ Mesh draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const Debu
         data.indices.push_back(first + 1);
         data.indices.push_back(first + 2);
     }
-    Mesh mesh = renderer.create_mesh(data);
+    Mesh3D mesh = renderer.create_mesh(data);
     if (mesh.valid()) {
         Material3D material;
         material.unlit = true;

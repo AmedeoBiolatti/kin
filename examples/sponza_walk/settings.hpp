@@ -3,15 +3,14 @@
 // Everything Sponza Walk can switch, in one struct, and how it is applied to a
 // Scene3D each frame. A new renderer feature is a field here, a line in
 // apply() and one row in the controls table (main.cpp).
-#include <kin/render3d/particles3d.hpp>
-#include <kin/render3d/renderer3d.hpp>
-#include <kin/render3d/shadow_cascades.hpp>
-#include <kin/render3d/taa.hpp>
-#include <kin/render3d/timeofday3d.hpp>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <kin/render3d/particles3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
+#include <kin/render3d/shadow_cascades3d.hpp>
+#include <kin/render3d/taa3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
 #include <string>
 #include <vector>
 
@@ -22,11 +21,15 @@ inline constexpr float pi = 3.14159265f;
 
 // The reference scene's sun (tests/reference/scenes/sponza.json), as angles.
 inline constexpr Vec3f reference_sun{0.4f, 1.0f, 0.12f};
-inline constexpr Vec3f reference_sun_colour{4.0f, 3.8f, 3.4f};
-inline constexpr Vec3f reference_ambient{0.36f, 0.4f, 0.48f};
+inline constexpr LinearRgb reference_sun_colour{4.0f, 3.8f, 3.4f};
+inline constexpr LinearRgb reference_ambient{0.36f, 0.4f, 0.48f};
 
-inline float azimuth_of(Vec3f d) { return std::atan2(d.z, d.x) * 180.0f / pi; }
-inline float elevation_of(Vec3f d) { return std::atan2(d.y, std::hypot(d.x, d.z)) * 180.0f / pi; }
+inline float azimuth_of(Vec3f d) {
+    return std::atan2(d.z, d.x) * 180.0f / pi;
+}
+inline float elevation_of(Vec3f d) {
+    return std::atan2(d.y, std::hypot(d.x, d.z)) * 180.0f / pi;
+}
 
 enum class WireMode { Off, Overlay, Only };
 enum class ShadowArea { Auto, AroundCamera };
@@ -34,16 +37,16 @@ enum class ShadowArea { Auto, AroundCamera };
 // What is done to every material of the model (copies are changed, the
 // model's own are kept).
 struct MaterialSettings {
-    bool textures = true;      // base colour textures; off: flat grey
+    bool textures = true; // base colour textures; off: flat grey
     bool normal_maps = true;
     bool metal_rough_maps = true;
     bool occlusion_maps = true;
     bool emissive = true;
     float emissive_scale = 1.0f;
-    bool cutout = true;        // alpha cut-out (Blend3D::Mask); off: opaque
-    bool blended = true;       // alpha-blended and additive parts drawn at all
+    bool cutout = true;  // alpha cut-out (Blend3D::Mask); off: opaque
+    bool blended = true; // alpha-blended and additive parts drawn at all
     bool force_double_sided = false;
-    bool casts_shadow = true;  // off: no part casts
+    bool casts_shadow = true; // off: no part casts
     bool receives_shadow = true;
     bool force_unlit = false;
     float normal_scale = 1.0f;
@@ -56,8 +59,8 @@ struct MaterialSettings {
 
 struct Settings {
     // Camera
-    float move_speed = 4.0f;    // metres a second
-    float sensitivity = 0.08f;  // degrees a pixel
+    float move_speed = 4.0f;   // metres a second
+    float sensitivity = 0.08f; // degrees a pixel
     float fov = 65.0f;
     float near_plane = 0.05f;
     bool far_limit = false;
@@ -68,7 +71,7 @@ struct Settings {
     float sun_azimuth = azimuth_of(reference_sun);
     float sun_elevation = elevation_of(reference_sun);
     bool sun_animate = false;
-    float sun_speed = 12.0f;    // degrees a second
+    float sun_speed = 12.0f; // degrees a second
     bool fill = false;
     float fill_intensity = 0.5f;
     // Ambient
@@ -76,26 +79,27 @@ struct Settings {
     float ambient_intensity = 1.0f;
     bool ground = false;
     float ground_intensity = 1.0f;
-    int environment = 0;        // 0: none, else the HDRI at index - 1
+    int environment = 0; // 0: none, else the HDRI at index - 1
     float environment_intensity = 1.0f;
     float environment_rotation = 0.0f;
     // Point lights (at most 16 light a frame)
-    std::vector<PointLight> points;
+    std::vector<PointLightSource3D> points;
     bool light_markers = true;
-    // Spot lights and the shadows of lights that are not the sun (P3b). `spots` are dropped at the camera (J) and shine the way it looked;
-    // the flashlight is carried with the camera; a ring of `spot_ring` lamps hangs over the model's middle, and `point_ring` point lamps
-    // (cube shadows) beside them. The maps are given to the most important (`spot_shadow_count`, `point_shadow_count`); the moon's shadow is
-    // the fill light's own cascades (with the time of day, faded in with the moon's height).
-    std::vector<SpotLight> spots;
+    // Spot lights and the shadows of lights that are not the sun (P3b). `spots` are dropped at the camera (J) and shine
+    // the way it looked; the flashlight is carried with the camera; a ring of `spot_ring` lamps hangs over the model's
+    // middle, and `point_ring` point lamps (cube shadows) beside them. The maps are given to the most important
+    // (`spot_shadow_count`, `point_shadow_count`); the moon's shadow is the fill light's own cascades (with the time of
+    // day, faded in with the moon's height).
+    std::vector<SpotLightSource3D> spots;
     bool flashlight = false;
-    float flash_intensity = 45.0f;  // the light a white surface shows one unit away
+    float flash_intensity = 45.0f; // the light a white surface shows one unit away
     float flash_inner = 7.0f;
     float flash_outer = 16.0f;
     float flash_radius = 30.0f;
     bool flash_shadow = true;
     int spot_ring = 0;
     float spot_ring_intensity = 60.0f;
-    float spot_inner = 22.0f;       // for the ring and the lights dropped from now on
+    float spot_inner = 22.0f; // for the ring and the lights dropped from now on
     float spot_outer = 40.0f;
     float spot_radius = 16.0f;
     bool spot_shadows = true;       // a light made from now on asks for a shadow
@@ -106,13 +110,14 @@ struct Settings {
     float spot_softness = 1.0f;
     int point_ring = 0;
     bool point_shadows = true;
-    int point_shadow_count = 2;     // Lights3D::max_shadowed_points (0 to 2)
-    bool moon_shadow = false;       // the fill light's cascades (needs shadows on and, for the moon, the time of day)
+    int point_shadow_count = 2; // Lights3D::max_shadowed_points (0 to 2)
+    bool moon_shadow = false;   // the fill light's cascades (needs shadows on and, for the moon, the time of day)
     int moon_cascades = 2;
-    // Particles and weather (P3c). Rain, snow, dust and mist (0 to 1) fall in volumes round the camera as a function of the weather's
-    // clock (`weather_time`, seconds, which the walk advances); the wind blows them and the fires. The weather may dim the light and thicken
-    // the fog (Weather3D::apply), the ground is the model's floor (rain splashes on it). `fire` fires burn in the model's middle (each a
-    // flame and a few sparks, with a light); more are dropped at the camera (F), at `fires`.
+    // Particles and weather (P3c). Rain, snow, dust and mist (0 to 1) fall in volumes round the camera as a function of
+    // the weather's clock (`weather_time`, seconds, which the walk advances); the wind blows them and the fires. The
+    // weather may dim the light and thicken the fog (Weather3D::apply), the ground is the model's floor (rain splashes
+    // on it). `fire` fires burn in the model's middle (each a flame and a few sparks, with a light); more are dropped
+    // at the camera (F), at `fires`.
     float rain = 0.0f, snow = 0.0f, dust = 0.0f, mist = 0.0f;
     float wind_speed = 0.0f;
     float wind_direction = 20.0f; // degrees from +x toward +z
@@ -135,9 +140,10 @@ struct Settings {
     int shadow_resolution = 2; // index into shadow_resolutions
     int shadow_cascades = 1;
     float shadow_distance = 100.0f;
-    int shadow_area = 0;       // ShadowArea
+    int shadow_area = 0;         // ShadowArea
     float shadow_extent = 12.0f; // half a side of the box round the camera
-    bool shadow_cache = false;   // Lights3D::cache_shadows: the map is kept while nothing it depends on moves (a hit shows in the stats)
+    bool shadow_cache =
+        false; // Lights3D::cache_shadows: the map is kept while nothing it depends on moves (a hit shows in the stats)
     // Ambient occlusion
     bool ao = false;
     float ao_radius = 0.5f;
@@ -156,125 +162,135 @@ struct Settings {
     float taa_jitter_scale = 1.0f;
     int taa_jitter_samples = 8;
     bool taa_freeze = false;
-    // Sky and fog (P3a): a procedural atmosphere behind the model (seen through its open roof and the arches), fog that takes its
-    // colour from it, and a time of day that drives the sun, the moonlight, the ambient light and the sky together.
+    // Sky and fog (P3a): a procedural atmosphere behind the model (seen through its open roof and the arches), fog that
+    // takes its colour from it, and a time of day that drives the sun, the moonlight, the ambient light and the sky
+    // together.
     bool sky = false;
-    float sky_turbidity = 2.5f;     // haze
-    float sky_sun_intensity = 3.0f; // the sun's light above the atmosphere (the time of day makes the sun's own from it)
+    float sky_turbidity = 2.5f; // haze
+    float sky_sun_intensity =
+        3.0f; // the sun's light above the atmosphere (the time of day makes the sun's own from it)
     float sky_intensity = 1.0f;
-    float sky_sun_size = 0.8f;      // degrees across
-    float sky_sun_disc = 30.0f;     // the disc's radiance over the sun's light (HDR: bloom picks it up)
+    float sky_sun_size = 0.8f;  // degrees across
+    float sky_sun_disc = 30.0f; // the disc's radiance over the sun's light (HDR: bloom picks it up)
     bool sky_stars = true;
     bool sky_moon = true;
-    bool sky_lights = false;        // Lights3D::sky_lights_scene: ambient light and reflections from the sky (replaces the hemisphere ambient)
+    bool sky_lights = false; // Lights3D::sky_lights_scene: ambient light and reflections from the sky (replaces the
+                             // hemisphere ambient)
     bool fog = false;
-    float fog_density = 0.004f;     // per metre of distance
+    float fog_density = 0.004f; // per metre of distance
     float fog_height_density = 0.0f;
-    float fog_falloff = 0.1f;       // per metre of height
-    float fog_base = 0.0f;          // the height its density is measured at
+    float fog_falloff = 0.1f; // per metre of height
+    float fog_base = 0.0f;    // the height its density is measured at
     float fog_start = 0.0f;
-    float fog_max = 1.0f;           // the greatest opacity
-    bool fog_from_sky = true;       // its colour is the sky's in the view's direction
+    float fog_max = 1.0f;     // the greatest opacity
+    bool fog_from_sky = true; // its colour is the sky's in the view's direction
     float fog_sun_scatter = 0.25f;
     float fog_anisotropy = 0.6f;
-    bool tod = false;               // the time of day sets the sun, the fill (the moon), the ambient light, the moon of the sky and the fog's colour
-    float tod_hours = 12.0f;        // solar time
-    float tod_day = 172.0f;         // day of the year
+    bool tod = false; // the time of day sets the sun, the fill (the moon), the ambient light, the moon of the sky and
+                      // the fog's colour
+    float tod_hours = 12.0f; // solar time
+    float tod_day = 172.0f;  // day of the year
     float tod_latitude = 45.0f;
     bool tod_play = false;
-    float tod_speed = 1800.0f;      // game seconds a second (1800: a game hour in two seconds)
+    float tod_speed = 1800.0f; // game seconds a second (1800: a game hour in two seconds)
     // Levels of detail (meshes are made with levels at load: --lod-levels)
     bool lod = false;
-    float lod_error = 1.0f;     // pixels
+    float lod_error = 1.0f; // pixels
     float lod_bias = 1.0f;
     int lod_force = -1;         // -1: by distance
     bool lod_gpu = true;        // clusters: cut in compute where the device can
     bool lod_readback = false;  // read the GPU cut's counts back each frame (waits for the GPU)
     bool lod_occlusion = false; // clusters: those behind others are not drawn (Lod3D::occlusion; needs the GPU cut)
-    // A skinned character (procedural: three joints, clips Sway, Bend and Wave), as entities with Animator3D (P1a part 2)
+    // A skinned character (procedural: three joints, clips Sway, Bend and Wave), as entities with Animator3D (P1a part
+    // 2)
     bool character = false;
-    int char_clip = 3;          // 0..2 a clip, 3 a 1D blend of Sway and Wave by char_blend
-    float char_blend = 0.5f;    // the blend's parameter, 0 (Sway) to 1 (Wave)
+    int char_clip = 3;       // 0..2 a clip, 3 a 1D blend of Sway and Wave by char_blend
+    float char_blend = 0.5f; // the blend's parameter, 0 (Sway) to 1 (Wave)
     float char_speed = 1.0f;
-    int char_count = 1;         // a row of up to 64 (their poses are in step)
+    int char_count = 1; // a row of up to 64 (their poses are in step)
     float char_scale = 1.0f;
-    // Inverse kinematics (P1b) on a person of 18 joints (the Person rig, chosen by `ik`): a hand to a target, the head to the camera,
-    // the feet on a floor and a step. The characters' clips are the person's Sway, Bend and Wave.
+    // Inverse kinematics (P1b) on a person of 18 joints (the Person rig, chosen by `ik`): a hand to a target, the head
+    // to the camera, the feet on a floor and a step. The characters' clips are the person's Sway, Bend and Wave.
     bool ik = false;
-    float ik_hand_x = 0.45f;    // the hand's target from the left shoulder, in the person's own axes (x to its left, y up, z forward), metres
+    float ik_hand_x = 0.45f; // the hand's target from the left shoulder, in the person's own axes (x to its left, y up,
+                             // z forward), metres
     float ik_hand_y = 0.1f;
     float ik_hand_z = 0.45f;
-    int ik_pole = 1;            // where the elbow points: 0 as animated, 1 down, 2 back, 3 up, 4 out
+    int ik_pole = 1; // where the elbow points: 0 as animated, 1 down, 2 back, 3 up, 4 out
     float ik_weight = 1.0f;
-    float ik_fade = 0.2f;       // seconds a weight takes to change
-    float ik_stretch = 1.0f;    // the arm may lengthen to this factor
-    bool ik_marker = true;      // a small red ball at the hand's target
-    bool ik_look = false;       // the head looks at the camera
+    float ik_fade = 0.2f;    // seconds a weight takes to change
+    float ik_stretch = 1.0f; // the arm may lengthen to this factor
+    bool ik_marker = true;   // a small red ball at the hand's target
+    bool ik_look = false;    // the head looks at the camera
     float ik_look_weight = 1.0f;
     float ik_look_smooth = 0.15f; // seconds
-    bool ik_feet = false;       // foot placement on the floor (and the step)
-    bool ik_step = true;        // a step under the left foot
+    bool ik_feet = false;         // foot placement on the floor (and the step)
+    bool ik_step = true;          // a step under the left foot
     float ik_step_height = 0.2f;
-    bool ik_tail = false;       // a FABRIK chain on the tail, to a point of the person's own space
+    bool ik_tail = false; // a FABRIK chain on the tail, to a point of the person's own space
     float ik_tail_x = 0.5f;
     float ik_tail_y = 0.9f;
     float ik_tail_z = -0.35f;
-    bool ik_limits = false;     // knee hinges with a twist limit at the hip, the arm folds to 150 degrees
-    bool ik_lock = false;       // planted feet stay where they were put while the person moves
-    bool ik_toes = false;       // toes lie on the ground under them
-    bool ik_walk = false;       // the person drifts from side to side
-    // Physics (kin/physics3d, P2b): a floor at y = 0 and boxes thrown from the camera (B, or the button), stepped at 60 Hz by
-    // WorldPhysicsState3D over the viewer's ECS world, with the debug lines (the shapes, awake or asleep, and the contacts).
+    bool ik_limits = false; // knee hinges with a twist limit at the hip, the arm folds to 150 degrees
+    bool ik_lock = false;   // planted feet stay where they were put while the person moves
+    bool ik_toes = false;   // toes lie on the ground under them
+    bool ik_walk = false;   // the person drifts from side to side
+    // Physics (kin/physics3d, P2b): a floor at y = 0 and boxes thrown from the camera (B, or the button), stepped at 60
+    // Hz by WorldPhysicsState3D over the viewer's ECS world, with the debug lines (the shapes, awake or asleep, and the
+    // contacts).
     bool physics = false;
     bool phys_debug = true;
-    int phys_count = 10;        // boxes a throw
-    float phys_size = 0.4f;     // metres a side
-    float phys_speed = 8.0f;    // m/s along the view
-    // Character controller (kin/physics3d, P2c): a person driven by a capsule controller over the physics floor and the test level
-    // (tests/character_level.hpp, put in front of the camera when it goes on). WASD relative to the camera, Space jumps, Shift
-    // sprints, Ctrl crouches; the camera follows behind. `ctrl_demo` plays a scripted walk instead of the keys (a headless run).
+    int phys_count = 10;     // boxes a throw
+    float phys_size = 0.4f;  // metres a side
+    float phys_speed = 8.0f; // m/s along the view
+    // Character controller (kin/physics3d, P2c): a person driven by a capsule controller over the physics floor and the
+    // test level (tests/character_level.hpp, put in front of the camera when it goes on). WASD relative to the camera,
+    // Space jumps, Shift sprints, Ctrl crouches; the camera follows behind. `ctrl_demo` plays a scripted walk instead
+    // of the keys (a headless run).
     bool ctrl = false;
-    bool ctrl_debug = true;     // the capsule, the level's bodies and the character's contacts as lines
+    bool ctrl_debug = true; // the capsule, the level's bodies and the character's contacts as lines
     bool ctrl_demo = false;
     float ctrl_speed = 4.0f;    // walk speed, m/s (sprint 1.75 times)
     float ctrl_jump = 5.0f;     // m/s up: the apex is v^2 / 2g
     float ctrl_slope = 45.0f;   // the steepest ground it stands on, degrees
     float ctrl_step = 0.4f;     // the highest step it climbs, m
     float ctrl_distance = 3.5f; // the camera behind it, m
-    // Climb (kin/physics3d, P2d): a person with two hands that take hold of the world, on the climb level (tests/climb_level.hpp:
-    // a wall with a ledge, an overhang, a smooth wall with holds, a platform that moves, a crate, ice, a low roof) in front of the
-    // camera. WASD walk (while it hangs: along the surface and up it), the camera aims the reach, the mouse buttons (or Q and E)
-    // hold with the left and the right hand, Space jumps (jumps off while it hangs), F pulls up, X lets go. `climb_demo` plays
-    // a scripted climb instead of the keys (a headless run). Replaces the controller section's level when both are on.
+    // Climb (kin/physics3d, P2d): a person with two hands that take hold of the world, on the climb level
+    // (tests/climb_level.hpp: a wall with a ledge, an overhang, a smooth wall with holds, a platform that moves, a
+    // crate, ice, a low roof) in front of the camera. WASD walk (while it hangs: along the surface and up it), the
+    // camera aims the reach, the mouse buttons (or Q and E) hold with the left and the right hand, Space jumps (jumps
+    // off while it hangs), F pulls up, X lets go. `climb_demo` plays a scripted climb instead of the keys (a headless
+    // run). Replaces the controller section's level when both are on.
     bool climb = false;
-    bool climb_debug = true;    // the bodies, the grips (anchors, normals, the hands' lines), the hang place, what a free hand sees
+    bool climb_debug =
+        true; // the bodies, the grips (anchors, normals, the hands' lines), the hang place, what a free hand sees
     bool climb_demo = false;
-    float climb_reach = 0.95f;  // the arm's reach, m
+    float climb_reach = 0.95f;    // the arm's reach, m
     float climb_stamina = 100.0f; // the resource's size: it drains by the mode (hanging 7 or 12 a second, sprinting 20)
     float climb_distance = 4.0f;  // the camera behind it, m
-    // Ragdolls (kin/physics3d, P2e): `rag_count` people stand in a row in front of the camera on the physics floor, each with a
-    // Ragdoll3D made from its skeleton. G knocks them down (their ragdolls start, blending in over `rag_blend`) and gets them up
-    // (the clip blended back, put where the pelvis lies); H throws a ball along the view (what it hits starts its ragdoll).
-    // `rag_demo` plays that by itself (a headless run).
+    // Ragdolls (kin/physics3d, P2e): `rag_count` people stand in a row in front of the camera on the physics floor,
+    // each with a Ragdoll3D made from its skeleton. G knocks them down (their ragdolls start, blending in over
+    // `rag_blend`) and gets them up (the clip blended back, put where the pelvis lies); H throws a ball along the view
+    // (what it hits starts its ragdoll). `rag_demo` plays that by itself (a headless run).
     bool rag = false;
-    bool rag_debug = true;      // the bones' capsules and the contacts as lines
+    bool rag_debug = true; // the bones' capsules and the contacts as lines
     bool rag_demo = false;
     int rag_count = 3;
-    float rag_blend = 0.15f;    // seconds the pose takes to go from the clip to the bodies
-    float rag_hit = 60.0f;      // N s at a knocked-down person's chest (G)
-    // Rope (kin/physics3d, P2e): a rope hung from a beam 25 degrees out from the vertical, drawn as a tube, with a person under
-    // its end that takes hold with both hands (Q and E or the mouse buttons, as the climb), climbs (W, S), swings and jumps
-    // off (Space). `rope_demo` plays a scripted climb and jump off, over and over.
+    float rag_blend = 0.15f; // seconds the pose takes to go from the clip to the bodies
+    float rag_hit = 60.0f;   // N s at a knocked-down person's chest (G)
+    // Rope (kin/physics3d, P2e): a rope hung from a beam 25 degrees out from the vertical, drawn as a tube, with a
+    // person under its end that takes hold with both hands (Q and E or the mouse buttons, as the climb), climbs (W, S),
+    // swings and jumps off (Space). `rope_demo` plays a scripted climb and jump off, over and over.
     bool rope = false;
-    bool rope_debug = false;    // the segments' capsules
+    bool rope_debug = false; // the segments' capsules
     bool rope_demo = false;
     float rope_length = 6.0f;
     float rope_stamina = 400.0f;
     // View
-    int msaa = 2;              // index into the device's sample counts
+    int msaa = 2; // index into the device's sample counts
     float background[3] = {120, 150, 190};
     bool cull = true;
-    int wireframe = 0;         // WireMode
+    int wireframe = 0; // WireMode
     // Post
     bool hdr = false;
     float exposure = 1.0f;
@@ -314,13 +330,16 @@ inline Vec3f sun_direction(const Settings& s) {
 // The lights, shadows and occlusion for this frame. `environment` is the HDRI
 // chosen (empty: none), `area` the model's bounds. The lights are made anew
 // each time, so nothing set earlier lingers.
-inline void apply(const Settings& s, Scene3D& scene, const Environment3D& environment, const Bounds3& area, Vec3f eye) {
+inline void apply(const Settings& s, Scene3D& scene, const Environment3D& environment, const Bounds3D& area,
+                  Vec3f eye) {
     Lights3D& l = scene.lights;
     l = Lights3D{};
-    l.sun = {.direction = sun_direction(s), .color = s.sun ? reference_sun_colour * s.sun_intensity : Vec3f{}};
-    if (s.fill) l.fill.color = Vec3f{0.55f, 0.6f, 0.75f} * s.fill_intensity;
-    l.ambient = s.ambient ? reference_ambient * s.ambient_intensity : Vec3f{};
-    if (s.ground) l.ground_ambient = Vec3f{0.12f, 0.1f, 0.085f} * s.ground_intensity;
+    l.sun = {.direction = sun_direction(s), .color = s.sun ? reference_sun_colour * s.sun_intensity : LinearRgb{}};
+    if (s.fill)
+        l.fill.color = kin::LinearRgb{0.55f, 0.6f, 0.75f} * s.fill_intensity;
+    l.ambient = s.ambient ? reference_ambient * s.ambient_intensity : LinearRgb{};
+    if (s.ground)
+        l.ground_ambient = kin::LinearRgb{0.12f, 0.1f, 0.085f} * s.ground_intensity;
     l.environment = environment;
     l.environment_intensity = s.environment_intensity;
     l.environment_rotation = s.environment_rotation;
@@ -340,10 +359,10 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         l.spots = s.spots;
         if (s.flashlight) {
             const Camera3D& cam = scene.camera;
-            SpotLight torch;
+            SpotLightSource3D torch;
             torch.position = cam.position + cam.right() * 0.18f - cam.up() * 0.14f + cam.forward() * 0.1f;
             torch.direction = cam.forward();
-            torch.color = Vec3f{1.0f, 0.96f, 0.88f} * s.flash_intensity;
+            torch.color = kin::LinearRgb{1.0f, 0.96f, 0.88f} * s.flash_intensity;
             torch.radius = s.flash_radius;
             torch.size = 0.04f;
             torch.inner_angle = s.flash_inner;
@@ -355,10 +374,11 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         const Vec3f centre = area.center(), half = area.size() * 0.5f;
         for (int i = 0; i < s.spot_ring; ++i) {
             const float t = s.spot_ring > 1 ? float(i) / float(s.spot_ring - 1) * 2.0f - 1.0f : 0.0f;
-            SpotLight lamp;
-            lamp.position = {centre.x + t * half.x * 0.7f, area.min.y + std::min(half.y * 1.1f, 7.0f), centre.z + (i % 2 ? 0.25f : -0.25f) * half.z};
+            SpotLightSource3D lamp;
+            lamp.position = {centre.x + t * half.x * 0.7f, area.min.y + std::min(half.y * 1.1f, 7.0f),
+                             centre.z + (i % 2 ? 0.25f : -0.25f) * half.z};
             lamp.direction = {0.0f, -1.0f, i % 2 ? -0.2f : 0.2f};
-            lamp.color = Vec3f{1.0f, 0.82f, 0.6f} * s.spot_ring_intensity;
+            lamp.color = kin::LinearRgb{1.0f, 0.82f, 0.6f} * s.spot_ring_intensity;
             lamp.radius = s.spot_radius;
             lamp.size = 0.15f;
             lamp.inner_angle = s.spot_inner;
@@ -369,9 +389,10 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         }
         for (int i = 0; i < s.point_ring; ++i) {
             const float t = s.point_ring > 1 ? float(i) / float(s.point_ring - 1) * 2.0f - 1.0f : 0.0f;
-            PointLight lamp;
-            lamp.position = {centre.x + t * half.x * 0.45f, area.min.y + std::min(half.y * 0.55f, 3.2f), centre.z + (i % 2 ? 0.3f : -0.3f) * half.z};
-            lamp.color = Vec3f{0.9f, 0.95f, 1.0f} * (s.spot_ring_intensity * 0.5f);
+            PointLightSource3D lamp;
+            lamp.position = {centre.x + t * half.x * 0.45f, area.min.y + std::min(half.y * 0.55f, 3.2f),
+                             centre.z + (i % 2 ? 0.3f : -0.3f) * half.z};
+            lamp.color = kin::LinearRgb{0.9f, 0.95f, 1.0f} * (s.spot_ring_intensity * 0.5f);
             lamp.radius = s.spot_radius;
             lamp.size = 0.2f;
             lamp.shadow = shadow_of(s.point_shadows);
@@ -381,34 +402,45 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         l.max_shadowed_spots = static_cast<u32>(std::clamp(s.spot_shadow_count, 0, 8));
         l.max_shadowed_points = static_cast<u32>(std::clamp(s.point_shadow_count, 0, 2));
         l.local_shadow_resolution = local_res;
-        l.fill_shadow = {.enabled = s.moon_shadow, .strength = 1.0f, .cascades = static_cast<u32>(std::clamp(s.moon_cascades, 1, 4)), .resolution = 1024};
+        l.fill_shadow = {.enabled = s.moon_shadow,
+                         .strength = 1.0f,
+                         .cascades = static_cast<u32>(std::clamp(s.moon_cascades, 1, 4)),
+                         .resolution = 1024};
     }
     if (s.shadows && (s.sun || s.moon_shadow)) {
         l.shadow_area = s.shadow_area == int(ShadowArea::Auto)
                             ? area
-                            : Bounds3{eye - Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent},
-                                      eye + Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent}};
+                            : Bounds3D{eye - Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent},
+                                       eye + Vec3f{s.shadow_extent, s.shadow_extent, s.shadow_extent}};
         l.shadow_resolution = shadow_resolutions[std::clamp(s.shadow_resolution, 0, 3)];
         l.shadow_cascades = static_cast<u32>(std::clamp(s.shadow_cascades, 1, int(max_shadow_cascades)));
         l.shadow_distance = s.shadow_distance;
         l.cache_shadows = s.shadow_cache;
     }
-    scene.ambient_occlusion = {.enabled = s.ao, .radius = s.ao_radius, .intensity = s.ao_intensity, .half_resolution = s.ao_half};
-    scene.contact_shadows = {.enabled = s.contact,
-                             .distance = s.contact_distance,
-                             .thickness = s.contact_thickness,
-                             .intensity = s.contact_intensity,
-                             .steps = static_cast<u32>(std::clamp(s.contact_steps, int(min_contact_steps), int(max_contact_steps)))};
-    scene.taa = {.enabled = s.taa, .blend = s.taa_blend, .sharpness = s.taa_sharpness,
+    scene.ambient_occlusion = {
+        .enabled = s.ao, .radius = s.ao_radius, .intensity = s.ao_intensity, .half_resolution = s.ao_half};
+    scene.contact_shadows = {
+        .enabled = s.contact,
+        .distance = s.contact_distance,
+        .thickness = s.contact_thickness,
+        .intensity = s.contact_intensity,
+        .steps = static_cast<u32>(std::clamp(s.contact_steps, int(min_contact_steps), int(max_contact_steps)))};
+    scene.taa = {.enabled = s.taa,
+                 .blend = s.taa_blend,
+                 .sharpness = s.taa_sharpness,
                  .jitter_scale = s.taa_jitter_scale,
                  .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, int(max_taa_jitter_samples)))};
     scene.debug.freeze_jitter = s.taa_freeze;
-    scene.lod = {.enabled = s.lod, .error_pixels = s.lod_error, .bias = s.lod_bias, .occlusion = {.enabled = s.lod && s.lod_occlusion}};
+    scene.lod = {.enabled = s.lod,
+                 .error_pixels = s.lod_error,
+                 .bias = s.lod_bias,
+                 .occlusion = {.enabled = s.lod && s.lod_occlusion}};
     scene.debug.force_level = s.lod_force;
     scene.debug.gpu_culling = s.lod_gpu;
     scene.debug.stats_readback = s.lod && s.lod_readback;
     scene.cull = s.cull;
-    // The sky and the fog (the time of day, when it drives them, last: it replaces the sun's direction and colour, the fill and the ambient).
+    // The sky and the fog (the time of day, when it drives them, last: it replaces the sun's direction and colour, the
+    // fill and the ambient).
     scene.sky = {.enabled = s.sky,
                  .turbidity = s.sky_turbidity,
                  .sun_intensity = s.sky_sun_intensity,
@@ -432,12 +464,17 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     if (s.tod) {
         const Vec3f own_fog = scene.fog.colour;
         const bool moon = s.sky_moon;
-        kin::apply({.hours = s.tod_hours, .day_of_year = s.tod_day, .latitude = s.tod_latitude, .shadows = s.moon_shadow}, l, scene.sky, scene.fog);
+        kin::apply(
+            {.hours = s.tod_hours, .day_of_year = s.tod_day, .latitude = s.tod_latitude, .shadows = s.moon_shadow}, l,
+            scene.sky, scene.fog);
         scene.sky.moon = scene.sky.moon && moon;
-        if (s.fog_from_sky) scene.fog.colour = own_fog;
-        if (!s.sun) l.sun.color = {};
+        if (s.fog_from_sky)
+            scene.fog.colour = own_fog;
+        if (!s.sun)
+            l.sun.color = {};
     }
-    // Particles and weather (P3c), last: the weather dims the light the time of day has just written, and thickens the fog it has.
+    // Particles and weather (P3c), last: the weather dims the light the time of day has just written, and thickens the
+    // fog it has.
     {
         Weather3D& w = scene.weather;
         w = Weather3D{};
@@ -464,8 +501,8 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     }
 }
 
-// A fire's flame and its sparks, as particle systems' descs (the walk makes the systems). The flame is additive, soft, rising and
-// widening; the sparks are stretched along their velocity and fall, with drag.
+// A fire's flame and its sparks, as particle systems' descs (the walk makes the systems). The flame is additive, soft,
+// rising and widening; the sparks are stretched along their velocity and fall, with drag.
 inline ParticleDesc3D fire_flame(const Settings& s) {
     ParticleDesc3D d;
     d.shape = ParticleShape3D::Cone;
@@ -529,20 +566,28 @@ inline Material3D adjust(Material3D m, const MaterialSettings& s) {
         m.texture = {};
         m.color = Color::rgb(178, 178, 178);
     }
-    if (!s.normal_maps) m.normal = {};
-    if (!s.metal_rough_maps) m.metallic_roughness = {};
-    if (!s.occlusion_maps) m.occlusion = {};
+    if (!s.normal_maps)
+        m.normal = {};
+    if (!s.metal_rough_maps)
+        m.metallic_roughness = {};
+    if (!s.occlusion_maps)
+        m.occlusion = {};
     if (!s.emissive) {
         m.emissive = 0.0f;
         m.emissive_texture = {};
     } else {
         m.emissive *= s.emissive_scale;
     }
-    if (!s.cutout && m.blend == Blend3D::Mask) m.blend = Blend3D::Opaque;
-    if (s.force_double_sided) m.double_sided = true;
-    if (!s.casts_shadow) m.casts_shadow = false;
-    if (!s.receives_shadow) m.receives_shadow = false;
-    if (s.force_unlit) m.unlit = true;
+    if (!s.cutout && m.blend == Blend3D::Mask)
+        m.blend = Blend3D::Opaque;
+    if (s.force_double_sided)
+        m.double_sided = true;
+    if (!s.casts_shadow)
+        m.casts_shadow = false;
+    if (!s.receives_shadow)
+        m.receives_shadow = false;
+    if (s.force_unlit)
+        m.unlit = true;
     m.normal_scale *= s.normal_scale;
     if (s.roughness_override) {
         m.roughness = s.roughness;

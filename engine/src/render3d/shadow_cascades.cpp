@@ -1,7 +1,6 @@
-#include <kin/render3d/shadow_cascades.hpp>
-
 #include <algorithm>
 #include <cmath>
+#include <kin/render3d/shadow_cascades3d.hpp>
 
 namespace kin {
 
@@ -35,8 +34,8 @@ Camera3D slice_of(const Camera3D& camera, f32 near, f32 far) {
     return slice;
 }
 
-SunBox fit_sun_box(const Bounds3& area, Vec3f to_sun) {
-    SunBox box;
+SunBox3D fit_sun_box(const Bounds3D& area, Vec3f to_sun) {
+    SunBox3D box;
     const Vec3f center = area.center();
     const f32 radius = std::max(area.radius(), 0.01f);
     const Vec3f up = std::abs(to_sun.y) > 0.99f ? Vec3f{0.0f, 0.0f, -1.0f} : Vec3f{0.0f, 1.0f, 0.0f};
@@ -44,7 +43,8 @@ SunBox fit_sun_box(const Bounds3& area, Vec3f to_sun) {
     box.lo = {1e30f, 1e30f, 1e30f};
     box.hi = {-1e30f, -1e30f, -1e30f};
     for (int i = 0; i < 8; ++i) {
-        const Vec3f corner{(i & 1) ? area.max.x : area.min.x, (i & 2) ? area.max.y : area.min.y, (i & 4) ? area.max.z : area.min.z};
+        const Vec3f corner{(i & 1) ? area.max.x : area.min.x, (i & 2) ? area.max.y : area.min.y,
+                           (i & 4) ? area.max.z : area.min.z};
         const Vec3f p = box.light_view.apply(corner);
         box.lo = {std::min(box.lo.x, p.x), std::min(box.lo.y, p.y), std::min(box.lo.z, p.z)};
         box.hi = {std::max(box.hi.x, p.x), std::max(box.hi.y, p.y), std::max(box.hi.z, p.z)};
@@ -54,11 +54,12 @@ SunBox fit_sun_box(const Bounds3& area, Vec3f to_sun) {
     return box;
 }
 
-ShadowCascades fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_sun, const Bounds3& area, u32 cascades,
-                                   f32 distance, u32 resolution) {
-    ShadowCascades out;
+ShadowCascades3D fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_sun, const Bounds3D& area,
+                                     u32 cascades, f32 distance, u32 resolution) {
+    ShadowCascades3D out;
     const Vec3f area_size = area.size();
-    if (!(area_size.x > 0 && area_size.y >= 0 && area_size.z > 0) || length_squared(to_sun) <= 0.0f || resolution == 0) {
+    if (!(area_size.x > 0 && area_size.y >= 0 && area_size.z > 0) || length_squared(to_sun) <= 0.0f ||
+        resolution == 0) {
         return out;
     }
     to_sun = normalize(to_sun);
@@ -69,7 +70,7 @@ ShadowCascades fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_
 
     // The sun's space is fixed by the area, not the camera: a texel grid in
     // it stays put in the world, which is what snapping needs.
-    const SunBox sun = fit_sun_box(area, to_sun);
+    const SunBox3D sun = fit_sun_box(area, to_sun);
     const Mat4f& light_view = sun.light_view;
     const Vec3f lo = sun.lo, hi = sun.hi;
     const f32 z_near = sun.z_near, z_far = sun.z_far;
@@ -80,7 +81,7 @@ ShadowCascades fit_shadow_cascades(const Camera3D& camera, f32 aspect, Vec3f to_
     const auto half_height = [&](f32 d) { return ortho ? camera.height * 0.5f : d * half_tan; };
 
     for (u32 k = 0; k < out.count; ++k) {
-        ShadowCascade& c = out.cascade[k];
+        ShadowCascade3D& c = out.cascade[k];
         // Each fades into the next over its last tenth, so the next must
         // cover from where that starts.
         c.slice_far = splits[k + 1];

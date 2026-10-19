@@ -25,7 +25,7 @@ struct SceneEnvironment3D {
     AmbientOcclusion3D ambient_occlusion;
     ContactShadows3D contact_shadows;
     TemporalAA3D taa;
-    View3DOptions view;
+    ViewOptions3D view;
     bool enabled = true;
     i32 priority = 0;
 };
@@ -34,15 +34,15 @@ struct SceneEnvironment3D {
 // Applies each selected camera/environment atomically after validation.
 // Optional view options are for create_view; this does no GPU work.
 // With `only`, validate/apply that entity even when disabled (editor preflight).
-std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene, View3DOptions* view = nullptr,
-                                              EcsEntity only = {});
+std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view = nullptr,
+                                                EcsEntity only = {});
 
 struct AnimatorConfiguration3D {
     std::shared_ptr<const AnimationStateMachine> machine;
     std::unordered_map<std::string, Animator3D::BlendSpace> blend_spaces;
     std::vector<Animator3D::LayerConfig> layers;
     std::vector<Animator3D::Fade> fades;
-    std::vector<IKConstraint> ik;
+    std::vector<IKConstraint3D> ik;
     std::shared_ptr<const AnimationEventTracks3D> events;
     std::shared_ptr<const CharacterActions3D> actions;
     // Exact sources for explicit reload identity; shared once per loaded config.
@@ -60,10 +60,11 @@ struct AnimatorAsset3D {
 // last good configuration. Unchanged content keeps animation progress intact.
 // Called by resolve_render3d_assets after models bind, or separately by tools.
 std::vector<std::string> resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path& content_root,
-                                                std::span<const EcsId> entities = {});
+                                                   std::span<const EcsId> entities = {});
 // Atomic per entity, renderer thread. Called by resolve_render3d_assets.
 // Invalid replacements retain the last good binding; empty refs clear it.
-std::vector<std::string> resolve_materials3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> entities = {});
+std::vector<std::string> resolve_materials3d_assets(EcsWorld& world, Assets3D& assets,
+                                                    std::span<const EcsId> entities = {});
 
 // Extend the SAME component registry used by .kinscene/.kinprefab, inspection,
 // patches and Lua. No renderer needed. Idempotent; the standard
@@ -75,14 +76,16 @@ void register_physics3d_components(EcsWorld& world);
 // I/O/allocation of particles. Call after edits and before simulation/collection.
 // This bounds configured capacity, not textures or custom C++ particle draws.
 struct ParticleLimits3D {
-    std::size_t emitters=128;
-    u32 per_emitter=20000;
-    u64 total_particles=65536;
+    std::size_t emitters = 128;
+    u32 per_emitter = 20000;
+    u64 total_particles = 65536;
 };
-std::vector<std::string> validate_particles3d(EcsWorld& world,ParticleLimits3D limits={},std::span<const EcsId> entities={});
+std::vector<std::string> validate_particles3d(EcsWorld& world, ParticleLimits3D limits = {},
+                                              std::span<const EcsId> entities = {});
 // Renderer-thread texture binding; uses the existing Assets3D weak texture cache.
 // Validation precedes binding; failed texture loads retain the previous texture.
-std::vector<std::string> resolve_particles3d_assets(EcsWorld& world,Assets3D& assets,ParticleLimits3D limits={},std::span<const EcsId> entities={});
+std::vector<std::string> resolve_particles3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D limits = {},
+                                                    std::span<const EcsId> entities = {});
 
 // Renderer-thread-only binding after normal scene/prefab instantiation or an
 // asset-reference edit. Uses Assets3D handles, never serializes GPU objects.
@@ -93,7 +96,7 @@ std::vector<std::string> resolve_particles3d_assets(EcsWorld& world,Assets3D& as
 // animation/physics setup; rebuild existing ragdolls when changing skeletons.
 // An empty entity span means the whole world; a nonempty span binds only those
 // entities. Use whole-world particle validation separately for aggregate budgets.
-std::vector<std::string> resolve_render3d_assets(EcsWorld& world, Assets3D& assets,ParticleLimits3D particles={},
-                                              std::span<const EcsId> entities={});
+std::vector<std::string> resolve_render3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D particles = {},
+                                                 std::span<const EcsId> entities = {});
 
 } // namespace kin

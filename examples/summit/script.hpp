@@ -1,9 +1,9 @@
 #pragma once
 
-// A route follower for Summit (docs/3d_plan.md, P4a): a small state machine over the level's route legs that reads the game's
-// state and answers with a PlayerCommand each step: walk to the foot of a wall, take hold, climb, pull up, rest for stamina, climb
-// the rope, reach the top. It is the "player" of the scripted run and of the tests; its commands are recorded and replayed as a
-// log (the replay needs no bot). It only reads the Game it is given.
+// A route follower for Summit (docs/3d_plan.md, P4a): a small state machine over the level's route legs that reads the
+// game's state and answers with a PlayerCommand each step: walk to the foot of a wall, take hold, climb, pull up, rest
+// for stamina, climb the rope, reach the top. It is the "player" of the scripted run and of the tests; its commands are
+// recorded and replayed as a log (the replay needs no bot). It only reads the Game it is given.
 
 #include "game.hpp"
 
@@ -20,8 +20,8 @@ struct BotConfig {
     i32 leg_timeout = 6000;
     // Finished once this leg (an index of the route) is done (-1: at the end).
     i32 stop_after_leg = -1;
-    // On this leg it lets go (the release command for a few steps) once the player's feet are `drop_height` above the leg's
-    // start: a scripted fall (-1: never).
+    // On this leg it lets go (the release command for a few steps) once the player's feet are `drop_height` above the
+    // leg's start: a scripted fall (-1: never).
     i32 drop_leg = -1;
     f32 drop_height = 5.0f;
 };
@@ -32,7 +32,9 @@ public:
 
     // The command for the next step, from the game as it is now.
     PlayerCommand next();
-    bool finished() const { return _leg >= i32(_route.size()) || (_config.stop_after_leg >= 0 && _leg > _config.stop_after_leg); }
+    bool finished() const {
+        return _leg >= i32(_route.size()) || (_config.stop_after_leg >= 0 && _leg > _config.stop_after_leg);
+    }
     i32 leg() const { return _leg; }
     // What it is doing, for logs.
     std::string status() const;
@@ -54,8 +56,8 @@ private:
     std::vector<Leg> _route;
     i32 _leg = 0;
     Sub _sub = Sub::Start;
-    i32 _leg_steps = 0;   // steps in this leg
-    i32 _sub_steps = 0;   // steps in this sub-state
+    i32 _leg_steps = 0; // steps in this leg
+    i32 _sub_steps = 0; // steps in this sub-state
     i32 _stuck = 0;
     Vec3f _last_feet{};
     i32 _restarts = 0;
@@ -64,7 +66,7 @@ private:
     i32 _hand = 0;
     i32 _hand_steps = 0;
     i32 _retry = 0;
-    i32 _drops = 0;       // steps of release still to send
+    i32 _drops = 0; // steps of release still to send
     bool _dropped = false;
     bool _falling = false;
 };
@@ -83,20 +85,23 @@ struct RunReport {
     std::vector<PlayerCommand> log;
 };
 
-// Plays `bot` against `game` for at most `max_steps` (stopping at the summit when `stop_at_summit`), recording the commands.
+// Plays `bot` against `game` for at most `max_steps` (stopping at the summit when `stop_at_summit`), recording the
+// commands.
 RunReport run_bot(Game& game, Bot& bot, u64 max_steps, bool stop_at_summit = true);
 
 // Plays a recorded log (one command a step, player 0; other players' commands default) and returns the final hash.
 u64 replay(Game& game, const std::vector<PlayerCommand>& log);
 
-// A command log as a file (the same bytes on every machine): seed, count, then each command's numbers and flags. False when the
-// file cannot be written or read, is not a log, or is cut short.
-bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log, bool expedition = false, bool dense_scenery = false);
-bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log, bool* expedition = nullptr, bool* dense_scenery = nullptr);
+// A command log as a file (the same bytes on every machine): seed, count, then each command's numbers and flags. False
+// when the file cannot be written or read, is not a log, or is cut short.
+bool write_command_log(const std::string& path, u64 seed, const std::vector<PlayerCommand>& log,
+                       bool expedition = false, bool dense_scenery = false);
+bool read_command_log(const std::string& path, u64& seed, std::vector<PlayerCommand>& log, bool* expedition = nullptr,
+                      bool* dense_scenery = nullptr);
 
-// The bot's settings for a scripted run by name: "climb" (walk and climb to the summit), "fall" (the same, but it lets go
-// near the top of the chimney once: a 5 m fall, a knock-out, a get-up, then it climbs on), "rope" (stops once it is over the
-// rope). False for another name.
+// The bot's settings for a scripted run by name: "climb" (walk and climb to the summit), "fall" (the same, but it lets
+// go near the top of the chimney once: a 5 m fall, a knock-out, a get-up, then it climbs on), "rope" (stops once it is
+// over the rope). False for another name.
 bool script_config(const std::string& name, const SummitLevel& level, BotConfig& out);
 
 } // namespace summit

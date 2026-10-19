@@ -2,20 +2,23 @@
 
 // Summit's sound (docs/3d_plan.md, P4b). Two halves:
 //
-//  - `CueGenerator` turns the game's events and state into a list of `SoundCue`s, once a step: plain data (what, where, how loud,
-//    which pitch), so that a test can count the grabs of a scripted run or check that a fall made a whoosh and an impact without
-//    a sound card. The curves it uses (`wind_gain`, `footstep_cadence`, ...) are free functions for the same reason.
-//  - `SummitAudio` plays them through kin::AudioEngine, with clips synthesised at start-up (no files: wind, footsteps by surface,
-//    grabs, breath, falls, rope, fire, stings), positional where it makes sense (the engine's 3D listener), and three volumes
-//    (master, effects, ambience). Muted, or with no device, it mixes into the engine's null backend: same code, no sound.
+//  - `CueGenerator` turns the game's events and state into a list of `SoundCue`s, once a step: plain data (what, where,
+//  how loud,
+//    which pitch), so that a test can count the grabs of a scripted run or check that a fall made a whoosh and an
+//    impact without a sound card. The curves it uses (`wind_gain`, `footstep_cadence`, ...) are free functions for the
+//    same reason.
+//  - `SummitAudio` plays them through kin::AudioEngine, with clips synthesised at start-up (no files: wind, footsteps
+//  by surface,
+//    grabs, breath, falls, rope, fire, stings), positional where it makes sense (the engine's 3D listener), and three
+//    volumes (master, effects, ambience). Muted, or with no device, it mixes into the engine's null backend: same code,
+//    no sound.
 //
 // Presentation only: it reads a `Game` and never writes it.
 
 #include "game.hpp"
 
-#include <kin/audio/audio.hpp>
-
 #include <array>
+#include <kin/audio/audio.hpp>
 #include <string>
 #include <vector>
 
@@ -25,12 +28,12 @@ using namespace kin;
 enum class CueKind : u8 {
     Footstep,
     Jump,
-    Land,     // a landing with no damage
+    Land, // a landing with no damage
     Grab,
     Release,
-    Impact,   // damage from a fall: a thump by how much
+    Impact, // damage from a fall: a thump by how much
     FallStart,
-    Breath,   // effort breathing at low stamina
+    Breath, // effort breathing at low stamina
     Exhausted,
     RopeCreak,
     Hurt,
@@ -51,14 +54,15 @@ struct SoundCue {
     Vec3f position{};
     f32 gain = 1.0f;
     f32 pitch = 1.0f;
-    i32 variant = 0;   // a footstep's SurfaceSound; a grab's hand (0 left, 1 right)
+    i32 variant = 0; // a footstep's SurfaceSound; a grab's hand (0 left, 1 right)
     friend bool operator==(const SoundCue&, const SoundCue&) = default;
 };
 
-// ---- the curves (pure) ------------------------------------------------------------------------------------------------------
+// ---- the curves (pure)
+// ------------------------------------------------------------------------------------------------------
 
-// The wind's loudness (0 to 1) at an altitude of a mountain `height` high for a wind speed in m/s: it rises with height and with
-// the wind's strength.
+// The wind's loudness (0 to 1) at an altitude of a mountain `height` high for a wind speed in m/s: it rises with height
+// and with the wind's strength.
 f32 wind_gain(f32 altitude, f32 height, f32 wind_speed);
 f32 wind_pitch(f32 wind_speed);
 // The whoosh of a fall by its speed down (m/s): none under walking speed, full by 20.
@@ -76,7 +80,8 @@ SurfaceSound surface_under(const Game& game, i32 player);
 // Where a camp's fire is (for the crackle and the lights): beside the camp's marker.
 Vec3f camp_fire_position(const Camp& camp);
 
-// ---- the cues ---------------------------------------------------------------------------------------------------------------
+// ---- the cues
+// ---------------------------------------------------------------------------------------------------------------
 
 class CueGenerator {
 public:
@@ -91,7 +96,8 @@ private:
     bool _was_on_ground = true;
 };
 
-// ---- playing them -----------------------------------------------------------------------------------------------------------
+// ---- playing them
+// -----------------------------------------------------------------------------------------------------------
 
 struct AudioVolumes {
     f32 master = 0.8f;
@@ -101,7 +107,8 @@ struct AudioVolumes {
 
 class SummitAudio {
 public:
-    // `muted`: the engine's null backend (a silent mix, the same code path). A machine with no device falls back to it too.
+    // `muted`: the engine's null backend (a silent mix, the same code path). A machine with no device falls back to it
+    // too.
     explicit SummitAudio(bool muted);
     ~SummitAudio();
 
@@ -111,8 +118,8 @@ public:
     void play(const SoundCue& cue);
     // One of "ui_move", "ui_select".
     void play_ui(const char* name);
-    // Once a frame: the listener (the camera), the loops that follow the game (wind, whoosh, fires), and the engine's clock.
-    // `paused`: the menu is up (the effects hold, the ambience goes quiet).
+    // Once a frame: the listener (the camera), the loops that follow the game (wind, whoosh, fires), and the engine's
+    // clock. `paused`: the menu is up (the effects hold, the ambience goes quiet).
     void update(const Game& game, i32 player, const AudioListener3D& listener, f32 dt, bool paused = false);
 
     // How many of a kind were played (a test and the report).

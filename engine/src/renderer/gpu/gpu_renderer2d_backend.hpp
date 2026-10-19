@@ -150,7 +150,7 @@ public:
         _device.set_job_system(jobs);
     }
 #if defined(KIN_EXPERIMENTAL_3D)
-    IRenderer3DBackend* renderer_3d() override;
+    IRendererBackend3D* renderer_3d() override;
 #endif
 
     void fill_rect(Rectf rect, Color color) override;

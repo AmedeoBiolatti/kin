@@ -210,7 +210,7 @@ public:
             .field("checksum", _breach.checksum()).field("autoplay", _autoplay)
             .field("player_x", f64(_breach.player.x)).field("player_y", f64(_breach.player.y)).field("player_z", f64(_breach.player.z))
             .field("yaw", f64(_breach.yaw)).field("pitch", f64(_breach.pitch));
-        const Render3DStats& s = _view.stats();
+        const RenderStats3D& s = _view.stats();
         json.field("draws_3d", u64(s.draws)).field("instances_3d", u64(s.instances)).field("culled_3d", u64(s.culled))
             .field("triangles_3d", s.triangles).field("drawn_3d", _view.available());
         if (_options.latency_probe) {

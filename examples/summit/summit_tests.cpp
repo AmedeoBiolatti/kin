@@ -1,6 +1,6 @@
-// Summit's simulation, on the CPU (docs/3d_plan.md, P4a): the level (determinism, climbability by the stamina model), the player
-// model's numbers, input as commands (the mapper, replay, save and restore, frame-rate independence, step purity), falls and
-// ragdolls, the rope, the camera, and the scripted runs. No window and no GPU.
+// Summit's simulation, on the CPU (docs/3d_plan.md, P4a): the level (determinism, climbability by the stamina model),
+// the player model's numbers, input as commands (the mapper, replay, save and restore, frame-rate independence, step
+// purity), falls and ragdolls, the rope, the camera, and the scripted runs. No window and no GPU.
 
 #include "camera.hpp"
 #include "game.hpp"
@@ -8,14 +8,13 @@
 #include "level.hpp"
 #include "script.hpp"
 
-#include <kin/platform/gamepad.hpp>
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <kin/platform/gamepad.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -27,35 +26,37 @@ using namespace summit;
 int failures = 0;
 bool verbose = false;
 
-#define CHECK(cond)                                                                                   \
-    do {                                                                                              \
-        if (!(cond)) {                                                                                \
-            ++failures;                                                                               \
-            std::fprintf(stderr, "summit_tests:%d: CHECK failed: %s\n", __LINE__, #cond);              \
-        }                                                                                             \
+#define CHECK(cond)                                                                                                    \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ++failures;                                                                                                \
+            std::fprintf(stderr, "summit_tests:%d: CHECK failed: %s\n", __LINE__, #cond);                              \
+        }                                                                                                              \
     } while (0)
 
-#define CHECK_NEAR(value, expected, eps)                                                                              \
-    do {                                                                                                              \
-        const double v_ = static_cast<double>(value), e_ = static_cast<double>(expected);                             \
-        if (verbose) std::printf("  %s = %.4f (expected %.4f +- %.4f)\n", #value, v_, e_, static_cast<double>(eps));    \
-        if (!(std::fabs(v_ - e_) <= static_cast<double>(eps))) {                                                      \
-            ++failures;                                                                                               \
-            std::fprintf(stderr, "summit_tests:%d: %s = %.5f, expected %.5f +- %.5f\n", __LINE__, #value, v_, e_,        \
-                         static_cast<double>(eps));                                                                   \
-        }                                                                                                             \
+#define CHECK_NEAR(value, expected, eps)                                                                               \
+    do {                                                                                                               \
+        const double v_ = static_cast<double>(value), e_ = static_cast<double>(expected);                              \
+        if (verbose)                                                                                                   \
+            std::printf("  %s = %.4f (expected %.4f +- %.4f)\n", #value, v_, e_, static_cast<double>(eps));            \
+        if (!(std::fabs(v_ - e_) <= static_cast<double>(eps))) {                                                       \
+            ++failures;                                                                                                \
+            std::fprintf(stderr, "summit_tests:%d: %s = %.5f, expected %.5f +- %.5f\n", __LINE__, #value, v_, e_,      \
+                         static_cast<double>(eps));                                                                    \
+        }                                                                                                              \
     } while (0)
 
 using Clock = std::chrono::steady_clock;
 
 // The seed the stored numbers are for.
 constexpr u64 test_seed = 1;
-// The final state hash of the scripted climb of seed 1 on this machine ("same machine" determinism: Jolt claims more, the look and
-// facing use std::sin and std::atan2), and the steps it takes.
+// The final state hash of the scripted climb of seed 1 on this machine ("same machine" determinism: Jolt claims more,
+// the look and facing use std::sin and std::atan2), and the steps it takes.
 constexpr u64 expected_climb_hash = 0x65e783b36e5dea50ull;
 constexpr u64 expected_climb_steps = 9769;
 
-// ---- helpers ------------------------------------------------------------------------------------------------------------------
+// ---- helpers
+// ------------------------------------------------------------------------------------------------------------------
 
 struct Observed {
     RunReport report;
@@ -92,23 +93,30 @@ Observed observe(u64 seed, const std::string& script, u64 max_steps = 40000) {
         o.report.log.push_back(c);
         game.step({&c, 1});
         const Vec3f f = game.feet(0);
-        if (!std::isfinite(f.x) || !std::isfinite(f.y) || !std::isfinite(f.z)) o.report.non_finite = true;
+        if (!std::isfinite(f.x) || !std::isfinite(f.y) || !std::isfinite(f.z))
+            o.report.non_finite = true;
         o.report.min_stamina = std::min(o.report.min_stamina, game.stamina(0));
         o.report.highest = std::max(o.report.highest, f.y - game.level().start.y);
         for (const GameEvent& e : game.events()) {
-            if (e.kind == GameEventKind::GotUp) ++o.got_up_events;
-            if (e.kind == GameEventKind::Camp) ++o.camp_events;
-            if (e.kind == GameEventKind::Summit) ++o.summit_events;
-            if (e.kind == GameEventKind::PullUpBlocked) ++o.pull_up_blocked;
+            if (e.kind == GameEventKind::GotUp)
+                ++o.got_up_events;
+            if (e.kind == GameEventKind::Camp)
+                ++o.camp_events;
+            if (e.kind == GameEventKind::Summit)
+                ++o.summit_events;
+            if (e.kind == GameEventKind::PullUpBlocked)
+                ++o.pull_up_blocked;
         }
         // Never through a collider: the middle of the capsule is not inside a piece.
         if (game.player(0).state == PlayerState::Alive) {
             QueryFilter3D filter;
             filter.mask = layer_bit(layers3d::Static);
-            if (!game.world().point_inside(f + Vec3f{0.0f, 0.9f, 0.0f}, filter).empty()) ++o.inside_steps;
+            if (!game.world().point_inside(f + Vec3f{0.0f, 0.9f, 0.0f}, filter).empty())
+                ++o.inside_steps;
         }
         const TraversalState3D ts = game.traversal(0);
-        const bool on_rope = ts.held >= 1 && (ts.grips[0].kind == GripKind3D::Rope || ts.grips[1].kind == GripKind3D::Rope) &&
+        const bool on_rope = ts.held >= 1 &&
+                             (ts.grips[0].kind == GripKind3D::Rope || ts.grips[1].kind == GripKind3D::Rope) &&
                              (ts.grips[0].phase == GripPhase3D::Held || ts.grips[1].phase == GripPhase3D::Held);
         if (on_rope) {
             if (!rope_seen) {
@@ -124,9 +132,12 @@ Observed observe(u64 seed, const std::string& script, u64 max_steps = 40000) {
         ++o.camera_steps;
         QueryFilter3D wall;
         wall.mask = layer_bit(layers3d::Static);
-        if (!game.world().point_inside(v.position, wall).empty()) ++o.camera_inside;
-        if (v.obstructed) ++o.camera_obstructed;
-        if (prev_arm >= 0.0f && v.arm > prev_arm) o.camera_worst_ease = std::max(o.camera_worst_ease, v.arm - prev_arm);
+        if (!game.world().point_inside(v.position, wall).empty())
+            ++o.camera_inside;
+        if (v.obstructed)
+            ++o.camera_obstructed;
+        if (prev_arm >= 0.0f && v.arm > prev_arm)
+            o.camera_worst_ease = std::max(o.camera_worst_ease, v.arm - prev_arm);
         prev_arm = v.arm;
         o.camera_farthest = std::max(o.camera_farthest, v.arm);
     }
@@ -149,23 +160,27 @@ const Observed& climb() {
 
 // Steps `n` steps of a held command.
 void hold(Game& g, const PlayerCommand& c, int n) {
-    for (int i = 0; i < n; ++i) g.step({&c, 1});
+    for (int i = 0; i < n; ++i)
+        g.step({&c, 1});
 }
 
-// Brings a fresh game to the moment the player hangs by both hands at the first wall (after the walk, the face, the grab).
+// Brings a fresh game to the moment the player hangs by both hands at the first wall (after the walk, the face, the
+// grab).
 Game* hang_at_first_wall(Game& g, Bot& bot) {
     for (int s = 0; s < 4000; ++s) {
         const PlayerCommand c = bot.next();
         g.step({&c, 1});
         const TraversalState3D ts = g.traversal(0);
-        if (ts.mode == TraversalMode3D::Hanging && ts.held == 2 && ts.grips[0].phase == GripPhase3D::Held && ts.grips[1].phase == GripPhase3D::Held) {
+        if (ts.mode == TraversalMode3D::Hanging && ts.held == 2 && ts.grips[0].phase == GripPhase3D::Held &&
+            ts.grips[1].phase == GripPhase3D::Held) {
             return &g;
         }
     }
     return nullptr;
 }
 
-// ---- the level -----------------------------------------------------------------------------------------------------------------
+// ---- the level
+// -----------------------------------------------------------------------------------------------------------------
 
 void test_level_determinism() {
     const SummitLevel a = generate_level(7), b = generate_level(7), c = generate_level(8);
@@ -182,14 +197,17 @@ void test_level_determinism() {
     bool same = ma.size() == mb.size();
     for (std::size_t i = 0; same && i < ma.size(); ++i) {
         same = ma[i].mesh.vertices.size() == mb[i].mesh.vertices.size() &&
-               std::memcmp(ma[i].mesh.vertices.data(), mb[i].mesh.vertices.data(), ma[i].mesh.vertices.size() * sizeof(MeshVertex)) == 0 &&
+               std::memcmp(ma[i].mesh.vertices.data(), mb[i].mesh.vertices.data(),
+                           ma[i].mesh.vertices.size() * sizeof(MeshVertex3D)) == 0 &&
                ma[i].mesh.indices == mb[i].mesh.indices;
     }
     CHECK(same);
     // The route has every kind of leg.
     bool kinds[6] = {};
-    for (const Leg& l : a.route) kinds[int(l.kind)] = true;
-    for (bool k : kinds) CHECK(k);
+    for (const Leg& l : a.route)
+        kinds[int(l.kind)] = true;
+    for (bool k : kinds)
+        CHECK(k);
     // Altitude: the design asks for about 120 to 180 m, over many seeds.
     for (u64 seed = 1; seed <= 20; ++seed) {
         const SummitLevel l = generate_level(seed);
@@ -217,30 +235,35 @@ void test_colliders_and_meshes_are_one_list() {
         CHECK(g.world().surface_material(b).grippable == p.grippable);
     }
     CHECK(holds >= 8);
-    // A ray down onto a ground piece's top finds that piece's body, and the mesh has a vertex on that face (what is drawn is
-    // where it is hit).
+    // A ray down onto a ground piece's top finds that piece's body, and the mesh has a vertex on that face (what is
+    // drawn is where it is hit).
     const std::vector<RenderMeshData> meshes = build_render_meshes(level);
     int rays = 0;
     for (std::size_t i = 0; i < level.pieces.size(); ++i) {
         const Piece& p = level.pieces[i];
-        if (p.kind != PieceKind::Ground || p.half.y < 1.0f) continue;
+        if (p.kind != PieceKind::Ground || p.half.y < 1.0f)
+            continue;
         const Vec3f top = p.centre + p.rotation.rotate({0.0f, p.half.y, 0.0f});
         const auto hit = g.world().raycast(top + Vec3f{0.0f, 0.5f, 0.0f}, top - Vec3f{0.0f, 0.5f, 0.0f});
-        if (!hit || hit->fraction <= 0.0f) continue; // (covered by something higher: the ray starts inside it)
-        if (hit->user_id > level.pieces.size()) continue; // (a stone sits there)
+        if (!hit || hit->fraction <= 0.0f)
+            continue; // (covered by something higher: the ray starts inside it)
+        if (hit->user_id > level.pieces.size())
+            continue; // (a stone sits there)
         ++rays;
         // Whichever ground piece covers that spot is hit first: a body of the list, at that height.
         CHECK(hit->user_id >= 1 && hit->user_id <= level.pieces.size());
         CHECK_NEAR(hit->point.y, top.y, 0.06f);
         bool vertex_there = false;
         for (const RenderMeshData& m : meshes) {
-            for (const MeshVertex& v : m.mesh.vertices) {
-                if (std::fabs(v.position.y - top.y) < 0.05f && std::fabs(v.position.x - top.x) < 1.0f && std::fabs(v.position.z - top.z) < 1.0f) {
+            for (const MeshVertex3D& v : m.mesh.vertices) {
+                if (std::fabs(v.position.y - top.y) < 0.05f && std::fabs(v.position.x - top.x) < 1.0f &&
+                    std::fabs(v.position.z - top.z) < 1.0f) {
                     vertex_there = true;
                     break;
                 }
             }
-            if (vertex_there) break;
+            if (vertex_there)
+                break;
         }
         CHECK(vertex_there);
     }
@@ -248,12 +271,13 @@ void test_colliders_and_meshes_are_one_list() {
     // The meshes' bounds hold every piece's centre.
     Vec3f lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
     for (const RenderMeshData& m : build_render_meshes(level)) {
-        const Bounds3 bb = m.mesh.bounds();
+        const Bounds3D bb = m.mesh.bounds();
         lo = {std::min(lo.x, bb.min.x), std::min(lo.y, bb.min.y), std::min(lo.z, bb.min.z)};
         hi = {std::max(hi.x, bb.max.x), std::max(hi.y, bb.max.y), std::max(hi.z, bb.max.z)};
     }
     for (const Piece& p : level.pieces) {
-        CHECK(p.centre.x >= lo.x && p.centre.x <= hi.x && p.centre.y >= lo.y && p.centre.y <= hi.y && p.centre.z >= lo.z && p.centre.z <= hi.z);
+        CHECK(p.centre.x >= lo.x && p.centre.x <= hi.x && p.centre.y >= lo.y && p.centre.y <= hi.y &&
+              p.centre.z >= lo.z && p.centre.z <= hi.z);
     }
     // The meshes touch the level's bounds: they are drawn from the pieces that make them.
     CHECK_NEAR(lo.y, level.bounds.min.y, 0.05f);
@@ -271,7 +295,8 @@ void test_route_is_climbable_by_the_stamina_model() {
         CHECK(plan.least_margin > 4.0f);
         CHECK(plan.total_seconds > 90.0f && plan.total_seconds < 400.0f);
         for (const LegPlan& l : plan.legs) {
-            if (l.kind == LegKind::Climb || l.kind == LegKind::Overhang || l.kind == LegKind::Rope) ++climbing_legs;
+            if (l.kind == LegKind::Climb || l.kind == LegKind::Overhang || l.kind == LegKind::Rope)
+                ++climbing_legs;
         }
     }
     CHECK(climbing_legs >= 30 * 6);
@@ -279,9 +304,11 @@ void test_route_is_climbable_by_the_stamina_model() {
     const SummitLevel level = generate_level(test_seed);
     const RoutePlan plan = plan_route(level, costs);
     for (std::size_t i = 0; i < level.route.size(); ++i) {
-        if (level.route[i].kind != LegKind::Climb) continue;
+        if (level.route[i].kind != LegKind::Climb)
+            continue;
         const f32 t = (level.route[i].height - costs.first_hold_height) / costs.climb_speed + costs.settle_seconds;
-        const f32 expected = 2.0f * costs.grab_cost + (costs.drain_two_hands + costs.drain_moving) * t + costs.pull_up_cost;
+        const f32 expected =
+            2.0f * costs.grab_cost + (costs.drain_two_hands + costs.drain_moving) * t + costs.pull_up_cost;
         CHECK_NEAR(plan.legs[i].cost, expected, 0.01f);
         break;
     }
@@ -289,26 +316,30 @@ void test_route_is_climbable_by_the_stamina_model() {
     {
         SummitLevel one = level;
         for (Leg& l : one.route) {
-            if (l.kind == LegKind::Climb) l.height *= 2.5f;
+            if (l.kind == LegKind::Climb)
+                l.height *= 2.5f;
         }
         const RoutePlan p = plan_route(one, costs);
         CHECK(!p.climbable);
         bool some_infeasible = false;
-        for (const LegPlan& l : p.legs) some_infeasible = some_infeasible || !l.feasible;
+        for (const LegPlan& l : p.legs)
+            some_infeasible = some_infeasible || !l.feasible;
         CHECK(some_infeasible);
     }
     // A mountain whose pitches are three times as high is not climbable: the planner says so.
     SummitLevel steep = level;
-    for (Leg& l : steep.route) l.height *= 3.0f;
+    for (Leg& l : steep.route)
+        l.height *= 3.0f;
     CHECK(!plan_route(steep, costs).climbable);
-    // And the planner is not far from the run: the lowest stamina the bot reached is no lower than the dearest leg allows (a
-    // margin for the reach, the grabs and the pull-up's start).
+    // And the planner is not far from the run: the lowest stamina the bot reached is no lower than the dearest leg
+    // allows (a margin for the reach, the grabs and the pull-up's start).
     const Observed& o = climb();
     CHECK(o.report.min_stamina > plan.least_margin - 3.0f);
     CHECK(o.report.min_stamina < plan.least_margin + 14.0f);
 }
 
-// ---- the player model's numbers -------------------------------------------------------------------------------------------
+// ---- the player model's numbers
+// -------------------------------------------------------------------------------------------
 
 void test_stamina_numbers() {
     // Hanging by both hands, still: 7 a second; moving up: 7 + 4; one hand: 12.
@@ -427,7 +458,8 @@ void test_look_is_clamped() {
     CHECK(std::isfinite(f.x) && std::isfinite(f.y) && std::isfinite(f.z) && std::isfinite(g.player(0).yaw));
 }
 
-// ---- input as commands -----------------------------------------------------------------------------------------------------
+// ---- input as commands
+// -----------------------------------------------------------------------------------------------------
 
 void test_mapper() {
     const InputBindings b = InputBindings::defaults();
@@ -559,13 +591,15 @@ void test_mapper() {
 }
 
 void test_gamepad_poll_without_a_device() {
-    // No window and no device here: polling reports nothing and does not fail (and the subsystem is left as it was found).
+    // No window and no device here: polling reports nothing and does not fail (and the subsystem is left as it was
+    // found).
     kin::Gamepads pads;
     const kin::GamepadState& a = pads.poll();
     const bool connected = a.connected;
     const kin::GamepadState& b = pads.poll();
     CHECK(b.connected == connected);
-    if (!connected) CHECK(b == kin::GamepadState{});
+    if (!connected)
+        CHECK(b == kin::GamepadState{});
 }
 
 void test_command_log_files() {
@@ -580,7 +614,8 @@ void test_command_log_files() {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     std::vector<unsigned char> bytes(64 * 1024);
     const std::size_t n = f ? std::fread(bytes.data(), 1, bytes.size(), f) : 0;
-    if (f) std::fclose(f);
+    if (f)
+        std::fclose(f);
     f = std::fopen(path.c_str(), "wb");
     if (f) {
         std::fwrite(bytes.data(), 1, n - 7, f);
@@ -592,7 +627,8 @@ void test_command_log_files() {
     CHECK(!read_command_log("no_such_summit_log.bin", seed, back));
 }
 
-// ---- replay, hash, save and restore ----------------------------------------------------------------------------------------------
+// ---- replay, hash, save and restore
+// ----------------------------------------------------------------------------------------------
 
 void test_replay_gives_the_same_hash() {
     const Observed& o = climb();
@@ -620,31 +656,37 @@ void test_save_and_restore() {
         Game probe(test_seed);
         for (std::size_t i = 0; i < log.size() && at == 0; ++i) {
             probe.step({&log[i], 1});
-            if (i > 2000 && probe.traversal(0).hanging() && probe.traversal(0).held == 2) at = i + 1;
+            if (i > 2000 && probe.traversal(0).hanging() && probe.traversal(0).held == 2)
+                at = i + 1;
         }
     }
     CHECK(at > 2000);
     Game a(test_seed);
-    for (std::size_t i = 0; i < at; ++i) a.step({&log[i], 1});
+    for (std::size_t i = 0; i < at; ++i)
+        a.step({&log[i], 1});
     const TraversalState3D mid = a.traversal(0);
     CHECK(mid.hanging());
     const u64 hash_at = a.state_hash();
     const std::vector<u8> blob = a.save();
-    for (std::size_t i = at; i < log.size(); ++i) a.step({&log[i], 1});
+    for (std::size_t i = at; i < log.size(); ++i)
+        a.step({&log[i], 1});
     CHECK(a.state_hash() == o.report.final_hash);
     Game b(test_seed);
     CHECK(b.restore(blob));
     CHECK(b.state_hash() == hash_at);
     CHECK(b.step_count() == at);
-    for (std::size_t i = at; i < log.size(); ++i) b.step({&log[i], 1});
+    for (std::size_t i = at; i < log.size(); ++i)
+        b.step({&log[i], 1});
     CHECK(b.state_hash() == o.report.final_hash);
     // The same game, after it has run on, goes back.
     CHECK(a.restore(blob));
     CHECK(a.state_hash() == hash_at);
-    for (std::size_t i = at; i < at + 600; ++i) a.step({&log[i], 1});
+    for (std::size_t i = at; i < at + 600; ++i)
+        a.step({&log[i], 1});
     Game c(test_seed);
     CHECK(c.restore(blob));
-    for (std::size_t i = at; i < at + 600; ++i) c.step({&log[i], 1});
+    for (std::size_t i = at; i < at + 600; ++i)
+        c.step({&log[i], 1});
     CHECK(a.state_hash() == c.state_hash());
     // Refused, and nothing changed: another mountain, another player count, a cut file, a wrong magic.
     Game other(test_seed + 1);
@@ -708,15 +750,19 @@ void test_frame_rate_independence() {
     const std::vector<PlayerCommand>& log = o.report.log;
     const std::size_t total = 5000; // enough to include a climb and a camp
     Game ref(test_seed);
-    for (std::size_t i = 0; i < total; ++i) ref.step({&log[i], 1});
+    for (std::size_t i = 0; i < total; ++i)
+        ref.step({&log[i], 1});
     const u64 reference = ref.state_hash();
     struct Rate {
         const char* name;
         double seconds;
         bool jitter;
     };
-    const Rate rates[] = {{"30 fps", 1.0 / 30.0, false}, {"60 fps", 1.0 / 60.0, false}, {"144 fps", 1.0 / 144.0, false},
-                          {"240 fps", 1.0 / 240.0, false}, {"jitter", 0.0, true}};
+    const Rate rates[] = {{"30 fps", 1.0 / 30.0, false},
+                          {"60 fps", 1.0 / 60.0, false},
+                          {"144 fps", 1.0 / 144.0, false},
+                          {"240 fps", 1.0 / 240.0, false},
+                          {"jitter", 0.0, true}};
     u32 lcg = 12345u;
     for (const Rate& rate : rates) {
         Game g(test_seed);
@@ -740,7 +786,8 @@ void test_frame_rate_independence() {
             (void)rig.frame(g.world(), stepper.alpha(), f32(frame));
             ++frames;
         }
-        if (verbose) std::printf("  %s: %d frames\n", rate.name, frames);
+        if (verbose)
+            std::printf("  %s: %d frames\n", rate.name, frames);
         CHECK(g.state_hash() == reference);
     }
 }
@@ -791,22 +838,27 @@ void test_two_players() {
     std::vector<PlayerCommand> c(2);
     c[1].move.y = 1.0f;
     c[1].sprint = true;
-    for (int i = 0; i < 150; ++i) g.step(c);
+    for (int i = 0; i < 150; ++i)
+        g.step(c);
     // Player 1 ran; player 0 stood where it began (a metre or so off the camp's middle).
     CHECK(length(g.feet(1) - g.feet(0)) > 5.0f);
     CHECK(g.player(0).state == PlayerState::Alive && g.player(1).state == PlayerState::Alive);
     CHECK(g.stamina(1) < g.stamina(0));
     const std::vector<u8> blob = g.save();
     const u64 h = g.state_hash();
-    for (int i = 0; i < 60; ++i) g.step(c);
+    for (int i = 0; i < 60; ++i)
+        g.step(c);
     CHECK(g.restore(blob) && g.state_hash() == h);
     // Each has its own ragdoll.
     CHECK(g.world().ragdoll_count() == 2);
 }
 
-// ---- falls, ragdoll, get-up, respawn ----------------------------------------------------------------------------------------------
+// ---- falls, ragdoll, get-up, respawn
+// ----------------------------------------------------------------------------------------------
 
-void settle(Game& g, int steps = 60) { hold(g, {}, steps); }
+void settle(Game& g, int steps = 60) {
+    hold(g, {}, steps);
+}
 
 void test_short_fall_is_free() {
     Game g(test_seed);
@@ -833,8 +885,10 @@ void test_fall_stuns_ragdolls_gets_up() {
         const bool walking_now = g.player(0).state == PlayerState::Alive && got_up;
         g.step({&ahead, walking_now ? 1u : 0u});
         for (const GameEvent& e : g.events()) {
-            if (e.kind == GameEventKind::Landed) landing = e.value;
-            if (e.kind == GameEventKind::GotUp) got_up = true;
+            if (e.kind == GameEventKind::Landed)
+                landing = e.value;
+            if (e.kind == GameEventKind::GotUp)
+                got_up = true;
         }
         const Player& p = g.player(0);
         if (p.state == PlayerState::Stunned) {
@@ -844,8 +898,10 @@ void test_fall_stuns_ragdolls_gets_up() {
             const RagdollState3D rs = g.world().ragdoll_state(p.ragdoll);
             ragdoll_running = ragdoll_running || rs.mode == RagdollMode3D::Ragdoll || rs.mode == RagdollMode3D::Blend;
         }
-        if (p.state == PlayerState::GettingUp) ++getting_up_steps;
-        if (got_up && p.state == PlayerState::Alive) up_again = true;
+        if (p.state == PlayerState::GettingUp)
+            ++getting_up_steps;
+        if (got_up && p.state == PlayerState::Alive)
+            up_again = true;
     }
     CHECK(stunned);
     CHECK(capsule_off);
@@ -899,14 +955,16 @@ void test_death_respawns_at_the_camp() {
     bool lost = false;
     for (int i = 0; i < 120 && !lost; ++i) {
         g.step({});
-        for (const GameEvent& e : g.events()) lost = lost || e.kind == GameEventKind::Died;
+        for (const GameEvent& e : g.events())
+            lost = lost || e.kind == GameEventKind::Died;
     }
     CHECK(lost);
     CHECK(length(g.feet(0) - camp.spawn) < 2.5f);
     CHECK(g.player(0).deaths == 2);
 }
 
-// ---- the rope, the camera, the scripted runs ------------------------------------------------------------------------------------
+// ---- the rope, the camera, the scripted runs
+// ------------------------------------------------------------------------------------
 
 void test_rope_climb() {
     const Observed& o = climb();
@@ -918,7 +976,8 @@ void test_rope_climb() {
     const SummitLevel level = generate_level(test_seed);
     int rope_leg = -1;
     for (std::size_t i = 0; i < level.route.size(); ++i) {
-        if (level.route[i].kind == LegKind::Rope) rope_leg = int(i);
+        if (level.route[i].kind == LegKind::Rope)
+            rope_leg = int(i);
     }
     CHECK(rope_leg > 0 && o.report.legs_done > rope_leg);
     // The rope's physics: its anchor is where the level says; a body hangs from it with the length asked.
@@ -957,7 +1016,8 @@ void test_camera_stays_out_of_the_rock() {
     CHECK(dot(normalize(g.head(0) - t.position), fwd) > 0.9f);
     // It never writes to the game: the state is what it was.
     const u64 before = g.state_hash();
-    for (int i = 0; i < 20; ++i) (void)third.frame(g.world(), 0.5f, 1.0f / 60.0f);
+    for (int i = 0; i < 20; ++i)
+        (void)third.frame(g.world(), 0.5f, 1.0f / 60.0f);
     CHECK(g.state_hash() == before);
 }
 
@@ -1003,28 +1063,31 @@ void test_scripted_fall() {
 
 void test_authored_holds_are_in_reach() {
     const SummitLevel level = generate_level(test_seed);
-    // The hold line: holds in order up the slab, alternating sides, each at most 0.55 m above the one before and at least 0.2 m
-    // (the hand's reach is 0.95 m from a shoulder 1.65 m up, so hand over hand it is a short reach).
+    // The hold line: holds in order up the slab, alternating sides, each at most 0.55 m above the one before and at
+    // least 0.2 m (the hand's reach is 0.95 m from a shoulder 1.65 m up, so hand over hand it is a short reach).
     std::vector<const Piece*> holds;
     for (const Piece& p : level.pieces) {
-        if (p.hold) holds.push_back(&p);
+        if (p.hold)
+            holds.push_back(&p);
     }
     CHECK(holds.size() >= 8);
     for (std::size_t i = 1; i < holds.size(); ++i) {
         const f32 dy = holds[i]->centre.y - holds[i - 1]->centre.y;
         CHECK(dy > 0.2f && dy < 0.55f);
-        const f32 dx = length(Vec3f{holds[i]->centre.x - holds[i - 1]->centre.x, 0.0f, holds[i]->centre.z - holds[i - 1]->centre.z});
+        const f32 dx = length(
+            Vec3f{holds[i]->centre.x - holds[i - 1]->centre.x, 0.0f, holds[i]->centre.z - holds[i - 1]->centre.z});
         CHECK(dx > 0.1f && dx < 0.9f);
         CHECK(holds[i]->hold_quality > 0.5f);
     }
 }
 
-// Hand over hand up the hold line (a smooth slab no hand can take, with an authored hold every 0.45 m alternating sides): the
-// test's own tiny state machine, not the route bot's, aims each free hand at the next hold and lets go of the one behind.
+// Hand over hand up the hold line (a smooth slab no hand can take, with an authored hold every 0.45 m alternating
+// sides): the test's own tiny state machine, not the route bot's, aims each free hand at the next hold and lets go of
+// the one behind.
 struct HoldClimb {
     int steps = 0;
-    int taken = 0;       // holds gripped
-    f32 top_y = 0.0f;    // highest feet
+    int taken = 0;    // holds gripped
+    f32 top_y = 0.0f; // highest feet
     bool mantled = false;
     bool fell = false;
 };
@@ -1035,14 +1098,17 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
     const SummitLevel& level = g.level();
     std::vector<const Piece*> holds;
     for (const Piece& p : level.pieces) {
-        if (p.hold) holds.push_back(&p);
+        if (p.hold)
+            holds.push_back(&p);
     }
-    if (holds.size() < 4) return out;
-    const Vec3f normal = holds[0]->rotation.rotate({0.0f, 0.0f, 1.0f});    // out of the wall
-    const Vec3f right{normal.z, 0.0f, -normal.x};                          // to the right of someone facing the wall
+    if (holds.size() < 4)
+        return out;
+    const Vec3f normal = holds[0]->rotation.rotate({0.0f, 0.0f, 1.0f}); // out of the wall
+    const Vec3f right{normal.z, 0.0f, -normal.x};                       // to the right of someone facing the wall
     // The places the hands go for, in order: each hold's front, then the lip's edge (left hand, right hand).
     std::vector<Vec3f> targets;
-    for (const Piece* h : holds) targets.push_back(h->centre + normal * 0.08f);
+    for (const Piece* h : holds)
+        targets.push_back(h->centre + normal * 0.08f);
     const Piece* lip = nullptr;
     f32 nearest = 1e9f;
     for (const Piece& p : level.pieces) {
@@ -1064,7 +1130,8 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
     // The bench the slab stands over: the second climb leg's foot (the second pitch) is at its height.
     f32 bench_y = holds[0]->centre.y - 1.7f;
     for (const Leg& l : level.route) {
-        if (l.kind == LegKind::Climb && std::fabs((l.from.y + 1.7f) - holds[0]->centre.y) < 0.8f) bench_y = l.from.y;
+        if (l.kind == LegKind::Climb && std::fabs((l.from.y + 1.7f) - holds[0]->centre.y) < 0.8f)
+            bench_y = l.from.y;
     }
     // Stand 0.8 m off the wall below the first hold, facing it.
     const Vec3f stand = Vec3f{holds[0]->centre.x, bench_y, holds[0]->centre.z} + normal * 0.8f;
@@ -1080,7 +1147,7 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
     };
     (void)yaw;
     (void)hold_count;
-    std::size_t next = 0;      // the hold the free hand goes for
+    std::size_t next = 0; // the hold the free hand goes for
     bool held[2] = {false, false};
     constexpr std::size_t none = ~std::size_t{0};
     std::size_t on[2] = {none, none};
@@ -1090,9 +1157,13 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
         const TraversalState3D ts = g.traversal(0);
         PlayerCommand c;
         // Which limb takes the next hold: the one on its side of the slab's middle line.
-        const auto side_of = [&](std::size_t k) -> int { return int(k % 2); }; // the line alternates, the first on the left
-        for (int limb = 0; limb < 2; ++limb) held[limb] = ts.grips[limb].phase == GripPhase3D::Held;
-        // Taken: the limb holds the hold wanted next (its grip within 0.3 m of the hold's front), before any command is made.
+        const auto side_of = [&](std::size_t k) -> int {
+            return int(k % 2);
+        }; // the line alternates, the first on the left
+        for (int limb = 0; limb < 2; ++limb)
+            held[limb] = ts.grips[limb].phase == GripPhase3D::Held;
+        // Taken: the limb holds the hold wanted next (its grip within 0.3 m of the hold's front), before any command is
+        // made.
         if (next < targets.size()) {
             const int limb = side_of(next);
             const Vec3f target = targets[next];
@@ -1105,9 +1176,12 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
         out.taken = std::max<int>(out.taken, int(next));
         out.top_y = std::max(out.top_y, cs.position.y);
         // A pull-up over the lip at the top.
-        if (ts.mode == TraversalMode3D::Mantling) out.mantled = true;
-        if (out.mantled && ts.mode == TraversalMode3D::Walking) break;
-        if (!ts.hanging() && cs.ground != CharacterGround3D::OnGround && s > 60) out.fell = true;
+        if (ts.mode == TraversalMode3D::Mantling)
+            out.mantled = true;
+        if (out.mantled && ts.mode == TraversalMode3D::Walking)
+            break;
+        if (!ts.hanging() && cs.ground != CharacterGround3D::OnGround && s > 60)
+            out.fell = true;
         // Looking at the hold wanted next, from the shoulder of the limb that goes for it.
         if (next < targets.size()) {
             const int limb = side_of(next);
@@ -1118,8 +1192,10 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
             c.grab_left = held[0] && on[0] != none && on[0] + 2 > next;
             c.grab_right = held[1] && on[1] != none && on[1] + 2 > next;
             const bool behind_free = next < 2 || !held[limb] || on[limb] == none || on[limb] + 2 <= next;
-            if (limb == 0) c.grab_left = c.grab_left || behind_free;
-            else c.grab_right = c.grab_right || behind_free;
+            if (limb == 0)
+                c.grab_left = c.grab_left || behind_free;
+            else
+                c.grab_right = c.grab_right || behind_free;
             // The hold behind is let go of by not asking for it: held[limb] on an old hold, `next` two ahead of it.
             if (next >= 2 && held[limb] && on[limb] != none && on[limb] + 2 == next) {
                 (limb == 0 ? c.grab_left : c.grab_right) = false;
@@ -1131,13 +1207,18 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
             aim(c, -normal + Vec3f{0.0f, 0.3f, 0.0f});
         }
         if (verbose && s % 30 == 0) {
-            std::printf("    s %d feet (%.2f %.2f %.2f) next %zu phase %d/%d kind %d/%d held %u yaw %.1f pitch %.1f", s, double(cs.position.x), double(cs.position.y),
-                        double(cs.position.z), next, int(ts.grips[0].phase), int(ts.grips[1].phase), int(ts.grips[0].kind), int(ts.grips[1].kind), ts.held,
-                        double(g.player(0).yaw), double(g.player(0).pitch));
-            if (next < targets.size()) std::printf(" target (%.2f %.2f %.2f)", double(targets[next].x), double(targets[next].y), double(targets[next].z));
-            std::printf(" cmd grabs %d%d look %.1f %.1f\n", int(c.grab_left), int(c.grab_right), double(c.look.x), double(c.look.y));
+            std::printf("    s %d feet (%.2f %.2f %.2f) next %zu phase %d/%d kind %d/%d held %u yaw %.1f pitch %.1f", s,
+                        double(cs.position.x), double(cs.position.y), double(cs.position.z), next,
+                        int(ts.grips[0].phase), int(ts.grips[1].phase), int(ts.grips[0].kind), int(ts.grips[1].kind),
+                        ts.held, double(g.player(0).yaw), double(g.player(0).pitch));
+            if (next < targets.size())
+                std::printf(" target (%.2f %.2f %.2f)", double(targets[next].x), double(targets[next].y),
+                            double(targets[next].z));
+            std::printf(" cmd grabs %d%d look %.1f %.1f\n", int(c.grab_left), int(c.grab_right), double(c.look.x),
+                        double(c.look.y));
         }
-        if (++stall > 600) break;
+        if (++stall > 600)
+            break;
         g.step({&c, 1});
         ++out.steps;
     }
@@ -1146,7 +1227,9 @@ HoldClimb climb_hold_line(u64 seed, int max_steps = 6000) {
 
 void test_hold_line_by_hand_over_hand() {
     const HoldClimb h = climb_hold_line(test_seed);
-    if (verbose) std::printf("  holds taken %d, top %.2f, mantled %d, fell %d, steps %d\n", h.taken, double(h.top_y), int(h.mantled), int(h.fell), h.steps);
+    if (verbose)
+        std::printf("  holds taken %d, top %.2f, mantled %d, fell %d, steps %d\n", h.taken, double(h.top_y),
+                    int(h.mantled), int(h.fell), h.steps);
     CHECK(h.taken >= 10);
     CHECK(h.mantled);
     CHECK(!h.fell);
@@ -1164,29 +1247,35 @@ void test_cost_of_a_step() {
         ++steps;
     }
     const double s = std::chrono::duration<double>(Clock::now() - start).count();
-    std::printf("summit_tests: the climb: %llu steps in %.2f s (%.0f steps a second, %.0f us a step)\n", (unsigned long long)steps, s,
-                double(steps) / s, s / double(steps) * 1e6);
+    std::printf("summit_tests: the climb: %llu steps in %.2f s (%.0f steps a second, %.0f us a step)\n",
+                (unsigned long long)steps, s, double(steps) / s, s / double(steps) * 1e6);
     CHECK(steps == expected_climb_steps);
     CHECK(s < 30.0);
 }
 
-// ---- the decor rock's colliders (P4b follow-up) ----------------------------------------------------------------------------------
+// ---- the decor rock's colliders (P4b follow-up)
+// ----------------------------------------------------------------------------------
 
 // Distance from `p` to the triangle abc (Ericson, Real-Time Collision Detection).
 f32 point_triangle_distance(Vec3f p, Vec3f a, Vec3f b, Vec3f c) {
     const Vec3f ab = b - a, ac = c - a, ap = p - a;
     const f32 d1 = dot(ab, ap), d2 = dot(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) return length(p - a);
+    if (d1 <= 0.0f && d2 <= 0.0f)
+        return length(p - a);
     const Vec3f bp = p - b;
     const f32 d3 = dot(ab, bp), d4 = dot(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) return length(p - b);
+    if (d3 >= 0.0f && d4 <= d3)
+        return length(p - b);
     const f32 vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) return length(p - (a + ab * (d1 / (d1 - d3))));
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+        return length(p - (a + ab * (d1 / (d1 - d3))));
     const Vec3f cp = p - c;
     const f32 d5 = dot(ab, cp), d6 = dot(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) return length(p - c);
+    if (d6 >= 0.0f && d5 <= d6)
+        return length(p - c);
     const f32 vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) return length(p - (a + ac * (d2 / (d2 - d6))));
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+        return length(p - (a + ac * (d2 / (d2 - d6))));
     const f32 va = d3 * d6 - d5 * d4;
     if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
         const f32 w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
@@ -1196,8 +1285,8 @@ f32 point_triangle_distance(Vec3f p, Vec3f a, Vec3f b, Vec3f c) {
     return length(p - (a + ab * (vb * denom) + ac * (vc * denom)));
 }
 
-// How far the visible chunk and its collider part: the worst mesh vertex outside the hull, and the worst point of the hull's
-// surface (hit by rays from all round) away from the mesh's triangles.
+// How far the visible chunk and its collider part: the worst mesh vertex outside the hull, and the worst point of the
+// hull's surface (hit by rays from all round) away from the mesh's triangles.
 struct DecorGap {
     f32 vertex_outside = 0.0f;
     f32 collider_proud = 0.0f;
@@ -1213,8 +1302,8 @@ DecorGap decor_gap(World3D& world, const SummitLevel& level, const DecorChunk& c
     d.position = c.centre;
     d.rotation = c.rotation;
     const Body3D b = world.create_body(d);
-    const MeshData mesh = decor_chunk_mesh(level, c);
-    for (const MeshVertex& v : mesh.vertices) {
+    const MeshData3D mesh = decor_chunk_mesh(level, c);
+    for (const MeshVertex3D& v : mesh.vertices) {
         ++gap.vertices;
         const auto hit = world.closest_point(v.position, 0.5f);
         gap.vertex_outside = std::max(gap.vertex_outside, hit ? hit->distance : 0.5f);
@@ -1228,12 +1317,14 @@ DecorGap decor_gap(World3D& world, const SummitLevel& level, const DecorChunk& c
         const f32 a = f32(i) * 2.39996323f;
         const Vec3f dir{r * std::cos(a), y, r * std::sin(a)};
         const auto hit = world.raycast(c.centre + dir * reach, c.centre);
-        if (!hit) continue;
+        if (!hit)
+            continue;
         ++gap.rays;
         f32 best = 1e9f;
         for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
             best = std::min(best, point_triangle_distance(hit->point, mesh.vertices[mesh.indices[t]].position,
-                                                          mesh.vertices[mesh.indices[t + 1]].position, mesh.vertices[mesh.indices[t + 2]].position));
+                                                          mesh.vertices[mesh.indices[t + 1]].position,
+                                                          mesh.vertices[mesh.indices[t + 2]].position));
         }
         gap.collider_proud = std::max(gap.collider_proud, best);
     }
@@ -1241,8 +1332,8 @@ DecorGap decor_gap(World3D& world, const SummitLevel& level, const DecorChunk& c
     return gap;
 }
 
-// The decor's tolerance (m): a visible vertex further than this outside its collider, or a collider's surface this far off the
-// visible rock, would be a rock you stand on that is not there, or fall through one that is.
+// The decor's tolerance (m): a visible vertex further than this outside its collider, or a collider's surface this far
+// off the visible rock, would be a rock you stand on that is not there, or fall through one that is.
 constexpr f32 decor_tolerance = 0.04f;
 
 void test_decor_has_colliders() {
@@ -1280,8 +1371,9 @@ void test_decor_has_colliders() {
             worst_proud = std::max(worst_proud, gap.collider_proud);
         }
         if (verbose) {
-            std::printf("  seed %llu: %d buttresses, %d stones, %d boulders; vertex outside %.4f, collider proud %.4f\n", (unsigned long long)seed,
-                        buttresses, stones, boulders, double(worst_vertex), double(worst_proud));
+            std::printf(
+                "  seed %llu: %d buttresses, %d stones, %d boulders; vertex outside %.4f, collider proud %.4f\n",
+                (unsigned long long)seed, buttresses, stones, boulders, double(worst_vertex), double(worst_proud));
         }
         CHECK(buttresses >= 8 && stones >= 20);
         CHECK(worst_vertex <= decor_tolerance);
@@ -1294,7 +1386,8 @@ std::optional<RayHit3D> decor_top(const Game& g, std::size_t j) {
     const DecorChunk& c = g.decor()[j];
     const f32 up = length(c.half) + 2.0f;
     const auto hit = g.world().raycast(c.centre + Vec3f{0.0f, up, 0.0f}, c.centre - Vec3f{0.0f, up, 0.0f});
-    if (!hit || hit->body != g.decor_body(j)) return std::nullopt;
+    if (!hit || hit->body != g.decor_body(j))
+        return std::nullopt;
     return hit;
 }
 
@@ -1307,10 +1400,13 @@ void test_decor_is_stood_on_and_blocks() {
     for (std::size_t j = 0; j < g.decor().size() && (stood_boulder < 2 || stood_buttress < 2); ++j) {
         const DecorChunk& c = g.decor()[j];
         const auto top = decor_top(g, j);
-        if (!top || top->normal.y < 0.97f) continue;
-        if (c.kind == DecorKind::Scree) continue;
+        if (!top || top->normal.y < 0.97f)
+            continue;
+        if (c.kind == DecorKind::Scree)
+            continue;
         int& count = c.kind == DecorKind::Buttress ? stood_buttress : stood_boulder;
-        if (count >= 2) continue;
+        if (count >= 2)
+            continue;
         g.debug_teleport(0, top->point + Vec3f{0.0f, 0.4f, 0.0f});
         const PlayerCommand idle{};
         hold(g, idle, 90);
@@ -1318,7 +1414,8 @@ void test_decor_is_stood_on_and_blocks() {
         CHECK(cs.ground == CharacterGround3D::OnGround);
         CHECK(cs.ground_user_id == first_decor_id + j);
         CHECK_NEAR(cs.position.y, top->point.y, 0.06f);
-        if (g.player(0).state == PlayerState::Alive && cs.ground == CharacterGround3D::OnGround) ++count;
+        if (g.player(0).state == PlayerState::Alive && cs.ground == CharacterGround3D::OnGround)
+            ++count;
     }
     CHECK(stood_boulder >= 1);
     CHECK(stood_buttress >= 1);
@@ -1327,11 +1424,13 @@ void test_decor_is_stood_on_and_blocks() {
     int swept = 0;
     for (std::size_t j = 0; j < g.decor().size() && swept < 3; ++j) {
         const DecorChunk& c = g.decor()[j];
-        if (c.kind != DecorKind::Buttress) continue;
+        if (c.kind != DecorKind::Buttress)
+            continue;
         const Vec3f out = c.rotation.rotate({1.0f, 0.0f, 0.0f});
         for (f32 side : {1.0f, -1.0f}) {
             const Vec3f start = c.centre + out * (side * (c.half.x + 2.0f));
-            const auto hit = g.world().shape_cast(Shape3D::capsule(0.65f, 0.3f), start, Quatf{}, out * (-side * (c.half.x + 2.0f)));
+            const auto hit =
+                g.world().shape_cast(Shape3D::capsule(0.65f, 0.3f), start, Quatf{}, out * (-side * (c.half.x + 2.0f)));
             if (hit && hit->user_id >= first_decor_id) {
                 ++swept;
                 break;
@@ -1341,8 +1440,8 @@ void test_decor_is_stood_on_and_blocks() {
     CHECK(swept >= 2);
 }
 
-// Walking into the side of a boulder that stands a metre above its (flat) ground stops at it (the capsule's radius from the rock)
-// and does not climb it (0.4 m is the step). Tries the seeds' boulders until two have been walked at.
+// Walking into the side of a boulder that stands a metre above its (flat) ground stops at it (the capsule's radius from
+// the rock) and does not climb it (0.4 m is the step). Tries the seeds' boulders until two have been walked at.
 void test_boulders_stop_a_walker() {
     int bumped = 0;
     for (u64 seed : {1ull, 2ull, 7ull, 19ull}) {
@@ -1350,28 +1449,34 @@ void test_boulders_stop_a_walker() {
         const SummitLevel& level = g.level();
         for (std::size_t j = 0; j < g.decor().size() && bumped < 3; ++j) {
             const DecorChunk& c = g.decor()[j];
-            if (c.kind != DecorKind::Boulder) continue;
+            if (c.kind != DecorKind::Boulder)
+                continue;
             const auto top = decor_top(g, j);
-            if (!top) continue;
+            if (!top)
+                continue;
             // The way the player looks, flat: walk along it at the boulder from 3 m away.
             Vec3f dir = look_vector(g.player(0).yaw, 0.0f);
             dir.y = 0.0f;
             dir = normalize(dir);
             const Vec3f from = c.centre - dir * (length(c.half) + 3.0f);
             const auto ground = g.world().raycast(from + Vec3f{0.0f, 2.0f, 0.0f}, from - Vec3f{0.0f, 3.0f, 0.0f});
-            if (!ground || ground->user_id > level.pieces.size() || ground->normal.y < 0.995f) continue;
-            if (top->point.y - ground->point.y < 0.9f) continue;
+            if (!ground || ground->user_id > level.pieces.size() || ground->normal.y < 0.995f)
+                continue;
+            if (top->point.y - ground->point.y < 0.9f)
+                continue;
             bool clear = true;
             for (std::size_t k = 0; k < g.decor().size(); ++k) {
-                if (k != j && length(g.decor()[k].centre - c.centre) < length(c.half) + 4.0f) clear = false;
+                if (k != j && length(g.decor()[k].centre - c.centre) < length(c.half) + 4.0f)
+                    clear = false;
             }
-            if (!clear) continue;
+            if (!clear)
+                continue;
             g.debug_teleport(0, ground->point + Vec3f{0.0f, 0.1f, 0.0f});
             hold(g, PlayerCommand{}, 30);
             PlayerCommand walk;
             walk.move = {0.0f, 1.0f};
             f32 highest = -1e9f, closest = 1e9f;
-            const MeshData mesh = decor_chunk_mesh(level, c);
+            const MeshData3D mesh = decor_chunk_mesh(level, c);
             for (int i = 0; i < 150; ++i) {
                 g.step({&walk, 1});
                 const Vec3f f = g.feet(0);
@@ -1379,18 +1484,20 @@ void test_boulders_stop_a_walker() {
                 // The capsule's axis at three heights against the visible rock's triangles.
                 for (f32 h : {0.4f, 0.6f, 0.8f}) {
                     for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
-                        const f32 d = point_triangle_distance(f + Vec3f{0.0f, h, 0.0f}, mesh.vertices[mesh.indices[t]].position,
-                                                              mesh.vertices[mesh.indices[t + 1]].position, mesh.vertices[mesh.indices[t + 2]].position);
+                        const f32 d = point_triangle_distance(
+                            f + Vec3f{0.0f, h, 0.0f}, mesh.vertices[mesh.indices[t]].position,
+                            mesh.vertices[mesh.indices[t + 1]].position, mesh.vertices[mesh.indices[t + 2]].position);
                         closest = std::min(closest, d);
                     }
                 }
             }
             if (verbose) {
-                std::printf("  boulder %zu: highest +%.3f (rock %.2f), closest %.3f, ground n.y %.3f\n", j, double(highest - ground->point.y),
-                            double(top->point.y - ground->point.y), double(closest), double(ground->normal.y));
+                std::printf("  boulder %zu: highest +%.3f (rock %.2f), closest %.3f, ground n.y %.3f\n", j,
+                            double(highest - ground->point.y), double(top->point.y - ground->point.y), double(closest),
+                            double(ground->normal.y));
             }
-            // Never into the rock (the radius is 0.3, rounded edges let the mesh's own bumps in by a centimetre or two) and it did
-            // meet it; the 0.4 m step does not carry it up a metre of rock.
+            // Never into the rock (the radius is 0.3, rounded edges let the mesh's own bumps in by a centimetre or two)
+            // and it did meet it; the 0.4 m step does not carry it up a metre of rock.
             CHECK(closest > 0.25f && closest < 0.36f);
             CHECK(highest < top->point.y - 0.3f);
             ++bumped;
@@ -1399,18 +1506,20 @@ void test_boulders_stop_a_walker() {
     CHECK(bumped >= 1);
 }
 
-// A route through a chunk takes the chunk out of the list (the clearance is part of the placement, so the collider cannot block
-// the way): a level with one more leg drawn through each kind loses exactly those chunks.
+// A route through a chunk takes the chunk out of the list (the clearance is part of the placement, so the collider
+// cannot block the way): a level with one more leg drawn through each kind loses exactly those chunks.
 void test_route_keeps_decor_out() {
     const SummitLevel level = generate_level(test_seed);
     const std::vector<DecorChunk> all = decor_chunks(level);
     for (DecorKind kind : {DecorKind::Buttress, DecorKind::Scree, DecorKind::Boulder}) {
         std::size_t pick = all.size();
         for (std::size_t j = 0; j < all.size() && pick == all.size(); ++j) {
-            if (all[j].kind == kind) pick = j;
+            if (all[j].kind == kind)
+                pick = j;
         }
         CHECK(pick < all.size());
-        if (pick == all.size()) continue;
+        if (pick == all.size())
+            continue;
         SummitLevel blocked = level;
         Leg l;
         l.from = all[pick].centre - Vec3f{1.0f, 0.0f, 0.0f};
@@ -1430,23 +1539,28 @@ void test_small_stones_are_stepped_over() {
     int walked = 0;
     for (std::size_t j = 0; j < g.decor().size() && walked < 3; ++j) {
         const DecorChunk& c = g.decor()[j];
-        if (c.kind != DecorKind::Scree) continue;
+        if (c.kind != DecorKind::Scree)
+            continue;
         Vec3f dir = look_vector(g.player(0).yaw, 0.0f);
         dir.y = 0.0f;
         dir = normalize(dir);
         const Vec3f from = c.centre - dir * 3.0f, to = c.centre + dir * 3.0f;
         const auto g0 = g.world().raycast(from + Vec3f{0.0f, 2.0f, 0.0f}, from - Vec3f{0.0f, 3.0f, 0.0f});
         const auto g1 = g.world().raycast(to + Vec3f{0.0f, 2.0f, 0.0f}, to - Vec3f{0.0f, 3.0f, 0.0f});
-        if (!g0 || !g1 || g0->user_id > level.pieces.size() || g1->user_id > level.pieces.size()) continue;
+        if (!g0 || !g1 || g0->user_id > level.pieces.size() || g1->user_id > level.pieces.size())
+            continue;
         // Nothing else of the decor on the line, and a stone the step can take.
         bool clear = true;
         for (std::size_t k = 0; k < g.decor().size(); ++k) {
-            if (k == j) continue;
+            if (k == j)
+                continue;
             const Vec3f d = g.decor()[k].centre - c.centre;
-            if (length(d) < length(g.decor()[k].half) + 4.0f) clear = false;
+            if (length(d) < length(g.decor()[k].half) + 4.0f)
+                clear = false;
         }
         const auto top = decor_top(g, j);
-        if (!clear || !top || top->point.y - g0->point.y > 0.3f || top->point.y - g0->point.y < 0.05f) continue;
+        if (!clear || !top || top->point.y - g0->point.y > 0.3f || top->point.y - g0->point.y < 0.05f)
+            continue;
         g.debug_teleport(0, g0->point + Vec3f{0.0f, 0.05f, 0.0f});
         hold(g, PlayerCommand{}, 30);
         PlayerCommand walk;
@@ -1477,21 +1591,26 @@ void test_nothing_of_the_route_is_inside_decor() {
         const Shape3D capsule = Shape3D::capsule(0.675f, 0.3f);
         const auto in_decor = [&](Vec3f feet) {
             for (const OverlapHit3D& h : g.world().overlap(capsule, feet + Vec3f{0.0f, 0.975f, 0.0f}, Quatf{})) {
-                if (h.user_id >= first_decor_id && h.user_id < 1000000u) return true;
+                if (h.user_id >= first_decor_id && h.user_id < 1000000u)
+                    return true;
             }
             return false;
         };
         int bad = 0;
         for (const Camp& c : level.camps) {
-            if (in_decor(c.spawn)) ++bad;
-            if (in_decor(c.marker)) ++bad;
+            if (in_decor(c.spawn))
+                ++bad;
+            if (in_decor(c.marker))
+                ++bad;
         }
-        if (in_decor(level.start)) ++bad;
+        if (in_decor(level.start))
+            ++bad;
         // The route's legs, a sample every 0.5 m (the climb's vertical ones included).
         for (const Leg& l : level.route) {
             const int n = std::max(1, int(length(l.to - l.from) / 0.5f));
             for (int i = 0; i <= n; ++i) {
-                if (in_decor(l.from + (l.to - l.from) * (f32(i) / f32(n)))) ++bad;
+                if (in_decor(l.from + (l.to - l.from) * (f32(i) / f32(n))))
+                    ++bad;
             }
         }
         // Rope: its anchor and the hang below.
@@ -1499,7 +1618,8 @@ void test_nothing_of_the_route_is_inside_decor() {
             const Shape3D bead = Shape3D::sphere(0.25f);
             for (f32 d = 0.0f; d <= r.length; d += 0.25f) {
                 for (const OverlapHit3D& h : g.world().overlap(bead, r.anchor - Vec3f{0.0f, d, 0.0f}, Quatf{})) {
-                    if (h.user_id >= first_decor_id && h.user_id < 1000000u) ++bad;
+                    if (h.user_id >= first_decor_id && h.user_id < 1000000u)
+                        ++bad;
                 }
             }
         }
@@ -1511,7 +1631,8 @@ void test_nothing_of_the_route_is_inside_decor() {
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "-v") verbose = true;
+        if (std::string(argv[i]) == "-v")
+            verbose = true;
     }
     const auto run = [](const char* name, void (*f)()) {
         const auto t0 = Clock::now();

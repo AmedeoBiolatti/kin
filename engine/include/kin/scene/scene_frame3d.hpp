@@ -41,7 +41,7 @@ public:
     // Clears draws/settings, applies authored settings and collects the world.
     // Caller owns the destination and view options; add custom draws afterwards
     // and submit with its own Renderer3D/View3D. No view is allocated here.
-    bool collect(Scene3D& scene, View3DOptions* view = nullptr);
+    bool collect(Scene3D& scene, ViewOptions3D* view = nullptr);
     const std::vector<std::string>& diagnostics() const { return _errors; }
 
 private:

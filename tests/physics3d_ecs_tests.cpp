@@ -8,7 +8,7 @@
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
-#include <kin/render3d/mesh.hpp>
+#include <kin/render3d/mesh3d.hpp>
 
 #include <algorithm>
 #include <array>
@@ -541,9 +541,9 @@ void test_foot_placement_over_physics() {
                                              .position = {0.55f, -0.1f, 0}});
     physics.optimize_broad_phase();
 
-    auto model = std::make_shared<Model>();
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(skin_fixtures::make_biped());
-    const Skeleton& sk = model->skeletons[0];
+    const Skeleton3D& sk = model->skeletons[0];
     AnimClip3D idle;
     idle.name = "idle";
     idle.duration = 1.0f;
@@ -552,18 +552,18 @@ void test_foot_placement_over_physics() {
 
     kin::EcsWorld ecs;
     WorldRenderState3D state{ecs};
-    const flecs::entity e = ecs.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = model}).set(Animator3D{.clip = "idle"});
+    const flecs::entity e = ecs.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = model}).set(Animator3D{.clip = "idle"});
     int casts = 0;
-    IKConstraint feet;
+    IKConstraint3D feet;
     feet.name = "feet";
-    feet.kind = IKKind::FootPlacer;
+    feet.kind = IKKind3D::FootPlacer;
     feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
     feet.foot_heights = {0.05f, 0.05f};
-    feet.pole = IKConstraint::Pole::ModelDirection;
+    feet.pole = IKConstraint3D::Pole::ModelDirection;
     feet.pole_vector = {0, 0, 1};
     feet.foot.smooth_seconds = 0.0f;
     feet.foot.ray_down = 0.8f;
-    const GroundQuery physics_ground = ground_query_from_world(physics, all_layers3d);
+    const GroundQuery3D physics_ground = ground_query_from_world(physics, all_layers3d);
     feet.ground = [&](Vec3f from, Vec3f to) {
         ++casts;
         return physics_ground(from, to);
@@ -598,8 +598,8 @@ void test_foot_placement_over_physics() {
     // The character's own body is ignored by the query: a capsule round the pelvis would otherwise be "ground".
     const Body3D self = physics.create_body({.shape = Shape3D::capsule(0.6f, 0.3f), .motion = Body3DMotion::Kinematic,
                                              .position = {0, 0.5f, 0}});
-    const GroundQuery with_self = ground_query_from_world(physics, all_layers3d);
-    const GroundQuery without_self = ground_query_from_world(physics, all_layers3d, self);
+    const GroundQuery3D with_self = ground_query_from_world(physics, all_layers3d);
+    const GroundQuery3D without_self = ground_query_from_world(physics, all_layers3d, self);
     const auto blocked = with_self({0, 2, 0}, {0, -1, 0});
     const auto clear = without_self({0, 2, 0}, {0, -1, 0});
     CHECK(blocked && blocked->position.y > 1.0f);
@@ -611,11 +611,11 @@ void test_foot_placement_over_physics() {
 // --- colliders from meshes ---
 
 void test_colliders_from_meshes() {
-    struct FakeMesh final : IMeshBackend {};
-    const Bounds3 bounds{{-1, 0, -2}, {1, 3, 2}};
+    struct FakeMesh final : IMeshBackend3D {};
+    const Bounds3D bounds{{-1, 0, -2}, {1, 3, 2}};
     kin::EcsWorld ecs;
     flecs::world& world = ecs.raw();
-    const flecs::entity e = world.entity().set(Transform3D{}).set(MeshRenderer{.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, bounds}});
+    const flecs::entity e = world.entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, bounds}});
     const auto c = collider_from_mesh(e);
     CHECK(c && c->kind == Collider3D::Kind::Box && near(c->half_extents, {1, 1.5f, 2}, 1e-6f) && near(c->offset, {0, 1.5f, 0}, 1e-6f));
     CHECK(!collider_from_mesh(world.entity()));
@@ -630,7 +630,7 @@ void test_colliders_from_meshes() {
     CHECK(side && near(side->point.x, -1.0f, 1e-3f));
 
     // From the CPU triangles: a convex hull of a box mesh, and its triangles as a static mesh.
-    auto data = std::make_shared<MeshData>(meshes::box({2, 2, 2}));
+    auto data = std::make_shared<MeshData3D>(meshes::box({2, 2, 2}));
     const Collider3D hull = collider_hull_from_mesh_data(data);
     const Collider3D tris = collider_triangles_from_mesh_data(data);
     World3D other(serial());
@@ -820,9 +820,9 @@ void test_character_animation_link() {
     add_floor(world);
     const flecs::entity hero = add_character(world, {0, 0, 0});
     Animator3D animator = locomotion_animator();
-    IKConstraint feet;
+    IKConstraint3D feet;
     feet.name = "feet";
-    feet.kind = IKKind::FootPlacer;
+    feet.kind = IKKind3D::FootPlacer;
     feet.weight = 0.0f;
     animator.add_ik(feet);
     hero.set(static_cast<const Animator3D&>(animator));
@@ -834,7 +834,7 @@ void test_character_animation_link() {
     CHECK(near(params().get_float("speed"), 0.0f, 0.01f));
     CHECK(!params().get_bool("airborne"));
     // Its foot placer is given the physics floor as the ground, weight 1, and the capsule is not part of it.
-    const IKConstraint* placer = hero.get<Animator3D>()->ik_constraints.empty() ? nullptr : &hero.get<Animator3D>()->ik_constraints[0];
+    const IKConstraint3D* placer = hero.get<Animator3D>()->ik_constraints.empty() ? nullptr : &hero.get<Animator3D>()->ik_constraints[0];
     CHECK(placer != nullptr && placer->ground && near(placer->weight, 1.0f, 1e-6f));
     if (placer != nullptr && placer->ground) {
         const auto hit = placer->ground({0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
@@ -885,9 +885,9 @@ void test_character_feet_on_physics_ground() {
                                    .set(RigidBody3D{.motion = Body3DMotion::Static, .layer = layers3d::User0});
     (void)step;
 
-    auto model = std::make_shared<Model>();
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(skin_fixtures::make_biped());
-    const Skeleton& sk = model->skeletons[0];
+    const Skeleton3D& sk = model->skeletons[0];
     AnimClip3D idle;
     idle.name = "idle";
     idle.duration = 1.0f;
@@ -899,12 +899,12 @@ void test_character_feet_on_physics_ground() {
     CharacterController3D controller;
     controller.desc = desc;
     Animator3D animator = locomotion_animator({.idle = "idle", .walk = "", .run = "", .fall = "idle"});
-    IKConstraint feet;
+    IKConstraint3D feet;
     feet.name = "feet";
-    feet.kind = IKKind::FootPlacer;
+    feet.kind = IKKind3D::FootPlacer;
     feet.joints = {"pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"};
     feet.foot_heights = {0.05f, 0.05f};
-    feet.pole = IKConstraint::Pole::ModelDirection;
+    feet.pole = IKConstraint3D::Pole::ModelDirection;
     feet.pole_vector = {0, 0, 1};
     feet.foot.smooth_seconds = 0.0f;
     feet.foot.ray_down = 0.8f;
@@ -912,7 +912,7 @@ void test_character_feet_on_physics_ground() {
     const flecs::entity hero = world.entity()
                                    .set(Transform3D{.position = {0, 0.02f, 0}})
                                    .set(controller)
-                                   .set(SkinnedMeshRenderer{.model = model})
+                                   .set(SkinnedMeshRenderer3D{.model = model})
                                    .set(static_cast<const Animator3D&>(animator))
                                    .set(CharacterAnimationLink3D{});
     WorldRenderState3D state{ecs};
@@ -1118,9 +1118,9 @@ void test_traversal_entities_events() {
 void test_traversal_hands_ik() {
     // The biped's two hands go to the two anchors by IK (limb 0 the left hand), from the animation link, while it hangs; and
     // the hands go free (weight 0) when it lets go.
-    auto model = std::make_shared<Model>();
+    auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(skin_fixtures::make_biped());
-    const Skeleton& sk = model->skeletons[0];
+    const Skeleton3D& sk = model->skeletons[0];
     AnimClip3D idle;
     idle.name = "idle";
     idle.duration = 1.0f;
@@ -1133,18 +1133,18 @@ void test_traversal_hands_ik() {
     ClimbScene scene(desc);
     Animator3D animator = locomotion_animator({.idle = "idle", .walk = "", .run = "", .fall = "idle", .hang = "idle"});
     for (const char* side : {"L", "R"}) {
-        IKConstraint hand;
+        IKConstraint3D hand;
         hand.name = std::string("hand_") + side;
-        hand.kind = IKKind::TwoBone;
+        hand.kind = IKKind3D::TwoBone;
         hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
         hand.weight = 0.0f;
         hand.fade_seconds = 0.0f;
-        hand.pole = IKConstraint::Pole::ModelDirection;
+        hand.pole = IKConstraint3D::Pole::ModelDirection;
         hand.pole_vector = {0.0f, -0.3f, -1.0f};
         animator.add_ik(hand);
     }
     CHECK(animator.machine && animator.machine->transitions.size() == 6 && animator.machine->states.count("hang") == 1);
-    scene.hero.set(SkinnedMeshRenderer{.model = model});
+    scene.hero.set(SkinnedMeshRenderer3D{.model = model});
     scene.hero.set(static_cast<const Animator3D&>(animator));
     CharacterAnimationLink3D link;
     link.hands = {"hand_L", "hand_R"};

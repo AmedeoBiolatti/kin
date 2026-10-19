@@ -10,7 +10,7 @@
 namespace {
 using namespace kin;
 void check(bool condition,const char* why) {if(!condition)throw std::runtime_error(why);}
-Skeleton skeleton() {Skeleton s;s.names={"root"};s.parents={-1};s.rest.resize(1);s.inverse_bind.resize(1);return s;}
+Skeleton3D skeleton() {Skeleton3D s;s.names={"root"};s.parents={-1};s.rest.resize(1);s.inverse_bind.resize(1);return s;}
 AnimClip3D clip(std::string name,float duration=1) {return {.name=std::move(name),.duration=duration};}
 AnimationMarker3D marker(float phase,std::string name) {return {phase,{.channel="game",.name=std::move(name)}};}
 void player_events() {
@@ -65,10 +65,10 @@ void ecs_assets() {
     const auto write=[&](const std::string& events){std::ofstream(file)<<"{\"schema\":\"kin.animator3d/1\",\"events\":"<<events<<"}";};
     write(R"([{"clip":"a","markers":[{"phase":0.25,"channel":"game","name":"hit"}]}])");
     kin::EcsWorld world;register_render3d_components(world);WorldRenderState3D rendering{world};
-    auto model=std::make_shared<Model>();model->skeletons.push_back(skeleton());model->clips.push_back(clip("a"));
-    auto actor=world.entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model=model}).set(Animator3D{.clip="a"})
+    auto model=std::make_shared<Model3D>();model->skeletons.push_back(skeleton());model->clips.push_back(clip("a"));
+    auto actor=world.entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model=model}).set(Animator3D{.clip="a"})
         .set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
-    auto other=world.entity().set(SkinnedMeshRenderer{.model=model}).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
+    auto other=world.entity().set(SkinnedMeshRenderer3D{.model=model}).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
     check(resolve_animator3d_assets(world,temp.path).empty(),"valid event asset rejected");
     check(actor.get<Animator3D>()->event_tracks==other.get<Animator3D>()->event_tracks,"marker data copied per instance");
     rendering.animate(.25f);check(actor.get<Animator3D>()->events.count==1,"ECS animation omitted markers");
@@ -101,9 +101,9 @@ void ecs_assets() {
     check(!retained.expired(),"pending native table replacement invalidated event references");
     const auto before_hits=hits;
     check(dispatch_animation_events3d(world,dispatch)==0&&hits==before_hits+1&&retained.expired(),"batch did not retain/release its original table through dispatch");
-    actor.get_mut<Animator3D>()->events.count=1;actor.get_mut<SkinnedMeshRenderer>()->model.reset();rendering.animate(.1f);
+    actor.get_mut<Animator3D>()->events.count=1;actor.get_mut<SkinnedMeshRenderer3D>()->model.reset();rendering.animate(.1f);
     check(actor.get<Animator3D>()->events.count==0,"missing model retained events");
-    actor.get_mut<Animator3D>()->events.count=1;actor.remove<SkinnedMeshRenderer>();rendering.animate(.1f);
+    actor.get_mut<Animator3D>()->events.count=1;actor.remove<SkinnedMeshRenderer3D>();rendering.animate(.1f);
     check(actor.get<Animator3D>()->events.count==0&&dispatch_animation_events3d(world,unknown)==0,"removed renderer retained stale events");
 }
 }

@@ -2,10 +2,9 @@
 
 #include "breach.hpp"
 
-#include <kin/render3d/model.hpp>
+#include <kin/render3d/model3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/ui2/context.hpp>
-
 #include <memory>
 #include <vector>
 
@@ -25,7 +24,7 @@ struct BreachHudState {
 };
 
 // Signal Breach drawn: the deck, its walls and ramps, the enemies (from the
-// ECS: MeshRenderer, WorldRenderState3D), their shots, cores, sparks and the
+// ECS: MeshRenderer3D, WorldRenderState3D), their shots, cores, sparks and the
 // player's tracers, seen from the player's eye; the gun in the view's overlay;
 // health bars, damage numbers and the HUD in 2D on top. Reads the simulation
 // only, as ArenaPainter does.
@@ -38,7 +37,7 @@ public:
     void update(Breach& breach, float dt);
     void draw(Renderer2D& renderer, Breach& breach, Input& input, const BreachHudState& state, float dt);
 
-    const Render3DStats& stats() const;
+    const RenderStats3D& stats() const;
     bool available() const { return _r3d && _r3d->available(); }
     // The camera of the last frame drawn, and the playfield it fills (logical).
     const Camera3D& camera() const { return _scene.camera; }
@@ -54,23 +53,42 @@ private:
     View3D _view;
     Scene3D _scene;
     Rectf _playfield{0, 0, 1280, 800};
-    Mesh _box, _wedge, _shot, _core, _spark, _barrel, _flash;
+    Mesh3D _box, _wedge, _shot, _core, _spark, _barrel, _flash;
     // glTF models from the content folder, loaded again when they change
     // (tools/models/make_breach_models.py); the shapes above stand in without them.
-    std::unique_ptr<ModelFile> _gun, _crate;
-    std::vector<MeshInstance> _tiles, _raised, _walls, _ramps;
+    std::unique_ptr<ModelFile3D> _gun, _crate;
+    std::vector<MeshInstance3D> _tiles, _raised, _walls, _ramps;
     std::vector<Vec3f> _crates; // where crates stand
 
     // Shields: shells that flash round an enemy where a shot hit it (shield.frag.glsl).
-    struct Shell { Vec3f pos{}; float life = 0; Color color{}; };
+    struct Shell {
+        Vec3f pos{};
+        float life = 0;
+        Color color{};
+    };
     std::vector<Shell> _shells;
     MaterialShader3D _shield;
-    Mesh _shell;
-    struct Spark { Vec3f pos{}, velocity{}; float life = 0; Color color{}; };
-    struct Flash { Vec3f pos{}; Vec3f color{}; float radius = 0, life = 0, length = 0, size = 0.3f; };
+    Mesh3D _shell;
+    struct Spark {
+        Vec3f pos{}, velocity{};
+        float life = 0;
+        Color color{};
+    };
+    struct Flash {
+        Vec3f pos{};
+        LinearRgb color{};
+        float radius = 0, life = 0, length = 0, size = 0.3f;
+    };
     std::vector<Flash> _flashes;
-    struct Tracer { Vec3f from{}, to{}; float life = 0; };
-    struct Number { Vec3f pos{}; float life = 0; bool kill = false; };
+    struct Tracer {
+        Vec3f from{}, to{};
+        float life = 0;
+    };
+    struct Number {
+        Vec3f pos{};
+        float life = 0;
+        bool kill = false;
+    };
     std::vector<Spark> _sparks;
     std::vector<Tracer> _tracers;
     std::vector<Number> _numbers;

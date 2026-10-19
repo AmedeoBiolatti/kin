@@ -1,11 +1,9 @@
-#include <kin/scene/scene_frame3d.hpp>
-
+#include <cmath>
 #include <kin/audio/audio.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
-
-#include <cmath>
+#include <kin/scene/scene_frame3d.hpp>
 #include <stdexcept>
 #include <utility>
 
@@ -33,13 +31,17 @@ bool SceneFrame3D::after_phase(SystemPhase phase, f32 dt) {
     try {
         switch (phase) {
         case SystemPhase::Physics:
-            if (!validate()) return false;
-            if (_options.physics_step) _options.physics_step(dt);
-            else if (_options.bodies) _options.bodies->step(dt);
+            if (!validate())
+                return false;
+            if (_options.physics_step)
+                _options.physics_step(dt);
+            else if (_options.bodies)
+                _options.bodies->step(dt);
             _rendering.propagate_transforms();
             break;
         case SystemPhase::Animation:
-            if (!validate()) return false;
+            if (!validate())
+                return false;
             _rendering.animate(dt);
             _rendering.advance_time_of_day(dt);
             _rendering.advance_weather(dt);
@@ -54,10 +56,12 @@ bool SceneFrame3D::after_phase(SystemPhase phase, f32 dt) {
             }
             break;
         case SystemPhase::Editor:
-            if (!validate()) return false;
+            if (!validate())
+                return false;
             _rendering.propagate_transforms();
             break;
-        default: break;
+        default:
+            break;
         }
         return _errors.empty();
     } catch (const std::exception& error) {
@@ -67,47 +71,70 @@ bool SceneFrame3D::after_phase(SystemPhase phase, f32 dt) {
 }
 
 bool SceneFrame3D::step(f32 dt, const SystemPhaseHooks& hooks) {
-    if (_running) { _errors = {"recursive scene frame step"}; return false; }
+    if (_running) {
+        _errors = {"recursive scene frame step"};
+        return false;
+    }
     _errors.clear();
     if (!std::isfinite(dt) || dt <= 0) {
         _errors = {"scene frame requires finite positive dt"};
         return false;
     }
-    struct Guard { bool& running; ~Guard() { running = false; } } guard{_running};
+    struct Guard {
+        bool& running;
+        ~Guard() { running = false; }
+    } guard{_running};
     _running = true;
     SystemPhaseHooks stages;
     stages.before = hooks.before;
     stages.after = [&](SystemPhase phase, std::string& error) {
-        if (hooks.after && !hooks.after(phase, error)) return false;
-        if (after_phase(phase, dt)) return true;
+        if (hooks.after && !hooks.after(phase, error))
+            return false;
+        if (after_phase(phase, dt))
+            return true;
         for (const auto& message : _errors) {
-            if (!error.empty()) error += '\n';
+            if (!error.empty())
+                error += '\n';
             error += message;
         }
         return false;
     };
-    if (_world.run_frame(dt, stages)) return true;
+    if (_world.run_frame(dt, stages))
+        return true;
     _errors = {_world.systems().last_error()};
     return false;
 }
 
-bool SceneFrame3D::collect(Scene3D& scene, View3DOptions* view) {
-    if (_running) { _errors = {"recursive scene frame collection"}; return false; }
-    struct Guard { bool& running; ~Guard() { running = false; } } guard{_running};
+bool SceneFrame3D::collect(Scene3D& scene, ViewOptions3D* view) {
+    if (_running) {
+        _errors = {"recursive scene frame collection"};
+        return false;
+    }
+    struct Guard {
+        bool& running;
+        ~Guard() { running = false; }
+    } guard{_running};
     _running = true;
     _errors.clear();
     try {
-        if (!validate()) return false;
+        if (!validate())
+            return false;
         scene.clear();
         scene.camera = {};
         scene.lights = {};
-        scene.sky = {}; scene.fog = {}; scene.weather = {};
+        scene.sky = {};
+        scene.fog = {};
+        scene.weather = {};
         scene.debug = {};
-        scene.ambient_occlusion = {}; scene.contact_shadows = {}; scene.taa = {}; scene.lod = {};
+        scene.ambient_occlusion = {};
+        scene.contact_shadows = {};
+        scene.taa = {};
+        scene.lod = {};
         scene.cull = true;
         _rendering.propagate_transforms();
         _errors = apply_scene3d_settings(_world, scene, view);
-        if (!_errors.empty()) return false;
+        if (!_errors.empty())
+            return false;
         _rendering.apply_time_of_day(scene);
         const auto fog = scene.fog;
         _rendering.apply_weather(scene, fog);
@@ -115,7 +142,9 @@ bool SceneFrame3D::collect(Scene3D& scene, View3DOptions* view) {
         if (_options.bodies && _options.renderer && _options.renderer->available())
             _options.bodies->collect_ropes(*_options.renderer, scene);
         _errors = scene.diagnostics();
-        if (_errors.empty()) if (const auto* overlay = scene.overlay_if_any()) _errors = overlay->diagnostics();
+        if (_errors.empty())
+            if (const auto* overlay = scene.overlay_if_any())
+                _errors = overlay->diagnostics();
         return _errors.empty();
     } catch (const std::exception& error) {
         _errors = {"scene frame collection: " + std::string(error.what())};

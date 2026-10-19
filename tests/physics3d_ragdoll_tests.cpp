@@ -9,8 +9,8 @@
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/physics3d/world3d.hpp>
-#include <kin/render3d/ik.hpp>
-#include <kin/render3d/skeleton.hpp>
+#include <kin/render3d/ik3d.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -58,7 +58,7 @@ bool near(Vec3f a, Vec3f b, f32 eps) { return length(a - b) <= eps; }
 
 // A biped and a ragdoll of it at `at` (the model's origin is at the feet), over a floor whose top is y = 0.
 struct Rig {
-    Skeleton skeleton = skin_fixtures::make_biped();
+    Skeleton3D skeleton = skin_fixtures::make_biped();
     RagdollDesc desc;
     std::vector<Mat4f> model_world; // the rest pose, in the model's space
     World3D world;
@@ -127,7 +127,7 @@ struct Rig {
 // ---- the desc from a skeleton -------------------------------------------------------------------------------------
 
 void test_auto_desc() {
-    const Skeleton sk = skin_fixtures::make_biped();
+    const Skeleton3D sk = skin_fixtures::make_biped();
     const RagdollDesc d = auto_ragdoll_desc(sk, sk.rest_pose());
     // The pelvis and everything below it: pelvis, spine, chest, neck, head, hips, knees, ankles, shoulders, elbows, hands.
     CHECK(d.bones.size() == 17);
@@ -168,7 +168,7 @@ void test_auto_desc() {
     CHECK(d2.bones.size() == 15);
     CHECK(std::none_of(d2.bones.begin(), d2.bones.end(), [](const auto& b) { return b.joint_kind == RagdollJoint3D::Hinge; }));
     // A skeleton with a pose of the wrong size or nothing: an empty desc.
-    CHECK(auto_ragdoll_desc(Skeleton{}, Pose{}).bones.empty());
+    CHECK(auto_ragdoll_desc(Skeleton3D{}, Pose3D{}).bones.empty());
 }
 
 void test_create_and_refusals() {
@@ -386,7 +386,7 @@ void test_limits_respected() {
 void test_no_tunnelling_at_speed() {
     // Thrown at 40 m/s into a thin floor (2 cm): continuous collision keeps every bone above it.
     World3D world(serial());
-    const Skeleton sk = skin_fixtures::make_biped();
+    const Skeleton3D sk = skin_fixtures::make_biped();
     const RagdollDesc d = auto_ragdoll_desc(sk, sk.rest_pose());
     std::vector<Mat4f> mw;
     compute_world_matrices(sk, sk.rest_pose(), mw);
@@ -872,7 +872,7 @@ struct EcsRig {
     World3D physics;
     WorldPhysicsState3D bodies;
     WorldRenderState3D render;
-    std::shared_ptr<Model> model;
+    std::shared_ptr<Model3D> model;
     flecs::entity hero;
     flecs::entity floor;
 
@@ -880,7 +880,7 @@ struct EcsRig {
         : physics(cfg)
         , bodies(ecs, physics)
         , render(ecs) {
-        model = std::make_shared<Model>();
+        model = std::make_shared<Model3D>();
         model->skeletons.push_back(skin_fixtures::make_biped());
         AnimClip3D idle;
         idle.name = "idle";
@@ -891,7 +891,7 @@ struct EcsRig {
                                       .half_extents = {20.0f, 0.5f, 20.0f}});
         Animator3D animator;
         animator.clip = "idle";
-        hero = ecs.raw().entity().set(Transform3D{.position = at}).set(SkinnedMeshRenderer{.model = model}).set(animator);
+        hero = ecs.raw().entity().set(Transform3D{.position = at}).set(SkinnedMeshRenderer3D{.model = model}).set(animator);
         if (with_character) {
             CharacterController3D controller;
             hero.set(controller);
@@ -933,7 +933,7 @@ struct EcsRig {
 void test_ecs_ragdoll_made_in_order() {
     EcsRig rig;
     // A second skinned entity with a ragdoll and a character on the first: made after the bodies and characters, in id order.
-    const flecs::entity other = rig.ecs.raw().entity().set(Transform3D{.position = {3.0f, 0.0f, 0.0f}}).set(SkinnedMeshRenderer{.model = rig.model}).set(Ragdoll3D{});
+    const flecs::entity other = rig.ecs.raw().entity().set(Transform3D{.position = {3.0f, 0.0f, 0.0f}}).set(SkinnedMeshRenderer3D{.model = rig.model}).set(Ragdoll3D{});
     rig.bodies.sync_bodies();
     CHECK(rig.bodies.ragdoll_of(rig.hero).valid() && rig.bodies.ragdoll_of(other).valid());
     CHECK(rig.bodies.ragdoll_of(rig.hero).index == 0 && rig.bodies.ragdoll_of(other).index == 1);
@@ -959,7 +959,7 @@ void test_pose_reaches_the_animator() {
     CHECK(!rig.animator().pose_override.empty());
     const Animator3D& a = rig.animator();
     CHECK(a.ik_world.size() == 18 && a.ik_pose.joints.size() == 18);
-    const Skeleton& sk = rig.model->skeletons[0];
+    const Skeleton3D& sk = rig.model->skeletons[0];
     std::vector<Mat4f> rest;
     compute_world_matrices(sk, sk.rest_pose(), rest);
     // The joint places are the bodies' (within the joints' stretch) and the bones keep their lengths exactly.
@@ -997,14 +997,14 @@ void test_pose_reaches_the_animator() {
 void test_alpha_zero_is_the_clip_bit_for_bit_and_one_is_the_body() {
     EcsRig rig({0.0f, 1.0f, 0.0f});
     rig.run(3);
-    const Skeleton& sk = rig.model->skeletons[0];
+    const Skeleton3D& sk = rig.model->skeletons[0];
     Animator3D* a = rig.hero.get_mut<Animator3D>();
     // An override with every weight 0 gives the clips' pose to the bit: pose and world matrices.
     a->pose_override.weights.assign(sk.joint_count(), 0.0f);
     a->pose_override.position.assign(sk.joint_count(), Vec3f{5.0f, 5.0f, 5.0f});
     a->pose_override.rotation.assign(sk.joint_count(), Quatf::axis_angle({0, 1, 0}, 77.0f));
     rig.render.apply_ik();
-    const Pose clip = a->player.pose();
+    const Pose3D clip = a->player.pose();
     std::vector<Mat4f> clip_world;
     compute_world_matrices(sk, clip, clip_world);
     bool same = a->ik_pose.joints.size() == clip.joints.size() && a->ik_world.size() == clip_world.size();
@@ -1039,8 +1039,8 @@ void test_partial_ragdoll_leaves_the_rest_exact() {
     rig.bodies.start_ragdoll(rig.hero, {});
     rig.run(40);
     const Animator3D& a = rig.animator();
-    const Skeleton& sk = rig.model->skeletons[0];
-    const Pose& clip = a.player.pose();
+    const Skeleton3D& sk = rig.model->skeletons[0];
+    const Pose3D& clip = a.player.pose();
     const std::vector<u8> arm = sk.subtree(B::shoulder_l);
     int arm_moved = 0;
     for (std::size_t j = 0; j < sk.joint_count(); ++j) {
@@ -1064,11 +1064,11 @@ void test_ik_after_the_pose_is_written() {
     // The left arm is a ragdoll, the right hand reaches a target by IK: the IK is solved first and the pose written over
     // the ragdolled joints only, so that the IK arm is where the IK put it.
     EcsRig rig({0.0f, 1.0f, 0.0f});
-    IKConstraint hand;
+    IKConstraint3D hand;
     hand.name = "hand";
-    hand.kind = IKKind::TwoBone;
+    hand.kind = IKKind3D::TwoBone;
     hand.joints = {"shoulder_R", "elbow_R", "hand_R"};
-    hand.pole = IKConstraint::Pole::ModelDirection;
+    hand.pole = IKConstraint3D::Pole::ModelDirection;
     hand.pole_vector = {0.0f, 0.0f, -1.0f};
     rig.hero.get_mut<Animator3D>()->add_ik(hand);
     rig.run(3);
@@ -1183,7 +1183,7 @@ void test_recovery_blocked_without_room() {
 std::vector<u64> ecs_scene_hashes(World3DConfig cfg, int steps) {
     EcsRig rig({0.0f, 1.5f, 0.0f}, cfg, true);
     // A second character and a rope in the scene as well.
-    rig.ecs.raw().entity().set(Transform3D{.position = {4.0f, 1.0f, 0.0f}}).set(SkinnedMeshRenderer{.model = rig.model}).set(Ragdoll3D{});
+    rig.ecs.raw().entity().set(Transform3D{.position = {4.0f, 1.0f, 0.0f}}).set(SkinnedMeshRenderer3D{.model = rig.model}).set(Ragdoll3D{});
     std::vector<u64> hashes;
     for (int i = 0; i < steps; ++i) {
         if (i == 5) {
@@ -1258,12 +1258,12 @@ void test_hands_on_a_rope_by_ik() {
     Animator3D animator;
     animator.clip = "idle";
     for (const char* side : {"L", "R"}) {
-        IKConstraint hand;
+        IKConstraint3D hand;
         hand.name = std::string("hand_") + side;
-        hand.kind = IKKind::TwoBone;
+        hand.kind = IKKind3D::TwoBone;
         hand.joints = {std::string("shoulder_") + side, std::string("elbow_") + side, std::string("hand_") + side};
         hand.weight = 0.0f;
-        hand.pole = IKConstraint::Pole::ModelDirection;
+        hand.pole = IKConstraint3D::Pole::ModelDirection;
         hand.pole_vector = {side[0] == 'L' ? 0.5f : -0.5f, -0.7f, -0.5f};
         hand.two_bone.max_stretch = 1.1f;
         animator.add_ik(hand);

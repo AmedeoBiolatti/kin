@@ -14,10 +14,10 @@
 // eight steps along the ray) lit by Lights3D::sun.direction. Fog and the sky use the one model, so that far
 // geometry melts into the sky at the horizon whatever the time of day. docs/rendering_3d.md has the model.
 
+#include <array>
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
-
-#include <array>
+#include <kin/renderer/color.hpp>
 
 namespace kin {
 
@@ -27,8 +27,8 @@ enum class SkyMode3D : u8 {
 };
 
 struct Sky3D {
-    // Off: the view shows its background colour where nothing is drawn, as before. On, the sky is drawn there, after the
-    // opaque meshes and before the blended ones, in the view's HDR colour (bloom picks up the sun).
+    // Off: the view shows its background colour where nothing is drawn, as before. On, the sky is drawn there, after
+    // the opaque meshes and before the blended ones, in the view's HDR colour (bloom picks up the sun).
     bool enabled = false;
     SkyMode3D mode = SkyMode3D::Procedural;
 
@@ -36,13 +36,13 @@ struct Sky3D {
     // Haze: 2 is a very clear day, 3 to 4 an ordinary one, 8 and more a murky one (clamped to 1 to 20).
     f32 turbidity = 2.5f;
     // The sun's light above the atmosphere, in kin's light units (a white surface facing a clear noon sun shows about
-    // this times the atmosphere's transmittance, 0.7 to 0.9 of it). The sky and the sun disc scale with it. Lights3D::sun
-    // is what lights the meshes: set the two together (TimeOfDay3D's apply() does).
+    // this times the atmosphere's transmittance, 0.7 to 0.9 of it). The sky and the sun disc scale with it.
+    // Lights3D::sun is what lights the meshes: set the two together (TimeOfDay3D's apply() does).
     f32 sun_intensity = 3.0f;
     // Times the light of the sky itself (not the sun disc, the moon or the stars).
     f32 intensity = 1.0f;
-    // The ground below the horizon: its colour (a linear albedo, lit by the sun and sky as a horizontal surface is). The
-    // sky's colour reaches it over the 9 degrees under the horizon, so there is no seam.
+    // The ground below the horizon: its colour (a linear albedo, lit by the sun and sky as a horizontal surface is).
+    // The sky's colour reaches it over the 9 degrees under the horizon, so there is no seam.
     Vec3f ground_color{0.20f, 0.18f, 0.16f};
     // The sun disc: its angular diameter in degrees (the real sun is 0.53; a little more reads better in a game's
     // field of view) and its radiance as a multiple of the sun's light (HDR: above 1 feeds bloom).
@@ -73,18 +73,19 @@ struct Sky3D {
 // Distance and height fog of the main pass: opaque, cut-out, skinned, instanced and clustered meshes, blended and
 // additive ones too (a particle pass shares kin_fog.inc.glsl). The optical depth along a view ray from the eye to a
 // point `s` away is
-//     tau = density * (s - start) + height_density * e^(-height_falloff * (y0 - base_height)) * (1 - e^(-k dy s')) / (k dy)
+//     tau = density * (s - start) + height_density * e^(-height_falloff * (y0 - base_height)) * (1 - e^(-k dy s')) / (k
+//     dy)
 // (y0: the eye's height, dy: the ray's vertical component, s' = s - start: the height term is the integral of the
 // density that falls off with height, exact), the opacity 1 - e^-tau capped at `max_opacity`. Custom material
 // shaders (Material3D::shader) are not fogged: they run their own code.
 struct Fog3D {
     bool enabled = false;
-    f32 density = 0.0f;         // per world unit of distance (0.002: visibility of about 2 km)
-    f32 height_density = 0.0f;  // per unit of distance, at `base_height`; thinner above and thicker below
-    f32 height_falloff = 0.1f;  // per unit of height: how fast the height fog thins going up (1 / its scale height)
-    f32 base_height = 0.0f;     // world y where `height_density` is measured
-    f32 start = 0.0f;           // nothing nearer than this is fogged
-    f32 max_opacity = 1.0f;     // the most any pixel is fogged (below 1, the far sky and ground show through)
+    f32 density = 0.0f;        // per world unit of distance (0.002: visibility of about 2 km)
+    f32 height_density = 0.0f; // per unit of distance, at `base_height`; thinner above and thicker below
+    f32 height_falloff = 0.1f; // per unit of height: how fast the height fog thins going up (1 / its scale height)
+    f32 base_height = 0.0f;    // world y where `height_density` is measured
+    f32 start = 0.0f;          // nothing nearer than this is fogged
+    f32 max_opacity = 1.0f;    // the most any pixel is fogged (below 1, the far sky and ground show through)
     Vec3f colour{0.62f, 0.68f, 0.76f}; // linear
     // Take the colour from the sky in the view's direction (the horizon colour for rays that look down), so far
     // geometry melts into the sky; `colour` is then unused. Needs the procedural sky's settings (it uses them whether
@@ -104,14 +105,14 @@ constexpr Vec3f rayleigh_zenith{0.0464f, 0.1080f, 0.2650f};
 // The ozone layer's absorption (the green mostly), which keeps the zenith blue at twilight.
 constexpr Vec3f ozone_zenith{0.0065f, 0.0188f, 0.00085f};
 constexpr f32 mie_per_turbidity = 0.0105f;
-constexpr f32 mie_extinction = 1.1f;   // extinction over scattering
-constexpr f32 mie_anisotropy = 0.8f;   // the Henyey-Greenstein g of the haze
+constexpr f32 mie_extinction = 1.1f;      // extinction over scattering
+constexpr f32 mie_anisotropy = 0.8f;      // the Henyey-Greenstein g of the haze
 constexpr f32 height_ratio = 8.0f / 1.2f; // Rayleigh's scale height over Mie's
 constexpr u32 steps = 8;
-constexpr f32 top = 0.9994f;           // the share of the atmosphere's density below its top (60 km over 8)
-constexpr f32 brightness = 2.0f;       // multiple scattering and the ground's bounce, which single scattering leaves out
-constexpr f32 twilight = 0.07f;        // sin(elevation) over which the sun's scattered light dies under the horizon
-constexpr f32 ground_band = 0.15f;     // sin(depression) over which the sky's colour becomes the ground's
+constexpr f32 top = 0.9994f;       // the share of the atmosphere's density below its top (60 km over 8)
+constexpr f32 brightness = 2.0f;   // multiple scattering and the ground's bounce, which single scattering leaves out
+constexpr f32 twilight = 0.07f;    // sin(elevation) over which the sun's scattered light dies under the horizon
+constexpr f32 ground_band = 0.15f; // sin(depression) over which the sky's colour becomes the ground's
 // How many times the optical depth the sun's light meets (a path through the atmosphere, in zenith paths) at
 // sin(elevation) `s` (Kasten and Young's fit, clamped at the horizon).
 f32 air_mass(f32 sin_elevation);
@@ -124,8 +125,8 @@ f32 air_mass(f32 sin_elevation);
 Vec3f sky_sun_light(const Sky3D& sky, Vec3f sun_direction);
 // The fraction of the sun's light that gets through to the ground, per colour (no horizon cut-off).
 Vec3f sky_sun_transmittance(const Sky3D& sky, Vec3f sun_direction);
-// The atmosphere's light along `direction` (rays that look below the horizon get the horizon's): sun and moon scattering
-// and the night's own light, times `intensity`. Linear; no sun disc, moon disc, stars or ground.
+// The atmosphere's light along `direction` (rays that look below the horizon get the horizon's): sun and moon
+// scattering and the night's own light, times `intensity`. Linear; no sun disc, moon disc, stars or ground.
 Vec3f sky_radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction);
 // What the sky pass shows along `direction` without the discs and stars: sky_radiance above the horizon, going over
 // the horizon to the ground's light below it.
@@ -139,27 +140,28 @@ Vec3f sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 sa
 
 namespace sky_model {
 // The sky's light as the GPU's fog reads it (Fog3D::colour_from_sky): from a table made once for each sky and sun, not
-// the integral at every pixel. A ray's scattering splits by its phase functions, the only part that depends on the angle
-// mu to the light: a light's share along a ray at sin(elevation) s is rayleigh_phase(mu) R(s) + mie_phase(mu) M(s). The
-// rows hold R and M at `rows` elevations spaced evenly in coordinate(s), the log of the air mass's rounded sin (crowded
-// where the colour changes fastest, the last degrees over the horizon); read linearly between them, within a fraction of a
-// level of sky_radiance (at and under the horizon, the first row: the same). The renderer keeps one; the tests read it.
-struct FogTable {
+// the integral at every pixel. A ray's scattering splits by its phase functions, the only part that depends on the
+// angle mu to the light: a light's share along a ray at sin(elevation) s is rayleigh_phase(mu) R(s) + mie_phase(mu)
+// M(s). The rows hold R and M at `rows` elevations spaced evenly in coordinate(s), the log of the air mass's rounded
+// sin (crowded where the colour changes fastest, the last degrees over the horizon); read linearly between them, within
+// a fraction of a level of sky_radiance (at and under the horizon, the first row: the same). The renderer keeps one;
+// the tests read it.
+struct FogTable3D {
     static constexpr u32 rows = 48; // = KIN_FOG_ROWS in kin_fog.inc.glsl: change both
     // Per row: the sun's R and M, then the moon's (rgb and a w of 0: the GPU's vec4s), times the sky's brightness.
     std::array<f32, rows * 16> values{};
-    // What they were made for: the sun's sin(elevation) and light, the haze's optical depth, the sky's intensity, the moon's
-    // light and sin(elevation).
+    // What they were made for: the sun's sin(elevation) and light, the haze's optical depth, the sky's intensity, the
+    // moon's light and sin(elevation).
     std::array<f32, 6> made_for{};
     bool made = false;
 
     // The row coordinate of a ray at sin(elevation) `s`: 0 at the horizon (and under it), rows - 1 at the zenith.
     static f32 coordinate(f32 s);
-    // Makes the rows for this sky and sun unless they are made for them already (the sky is still most frames; the sun's
-    // and the moon's azimuths do not change them): true if it did.
+    // Makes the rows for this sky and sun unless they are made for them already (the sky is still most frames; the
+    // sun's and the moon's azimuths do not change them): true if it did.
     bool update(const Sky3D& sky, Vec3f sun_direction);
-    // The sky's light along `direction` read from the rows (made for `sky` and `sun_direction`): what the GPU's fog takes
-    // for sky_radiance.
+    // The sky's light along `direction` read from the rows (made for `sky` and `sun_direction`): what the GPU's fog
+    // takes for sky_radiance.
     Vec3f radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const;
 };
 } // namespace sky_model
@@ -172,9 +174,9 @@ f32 fog_optical_depth(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance
 // 1 - e^-tau, at most max_opacity.
 f32 fog_opacity(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance);
 // The fog's colour along `direction` (unit): the fixed one or the sky's, and the sun's in-scattering.
-Vec3f fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, Vec3f sun_light, Vec3f direction);
+Vec3f fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f direction);
 // `color` (a surface's) as seen through the fog at `distance`.
-Vec3f fog_apply(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, Vec3f sun_light, Vec3f eye, Vec3f direction, f32 distance,
-                Vec3f color);
+Vec3f fog_apply(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f eye,
+                Vec3f direction, f32 distance, Vec3f color);
 
 } // namespace kin

@@ -12,7 +12,9 @@ f32 smoothstep(f32 a, f32 b, f32 x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-f32 lerp(f32 a, f32 b, f32 t) { return a + (b - a) * t; }
+f32 lerp(f32 a, f32 b, f32 t) {
+    return a + (b - a) * t;
+}
 
 } // namespace
 
@@ -32,7 +34,8 @@ const std::vector<Look>& looks() {
 
 const Look* find_look(const std::string& name) {
     for (const Look& l : looks()) {
-        if (name == l.name) return &l;
+        if (name == l.name)
+            return &l;
     }
     return nullptr;
 }
@@ -49,7 +52,8 @@ f32 snow_cover(f32 altitude, f32 height, f32 normal_up) {
 f32 clock_hours(f32 start_hours, f64 game_seconds, f32 time_speed) {
     const f64 h = f64(start_hours) + game_seconds / 60.0 * f64(std::max(0.0f, time_speed));
     f64 w = std::fmod(h, 24.0);
-    if (w < 0.0) w += 24.0;
+    if (w < 0.0)
+        w += 24.0;
     return f32(w);
 }
 
@@ -67,8 +71,8 @@ EnvironmentState evaluate_environment(const EnvironmentInput& in) {
     const f32 t = fx.altitude_look ? smoothstep(0.0f, 1.0f, e.altitude_fraction) : 0.0f;
     e.hours = fx.time_of_day ? clock_hours(look.hours, in.game_seconds, in.time_speed) : look.hours;
 
-    // Thinner air higher up: less haze, a clearer and bluer sky, a stronger sun, a colder fog; the mist that hugs the ground
-    // stays low.
+    // Thinner air higher up: less haze, a clearer and bluer sky, a stronger sun, a colder fog; the mist that hugs the
+    // ground stays low.
     e.fog_density = look.fog_density * lerp(1.0f, 0.45f, t);
     e.fog_height_density = look.fog_height_density * lerp(1.0f, 0.2f, t);
     e.turbidity = look.turbidity * lerp(1.0f, 0.68f, t);
@@ -80,7 +84,8 @@ EnvironmentState evaluate_environment(const EnvironmentInput& in) {
     e.snow = look.snow;
     e.mist = look.mist;
     e.snow_line = snow_line_fraction * height;
-    e.snow_share = smoothstep(e.snow_line - 0.25f * snow_band_fraction * height, e.snow_line + snow_band_fraction * height, in.altitude);
+    e.snow_share = smoothstep(e.snow_line - 0.25f * snow_band_fraction * height,
+                              e.snow_line + snow_band_fraction * height, in.altitude);
     if (fx.snow_line) {
         e.snow = std::max(e.snow, 0.55f * e.snow_share);
         e.mist = std::min(1.0f, e.mist + 0.12f * e.snow_share);

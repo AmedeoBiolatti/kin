@@ -1,6 +1,6 @@
 """Writes small glTF 2.0 binary files (.glb) from Python, standard library only.
 
-kin's tests and examples make their models with this (kin/render3d/model.hpp
+kin's tests and examples make their models with this (kin/render3d/model3d.hpp
 reads them): boxes, quads, prisms, spheres and polygons with materials
 (metallic-roughness factors, emissive strength) and embedded PNG textures.
 

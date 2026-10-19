@@ -2,18 +2,19 @@
 
 #include "environment.hpp"
 
-#include <kin/ui2/layout.hpp>
-
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <kin/ui2/layout.hpp>
 
 namespace summit {
 
 namespace {
 
-f32 lerp(f32 a, f32 b, f32 t) { return a + (b - a) * t; }
+f32 lerp(f32 a, f32 b, f32 t) {
+    return a + (b - a) * t;
+}
 
 const Color tone_good = Color::rgb(112, 200, 120);
 const Color tone_low = Color::rgb(236, 176, 56);
@@ -23,29 +24,42 @@ const Color tone_spent = Color::rgb(224, 66, 56);
 
 const char* status_text(StatusKind s) {
     switch (s) {
-    case StatusKind::Standing: return "Standing";
-    case StatusKind::Walking: return "Walking";
-    case StatusKind::Sprinting: return "Sprinting";
-    case StatusKind::InAir: return "In the air";
-    case StatusKind::Hanging: return "Hanging";
-    case StatusKind::PullingUp: return "Pulling up";
-    case StatusKind::KnockedOut: return "Knocked out";
-    case StatusKind::GettingUp: return "Getting up";
-    case StatusKind::Dead: return "Dead: back to camp";
+    case StatusKind::Standing:
+        return "Standing";
+    case StatusKind::Walking:
+        return "Walking";
+    case StatusKind::Sprinting:
+        return "Sprinting";
+    case StatusKind::InAir:
+        return "In the air";
+    case StatusKind::Hanging:
+        return "Hanging";
+    case StatusKind::PullingUp:
+        return "Pulling up";
+    case StatusKind::KnockedOut:
+        return "Knocked out";
+    case StatusKind::GettingUp:
+        return "Getting up";
+    case StatusKind::Dead:
+        return "Dead: back to camp";
     }
     return "";
 }
 
 StaminaTone stamina_tone(f32 fraction, bool exhausted, const HudRules& rules) {
-    if (exhausted || fraction <= 0.0f) return StaminaTone::Spent;
-    if (fraction < rules.low_stamina) return StaminaTone::Low;
+    if (exhausted || fraction <= 0.0f)
+        return StaminaTone::Spent;
+    if (fraction < rules.low_stamina)
+        return StaminaTone::Low;
     return StaminaTone::Good;
 }
 
 Color stamina_colour(f32 fraction, bool exhausted, const HudRules& rules) {
-    if (exhausted || fraction <= 0.0f) return tone_spent;
+    if (exhausted || fraction <= 0.0f)
+        return tone_spent;
     // A short blend between the tones either side of the thresholds, so that it does not flicker across one.
-    if (fraction < rules.critical_stamina) return tone_spent;
+    if (fraction < rules.critical_stamina)
+        return tone_spent;
     if (fraction < rules.low_stamina) {
         const f32 t = (fraction - rules.critical_stamina) / std::max(1e-4f, rules.low_stamina - rules.critical_stamina);
         return mix(tone_spent, tone_low, t);
@@ -55,9 +69,12 @@ Color stamina_colour(f32 fraction, bool exhausted, const HudRules& rules) {
 }
 
 FallWarning fall_warning_for(f32 speed_down, const PlayerRules& rules, const HudRules& hud) {
-    if (speed_down >= rules.stun_speed) return FallWarning::KnockOut;
-    if (speed_down > rules.safe_landing) return FallWarning::Hurt;
-    if (speed_down >= rules.safe_landing * hud.brace_fraction) return FallWarning::Brace;
+    if (speed_down >= rules.stun_speed)
+        return FallWarning::KnockOut;
+    if (speed_down > rules.safe_landing)
+        return FallWarning::Hurt;
+    if (speed_down >= rules.safe_landing * hud.brace_fraction)
+        return FallWarning::Brace;
     return FallWarning::None;
 }
 
@@ -71,9 +88,11 @@ std::string clock_text(f32 seconds) {
 void HudNotices::observe(const Game& game, i32 player, const HudRules& rules) {
     camp_seconds = std::max(0.0f, camp_seconds - fixed_step);
     hurt_seconds = std::max(0.0f, hurt_seconds - fixed_step);
-    if (hurt_seconds <= 0.0f) hurt = 0.0f;
+    if (hurt_seconds <= 0.0f)
+        hurt = 0.0f;
     for (const GameEvent& e : game.events()) {
-        if (e.player != player) continue;
+        if (e.player != player)
+            continue;
         if (e.kind == GameEventKind::Camp) {
             camp = i32(e.value);
             camp_seconds = rules.notice_seconds;
@@ -111,10 +130,14 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
 
     const auto hand = [&](std::size_t i) {
         switch (ts.grips[i].phase) {
-        case GripPhase3D::Reaching: return HandState::Reaching;
-        case GripPhase3D::Held: return HandState::Held;
-        case GripPhase3D::Slipping: return HandState::Slipping;
-        default: return HandState::Free;
+        case GripPhase3D::Reaching:
+            return HandState::Reaching;
+        case GripPhase3D::Held:
+            return HandState::Held;
+        case GripPhase3D::Slipping:
+            return HandState::Slipping;
+        default:
+            return HandState::Free;
         }
     };
     m.left = hand(0);
@@ -126,8 +149,13 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
     m.health_max = pr.max_health;
     m.health = std::clamp(p.health, 0.0f, m.health_max);
     m.health_fraction = m.health / std::max(1.0f, m.health_max);
-    m.injury = m.health_fraction >= 0.9f ? "" : m.health_fraction >= 0.5f ? "Hurt" : m.health_fraction >= 0.2f ? "Badly hurt" : "Critical";
-    m.health_colour = m.health_fraction >= 0.9f ? tone_good : mix(tone_spent, tone_low, std::clamp((m.health_fraction - 0.15f) / 0.6f, 0.0f, 1.0f));
+    m.injury = m.health_fraction >= 0.9f   ? ""
+               : m.health_fraction >= 0.5f ? "Hurt"
+               : m.health_fraction >= 0.2f ? "Badly hurt"
+                                           : "Critical";
+    m.health_colour = m.health_fraction >= 0.9f
+                          ? tone_good
+                          : mix(tone_spent, tone_low, std::clamp((m.health_fraction - 0.15f) / 0.6f, 0.0f, 1.0f));
     m.hurt_flash = rules.hurt_seconds > 0.0f ? std::clamp(notices.hurt_seconds / rules.hurt_seconds, 0.0f, 1.0f) : 0.0f;
 
     m.altitude = game.altitude(player);
@@ -142,29 +170,44 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
     }
 
     switch (p.state) {
-    case PlayerState::Stunned: m.status = StatusKind::KnockedOut; break;
-    case PlayerState::GettingUp: m.status = StatusKind::GettingUp; break;
-    case PlayerState::Dead: m.status = StatusKind::Dead; break;
+    case PlayerState::Stunned:
+        m.status = StatusKind::KnockedOut;
+        break;
+    case PlayerState::GettingUp:
+        m.status = StatusKind::GettingUp;
+        break;
+    case PlayerState::Dead:
+        m.status = StatusKind::Dead;
+        break;
     case PlayerState::Alive:
-        if (ts.mode == TraversalMode3D::Mantling) m.status = StatusKind::PullingUp;
-        else if (ts.mode == TraversalMode3D::Hanging) m.status = StatusKind::Hanging;
-        else if (cs.ground == CharacterGround3D::InAir) m.status = StatusKind::InAir;
-        else if (p.command.sprint && cs.ground_speed > 5.0f) m.status = StatusKind::Sprinting;
-        else if (cs.ground_speed > 0.3f) m.status = StatusKind::Walking;
-        else m.status = StatusKind::Standing;
+        if (ts.mode == TraversalMode3D::Mantling)
+            m.status = StatusKind::PullingUp;
+        else if (ts.mode == TraversalMode3D::Hanging)
+            m.status = StatusKind::Hanging;
+        else if (cs.ground == CharacterGround3D::InAir)
+            m.status = StatusKind::InAir;
+        else if (p.command.sprint && cs.ground_speed > 5.0f)
+            m.status = StatusKind::Sprinting;
+        else if (cs.ground_speed > 0.3f)
+            m.status = StatusKind::Walking;
+        else
+            m.status = StatusKind::Standing;
         break;
     }
 
     if (notices.camp >= 0 && notices.camp_seconds > 0.0f) {
         char b[48];
-        if (notices.camp == 0) std::snprintf(b, sizeof b, "Base camp");
-        else std::snprintf(b, sizeof b, "Camp %d reached", notices.camp);
+        if (notices.camp == 0)
+            std::snprintf(b, sizeof b, "Base camp");
+        else
+            std::snprintf(b, sizeof b, "Camp %d reached", notices.camp);
         m.camp_notice = b;
         m.camp_notice_alpha = std::clamp(notices.camp_seconds, 0.0f, 1.0f);
     }
     for (const Camp& c : game.level().camps) {
         const Vec3f d = game.feet(player) - c.spawn;
-        if (std::sqrt(d.x * d.x + d.z * d.z) < c.radius && std::fabs(d.y) < 3.0f) m.at_camp = true;
+        if (std::sqrt(d.x * d.x + d.z * d.z) < c.radius && std::fabs(d.y) < 3.0f)
+            m.at_camp = true;
     }
 
     m.falls = p.falls;
@@ -172,7 +215,8 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
     m.run_seconds = p.summit && p.summit_step >= 0 ? f32(f64(p.summit_step) * f64(fixed_step)) : f32(game.time());
     if (p.summit) {
         char b[96];
-        std::snprintf(b, sizeof b, "Summit! %s, %d %s", clock_text(m.run_seconds).c_str(), p.falls, p.falls == 1 ? "fall" : "falls");
+        std::snprintf(b, sizeof b, "Summit! %s, %d %s", clock_text(m.run_seconds).c_str(), p.falls,
+                      p.falls == 1 ? "fall" : "falls");
         m.summit_message = b;
     }
     if (game.config().expedition) {
@@ -206,15 +250,23 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
             Vec3f flat{delta.x, 0, delta.z};
             const Vec3f forward = look_vector(p.yaw, 0);
             const Vec3f right{-forward.z, 0, forward.x};
-            if (length(flat) > 0.01f) flat = normalize(flat);
-            const char* direction = dot(flat, forward) < -0.5f ? "Behind" : dot(flat, right) > 0.3f ? "Right" : dot(flat, right) < -0.3f ? "Left" : "Ahead";
+            if (length(flat) > 0.01f)
+                flat = normalize(flat);
+            const char* direction = dot(flat, forward) < -0.5f ? "Behind"
+                                    : dot(flat, right) > 0.3f  ? "Right"
+                                    : dot(flat, right) < -0.3f ? "Left"
+                                                               : "Ahead";
             char b[96];
             std::snprintf(b, sizeof b, "%s / %.0f m   %s", direction, double(distance),
-                m.sheltered ? "Sheltered: stop to recover" : p.camp == 0 ? "Orange: climb   Blue: cave" : "Follow the gold trail markers");
+                          m.sheltered   ? "Sheltered: stop to recover"
+                          : p.camp == 0 ? "Orange: climb   Blue: cave"
+                                        : "Follow the gold trail markers");
             m.objective_detail = b;
         }
         switch (game.interaction(player)) {
-        case ExpeditionInteraction::Begin: m.interaction = "Begin expedition"; break;
+        case ExpeditionInteraction::Begin:
+            m.interaction = "Begin expedition";
+            break;
         case ExpeditionInteraction::Beacon:
             m.interaction = "Hold to restore the beacon";
             m.interaction_progress = f32(p.expedition.beacon_steps) / beacon_hold_steps;
@@ -223,8 +275,11 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
             m.interaction = "Hold to request extraction";
             m.interaction_progress = f32(p.expedition.extraction_steps) / extraction_hold_steps;
             break;
-        case ExpeditionInteraction::Recover: m.interaction = "Cave shelter / stand still to recover health and stamina"; break;
-        default: break;
+        case ExpeditionInteraction::Recover:
+            m.interaction = "Cave shelter / stand still to recover health and stamina";
+            break;
+        default:
+            break;
         }
         const i32 end = m.phase == ExpeditionPhase::Complete ? p.expedition.finish_step : i32(game.step_count());
         m.run_seconds = p.expedition.start_step < 0 ? 0 : f32(std::max(0, end - p.expedition.start_step)) * fixed_step;
@@ -232,7 +287,8 @@ HudModel build_hud_model(const Game& game, i32 player, const HudNotices& notices
     return m;
 }
 
-// ---- layout ----------------------------------------------------------------------------------------------------------------
+// ---- layout
+// ----------------------------------------------------------------------------------------------------------------
 
 namespace {
 
@@ -249,7 +305,8 @@ struct Builder {
         n.parent = parent;
         nodes.push_back(n);
         const i32 index = i32(nodes.size()) - 1;
-        if (parent >= 0) nodes[std::size_t(parent)].children.push_back(index);
+        if (parent >= 0)
+            nodes[std::size_t(parent)].children.push_back(index);
         return index;
     }
 };
@@ -259,8 +316,8 @@ struct Builder {
 HudLayout hud_layout(Vec2f screen, f32 scale) {
     HudLayout l;
     l.screen = screen;
-    // The design is 1280x720: the whole layout is scaled to fit the smaller of the two ratios, so 4:3 and tiny sizes keep the
-    // same arrangement (nothing is re-flowed: it is the same picture smaller).
+    // The design is 1280x720: the whole layout is scaled to fit the smaller of the two ratios, so 4:3 and tiny sizes
+    // keep the same arrangement (nothing is re-flowed: it is the same picture smaller).
     l.u = std::max(0.05f, std::min(screen.x / 1280.0f, screen.y / 720.0f) * scale);
     const f32 u = l.u;
     const f32 margin = 16.0f * u;
@@ -313,20 +370,40 @@ std::string hud_hint_line(const InputBindings& bindings) {
         const std::vector<Binding>& list = bindings.bindings(a);
         return list.empty() ? std::string("-") : binding_label(list.front());
     };
-    return "Esc menu    " + first(Action::GrabLeft) + " / " + first(Action::GrabRight) + " hands    " + first(Action::Release) + " let go";
+    return "Esc menu    " + first(Action::GrabLeft) + " / " + first(Action::GrabRight) + " hands    " +
+           first(Action::Release) + " let go";
 }
 
-// ---- menu ------------------------------------------------------------------------------------------------------------------
+// ---- menu
+// ------------------------------------------------------------------------------------------------------------------
 
 namespace {
 
-bool nav_up(const RawInput& r) { return r.key(Key::Up) || r.key(Key::W) || r.pad.button(GamepadButton::DPadUp) || (r.pad.connected && r.pad.left_y > 0.6f); }
-bool nav_down(const RawInput& r) { return r.key(Key::Down) || r.key(Key::S) || r.pad.button(GamepadButton::DPadDown) || (r.pad.connected && r.pad.left_y < -0.6f); }
-bool nav_left(const RawInput& r) { return r.key(Key::Left) || r.key(Key::A) || r.pad.button(GamepadButton::DPadLeft) || (r.pad.connected && r.pad.left_x < -0.6f); }
-bool nav_right(const RawInput& r) { return r.key(Key::Right) || r.key(Key::D) || r.pad.button(GamepadButton::DPadRight) || (r.pad.connected && r.pad.left_x > 0.6f); }
-bool nav_accept(const RawInput& r) { return r.key(Key::Enter) || r.key(Key::KeypadEnter) || r.key(Key::Space) || r.pad.button(GamepadButton::A); }
-bool nav_back(const RawInput& r) { return r.key(Key::Backspace) || r.pad.button(GamepadButton::B); }
-bool nav_toggle(const RawInput& r) { return r.key(Key::Escape) || r.pad.button(GamepadButton::Start); }
+bool nav_up(const RawInput& r) {
+    return r.key(Key::Up) || r.key(Key::W) || r.pad.button(GamepadButton::DPadUp) ||
+           (r.pad.connected && r.pad.left_y > 0.6f);
+}
+bool nav_down(const RawInput& r) {
+    return r.key(Key::Down) || r.key(Key::S) || r.pad.button(GamepadButton::DPadDown) ||
+           (r.pad.connected && r.pad.left_y < -0.6f);
+}
+bool nav_left(const RawInput& r) {
+    return r.key(Key::Left) || r.key(Key::A) || r.pad.button(GamepadButton::DPadLeft) ||
+           (r.pad.connected && r.pad.left_x < -0.6f);
+}
+bool nav_right(const RawInput& r) {
+    return r.key(Key::Right) || r.key(Key::D) || r.pad.button(GamepadButton::DPadRight) ||
+           (r.pad.connected && r.pad.left_x > 0.6f);
+}
+bool nav_accept(const RawInput& r) {
+    return r.key(Key::Enter) || r.key(Key::KeypadEnter) || r.key(Key::Space) || r.pad.button(GamepadButton::A);
+}
+bool nav_back(const RawInput& r) {
+    return r.key(Key::Backspace) || r.pad.button(GamepadButton::B);
+}
+bool nav_toggle(const RawInput& r) {
+    return r.key(Key::Escape) || r.pad.button(GamepadButton::Start);
+}
 
 } // namespace
 
@@ -373,19 +450,32 @@ MenuAction Menu::toggle() {
 
 std::string Menu::label(MenuRow row) const {
     switch (row) {
-    case MenuRow::Resume: return "Resume";
-    case MenuRow::Restart: return _expedition_complete ? "New expedition" : "Restart from camp";
-    case MenuRow::Look: return "Look";
-    case MenuRow::Camera: return "Camera";
-    case MenuRow::MasterVolume: return "Master volume";
-    case MenuRow::SfxVolume: return "Effects volume";
-    case MenuRow::AmbienceVolume: return "Ambience volume";
-    case MenuRow::Sensitivity: return "Mouse sensitivity";
-    case MenuRow::InvertLook: return "Invert look";
-    case MenuRow::TimeOfDay: return "Time of day";
-    case MenuRow::Controls: return "Controls";
-    case MenuRow::Quit: return "Quit";
-    case MenuRow::Count: break;
+    case MenuRow::Resume:
+        return "Resume";
+    case MenuRow::Restart:
+        return _expedition_complete ? "New expedition" : "Restart from camp";
+    case MenuRow::Look:
+        return "Look";
+    case MenuRow::Camera:
+        return "Camera";
+    case MenuRow::MasterVolume:
+        return "Master volume";
+    case MenuRow::SfxVolume:
+        return "Effects volume";
+    case MenuRow::AmbienceVolume:
+        return "Ambience volume";
+    case MenuRow::Sensitivity:
+        return "Mouse sensitivity";
+    case MenuRow::InvertLook:
+        return "Invert look";
+    case MenuRow::TimeOfDay:
+        return "Time of day";
+    case MenuRow::Controls:
+        return "Controls";
+    case MenuRow::Quit:
+        return "Quit";
+    case MenuRow::Count:
+        break;
     }
     return "";
 }
@@ -394,24 +484,32 @@ std::string Menu::value(MenuRow row) const {
     static const SummitSettings fallback;
     const SummitSettings& s = _settings != nullptr ? *_settings : fallback;
     switch (row) {
-    case MenuRow::Look: return s.look;
-    case MenuRow::Camera: return s.first_person ? "First person" : "Third person";
-    case MenuRow::MasterVolume: return percent(s.master_volume);
-    case MenuRow::SfxVolume: return percent(s.sfx_volume);
-    case MenuRow::AmbienceVolume: return percent(s.ambience_volume);
+    case MenuRow::Look:
+        return s.look;
+    case MenuRow::Camera:
+        return s.first_person ? "First person" : "Third person";
+    case MenuRow::MasterVolume:
+        return percent(s.master_volume);
+    case MenuRow::SfxVolume:
+        return percent(s.sfx_volume);
+    case MenuRow::AmbienceVolume:
+        return percent(s.ambience_volume);
     case MenuRow::Sensitivity: {
         char b[16];
         std::snprintf(b, sizeof b, "%.2f", double(s.bindings.mouse_sensitivity));
         return b;
     }
-    case MenuRow::InvertLook: return s.bindings.invert_y ? "On" : "Off";
+    case MenuRow::InvertLook:
+        return s.bindings.invert_y ? "On" : "Off";
     case MenuRow::TimeOfDay: {
-        if (s.time_speed <= 0.0f || !s.effects.time_of_day) return "Frozen";
+        if (s.time_speed <= 0.0f || !s.effects.time_of_day)
+            return "Frozen";
         char b[24];
         std::snprintf(b, sizeof b, "%.2f h/min", double(s.time_speed));
         return b;
     }
-    default: return "";
+    default:
+        return "";
     }
 }
 
@@ -419,37 +517,57 @@ f32 Menu::slider(MenuRow row) const {
     static const SummitSettings fallback;
     const SummitSettings& s = _settings != nullptr ? *_settings : fallback;
     switch (row) {
-    case MenuRow::MasterVolume: return s.master_volume;
-    case MenuRow::SfxVolume: return s.sfx_volume;
-    case MenuRow::AmbienceVolume: return s.ambience_volume;
-    case MenuRow::Sensitivity: return std::clamp((s.bindings.mouse_sensitivity - sens_min) / (sens_max - sens_min), 0.0f, 1.0f);
-    default: return -1.0f;
+    case MenuRow::MasterVolume:
+        return s.master_volume;
+    case MenuRow::SfxVolume:
+        return s.sfx_volume;
+    case MenuRow::AmbienceVolume:
+        return s.ambience_volume;
+    case MenuRow::Sensitivity:
+        return std::clamp((s.bindings.mouse_sensitivity - sens_min) / (sens_max - sens_min), 0.0f, 1.0f);
+    default:
+        return -1.0f;
     }
 }
 
 bool Menu::set_slider(MenuRow row, f32 fraction) {
-    if (_settings == nullptr) return false;
+    if (_settings == nullptr)
+        return false;
     const f32 f = std::clamp(fraction, 0.0f, 1.0f);
     switch (row) {
-    case MenuRow::MasterVolume: _settings->master_volume = f; return true;
-    case MenuRow::SfxVolume: _settings->sfx_volume = f; return true;
-    case MenuRow::AmbienceVolume: _settings->ambience_volume = f; return true;
-    case MenuRow::Sensitivity: _settings->bindings.mouse_sensitivity = lerp(sens_min, sens_max, f); return true;
-    default: return false;
+    case MenuRow::MasterVolume:
+        _settings->master_volume = f;
+        return true;
+    case MenuRow::SfxVolume:
+        _settings->sfx_volume = f;
+        return true;
+    case MenuRow::AmbienceVolume:
+        _settings->ambience_volume = f;
+        return true;
+    case MenuRow::Sensitivity:
+        _settings->bindings.mouse_sensitivity = lerp(sens_min, sens_max, f);
+        return true;
+    default:
+        return false;
     }
 }
 
 MenuAction Menu::navigate(const MenuInput& in) {
-    if (_screen == MenuScreen::Closed) return MenuAction::None;
+    if (_screen == MenuScreen::Closed)
+        return MenuAction::None;
     if (_screen == MenuScreen::Controls) {
-        if (in.back || in.accept) _screen = MenuScreen::Main;
+        if (in.back || in.accept)
+            _screen = MenuScreen::Main;
         return MenuAction::None;
     }
-    if (_settings == nullptr) return MenuAction::None;
+    if (_settings == nullptr)
+        return MenuAction::None;
     SummitSettings& s = *_settings;
     const i32 n = i32(menu_row_count);
-    if (in.up) _focus = (_focus + n - 1) % n;
-    if (in.down) _focus = (_focus + 1) % n;
+    if (in.up)
+        _focus = (_focus + n - 1) % n;
+    if (in.down)
+        _focus = (_focus + 1) % n;
     if (in.back) {
         _screen = MenuScreen::Closed;
         return MenuAction::Resume;
@@ -457,7 +575,8 @@ MenuAction Menu::navigate(const MenuInput& in) {
     const MenuRow row = MenuRow(_focus);
     const i32 dir = (in.right ? 1 : 0) - (in.left ? 1 : 0);
     const bool act = in.accept;
-    if (!act && dir == 0) return MenuAction::None;
+    if (!act && dir == 0)
+        return MenuAction::None;
     const auto step_slider = [&](f32& v, f32 step) {
         v = std::clamp(std::round((v + f32(dir == 0 ? 1 : dir) * step) / step) * step, 0.0f, 1.0f);
         return MenuAction::Changed;
@@ -479,7 +598,8 @@ MenuAction Menu::navigate(const MenuInput& in) {
         const std::vector<Look>& all = looks();
         std::size_t i = 0;
         for (; i < all.size(); ++i) {
-            if (s.look == all[i].name) break;
+            if (s.look == all[i].name)
+                break;
         }
         const i32 d = dir == 0 ? 1 : dir;
         const i32 count = i32(all.size());
@@ -489,9 +609,12 @@ MenuAction Menu::navigate(const MenuInput& in) {
     case MenuRow::Camera:
         s.first_person = !s.first_person;
         return MenuAction::Changed;
-    case MenuRow::MasterVolume: return step_slider(s.master_volume, volume_step);
-    case MenuRow::SfxVolume: return step_slider(s.sfx_volume, volume_step);
-    case MenuRow::AmbienceVolume: return step_slider(s.ambience_volume, volume_step);
+    case MenuRow::MasterVolume:
+        return step_slider(s.master_volume, volume_step);
+    case MenuRow::SfxVolume:
+        return step_slider(s.sfx_volume, volume_step);
+    case MenuRow::AmbienceVolume:
+        return step_slider(s.ambience_volume, volume_step);
     case MenuRow::Sensitivity: {
         const f32 d = f32(dir == 0 ? 1 : dir) * 0.02f;
         s.bindings.mouse_sensitivity = std::clamp(s.bindings.mouse_sensitivity + d, sens_min, sens_max);
@@ -516,16 +639,19 @@ MenuAction Menu::navigate(const MenuInput& in) {
         }
         break;
     case MenuRow::Quit:
-        if (act) return MenuAction::Quit;
+        if (act)
+            return MenuAction::Quit;
         break;
-    case MenuRow::Count: break;
+    case MenuRow::Count:
+        break;
     }
     return MenuAction::None;
 }
 
 bool restart_from_camp(Game& game, i32 player) {
     const Player& p = game.player(player);
-    if (p.state != PlayerState::Alive || game.level().camps.empty()) return false;
+    if (p.state != PlayerState::Alive || game.level().camps.empty())
+        return false;
     const Camp& c = game.level().camps[std::size_t(std::clamp(p.camp, 0, i32(game.level().camps.size()) - 1))];
     game.debug_teleport(player, c.spawn);
     game.debug_set_health(player, game.rules().max_health);
@@ -533,45 +659,68 @@ bool restart_from_camp(Game& game, i32 player) {
 }
 
 std::string binding_label(const Binding& b) {
-    static const char* const pad_names[] = {"Pad A", "Pad B", "Pad X", "Pad Y", "Pad Back", "Pad Start", "Left stick click", "Right stick click",
-                                            "Left bumper", "Right bumper", "Pad up", "Pad down", "Pad left", "Pad right"};
+    static const char* const pad_names[] = {"Pad A",
+                                            "Pad B",
+                                            "Pad X",
+                                            "Pad Y",
+                                            "Pad Back",
+                                            "Pad Start",
+                                            "Left stick click",
+                                            "Right stick click",
+                                            "Left bumper",
+                                            "Right bumper",
+                                            "Pad up",
+                                            "Pad down",
+                                            "Pad left",
+                                            "Pad right"};
     switch (b.device) {
     case Binding::Device::Key: {
         const std::string name(key_name(static_cast<Key>(b.code)));
         // "LeftShift" reads better as "Left Shift".
         std::string out;
         for (std::size_t i = 0; i < name.size(); ++i) {
-            if (i > 0 && std::isupper(static_cast<unsigned char>(name[i])) && std::islower(static_cast<unsigned char>(name[i - 1]))) out += ' ';
+            if (i > 0 && std::isupper(static_cast<unsigned char>(name[i])) &&
+                std::islower(static_cast<unsigned char>(name[i - 1])))
+                out += ' ';
             out += name[i];
         }
         return out;
     }
     case Binding::Device::Mouse:
         switch (static_cast<MouseButton>(b.code)) {
-        case MouseButton::Left: return "Left mouse";
-        case MouseButton::Right: return "Right mouse";
-        case MouseButton::Middle: return "Middle mouse";
-        default: return "Mouse button";
+        case MouseButton::Left:
+            return "Left mouse";
+        case MouseButton::Right:
+            return "Right mouse";
+        case MouseButton::Middle:
+            return "Middle mouse";
+        default:
+            return "Mouse button";
         }
-    case Binding::Device::PadButton: return pad_names[std::clamp(b.code, 0, 13)];
-    case Binding::Device::PadTrigger: return b.code == 0 ? "Left trigger" : "Right trigger";
+    case Binding::Device::PadButton:
+        return pad_names[std::clamp(b.code, 0, 13)];
+    case Binding::Device::PadTrigger:
+        return b.code == 0 ? "Left trigger" : "Right trigger";
     }
     return "";
 }
 
 std::vector<ControlLine> controls_screen(const InputBindings& bindings) {
-    static const char* const names[action_count] = {"Move forward", "Move back", "Move left", "Move right", "Jump", "Sprint",
-                                                    "Left hand (hold)", "Right hand (hold)", "Let go", "Pull up", "Rest at camp"};
+    static const char* const names[action_count] = {
+        "Move forward",     "Move back",         "Move left", "Move right", "Jump",        "Sprint",
+        "Left hand (hold)", "Right hand (hold)", "Let go",    "Pull up",    "Rest at camp"};
     std::vector<ControlLine> lines;
     for (std::size_t a = 0; a < action_count; ++a) {
         ControlLine l;
         l.action = names[a];
         const std::vector<Binding>& list = bindings.bindings(Action(a));
         for (std::size_t i = 0; i < list.size(); ++i) {
-            if (i > 0) l.keys += ", ";
+            if (i > 0)
+                l.keys += ", ";
             l.keys += binding_label(list[i]);
         }
-        if (l.keys.empty()) l.keys = "(not bound)";
+        if (l.keys.empty())
+            l.keys = "(not bound)";
         lines.push_back(std::move(l));
     }
     return lines;
@@ -587,17 +736,21 @@ MenuLayout menu_layout(Vec2f screen, i32 rows) {
     l.panel = ui2::centered_rect({screen.x * 0.5f, screen.y * 0.5f}, {w * u, h * u});
     l.title = {l.panel.x + pad * u, l.panel.y + pad * u, (w - 2 * pad) * u, title * u};
     for (i32 i = 0; i < rows; ++i) {
-        l.rows.push_back({l.panel.x + pad * u, l.panel.y + (pad + title + row * f32(i)) * u, (w - 2 * pad) * u, row * u});
+        l.rows.push_back(
+            {l.panel.x + pad * u, l.panel.y + (pad + title + row * f32(i)) * u, (w - 2 * pad) * u, row * u});
     }
     l.footer = {l.panel.x + pad * u, l.panel.y + (pad + title + row * f32(rows)) * u, (w - 2 * pad) * u, footer * u};
     return l;
 }
 
-Rectf menu_row_track(const Rectf& row) { return {row.x + row.w * 0.52f, row.y + row.h * 0.3f, row.w * 0.30f, row.h * 0.4f}; }
+Rectf menu_row_track(const Rectf& row) {
+    return {row.x + row.w * 0.52f, row.y + row.h * 0.3f, row.w * 0.30f, row.h * 0.4f};
+}
 
 i32 menu_row_at(const MenuLayout& layout, Vec2f pointer) {
     for (std::size_t i = 0; i < layout.rows.size(); ++i) {
-        if (ui2::contains(layout.rows[i], pointer)) return i32(i);
+        if (ui2::contains(layout.rows[i], pointer))
+            return i32(i);
     }
     return -1;
 }

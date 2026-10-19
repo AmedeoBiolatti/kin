@@ -711,8 +711,8 @@ int meshes(int frames, int count) {
     auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
     renderer->set_gpu_timing_enabled(true);
     kin::Renderer3D r3d{*renderer};
-    const kin::Mesh box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f}));
-    const kin::Mesh ball = r3d.create_mesh(kin::meshes::sphere(0.35f, 24, 12));
+    const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f}));
+    const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.35f, 24, 12));
     kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)});
     kin::JobSystem jobs;
     // A grid on the ground, square, seen from above at an angle.
@@ -811,13 +811,13 @@ int shadows(int frames, int count) {
     kin::JobSystem jobs;
     renderer->set_job_system(&jobs);
     kin::Renderer3D r3d{*renderer};
-    const kin::Mesh tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
-    const std::array<kin::Mesh, 3> enemy{r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f)),
+    const kin::Mesh3D tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+    const std::array<kin::Mesh3D, 3> enemy{r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f)),
                                          r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6)),
                                          r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8))};
     kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)});
     constexpr int width = 48, depth = 32;
-    std::vector<kin::MeshInstance> tiles;
+    std::vector<kin::MeshInstance3D> tiles;
     for (int z = 0; z < depth; ++z) {
         for (int x = 0; x < width; ++x) {
             tiles.push_back({kin::Mat4f::translation({x + 0.5f, -0.5f, z + 0.5f}), kin::Color::rgb(90, 96, 110)});
@@ -857,7 +857,7 @@ int shadows(int frames, int count) {
             scene.lights.sun = {.direction = {-0.4f, 1.0f, 0.25f}, .color = {1.0f, 0.97f, 0.92f}};
             scene.lights.ambient = {0.25f, 0.28f, 0.35f};
             scene.lights.cache_shadows = false; // a bench renders one scene many times and means to time the shadow pass
-            scene.lights.shadow_area = c.shadows ? kin::Bounds3{{0.0f, -0.2f, 0.0f}, {float(width), 4.0f, float(depth)}} : kin::Bounds3{};
+            scene.lights.shadow_area = c.shadows ? kin::Bounds3D{{0.0f, -0.2f, 0.0f}, {float(width), 4.0f, float(depth)}} : kin::Bounds3D{};
             if (const char* res = std::getenv("KIN_BENCH_SHADOW_RES")) {
                 scene.lights.shadow_resolution = static_cast<kin::u32>(std::atoi(res));
             }
@@ -899,7 +899,7 @@ int shadows(int frames, int count) {
             std::ranges::sort(*v);
         }
         const auto median = [](const std::vector<double>& v) { return v.empty() ? 0.0 : v[v.size() / 2]; };
-        const kin::Render3DDebugStats& st = r3d.debug_stats();
+        const kin::RenderDebugStats3D& st = r3d.debug_stats();
         std::printf("%d enemies, %-12s %-10s: render() %6.3f ms, frame %6.3f ms, GPU %6.3f ms; %u culled, %u casters\n", count, c.name,
                     c.shadows ? "shadows" : "no shadows", median(render), per_frame, median(gpu), st.culled, st.shadow_casters);
     }

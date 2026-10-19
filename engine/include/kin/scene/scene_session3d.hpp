@@ -1,13 +1,12 @@
 #pragma once
 
-#include <kin/ecs/scene3d.hpp>
-#include <kin/scene/scene_entity3d.hpp>
+#include <functional>
 #include <kin/ecs/physics3d.hpp>
+#include <kin/ecs/scene3d.hpp>
+#include <kin/physics3d/assets3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
-#include <kin/physics3d/assets3d.hpp>
-
-#include <functional>
+#include <kin/scene/scene_entity3d.hpp>
 
 namespace kin {
 
@@ -22,10 +21,10 @@ struct ScenePrefab3D {
 struct SceneSpawnContext3D {
     EcsWorld& world;
     EcsEntity root;
-    const std::unordered_map<std::string,EcsEntity>& entities;
+    const std::unordered_map<std::string, EcsEntity>& entities;
     EcsEntity entity(std::string_view local_id) const {
-        const auto it=entities.find(std::string(local_id));
-        return it==entities.end()?EcsEntity{}:it->second;
+        const auto it = entities.find(std::string(local_id));
+        return it == entities.end() ? EcsEntity{} : it->second;
     }
 };
 struct SceneSpawn3D {
@@ -40,15 +39,15 @@ struct SceneSpawn3D {
 };
 
 struct ScenePreparedPrefab3D {
-    u64 session=0,generation=0,id=0;
-    explicit operator bool()const{return session&&id;}
+    u64 session = 0, generation = 0, id = 0;
+    explicit operator bool() const { return session && id; }
 };
 struct ScenePrefabPool3D {
-    u64 session=0,generation=0,id=0;
-    explicit operator bool()const{return session&&id;}
+    u64 session = 0, generation = 0, id = 0;
+    explicit operator bool() const { return session && id; }
 };
 struct ScenePrefabPoolOptions3D {
-    std::size_t capacity=16;
+    std::size_t capacity = 16;
     // Reset arbitrary native game state on every acquisition (and warm-up).
     // Configure only game-owned components; engine settings/assets are fixed.
     std::function<void(SceneSpawnContext3D&)> reset;
@@ -56,15 +55,19 @@ struct ScenePrefabPoolOptions3D {
     std::function<void(SceneSpawnContext3D&)> release;
 };
 struct ScenePrefabPoolStats3D {
-    std::size_t capacity=0,active=0,available=0;
-    u64 acquired=0,reused=0,exhausted=0;
+    std::size_t capacity = 0, active = 0, available = 0;
+    u64 acquired = 0, reused = 0, exhausted = 0;
 };
 
 class EcsCommandBuffer;
-namespace detail { struct SceneRequestState3D; struct SceneCommandQueue3D; struct SceneOperation3D; }
-// A request still Pending when a replacement scene is prepared (prepare() without activate() or cancel() yet) is Cancelled by the
-// next step() with an error that says so: requests are never held for a later scene, and a new one made after cancel() (or from
-// the new scene's commands() after activate()) runs normally.
+namespace detail {
+struct SceneRequestState3D;
+struct SceneCommandQueue3D;
+struct SceneOperation3D;
+} // namespace detail
+// A request still Pending when a replacement scene is prepared (prepare() without activate() or cancel() yet) is
+// Cancelled by the next step() with an error that says so: requests are never held for a later scene, and a new one
+// made after cancel() (or from the new scene's commands() after activate()) runs normally.
 enum class SceneRequestStatus3D { Invalid, Pending, Succeeded, Failed, Cancelled };
 // Owns a small result only, never a world, assets or constructor captures.
 // Safe to retain across scene replacement; inspect the status before the result.
@@ -73,6 +76,7 @@ public:
     SceneRequestStatus3D status() const;
     ScenePrefab3D prefab() const; // populated only for a successful spawn
     std::string error() const;
+
 private:
     std::shared_ptr<detail::SceneRequestState3D> _state;
     friend class SceneCommands3D;
@@ -90,55 +94,63 @@ public:
     SceneRequest3D spawn(EcsCommandBuffer&, ScenePrefabPool3D, SceneSpawn3D = {}) const;
     SceneRequest3D despawn(EcsCommandBuffer&, ScenePrefab3D) const;
     SceneRequest3D despawn(EcsCommandBuffer&, SceneRequest3D spawn) const;
+
 private:
-    explicit SceneCommands3D(std::weak_ptr<detail::SceneCommandQueue3D> queue):_queue(std::move(queue)){}
+    explicit SceneCommands3D(std::weak_ptr<detail::SceneCommandQueue3D> queue) : _queue(std::move(queue)) {}
     SceneRequest3D submit(EcsCommandBuffer&, std::shared_ptr<detail::SceneOperation3D>) const;
     std::weak_ptr<detail::SceneCommandQueue3D> _queue;
     friend class SceneSession3D;
 };
 
 struct SceneQueryFilter3D {
-    Layer3DMask mask=all_layers3d;
+    Layer3DMask mask = all_layers3d;
     SceneEntity3D ignore; // checked scene entity; excludes all of its native bodies
-    bool sensors=false;
-    bool initial_overlap=false; // sweeps: include outward initial convex overlap
+    bool sensors = false;
+    bool initial_overlap = false; // sweeps: include outward initial convex overlap
 };
-template<class Hit> struct SceneQueryHit3D {
+template <class Hit> struct SceneQueryHit3D {
     Hit physics;
     SceneEntity3D entity; // empty for native bodies without a live ECS binding
 };
-using SceneRayHit3D=SceneQueryHit3D<RayHit3D>;
-using SceneShapeHit3D=SceneQueryHit3D<ShapeHit3D>;
-using SceneOverlapHit3D=SceneQueryHit3D<OverlapHit3D>;
+using SceneRayHit3D = SceneQueryHit3D<RayHit3D>;
+using SceneShapeHit3D = SceneQueryHit3D<ShapeHit3D>;
+using SceneOverlapHit3D = SceneQueryHit3D<OverlapHit3D>;
 // Weak, scene-generation endpoint. Renderer-thread queries read native physics
 // as last synchronized/stepped; they never sync or simulate implicitly. Safe to
 // retain after reload/unload (unavailable), but do not query from worker systems.
 class SceneQueries3D {
 public:
-    SceneQueries3D()=default;
-    explicit operator bool()const;
-    SceneEntity3D handle(EcsEntity entity)const;
-    EcsEntity resolve(SceneEntity3D entity)const; // owner thread, current scene/lease
-    std::optional<SceneRayHit3D> raycast(Vec3f from,Vec3f to,const SceneQueryFilter3D& filter={})const;
-    BoundedQueryResult3D raycast_all(Vec3f from,Vec3f to,std::span<SceneRayHit3D> output,const SceneQueryFilter3D& filter={})const;
-    std::optional<SceneShapeHit3D> shape_cast(const Shape3D& shape,Vec3f position,Quatf rotation,Vec3f displacement,const SceneQueryFilter3D& filter={})const;
-    BoundedQueryResult3D overlap(const Shape3D& shape,Vec3f position,Quatf rotation,std::span<SceneOverlapHit3D> output,const SceneQueryFilter3D& filter={})const;
+    SceneQueries3D() = default;
+    explicit operator bool() const;
+    SceneEntity3D handle(EcsEntity entity) const;
+    EcsEntity resolve(SceneEntity3D entity) const; // owner thread, current scene/lease
+    std::optional<SceneRayHit3D> raycast(Vec3f from, Vec3f to, const SceneQueryFilter3D& filter = {}) const;
+    BoundedQueryResult3D raycast_all(Vec3f from, Vec3f to, std::span<SceneRayHit3D> output,
+                                     const SceneQueryFilter3D& filter = {}) const;
+    std::optional<SceneShapeHit3D> shape_cast(const Shape3D& shape, Vec3f position, Quatf rotation, Vec3f displacement,
+                                              const SceneQueryFilter3D& filter = {}) const;
+    BoundedQueryResult3D overlap(const Shape3D& shape, Vec3f position, Quatf rotation,
+                                 std::span<SceneOverlapHit3D> output, const SceneQueryFilter3D& filter = {}) const;
     // Checks scene/lease and native body identity. A body rebuilt on the same
     // live entity invalidates the captured hit as well. Hits retain no resources.
-    template<class Hit> EcsEntity resolve(const SceneQueryHit3D<Hit>& hit)const {return resolve_hit(hit.entity,hit.physics.body);}
+    template <class Hit> EcsEntity resolve(const SceneQueryHit3D<Hit>& hit) const {
+        return resolve_hit(hit.entity, hit.physics.body);
+    }
+
 private:
-    explicit SceneQueries3D(std::weak_ptr<detail::SceneCommandQueue3D> queue):_queue(std::move(queue)){}
-    EcsEntity resolve_hit(SceneEntity3D entity,Body3D body)const;
+    explicit SceneQueries3D(std::weak_ptr<detail::SceneCommandQueue3D> queue) : _queue(std::move(queue)) {}
+    EcsEntity resolve_hit(SceneEntity3D entity, Body3D body) const;
     std::weak_ptr<detail::SceneCommandQueue3D> _queue;
     friend class SceneSession3D;
 };
 
 // What SceneSession3D::pick found under a pixel of the last rendered frame.
 struct ScenePick3D {
-    // The live entity drawn there: one whose MeshRenderer, ModelRenderer3D or SkinnedMeshRenderer draws with `id` (its own
-    // id, or the entity's low 32 bits when that is 0). Empty when none does: a compose() draw, or an entity gone since.
+    // The live entity drawn there: one whose MeshRenderer3D, ModelRenderer3D or SkinnedMeshRenderer3D draws with `id`
+    // (its own id, or the entity's low 32 bits when that is 0). Empty when none does: a compose() draw, or an entity
+    // gone since.
     EcsEntity entity;
-    u32 id = 0;       // the id drawn there (PickResult::id)
+    u32 id = 0;       // the id drawn there (PickResult3D::id)
     Vec3f position{}; // the point of it the pixel showed, in the world
 };
 
@@ -156,9 +168,9 @@ struct SceneSession3DContext {
 
 struct SceneSession3DOptions {
     Vec2i viewport{960, 540};
-    // The scene's SceneEnvironment3D replaces these, but `pick` is the game's: true keeps a pick pass in every render (one
-    // more pass over the opaque meshes) for pick(). Off by default.
-    View3DOptions view;
+    // The scene's SceneEnvironment3D replaces these, but `pick` is the game's: true keeps a pick pass in every render
+    // (one more pass over the opaque meshes) for pick(). Off by default.
+    ViewOptions3D view;
     // No physics world/scratch pool allocated unless requested. Tune capacities
     // for the game; a transactional replacement briefly owns two physics worlds.
     std::optional<World3DConfig> physics;
@@ -184,9 +196,9 @@ struct SceneSession3DOptions {
     // Optional per-frame game drawing/settings after the stock scene collection.
     std::function<void(SceneSession3DContext&, Scene3D&)> compose;
     // Optional ECS audio (kin/ecs/audio.hpp), both or neither: each step() then runs update_audio_listeners,
-    // update_audio_emitters and consume_audio_one_shots after the Audio phase's systems, so emitters and one-shots sound
-    // from their WorldTransform3D and the listener follows the AudioListener entity or else the active SceneCamera3D.
-    // Both outlive the session; the host still calls audio.update(dt) once a frame.
+    // update_audio_emitters and consume_audio_one_shots after the Audio phase's systems, so emitters and one-shots
+    // sound from their WorldTransform3D and the listener follows the AudioListener entity or else the active
+    // SceneCamera3D. Both outlive the session; the host still calls audio.update(dt) once a frame.
     AudioEngine* audio = nullptr;
     const AudioCatalog* audio_catalog = nullptr;
 };
@@ -271,11 +283,11 @@ public:
     // Typed reflected configuration changes, using the same validated binding
     // transaction as edit(). Runtime input/state still uses native components
     // directly. Only reflected fields are applied; the callback edits a copy.
-    template<class T, class Fn>
-    bool reconfigure(SceneEntity3D entity, Fn change) {
-        if(!resolve(entity))return configuration_error("configuration requires a live session entity");
-        return reconfigure_native(entity,world()->component<T>().id(),
-            [change=std::move(change)](EcsEntity copy) mutable {change(*copy.get_mut<T>());});
+    template <class T, class Fn> bool reconfigure(SceneEntity3D entity, Fn change) {
+        if (!resolve(entity))
+            return configuration_error("configuration requires a live session entity");
+        return reconfigure_native(entity, world()->component<T>().id(),
+                                  [change = std::move(change)](EcsEntity copy) mutable { change(*copy.get_mut<T>()); });
     }
 
     // One fixed step: Input..Physics systems, queued lifecycle work and native
@@ -292,9 +304,10 @@ public:
     bool collect();
     bool render();
     bool resize(Vec2i viewport);
-    // What `pixel` (the view's own, from its top left) showed in the last render(): the entity drawn there and the point
-    // of it. Draws nothing. Needs options.view.pick; waits for the GPU like Renderer3D::pick, so ask on a click, not every
-    // frame. Nullopt over the background or outside the view, and (with why in diagnostics()) without picking or a renderer.
+    // What `pixel` (the view's own, from its top left) showed in the last render(): the entity drawn there and the
+    // point of it. Draws nothing. Needs options.view.pick; waits for the GPU like Renderer3D::pick, so ask on a click,
+    // not every frame. Nullopt over the background or outside the view, and (with why in diagnostics()) without picking
+    // or a renderer.
     std::optional<ScenePick3D> pick(Vec2i pixel);
 
     bool active() const;

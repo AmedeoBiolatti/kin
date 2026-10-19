@@ -1,10 +1,8 @@
-#include <kin/render3d/renderer3d.hpp>
-
+#include <cstddef>
 #include <kin/assets/content.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
-
-#include <cstddef>
 #include <optional>
 #include <string>
 
@@ -17,12 +15,15 @@ namespace kin {
 
 Environment3D Renderer3D::create_environment(Vec2i size, std::span<const f32> rgb) {
     _errors.clear();
-    if (!_backend || size.x < 8 || size.y < 4 || rgb.size() != static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 3) {
-        fail3d(_errors, "Renderer3D::create_environment", _backend ? "invalid environment dimensions/pixel count" : "3D is not available");
+    if (!_backend || size.x < 8 || size.y < 4 ||
+        rgb.size() != static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 3) {
+        fail3d(_errors, "Renderer3D::create_environment",
+               _backend ? "invalid environment dimensions/pixel count" : "3D is not available");
         return {};
     }
-    std::shared_ptr<IEnvironmentBackend> backend = _backend->create_environment(size, rgb);
-    if (!backend) fail3d(_errors, "Renderer3D::create_environment", "device refused environment textures");
+    std::shared_ptr<IEnvironmentBackend3D> backend = _backend->create_environment(size, rgb);
+    if (!backend)
+        fail3d(_errors, "Renderer3D::create_environment", "device refused environment textures");
     return backend ? Environment3D{std::move(backend), size} : Environment3D{};
 }
 
@@ -36,11 +37,13 @@ Environment3D Renderer3D::load_environment(const std::filesystem::path& path, st
         why = "cannot read " + path.string();
     } else {
         int w = 0, h = 0;
-        float* pixels = kin_hdr_load(reinterpret_cast<const unsigned char*>(bytes->data()), static_cast<int>(bytes->size()), &w, &h);
+        float* pixels = kin_hdr_load(reinterpret_cast<const unsigned char*>(bytes->data()),
+                                     static_cast<int>(bytes->size()), &w, &h);
         if (!pixels) {
             why = path.string() + ": not a Radiance .hdr picture";
         } else {
-            environment = create_environment({w, h}, {pixels, static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3});
+            environment =
+                create_environment({w, h}, {pixels, static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3});
             kin_hdr_free(pixels);
             if (!environment.valid()) {
                 why = path.string() + ": cannot make an environment of it (compute shaders, or a picture under 8 x 4)";
@@ -48,11 +51,15 @@ Environment3D Renderer3D::load_environment(const std::filesystem::path& path, st
         }
     }
     if (!environment.valid()) {
-        KIN_LOG_WARN_F("render", "3D: environment not loaded", (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
+        KIN_LOG_WARN_F("render", "3D: environment not loaded",
+                       (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
     }
-    if (!environment) fail3d(_errors, "Renderer3D::load_environment(" + path.string() + ")", why);
-    else _errors.clear();
-    if (error) *error = diagnostics3d_text(_errors);
+    if (!environment)
+        fail3d(_errors, "Renderer3D::load_environment(" + path.string() + ")", why);
+    else
+        _errors.clear();
+    if (error)
+        *error = diagnostics3d_text(_errors);
     return environment;
 }
 
@@ -63,7 +70,8 @@ MaterialShader3D Renderer3D::create_material_shader(std::span<const u8> spirv) {
         return {};
     }
     MaterialShader3D shader{_backend->create_material_shader(spirv)};
-    if (!shader) fail3d(_errors, "Renderer3D::create_material_shader", "device refused shader");
+    if (!shader)
+        fail3d(_errors, "Renderer3D::create_material_shader", "device refused shader");
     return shader;
 }
 
@@ -80,11 +88,15 @@ MaterialShader3D Renderer3D::compile_material_shader(const std::filesystem::path
         }
     }
     if (!shader.valid()) {
-        KIN_LOG_WARN_F("render", "3D: material shader not made", (LogFields{{.name = "path", .value = source.string()}, {.name = "reason", .value = why}}));
+        KIN_LOG_WARN_F("render", "3D: material shader not made",
+                       (LogFields{{.name = "path", .value = source.string()}, {.name = "reason", .value = why}}));
     }
-    if (!shader) fail3d(_errors, "Renderer3D::compile_material_shader(" + source.string() + ")", why);
-    else _errors.clear();
-    if (error) *error = diagnostics3d_text(_errors);
+    if (!shader)
+        fail3d(_errors, "Renderer3D::compile_material_shader(" + source.string() + ")", why);
+    else
+        _errors.clear();
+    if (error)
+        *error = diagnostics3d_text(_errors);
     return shader;
 }
 

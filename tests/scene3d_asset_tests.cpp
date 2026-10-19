@@ -157,7 +157,7 @@ void authored_settings_and_animation() {
     WorldRenderState3D state{world};
     auto instance=instantiate_scene_asset(world,*parsed.scene,{},world.components());
     check(instance.ok(), "camera/environment instantiation failed");
-    state.propagate_transforms(); Scene3D scene; View3DOptions view;
+    state.propagate_transforms(); Scene3D scene; ViewOptions3D view;
     check(apply_scene3d_settings(world,scene,&view).empty(), "camera/environment application failed");
     check(near(scene.camera.position,{14,2,0}) && near(scene.camera.forward(),{-1,0,0}) && scene.camera.fov==75 && std::isinf(scene.camera.z_far), "authored parented camera pose/projection lost");
     check(scene.sky.enabled && scene.fog.enabled && scene.fog.density==.02f && view.hdr && view.bloom==.2f, "environment/view settings lost");
@@ -271,8 +271,8 @@ void gpu_scene(Renderer2D& renderer) {
     std::filesystem::copy_file(scratch.path/"parts.glb",scratch.path/"late.glb");
     check(resolve_render3d_assets(world,assets).empty() && left.get<ModelRenderer3D>()->model!=model, "explicit failed-asset retry did not work");
 
-    std::weak_ptr<const Model> weak=model;
-    std::weak_ptr<IMeshBackend> mesh_weak=model->parts[0].mesh.backend();
+    std::weak_ptr<const Model3D> weak=model;
+    std::weak_ptr<IMeshBackend3D> mesh_weak=model->parts[0].mesh.backend();
     model.reset(); scene.clear(); runtime.clear(world); state.collect(scene); assets.trim();
     check(weak.expired() && mesh_weak.expired() && assets.stats().model_entries==0, "scene unloading/prototypes/buckets pinned GPU assets");
 
@@ -301,7 +301,7 @@ void gpu_scene(Renderer2D& renderer) {
         check(survivor.ok() && binding_errors.empty(), "authored skinned binding failed");
         WorldRenderState3D skin_state{skin_world}; skin_state.animate(.1f);
         auto* animator=survivor.root.get_mut<Animator3D>();
-        const auto old=survivor.root.get<SkinnedMeshRenderer>()->model;
+        const auto old=survivor.root.get<SkinnedMeshRenderer3D>()->model;
         check(animator->bound==old.get(), "authored animator did not bind");
         const auto good_config=survivor.root.get<AnimatorAsset3D>()->configuration;
         const auto invalid_path=scratch.path/"bad-clip.kinanimator";
@@ -316,11 +316,11 @@ void gpu_scene(Renderer2D& renderer) {
         check(!animator->bound && animator->clip=="Idle", "skinned refresh failed to reset runtime or erased config");
         skin_state.animate(.1f);
         check(animator->bound!=old.get(), "skinned animator kept stale model pointers");
-        auto inherited_base=skin_world.raw().prefab().set(SkinnedMeshRenderer{.asset={"kenney-character/survivor.glb"}}).set(Animator3D{.clip="Idle"});
+        auto inherited_base=skin_world.raw().prefab().set(SkinnedMeshRenderer3D{.asset={"kenney-character/survivor.glb"}}).set(Animator3D{.clip="Idle"});
         auto inherited=kin::EcsEntity{skin_world.raw().entity().is_a(inherited_base)};
-        check(resolve_render3d_assets(skin_world,skin_assets).empty() && inherited.get<SkinnedMeshRenderer>()->model && inherited.raw().owns<Animator3D>() && !inherited_base.get<SkinnedMeshRenderer>()->model, "skinned binding failed inherited copy-on-write");
+        check(resolve_render3d_assets(skin_world,skin_assets).empty() && inherited.get<SkinnedMeshRenderer3D>()->model && inherited.raw().owns<Animator3D>() && !inherited_base.get<SkinnedMeshRenderer3D>()->model, "skinned binding failed inherited copy-on-write");
         skin_world.entity("bad-static").set(ModelRenderer3D{.asset={"kenney-character/survivor.glb"}});
-        skin_world.entity("bad-skin").set(SkinnedMeshRenderer{.asset={(std::filesystem::path(KIN_TEST_MODELS)/"parts.glb").string()}});
+        skin_world.entity("bad-skin").set(SkinnedMeshRenderer3D{.asset={(std::filesystem::path(KIN_TEST_MODELS)/"parts.glb").string()}});
         const auto incompatible=resolve_render3d_assets(skin_world,skin_assets);
         check(incompatible.size()==2 && incompatible[0].find("requires")!=std::string::npos && incompatible[1].find("requires")!=std::string::npos,
             "incompatible static/skinned asset was accepted");
