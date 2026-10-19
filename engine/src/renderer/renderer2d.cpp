@@ -1,5 +1,6 @@
 #include <kin/renderer/renderer2d.hpp>
 
+#include <kin/assets/texture_file.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/shader_reflect.hpp>
@@ -98,8 +99,9 @@ TextureFormat Texture::format() const {
 namespace {
 
 // Data textures hold numbers for shaders; sampling one as an image is invalid.
+// Compressed ones are images.
 bool drawable(const Texture& texture) {
-    if (texture.format() == TextureFormat::Rgba8) {
+    if (texture.format() == TextureFormat::Rgba8 || texture_format_compressed(texture.format())) {
         return true;
     }
     KIN_LOG_ERROR("render", "draw_texture: data textures can only be read by shaders");
@@ -403,6 +405,32 @@ Texture Renderer2D::create_texture(Vec2i size, TextureFormat format, const void*
         KIN_LOG_ERROR_F("render", "texture creation failed", (LogFields{{.name = "error", .value = error.what()}}));
         return {};
     }
+}
+
+Texture Renderer2D::create_texture_compressed(const CompressedImage& image) {
+    if (!image.valid()) {
+        KIN_LOG_ERROR("render", "create_texture_compressed: levels that do not fit the image's size and format");
+        return {};
+    }
+    Texture texture;
+    try {
+        texture = _backend->create_texture_compressed(image);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "texture creation failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+    // Said once a format: a game that falls back to another file asks for each of its textures.
+    const u32 bit = 1u << static_cast<u32>(image.format);
+    if (!texture && !(_compressed_refused & bit)) {
+        _compressed_refused |= bit;
+        static constexpr const char* names[] = {"BC1", "BC1 sRGB", "BC3", "BC3 sRGB", "BC4", "BC5",
+                                                "BC7", "BC7 sRGB", "ASTC 4x4", "ASTC 4x4 sRGB"};
+        const auto index = static_cast<std::size_t>(image.format) - static_cast<std::size_t>(TextureFormat::Bc1RgbaUnorm);
+        KIN_LOG_WARN_F("render", "compressed textures of this format cannot be made here",
+                       (LogFields{{.name = "format", .value = index < std::size(names) ? names[index] : "?"},
+                                  {.name = "backend", .value = std::string{_backend->name()}}}));
+    }
+    return texture;
 }
 
 Texture Renderer2D::create_texture_from_rgba(const u8* pixels, Vec2i size) {

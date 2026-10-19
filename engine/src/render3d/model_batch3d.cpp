@@ -39,13 +39,17 @@ Mat4f Model::placement(const ModelPlacement3D& options) const {
 }
 
 ModelBatch3D::ModelBatch3D(const Model& model, std::span<const MeshInstance> instances, const ModelBatchOptions3D& options) {
-    if (!std::isfinite(options.cell_size) || options.cell_size < 0) throw std::invalid_argument("Model batch cell size must be finite and non-negative");
-    if (instances.size() > std::numeric_limits<u32>::max()) throw std::length_error("Too many model instances");
+    const auto reject = [&](std::string_view reason) {
+        _parts.clear(); _instances = 0; _triangles = 0; _record_bytes = 0;
+        fail3d(_errors, "ModelBatch3D", reason);
+    };
+    if (!std::isfinite(options.cell_size) || options.cell_size < 0) { reject("Model batch cell size must be finite and non-negative"); return; }
+    if (instances.size() > std::numeric_limits<u32>::max()) { reject("Too many model instances"); return; }
     for (const auto& part : model.parts) {
-        if (part.skin >= 0 || part.mesh.skinned()) throw std::invalid_argument("ModelBatch3D requires a static model");
-        if (!finite(part.transform)) throw std::invalid_argument("Model part transform must be finite");
+        if (part.skin >= 0 || part.mesh.skinned()) { reject("ModelBatch3D requires a static model"); return; }
+        if (!finite(part.transform)) { reject("Model part transform must be finite"); return; }
     }
-    for (const auto& copy : instances) if (!finite(copy.transform)) throw std::invalid_argument("Model instance transform must be finite");
+    for (const auto& copy : instances) if (!finite(copy.transform)) { reject("Model instance transform must be finite"); return; }
     if (instances.empty() || !model) return;
     std::vector<u32> order;
     std::vector<InstanceGroup3D> groups;
@@ -74,7 +78,7 @@ ModelBatch3D::ModelBatch3D(const Model& model, std::span<const MeshInstance> ins
         for (u32 index : order) {
             const auto& copy = instances[index];
             const Mat4f transform = copy.transform * part.transform;
-            if (!finite(transform)) throw std::invalid_argument("Model part/instance composition must be finite");
+            if (!finite(transform)) { reject("Model part/instance composition must be finite"); return; }
             records.push_back({transform, copy.tint, copy.id});
         }
         _triangles += u64(records.size()) * part.mesh.triangle_count();
@@ -84,8 +88,11 @@ ModelBatch3D::ModelBatch3D(const Model& model, std::span<const MeshInstance> ins
     if (!_parts.empty()) _instances = u32(instances.size());
 }
 
-void Scene3D::draw_instanced(const ModelBatch3D& batch) {
+bool Scene3D::draw_instanced(const ModelBatch3D& batch) {
+    if (!_errors.empty()) return false;
+    if (!batch.diagnostics().empty()) return fail_submission(batch.diagnostics().front());
     for (const auto& part : batch.parts()) draw_instanced(part.instances, part.material);
+    return _errors.empty();
 }
 
 } // namespace kin

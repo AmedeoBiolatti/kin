@@ -19,7 +19,8 @@ float kin_fog_optical_depth(KinFog f, vec3 eye, vec3 dir, float dist, bool infin
     const float d = f.density.y;
     if (d > 0.0 && len > 0.0) {
         const float k = f.density.z;
-        const float y0 = eye.y + dir.y * (infinite ? 0.0 : start) - f.density.w;
+        // From the start on, to infinity too: the sky's depth is the limit of the geometry's as `dist` grows.
+        const float y0 = eye.y + dir.y * start - f.density.w;
         const float kd = k * dir.y;
         const float at_start = exp(clamp(-k * y0, -80.0, 80.0));
         float shape;
@@ -38,14 +39,30 @@ float kin_fog_opacity(KinFog f, float tau) {
     return min(1.0 - exp(-tau), f.limits.y);
 }
 
-// The fog's colour along `dir`: the fixed one or the sky's, brightened toward the sun by its in-scattering (the
+// `c` (the fog's fixed colour or the sky's along `dir`) brightened toward the sun by its in-scattering (the
 // Henyey-Greenstein lobe, scaled so that an even one is 1).
-vec3 kin_fog_colour(KinFog f, KinSky sky, vec3 dir, vec3 sun_dir, vec3 sun_light) {
-    vec3 c = f.colour.w > 0.5 ? kin_sky_scatter(sky, dir) : f.colour.rgb;
+vec3 kin_fog_sun(KinFog f, vec3 c, vec3 dir, vec3 sun_dir, vec3 sun_light) {
     if (f.limits.z > 0.0) {
         const float g = f.limits.w;
         const float mu = dot(dir, sun_dir);
         c += sun_light * (f.limits.z * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
     }
     return c;
+}
+
+// The fog's colour along `dir`: the fixed one or the sky's, and the sun's in-scattering. The sky's is integrated here (the
+// particles' fog, made per vertex); the meshes' read it from the fog table (kin_material.inc.glsl, kin_fog_sky) and the sky
+// pass has it already.
+vec3 kin_fog_colour(KinFog f, KinSky sky, vec3 dir, vec3 sun_dir, vec3 sun_light) {
+    return kin_fog_sun(f, f.colour.w > 0.5 ? kin_sky_scatter(sky, dir) : f.colour.rgb, dir, sun_dir, sun_light);
+}
+
+// The fog table (sky3d.hpp, sky_model::FogTable): the sky's light at KIN_FOG_ROWS elevations, made on the CPU for each sky,
+// four vec4s a row (the sun's Rayleigh and Mie terms, the moon's). The row of a ray at sin(elevation) `s` (0 to
+// KIN_FOG_ROWS - 1, evenly in the log of kin_air_mass's rounded sin: the rows crowd near the horizon), FogTable::coordinate.
+const int KIN_FOG_ROWS = 48; // = sky_model::FogTable::rows (sky3d.hpp): change both, the C++ static_assert sees only its side
+float kin_fog_row(float s) {
+    const float h = max(s, 0.0);
+    const float c = min(sqrt(h * h + 0.000625), 1.0);
+    return clamp(log(c * 40.0) * 0.2710850307, 0.0, 1.0) * float(KIN_FOG_ROWS - 1);
 }

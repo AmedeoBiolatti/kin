@@ -43,6 +43,7 @@ const float PI = 3.14159265358979;
 layout(set = 3, binding = 2) uniform FogParams {
     KinFog fog;
     KinSky sky;
+    vec4 table[KIN_FOG_ROWS * 4]; // the sky's light for colour_from_sky (kin_fog_sky), made when the sky changes
 } fog_params;
 #endif
 
@@ -91,22 +92,53 @@ layout(location = 0) out vec4 FragColor;
 
 #include "kin_srgb.inc.glsl"
 
+// The normal a shadow map is read along (the receiver pushed off along it, a
+// bias's slope taken to it), for the sun's, the moon's and the local lights'.
+// Texture/bump normals change illumination, not the receiver geometry.
+// Flat-shaded clusters have no vertex normal; n is already their face
+// normal. Double-sided receivers offset toward the side being rendered.
+vec3 shadow_offset_normal(vec3 n) {
+    return dot(vNormal, vNormal) > 1e-20 ? normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0) : n;
+}
+
 // The share of the sun one cascade lets through: 3x3 comparisons against its
 // layer of the shadow map, from a point pushed a little off the surface (no
 // self-shadowing acne). Reverse Z: the map keeps the depth nearest the sun,
 // the greatest. -1 where the point is outside the cascade's map.
-float cascade_light(int k, vec3 n) {
-    const vec4 clip = frame.shadow_matrix[k] * vec4(vWorld + n * frame.cascade_bias[k].y, 1.0);
+float cascade_light(int k, vec3 n, vec3 world_dx, vec3 world_dy) {
+    const bool receiver_plane = frame.shadow.y > 0.5;
+    const vec3 offset_normal = shadow_offset_normal(n);
+    const vec4 clip = frame.shadow_matrix[k] * vec4(vWorld + offset_normal * frame.cascade_bias[k].y, 1.0);
     const vec3 ndc = clip.xyz / clip.w;
     const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
         return -1.0;
     }
-    const float ref = ndc.z + frame.cascade_bias[k].x;
+    vec2 gradient = vec2(0.0);
+    if (receiver_plane) {
+        // Directional maps are orthographic. Transform world derivatives with
+        // the selected matrix rather than differentiating across cascade IDs.
+        const vec3 dx = (frame.shadow_matrix[k] * vec4(world_dx, 0.0)).xyz;
+        const vec3 dy = (frame.shadow_matrix[k] * vec4(world_dy, 0.0)).xyz;
+        const vec2 ux = dx.xy * vec2(0.5, -0.5), uy = dy.xy * vec2(0.5, -0.5);
+        const float determinant = ux.x * uy.y - ux.y * uy.x;
+        if (abs(determinant) > 1e-12) {
+            gradient = vec2(dx.z * uy.y - dy.z * ux.y, ux.x * dy.z - uy.x * dx.z) / determinant;
+        }
+    }
+    // Bilinear comparisons span two texel centers on each axis. Their reach
+    // depends on subtexel phase and can approach a full texel, not just half.
+    // All integer-offset PCF taps share this phase. Bound the greatest plane
+    // depth at their four centers without lifting the whole receiver.
+    const vec2 phase = fract(uv / frame.shadow.z - 0.5);
+    const float filter_bias = frame.shadow.z * (dot(max(gradient, vec2(0.0)), 1.0 - phase)
+                                               + dot(max(-gradient, vec2(0.0)), phase));
+    const float ref = ndc.z + frame.cascade_bias[k].x + filter_bias;
     float lit = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            lit += texture(uShadow, vec4(uv + vec2(x, y) * frame.shadow.z, float(k), ref));
+            const vec2 tap = vec2(x, y) * frame.shadow.z;
+            lit += texture(uShadow, vec4(uv + tap, float(k), ref + dot(gradient, tap)));
         }
     }
     return lit / 9.0;
@@ -115,13 +147,13 @@ float cascade_light(int k, vec3 n) {
 // How much of the sun reaches here. With cascades, the one whose slice of
 // the view holds this depth, faded into the next over the last tenth of its
 // range (so the border isn't a visible seam); one map is just cascade 0.
-float sunlight(vec3 n) {
+float sunlight(vec3 n, vec3 world_dx, vec3 world_dy) {
     if (frame.flags.z < 0.5 || material.params.z < 0.5) {
         return 1.0;
     }
     const int count = int(frame.shadow.x);
     if (count <= 1) {
-        const float one = cascade_light(0, n);
+        const float one = cascade_light(0, n, world_dx, world_dy);
         return one < 0.0 ? 1.0 : one;
     }
     const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
@@ -129,14 +161,22 @@ float sunlight(vec3 n) {
     for (int i = 0; i < count - 1; ++i) {
         k += depth > frame.cascade_end[i] ? 1 : 0;
     }
-    float lit = cascade_light(k, n);
+    float lit = cascade_light(k, n, world_dx, world_dy);
     if (k < count - 1 && depth > frame.cascade_blend[k]) {
         const float t = clamp((depth - frame.cascade_blend[k]) / max(frame.cascade_end[k] - frame.cascade_blend[k], 1e-4), 0.0, 1.0);
-        const float next = cascade_light(k + 1, n);
+        const float next = cascade_light(k + 1, n, world_dx, world_dy);
         // Outside one's map (its fit stops at the area), the other's word stands.
         lit = lit < 0.0 ? next : next < 0.0 ? lit : mix(lit, next, t);
     }
     return lit < 0.0 ? 1.0 : lit;
+}
+
+// Custom surface shaders can sample sunlight directly. Call outside varying
+// branches so receiver-plane derivatives are defined across the pixel quad.
+float sunlight(vec3 n) {
+    vec3 world_dx = vec3(0.0), world_dy = vec3(0.0);
+    if (frame.shadow.y > 0.5) { world_dx = dFdx(vWorld); world_dy = dFdy(vWorld); }
+    return sunlight(n, world_dx, world_dy);
 }
 
 #ifdef KIN_LIGHTS
@@ -144,11 +184,12 @@ float sunlight(vec3 n) {
 // point light's cube): nine comparisons in the layer's corner of the array, from a point pushed a little off the surface,
 // the reference moved toward the light by a bias of texels that grows with the surface's slope to it. Reverse Z, a
 // perspective depth: depth(d) = near (far / d - 1) / (far - near). -1 where the point is outside the map's view.
-float local_light(int layer, vec3 n, vec3 l) {
+// `offset_normal` is shadow_offset_normal's: the push and the slope are the mesh's own, not a normal map's.
+float local_light(int layer, vec3 offset_normal, vec3 l) {
     const vec4 a = locals.local_a[layer];
     const vec4 b = locals.local_b[layer];
     const float texel_world = (locals.local_matrix[layer] * vec4(vWorld, 1.0)).w * a.y;
-    const vec4 clip = locals.local_matrix[layer] * vec4(vWorld + n * (b.y * texel_world), 1.0);
+    const vec4 clip = locals.local_matrix[layer] * vec4(vWorld + offset_normal * (b.y * texel_world), 1.0);
     if (clip.w <= a.z) {
         return -1.0;
     }
@@ -157,7 +198,7 @@ float local_light(int layer, vec3 n, vec3 l) {
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || clip.w > a.w) {
         return -1.0;
     }
-    const float n_l = clamp(dot(n, l), 0.0, 1.0);
+    const float n_l = clamp(dot(offset_normal, l), 0.0, 1.0);
     const float slope = min(sqrt(max(1.0 - n_l * n_l, 0.0)) / max(n_l, 0.05), 12.0);
     const float d = max(clip.w - texel_world * b.x * (1.0 + slope), a.z);
     const float ref = a.z * (a.w / d - 1.0) / (a.w - a.z);
@@ -175,8 +216,8 @@ float local_light(int layer, vec3 n, vec3 l) {
 }
 
 // Its share of the light, with the shadow faded out toward `b.w` from the light (1: no shadow, or not in the map's view).
-float local_shadow(int layer, vec3 n, vec3 l, float distance) {
-    float lit = local_light(layer, n, l);
+float local_shadow(int layer, vec3 offset_normal, vec3 l, float distance) {
+    float lit = local_light(layer, offset_normal, l);
     if (lit < 0.0) {
         return 1.0;
     }
@@ -185,7 +226,7 @@ float local_shadow(int layer, vec3 n, vec3 l, float distance) {
 }
 
 // A point light's: the face its direction from the light falls in (the axis it is longest along), its layer.
-float point_light_shadow(int i, vec3 n, vec3 toward, float distance) {
+float point_light_shadow(int i, vec3 offset_normal, vec3 toward, float distance) {
     const float first = locals.point_shadow[i].x;
     if (first < 0.0) {
         return 1.0;
@@ -200,12 +241,12 @@ float point_light_shadow(int i, vec3 n, vec3 toward, float distance) {
     } else {
         face = from_light.z < 0.0 ? 5 : 4;
     }
-    return local_shadow(int(first) + face, n, toward, distance);
+    return local_shadow(int(first) + face, offset_normal, toward, distance);
 }
 
 // One of the moon's cascades, as cascade_light is the sun's; -1 outside its map.
-float moon_cascade_light(int k, vec3 n) {
-    const vec4 clip = locals.moon_matrix[k] * vec4(vWorld + n * locals.moon_bias[k].y, 1.0);
+float moon_cascade_light(int k, vec3 offset_normal) {
+    const vec4 clip = locals.moon_matrix[k] * vec4(vWorld + offset_normal * locals.moon_bias[k].y, 1.0);
     const vec3 ndc = clip.xyz / clip.w;
     const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
@@ -222,7 +263,7 @@ float moon_cascade_light(int k, vec3 n) {
 }
 
 // How much of the moon reaches here: its cascade for this depth, faded into the next as the sun's are, then by its strength.
-float moonlight(vec3 n) {
+float moonlight(vec3 offset_normal) {
     const int count = int(locals.counts.y);
     if (count < 1 || material.params.z < 0.5) {
         return 1.0;
@@ -232,10 +273,10 @@ float moonlight(vec3 n) {
     for (int i = 0; i < count - 1; ++i) {
         k += depth > locals.moon_end[i] ? 1 : 0;
     }
-    float lit = moon_cascade_light(k, n);
+    float lit = moon_cascade_light(k, offset_normal);
     if (k < count - 1 && depth > locals.moon_blend[k]) {
         const float t = clamp((depth - locals.moon_blend[k]) / max(locals.moon_end[k] - locals.moon_blend[k], 1e-4), 0.0, 1.0);
-        const float next = moon_cascade_light(k + 1, n);
+        const float next = moon_cascade_light(k + 1, offset_normal);
         lit = lit < 0.0 ? next : next < 0.0 ? lit : mix(lit, next, t);
     }
     return lit < 0.0 ? 1.0 : mix(1.0, lit, locals.counts.z);
@@ -450,9 +491,16 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     s.boost = vec3(1.0) + s.f0 * (1.0 / max(single, 1e-3) - 1.0);
 
     vec3 light = vec3(0.0);
+    // Compute derivatives before the varying sun-facing branch as well as
+    // cascade selection/blending and map-edge exits.
+    vec3 world_dx = vec3(0.0), world_dy = vec3(0.0);
+    if (frame.shadow.y > 0.5) { world_dx = dFdx(vWorld); world_dy = dFdy(vWorld); }
+#ifdef KIN_LIGHTS
+    const vec3 offset_normal = shadow_offset_normal(n); // the moon's and the local lights' shadows, as the sun's
+#endif
     const float sun = dot(n, frame.sun_direction.xyz);
     if (sun > 0.0) {
-        float lit = sunlight(n);
+        float lit = sunlight(n, world_dx, world_dy);
 #ifdef KIN_LIGHTS
         lit = mix(1.0, lit, locals.counts.w);
 #endif
@@ -463,26 +511,14 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {
 #ifdef KIN_LIGHTS
-        light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb * moonlight(n));
+        light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb * moonlight(offset_normal));
 #else
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb);
 #endif
     }
     const int count = int(frame.flags.w);
-#ifdef KIN_POINT_TILES
-    const uvec2 tile = uvec2(gl_FragCoord.xy) / frame.point_tiles.z;
-    const uint tile_index = tile.y * frame.point_tiles.x + tile.x;
-    uint remaining = (1u << uint(count)) - 1u;
-    if (tile.x < frame.point_tiles.x && tile.y < frame.point_tiles.y && tile_index < 1024u) {
-        const uint word = tile_index >> 1u;
-        remaining = (frame.point_masks[word >> 2u][word & 3u] >> ((tile_index & 1u) * 16u)) & 65535u;
-    }
-    while (remaining != 0u) {
-        const int i = findLSB(remaining);
-        remaining &= remaining - 1u; // ascending indices preserve the accumulation order
-#else
     for (int i = 0; i < count; ++i) {
-#endif
+
         const vec4 at = frame.lights[2 * i];
         const vec3 to = at.xyz - vWorld;
         const float d2 = dot(to, to);
@@ -501,7 +537,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const vec3 toward = to * inversesqrt(max(d2, 1e-8));
         float seen = 1.0;
         if (k > 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
-            seen = point_light_shadow(i, n, toward, sqrt(d2));
+            seen = point_light_shadow(i, offset_normal, toward, sqrt(d2));
         }
         light += shade(s, toward, frame.lights[2 * i + 1].rgb * (k * seen));
 #else
@@ -529,7 +565,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         }
         float seen = 1.0;
         if (more.y >= 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
-            seen = local_shadow(int(more.y), n, toward, sqrt(d2));
+            seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
         }
         light += shade(s, toward, colour.rgb * (k * seen));
     }
@@ -572,6 +608,26 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
 // What a shader writes: `colour` (linear) encoded for the target, with its
 // alpha, premultiplied as kin's targets are.
 #ifdef KIN_FOG
+// The sky's light along `dir` for the fog's colour: kin_sky_scatter's, read from the fog table (two rows, linearly) rather
+// than integrated at each fragment: the integral's part that depends on the angle to the light is its phase functions,
+// worked out here; the rest depends on the ray's elevation alone, and is the table's.
+vec3 kin_fog_sky(vec3 dir) {
+    const vec3 v = normalize(vec3(dir.x, max(dir.y, 0.0), dir.z) + vec3(1e-6, 0.0, 0.0)); // as kin_sky_scatter takes it
+    const float x = kin_fog_row(v.y);
+    const int i = min(int(x), KIN_FOG_ROWS - 2);
+    const float w = x - float(i);
+    const int k = i * 4;
+    const float mu = dot(v, fog_params.sky.sun.xyz);
+    vec3 light = kin_rayleigh_phase(mu) * mix(fog_params.table[k].rgb, fog_params.table[k + 4].rgb, w) +
+                 kin_mie_phase(mu, fog_params.sky.shape.y) * mix(fog_params.table[k + 1].rgb, fog_params.table[k + 5].rgb, w);
+    if (fog_params.sky.shape.w > 0.0) {
+        const float mu_moon = dot(v, fog_params.sky.moon.xyz);
+        light += kin_rayleigh_phase(mu_moon) * mix(fog_params.table[k + 2].rgb, fog_params.table[k + 6].rgb, w) +
+                 kin_mie_phase(mu_moon, fog_params.sky.shape.y) * mix(fog_params.table[k + 3].rgb, fog_params.table[k + 7].rgb, w);
+    }
+    return light + fog_params.sky.night.rgb;
+}
+
 // `colour` as seen through the fog from the camera to this fragment: mixed toward the fog's colour by its opacity (a
 // blended surface fades the same way, its alpha applied after), or, for an additive one, only dimmed (what it lies over
 // has the fog already).
@@ -591,7 +647,11 @@ vec3 kin_fog_apply(vec3 colour) {
     if (material.maps.w > 0.5) {
         return colour * (1.0 - opacity);
     }
-    return mix(colour, kin_fog_colour(fog_params.fog, fog_params.sky, dir, frame.sun_direction.xyz, frame.sun_color.rgb), opacity);
+    vec3 fog_colour = fog_params.fog.colour.rgb;
+    if (fog_params.fog.colour.w > 0.5) {
+        fog_colour = kin_fog_sky(dir);
+    }
+    return mix(colour, kin_fog_sun(fog_params.fog, fog_colour, dir, frame.sun_direction.xyz, frame.sun_color.rgb), opacity);
 }
 #endif
 

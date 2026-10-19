@@ -94,11 +94,16 @@ vec3 kin_sky_ground(KinSky a) {
     return a.ground.rgb * (sun + kin_sky_scatter(a, vec3(0.0, 1.0, 0.0)));
 }
 
-// What the sky shows along `v`: the atmosphere, going over the horizon to the ground's light.
-vec3 kin_sky_color(KinSky a, vec3 v) {
-    const vec3 sky = kin_sky_scatter(a, v);
+// What the sky shows along `v` given the atmosphere's light along it (kin_sky_scatter's), going over the horizon to the
+// ground's light.
+vec3 kin_sky_over_ground(KinSky a, vec3 v, vec3 sky) {
     if (v.y >= 0.0) {
         return sky;
     }
     return mix(sky, kin_sky_ground(a), smoothstep(0.0, KIN_GROUND_BAND, -v.y));
+}
+
+// What the sky shows along `v`: the atmosphere, going over the horizon to the ground's light.
+vec3 kin_sky_color(KinSky a, vec3 v) {
+    return kin_sky_over_ground(a, v, kin_sky_scatter(a, v));
 }

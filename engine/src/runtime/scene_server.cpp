@@ -1,4 +1,7 @@
 #include <kin/runtime/scene_server.hpp>
+#ifdef KIN_EXPERIMENTAL_3D
+#include <kin/render3d/renderer3d.hpp>
+#endif
 
 #include "runtime_internal.hpp"
 
@@ -832,10 +835,11 @@ ServerContext::ServerContext(App& app,
                              RngKey rng,
                              f32 fixed_dt,
                              bool render,
-                             AssetServer* asset_server)
+                             AssetServer* asset_server,
+                             Renderer3D* renderer3d)
     : _app(app), _window(window), _renderer(renderer), _scenes(scenes),
       _window_config(std::move(window_config)), _rng(rng), _fixed_dt(fixed_dt), _render(render),
-      _asset_server(asset_server) {
+      _asset_server(asset_server), _renderer3d(renderer3d) {
 }
 
 namespace {
@@ -983,6 +987,7 @@ SceneContext ServerContext::make_context() {
         .is_top = true,
         .rng = _rng,
         .report = &_report,
+        .renderer3d = _renderer3d,
     };
 }
 
@@ -1419,6 +1424,12 @@ ServerTransport parse_server_transport(std::string_view text) {
 }
 
 int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
+#ifndef KIN_EXPERIMENTAL_3D
+    if (config.rendering_3d) {
+        KIN_LOG_ERROR("server", "3D rendering requested in a 2D-only build");
+        return 1;
+    }
+#endif
     std::istream& in = config.in ? *config.in : std::cin;
     std::ostream& out = config.out ? *config.out : std::cout;
 
@@ -1468,6 +1479,14 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
         app.input().set_map(*config.window.input_map);
     }
 
+    Renderer3D* scene_renderer3d = nullptr;
+#ifdef KIN_EXPERIMENTAL_3D
+    std::unique_ptr<Renderer3D> renderer3d;
+    if (config.rendering_3d) {
+        renderer3d = std::make_unique<Renderer3D>(renderer);
+        scene_renderer3d = renderer3d.get();
+    }
+#endif
     ServerContext ctx{app,
                       window,
                       renderer,
@@ -1476,7 +1495,8 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
                       make_key(config.seed),
                       fixed_dt,
                       config.render,
-                      config.asset_server};
+                      config.asset_server,
+                      scene_renderer3d};
     ctx.set_reset_factory(config.reset_scenes);
 
     // Realize the initial scene stack (apply pending push + on_enter) without

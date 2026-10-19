@@ -4,7 +4,7 @@
 // pixel's, so the shadow of a crease does not bleed over an edge onto what is
 // in front of it or behind it.
 //
-// This is the chain version (KIN_AO_CLASSIC=1 uses ao_blur.comp): the depth comes from the linear depth chain's first level
+// This is the chain version (selected automatically for large views): the depth comes from the linear depth chain's first level
 // (ao_depth_chain.comp), so a tap needs no divide to find its distance, and the centre's reciprocal is worked out once.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uChain; // the distance in front of the camera, 0 is nothing (level 0 only)

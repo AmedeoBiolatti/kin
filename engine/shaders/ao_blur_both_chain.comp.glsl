@@ -1,7 +1,7 @@
 #version 450 core
 // ao_blur.comp for both screen-space shadows at once (ambient occlusion and contact shadows, when they have the same
 // size): the depth-aware weights of a tap are worked out once and applied to both sources, so the depth is read, and
-// the weights computed, half as often as with two dispatches. This is the chain version (KIN_AO_CLASSIC=1 uses ao_blur_both.comp): the
+// the weights computed, half as often as with two dispatches. This is the chain version (selected automatically for large views): the
 // depth comes from the linear depth chain's first level (ao_depth_chain.comp), so no tap needs a divide. Each result is what ao_blur.comp would have written.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uChain; // the distance in front of the camera, 0 is nothing (level 0 only)

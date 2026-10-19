@@ -116,13 +116,17 @@ void main() {
 #else
     const float pixel = max(length(dFdx(d)), length(dFdy(d)));
     vec3 c;
+    // The atmosphere's light along d (procedural): the sky's, and the fog's colour when that is the sky's (fill_fog says so
+    // only for a procedural sky), found once.
+    vec3 scattered = vec3(0.0);
     if (sky.target.z > 0.5) {
         // The light's own turn (Lights3D::environment_rotation), as the surfaces take it.
         const vec3 e = mat3(frame.environment_matrix) * d;
         const vec2 st = vec2(0.5 + atan(e.z, e.x) / (2.0 * KIN_PI), 0.5 - asin(clamp(e.y, -1.0, 1.0)) / KIN_PI);
         c = textureLod(uEnvSpecular, st, 0.0).rgb * frame.environment.x;
     } else {
-        c = kin_sky_color(sky.atmosphere, d);
+        scattered = kin_sky_scatter(sky.atmosphere, d);
+        c = kin_sky_over_ground(sky.atmosphere, d, scattered);
         if (d.y > -0.1) {
             // The sun's disc, a pixel-wide edge: coverage by the angle to its centre (atan of the cross over the dot
             // is exact for small angles, where an arccosine is not).
@@ -149,11 +153,13 @@ void main() {
             }
         }
     }
-    // Height fog on the way to the sky: the same optical depth as for geometry, to infinity, over the horizon.
+    // Height fog on the way to the sky: the same optical depth as for geometry, from its start to infinity, over the
+    // horizon. In Image mode its colour is the fixed one (fill_fog): the particles' fog, made per vertex, cannot read the
+    // panorama, and the sky's fog must match theirs and the meshes'.
     const vec3 sun_dir = frame.sun_direction.xyz;
     const float opacity = kin_fog_opacity(sky.fog, kin_fog_optical_depth(sky.fog, sky.camera.xyz, d, 0.0, true));
     if (sky.fog.limits.y > 0.0 && opacity > 0.0 && (sky.fog.density.y > 0.0)) {
-        c = mix(c, kin_fog_colour(sky.fog, sky.atmosphere, d, sun_dir, frame.sun_color.rgb), opacity);
+        c = mix(c, kin_fog_sun(sky.fog, sky.fog.colour.w > 0.5 ? scattered : sky.fog.colour.rgb, d, sun_dir, frame.sun_color.rgb), opacity);
     }
     if (frame.flags.x > 0.5) {
         c = kin_encode(c);

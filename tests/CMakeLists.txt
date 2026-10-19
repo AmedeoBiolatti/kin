@@ -21,6 +21,7 @@ endfunction()
 
 kin_add_test(kin_core_tests kin-core SOURCES core_tests.cpp)
 kin_add_test(kin_math3d_tests kin-math3d SOURCES math3d_tests.cpp)
+kin_add_test(kin_render3d_api_tests kin-render3d-api SOURCES render3d_api_tests.cpp)
 kin_add_test(kin_shape_tests kin-shapes SOURCES shape_tests.cpp)
 kin_add_test(kin_jobs_tests kin-jobs SOURCES jobs_tests.cpp)
 kin_add_test(kin_instrumentation_tests kin-instrumentation
@@ -72,6 +73,7 @@ kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
 kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
+kin_add_test(kin_texture_file_tests kin-texture-file SOURCES texture_file_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
 # Test-only material shaders for the GPU renderer tests. Without glslc (found by the
 # engine) they are not compiled and the tests that need them skip.
@@ -109,6 +111,12 @@ if(KIN_GLSLC)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 if(KIN_EXPERIMENTAL_3D)
+    kin_add_test(kin_errors3d_tests kin-errors3d SOURCES errors3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    kin_add_test(kin_scene_frame3d_tests kin-scene-frame3d SOURCES scene_frame3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    kin_add_test(kin_diagnostics3d_tests kin-diagnostics3d SOURCES diagnostics3d_tests.cpp)
+    kin_add_test(kin_render3d_cpu_tests kin-render3d-cpu SOURCES render3d_cpu_tests.cpp)
     kin_add_test(kin_interaction3d_tests kin-interaction3d SOURCES interaction3d_tests.cpp
         LIBRARIES kin::core_allocation_instrumentation)
     set_tests_properties(kin-interaction3d PROPERTIES SKIP_RETURN_CODE 77)
@@ -159,6 +167,12 @@ if(KIN_EXPERIMENTAL_3D)
     kin_add_test(kin_material_assets3d_tests kin-material-assets3d SOURCES material_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    if(KIN_GLSLC)
+        kin_compile_glsl(_kin_material_shader OUTPUT_DIR "${_kin_test_shader_dir}" SOURCES shaders/custom_flat.frag.glsl)
+        add_custom_target(kin_material_test_shader DEPENDS ${_kin_material_shader})
+        add_dependencies(kin_material_assets3d_tests kin_material_test_shader)
+        target_compile_definitions(kin_material_assets3d_tests PRIVATE KIN_TEST_MATERIAL_SHADER="${_kin_test_shader_dir}/custom_flat.frag.spv")
+    endif()
     set_tests_properties(kin-material-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_scene_session3d_tests kin-scene-session3d SOURCES scene_session3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
@@ -219,6 +233,9 @@ if(KIN_BUILD_BENCHMARKS)
         # kin/physics3d step times: piles and stacks of boxes, 1 to 8 workers (docs/physics_3d.md).
         add_executable(kin_physics3d_bench physics3d_bench.cpp)
         target_link_libraries(kin_physics3d_bench PRIVATE kin::engine)
+        # kin/render3d CPU costs that need no window: instance batch edits, particle wind (docs/rendering_3d.md).
+        add_executable(kin_render3d_bench render3d_bench.cpp)
+        target_link_libraries(kin_render3d_bench PRIVATE kin::engine)
     endif()
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)

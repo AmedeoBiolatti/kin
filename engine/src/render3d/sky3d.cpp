@@ -131,13 +131,109 @@ Vec3f sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 sa
     return sum / static_cast<f32>(samples_u * samples_v);
 }
 
+namespace sky_model {
+
+f32 FogTable::coordinate(f32 s) {
+    // c is air_mass()'s: the rounding's 0.025 at the horizon, 1 at the zenith, its log over log 40 from 0 to 1.
+    const f32 h = std::max(s, 0.0f);
+    const f32 c = std::min(std::sqrt(h * h + 0.000625f), 1.0f);
+    return std::clamp(std::log(c * 40.0f) * 0.2710850307f, 0.0f, 1.0f) * static_cast<f32>(rows - 1);
+}
+
+bool FogTable::update(const Sky3D& sky, Vec3f sun_direction) {
+    // The sun and the moon as the GPU's atmosphere has them (fill_atmosphere): unit, up when there is no direction.
+    const Vec3f sun = length_squared(sun_direction) > 0.0f ? normalize(sun_direction) : Vec3f{0.0f, 1.0f, 0.0f};
+    const Vec3f moon = length_squared(sky.moon_direction) > 0.0f ? normalize(sky.moon_direction) : Vec3f{0.0f, 1.0f, 0.0f};
+    const f32 moon_light = sky.moon ? std::max(sky.moon_light, 0.0f) : 0.0f;
+    const f32 tau_m = mie_tau(sky);
+    const std::array<f32, 6> key{sun.y, sky.sun_intensity, tau_m, sky.intensity, moon_light, moon.y};
+    if (made && key == made_for) {
+        return false;
+    }
+    made_for = key;
+    made = true;
+    values.fill(0.0f);
+    // kin_scatter split by its phase functions: along a ray of air mass mv, a light's share is rayleigh_phase(mu) R + mie_phase(mu) M,
+    // R and M the sums over the eight steps of the light that reaches each and gets to the eye. What reaches a step from the light
+    // is the same for every row, what gets from it to the eye the same for both lights: each worked out once.
+    const f32 lights[2] = {sky.sun_intensity * std::exp(-std::max(-sun.y, 0.0f) / twilight),
+                           moon_light * std::exp(-std::max(-moon.y, 0.0f) / twilight)};
+    const f32 masses[2] = {air_mass(sun.y), air_mass(moon.y)};
+    const u32 count = moon_light > 0.0f ? 2u : 1u;
+    std::array<f32, steps> q, qm;
+    std::array<Vec3f, steps> extinction;  // per unit of air mass from the eye to the step
+    std::array<Vec3f, 2 * steps> arriving; // the light's share that reaches the step, times its width (dw)
+    for (u32 i = 0; i < steps; ++i) {
+        const f32 u = (static_cast<f32>(i) + 0.5f) / static_cast<f32>(steps);
+        const f32 dw = 2.0f * top * u / static_cast<f32>(steps);
+        q[i] = 1.0f - top * u * u;
+        qm[i] = std::pow(q[i], height_ratio);
+        extinction[i] = rayleigh_zenith * (1.0f - q[i]) + splat(mie_extinction * tau_m * (1.0f - qm[i]));
+        const Vec3f toward = rayleigh_zenith * q[i] + splat(mie_extinction * tau_m * qm[i]) + ozone_zenith;
+        for (u32 l = 0; l < count; ++l) {
+            arriving[l * steps + i] = exp3(-(toward * masses[l])) * dw;
+        }
+    }
+    for (u32 row = 0; row < rows; ++row) {
+        // The row's ray: c from 0.025 to 1 evenly in its log (coordinate()'s inverse), and the sin(elevation) of that c.
+        const f32 c = std::pow(0.025f, 1.0f - static_cast<f32>(row) / static_cast<f32>(rows - 1));
+        const f32 mv = air_mass(std::sqrt(std::max(c * c - 0.000625f, 0.0f)));
+        Vec3f r[2]{}, m[2]{};
+        for (u32 i = 0; i < steps; ++i) {
+            const Vec3f leaving = exp3(-(extinction[i] * mv));
+            const f32 mie = tau_m * height_ratio * qm[i] / q[i];
+            for (u32 l = 0; l < count; ++l) {
+                const Vec3f seen = leaving * arriving[l * steps + i];
+                r[l] += rayleigh_zenith * seen;
+                m[l] += seen * mie;
+            }
+        }
+        for (u32 l = 0; l < count; ++l) {
+            const f32 scale = mv * pi * lights[l] * brightness * sky.intensity;
+            const Vec3f rs = r[l] * scale, ms = m[l] * scale;
+            const u32 at = row * 16 + l * 8;
+            values[at] = rs.x;
+            values[at + 1] = rs.y;
+            values[at + 2] = rs.z;
+            values[at + 4] = ms.x;
+            values[at + 5] = ms.y;
+            values[at + 6] = ms.z;
+        }
+    }
+    return true;
+}
+
+Vec3f FogTable::radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const {
+    const Vec3f v = up_clamped(normalize(direction));
+    const f32 x = coordinate(v.y);
+    const u32 i = std::min(static_cast<u32>(x), rows - 2);
+    const f32 w = x - static_cast<f32>(i);
+    const auto at = [&](u32 k) {
+        const u32 a = i * 16 + k, b = a + 16;
+        return Vec3f{values[a] + (values[b] - values[a]) * w, values[a + 1] + (values[b + 1] - values[a + 1]) * w,
+                     values[a + 2] + (values[b + 2] - values[a + 2]) * w};
+    };
+    const Vec3f sun = length_squared(sun_direction) > 0.0f ? normalize(sun_direction) : Vec3f{0.0f, 1.0f, 0.0f};
+    const f32 mu = dot(v, sun);
+    Vec3f light = at(0) * rayleigh_phase(mu) + at(4) * mie_phase(mu, mie_anisotropy);
+    if (sky.moon && sky.moon_light > 0.0f) {
+        const Vec3f moon = length_squared(sky.moon_direction) > 0.0f ? normalize(sky.moon_direction) : Vec3f{0.0f, 1.0f, 0.0f};
+        const f32 mu_moon = dot(v, moon);
+        light += at(8) * rayleigh_phase(mu_moon) + at(12) * mie_phase(mu_moon, mie_anisotropy);
+    }
+    return light + sky.night_color;
+}
+
+} // namespace sky_model
+
 f32 fog_optical_depth(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance) {
     const bool infinite = !(distance < std::numeric_limits<f32>::max());
     const f32 len = infinite ? std::numeric_limits<f32>::infinity() : std::max(distance - fog.start, 0.0f);
     f32 tau = infinite ? 0.0f : fog.density * len;
     if (fog.height_density > 0.0f && len > 0.0f) {
         const f32 k = fog.height_falloff;
-        const f32 y0 = eye.y + direction.y * (infinite ? 0.0f : fog.start) - fog.base_height;
+        // From the start on, to infinity too: the sky's depth is the limit of the geometry's as `distance` grows.
+        const f32 y0 = eye.y + direction.y * fog.start - fog.base_height;
         const f32 kd = k * direction.y;
         const f32 at_start = std::exp(std::clamp(-k * y0, -80.0f, 80.0f));
         f32 shape;
@@ -157,7 +253,8 @@ f32 fog_opacity(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance) {
 }
 
 Vec3f fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, Vec3f sun_light, Vec3f direction) {
-    Vec3f c = fog.colour_from_sky ? sky_radiance(sky, sun_direction, direction) : fog.colour;
+    // An image sky's panorama is not read for the fog: the fixed colour stands in for it, as on the GPU.
+    Vec3f c = fog.colour_from_sky && sky.mode == SkyMode3D::Procedural ? sky_radiance(sky, sun_direction, direction) : fog.colour;
     if (fog.sun_scatter > 0.0f) {
         const f32 g = fog.sun_anisotropy;
         const f32 mu = dot(normalize(direction), normalize(sun_direction));

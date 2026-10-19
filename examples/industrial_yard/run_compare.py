@@ -29,13 +29,7 @@ generator = module('yard_generator', HERE / 'generate.py')
 
 def environment(root):
     env = dict(os.environ, TMPDIR=str(root / 'tmp'), KIN_RENDER_BACKEND='gpu',
-               KIN_REQUIRE_GPU_TESTS='1', KIN_MASKED_DEPTH_PREPASS='1',
-               KIN_PREPARED_SCENES='1', KIN_CAMERA_RANGES='1',
-               KIN_RETAINED_INSTANCES='1', KIN_CACHED_INSTANCE_BOUNDS='1',
-               KIN_SPATIAL_CULLING='1', KIN_LOCAL_SHADOW_CULLING='1',
-               KIN_LOCAL_SHADOW_PACKING='1', KIN_ADAPTIVE_STAGING='1',
-               KIN_SHADOW_REACH='1', KIN_LOCAL_SHADOW_SIMD='1',
-               KIN_INCREMENTAL_BOUNDS='1', KIN_PARALLEL_INSTANCE_PACKING='1')
+               KIN_REQUIRE_GPU_TESTS='1')
     return env
 
 

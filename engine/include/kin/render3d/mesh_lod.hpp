@@ -6,6 +6,7 @@
 
 #include <kin/render3d/mesh.hpp>
 
+#include <span>
 #include <vector>
 
 namespace kin {
@@ -26,7 +27,9 @@ struct MeshLodChain {
     // [0] is the mesh as given; each next one is simpler, with a larger error.
     std::vector<MeshLodLevel> levels;
     // Vertices the levels have of their own, to be kept after the mesh's: made for a flat-shaded mesh with no
-    // indices (its triangles share no vertex, so a level is made of new ones). Empty otherwise.
+    // indices (its triangles share no vertex, so a level is made of new ones). Each is a welded position some level
+    // uses, once, shared by all the levels, with a zero normal: the shader then makes the face's own (as for flat
+    // clusters; a normal map has no effect on those levels). Empty otherwise.
     std::vector<MeshVertex> extra_vertices;
     std::size_t count() const { return levels.size(); }
 };
@@ -36,5 +39,15 @@ struct MeshLodChain {
 // simplified by `options.min_reduction`. Takes time in proportion to the
 // triangles: about a second for a million.
 MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options);
+
+// For a bake cache (kin/assets/bake_cache.hpp; Renderer3D::set_bake_cache uses these). The key of what
+// build_mesh_levels(data, options) makes: the mesh's vertex and index bytes, every option the chain reads (levels,
+// target_ratio, min_reduction, min_triangles, max_error, the three weights, lock_border), this format's version and
+// meshoptimizer's. The chain as bytes (every level's triangles, error and indices, and the extra vertices;
+// little-endian, fixed width), and back for the same `data`: false, with `out` emptied, for bytes that are not a whole
+// chain of that mesh (short, too long, a level 0 that is not the mesh, an index past its vertices and the extra ones).
+u64 mesh_levels_bake_key(const MeshData& data, const MeshOptions& options);
+std::vector<u8> save_mesh_levels(const MeshLodChain& chain);
+bool restore_mesh_levels(std::span<const u8> bytes, const MeshData& data, MeshLodChain& out);
 
 } // namespace kin

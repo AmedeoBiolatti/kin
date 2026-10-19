@@ -35,11 +35,13 @@ namespace gpu {
 // Wraps a GpuTexture so it lives behind a kin::Texture.
 class GpuTextureBackend : public ITextureBackend {
 public:
+    // `mipmapped`: the texture has its mip chain already (a compressed one's levels).
     explicit GpuTextureBackend(GpuTexture texture, bool premultiplied = false,
                                ScaleMode scale = ScaleMode::Nearest,
-                               TextureFormat format = TextureFormat::Rgba8)
+                               TextureFormat format = TextureFormat::Rgba8, bool mipmapped = false)
         : ITextureBackend(ITextureBackend::Kind::Gpu),
-          _texture(std::move(texture)), _premultiplied(premultiplied), _scale(scale), _format(format) {}
+          _texture(std::move(texture)), _mipmapped(mipmapped), _premultiplied(premultiplied), _scale(scale),
+          _format(format) {}
     Vec2i size() const override {
         return {static_cast<i32>(_texture.width()), static_cast<i32>(_texture.height())};
     }
@@ -134,6 +136,7 @@ public:
 
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
     Texture create_texture(Vec2i size, TextureFormat format, const void* pixels) override;
+    Texture create_texture_compressed(const CompressedImage& image) override;
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,
                        const std::function<void(std::span<u8>)>& fill) override;

@@ -11,7 +11,11 @@
 //                 [--taa] [--taa-blend B] [--taa-sharpness S] [--taa-frames N]
 //                 [--supersample N] [--samples N]
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
-//                 [--lod-gpu | --lod-cpu] [--readback] [--lod-room TRIANGLES] [--lod-occlusion]
+//                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
+//                 [--bake-cache DIR]
+//
+// --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR (Renderer3D::set_bake_cache),
+// and reads them back on the next run with the same DIR instead of building them: the pictures are the same.
 //
 // A scene file names its models (in the cache, tools/reference/fetch.py),
 // its cameras, lights and view; `procedural: "crowd"` builds Signal
@@ -47,7 +51,7 @@
 // take no levels); with the selection on, each copy is cut through its hierarchy by the error bound
 // (--lod-force N is then the depth of the cut, 0 the leaves). The hierarchy's build time, the process's peak
 // resident memory so far, and each camera's cut (copies, clusters tested and drawn, bytes uploaded, CPU time) are printed.
-// The cut on the GPU (G3c): the default where the device can (Lod3D::gpu_culling); --lod-cpu cuts on the CPU, --lod-gpu on the GPU (a
+// The cut on the GPU (G3c): the default where the device can (Scene3D::debug.gpu_culling); --lod-cpu cuts on the CPU, --lod-gpu on the GPU (a
 // device that cannot falls back, and the run says which cut it made). --readback reads the GPU cut's counts back for the picture's render
 // (clusters drawn, triangles, clusters dropped) -- never in the timed frames, which would wait for the GPU. --lod-room N sets
 // Lod3D::max_cluster_triangles.
@@ -77,6 +81,7 @@
 // system is stepped `simulate` seconds at load: the pictures show that moment). --rain I, --snow I, --wind S (m/s), --no-weather,
 // --no-particles, --soft 0|1, --particles N (a system of N live particles in the middle of the scene: the cost tables).
 
+#include <kin/assets/bake_cache.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/core/jobs.hpp>
@@ -1728,10 +1733,10 @@ struct Overrides {
     long lod_room = 0;
     bool lod_occlusion = false;
     int flicker = 0; // --flicker N: after each camera's picture, N more frames read back, the largest and mean frame-to-frame difference printed (temporal shimmer)
-    std::string ab; // --ab NAME: the timed frames in blocks of eight with the environment variable NAME at 0 and at 1 in turn (the renderer reads its switches on each render), A and B timed apart in one run
+    bool gpu_pass_markers = false; // labels for external GPU profilers
     std::string hitch; // --hitch <feature>: the first renders after switching it on at runtime, timed (then the process ends)
     bool warm_up = false; // with --hitch: Renderer3D::warm_up before the feature goes on
-    bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on and after (see Render3DStats::feature_bytes)
+    bool vram_cycle = false; // after a camera: the features off for 130 renders; prints the video memory with them on and after (see Render3DDebugStats::feature_bytes)
     bool crowd_move = false; // the crowd's enemies drift each frame (a game's crowd always moves): the scene is posed per frame
     bool sky = false, no_sky = false;    // --sky: the procedural sky on for every scene; --no-sky: the scene's own off (to time its cost)
     bool no_fog = false;                  // --no-fog
@@ -1813,12 +1818,12 @@ void merge_taa(kin::TemporalAA3D& taa, const kin::JsonValue* doc, const Override
     }
 }
 
-void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over) {
+void merge_lod(kin::Lod3D& lod, kin::Render3DDebugOptions& debug, const kin::JsonValue* doc, const Overrides& over) {
     if (doc) {
         lod.enabled = doc->bool_at("enabled", true);
         lod.error_pixels = static_cast<float>(doc->number_at("error_pixels", lod.error_pixels));
         lod.bias = static_cast<float>(doc->number_at("bias", lod.bias));
-        lod.force_level = static_cast<kin::i32>(doc->number_at("force_level", lod.force_level));
+        debug.force_level = static_cast<kin::i32>(doc->number_at("force_level", debug.force_level));
         if (const kin::JsonValue* occlusion = doc->find("occlusion")) {
             lod.occlusion.enabled = occlusion->is_bool() ? occlusion->as_bool() : occlusion->bool_at("enabled", true);
             lod.occlusion.depth_margin = static_cast<float>(occlusion->number_at("depth_margin", lod.occlusion.depth_margin));
@@ -1839,10 +1844,10 @@ void merge_lod(kin::Lod3D& lod, const kin::JsonValue* doc, const Overrides& over
         }
     }
     if (over.lod_force > -2) {
-        lod.force_level = over.lod_force;
+        debug.force_level = over.lod_force;
     }
     if (over.lod_gpu >= 0) {
-        lod.gpu_culling = over.lod_gpu > 0;
+        debug.gpu_culling = over.lod_gpu > 0;
     }
     if (over.lod_room > 0) {
         lod.max_cluster_triangles = static_cast<kin::u32>(over.lod_room);
@@ -2257,6 +2262,7 @@ int main(int argc, char** argv) {
     double distance_override = 0.0;
     Overrides over;
     int taa_frames = 32, supersample = 1, samples_override = 0; // 0: the scene's
+    fs::path bake_dir; // --bake-cache DIR
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
@@ -2297,8 +2303,8 @@ int main(int argc, char** argv) {
             over.contact_steps = std::atoi(next().c_str());
         } else if (a == "--flicker") {
             over.flicker = std::max(2, std::atoi(next().c_str()));
-        } else if (a == "--ab") {
-            over.ab = next();
+        } else if (a == "--gpu-pass-markers") {
+            over.gpu_pass_markers = true;
         } else if (a == "--hitch") {
             over.hitch = next();
         } else if (a == "--warm-up") {
@@ -2395,6 +2401,8 @@ int main(int argc, char** argv) {
             supersample = std::clamp(std::atoi(next().c_str()), 1, 6);
         } else if (a == "--no-gpu-timing") {
             gpu_timing = false;
+        } else if (a == "--bake-cache") {
+            bake_dir = next();
         } else if (a == "--width") {
             width = std::max(16, std::atoi(next().c_str()));
         } else if (a == "--height") {
@@ -2424,6 +2432,8 @@ int main(int argc, char** argv) {
     kin::JobSystem jobs;
     renderer.set_job_system(&jobs);
     kin::Renderer3D r3d{renderer};
+    std::unique_ptr<kin::BakeCache> bake = bake_dir.empty() ? nullptr : std::make_unique<kin::BakeCache>(bake_dir);
+    r3d.set_bake_cache(bake.get());
     const kin::Rectf full{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)};
     std::vector<kin::u8> pixel;
     kin::Vec2i pixel_size{};
@@ -2675,6 +2685,12 @@ int main(int argc, char** argv) {
         const bool animated = doc.bool_at("animated") || (over.crowd_move && doc.string_at("procedural") == "crowd");
         std::array<std::vector<kin::MeshInstance>, 3> crowd_moved;
         const double load_ms = ms_since(load_start);
+        if (bake) {
+            const kin::BakeCacheStats b = bake->stats();
+            std::printf("  loaded in %.0f ms with the bake cache: %llu hits, %llu misses, %llu writes so far (%.1f MB read, %.1f MB written)\n", load_ms,
+                        static_cast<unsigned long long>(b.hits), static_cast<unsigned long long>(b.misses), static_cast<unsigned long long>(b.writes),
+                        static_cast<double>(b.bytes_read) / 1048576.0, static_cast<double>(b.bytes_written) / 1048576.0);
+        }
         {
             std::size_t meshes = 0, with_levels = 0, level_triangles = 0, base_triangles = 0;
             for (const Placed& p : placed) {
@@ -2811,7 +2827,8 @@ int main(int argc, char** argv) {
             scene.taa = {};
             merge_taa(scene.taa, doc.find("taa"), over);
             scene.lod = {};
-            merge_lod(scene.lod, doc.find("lod"), over);
+            merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
+            scene.debug.gpu_pass_markers = over.gpu_pass_markers;
             attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
@@ -3083,7 +3100,7 @@ int main(int argc, char** argv) {
                         scene.lod.enabled = on;
                     } else if (feature == "lod-cpu") {
                         scene.lod.enabled = on;
-                        scene.lod.gpu_culling = false;
+                        scene.debug.gpu_culling = false;
                     } else if (feature == "occlusion") {
                         scene.lod.enabled = on;
                         scene.lod.occlusion.enabled = on;
@@ -3105,8 +3122,8 @@ int main(int argc, char** argv) {
                     renderer.present();
                     const double cpu_wall = ms_since(start);
                     wait_for_gpu();
-                    made += r3d.stats().pipelines_made;
-                    return std::array<double, 3>{cpu_wall, r3d.stats().cpu_ms, ms_since(start)};
+                    made += r3d.debug_stats().pipelines_made;
+                    return std::array<double, 3>{cpu_wall, r3d.debug_stats().cpu_ms, ms_since(start)};
                 };
                 if (over.warm_up) {
                     pose(0);
@@ -3152,19 +3169,9 @@ int main(int argc, char** argv) {
             const double first_ms = ms_since(first_start);
             renderer.present();
 
-            std::vector<double> cpu, gpu, cut_ms, cut_upload_ms, ab_gpu[2], ab_cpu[2];
-            // --ab NAME or NAME:A:B (the values of the variable in the even and odd blocks; 0 and 1 by default)
-            std::string ab_name = over.ab, ab_a = "0", ab_b = "1";
-            if (const std::size_t c1 = over.ab.find(':'); c1 != std::string::npos) {
-                const std::size_t c2 = over.ab.find(':', c1 + 1);
-                ab_name = over.ab.substr(0, c1);
-                ab_a = over.ab.substr(c1 + 1, c2 - c1 - 1);
-                ab_b = c2 == std::string::npos ? "1" : over.ab.substr(c2 + 1);
-            }
+            std::vector<double> cpu, gpu, cut_ms, cut_upload_ms;
             for (int f = 0; f < run; ++f) {
-                if (!over.ab.empty()) {
-                    setenv(ab_name.c_str(), ((f / 8) & 1) ? ab_b.c_str() : ab_a.c_str(), 1);
-                }
+
                 pose(f - run);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 for (int k = 0; k < each; ++k) {
@@ -3173,32 +3180,23 @@ int main(int argc, char** argv) {
                 renderer.draw_texture(view.texture(), full);
                 renderer.present();
                 if (f >= run - frames) {
-                    cpu.push_back(r3d.stats().cpu_ms);
-                    cut_ms.push_back(r3d.stats().cluster_ms);
-                    cut_upload_ms.push_back(r3d.stats().cluster_upload_ms);
+                    cpu.push_back(r3d.debug_stats().cpu_ms);
+                    cut_ms.push_back(r3d.debug_stats().cluster_ms);
+                    cut_upload_ms.push_back(r3d.debug_stats().cluster_upload_ms);
                     gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
-                    if (!over.ab.empty() && (f % 8) >= 3) { // the GPU time arrives a frame or two late: the block's first three are not counted
-                        ab_gpu[(f / 8) & 1].push_back(gpu.back());
-                        ab_cpu[(f / 8) & 1].push_back(cpu.back());
-                    }
+
                 }
             }
             wait_for_gpu();
-            if (!over.ab.empty()) {
-                setenv(ab_name.c_str(), ab_a.c_str(), 1);
-                const Summary a = summarize(ab_gpu[0]), b = summarize(ab_gpu[1]);
-                const Summary ca = summarize(ab_cpu[0]), cb = summarize(ab_cpu[1]);
-                std::printf("AB %s/%s %s=A gpu %.4f (p10 %.4f) cpu %.4f  %s=B gpu %.4f (p10 %.4f) cpu %.4f\n", name.c_str(), camera_name.c_str(), ab_name.c_str(),
-                            a.median, a.p10, ca.median, ab_name.c_str(), b.median, b.p10, cb.median);
-            }
+
 
             // The picture.
             pose(0);
             renderer.clear(kin::Color::rgb(0, 0, 0));
-            scene.lod.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
+            scene.debug.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
             r3d.render(view, scene);
-            scene.lod.stats_readback = false;
-            const kin::Render3DStats stats = r3d.stats();
+            scene.debug.stats_readback = false;
+            const kin::Render3DDebugStats stats = r3d.debug_stats();
             renderer.draw_texture(view.texture(), full);
             kin::Image image;
             if (!renderer.read_rgba(full, image.rgba, image.size)) {
@@ -3256,12 +3254,12 @@ int main(int argc, char** argv) {
                     r3d.render(view, scene);
                     renderer.draw_texture(view.texture(), full);
                     renderer.present();
-                    released += r3d.stats().targets_released;
+                    released += r3d.debug_stats().targets_released;
                 }
                 wait_for_gpu();
                 std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
                             name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
-                            static_cast<double>(r3d.stats().feature_bytes) / 1048576.0, static_cast<unsigned long long>(released));
+                            static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0, static_cast<unsigned long long>(released));
                 pose(0);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 r3d.render(view, scene);

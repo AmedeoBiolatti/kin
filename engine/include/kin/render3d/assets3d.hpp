@@ -1,4 +1,5 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 #include <kin/assets/asset_handle.hpp>
 #include <kin/render3d/model.hpp>
@@ -34,6 +35,7 @@ public:
         std::size_t models = 128;
         std::size_t textures = 512;
         std::size_t materials = 128;
+        std::size_t shaders = 64;
     };
     struct Stats {
         std::size_t model_entries = 0, texture_entries = 0;
@@ -41,6 +43,8 @@ public:
         u64 model_loads = 0, texture_loads = 0;
         std::size_t material_entries = 0;
         u64 material_hits = 0, material_loads = 0;
+        std::size_t shader_entries = 0;
+        u64 shader_hits = 0, shader_loads = 0;
     };
 
     explicit Assets3D(Renderer3D& renderer, std::filesystem::path root = ".");
@@ -49,10 +53,17 @@ public:
     Assets3D(const Assets3D&) = delete;
     Assets3D& operator=(const Assets3D&) = delete;
 
+    // Without 3D (Renderer3D::available() false: a headless session, a server) a CPU-only model: its parts' names,
+    // transforms and skins, each with an empty mesh handle that keeps its vertex/index counts, bounds and joint count, and
+    // the model's skeletons, clips and bounds. No GPU memory; parts keep the default material, and only the model's own
+    // file is a source (its images are not decoded).
     AssetHandle<Model> load_model(const std::filesystem::path& path, std::string* error = nullptr);
     AssetHandle<Model> load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error = nullptr);
     // Shares the same role/filter-aware texture cache as imported glTF maps.
     Texture load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true, std::string* error = nullptr);
+    // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials naming
+    // a shader still bind.
+    MaterialShader3D load_material_shader(const std::filesystem::path& path, std::string* error = nullptr);
     // Patches imported materials without cloning any model/mesh. Empty variant
     // selects the base layer. Invalidate changed sources explicitly before rebinding.
     AssetHandle<MaterialBinding3D> load_materials(const std::filesystem::path& path, const std::shared_ptr<const Model>& model,
@@ -67,6 +78,9 @@ public:
     void invalidate(const std::filesystem::path& source);
     Stats stats() const;
     const std::filesystem::path& root() const;
+    // Last load's diagnostic, including cache hits (which clear it). Optional
+    // legacy output strings are snapshots of this report, not another channel.
+    const Diagnostics3D& diagnostics() const;
 
 private:
     friend class Renderer3D;
@@ -74,6 +88,11 @@ private:
                           const std::function<Texture()>& load);
     struct Data;
     std::unique_ptr<Data> _data;
+    AssetHandle<Model> load_model_impl(const std::filesystem::path&, const MeshOptions&, std::string*);
+    Texture load_texture_impl(const std::filesystem::path&, bool, bool, std::string*);
+    MaterialShader3D load_material_shader_impl(const std::filesystem::path&, std::string*);
+    AssetHandle<MaterialBinding3D> load_materials_impl(const std::filesystem::path&, const std::shared_ptr<const Model>&,
+                                                     std::string_view, std::string*);
 };
 
 } // namespace kin

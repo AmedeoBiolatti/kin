@@ -85,16 +85,21 @@ struct MeshRenderer {
     Material3D material{};
     Color tint = colors::white;
     bool visible = true;
+    // What pick says of it, and how its frames are matched for the velocity under temporal anti-aliasing. 0: the entity's id
+    // (the low 32 bits of flecs's: an index that is recycled inherits the dead entity's history).
+    u32 id = 0;
 };
 
 // A complete static model, placed by Transform3D. `asset` is authored relative
 // to Assets3D::root(); resolve_render3d_assets binds it on the renderer thread.
-// `model` is runtime-only and may also be supplied directly from C++.
+// `model` is runtime-only and may also be supplied directly from C++. With an
+// Animator3D on the entity, a model whose animations move plain nodes (a door, a
+// fan: Model::node_skeleton) plays its clips on them; without one it is drawn at rest.
 struct ModelRenderer3D {
     std::shared_ptr<const Model> model;
     Color tint = colors::white;
     bool visible = true;
-    u32 id = 0; // zero: use the entity's ID for every model part
+    u32 id = 0; // zero: use the entity's ID for every model part (its low 32 bits: a recycled index inherits the dead one's history)
     ComponentAssetRef asset;
 };
 
@@ -151,7 +156,8 @@ struct SkinnedMeshRenderer {
     Color tint = colors::white;
     bool visible = true;
     // What pick says of every part of it, and how its frames are matched for the velocity under temporal anti-aliasing.
-    // 0: the entity's id (the low 32 bits of flecs's), so that pick names the entity and two characters do not swap histories.
+    // 0: the entity's id (the low 32 bits of flecs's), so that pick names the entity and two characters do not swap histories;
+    // an index that is recycled inherits the dead entity's history.
     u32 id = 0;
     // Optional authored reference; model stays runtime-only. Resolve before
     // animation/physics setup. An empty reference leaves C++ models untouched.
@@ -275,6 +281,8 @@ struct IKConstraint {
     std::vector<GroundCache> ground_cache; // the query's answers of this frame, by the order it was asked in
     std::vector<i32> resolved; // joint indices of `joints`
     std::vector<i32> resolved_toes; // joint indices of `toe_joints` (-1: none)
+    // The skeleton `resolved` was looked up in. An address is not an identity (a skeleton freed and replaced can come back at it),
+    // so this is only compared within one binding of the animator to a model: animate() clears it whenever the animator rebinds.
     const Skeleton* resolved_for = nullptr;
 };
 
@@ -308,7 +316,8 @@ using CharacterActions3D = std::vector<CharacterAction3D>;
 // What plays on a skinned entity, as data: a clip by name, or a state machine (kin/anim's AnimationStateMachine, driven by
 // `params`) that chooses it, with crossfades and 1D blends by a parameter; layers over it with masks. WorldRenderState3D::animate
 // steps it. A state `s` plays the blend space `blend_spaces[s]` if there is one, else the clip `machine->states[s]` (the
-// state's own name if the machine gives none).
+// state's own name if the machine gives none). It poses the first skin of a SkinnedMeshRenderer's model, or the node
+// skeleton (Model::node_skeleton) of a ModelRenderer3D's: its clips, layers' masks and IK joints are looked up in that one.
 struct Animator3D {
     // One point of a 1D blend: `clip` plays at `position` of the parameter.
     struct BlendEntry {
@@ -401,7 +410,13 @@ struct Animator3D {
 
     // Set by animate(): the player, and what it was bound to and plays. Not for setting.
     AnimationPlayer3D player;
+    // The model the player is bound to. `bound` is only its address, kept for readers that compare it: a model freed and replaced
+    // can come back at the same address, so what decides a rebind is `bound_model`'s owner (bound_to).
     const Model* bound = nullptr;
+    std::weak_ptr<const Model> bound_model;
+    bool bound_to(const std::shared_ptr<const Model>& model) const {
+        return model && bound == model.get() && !bound_model.owner_before(model) && !model.owner_before(bound_model);
+    }
     std::string applied;
     std::vector<std::string> applied_layers;
 };
@@ -429,7 +444,8 @@ public:
     // (Also: a light in `scene` for each PointLight3D and SpotLight3D, at its entity's place.)
     // A draw into `scene` for each mesh and material the MeshRenderers use, all
     // their entities instances of it (in the order the world keeps them); and each SkinnedMeshRenderer's model in its
-    // animator's pose (draw_skinned, one range of matrices for all its parts).
+    // animator's pose (draw_skinned, one range of matrices for all its parts). A ModelRenderer3D's parts join the
+    // MeshRenderers' draws, those that hang from an animated node placed by its animator's pose of them.
     void collect(Scene3D& scene);
     // Release reusable mesh/material buckets after bulk removal. ECS-owned
     // handles remain intact; the next collect rebuilds active buckets.
@@ -475,8 +491,8 @@ private:
     flecs::observer _transform_observer;
     flecs::query<WorldTransform3D, const Transform3D, const WorldTransform3D> _transforms;
     flecs::query<const WorldTransform3D, const MeshRenderer, const RenderTransform3D*> _meshes;
-    flecs::query<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*> _models;
-    flecs::query<const SkinnedMeshRenderer*, Animator3D, Transform3D*> _animators; // optional skin/transform: clear stale events even after renderer removal
+    flecs::query<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*, Animator3D*> _models; // the animator is optional
+    flecs::query<const SkinnedMeshRenderer*, const ModelRenderer3D*, Animator3D, Transform3D*> _animators; // optional renderers/transform: clear stale events even after renderer removal
     flecs::query<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*, const RenderTransform3D*> _skinned; // the animator is optional
     flecs::query<TimeOfDay3D> _time_of_day;
     flecs::query<const WorldTransform3D, const PointLight3D, const RenderTransform3D*> _point_lights;
@@ -484,10 +500,12 @@ private:
     flecs::query<const WorldTransform3D, const ParticleEmitter3D> _emitters;
     flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
+    Pose _rest_pose;                  // a skeleton's rest pose for a model with no animator, reused
     struct Bucket {
         Mesh mesh;
         Material3D material;
         std::vector<MeshInstance> instances;
+        InstanceBatch3D batch; // bounded automatic retention for substantial opaque/masked buckets
     };
     std::vector<Bucket> _buckets; // kept between frames, emptied each collect
     u64 _epoch = 0; // advanced by animate() and propagate_transforms(): what the game's ground query said is good until it moves

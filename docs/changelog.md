@@ -9,6 +9,47 @@ releases may change APIs.
 
 ### Added
 
+- Separate the compact 20-field `Render3DStats` game summary from explicit
+  `Render3DDebugStats` implementation instrumentation via `debug_stats()`.
+  Move forced LOD, CPU/GPU cluster comparison, blocking readback and frozen TAA
+  jitter into `Scene3D::debug`, outside visual quality settings. Mark partial
+  triangle counts without GPU readback; keep default diagnostics lightweight
+  and provide a separate detailed debug sink. Migrate benchmark/report callers.
+
+- Common 3D runtime diagnostics on renderer, asset loading, scene submission and batches. Invalid draw/pose/material
+  submissions and batch edits report failure without throwing; scenes retain only their first submission error and
+  reject rendering before GPU work. Additive 3D binding reports through its scene runtime. Legacy output error
+  strings mirror the same diagnostics, while successful loads/operations clear stale failures.
+  Keep the throwing material-binding builder internal; public material loading uses `Assets3D::load_materials`.
+
+- Non-owning `SceneFrame3D` over an existing ECS/render state and optional physics bridge or raw simulation callback;
+  the owning scene session reuses its native phase stages and collection. Additive 3D instantiation reuses
+  `SceneAssetRuntime`, binds only the new instance and rolls it back on binding failure. Runtime scene contexts
+  optionally expose one shared `Renderer3D` in normal, headless and command-server runs; Camp, Projectile Range
+  and Summit reuse it. 2D-only builds reject the explicit 3D opt-in.
+
+- Rigid node animation for glTF models: animations of plain nodes (doors, fans, crane arms) play through a
+  per-model node skeleton (`Model::node_skeleton`, `ModelPart::node`/`node_offset`), with
+  `Scene3D::draw(model, transform, node_matrices)`, `Model::part_transform`, a `draw_skinned` overload that
+  poses a skin and animated props together, and an `Animator3D` beside a `ModelRenderer3D` driving clips,
+  blends, layers, actions, events and IK on those nodes. Models without node animation load and draw unchanged.
+- `SceneSession3D` runs headless over a renderer without 3D: loading, spawning, pools, edits, physics,
+  animation, particles and queries work on CPU-only `Assets3D` models (parts, skeletons, clips, nodes and
+  bounds kept, empty mesh handles); `render()` and `pick()` report "no renderer". `kin_scene_session3d_tests`
+  now runs its headless checks without a GPU.
+- `SceneSession3D::pick(pixel)` maps the last rendered frame's pick to the live entity (by entity index or a
+  renderer's own `id`), and `options.view.pick` survives an authored `SceneEnvironment3D`.
+- 3D audio in the ECS: `AudioEmitter` and `AudioOneShot` are placed by `WorldTransform3D` (with `offset_3d`),
+  the listener comes from the `AudioListener` entity or the active `SceneCamera3D`, and `SceneSession3D` runs
+  the audio systems in its Audio phase when `SceneSession3DOptions::audio` is set.
+- `kin::BakeCache` (kin/assets/bake_cache.hpp): an opt-in folder of baked results keyed by a hash of their
+  inputs, with atomic writes, checksummed entries and least-recently-used eviction. `Renderer3D::set_bake_cache`
+  restores cluster hierarchies and level-of-detail chains byte-identical instead of rebuilding them;
+  `kin_reference --bake-cache DIR` uses it.
+- GPU-compressed textures: KTX2 and DDS readers (kin/assets/texture_file.hpp) for BC1/3/4/5/7 and ASTC 4x4,
+  refusing supercompressed, cube, array, 3D and malformed files with a reason; `Renderer2D::create_texture_compressed`
+  uploads the file's own mip chain (SDL_GPU), `Assets3D::load_texture` reads `.ktx2`/`.dds`, and glTF images in
+  those formats are uploaded compressed and shared like any other texture.
 - Native 3D interaction queries with caller-bounded discovery, checked target/verb
   locks, current contact revalidation and shared reach/visibility rules. Camp
   pickups and crate pushing reuse the API with native keyboard/gamepad prompts.
@@ -538,7 +579,76 @@ releases may change APIs.
   Shader building passes `-I` for the engine's includes. Reference scenes
   `ibl_spheres` and `ibl_helmet` with Poly Haven's Kloofendal sky (CC0).
 
+### Changed
+
+- Make normal ECS collection retain large opaque/masked mesh/model buckets automatically, with changed-run updates,
+  conservative range bounds, snapshot isolation and bounded CPU records. Reuse renderer layouts after exact structural
+  validation of clear/resubmission into the same scene. Preserve feature quality and GPU/workload/budget fallbacks.
+
+- Retire the renderer's implementation A/B environment controls and remove their
+  obsolete paths, including point-light tile-mask and cutout-depth experiments.
+  Preserve automatic capability/workload fallbacks and bounded caches. GPU pass
+  labels now use `Scene3D::debug.gpu_pass_markers`; profiling samples expose
+  `--gpu-pass-markers`. Remove `kin_reference --ab` and stale experiment counters.
+
+
+- Experimental 3D models: the glTF reader refuses what it cannot read correctly instead of
+  loading it silently wrong: Draco/meshopt-compressed and sparse accessors (they read as zeros),
+  absolute paths and `..` that leaves the content root or the mounted pack, nodes nested over
+  512 deep. `data:` images are decoded. A plain node between two of a skin's joints is kept as
+  a joint instead of breaking the chain.
+- ECS: `MeshRenderer` entities have a pick id (the entity id, or `MeshRenderer::id`), so
+  `Renderer3D::pick` names them; it returned 0 for every one.
+
+- Experimental 3D performance round (measured before/after, interleaved, medians):
+  - Retained instance tables are keyed by batch and material colour (two views drawing one
+    batch in two colours no longer re-upload the table every frame), release expired tables
+    without a device-wide wait, evict least-recently-used tables when the 128-table / 32 MiB
+    budget is full (one upgrade per frame, so the largest batches win and nothing thrashes),
+    and upload only the edited records of a batch (grove with 2,000 moving instances: 256 KB
+    instead of 1.28 MB a frame, frame time -11%). New `Render3DDebugStats` counters
+    `retained_evictions`, `retained_refused`, `device_waits`.
+  - The adaptive upload staging buffer grows after a batch it had to split, up to 64 MiB
+    (streaming 17 MiB a frame: one submission instead of 1.8, fence time -25%).
+  - The local shadow array is sized by the lights that get a map this render, not by every
+    light with shadows enabled, and shrinks after 120 renders.
+  - Fog coloured by the procedural sky reads a 48-row elevation table built on the CPU when
+    the sky changes instead of integrating the atmosphere per fragment (fogged cameras
+    10-37% less GPU time at 1280x720; pictures move by at most one level; fixed-colour fog
+    is byte-identical).
+  - `InstanceBatch3D::update` grows group bounds incrementally and re-measures a group only
+    when a bounding copy moved inward (2,000 scattered single-copy edits: 354 ms to 0.24 ms a
+    frame); past 16 edits `changed_since` is rounded to 16-copy blocks instead of the whole
+    batch, and `changed_ranges_since` lists the edited ranges.
+  - Particle wind is evaluated per 1/120 s step with the sines' time phases precomputed and
+    a vectorised polynomial sine (20k particles with gusts and turbulence: 16 ms to 0.57 ms
+    per update; the wind field agrees with `Wind3D::velocity` to 1.4e-5 m/s).
+  - Animation blends in place into the player's scratch poses and caches the animator's
+    state/layer keys (five times fewer allocations in the skeleton tests).
+  - Clustered meshes release their welded CPU vertices after upload (`MeshClusterBuild`
+    holds them only while a mesh is made; `MeshClusters` is the hierarchy alone), and flat
+    unindexed meshes' LOD levels index shared zero-normal vertices instead of three per
+    triangle per level (a 2 M-triangle soup with 4 levels: -168 MB resident, -325 MB peak;
+    the levels then ignore a normal map, as flat clusters do). Benchmarks
+    `kin_render3d_bench` (batch edits, wind) is added.
+
 ### Fixed
+
+- Experimental 3D renderer: `pick()` before the first render or after a resize read an
+  uncleared target; TAA gave a re-made mesh the history of the mesh freed at the same address
+  (keyed by serial now); readback fence waits were released unchecked (a failed wait keeps the
+  fence and returns false); the occlusion cut warned every frame when its history was too small,
+  and at all for a scene with nothing clustered.
+- Experimental 3D lighting: spot, point and moon shadows biased by the normal-mapped normal
+  (acne on bumpy surfaces; the sun used the geometric one, now all do); sky fog ignored
+  `start`; fog over an Image sky takes the fixed colour as documented; the view output
+  tonemapped premultiplied colour over partial alpha (dark fringes on HDR edges); TAA blended
+  black where a history sample was NaN; the environment filter spread a NaN texel.
+- Experimental 3D animation: root motion wrapped the wrong way at negative speed; a model with
+  several skins drew only the first skin's parts (the rest pose and one warning now); an
+  `Animator3D` kept pointing at a model that `ModelFile::poll` had replaced.
+- Experimental 3D: `SceneSession3D`'s error for a lifecycle request made while a replacement
+  scene is prepared says the request is cancelled, not held.
 
 - Rebind changed vertex storage buffers when consecutive 3D draws share a graphics pipeline. Multiple retained instance
   batches previously kept the first table bound, hiding or misplacing later geometry despite correct draw counters. Add

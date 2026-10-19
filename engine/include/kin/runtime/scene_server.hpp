@@ -62,7 +62,8 @@ public:
                   RngKey rng,
                   f32 fixed_dt,
                   bool render,
-                  AssetServer* asset_server = nullptr);
+                  AssetServer* asset_server = nullptr,
+                  Renderer3D* renderer3d = nullptr);
 
     App& app() { return _app; }
     Window& window() { return _window; }
@@ -151,6 +152,7 @@ private:
     f32 _fixed_dt;
     bool _render;
     AssetServer* _asset_server = nullptr;
+    Renderer3D* _renderer3d = nullptr;
     i64 _frame = 0;
     RunReport _report;
     std::vector<PendingInput> _pending;
@@ -187,6 +189,7 @@ struct ServerConfig {
     // Optional async assets are pumped before each simulation step. Kept last
     // so existing positional aggregate initialization remains source-compatible.
     AssetServer* asset_server = nullptr;
+    bool rendering_3d = false;
 };
 
 // Runs the game as a long-lived command server. Returns a process exit code.

@@ -78,10 +78,17 @@ void write_scene_asset(std::ostream& out, const SceneAsset& scene);
 
 std::vector<std::string> validate_scene_asset(const SceneAsset& scene,
                                               const EcsComponentRegistry& components);
+struct SceneInstantiateOptions {
+    bool update_scene_header = true;
+};
+// Explicit header commit for additive loaders that finish binding after
+// instantiation. Changes no gameplay entities.
+void apply_scene_header(EcsWorld& world, const SceneAsset& scene);
 SceneInstance instantiate_scene_asset(EcsWorld& world,
                                       const SceneAsset& scene,
                                       const std::filesystem::path& asset_root,
-                                      EcsComponentRegistry& components,PrefabAssetLoadOptions limits={});
+                                      EcsComponentRegistry& components,PrefabAssetLoadOptions limits={},
+                                      SceneInstantiateOptions options={});
 // Adopt an authored child into a linked instance for structural saves. Local ID
 // is stable; the global authored ID is instance_id + "." + local_id. Does not
 // reparent it; its parent must already belong to this same instance.

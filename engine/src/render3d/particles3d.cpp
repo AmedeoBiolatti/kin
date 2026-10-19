@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <optional>
+#include <span>
 
 namespace kin {
 
@@ -82,24 +84,30 @@ Vec3f wind_unit(const Wind3D& w) {
 
 // ---- Wind ----
 
-f32 Wind3D::gust_factor(Vec3f position, f64 time) const {
-    if (gust_strength == 0.0f || speed == 0.0f) {
+namespace {
+// The gust's factor along a unit direction `d` (the wind's, normalised once by the caller).
+f32 gust_factor_along(const Wind3D& w, Vec3f d, Vec3f position, f64 time) {
+    if (w.gust_strength == 0.0f || w.speed == 0.0f) {
         return 1.0f;
     }
-    const Vec3f d = wind_unit(*this);
     const f64 along = static_cast<f64>(dot(position, d));
     f64 g = 0.0;
     for (const GustTerm& term : gust_terms) {
-        const f64 period = std::max(static_cast<f64>(gust_period) * term.period, 1e-6);
-        const f64 length = std::max(static_cast<f64>(gust_length) * term.length, 1e-6);
+        const f64 period = std::max(static_cast<f64>(w.gust_period) * term.period, 1e-6);
+        const f64 length = std::max(static_cast<f64>(w.gust_length) * term.length, 1e-6);
         g += term.weight * std::sin(two_pi * (time / period - along / length) + term.phase);
     }
-    return 1.0f + gust_strength * static_cast<f32>(g);
+    return 1.0f + w.gust_strength * static_cast<f32>(g);
+}
+} // namespace
+
+f32 Wind3D::gust_factor(Vec3f position, f64 time) const {
+    return gust_factor_along(*this, wind_unit(*this), position, time);
 }
 
 Vec3f Wind3D::velocity(Vec3f position, f64 time) const {
     const Vec3f d = wind_unit(*this);
-    Vec3f v = d * (speed * gust_factor(position, time));
+    Vec3f v = d * (speed * gust_factor_along(*this, d, position, time));
     if (turbulence != 0.0f) {
         const f64 length = std::max(static_cast<f64>(turbulence_length), 1e-6);
         f32 c[3];
@@ -279,6 +287,157 @@ Vec3f cone_direction(f32 degrees, f32 u, f32 v) {
     return {sin_t * std::cos(phi), cos_t, sin_t * std::sin(phi)};
 }
 
+// ---- The wind at many particles ----
+//
+// Wind3D::velocity is nine sines in f64 for a place and a time, and a system of 20,000 particles takes it for every particle at
+// every 1/120 s step. WindStep is the same field with all that does not depend on the place done once a step (the unit direction,
+// the clock's share of each sine's phase), and the sines, in f32 turns, run 32 places at a time in loops the compiler makes
+// vector code of. The polynomial is arithmetic only, so a sine is the same bits on every machine (libm's are not); it is within
+// 1e-6 of the exact one, and the field within 1e-5 of Wind3D::velocity's near the origin (the sines' arguments are f32 turn counts, so the
+// error grows with the distance from it: about 1e-3 of the turbulence at 10 km; tests/render3d_cpu_tests.cpp asserts 2e-3 over a 36 m box).
+
+// sin(2 pi t) for t in turns: reduced to [-1/2, 1/2] by adding and taking away 1.5 * 2^23 (which rounds to a whole number), folded
+// to [-1/4, 1/4] (sin(pi - x) = sin x), and an odd polynomial of degree 9 fitted to the sine there (error 3e-9: below f32's own).
+inline f32 sin_turns(f32 t) {
+    constexpr f32 magic = 12582912.0f;
+    const f32 r = t - ((t + magic) - magic);
+    const f32 a = std::fabs(r);
+    const f32 u = std::copysign(std::min(a, 0.5f - a), r); // (no branches: a loop of these is vector code)
+    const f32 u2 = u * u;
+    return u * (6.283185160f + u2 * (-41.34165503f + u2 * (81.60100407f + u2 * (-76.54978238f + u2 * 39.53670662f))));
+}
+
+constexpr std::size_t wind_lanes = 32;
+struct WindLanes { f32 x[wind_lanes], y[wind_lanes], z[wind_lanes]; }; // places in, the air's velocity there out
+
+struct WindStep {
+    Vec3f d{};                  // the wind's unit direction
+    f32 speed = 0.0f, gust_strength = 0.0f, turbulence = 0.0f, influence = 1.0f;
+    bool gusts = false, swirls = false;
+    f32 gust_offset[3]{}, gust_slope[3]{};  // a gust sine's turns: offset + slope * (place along d)
+    f32 swirl_offset[3][2]{};               // a turbulence sine's turns: offset + dot(place, swirl_wave)
+    Vec3f swirl_wave[3][2]{};
+
+    WindStep(const Wind3D& w, f64 time, f32 influence_) : d(wind_unit(w)), speed(w.speed), gust_strength(w.gust_strength),
+                                                          turbulence(w.turbulence), influence(influence_) {
+        const auto fraction = [](f64 x) { return static_cast<f32>(x - std::floor(x)); };
+        gusts = w.gust_strength != 0.0f && w.speed != 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            const f64 period = std::max(static_cast<f64>(w.gust_period) * gust_terms[k].period, 1e-6);
+            const f64 length = std::max(static_cast<f64>(w.gust_length) * gust_terms[k].length, 1e-6);
+            gust_offset[k] = fraction(time / period + static_cast<f64>(gust_terms[k].phase) / two_pi);
+            gust_slope[k] = static_cast<f32>(-1.0 / length);
+        }
+        swirls = w.turbulence != 0.0f;
+        const f32 inv_length = static_cast<f32>(1.0 / std::max(static_cast<f64>(w.turbulence_length), 1e-6));
+        for (int k = 0; k < 3; ++k) {
+            for (int j = 0; j < 2; ++j) {
+                const TurbulenceTerm& term = turbulence_terms[k][j];
+                swirl_offset[k][j] = fraction(static_cast<f64>(term.frequency) * time + static_cast<f64>(term.phase) / two_pi);
+                swirl_wave[k][j] = term.wave * inv_length;
+            }
+        }
+    }
+
+    // The air's velocity (times the influence) at the `wind_lanes` places in `at`, put in their place. (One struct of arrays, and
+    // locals for the rest, so that the compiler can see that no two of them alias.)
+    void sample(WindLanes& at) const {
+        const f32 dx = d.x, dy = d.y, dz = d.z, base_speed = speed, scale = influence; // (the stores to `at` could alias members)
+        f32 factor[wind_lanes];
+        if (gusts) {
+            for (std::size_t i = 0; i < wind_lanes; ++i) {
+                const f32 along = at.x[i] * dx + at.y[i] * dy + at.z[i] * dz;
+                const f32 g = gust_terms[0].weight * sin_turns(gust_offset[0] + gust_slope[0] * along) +
+                              gust_terms[1].weight * sin_turns(gust_offset[1] + gust_slope[1] * along) +
+                              gust_terms[2].weight * sin_turns(gust_offset[2] + gust_slope[2] * along);
+                factor[i] = 1.0f + gust_strength * g;
+            }
+        } else {
+            for (std::size_t i = 0; i < wind_lanes; ++i) factor[i] = 1.0f;
+        }
+        f32 swirl[3][wind_lanes];
+        for (int k = 0; k < 3; ++k) {
+            const Vec3f w0 = swirl_wave[k][0], w1 = swirl_wave[k][1];
+            const f32 o0 = swirl_offset[k][0], o1 = swirl_offset[k][1];
+            if (swirls) {
+                for (std::size_t i = 0; i < wind_lanes; ++i)
+                    swirl[k][i] = 0.5f * (sin_turns(o0 + (at.x[i] * w0.x + at.y[i] * w0.y + at.z[i] * w0.z)) +
+                                          sin_turns(o1 + (at.x[i] * w1.x + at.y[i] * w1.y + at.z[i] * w1.z))) * turbulence;
+            } else {
+                for (std::size_t i = 0; i < wind_lanes; ++i) swirl[k][i] = 0.0f;
+            }
+        }
+        for (std::size_t i = 0; i < wind_lanes; ++i) {
+            const f32 along = base_speed * factor[i];
+            at.x[i] = (dx * along + swirl[0][i]) * scale;
+            at.y[i] = (dy * along + swirl[1][i]) * scale;
+            at.z[i] = (dz * along + swirl[2][i]) * scale;
+        }
+    }
+};
+
+// What a step needs of the desc (copied, so that the compiler knows that writing a particle changes none of it), and of the drag's
+// relaxation that is the same for every particle: it depends on the drag and the step alone.
+struct Forces {
+    bool drag_on, ground;
+    Vec3f gravity;
+    f32 ground_height, bounce;
+    f32 e = 0.0f, gain = 0.0f; // exp(-k h) and (1 - e) / k
+    Vec3f gravity_over_k{};
+    Forces(const ParticleDesc3D& d, f32 h) : drag_on(d.drag > 0.0f), ground(d.ground), gravity(d.gravity), ground_height(d.ground_height), bounce(d.bounce) {
+        if (drag_on) {
+            e = std::exp(-d.drag * h);
+            gain = (1.0f - e) / d.drag;
+            gravity_over_k = d.gravity / d.drag;
+        }
+    }
+};
+
+// Every particle of `particles` one step of `dt` seconds on, in the wind (null: none) as it blows at `time`. The air acts only through
+// the drag, so without drag (or influence) it is not looked for; else the wind is found 32 places at a time.
+void advance_all(std::span<Particle3D> particles, const ParticleDesc3D& desc, f64 time, f64 dt, const Wind3D* wind) {
+    const f32 h = static_cast<f32>(dt);
+    const Forces f(desc, h);
+    const bool windy = wind && f.drag_on && desc.wind_influence != 0.0f;
+    std::optional<WindStep> air;
+    if (windy) air.emplace(*wind, time, desc.wind_influence);
+    WindLanes lanes;
+    for (std::size_t base = 0; base < particles.size(); base += wind_lanes) {
+        const std::size_t n = std::min(wind_lanes, particles.size() - base);
+        Particle3D* block = particles.data() + base;
+        if (windy) {
+            for (std::size_t i = 0; i < wind_lanes; ++i) { // the last block is filled up with its first place
+                const Vec3f at = block[i < n ? i : 0].position;
+                lanes.x[i] = at.x; lanes.y[i] = at.y; lanes.z[i] = at.z;
+            }
+            air->sample(lanes);
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            Particle3D& p = block[i];
+            if (f.drag_on) {
+                // Velocity relaxes toward the terminal one (the air's, with gravity's pull balanced by the drag): exact for a step.
+                const Vec3f wind_here = windy ? Vec3f{lanes.x[i], lanes.y[i], lanes.z[i]} : Vec3f{};
+                const Vec3f terminal = wind_here + f.gravity_over_k;
+                p.position += terminal * h + (p.velocity - terminal) * f.gain;
+                p.velocity = terminal + (p.velocity - terminal) * f.e;
+            } else {
+                p.velocity += f.gravity * h;
+                p.position += p.velocity * h;
+            }
+            if (f.ground && p.position.y < f.ground_height) {
+                if (f.bounce > 0.0f && p.velocity.y < 0.0f) {
+                    p.position.y = f.ground_height + (f.ground_height - p.position.y) * f.bounce;
+                    p.velocity.y = -p.velocity.y * f.bounce;
+                } else {
+                    p.age = p.lifetime + 1.0f; // gone
+                }
+            }
+            p.rotation += p.spin * h;
+            p.age += h;
+        }
+    }
+}
+
 constexpr u64 fnv_offset = 1469598103934665603ull;
 constexpr u64 fnv_prime = 1099511628211ull;
 
@@ -338,29 +497,8 @@ f32 ParticleSystem3D::alpha_over_life(const ParticleDesc3D& d, f32 t) {
 }
 
 void ParticleSystem3D::advance(Particle3D& p, f64 dt, const Wind3D* wind) const {
-    const f32 h = static_cast<f32>(dt);
-    const Vec3f air = wind ? wind->velocity(p.position, _time) * desc.wind_influence : Vec3f{};
-    if (desc.drag > 0.0f) {
-        // Velocity relaxes toward the terminal one (the air's, with gravity's pull balanced by the drag): exact for a step.
-        const f32 k = desc.drag;
-        const Vec3f terminal = air + desc.gravity / k;
-        const f32 e = std::exp(-k * h);
-        p.position += terminal * h + (p.velocity - terminal) * ((1.0f - e) / k);
-        p.velocity = terminal + (p.velocity - terminal) * e;
-    } else {
-        p.velocity += desc.gravity * h;
-        p.position += p.velocity * h;
-    }
-    if (desc.ground && p.position.y < desc.ground_height) {
-        if (desc.bounce > 0.0f && p.velocity.y < 0.0f) {
-            p.position.y = desc.ground_height + (desc.ground_height - p.position.y) * desc.bounce;
-            p.velocity.y = -p.velocity.y * desc.bounce;
-        } else {
-            p.age = p.lifetime + 1.0f; // gone
-        }
-    }
-    p.rotation += p.spin * h;
-    p.age += h;
+    // A birth part-way through a step: one particle in the same code that steps the rest, so that it is carried as they are.
+    advance_all({&p, 1}, desc, _time, dt, wind);
 }
 
 void ParticleSystem3D::spawn(u32 count, bool at_point, Vec3f point, const Wind3D* wind, f64 sub_step) {
@@ -460,9 +598,7 @@ void ParticleSystem3D::update(f64 dt, const Wind3D* wind) {
     // A hair under a step counts as one: the frame lengths 1/60 and 1/144 add up to whole steps only to rounding.
     while (_accumulated >= step - 1e-9) {
         _accumulated -= step;
-        for (Particle3D& p : _particles) {
-            advance(p, step, wind);
-        }
+        advance_all(_particles, desc, _time, step, wind);
         std::erase_if(_particles, [](const Particle3D& p) { return p.age >= p.lifetime; });
         if (emitting && desc.rate > 0.0f && rate_scale > 0.0f) {
             _carry += static_cast<f64>(desc.rate) * static_cast<f64>(rate_scale) * step;

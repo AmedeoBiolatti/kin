@@ -51,6 +51,9 @@ void cpu() {
     check(parsed.ok() && parsed.asset->variants.size()==4,"valid material variants rejected");
     check(parsed.asset->base.material.texture && parsed.asset->base.material.texture->asset.empty(),"explicit texture clearing lost");
     for (const auto* text : {
+        R"({"schema":"kin.materials3d/1","material":{"shader":12}})",
+        R"({"schema":"kin.materials3d/1","material":{"shader_params":[1,2,3]}})",
+        R"({"schema":"kin.materials3d/1","material":{"shader_params":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"bad"]}})",
         R"({"schema":"unknown"})", R"({"schema":"kin.materials3d/1","metallic":0.1})",
         R"({"schema":"kin.materials3d/1","material":{"roughnes":0.1}})",
         R"({"schema":"kin.materials3d/1","material":{"roughness":-0.1}})",
@@ -65,6 +68,9 @@ void cpu() {
         R"({"schema":"kin.materials3d/1","parts":[{"part":0,"material":{}},{"part":0,"material":{}}]})"})
         check(!parse_materials3d_asset(text).ok(),"invalid material source accepted");
     check(!parse_materials3d_asset(std::string(1024*1024+1,' ')).ok(),"material source budget ignored");
+    const auto shader=parse_materials3d_asset(R"({"schema":"kin.materials3d/1","material":{"shader":"glass.spv","shader_params":[1.45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},"variants":{"plain":{"material":{"shader":null}}}})");
+    check(shader.ok() && shader.asset->base.material.shader==std::filesystem::path{"glass.spv"} &&
+        (*shader.asset->base.material.shader_params)[0]==1.45f && shader.asset->variants.at("plain").material.shader->empty(),"shader parameters or explicit clearing lost");
     Scratch scratch;write(scratch.path/"colors.kinmaterials",materials);write(scratch.path/"quad.kinprefab",prefab);
     kin::EcsWorld world;register_builtin_editor_components(world);
     auto loaded=parse_scene_asset(scene,world.components());check(loaded.ok(),"shared scene codec rejected material component");
@@ -120,6 +126,38 @@ void material_gpu(Renderer2D& renderer) {
         mask->materials[0].alpha_cutoff==.4f && mask->materials[0].blend==Blend3D::Mask && glow->materials[0].emissive==2 &&
         glow->materials[0].blend==Blend3D::Additive,"transparency/emissive settings lost");
 
+#ifdef KIN_TEST_MATERIAL_SHADER
+    {
+        std::filesystem::copy_file(KIN_TEST_MATERIAL_SHADER,scratch.path/"custom.spv");
+        write(scratch.path/"shader.kinmaterials",R"({"schema":"kin.materials3d/1","material":{"shader":"custom.spv","shader_params":[0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]},"variants":{"plain":{"material":{"shader":null}}}})");
+        auto shaded=assets.load_materials("shader.kinmaterials",model,{},&error);
+        check(shaded && shaded->materials[0].shader && shaded->materials[0].shader_params[5]==1,"shader material did not bind");
+        auto shared=assets.load_material_shader("custom.spv",&error);
+        check(shared==shaded->materials[0].shader && assets.load_material_shader("./custom.spv")==shared,"shader source aliases not shared");
+        const auto plain=assets.load_materials("shader.kinmaterials",model,"plain",&error);
+        check(plain && !plain->materials[0].shader,"plain variant did not clear custom shader");
+        auto view=r3d.create_view({64,64});Scene3D probe;
+        probe.camera=Camera3D::look_at({0,0,3},{0,0,0});
+        probe.draw(*model,Mat4f::identity(),colors::white,0,shaded->materials);
+        check(r3d.render(view,probe),"custom asset shader render failed");
+        {auto target=renderer.create_render_target({64,64});auto bind=renderer.scoped_render_target(target);
+         renderer.clear();renderer.draw_texture(view.texture(),{0,0,64,64});std::vector<u8> rgba;Vec2i size;
+         check(renderer.read_rgba({0,0,64,64},rgba,size),"custom asset shader readback failed");
+         const auto i=(32*64+32)*4;check(rgba[i]<10 && rgba[i+1]>150 && rgba[i+2]<10,"shader_params did not affect actual pixels");}
+        const auto old=shaded->materials[0].shader;assets.invalidate("custom.spv");
+        auto rebound=assets.load_materials("shader.kinmaterials",model,{},&error);
+        check(rebound && rebound.shared()!=shaded.shared() && rebound->materials[0].shader!=old && old,"shader dependency invalidation lost retained handles");
+        write(scratch.path/"broken.spv","bad");
+        write(scratch.path/"header.spv",std::string(20,'x'));
+        const auto entries=assets.stats().shader_entries;
+        check(!assets.load_material_shader("broken.spv",&error) && !error.empty() && !assets.load_material_shader("missing.spv",&error) &&
+              !assets.load_material_shader("header.spv",&error) &&
+              assets.stats().shader_entries==entries,"failed shader cached or missing error");
+        Assets3D uncached{r3d,scratch.path,{.shaders=0}};
+        const auto one=uncached.load_materials("shader.kinmaterials",model,{},&error);
+        check(one && uncached.stats().shader_entries==0 && uncached.stats().shader_loads==1,"disabled shader cache duplicated one binding's shader");
+    }
+#endif
     // Authored maps reuse imported glTF textures only when role AND sampling match.
     write(scratch.path/"maps.kinmaterials",R"({"schema":"kin.materials3d/1","material":{
         "texture":{"asset":"shared pixel.png","filter":"nearest"},
@@ -141,7 +179,8 @@ void material_gpu(Renderer2D& renderer) {
         layered->materials[0].roughness==.2f && layered->materials[1].emissive==3 &&
         layered->materials[2].emissive==parts->parts[2].material.emissive,"per-part layering incorrect");
     { Scene3D direct;const Material3D wrong[]={{}};bool rejected=false;
-      try { direct.draw(*parts,{},colors::white,0,wrong); } catch (const std::invalid_argument&) { rejected=true; }
+      rejected = !direct.draw(*parts,{},colors::white,0,wrong);
+      check(!direct.diagnostics().empty(),"missing draw rejection diagnostics");
       check(rejected && direct.draws().empty(),"mismatched material array partially submitted a model"); }
     // A unique name resolves to the same index; duplicate names require indices.
     auto named_model=std::make_shared<Model>(*parts);named_model->parts[0].name="unique";
@@ -222,7 +261,12 @@ void material_gpu(Renderer2D& renderer) {
     check(write_content_pack(scratch.path,archive).ok,"material pack write failed");
     const auto mount=packed.path/"virtual";mount_content_pack(mount,ContentPack::open(archive));
     { Assets3D packed_assets{r3d,mount};SceneSession3D packed_session{r3d,packed_assets,options};
-      check(packed_session.load("test.kinscene"),"packed material references failed"); }
+      check(packed_session.load("test.kinscene"),"packed material references failed");
+#ifdef KIN_TEST_MATERIAL_SHADER
+      const auto packed_shader=packed_assets.load_materials("shader.kinmaterials",model,{},&error);
+      check(packed_shader && packed_shader->materials[0].shader,"packed shader reference failed");
+#endif
+    }
     unmount_content_pack(mount);
 
     if (r3d.capabilities().skinning) {

@@ -1,5 +1,10 @@
 # 3D Rendering — Experimental Plan
 
+> Historical design and measurement log. Renderer implementation A/B environment
+> controls and `kin_reference --ab` described in past entries have been retired.
+> Supported paths are automatic; current controls are documented in `rendering_3d.md`.
+
+
 > Branch `exp/3d-rendering`, from 0.2.6 (d307186). A proposal: nothing here is
 > built yet.
 

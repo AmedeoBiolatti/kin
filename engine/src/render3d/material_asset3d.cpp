@@ -4,6 +4,8 @@
 #include <kin/ecs/component.hpp>
 #include <kin/core/json_value.hpp>
 
+#include "material_asset3d_impl.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -48,8 +50,15 @@ MaterialTexture3D texture(const JsonValue& value) {
 MaterialPatch3D patch(const JsonValue& value) {
     fields(value, {"color","metallic","roughness","emissive","normal_scale","occlusion_strength","alpha_cutoff",
         "unlit","double_sided","casts_shadow","receives_shadow","wireframe","blend","wrap_u","wrap_v",
-        "texture","normal","metallic_roughness","occlusion","emissive_texture"});
+        "texture","normal","metallic_roughness","occlusion","emissive_texture","shader","shader_params"});
     MaterialPatch3D result;
+    if(const auto* v=value.find("shader"))result.shader=v->is_null()?std::filesystem::path{}:std::filesystem::path{text(*v)};
+    if(const auto* v=value.find("shader_params")) {
+        require(v->is_array() && v->items().size()==16,"shader_params requires 16 finite numbers");
+        std::array<f32,16> params;
+        for(size_t i=0;i<16;++i)params[i]=number(v->items()[i],-std::numeric_limits<f32>::max(),std::numeric_limits<f32>::max(),"shader_params");
+        result.shader_params=params;
+    }
     if (const auto* color=value.find("color")) {
         const auto channel=[](const JsonValue& value) {
             number(value,0,255,"color channel");
@@ -110,7 +119,7 @@ MaterialVariant3D layer(const JsonValue& value, bool root) {
 }
 void merge(MaterialPatch3D& to, const MaterialPatch3D& from) {
 #define FIELD(name) if (from.name) to.name=from.name
-    FIELD(color); FIELD(metallic); FIELD(roughness); FIELD(emissive); FIELD(normal_scale); FIELD(occlusion_strength); FIELD(alpha_cutoff);
+    FIELD(shader); FIELD(shader_params); FIELD(color); FIELD(metallic); FIELD(roughness); FIELD(emissive); FIELD(normal_scale); FIELD(occlusion_strength); FIELD(alpha_cutoff);
     FIELD(unlit); FIELD(double_sided); FIELD(casts_shadow); FIELD(receives_shadow); FIELD(wireframe);
     FIELD(blend); FIELD(wrap_u); FIELD(wrap_v);
     FIELD(texture); FIELD(normal); FIELD(metallic_roughness); FIELD(occlusion); FIELD(emissive_texture);
@@ -188,17 +197,33 @@ MaterialBinding3D build_materials3d_binding(const Materials3DAsset& asset, const
         }
         return entry->second;
     };
+    std::map<std::filesystem::path,MaterialShader3D> shaders;
+    const auto resolve_shader=[&](const std::filesystem::path& source) {
+        const auto path=(assets.root()/source).lexically_normal();
+        auto [entry,added]=shaders.try_emplace(path);
+        if(added) {
+            std::string error;entry->second=assets.load_material_shader(path,&error);
+            require(bool(entry->second),error);result.source_files.push_back(path);
+        }
+        return entry->second;
+    };
     result.materials.reserve(model->parts.size());
     for (size_t i=0;i<patches.size();++i) {
         const auto& p=patches[i]; auto material=model->parts[i].material;
 #define FIELD(name) if (p.name) material.name=*p.name
-        FIELD(color); FIELD(metallic); FIELD(roughness); FIELD(emissive); FIELD(normal_scale); FIELD(occlusion_strength); FIELD(alpha_cutoff);
+        FIELD(shader_params); FIELD(color); FIELD(metallic); FIELD(roughness); FIELD(emissive); FIELD(normal_scale); FIELD(occlusion_strength); FIELD(alpha_cutoff);
         FIELD(unlit); FIELD(double_sided); FIELD(casts_shadow); FIELD(receives_shadow); FIELD(wireframe); FIELD(blend); FIELD(wrap_u); FIELD(wrap_v);
 #undef FIELD
 #define TEXTURE(name, srgb) if (p.name) material.name=resolve(*p.name,srgb)
         TEXTURE(texture,true); TEXTURE(emissive_texture,true);
         TEXTURE(metallic_roughness,false); TEXTURE(normal,false); TEXTURE(occlusion,false);
 #undef TEXTURE
+        if(p.shader) {
+            material.shader={};
+            if(!p.shader->empty()) {
+                material.shader=resolve_shader(*p.shader);
+            }
+        }
         result.materials.push_back(std::move(material));
     }
     std::ranges::sort(result.source_files);

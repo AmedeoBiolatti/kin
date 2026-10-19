@@ -3,6 +3,7 @@
 #include "../rounded_rect_loop.hpp"
 #include "embedded_gpu_shader.hpp"
 
+#include <kin/assets/texture_file.hpp>
 #include <kin/platform/log.hpp>
 
 #include <SDL3_image/SDL_image.h>
@@ -1308,7 +1309,8 @@ SDL_GPUTextureFormat sdl_format(TextureFormat format) {
 } // namespace
 
 Texture GpuRenderer2DBackend::create_texture(Vec2i size, TextureFormat format, const void* pixels) {
-    if (size.x <= 0 || size.y <= 0 || (format != TextureFormat::Rgba8 && !_data_textures)) {
+    if (size.x <= 0 || size.y <= 0 || (format != TextureFormat::Rgba8 && !_data_textures) ||
+        texture_format_compressed(format)) { // compressed ones come whole: create_texture_compressed
         return {};
     }
     gpu::GpuTexture tex = _device.create_texture(pixels, static_cast<u32>(size.x), static_cast<u32>(size.y),
@@ -1316,9 +1318,22 @@ Texture GpuRenderer2DBackend::create_texture(Vec2i size, TextureFormat format, c
     return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Nearest, format)};
 }
 
+Texture GpuRenderer2DBackend::create_texture_compressed(const CompressedImage& image) {
+    // An sRGB file's colour is kept as create_texture_from_rgba keeps colour: decoded as sampled in a linear
+    // pipeline, stored encoded in a gamma one (whose 3D shaders decode it, and whose 2D draws show it as it is).
+    const bool decode = _color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB;
+    gpu::GpuTexture tex = _device.create_texture_compressed(image, decode);
+    if (!tex) {
+        return {}; // the device cannot sample the format (Renderer2D says so)
+    }
+    // Its levels are the file's: set_scale_mode(Mipmapped) only picks the sampler that reads them.
+    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Nearest, image.format,
+                                                            image.levels.size() > 1)};
+}
+
 bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) {
     const auto* backend = as_gpu(texture.backend().get());
-    if (!backend || !backend->texture()) {
+    if (!backend || !backend->texture() || texture_format_compressed(backend->format())) {
         return false;
     }
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
@@ -1334,7 +1349,7 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
 bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t /*bytes*/,
                                          const std::function<void(std::span<u8>)>& fill) {
     const auto* backend = as_gpu(texture.backend().get());
-    if (!backend || !backend->texture()) {
+    if (!backend || !backend->texture() || texture_format_compressed(backend->format())) {
         return false;
     }
     _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
@@ -1943,6 +1958,8 @@ void GpuRenderer2DBackend::set_scale_mode(const Texture& texture, ScaleMode mode
         return;
     }
     backend->set_scale_mode(mode);
+    // RGBA8 only: a compressed texture has the levels its file brought, and a
+    // block format cannot be drawn into to make more.
     if (mode == ScaleMode::Mipmapped && !backend->mipmapped() && !backend->premultiplied() &&
         backend->format() == TextureFormat::Rgba8 && backend->texture()) {
         // Remade with room for its mips; the old one stays alive until the
@@ -2185,6 +2202,9 @@ ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv
 }
 
 Texture GpuRenderer2DBackend::create_storage_texture(Vec2i size, TextureFormat format) {
+    if (texture_format_compressed(format)) {
+        return {}; // shaders cannot write blocks
+    }
     gpu::GpuTexture tex = _device.create_texture(nullptr, static_cast<u32>(size.x), static_cast<u32>(size.y),
                                                  sdl_format(format), texture_format_bytes(format),
                                                  SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
@@ -2304,8 +2324,10 @@ GpuRenderer2DBackend::SourceBindings GpuRenderer2DBackend::bind_sources(const gp
             backend && backend->texture()) {
             retain(src);
             binding.texture = backend->texture().handle();
-            // Integer textures cannot be filtered, and 32-bit floats may not be.
-            binding.sampler = backend->format() == TextureFormat::Rgba8 ? sampler_for(*backend) : _sampler_nearest;
+            // Integer textures cannot be filtered, and 32-bit floats may not be; compressed ones are colour.
+            binding.sampler = backend->format() == TextureFormat::Rgba8 || texture_format_compressed(backend->format())
+                                  ? sampler_for(*backend)
+                                  : _sampler_nearest;
         }
         return binding;
     };

@@ -3,12 +3,14 @@
 // and a per-frame command-buffer wrapper. kin forces the SPIR-V/Vulkan driver.
 #include <kin/core/types.hpp>
 #include <kin/platform/window.hpp>
+#include <kin/renderer/texture.hpp>
 
 #include "gpu_buffer.hpp"
 #include "gpu_texture.hpp"
 
 #include <SDL3/SDL.h>
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -20,6 +22,7 @@
 
 namespace kin {
 class JobSystem;
+struct CompressedImage;
 }
 
 namespace kin::gpu {
@@ -71,6 +74,17 @@ public:
     // or with zeros when null. RGBA8 textures can also be render targets.
     GpuTexture create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
                               u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage = 0);
+    // A sampled texture of a block-compressed `image` (image.valid()) with its own
+    // mip chain, every level uploaded through the staging buffer; never given
+    // generated mips (a block format is no render target). Pooled apart from the
+    // other kinds. Null when the device cannot sample the format (most desktop
+    // GPUs have no ASTC, some phones no BC). `decode_srgb`: as compressed_format.
+    GpuTexture create_texture_compressed(const CompressedImage& image, bool decode_srgb = true);
+    // The SDL_GPU format of a compressed TextureFormat; INVALID for the others.
+    // `decode_srgb` false: an sRGB format's UNORM twin, the same blocks read
+    // without decoding (a gamma pipeline's colour textures, which its shaders
+    // decode where they need linear light).
+    static SDL_GPUTextureFormat compressed_format(TextureFormat format, bool decode_srgb = true);
     // Uploads `pixels` (tightly packed, `texel_bytes` per texel) over the w x h
     // region at (x, y), ordered after the frames submitted before it. `whole`:
     // the region is the whole texture, so its storage may be cycled (a frame
@@ -82,6 +96,11 @@ public:
     // replaced and may get fresh storage.
     void upload_storage_buffer(SDL_GPUBuffer* buffer, u32 offset, u32 bytes, const void* data, bool cycle,
                                const std::function<void(std::span<u8>)>* fill = nullptr);
+    // Several ranges of a buffer in one staged write, never cycled (the rest of the buffer is kept): `ranges` are (offset,
+    // bytes) in the buffer, and `fill` writes them one after another into a span of their total. Like any upload it lands
+    // after the work submitted before it and before the next frame: a draw recorded already, not yet submitted, sees it.
+    void upload_storage_ranges(SDL_GPUBuffer* buffer, std::span<const std::array<u32, 2>> ranges,
+                               const std::function<void(std::span<u8>)>& fill);
     // As update_texture, but `fill` writes the texels straight into the upload
     // memory (no copy). It must not call back into the device.
     void write_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, bool whole,
@@ -123,6 +142,8 @@ public:
     // Texture uploads recorded and command buffers submitted for them so far.
     std::pair<u64, u64> upload_counts() const { return {_uploads_staged, _upload_batches}; }
     std::pair<u64, u64> staging_stats() const { return {_staging ? _staging_size : 0u, _staging_allocations}; }
+    // wait_idle() calls so far (the 3D renderer reports those inside a render).
+    u64 idle_waits() const { return _idle_waits; }
 
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
@@ -168,12 +189,15 @@ private:
     void stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const void* pixels,
                               u32 texel_bytes, bool cycle,
                               const std::function<void(std::span<u8>)>* fill = nullptr);
-    // Where an upload goes: a texture's region, or a range of a buffer.
+    // Where an upload goes: a texture's region (of mip `level`), or a range of a buffer.
     struct UploadDestination {
         SDL_GPUTexture* texture = nullptr;
         u32 x = 0, y = 0, w = 0, h = 0;
+        u32 level = 0;
+        bool blocks = false; // block-compressed texels, tightly packed: Vulkan wants a row length of 0 (or whole blocks)
         SDL_GPUBuffer* buffer = nullptr;
         u32 buffer_offset = 0;
+        std::span<const std::array<u32, 2>> ranges; // upload_storage_ranges: the buffer's ranges, from consecutive staging
     };
     void stage_upload(const UploadDestination& to, u32 bytes, const void* pixels, bool cycle,
                       const std::function<void(std::span<u8>)>* fill);
@@ -203,14 +227,17 @@ private:
     SDL_GPUTransferBuffer* _staging = nullptr;
     u32 _staging_used = 0;
     u32 _staging_size = 0;     // current or next capacity; initially uses the bulk-upload floor
-    bool _adaptive_staging = true; // KIN_ADAPTIVE_STAGING=0: fixed 16 MiB floor
     u32 _staging_recent_peak = 0, _staging_recent_batches = 0;
+    // A batch that filled the staging buffer is sent in parts: `_staging_overflow` marks the flush that sends one, and
+    // `_staging_spilled` adds up the parts sent so far, so that the batch's whole need is known at its last flush.
+    bool _staging_overflow = false;
+    u64 _staging_spilled = 0;
     u64 _staging_allocations = 0;
-    u64 _big_upload_batch = 0; // the batch of the last upload over half the usual size
     JobSystem* _jobs = nullptr;
     std::shared_ptr<GpuTexturePool> _texture_pool; // released sampled textures, for create_texture
     u64 _uploads_staged = 0;
     u64 _upload_batches = 0;
+    u64 _idle_waits = 0;
 };
 
 class GpuFrame {

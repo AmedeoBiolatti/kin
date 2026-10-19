@@ -573,7 +573,7 @@ public:
         ++_frames;
         _presentation_time += double(frame_dt);
         draw_ui(ctx, out);
-        if (_benchmark) _benchmark->capture(*_game,_bot ? _bot->leg() : -1,*_summit_view,_r3d->stats(),_view_size,scene_ms,_render_ms);
+        if (_benchmark) _benchmark->capture(*_game,_bot ? _bot->leg() : -1,*_summit_view,_r3d->debug_stats(),_view_size,scene_ms,_render_ms);
         if (_options.gpu_timing) {
             const RendererBackendStats st = ctx.renderer.backend_stats();
             if (st.gpu_frames_sampled != _gpu_sampled) {
@@ -587,14 +587,14 @@ public:
 private:
     bool init(SceneContext& ctx) {
         const auto setup_start = Clock::now();
-        _r3d = std::make_unique<Renderer3D>(ctx.renderer);
-        if (!_r3d->available()) {
+        _r3d = ctx.renderer3d;
+        if (!_r3d || !_r3d->available()) {
             std::fprintf(stderr, "summit: this renderer cannot draw 3D: it needs SDL_GPU (KIN_RENDER_BACKEND=gpu, a Vulkan/Metal/D3D12 device)\n");
             if (ctx.report) ctx.report->fail("no 3D renderer");
             _failed = true;
             _unavailable = true;
             ctx.app.quit();
-            _r3d.reset();
+            _r3d = nullptr;
             return false;
         }
         _summit_view = std::make_unique<SummitView>(*_r3d, _game->level(), !_options.procedural_assets);
@@ -946,7 +946,7 @@ private:
     std::unique_ptr<Gamepads> _pad;
     GamepadState _pad_state;
     LookFeed _look_feed;
-    std::unique_ptr<Renderer3D> _r3d;
+    Renderer3D* _r3d = nullptr;
     std::unique_ptr<SummitView> _summit_view;
     std::unique_ptr<SummitAudio> _audio;
     CueGenerator _cue_generator;
@@ -1028,7 +1028,7 @@ int run(int argc, char** argv) {
             scene = s.get();
             scenes.push(std::move(s));
         }
-        const int code = run_scene_app({.window = window, .headless = headless, .game = &game, .render_headless = true}, scenes);
+        const int code = run_scene_app({.window = window, .headless = headless, .game = &game, .render_headless = true, .rendering_3d = true}, scenes);
         if (scene != nullptr && scene->unavailable() && options.skip_if_unavailable) return exit_skipped;
         return code;
     } catch (const std::exception& e) {

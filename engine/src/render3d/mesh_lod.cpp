@@ -1,5 +1,7 @@
 #include <kin/render3d/mesh_lod.hpp>
 
+#include "mesh_bake.hpp"
+
 #include <meshoptimizer.h>
 
 #include <algorithm>
@@ -27,7 +29,7 @@ f32 extent_of(const std::vector<u32>& indices, const Position& position_of) {
 
 // Whether a mesh with no indices is flat-shaded: every corner's normal is its triangle's own (what a model with no
 // normals is read as). Its triangles then share no vertex, and a level is better made over welded positions, with its
-// own vertices (flat normals again).
+// own vertices (with no normal: the shader makes the face's).
 bool is_flat_soup(const MeshData& data) {
     std::size_t flat = 0, counted = 0;
     for (std::size_t t = 0; t + 2 < data.vertices.size(); t += 3) {
@@ -74,8 +76,12 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
     };
 
     // A flat-shaded mesh with no indices (a model with no normals; the kiln's 15 M vertices): welded by position, simplified
-    // on positions alone (cheap: the 9 attributes of 15 M vertices took gigabytes), and each level gets vertices of its own
-    // with the flat normal of its triangle and the UV and colour of the vertex it replaces. The mesh's vertices are not touched.
+    // on positions alone (cheap: the 9 attributes of 15 M vertices took gigabytes). The levels index vertices of the chain's
+    // own: each welded position they use, once, with the UV and colour of the mesh's first corner there and a zero normal,
+    // which the shader takes for flat and replaces with the face's (from the derivatives of the position, as for flat
+    // clusters). A vertex for each corner of each level, to carry its triangle's normal, took the kiln's 4 levels 12.8 M
+    // vertices; these are at most the first level's (a level only drops vertices of the one before). The mesh's vertices
+    // are not touched.
     if (data.indices.empty() && is_flat_soup(data)) {
         std::vector<u32> current(vertex_count);
         const meshopt_Stream stream{&data.vertices[0].position, 3 * sizeof(f32), sizeof(MeshVertex)};
@@ -93,6 +99,12 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
             positions[w * 3 + 2] = p.z;
         }
         std::vector<u32> simplified, ordered;
+        std::vector<u32> slot; // each welded position's place in extra_vertices (~0u: none yet)
+        const auto own_vertex = [&](u32 w) {
+            MeshVertex v = data.vertices[from[w]];
+            v.normal = {};
+            return v;
+        };
         f32 error = 0.0f;
         for (u32 level = 1; level < wanted; ++level) {
             const std::size_t current_triangles = current.size() / 3;
@@ -108,19 +120,32 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
             ordered.resize(kept);
             meshopt_optimizeVertexCache(ordered.data(), simplified.data(), kept, unique);
             error += relative * scale;
+            if (slot.empty()) {
+                // The first level's vertices, in the order its triangles first use them (what the GPU fetches best),
+                // counted first so that the array is made once at its size.
+                slot.assign(unique, ~0u);
+                u32 used = 0;
+                for (const u32 w : ordered) {
+                    if (slot[w] == ~0u) {
+                        slot[w] = used++;
+                    }
+                }
+                chain.extra_vertices.resize(used);
+                for (std::size_t w = 0; w < unique; ++w) {
+                    if (slot[w] != ~0u) {
+                        chain.extra_vertices[slot[w]] = own_vertex(static_cast<u32>(w));
+                    }
+                }
+            }
             MeshLodLevel out{static_cast<u32>(kept / 3), error, {}};
             out.indices.resize(kept);
-            for (std::size_t t = 0; t < kept / 3; ++t) {
-                const MeshVertex corner[3] = {data.vertices[from[ordered[t * 3]]], data.vertices[from[ordered[t * 3 + 1]]], data.vertices[from[ordered[t * 3 + 2]]]};
-                const Vec3f n = cross(corner[1].position - corner[0].position, corner[2].position - corner[0].position);
-                const f32 n_length = length(n);
-                const Vec3f normal = n_length > 1e-20f ? n * (1.0f / n_length) : corner[0].normal;
-                for (std::size_t k = 0; k < 3; ++k) {
-                    MeshVertex v = corner[k];
-                    v.normal = normal;
-                    out.indices[t * 3 + k] = static_cast<u32>(vertex_count + chain.extra_vertices.size());
-                    chain.extra_vertices.push_back(v);
+            for (std::size_t i = 0; i < kept; ++i) {
+                const u32 w = ordered[i];
+                if (slot[w] == ~0u) { // not expected (a level uses vertices of the one before), but cheap to allow
+                    slot[w] = static_cast<u32>(chain.extra_vertices.size());
+                    chain.extra_vertices.push_back(own_vertex(w));
                 }
+                out.indices[i] = static_cast<u32>(vertex_count) + slot[w];
             }
             chain.levels.push_back(std::move(out));
             current.swap(ordered);
@@ -194,6 +219,70 @@ MeshLodChain build_mesh_levels(const MeshData& data, const MeshOptions& options)
         current.swap(ordered);
     }
     return chain;
+}
+
+// The bake of a chain (mesh_levels_bake_key, save_mesh_levels). Raise it whenever build_mesh_levels would make another
+// chain from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
+constexpr u32 levels_bake_version = 1;
+
+u64 mesh_levels_bake_key(const MeshData& data, const MeshOptions& options) {
+    BakeKey key{"kin.mesh_levels", levels_bake_version};
+    key.value(max_mesh_levels).value(options.levels).value(options.target_ratio).value(options.min_reduction).value(options.min_triangles);
+    key.value(options.max_error).value(options.normal_weight).value(options.uv_weight).value(options.color_weight);
+    key.value<u8>(options.lock_border ? 1 : 0);
+    mesh_bake::add_mesh(key, data);
+    return key.hash();
+}
+
+std::vector<u8> save_mesh_levels(const MeshLodChain& chain) {
+    BakeWriter w;
+    std::size_t size = 16 + chain.extra_vertices.size() * mesh_bake::vertex_bytes;
+    for (const MeshLodLevel& level : chain.levels) {
+        size += 16 + level.indices.size() * 4;
+    }
+    w.reserve(size);
+    w.value<u64>(chain.levels.size());
+    for (const MeshLodLevel& level : chain.levels) {
+        w.value(level.triangles);
+        w.value(level.error);
+        w.array(std::span<const u32>{level.indices});
+    }
+    mesh_bake::write_vertices(w, chain.extra_vertices);
+    return std::move(w.bytes());
+}
+
+bool restore_mesh_levels(std::span<const u8> bytes, const MeshData& data, MeshLodChain& out) {
+    out = {};
+    MeshLodChain chain;
+    BakeReader r{bytes};
+    u64 count = 0;
+    if (!r.count(count, 16) || count < 1 || count > max_mesh_levels) {
+        return false;
+    }
+    chain.levels.resize(static_cast<std::size_t>(count));
+    for (MeshLodLevel& level : chain.levels) {
+        r.value(level.triangles);
+        r.value(level.error);
+        r.array(level.indices);
+    }
+    if (!mesh_bake::read_vertices(r, chain.extra_vertices) || !r.done()) {
+        return false;
+    }
+    // Level 0 is the mesh itself; the others are whole triangles over its vertices and the chain's own.
+    const MeshLodLevel& first = chain.levels[0];
+    if (first.triangles != data.triangle_count() || first.error != 0.0f || !first.indices.empty()) {
+        return false;
+    }
+    const u64 vertices = static_cast<u64>(data.vertices.size()) + chain.extra_vertices.size();
+    for (std::size_t l = 1; l < chain.levels.size(); ++l) {
+        const MeshLodLevel& level = chain.levels[l];
+        if (level.indices.size() != static_cast<std::size_t>(level.triangles) * 3 ||
+            !std::all_of(level.indices.begin(), level.indices.end(), [&](u32 i) { return i < vertices; })) {
+            return false;
+        }
+    }
+    out = std::move(chain);
+    return true;
 }
 
 } // namespace kin

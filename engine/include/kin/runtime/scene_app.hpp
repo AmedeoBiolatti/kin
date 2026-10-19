@@ -124,6 +124,9 @@ struct SceneAppConfig {
     // the next run loads (Renderer2D::pipeline_record). Unset: the user data
     // folder, kin/<the window title>/pipelines.txt. Empty: not kept.
     std::optional<std::filesystem::path> pipeline_record_path{};
+    // Expose one Renderer3D through SceneContext for normal/headless/server
+    // runs. Opt-in: 2D games allocate no 3D renderer. Requires experimental 3D.
+    bool rendering_3d = false;
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);

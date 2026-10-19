@@ -17,6 +17,8 @@ struct MaterialTexture3D {
 // component codec (sRGB bytes); texture roles choose sRGB or linear on binding.
 struct MaterialPatch3D {
     std::optional<Color> color;
+    std::optional<std::filesystem::path> shader; // SPIR-V; empty clears it
+    std::optional<std::array<f32,16>> shader_params;
     std::optional<f32> metallic, roughness, emissive, normal_scale, occlusion_strength, alpha_cutoff;
     std::optional<bool> unlit, double_sided, casts_shadow, receives_shadow, wireframe;
     std::optional<Blend3D> blend;
@@ -54,8 +56,4 @@ struct MaterialBinding3D {
     std::vector<Material3D> materials; // one entry per original model part
     std::vector<std::filesystem::path> source_files;
 };
-// Renderer-thread-only low-level builder; throws on invalid selectors, variant
-// or textures. Assets3D::load_materials wraps it with diagnostics/weak caching.
-MaterialBinding3D build_materials3d_binding(const Materials3DAsset& asset, const std::shared_ptr<const Model>& model,
-                                         std::string_view variant, Assets3D& assets);
 } // namespace kin

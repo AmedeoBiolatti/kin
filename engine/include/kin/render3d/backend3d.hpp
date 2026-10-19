@@ -5,6 +5,7 @@
 // docs/3d_plan.md.
 
 #include <kin/core/types.hpp>
+#include <kin/render3d/debug_stats3d.hpp>
 #include <kin/render3d/mesh.hpp>
 #include <kin/render3d/mesh_clusters.hpp>
 #include <kin/render3d/local_lights.hpp>
@@ -37,7 +38,7 @@ struct Renderer3DCapabilities {
     bool ambient_occlusion = false;
     bool contact_shadows = false;
     bool temporal_aa = false;
-    // Whether Scene3D::lod's cluster cut can run in compute (Lod3D::gpu_culling): compute with storage buffers read and
+    // Whether Scene3D::lod's cluster cut can run in compute (Scene3D::debug.gpu_culling): compute with storage buffers read and
     // written, buffers that are index and indirect-argument buffers a compute pass writes. Else the CPU cuts.
     bool gpu_driven_clusters = false;
     // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
@@ -101,154 +102,6 @@ struct ClusterDraw {
     u32 first_instance = 0; // the copy's slot in the instance buffer
 };
 
-// What the last render() drew.
-struct Render3DStats {
-    // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
-    u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;
-    u64 shared_mesh_range_reuses = 0;
-    u32 shared_mesh_pages = 0;
-    u32 draws = 0;     // draw calls
-    u32 instances = 0; // meshes drawn
-    u32 culled = 0;    // meshes skipped, outside the view
-    // Optional instance-cell culling. Tests count refined copies, not individual planes;
-    // rejected local candidates count a copy once per wanted shadow view.
-    // Live bounded GPU tables; per-render upload bytes (records exclude index lists).
-    u64 retained_gpu_bytes = 0, retained_upload_bytes = 0, retained_index_bytes = 0, instance_upload_bytes = 0;
-    u32 retained_instances = 0;
-    // CPU sphere storage: resident-table cache (<=4 MiB), compact transient allocation,
-    // submitted copies using the cache, and actual cache rebuilds this render.
-    u64 bounds_cache_bytes = 0, bounds_scratch_bytes = 0, bounds_cache_rebuilt = 0;
-    u32 bounds_cache_instances = 0;
-    // Draw/piece/task layout reuse, excluding visibility and instance data. Layout bytes
-    // are existing vector payload capacities; cache bytes are the additional key/stamps.
-    u32 prepared_reused = 0, prepared_draws = 0;
-    u64 prepared_cache_bytes = 0, prepared_layout_bytes = 0;
-    u32 spatial_groups = 0;
-    u64 camera_instance_tests = 0, bounds_instance_tests = 0, local_instance_tests = 0;
-    u64 camera_group_rejected = 0, local_group_rejected = 0;
-    u64 camera_range_accepted = 0; // copies classified together from a camera-inside cell proof
-    // Experimental point-light masks: tiles, sum of selected light bits, extra uniform payload, build/upload wall time.
-    u32 point_light_tiles = 0, point_light_tile_slots = 0, point_light_tile_bytes = 0;
-    double point_light_tile_ms = 0;
-    u32 masked_depth_draws = 0, masked_depth_instances = 0; // experimental main-depth cutout prepass
-    // Local gather after whole-cell rejection: candidates, fully accepted ranges,
-    // potential plane tests before per-copy early outs, actual radius tests, byte scratch.
-    u64 local_candidates = 0, local_group_accepted = 0, local_plane_budget = 0, local_radius_tests = 0, local_bucket_bytes = 0;
-    // Local preparation vector payload capacities: gather tasks/counts, caster-union slot map,
-    // and accepted/upload copy lists (including their simultaneous backing storage).
-    u64 local_task_bytes = 0, local_slot_bytes = 0, local_copy_bytes = 0;
-    // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed to the
-    // GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one mesh is one).
-    // Also counted in draws, instances and triangles above. 0 for a frame without any.
-    u32 skinned_copies = 0;
-    u32 skin_matrices = 0;
-    u32 skinned_draws = 0;
-    // Main-pass calls using the specialized unlit shaders; textured calls are a subset.
-    u32 unlit_draws = 0, unlit_textured_draws = 0;
-    u32 shadow_draws = 0; // draw calls into the shadow map
-    u32 shadow_casters = 0; // meshes drawn into it (those seen, and those casting into view; all cascades)
-    u32 shadow_cascades = 0; // maps drawn (0: no shadows)
-    bool shadow_cached = false; // the maps are those of the render before (Lights3D::cache_shadows): nothing was drawn into them, so the shadow numbers above are 0
-    std::array<u32, max_shadow_cascades> cascade_casters{}; // meshes drawn into each cascade
-    u32 ao_draws = 0;      // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither this render)
-    u32 ao_instances = 0;  // meshes drawn into it
-    u32 ao_dispatches = 0; // compute dispatches (the occlusion and its blur)
-    u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
-    // With both on at one size (the occlusion not at half resolution) the two blurs are one dispatch a direction; these
-    // count that dispatch in each of the two numbers above, and this says how many there were (2, else 0).
-    u32 blur_merged = 0;
-    u32 ao_chain_built = 0; // 1 when the occlusion read the linear depth chain this render (the chain's own dispatch is not in ao_dispatches), else 0
-    u32 taa_dispatches = 0; // compute dispatches of the temporal anti-aliasing (the resolve, and the sharpen): 0 when off
-    bool taa_reset = false; // its history was not used this render: the first, after a resize or reset_history(), or the camera changed kind
-    Vec2f taa_jitter{};     // this render's offset in pixels (0, 0 when off)
-    // With temporal anti-aliasing and nothing else that needs a pre-pass, the main pass writes the velocity itself (no
-    // geometry pass for it: ao_draws is 0); false with the pre-pass (ambient occlusion, contact shadows, occlusion culling, an opaque
-    // mesh with a custom shader) or without temporal anti-aliasing.
-    bool taa_main_velocity = false;
-    // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal anti-aliasing and
-    // occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered buffer too), in bytes, and how many
-    // feature groups of them this render gave back: a feature that has not been used for 120 renders (`View3D`'s own, so a view that is
-    // not drawn keeps them) releases its targets, and a feature on again makes them again.
-    u64 feature_bytes = 0;
-    u32 targets_released = 0;
-    // Graphics pipelines this render had to make (the first use of a kind of draw: tens of milliseconds on a cold driver cache). Renderer3D::warm_up
-    // makes the ones a scene will need beforehand, and the first render after it makes none.
-    u32 pipelines_made = 0;
-    u32 samples = 0;        // samples a pixel of the scene took: the view's, or 1 with temporal anti-aliasing
-    u32 lights = 0;    // point lights used
-    // Spot lights and the shadows of lights that are not the sun (P3b). `spots`: the spot lights used (those that reach the view, at
-    // most 16). `spot_slot[i]` and `point_slot[i]`: the shadow-map slot of Lights3D::spots[i] and ::points[i] (-1: none; a point
-    // light's is its cube's). `local_shadow_maps`: layers of the local array in use this render (a spot's one, a point light's cube's
-    // faces that a visible surface can fall in), `local_shadow_drawn` of them drawn now and `local_shadow_cached` kept from before
-    // (Lights3D::cache_shadows); `local_shadow_draws` and `local_shadow_casters` the draw calls and meshes drawn into them (the moon's
-    // cascades included). `moon_cascades`: the fill light's shadow cascades this render (0: none). `local_shadow_bytes`: the video
-    // memory the local and moon arrays hold. `lights_variant`: the main pass used the light shaders.
-    u32 spots = 0;
-    static constexpr std::size_t max_reported_lights = 64; // lights past this index are not reported
-    std::array<i32, max_reported_lights> spot_slot{};
-    std::array<i32, max_reported_lights> point_slot{};
-    u32 local_shadow_maps = 0, local_shadow_drawn = 0, local_shadow_cached = 0, local_shadow_draws = 0, local_shadow_casters = 0;
-    u32 moon_cascades = 0;
-    u64 local_shadow_bytes = 0;
-    u64 local_shadow_triangles = 0; // submitted to the local and moon maps this render (a clustered copy's: its cut's, from the light)
-    bool lights_variant = false;
-    u32 environment_prefilters = 0; // environments filtered by this render (once each)
-    // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader variants (custom
-    // shaders are not fogged); with Lights3D::sky_lights_scene the environment was made again this render (the sky moved
-    // past Sky3D::light_threshold and light_interval renders had passed), how many times so far, and the CPU time spent recording the last one.
-    bool sky_drawn = false;
-    bool fog_applied = false;
-    bool sky_env_regenerated = false;
-    u32 sky_env_generations = 0;
-    f64 sky_env_cpu_ms = 0.0;
-    // Particles and weather (P3c). `particles_submitted`: sprites handed in (the scene's batches and the weather's layers),
-    // `particles_drawn`: those left after the view's cull and the frame's limit (written to the GPU: 64 bytes each),
-    // `particle_batches`: batches drawn (one instanced draw each), `particle_soft`: batches that read the depth, `weather_particles`:
-    // of the submitted, the weather's. `particles_dropped`: past the frame's limit. `particle_cpu_ms`: the weather's making, the
-    // culling, the sorting and the writing.
-    u32 particles_submitted = 0;
-    u32 particles_drawn = 0;
-    u32 particle_batches = 0;
-    u32 particle_soft = 0;
-    u32 weather_particles = 0;
-    u32 particles_dropped = 0;
-    f64 particle_cpu_ms = 0.0;
-    u64 triangles = 0; // drawn by the main pass: at the level each copy is drawn at (Scene3D::lod)
-    // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is off).
-    std::array<u32, max_mesh_levels> lod_copies_by_level{};
-    // With Scene3D::lod and a mesh with clusters (MeshOptions::clusters): the copies cut through their hierarchy this
-    // render (those the camera or a shadow map sees), the clusters the cuts looked at, the clusters of the camera's
-    // cut that are in view (`triangles` counts what they draw), the bytes of the compacted indices uploaded (all
-    // passes), and the CPU time of the cuts (choosing, compacting, handing over the upload).
-    u32 cluster_copies = 0;
-    u64 clusters_tested = 0;
-    u32 clusters_drawn = 0;
-    u32 cluster_upload_bytes = 0;
-    f64 cluster_ms = 0.0;
-    f64 cluster_upload_ms = 0.0; // of which the compaction and handing over the upload (the rest is choosing)
-    // When the cut ran in compute (Lod3D::gpu_culling): `cluster_gpu` is true, `cluster_copies` the copies it covers,
-    // `cluster_upload_bytes` the bytes handed over (its table of copies), `cluster_ms` the CPU time of setting it up
-    // and recording it, `cluster_dispatches` its compute dispatches. The counts below need Lod3D::stats_readback (0
-    // without): `clusters_tested` the clusters looked at (all of every copy's), `clusters_drawn` and `triangles` the
-    // camera's cut, `cluster_overflow` the clusters dropped for lack of room in Lod3D::max_cluster_triangles, in all
-    // passes, `cluster_triangles_all` the triangles gathered for all passes.
-    bool cluster_gpu = false;
-    u32 cluster_dispatches = 0;
-    u32 cluster_overflow = 0;
-    u64 cluster_triangles_all = 0;
-    // With Lod3D::occlusion (and the GPU cut): `occlusion` is true when it ran this render; `occlusion_levels` the depth
-    // pyramid's levels; `occlusion_dispatches` the compute dispatches that built it. With stats_readback: the clusters
-    // that were in the cut and in view but behind this frame's depth (`clusters_occluded`, `triangles_occluded`: not
-    // drawn), the clusters drawn in the first pass because they showed last frame and were hidden after all
-    // (`clusters_wasted`, `triangles_wasted`), and the clusters of the first pass (`clusters_first_pass`).
-    bool occlusion = false;
-    u32 occlusion_levels = 0;
-    u32 occlusion_dispatches = 0;
-    u32 clusters_occluded = 0, clusters_wasted = 0, clusters_first_pass = 0;
-    u64 triangles_occluded = 0, triangles_wasted = 0;
-    f64 cpu_ms = 0.0;  // render()'s own time on the CPU
-};
-
 // A view's targets on the backend.
 class IView3DBackend {
 public:
@@ -269,8 +122,9 @@ public:
     virtual Renderer3DCapabilities capabilities() const = 0;
     // Null when the data can't be uploaded (validated already). `chain`, when
     // not null, holds the levels of detail to keep with it (level 0 of it is `data`).
-    // `clusters`, when not null, is the mesh's cluster hierarchy (MeshOptions::clusters): the mesh is then
-    // kept as its welded vertices and leaf clusters, and `data` is not used, nor `chain` (null then).
+    // `clusters`, when not null, is the mesh's cluster hierarchy (MeshOptions::clusters), to keep for the cut: `data`
+    // is then its welded vertices and its leaves' triangles (MeshClusterBuild::vertices, MeshClusters::leaf_indices),
+    // which the hierarchy does not hold, and `chain` is null.
     virtual std::shared_ptr<IMeshBackend> create_mesh(const MeshData& data, const MeshLodChain* chain,
                                                       std::shared_ptr<const MeshClusters> clusters) = 0;
     // An equirectangular picture of `size` pixels, three floats (linear RGB)
@@ -283,7 +137,7 @@ public:
     virtual bool resize_view(IView3DBackend& view, Vec2i size) = 0;
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
-    virtual bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) = 0;
+    virtual bool render(IView3DBackend& view, const Scene3D& scene, Render3DDebugStats& stats) = 0;
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual PickResult pick(IView3DBackend& view, Vec2i pixel) = 0;
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False where there is nothing to make.

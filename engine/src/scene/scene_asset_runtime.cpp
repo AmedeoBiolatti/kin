@@ -65,7 +65,7 @@ bool SceneAssetRuntime::load(const std::filesystem::path& scene_path,
     return true;
 }
 
-bool SceneAssetRuntime::instantiate(EcsWorld& world) {
+bool SceneAssetRuntime::instantiate(EcsWorld& world, SceneInstantiateOptions options) {
     _diagnostics.clear();
     if (!_loaded) {
         _diagnostics.push_back("scene asset runtime is not loaded");
@@ -76,7 +76,7 @@ bool SceneAssetRuntime::instantiate(EcsWorld& world) {
         return false;
     }
 
-    auto instance = instantiate_scene_asset(world, _scene, _asset_root, world.components(),{.content_root=_asset_root,.max_source_bytes=_limits.max_source_bytes,.max_entities=_limits.max_entities,.max_depth=_limits.max_prefab_depth,.max_sources=_limits.max_prefab_sources});
+    auto instance = instantiate_scene_asset(world, _scene, _asset_root, world.components(),{.content_root=_asset_root,.max_source_bytes=_limits.max_source_bytes,.max_entities=_limits.max_entities,.max_depth=_limits.max_prefab_depth,.max_sources=_limits.max_prefab_sources},options);
     if (!instance.ok()) {
         _diagnostics = std::move(instance.diagnostics);
         return false;

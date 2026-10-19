@@ -273,6 +273,16 @@ public:
     // logs and returns an invalid texture. Data textures are only for shaders;
     // draw_texture() refuses them.
     Texture create_texture(Vec2i size, TextureFormat format, const void* pixels = nullptr);
+    // A texture of block-compressed texels, from a KTX2 or DDS file read by
+    // decode_compressed_image (kin/assets/texture_file.hpp), with the file's own
+    // mip chain: set_scale_mode(Mipmapped) samples those levels and never makes
+    // new ones. Drawn and sampled like any texture, but never updated in place;
+    // an sRGB format's texels are colour as create_texture_from_rgba's are, a
+    // Unorm one's the numbers create_texture's hold. Invalid when the image is
+    // not valid(), or the backend or device cannot sample its format (the
+    // SDL_Renderer backend has none; few desktop GPUs have ASTC), said once a
+    // format.
+    Texture create_texture_compressed(const CompressedImage& image);
     // Replace part of a texture in place: the `size` texels at `at` from `pixels`,
     // tightly packed in the texture's format (texture_format_bytes each). Much cheaper
     // than making the texture again when only part of it changes. False when the
@@ -550,6 +560,7 @@ private:
 
     u64 _id = 0;
     std::unique_ptr<IRenderer2DBackend> _backend;
+    u32 _compressed_refused = 0; // a bit for each format create_texture_compressed has said it cannot make
     std::vector<RenderTargetPoolEntry> _rt_pool;
     std::unordered_map<int, ShaderHandle> _builtin_shaders; // BuiltinShader -> cached handle
     std::unordered_map<u64, std::shared_ptr<const ShaderLayout>> _shader_layouts; // read from each shader's SPIR-V

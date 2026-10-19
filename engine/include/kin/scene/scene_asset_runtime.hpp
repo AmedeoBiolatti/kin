@@ -10,6 +10,10 @@
 namespace kin {
 
 class ScriptScene;
+#ifdef KIN_EXPERIMENTAL_3D
+class Assets3D;
+struct SceneBindingOptions3D;
+#endif
 
 enum class SceneAssetRuntimeChange {
     None,
@@ -30,7 +34,10 @@ public:
               const EcsComponentRegistry& components,
               SceneAssetLoadLimits limits = {});
 
-    bool instantiate(EcsWorld& world);
+    bool instantiate(EcsWorld& world, SceneInstantiateOptions options = {});
+#ifdef KIN_EXPERIMENTAL_3D
+    bool instantiate3d(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options);
+#endif
     void clear(EcsWorld& world);
 
     SceneAssetRuntimeChange poll_changes() const;

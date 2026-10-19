@@ -5,13 +5,16 @@
 #include "skin_fixtures.hpp"
 #include "../examples/sponza_walk/ik_rig.hpp"
 
+#include <kin/assets/content.hpp>
 #include <kin/ecs/render3d.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/platform/log.hpp>
 #include <kin/render3d/animation3d.hpp>
 #include <kin/render3d/ik.hpp>
 #include <kin/render3d/model.hpp>
 #include <kin/render3d/skeleton.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <chrono>
@@ -23,6 +26,7 @@
 #include <functional>
 #include <iostream>
 #include <random>
+#include <span>
 
 namespace {
 
@@ -353,6 +357,11 @@ void test_root_motion() {
     m = extract_root_motion(clip, sk, 1.5f, 2.5f, true, {.x = true, .y = false, .z = true, .rotation = true});
     assert(close(m.translation, {2.0f, 0, 0}, 1e-5f));          // 3 -> 4 (1) and 0 -> 1 (1)
     assert(close(m.rotation, rz(45), 1e-4f));                  // 67.5 -> 90, then 0 -> 22.5
+    // Backwards across the start (a negative speed): the start's motion from `from`, then the end's to `to`, not the
+    // whole clip's travel forwards.
+    m = extract_root_motion(clip, sk, 0.5f, -0.5f, true, {.x = true, .y = false, .z = true, .rotation = true});
+    assert(close(m.translation, {-2.0f, 0, 0}, 1e-5f));         // 1 -> 0 (-1) and 4 -> 3 (-1)
+    assert(close(m.rotation, rz(-45), 1e-4f));                  // 22.5 -> 0, then 90 -> 67.5
     // Not looping: held at the end, no motion past it.
     m = extract_root_motion(clip, sk, 1.5f, 3.0f, false);
     assert(close(m.translation, {1.0f, 0, 0}));
@@ -504,6 +513,18 @@ void test_player_layers_and_root_motion() {
     p3.play(&walk);
     p3.update(0.5f);
     assert(close(p3.pose().joints[0].translation, {1.5f, 0, 0}) && close(p3.root_motion().translation, {0, 0, 0}));
+    // A negative speed on a loop: the step across the start is a small step back, not the clip's whole travel forwards.
+    AnimationPlayer3D p4{&sk};
+    p4.set_speed(-1.0f);
+    p4.play(&walk);
+    p4.set_root_motion(true);
+    float back = 0.0f;
+    for (int i = 0; i < 25; ++i) { // 2.5 s backwards, across two wraps
+        p4.update(0.1f);
+        assert(p4.root_motion().translation.x < 0.0f);
+        back += p4.root_motion().translation.x;
+    }
+    assert(close(back, -7.5f, 1e-3f));
 }
 
 // --- bounds ----------------------------------------------------------------------------------------------------------------
@@ -751,14 +772,20 @@ void test_loader_skins_and_clips() {
     w = weights_of(read(skin_fixtures::make_gltf(o)));
     assert(close(w[5][0], 1.0f) && close(w[5][1], 0.0f)); // the index 200 influence is dropped, the rest renormalised
 
-    // Morph target weights channels are ignored (logged); the joints' clip is kept. So are animations of nodes that are no joints.
+    // Morph target weights channels are ignored (logged); the joints' clip is kept. A node that is no joint, moved by the same
+    // animation, is the node skeleton's (after the skin), and its channel a second clip of the same name after the skin's.
     o = {};
     o.morph_channel = true;
     o.node_animation = true;
     auto data3 = read(skin_fixtures::make_gltf(o));
-    assert(data3.clips.size() == 1 && data3.clips[0].channels.size() == 2 && data3.clips[0].channels[1].rotation.times.size() == 3);
-    // The loose mesh (a node that is no joint) is a static part at its node's placing; the strip is skinned.
+    assert(data3.clips.size() == 2 && data3.clips[0].channels.size() == 2 && data3.clips[0].channels[1].rotation.times.size() == 3);
+    assert(data3.clips[0].skeleton == 0 && data3.skeletons.size() == 2 && data3.node_skeleton == 1);
+    assert(data3.clips[1].name == "bend" && data3.clips[1].skeleton == 1 && data3.clips[1].channels.size() == 1);
+    assert(data3.clips[1].channels[0].translation.times.size() == 3 && close(data3.clips[1].duration, 2.0f));
+    assert(data3.skeletons[1].names == std::vector<std::string>{"loose"} && data3.skeletons[1].parents == std::vector<i32>{-1});
+    // The loose mesh (a node that is no joint) is a static part at its node's placing, hanging from it; the strip is skinned.
     assert(data3.parts.size() == 2 && data3.parts[0].skin == 0 && data3.parts[1].skin == -1);
+    assert(data3.parts[0].node == -1 && data3.parts[1].node == 0);
 
     // A mesh on a node under a joint becomes a part bound to that joint, in the space the inverse binds start from.
     o = {};
@@ -807,6 +834,185 @@ void test_loader_skin_limits() {
     assert(data.parts.size() == 1 && data.parts[0].skin == -1 && !data.parts[0].mesh.skinned());
     // Static, at its node's placing (as a model without a skin would be).
     assert(data.parts[0].mesh.vertices.size() == 6);
+}
+
+// `values` appended to `buffer` (from a multiple of four bytes): their buffer view, as {offset, length}.
+template <class T>
+std::pair<std::size_t, std::size_t> append_values(std::vector<std::uint8_t>& buffer, const std::vector<T>& values) {
+    while (buffer.size() % 4 != 0) buffer.push_back(0);
+    const std::size_t offset = buffer.size();
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(values.data());
+    buffer.insert(buffer.end(), bytes, bytes + values.size() * sizeof(T));
+    return {offset, values.size() * sizeof(T)};
+}
+
+// A .gltf of `rest` (its nodes, meshes, accessors and so on), with `buffer` embedded as buffer 0 and `views` its buffer views.
+std::string test_gltf(const std::vector<std::uint8_t>& buffer, const std::vector<std::pair<std::size_t, std::size_t>>& views, const std::string& rest) {
+    std::ostringstream j;
+    j << "{\"asset\":{\"version\":\"2.0\"}," << rest << ",\"buffers\":[{\"byteLength\":" << buffer.size()
+      << ",\"uri\":\"data:application/octet-stream;base64," << skin_fixtures::base64(buffer) << "\"}],\"bufferViews\":[";
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        j << (i ? "," : "") << "{\"buffer\":0,\"byteOffset\":" << views[i].first << ",\"byteLength\":" << views[i].second << "}";
+    }
+    j << "]}";
+    return j.str();
+}
+
+// Whether a warning `message` with a detail holding `detail` was logged.
+bool logged(const std::vector<LogEvent>& events, std::string_view message, std::string_view detail) {
+    return std::any_of(events.begin(), events.end(), [&](const LogEvent& event) {
+        return event.message == message && std::any_of(event.fields.begin(), event.fields.end(), [&](const LogField& field) {
+                   return field.name == "detail" && field.value.find(detail) != std::string::npos;
+               });
+    });
+}
+
+void test_loader_refuses_unreadable_geometry() {
+    // One triangle three ways: plainly, with its POSITION sparse (a corner replaced), and with its POSITION read as VEC2. cgltf
+    // reads neither of the last two element by element (it hands back nothing, or a z of 0): they are left out and logged, not
+    // drawn as a heap of vertices at the origin.
+    std::vector<std::uint8_t> buffer;
+    const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+    const auto sparse_index = append_values(buffer, std::vector<std::uint16_t>{1});
+    const auto sparse_value = append_values(buffer, std::vector<float>{5, 5, 5});
+    const std::string json = test_gltf(buffer, {corners, sparse_index, sparse_value},
+        "\"scene\":0,\"scenes\":[{\"nodes\":[0,1,2]}],"
+        "\"nodes\":[{\"name\":\"plain\",\"mesh\":0},{\"name\":\"sparse\",\"mesh\":1},{\"name\":\"flat\",\"mesh\":2}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]},{\"primitives\":[{\"attributes\":{\"POSITION\":1}}]},"
+        "{\"primitives\":[{\"attributes\":{\"POSITION\":2}}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\",\"sparse\":{\"count\":1,"
+        "\"indices\":{\"bufferView\":1,\"componentType\":5123},\"values\":{\"bufferView\":2}}},"
+        "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC2\"}]");
+    std::vector<LogEvent> events;
+    const LoggerConfig before = logger_config();
+    set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+    ModelData data;
+    std::string error;
+    const bool ok = read_model_data(json, "refusals.gltf", data, &error);
+    set_logger_config(before);
+    assert(ok);
+    assert(data.parts.size() == 1 && data.parts[0].name == "plain" && data.parts[0].mesh.vertices.size() == 3);
+    assert(close(data.parts[0].mesh.bounds().max, {1, 1, 0}));
+    const char* left_out = "3D: a mesh primitive is left out (its geometry cannot be read)";
+    assert(logged(events, left_out, "sparse: a sparse accessor is not read"));
+    assert(logged(events, left_out, "flat: an attribute has the wrong number of components"));
+}
+
+void test_loader_keeps_nodes_between_joints() {
+    // Hips (a joint) -> SpineOffset (a plain node, moved and turned) -> Spine (a joint), under an Armature moved 2 in x. The
+    // inverse bind matrices are the joints' world matrices inverted, as an exporter makes them, so every joint matrix is the
+    // identity at rest only when the offset is in the skeleton (without it Spine rests 0.5 too low and unturned).
+    const Quatf turn = Quatf{0.0f, 0.0f, 0.70710678f, 0.70710678f}.normalized(); // 90 degrees about Z
+    const Mat4f hips_world = Mat4f::translation({2, 0, 0}) * Mat4f::translation({0, 1, 0});
+    const Mat4f spine_world = hips_world * Mat4f::trs({0, 0.5f, 0}, turn, {1, 1, 1}) * Mat4f::translation({0, 0.25f, 0});
+    std::vector<float> binds;
+    for (const Mat4f& world : {hips_world, spine_world}) {
+        const Mat4f inverse = world.inverse();
+        binds.insert(binds.end(), inverse.m, inverse.m + 16);
+    }
+    const Quatf bow = Quatf::axis_angle({1, 0, 0}, 30);
+    std::vector<std::uint8_t> buffer;
+    const auto corners = append_values(buffer, std::vector<float>{-0.5f, 1.5f, 0, 0.5f, 1.5f, 0, 0, 2, 0});
+    const auto joints = append_values(buffer, std::vector<std::uint8_t>{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0}); // the file's joint 1: Spine
+    const auto weights = append_values(buffer, std::vector<float>{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0});
+    const auto inverse_binds = append_values(buffer, binds);
+    const auto times = append_values(buffer, std::vector<float>{0, 1});
+    const auto rotations = append_values(buffer, std::vector<float>{0, 0, 0, 1, bow.x, bow.y, bow.z, bow.w});
+    const std::string json = test_gltf(buffer, {corners, joints, weights, inverse_binds, times, rotations},
+        "\"scene\":0,\"scenes\":[{\"nodes\":[0,4]}],"
+        "\"nodes\":[{\"name\":\"Armature\",\"translation\":[2,0,0],\"children\":[1]},"
+        "{\"name\":\"Hips\",\"translation\":[0,1,0],\"children\":[2]},"
+        "{\"name\":\"SpineOffset\",\"translation\":[0,0.5,0],\"rotation\":[0,0,0.70710678,0.70710678],\"children\":[3]},"
+        "{\"name\":\"Spine\",\"translation\":[0,0.25,0]},"
+        "{\"name\":\"body\",\"mesh\":0,\"skin\":0}],"
+        "\"skins\":[{\"inverseBindMatrices\":3,\"joints\":[1,3]}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"JOINTS_0\":1,\"WEIGHTS_0\":2}}]}],"
+        "\"animations\":[{\"name\":\"bow\",\"samplers\":[{\"input\":4,\"output\":5}],"
+        "\"channels\":[{\"sampler\":0,\"target\":{\"node\":3,\"path\":\"rotation\"}}]}],"
+        "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        "{\"bufferView\":1,\"componentType\":5121,\"count\":3,\"type\":\"VEC4\"},"
+        "{\"bufferView\":2,\"componentType\":5126,\"count\":3,\"type\":\"VEC4\"},"
+        "{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"MAT4\"},"
+        "{\"bufferView\":4,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
+        "{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}]");
+    ModelData data;
+    std::string error;
+    assert(read_model_data(json, "between.gltf", data, &error));
+    assert(data.skeletons.size() == 1 && data.parts.size() == 1 && data.parts[0].skin == 0);
+    const Skeleton& sk = data.skeletons[0];
+    const i32 hips = sk.find("Hips"), offset = sk.find("SpineOffset"), spine = sk.find("Spine");
+    assert(sk.joint_count() == 3 && sk.validate() && hips >= 0 && offset >= 0 && spine >= 0);
+    assert(sk.parents[static_cast<std::size_t>(offset)] == hips && sk.parents[static_cast<std::size_t>(spine)] == offset);
+    assert(close(sk.root_transform.m[12], 2.0f));
+    std::vector<Mat4f> matrices;
+    compute_joint_matrices(sk, sk.rest_pose(), matrices);
+    for (const Mat4f& m : matrices) {
+        const Mat4f identity{};
+        for (int i = 0; i < 16; ++i) assert(close(m.m[i], identity.m[i], 1e-5f));
+    }
+    // The vertices, bound to the file's joint 1, are bound to Spine in the skeleton's order; the clip moves Spine, not the offset.
+    assert(data.parts[0].mesh.skin.size() == 3);
+    for (const MeshSkinVertex& v : data.parts[0].mesh.skin) assert(v.joints[0] == static_cast<u8>(spine) && close(v.weights[0], 1.0f));
+    assert(data.clips.size() == 1 && data.clips[0].channels.size() == 3);
+    assert(data.clips[0].channels[static_cast<std::size_t>(spine)].rotation.times.size() == 2);
+    assert(data.clips[0].channels[static_cast<std::size_t>(offset)].rotation.times.empty());
+}
+
+void test_loader_refuses_hostile_files() {
+    std::vector<std::uint8_t> buffer;
+    const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+    const std::string triangle = "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+                                 "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}]";
+    // Nodes nested `depth` deep, the triangle on the deepest: 512 are read (a 256-joint chain must); more are refused,
+    // for the reader recurses.
+    const auto nested = [&](int depth) {
+        std::string nodes = "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[";
+        for (int i = 0; i + 1 < depth; ++i) nodes += "{\"children\":[" + std::to_string(i + 1) + "]},";
+        return test_gltf(buffer, {corners}, nodes + "{\"mesh\":0}]," + triangle);
+    };
+    ModelData data;
+    std::string error;
+    assert(read_model_data(nested(512), "nested.gltf", data, &error) && data.parts.size() == 1);
+    assert(!read_model_data(nested(520), "nested.gltf", data, &error) && error.find("nest more than 512 deep") != std::string::npos);
+
+    // A model under the content root may name a buffer up a folder ("../"), but not one that ".." takes out of the root, nor
+    // an absolute path, even when the file is there: that model does not load. A loose model outside any root keeps "..".
+    const std::filesystem::path folder = std::filesystem::temp_directory_path() /
+        ("kin-skeleton-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(folder / "content" / "models");
+    std::filesystem::create_directories(folder / "loose"); // "loose/../triangle.bin" needs the folder to exist for the OS to resolve ".."
+    for (const std::filesystem::path& file : {folder / "triangle.bin", folder / "content" / "triangle.bin"}) {
+        std::ofstream out{file, std::ios::binary};
+        out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    }
+    const auto naming = [&](const std::string& uri) {
+        std::string json = test_gltf(buffer, {corners}, "\"nodes\":[{\"mesh\":0}]," + triangle);
+        const std::size_t at = json.find("data:application/octet-stream");
+        json.replace(at, json.find('"', at) - at, uri);
+        return json;
+    };
+    const auto reads = [&](const std::string& uri, const std::filesystem::path& model) {
+        return read_model_data(naming(uri), model, data, &error) && data.parts.size() == 1;
+    };
+    char program[] = "skeleton-tests";
+    std::string root_arg = "--content=" + (folder / "content").string(), none_arg = "--content=" + (folder / "nowhere").string();
+    char* root_argv[] = {program, root_arg.data()};
+    char* none_argv[] = {program, none_arg.data()};
+    const bool rooted = !find_content_root({}, 2, root_argv).empty();
+    const bool beside = reads("triangle.bin", folder / "content" / "beside.gltf");
+    const bool up_inside = reads("../triangle.bin", folder / "content" / "models" / "climbs.gltf");
+    const bool up_out = reads("../../triangle.bin", folder / "content" / "models" / "escapes.gltf");
+    const std::string up_out_error = error;
+    const bool absolute = reads((folder / "content" / "triangle.bin").generic_string(), folder / "content" / "absolute.gltf");
+    const bool loose = reads("../triangle.bin", folder / "loose" / "loose.gltf");
+    find_content_root({}, 2, none_argv); // no root again: content_root() is empty
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+    assert(rooted && content_root().empty());
+    assert(beside && up_inside && loose);
+    assert(!up_out && up_out_error.find("outside its content") != std::string::npos);
+    assert(!absolute);
 }
 
 // The CPU cost of animating one character a frame, printed (no assertion: a machine's speed is not a test): a clip sampled and its joint
@@ -945,6 +1151,300 @@ float max_difference(const Pose& a, const Pose& b) {
         worst = std::max(worst, 1.0f - std::min(d, 1.0f));
     }
     return worst;
+}
+
+// --- animated nodes --------------------------------------------------------------------------------------------------------
+
+// A small crane in a glTF: "base" (a triangle, at x 1) carries "arm" (2 up), which carries "tip" (a triangle 1 out in z, twice
+// the size); "ground" (a triangle at x 5) hangs from nothing that moves, and "marker" carries no mesh. The animation "swing"
+// moves the arm (2 to 3 up, and a turn of 90 degrees about Y, over a second), the marker, and "elsewhere", a mesh of another
+// scene. Without `animated` there is no animation; with `meshless` only the marker moves.
+std::string crane_gltf(bool animated = true, bool meshless = false) {
+    std::vector<std::uint8_t> buffer;
+    const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+    const auto times = append_values(buffer, std::vector<float>{0, 1});
+    const auto moves = append_values(buffer, std::vector<float>{0, 2, 0, 0, 3, 0});
+    const Quatf turn = Quatf::axis_angle({0, 1, 0}, 90);
+    const auto turns = append_values(buffer, std::vector<float>{0, 0, 0, 1, turn.x, turn.y, turn.z, turn.w});
+    std::string json =
+        "\"scene\":0,\"scenes\":[{\"nodes\":[0,3,5]},{\"nodes\":[4]}],"
+        "\"nodes\":[{\"name\":\"base\",\"mesh\":0,\"translation\":[1,0,0],\"children\":[1]},"
+        "{\"name\":\"arm\",\"translation\":[0,2,0],\"children\":[2]},"
+        "{\"name\":\"tip\",\"mesh\":0,\"translation\":[0,0,1],\"scale\":[2,2,2]},"
+        "{\"name\":\"ground\",\"mesh\":0,\"translation\":[5,0,0]},"
+        "{\"name\":\"elsewhere\",\"mesh\":0},"
+        "{\"name\":\"marker\",\"translation\":[0,0,-3]}],"
+        "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],";
+    if (animated && meshless) {
+        json += "\"animations\":[{\"name\":\"idle\",\"samplers\":[{\"input\":1,\"output\":2}],"
+                "\"channels\":[{\"sampler\":0,\"target\":{\"node\":5,\"path\":\"translation\"}}]}],";
+    } else if (animated) {
+        json += "\"animations\":[{\"name\":\"swing\",\"samplers\":[{\"input\":1,\"output\":2},{\"input\":1,\"output\":3}],"
+                "\"channels\":[{\"sampler\":0,\"target\":{\"node\":1,\"path\":\"translation\"}},"
+                "{\"sampler\":1,\"target\":{\"node\":1,\"path\":\"rotation\"}},"
+                "{\"sampler\":0,\"target\":{\"node\":4,\"path\":\"translation\"}},"
+                "{\"sampler\":0,\"target\":{\"node\":5,\"path\":\"translation\"}}]}],";
+    }
+    json += "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+            "{\"bufferView\":1,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
+            "{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"},"
+            "{\"bufferView\":3,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}]";
+    return test_gltf(buffer, {corners, times, moves, turns}, json);
+}
+
+// The crane read with a fake mesh for each part (no GPU): a Model to pose and draw on the CPU.
+std::shared_ptr<Model> crane_model(const ModelData& data) {
+    struct FakeMesh final : IMeshBackend {};
+    auto model = std::make_shared<Model>();
+    for (const ModelPartData& part : data.parts) {
+        model->parts.push_back({part.name, Mesh{std::make_shared<FakeMesh>(), 3, 3, part.mesh.bounds()}, {}, part.transform, part.skin,
+                                part.node, part.node_offset});
+    }
+    model->skeletons = data.skeletons;
+    model->clips = data.clips;
+    model->node_skeleton = data.node_skeleton;
+    return model;
+}
+
+bool close(const Mat4f& a, const Mat4f& b, float eps = 1e-5f) {
+    for (int i = 0; i < 16; ++i) {
+        if (!close(a.m[i], b.m[i], eps)) return false;
+    }
+    return true;
+}
+bool same(const Mat4f& a, const Mat4f& b) { return std::memcmp(a.m, b.m, sizeof(a.m)) == 0; }
+
+const ModelPart& part_called(const Model& model, std::string_view name) {
+    const auto found = std::find_if(model.parts.begin(), model.parts.end(), [&](const ModelPart& p) { return p.name == name; });
+    assert(found != model.parts.end());
+    return *found;
+}
+std::size_t index_of(const Model& model, std::string_view name) { return static_cast<std::size_t>(&part_called(model, name) - model.parts.data()); }
+
+// Where the crane's tip is in the model at `t` seconds of "swing": base, the arm moved and turned, the tip below it.
+Mat4f crane_tip_at(float t) {
+    return Mat4f::translation({1, 0, 0}) * Mat4f::trs({0, 2 + t, 0}, Quatf::axis_angle({0, 1, 0}, 90 * t), {1, 1, 1}) *
+           Mat4f::trs({0, 0, 1}, Quatf{}, {2, 2, 2});
+}
+
+// The plain nodes a glTF animation moves are a skeleton of the model, its node skeleton: the moved nodes and those above them,
+// parents first, the nodes' names and rest placings, identity inverse binds; its clip has the nodes' channels; each part that is
+// not skinned hangs from its nearest node in it, and a pose places it at that node's matrix times its placing below. A file
+// without the animation reads exactly as before, and nodes the model draws nothing below, or of another scene, are not animated.
+void test_loader_node_animation() {
+    std::vector<LogEvent> events;
+    const LoggerConfig before = logger_config();
+    set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+    ModelData data, plain, meshless;
+    std::string error;
+    const bool read_crane = read_model_data(crane_gltf(), "crane.gltf", data, &error);
+    const bool read_plain = read_model_data(crane_gltf(false), "plain.gltf", plain, &error);
+    const bool read_meshless = read_model_data(crane_gltf(true, true), "meshless.gltf", meshless, &error);
+    set_logger_config(before);
+    assert(read_crane && read_plain && read_meshless);
+
+    // The node skeleton: base and arm (the arm's parent), then the marker, a root of its own; "elsewhere" is another scene's.
+    assert(data.skeletons.size() == 1 && data.node_skeleton == 0);
+    const Skeleton& sk = data.skeletons[0];
+    assert(sk.validate() && (sk.names == std::vector<std::string>{"base", "arm", "marker"}) && (sk.parents == std::vector<i32>{-1, 0, -1}));
+    assert(close(sk.rest[0].translation, {1, 0, 0}) && close(sk.rest[1].translation, {0, 2, 0}) && close(sk.rest[2].translation, {0, 0, -3}));
+    for (const Mat4f& m : sk.inverse_bind) assert(same(m, Mat4f{}));
+    assert(same(sk.root_transform, Mat4f{}));
+    assert(data.clips.size() == 1);
+    const AnimClip3D& swing = data.clips[0];
+    assert(swing.name == "swing" && swing.skeleton == 0 && swing.channels.size() == 3 && close(swing.duration, 1.0f));
+    assert(swing.channels[0].translation.empty() && swing.channels[0].rotation.empty());
+    assert(swing.channels[1].translation.times.size() == 2 && swing.channels[1].rotation.times.size() == 2 && swing.channels[1].scale.empty());
+    assert(swing.channels[2].translation.times.size() == 2);
+    assert(logged(events, "3D: an animation moves nodes no part of the model hangs from: those channels are ignored", "swing"));
+
+    // The parts: the base hangs from its own node, the tip from the arm (its placing below it kept), the ground from nothing.
+    const std::shared_ptr<Model> crane = crane_model(data);
+    assert(crane->parts.size() == 3);
+    const ModelPart& base = part_called(*crane, "base");
+    const ModelPart& tip = part_called(*crane, "tip");
+    const ModelPart& ground = part_called(*crane, "ground");
+    assert(base.node == 0 && same(base.node_offset, Mat4f{}) && tip.node == 1 && ground.node == -1 && same(ground.node_offset, Mat4f{}));
+    assert(close(tip.node_offset, Mat4f::trs({0, 0, 1}, Quatf{}, {2, 2, 2})) && close(tip.transform, crane_tip_at(0.0f)));
+
+    // Posed: the player's joint matrices are the nodes' world matrices (identity inverse binds), and part_transform places each.
+    AnimationPlayer3D player{&crane->skeletons[0]};
+    player.play(crane->find_clip("swing"), false);
+    std::vector<Mat4f> nodes, world;
+    player.joint_matrices(nodes);
+    for (std::size_t i = 0; i < crane->parts.size(); ++i) assert(close(crane->part_transform(i, nodes), crane->parts[i].transform, 1e-6f));
+    player.update(0.5f);
+    player.joint_matrices(nodes);
+    compute_world_matrices(crane->skeletons[0], player.pose(), world);
+    assert(nodes.size() == 3 && max_difference(nodes, world) == 0.0f);
+    assert(close(crane->part_transform(index_of(*crane, "tip"), nodes), crane_tip_at(0.5f)));
+    assert(close(crane->part_transform(index_of(*crane, "base"), nodes), base.transform));
+    assert(same(crane->part_transform(index_of(*crane, "ground"), nodes), ground.transform));
+    assert(close(nodes[2].apply({0, 0, 0}), {0, 2.5f, 0.0f})); // the marker moves too (its track replaces its rest), carrying nothing
+    // Too few matrices, or a part past the parts: at rest, and the identity.
+    assert(same(crane->part_transform(index_of(*crane, "tip"), std::span<const Mat4f>{nodes}.first(1)), tip.transform));
+    assert(same(crane->part_transform(99, nodes), Mat4f{}));
+
+    // Without the animation: no node skeleton, no clip, every part as it was (its placing to the bit, hanging from nothing).
+    assert(plain.skeletons.empty() && plain.clips.empty() && plain.node_skeleton == -1 && plain.parts.size() == data.parts.size());
+    for (std::size_t i = 0; i < plain.parts.size(); ++i) {
+        const ModelPartData& a = plain.parts[i];
+        const ModelPartData& b = data.parts[i];
+        assert(a.name == b.name && same(a.transform, b.transform) && a.skin == -1 && a.node == -1 && same(a.node_offset, Mat4f{}));
+        assert(a.mesh.vertices.size() == b.mesh.vertices.size() &&
+               std::memcmp(a.mesh.vertices.data(), b.mesh.vertices.data(), a.mesh.vertices.size() * sizeof(MeshVertex)) == 0);
+    }
+    // Only a node that carries no mesh moves: nothing to pose, so no node skeleton, and the animation is left out (said so).
+    assert(meshless.skeletons.empty() && meshless.clips.empty() && meshless.node_skeleton == -1);
+    assert(logged(events, "3D: an animation moves no joint of a skin and no node a part hangs from: it is left out", "idle"));
+    for (const ModelPartData& part : meshless.parts) assert(part.node == -1);
+
+    // More moved nodes (with those above them) than a skeleton may have: not animated, said so, the parts at rest.
+    {
+        std::vector<std::uint8_t> buffer;
+        const auto corners = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+        const auto times = append_values(buffer, std::vector<float>{0, 1});
+        const auto moves = append_values(buffer, std::vector<float>{0, 0, 0, 1, 0, 0});
+        std::string nodes_json = "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[";
+        for (int i = 0; i < 299; ++i) nodes_json += "{\"children\":[" + std::to_string(i + 1) + "]},";
+        const std::string json = test_gltf(buffer, {corners, times, moves}, nodes_json + "{\"mesh\":0}],"
+            "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+            "\"animations\":[{\"name\":\"slide\",\"samplers\":[{\"input\":1,\"output\":2}],"
+            "\"channels\":[{\"sampler\":0,\"target\":{\"node\":299,\"path\":\"translation\"}}]}],"
+            "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+            "{\"bufferView\":1,\"componentType\":5126,\"count\":2,\"type\":\"SCALAR\",\"min\":[0],\"max\":[1]},"
+            "{\"bufferView\":2,\"componentType\":5126,\"count\":2,\"type\":\"VEC3\"}]");
+        events.clear();
+        set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+        ModelData deep;
+        const bool ok = read_model_data(json, "deep.gltf", deep, &error);
+        set_logger_config(before);
+        assert(ok && deep.parts.size() == 1 && deep.parts[0].node == -1 && deep.skeletons.empty() && deep.clips.empty());
+        assert(logged(events, "3D: animations move more nodes than a skeleton can have: those nodes are not animated", "300 nodes"));
+    }
+}
+
+// Drawing the crane's pose: Scene3D::draw(model, transform, node_matrices) places the parts that hang from a node by it and the
+// others as draw(model) does (to the bit), at rest for a pose that lacks a part's matrix (said once); draw_skinned with node
+// matrices poses a skinned model's animated props alongside its skin. An entity with a ModelRenderer3D and an Animator3D plays the
+// clip on the nodes; one without an animator (or before its first animate) draws exactly what it drew before.
+void test_node_animation_draws() {
+    ModelData data;
+    std::string error;
+    assert(read_model_data(crane_gltf(), "crane.gltf", data, &error));
+    const std::shared_ptr<Model> crane = crane_model(data);
+    const Skeleton& sk = crane->skeletons[static_cast<std::size_t>(crane->node_skeleton)];
+    Pose pose;
+    sample_clip(*crane->find_clip("swing"), sk, 0.5f, false, pose);
+    std::vector<Mat4f> nodes;
+    compute_world_matrices(sk, pose, nodes);
+    const Mat4f placed = Mat4f::translation({0, 0, -2});
+    const auto transform_of = [](const Scene3D& scene, const Mesh& mesh) {
+        for (const Scene3D::Draw& draw : scene.draws()) {
+            if (draw.mesh == mesh) return scene.instances()[draw.first].transform;
+        }
+        assert(false);
+        return Mat4f{};
+    };
+    {
+        Scene3D scene, still;
+        scene.draw(*crane, placed, nodes, colors::white, 9);
+        still.draw(*crane, placed, colors::white, 9);
+        assert(scene.draws().size() == 3 && scene.instances().size() == 3 && scene.instances()[0].id == 9);
+        assert(close(transform_of(scene, part_called(*crane, "tip").mesh), placed * crane_tip_at(0.5f)));
+        assert(same(transform_of(scene, part_called(*crane, "ground").mesh), transform_of(still, part_called(*crane, "ground").mesh)));
+        // A pose of one matrix: the tip has none, so it is at rest; said once.
+        std::vector<LogEvent> events;
+        const LoggerConfig before = logger_config();
+        set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+        Scene3D short_pose;
+        short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
+        short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
+        set_logger_config(before);
+        assert(same(short_pose.instances()[index_of(*crane, "tip")].transform, placed * part_called(*crane, "tip").transform));
+        assert(std::count_if(events.begin(), events.end(), [](const LogEvent& e) { return e.message.find("node pose") != std::string::npos; }) == 1);
+    }
+    {
+        // A skinned strip with an animated loose mesh: one call poses both; without node matrices the loose mesh is at rest.
+        GltfOptions o;
+        o.node_animation = true;
+        const ModelData both = read(skin_fixtures::make_gltf(o));
+        struct FakeMesh final : IMeshBackend {};
+        Model model;
+        for (const ModelPartData& part : both.parts) {
+            model.parts.push_back({part.name, part.skin >= 0 ? Mesh{std::make_shared<FakeMesh>(), 6, 12, {}, {}, {}, 2}
+                                                             : Mesh{std::make_shared<FakeMesh>(), 6, 12, {}},
+                                   {}, part.transform, part.skin, part.node, part.node_offset});
+        }
+        model.skeletons = both.skeletons;
+        model.clips = both.clips;
+        model.node_skeleton = both.node_skeleton;
+        assert(model.node_skeleton == 1 && model.parts[1].node == 0);
+        std::vector<Mat4f> joints, loose;
+        compute_joint_matrices(model.skeletons[0], model.skeletons[0].rest_pose(), joints);
+        Pose moved;
+        sample_clip(*model.find_clip("bend", 1), model.skeletons[1], 1.0f, false, moved);
+        compute_world_matrices(model.skeletons[1], moved, loose);
+        Scene3D scene, rest;
+        scene.draw_skinned(model, joints, Mat4f{}, colors::white, 3, {}, loose);
+        rest.draw_skinned(model, joints, Mat4f{}, colors::white, 3);
+        assert(scene.draws().size() == 2 && scene.draws()[0].skinned && !scene.draws()[1].skinned);
+        assert(close(scene.instances()[1].transform.apply({0, 0, 0}), {0, 2, 0})); // the stepped key of 1 s: 2 up
+        assert(same(rest.instances()[1].transform, model.parts[1].transform));
+        assert(max_difference(scene.joint_matrices(), rest.joint_matrices()) == 0.0f);
+    }
+    // The ECS: two cranes, one animated. The still one, and the animated one before its first animate(), draw what they drew before.
+    kin::EcsWorld world;
+    WorldRenderState3D state{world};
+    auto& w = world.raw();
+    const Animator3D swinging = [] {
+        Animator3D a;
+        a.clip = "swing";
+        a.loop = false;
+        return a;
+    }();
+    const flecs::entity moving = w.entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane}).set(swinging);
+    const flecs::entity still = w.entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane});
+    const auto collected = [&](const flecs::entity& e, std::string_view part) {
+        Scene3D scene;
+        state.propagate_transforms();
+        state.collect(scene);
+        const Mesh& mesh = part_called(*crane, part).mesh;
+        const u32 id = static_cast<u32>(e.id() & 0xffffffffu);
+        for (const Scene3D::Draw& draw : scene.draws()) {
+            if (!(draw.mesh == mesh)) continue;
+            for (u32 i = draw.first; i < draw.first + draw.count; ++i) {
+                if (scene.instances()[i].id == id) return scene.instances()[i].transform;
+            }
+        }
+        assert(false);
+        return Mat4f{};
+    };
+    const Mat4f entity = Mat4f::translation({0, 0, -2});
+    for (const char* part : {"base", "tip", "ground"}) {
+        assert(same(collected(moving, part), entity * part_called(*crane, part).transform));
+        assert(same(collected(still, part), entity * part_called(*crane, part).transform));
+    }
+    state.animate(0.25f);
+    state.animate(0.25f);
+    assert(moving.get<Animator3D>()->player.skeleton() == &crane->skeletons[0] && still.get<Animator3D>() == nullptr);
+    assert(close(collected(moving, "tip"), entity * crane_tip_at(0.5f)));
+    assert(close(collected(moving, "base"), entity * part_called(*crane, "base").transform));
+    for (const char* part : {"base", "tip", "ground"}) {
+        assert(same(collected(still, part), entity * part_called(*crane, part).transform));
+    }
+    // Held at the end (no loop), and deterministic: a second world steps to the same matrices, to the bit.
+    state.animate(1.0f);
+    assert(close(collected(moving, "tip"), entity * crane_tip_at(1.0f)));
+    kin::EcsWorld again;
+    WorldRenderState3D again_state{again};
+    const flecs::entity twin = again.raw().entity().set(Transform3D{.position = {0, 0, -2}}).set(ModelRenderer3D{.model = crane}).set(swinging);
+    for (const float dt : {0.25f, 0.25f, 1.0f}) again_state.animate(dt);
+    Scene3D twin_scene;
+    again_state.propagate_transforms();
+    again_state.collect(twin_scene);
+    const Mat4f twin_tip = transform_of(twin_scene, part_called(*crane, "tip").mesh);
+    assert(same(twin_tip, collected(moving, "tip")) && twin.get<Animator3D>()->player.finished());
 }
 
 // A one-dimensional blend in the player: the clips of the two points either side of the parameter, each at the same phase of its own
@@ -3793,6 +4293,214 @@ void bench_ik() {
               << per_frame / 1000.0 << " ms a frame (" << per_frame / 500.0 << " us each; the same 500 without constraints " << plain_per_frame / 1000.0 << " ms)" << std::endl;
 }
 
+// --- the 3D ECS bridge: a model replaced under an animator, a mesh entity's id, a model with a second skin ---
+
+// An animator rebinds when its entity's model is replaced, even by one that lands at the old one's address (a freed model's place
+// taken again). The address is forced here: two shared_ptrs that own nothing, over one Model that is changed in place between them,
+// so a comparison of addresses sees no change and only the owner differs.
+void test_ecs_animator_rebinds_to_a_replaced_model() {
+    const BipedCharacter hero = make_biped_character();
+    Model storage = *hero.model;
+    const std::shared_ptr<const Model> first{&storage, [](const Model*) {}};
+    const std::shared_ptr<const Model> second{&storage, [](const Model*) {}};
+    assert(first.get() == second.get() && (first.owner_before(second) || second.owner_before(first)));
+
+    kin::EcsWorld world;
+    WorldRenderState3D state{world};
+    const flecs::entity e = world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = first}).set(Animator3D{.clip = "sway"});
+    e.get_mut<Animator3D>()->add_ik(hand_constraint()).set_target(Vec3f{0.3f, 1.4f, 0.5f});
+    const float dt = 0.1f;
+    ik_frame(state, dt);
+    ik_frame(state, dt);
+    const auto resolved = [&] { return e.get<Animator3D>()->ik_constraints[0].resolved; };
+    assert(close(e.get<Animator3D>()->player.time(), 2.0f * dt) && e.get<Animator3D>()->bound_to(first));
+    assert(resolved() == (std::vector<i32>{biped::shoulder_l, biped::elbow_l, biped::hand_l}));
+
+    // The same Model under a new owner, with the left and right arms' names swapped in it, as another file's would be.
+    Skeleton& sk = storage.skeletons[0];
+    for (int j = 0; j < 3; ++j) {
+        std::swap(sk.names[static_cast<std::size_t>(biped::shoulder_l + j)], sk.names[static_cast<std::size_t>(biped::shoulder_r + j)]);
+    }
+    e.get_mut<SkinnedMeshRenderer>()->model = second;
+    ik_frame(state, dt);
+    assert(close(e.get<Animator3D>()->player.time(), dt));     // played again from the start: a new binding
+    assert(resolved() == (std::vector<i32>{biped::shoulder_r, biped::elbow_r, biped::hand_r})); // looked up again in what it holds now
+    assert(e.get<Animator3D>()->bound_to(second) && !e.get<Animator3D>()->bound_to(first));
+}
+
+// A MeshRenderer entity is named in the scene as the model and character entities are: by its own `id` when it gives one, else by
+// the entity's (its low 32 bits), which is what pick reports for it.
+void test_ecs_mesh_renderer_id() {
+    struct FakeMesh final : IMeshBackend {};
+    const Mesh mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
+    kin::EcsWorld world;
+    WorldRenderState3D state{world};
+    auto& w = world.raw();
+    const flecs::entity plain = w.entity().set(Transform3D{}).set(MeshRenderer{.mesh = mesh});
+    w.entity().set(Transform3D{}).set(MeshRenderer{.mesh = mesh, .id = 7});
+    state.propagate_transforms();
+    Scene3D scene;
+    state.collect(scene);
+    assert(scene.instances().size() == 2);
+    const u32 plain_id = static_cast<u32>(plain.id() & 0xffffffffu);
+    assert(plain_id != 0 && plain_id != 7);
+    bool saw_plain = false, saw_given = false;
+    for (const MeshInstance& instance : scene.instances()) {
+        saw_plain = saw_plain || instance.id == plain_id;
+        saw_given = saw_given || instance.id == 7;
+    }
+    assert(saw_plain && saw_given);
+}
+
+// draw_skinned(Model) is given the pose of the first skeleton: the parts on a second skin are not drawn (the limit, pinned), and
+// that is said in the log, once for each model.
+void test_draw_skinned_poses_the_first_skin_only() {
+    struct FakeMesh final : IMeshBackend {};
+    const auto make = [] {
+        auto model = std::make_unique<Model>();
+        model->skeletons = {skin_fixtures::make_tube().skeleton, skin_fixtures::make_tube().skeleton};
+        for (const i32 skin : {0, 1}) {
+            ModelPart part;
+            part.name = skin ? "second" : "first";
+            part.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}, {}, {}, 3};
+            part.skin = skin;
+            model->parts.push_back(part);
+        }
+        ModelPart still;
+        still.name = "still";
+        still.mesh = Mesh{std::make_shared<FakeMesh>(), 3, 3, {}};
+        model->parts.push_back(still);
+        return model;
+    };
+    std::vector<LogEvent> events;
+    set_logger_config({.min_level = LogLevel::Debug, .sdl_sink = false, .memory_events = &events});
+    const auto lines = [&] {
+        std::size_t n = 0;
+        for (const LogEvent& event : events) {
+            n += event.message.find("another skin") != std::string::npos ? 1 : 0;
+        }
+        return n;
+    };
+    const auto a = make(), b = make(); // both alive: two addresses
+    const std::vector<Mat4f> joints(3);
+    Scene3D scene;
+    scene.draw_skinned(*a, joints, Mat4f{}, colors::white, 5);
+    assert(scene.draws().size() == 2); // the first skin's part and the one that is not skinned
+    assert(scene.draws()[0].mesh == a->parts[0].mesh && scene.draws()[0].skinned);
+    assert(scene.draws()[1].mesh == a->parts[2].mesh && !scene.draws()[1].skinned);
+    assert(lines() == 1);
+    scene.draw_skinned(*a, joints, Mat4f{}, colors::white, 5);
+    assert(lines() == 1); // not said again for the same model
+    scene.draw_skinned(*b, joints, Mat4f{}, colors::white, 6);
+    assert(lines() == 2); // but for another
+    reset_logger_config_from_environment();
+}
+
+// The CPU cost of the player's other states, printed (no assertion): the base a 1D blend of three clips (a locomotion state), a
+// crossfade out of that blend into a clip, a fade begun in the middle of another (the held picture fades out), and a base clip under two
+// layers (one masked, one additive). Each is an update and the joint matrices of a 24-joint character; the blends and fades combine two
+// poses a frame, which is where a player that allocates for each shows.
+void bench_animation_states() {
+    const auto per_call = [](int iterations, const auto& body) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < iterations; ++i) {
+            body(i);
+        }
+        return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / iterations;
+    };
+    Skeleton sk;
+    const int n = 24;
+    sk.parents.resize(n);
+    sk.names.resize(n);
+    sk.rest.resize(n);
+    sk.inverse_bind.resize(n);
+    for (int j = 0; j < n; ++j) {
+        sk.parents[j] = j == 0 ? -1 : (j - 1) / 2;
+        sk.names[j] = "joint" + std::to_string(j);
+        sk.rest[j].translation = {0.0f, 0.2f, 0.0f};
+    }
+    const auto make_clip = [&](float phase) {
+        AnimClip3D clip;
+        clip.channels.resize(n);
+        for (int j = 0; j < n; ++j) {
+            JointChannels& c = clip.channels[j];
+            for (int k = 0; k < 30; ++k) {
+                const float t = static_cast<float>(k) / 29.0f;
+                c.translation.times.push_back(t);
+                c.translation.values.push_back({0.0f, 0.2f + 0.01f * std::sin(t * 6.0f + phase), 0.0f});
+                c.rotation.times.push_back(t);
+                c.rotation.values.push_back(Quatf::axis_angle({0, 0, 1}, 30.0f * std::sin(t * 6.0f + static_cast<float>(j) + phase)));
+                c.scale.times.push_back(t);
+                c.scale.values.push_back({1, 1, 1});
+            }
+        }
+        clip.duration = 1.0f;
+        return clip;
+    };
+    const AnimClip3D idle = make_clip(0.0f), walk = make_clip(1.0f), run = make_clip(2.0f);
+    const std::array<BlendPoint3D, 3> points{{{&idle, 0.0f}, {&walk, 1.6f}, {&run, 4.2f}}};
+    float sink = 0.0f;
+    std::vector<Mat4f> matrices;
+    const auto frame = [&](AnimationPlayer3D& player) {
+        player.update(1.0f / 60.0f);
+        player.joint_matrices(matrices);
+        sink += matrices[7].m[12];
+    };
+    AnimationPlayer3D blend{&sk};
+    blend.play_blend(points, 2.5f);
+    const double blended = per_call(20000, [&](int) { frame(blend); });
+    AnimationPlayer3D fading{&sk};
+    fading.play_blend(points, 2.5f);
+    fading.crossfade_to(&idle, 1000.0f);
+    const double blend_fade = per_call(20000, [&](int) { frame(fading); });
+    AnimationPlayer3D frozen{&sk};
+    frozen.play(&walk);
+    frozen.crossfade_to(&run, 1000.0f);
+    frozen.update(1.0f / 60.0f);
+    frozen.crossfade_to(&idle, 1000.0f); // begun in the middle of the first: the picture so far is held and fades out
+    const double held = per_call(20000, [&](int) { frame(frozen); });
+    AnimationPlayer3D layered{&sk};
+    layered.play(&walk);
+    {
+        AnimationPlayer3D::Layer& upper = layered.layer(0);
+        upper.clip = &run;
+        upper.mask = PoseMask::subtree(sk, 2, 1.0f);
+        upper.weight = 0.7f;
+        AnimationPlayer3D::Layer& add = layered.layer(1);
+        add.clip = &idle;
+        add.additive = true;
+        add.weight = 0.5f;
+    }
+    const double layers = per_call(20000, [&](int) { frame(layered); });
+    std::cerr << "animation, a 24-joint character: 1D blend of three clips " << blended << " us, the blend crossfaded into a clip " << blend_fade
+              << " us, a fade begun in the middle of another " << held << " us, a clip under a masked and an additive layer " << layers
+              << " us (update + matrices) [" << sink << "]\n";
+    // The ECS animators: 200 characters in a machine's locomotion state (a 1D blend) with one layer, WorldRenderState3D::animate a frame.
+    // Each frame an animator asks which state it is in and which layer clips it plays; that is a string it should not have to build.
+    {
+        const Character hero = make_character();
+        auto machine = std::make_shared<AnimationStateMachine>();
+        machine->initial = "locomotion";
+        machine->states = {{"idle", "idle"}, {"locomotion", "walk"}};
+        Animator3D animator;
+        animator.machine = machine;
+        animator.blend_spaces["locomotion"] = {"speed", {{"walk", 1.5f}, {"run", 4.5f}}};
+        animator.params.set_float("speed", 3.0f);
+        animator.layers.push_back({.clip = "run", .mask_joint = "upper_body_spine_joint", .weight = 0.5f});
+        kin::EcsWorld world;
+        WorldRenderState3D state{world};
+        for (int i = 0; i < 200; ++i) {
+            world.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer{.model = hero.model}).set(static_cast<const Animator3D&>(animator));
+        }
+        for (int i = 0; i < 120; ++i) {
+            state.animate(1.0f / 60.0f); // settled: the machine has made its transition, the fade is over
+        }
+        const double animate_us = per_call(2000, [&](int) { state.animate(1.0f / 60.0f); });
+        std::cerr << "animation, WorldRenderState3D::animate for 200 characters in a blend state with a layer: " << animate_us << " us a frame ("
+                  << animate_us / 200.0 << " us a character)\n";
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3817,6 +4525,11 @@ int main() {
     test_mesh_skin_data();
     test_loader_skins_and_clips();
     test_loader_skin_limits();
+    test_loader_refuses_unreadable_geometry();
+    test_loader_keeps_nodes_between_joints();
+    test_loader_refuses_hostile_files();
+    test_loader_node_animation();
+    test_node_animation_draws();
     test_ik_two_bone_reach();
     test_ik_two_bone_out_of_reach();
     test_ik_two_bone_pole();
@@ -3842,8 +4555,12 @@ int main() {
     test_ecs_ik_fabrik_locking_and_limits();
     test_sponza_walk_ik_panel();
     test_ik_cesium_man();
+    test_ecs_animator_rebinds_to_a_replaced_model();
+    test_ecs_mesh_renderer_id();
+    test_draw_skinned_poses_the_first_skin_only();
     bench_ik();
     bench_animation();
+    bench_animation_states();
     std::cout << "skeleton tests passed\n";
     return 0;
 }

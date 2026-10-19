@@ -45,6 +45,18 @@ The maths is in `kin/core/math3d.hpp`: `Vec3f`, `Vec4f`, `Quatf`
 and `project`, `unproject` and `screen_ray` between the world and 2D draw
 coordinates.
 
+## Automatic rendering paths
+
+Renderer implementation A/B environment variables have been retired. The supported optimizations are automatic;
+shader/device support, scene features, workload thresholds and bounded resource budgets select the necessary fallbacks.
+GPU retention and cached bounds keep their existing limits. Feature targets expire after 120 unused renders, and upload
+staging adapts to completed batch occupancy. There is no environment checklist to enable these paths.
+
+Use authored quality settings for visual features, `scene.lights.cache_shadows` for shadow caching, and explicit
+`scene.debug` controls for CPU cluster selection, LOD overrides, jitter freezing, GPU counter readback and pass markers.
+The disabled point-light tile-mask and cutout main-depth experiments, their shaders and their counters have been removed.
+Historical measurements in the plan/changelog describe the switches that existed when those measurements were taken.
+
 ## Meshes
 
 `kin::MeshData` is triangles as data: vertices (position, normal, UV, colour)
@@ -56,15 +68,58 @@ a shape from shapes. `Renderer3D::create_mesh` keeps it on the GPU as a
 Small static meshes share bounded vertex/index buffer pages. The renderer binds a page at zero and selects each mesh with
 indexed-draw offsets, including its LOD ranges; consecutive meshes on the same pages avoid redundant buffer bindings in the
 main, shadow, depth, velocity and picking passes. Skinned and clustered meshes keep dedicated vertices. Retirement fences
-protect shared ranges before reuse, and empty pages are released. For diagnostics, `KIN_SHARED_MESH_BUFFERS=0` disables
-pooling; `KIN_MESH_PAGE_BINDINGS=0` keeps pooling but selects mesh offsets through buffer bindings. The latter is read once
-when the 3D renderer is created. Local-shadow preparation packs accepted caster copies into flat lists instead of allocating
+protect shared ranges before reuse, and empty pages are released. Local-shadow preparation packs accepted caster copies into flat lists instead of allocating
 per-mesh/per-view vectors; the stable ordering preserves shadow-cache keys and clustered cuts.
 
 Shapes made in code (`kin::meshes`): `box`, `plane`, `sphere`, `cylinder`,
 `cone`, `torus`, `star_prism`, `octahedron`, `wedge` (a ramp).
 
+### Baked cache
+
+Levels of detail and cluster hierarchies are built by `create_mesh` at every launch (the kiln's hierarchy: 5 s and 1.5 GB of the
+process). A `kin::BakeCache` (`kin/assets/bake_cache.hpp`) keeps each build in a folder and gives it back on the next run:
+
+```cpp
+#include <kin/assets/bake_cache.hpp>
+
+kin::BakeCache bake{kin::user_data_dir("my-game") / "kin" / "bake"}; // the game's folder; 1 GiB at most by default
+r3d.set_bake_cache(&bake);        // levels and clusters, for create_mesh, load_model and Assets3D
+```
+
+With a cache set, `create_mesh` with `clusters` or `levels > 1` looks the build up under its key and restores it, else builds it and
+writes it. The key is a hash of the mesh's vertex and index bytes, the `MeshOptions` fields the build reads (for clusters
+`cluster_triangles` and the three weights; for levels every level option), the format's version and meshoptimizer's
+(`mesh_clusters_bake_key`, `mesh_levels_bake_key`). **The invalidation rule is the key**: a changed mesh or option is another key, so an
+entry is never stale and there is nothing to clear after editing a model; entries no longer asked for age out. A restored build is the
+build to the byte (every field of `MeshClusterBuild`, or the `MeshLodChain`), so the mesh and the pictures are those without the cache:
+the reference scenes `hidden` and `hidden_dense`, and the helmet and Sponza with `--lod-levels 4` and with `--lod-clusters`, give the same
+PNGs off, cold and warm (`kin_reference --bake-cache DIR`). Meshes with nothing worth keeping (one cluster's worth of triangles, a chain
+that stops at level 0 at once) are built as before. `hidden` loads in 30 ms warm against 109 ms without (its 100,352-triangle torus);
+Sponza with clusters in 1.8 s against 2.1 s (the rest is its textures). The key reads the mesh at 2.2 GB/s (the kiln's: a quarter of a second).
+
+The folder holds a `<key>.bake` file a build: the key, the length and a checksum before the bytes. A truncated, corrupt or misplaced
+file is a miss (and removed), never a crash; the restore checks every offset and count besides. Writes go to a temporary file renamed
+into place, so a crash or a second process never leaves half a file under a key. Past `max_bytes` (the constructor's second argument)
+the entries used longest ago go first. `bake.stats()` counts hits, misses, refused files, writes, evictions and bytes. Opt-in: the engine
+never picks a folder (nor creates `<user data>/kin/bake` by itself); the folder the game passes is made by the first write, and a
+default-constructed cache (or none) reads and writes nothing. The bytes are for this machine's build: keep them out of shipped content.
+
 ## Scenes
+
+The normal `WorldRenderState3D::collect(scene)` / `SceneFrame3D::collect(scene)` loop automatically retains substantial
+opaque/masked mesh and static-model buckets. Keep using ordinary ECS components and clear/collect/render each frame;
+no hand-built `InstanceBatch3D`, static marker or renderer flags are required. Buckets of 256 or more copies use fixed
+records, with conservative bounds for consecutive 256-copy ranges from 512 copies upward. Source order is preserved;
+this is not a spatial sort. Unchanged records keep their revision; changed runs update only those records and bounds.
+Small buckets, blended/custom/wireframe/skinned materials and budget overflow use ordinary streamed submissions.
+
+The collector keeps at most 128 automatic batches and **16 MiB of instance-record payload** per render state, in addition
+to its existing collection scratch. Group/edit metadata and allocator overhead are extra. Separate scenes keep snapshot
+semantics: an edit makes a new batch if an older collected scene still owns the old records. Such scene-owned snapshots
+are outside the collector's live-record budget. Clear old scenes to release them; `clear_collection_cache()` drops the
+collector's handles. Collection still visits the current ECS records each frame, so writes through ordinary component
+pointers remain visible. GPU tables retain their separate 32 MiB cap and feature/capability fallbacks below; enabling
+TAA or unsupported material features does not silently lower quality to retain records.
 
 A `kin::Scene3D` is filled each frame and holds no GPU state: a camera, the
 lights, and draws.
@@ -77,9 +132,12 @@ lights, and draws.
 - `add_instances(mesh, count, material)`: room to fill in place (valid until
   the next draw is added).
 
-The GPU renderer can reuse the mesh draw/piece/task layout when the same `Scene3D` mesh commands remain submitted.
+The GPU renderer reuses the mesh draw/piece/task layout for persistent commands and structurally identical resubmissions.
 `draw_identity()` and `draw_revision()` identify that command set: mesh submissions and `clear()` change its revision;
-moving a scene gives the destination a fresh identity and invalidates the source. Camera, light and particle changes do
+moving a scene gives the destination a fresh identity and invalidates the source. After clear/resubmission into the same
+scene/storage, exact weak-owner/mesh/batch/range/group checks can reuse the layout despite a changed revision. Changed
+mesh identity, ranges, skin layout, group layout or scene identity rebuild it. Material and instance content are read
+afresh; no content hash is used to establish correctness. Camera, light and particle changes do
 not invalidate the layout. Batch layout revisions are checked separately, including edits through another shared handle.
 Fixed-size batch content edits keep draw/piece/task metadata valid. Group bounds and all visibility proofs still refresh;
 a group gaining/losing valid bounds changes the batch layout revision and rebuilds the layout, even if the total number
@@ -87,17 +145,19 @@ of valid groups stays the same. GPU tables and CPU spheres continue to use the f
 
 This reuses the renderer's existing arrays, not a copy of scene instances or visibility results. Camera frustums, shadow
 membership, group plane proofs, retained-table slots/bounds and uploads are refreshed each render. Writes through a still
-valid `add_instances()` span remain visible. A single layout is kept per renderer, bounded to 8,192 draw references,
-16,384 pieces, 4,096 valid spatial groups, 128 batch stamps and 16 MiB of existing vector payload capacity. LOD-enabled
-scenes use the original construction path; oversized layouts and scene-command edits rebuild it too. Skinned commands
+valid `add_instances()` span remain visible. A single layout is kept per GPU backend (shared by its `Renderer3D` facades);
+alternating unrelated scenes replaces it. It is bounded to 8,192 draw references,
+16,384 pieces, 4,096 submitted spatial groups, 128 batch stamps and 16 MiB of existing vector payload capacity.
+Exact structural descriptors add at most 1 MiB of bounded vector payload (plus weak-owner control-block overhead).
+They keep no owning mesh/batch handles and no second instance array. LOD-enabled
+scenes use the original construction path; oversized layouts and structural command edits rebuild it too. Skinned commands
 can reuse the layout: joint pointers/offsets, posed bounds, visibility, shadows and GPU uploads refresh each render.
 
-Set `KIN_PREPARED_SCENES=0` before renderer creation for the reference path. Stats `prepared_reused` (0/1) and
-`prepared_draws` report reuse and submitted valid draw references. `prepared_cache_bytes` counts key/stamp payload;
-`prepared_layout_bytes` counts the existing layout vector capacities, not additional allocations. Rebuilt scene commands
-miss the cache. No shader, render target or per-instance cache is added.
-`KIN_PREPARED_BATCH_EDITS=0` before renderer creation restores invalidation after every batch content edit while keeping
-unchanged-scene reuse. Batch `layout_revision()` adds eight bytes per shared batch; no new renderer stamp array is needed.
+Stats `prepared_reused` (0/1) and
+`prepared_draws` report reuse and submitted valid draw references. `prepared_cache_bytes` counts keys, stamps and exact structural descriptors;
+`prepared_layout_bytes` counts the existing layout vector capacities, not additional allocations. Structurally unchanged
+resubmissions can hit the cache. No shader, render target or per-instance cache is added.
+Batch `layout_revision()` adds eight bytes per shared batch; no new renderer stamp array is needed.
 
 `draw_instanced_group(mesh, instances, world_bounds, material)` preserves a spatial cell within an instanced draw. It accepts
 either transforms or `MeshInstance` records. Equal mesh/material groups still merge into one draw, retaining global alpha
@@ -111,7 +171,7 @@ tighter box. Bounds use the coordinate space of their own scene, including an ov
 bounds can incorrectly cull copies; invalid/nonfinite boxes fall back to per-copy tests. These calls submit plain instances;
 `draw_skinned` continues to use its posed bounds. `clear()` also clears group metadata while retaining its capacity.
 
-Set `KIN_SPATIAL_CULLING=0` before creating the GPU renderer for the reference per-copy path. `Render3DStats::spatial_groups`
+`Render3DDebugStats::spatial_groups`
 counts active cells; `camera_instance_tests`, `bounds_instance_tests` and `local_instance_tests` count refined copies, not
 planes. `camera_group_rejected` counts copies rejected for the camera; `local_group_rejected` counts rejected candidates
 across wanted shadow views. Group metadata introduces no additional GPU draws or instance buffers. Blockfield's grove caches
@@ -123,23 +183,26 @@ ordered, disjoint cell ranges. Move the vectors in to avoid another CPU copy. Ce
 rather than `Scene3D::instances()`. A batch stays a separate draw even beside equal materials. `clear()` releases the scene's
 handle; the caller can reuse its own handle next frame. Meshes, materials, transforms, tints and picking IDs behave as usual.
 
-`batch.update(first, records)` edits a fixed range, increments the shared revision, and refreshes affected cell bounds.
-Out-of-range edits throw; changing the count requires a new batch. Copies share edits, including handles already submitted
+`batch.update(first, records)` edits a fixed range, increments the shared revision, and refreshes affected cell bounds at the cost
+of the edit's size, not the cell's: a copy strictly inside its cell's bounds that moves only widens them, and a cell an edit may
+have shrunk (a copy on one of its faces moved in from it) is measured again once, when `groups()` is next read (2,000 one-copy edits
+of a 100,000-copy batch: 0.2 ms, not 350 ms; `kin_render3d_bench batch`). Out-of-range edits return false with `diagnostics()`; changing the count requires a new batch. Copies share edits, including handles already submitted
 into a scene. Edit between renders, never concurrently with rendering. The latest records are read when rendering starts.
 `changed_since(revision)` returns the enclosing changed range for an independent reader, or an empty range at the current
-revision. Each batch keeps the last 16 edit ranges in 128 bytes; zero, future or expired revisions conservatively return the
-whole batch. Queries do not consume history, and empty edits do not advance the revision.
+revision. Each batch keeps the last 16 edit ranges (exact) and, from its first edit, the revision of the last edit of every
+16-copy block (half a byte a copy): a reader further behind than 16 edits gets the span of the blocks edited since, not the whole
+batch; zero or future revisions conservatively return the whole batch. `changed_ranges_since(revision, out)` gives the same
+edits as ascending, disjoint ranges (touching ones merged) for a reader that copies what changed and can skip the gaps between
+far edits. Queries do not consume history, and empty edits do not advance the revision.
 `layout_revision()` is separate from the content revision: fixed storage/group ranges and mesh identity do not change on
 updates. Only a group's validity changing affects the renderer's piece ranges. Empty handles report zero for both revisions.
 
 The camera classifier reuses current cached spheres for single-level, non-skinned/non-clustered draws that need no sun
 membership bits. It fills camera-inside/outside ranges and tests partial ranges four copies at a time, using the existing
 local-shadow SIMD helper (or its scalar fallback), in source order with the original boundary comparisons. Local shadow
-selection remains independent of camera rejection. `KIN_CACHED_CAMERA_CULL=0` before renderer creation keeps the general
-per-copy classifier. No sphere cache or GPU resource is added.
+selection remains independent of camera rejection. No sphere cache or GPU resource is added.
 Classification and prefix reduction also clear only the LOD/cascade counter prefixes consumed by the current render;
-enabling more levels/cascades clears those newly active slots before use. `KIN_ACTIVE_CULL_COUNTERS=0` restores full-array
-clearing. Setting both controls to zero selects the previous CPU culling path for measurement.
+enabling more levels/cascades clears those newly active slots before use.
 
 For a compiler-only experiment, configure `-DKIN_RENDERER3D_O3=ON`. In GCC/Clang Release builds this appends `-O3`
 only to `gpu_renderer3d.cpp`, after the engine target's `-O2`; other engine sources, floating-point flags and GPU
@@ -148,29 +211,37 @@ larger renderer code. Set it OFF and rebuild to restore O2; this is a CMake opti
 
 The GPU renderer retains up to **32 MiB of live instance tables / 128 batches**. Built-in opaque/masked, non-skinned copies
 with one selected mesh level use stable 128-byte records and per-view 32-bit index lists for main/prepass/pick and shadows.
-An unchanged batch uploads no records. An explicit edit or material-colour change reuploads the entire table, at most once
-per table per GPU frame; changed data in a later view of that frame uses the immediate path. Simultaneous conflicting
-material colours also fall back. TAA, blended materials, custom shaders, selected multi-level/cluster LOD, occlusion culling,
+An unchanged batch uploads no records. An explicit edit sends only the copies edited since (`changed_ranges_since`), written
+in place; the entire table, cycled, goes instead for a new table, a colour or layout change, over half the copies changed, or a
+table an earlier view of the same GPU frame draws from (that frame's uploads land before all its draws). At most one upload
+per table per GPU frame: changed data in a later view of that frame uses the immediate path. Each material colour a batch is drawn in has a table of
+its own, so two views (or draws) of one batch in different colours upload nothing once made; a colour without a table takes
+over the batch's table unused for a whole frame (an animated colour uploads once a frame), else a new one. TAA, blended
+materials, custom shaders, selected multi-level/cluster LOD, occlusion culling,
 unavailable shaders and capacity overflow keep the ordinary upload path. CPU batch handles work in these cases too.
 The budget covers live tables, not total GPU memory: streamed buffers, staging and in-flight buffer versions are additional.
-Expired batches are collected between GPU frames after waiting for submitted GPU work; recreate batches only when needed.
+Expired batches' tables are released between GPU frames without waiting for the GPU (SDL frees a buffer once the work
+submitted with it is done). When the 128 tables or 32 MiB are full, tables not drawn for a whole frame are evicted, least
+recently drawn first; the next frame, the largest batch refused may also evict tables drawn last frame that together are
+smaller than it, its room kept for it, so retention settles on the larger batches without equal ones trading places. Stats:
+`retained_evictions`, `retained_refused` (eligible draws streamed for lack of room) and `device_waits` (device-wide waits
+inside `render()`, 0 normally).
 Tables with at least 8,192 records pack directly into upload staging on the attached renderer workers, in 2,048-record
-slices. `KIN_PARALLEL_INSTANCE_PACKING=0` before renderer creation keeps caller-only packing. This changes neither GPU upload
+slices when renderer workers are attached. This changes neither GPU upload
 size nor the cycling/multiple-view safety rules, and adds no CPU instance mirror or GPU buffer.
 Consecutive retained batches can share a graphics pipeline while using different instance storage. The draw binding cache
-compares storage-buffer handles/counts independently of pipeline identity, including masked depth, shadows and picking.
+compares storage-buffer handles/counts independently of pipeline identity, including depth, shadows and picking.
 
-`KIN_RETAINED_INSTANCES=0` disables GPU retention before renderer creation. Stats expose live `retained_gpu_bytes`, submitted
+Stats expose live `retained_gpu_bytes`, submitted
 `retained_instances`, per-render `retained_upload_bytes`, and main-view `retained_index_bytes`. `instance_upload_bytes` counts
 streamed main/local-shadow 128-byte records, excluding retained records and all index lists. The same fields appear in the
-Blockfield CSV/report. Grove retains its masked foliage by default; `KIN_GROVE_RETAINED=0` selects grouped streamed
-instance records. Combine it with `--rebuild-scene` to restore the original per-frame CPU submission workload for diagnosis.
+Blockfield CSV/report. Grove uses retained masked foliage. `--rebuild-scene` measures per-frame command submission.
 Mist keeps its existing alpha-sorted path.
 
 Resident tables also cache transformed culling spheres on the CPU, using 16 bytes/copy and at most **4 MiB per renderer**
 (plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes only
 the union of edited ranges since that table's own bounds revision; new tables and expired history refresh the full array.
-`KIN_INCREMENTAL_BOUNDS=0` before renderer creation restores full-array refreshes after edits. Material-colour changes alone
+Material-colour changes alone
 do not refresh spheres. Main and sun/local/moon culling still perform
 their normal visibility tests, reading these spheres rather than retransforming each copy. CPU cache refresh is independent
 of GPU record uploads, including edits between views in one GPU frame.
@@ -181,7 +252,7 @@ Selected multi-level LOD keeps its original scale calculation to preserve thresh
 Uncached local casters use a compact transient sphere array addressed separately from visibility flags. When a batch becomes
 cached, oversized old transient storage is released, avoiding two full sphere arrays. Expired tables release both caches.
 
-`KIN_CACHED_INSTANCE_BOUNDS=0` before renderer creation disables sphere caching while retaining GPU records. Stats/CSV/report
+Stats/CSV/report
 expose live allocated `bounds_cache_bytes`, allocated transient `bounds_scratch_bytes`, submitted `bounds_cache_instances`
 (counting repeated draws separately), and actual `bounds_cache_rebuilt` copies this render. `bounds_instance_tests` counts
 actual sphere calculations, including cache rebuilds; it therefore includes a cold or edited batch once and skips unchanged
@@ -195,8 +266,7 @@ frustum in their original order. Proven light-radius containment skips per-copy 
 Moon views retain their camera/slice shadow-reach tests when camera culling is enabled; camera rejection never removes
 local offscreen casters. Selected LOD/cluster ranges keep per-copy classification. No per-instance persistent cache is added.
 
-`KIN_LOCAL_SHADOW_CULLING=0` before renderer creation restores the original local gather refinement while retaining prior
-cell rejection, instance retention and bounds caching. `local_candidates` counts copy/view pairs after cell rejection;
+`local_candidates` counts copy/view pairs after cell rejection;
 `local_instance_tests` counts those receiving per-copy gather work; `local_group_accepted` counts the rest. `local_radius_tests`
 counts actual per-copy radius checks. `local_plane_budget` is the **potential** plane-test count before radius rejection and
 per-copy early exits, not executed dot products. `local_bucket_bytes` counts temporary byte-classification payload. These
@@ -210,8 +280,7 @@ cache decisions and cluster cuts finish before that list is compacted/remapped i
 batch indices, while streamed draws are remapped into the caster union. Slot lookup storage covers only streamed copies;
 oversized prior slot allocations are released when they exceed twice the required size (with a 4,096-slot floor).
 
-`KIN_LOCAL_SHADOW_PACKING=0` before renderer creation selects full per-task counters, separate accepted/upload lists and
-slots for all copies. This is independent of `KIN_LOCAL_SHADOW_CULLING`. Stats/CSV/report expose `local_task_bytes` (task and
+Stats/CSV/report expose `local_task_bytes` (task and
 rare multi-level counter vector capacities), `local_slot_bytes` (allocated slot-vector capacity), and `local_copy_bytes`
 (combined simultaneous accepted/upload-list capacities). These measure specific CPU payloads, excluding allocator overhead,
 other scratch, GPU buffers and process RSS. The reused copy list retains its high-water capacity, as the upload list did.
@@ -222,8 +291,7 @@ Spatial cells carry pending camera/slice plane masks: planes proven to contain e
 a cell outside the camera is never rejected from that proof alone, since its shadows may enter view. Original plane
 coefficients, order and float divisions are retained. Cluster spheres use full plane sets rather than instance-cell proofs.
 
-`KIN_SHADOW_REACH=0` before renderer creation restores the original eager directional reach tests, independently of local
-culling/packing controls. The main loop compiles both forms separately. Spatial groups and multiple sun cascades use the
+Spatial groups and multiple sun cascades use the
 prepared form; ordinary single-map draws and scenes without sun shadows use the original form, avoiding helper overhead
 for small draws. Masks add eight bytes per allocated spatial cell; no per-instance cache is added and compact local
 tasks remain 32 bytes. Existing culling/payload counters retain their meaning: `local_plane_budget` covers light
@@ -234,8 +302,7 @@ visibility bytes and recording one count. The shortcut requires that no per-copy
 local-shadow sphere is needed. Partial cells, offscreen casters and those consumers retain refinement. Fully visible
 single-level pieces also fill retained indices as consecutive source indices, or pack streamed records without reading
 visibility per copy. Source order, draw counts and alpha sorting are preserved, with no new per-instance storage.
-`KIN_CAMERA_RANGES=0` before renderer creation restores the previous classification and packing loops.
-`Render3DStats::camera_range_accepted` counts copies classified by the cell shortcut; `bounds_instance_tests` continues
+`Render3DDebugStats::camera_range_accepted` counts copies classified by the cell shortcut; `bounds_instance_tests` continues
 to count actual transformed bounds, so it may decrease for streamed cells. The counter does not include packing alone.
 
 Large local-shadow candidate ranges also test four spheres at once directly from the shared 16-byte cached/scratch
@@ -244,41 +311,29 @@ is allocated. Ranges below 16 candidates retain the scalar loop, fully accepted 
 and final one-to-three candidates use the scalar tail. Surviving lanes stay in source order through moon reach tests,
 LOD/cluster buckets and cache decisions. Single-bucket ranges classify four accepted copies together.
 
-`KIN_LOCAL_SHADOW_SIMD=0` before renderer creation selects scalar gathering independently of the other shadow controls.
 The native path uses SSE2 with scalar SSE math on GCC/Clang builds without FMA/fast-math flags; MSVC and other targets
 retain scalar gathering. Ordered rejection comparisons, arithmetic order, touching and unordered inputs match the scalar
-predicates on the tested build. Compact/reference tasks remain 32/64 bytes and existing diagnostics retain their meaning;
+predicates on the tested build. Compact tasks remain 32 bytes and existing diagnostics retain their meaning;
 `local_plane_budget` still describes potential scalar plane tests rather than executed SIMD operations. The native test
-object is 464 bytes on the tested x86-64 build, temporary per active worker task, plus one enable flag per renderer.
+object is 464 bytes on the tested x86-64 build, temporary per active worker task, without per-renderer override state.
 
-The GPU device's shared texture/storage upload staging starts at the 16 MiB bulk-loading floor. Every 120 completed
+The GPU device's shared texture/storage upload staging starts at 4 MiB, growing immediately for larger
+writes. This limits startup cycle backings before the first observation window. Every 120 completed
 upload batches, it can shrink to the next power of two of that window's maximum aggregate batch occupancy, with a 1 MiB
-minimum and a factor-of-two size threshold. It grows immediately when an individual upload needs more space. Bursts can
+minimum and a factor-of-two size threshold. It grows immediately when an individual upload needs more space, and when a
+batch of smaller writes overflowed it (sent as several submissions) it grows to the next power of two of that batch's total,
+up to 64 MiB, so the next such batch is one submission. Bursts can
 therefore take up to two windows of subsequent quiet batches to reach the minimum. Idle frames without upload submissions
 do not advance the window. SDL retires old transfer buffers after their submitted copies finish; this adds no GPU wait.
 
-`KIN_ADAPTIVE_STAGING=0` before device creation restores the 16 MiB floor and the previous policy that only shrank oversized
-buffers back to that floor after 600 batches without a large individual upload. The policy is device-wide, covering 2D
+The policy is device-wide, covering 2D
 textures and 3D storage uploads; the separate vertex/index upload ring is unchanged. `RendererBackendStats` exposes
 `upload_staging_bytes` (current single-handle capacity, zero between retirement and reallocation) and cumulative
 `upload_staging_allocations`. These exclude SDL's cycle backings, retired resources and driver pools, so are not total RAM.
 Blockfield's CSV also records `upload_count` and `upload_batches` from the shared upload path. Large active workloads,
 including the tested dense TAA case, retain 16 MiB; smaller staging is not a universal process-memory guarantee.
 
-`KIN_MASKED_DEPTH_PREPASS=1` before renderer creation opts into an experimental main-depth pass for stock lit cutout
-materials. Eligible single-level, non-skinned, non-clustered draws first write the view's existing main depth, using the
-same stock vertex shader, base sampler/wrap, tint alpha and `max(alpha_cutoff, 1e-6)` as shading. Main rendering loads that
-depth without cycling it; prepassed cutouts test depth without writing it, while other geometry retains its normal depth
-behaviour and source order. No extra render target or per-instance cache is allocated. `warm_up` prepares ordinary and
-retained depth/read-only variants. Diagnostics `masked_depth_draws` / `masked_depth_instances` count the additional work,
-separately from main and shadow counts; `kin3d.masked_depth` labels it for an external profiler.
-
-The experiment is **off by default**. TAA, MSAA, overlays, GPU occlusion and any submitted custom shader keep the existing
-view path; unlit/wireframe, skinned and selected multi-level/cluster draws are not prepassed. A view without eligible draws
-still clears main depth normally. The added pass can hurt CPU-bound or low-overdraw scenes; use measured workload evidence
-rather than enabling it globally. The tested dense Grove route benefits with four helpers but not reliably without them.
-
-For external GPU profilers, `KIN_GPU_PASS_MARKERS=1` before renderer creation adds SDL debug groups around clusters,
+For external GPU profilers, `scene.debug.gpu_pass_markers = true` adds SDL debug groups around clusters,
 sun/local shadows, prepass/occluders, overlay velocity, main rendering, temporal resolve, picking and view output. These
 are labels in the existing command buffer: they do not create timestamp pools, readbacks, fence scopes or submission
 splits. Disabled by default, with one flag per renderer and stack-only guards. SDL may ignore labels on unsupported
@@ -337,8 +392,8 @@ Unlit materials use dedicated colour-only or base-textured main-pass shaders, wi
 vertex/material/tint colours, sRGB conversion, emission, alpha/additive blending, HDR and MSAA, while omitting lighting resources
 and unused normal/world-position outputs. Fog, skinned meshes, temporal AA and custom materials use the general shaders.
 Shadow, picking and depth/normal passes keep their existing shaders. `warmup()` prepares the selected unlit pipeline too.
-`Render3DStats::unlit_draws` counts specialized main-pass commands; `unlit_textured_draws` is its textured subset.
-Set `KIN_UNLIT_SHADERS=0` before creating the renderer to compare with the general path (default: enabled).
+`Render3DDebugStats::unlit_draws` counts specialized main-pass commands; `unlit_textured_draws` is its textured subset.
+Specialization is selected automatically when the material and view support it.
 
 `wireframe` draws only the mesh's triangles' edges, a pixel wide, unlit in
 the material's colour, just in front of faces in the same place (a little
@@ -387,24 +442,6 @@ The material shader skips a point light's shadow and BRDF evaluation when its
 windowed attenuation is zero. Positive contributions, however small, retain the
 same shading; this adds no light lists, caches or GPU buffers.
 
-An opt-in stock-material experiment, `KIN_POINT_TILES=1` (set before creating the
-renderer), builds conservative screen-space point-light masks for 64 × 64 pixel
-tiles. It preserves the selected lights and their accumulation order. Each
-light sphere must reach a tile's four homogeneous side planes, built from the
-jittered projection; uncertain inputs retain that light everywhere. No depth
-prepass is required. Overlays and custom materials use the original loop, as do
-views requiring more than 1,024 tiles (including 4K).
-
-The masks append a fixed 2,064-byte payload to the existing frame uniform, for a
-3,184-byte block within SDL's 4 KiB slot. Each tile uses 16 bits; there is no new
-GPU buffer, texture, persistent CPU cache, light-count reduction, or shadow-quality
-change. Eight optional fragment variants cover fog, local shadows and velocity.
-`Render3DStats::point_light_tiles`, `point_light_tile_slots`,
-`point_light_tile_bytes` and `point_light_tile_ms` report grid size, sum of set
-bits, extra uniform bytes and mask build/upload wall time. Divide the slot count
-by tiles × selected lights to estimate retained candidate coverage; it is not a
-fragment-weighted shading count. The experiment defaults off for comparison.
-
 Image-based light: `scene.lights.environment` is an `Environment3D`, an
 equirectangular HDR picture of the sky or a room (`r3d.load_environment(
 "sky.hdr")` reads a Radiance `.hdr` through the content folder or pack;
@@ -412,14 +449,15 @@ equirectangular HDR picture of the sky or a room (`r3d.load_environment(
 bottom, 2:1). With one set, surfaces take their ambient light from it instead
 of `ambient`/`ground_ambient` (which are then not used; the sun, fill and point
 lights go on): the diffuse from its irradiance by the normal, the specular
-from a mip a roughness (GGX-filtered) along the reflection, times the same
+from a mip a roughness (GGX-filtered; a NaN or infinite texel of the picture
+is filtered as black) along the reflection, times the same
 split-sum fit as before. `environment_intensity` scales it,
 `environment_rotation` (degrees) turns it about +y. The picture's centre is
 +x, its top +y, and going right from the centre turns toward +z (Blender's
 world texture in kin's axes). The filtered copies (a 7-level equirect chain up
 to 1024 x 512 for the specular, 64 x 32 for the irradiance, half floats) are
 made by compute shaders in the first render that uses the environment, once
-(`stats().environment_prefilters`); that render needs `compute` and a float
+(`debug_stats().environment_prefilters`); that render needs `compute` and a float
 format that storage textures can write, else the hemisphere stays. An
 environment is not drawn as a background (the view's `background` colour is),
 and in the overlay it is carried into the overlay's space.
@@ -431,6 +469,24 @@ casts and receives them (the level): one shadow map
 camera still cast when their shadow may fall in view (the copy swept down
 the light, through the area, reaches the camera's view), and are left out
 otherwise. A smaller box is sharper. The overlay gets no shadows.
+
+Sun receiver offsets are configurable in shadow texels: `shadow_bias` (depth,
+1 by default) and `shadow_normal_offset` (1.5 by default). Sun receiver offsets
+use the mesh normal facing the viewer, rather than normal-map relief: changing
+a texture must not move an unchanged caster's shadow. Flat-shaded clusters with
+zero vertex normals retain their reconstructed face normal.
+Opting into `shadow_receiver_plane_bias` corrects each PCF tap for the receiver's
+geometric depth gradient, including the comparison sampler's subtexel-dependent
+bilinear footprint. On planar receivers it allows small offsets on thin contacts
+without coplanar self-shadowing. Coarse curved meshes can produce streaks or
+triangular light/shadow patches where the filter extrapolates across different
+facets; use conventional PCF for these. XC121 uses conventional PCF with depth 1
+and normal offset 1.5, supported by finer maps for thin cables. Derivatives for
+the optional correction are taken before the sun-facing branch and cascade selection/blending; the
+correction applies independently in each cascade. These are receiver uniforms:
+changing them updates shading while a valid cached depth map remains reusable.
+No additional texture or shadow pass is allocated. Local-light and moon bias
+settings are unchanged.
 
 A single-sided mesh casts with the faces it shows, toward the sun: for a
 closed mesh that is the same shadow as both sides for half the work, but a
@@ -459,8 +515,8 @@ far-off thing isn't drawn into the near maps. Without a depth array to render
 into the renderer makes fewer layers (down to one: the single map), says so
 once in the log, and never fails. Costs more than one map: a pass and the
 casters of each cascade, a few more taps; use it where the area is
-much bigger than what the camera sees close up. `stats()` has
-`shadow_cascades` and the copies drawn into each (`cascade_casters`).
+much bigger than what the camera sees close up. `stats().shadow_cascades` counts
+the maps; `debug_stats().cascade_casters` counts copies drawn into each.
 
 **Kept while nothing moves.** `lights.cache_shadows` (off by default: a game that pauses or has photo mode turns it on) keeps the map(s) from one render to the next and does not draw them again
 when they would come out the same, to the byte: the sun, the area, the resolution, the **camera** (what casts into view, and the cascades' fit,
@@ -468,8 +524,7 @@ depend on it), the levels of detail, and every caster's mesh, material and copie
 in place, it is seen; a render target as the texture is never cached). It pays for a paused game, a photo mode, a viewer at rest (the shadow pass
 is a quarter to a half of such a frame) and costs a moving scene nothing measurable (a key of a few hundred bytes and a sample of the copies; the
 copies are compared in full, stopping at the first difference, only once two renders agreed). `stats().shadow_cached` is true when it hit (the
-shadow draw counts are then 0). Turn it off for a benchmark that renders one scene many times; `KIN_SHADOW_CACHE=0` turns it off for the whole
-renderer. See the plan's "Opt-in speedups, phase 1".
+shadow draw counts are then 0). Set `scene.lights.cache_shadows = false` for a benchmark that renders one scene many times. See the plan's "Opt-in speedups, phase 1".
 
 ### Ambient occlusion
 
@@ -491,24 +546,23 @@ nor does the first-person overlay, which is not in the pre-pass either: its
 own lighting stays as it was. Where the device lacks a sampled depth, a
 two-float colour target or an R8 storage texture, occlusion is off with one
 line in the log. `half_resolution` computes at half the view's size (about a
-third of the cost; a little softer at depth edges). `stats()` has
+third of the cost; a little softer at depth edges). `debug_stats()` has
 `ao_draws`, `ao_instances` and `ao_dispatches` (0 when off). Costs a second
 draw of every opaque copy and about 0.3 ms or more of compute at 1280 x 720:
 see the plan's G2b results.
-With contact shadows also on (and `half_resolution` off) the two blurs are one dispatch a direction (`stats().blur_merged` is 2; the counts above
+With contact shadows also on (and `half_resolution` off) the two blurs are one dispatch a direction (`debug_stats().blur_merged` is 2; the counts above
 still count each feature's own); the result is the same to the byte. The blur ends in the first target again (raw, across, raw), so a feature
 holds two R8 textures, not three.
 In views of 1.5 million pixels or more (about 1440 x 1040; 1920 x 1080 and up) the occlusion reads a **linear depth chain** instead of the depth: one
 compute dispatch writes the distance in front of the camera of every pre-pass pixel and four coarser levels (R32F, a weighted average of four texels
 that leans to the farthest, after XeGTAO), a tap picks its level by its distance from the pixel (the first level from 20 pixels, the next from 40, and
 so on) and the blurs read level 0, so the far taps of a wide search miss the cache far less and no tap divides to find its position. It gives the
-pictures of the old path to within 0.2 levels on the reference scenes (`stats().ao_chain_built` is 1; the chain's own dispatch is not in
+pictures of the old path to within 0.2 levels on the reference scenes (`debug_stats().ao_chain_built` is 1; the chain's own dispatch is not in
 `ao_dispatches`) and saves 0.2 to 0.5 ms of the 1.3 to 2 of the occlusion at 1080p and 25 to 30% of it at 4K, but costs a little more where the occlusion's
 reach is a few pixels (far views, the kiln at 1080p: +0.2 of 8 ms): the plan's "Opt-in speedups, phase 2". Below that size the old path runs and the
-picture is the old one to the byte. `KIN_AO_CLASSIC=1` never uses the chain and `KIN_AO_CHAIN=1` always does (read on each render: tests, A/B timing).
+picture is the old one to the byte.
 Contact shadows blurred on their own (no occlusion in the same view, or the occlusion at half resolution) get one blur pass, not two (-0.03 ms at 1280 x 720,
--0.1 at 1080p; the pictures differ by under 0.3 levels on average): `stats().contact_dispatches` is then 2 (the march and the blur);
-`KIN_CONTACT_CLASSIC=1` blurs twice.
+-0.1 at 1080p; the pictures differ by under 0.3 levels on average): `debug_stats().contact_dispatches` is then 2 (the march and the blur).
 
 ### Contact shadows
 
@@ -535,7 +589,7 @@ none. Marched in compute rather than in `mesh.frag`: the main pass shades
 every fragment of the overdraw and the march would run in each, where compute
 runs once a pixel and `mesh.frag` stays one texture read. Without a sampled
 depth, an RG16F colour target or R8 storage it is off with one line in the log;
-with no sun it does nothing. `stats()` has `contact_dispatches` (0 when off);
+with no sun it does nothing. `debug_stats()` has `contact_dispatches` (0 when off);
 the pre-pass shows in `ao_draws` and `ao_instances`. Custom shaders see a tenth
 sampler (`uContactShadow`) in kin's include; ones compiled before still work.
 Full size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
@@ -543,7 +597,7 @@ Full size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
 ### Temporal anti-aliasing
 
 `scene.taa = {.enabled = true, .blend = 0.9f, .sharpness = 0.0f,
-.jitter_scale = 1.0f, .jitter_samples = 8, .freeze_jitter = false}` (off by
+.jitter_scale = 1.0f, .jitter_samples = 8}` (off by
 default; off, the picture is bit-identical and nothing extra exists: no pass,
 no buffer). Each frame is drawn a Halton (2, 3) fraction of a pixel off
 (`kin::taa_jitter`, `kin/render3d/taa.hpp`), and a compute pass blends it into
@@ -557,7 +611,7 @@ draws one sample a pixel whatever `View3DOptions::samples` asks
   the first frame that asks, dropped by the first that doesn't. `View3D::reset_history()`
   drops it by hand (a camera cut, a scene swapped); a resize, the first frame
   and a change from a perspective to an orthographic camera do it by themselves
-  (`stats().taa_reset`).
+  (`debug_stats().taa_reset`).
 - **Jitter** moves the projection of the passes that draw the picture (the main
   pass, the pre-pass, the occlusion and contact-shadow maths that unproject its
   depth, the overlay). The frustum culling, the shadow cascades' fit, the pick
@@ -568,13 +622,12 @@ draws one sample a pixel whatever `View3DOptions::samples` asks
   output when temporal anti-aliasing is all that needs a depth pre-pass (no
   ambient occlusion, contact shadows or occlusion culling, and no opaque mesh
   with a custom shader): there is then no second geometry pass for it
-  (`stats().taa_main_velocity`, `ao_draws` 0), which was the largest part of
+  (`debug_stats().taa_main_velocity`, `ao_draws` 0), which was the largest part of
   TAA's cost in big scenes (the kiln's fell by 2.2 ms of 7.2). Opaque and
   cut-out meshes write it; blended, additive and wireframe ones leave it as it
   is. With any of those other features the pre-pass is drawn once and shared,
   writing four floats (the normal and the velocity, instead of two). The
-  pictures of the two ways are identical to the byte; `KIN_TAA_PREPASS=1`
-  forces the pre-pass. The first-person overlay has its own pass
+  pictures of the two ways are identical to the byte. The first-person overlay has its own pass
   and its own previous camera, so a gun is neither smeared by the world behind
   it nor trailed.
 - **Matching copies from frame to frame** (the scene is rebuilt, so nothing
@@ -615,7 +668,7 @@ draws one sample a pixel whatever `View3DOptions::samples` asks
   is softer than MSAA's. The occlusion's and contact shadows' per-pixel noise
   is fixed, not varied by frame: left.
 - Without RGBA16F as target and storage, or without what the pre-pass needs, it is off with
-  one line in the log. `stats()` has `taa_dispatches` (0 when off, 2 with
+  one line in the log. `debug_stats()` has `taa_dispatches` (0 when off, 2 with
   sharpening), `taa_reset`, `taa_jitter` and `samples`.
   See the plan's G2d results for numbers.
 
@@ -630,18 +683,21 @@ size) from the one before. **Level 0 is the mesh as given**, to the bit; the lev
 lists over the same vertices (a mesh costs a few more indices, not more vertices). `Mesh::level_count()`,
 `level_triangles(i)` and `level_error(i)` (an upper bound, in the mesh's units, on how far level i
 lies from level 0: meshoptimizer's error for each step, added up) read them back. A mesh without
-indices (a glTF with no normals is read as flat-shaded triangles) is welded by position, and each level gets
-vertices of its own with flat normals (kept after the mesh's; level 0 is untouched), which costs memory: the kiln's
-5 M triangles take 8 s and about 1.1 GB more at load for 4 levels.
+indices (a glTF with no normals is read as flat-shaded triangles) is welded by position, and its levels share
+vertices of their own (kept after the mesh's; level 0 is untouched): one for each welded position they use, with no
+normal, so that the shader makes each face's from derivatives as for flat clusters (a normal map has no effect on
+those levels). A vertex for each corner of each level, as before, took the kiln's 4 levels 12.8 M vertices (1.1 GB
+more at load, all told); for a 2 M-triangle flat torus with 4 levels it is 0.5 M vertices (17 MB) against 5.25 M (180
+MB), on the CPU and the GPU, and the `kin_reference` run peaks at 0.85 GB against 1.17.
 
-`scene.lod = {.enabled = true, .error_pixels = 1.0f, .bias = 1.0f, .force_level = -1}` (off by default;
+`scene.lod = {.enabled = true, .error_pixels = 1.0f, .bias = 1.0f}` (off by default;
 off, the picture, the statistics and the cost are those without it) draws each copy at the coarsest level
 whose error, times the copy's largest scale, spans no more than `error_pixels / bias` pixels at the
 nearest point of its bounding sphere (`distance` along the view, `0.5 * view height / tan(fov / 2)` pixels
 at a unit; orthographic cameras use the view's pixels a unit). A copy has one level a frame, in the
 camera's pass, the shadow passes (every cascade), the depth pre-pass, the velocity pass and picking, so
 a shadow is that of the surface drawn. Copies of a mesh and material at one level are one instanced
-draw, so a draw is up to `levels` draws; `stats().lod_copies_by_level` counts the copies the camera
+draw, so a draw is up to `levels` draws; `debug_stats().lod_copies_by_level` counts the copies the camera
 sees at each level and `stats().triangles` the triangles drawn. Limits: whole meshes only (a big mesh
 is drawn at one level whole: see the plan's G3b for clusters); no hysteresis (copies are not
 matched from frame to frame except for TAA, so a copy at the edge of a threshold can change level as
@@ -673,15 +729,20 @@ light: HDR, bloom has it), optional `stars` and a `moon` (a disc, and a glow). `
 (its intensity and rotation). It is drawn in the main pass after the opaque meshes and before the blended ones and the overlay, with the depth
 test of "nothing was drawn here", so it costs a triangle's pixels where nothing else is, is correct under MSAA and TAA (the jittered
 matrix, and the camera's turn as the velocity), and is HDR (bloom, exposure, tonemap) like the rest. A view with a sky is output through a
-shader with a one-step dither (night skies ring in 8 bits without it). `stats().sky_drawn`.
+shader with a one-step dither (night skies ring in 8 bits without it). `debug_stats().sky_drawn`.
 
 **The fog** (`Fog3D`) is `density` per unit of distance plus a `height_density` that thins upward with `height_falloff`
 from `base_height`, from `start`, up to `max_opacity`; the optical depth along each fragment's **view ray** is exact (the integral of the
 height density is closed: `kin::fog_optical_depth` is the same arithmetic on the CPU). The colour is `colour`, or with `colour_from_sky` the
 sky's in that direction (so far geometry melts into it at the horizon, whatever the time of day), plus the sun's light times a lobe of
-`sun_anisotropy` (`sun_scatter`). Applied to everything the main pass shades through the stock shader (opaque, cut-out, skinned,
+`sun_anisotropy` (`sun_scatter`). The meshes read the sky's colour from a table made on the CPU when the sky or the sun's height
+changes (`sky_model::FogTable`: the scattering split by its phase functions, 48 elevations crowded at the horizon, within a third of a
+level of `sky_radiance` and the same at and under the horizon), not the integral per fragment; the sky pass reuses its own, the particles
+integrate per vertex. Applied to everything the main pass shades through the stock shader (opaque, cut-out, skinned,
 instanced, clustered, blended, additive); the overlay (a gun in the hand) is not fogged and custom material shaders are not.
-`kin_fog.inc.glsl` holds it for a pass of your own. `stats().fog_applied`.
+The sky gets the height fog from `start` to infinity (the limit of a mesh's as it recedes), not the distance term, which an infinite
+ray would make total. With `SkyMode3D::Image`, `colour_from_sky` takes `colour` everywhere (the panorama is not read for the fog):
+set it to the panorama's horizon. `kin_fog.inc.glsl` holds the fog for a pass of your own. `debug_stats().fog_applied`.
 
 **Time of day** (`TimeOfDay3D`): `hours` (solar time), `day_of_year`, `latitude`, `axial_tilt`, `moon_phase`, `speed` (game seconds a
 second for `advance(day, dt)`). `evaluate()` is a pure function of them (and the sky's haze and sun intensity): sun and moon
@@ -693,7 +754,7 @@ looks); `sun_times()` gives sunrise and sunset. North is -z, east +x. As a compo
 **The sky's light** (`Lights3D::sky_lights_scene`): the atmosphere and ground (no disc, stars or moon) are drawn into a 256 x 128 panorama,
 mipped and filtered with the environment machinery, and take the place of `environment` and `ambient`. It is made again only when
 the sun or the sky moved by more than `Sky3D::light_threshold` and `light_interval` renders (4) have passed, so a day sweep re-filters a few
-times a second (`stats().sky_env_regenerated`, `sky_env_generations`, `sky_env_cpu_ms`; about 0.4 ms of GPU each time). It lights the scene
+times a second (`debug_stats().sky_env_regenerated`, `sky_env_generations`, `sky_env_cpu_ms`; about 0.4 ms of GPU each time). It lights the scene
 whether or not the sky is drawn. Without it the hemisphere ambient is used as before.
 
 `warm_up()` makes the sky's, the fog variants' and the dither's pipelines too. Harness: `kin_reference` JSON `sky`, `fog`,
@@ -730,13 +791,16 @@ first, as the point lights). `kin::spot_attenuation(light, point)` is the same n
 
 **Shadows.** A light's `shadow.enabled` asks for a map; of the spots in view that ask, the `max_shadowed_spots` most important have one,
 and of the point lights the `max_shadowed_points`. A map is a perspective depth map over the cone (a point light's: six 90-degree faces
-with a guard band, only those a visible surface can fall in drawn), in one array whose side is the largest `resolution` any shadow
-light asks for (default `Lights3D::local_shadow_resolution`, 1024; a light that asks for less draws into a corner of it). Importance is
+with a guard band, only those a visible surface can fall in drawn), in one array whose side is the largest `resolution` of the lights
+given a map this render (default `Lights3D::local_shadow_resolution`, 1024; a light that asks for less draws into a corner of it); it
+grows at once and shrinks only after a smaller side has done for 120 renders in a row. Importance is
 intensity times reach times the share of the view the light fills, and a light that had a map last frame counts 1.5 times over, so the
 choice does not flip between frames; name a light with `id` (else its index in the list) to keep that across frames. Filtering is
 3x3 comparisons as the sun's, `bias` (texels, times 1 + the surface's slope to the light) and `normal_offset` (texels) in the light's
 own texel at the surface's distance, `softness` the taps' spacing, `near_plane` the map's, and `distance` the reach (the shadow fades
-out over its last fifth and the map ends there). Casters are what the cone and the radius reach: opaque and cut-out meshes, instanced
+out over its last fifth and the map ends there). The offset and the slope are the mesh's own normal's, as the sun's (and the moon's
+offset): a normal map changes the light, not where a shadow falls.
+Casters are what the cone and the radius reach: opaque and cut-out meshes, instanced
 and posed (skinned) copies, levels of detail by the camera's choice, and clustered meshes cut from the light's own point of view (the
 error is judged in the map's texels). `Material3D::receives_shadow` and `casts_shadow` govern these shadows too; custom material shaders
 get neither the spots nor the shadows; the overlay gets the lights without shadows.
@@ -750,7 +814,7 @@ it): a strength under 1 uses the light shaders, 0 draws no sun map. At dusk both
 **Kept while nothing moves.** `lights.cache_shadows` keeps each local map as it is cached: the exact bytes the draw is a function of (the
 view's matrix and size, each caster's mesh, material, copies and pose, the cut's settings) are compared, so a static spot over static
 casters costs nothing after its first render, a moved light or caster redraws only its own map, and the camera is not part of it for a spot
-or a point light (it is for the moon's cascades). `stats()` has `spots`, `spot_slot[i]` / `point_slot[i]` (the slot of `Lights3D::spots[i]`
+or a point light (it is for the moon's cascades). `debug_stats()` has `spots`, `spot_slot[i]` / `point_slot[i]` (the slot of `Lights3D::spots[i]`
 and `points[i]`, -1 none), `local_shadow_maps`, `local_shadow_drawn`, `local_shadow_cached`, `local_shadow_draws`, `local_shadow_casters`,
 `moon_cascades`, `local_shadow_bytes` and `lights_variant`.
 
@@ -793,7 +857,10 @@ solution for constant air, so any drag is stable), size, colour and alpha over l
 flipbook over the life. The simulation runs in fixed steps of 1/120 s taken out of the time `update(dt)` is given, with every random a hash of
 (seed, birth number, purpose): the same seed and the same calls make the same particles whatever the frame lengths were, `state_hash()` is
 a hash of all of it, and `save()` / `restore()` take the state to bytes and back for a rollback. A ground height (visual only: no
-physics) kills or bounces. ECS: `ParticleEmitter3D` holds a system and is stepped at its entity's place by
+physics) kills or bounces. The wind is read at every particle's own place each step, 32 at a time: the gust and turbulence sines run in f32
+turns by a polynomial (arithmetic only, so the same bits on every machine; within 1e-5 m/s of `Wind3D::velocity`) in loops the compiler
+makes vector code of, the drag's `exp` is taken once a step, and a system without drag, influence or wind never looks for the air (20,000
+particles in gusts and turbulence: 0.6 ms an `update(1/60)`, from 16 ms; `kin_render3d_bench wind`). ECS: `ParticleEmitter3D` holds a system and is stepped at its entity's place by
 `WorldRenderState3D::simulate_particles(dt, wind)` and drawn by `collect()`; a `Weather3D` component is the game's weather
 (`advance_weather(dt)`, `apply_weather(scene, base_fog)`).
 
@@ -833,7 +900,7 @@ base fog (the fog is overwritten, so it does not compound), and scale your sun d
 three gust sines, three turbulence sines per component) has `velocity()` for simulated particles and a closed-form `displacement()` for the
 weather: the same wind.
 
-`stats()` has `particles_submitted`, `particles_drawn` (after the view's cull and the 1,048,576 sprites a frame it takes), `particle_batches`,
+`debug_stats()` has `particles_submitted`, `particles_drawn` (after the view's cull and the 1,048,576 sprites a frame it takes), `particle_batches`,
 `particle_soft`, `weather_particles`, `particles_dropped` and `particle_cpu_ms`. `capabilities().particles` and `soft_particles`. Not done:
 particles lit by spot lights, depth-hit splashes (the ground is one height), the velocity of a particle for TAA (a moving particle ghosts under
 TAA; use MSAA for rain), collisions with anything, GPU-simulated particles (the CPU writes the instance buffer each frame), a sort across
@@ -884,6 +951,9 @@ and climbing lines, additive) are one. Passes of your own on an HDR view are
 not offered: draw into the view's texture with the 2D renderer's shaders.
 
 ## Models
+
+For an isolated asset turntable, material/normal/UV inspection, explicit reload
+and reusable runtime diagnostics, see [the asset preview tool](asset_preview.md).
 
 ### Shared assets and whole-model placement
 
@@ -964,6 +1034,72 @@ are read too (see Skinned meshes below). Not read yet: morph targets (their
 animation channels are ignored, with a line in the log), texture transforms,
 second UV sets, `KHR_materials_*` other than unlit and emissive strength.
 
+Images embedded as base64 `data:` URIs (Blender's "glTF Embedded" export) load
+as a `.glb`'s do. An image that is a KTX2 or DDS file (a `.ktx2` file,
+`image/ktx2`, or `KHR_texture_basisu`'s image where the texture has no other)
+is uploaded compressed as it is, with its own mips, and `Assets3D::load_texture`
+reads `.ktx2` and `.dds` paths the same way; Basis Universal ones need a
+transcoder and are a missing texture (see
+[compressed textures](assets.md#compressed-textures)). Geometry that cannot
+be read as it is (Draco or meshopt compression, sparse accessors, a `POSITION` or `NORMAL` that is not `VEC3`, a
+`TEXCOORD_0` that is not `VEC2`) leaves its primitive out, with a line in the
+log and in `Model::asset_diagnostics`, rather than loading as zeros. A file
+named by an absolute path is never read, and a model under the content root or
+in a mounted pack cannot leave it with `..` (`../textures/` from `models/`
+still reads; a loose model opened from elsewhere keeps `..`). A file not read
+is missing: a buffer fails the model, an image is a missing texture. Nodes nest
+at most 512 deep. A plain node between two of a skin's joints is kept as a joint
+of the skeleton that no vertex is bound to, so the joints below it rest where
+their inverse bind matrices say (logged and dropped as before if that would take
+the skin past 256 joints).
+
+### Animated nodes
+
+An animation that moves plain nodes (a door on its hinge, a fan, a crane's arm, a
+prop's root) plays as a skin's does: the moved nodes and every node above them are
+a skeleton of the model, its **node skeleton** (`Model::node_skeleton`, an index
+into `skeletons` after the skins; -1 for none). Its joints are those nodes, parents
+first, with their names and rest placings; its inverse binds are identities, so its
+joint matrices are the nodes' world matrices in the model's space. The animation's
+channels on them are a clip of that skeleton, of the animation's name (after the
+skins' clips, so theirs keep their places). Each part that is not skinned hangs from
+its nearest node in it (`ModelPart::node`, -1 for none) with its placing below that
+node (`ModelPart::node_offset`); `ModelPart::transform` stays its place at rest, so
+everything that draws a model at rest is unchanged. A part is drawn at its node's
+matrix times its offset (`Model::part_transform(part, node_matrices)`).
+
+```cpp
+kin::Model door = r3d.load_model("models/door.glb");
+const kin::u32 nodes = static_cast<kin::u32>(door.node_skeleton);   // -1: nothing in it moves
+kin::AnimationPlayer3D player{&door.skeletons[nodes]};
+player.play(door.find_clip("Open", nodes), /*loop=*/false);
+std::vector<kin::Mat4f> matrices;
+
+// each frame
+player.update(dt);                                      // crossfades, layers and events as for a character
+player.joint_matrices(matrices);                        // the nodes' world matrices
+scene.draw(door, kin::Mat4f::translation(position), matrices);
+```
+
+`scene.draw(model, transform, node_matrices)` places the parts under an animated
+node by the pose and the rest as `draw(model, transform)` does; the rest pose's
+matrices draw the same picture (to rounding). A part whose node has no matrix in the
+span, or one that is not finite, is drawn at rest (logged once). A model with a skin
+and animated props as well: pose each skeleton with its own player (the props' clip
+is `find_clip(name, model.node_skeleton)`) and draw both with
+`scene.draw_skinned(model, joints, transform, tint, id, {}, node_matrices)`.
+In the ECS a `ModelRenderer3D` with an `Animator3D` plays the animator's clips on
+its model's node skeleton (state machines, blends, layers, actions, events and IK
+on the nodes' names); without an animator it draws exactly as before.
+
+The node skeleton is made only when a part that is not skinned hangs from one of its
+nodes: an animation of nodes that carry no mesh of the model (BrainStem's root above
+its skin's joints, a node of another scene) is ignored as before, with a line in the
+log. At most 256 nodes (the moved ones and those above them); more are not animated
+(logged). Not animated yet: a skin under an animated node (its joints' root does not
+follow it), a node under a skin's joint (the part follows the joint only), and morph
+targets.
+
 ## Skinned meshes
 
 A character is a mesh whose vertices follow a skeleton. kin keeps the three
@@ -995,12 +1131,15 @@ GPU). `Pose` is the local `JointPose` of every joint. `AnimClip3D` holds, per jo
 `CubicSpline` interpolation exactly as glTF specifies (rotations slerped; a cubic
 spline's tangents scaled by the time between keys). A joint with no track keeps its rest value.
 
-**Maths.** `sample_clip(clip, skeleton, time, loop, pose)`; `blend_poses(a, b, w)`;
+**Maths.** `sample_clip(clip, skeleton, time, loop, pose)`; `blend_poses(a, b, w)` (or `blend_poses(a, b, w, out)`, which
+may write over `a` or `b` and allocates nothing once `out` has room: the player blends this way, into scratch it keeps, so a
+1D blend, a crossfade or a layer allocates nothing after its first frame, and the ECS animator compares its state and layer
+keys without building the strings);
 `PoseMask::subtree(skeleton, joint)`, `::joints(skeleton, names)` and `blend_masked`
 for an upper-body layer over locomotion; `apply_additive(base, additive, reference,
 mask, weight)` for additive clips (hit reactions, breathing); `extract_root_motion`
 and `remove_root_motion` for clips whose root joint carries the character's travel
-(you get the delta between two times, wrapping at a loop's end, and the pose with the root held at rest);
+(you get the delta between two times, wrapping at a loop's end, or its start at a negative speed, and the pose with the root held at rest);
 `compute_joint_matrices(skeleton, pose, out)`.
 
 **Player.** `AnimationPlayer3D` plays a clip (`play`), fades to another
@@ -1008,7 +1147,8 @@ and `remove_root_motion` for clips whose root joint carries the character's trav
 that moment, held, so nothing jumps), and has layers (`layer(i)`: clip, weight, mask,
 additive, loop, speed). `set_root_motion(true)` holds the base layer's root and reports the motion
 of the last `update` as `root_motion()`. The pointers to the skeleton and clips are
-not owned: a `Model`'s stay put as long as the `Model` is not copied or changed.
+not owned: a `Model`'s stay put as long as the `Model` is not copied or changed (`ModelFile::poll()` replaces its model in
+place, so rebind a player after it returns true).
 Measured: about 2 us for a 24-joint character's `update` and matrices, 4.5 us with a crossfade.
 
 **Loading.** The glTF reader takes skins (joints, `inverseBindMatrices`) and
@@ -1020,8 +1160,10 @@ whatever order the file listed them in, and the vertices' indices follow. A skin
 than 256 joints is not used (logged): its meshes are drawn as static meshes. A skinned
 mesh's node placing is ignored (as glTF says); the joint matrices place it, and the transform you pass
 to `draw_skinned` is the model's. A mesh on a node under a joint (a sword in a hand) with no skin of its
-own is bound to that joint with all its weight, so it follows. `Model::skeletons`, `Model::clips`
-(an animation of two skins is two clips of one name), `ModelPart::skin`, `Model::find_clip`; or read
+own is bound to that joint with all its weight, so it follows. `Animator3D` and `draw_skinned(model, ...)` pose `skeletons[0]` only: a
+model with several skins loads, but its parts on any other skin are not drawn there (logged once for each model). `Model::skeletons`, `Model::clips`
+(an animation of two skins is two clips of one name; one that moves plain nodes too has one more, of the node skeleton: see
+Animated nodes above), `ModelPart::skin`, `Model::find_clip`; or read
 the same without a GPU with `read_model_data` (for tools and tests).
 
 **Meshes.** `MeshData::skin` is a parallel stream (four joint indices and four
@@ -1039,7 +1181,8 @@ own (the 128-byte instance is unchanged); the vertex shader moves each vertex by
 of its joints' matrices and turns its normal by their linear part (right for rigid and uniformly scaled
 joints; a non-uniform scale in a joint is approximated). `draw_skinned(model, joints, transform)`
 draws all of a model's parts (skinned ones in the pose, the others as `draw` does).
-`Renderer3DCapabilities::skinning`; `Render3DStats::skinned_copies`, `skin_matrices`, `skinned_draws`.
+`Renderer3DCapabilities::skinning`; `stats().skinned_copies` and `stats().skinned_draws`
+report submitted copies/draws; `debug_stats().skin_matrices` counts uploaded matrices.
 
 To animate submitted commands, call `scene.update_joint_matrices(first, matrices)` between renders. `first` is an index
 in the scene's existing `joint_matrices()` array; record its size before `draw_skinned`, or use the copy's entry in
@@ -1047,7 +1190,7 @@ in the scene's existing `joint_matrices()` array; record its size before `draw_s
 changes `draw_revision()`. Empty ranges at the end are allowed and overlapping source spans are supported. Indices are
 local to the scene's current submissions: obtain them again after `clear()`. Parts sharing a model pose see one update.
 This edits existing storage without another palette or per-character cache. Transforms/materials still require ordinary
-scene submission. `KIN_PREPARED_SCENES=0` keeps the reference layout-building path while retaining pose updates.
+scene submission.
 
 **Every pass** (P1a part 2). A skinned copy is drawn by the main pass, casts the sun's shadow (one map or any
 cascades, cut-out materials too), is in the depth and normal pre-pass (ambient occlusion, contact shadows, the
@@ -1225,8 +1368,8 @@ written above; look-at has its limits, the two-bone and FABRIK (a pole only) hav
 `kin/ecs/render3d.hpp` puts meshes on ECS entities: `Transform3D` (position,
 rotation, scale, relative to the flecs parent), `WorldTransform3D` (added with
 it, composed through the hierarchy) and `MeshRenderer` (mesh, material,
-tint). `WorldRenderState3D::propagate_transforms()` then `collect(scene)` turn
-them into one instanced draw a mesh and material.
+tint, and an `id` that pick reports and TAA matches frames by: the entity's own when 0). `WorldRenderState3D::propagate_transforms()`
+then `collect(scene)` turn them into one instanced draw a mesh and material.
 
 ```cpp
 kin::WorldRenderState3D state{world};
@@ -1243,7 +1386,10 @@ camera or a hand to carry it); the entity's id names the light for the choice of
 **Characters.** `SkinnedMeshRenderer{.model}` (a `std::shared_ptr<const Model>`: its parts, skeleton and clips) draws the model at the
 entity's `WorldTransform3D`, in the pose of the entity's `Animator3D`. It is its own component, not `MeshRenderer`: a mesh renderer's
 entities merge into one instanced draw of one mesh, and a character is several parts with a skeleton and a pose of its own.
-`WorldRenderState3D::animate(dt)` (once per fixed step or frame) steps every animator; `collect` draws them.
+`WorldRenderState3D::animate(dt)` (once per fixed step or frame) steps every animator; `collect` draws them. An animator rebinds to
+its entity's model whenever that `shared_ptr` is replaced by another, even a model that lands at the old one's address. An
+`Animator3D` beside a `ModelRenderer3D` poses that model's animated nodes (its node skeleton: see Models, Animated nodes), so a
+door or a fan placed as a static model plays its clips; a `SkinnedMeshRenderer` keeps posing its model's first skin.
 
 ```cpp
 auto hero = std::make_shared<const kin::Model>(r3d.load_model("models/hero.glb"));
@@ -1507,12 +1653,17 @@ glows or the overlay). `Renderer3D::pick(view, pixel)` reads one back: `hit`,
 `id`, `position`. It waits for the GPU: what the frame has recorded so far is
 submitted, and 2D drawn after it goes on in a new command buffer, as after a
 read-back. Ask once per pixel per picture (a studio keeps the answer under a
-still pointer), not every pixel every frame.
+still pointer), not every pixel every frame. A view that has not been rendered
+since it was made or resized has nothing to ask: `pick` says no `hit` until the
+next `render`.
 
 `hdr` draws into a float picture that keeps light past white, then exposes
 and tonemaps it (ACES: brights roll off, the darkest tones darken a little)
 on its way to the 2D frame; an HDR 2D pipeline gets it linear and tonemaps
-it with everything else. `bloom` (its strength; it turns `hdr` on) glows
+it with everything else. Over a transparent `background` a partly covered
+pixel (an MSAA edge, a faint glow) is exposed and tonemapped as its own colour,
+then given its coverage again, so an edge has the colour of what it belongs to.
+`bloom` (its strength; it turns `hdr` on) glows
 round what is brighter than `bloom_threshold`: emissive materials past 1,
 lit by strong lights. The glow belongs to the view, so 2D drawn over it
 (a HUD) stays crisp. `render(view,
@@ -1522,10 +1673,15 @@ no rendering each frame. `resize(view, size)` gives it a new size and texture.
 `view.reset_history()` drops the history temporal anti-aliasing keeps.
 
 `Renderer3D::capabilities()` says what the device has (depth bits, most
-samples); `stats()` what the last render drew (draw calls, instances, copies
-culled, shadow draws and casters (and per cascade), point lights, triangles, CPU time).
+samples); `stats()` summarizes the last render (draw calls, instances, culled
+copies, shadow draws/casters, lights, triangles and CPU recording time).
+`debug_stats()` adds per-cascade counts and renderer implementation counters.
 
 ## Memory and warm-up
+
+**Load time.** Levels of detail and cluster hierarchies are built at load, on the CPU, which for a huge mesh is the longest part of
+loading (the kiln: 5 s, and the peak of the process's memory). A bake cache (`r3d.set_bake_cache`, see [Baked cache](#baked-cache)) reads
+them back on later runs instead: the same meshes, without the simplifier's time or memory.
 
 **Targets of the opt-in features are given back.** Ambient occlusion's and contact shadows' textures, the pre-pass's depth and normals,
 temporal anti-aliasing's history and velocity, and occlusion culling's pyramid, history and occluder depth (with the renderer's second gathered
@@ -1533,7 +1689,7 @@ buffer of cluster indices) belong to a view and are made by the first render tha
 view gives its targets back (they go to SDL_GPU's allocator, so they are reusable at once, though a driver may keep its blocks); a feature that is
 on again makes them again, and the pictures are those of a fresh view (the temporal history starts afresh, as after `reset_history()`). A
 feature toggled at least every 119 renders never lets go, so toggling does not thrash. `stats().feature_bytes` is the video memory those targets
-hold now (1280 x 720, everything on: Sponza 45.7 MiB, the kiln with occlusion culling 93.2 MiB; nothing when off) and `stats().targets_released`
+hold now (1280 x 720, everything on: Sponza 45.7 MiB, the kiln with occlusion culling 93.2 MiB; nothing when off) and `debug_stats().targets_released`
 the groups given back this render. Nothing else is released (the shadow map, MSAA and HDR targets stay).
 
 **Warm-up.** Pipelines are made on first use, which is tens of milliseconds a pipeline on a driver with a cold shader cache (turning on temporal
@@ -1571,19 +1727,20 @@ result, up to one cluster (open meshes stop at a few roots). The mesh is welded 
 flat-shaded one, as a model with no normals, by position, UV and colour, and its normals are then made in the shader from the screen-space
 derivatives of the position: a normal map has no effect on it). `Mesh::cluster_count()`, `cluster_levels()`, `cluster_roots()`,
 `leaf_triangles()`, `cluster_triangles()` read it back. The kiln (5.15 M triangles) takes 5 s at load and 1.5 GB for the process, less than
-with no hierarchy, since the welded vertices replace the unindexed ones on the GPU.
+with no hierarchy, since the welded vertices replace the unindexed ones on the GPU. The mesh keeps on the CPU only the
+hierarchy (`MeshClusters`, what the cut reads): the welded vertices are uploaded and let go (`MeshClusterBuild`).
 
 With `scene.lod.enabled` each copy is cut through its hierarchy every frame (in compute on the GPU where the device can, else on the CPU: see below): a cluster is drawn when its own error spans at
 most `error_pixels / bias` pixels at the nearest point of its bounding sphere and its parent's does not, so near parts stay fine
 and far parts are coarse inside one mesh, with no cracks (the borders between groups were locked in every simplification above them) and every
-surface covered once. `force_level = N` draws the cut at hierarchy depth N (0: the leaves). The same triangles are drawn by every pass for a copy
+surface covered once. `scene.debug.force_level = N` draws the cut at hierarchy depth N (0: the leaves). The same triangles are drawn by every pass for a copy
 (colour, pre-pass, velocity, pick, each shadow map; casters outside the view that cast into it are cut for the shadow only). The indices
-of what is drawn are compacted into one buffer a frame; one draw per copy per pass. `stats()` has `cluster_copies`, `clusters_tested`,
+of what is drawn are compacted into one buffer a frame; one draw per copy per pass. `debug_stats()` has `cluster_copies`, `clusters_tested`,
 `clusters_drawn`, `cluster_upload_bytes`, `cluster_ms`. Off (the default) a mesh with clusters is drawn whole and the picture is that of the mesh
 without; alpha-blended copies are never cut. Clusters pay for one huge mesh seen near and far (the kiln close up: 0.4 against 2.3 ms of GPU for whole-mesh levels, 4.4 at
 full detail); not for many copies of small meshes, nor mid-size ones.
 
-**The cut on the GPU** (`scene.lod.gpu_culling`, default on; `Renderer3DCapabilities::gpu_driven_clusters`). A cluster's test needs no neighbour, so
+**The cut on the GPU** (`scene.debug.gpu_culling`, default on; `Renderer3DCapabilities::gpu_driven_clusters`). A cluster's test needs no neighbour, so
 four compute passes test every cluster of every copy at once: the cut and the frustum tests of each pass (the camera's, each cascade's or the one
 shadow map's: the same expressions as the CPU's, in the same order), a prefix sum of the chosen clusters' triangle counts, and a gather of their
 indices into one index buffer in the clusters' own order (so a picture is the same every run), which indirect draws read: one multi-draw a draw and pass,
@@ -1592,10 +1749,10 @@ against 0.4 to 0.9 for the CPU cut). The picture is the CPU cut's, byte for byte
 anti-aliasing, picking). It costs video memory: the table of clusters (80 bytes each) and every level's indices (the kiln: 62 MB more than the leaves
 alone, 7 MB of table), and the gathered indices (`scene.lod.max_cluster_triangles`, default 4 million triangles, 12 bytes each, shared by all
 passes and copies; a cut that passes it is cut short, never written out of bounds). The counts of what it drew are on the GPU:
-`scene.lod.stats_readback` reads them back at the end of `render()` (waiting for the GPU, as `pick` does: for tools and tests) into `stats()`
-(`clusters_drawn`, `triangles`, `cluster_overflow`, `cluster_triangles_all`); without it those are 0 and `draws`, `shadow_draws` count the multi-draws.
-`Renderer3D::read_cluster_picks` lists the clusters it chose. `stats().cluster_gpu` says which cut a render made.
-`KIN_GPU_CLUSTERS=0` forces the CPU cut. Alpha-blended copies are never cut.
+`scene.debug.stats_readback` reads them back at the end of `render()` (waiting for the GPU, as `pick` does: for tools and tests) into `debug_stats()`
+(`clusters_drawn`, `triangles`, `cluster_overflow`, `cluster_triangles_all`); without it the GPU-only counters are 0, `triangles` excludes GPU-selected geometry (`triangles_complete` is false), and `draws`, `shadow_draws` count the multi-draws.
+`Renderer3D::read_cluster_picks` lists the clusters it chose. `debug_stats().cluster_gpu` says which cut a render made.
+`scene.debug.gpu_culling = false` selects the CPU cut. Alpha-blended copies are never cut.
 
 **Occlusion culling** (`scene.lod.occlusion = {.enabled = true}`; off by default; `Renderer3DCapabilities::occlusion_culling`). Clusters hidden
 behind other geometry are not drawn. It needs the selection, the GPU cut and clustered meshes (else it is ignored, with one line in the log), and the picture
@@ -1607,7 +1764,7 @@ depths (three compute passes) is built; every other cluster is tested against it
 a change of the scene's clustered draws start it empty. With a pre-pass (ambient occlusion, contact shadows or temporal anti-aliasing on) the pre-pass is made in
 two halves and nothing is drawn twice; without one a depth-only pass of the first set is the price, because the multisampled main depth cannot be
 sampled. The shadow maps are not culled (a caster hidden from the camera still shadows what shows), nor the overlay, and meshes with a shader of their own are no occluders.
-`depth_margin` (relative, 0.001) and `pixel_margin` (1) widen the test a little. `stats()` has `occlusion`, `occlusion_levels`, `occlusion_dispatches`
+`depth_margin` (relative, 0.001) and `pixel_margin` (1) widen the test a little. `debug_stats()` has `occlusion`, `occlusion_levels`, `occlusion_dispatches`
 and, with `stats_readback`, `clusters_first_pass`, `clusters_occluded`, `triangles_occluded`, `clusters_wasted` (drawn first, found hidden after all);
 `clusters_drawn + clusters_occluded` is the cut's clusters in view. It adds fixed work (the pyramid, a second cut, a second multi-draw a draw) and wins only
 where much more is hidden than that costs: see the plan's G3d for the numbers (a wall hiding 256 copies of a 100 thousand triangle clustered mesh:
@@ -1679,9 +1836,36 @@ draws/settings, propagates transforms, applies authored camera/environment and c
 collects local lights/models/ropes, then calls `compose`. `render()` collects and submits.
 Custom gameplay ordering can use `world()`, `bodies()` and `rendering()` directly instead
 of `step`. The host remains responsible for input, fixed-step scheduling, compositing,
-UI, audio and scene-stack enter/suspend/resume policies. A host `Scene::world()` can
+UI and scene-stack enter/suspend/resume policies. A host `Scene::world()` can
 return `session.world()` for the existing inspection tools. Lua-authored scenes are
 explicitly rejected; continue using `ScriptScene` for its Lua context and callbacks.
+
+Audio is opt-in: give `options.audio` and `options.audio_catalog` (both outlive the
+session) and each `step` runs the ECS audio bridge after the Audio phase's systems, so
+the one-shots and emitters they add sound that step. Emitters and one-shots sound from
+their `WorldTransform3D` (`offset_3d` in the entity's own space), and the listener is the
+`AudioListener` entity's transform or, with none, the scene's active `SceneCamera3D`
+facing its -Z ([audio](audio.md#runtime)). The host still calls `audio.update(dt)` once a
+frame.
+
+```cpp
+options.audio = &audio; options.audio_catalog = &catalog;
+options.initialize = [](kin::SceneSession3DContext& context) {
+    context.world.entities().find_by_authored_id("campfire").set(kin::AudioEmitter{.cue = "crackle"});
+};
+```
+
+A session also runs headless, over a renderer without 3D (`Renderer3D::available()` false:
+the `SDL_Renderer` backend, a server under `AppMode::Headless`, a test job without a GPU).
+Everything but drawing is the same: preparation and activation, spawning, preloading and
+pools, edits, commands, physics and queries, animation, particles, time and weather, and
+`collect()`, which builds the `Scene3D` on the CPU. Models load CPU-only through
+`Assets3D::load_model`: their parts' names, transforms and skins, with empty mesh handles
+that keep their counts, bounds and joints, and the skeletons and clips, so animation, joint
+sockets and placement behave as with a GPU; parts keep default materials and no image is
+decoded. There is no view (`view()` is null), ropes are not meshed, and `render()` and
+`pick()` return false/empty with the diagnostic "no renderer". A session over a GPU
+renderer takes exactly the path it took before.
 
 Hot reload is explicit: call `changed_sources()` or `reload_if_changed()` on a development
 timer, never implicitly in every render. It watches the loaded scene/prefabs, model
@@ -1830,7 +2014,10 @@ with host boundaries on the renderer thread:
 3. Animation systems run, their requests commit, and native animation, environment
    clocks, transforms and particles advance once.
 4. Audio through Editor systems run. Remaining requests commit and transforms
-   propagate before collection; these late births first simulate on the next step.
+   propagate before collection; these late births first simulate on the next step. When no system of
+   these phases was scheduled this frame and no request waits, nothing can have changed since the Animation
+   boundary, and the particle budgets are not checked and the transforms not propagated a second time
+   (`collect()` does both for whatever the host changed since).
 
 Empty phases still execute their host boundaries. Frame rates/intervals update once,
 and the complete graph is validated before any system or native simulation runs.
@@ -1852,8 +2039,11 @@ later phases and cancels requests that have not reached a lifecycle boundary. Ea
 commits and native physics cannot be rolled back; retrying `step()` advances a new
 step. Dropped/unflushed command buffers cancel their own requests.
 Reload, unload and destruction cancel all old requests, including unflushed ones.
-A prepared replacement cancels requests when a step attempts to execute them; activate
-or cancel the replacement before stepping gameplay. Direct recursive calls remain rejected.
+A prepared replacement cancels requests when a step attempts to execute them (`error()` says
+that they are cancelled, not held): spawns and despawns queued between `prepare` and
+`activate`/`cancel` are lost, as are those still queued at activation, because the request
+belongs to the old scene. Submit them again after `cancel`, or through the new scene's
+`commands()` after `activate`. Direct recursive calls remain rejected.
 
 `max_pending_commands` defaults to 64 and counts accepted requests in both unflushed
 buffers and the scene queue. Capacity exhaustion fails immediately without appending
@@ -2167,8 +2357,24 @@ wireframe, blend and wrap_u/wrap_v. Blend values are `opaque`, `alpha`, `additiv
 `mask`; wrapping is `clamp`, `repeat`, `mirror`. Metallic, roughness, occlusion strength
 and alpha cutoff are in [0,1], emissive in [0,1e6], normal scale in [0,100]. Unknown
 fields, non-finite values, invalid enums and out-of-range values return diagnostics.
-Shaders and shader parameters remain runtime/imported values; this format does not
-compile custom shaders or implement a shader graph.
+`shader` names a compiled material fragment shader relative to the content root;
+`null` explicitly clears an imported or inherited shader. `shader_params` supplies
+exactly 16 finite numbers (four vec4s, read through `kin_param`). For example:
+
+```json
+"shader": "shaders/thin_glass.frag.spv",
+"shader_params": [1.45,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0]
+```
+
+Compile shaders with `kin_compile_glsl` and the material shader API described above.
+The loader checks SPIR-V size/header before creating the shader; files are capped at
+4 MiB. It does not compile GLSL or implement a shader graph. `load_material_shader`
+shares live handles in a weak cache with 64 metadata entries by default
+(`Assets3D::Limits::shaders`, zero disables caching). Bindings own their shader handles,
+and invalidating a shader source refreshes affected bindings without invalidating
+retained handles. Shader dependencies use the same content-pack and reload paths as
+textures. The GPU renderer retains compiled custom shaders for its pipeline lifetime;
+this cache limit bounds lookup metadata, not total shader/pipeline GPU memory.
 
 Texture fields are `texture`, `normal`, `metallic_roughness`, `occlusion` and
 `emissive_texture`. A string names a path relative to the common content root, a
@@ -2204,7 +2410,7 @@ materials rather than applying stale part indices.
 
 Invalid material/configuration/texture replacements retain the last good binding.
 Use `assets.invalidate(changed_source)` before manual rebinding; `SceneSession3D` does
-this for watched material files and their selected texture dependencies. A material-only
+this for watched material files and their selected texture/shader dependencies. A material-only
 edit keeps the same model/mesh; an image edit refreshes affected material bindings and
 textures. An image also used by the imported model can require that model to be rebound
 to update its original material handles. Existing consumers stay valid throughout.
@@ -2662,3 +2868,244 @@ contact and direct known-target crate pushing. Its native verbs map to keyboard
 and gamepad prompts. Game inventory, impulses, action cancellation and command
 acknowledgement remain ordinary C++ systems. The utility itself performs no
 per-call C++ allocations after warm-up; game callbacks can impose their own costs.
+
+### Pointing at an entity
+
+Choosing with the pointer is a question about pixels rather than reach. Give the session
+`options.view.pick = true` (one more pass over the opaque meshes every render; off by
+default, and a `SceneEnvironment3D`'s view settings never turn it off), and
+`pick(pixel)` reads the last rendered frame, drawing nothing: the entity under the pixel
+and the world point there. `MeshRenderer`, `ModelRenderer3D` and `SkinnedMeshRenderer`
+draw with their entity's low 32 bits, or with an `id` of their own; the session maps
+either back to the live entity, the child that carries the renderer (walk its parents for
+a prefab root). It names no entity for a `compose` draw or for an entity hidden or gone
+since the render, and returns nothing over the background or without picking (with the
+reason in `diagnostics()`). Like `Renderer3D::pick` it waits for the GPU: ask on a click
+or when the pointer moves, not every frame.
+
+```cpp
+if (input.pressed("select")) if (auto hit = session.pick(pointer_in_view)) {
+    if (hit->entity) select(hit->entity);  // hit->position: the point clicked, in the world
+}
+```
+
+## Using a game-owned world and physics
+
+`SceneSession3D` is the owning convenience layer. A game that already owns its
+ECS/physics world can use the same loader, bindings and frame stages separately:
+
+```cpp
+#include <kin/scene/scene_loader3d.hpp>
+#include <kin/scene/scene_frame3d.hpp>
+
+kin::EcsWorld world;
+kin::register_builtin_editor_components(world);
+kin::WorldRenderState3D rendering{world};
+kin::SceneAssetRuntime level;
+// assets is the game's renderer-scoped Assets3D.
+if (!level.load(assets.root() / "scenes/level.kinscene", assets.root(), world.components())) {
+    // Inspect level.diagnostics().
+}
+if (!kin::instantiate_scene3d(level, world, assets)) {
+    // Inspect level.diagnostics(). Binding failure removes only new entities.
+}
+
+kin::SceneFrame3D frame{world, rendering};
+// Each fixed update: frame.step(dt), checking frame.diagnostics() on failure.
+kin::Scene3D scene;
+kin::View3DOptions options;
+// Each render: frame.collect(scene, &options), then custom draws and the game's
+// own Renderer3D::render(view, scene). The game owns/reuses/resizes its View3D.
+```
+
+`SceneAssetRuntime` still loads `.kinscene`/`.kinprefab` through the shared
+registry. `instantiate_scene3d` binds only the new instance's models, materials,
+animators and particles. Its `SceneBindingOptions3D::physics_assets` optionally
+binds collider assets too. It neither creates nor steps native physics. Empty
+instances do not bind unrelated entities. Additive loads preserve the world's
+scene header by default; `update_scene_header` explicitly opts into replacing it.
+Authored IDs must be unique in the destination world. Register native components
+before loading. Lua scenes use `ScriptScene` instead.
+
+Call `level.clear(world)` to remove the instance while the world is alive. Its
+entity descendants are owned with it: detach game-owned children first. A failed
+binding leaves pre-existing entities intact; successful asset-cache entries may
+remain shared. This path does not promise transactional replacement of an entire
+live world: explicitly unload/reload at a game boundary, or use the owning
+session for isolated candidate-world replacement, checked lifecycle commands,
+preloaded prefab pools and live-edit transactions.
+
+`SceneFrame3D` borrows the ECS world and its `WorldRenderState3D`. Give it
+`SceneFrameOptions3D::bodies = &existing_bridge` to reuse an existing
+`WorldPhysicsState3D` and its `World3D`, including unrelated native obstacles.
+For a raw simulation, instead supply `physics_step = [&](float dt) {
+    game.step(dt); }`. The callback runs once at the Physics boundary; the game
+owns synchronization with its ECS representation. Supplying both step owners is
+rejected. A game that already steps physics can supply neither.
+
+The driver runs ECS phases with native physics after Physics, animation/clocks/
+particles after Animation, optional ECS audio after Audio, and a final validation
+and transform propagation after Editor. Custom `SystemPhaseHooks::after` run
+before the native stage, after ECS command buffers flush. A failure stops later
+phases without undoing completed gameplay. Hosts with an existing phase loop can
+call `after_phase(phase, dt)` instead of `step(dt)`; never call both for one step.
+The owning session uses these same stages and collection code.
+
+No world, scene, view, assets or GPU resources are owned by the frame driver.
+Collection fills caller-owned scene/view options and does no view creation.
+Its optional renderer is used only for rope meshing; without one it remains a
+CPU-only path. Owner-thread calls only; borrowed objects outlive the driver.
+
+### One scene runtime for 2D and 3D
+
+Set `SceneAppConfig::rendering_3d = true` to expose the runtime's shared renderer
+as `SceneContext::renderer3d` through enter/update/render/exit in windowed,
+headless and command-server runs. `ServerConfig` has the same opt-in. Camp,
+Projectile Range and Summit use it; each retains ownership of its own gameplay
+and assets. It is released after scenes shut down, before the 2D renderer dies.
+
+The default is false: existing 2D games allocate no `Renderer3D`. The pointer is
+null when not requested. A requested renderer can still have `available() ==
+false` on a backend without 3D: CPU loading and simulation remain usable. This
+option does not select a GPU backend; use the normal backend configuration.
+A 2D-only build rejects the opt-in with a diagnostic rather than silently
+ignoring it. No 3D definitions or dependencies are needed by its scene context.
+
+## Runtime failure reporting
+
+The 3D runtime facades use the same contract: check the returned handle/span or
+boolean, then read `diagnostics()` on the object that performed the operation.
+`Diagnostics3D` is a list of contextual messages; `diagnostics3d_text()` joins
+it for a log, HUD or run report. No diagnostic strings or history are allocated
+on the successful draw path.
+
+```cpp
+auto model = assets.load_model("models/prop.glb");
+if (!model) {
+    show_error(kin::diagnostics3d_text(assets.diagnostics()));
+    return;
+}
+if (!scene.draw(*model, transform)) {
+    show_error(kin::diagnostics3d_text(scene.diagnostics()));
+    return;
+}
+if (!r3d.render(view, scene)) {
+    show_error(kin::diagnostics3d_text(r3d.diagnostics()));
+}
+```
+
+Stop or choose a fallback after a failed load; do not dereference the failed
+handle. `Renderer3D`, `Assets3D`, `SceneFrame3D` and `SceneSession3D` report the
+last attempted operation. Successful operations clear old errors; observing
+capabilities, counters or current state does not clear them. A valid pick with
+no hit is an ordinary empty result with no error. Diagnostic references remain
+valid until the next operation on their owner. Calls belong on the owner thread.
+
+`Scene3D` is a command accumulator: it retains only the first rejected submission
+until `clear()`. Invalid material counts, insufficient poses, index ranges and
+oversized instance counts reject without changing already submitted commands or
+poses. Later submissions to an invalid scene are rejected too. Rendering and
+GPU warm-up report an invalid scene (including its overlay) before submitting
+GPU work. `clear_diagnostics()` explicitly acknowledges a rejected operation
+while retaining the previous commands; use it only when deliberately retaining
+the previous valid submission. Normal frame construction uses `clear()`.
+
+Instance/model batch construction returns an invalid batch plus diagnostics for
+invalid groups, skinning or transforms. A failed `InstanceBatch3D::update` returns
+false and preserves records, bounds and revisions; a successful update clears
+its last error. Diagnostic storage lives with the shared batch data, adding no
+fields to every retained draw handle. Asset load failure leaves existing asset
+handles valid. Model-file reload failure keeps the last good model and reports
+through `diagnostics()`; `error()` remains a compatibility snapshot.
+Missing required meshes or texture maps fail the load instead of returning a
+partially loaded model as a successful result.
+
+`instantiate_scene3d` returns a boolean and publishes binding failures through
+the supplied `SceneAssetRuntime::diagnostics()`, the same place as scene parsing
+and instantiation failures. The loader removes its new instance on binding
+failure and retains pre-existing world entities. Scene/frame collection forwards
+submission failures, including custom scene composition. Deferred lifecycle
+requests keep their completion status and an immutable failure message.
+
+Optional legacy output strings on asset/renderer load functions are copies of
+the same diagnostic report. New code needs no output parameter, and omitting it
+never loses the reason for a failure. They do not select another loading or
+error-handling path. Low-level pure data validators/parsers continue to return
+their validation report directly, without mutable diagnostic state.
+
+Recoverable runtime validation and draw submission do not throw. Invalid fixed
+constructor configuration (session capacities, frame step ownership/audio pairs)
+and invalid arguments to the pure `Model::placement` transform helper remain
+programming-contract exceptions. Allocation failure is not converted into a
+promise of recoverable operation; these APIs are not declared `noexcept`.
+
+
+## Public statistics and debug controls
+
+`Renderer3D::stats()` returns the compact `Render3DStats` summary from
+`kin/render3d/stats3d.hpp`: 20 counters/flags for submitted geometry, lights,
+shadows, skinning, particles, CPU recording time, first-use pipelines and the
+reported feature/local-shadow allocations. Those allocations are not total
+VRAM. CPU recording time is not GPU or complete-frame time. Reading the summary
+never waits for the GPU.
+
+Detailed implementation instrumentation is available explicitly through
+`Renderer3D::debug_stats()` (`Render3DDebugStats`,
+`kin/render3d/debug_stats3d.hpp`). It includes retained tables, buffer uploads,
+cache payloads, per-pass dispatches, light slots, LOD histograms and cluster
+counters. These fields may change with the renderer implementation. Both APIs
+observe the same last render, including overlays; the renderer keeps one
+counter store and does not copy a detailed report into every summary.
+
+GPU cluster selection is asynchronous. With debug readback off, `triangles`
+counts only the main-pass triangles known to the CPU and `triangles_complete`
+is false when GPU-selected geometry contributes. It is a partial count, not an
+estimated total. Explicit readback makes the count complete when the GPU reads
+succeed; CPU cuts and scenes without GPU-selected geometry need no readback.
+Neither stats getter initiates a readback, changes errors, or retains history.
+A new render resets both reports, including after a rejected render.
+
+Visual quality stays in `scene.taa` and `scene.lod`. Diagnostic overrides live
+in `scene.debug` (`Render3DDebugOptions`, `kin/render3d/debug3d.hpp`):
+
+```cpp
+scene.lod.enabled = true;
+scene.lod.error_pixels = 1.0f;
+// Only when inspecting a rendering problem:
+scene.debug.force_level = 2;       // -1 restores normal LOD selection
+scene.debug.gpu_culling = false;   // compare against the CPU cluster cut
+scene.debug.freeze_jitter = true;  // hold the first TAA jitter sample
+scene.debug.stats_readback = true; // blocking GPU cluster readback for profiling
+scene.debug.gpu_pass_markers = true; // external GPU profiler labels, no readback
+if (!r3d.render(view, scene)) return;
+const auto& summary = r3d.stats();
+const auto& details = r3d.debug_stats();
+```
+
+When storing a detailed snapshot, use `Render3DDebugStats`; copying it into
+`Render3DStats` intentionally keeps only the compact summary.
+
+Migration from the combined API:
+
+| Previous access | Explicit access |
+|---|---|
+| `r3d.stats().retained_gpu_bytes` (and other implementation counters) | `r3d.debug_stats().retained_gpu_bytes` |
+| `scene.lod.force_level` | `scene.debug.force_level` |
+| `scene.lod.gpu_culling` | `scene.debug.gpu_culling` |
+| `scene.lod.stats_readback` | `scene.debug.stats_readback` |
+| `scene.taa.freeze_jitter` | `scene.debug.freeze_jitter` |
+
+Defaults select normal rendering and no blocking readback. Debug overrides are
+not serialized scene quality settings. They belong to each scene; the overlay
+can have its own forced LOD. GPU/CPU cluster selection and cluster readback use
+the main scene's options for the whole view; TAA jitter also belongs to the view.
+`Scene3D::clear()` preserves quality and debug options while clearing commands.
+`SceneFrame3D::collect()` rebuilds the main scene's quality and debug options
+from defaults; set overrides after collection or in the session's compose callback.
+
+The existing `record_render3d_diagnostics()` publishes only the public summary
+to F1/capture/profiling sinks. Tools can explicitly add implementation rows with
+`record_render3d_debug_diagnostics()` from
+`kin/render3d/debug_diagnostics3d.hpp`. Neither sink performs GPU reads or owns
+renderer resources. Benchmarks and reference tools consume `debug_stats()` so
+supported CSV/report counters remain available; retired experiment columns have been removed.

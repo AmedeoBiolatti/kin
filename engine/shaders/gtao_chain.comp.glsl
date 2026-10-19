@@ -9,7 +9,7 @@
 // occluder, so poles and railings do not shut out all that is behind them.
 // Writes the share of the ambient light that reaches the pixel (1: all).
 //
-// This is the chain version (the default; KIN_AO_CLASSIC=1 uses gtao.comp): the taps read the linear depth chain
+// This is the chain version (selected automatically for large views): the taps read the linear depth chain
 // of ao_depth_chain.comp, each from the level its distance from the pixel picks (far taps fall in few cache
 // lines), and rebuild the view-space position from the distance without a divide.
 layout(local_size_x = 8, local_size_y = 8) in;

@@ -28,6 +28,7 @@ namespace kin {
 
 class JobSystem;
 class IRenderer3DBackend;
+struct CompressedImage;
 
 // Mirroring a sprite within its rectangle, left-right (X) and/or upside
 // down (Y), before it turns about its pivot.
@@ -292,6 +293,13 @@ public:
         }
         const std::vector<u8> zeros(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 4u, 0);
         return create_texture_from_rgba(zeros.data(), size);
+    }
+    // A texture of block-compressed texels with their own mip chain
+    // (kin/assets/texture_file.hpp; the caller has checked image.valid()), never
+    // given generated mips. Default: an invalid texture, for a backend without
+    // compressed textures.
+    virtual Texture create_texture_compressed(const CompressedImage& /*image*/) {
+        return {};
     }
     // Replace the texels of a `size` region at `at` of `texture` with `pixels`
     // (RGBA8, tightly packed, row by row). False when the backend cannot update a

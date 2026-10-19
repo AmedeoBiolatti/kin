@@ -151,15 +151,26 @@ Quatf nlerp(Quatf a, Quatf b, f32 t) {
     return Quatf{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t}.normalized();
 }
 
-Pose blend_poses(const Pose& a, const Pose& b, f32 weight) {
+void blend_poses(const Pose& a, const Pose& b, f32 weight, Pose& out) {
     const std::size_t n = std::min(a.joints.size(), b.joints.size());
-    Pose out;
     out.joints.resize(n);
     for (std::size_t j = 0; j < n; ++j) {
-        out.joints[j].translation = mix(a.joints[j].translation, b.joints[j].translation, weight);
-        out.joints[j].rotation = slerp(a.joints[j].rotation, b.joints[j].rotation, weight);
-        out.joints[j].scale = mix(a.joints[j].scale, b.joints[j].scale, weight);
+        // Each joint is read before it is written: `out` may be `a` or `b`. (Read field by field: a copy of the whole joint is a wide
+        // load over what sample_clip stored narrow, and stalls.)
+        const JointPose& x = a.joints[j];
+        const JointPose& y = b.joints[j];
+        const Vec3f translation = mix(x.translation, y.translation, weight);
+        const Quatf rotation = slerp(x.rotation, y.rotation, weight);
+        const Vec3f scale = mix(x.scale, y.scale, weight);
+        out.joints[j].translation = translation;
+        out.joints[j].rotation = rotation;
+        out.joints[j].scale = scale;
     }
+}
+
+Pose blend_poses(const Pose& a, const Pose& b, f32 weight) {
+    Pose out;
+    blend_poses(a, b, weight, out);
     return out;
 }
 
@@ -228,16 +239,21 @@ RootMotion extract_root_motion(const AnimClip3D& clip, const Skeleton& skeleton,
     }
     const f32 t0 = clip_time(clip, from, loop);
     const f32 t1 = clip_time(clip, to, loop);
-    // Wrapped: the end's motion from t0, then the start's to t1. Going backwards within a clip is just negative motion.
-    const bool wrapped = loop && to > from && t1 < t0;
+    // Wrapped: forward, the end's motion from t0 then the start's to t1; backward (a negative speed), the start's from t0
+    // then the end's to t1. Without a wrap, going backwards within a clip is just negative motion.
+    const bool forward = to > from;
+    const bool wrapped = loop && (forward ? t1 < t0 : t1 > t0);
     if (wrapped) {
         const JointPose a = root_at(clip, skeleton, t0, false);
         const JointPose end = root_at(clip, skeleton, clip.duration, false);
         const JointPose start = root_at(clip, skeleton, 0.0f, false);
         const JointPose b = root_at(clip, skeleton, t1, false);
-        motion.translation = masked((end.translation - a.translation) + (b.translation - start.translation), axes);
+        // Where the root leaves the clip and where it comes back in.
+        const JointPose& leave = forward ? end : start;
+        const JointPose& enter = forward ? start : end;
+        motion.translation = masked((leave.translation - a.translation) + (b.translation - enter.translation), axes);
         if (axes.rotation) {
-            motion.rotation = ((b.rotation * start.rotation.conjugate()) * (end.rotation * a.rotation.conjugate())).normalized();
+            motion.rotation = ((b.rotation * enter.rotation.conjugate()) * (leave.rotation * a.rotation.conjugate())).normalized();
         }
         return motion;
     }
@@ -427,20 +443,19 @@ void AnimationPlayer3D::advance(Playing& p, f32 dt) {
     }
 }
 
-void AnimationPlayer3D::sample(const Playing& p, Pose& out) const {
+void AnimationPlayer3D::sample(const Playing& p, Pose& out, Pose& second) const {
     if (!p.blend.empty()) {
         const BlendPair pair = blend_pair(p.blend, p.parameter);
         // Each clip at the same phase of its own length; (for a looped phase of exactly 1 the clip's end, as the wrap leaves 0).
         sample_clip(*pair.a, *_skeleton, p.time * pair.a->duration, p.loop, out);
         if (pair.b != pair.a && pair.weight > 0.0f) {
-            Pose second;
             sample_clip(*pair.b, *_skeleton, p.time * pair.b->duration, p.loop, second);
-            out = blend_poses(out, second, pair.weight);
+            blend_poses(out, second, pair.weight, out);
         }
     } else if (p.clip) {
         sample_clip(*p.clip, *_skeleton, p.time, p.loop, out);
     } else {
-        out = _skeleton->rest_pose();
+        out.joints = _skeleton->rest;
     }
 }
 
@@ -585,22 +600,22 @@ void AnimationPlayer3D::update(f32 dt, std::span<const ClipEventTrack3D> tracks,
         gather(_action.clip, before, after, double(dt) * _action.options.speed / duration, false, _action.token);
     }
     events.dropped = u32(std::min(std::max(0.0, total - events.count), double(std::numeric_limits<u32>::max())));
-    const f32 base_before = _base.time;
-    const Playing from_before = _from;
+    const f32 base_before = _base.time, from_before = _from.time;
     advance(_base, dt);
     if (_fading) {
         advance(_from, dt);
         _fade_elapsed += dt;
     }
-    // Root motion of the base layer: the clip's own motion between the times, faded like the pictures are.
-    const auto motion_of = [&](const Playing& before, const Playing& after) {
+    // Root motion of the base layer: the clip's own motion between the times, faded like the pictures are. `before` is the
+    // playing after its advance (advance moves only the time) and `before_time` the time it had before it.
+    const auto motion_of = [&](const Playing& before, f32 before_time, const Playing& after) {
         RootMotion m;
         if (!before.blend.empty()) {
             // A blend: each of its two clips' motion over the same span of phase, mixed as the pictures are.
             const BlendPair pair = blend_pair(before.blend, before.parameter);
-            const f32 end = before.loop ? before.time + (pair.duration > 0.0f ? dt * before.speed / pair.duration : 0.0f) : after.time;
+            const f32 end = before.loop ? before_time + (pair.duration > 0.0f ? dt * before.speed / pair.duration : 0.0f) : after.time;
             const auto of = [&](const AnimClip3D* clip) {
-                return extract_root_motion(*clip, *_skeleton, before.time * clip->duration, end * clip->duration, before.loop, _axes);
+                return extract_root_motion(*clip, *_skeleton, before_time * clip->duration, end * clip->duration, before.loop, _axes);
             };
             m = of(pair.a);
             if (pair.b != pair.a && pair.weight > 0.0f) {
@@ -610,31 +625,29 @@ void AnimationPlayer3D::update(f32 dt, std::span<const ClipEventTrack3D> tracks,
             }
         } else if (before.clip) {
             // A clip that did not wrap or stop at its end moved from `before` to `after`; one that wrapped carries on past
-            // the end (extract_root_motion wraps when `to` is earlier and the clip loops).
+            // the end, or before the start at a negative speed (extract_root_motion wraps either way when the clip loops).
             const f32 span = dt * before.speed;
-            const f32 to = before.loop ? before.time + span : after.time;
-            m = extract_root_motion(*before.clip, *_skeleton, before.time, to, before.loop, _axes);
+            const f32 to = before.loop ? before_time + span : after.time;
+            m = extract_root_motion(*before.clip, *_skeleton, before_time, to, before.loop, _axes);
         }
         return m;
     };
-    Playing base_start = _base;
-    base_start.time = base_before;
     if (_root_motion) {
-        _delta = motion_of(base_start, _base);
+        _delta = motion_of(_base, base_before, _base);
     }
-    sample(_base, _pose);
+    sample(_base, _pose, _scratch2);
     if (_fading) {
         const f32 alpha = _fade_seconds > 0.0f ? std::clamp(_fade_elapsed / _fade_seconds, 0.0f, 1.0f) : 1.0f;
         if (_from_frozen) {
-            _pose = blend_poses(_frozen, _pose, alpha);
+            blend_poses(_frozen, _pose, alpha, _pose);
         } else {
-            sample(_from, _scratch);
+            sample(_from, _scratch, _scratch2);
             if (_root_motion) {
-                const RootMotion old = motion_of(from_before, _from);
+                const RootMotion old = motion_of(_from, from_before, _from);
                 _delta.translation = mix(old.translation, _delta.translation, alpha);
                 _delta.rotation = nlerp(old.rotation, _delta.rotation, alpha);
             }
-            _pose = blend_poses(_scratch, _pose, alpha);
+            blend_poses(_scratch, _pose, alpha, _pose);
         }
         if (alpha >= 1.0f) {
             _fading = false;
@@ -651,7 +664,7 @@ void AnimationPlayer3D::update(f32 dt, std::span<const ClipEventTrack3D> tracks,
         Playing p{layer.clip, layer.time, layer.speed, layer.loop, {}, 0.0f};
         advance(p, dt);
         layer.time = p.time;
-        sample(p, _scratch);
+        sample(p, _scratch, _scratch2);
         if (layer.additive) {
             sample_clip(*layer.clip, *_skeleton, 0.0f, layer.loop, _reference);
             apply_additive(_pose, _scratch, _reference, layer.mask, layer.weight);

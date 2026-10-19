@@ -399,14 +399,14 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                              .thickness = s.contact_thickness,
                              .intensity = s.contact_intensity,
                              .steps = static_cast<u32>(std::clamp(s.contact_steps, int(min_contact_steps), int(max_contact_steps)))};
-    scene.taa = {.enabled = s.taa,
-                 .blend = s.taa_blend,
-                 .sharpness = s.taa_sharpness,
+    scene.taa = {.enabled = s.taa, .blend = s.taa_blend, .sharpness = s.taa_sharpness,
                  .jitter_scale = s.taa_jitter_scale,
-                 .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, int(max_taa_jitter_samples))),
-                 .freeze_jitter = s.taa_freeze};
-    scene.lod = {.enabled = s.lod, .error_pixels = s.lod_error, .bias = s.lod_bias, .force_level = s.lod_force, .gpu_culling = s.lod_gpu,
-                 .stats_readback = s.lod && s.lod_readback, .occlusion = {.enabled = s.lod && s.lod_occlusion}};
+                 .jitter_samples = static_cast<u32>(std::clamp(s.taa_jitter_samples, 1, int(max_taa_jitter_samples)))};
+    scene.debug.freeze_jitter = s.taa_freeze;
+    scene.lod = {.enabled = s.lod, .error_pixels = s.lod_error, .bias = s.lod_bias, .occlusion = {.enabled = s.lod && s.lod_occlusion}};
+    scene.debug.force_level = s.lod_force;
+    scene.debug.gpu_culling = s.lod_gpu;
+    scene.debug.stats_readback = s.lod && s.lod_readback;
     scene.cull = s.cull;
     // The sky and the fog (the time of day, when it drives them, last: it replaces the sun's direction and colour, the fill and the ambient).
     scene.sky = {.enabled = s.sky,

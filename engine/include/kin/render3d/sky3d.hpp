@@ -17,6 +17,8 @@
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
 
+#include <array>
+
 namespace kin {
 
 enum class SkyMode3D : u8 {
@@ -86,7 +88,8 @@ struct Fog3D {
     Vec3f colour{0.62f, 0.68f, 0.76f}; // linear
     // Take the colour from the sky in the view's direction (the horizon colour for rays that look down), so far
     // geometry melts into the sky; `colour` is then unused. Needs the procedural sky's settings (it uses them whether
-    // or not Scene3D::sky is enabled).
+    // or not Scene3D::sky is enabled). With SkyMode3D::Image `colour` is used all the same (the panorama is not read
+    // for the fog): set it to the panorama's horizon.
     bool colour_from_sky = false;
     // The sun brightening the fog it shines through, toward it: its light (Lights3D::sun.color) times this times a
     // Henyey-Greenstein lobe of `sun_anisotropy` (0 even, near 1 a tight glare), added to the fog's colour.
@@ -134,10 +137,37 @@ Vec3f sky_ground_light(const Sky3D& sky, Vec3f sun_direction);
 // Lights3D::sky_lights_scene lights a white sphere with, to within the environment's filtering.
 Vec3f sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 samples_u = 64, u32 samples_v = 32);
 
+namespace sky_model {
+// The sky's light as the GPU's fog reads it (Fog3D::colour_from_sky): from a table made once for each sky and sun, not
+// the integral at every pixel. A ray's scattering splits by its phase functions, the only part that depends on the angle
+// mu to the light: a light's share along a ray at sin(elevation) s is rayleigh_phase(mu) R(s) + mie_phase(mu) M(s). The
+// rows hold R and M at `rows` elevations spaced evenly in coordinate(s), the log of the air mass's rounded sin (crowded
+// where the colour changes fastest, the last degrees over the horizon); read linearly between them, within a fraction of a
+// level of sky_radiance (at and under the horizon, the first row: the same). The renderer keeps one; the tests read it.
+struct FogTable {
+    static constexpr u32 rows = 48; // = KIN_FOG_ROWS in kin_fog.inc.glsl: change both
+    // Per row: the sun's R and M, then the moon's (rgb and a w of 0: the GPU's vec4s), times the sky's brightness.
+    std::array<f32, rows * 16> values{};
+    // What they were made for: the sun's sin(elevation) and light, the haze's optical depth, the sky's intensity, the moon's
+    // light and sin(elevation).
+    std::array<f32, 6> made_for{};
+    bool made = false;
+
+    // The row coordinate of a ray at sin(elevation) `s`: 0 at the horizon (and under it), rows - 1 at the zenith.
+    static f32 coordinate(f32 s);
+    // Makes the rows for this sky and sun unless they are made for them already (the sky is still most frames; the sun's
+    // and the moon's azimuths do not change them): true if it did.
+    bool update(const Sky3D& sky, Vec3f sun_direction);
+    // The sky's light along `direction` read from the rows (made for `sky` and `sun_direction`): what the GPU's fog takes
+    // for sky_radiance.
+    Vec3f radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const;
+};
+} // namespace sky_model
+
 // ---- Fog, on the CPU ----
 
 // The optical depth from `eye` along the unit `direction` for `distance` (infinity: to the end of the ray: the height
-// fog's integral to the sky, no distance term).
+// fog's integral from `start` to the sky, no distance term).
 f32 fog_optical_depth(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance);
 // 1 - e^-tau, at most max_opacity.
 f32 fog_opacity(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance);

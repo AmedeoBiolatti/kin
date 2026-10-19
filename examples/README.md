@@ -251,8 +251,7 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   `--print-settings` prints the settings). `ctest -R sponza-walk` does this and
   checks the picture is not blank; it skips without Sponza or a GPU.
 - Ambient occlusion in a window of 1.5 million pixels or more (1920 x 1080 and up) runs over a linear depth chain (cheaper there, the same picture to
-  0.2 levels); the stats line (F3) says "(depth chain)" when it did. `KIN_AO_CLASSIC=1` runs the old path, `KIN_AO_CHAIN=1` forces the new one, `KIN_CONTACT_CLASSIC=1`
-  blurs the contact shadows twice. (Not tried with the panel's controls here: the click path cannot be exercised without a display.)
+  0.2 levels); the stats line (F3) says "(depth chain)" when it did. (Not tried with the panel's controls here: the click path cannot be exercised without a display.)
 - It makes the pipelines and targets of every switch once when it starts (`Renderer3D::warm_up`), so that turning one on for the first time
   does not hitch, and again when a switch that needs it (map size, MSAA, HDR) is turned; the engine does nothing of the kind by itself.
 - The code is `sponza_walk/settings.hpp` (all state, applied to the `Scene3D`
@@ -330,8 +329,7 @@ the scene report to exclude loading. Raw profile events grow with the frame coun
 can nest and GPU work overlaps the CPU; their times are not additive. The CPU profiling section of `docs/3d_plan.md` records the
 distance-32 findings and a `perf` sampling command, with shared geometry buffers as the first measured optimisation target.
 
-Kin now shares GPU buffers for small static meshes, including these chunks. To compare the original allocation path, set
-`KIN_SHARED_MESH_BUFFERS=0` before launching; the choice applies when each mesh is created. The report's `shared_mesh_*` fields
+Kin shares GPU buffers for small static meshes, including these chunks. The report's `shared_mesh_*` fields
 show reserved GPU page bytes, live/retired ranges, page counts and reuse. Pool reservation includes page padding, so it can exceed
 the sample's resident mesh bytes. Dedicated meshes, view targets and driver allocations are outside these pool counters.
 
@@ -448,7 +446,7 @@ static SPIR-V instruction counts also include unused or runtime-skipped branches
 Full measurements, probe hashes, source observations and pixel checks are in `$HOME/kin-bench/shader-analysis/investigation.json`.
 
 The production implementation now uses dedicated unlit colour-only, textured and masked shaders in Kin, enabled by default.
-Set `KIN_UNLIT_SHADERS=0` before renderer creation for a same-binary reference. Fog, skinning, temporal AA and custom shaders
+Fog, skinning, temporal AA and custom shaders
 use the general path; emission, blending, HDR and MSAA are supported by the specialization. New paired runs reduced frame time
 by about 27.5% at 20× and 29.8% at 100× (median paired p50 reductions), with exact Kin screenshot matches. Median run p50s were
 10.99→7.97 ms at 20× and 58.99→40.40 ms at 100×; Mobile measured 8.13 / 41.28 ms. Clocks drifted during the longer sweep, so
@@ -500,8 +498,7 @@ not apply). CSV/report counters confirm the requested lights, samples, shadow pa
 Results and peak RSS go under `$HOME/kin-bench/lighting-materials/`; the sequential memory guards still apply.
 
 Kin now packs shadow casters into flat lists and addresses small meshes within already-bound GPU pages. Both changes are
-engine-wide and preserve the same shading and geometry. `KIN_MESH_PAGE_BINDINGS=0` disables page-addressed draws for diagnosis
-while retaining shared storage and the flat shadow gather. Paired before/after measurements and exact capture comparisons
+engine-wide and preserve the same shading and geometry. Paired before/after measurements and exact capture comparisons
 are recorded in `docs/3d_plan.md` and `$HOME/kin-bench/shadow-binding-opt/`.
 The subsequent 90-run Kin/Godot rerun is saved separately in `$HOME/kin-bench/lighting-after-cpu-opt/`. At 3.20 million main
 triangles, local-shadow frame medians are 3.09 ms (Kin), 6.03 ms (Mobile), 7.36 ms (Forward+); with MSAA 4× they are
@@ -509,13 +506,12 @@ triangles, local-shadow frame medians are 3.09 ms (Kin), 6.03 ms (Mobile), 7.36 
 
 
 
-Kin reuses renderer draw/task layout for unchanged scene commands; `KIN_PREPARED_SCENES=0` restores rebuilding that layout.
+Kin reuses renderer draw/task layout for unchanged scene commands.
 The Grove harness already retains its scene, so this targets engine preparation rather than the sample's command builder.
 `--rebuild-scene` deliberately invalidates it every frame. CSV/report fields `prepared_reused`, `prepared_draws`,
 `prepared_cache_bytes` and `prepared_layout_bytes` distinguish the small new key/stamps from existing reused arrays.
 Visibility, lighting and shadow work still update each frame. See the prepared-layout measurements in `docs/3d_plan.md`.
-Ordinary fixed-size batch edits now reuse that layout too; `KIN_PREPARED_BATCH_EDITS=0` restores invalidation on content
-edits. Group validity changes still rebuild the layout. GPU uploads, bounds and camera/light selection always refresh.
+Ordinary fixed-size batch edits reuse that layout too. Group validity changes still rebuild the layout. GPU uploads, bounds and camera/light selection always refresh.
 
 For a shared spot-shadow path, `--point-shadows 0` keeps point illumination but disables its shadows. With
 `--shadows 0 --local-shadows 1 --lights 4 --spots 1`, both engines render one perspective spot map. Godot uses
@@ -571,27 +567,14 @@ renderers, unlike the uncropped full-field triangle test. Godot uses 64 spatial 
 merges consecutive identical-mesh/material instance draws while preserving cell bounds for CPU culling. Reports retain actual work rather than asserting equal triangle
 submission. Lighting/shadow implementations differ as in the lighting sweep; no cross-engine pixel-equivalence claim is made.
 
-`KIN_MASKED_DEPTH_PREPASS=1` opts into the stock masked-material main-depth experiment (off by default). The dense Grove
-route then prepasses the visible plant copies into the existing main depth target and shades against it without rewriting
-depth. It does not change camera/shadow selection or allocate another depth texture. CSV/report fields
-`masked_depth_draws` and `masked_depth_instances` report the extra pass separately; other draw/caster counts keep their
-meaning. TAA/MSAA/overlay/GPU-occlusion/custom-shader views and unsupported draws keep their previous paths. This can cost
-CPU time, so measure it with the intended helper count; the recorded 100k four-helper gain does not apply to serial runs.
-
-For external GPU captures, `--visible` uses an uncapped visible window with the same 300-frame warm-up, frame-indexed
-camera/light route and exact `--measured` CSV count. It exits from the benchmark's own render count. Unlike `--preview`,
-it does not skip warm-up or impose a 60 FPS cap. Presentation gives Nsight Systems frame boundaries: hidden SDL windows
-can otherwise exhaust its per-frame GPU timestamp limit. Use hidden runs for the established throughput comparison;
-visible capture intervals include window/compositor and profiler overhead.
-
-`KIN_GPU_PASS_MARKERS=1` enables optional `kin3d.*` SDL debug groups without splitting submissions. For example, with
+`--gpu-pass-markers` enables optional `kin3d.*` SDL debug groups without splitting submissions. For example, with
 Nsight Systems already installed (output/scratch on disk, not a RAM filesystem):
 
 ```sh
-KIN_RENDER_BACKEND=gpu KIN_GPU_PASS_MARKERS=1 TMPDIR="$HOME/kin-bench/tmp" \
+KIN_RENDER_BACKEND=gpu TMPDIR="$HOME/kin-bench/tmp" \
 nsys profile --trace=vulkan-annotations --sample=none --cpuctxsw=none --backtrace=none \
   --vulkan-gpu-workload=individual --output="$HOME/kin-bench/grove-capture" \
-  ./build/bin/blockfield_render_compare --visible --preset grove --workers 4 \
+  ./build/bin/blockfield_render_compare --gpu-pass-markers --visible --preset grove --workers 4 \
   --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
   --foliage 100000 --transparent 0 --measured 1440 --profile-cpu \
   --metrics "$HOME/kin-bench/grove-capture.csv" --report "$HOME/kin-bench/grove-capture.json"
@@ -611,68 +594,16 @@ renderer/driver helper threads and can exceed elapsed time; the clocks are not G
 `--workers 0..4` attaches that many renderer helpers (the caller also works); default zero preserves the serial benchmark.
 This is an experiment control; choose a worker policy from measured workload costs. Shadow jobs now group small draws
 into batches instead of scheduling each draw separately; the documented profile retains the earlier overhead measurements.
-`KIN_SPATIAL_CULLING=0` before launch disables cell culling for a same-binary comparison. The grove caches conservative cell
-bounds at load; its GPU draw batching and geometry stay unchanged. CSV also reports active cells, refined
-camera/bounds/local-shadow copies and group-rejected candidates. Grove submits foliage using `InstanceBatch3D` shared CPU
-handles and retains its GPU records within the renderer's 32 MiB / 128-batch live-table cap. `KIN_RETAINED_INSTANCES=0`
-disables GPU retention; additionally set `KIN_GROVE_RETAINED=0` to use grouped streamed CPU records, and
-`--rebuild-scene` to restore per-frame CPU submission. CSV/report fields
-`retained_instances`, `retained_gpu_bytes`, `retained_upload_bytes`, `retained_index_bytes` and `instance_upload_bytes`
-show the work removed. See `docs/rendering_3d.md` for edit semantics, fallbacks and what the memory cap counts.
-`KIN_CACHED_INSTANCE_BOUNDS=0` keeps the per-render sphere transforms for a same-binary CPU-cache comparison, with GPU
-retention still enabled. The CPU sphere cache is capped at 4 MiB and replaces the retained batches' transient sphere ranges.
-`bounds_cache_bytes`, `bounds_scratch_bytes`, `bounds_cache_instances` and `bounds_cache_rebuilt` report its storage/work;
-`bounds_instance_tests` includes actual cold/edited cache rebuilds.
+Grove uses retained masked foliage in combined mesh/material batches, preserving 64 spatial plant cells and eight mist
+cells for culling. Retained GPU tables, cached bounds, compact shadow gathering, camera range classification, SIMD and
+worker packing are selected automatically within the engine's existing budgets and capability limits. Mist retains its
+alpha-sorted path. CSV/report counters expose the actual culling, upload, scratch and retained-table work.
 
-Shared `--moving-instances N` animates a contiguous range of ground-route foliage using deterministic frame indices.
-It requires `N <= --foliage` (and native `KIN_GROVE_RETAINED` enabled); zero keeps the original static scene. The range starts
-near the middle of the grove. Kin keeps animation copies only for those records (two 72-byte records per moving instance).
-Godot bulk-writes the affected MultiMesh buffers and records `motion_update_ms`, including its GDScript loop/API overhead.
-Reports include `moving_instances`, `moving_first`, initial/current position sums and `foliage_batch_count`. Set
-`KIN_INCREMENTAL_BOUNDS=0 KIN_PARALLEL_INSTANCE_PACKING=0` for the previous full-sphere-refresh/caller-only packing path.
-The default refreshes edited spheres and packs large GPU tables on attached workers, keeping full GPU uploads for safe
-buffer cycling. Prepared command layouts survive ordinary batch edits; use `KIN_PREPARED_BATCH_EDITS=0` to compare the old
-invalidation behavior. Timings and limitations are in `docs/3d_plan.md`.
-`KIN_CACHED_CAMERA_CULL=0 KIN_ACTIVE_CULL_COUNTERS=0` keeps the previous general camera classifier and full LOD/cascade
-counter clearing. The default uses existing cached spheres for camera-only decisions and clears active counter prefixes;
-these CPU changes add no per-copy storage or GPU buffer and preserve local-shadow selection.
-
-Godot normally has one foliage MultiMesh per spatial cell (64 at 100k plants); Kin normally has one retained table with
-64 cell bounds. `KIN_GROVE_CELL_BATCHES=1` before native launch instead creates one retained batch per cell, preserving the
-source order and visibility bounds. Use this control to distinguish upload granularity from renderer differences. For the
-1,000-record motion range in the 100k recipe, two cells change: Kin's cell control uploads 399,872 bytes/frame versus
-12,800,000 in its normal layout; Godot submits 149,952 bytes of transform buffers (48-byte records versus Kin's 128).
-Native layouts must match images, triangles and camera/light selection; draw counts differ. The Forward+ dynamic comparison
-and its checks are recorded in `docs/3d_plan.md`.
-
-`KIN_LOCAL_SHADOW_CULLING=0` restores the previous local-shadow gather for comparison. Fully contained single-level ranges
-now skip per-copy classification; partial cells retain only unresolved frustum planes and skip proven radius tests.
-`local_candidates`, `local_group_accepted`, `local_radius_tests`, `local_plane_budget` and `local_bucket_bytes` expose the
-work/memory change. The plane budget is an upper bound before per-copy early exits; `local_instance_tests` excludes fully
-accepted ranges.
-`KIN_LOCAL_SHADOW_PACKING=0` separately restores full task counter arrays, duplicate accepted/upload copy lists and slot
-lookup storage covering retained copies too. `local_task_bytes`, `local_slot_bytes` and `local_copy_bytes` report the
-corresponding CPU vector payload capacities; they do not represent total RSS or GPU memory.
-`KIN_SHADOW_REACH=0` restores eager sun/moon swept-sphere reach tests. The default prepares ray exit faces once,
-computes endpoints lazily, reuses them across sun cascades, and skips camera/slice planes proven safe for a spatial cell.
-Ordinary single-map draws keep the original main loop; grouped/cascaded sun draws use the prepared loop.
-Outside cells still cast into view; compact local tasks retain their 32-byte size. Eight extra bytes per cell replace
-repeated work without adding a per-instance cache. CPU cluster cuts use full reach frustums.
-The comparison harness retains its static geometry/material commands in `Scene3D`, updating the camera and animated
-light rig each frame, matching the persistent Godot scene's lifetime. This uses the existing API and the same vector
-capacities, rather than a new engine cache. `--rebuild-scene` restores clearing and resubmitting all geometry each frame;
-reports record `static_scene_commands`. Keep that setting consistent when comparing engine-only changes.
-`KIN_CAMERA_RANGES=0` restores per-copy classification/packing inside camera-visible cells. The default fills accepted
-single-level ranges together when no cascade/LOD/skin or uncached local bounds require refinement, and packs fully
-visible pieces without per-copy visibility branches. CSV `camera_range_accepted` counts classified copies, not packing
-alone; no new per-instance cache or task payload is allocated.
-`KIN_LOCAL_SHADOW_SIMD=0` selects scalar local-shadow candidate tests. Supported SSE2 builds test four existing bounds
-records together for ranges of at least 16 candidates, retain scalar tails/small draws and preserve accepted-copy order.
-No new per-instance storage or larger task records are needed; unsupported/contraction-enabled builds use scalar tests.
-`KIN_ADAPTIVE_STAGING=0` restores the GPU device's fixed 16 MiB shared-upload floor. The default can shrink after quiet
-120-batch windows, down to 1 MiB, and regrows for large uploads. CSV fields `upload_staging_bytes`,
-`upload_staging_allocations`, `upload_count` and `upload_batches` distinguish capacity, allocations and upload traffic;
-capacity excludes SDL cycle backings and driver pools.
+`--moving-instances N` animates a deterministic subset of the foliage in both engines. It requires `N <= --foliage`;
+zero keeps the scene static. `--rebuild-scene` measures command resubmission separately from renderer preparation.
+GPU texture/storage staging adapts over 120-batch windows, with a 1 MiB floor. `upload_staging_bytes`,
+`upload_staging_allocations`, `upload_count` and `upload_batches` distinguish capacity, allocations and traffic;
+capacity excludes SDL cycle backings and driver pools. The retired environment A/B variables no longer affect runs.
 
 ```sh
 KIN_RENDER_BACKEND=gpu taskset -c 0-15 ./build/bin/blockfield_render_compare --preset grove \

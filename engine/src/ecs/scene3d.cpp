@@ -108,7 +108,8 @@ std::vector<std::string> resolve_render3d_assets(EcsWorld& world, Assets3D& asse
             if (original->asset.id.empty()) continue;
             const std::string path = original->asset.id;
             std::string error;
-            auto model = assets.load_model(path, &error).shared();
+            auto model = assets.load_model(path).shared();
+            error = diagnostics3d_text(assets.diagnostics());
             if (model) {
                 const bool has_skin = std::any_of(model->parts.begin(), model->parts.end(), [](const auto& part) { return part.skin >= 0 || part.mesh.skinned(); });
                 if (has_skin != skinned || (skinned && model->skeletons.empty())) {
@@ -169,7 +170,8 @@ std::vector<std::string> resolve_materials3d_assets(EcsWorld& world, Assets3D& a
         std::string error;
         std::shared_ptr<const MaterialBinding3D> binding;
         if (bool(statics) == bool(skinned)) error = "requires exactly one ModelRenderer3D or SkinnedMeshRenderer";
-        else binding = assets.load_materials(reference.asset.id, statics ? statics->model : skinned->model, reference.variant, &error).shared();
+        else { binding = assets.load_materials(reference.asset.id, statics ? statics->model : skinned->model, reference.variant).shared();
+            error = diagnostics3d_text(assets.diagnostics()); }
         if (!binding) diagnostics.push_back("entity '" + entity.name() + "', ModelMaterials3D asset '" + reference.asset.id + "': " + error);
         else entity.get_mut<ModelMaterials3D>()->binding = std::move(binding);
     }

@@ -752,7 +752,7 @@ int meshes(int frames, int count) {
                 renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
                 renderer->present();
                 fill.push_back(ms(t0, t1));
-                render.push_back(r3d.stats().cpu_ms);
+                render.push_back(r3d.debug_stats().cpu_ms);
                 gpu.push_back(renderer->backend_stats().last_gpu_frame_ms);
             };
             for (int f = 0; f < 10; ++f) {
@@ -778,8 +778,8 @@ int meshes(int frames, int count) {
             std::printf("%d meshes, %-17s %-10s: scene %6.3f ms, render() %6.3f ms (min %6.3f), frame %6.3f ms, GPU %6.3f ms, "
                         "%u draws, %llu triangles\n",
                         count, c.name, threads ? "(workers)" : "(1 thread)", median(fill), median(render),
-                        render.empty() ? 0.0 : render.front(), per_frame, median(gpu), r3d.stats().draws,
-                        static_cast<unsigned long long>(r3d.stats().triangles));
+                        render.empty() ? 0.0 : render.front(), per_frame, median(gpu), r3d.debug_stats().draws,
+                        static_cast<unsigned long long>(r3d.debug_stats().triangles));
         }
     }
     renderer->set_job_system(nullptr);
@@ -877,7 +877,7 @@ int shadows(int frames, int count) {
             }
             renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
             renderer->present();
-            render.push_back(r3d.stats().cpu_ms);
+            render.push_back(r3d.debug_stats().cpu_ms);
             gpu.push_back(renderer->backend_stats().last_gpu_frame_ms / repeat);
         };
         for (int f = 0; f < 10; ++f) {
@@ -899,7 +899,7 @@ int shadows(int frames, int count) {
             std::ranges::sort(*v);
         }
         const auto median = [](const std::vector<double>& v) { return v.empty() ? 0.0 : v[v.size() / 2]; };
-        const kin::Render3DStats& st = r3d.stats();
+        const kin::Render3DDebugStats& st = r3d.debug_stats();
         std::printf("%d enemies, %-12s %-10s: render() %6.3f ms, frame %6.3f ms, GPU %6.3f ms; %u culled, %u casters\n", count, c.name,
                     c.shadows ? "shadows" : "no shadows", median(render), per_frame, median(gpu), st.culled, st.shadow_casters);
     }

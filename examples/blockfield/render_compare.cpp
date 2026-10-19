@@ -38,7 +38,7 @@ f64 cpu_clock(bool process) {
 f64 monotonic_ms() {
     return std::chrono::duration<f64, std::milli>(Clock::now().time_since_epoch()).count();
 }
-struct Options { std::string snapshot, generate, metrics, dressing, generate_dressing; u32 foliage = 0, transparent = 0, moving = 0; bool preview = false, profile_cpu = false, rebuild_scene = false, visible = false; int workers = 0; int distance = 24, measured = 900, copies = 1; f32 fov = 110; bool triangle_stress = false; blockfield::compare::Features features; };
+struct Options { std::string snapshot, generate, metrics, dressing, generate_dressing; u32 foliage = 0, transparent = 0, moving = 0; bool gpu_pass_markers = false, preview = false, profile_cpu = false, rebuild_scene = false, visible = false; int workers = 0; int distance = 24, measured = 900, copies = 1; f32 fov = 110; bool triangle_stress = false; blockfield::compare::Features features; };
 void put(std::ostream& out, u32 n) { for (int i = 0; i < 4; ++i) out.put(char(n >> (i * 8))); }
 u32 get(std::istream& in) {
     u32 n = 0; for (int i = 0; i < 4; ++i) { const int c = in.get(); if (c == EOF) throw std::runtime_error("truncated snapshot"); n |= u32(c) << (8 * i); } return n;
@@ -71,7 +71,7 @@ class CompareScene final : public Scene {
 public:
     explicit CompareScene(Options o, JobSystem* jobs) : _options(std::move(o)), _jobs(jobs) {
         _csv.open(_options.metrics); if (!_csv) throw std::runtime_error("cannot open metrics");
-        _csv << "frame,frame_interval_ms,scene_build_ms,cpu_submit_ms,kin_fence_ms,draws,triangles,lights,spots,shadow_draws,shadow_cascades,local_shadow_maps,local_shadow_draws,samples,taa_dispatches,ao_draws,ao_dispatches,contact_dispatches,feature_bytes,local_shadow_bytes,instances,foliage_requested,transparent_requested,route_frame,profile_mono_ms,scene_main_cpu_ms,render_main_cpu_ms,render_process_cpu_ms,spatial_groups,camera_instance_tests,bounds_instance_tests,local_instance_tests,camera_group_rejected,local_group_rejected,retained_instances,retained_gpu_bytes,retained_upload_bytes,retained_index_bytes,instance_upload_bytes,bounds_cache_bytes,bounds_scratch_bytes,bounds_cache_instances,bounds_cache_rebuilt,camera_range_accepted,local_candidates,local_group_accepted,local_plane_budget,local_radius_tests,local_bucket_bytes,local_task_bytes,local_slot_bytes,local_copy_bytes,upload_staging_bytes,upload_staging_allocations,upload_count,upload_batches,masked_depth_draws,masked_depth_instances,prepared_reused,prepared_draws,prepared_cache_bytes,prepared_layout_bytes\n";
+        _csv << "frame,frame_interval_ms,scene_build_ms,cpu_submit_ms,kin_fence_ms,draws,triangles,lights,spots,shadow_draws,shadow_cascades,local_shadow_maps,local_shadow_draws,samples,taa_dispatches,ao_draws,ao_dispatches,contact_dispatches,feature_bytes,local_shadow_bytes,instances,foliage_requested,transparent_requested,route_frame,profile_mono_ms,scene_main_cpu_ms,render_main_cpu_ms,render_process_cpu_ms,spatial_groups,camera_instance_tests,bounds_instance_tests,local_instance_tests,camera_group_rejected,local_group_rejected,retained_instances,retained_gpu_bytes,retained_upload_bytes,retained_index_bytes,instance_upload_bytes,bounds_cache_bytes,bounds_scratch_bytes,bounds_cache_instances,bounds_cache_rebuilt,camera_range_accepted,local_candidates,local_group_accepted,local_plane_budget,local_radius_tests,local_bucket_bytes,local_task_bytes,local_slot_bytes,local_copy_bytes,upload_staging_bytes,upload_staging_allocations,upload_count,upload_batches,prepared_reused,prepared_draws,prepared_cache_bytes,prepared_layout_bytes\n";
     }
     std::string_view name() const override { return "Blockfield render comparison"; }
     void update(SceneContext& ctx) override { if (_options.preview && ctx.input.frame_pressed(Key::Escape)) ctx.app.quit(); }
@@ -132,6 +132,7 @@ public:
             if (_options.features.camera == "ground") _dressing.draw(_scene, _options.features.shadows || _options.features.local_shadows, _options.features.material == "unlit");
             _scene_ready = true;
         }
+        _scene.debug.gpu_pass_markers = _options.gpu_pass_markers;
         const auto submitted = Clock::now();
         const double prepare_ms = std::chrono::duration<double, std::milli>(submitted - begin).count();
         const double render_cpu = _options.profile_cpu ? cpu_clock(false) : 0;
@@ -144,7 +145,7 @@ public:
         ctx.renderer.draw_texture(_view.texture(), {0, 0, 1280, 720});
         const auto backend_stats = ctx.renderer.backend_stats();
         if (_frame > warmup) {
-            const auto stats = _renderer->stats();
+            const auto stats = _renderer->debug_stats();
             if (field_camera() && (stats.triangles != _triangles * u64(_options.copies) || stats.instances != _chunks.size() * _options.copies))
                 throw std::runtime_error("triangle stress did not submit all requested geometry");
             _csv << _frame << ',' << interval << ',' << prepare_ms << ',' << submit_ms << ','
@@ -152,7 +153,7 @@ public:
                  << stats.lights << ',' << stats.spots << ',' << stats.shadow_draws << ',' << stats.shadow_cascades << ','
                  << stats.local_shadow_maps << ',' << stats.local_shadow_draws << ',' << stats.samples << ',' << stats.taa_dispatches << ','
                  << stats.ao_draws << ',' << stats.ao_dispatches << ',' << stats.contact_dispatches << ',' << stats.feature_bytes << ',' << stats.local_shadow_bytes << ',' << stats.instances << ',' << _dressing.foliage_count << ',' << _dressing.transparent_count << ',' << _route_frame << ',' << std::fixed << std::setprecision(6) << mono << ','
-                 << (_options.profile_cpu ? render_cpu - build_cpu : 0) << ',' << render_main_cpu << ',' << render_process_cpu << ',' << stats.spatial_groups << ',' << stats.camera_instance_tests << ',' << stats.bounds_instance_tests << ',' << stats.local_instance_tests << ',' << stats.camera_group_rejected << ',' << stats.local_group_rejected << ',' << stats.retained_instances << ',' << stats.retained_gpu_bytes << ',' << stats.retained_upload_bytes << ',' << stats.retained_index_bytes << ',' << stats.instance_upload_bytes << ',' << stats.bounds_cache_bytes << ',' << stats.bounds_scratch_bytes << ',' << stats.bounds_cache_instances << ',' << stats.bounds_cache_rebuilt << ',' << stats.camera_range_accepted << ',' << stats.local_candidates << ',' << stats.local_group_accepted << ',' << stats.local_plane_budget << ',' << stats.local_radius_tests << ',' << stats.local_bucket_bytes << ',' << stats.local_task_bytes << ',' << stats.local_slot_bytes << ',' << stats.local_copy_bytes << ',' << backend_stats.upload_staging_bytes << ',' << backend_stats.upload_staging_allocations << ',' << backend_stats.texture_uploads << ',' << backend_stats.texture_upload_submits << ',' << stats.masked_depth_draws << ',' << stats.masked_depth_instances << ',' << stats.prepared_reused << ',' << stats.prepared_draws << ',' << stats.prepared_cache_bytes << ',' << stats.prepared_layout_bytes << '\n';
+                 << (_options.profile_cpu ? render_cpu - build_cpu : 0) << ',' << render_main_cpu << ',' << render_process_cpu << ',' << stats.spatial_groups << ',' << stats.camera_instance_tests << ',' << stats.bounds_instance_tests << ',' << stats.local_instance_tests << ',' << stats.camera_group_rejected << ',' << stats.local_group_rejected << ',' << stats.retained_instances << ',' << stats.retained_gpu_bytes << ',' << stats.retained_upload_bytes << ',' << stats.retained_index_bytes << ',' << stats.instance_upload_bytes << ',' << stats.bounds_cache_bytes << ',' << stats.bounds_scratch_bytes << ',' << stats.bounds_cache_instances << ',' << stats.bounds_cache_rebuilt << ',' << stats.camera_range_accepted << ',' << stats.local_candidates << ',' << stats.local_group_accepted << ',' << stats.local_plane_budget << ',' << stats.local_radius_tests << ',' << stats.local_bucket_bytes << ',' << stats.local_task_bytes << ',' << stats.local_slot_bytes << ',' << stats.local_copy_bytes << ',' << backend_stats.upload_staging_bytes << ',' << backend_stats.upload_staging_allocations << ',' << backend_stats.texture_uploads << ',' << backend_stats.texture_upload_submits << ',' << stats.prepared_reused << ',' << stats.prepared_draws << ',' << stats.prepared_cache_bytes << ',' << stats.prepared_layout_bytes << '\n';
         }
         ++_frame;
         if (_options.visible && !_options.preview && _frame > warmup + _options.measured) ctx.app.quit();
@@ -186,7 +187,7 @@ public:
             .field("transparent_instances", _dressing.transparent_count).field("camera_route_frame", _route_frame)
             .field("extra_texture_bytes", _options.features.camera == "ground" ? 81920 : 0)
             .field("extra_mesh_triangles", u64(_dressing.foliage_count) * 6 + u64(_dressing.transparent_count) * 2)
-            .field("preview", _options.preview).field("renderer_workers", _jobs ? _jobs->worker_count() : 0).field("profile_cpu", _options.profile_cpu)
+            .field("preview", _options.preview).field("renderer_workers", _jobs ? _jobs->worker_count() : 0).field("profile_cpu", _options.profile_cpu).field("gpu_pass_markers", _options.gpu_pass_markers)
             .field("static_scene_commands", !_options.rebuild_scene).field("visible_window", _options.preview || _options.visible)
             .field("moving_instances", _options.moving).field("moving_first", _moving_first)
             .field("foliage_batch_count", u64(_dressing.foliage_batches.size()));
@@ -200,7 +201,7 @@ public:
                 .field("moving_x_sum", x).field("moving_y_sum", y).field("moving_z_sum", z);
         }
         if (_renderer) {
-            const auto& st = _renderer->stats();
+            const auto& st = _renderer->debug_stats();
             json.field("spatial_groups", st.spatial_groups).field("camera_instance_tests", st.camera_instance_tests).field("camera_range_accepted", st.camera_range_accepted)
                 .field("bounds_instance_tests", st.bounds_instance_tests).field("local_instance_tests", st.local_instance_tests)
                 .field("camera_group_rejected", st.camera_group_rejected).field("local_group_rejected", st.local_group_rejected)
@@ -213,12 +214,12 @@ public:
             json.field("lights_used", st.lights).field("spots_used", st.spots).field("samples_used", st.samples)
                 .field("shadow_draws", st.shadow_draws).field("shadow_cascades", st.shadow_cascades)
                 .field("local_shadow_maps", st.local_shadow_maps).field("local_shadow_draws", st.local_shadow_draws)
-                .field("local_shadow_bytes", st.local_shadow_bytes).field("feature_bytes", st.feature_bytes).field("masked_depth_draws", st.masked_depth_draws).field("masked_depth_instances", st.masked_depth_instances).field("prepared_reused", st.prepared_reused).field("prepared_draws", st.prepared_draws).field("prepared_cache_bytes", st.prepared_cache_bytes).field("prepared_layout_bytes", st.prepared_layout_bytes)
+                .field("local_shadow_bytes", st.local_shadow_bytes).field("feature_bytes", st.feature_bytes).field("prepared_reused", st.prepared_reused).field("prepared_draws", st.prepared_draws).field("prepared_cache_bytes", st.prepared_cache_bytes).field("prepared_layout_bytes", st.prepared_layout_bytes)
                 .field("taa_dispatches", st.taa_dispatches).field("ao_draws", st.ao_draws).field("ao_dispatches", st.ao_dispatches)
                 .field("contact_dispatches", st.contact_dispatches);
         }
-        if (_renderer) json.field("shared_mesh_allocated_bytes", _renderer->stats().shared_mesh_allocated_bytes)
-            .field("unlit_draws", _renderer->stats().unlit_draws).field("unlit_textured_draws", _renderer->stats().unlit_textured_draws);
+        if (_renderer) json.field("shared_mesh_allocated_bytes", _renderer->debug_stats().shared_mesh_allocated_bytes)
+            .field("unlit_draws", _renderer->debug_stats().unlit_draws).field("unlit_textured_draws", _renderer->debug_stats().unlit_textured_draws);
     }
 private:
     bool field_camera() const { return _options.features.camera == "field" || (_options.features.camera == "auto" && _options.triangle_stress); }
@@ -333,6 +334,7 @@ int main(int argc, char** argv) {
                 (a == "--foliage" ? o.foliage : o.transparent) = u32(count);
             }
             else if (a == "--workers") { o.workers = std::stoi(value()); if (o.workers < 0 || o.workers > 4) throw std::runtime_error("workers must be 0..4"); }
+            else if (a == "--gpu-pass-markers") o.gpu_pass_markers = true;
             else if (a == "--profile-cpu") o.profile_cpu = true;
             else if (a == "--rebuild-scene") o.rebuild_scene = true;
             else if (a == "--visible") o.visible = true;

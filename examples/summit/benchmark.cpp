@@ -40,7 +40,7 @@ void ExpeditionBenchmark::begin_frame(const AppFrameStats& app) {
     _have_pending = false;
 }
 
-void ExpeditionBenchmark::capture(const Game& game, i32 leg, const SummitView& view, const Render3DStats& stats, Vec2i size,
+void ExpeditionBenchmark::capture(const Game& game, i32 leg, const SummitView& view, const Render3DDebugStats& stats, Vec2i size,
                                   f64 build_ms, f64 submit_ms) {
     _pending = {};
     _pending.frame = ++_frames;

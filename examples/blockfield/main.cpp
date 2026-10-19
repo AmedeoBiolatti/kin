@@ -215,7 +215,7 @@ public:
         if (_metrics) {
             _metrics << _frames << ',' << _step << ',' << _simulation_ms << ',' << _apply_ms << ',' << _scene_ms << ',' << _render_ms << ',';
             if (_gpu_count) _metrics << _gpu_ms;
-            _metrics << ',' << _chunks.size() << ',' << _renderer->stats().triangles << ',' << _renderer->stats().draws << ',' << _mesh_bytes << ',' << _voxels.edits() << '\n';
+            _metrics << ',' << _chunks.size() << ',' << _renderer->debug_stats().triangles << ',' << _renderer->debug_stats().draws << ',' << _mesh_bytes << ',' << _voxels.edits() << '\n';
         }
         ++_frames;
     }
@@ -249,7 +249,7 @@ public:
             json.end_object();
         }
         if (_renderer) {
-            const auto& stats = _renderer->stats();
+            const auto& stats = _renderer->debug_stats();
             json.field("draws_last", stats.draws).field("triangles_last", stats.triangles)
                 .field("lights_used", stats.lights).field("spots_used", stats.spots).field("samples_used", stats.samples)
                 .field("taa_dispatches", stats.taa_dispatches).field("ao_dispatches", stats.ao_dispatches)

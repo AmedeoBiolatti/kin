@@ -29,12 +29,19 @@ void main() {
     const vec3 bloom = params.a.x > 0.0 ? texture(uBloom, vUV).rgb * params.a.x : vec3(0.0);
     vec3 c = scene.rgb + bloom;
     const float alpha = clamp(scene.a + dot(bloom, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    // As view_output.frag's: a partly covered pixel is exposed and tonemapped out of its alpha.
+    const bool partial = params.a.z < 1.5 && alpha > 0.0 && alpha < 1.0;
+    if (partial) {
+        c /= alpha;
+    }
     if (params.a.z < 1.5) {
         c = aces(c * params.a.y);
     }
     if ((params.a.z < 0.5 || params.a.z > 2.5) && alpha > 0.0) {
-        c = encode(c / alpha) * alpha;
+        c = encode(partial ? c : c / alpha) * alpha;
         c += (noise(gl_FragCoord.xy) + noise(gl_FragCoord.xy + vec2(5.0, 3.0)) - 1.0) * (alpha / 255.0);
+    } else if (partial) {
+        c *= alpha;
     }
     FragColor = vec4(c, alpha);
 }

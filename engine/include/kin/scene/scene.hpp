@@ -15,6 +15,7 @@ class SceneManager;
 class JsonWriter;
 class EcsWorld;
 class AnimationAssetLibrary;
+class Renderer3D;
 struct RuntimeDebugOptions;
 struct RunReport;
 
@@ -38,6 +39,9 @@ struct SceneContext {
     // Pass/fail sink for headless runs. Null in contexts that do not produce a
     // run report. Use report->fail("reason") to abort with a non-zero exit code.
     RunReport* report = nullptr;
+    // Optional shared 3D renderer, owned by the runtime. Null unless requested
+    // by SceneAppConfig::rendering_3d (and always null in a 2D-only build).
+    Renderer3D* renderer3d = nullptr;
 };
 
 class Scene {

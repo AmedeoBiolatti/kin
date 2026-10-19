@@ -116,6 +116,80 @@ the folder's place. Every loader reads through the content layer, so the same
 relative paths work either way. `discover()` lists a pack's files as it lists
 a folder's. See [shipping](shipping.md).
 
+## Compressed textures
+
+PNG and JPEG textures are decoded to RGBA8 (4 bytes a texel) and given their
+mips on the GPU. A texture can instead come already compressed, as the GPU
+keeps it: a **KTX2** or **DDS** file of a block format, which the GPU decodes as
+it samples, in a quarter to an eighth of the memory, with the mip chain the
+tool made. Kin reads these files; it has no encoder, so they are made by a tool.
+
+| Format | `TextureFormat` | Bytes a 4 x 4 block | For |
+| --- | --- | --- | --- |
+| BC1 | `Bc1RgbaUnorm`, `Bc1RgbaSrgb` | 8 | colour, 1-bit alpha |
+| BC3 | `Bc3RgbaUnorm`, `Bc3RgbaSrgb` | 16 | colour with alpha |
+| BC4 | `Bc4RUnorm` | 8 | one channel: roughness, masks |
+| BC5 | `Bc5RgUnorm` | 16 | two channels: normal maps |
+| BC7 | `Bc7RgbaUnorm`, `Bc7RgbaSrgb` | 16 | colour and alpha, the best of the BC formats |
+| ASTC 4x4 | `Astc4x4RgbaUnorm`, `Astc4x4RgbaSrgb` | 16 | phones and tablets |
+
+```cpp
+#include <kin/assets/content.hpp>
+#include <kin/assets/texture_file.hpp>
+
+const auto bytes = kin::read_content_file(root / "rock.ktx2");
+std::string error;
+const auto image = bytes ? kin::decode_compressed_image(
+    {reinterpret_cast<const kin::u8*>(bytes->data()), bytes->size()}, &error) : std::nullopt;
+if (image) {
+    kin::Texture rock = renderer.create_texture_compressed(*image);
+    renderer.set_scale_mode(rock, kin::ScaleMode::Mipmapped); // the file's own levels
+}
+```
+
+In 3D, `Assets3D::load_texture` reads a `.ktx2` or `.dds` path this way, and a
+glTF model's image that is a KTX2 or DDS file is uploaded as it is (see
+[3D rendering](rendering_3d.md#direct-loading-and-reload)).
+
+- A KTX2 file holds one 2D texture (not an array, a cube map or a 3D texture)
+  of a format above, without supercompression. Basis Universal files (ETC1S or
+  UASTC: `KHR_texture_basisu`, `basisu`, `toktx --encode etc1s` or `uastc`) and
+  Zstandard or ZLIB supercompressed ones are refused: they need a transcoder,
+  which kin does not ship. A DDS file has the DX10 header with a BC format, or
+  the older DXT1, DXT5, ATI1 (BC4U) or ATI2 (BC5U) one.
+- Every level must be the size its place in the chain gives it; a file whose
+  header, level index or levels do not fit is refused with the reason in
+  `error`, and never read past its end.
+- The format says what the texels are. An sRGB one is colour, used as
+  `create_texture_from_rgba`'s colour is; a UNORM one holds numbers, as
+  `create_texture`'s RGBA8 data does. Make base colour and emissive maps sRGB,
+  and normal, metal-roughness and occlusion maps UNORM. A texture asked for the
+  other way round (`load_texture`'s `srgb`, a glTF map) is said once in the log,
+  as it loads, and sampled as the file says.
+- The mips are the file's: `ScaleMode::Mipmapped` samples them and never makes
+  more, so make the chain when compressing; a one-level file is sampled without
+  mips. Rows run from the top, the way these tools write them.
+- A compressed texture is drawn and sampled like any other, but never updated
+  in place (`update_texture` and `write_texture` return false).
+- Only SDL_GPU makes them (the SDL_Renderer backend has none), and only in
+  formats the device samples: desktop GPUs have BC and few have ASTC; phones the
+  other way round. Where it cannot, `create_texture_compressed` returns an
+  invalid texture and says so once a format, so keep a PNG to fall back to.
+
+Some tools that write them:
+
+```sh
+# BC7 colour and BC5 normals, as DDS with every mip (DirectXTex's texconv)
+texconv -f BC7_UNORM_SRGB -m 0 -dx10 rock.png
+texconv -f BC5_UNORM -m 0 -dx10 rock_normal.png
+# ASTC 4x4 as KTX2 (KTX-Software's toktx; not --encode etc1s or uastc, which make Basis files)
+toktx --t2 --encode astc --astc_blk_d 4x4 --genmipmap rock.ktx2 rock.png
+```
+
+AMD's Compressonator (`compressonatorcli -fd BC7 ...`) and NVIDIA's Texture
+Tools write KTX2 and DDS too; check that a colour map comes out in an sRGB
+format.
+
 ## Hot-reloading game data
 
 `kin::FileWatcher` (`kin/assets/file_watcher.hpp`) reloads a game's own data

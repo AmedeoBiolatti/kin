@@ -1,8 +1,8 @@
 #pragma once
 
 // Clusters for one huge mesh (docs/3d_plan.md, G3b): the CPU side, with no GPU, so that it can be tested alone.
-// Renderer3D::create_mesh(data, {.clusters = true}) calls build_mesh_clusters and keeps the result; the renderer
-// calls select_clusters for each copy, each frame.
+// Renderer3D::create_mesh(data, {.clusters = true}) calls build_mesh_clusters, uploads the welded vertices and keeps
+// the rest (MeshClusters, the hierarchy alone); the renderer calls select_clusters for each copy, each frame.
 //
 // The hierarchy, as Nanite's. The mesh is welded and cut into leaf clusters of at most 128 triangles. Then, round
 // after round: the clusters of the round are grouped by adjacency (about 4 to a group), each group's triangles are
@@ -27,6 +27,7 @@
 
 #include <functional>
 #include <limits>
+#include <span>
 #include <vector>
 
 namespace kin {
@@ -37,7 +38,7 @@ constexpr u32 no_cluster = ~0u;
 struct MeshCluster {
     // Its triangles: `triangle_count` of them, three u8 each from `triangle_offset` in MeshClusters::triangles,
     // indexing its `vertex_count` vertices from `vertex_offset` in MeshClusters::cluster_vertices, which hold
-    // indices into MeshClusters::vertices.
+    // indices into the welded vertices (MeshClusterBuild::vertices).
     u32 vertex_offset = 0;
     u32 triangle_offset = 0;
     u16 vertex_count = 0;
@@ -70,11 +71,11 @@ struct MeshClusterGroup {
     f32 radius = 0.0f;
 };
 
+// The hierarchy: everything the cut reads, and all that a mesh keeps of it on the CPU. Its clusters index the welded
+// vertices that were built with it (MeshClusterBuild), which are on the GPU once the mesh is made and not kept here:
+// the cut never reads a vertex, and the kiln's 2.5 M welded vertices would hold 90 MB for nothing.
 struct MeshClusters {
-    // The mesh welded: by position, UV and colour (a flat-shaded mesh: its normals are then zero, for the shader to
-    // make from derivatives), else by every attribute. Indexed by the clusters.
-    std::vector<MeshVertex> vertices;
-    bool flat = false;
+    bool flat = false; // the welded vertices have no normal (zero), for the shader to make from derivatives
     std::vector<MeshCluster> clusters; // the leaves first, then each round's
     std::vector<MeshClusterGroup> groups;
     std::vector<u32> group_inputs;
@@ -86,10 +87,10 @@ struct MeshClusters {
     u32 leaf_triangles = 0;
     u64 total_triangles = 0;
     u32 degenerate_removed = 0; // triangles with a repeated vertex, dropped at the weld
-    f64 build_ms = 0.0;
+    f64 build_ms = 0.0;       // what the build took (restored from a bake: the build's that was baked)
     u32 stuck_groups = 0;     // groups that could not be simplified (their clusters wait for a regrouping)
 
-    // Appends cluster `c`'s triangles as indices into `vertices` (triangle_count * 3 of them) at `out`.
+    // Appends cluster `c`'s triangles as indices into the welded vertices (triangle_count * 3 of them) at `out`.
     void append_indices(u32 c, u32* out) const {
         const MeshCluster& k = clusters[c];
         const u32* v = cluster_vertices.data() + k.vertex_offset;
@@ -103,13 +104,32 @@ struct MeshClusters {
     MeshClusterInfo info() const;
 };
 
+// What build_mesh_clusters makes: the hierarchy and the mesh welded, by position, UV and colour (a flat-shaded mesh:
+// its normals are then zero, for the shader to make from derivatives), else by every attribute; indexed by the
+// clusters. Renderer3D::create_mesh uploads `vertices` with the leaves' triangles, then keeps the hierarchy alone (it
+// moves the MeshClusters part out) and lets the vertices go: they live only while the mesh is being made.
+struct MeshClusterBuild : MeshClusters {
+    std::vector<MeshVertex> vertices;
+};
+
 // Runs `body(i)` for i in [0, count) on any threads; nothing else is assumed. Empty: serial.
 using ClusterParallelFor = std::function<void(u32 count, const std::function<void(u32)>& body)>;
 
 // The hierarchy for `data` (valid: MeshData::validate). Takes about as long as the simplifier takes on the mesh
 // (seconds for millions of triangles; `parallel` spreads the groups over threads). One cluster, no groups, for a
 // mesh of at most options.cluster_triangles triangles.
-MeshClusters build_mesh_clusters(const MeshData& data, const MeshOptions& options, const ClusterParallelFor& parallel = {});
+MeshClusterBuild build_mesh_clusters(const MeshData& data, const MeshOptions& options, const ClusterParallelFor& parallel = {});
+
+// For a bake cache (kin/assets/bake_cache.hpp; Renderer3D::set_bake_cache uses these). The key of what
+// build_mesh_clusters(data, options) makes: the mesh's vertex and index bytes, the options the build reads
+// (cluster_triangles and the three attribute weights), max_cluster_triangles, this format's version and
+// meshoptimizer's. The build as bytes: every field of the hierarchy and the welded vertices, little-endian, fixed
+// width (the leaves' indices are not kept: leaf_indices() makes them again, the same). And back: false, with `out`
+// emptied, for bytes that are not a whole build (short, too long, or an offset, count or index out of range), so
+// that no bytes can make a hierarchy the cut or the upload would read out of bounds.
+u64 mesh_clusters_bake_key(const MeshData& data, const MeshOptions& options);
+std::vector<u8> save_mesh_clusters(const MeshClusterBuild& build);
+bool restore_mesh_clusters(std::span<const u8> bytes, MeshClusterBuild& out);
 
 // What a cut depends on besides the clusters, for one copy: its place in the world, and the camera.
 struct ClusterCutView {

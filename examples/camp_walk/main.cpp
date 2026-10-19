@@ -19,7 +19,7 @@ using namespace kin;
 class Camp final:public Scene {
     std::filesystem::path _root;
     bool _script;
-    std::unique_ptr<Renderer3D> _renderer;
+    Renderer3D* _renderer = nullptr;
     std::unique_ptr<Assets3D> _assets;
     std::unique_ptr<SceneSession3D> _session;
     camp_walk::InputMapper _mapper;
@@ -56,7 +56,8 @@ public:
     Camp(std::filesystem::path root,bool script):_root(std::move(root)),_script(script){}
     std::string_view name()const override{return "Camp walk";}
     void on_enter(SceneContext& context)override {
-        _renderer=std::make_unique<Renderer3D>(context.renderer);
+        _renderer=context.renderer3d;
+        if(!_renderer)throw std::runtime_error("runtime 3D renderer was not enabled");
         _assets=std::make_unique<Assets3D>(*_renderer,_root);
         SceneSession3DOptions options;options.viewport={960,540};options.view.samples=1;
         options.physics=World3DConfig{.max_bodies=128,.max_body_pairs=512,.max_contact_constraints=512,.temp_memory_bytes=2u*1024u*1024u,.single_threaded=true,.max_events=256};
@@ -70,7 +71,7 @@ public:
         _pads=std::make_unique<Gamepads>();
         _audio=std::make_unique<camp_walk::FootstepAudio>(context.app.headless());
     }
-    void on_exit(SceneContext&)override {_audio.reset();_pads.reset();_session.reset();_assets.reset();_renderer.reset();}
+    void on_exit(SceneContext&)override {_audio.reset();_pads.reset();_session.reset();_assets.reset();_renderer=nullptr;}
     kin::EcsWorld* world()override{return _session?_session->world():nullptr;}
     void collect_actions(InputActionContext& actions)const override {camp_walk::collect_actions(actions);}
     void update(SceneContext& ctx)override {
@@ -155,6 +156,6 @@ int main(int argc,char** argv) {
         auto headless=kin::parse_headless_options(int(args.size()),args.data());
         const auto root=kin::find_content_root(KIN_GAME_CONTENT,argc,argv);
         kin::SceneManager scenes;scenes.push(std::make_unique<Camp>(root,script));
-        return kin::run_scene_app({.window={.title="Camp walk",.width=960,.height=540,.logical_width=960,.logical_height=540,.max_fps=60,.input_map=camp_walk::input_map()},.headless=headless,.render_headless=true},scenes);
+        return kin::run_scene_app({.window={.title="Camp walk",.width=960,.height=540,.logical_width=960,.logical_height=540,.max_fps=60,.input_map=camp_walk::input_map()},.headless=headless,.render_headless=true,.rendering_3d=true},scenes);
     } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

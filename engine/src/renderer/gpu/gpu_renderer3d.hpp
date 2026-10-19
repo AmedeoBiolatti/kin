@@ -171,6 +171,7 @@ private:
     GpuTexture _scene;             // HDR: the resolved float picture
     GpuTexture _bloom_a, _bloom_b; // HDR with bloom: half size
     GpuTexture _pick, _pick_depth; // with View3DOptions::pick: position and id a pixel
+    bool _pick_valid = false;      // a render has written _pick since it was made (a new target holds whatever the memory did)
     // With Scene3D::ambient_occlusion, made by the first render that asks:
     // the pre-pass's depth and normals (one sample, whatever the view's), and
     // the occlusion (raw, blurred across, blurred down: R8, the view's size or half).
@@ -205,7 +206,7 @@ private:
     GpuTexture _occ_depth;
     struct OccRegion {
         u32 scene = 0, draw = 0;
-        const void* mesh = nullptr;
+        u64 mesh = 0; // GpuMesh3D::serial: not the address, which a mesh made after another was freed may share
         u32 copies = 0, per_copy = 0;
         bool operator==(const OccRegion&) const = default;
     };
@@ -235,7 +236,7 @@ public:
     std::shared_ptr<IMaterialShaderBackend> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<IView3DBackend> create_view(Vec2i size, const View3DOptions& options) override;
     bool resize_view(IView3DBackend& view, Vec2i size) override;
-    bool render(IView3DBackend& view, const Scene3D& scene, Render3DStats& stats) override;
+    bool render(IView3DBackend& view, const Scene3D& scene, Render3DDebugStats& stats) override;
     PickResult pick(IView3DBackend& view, Vec2i pixel) override;
     bool warm_up(IView3DBackend& view, const Scene3D& scene) override;
 
@@ -245,7 +246,7 @@ public:
 
 private:
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder, MaskedDepth };
+    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder };
     enum class Unlit : u8 { Off, Colour, Textured };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
@@ -260,7 +261,7 @@ private:
     // velocity variants; a custom shader has neither).
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                          SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false, bool fog = false,
-                                         bool lights = false, Unlit unlit = Unlit::Off, bool indexed = false, bool depth_read_only = false, bool point_tiles = false) const;
+                                         bool lights = false, Unlit unlit = Unlit::Off, bool indexed = false) const;
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`: the
     // second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is far.
     SDL_GPUGraphicsPipeline* sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const;
@@ -294,13 +295,13 @@ private:
     // With `blur_too` false only the first dispatch (the blur is then someone else's: blur_screen_space_both).
     bool build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, f32 radius);
     void compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
-                           const AmbientOcclusion3D& ao, Render3DStats& stats, bool blur_too = true);
+                           const AmbientOcclusion3D& ao, Render3DDebugStats& stats, bool blur_too = true);
     // The blur of both, in one dispatch a direction (the two results at one size).
-    void blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, Render3DStats& stats);
+    void blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection, Render3DDebugStats& stats);
     // Records the compute passes that march the view's pre-pass toward the sun
     // (`sun`: toward it in world space) and blur the result.
     void compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera, const Mat4f& projection,
-                                 const ContactShadows3D& contact, const Vec3f& sun, Render3DStats& stats, bool blur_too = true);
+                                 const ContactShadows3D& contact, const Vec3f& sun, Render3DDebugStats& stats, bool blur_too = true);
     // The view's passes after the picture is drawn: bloom (HDR), then out to what 2D draws.
     // `source` is the picture (the view's float scene, or the temporal resolve's);
     // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
@@ -309,8 +310,6 @@ private:
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
     void release_taa(GpuView3D& view);
-    // Reads the KIN_* switches (they are read on each render and warm_up, so that tests can change them).
-    void read_switches();
     // Occlusion culling's depth pyramid for a depth of w x h (the levels' sizes and count come back), and the depth it is built from when no
     // pre-pass makes one.
     bool ensure_pyramid(GpuView3D& view, u32 w, u32 h, std::array<std::pair<u32, u32>, GpuView3D::max_hiz_levels>& size, u32& levels);
@@ -319,7 +318,7 @@ private:
     // but the targets stay until age_targets lets them go.
     void suspend_taa(GpuView3D& view);
     u64 feature_bytes(const GpuView3D& view) const;
-    u32 _release_after = 120; // KIN_RELEASE_FRAMES=n changes it (read each render: tests); 0 never
+    static constexpr u32 _release_after = 120; // unused feature targets expire after 120 renders
     u32 _idle_occlusion_renders = 0; // renders since any view used occlusion culling: the renderer's second gathered buffer goes at _release_after
     // Where each copy of `_refs` was last frame, into _taa_prev (a matrix a copy, flat as _visible is) and the
     // view's record for the next.
@@ -328,7 +327,7 @@ private:
     void match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs, bool skinned);
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input, const TemporalAA3D& taa,
-                                  bool reset, Vec2f jitter, Render3DStats& stats);
+                                  bool reset, Vec2f jitter, Render3DDebugStats& stats);
 
     // render()'s stages, in the order they run, over a FrameCtx (defined in the .cpp)
     // that holds what they share. Each records into the frame's command buffer; any
@@ -356,13 +355,11 @@ private:
     void begin_commands(FrameCtx& ctx);       // flushes 2D; environment and empty-shadow set-up
     void shadow_pass(FrameCtx& ctx);
     // End of a render: counts the renders each feature's targets went unused and releases those unused for `_release_after`;
-    // fills Render3DStats::feature_bytes.
+    // fills Render3DDebugStats::feature_bytes.
     void age_targets(FrameCtx& ctx);
     void prepass(FrameCtx& ctx);              // depth and normals (or velocity), then the occlusion and contact shadows
     void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
     void overlay_velocity(FrameCtx& ctx);
-    static bool masked_depth_draw(const DrawRef& ref);
-    void masked_depth_pass(FrameCtx& ctx);
     bool main_pass(FrameCtx& ctx);            // false: the pass could not begin (2D is resumed already)
     void resolve_history(FrameCtx& ctx);      // the temporal resolve
     void pick_pass(FrameCtx& ctx);
@@ -392,7 +389,6 @@ private:
     GpuShader _vertex_shader;     // mesh.vert
     GpuShader _fragment_shader;   // mesh.frag
     // Optional unlit main-pass variants. Fog, skinning, custom shaders and TAA use the general shaders.
-    bool _page_mesh_bindings = true; // diagnostic override: KIN_MESH_PAGE_BINDINGS=0
     bool _unlit_available = false;
     GpuShader _unlit_vertex_shader, _unlit_textured_vertex_shader;
     GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
@@ -408,7 +404,6 @@ private:
     GpuShader _prepass_vertex_shader;     // prepass.vert
     GpuShader _prepass_shader;            // prepass.frag
     GpuShader _prepass_mask_shader;       // prepass_mask.frag
-    GpuShader _masked_depth_shader;      // optional main-depth cutout experiment
     GpuShader _prepass_velocity_vertex_shader; // prepass_velocity.vert
     GpuShader _prepass_velocity_shader;        // prepass_velocity.frag
     GpuShader _prepass_velocity_mask_shader;   // prepass_velocity_mask.frag
@@ -424,8 +419,6 @@ private:
     GpuShader _mesh_light_fog_shader;          // mesh_light_fog.frag
     GpuShader _mesh_velocity_light_shader;     // mesh_velocity_light.frag
     GpuShader _mesh_velocity_light_fog_shader; // mesh_velocity_light_fog.frag
-    std::array<GpuShader, 8> _point_tile_shaders;
-    bool _point_tiles = false; // opt-in experiment: KIN_POINT_TILES=1
     bool _lights_available = false;
     bool _lights_warned = false;
     GpuShader _sky_shader;                     // sky.frag
@@ -466,6 +459,8 @@ private:
     // it was made from, the renders since it was, and how many times it has been made.
     std::shared_ptr<GpuEnvironment3D> _sky_env;
     std::array<f32, 16> _sky_key{};
+    // The fog's table of the sky's light (Fog3D::colour_from_sky), and what it was made for.
+    sky_model::FogTable _fog_table;
     u32 _sky_env_age = 0;
     u32 _sky_env_generations = 0;
     // Skinned copies (Scene3D::draw_skinned): the vertex shaders that pose the vertex by its joints, with the same varyings.
@@ -490,9 +485,7 @@ private:
     // Temporal anti-aliasing needs the pre-pass and four-float colour targets,
     // and a float storage texture; else it is off (said once, when asked for).
     bool _taa_available = false;
-    // The main pass writes the velocity when temporal anti-aliasing has no other use for a pre-pass; KIN_TAA_PREPASS=1
-    // brings the pre-pass back (to compare, and to test it).
-    bool _main_velocity_allowed = true;
+    // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;
     SDL_GPUComputePipeline* _taa_pipeline = nullptr; // taa.comp
@@ -536,13 +529,9 @@ private:
     } _shadow_cache;
     u64 _shadow_generation = 0; // changes whenever _shadow_map is made again
     u64 _next_mesh_serial = 1;
-    bool _shadow_cache_allowed = true; // KIN_SHADOW_CACHE=0 turns it off; read each render
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
-    bool _contact_classic = false; // KIN_CONTACT_CLASSIC=1 blurs the contact shadows twice (across and down), as before; read each render
     bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it
-    u32 _ao_chain_mode = 0; // 0: by the view's size, 1: KIN_AO_CLASSIC=1 (gtao.comp, reading the depth itself), 2: KIN_AO_CHAIN=1; read each render
-    bool _merge_blurs = true; // KIN_BLUR_SEPARATE=1 turns it off (to compare, and to test the separate path); read each render
     SDL_GPUSampler* _point_sampler = nullptr;            // texel by texel, for compute
     SDL_GPUSampler* _compare_sampler = nullptr; // the shadow map's
     SDL_GPUSampler* _environment_sampler = nullptr; // wraps round, clamps at the poles, mipmapped
@@ -560,6 +549,7 @@ private:
     u32 _local_spot_layers = 0, _local_point_slots = 0; // its layout: the spots' layers, then the point lights' cubes
     u64 _local_generation = 0;
     u32 _local_idle = 0;
+    u32 _local_smaller = 0; // renders in a row the lights with maps needed a smaller side than the array's
     GpuTexture _moon_map;
     u32 _moon_side = 0, _moon_layers = 0;
     u64 _moon_generation = 0;
@@ -679,42 +669,59 @@ private:
         u64 identity = 0, revision = 0;
         bool operator==(const PreparedKey&) const = default;
     };
+    // Exact structural validation across clear()/resubmission. Weak mesh owners
+    // prevent pointer-reuse mistakes without keeping removed assets resident.
+    struct PreparedDraw {
+        std::weak_ptr<IMeshBackend> mesh;
+        Bounds3 bounds;
+        u64 batch = 0;
+        u32 first = 0, count = 0, skin_first = 0, group_first = 0, group_count = 0;
+        bool skinned = false;
+    };
+    static_assert(sizeof(PreparedDraw) <= 96);
+    std::vector<PreparedDraw> _prepared_draws; // <=8192 descriptors, never instance records
+    std::vector<Scene3D::InstanceGroup> _prepared_groups; // <=4096 streamed groups
     struct PreparedBatch { u32 ref; u64 revision; };
     std::array<PreparedKey, 2> _prepared_keys{};
     std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
-    bool _prepared_enabled = true, _prepared_valid = false;
-    bool _prepared_batch_edits = true; // KIN_PREPARED_BATCH_EDITS=0: content revisions invalidate layouts
+    bool _prepared_valid = false;
     u32 _prepared_total = 0;
+    // A table per batch and material colour (two views or two draws of a batch in different colours keep one each).
     struct RetainedTable {
         u64 id = 0, revision = 0, claimed = 0, upload_frame = ~0ull;
+        u64 frame = 0, used = 0; // the _retained_frames it was last claimed in, and the claim's place in _retained_claims (eviction's order)
+        u64 serial = ~0ull, layout = 0; // the GPU frame (submission) it was last claimed in; the batch layout_revision it holds
         Color color{};
         std::weak_ptr<const void> lifetime;
-        std::shared_ptr<GpuBuffer> buffer;
+        std::shared_ptr<GpuBuffer> buffer; // null: a free entry (evicted), dropped at the next collection
         u64 bounds_revision = 0;
-        std::vector<Vec4f> bounds; // at most 1/8 of the live GPU-table budget (4 MiB total)
+        std::vector<Vec4f> bounds; // one of a batch's tables holds them; at most 1/8 of the live GPU-table budget (4 MiB total)
     };
     std::vector<RetainedTable> _retained;
-    u64 _retained_epoch = 0, _retained_gc_frame = ~0ull;
+    u64 _retained_epoch = 0, _retained_gc_frame = ~0ull, _retained_claims = 0;
+    // Frame serials with a 3D render (counted at the collection): what "unused for a whole frame" counts in. A read-back with
+    // no render between does not age the tables; a pick() or read-back between two renders of one app frame does (each render
+    // then sees a new serial), which can cost an early eviction and re-upload under a full budget, never a wrong picture.
+    u64 _retained_frames = 0;
     u32 _retained_bytes = 0;
+    // The largest batch refused a table this GPU frame, and the room the next collection evicted for it (kept for it that frame).
+    struct RetainedWant { u64 id = 0, bytes = 0; std::weak_ptr<const void> lifetime; };
+    RetainedWant _retained_wanted, _retained_reserved;
+    std::vector<u32> _retained_victims; // scratch
+    std::vector<InstanceBatch3D::ChangedRange> _retained_ranges; // an edited table's changed copies (scratch)
+    std::vector<std::array<u32, 2>> _retained_spans;             // and their bytes in the table
+    std::vector<u32> _retained_starts;                           // each range's first among the changed copies
+    void drop_table(RetainedTable& table);
+    bool make_room(u64 id, u64 bytes, bool active_too, Render3DDebugStats& stats);
     bool _retained_enabled = false;
-    bool _cached_bounds_enabled = true, _bounds_cache_grew = false;
-    bool _incremental_bounds = true; // KIN_INCREMENTAL_BOUNDS=0: refresh every sphere after an edit
-    bool _parallel_instance_packing = true; // KIN_PARALLEL_INSTANCE_PACKING=0: pack on the caller
-    bool _shadow_reach_fast = true; // KIN_SHADOW_REACH=0: original directional reach tests
-    bool _camera_ranges = true; // KIN_CAMERA_RANGES=0: classify every copy in accepted cells
-    bool _cached_camera_cull = true; // KIN_CACHED_CAMERA_CULL=0: general per-copy classifier
-    bool _active_cull_counters = true; // KIN_ACTIVE_CULL_COUNTERS=0: clear every LOD/cascade slot
-    bool _gpu_markers = false; // KIN_GPU_PASS_MARKERS=1: external GPU profiler labels, no fence scopes
-    bool _masked_depth = false; // KIN_MASKED_DEPTH_PREPASS=1: experimental cutout prepass, off by default
-    bool _local_spheres4 = true; // KIN_LOCAL_SHADOW_SIMD=0: scalar sphere tests
-    bool _local_pack_fast = true; // KIN_LOCAL_SHADOW_PACKING=0: full counters and separate copy lists
-    bool _local_cull_fast = true; // KIN_LOCAL_SHADOW_CULLING=0: original per-copy gather
+    bool _bounds_cache_grew = false;
+    bool _gpu_markers = false; // external GPU profiler labels, no fence scopes
     u32 _bounds_cache_bytes = 0;
     std::vector<u32> _retained_visible;
     std::shared_ptr<GpuBuffer> _retained_indices;
     GpuInstance3D pack_instance(const MeshInstance& instance, Color material) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
-    void cache_instance_bounds(DrawRef& ref, Render3DStats& stats);
+    void cache_instance_bounds(DrawRef& ref, Render3DDebugStats& stats);
     struct CullGroup {
         u32 first = 0, end = 0; // relative to the draw
         u8 camera = 1;         // 0 outside, 1 partial, 2 inside
@@ -758,7 +765,7 @@ private:
     // `stats`, when given, counts them as the pre-pass's.
     template <typename Binder, typename Uniforms>
     void draw_cluster_copies(const DrawRef& ref, SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, Binder& binder, Uniforms& u,
-                             Render3DStats* stats) const;
+                             Render3DDebugStats* stats) const;
     // Lod3D::occlusion splits the pre-pass in two: `First` draws the opaque meshes and the first pass's clusters, from which the
     // pyramid is built; `Second` the second pass's. A mesh with a shader of its own (which may discard what the pyramid
     // would count as covered) is no occluder: it waits for `Second`, all of its clusters. `All` is every other draw.
@@ -795,6 +802,7 @@ private:
     bool _gpu_clusters = false; // the device can (capabilities)
     bool _occlusion_available = false; // and can build a depth pyramid (Renderer3DCapabilities::occlusion_culling)
     bool _occlusion_warned = false;
+    bool _occlusion_history_warned = false;
     SDL_GPUComputePipeline* _gc_cull_occ = nullptr;      // cluster_cull_occ.comp
     SDL_GPUComputePipeline* _hiz_depth_pipeline = nullptr;  // hiz_depth.comp
     SDL_GPUComputePipeline* _hiz_reduce_pipeline = nullptr; // hiz_reduce.comp
@@ -850,7 +858,6 @@ private:
     } _gc;
     bool _gc_overflow_warned = false;
     std::vector<DrawRef> _refs;
-    bool _spatial_culling = true; // KIN_SPATIAL_CULLING=0: reference per-copy path
     std::vector<CullGroup> _cull_groups;
     std::vector<Piece> _pieces;
     std::vector<u32> _tasks;   // where each task's pieces start

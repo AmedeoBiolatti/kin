@@ -57,7 +57,7 @@ void WorldRenderState3D::prepare_joint_attachments() {
             if(!target.raw().owns<Animator3D>()){attachment._status=Status::UnsupportedTarget;return;}
             animator=target.raw().get_mut<Animator3D>();
         }
-        const bool playing=animator&&animator->bound==model.get()&&animator->player.skeleton()==&skeleton;
+        const bool playing=animator&&animator->bound_to(model)&&animator->player.skeleton()==&skeleton;
         const bool solved=playing&&(!animator->ik_constraints.empty()||!animator->pose_override.empty());
         std::optional<Mat4f> joint;
         if(solved) {

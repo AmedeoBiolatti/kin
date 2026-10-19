@@ -131,6 +131,8 @@ void sample_clip(const AnimClip3D& clip, const Skeleton& skeleton, f32 time, boo
 
 // Between `a` (weight 0) and `b` (weight 1): translations and scales lerped, rotations slerped the short way.
 Pose blend_poses(const Pose& a, const Pose& b, f32 weight);
+// The same into `out`, which may be `a` or `b`: no allocation once `out` has the room (the player blends every frame).
+void blend_poses(const Pose& a, const Pose& b, f32 weight, Pose& out);
 // Normalised lerp of rotations: cheaper than slerp, the same path to within rounding for small angles.
 Quatf nlerp(Quatf a, Quatf b, f32 t);
 // `base` moved toward `layer` joint by joint, each by `mask` times `weight` (mask empty: all 1).
@@ -154,8 +156,9 @@ struct RootMotion {
 };
 
 // How far the root joint moved between `from` and `to` seconds of `clip`, in the chosen axes, in the root's parent space.
-// With `loop`, a `to` earlier than `from` is taken as the clip having wrapped round its end once: the end's motion
-// from `from` plus the start's to `to`; times beyond the duration wrap.
+// With `loop`, a step that crosses the clip's end is taken as having wrapped once: forward (`to` after `from`) the end's
+// motion from `from` plus the start's to `to`, backward (a negative speed) the start's from `from` plus the end's to `to`;
+// times beyond the duration wrap.
 RootMotion extract_root_motion(const AnimClip3D& clip, const Skeleton& skeleton, f32 from, f32 to, bool loop, const RootMotionAxes& axes = {});
 // `pose` with the root's motion removed: the chosen axes of its translation put back to the rest pose's (and its rotation to
 // the rest rotation), so that the character moves by the extracted motion and not by the root joint.
@@ -273,7 +276,8 @@ private:
         f32 parameter = 0.0f;
     };
     static void advance(Playing& p, f32 dt);
-    void sample(const Playing& p, Pose& out) const;
+    // `second` is the room for the second clip of a blend.
+    void sample(const Playing& p, Pose& out, Pose& second) const;
     static void set_blend(Playing& p, std::span<const BlendPoint3D> points, f32 parameter);
 
     struct Action {

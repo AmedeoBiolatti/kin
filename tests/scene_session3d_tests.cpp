@@ -1,4 +1,6 @@
 #include <kin/scene/scene_session3d.hpp>
+#include <kin/audio/audio.hpp>
+#include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/platform/app.hpp>
@@ -6,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -420,10 +423,276 @@ void gpu_session(Renderer2D& renderer) {
         check(session.reload_if_changed()==SceneSession3DReload::Activated,"animator failure did not recover");
     }
 }
+
+// Lifecycle requests and a prepared replacement: cancelled with a reason, never held for another scene.
+void gpu_prepared_requests(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS)/"parts.glb",scratch.path/"parts.glb");
+    write(scratch.path/"prop.kinprefab",prefab); write(scratch.path/"test.kinscene",scene);
+    Renderer3D r3d{renderer}; Assets3D assets{r3d,scratch.path};
+    SceneSession3DOptions options;
+    options.viewport={160,120}; options.view.samples=1; options.warm_up=false;
+    options.physics=World3DConfig{.max_bodies=16,.max_body_pairs=64,.max_contact_constraints=64,
+        .temp_memory_bytes=1024*1024,.single_threaded=true};
+    SceneSession3D session{r3d,assets,options};
+    const auto ok=[&](bool result,const char* message) {
+        if (!result) for (const auto& error:session.diagnostics()) std::cerr<<error<<'\n';
+        check(result,message);
+    };
+    using Status=SceneRequestStatus3D;
+    ok(session.load("test.kinscene"),"request fixture load failed");
+    auto commands=session.commands(); EcsCommandBuffer buffer; std::string error;
+    const auto submit=[&] {
+        auto ticket=commands.spawn(buffer,"prop.kinprefab");
+        check(buffer.flush(*session.world(),error),"request flush failed");
+        return ticket;
+    };
+    const auto says_cancelled_not_held=[](const SceneRequest3D& ticket) {
+        return ticket.status()==Status::Cancelled && ticket.error().find("cancelled, not held")!=std::string::npos;
+    };
+
+    // Queued before the candidate and after it: both are cancelled by the next step, with the reason, and nothing is run.
+    auto before=submit();
+    ok(session.prepare("test.kinscene"),"request candidate failed");
+    auto during=submit();
+    check(before.status()==Status::Pending && during.status()==Status::Pending,"request executed before a step");
+    ok(session.step(1.f/60),"step with a prepared replacement failed");
+    check(says_cancelled_not_held(before) && says_cancelled_not_held(during) && session.runtime_prefabs()==0,
+        "requests were held or run while a replacement was prepared");
+    // Cancelling the candidate does not bring them back; a request made now runs.
+    session.cancel();
+    ok(session.step(1.f/60),"step after cancel failed");
+    check(before.status()==Status::Cancelled && during.status()==Status::Cancelled && session.runtime_prefabs()==0,
+        "a cancelled request ran after the replacement was cancelled");
+    auto after=submit();
+    ok(session.step(1.f/60),"step with a fresh request failed");
+    check(after.status()==Status::Succeeded && session.runtime_prefabs()==1,"request after cancel did not run");
+
+    // Still queued when the candidate is activated: it belongs to the old scene, which is gone; the new one starts clean.
+    auto queued=submit();
+    ok(session.prepare("test.kinscene") && session.activate(),"request activation failed");
+    check(queued.status()==Status::Cancelled && queued.error().find("replaced")!=std::string::npos && session.runtime_prefabs()==0,
+        "request survived the scene it was made for");
+    commands=session.commands();
+    auto fresh=submit();
+    ok(session.step(1.f/60),"step in the new scene failed");
+    check(fresh.status()==Status::Succeeded && session.runtime_prefabs()==1,"new scene's endpoint did not run its request");
+}
+// Without a GPU (an SDL_Renderer over the dummy video driver: what a server or a CI job without a GPU has, no 3D): the
+// whole session but drawing, on CPU-only models, over the real camp and its prefabs.
+void headless() {
+    App app{{.mode=AppMode::Headless}};
+    auto& window=app.create_window({.title="scene-session-headless",.width=64,.height=64,.hidden=true});
+    Renderer2D renderer{window};
+    Renderer3D r3d{renderer};
+    check(!r3d.available(),"the headless renderer has 3D");
+    const auto content=std::filesystem::path(KIN_TEST_SUMMIT);
+    Assets3D assets{r3d,content};
+
+    // A CPU-only model is what read_model_data reads, with empty mesh handles that keep their counts, bounds and joints.
+    {
+        const auto path=content/"kenney-character/survivor.glb";
+        std::string error;
+        const auto model=assets.load_model("kenney-character/survivor.glb",&error).shared();
+        check(model && error.empty() && !model->skeletons.empty() && !model->clips.empty(),"CPU model lost its skeleton or clips");
+        ModelData data;
+        check(read_model_data(*read_content_file(path),path,data),"reference model read failed");
+        check(model->parts.size()==data.parts.size() && model->node_skeleton==data.node_skeleton &&
+            model->source_files==std::vector<std::filesystem::path>{path.lexically_normal()},"CPU model parts/sources differ");
+        for(std::size_t i=0;i<data.parts.size();++i) {
+            const auto& part=model->parts[i];const auto& want=data.parts[i];
+            const auto bounds=want.mesh.bounds();
+            check(!part.mesh.valid() && part.name==want.name && part.skin==want.skin && std::ranges::equal(part.transform.m,want.transform.m) &&
+                part.node==want.node && std::ranges::equal(part.node_offset.m,want.node_offset.m) &&
+                part.mesh.vertex_count()==want.mesh.vertices.size() && part.mesh.skin_joint_count()==want.mesh.skin_joint_count() &&
+                part.mesh.bounds().min==bounds.min && part.mesh.bounds().max==bounds.max,"CPU model part differs from its data");
+        }
+        check(model->bounds.max.y>model->bounds.min.y && assets.load_model("kenney-character/survivor.glb").shared()==model,"CPU model bounds/sharing");
+        check(!assets.load_model("kenney-character/absent.glb",&error) && !error.empty(),"missing CPU model accepted");
+    }
+
+    AudioEngine audio{create_null_audio_backend(48000,2),{}};
+    audio.add_clip("dc",make_memory_audio_clip("dc",std::vector<f32>(48000,0.5f),1,48000));
+    AudioCatalog catalog;
+    catalog.add_cue({.id="hum",.clips={"dc"},.bus="sfx",.loop=true,.spatial=true,.min_distance=1.0f,.max_distance=40.0f});
+    SceneSession3DOptions options;
+    options.viewport={160,120};options.view.pick=true;
+    options.physics=World3DConfig{.max_bodies=64,.max_body_pairs=256,.max_contact_constraints=256,.temp_memory_bytes=1024*1024,.single_threaded=true};
+    options.audio=&audio;options.audio_catalog=&catalog;
+    int ticks=0;
+    options.register_components=[&](kin::EcsWorld& world) {
+        world.systems().register_native<SceneCamera3D>({.id="game.headless.tick",.writes={"SceneCamera3D"},
+            .run=[&](kin::EcsEntity,SceneCamera3D&,SystemContext&){++ticks;}});
+    };
+    // The blue barrel hums, to the right of the camera (no AudioListener: the session's camera hears).
+    options.initialize=[&](SceneSession3DContext& context) {
+        context.world.entities().find_by_authored_id("blue-barrel").set(AudioEmitter{.cue="hum"});
+    };
+    SceneSession3D session{r3d,assets,options};
+    const auto ok=[&](bool result,const char* message) {
+        if(!result)for(const auto& e:session.diagnostics())std::cerr<<e<<'\n';
+        check(result,message);
+    };
+    ok(session.load("scenes/camp.kinscene"),"headless camp load failed");
+    check(session.active() && !session.view() && session.physics() && session.physics()->body_count()>=3,"headless camp incomplete");
+    const auto hero=session.entity("survivor");const auto barrel=session.entity("blue-barrel");
+    check(hero && hero.get<SkinnedMeshRenderer>()->model && !hero.get<SkinnedMeshRenderer>()->model->parts[0].mesh.valid(),"headless skinned model");
+    const auto start=hero.get<Animator3D>()->player.time();
+    const auto particles=[&]{u64 count=0;session.world()->raw().each([&](const ParticleEmitter3D& e){count+=e.system.count();});return count;};
+
+    // Spawn, pool, commands, physics, queries and edits, all without a GPU.
+    const auto crate=session.spawn("prefabs/camp-crate.kinprefab",{.position=Vec3f{0,3,3}});
+    ok(bool(crate),"headless spawn failed");
+    const auto crate_entity=session.resolve(crate.root);
+    const auto prepared=session.preload("prefabs/camp-crate.kinprefab");
+    ok(bool(prepared),"headless preload failed");
+    const auto pool=session.create_pool(prepared,{.capacity=2});
+    ok(bool(pool),"headless pool failed");
+    const auto pooled=session.spawn(pool,{.position=Vec3f{-3,2,3}});
+    ok(bool(pooled) && session.pool_stats(pool).active==1,"headless pool spawn failed");
+    auto commands=session.commands();EcsCommandBuffer buffer;std::string error;
+    const auto request=commands.spawn(buffer,"prefabs/camp-crate.kinprefab",{.position=Vec3f{3,2,3}});
+    check(buffer.flush(*session.world(),error),"headless request flush failed");
+    for(int i=0;i<30;++i)ok(session.step(1.f/60),"headless step failed");
+    check(ticks==30 && request.status()==SceneRequestStatus3D::Succeeded && session.runtime_prefabs()==3,"headless systems/commands");
+    check(crate_entity.get<Transform3D>()->position.y<3,"headless physics did not move the crate");
+    check(hero.get<Animator3D>()->player.time()!=start,"headless animation did not advance");
+    check(particles()>0,"headless particles did not emit");
+    const auto hit=session.queries().raycast({0,10,3},{0,-10,3});
+    check(hit && session.queries().resolve(*hit).id()==crate_entity.id(),"headless query did not find the crate");
+    const SceneFieldEdit3D move[]={{barrel,"Transform3D","position",Vec3f{2.5f,0,0}}};
+    ok(session.edit(move),"headless edit failed");
+    ok(session.despawn(pooled) && session.despawn(crate) && session.runtime_prefabs()==1 && session.pool_stats(pool).available==2,"headless despawn");
+
+    // The listener is the camera, and the barrel's hum comes from its right.
+    ok(session.step(1.f/60),"headless step after edits failed");
+    check(barrel.get<AudioEmitter>()->playing && audio.active_voice_count()==1,"headless session did not start the emitter");
+    std::vector<f32> out(4800*2);audio.render(out);
+    check(out[out.size()-1]>out[out.size()-2]*1.2f,"emitter right of the session camera not heard on the right");
+
+    // Collected on the CPU, with no view: render and pick say why they cannot.
+    ok(session.collect(),"headless collect failed");
+    check(session.scene()->camera.position==Vec3f{0,3,8},"headless collection lost the camera");
+    check(!session.render() && session.diagnostics()==std::vector<std::string>{"no renderer"},"headless render did not fail with its reason");
+    check(!session.pick({80,60}) && session.diagnostics()==std::vector<std::string>{"no renderer"},"headless pick did not fail with its reason");
+    const auto generation=session.generation();
+    ok(session.reload() && session.generation()==generation+1 && !session.view(),"headless reload failed");
+    check(session.resize({200,100}),"headless resize failed");
+}
+
+// pick names the entity drawn under a pixel of the last render (its index, or a renderer id of its own), with the point
+// there; nothing over the background; and says why without View3DOptions::pick, which an environment's view settings do not
+// turn off.
+void gpu_pick(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS)/"parts.glb",scratch.path/"parts.glb");
+    write(scratch.path/"pick.kinscene",R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,8]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{},"ModelRenderer3D":{"asset":"parts.glb"}}},
+      {"id":"tagged","components":{"Transform3D":{"position":[-3,-2,0]},"ModelRenderer3D":{"asset":"parts.glb","id":77}}}]})");
+    Renderer3D r3d{renderer};Assets3D assets{r3d,scratch.path};
+    SceneSession3DOptions options;options.viewport={160,120};options.view.samples=1;options.warm_up=false;options.view.pick=true;
+    SceneSession3D session{r3d,assets,options};
+    const auto ok=[&](bool result,const char* message) {
+        if(!result)for(const auto& e:session.diagnostics())std::cerr<<e<<'\n';
+        check(result,message);
+    };
+    ok(session.load("pick.kinscene"),"pick scene failed");
+    renderer.clear();ok(session.render(),"pick render failed");
+    const auto box=session.entity("box");auto tagged=session.entity("tagged");
+    const auto centre=session.pick({80,60});
+    ok(centre && centre->entity.id()==box.id() && centre->id==u32(box.id()&0xffffffffu),"centre pick did not name the box");
+    // The pixel's centre is half a pixel (about 0.04 m there) off the view's.
+    check(std::abs(centre->position.z-.5f)<.02f && std::abs(centre->position.x)<.1f && std::abs(centre->position.y)<.1f,
+        "centre pick point is not the box's front face");
+    const auto at=session.scene()->camera.project({-3,-2,.5f},{0,0,160,120});
+    check(bool(at),"tagged box off screen");
+    const Vec2i tagged_pixel{int(at->pos.x),int(at->pos.y)};
+    const auto custom=session.pick(tagged_pixel);
+    ok(custom && custom->entity.id()==tagged.id() && custom->id==77,"pick did not find the renderer with an id of its own");
+    check(!session.pick({2,2}) && session.diagnostics().empty(),"background pick named something");
+    // The frame keeps its ids; one whose renderer no longer draws names no entity.
+    tagged.get_mut<ModelRenderer3D>()->visible=false;
+    const auto hidden=session.pick(tagged_pixel);
+    check(hidden && !hidden->entity && hidden->id==77,"pick named a hidden renderer");
+    renderer.present();
+
+    options.view.pick=false;
+    SceneSession3D plain{r3d,assets,options};
+    check(plain.load("pick.kinscene"),"plain pick scene failed");
+    renderer.clear();check(plain.render(),"plain render failed");
+    check(!plain.pick({80,60}) && !plain.diagnostics().empty() && plain.diagnostics()[0].find("view.pick")!=std::string::npos,
+        "pick without a pick pass did not say why");
+    renderer.present();
+}
+// The CPU cost of a frame of a session with about 500 entities, printed (no assertion: a machine's speed is not a test): 20 groups with 10
+// children each, 100 static and 200 dynamic bodies (a grid of boxes that falls, lands and sleeps), 8 particle emitters, 600 steps and
+// collections after a warm-up. The tail of the run is the steady state of most games: little moves.
+void gpu_frame_cost(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS)/"parts.glb",scratch.path/"parts.glb");
+    std::string json=R"({"entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,12,40]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1,"ambient":[1,1,1]}}},
+      {"id":"ground","components":{"Transform3D":{"position":[0,-0.5,0]},"Collider3D":{"kind":"box","half_extents":[60,0.5,60]}}})";
+    const auto vec=[](float x,float y,float z){return "["+std::to_string(x)+","+std::to_string(y)+","+std::to_string(z)+"]";};
+    for(int g=0;g<20;++g) {
+        json+=",{\"id\":\"group"+std::to_string(g)+"\",\"components\":{\"Transform3D\":{\"position\":"+vec(float(g%5)*8-16,0,float(g/5)*8-16)+"}}}";
+        for(int c=0;c<10;++c)
+            json+=",{\"id\":\"decor"+std::to_string(g*10+c)+"\",\"parent\":\"group"+std::to_string(g)+"\",\"components\":{\"Transform3D\":{\"position\":"+
+                vec(float(c)*0.7f,0.2f,0)+"},\"ModelRenderer3D\":{\"asset\":\"parts.glb\"}}}";
+    }
+    for(int i=0;i<100;++i)
+        json+=",{\"id\":\"wall"+std::to_string(i)+"\",\"components\":{\"Transform3D\":{\"position\":"+vec(float(i%20)*2-19,0.25f,-30-float(i/20)*1.5f)+
+            "},\"Collider3D\":{\"kind\":\"box\",\"half_extents\":[0.5,0.25,0.5]},\"ModelRenderer3D\":{\"asset\":\"parts.glb\"}}}";
+    for(int i=0;i<200;++i)
+        json+=",{\"id\":\"crate"+std::to_string(i)+"\",\"components\":{\"Transform3D\":{\"position\":"+vec(float(i%20)*1.5f-14,1.0f+float(i/20)*0.3f,float(i/20)*1.5f)+
+            "},\"Collider3D\":{\"kind\":\"box\",\"half_extents\":[0.4,0.4,0.4]},\"RigidBody3D\":{\"motion\":\"dynamic\"},\"ModelRenderer3D\":{\"asset\":\"parts.glb\"}}}";
+    for(int i=0;i<8;++i)
+        json+=",{\"id\":\"smoke"+std::to_string(i)+"\",\"components\":{\"Transform3D\":{\"position\":"+vec(float(i)*4-14,1,-8)+
+            "},\"ParticleEmitter3D\":{\"rate\":10,\"max_particles\":32}}}";
+    json+="]}";
+    write(scratch.path/"frame.kinscene",json);
+    Renderer3D r3d{renderer};Assets3D assets{r3d,scratch.path};
+    SceneSession3DOptions options;options.viewport={160,120};options.view.samples=1;options.warm_up=false;
+    options.physics=World3DConfig{.max_bodies=1024,.max_body_pairs=16384,.max_contact_constraints=8192,.temp_memory_bytes=8*1024*1024,.single_threaded=true};
+    options.particle_limits={16,64,1024};
+    SceneSession3D session{r3d,assets,options};
+    const auto ok=[&](bool result,const char* why){if(!result)for(const auto& e:session.diagnostics())std::cerr<<e<<'\n';check(result,why);};
+    ok(session.load("frame.kinscene"),"frame cost fixture failed");
+    const std::size_t entities=session.world()->raw().count<Transform3D>();
+    using Clock=std::chrono::steady_clock;
+    const auto ms=[](Clock::time_point since){return std::chrono::duration<double,std::milli>(Clock::now()-since).count();};
+    for(int i=0;i<60;++i){ok(session.step(1.f/60),"frame cost step failed");ok(session.collect(),"frame cost collect failed");}
+    std::vector<double> steps,collects;
+    for(int i=0;i<600;++i) {
+        auto t=Clock::now();ok(session.step(1.f/60),"frame cost step failed");steps.push_back(ms(t));
+        t=Clock::now();ok(session.collect(),"frame cost collect failed");collects.push_back(ms(t));
+    }
+    const auto median=[](std::vector<double> v){std::nth_element(v.begin(),v.begin()+long(v.size()/2),v.end());return v[v.size()/2];};
+    const auto mean=[](const std::vector<double>& v){double s=0;for(double x:v)s+=x;return s/double(v.size());};
+    const auto tail=[](std::vector<double> v){v.erase(v.begin(),v.begin()+long(v.size()/2));return v;};
+    std::cerr<<"scene session, "<<entities<<" entities (300 bodies, 8 emitters), 600 frames: step "<<mean(steps)<<" ms mean, "<<median(steps)<<" ms median, "
+             <<median(tail(steps))<<" ms median over the last 300 (bodies asleep); collect "<<mean(collects)<<" ms mean, "<<median(collects)<<" ms median, "
+             <<median(tail(collects))<<" ms over the last 300\n";
+    // What a frame does several times over, alone: a step propagates the transforms three times and checks the particle budgets
+    // three times, and a collection once more each.
+    auto* rendering=session.rendering();
+    auto t=Clock::now();
+    for(int i=0;i<2000;++i)rendering->propagate_transforms();
+    const double propagate_us=ms(t)*1000/2000;
+    t=Clock::now();
+    std::size_t errors=0;
+    for(int i=0;i<2000;++i)errors+=validate_particles3d(*session.world(),options.particle_limits).size();
+    const double validate_us=ms(t)*1000/2000;
+    std::cerr<<"  propagate_transforms "<<propagate_us<<" us a call, validate_particles3d "<<validate_us<<" us a call ("<<errors<<" errors)\n";
+}
 } // namespace
 
 int main(int argc,char** argv) {
-    try { cpu(); }
+    // The CPU and headless checks run everywhere (CI's jobs without a GPU too); only the GPU checks are skipped there.
+    try { cpu(); headless(); std::cout<<"Headless scene session checks passed\n"; }
     catch(const std::exception& error) { std::cerr<<error.what()<<'\n'; return 1; }
     if(argc>1 && std::string_view(argv[1])=="cpu") return 0;
     bool ready=false;
@@ -431,10 +700,13 @@ int main(int argc,char** argv) {
         App app{}; auto& window=app.create_window({.title="scene-session-tests",.width=192,.height=128,.hidden=true});
         auto backend=make_render_backend(window,false,true);
         if(!backend || backend->name()!="SDL_GPU") throw std::runtime_error("GPU backend required for lifecycle checks");
-        ready=true; Renderer2D renderer{std::move(backend)}; gpu_live_edits(renderer); gpu_session(renderer);
+        ready=true; Renderer2D renderer{std::move(backend)}; gpu_live_edits(renderer); gpu_session(renderer); gpu_prepared_requests(renderer);
+        gpu_pick(renderer); gpu_frame_cost(renderer);
         std::cout<<"Transactional scene lifecycle, reload, budgets and ownership checks passed\n";
     } catch(const std::exception& error) {
         std::cerr<<error.what()<<'\n'; const char* required=std::getenv("KIN_REQUIRE_GPU_TESTS");
-        return ready || (required && std::string_view(required)!="0") ? 1 : 77;
+        if(ready || (required && std::string_view(required)!="0")) return 1;
+        std::cout<<"GPU scene session checks skipped (no GPU)\n";
     }
+    return 0;
 }

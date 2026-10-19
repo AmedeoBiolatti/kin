@@ -1,5 +1,7 @@
 #include <kin/render3d/mesh_clusters.hpp>
 
+#include "mesh_bake.hpp"
+
 #include <meshoptimizer.h>
 
 #include <algorithm>
@@ -245,9 +247,9 @@ MeshClusterInfo MeshClusters::info() const {
     return i;
 }
 
-MeshClusters build_mesh_clusters(const MeshData& data, const MeshOptions& options, const ClusterParallelFor& parallel) {
+MeshClusterBuild build_mesh_clusters(const MeshData& data, const MeshOptions& options, const ClusterParallelFor& parallel) {
     const auto started = std::chrono::steady_clock::now();
-    MeshClusters mesh;
+    MeshClusterBuild mesh;
     const std::size_t source_vertices = data.vertices.size();
     const bool indexed = !data.indices.empty();
     const std::size_t source_indices = indexed ? data.indices.size() : source_vertices;
@@ -520,6 +522,158 @@ MeshClusters build_mesh_clusters(const MeshData& data, const MeshOptions& option
     mesh.roots = frontier;
     mesh.build_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - started).count();
     return mesh;
+}
+
+// The bake of a build (mesh_clusters_bake_key, save_mesh_clusters). Raise it whenever build_mesh_clusters would make
+// another hierarchy from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
+constexpr u32 clusters_bake_version = 1;
+static_assert(sizeof(MeshCluster) == 84 && sizeof(MeshClusterGroup) == 36,
+              "a field added to MeshCluster or MeshClusterGroup must be saved and restored (and clusters_bake_version raised)");
+
+u64 mesh_clusters_bake_key(const MeshData& data, const MeshOptions& options) {
+    BakeKey key{"kin.mesh_clusters", clusters_bake_version};
+    key.value(max_cluster_triangles).value(static_cast<u32>(max_cluster_vertices)).value(max_rounds);
+    key.value(options.cluster_triangles).value(options.normal_weight).value(options.uv_weight).value(options.color_weight);
+    mesh_bake::add_mesh(key, data);
+    return key.hash();
+}
+
+std::vector<u8> save_mesh_clusters(const MeshClusterBuild& b) {
+    BakeWriter w;
+    w.reserve(64 + b.clusters.size() * 84 + b.groups.size() * 36 + (b.group_inputs.size() + b.cluster_vertices.size() + b.roots.size()) * 4 +
+              b.triangles.size() + b.vertices.size() * mesh_bake::vertex_bytes);
+    w.value<u8>(b.flat ? 1 : 0);
+    w.value(b.leaf_count);
+    w.value(b.levels);
+    w.value(b.leaf_triangles);
+    w.value(b.total_triangles);
+    w.value(b.degenerate_removed);
+    w.value(b.build_ms);
+    w.value(b.stuck_groups);
+    w.value<u64>(b.clusters.size());
+    for (const MeshCluster& c : b.clusters) {
+        w.value(c.vertex_offset);
+        w.value(c.triangle_offset);
+        w.value(c.vertex_count);
+        w.value(c.triangle_count);
+        w.value(c.depth);
+        w.value(c.parent_depth);
+        w.value(c.group);
+        w.value(c.parent_group);
+        for (const f32 f : {c.error, c.center.x, c.center.y, c.center.z, c.radius, c.parent_error, c.parent_center.x, c.parent_center.y,
+                            c.parent_center.z, c.parent_radius, c.cull_center.x, c.cull_center.y, c.cull_center.z, c.cull_radius}) {
+            w.value(f);
+        }
+    }
+    w.value<u64>(b.groups.size());
+    for (const MeshClusterGroup& g : b.groups) {
+        w.value(g.input_first);
+        w.value(g.input_count);
+        w.value(g.output_first);
+        w.value(g.output_count);
+        for (const f32 f : {g.error, g.center.x, g.center.y, g.center.z, g.radius}) {
+            w.value(f);
+        }
+    }
+    w.array(std::span<const u32>{b.group_inputs});
+    w.array(std::span<const u32>{b.cluster_vertices});
+    w.array(std::span<const u8>{b.triangles});
+    w.array(std::span<const u32>{b.roots});
+    mesh_bake::write_vertices(w, b.vertices);
+    return std::move(w.bytes());
+}
+
+bool restore_mesh_clusters(std::span<const u8> bytes, MeshClusterBuild& out) {
+    out = {};
+    MeshClusterBuild b;
+    BakeReader r{bytes};
+    u8 flat = 0;
+    r.value(flat);
+    r.value(b.leaf_count);
+    r.value(b.levels);
+    r.value(b.leaf_triangles);
+    r.value(b.total_triangles);
+    r.value(b.degenerate_removed);
+    r.value(b.build_ms);
+    r.value(b.stuck_groups);
+    b.flat = flat != 0;
+    u64 count = 0;
+    if (!r.count(count, 84)) {
+        return false;
+    }
+    b.clusters.resize(static_cast<std::size_t>(count));
+    for (MeshCluster& c : b.clusters) {
+        r.value(c.vertex_offset);
+        r.value(c.triangle_offset);
+        r.value(c.vertex_count);
+        r.value(c.triangle_count);
+        r.value(c.depth);
+        r.value(c.parent_depth);
+        r.value(c.group);
+        r.value(c.parent_group);
+        for (f32* f : {&c.error, &c.center.x, &c.center.y, &c.center.z, &c.radius, &c.parent_error, &c.parent_center.x, &c.parent_center.y,
+                       &c.parent_center.z, &c.parent_radius, &c.cull_center.x, &c.cull_center.y, &c.cull_center.z, &c.cull_radius}) {
+            r.value(*f);
+        }
+    }
+    if (!r.count(count, 36)) {
+        return false;
+    }
+    b.groups.resize(static_cast<std::size_t>(count));
+    for (MeshClusterGroup& g : b.groups) {
+        r.value(g.input_first);
+        r.value(g.input_count);
+        r.value(g.output_first);
+        r.value(g.output_count);
+        for (f32* f : {&g.error, &g.center.x, &g.center.y, &g.center.z, &g.radius}) {
+            r.value(*f);
+        }
+    }
+    r.array(b.group_inputs);
+    r.array(b.cluster_vertices);
+    r.array(b.triangles);
+    r.array(b.roots);
+    if (!mesh_bake::read_vertices(r, b.vertices) || !r.done()) {
+        return false;
+    }
+
+    // Everything the cut, leaf_indices() and the upload index is in range, and the totals are the clusters' own.
+    const u64 clusters = b.clusters.size(), groups = b.groups.size();
+    if (clusters > no_cluster || groups > no_cluster || b.leaf_count > clusters || b.vertices.size() > no_cluster) {
+        return false;
+    }
+    const auto group_ok = [&](u32 g) { return g == no_cluster || g < groups; };
+    u64 leaf_triangles = 0, total_triangles = 0;
+    for (u64 i = 0; i < clusters; ++i) {
+        const MeshCluster& c = b.clusters[static_cast<std::size_t>(i)];
+        if (c.vertex_count > max_cluster_vertices || static_cast<u64>(c.vertex_offset) + c.vertex_count > b.cluster_vertices.size() ||
+            static_cast<u64>(c.triangle_offset) + static_cast<u64>(c.triangle_count) * 3 > b.triangles.size() || !group_ok(c.group) ||
+            !group_ok(c.parent_group)) {
+            return false;
+        }
+        const u8* t = b.triangles.data() + c.triangle_offset;
+        for (u32 k = 0, n = c.triangle_count * 3u; k < n; ++k) {
+            if (t[k] >= c.vertex_count) {
+                return false;
+            }
+        }
+        total_triangles += c.triangle_count;
+        leaf_triangles += i < b.leaf_count ? c.triangle_count : 0u;
+    }
+    if (leaf_triangles != b.leaf_triangles || total_triangles != b.total_triangles) {
+        return false;
+    }
+    for (const MeshClusterGroup& g : b.groups) {
+        if (static_cast<u64>(g.input_first) + g.input_count > b.group_inputs.size() || static_cast<u64>(g.output_first) + g.output_count > clusters) {
+            return false;
+        }
+    }
+    const auto all_below = [](const std::vector<u32>& v, u64 bound) { return std::all_of(v.begin(), v.end(), [&](u32 x) { return x < bound; }); };
+    if (!all_below(b.group_inputs, clusters) || !all_below(b.roots, clusters) || !all_below(b.cluster_vertices, b.vertices.size())) {
+        return false;
+    }
+    out = std::move(b);
+    return true;
 }
 
 f32 cluster_scale_of(const Mat4f& t) {

@@ -2241,7 +2241,7 @@ private:
     }
 
     void draw_stats(Vec2i out, float u, Color glass, Color rim, Color ink, Color muted) {
-        const Render3DStats& st = _r3d->stats();
+        const Render3DDebugStats& st = _r3d->debug_stats();
         const RendererBackendStats be = _backend_stats;
         char line[160];
         std::vector<std::string> lines;

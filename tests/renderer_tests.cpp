@@ -1715,14 +1715,13 @@ void test_gpu_adaptive_upload_staging() {
         auto renderer = try_create_gpu_renderer(window,reason);
         if (!renderer) {skip_or_require_gpu_test(test_name,reason);return;}
         gpu_ready = true;
-        const char* override = std::getenv("KIN_ADAPTIVE_STAGING");
-        const bool adaptive = !override || std::string_view(override)!="0";
         constexpr kin::u64 mib = 1024*1024;
+        std::array<kin::u8,16> tiny_pixels{};
+        const auto tiny = renderer->create_texture_from_rgba(tiny_pixels.data(),{2,2});
+        assert(renderer->backend_stats().upload_staging_bytes==4*mib);
         std::vector<kin::u8> pixels(4*mib);
         for (std::size_t i=0;i<pixels.size();i+=4) {pixels[i]=211;pixels[i+1]=67;pixels[i+2]=29;pixels[i+3]=255;}
         const auto big = renderer->create_texture_from_rgba(pixels.data(),{1024,1024});
-        std::array<kin::u8,16> tiny_pixels{};
-        const auto tiny = renderer->create_texture_from_rgba(tiny_pixels.data(),{2,2});
         const auto check = [&](const kin::Texture& texture,kin::Color expected) {
             auto target=renderer->create_render_target({64,64},kin::ScaleMode::Nearest);
             auto bind=renderer->scoped_render_target(target);
@@ -1738,13 +1737,13 @@ void test_gpu_adaptive_upload_staging() {
             assert(renderer->update_texture(tiny,{0,0},{2,2},tiny_pixels.data()));
             renderer->clear(kin::colors::black);renderer->draw_texture(tiny,{0,0,64,64});renderer->present();
         }
-        assert(renderer->backend_stats().upload_staging_bytes==(adaptive?mib:16*mib));
+        assert(renderer->backend_stats().upload_staging_bytes==mib);
         check(tiny,kin::Color::rgb(3,81,197));
         check(big,kin::Color::rgb(211,67,29));
         const auto allocations=renderer->backend_stats().upload_staging_allocations;
         assert(renderer->update_texture(big,{0,0},{1024,1024},pixels.data()));
         assert(renderer->backend_stats().upload_staging_bytes>=4*mib);
-        if (adaptive) assert(renderer->backend_stats().upload_staging_allocations>allocations);
+        assert(renderer->backend_stats().upload_staging_allocations>allocations);
         check(big,kin::Color::rgb(211,67,29));renderer->present();
         const std::array<kin::Texture,3> textures{{
             renderer->create_texture_from_rgba(pixels.data(),{512,256}),
@@ -1754,7 +1753,7 @@ void test_gpu_adaptive_upload_staging() {
             for (const auto& texture:textures) assert(renderer->update_texture(texture,{0,0},{512,256},pixels.data()));
             renderer->clear(kin::colors::black);renderer->draw_texture(textures[2],{0,0,64,64});renderer->present();
         }
-        assert(renderer->backend_stats().upload_staging_bytes==(adaptive?2*mib:16*mib));
+        assert(renderer->backend_stats().upload_staging_bytes==2*mib);
         for (const auto& texture:textures) check(texture,kin::Color::rgb(211,67,29));
         check(big,kin::Color::rgb(211,67,29));
     } catch (const std::exception& e) {

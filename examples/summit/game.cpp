@@ -144,6 +144,9 @@ Game::~Game() = default;
 void Game::build() {
     World3DConfig cfg;
     cfg.single_threaded = _config.single_threaded;
+    // Nothing here reads the world's contact events (the game's own come from the character, ragdoll and rope events), so none are
+    // recorded: each costs a callback under a lock, and the pile of a step has hundreds.
+    cfg.contact_events = false;
     cfg.persist_events = false;
     _world = std::make_unique<World3D>(cfg);
 
@@ -353,7 +356,6 @@ void Game::step(std::span<const PlayerCommand> commands) {
         step_player(i32(i), c);
     }
     _world->step(fixed_step);
-    _world->drain_events();
     _world->drain_constraint_events();
     for (std::size_t i = 0; i < _players.size(); ++i) {
         after_player(i32(i));

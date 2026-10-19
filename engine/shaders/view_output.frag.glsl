@@ -25,11 +25,20 @@ void main() {
     vec3 c = scene.rgb + bloom;
     // The glow shows over a transparent background too.
     const float alpha = clamp(scene.a + dot(bloom, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    // The exposure and the tonemap are of the colour, not of the colour times its coverage: a partly covered pixel (an
+    // edge over a transparent background) is taken out of its alpha first and put back in it last. An opaque or empty
+    // one runs as it always did.
+    const bool partial = params.a.z < 1.5 && alpha > 0.0 && alpha < 1.0;
+    if (partial) {
+        c /= alpha;
+    }
     if (params.a.z < 1.5) {
         c = aces(c * params.a.y);
     }
     if ((params.a.z < 0.5 || params.a.z > 2.5) && alpha > 0.0) {
-        c = encode(c / alpha) * alpha;
+        c = encode(partial ? c : c / alpha) * alpha;
+    } else if (partial) {
+        c *= alpha;
     }
     FragColor = vec4(c, alpha);
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 // Experimental 3D rendering (docs/3d_plan.md): 3D views drawn inside a 2D
 // frame, on the SDL_GPU backend. The API may change in any release. Built
@@ -37,6 +38,7 @@ namespace kin {
 
 class Renderer2D;
 class Assets3D;
+class BakeCache;
 
 // A picture a 3D scene is drawn into (colour and depth), laid into the frame
 // with Renderer2D::draw_texture(view.texture(), rect). Cheap to copy (copies
@@ -83,19 +85,26 @@ public:
     Renderer2D& renderer() const { return *_renderer; }
 
     // `data` kept on the GPU. Empty when 3D isn't available or the data is
-    // not valid (MeshData::validate, logged).
+    // not valid (MeshData::validate); diagnostics() explains the failure.
     Mesh create_mesh(const MeshData& data);
     // The same with levels of detail (MeshOptions::levels): simpler versions of
     // the mesh that Scene3D::lod draws copies far from the camera with. Level 0
     // is `data` itself, so the picture without Scene3D::lod is the same. Takes
     // time to build (about a second for a million triangles).
     Mesh create_mesh(const MeshData& data, const MeshOptions& options);
+    // Where create_mesh keeps what it builds for levels of detail and clusters (kin/assets/bake_cache.hpp), and
+    // reads it back on a later run instead of building again: the same bytes, so the same mesh and pictures. Keyed by
+    // the mesh's bytes and the options the build reads (mesh_clusters_bake_key, mesh_levels_bake_key); meshes too
+    // small to build anything for are not kept. Null (the default): nothing is kept. Not owned: it must outlive
+    // the meshes made while it is set (Assets3D and load_model make theirs through create_mesh, and use it too).
+    void set_bake_cache(BakeCache* cache) { _bake_cache = cache; }
+    BakeCache* bake_cache() const { return _bake_cache; }
     // A view `size` pixels (at least 1 x 1). Where 3D isn't available, a
     // render target that render() fills with the background.
     View3D create_view(Vec2i size, const View3DOptions& options = {});
     // A glTF 2.0 model (.glb or .gltf, read through the content folder or
-    // pack): its meshes, materials and textures (mipmapped). Empty, with why
-    // in `error` (and logged), when it can't be read or 3D isn't available.
+    // pack): its meshes, materials and textures (mipmapped). Empty with diagnostics()
+    // when it can't be read or 3D isn't available. `error` is a legacy report snapshot.
     Model load_model(const std::filesystem::path& path, std::string* error = nullptr);
     // The same, each of its meshes made with `options` (levels of detail).
     Model load_model(const std::filesystem::path& path, const MeshOptions& options, std::string* error = nullptr);
@@ -105,7 +114,7 @@ public:
     // 3D or compute isn't available.
     Environment3D create_environment(Vec2i size, std::span<const f32> rgb);
     // One from a Radiance .hdr file, read through the content folder or pack.
-    // Empty, with why in `error` (and logged), when it can't be read.
+    // Empty with diagnostics() when it can't be read; `error` mirrors the report.
     Environment3D load_environment(const std::filesystem::path& path, std::string* error = nullptr);
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom
@@ -113,7 +122,7 @@ public:
     MaterialShader3D create_material_shader(std::span<const u8> spirv);
     // The same from GLSL source, compiled now by glslc (development: see
     // kin/renderer/shader_compiler.hpp; shipped games load SPIR-V). Empty,
-    // with glslc's messages in `error` (and logged), when it doesn't compile.
+    // with glslc's messages in diagnostics() when it doesn't compile; `error` mirrors the report.
     MaterialShader3D compile_material_shader(const std::filesystem::path& source, std::string* error = nullptr);
     // Gives `view` a new size (its texture changes); false when it can't.
     bool resize(View3D& view, Vec2i size);
@@ -133,23 +142,33 @@ public:
     // what is recorded so far (submitting it): ask when something calls for
     // it (a click, the pointer moving), not every frame.
     PickResult pick(View3D& view, Vec2i pixel);
-    // The clusters the last render's GPU cut chose (Scene3D::lod, Lod3D::gpu_culling), for tests and tools; waits for
+    // The clusters the last render's GPU cut chose (Scene3D::lod, Scene3D::debug.gpu_culling), for tests and tools; waits for
     // the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion the second pass's
     // clusters (view 0, the camera's) follow the first pass's.
     bool read_cluster_picks(View3D& view, std::vector<ClusterPick>& out);
     // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the second
     // pass's (the camera's view only) follow.
     bool read_cluster_draws(View3D& view, std::vector<ClusterDraw>& out);
-    // What the last render() drew.
+    // Compact, nonblocking summary of the last render().
     const Render3DStats& stats() const { return _stats; }
+    // Detailed implementation counters for profilers/tools. Reading this never
+    // waits; GPU-only counts require Scene3D::debug.stats_readback during render.
+    const Render3DDebugStats& debug_stats() const { return _stats; }
+    // Last runtime operation's failure. Success clears it; capability/stat
+    // queries do not. Optional legacy error strings mirror this same report.
+    const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:
     friend class Assets3D;
     Model load_model_shared(const std::filesystem::path& path, const MeshOptions& options, std::string* error, Assets3D* assets);
+    void warn_refused_bake(bool restored);
     Renderer2D* _renderer = nullptr;
     IRenderer3DBackend* _backend = nullptr;
-    Render3DStats _stats{};
+    Render3DDebugStats _stats{};
+    Diagnostics3D _errors;
+    BakeCache* _bake_cache = nullptr;
     bool _warned = false;
+    bool _bake_warned = false;
 };
 
 } // namespace kin

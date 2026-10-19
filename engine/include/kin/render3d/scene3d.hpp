@@ -1,4 +1,6 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
+#include <kin/render3d/debug3d.hpp>
 
 // What a 3D view shows, filled each frame (docs/3d_plan.md): a camera,
 // lights, and meshes to draw. Plain data, no GPU: Renderer3D::render() draws it.
@@ -245,7 +247,7 @@ struct Lights3D {
     // With Scene3D::sky enabled (procedural): the environment is made from the sky, in place of `environment` and
     // `ambient`: ambient light and reflections agree with the sky you see and with the time of day (P3a). It is drawn
     // into a small panorama, filtered as any environment is, and made again only when the sun or the sky moved
-    // (Sky3D::light_threshold, light_interval; Render3DStats::sky_env_*). `environment_intensity` scales it;
+    // (Sky3D::light_threshold, light_interval; Render3DDebugStats::sky_env_*). `environment_intensity` scales it;
     // `environment_rotation` does not apply (it is in world space). Off, or with the image sky, as before.
     bool sky_lights_scene = false;
     // Where the sun casts shadows: a box round what casts and receives them
@@ -289,6 +291,12 @@ struct Lights3D {
     // How dark the sun's shadow is, 1 (as always) to 0 (none: no map is drawn). Below 1 the picture is drawn by the
     // light shaders (the others know no strength). TimeOfDay3D::apply fades it through twilight when it is asked to.
     f32 sun_shadow_strength = 1.0f;
+    // Receiver offsets in shadow-map texels. Defaults preserve the legacy sun
+    // shadow. Receiver-plane correction accounts for the depth slope at PCF
+    // taps and uses geometric normals, allowing smaller offsets on thin parts.
+    f32 shadow_bias = 1.0f;
+    f32 shadow_normal_offset = 1.5f;
+    bool shadow_receiver_plane_bias = false;
 };
 
 // Ambient occlusion (GTAO) of the scene's own surfaces: how much of the
@@ -346,7 +354,6 @@ struct TemporalAA3D {
     f32 sharpness = 0.0f;    // a small local-contrast boost on the result, 0 (off) to 1; costs one more dispatch
     f32 jitter_scale = 1.0f; // the jitter's reach: 1 is a pixel; 0 turns the jitter off (no anti-aliasing, for looking at the rest)
     u32 jitter_samples = 8;  // frames before the jitter sequence repeats (1 to 16)
-    bool freeze_jitter = false; // debug: the same offset every frame, to see the history working without the jitter's crawl
 };
 
 // Levels of detail: each copy of a mesh made with levels (MeshOptions::levels)
@@ -379,23 +386,11 @@ struct Lod3D {
     f32 error_pixels = 1.0f;
     // Quality multiplier: 2 holds the error to half of error_pixels, 0.5 allows twice.
     f32 bias = 1.0f;
-    // Debug: -1 chooses by distance; 0 or more draws every copy at that level
-    // (or its coarsest, for a mesh with fewer).
-    i32 force_level = -1;
-    // Meshes made with clusters (MeshOptions::clusters) are cut through their hierarchy every render. With this on
-    // (and a device that has compute with storage buffers and indirect draws: Renderer3DCapabilities::gpu_driven_clusters)
-    // the cut, the frustum tests and the gathering of the chosen triangles into one index buffer run in compute and are
-    // drawn with indirect draws, so the CPU does not look at a cluster; off, or without that, the cut runs on the CPU
-    // (the picture is the same). Not a quality setting: it is for comparing the two and for tests.
-    bool gpu_culling = true;
     // The most triangles the GPU's gathered index buffer holds, all passes and copies together (12 bytes a triangle of
     // video memory). Clusters that do not fit are not drawn (the picture degrades, nothing is written out of bounds),
-    // counted in Render3DStats::cluster_overflow and said once in the log when stats_readback is on.
+    // counted in debug_stats().cluster_overflow when debug.stats_readback is on.
     u32 max_cluster_triangles = 4'000'000;
-    // Debug: reads the GPU cut's counts back at the end of every render() (Render3DStats::clusters_drawn, triangles,
-    // cluster_overflow). It waits for the GPU, as Renderer3D::pick does: for tools and tests, not for a game's frames.
-    bool stats_readback = false;
-    // Clusters hidden behind others are not drawn (G3d). Needs `enabled` and `gpu_culling` (else ignored, with a line in
+    // Clusters hidden behind others are not drawn (G3d). Needs `enabled` and Scene3D::debug.gpu_culling (else ignored, with a line in
     // the log) and a device with the GPU cut and ambient occlusion's formats (Renderer3DCapabilities::occlusion_culling).
     // The picture is the one without it; what changes is the work. Off by default: it adds a first draw of last
     // frame's visible clusters and a depth pyramid, which pay only where much of the scene is hidden.
@@ -404,7 +399,9 @@ struct Lod3D {
 
 // A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a
 // handle rather than copying the records each frame. Update between renders, never concurrently
-// with rendering. Bounds are recomputed on edits; GPU retention is an optional bounded cache.
+// with rendering. Groups' bounds follow the edits exactly (as instance_bounds of the group's copies would give) at a cost
+// of the edit's size: a copy strictly inside its group's bounds that moves only widens them, and a group whose bounds an edit
+// may have shrunk is measured again once, when groups() is next read. GPU retention is an optional bounded cache.
 struct InstanceGroup3D {
     u32 first = 0, count = 0;
     Bounds3 world_bounds{};
@@ -413,7 +410,7 @@ class InstanceBatch3D {
 public:
     InstanceBatch3D() = default;
     InstanceBatch3D(Mesh mesh, std::vector<MeshInstance> instances, std::vector<InstanceGroup3D> groups = {});
-    explicit operator bool() const { return bool(_data); }
+    explicit operator bool() const;
     const Mesh& mesh() const;
     std::span<const MeshInstance> instances() const;
     std::span<const InstanceGroup3D> groups() const;
@@ -423,14 +420,20 @@ public:
     // gaining/losing valid bounds changes the renderer's piece layout.
     u64 layout_revision() const;
     struct ChangedRange { u32 first = 0, count = 0; };
-    // Union of edits after a reader's revision. Old/unknown readers get the
-    // whole batch; querying never consumes edits belonging to another reader.
+    // Union of edits after a reader's revision. Unknown readers (revision 0, or one from the future) get the whole batch;
+    // querying never consumes edits belonging to another reader. Exact up to 16 edits behind the reader; further back it is
+    // the span of the 16-instance blocks edited since (a game making thousands of edits a frame gets a tight range, not the batch).
     ChangedRange changed_since(u64 revision) const;
+    // The same edits as ascending, disjoint ranges (touching ones merged) appended to `out`: a reader that copies what changed
+    // can skip the unedited gap between two far edits. Exact up to 16 edits behind; further back, whole 16-instance blocks.
+    void changed_ranges_since(u64 revision, std::vector<ChangedRange>& out) const;
     std::weak_ptr<const void> lifetime() const { return _data; }
-    // Fixed size: an out-of-range edit throws. Existing scene handles see the edit on their next render.
-    void update(u32 first, std::span<const MeshInstance> instances);
+    // Fixed size: an out-of-range edit returns false with diagnostics(). Existing scene handles see the edit on their next render.
+    bool update(u32 first, std::span<const MeshInstance> instances);
+    const Diagnostics3D& diagnostics() const;
 private:
     struct Data;
+    void resolve_bounds() const;
     std::shared_ptr<Data> _data;
 };
 
@@ -439,6 +442,10 @@ public:
     Scene3D() = default;
     Scene3D(Scene3D&&) noexcept = default;
     Scene3D& operator=(Scene3D&&) noexcept = default;
+    // First rejected submission/edit, retained until clear(). Rejection leaves
+    // existing commands/poses intact. Explicit acknowledgement keeps commands.
+    const Diagnostics3D& diagnostics() const { return _errors; }
+    void clear_diagnostics() { _errors.clear(); }
 
     Camera3D camera{};
     Lights3D lights{};
@@ -446,6 +453,7 @@ public:
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
     Lod3D lod{};
+    Render3DDebugOptions debug{}; // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:
     // off, the picture and the cost are as without the features.
     Sky3D sky{};
@@ -467,13 +475,20 @@ public:
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced).
-    void draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material = {},
+    bool draw(const Mesh& mesh, const Mat4f& transform, const Material3D& material = {},
               Color tint = colors::white, u32 id = 0);
     // Each part of `model` (model.hpp), placed by `transform`.
-    void draw(const Model& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
+    bool draw(const Model& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
     // Optional per-part materials, indexed as model.parts. Empty uses imported
-    // materials; a nonempty span must match the part count (else throws).
-    void draw(const Model& model, const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials);
+    // materials; a nonempty span must match the part count (else rejects the submission).
+    bool draw(const Model& model, const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials);
+    // `model` with its animated nodes in a pose (Model::node_skeleton: a door, a fan, a crane's arm): `node_matrices` are that
+    // skeleton's world matrices in the model's space, one a joint (AnimationPlayer3D::joint_matrices, or compute_world_matrices
+    // of a pose). A part that hangs from a node is placed by `transform` times Model::part_transform, the others as
+    // draw(model, transform) places them; the rest pose's matrices draw what that draws (to float rounding). A part whose node
+    // has no matrix here, or one that is not finite, is drawn at rest (said once). A model with skins too: draw_skinned with
+    // node matrices, below.
+    bool draw(const Model& model, const Mat4f& transform, std::span<const Mat4f> node_matrices, Color tint = colors::white, u32 id = 0);
     // A skinned mesh (made from MeshData with a skin) in a pose: `joint_matrices` are the matrices of
     // compute_joint_matrices (kin/render3d/skeleton.hpp), at least Mesh::skin_joint_count() of them, copied into the scene
     // (they need not outlive the call; clear() takes them away). `transform` places the posed mesh: the matrices are in
@@ -481,40 +496,46 @@ public:
     // pose; copies of one mesh and material one after another are drawn as one. Drawn in every pass: the main pass, the
     // sun's shadow, the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's occluders), the temporal
     // anti-aliasing's velocity (from last frame's matrices of the same copy, matched as its model matrix is: by `id`, else
-    // by order) and pick. A mesh without a skin is drawn as by draw(); too few matrices draw nothing (and say so once).
-    void draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform, const Material3D& material = {},
+    // by order) and pick. A mesh without a skin is drawn as by draw(); too few matrices return false with diagnostics().
+    bool draw_skinned(const Mesh& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform, const Material3D& material = {},
                       Color tint = colors::white, u32 id = 0);
     // Every part of `model`: its skinned parts in the pose `joint_matrices` (of Model::skeletons[0]) placed by `transform`
     // alone, the others (not skinned) by `transform` times their node's placing, as draw(model, ...) does. The pose is copied
     // into the scene once and every skinned part points at that range (BrainStem's 59 parts keep one set of 18 matrices, not
-    // 59). `id` is what pick says of each part; it is also how a copy is matched across frames for the velocity.
-    void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint = colors::white,
+    // 59). `id` is what pick says of each part; it is also how a copy is matched across frames for the velocity. Only that first
+    // skeleton is posed: a part on a later skin of a model with several has no pose here and is not drawn (said once a model).
+    bool draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint = colors::white,
                       u32 id = 0);
-    void draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint,
+    bool draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint,
                       u32 id, std::span<const Material3D> materials);
+    // Both poses of a model with skins and animated nodes: its skinned parts by `joint_matrices` (of skeletons[0]), the parts
+    // that hang from an animated node by `node_matrices` (of skeletons[node_skeleton], as draw(model, transform,
+    // node_matrices) takes them). Empty node matrices: the call above.
+    bool draw_skinned(const Model& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint,
+                      u32 id, std::span<const Material3D> materials, std::span<const Mat4f> node_matrices);
     // Many copies of `mesh`, in one draw.
-    void draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material = {});
-    void draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
+    bool draw_instanced(const Mesh& mesh, std::span<const MeshInstance> instances, const Material3D& material = {});
+    bool draw_instanced(const Mesh& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
     // Retain a handle; batch records need not be copied into instances(). The batch's groups
     // are read at render time, including bounds refreshed by update().
-    void draw_instanced(const InstanceBatch3D& batch, const Material3D& material = {});
+    bool draw_instanced(const InstanceBatch3D& batch, const Material3D& material = {});
     // Every part/material of a persistent static-model batch (model.hpp).
-    void draw_instanced(const ModelBatch3D& batch);
+    bool draw_instanced(const ModelBatch3D& batch);
     // A spatial cell of plain instances. `world_bounds` must enclose every copy's culling sphere
     // (instance_bounds() computes it). Equal mesh/material cells still merge into one GPU draw;
     // their bounds stay separate for camera and shadow culling. Invalid bounds fall back to
     // per-copy culling. Bounds are copied; transforms/tints/IDs are copied as by draw_instanced().
-    void draw_instanced_group(const Mesh& mesh, std::span<const Mat4f> transforms, const Bounds3& world_bounds, const Material3D& material = {});
-    void draw_instanced_group(const Mesh& mesh, std::span<const MeshInstance> instances, const Bounds3& world_bounds, const Material3D& material = {});
+    bool draw_instanced_group(const Mesh& mesh, std::span<const Mat4f> transforms, const Bounds3& world_bounds, const Material3D& material = {});
+    bool draw_instanced_group(const Mesh& mesh, std::span<const MeshInstance> instances, const Bounds3& world_bounds, const Material3D& material = {});
     // Room for `count` copies of `mesh`, for the caller to fill (from worker
     // threads, say). Valid until the next draw is added.
     std::span<MeshInstance> add_instances(const Mesh& mesh, std::size_t count, const Material3D& material = {});
     // Particles (P3c): a batch of sprites drawn after the scene's blended meshes, depth-tested and not written, in the
     // order of their depth (`look.sort`: the sprites within it back to front too). The sprites are copied (they need not
     // outlive the call); clear() takes them away. The overlay's are not drawn.
-    void draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites);
+    bool draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites);
     // The system's live particles with its desc's look.
-    void draw_particles(const ParticleSystem3D& system);
+    bool draw_particles(const ParticleSystem3D& system);
     void add_light(const PointLight& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLight& light) { lights.spots.push_back(light); }
     // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
@@ -555,7 +576,7 @@ public:
     // The range must fit; indices belong to this scene's current submissions and
     // must be obtained again after clear(). Shared model parts see the same edit.
     // Fixed-size edits preserve draw_revision(); no extra pose storage is kept.
-    void update_joint_matrices(u32 first, std::span<const Mat4f> matrices);
+    bool update_joint_matrices(u32 first, std::span<const Mat4f> matrices);
     std::span<const u32> skin_offsets() const { return _skin_offsets; }
 
 private:
@@ -578,7 +599,11 @@ private:
     std::vector<u32> _skin_offsets;
     std::vector<ParticleDraw> _particle_draws;
     std::vector<ParticleSprite3D> _particle_sprites;
-    bool _warned_skin = false;
+    Diagnostics3D _errors;
+    bool fail_submission(std::string_view reason) {
+        if (_errors.empty()) fail3d(_errors, "Scene3D", reason);
+        return false;
+    }
     std::unique_ptr<Scene3D> _overlay;
 };
 

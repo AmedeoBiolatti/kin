@@ -2,12 +2,18 @@
 // errors and spheres only grow up the hierarchy, and every cut through it covers the surface once and leaves no
 // crack (the open edges of what is selected, welded by position, are the mesh's own).
 
+#include <kin/assets/bake_cache.hpp>
 #include <kin/render3d/mesh_clusters.hpp>
+#include <kin/render3d/mesh_lod.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <random>
@@ -183,7 +189,7 @@ EdgeCounts edges_of(const MeshData& m) {
     return e;
 }
 
-EdgeCounts edges_of(const MeshClusters& mesh, const std::vector<SelectedCluster>& selection) {
+EdgeCounts edges_of(const MeshClusterBuild& mesh, const std::vector<SelectedCluster>& selection) {
     EdgeCounts e;
     std::vector<u32> indices;
     for (const SelectedCluster& s : selection) {
@@ -257,7 +263,7 @@ ClusterCutView random_view(std::mt19937& rng, const MeshData& m) {
 
 // --- tests ---
 
-void check_structure(const MeshData& data, const MeshClusters& mesh, bool expect_flat) {
+void check_structure(const MeshData& data, const MeshClusterBuild& mesh, bool expect_flat) {
     assert(mesh.flat == expect_flat);
     assert(mesh.leaf_count > 0 && mesh.leaf_count <= mesh.clusters.size());
     // Leaves: each triangle of the (welded) mesh once, and nothing else.
@@ -378,7 +384,7 @@ void check_covers_once(const MeshClusters& mesh, const std::vector<SelectedClust
     }
 }
 
-void check_cut(const MeshData& data, const MeshClusters& mesh, const ClusterCutView& view, const EdgeCounts& original, const char* what) {
+void check_cut(const MeshData& data, const MeshClusterBuild& mesh, const ClusterCutView& view, const EdgeCounts& original, const char* what) {
     const std::vector<SelectedCluster> cut = select_clusters(mesh, view, NoClusterCull{});
     const std::set<u32> brute = brute_cut(mesh, view);
     std::set<u32> traversed;
@@ -424,7 +430,7 @@ void test_meshes() {
     meshes.push_back({"half rough patch", half_rough_patch(64), false, 50});
     for (const Mesh1& m : meshes) {
         std::mt19937 rng(12345);
-        const MeshClusters mesh = build_mesh_clusters(m.data, options);
+        const MeshClusterBuild mesh = build_mesh_clusters(m.data, options);
         std::cout << "  " << m.name << ": " << m.data.triangle_count() << " triangles, " << mesh.clusters.size() << " clusters, " << mesh.levels
                   << " levels, " << mesh.groups.size() << " groups, " << mesh.roots.size() << " roots, " << mesh.stuck_groups << " stuck, "
                   << mesh.total_triangles << " triangles in all, " << mesh.build_ms << " ms\n";
@@ -464,7 +470,7 @@ void test_tiny_meshes() {
     MeshOptions options;
     options.clusters = true;
     for (const MeshData& m : {meshes::box({1.0f, 1.0f, 1.0f}), meshes::octahedron(1.0f), meshes::star_prism(5, 1.0f, 0.5f, 0.3f), meshes::wedge({1.0f, 1.0f, 1.0f})}) {
-        const MeshClusters mesh = build_mesh_clusters(m, options);
+        const MeshClusterBuild mesh = build_mesh_clusters(m, options);
         assert(mesh.clusters.size() == 1 && mesh.groups.empty() && mesh.roots.size() == 1 && mesh.levels == 1);
         assert(mesh.leaf_count == 1 && mesh.clusters[0].triangle_count == m.triangle_count() - mesh.degenerate_removed);
         const std::vector<SelectedCluster> cut = select_clusters(mesh, ClusterCutView{}, NoClusterCull{});
@@ -474,18 +480,18 @@ void test_tiny_meshes() {
     }
     MeshData one;
     one.vertices = {vertex({0, 0, 0}), vertex({1, 0, 0}), vertex({0, 1, 0})};
-    const MeshClusters mesh = build_mesh_clusters(one, options);
+    const MeshClusterBuild mesh = build_mesh_clusters(one, options);
     assert(mesh.clusters.size() == 1 && mesh.clusters[0].triangle_count == 1 && mesh.roots.size() == 1);
     // Degenerate triangles are dropped, not kept as clusters of nothing.
     MeshData degenerate = one;
     degenerate.vertices.push_back(vertex({0, 0, 0}));
     degenerate.vertices.push_back(vertex({0, 0, 0}));
     degenerate.vertices.push_back(vertex({1, 0, 0}));
-    const MeshClusters dropped = build_mesh_clusters(degenerate, options);
+    const MeshClusterBuild dropped = build_mesh_clusters(degenerate, options);
     assert(dropped.degenerate_removed == 1 && dropped.leaf_triangles == 1);
     // A smaller cluster size is honoured.
     options.cluster_triangles = 32;
-    const MeshClusters small = build_mesh_clusters(icosphere(3, false), options);
+    const MeshClusterBuild small = build_mesh_clusters(icosphere(3, false), options);
     for (const MeshCluster& c : small.clusters) {
         assert(c.triangle_count <= 32);
     }
@@ -498,7 +504,7 @@ void test_cut_formula() {
     MeshOptions options;
     options.clusters = true;
     const MeshData data = icosphere(5, false);
-    const MeshClusters mesh = build_mesh_clusters(data, options);
+    const MeshClusterBuild mesh = build_mesh_clusters(data, options);
     std::mt19937 rng(77);
     std::uniform_real_distribution<float> unit(0.0f, 1.0f);
     std::size_t scales_differ = 0;
@@ -563,7 +569,7 @@ void test_culled_cut() {
     MeshOptions options;
     options.clusters = true;
     const MeshData data = icosphere(5, false);
-    const MeshClusters mesh = build_mesh_clusters(data, options);
+    const MeshClusterBuild mesh = build_mesh_clusters(data, options);
     std::mt19937 rng(5);
     for (int i = 0; i < 80; ++i) {
         const ClusterCutView view = random_view(rng, data);
@@ -597,13 +603,13 @@ void test_parallel_build() {
     MeshOptions options;
     options.clusters = true;
     const MeshData data = icosphere(5, false);
-    const MeshClusters serial = build_mesh_clusters(data, options);
+    const MeshClusterBuild serial = build_mesh_clusters(data, options);
     const ClusterParallelFor reversed = [](u32 count, const std::function<void(u32)>& body) {
         for (u32 i = count; i-- > 0;) {
             body(i); // any order: the results are placed by group
         }
     };
-    const MeshClusters other = build_mesh_clusters(data, options, reversed);
+    const MeshClusterBuild other = build_mesh_clusters(data, options, reversed);
     assert(serial.clusters.size() == other.clusters.size() && serial.groups.size() == other.groups.size());
     assert(serial.cluster_vertices == other.cluster_vertices && serial.triangles == other.triangles && serial.roots == other.roots);
     for (std::size_t c = 0; c < serial.clusters.size(); ++c) {
@@ -616,18 +622,287 @@ void test_flat_weld() {
     MeshOptions options;
     options.clusters = true;
     const MeshData soup = icosphere(4, true);
-    const MeshClusters mesh = build_mesh_clusters(soup, options);
+    const MeshClusterBuild mesh = build_mesh_clusters(soup, options);
     const MeshData shared = icosphere(4, false);
     assert(mesh.flat && mesh.vertices.size() == shared.vertices.size());
     for (const MeshVertex& v : mesh.vertices) {
         assert(v.normal.x == 0.0f && v.normal.y == 0.0f && v.normal.z == 0.0f);
     }
     // A smooth mesh keeps its normals.
-    const MeshClusters smooth = build_mesh_clusters(shared, options);
+    const MeshClusterBuild smooth = build_mesh_clusters(shared, options);
     assert(!smooth.flat && smooth.vertices.size() == shared.vertices.size());
     assert(std::abs(length(smooth.vertices[7].normal) - 1.0f) < 1e-5f);
     // A box has a normal a face yet its corners are shared by three faces: still flat.
     assert(build_mesh_clusters(meshes::box({1.0f, 2.0f, 3.0f}), options).flat);
+}
+
+// What a mesh keeps (MeshClusters) holds no vertex: the welded ones are only in the build, which the renderer uploads and
+// lets go; the hierarchy moved out of a build is whole, and cuts as the build does.
+template <typename T>
+concept holds_vertices = requires(const T& t) { t.vertices; };
+static_assert(holds_vertices<MeshClusterBuild> && !holds_vertices<MeshClusters>, "a kept hierarchy must not hold the welded vertices");
+
+void test_hierarchy_alone() {
+    MeshOptions options;
+    options.clusters = true;
+    MeshClusterBuild built = build_mesh_clusters(icosphere(5, true), options);
+    const MeshClusterBuild copy = built;
+    const std::vector<u32> leaves = built.leaf_indices();
+    const MeshClusters kept = std::move(static_cast<MeshClusters&>(built));
+    assert(kept.levels > 1 && kept.clusters.size() == copy.clusters.size() && kept.roots == copy.roots && kept.flat == copy.flat);
+    assert(kept.leaf_indices() == leaves && kept.info().total_triangles == copy.info().total_triangles);
+    ClusterCutView view;
+    view.eye = {0.0f, 0.0f, 6.0f};
+    view.per_unit = 500.0f;
+    view.pixels = 2.0f;
+    const std::vector<SelectedCluster> a = select_clusters(kept, view, NoClusterCull{}), b = select_clusters(copy, view, NoClusterCull{});
+    assert(!a.empty() && a.size() == b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        assert(a[i].cluster == b[i].cluster);
+    }
+}
+
+// --- bakes (kin/assets/bake_cache.hpp) ---
+
+// Byte for byte, the vectors' elements included (MeshCluster, MeshClusterGroup and MeshVertex have no padding:
+// mesh_clusters.cpp and mesh_bake.hpp assert their sizes).
+template <typename V>
+bool same_bytes(const V& a, const V& b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(a[0])) == 0);
+}
+
+bool same_build(const MeshClusterBuild& a, const MeshClusterBuild& b) {
+    return a.flat == b.flat && same_bytes(a.clusters, b.clusters) && same_bytes(a.groups, b.groups) && same_bytes(a.group_inputs, b.group_inputs) &&
+           same_bytes(a.cluster_vertices, b.cluster_vertices) && same_bytes(a.triangles, b.triangles) && same_bytes(a.roots, b.roots) &&
+           a.leaf_count == b.leaf_count && a.levels == b.levels && a.leaf_triangles == b.leaf_triangles && a.total_triangles == b.total_triangles &&
+           a.degenerate_removed == b.degenerate_removed && std::memcmp(&a.build_ms, &b.build_ms, sizeof(f64)) == 0 &&
+           a.stuck_groups == b.stuck_groups && same_bytes(a.vertices, b.vertices);
+}
+
+bool same_chain(const MeshLodChain& a, const MeshLodChain& b) {
+    if (a.levels.size() != b.levels.size() || !same_bytes(a.extra_vertices, b.extra_vertices)) {
+        return false;
+    }
+    for (std::size_t l = 0; l < a.levels.size(); ++l) {
+        if (a.levels[l].triangles != b.levels[l].triangles || std::memcmp(&a.levels[l].error, &b.levels[l].error, sizeof(f32)) != 0 ||
+            a.levels[l].indices != b.levels[l].indices) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A build saved and restored is the build, every field to the bit, and the same as a fresh build of the same mesh (but
+// for the time it took); bytes that are not a whole build are refused, never read out of range.
+void test_cluster_bake() {
+    MeshOptions options;
+    options.clusters = true;
+    for (const MeshData& data : {icosphere(5, false), icosphere(5, true), open_tube(96, 48), half_rough_patch(60)}) {
+        const MeshClusterBuild built = build_mesh_clusters(data, options);
+        assert(built.levels > 1 && !built.vertices.empty());
+        const std::vector<u8> bytes = save_mesh_clusters(built);
+        MeshClusterBuild restored;
+        assert(restore_mesh_clusters(bytes, restored));
+        assert(same_build(built, restored) && restored.leaf_indices() == built.leaf_indices());
+        MeshClusterBuild again = build_mesh_clusters(data, options);
+        again.build_ms = built.build_ms;
+        assert(same_build(again, restored));
+        assert(save_mesh_clusters(restored) == bytes);
+
+        // Short, long, or out of range: refused, and `out` left empty.
+        for (const std::size_t size : {std::size_t{0}, std::size_t{1}, std::size_t{36}, std::size_t{45}, bytes.size() / 2, bytes.size() - 1}) {
+            MeshClusterBuild out = built;
+            assert(!restore_mesh_clusters(std::span<const u8>{bytes.data(), size}, out) && out.clusters.empty() && out.vertices.empty());
+        }
+        std::vector<u8> longer = bytes;
+        longer.push_back(0);
+        assert(!restore_mesh_clusters(longer, restored) && restored.clusters.empty());
+        // The layout: flat (1), leaf_count, levels, leaf_triangles (4 each), total_triangles (8), degenerate_removed (4),
+        // build_ms (8), stuck_groups (4), the cluster count (8), then the first cluster's vertex_offset.
+        std::vector<u8> bad = bytes;
+        bad[45] = bad[46] = bad[47] = bad[48] = 0xff;
+        assert(!restore_mesh_clusters(bad, restored));
+        bad = bytes;
+        ++bad[9]; // leaf_triangles: no longer the leaves' own (leaf_indices() would write past its end)
+        assert(!restore_mesh_clusters(bad, restored));
+        bad = bytes;
+        bad[bytes.size() - built.vertices.size() * 36 - 8] ^= 0x40; // the vertex count's low byte: more or fewer than there are
+        assert(!restore_mesh_clusters(bad, restored));
+    }
+}
+
+void test_levels_bake() {
+    MeshOptions options;
+    options.levels = 5;
+    const MeshData smooth = icosphere(5, false), soup = unindexed_flat(wavy_patch(60));
+    for (const MeshData* data : {&smooth, &soup}) {
+        const MeshLodChain chain = build_mesh_levels(*data, options);
+        assert(chain.count() > 2);
+        const std::vector<u8> bytes = save_mesh_levels(chain);
+        MeshLodChain restored;
+        assert(restore_mesh_levels(bytes, *data, restored) && same_chain(chain, restored));
+        assert(same_chain(build_mesh_levels(*data, options), restored));
+        for (const std::size_t size : {std::size_t{0}, std::size_t{8}, bytes.size() / 2, bytes.size() - 1}) {
+            assert(!restore_mesh_levels(std::span<const u8>{bytes.data(), size}, *data, restored) && restored.count() == 0);
+        }
+        // Another mesh's: its level 0 is not this mesh, or the indices pass its vertices.
+        assert(!restore_mesh_levels(bytes, icosphere(3, false), restored));
+    }
+    assert(!build_mesh_levels(soup, options).extra_vertices.empty());
+}
+
+// A key changes with what the build reads, and only with that.
+void test_bake_keys() {
+    const MeshData mesh = icosphere(4, false);
+    MeshOptions c;
+    c.clusters = true;
+    const u64 key = mesh_clusters_bake_key(mesh, c);
+    assert(key == mesh_clusters_bake_key(mesh, c));
+    MeshOptions o = c;
+    o.levels = 5;
+    o.target_ratio = 0.3f;
+    o.lock_border = false;
+    assert(mesh_clusters_bake_key(mesh, o) == key); // not read by build_mesh_clusters
+    for (const auto change : std::initializer_list<void (*)(MeshOptions&)>{[](MeshOptions& m) { m.cluster_triangles = 64; },
+                                                                           [](MeshOptions& m) { m.normal_weight = 0.25f; },
+                                                                           [](MeshOptions& m) { m.uv_weight = 0.0f; },
+                                                                           [](MeshOptions& m) { m.color_weight = 1.0f; }}) {
+        o = c;
+        change(o);
+        assert(mesh_clusters_bake_key(mesh, o) != key);
+    }
+    MeshData other = mesh;
+    other.vertices[3].uv.x += 0.5f;
+    assert(mesh_clusters_bake_key(other, c) != key);
+    other = mesh;
+    other.indices.resize(other.indices.size() - 3);
+    assert(mesh_clusters_bake_key(other, c) != key);
+
+    MeshOptions l;
+    l.levels = 4;
+    const u64 levels = mesh_levels_bake_key(mesh, l);
+    assert(levels != key && levels == mesh_levels_bake_key(mesh, l));
+    o = l;
+    o.cluster_triangles = 64;
+    assert(mesh_levels_bake_key(mesh, o) == levels);
+    for (const auto change : std::initializer_list<void (*)(MeshOptions&)>{
+             [](MeshOptions& m) { m.levels = 5; }, [](MeshOptions& m) { m.target_ratio = 0.4f; }, [](MeshOptions& m) { m.min_reduction = 0.2f; },
+             [](MeshOptions& m) { m.min_triangles = 32; }, [](MeshOptions& m) { m.max_error = 0.05f; }, [](MeshOptions& m) { m.normal_weight = 0.0f; },
+             [](MeshOptions& m) { m.uv_weight = 1.0f; }, [](MeshOptions& m) { m.color_weight = 0.0f; }, [](MeshOptions& m) { m.lock_border = false; }}) {
+        o = l;
+        change(o);
+        assert(mesh_levels_bake_key(mesh, o) != levels);
+    }
+}
+
+// The folder: misses, a write then a hit of the same bytes, corrupt, truncated and misplaced files refused (and removed),
+// the oldest-used entries evicted past the bound, nothing at all when off.
+void test_bake_cache() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / ("kin-bake-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::vector<u8> bytes(1000);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        bytes[i] = static_cast<u8>(i * 7 + 3);
+    }
+    {
+        BakeCache off;
+        assert(!off.enabled() && !off.read(1));
+        off.write(1, bytes);
+        assert(off.stats().misses == 0 && off.stats().writes == 0);
+    }
+    BakeCache cache{dir, 4200};
+    assert(!cache.read(7) && cache.stats().misses == 1 && cache.stats().refused == 0); // no folder yet
+    cache.write(7, bytes);
+    assert(fs::is_regular_file(cache.path_of(7)) && cache.stats().writes == 1 && cache.stats().bytes_written == 1000);
+    std::optional<std::vector<u8>> back = cache.read(7);
+    assert(back && *back == bytes && cache.stats().hits == 1 && cache.stats().bytes_read == 1000);
+    cache.write(8, {});
+    back = cache.read(8);
+    assert(back && back->empty());
+
+    const auto refused = [&](u64 key) {
+        const BakeCacheStats before = cache.stats();
+        const bool missed = !cache.read(key);
+        return missed && cache.stats().refused == before.refused + 1 && cache.stats().misses == before.misses + 1 && !fs::exists(cache.path_of(key));
+    };
+    {
+        cache.write(7, bytes);
+        std::fstream file(cache.path_of(7), std::ios::in | std::ios::out | std::ios::binary);
+        file.seekp(32 + 500);
+        file.put(static_cast<char>(bytes[500] ^ 0x10));
+    }
+    assert(refused(7)); // the checksum
+    cache.write(7, bytes);
+    fs::resize_file(cache.path_of(7), 20);
+    assert(refused(7)); // no whole header
+    cache.write(7, bytes);
+    fs::resize_file(cache.path_of(7), 32 + 999);
+    assert(refused(7)); // a payload cut short
+    cache.write(7, bytes);
+    fs::rename(cache.path_of(7), cache.path_of(9));
+    assert(refused(9)); // another key's
+    {
+        std::ofstream(cache.path_of(9), std::ios::binary) << "not a bake at all, but long enough for a header";
+    }
+    assert(refused(9));
+
+    // Bounded: 1032 bytes an entry, four fit; the fifth evicts the one used longest ago. A read counts as a use.
+    fs::remove(cache.path_of(8));
+    const auto at = [&](u64 key, int minutes_ago) { fs::last_write_time(cache.path_of(key), fs::file_time_type::clock::now() - std::chrono::minutes{minutes_ago}); };
+    for (u64 key = 1; key <= 3; ++key) {
+        cache.write(key, bytes);
+        at(key, 40 - static_cast<int>(key)); // 1 the oldest
+    }
+    assert(cache.read(1)); // now the newest
+    cache.write(4, bytes);
+    assert(cache.stats().evictions == 0);
+    cache.write(5, bytes);
+    assert(cache.stats().evictions == 1 && !fs::exists(cache.path_of(2)));
+    for (const u64 key : {1, 3, 4, 5}) {
+        assert(fs::exists(cache.path_of(key)));
+    }
+    // Too big to keep at all: not written. A temporary file a crash left an hour ago goes at the next write.
+    const BakeCacheStats before = cache.stats();
+    cache.write(6, std::vector<u8>(4200));
+    assert(cache.stats().write_failures == before.write_failures + 1 && !fs::exists(cache.path_of(6)));
+    const fs::path stale = dir / "0000000000000001.0000000000000002.tmp";
+    std::ofstream(stale) << "half a bake";
+    fs::last_write_time(stale, fs::file_time_type::clock::now() - std::chrono::hours{2});
+    cache.write(6, bytes);
+    assert(!fs::exists(stale) && fs::exists(cache.path_of(6)));
+    std::error_code error;
+    fs::remove_all(dir, error);
+}
+
+// The hash tells apart a change of any byte, in any lane or the tail, of the length and of the seed; and it is fast
+// enough for a key of the kiln's 540 MB of vertices.
+void test_bake_hash() {
+    std::vector<u8> bytes(100);
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        bytes[i] = static_cast<u8>(i * 13 + 1);
+    }
+    const u64 h0 = bake_hash(bytes.data(), bytes.size());
+    assert(h0 == bake_hash(bytes.data(), bytes.size()) && h0 != bake_hash(bytes.data(), bytes.size(), 1) && h0 != bake_hash(bytes.data(), 99));
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        std::vector<u8> changed = bytes;
+        changed[i] ^= 1;
+        assert(bake_hash(changed.data(), changed.size()) != h0);
+    }
+    // Swapping two lanes' bytes is a change too (the lanes are seeded apart).
+    std::vector<u8> swapped = bytes;
+    std::swap_ranges(swapped.begin(), swapped.begin() + 8, swapped.begin() + 8);
+    std::vector<u8> zeros(64, 0);
+    assert(bake_hash(swapped.data(), swapped.size()) != h0 && bake_hash(zeros.data(), 32) != bake_hash(zeros.data(), 64));
+    const BakeKey k1 = BakeKey{"kind", 1}.value(u32{5}), k2 = BakeKey{"kind", 2}.value(u32{5}), k3 = BakeKey{"kinds", 1}.value(u32{5});
+    const u64 again = BakeKey("kind", 1).value(u32{5}).hash();
+    assert(k1.hash() != k2.hash() && k1.hash() != k3.hash() && k1.hash() == again);
+    const u64 ab_c = BakeKey("k", 1).bytes("ab", 2).bytes("c", 1).hash(), a_bc = BakeKey("k", 1).bytes("a", 1).bytes("bc", 2).hash();
+    assert(ab_c != a_bc);
+    std::vector<u8> big(64u << 20, 1);
+    const auto started = std::chrono::steady_clock::now();
+    const u64 h = bake_hash(big.data(), big.size());
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    std::cout << "  bake_hash: 64 MiB in " << ms << " ms (" << h % 10 << ")\n";
 }
 
 } // namespace
@@ -645,6 +920,18 @@ int main() {
     test_parallel_build();
     std::cout << "flat\n";
     test_flat_weld();
+    std::cout << "hierarchy alone\n";
+    test_hierarchy_alone();
+    std::cout << "cluster bake\n";
+    test_cluster_bake();
+    std::cout << "levels bake\n";
+    test_levels_bake();
+    std::cout << "bake keys\n";
+    test_bake_keys();
+    std::cout << "bake cache\n";
+    test_bake_cache();
+    std::cout << "bake hash\n";
+    test_bake_hash();
     std::cout << "mesh cluster tests passed\n";
     return 0;
 }

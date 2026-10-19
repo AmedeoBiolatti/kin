@@ -37,12 +37,18 @@ float radical_inverse(uint bits) {
     return float(bits) * 2.3283064365386963e-10;
 }
 
+// A texel of the source, black where it is NaN or infinite (a broken picture):
+// tested before any clamp, as min() may turn a NaN into the bound, a firefly.
+vec3 finite_or_black(vec3 c) {
+    return any(isnan(c)) || any(isinf(c)) ? vec3(0.0) : c;
+}
+
 // A sample of the source along `d`, from the mip whose texels are as wide as the
 // solid angle each sample stands for (`pdf` the density of the lobe).
 vec3 radiance(vec3 d, float pdf, float samples) {
     const float texel = 4.0 * PI / (params.source.x * params.source.y);
     const float lod = max(0.5 * log2(1.0 / (samples * pdf * texel)) + 1.0, 0.0);
-    return min(textureLod(uSource, direction_to_uv(d), lod).rgb, vec3(1e4));
+    return min(finite_or_black(textureLod(uSource, direction_to_uv(d), lod).rgb), vec3(1e4));
 }
 
 void main() {
@@ -54,7 +60,7 @@ void main() {
     const vec3 n = uv_to_direction((vec2(xy) + 0.5) / size);
     const int mode = int(params.result.w);
     if (mode == 0) {
-        imageStore(uResult, xy, vec4(min(textureLod(uSource, direction_to_uv(n), 0.0).rgb, vec3(65000.0)), 1.0));
+        imageStore(uResult, xy, vec4(min(finite_or_black(textureLod(uSource, direction_to_uv(n), 0.0).rgb), vec3(65000.0)), 1.0));
         return;
     }
     const uint count = uint(params.source.z);

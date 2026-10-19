@@ -54,14 +54,16 @@ renderer, window, jobs or GPU resources; it does not require `--metrics`.
 
 Native profiling controls (default rendering is unchanged):
 
+- `--gpu-pass-markers` labels GPU passes for external profilers without readback.
+
 - `--visible` shows an uncapped window and exits after warm-up + measured frames.
   External GPU timestamp capture needs presentation; hidden runs do not provide
   Nsight with the same GPU workload boundaries. This differs from the 60 FPS preview.
 - `--warmup 0..300` shortens warm-up for size-bounded GPU captures. Keep the default
   300 for normal timings; very short captures are pass-attribution probes.
 - `--rebuild-scene` resubmits the full native command list when actors animate, as
-  the earlier sample did. The default updates existing joint ranges. Pair this
-  control with `KIN_PREPARED_SCENES=0` to isolate command submission and layout reuse.
+  the earlier sample did. The default updates existing joint ranges. Compare
+  with the default to isolate command submission and layout reuse.
 - `--point-lights N` limits the recipe's points (0..recipe count, maximum 16).
   Spot lights and their maps remain active. Default: all recipe points.
 - `--receive-shadows 0` disables material shadow reception while retaining casters
@@ -172,10 +174,3 @@ nonaffine matrices and truncation). GPU preflights also need visual inspection o
 both outside and warehouse screenshots.
 
 Measured results and practical conclusions are recorded in `docs/3d_plan.md`.
-
-The opt-in native experiment `KIN_POINT_TILES=1` adds bounded point-light tile
-masks; use `KIN_POINT_TILES=0` for the same-binary reference. The CSV appends
-`point_light_tiles`, `point_light_tile_slots`, `point_light_tile_bytes` and
-`point_light_tile_ms` so coverage and CPU preparation can be measured alongside
-frame intervals. It preserves scene settings and uses the original path for
-unsupported view sizes. See `docs/rendering_3d.md` for the limits.

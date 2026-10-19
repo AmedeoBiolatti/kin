@@ -11,6 +11,9 @@
 
 namespace kin {
 
+class AudioEngine;
+class AudioCatalog;
+
 struct ScenePrefab3D {
     u64 session = 0, generation = 0, id = 0;
     SceneEntity3D root;
@@ -59,6 +62,9 @@ struct ScenePrefabPoolStats3D {
 
 class EcsCommandBuffer;
 namespace detail { struct SceneRequestState3D; struct SceneCommandQueue3D; struct SceneOperation3D; }
+// A request still Pending when a replacement scene is prepared (prepare() without activate() or cancel() yet) is Cancelled by the
+// next step() with an error that says so: requests are never held for a later scene, and a new one made after cancel() (or from
+// the new scene's commands() after activate()) runs normally.
 enum class SceneRequestStatus3D { Invalid, Pending, Succeeded, Failed, Cancelled };
 // Owns a small result only, never a world, assets or constructor captures.
 // Safe to retain across scene replacement; inspect the status before the result.
@@ -127,6 +133,15 @@ private:
     friend class SceneSession3D;
 };
 
+// What SceneSession3D::pick found under a pixel of the last rendered frame.
+struct ScenePick3D {
+    // The live entity drawn there: one whose MeshRenderer, ModelRenderer3D or SkinnedMeshRenderer draws with `id` (its own
+    // id, or the entity's low 32 bits when that is 0). Empty when none does: a compose() draw, or an entity gone since.
+    EcsEntity entity;
+    u32 id = 0;       // the id drawn there (PickResult::id)
+    Vec3f position{}; // the point of it the pixel showed, in the world
+};
+
 struct SceneSession3DContext {
     EcsWorld& world;
     const SceneInstance& instance;
@@ -141,6 +156,8 @@ struct SceneSession3DContext {
 
 struct SceneSession3DOptions {
     Vec2i viewport{960, 540};
+    // The scene's SceneEnvironment3D replaces these, but `pick` is the game's: true keeps a pick pass in every render (one
+    // more pass over the opaque meshes) for pick(). Off by default.
     View3DOptions view;
     // No physics world/scratch pool allocated unless requested. Tune capacities
     // for the game; a transactional replacement briefly owns two physics worlds.
@@ -166,6 +183,12 @@ struct SceneSession3DOptions {
     std::function<void(SceneSession3DContext&)> initialize;
     // Optional per-frame game drawing/settings after the stock scene collection.
     std::function<void(SceneSession3DContext&, Scene3D&)> compose;
+    // Optional ECS audio (kin/ecs/audio.hpp), both or neither: each step() then runs update_audio_listeners,
+    // update_audio_emitters and consume_audio_one_shots after the Audio phase's systems, so emitters and one-shots sound
+    // from their WorldTransform3D and the listener follows the AudioListener entity or else the active SceneCamera3D.
+    // Both outlive the session; the host still calls audio.update(dt) once a frame.
+    AudioEngine* audio = nullptr;
+    const AudioCatalog* audio_catalog = nullptr;
 };
 
 enum class SceneSession3DReload { Unchanged, Activated, Failed };
@@ -179,6 +202,10 @@ struct SceneFieldEdit3D {
 // Authored C++ 3D scene ownership and transactional replacement. The renderer
 // and renderer-scoped Assets3D must outlive this object and retained handles.
 // Synchronous, renderer-thread-only. No background jobs or implicit file polling.
+// Headless with a renderer that has no 3D (Renderer3D::available() false: a server,
+// a test without a GPU): everything but drawing runs the same, on CPU-only models
+// (Assets3D::load_model); there is no view, and render() and pick() fail with
+// "no renderer".
 // Owns an isolated ECS world, optional physics, render state and view per scene.
 // Scene assets with a Lua script are rejected: use ScriptScene for its context
 // lifecycle instead of silently omitting script execution.
@@ -265,6 +292,10 @@ public:
     bool collect();
     bool render();
     bool resize(Vec2i viewport);
+    // What `pixel` (the view's own, from its top left) showed in the last render(): the entity drawn there and the point
+    // of it. Draws nothing. Needs options.view.pick; waits for the GPU like Renderer3D::pick, so ask on a click, not every
+    // frame. Nullopt over the background or outside the view, and (with why in diagnostics()) without picking or a renderer.
+    std::optional<ScenePick3D> pick(Vec2i pixel);
 
     bool active() const;
     bool prepared() const;
@@ -277,7 +308,7 @@ public:
     PhysicsAssets3D& physics_assets();
     const SceneInstance* instance() const;
     Scene3D* scene();
-    const View3D* view() const;
+    const View3D* view() const; // null without an active scene, or headless
     const std::vector<std::string>& diagnostics() const;
 
 private:

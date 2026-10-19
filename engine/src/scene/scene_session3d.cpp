@@ -1,5 +1,8 @@
 #include <kin/scene/scene_session3d.hpp>
+#include <kin/scene/scene_frame3d.hpp>
+#include <kin/scene/scene_loader3d.hpp>
 #include <kin/assets/content.hpp>
+#include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 
 #include <algorithm>
@@ -481,24 +484,21 @@ struct SceneSession3D::Data {
     }
 
     bool collect(State& state) {
-        append(errors,validate_particles3d(state.world,options.particle_limits));
-        if(!errors.empty())return false;
-        state.scene.clear();
-        state.scene.camera = {};
-        state.scene.lights = {};
-        state.scene.sky = {}; state.scene.fog = {}; state.scene.weather = {};
-        state.scene.ambient_occlusion = {}; state.scene.contact_shadows = {}; state.scene.taa = {}; state.scene.lod = {};
-        state.scene.cull = true;
-        state.rendering->propagate_transforms();
+        SceneFrame3D frame{state.world, *state.rendering, {
+            .particles = options.particle_limits, .bodies = state.bodies.get(), .renderer = &renderer}};
         auto view_options = options.view;
-        append(errors, apply_scene3d_settings(state.world, state.scene, &view_options));
-        if (!errors.empty()) return false;
-        state.rendering->apply_time_of_day(state.scene);
-        const auto base_fog = state.scene.fog;
-        state.rendering->apply_weather(state.scene, base_fog);
-        state.rendering->collect(state.scene);
-        if (state.bodies) state.bodies->collect_ropes(renderer, state.scene);
+        if (!frame.collect(state.scene, &view_options)) {
+            append(errors, frame.diagnostics());
+            return false;
+        }
+        // Picking is controlled by the game even when environment settings replace the view options.
+        view_options.pick = view_options.pick || options.view.pick;
         if (options.compose) { auto context = state.context(); options.compose(context, state.scene); }
+        if (!state.scene.diagnostics().empty()) { append(errors, state.scene.diagnostics()); return false; }
+        if (const auto* overlay = state.scene.overlay_if_any(); overlay && !overlay->diagnostics().empty()) {
+            append(errors, overlay->diagnostics()); return false;
+        }
+        if (!renderer.available()) { state.options = view_options; return true; } // headless: the scene alone, no view
         if (!state.view || state.view.size() != options.viewport || !same_options(state.options, view_options)) {
             View3D replacement;
             // Sharing an unchanged target avoids double frame buffers during reload.
@@ -533,6 +533,24 @@ struct SceneSession3D::Data {
             if (!state.bodies->rope_of(entity)) errors.push_back("rope creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
     }
+
+    // A drawn id is the renderer's own or else the entity's low 32 bits (WorldRenderState3D::collect). The index names
+    // the live entity at once; only an id it does not answer for scans the renderers for one drawing with that id of its
+    // own (the lowest entity then, as ids need not be unique). Disabled entities (idle pool slots) and hidden renderers
+    // were not drawn, so never answer.
+    EcsEntity pick_entity(State& state,u32 id) {
+        if(!id)return {};
+        if(const auto e=state.world.raw().get_alive(id);e&&e.enabled()&&!e.has(flecs::Prefab)) {
+            const auto own=[](const auto* r){return r&&r->visible&&!r->id;};
+            if(own(e.get<MeshRenderer>())||own(e.get<ModelRenderer3D>())||own(e.get<SkinnedMeshRenderer>()))return EcsEntity{e};
+        }
+        flecs::entity found;
+        const auto scan=[&]<class T>() {
+            state.world.raw().each([&](flecs::entity e,const T& r){if(r.visible&&r.id==id&&(!found||e.id()<found.id()))found=e;});
+        };
+        scan.template operator()<MeshRenderer>();scan.template operator()<ModelRenderer3D>();scan.template operator()<SkinnedMeshRenderer>();
+        return found?EcsEntity{found}:EcsEntity{};
+    }
 };
 
 SceneSession3D::SceneSession3D(Renderer3D& renderer, Assets3D& assets, SceneSession3DOptions options)
@@ -548,6 +566,8 @@ SceneSession3D::SceneSession3D(Renderer3D& renderer, Assets3D& assets, SceneSess
     if (config.physics && (!std::isfinite(config.physics->gravity.x) || !std::isfinite(config.physics->gravity.y) ||
         !std::isfinite(config.physics->gravity.z) || !std::isfinite(config.bodies.fixed_dt) || config.bodies.fixed_dt <= 0 || config.bodies.max_steps <= 0))
         throw std::invalid_argument("scene session requires finite gravity and positive physics stepping options");
+    if (bool(config.audio) != bool(config.audio_catalog))
+        throw std::invalid_argument("scene session audio requires both an engine and a catalog");
 }
 SceneSession3D::~SceneSession3D() { unload(); }
 
@@ -556,7 +576,6 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
     BoolScope busy(_data->editing);
     auto& d = *_data; d.errors.clear(); d.pending.reset(); d.assets.trim();
     try {
-        if (!d.renderer.available()) throw std::runtime_error("3D renderer unavailable");
         auto candidate = std::make_unique<Data::State>();
         candidate->commands->world=&candidate->world;candidate->commands->limit=d.options.max_pending_commands;
         register_builtin_editor_components(candidate->world);
@@ -582,8 +601,10 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
             invalidate.operator()<ModelRenderer3D>(); invalidate.operator()<SkinnedMeshRenderer>();
         }
         candidate->rendering = std::make_unique<WorldRenderState3D>(candidate->world);
-        if (!candidate->asset.instantiate(candidate->world)) { append(d.errors, candidate->asset.diagnostics()); return false; }
-        append(d.errors, resolve_render3d_assets(candidate->world, d.assets,d.options.particle_limits));
+        if (!instantiate_scene3d(candidate->asset, candidate->world, d.assets,
+            {.particles = d.options.particle_limits, .update_scene_header = true})) {
+            append(d.errors, candidate->asset.diagnostics()); return false;
+        }
         if (!d.errors.empty()) return false;
         if (d.options.physics) {
             candidate->physics = std::make_unique<World3D>(*d.options.physics);
@@ -794,7 +815,8 @@ bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
                 priority=c->priority;selected=entity.id();new_options=c->view;
             }
         });
-        if(!same_options(new_options,active.options)) {
+        new_options.pick=new_options.pick||d.options.view.pick;
+        if(d.renderer.available()&&!same_options(new_options,active.options)) {
             new_view=d.renderer.create_view(d.options.viewport,new_options);
             require(bool(new_view),"edited scene view creation failed");
         }
@@ -1255,8 +1277,12 @@ void SceneSession3D::drain_commands(bool systems_succeeded) {
     } cleanup{work};
     for(auto& op:work) {
         if(!systems_succeeded||d.pending) {
+            // Cancelled, not held: a request belongs to this generation's queue, which activate() destroys, and the lifecycle
+            // calls refuse to run while a replacement is prepared (gameplay_boundary), so a held request could only be
+            // cancelled later or run in a scene it was not made for.
             op->cancel(systems_succeeded?
-                "scene replacement is prepared; cancel it or activate before stepping commands":"scene systems failed before lifecycle execution");
+                "scene replacement is prepared: lifecycle requests are cancelled, not held; request again after cancel(), or "
+                "through the new scene's commands() after activate()":"scene systems failed before lifecycle execution");
             op.reset();
             continue;
         }
@@ -1288,42 +1314,35 @@ bool SceneSession3D::step(f32 dt) {
     if (!d.current || !std::isfinite(dt) || dt <= 0) { d.errors = {"scene step requires an active scene and finite positive dt"}; return false; }
     try {
         auto& state = *d.current;
+        SceneFrame3D driver{state.world, *state.rendering, {
+            .particles = d.options.particle_limits, .bodies = state.bodies.get(),
+            .audio = d.options.audio, .audio_catalog = d.options.audio_catalog}};
         SystemPhaseHooks hooks;
-        hooks.after=[this,dt](SystemPhase phase,std::string& error) {
+        hooks.after=[this,dt,&driver](SystemPhase phase,std::string& error) {
             auto& d=*_data;auto& state=*d.current;
-            const auto validate=[&](std::string& error) {
-                append(d.errors,validate_particles3d(state.world,d.options.particle_limits));
-                for(const auto& message:d.errors){if(!error.empty())error+='\n';error+=message;}
-                return d.errors.empty();
-            };
             switch(phase) {
             case SystemPhase::Physics:
-                drain_commands(true);
-                if(!validate(error))return false;
-                if(state.bodies)state.bodies->step(dt);
-                state.rendering->propagate_transforms();
-                break;
             case SystemPhase::PostPhysics:
-                // Contact-driven destruction finishes before animation/drawing.
-                // Bodies spawned here first simulate on the following step.
-                drain_commands(true);
-                break;
             case SystemPhase::Animation:
                 drain_commands(true);
-                if(!validate(error))return false;
-                state.rendering->animate(dt);state.rendering->advance_time_of_day(dt);state.rendering->advance_weather(dt);
-                state.rendering->propagate_transforms();state.rendering->simulate_particles(dt);
                 break;
-            case SystemPhase::Editor:
-                // Late-phase requests still commit before collection; native
-                // physics/animation/particles are never advanced a second time.
+            case SystemPhase::Editor: {
+                // Preserve the owning session's late-phase shortcut. Custom
+                // drivers conservatively synchronize at Editor by default.
+                bool quiet=true;
+                {std::lock_guard lock(state.commands->mutex);quiet=state.commands->pending.empty();}
+                if(quiet)for(const auto& batch:state.world.systems().schedule_snapshot().batches)
+                    if(!batch.systems.empty()&&batch.phase>=SystemPhase::Audio){quiet=false;break;}
                 drain_commands(true);
-                if(!validate(error))return false;
-                state.rendering->propagate_transforms();
+                if(quiet)return true;
                 break;
+            }
             default:break;
             }
-            return true;
+            if (driver.after_phase(phase, dt)) return true;
+            append(d.errors, driver.diagnostics());
+            for (const auto& message : driver.diagnostics()) { if (!error.empty()) error += '\n'; error += message; }
+            return false;
         };
         if(!state.world.run_frame(dt,hooks)) {
             drain_commands(false);d.errors.push_back(state.world.systems().last_error());return false;
@@ -1340,9 +1359,12 @@ bool SceneSession3D::collect() {
     catch (const std::exception& error) { d.errors.push_back("scene collection: " + std::string(error.what())); return false; }
 }
 bool SceneSession3D::render() {
+    if (!_data->renderer.available()) return configuration_error("no renderer");
     if (!collect()) return false;
     if (_data->renderer.render(_data->current->view, _data->current->scene)) return true;
-    _data->errors = {"scene render failed"}; return false;
+    _data->errors = _data->renderer.diagnostics();
+    if (_data->errors.empty()) _data->errors = {"scene render failed"};
+    return false;
 }
 bool SceneSession3D::resize(Vec2i viewport) {
     if(_data->editing||_data->in_frame)return configuration_error("scene resize cannot run inside a callback");
@@ -1352,6 +1374,17 @@ bool SceneSession3D::resize(Vec2i viewport) {
     const auto previous = d.options.viewport; d.options.viewport = viewport;
     if (d.current && !collect()) { d.options.viewport = previous; return false; }
     return true;
+}
+std::optional<ScenePick3D> SceneSession3D::pick(Vec2i pixel) {
+    if(_data->editing||_data->in_frame){configuration_error("scene picking cannot run inside a callback");return {};}
+    auto& d=*_data;d.errors.clear();
+    if(!d.current){configuration_error("no active scene to pick from");return {};}
+    auto& state=*d.current;
+    if(!d.renderer.available()||!state.view){configuration_error("no renderer");return {};}
+    if(!state.options.pick){configuration_error("picking requires SceneSession3DOptions::view.pick");return {};}
+    const auto hit=d.renderer.pick(state.view,pixel);
+    if(!hit.hit)return {};
+    return ScenePick3D{d.pick_entity(state,hit.id),hit.id,hit.position};
 }
 bool SceneSession3D::active() const { return bool(_data->current); }
 bool SceneSession3D::prepared() const { return bool(_data->pending); }
@@ -1364,7 +1397,7 @@ WorldPhysicsState3D* SceneSession3D::bodies() { return active() ? _data->current
 PhysicsAssets3D& SceneSession3D::physics_assets() { return _data->collision_assets; }
 const SceneInstance* SceneSession3D::instance() const { return active() ? &_data->current->asset.instance() : nullptr; }
 Scene3D* SceneSession3D::scene() { return active() ? &_data->current->scene : nullptr; }
-const View3D* SceneSession3D::view() const { return active() ? &_data->current->view : nullptr; }
+const View3D* SceneSession3D::view() const { return active() && _data->current->view ? &_data->current->view : nullptr; }
 const std::vector<std::string>& SceneSession3D::diagnostics() const { return _data->errors; }
 
 } // namespace kin

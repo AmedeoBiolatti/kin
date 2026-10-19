@@ -1,5 +1,6 @@
 #include <kin/render3d/renderer3d.hpp>
 
+#include <kin/assets/bake_cache.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -35,11 +36,21 @@ Renderer3DCapabilities Renderer3D::capabilities() const {
     return _backend ? _backend->capabilities() : Renderer3DCapabilities{};
 }
 
+// A bake that passed the cache's checksum but is not a build of this kind (a format changed without its version): built
+// again, and the new build replaces it.
+void Renderer3D::warn_refused_bake(bool restored) {
+    if (!restored && !_bake_warned) {
+        _bake_warned = true;
+        KIN_LOG_WARN("render", "3D: a baked mesh build was refused and is built again (later ones are not logged)");
+    }
+}
+
 Mesh Renderer3D::create_mesh(const MeshData& data) {
     return create_mesh(data, MeshOptions{});
 }
 
 Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& requested) {
+    _errors.clear();
     MeshOptions options = requested;
     if (data.skinned() && (options.clusters || options.levels > 1)) {
         // A skinned mesh moves with its joints: levels and clusters are built from the mesh at rest and would not follow.
@@ -49,20 +60,24 @@ Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& requested)
     }
     std::string error;
     if (!data.validate(&error)) {
+        fail3d(_errors, "Renderer3D::create_mesh", error);
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = error}}));
         return {};
     }
     const std::size_t vertices = data.vertices.size();
     const std::size_t indices = data.indices.empty() ? vertices : data.indices.size();
     if (vertices > std::numeric_limits<u32>::max() / sizeof(MeshVertex) || indices > std::numeric_limits<u32>::max() / 4) {
+        fail3d(_errors, "Renderer3D::create_mesh", "mesh too big for one buffer");
         KIN_LOG_WARN("render", "3D: mesh not made: too big for one buffer");
         return {};
     }
     if (!_backend) {
+        fail3d(_errors, "Renderer3D::create_mesh", "3D is not available");
         return {};
     }
     MeshLodChain chain;
     std::shared_ptr<const MeshClusters> clusters;
+    MeshData welded; // with clusters: what is uploaded (the hierarchy's vertices and its leaves' triangles), then let go
     if (options.clusters) {
         // A cluster hierarchy replaces the levels (which are then not built).
         JobSystem* jobs = _renderer->job_system();
@@ -72,16 +87,56 @@ Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& requested)
                 jobs->parallel_for(static_cast<i32>(count), [&](i32 i) { body(static_cast<u32>(i)); });
             };
         }
-        clusters = std::make_shared<const MeshClusters>(build_mesh_clusters(data, options, parallel));
-        if (clusters->leaf_count == 0) {
+        // A bake of the same mesh and options is restored in place of the build: the same bytes. A mesh of one
+        // cluster has nothing to build that costs more than reading a file.
+        BakeCache* bake = _bake_cache && _bake_cache->enabled() && data.triangle_count() > options.cluster_triangles ? _bake_cache : nullptr;
+        const u64 key = bake ? mesh_clusters_bake_key(data, options) : 0;
+        MeshClusterBuild built;
+        bool restored = false;
+        if (bake) {
+            if (std::optional<std::vector<u8>> baked = bake->read(key)) {
+                restored = restore_mesh_clusters(*baked, built);
+                warn_refused_bake(restored);
+            }
+        }
+        if (!restored) {
+            built = build_mesh_clusters(data, options, parallel);
+            if (bake && built.leaf_count > 0) {
+                bake->write(key, save_mesh_clusters(built));
+            }
+        }
+        if (built.leaf_count == 0) {
+            fail3d(_errors, "Renderer3D::create_mesh", "no triangles");
             KIN_LOG_WARN("render", "3D: mesh not made: no triangles");
             return {};
         }
+        // The mesh keeps the hierarchy alone (the cut reads no vertex): the vertices go to the GPU and no further.
+        welded.vertices = std::move(built.vertices);
+        welded.indices = built.leaf_indices();
+        clusters = std::make_shared<const MeshClusters>(std::move(static_cast<MeshClusters&>(built)));
     } else if (options.levels > 1) {
-        chain = build_mesh_levels(data, options);
+        // The same for levels, where the chain has work to do (build_mesh_levels returns level 0 alone at once otherwise).
+        const bool work = std::min(options.levels, max_mesh_levels) >= 2 && data.triangle_count() >= 2 * std::max<std::size_t>(options.min_triangles, 1);
+        BakeCache* bake = _bake_cache && _bake_cache->enabled() && work ? _bake_cache : nullptr;
+        const u64 key = bake ? mesh_levels_bake_key(data, options) : 0;
+        bool restored = false;
+        if (bake) {
+            if (std::optional<std::vector<u8>> baked = bake->read(key)) {
+                restored = restore_mesh_levels(*baked, data, chain);
+                warn_refused_bake(restored);
+            }
+        }
+        if (!restored) {
+            chain = build_mesh_levels(data, options);
+            if (bake) {
+                bake->write(key, save_mesh_levels(chain));
+            }
+        }
     }
-    std::shared_ptr<IMeshBackend> backend = _backend->create_mesh(data, chain.count() > 1 ? &chain : nullptr, clusters);
+    std::shared_ptr<IMeshBackend> backend = _backend->create_mesh(clusters ? welded : data, chain.count() > 1 ? &chain : nullptr, clusters);
+    welded = {};
     if (!backend) {
+        fail3d(_errors, "Renderer3D::create_mesh", "device refused mesh buffers");
         return {};
     }
     std::shared_ptr<const std::vector<MeshLevelInfo>> levels;
@@ -101,21 +156,26 @@ Mesh Renderer3D::create_mesh(const MeshData& data, const MeshOptions& requested)
 }
 
 View3D Renderer3D::create_view(Vec2i size, const View3DOptions& options) {
+    _errors.clear();
     size = at_least_one(size);
     if (_backend) {
-        return View3D{_backend->create_view(size, options)};
+        View3D result{_backend->create_view(size, options)};
+        if (!result) fail3d(_errors, "Renderer3D::create_view", "device refused view targets");
+        return result;
     }
     RenderTarget target = _renderer->create_render_target(size);
     if (!target.valid()) {
+        fail3d(_errors, "Renderer3D::create_view", "fallback target creation failed");
         return {};
     }
     return View3D{std::make_shared<FallbackView>(std::move(target), options)};
 }
 
 bool Renderer3D::resize(View3D& view, Vec2i size) {
+    _errors.clear();
     size = at_least_one(size);
     if (!view.valid()) {
-        return false;
+        return fail3d(_errors, "Renderer3D::resize", "invalid view");
     }
     if (view.size() == size) {
         return true;
@@ -123,48 +183,64 @@ bool Renderer3D::resize(View3D& view, Vec2i size) {
     if (auto* fallback = dynamic_cast<FallbackView*>(view.backend())) {
         RenderTarget target = _renderer->create_render_target(size);
         if (!target.valid()) {
-            return false;
+            return fail3d(_errors, "Renderer3D::resize", "fallback target creation failed");
         }
         fallback->target = std::move(target);
         return true;
     }
-    return _backend && _backend->resize_view(*view.backend(), size);
+    if (_backend && _backend->resize_view(*view.backend(), size)) return true;
+    return fail3d(_errors, "Renderer3D::resize", "device refused view resize");
 }
 
 PickResult Renderer3D::pick(View3D& view, Vec2i pixel) {
+    _errors.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        fail3d(_errors, "Renderer3D::pick", "picking requires a valid 3D view");
         return {};
     }
     return _backend->pick(*view.backend(), pixel);
 }
 
 bool Renderer3D::read_cluster_picks(View3D& view, std::vector<ClusterPick>& out) {
+    _errors.clear();
     out.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
-        return false;
+        return fail3d(_errors, "Renderer3D::read_cluster_picks", "operation requires a valid 3D view");
     }
     return _backend->read_cluster_picks(*view.backend(), out);
 }
 
 bool Renderer3D::read_cluster_draws(View3D& view, std::vector<ClusterDraw>& out) {
+    _errors.clear();
     out.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
-        return false;
+        return fail3d(_errors, "Renderer3D::read_cluster_draws", "operation requires a valid 3D view");
     }
     return _backend->read_cluster_draws(*view.backend(), out);
 }
 
 bool Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
+    _errors.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
-        return false;
+        return fail3d(_errors, "Renderer3D::warm_up", "operation requires a valid 3D view");
     }
-    return _backend->warm_up(*view.backend(), scene);
+    if (!scene.diagnostics().empty()) { _errors = scene.diagnostics(); return false; }
+    if (const auto* overlay = scene.overlay_if_any(); overlay && !overlay->diagnostics().empty()) {
+        _errors = overlay->diagnostics(); return false;
+    }
+    if (_backend->warm_up(*view.backend(), scene)) return true;
+    return fail3d(_errors, "Renderer3D::warm_up", "GPU warm-up failed");
 }
 
 bool Renderer3D::render(View3D& view, const Scene3D& scene) {
+    _errors.clear();
     _stats = {};
     if (!view.valid()) {
-        return false;
+        return fail3d(_errors, "Renderer3D::render", "invalid view");
+    }
+    if (!scene.diagnostics().empty()) { _errors = scene.diagnostics(); return false; }
+    if (const auto* overlay = scene.overlay_if_any(); overlay && !overlay->diagnostics().empty()) {
+        _errors = overlay->diagnostics(); return false;
     }
     const auto start = std::chrono::steady_clock::now();
     bool drawn = false;
@@ -181,6 +257,7 @@ bool Renderer3D::render(View3D& view, const Scene3D& scene) {
         drawn = _backend->render(*view.backend(), scene, _stats);
     }
     _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!drawn) fail3d(_errors, "Renderer3D::render", _backend ? "device refused scene rendering" : "3D is not available");
     return drawn;
 }
 

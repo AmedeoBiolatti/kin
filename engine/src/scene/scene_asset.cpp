@@ -422,7 +422,7 @@ std::vector<std::string> validate_scene_asset(const SceneAsset& scene,
 SceneInstance instantiate_scene_asset(EcsWorld& world,
                                       const SceneAsset& scene,
                                       const std::filesystem::path& asset_root,
-                                      EcsComponentRegistry& components,PrefabAssetLoadOptions limits) {
+                                      EcsComponentRegistry& components,PrefabAssetLoadOptions limits,SceneInstantiateOptions options) {
     SceneInstance instance;
     instance.diagnostics = validate_scene_asset(scene, components);
     if (!instance.diagnostics.empty()) {
@@ -564,12 +564,18 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
         }
     }
 
-    for (EcsEntity entity : world.entities().hierarchy_roots()) {
-        instance.roots.push_back(entity);
-    }
-    world.raw().entity("kin::prefab::scene_header").set(SceneHeader{scene.name, scene.script, scene.clear_color});
+    std::unordered_set<EcsId> managed;
+    for (const auto& [id, entity] : instance.by_authored_id) managed.insert(entity.id());
+    for (const auto& [id, entity] : instance.by_authored_id)
+        if (!entity.parent() || !managed.contains(entity.parent().id())) instance.roots.push_back(entity);
+    std::ranges::sort(instance.roots, {}, &EcsEntity::id);
+    if (options.update_scene_header) apply_scene_header(world, scene);
     rollback.committed = true;
     return instance;
+}
+
+void apply_scene_header(EcsWorld& world, const SceneAsset& scene) {
+    world.raw().entity("kin::prefab::scene_header").set(SceneHeader{scene.name, scene.script, scene.clear_color});
 }
 
 SceneAsset scene_asset_from_world(EcsWorld& world, const SceneSaveOptions& options) {

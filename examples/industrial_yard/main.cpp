@@ -16,7 +16,7 @@ using Clock=std::chrono::steady_clock;
 constexpr int default_warmup=300;
 struct Options {
     std::string recipe,metrics;int warmup=default_warmup,frames=1440,scale=1,workers=4,points=-1,actors=-1,smoke=-1,props=-1,offset=0;
-    bool receives=true,validate=false,animation=true,motion=true,glass=true,structures=true,shadows=true,taa=false,ao=false,contact=false,profile=false,visible=false,preview=false,rebuild=false;
+    bool gpu_pass_markers=false,receives=true,validate=false,animation=true,motion=true,glass=true,structures=true,shadows=true,taa=false,ao=false,contact=false,profile=false,visible=false,preview=false,rebuild=false;
 };
 double cpu(bool process){
 #ifdef __linux__
@@ -29,7 +29,7 @@ class Yard final:public Scene {
 public:
     Yard(Options options,JobSystem* jobs):_o(std::move(options)),_jobs(jobs){
         _csv.open(_o.metrics);if(!_csv)throw std::runtime_error("cannot write yard CSV");
-        _csv<<"frame,route_frame,frame_interval_ms,scene_build_ms,cpu_submit_ms,render_main_cpu_ms,render_process_cpu_ms,draws,triangles,instances,culled,lights,spots,local_shadow_maps,local_shadow_draws,local_shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_sum,moving_z_sum,profile_mono_ms,point_light_tiles,point_light_tile_slots,point_light_tile_bytes,point_light_tile_ms\n";
+        _csv<<"frame,route_frame,frame_interval_ms,scene_build_ms,cpu_submit_ms,render_main_cpu_ms,render_process_cpu_ms,draws,triangles,instances,culled,lights,spots,local_shadow_maps,local_shadow_draws,local_shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_sum,moving_z_sum,profile_mono_ms\n";
     }
     std::string_view name()const override{return "Industrial yard";}
     void update(SceneContext& ctx)override{if(_o.preview&&ctx.input.frame_pressed(Key::Escape))ctx.app.quit();}
@@ -60,7 +60,7 @@ public:
         const auto main_ms=_o.profile?cpu(false)-main:0,process_ms=_o.profile?cpu(true)-process:0;
         const double submit_ms=std::chrono::duration<double,std::milli>(Clock::now()-submitted).count();
         ctx.renderer.clear(Color::rgb(15,22,35));ctx.renderer.draw_texture(_view.texture(),{0,0,1280,720});
-        if(_frame>_o.warmup){const auto& st=_r->stats();_csv<<std::fixed<<std::setprecision(6)<<_frame<<','<<_route<<','<<interval<<','<<std::chrono::duration<double,std::milli>(submitted-begin).count()<<','<<submit_ms<<','<<main_ms<<','<<process_ms<<','<<st.draws<<','<<st.triangles<<','<<st.instances<<','<<st.culled<<','<<st.lights<<','<<st.spots<<','<<st.local_shadow_maps<<','<<st.local_shadow_draws<<','<<st.local_shadow_triangles<<','<<st.local_shadow_casters<<','<<st.skinned_copies<<','<<st.skin_matrices<<','<<st.retained_upload_bytes<<','<<st.instance_upload_bytes<<','<<st.prepared_reused<<','<<st.prepared_draws<<','<<st.feature_bytes<<','<<st.local_shadow_bytes<<','<<_sums[0]<<','<<_sums[1]<<','<<_sums[2]<<','<<std::chrono::duration<double,std::milli>(begin.time_since_epoch()).count()<<','<<st.point_light_tiles<<','<<st.point_light_tile_slots<<','<<st.point_light_tile_bytes<<','<<st.point_light_tile_ms<<'\n';}
+        if(_frame>_o.warmup){const auto& st=_r->debug_stats();_csv<<std::fixed<<std::setprecision(6)<<_frame<<','<<_route<<','<<interval<<','<<std::chrono::duration<double,std::milli>(submitted-begin).count()<<','<<submit_ms<<','<<main_ms<<','<<process_ms<<','<<st.draws<<','<<st.triangles<<','<<st.instances<<','<<st.culled<<','<<st.lights<<','<<st.spots<<','<<st.local_shadow_maps<<','<<st.local_shadow_draws<<','<<st.local_shadow_triangles<<','<<st.local_shadow_casters<<','<<st.skinned_copies<<','<<st.skin_matrices<<','<<st.retained_upload_bytes<<','<<st.instance_upload_bytes<<','<<st.prepared_reused<<','<<st.prepared_draws<<','<<st.feature_bytes<<','<<st.local_shadow_bytes<<','<<_sums[0]<<','<<_sums[1]<<','<<_sums[2]<<','<<std::chrono::duration<double,std::milli>(begin.time_since_epoch()).count()<<'\n';}
         ++_frame;
         if(_o.visible&&!_o.preview&&_frame>_o.warmup+_o.frames)ctx.app.quit();
     }
@@ -71,11 +71,12 @@ public:
             .field("render_width",1280*_o.scale).field("render_height",720*_o.scale).field("route_frame",_route).field("route_offset",_o.offset).field("measured_frames",_o.frames).field("warmup_frames",_o.warmup)
             .field("moving_props",_moving).field("moving_batches",u64(_dynamic.size())).field("source_triangles",_data.source_triangles).field("scene_triangles",_triangles).field("source_mesh_bytes",_data.mesh_bytes).field("recipe_bytes",_data.bytes)
             .field("moving_x_sum",_sums[0]).field("moving_y_sum",_sums[1]).field("moving_z_sum",_sums[2]).field("renderer_workers",_o.workers).field("preview",_o.preview).field("visible",_o.visible);
-        if(_r){const auto& st=_r->stats();j.field("lights_used",st.lights).field("spots_used",st.spots).field("local_shadow_maps",st.local_shadow_maps).field("local_shadow_draws",st.local_shadow_draws).field("local_shadow_bytes",st.local_shadow_bytes).field("skin_matrices",st.skin_matrices).field("skinned_copies",st.skinned_copies).field("prepared_reused",st.prepared_reused).field("prepared_draws",st.prepared_draws);}
+        if(_r){const auto& st=_r->debug_stats();j.field("lights_used",st.lights).field("spots_used",st.spots).field("local_shadow_maps",st.local_shadow_maps).field("local_shadow_draws",st.local_shadow_draws).field("local_shadow_bytes",st.local_shadow_bytes).field("skin_matrices",st.skin_matrices).field("skinned_copies",st.skinned_copies).field("prepared_reused",st.prepared_reused).field("prepared_draws",st.prepared_draws);}
     }
 private:
     void draw(const yard::Object& o){_scene.draw(_meshes[o.mesh],o.transform,_materials[o.material]);}
     void configure(){
+        _scene.debug.gpu_pass_markers=_o.gpu_pass_markers;
         auto& l=_scene.lights;l.points.clear();l.spots.clear();l.sun={.direction={-.5f,1,.35f},.color={.25f,.2f,.15f}};l.ambient={.035f,.045f,.065f};l.shadow_area={};l.environment=_environment;l.local_shadow_resolution=1024;l.max_shadowed_points=0;l.max_shadowed_spots=_data.spot_count;l.cache_shadows=false;
         u32 point=0;for(u32 i=0;i<_data.lights.size();++i){const auto& d=_data.lights[i];if(d.spot){SpotLight s{.position=d.position,.direction=normalize(d.target-d.position),.color=d.colour,.radius=d.radius,.inner_angle=30,.outer_angle=d.angle};s.shadow.enabled=_o.shadows;s.shadow.near_plane=.025f;s.id=i+1;_scene.add_spot_light(s);}else if(point++<u32(_o.points))_scene.add_light({.position=d.position,.color=d.colour,.radius=d.radius});}
         _scene.taa.enabled=_o.taa;_scene.ambient_occlusion.enabled=_o.ao;_scene.ambient_occlusion.radius=2;_scene.ambient_occlusion.half_resolution=true;_scene.contact_shadows.enabled=_o.contact;
@@ -111,7 +112,7 @@ private:
 int main(int argc,char** argv){try{
     Options o;std::vector<char*> runtime{argv[0]};
     for(int i=1;i<argc;++i){std::string a=argv[i];const auto value=[&](){if(++i==argc)throw std::runtime_error("missing yard option value");return std::string(argv[i]);};
-        if(a=="--recipe")o.recipe=value();else if(a=="--metrics")o.metrics=value();else if(a=="--warmup")o.warmup=std::stoi(value());else if(a=="--measured")o.frames=std::stoi(value());else if(a=="--resolution-scale")o.scale=std::stoi(value());else if(a=="--point-lights")o.points=std::stoi(value());else if(a=="--workers")o.workers=std::stoi(value());else if(a=="--actors")o.actors=std::stoi(value());else if(a=="--smoke")o.smoke=std::stoi(value());else if(a=="--props")o.props=std::stoi(value());else if(a=="--route-offset")o.offset=std::stoi(value());else if(a=="--validate-recipe")o.validate=true;else if(a=="--visible")o.visible=true;else if(a=="--preview")o.preview=true;else if(a=="--profile-cpu")o.profile=true;
+        if(a=="--recipe")o.recipe=value();else if(a=="--metrics")o.metrics=value();else if(a=="--warmup")o.warmup=std::stoi(value());else if(a=="--measured")o.frames=std::stoi(value());else if(a=="--resolution-scale")o.scale=std::stoi(value());else if(a=="--point-lights")o.points=std::stoi(value());else if(a=="--workers")o.workers=std::stoi(value());else if(a=="--actors")o.actors=std::stoi(value());else if(a=="--smoke")o.smoke=std::stoi(value());else if(a=="--props")o.props=std::stoi(value());else if(a=="--route-offset")o.offset=std::stoi(value());else if(a=="--validate-recipe")o.validate=true;else if(a=="--visible")o.visible=true;else if(a=="--preview")o.preview=true;else if(a=="--gpu-pass-markers")o.gpu_pass_markers=true;else if(a=="--profile-cpu")o.profile=true;
         else if(a=="--receive-shadows"||a=="--animation"||a=="--motion"||a=="--glass"||a=="--structures"||a=="--local-shadows"||a=="--taa"||a=="--ao"||a=="--contact"){auto v=value();if(v!="0"&&v!="1")throw std::runtime_error("yard booleans require 0 or 1");bool* p=a=="--receive-shadows"?&o.receives:a=="--animation"?&o.animation:a=="--motion"?&o.motion:a=="--glass"?&o.glass:a=="--structures"?&o.structures:a=="--local-shadows"?&o.shadows:a=="--taa"?&o.taa:a=="--ao"?&o.ao:&o.contact;*p=v=="1";}
         else if(a=="--rebuild-scene")o.rebuild=true;
         else runtime.push_back(argv[i]);}

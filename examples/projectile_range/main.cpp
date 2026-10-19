@@ -10,7 +10,7 @@ namespace {
 using namespace kin;
 class Range final:public Scene {
     std::filesystem::path _root;
-    std::unique_ptr<Renderer3D> _renderer;
+    Renderer3D* _renderer = nullptr;
     std::unique_ptr<Assets3D> _assets;
     std::unique_ptr<SceneSession3D> _session;
     const projectile_range::Stats& stats()const{return *_session->world()->raw().get<projectile_range::Stats>();}
@@ -22,7 +22,8 @@ public:
     explicit Range(std::filesystem::path root):_root(std::move(root)){}
     std::string_view name()const override{return "Projectile range";}
     void on_enter(SceneContext& context)override {
-        _renderer=std::make_unique<Renderer3D>(context.renderer);_assets=std::make_unique<Assets3D>(*_renderer,_root);
+        _renderer=context.renderer3d;
+        if(!_renderer)throw std::runtime_error("runtime 3D renderer was not enabled");_assets=std::make_unique<Assets3D>(*_renderer,_root);
         SceneSession3DOptions options;options.viewport={960,540};options.view.samples=1;
         options.physics=World3DConfig{.max_bodies=32,.max_body_pairs=128,.max_contact_constraints=128,
             .temp_memory_bytes=1024*1024,.single_threaded=true,.max_events=128};
@@ -32,7 +33,7 @@ public:
         if(!_session->load("scenes/projectile-range.kinscene"))throw std::runtime_error(errors());
         if(!projectile_range::prepare(*_session))throw std::runtime_error(errors());
     }
-    void on_exit(SceneContext&)override{_session.reset();_assets.reset();_renderer.reset();}
+    void on_exit(SceneContext&)override{_session.reset();_assets.reset();_renderer=nullptr;}
     kin::EcsWorld* world()override{return _session?_session->world():nullptr;}
     void update(SceneContext& context)override {
         if(context.input.pressed(Key::Escape)){context.app.quit();return;}
@@ -69,6 +70,6 @@ int main(int argc,char** argv) {
         const auto headless=kin::parse_headless_options(argc,argv);
         kin::SceneManager scenes;scenes.push(std::make_unique<Range>(kin::find_content_root(KIN_GAME_CONTENT,argc,argv)));
         return kin::run_scene_app({.window={.title="Projectile range",.width=960,.height=540,.logical_width=960,.logical_height=540,.max_fps=60},
-            .headless=headless,.render_headless=true},scenes);
+            .headless=headless,.render_headless=true,.rendering_3d=true},scenes);
     } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

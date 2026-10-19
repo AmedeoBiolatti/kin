@@ -69,7 +69,12 @@ vec4 history_at(vec2 uv) {
                      textureLod(uHistory, vec2(t12.x, t3.y), 0.0) * (w12.x * w3.y);
     // The four corners are dropped; what is left is divided back up to one.
     const float total = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
-    return max(sum / total, vec4(0.0));
+    const vec4 filtered = sum / total;
+    // Returned as it is when not finite, for main() to drop: max() may make a NaN 0 (black history, blended in).
+    if (any(isnan(filtered)) || any(isinf(filtered))) {
+        return filtered;
+    }
+    return max(filtered, vec4(0.0));
 }
 
 void sharpen(ivec2 p) {

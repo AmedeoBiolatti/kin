@@ -5,21 +5,57 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <initializer_list>
+#include <string_view>
 
 namespace kin {
 
 namespace {
 
-void bind_animator(Animator3D& a, const Model& model) {
-    const auto& skeleton = model.skeletons[0];
-    if (a.bound == &model && a.player.skeleton() == &skeleton) return;
+// Whether skeletons[0] is a skin: a model's node skeleton comes after its skins, so it is the first only when there are none.
+bool has_skin(const Model& model) { return !model.skeletons.empty() && model.node_skeleton != 0; }
+
+// What an animator poses: the first skin of its entity's SkinnedMeshRenderer, else the node skeleton of its ModelRenderer3D (the
+// plain nodes the model's animations move). Null model: neither.
+struct Animated {
+    const std::shared_ptr<const Model>* model = nullptr;
+    u32 skeleton = 0;
+};
+Animated animated(const SkinnedMeshRenderer* skin, const ModelRenderer3D* rigid) {
+    if (skin && skin->model && has_skin(*skin->model)) return {&skin->model, 0};
+    if (rigid && rigid->model && rigid->model->node_skeleton >= 0 &&
+        static_cast<std::size_t>(rigid->model->node_skeleton) < rigid->model->skeletons.size()) {
+        return {&rigid->model, static_cast<u32>(rigid->model->node_skeleton)};
+    }
+    return {};
+}
+
+void bind_animator(Animator3D& a, const std::shared_ptr<const Model>& model, u32 index) {
+    const auto& skeleton = model->skeletons[index];
+    if (a.bound_to(model) && a.player.skeleton() == &skeleton) return;
     a.events.clear();
     a.player.set_skeleton(&skeleton); a.player.play(nullptr); a.player.clear_layers();
-    a.bound = &model; a.applied.clear(); a.applied_layers.clear();
+    a.bound = model.get(); a.bound_model = model; a.applied.clear(); a.applied_layers.clear();
+    // The constraints' joints were looked up in the old skeleton, whose address a new one can take.
+    for (IKConstraint& k : a.ik_constraints) k.resolved_for = nullptr;
+}
+
+// Whether `key` is `parts` end to end: what the animators ask every frame, without building the string (the key is made only when it
+// changes).
+bool key_is(const std::string& key, std::initializer_list<std::string_view> parts) {
+    std::size_t at = 0;
+    for (const std::string_view part : parts) {
+        if (at + part.size() > key.size() || key.compare(at, part.size(), part) != 0) {
+            return false;
+        }
+        at += part.size();
+    }
+    return at == key.size();
 }
 
 // The clip a state plays when it has no blend space: the machine's animation name for it, else its own name.
-std::string clip_of_state(const Animator3D& a, const std::string& state) {
+const std::string& clip_of_state(const Animator3D& a, const std::string& state) {
     if (a.machine) {
         const auto found = a.machine->states.find(state);
         if (found != a.machine->states.end() && !found->second.empty()) {
@@ -38,12 +74,13 @@ f32 fade_for(const Animator3D& a, const std::string& from, const std::string& to
     return a.fade_seconds;
 }
 
-// What the base layer should be playing: the machine's state (stepped by one transition), or the clip named.
-// The key identifies it (a change of key crossfades); `blend` is the state's blend space, if any.
+// What the base layer should be playing: the machine's state (stepped by one transition), or the clip named. `kind` and `name`
+// make the key that identifies it (a change of key crossfades); `blend` is the state's blend space, if any.
 struct Wanted {
-    std::string key;
+    std::string_view kind;
+    const std::string* name = nullptr;
     const Animator3D::BlendSpace* blend = nullptr;
-    std::string clip;
+    std::string_view clip;
 };
 
 } // namespace
@@ -59,8 +96,8 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
                       .cached()
                       .build()),
       _meshes(world.query_builder<const WorldTransform3D, const MeshRenderer, const RenderTransform3D*>().cached().build()),
-      _models(world.query_builder<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*>().cached().build()),
-      _animators(world.query_builder<const SkinnedMeshRenderer*, Animator3D, Transform3D*>().build()),
+      _models(world.query_builder<const WorldTransform3D, const ModelRenderer3D, const RenderTransform3D*, Animator3D*>().cached().build()),
+      _animators(world.query_builder<const SkinnedMeshRenderer*, const ModelRenderer3D*, Animator3D, Transform3D*>().build()),
       _skinned(world.query_builder<const WorldTransform3D, const SkinnedMeshRenderer, Animator3D*, const RenderTransform3D*>().build()),
       _time_of_day(world.query_builder<TimeOfDay3D>().build()),
       _point_lights(world.query_builder<const WorldTransform3D, const PointLight3D, const RenderTransform3D*>().build()),
@@ -122,17 +159,18 @@ bool WorldRenderState3D::apply_time_of_day(Scene3D& scene) const {
 ActionToken3D play_action3d(EcsEntity actor, std::string_view name, ActionStart3D start) {
     if (!actor) return {};
     const auto* animator = actor.get<Animator3D>();
-    const auto* skin = actor.get<SkinnedMeshRenderer>();
-    if (!animator || !animator->actions || !skin || !skin->model || skin->model->skeletons.empty()) return {};
+    const Animated target = animated(actor.get<SkinnedMeshRenderer>(), actor.get<ModelRenderer3D>());
+    if (!animator || !animator->actions || !target.model) return {};
+    const std::shared_ptr<const Model>& model = *target.model;
     const auto definitions = animator->actions;
     const auto found = std::find_if(definitions->begin(), definitions->end(), [&](const auto& d) { return d.name == name; });
     if (found == definitions->end()) return {};
-    const auto* clip = skin->model->find_clip(found->clip);
+    const auto* clip = model->find_clip(found->clip, target.skeleton);
     auto options = found->playback;
-    options.mask_joint = found->mask_joint.empty() ? -1 : skin->model->skeletons[0].find(found->mask_joint);
+    options.mask_joint = found->mask_joint.empty() ? -1 : model->skeletons[target.skeleton].find(found->mask_joint);
     if (!clip || (!found->mask_joint.empty() && options.mask_joint < 0)) return {};
     auto* own = actor.get_mut<Animator3D>();
-    bind_animator(*own, *skin->model);
+    bind_animator(*own, model, target.skeleton);
     return own->player.play_action(clip, options, start);
 }
 bool cancel_action3d(EcsEntity actor, ActionToken3D token, f32 fade_seconds) {
@@ -164,18 +202,20 @@ u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& d
 
 void WorldRenderState3D::animate(f32 dt) {
     ++_epoch;
-    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer* renderer, Animator3D& a, Transform3D* own) {
+    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer* renderer, const ModelRenderer3D* rigid, Animator3D& a, Transform3D* own) {
         a.events.clear();
-        const Model* model = renderer ? renderer->model.get() : nullptr;
-        if (!model || model->skeletons.empty()) {
+        const Animated target = animated(renderer, rigid);
+        const Model* model = target.model ? target.model->get() : nullptr;
+        if (!model) {
             if (a.bound || a.player.skeleton()) {
                 a.player.set_skeleton(nullptr); a.player.play(nullptr); a.player.clear_layers();
-                a.bound = nullptr; a.applied.clear(); a.applied_layers.clear();
+                a.bound = nullptr; a.bound_model.reset(); a.applied.clear(); a.applied_layers.clear();
             }
             return;
         }
-        const Skeleton& skeleton = model->skeletons[0];
-        bind_animator(a, *model);
+        const u32 index = target.skeleton; // 0, the first skin, for a SkinnedMeshRenderer
+        const Skeleton& skeleton = model->skeletons[index];
+        bind_animator(a, *target.model, index);
         // The state machine: one transition a step (kin/anim's evaluate, consuming matched triggers), never to the state it is in.
         Wanted want;
         f32 fade = a.fade_seconds;
@@ -190,28 +230,30 @@ void WorldRenderState3D::animate(f32 dt) {
                 }
             }
             const auto space = a.blend_spaces.find(a.state);
-            want.key = "state:" + a.state;
+            want.kind = "state:";
+            want.name = &a.state;
             if (space != a.blend_spaces.end() && !space->second.entries.empty()) {
                 want.blend = &space->second;
             } else {
                 want.clip = clip_of_state(a, a.state);
             }
         } else {
-            want.key = "clip:" + a.clip;
+            want.kind = "clip:";
+            want.name = &a.clip;
             want.clip = a.clip;
         }
         const bool first = a.applied.empty();
-        if (want.key != a.applied) {
-            a.applied = want.key;
+        if (!key_is(a.applied, {want.kind, *want.name})) {
+            a.applied = std::string(want.kind) + *want.name;
             const f32 seconds = first ? 0.0f : fade;
             if (want.blend) {
                 std::vector<BlendPoint3D> points;
                 for (const Animator3D::BlendEntry& e : want.blend->entries) {
-                    points.push_back({model->find_clip(e.clip), e.position});
+                    points.push_back({model->find_clip(e.clip, index), e.position});
                 }
                 a.player.crossfade_to_blend(points, a.params.get_float(want.blend->parameter), seconds, a.loop);
             } else {
-                a.player.crossfade_to(model->find_clip(want.clip), seconds, a.loop);
+                a.player.crossfade_to(model->find_clip(want.clip, index), seconds, a.loop);
             }
         }
         if (a.machine && want.blend) {
@@ -224,10 +266,9 @@ void WorldRenderState3D::animate(f32 dt) {
         for (std::size_t i = 0; i < a.layers.size(); ++i) {
             const Animator3D::LayerConfig& config = a.layers[i];
             AnimationPlayer3D::Layer& layer = a.player.layer(static_cast<u32>(i));
-            const std::string key = config.clip + "|" + config.mask_joint + (config.include_root ? "+" : "-");
-            if (a.applied_layers[i] != key) {
-                a.applied_layers[i] = key;
-                layer.clip = config.clip.empty() ? nullptr : model->find_clip(config.clip);
+            if (!key_is(a.applied_layers[i], {config.clip, "|", config.mask_joint, config.include_root ? "+" : "-"})) {
+                a.applied_layers[i] = config.clip + "|" + config.mask_joint + (config.include_root ? "+" : "-");
+                layer.clip = config.clip.empty() ? nullptr : model->find_clip(config.clip, index);
                 layer.time = 0.0f;
                 const i32 joint = config.mask_joint.empty() ? -1 : skeleton.find(config.mask_joint);
                 layer.mask = joint >= 0 ? PoseMask::subtree(skeleton, joint, 1.0f, config.include_root) : PoseMask{};
@@ -499,12 +540,24 @@ void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton& sk, const Pos
 void WorldRenderState3D::apply_ik() {
     _skinned.each([&](flecs::iter& it, size_t, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator, const RenderTransform3D*) {
         const Model* model = renderer.model.get();
-        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || model->skeletons.empty()) {
+        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || !has_skin(*model)) {
             return;
         }
         const Skeleton& skeleton = model->skeletons[0];
-        if (animator->bound == model && animator->player.skeleton() == &skeleton) {
+        if (animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
             solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
+        }
+    });
+    // Models whose animated nodes an animator plays, with constraints on those nodes (a turret's look-at).
+    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer, const RenderTransform3D*, Animator3D* animator) {
+        const Model* model = renderer.model.get();
+        if (!animator || (animator->ik_constraints.empty() && animator->pose_override.empty()) || !model || model->node_skeleton < 0 ||
+            static_cast<std::size_t>(model->node_skeleton) >= model->skeletons.size()) {
+            return;
+        }
+        const Skeleton& skeleton = model->skeletons[static_cast<std::size_t>(model->node_skeleton)];
+        if (animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
+            solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, entity.world(), _epoch);
         }
     });
 }
@@ -558,36 +611,107 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                         }
                     }
                     if (!last) {
-                        last = &_buckets.emplace_back(Bucket{r.mesh, r.material, {}});
+                        last = &_buckets.emplace_back(Bucket{r.mesh, r.material, {}, {}});
                     }
                 }
                 const auto placement=draw_placement(it.entity(i),world[i],it.is_set(2)?&presentation[i]:nullptr);
-                if(placement)last->instances.push_back({*placement,r.tint});
+                // The entity's id when none is given, as for models: pick names the entity and TAA matches its frames by it.
+                if(placement)last->instances.push_back({*placement,r.tint,r.id?r.id:u32(it.entity(i).id()&0xFFFFFFFFu)});
             }
         }
     });
-    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer, const RenderTransform3D* presentation) {
+    _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer, const RenderTransform3D* presentation,
+                     Animator3D* animator) {
         if (!renderer.visible || !renderer.model) return;
         const auto placement=draw_placement(entity,world,presentation);if(!placement)return;
         const u32 id = renderer.id ? renderer.id : u32(entity.id() & 0xFFFFFFFFu);
         const auto* overrides = entity.get<ModelMaterials3D>();
         const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
             overrides->binding->materials.size() == renderer.model->parts.size() ? overrides->binding.get() : nullptr;
-        for (size_t index = 0; index < renderer.model->parts.size(); ++index) {
-            const auto& part = renderer.model->parts[index];
+        // The animator's pose of the model's animated nodes (their world matrices), once animate() has bound it to them. None:
+        // every part at rest, exactly as without an animator.
+        std::span<const Mat4f> nodes;
+        const Model& model = *renderer.model;
+        if (animator && model.node_skeleton >= 0 && static_cast<std::size_t>(model.node_skeleton) < model.skeletons.size()) {
+            const Skeleton& skeleton = model.skeletons[static_cast<std::size_t>(model.node_skeleton)];
+            if (animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
+                if (animator->ik_constraints.empty() && animator->pose_override.empty()) {
+                    compute_world_matrices(skeleton, animator->player.pose(), _pose_scratch);
+                    if (!animator->ik_world.empty()) {
+                        animator->ik_world.clear();
+                        animator->ik_pose.joints.clear();
+                    }
+                    nodes = _pose_scratch;
+                } else {
+                    if (!attachment_pose_prepared(entity.id())) solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, entity.world(), _epoch);
+                    nodes = animator->ik_world;
+                }
+            }
+        }
+        for (size_t index = 0; index < model.parts.size(); ++index) {
+            const auto& part = model.parts[index];
             const auto& material = binding ? binding->materials[index] : part.material;
             if (!part.mesh || part.mesh.skinned() || part.skin >= 0) continue;
             auto found = std::find_if(_buckets.begin(), _buckets.end(), [&](const auto& bucket) {
                 return bucket.mesh == part.mesh && bucket.material == material;
             });
-            if (found == _buckets.end()) found = _buckets.emplace(_buckets.end(), Bucket{part.mesh, material, {}});
-            found->instances.push_back({*placement * part.transform, renderer.tint, id});
+            if (found == _buckets.end()) found = _buckets.emplace(_buckets.end(), Bucket{part.mesh, material, {}, {}});
+            found->instances.push_back({*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint, id});
         }
     });
     // A bucket is a reuse aid for live draws, never a resident asset cache.
     std::erase_if(_buckets,[](const Bucket& bucket){return bucket.instances.empty();});
-    for (const Bucket& bucket : _buckets) {
-        scene.draw_instanced(bucket.mesh, bucket.instances, bucket.material);
+    // Keep the authoring path cheap for small buckets. Larger eligible buckets reuse
+    // fixed CPU records instead of copying them into Scene3D every frame. This cap
+    // covers the extra live records, independent of the renderer's GPU table budget.
+    constexpr std::size_t record_budget = 16 * 1024 * 1024;
+    constexpr std::size_t min_records = 256, max_batches = 128, group_size = 256;
+    std::size_t retained_bytes = 0, retained_batches = 0;
+    for (Bucket& bucket : _buckets) {
+        const auto& material = bucket.material;
+        const std::size_t bytes = bucket.instances.size() * sizeof(MeshInstance);
+        const bool eligible = bucket.instances.size() >= min_records && !bucket.mesh.skinned() &&
+            (material.blend == Blend3D::Opaque || material.blend == Blend3D::Mask) &&
+            !material.wireframe && !material.shader.backend() && retained_batches < max_batches &&
+            bytes <= record_budget - retained_bytes;
+        if (!eligible) {
+            bucket.batch = {};
+            scene.draw_instanced(bucket.mesh, bucket.instances, material);
+            continue;
+        }
+        retained_bytes += bytes;
+        ++retained_batches;
+        const auto rebuild = [&] {
+            std::vector<InstanceGroup3D> groups;
+            // Consecutive source ranges preserve draw order. Bounds follow edits;
+            // no spatial sorting, duplicate world or caller-maintained boxes.
+            if (bucket.instances.size() >= 2 * group_size) {
+                groups.reserve((bucket.instances.size() + group_size - 1) / group_size);
+                for (std::size_t first = 0; first < bucket.instances.size(); first += group_size)
+                    groups.push_back({static_cast<u32>(first), static_cast<u32>(std::min(group_size, bucket.instances.size() - first))});
+            }
+            bucket.batch = InstanceBatch3D(bucket.mesh, bucket.instances, std::move(groups));
+        };
+        if (!bucket.batch || bucket.batch.instances().size() != bucket.instances.size()) {
+            rebuild();
+        } else {
+            const auto previous = bucket.batch.instances();
+            const bool shared = bucket.batch.lifetime().use_count() > 1;
+            const auto changed = [&](std::size_t i) {
+                const auto& a = previous[i]; const auto& b = bucket.instances[i];
+                return a.tint != b.tint || a.id != b.id || std::memcmp(a.transform.m, b.transform.m, sizeof(a.transform.m)) != 0;
+            };
+            for (std::size_t i = 0; i < previous.size();) {
+                if (!changed(i)) { ++i; continue; }
+                // A separately collected scene must keep its snapshot. The usual
+                // clear/collect/render loop owns no old handle and edits in place.
+                if (shared) { rebuild(); break; }
+                const std::size_t first = i++;
+                while (i < previous.size() && changed(i)) ++i;
+                bucket.batch.update(static_cast<u32>(first), std::span<const MeshInstance>(bucket.instances).subspan(first, i - first));
+            }
+        }
+        scene.draw_instanced(bucket.batch, material);
     }
     // Lights (P3b): the entity's place, and for a spot its -Z axis; the entity's id names the light across frames.
     _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light, const RenderTransform3D* presentation) {
@@ -618,13 +742,13 @@ void WorldRenderState3D::collect(Scene3D& scene) {
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
     _skinned.each([&](flecs::iter& it, size_t row, const WorldTransform3D& world, const SkinnedMeshRenderer& renderer, Animator3D* animator, const RenderTransform3D* presentation) {
         const Model* model = renderer.model.get();
-        if (!renderer.visible || !model || model->skeletons.empty()) {
+        if (!renderer.visible || !model || !has_skin(*model)) {
             return;
         }
         const auto placement=draw_placement(it.entity(row),world,presentation);if(!placement)return;
         const Skeleton& skeleton = model->skeletons[0];
         _pose_scratch.resize(skeleton.joint_count());
-        if (animator && animator->bound == model && animator->player.skeleton() == &skeleton) {
+        if (animator && animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
             if (animator->ik_constraints.empty() && animator->pose_override.empty()) {
                 animator->player.joint_matrices(_pose_scratch);
                 if (!animator->ik_world.empty()) {
@@ -638,7 +762,8 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                 world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
             }
         } else {
-            compute_joint_matrices(skeleton, skeleton.rest_pose(), _pose_scratch);
+            _rest_pose.joints = skeleton.rest;
+            compute_joint_matrices(skeleton, _rest_pose, _pose_scratch);
         }
         // The entity's id when none is given: pick names the entity, and the velocity matches the character by it.
         const u32 id = renderer.id != 0 ? renderer.id : static_cast<u32>(it.entity(row).id() & 0xffffffffu);
