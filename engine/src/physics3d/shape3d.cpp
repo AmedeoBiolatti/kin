@@ -2,8 +2,12 @@
 
 #include "jolt_runtime.hpp"
 
+#include <kin/assets/bake_cache.hpp>
+
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/Memory.h>
+#include <Jolt/Core/StreamIn.h>
+#include <Jolt/Core/StreamOut.h>
 #include <Jolt/Geometry/IndexedTriangle.h>
 #include <Jolt/Physics/Collision/PhysicsMaterial.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
@@ -19,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <mutex>
 
 namespace kin {
@@ -57,7 +62,133 @@ std::shared_ptr<const ShapeData> make_data(const JPH::ShapeSettings::ShapeResult
     return data;
 }
 
+// save_binary's header: magic "KSH3", this layout's version, binary_version(), the kind, the payload's length and its
+// FNV-1a 64; then the payload, Jolt's SaveWithChildren.
+constexpr u32 binary_magic = 0x3348534bu;
+constexpr u32 binary_layout = 1;
+constexpr std::size_t binary_header = 4 + 4 + 8 + 1 + 8 + 8;
+
+class BytesOut final : public JPH::StreamOut {
+public:
+    explicit BytesOut(std::vector<u8>& out) : _out(out) {}
+    void WriteBytes(const void* data, size_t size) override {
+        const auto* p = static_cast<const u8*>(data);
+        _out.insert(_out.end(), p, p + size);
+    }
+    bool IsFailed() const override { return false; }
+
+private:
+    std::vector<u8>& _out;
+};
+
+// Reads past the end give zeros and set the end flag, which Jolt checks after every piece it reads.
+class BytesIn final : public JPH::StreamIn {
+public:
+    explicit BytesIn(std::span<const u8> bytes) : _bytes(bytes) {}
+    void ReadBytes(void* data, size_t size) override {
+        if (size > _bytes.size() - _at) {
+            std::memset(data, 0, size);
+            _at = _bytes.size();
+            _end = true;
+            return;
+        }
+        std::memcpy(data, _bytes.data() + _at, size);
+        _at += size;
+    }
+    bool IsEOF() const override { return _end; }
+    bool IsFailed() const override { return false; }
+    bool whole() const { return !_end && _at == _bytes.size(); }
+
+private:
+    std::span<const u8> _bytes;
+    std::size_t _at = 0;
+    bool _end = false;
+};
+
+// The Jolt shapes the factories make for each kind (Jolt makes a compound of one child a rotated-translated shape).
+bool made_as(Shape3DKind kind, JPH::EShapeSubType type) {
+    using T = JPH::EShapeSubType;
+    switch (kind) {
+    case Shape3DKind::Box: return type == T::Box;
+    case Shape3DKind::Sphere: return type == T::Sphere;
+    case Shape3DKind::Capsule: return type == T::Capsule;
+    case Shape3DKind::Cylinder: return type == T::Cylinder;
+    case Shape3DKind::ConvexHull: return type == T::ConvexHull;
+    case Shape3DKind::TriangleMesh: return type == T::Mesh;
+    case Shape3DKind::HeightField: return type == T::HeightField;
+    case Shape3DKind::Compound: return type == T::StaticCompound || type == T::MutableCompound || type == T::RotatedTranslated;
+    }
+    return false;
+}
+
 } // namespace
+
+u64 Shape3D::binary_version() {
+    using JPH::uint64; // JPH_VERSION_ID's macro names it unqualified
+    // Jolt's id: its version in the low 24 bits, its build features (double precision, determinism, ...) above them.
+    constexpr u64 jolt = JPH_VERSION_ID;
+    static_assert(jolt < (u64{1} << 48));
+    return (static_cast<u64>(binary_layout) << 48) | jolt;
+}
+
+bool Shape3D::save_binary(std::vector<u8>& out) const {
+    if (!_data) {
+        return false;
+    }
+    std::vector<u8> payload;
+    {
+        BytesOut stream{payload};
+        JPH::Shape::ShapeToIDMap shapes;
+        JPH::Shape::MaterialToIDMap materials;
+        _data->shape->SaveWithChildren(stream, shapes, materials);
+    }
+    BakeWriter header;
+    header.value(binary_magic);
+    header.value(binary_layout);
+    header.value(binary_version());
+    header.value(static_cast<u8>(_data->kind));
+    header.value(static_cast<u64>(payload.size()));
+    header.value(bake_hash(payload.data(), payload.size()));
+    out.insert(out.end(), header.bytes().begin(), header.bytes().end());
+    out.insert(out.end(), payload.begin(), payload.end());
+    return true;
+}
+
+Shape3D Shape3D::restore_binary(std::span<const u8> bytes, Shape3DKind kind) {
+    Shape3D out;
+    BakeReader header{bytes.first(std::min(bytes.size(), binary_header))};
+    u32 magic = 0, layout = 0;
+    u64 version = 0, length = 0, checksum = 0;
+    u8 stored_kind = 0;
+    header.value(magic);
+    header.value(layout);
+    header.value(version);
+    header.value(stored_kind);
+    header.value(length);
+    header.value(checksum);
+    // Jolt trusts the lengths in its state (it sizes arrays by them), so it reads nothing that the checksum has not passed.
+    if (!header.done() || magic != binary_magic || layout != binary_layout || version != binary_version() || stored_kind != static_cast<u8>(kind) ||
+        length != bytes.size() - binary_header) {
+        return out;
+    }
+    const std::span<const u8> payload = bytes.subspan(binary_header);
+    if (bake_hash(payload.data(), payload.size()) != checksum) {
+        return out;
+    }
+    physics3d_detail::ensure_jolt_runtime();
+    BytesIn stream{payload};
+    JPH::Shape::IDToShapeMap shapes;
+    JPH::Shape::IDToMaterialMap materials;
+    const JPH::Shape::ShapeResult result = JPH::Shape::sRestoreWithChildren(stream, shapes, materials);
+    if (!stream.whole() || result.HasError() || !result.IsValid() || result.Get() == nullptr || !made_as(kind, result.Get()->GetSubType())) {
+        return out;
+    }
+    auto data = std::make_shared<ShapeData>();
+    data->shape = result.Get();
+    data->kind = kind;
+    out._data = std::move(data);
+    return out;
+}
 
 Shape3D Shape3D::box(Vec3f half_extents) {
     Shape3D out;

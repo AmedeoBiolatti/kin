@@ -81,8 +81,9 @@
 // lit}, wind: {direction, speed, gust, gust_period, gust_length, turbulence, turbulence_length}, ground: y, time, seed,
 // apply}` (`apply`: the weather dims the sun and ambient light and thickens the fog) and `particles: [{name, seed,
 // simulate, position, rotation, shape, extent, cone_angle, spread, rate, max, burst, lifetime, speed, size, gravity,
-// drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance, lit, softness, ring, sort,
-// fog}}]` (each system is stepped `simulate` seconds at load: the pictures show that moment). --rain I, --snow I,
+// drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance, lit, receives_shadow,
+// casts_shadow, shadow_cutoff, softness, ring, sort, fog}}]` (each system is stepped `simulate` seconds at load: the
+// pictures show that moment). --rain I, --snow I,
 // --wind S (m/s), --no-weather,
 // --no-particles, --soft 0|1, --particles N (a system of N live particles in the middle of the scene: the cost tables).
 
@@ -131,6 +132,11 @@ Vec3f vec3(const kin::JsonValue* v, Vec3f fallback = {}) {
     const auto& a = v->items();
     return {static_cast<float>(a[0].as_number()), static_cast<float>(a[1].as_number()),
             static_cast<float>(a[2].as_number())};
+}
+
+kin::LinearRgb light_color(const kin::JsonValue* value, kin::LinearRgb fallback = {}) {
+    const Vec3f rgb = vec3(value, {fallback.r, fallback.g, fallback.b});
+    return {rgb.x, rgb.y, rgb.z};
 }
 
 kin::Color colour(const kin::JsonValue* v, kin::Color fallback) {
@@ -903,7 +909,8 @@ struct PhysicsCharacter {
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16));
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
                          error.c_str());
@@ -1132,7 +1139,8 @@ struct PhysicsClimb {
         }
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
                          error.c_str());
@@ -1359,7 +1367,8 @@ struct PhysicsRagdoll {
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12));
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
                          error.c_str());
@@ -1621,7 +1630,8 @@ struct PhysicsRope {
         lead = static_cast<int>(doc.number_at("lead", 0));
         box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}, &error);
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
                          error.c_str());
@@ -2026,12 +2036,12 @@ void merge_sky(kin::Sky3D& sky, const kin::JsonValue* doc, const Overrides& over
         sky.turbidity = static_cast<float>(doc->number_at("turbidity", sky.turbidity));
         sky.sun_intensity = static_cast<float>(doc->number_at("sun_intensity", sky.sun_intensity));
         sky.intensity = static_cast<float>(doc->number_at("intensity", sky.intensity));
-        sky.ground_color = vec3(doc->find("ground_color"), sky.ground_color);
+        sky.ground_color = light_color(doc->find("ground_color"), sky.ground_color);
         sky.sun_size = static_cast<float>(doc->number_at("sun_size", sky.sun_size));
         sky.sun_disc = static_cast<float>(doc->number_at("sun_disc", sky.sun_disc));
         sky.stars = doc->bool_at("stars", false);
         sky.star_brightness = static_cast<float>(doc->number_at("star_brightness", sky.star_brightness));
-        sky.night_color = vec3(doc->find("night_color"), sky.night_color);
+        sky.night_color = light_color(doc->find("night_color"), sky.night_color);
         sky.light_threshold = static_cast<float>(doc->number_at("light_threshold", sky.light_threshold));
         sky.light_interval = static_cast<kin::u32>(doc->number_at("light_interval", sky.light_interval));
         if (const kin::JsonValue* moon = doc->find("moon")) {
@@ -2039,7 +2049,7 @@ void merge_sky(kin::Sky3D& sky, const kin::JsonValue* doc, const Overrides& over
             sky.moon_direction = vec3(moon->find("direction"), sky.moon_direction);
             sky.moon_size = static_cast<float>(moon->number_at("size", sky.moon_size));
             sky.moon_light = static_cast<float>(moon->number_at("light", sky.moon_light));
-            sky.moon_color = vec3(moon->find("color"), sky.moon_color);
+            sky.moon_color = light_color(moon->find("color"), sky.moon_color);
         }
     }
     if (over.sky_light_every) {
@@ -2063,7 +2073,7 @@ void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over
         fog.base_height = static_cast<float>(doc->number_at("base_height", fog.base_height));
         fog.start = static_cast<float>(doc->number_at("start", fog.start));
         fog.max_opacity = static_cast<float>(doc->number_at("max_opacity", fog.max_opacity));
-        fog.colour = vec3(doc->find("color"), fog.colour);
+        fog.colour = light_color(doc->find("color"), fog.colour);
         fog.colour_from_sky = doc->bool_at("color_from_sky", false);
         fog.sun_scatter = static_cast<float>(doc->number_at("sun_scatter", fog.sun_scatter));
         fog.sun_anisotropy = static_cast<float>(doc->number_at("sun_anisotropy", fog.sun_anisotropy));
@@ -2164,6 +2174,9 @@ void merge_look(kin::ParticleLook3D& look, const kin::JsonValue* d, const Overri
         look.soft = d->bool_at("soft", look.soft);
         look.soft_distance = static_cast<float>(d->number_at("soft_distance", look.soft_distance));
         look.lit = static_cast<float>(d->number_at("lit", look.lit));
+        look.receives_shadow = d->bool_at("receives_shadow", look.receives_shadow);
+        look.casts_shadow = d->bool_at("casts_shadow", look.casts_shadow);
+        look.shadow_cutoff = static_cast<float>(d->number_at("shadow_cutoff", look.shadow_cutoff));
         look.fogged = d->bool_at("fog", look.fogged);
         look.sort = d->bool_at("sort", look.sort);
     }
@@ -2191,7 +2204,7 @@ void merge_layer(kin::WeatherLayer3D& layer, const kin::JsonValue* d, const Over
             layer.size_min = size.min;
             layer.size_max = size.max;
             layer.alpha = static_cast<float>(d->number_at("alpha", layer.alpha));
-            layer.colour = vec3(d->find("color"), layer.colour);
+            layer.colour = light_color(d->find("color"), layer.colour);
             layer.splash = static_cast<float>(d->number_at("splash", layer.splash));
             layer.splash_size = static_cast<float>(d->number_at("splash_size", layer.splash_size));
             layer.edge_fade = static_cast<float>(d->number_at("edge_fade", layer.edge_fade));
@@ -2287,8 +2300,8 @@ struct SceneParticles {
             p.size_start = static_cast<float>(d.number_at("size_start", p.size_start));
             p.size_mid = static_cast<float>(d.number_at("size_mid", p.size_mid));
             p.size_end = static_cast<float>(d.number_at("size_end", p.size_end));
-            p.colour_start = vec3(d.find("color_start"), p.colour_start);
-            p.colour_end = vec3(d.find("color_end"), p.colour_end);
+            p.colour_start = light_color(d.find("color_start"), p.colour_start);
+            p.colour_end = light_color(d.find("color_end"), p.colour_end);
             p.alpha_start = static_cast<float>(d.number_at("alpha_start", p.alpha_start));
             p.alpha_end = static_cast<float>(d.number_at("alpha_end", p.alpha_end));
             p.fade_in = static_cast<float>(d.number_at("fade_in", p.fade_in));
@@ -2669,7 +2682,8 @@ int main(int argc, char** argv) {
                     break;
                 }
                 std::string error;
-                kin::Model3D model = r3d.load_model(path, model_options_of(m), &error);
+                kin::Model3D model = r3d.load_model(path, model_options_of(m));
+                error = kin::diagnostics3d_text(r3d.diagnostics());
                 if (!model) {
                     std::fprintf(stderr, "  %s: %s\n", path.string().c_str(), error.c_str());
                     missing = true;
@@ -2978,7 +2992,8 @@ int main(int argc, char** argv) {
         if (const kin::JsonValue* l = doc.find("lights")) {
             if (const kin::JsonValue* env = l->find("environment")) {
                 std::string error;
-                environment = r3d.load_environment(cache / env->string_at("file"), &error);
+                environment = r3d.load_environment(cache / env->string_at("file"));
+                error = kin::diagnostics3d_text(r3d.diagnostics());
                 if (!environment) {
                     std::fprintf(stderr, "  environment: %s\n", error.c_str());
                     ++failures;
@@ -2998,10 +3013,6 @@ int main(int argc, char** argv) {
         };
         std::vector<Attached> attached;
         double camera_hours = -1.0; // the current camera's own time of day (< 0: the scene's)
-        const auto light_color = [](const kin::JsonValue* value, Vec3f fallback = {}) {
-            const Vec3f rgb = vec3(value, fallback);
-            return kin::LinearRgb{rgb.x, rgb.y, rgb.z};
-        };
         const auto fill_scene = [&](int time) {
             scene.clear();
             const kin::JsonValue* l = doc.find("lights");
@@ -3023,7 +3034,7 @@ int main(int argc, char** argv) {
                 scene.lights.environment_rotation = static_cast<float>(env->number_at("rotation", 0.0));
             }
             if (const kin::JsonValue* ground = lights.find("ground_ambient")) {
-                scene.lights.ground_ambient = light_color(ground);
+                scene.lights.ground_ambient = {true, light_color(ground)};
             }
             if (const kin::JsonValue* area = lights.find("shadow_area")) {
                 if (area->is_string() && area->as_string() == "auto") {

@@ -40,7 +40,7 @@ std::string read(const std::filesystem::path& path) {
 constexpr auto prefab = R"({"schema":"kin.prefab/1","id":"effect","root":"root","entities":[
  {"id":"root","components":{"Transform3D":{}}},
  {"id":"puff","parent":"root","components":{"Transform3D":{},"ParticleEmitter3D":{
-  "seed":7,"rate":40,"max_particles":16,"lifetime":[0.2,0.3],"size":[0.4,0.5],"speed":[0.5,1],"blend":"additive"}}}]})";
+  "seed":7,"rate":40,"max_particles":16,"lifetime":[0.2,0.3],"size":[0.4,0.5],"speed":[0.5,1],"blend":"additive","receives_shadow":true,"casts_shadow":true,"shadow_cutoff":0.3}}}]})";
 constexpr auto scene = R"({"schema":"kin.scene/1","prefabs":[
  {"id":"left","asset":"effect.kinprefab","overrides":{"root":{"Transform3D":{"position":[-1,0,0]}}}},
  {"id":"right","asset":"effect.kinprefab","overrides":{"root":{"Transform3D":{"position":[1,0,0]}}}}
@@ -60,6 +60,30 @@ void cpu() {
     check(source.load(scratch.path / "scene.kinscene", scratch.path, world.components()) && source.instantiate(world),
           "particle scene/prefab rejected");
     auto a = emitter(source.instance(), "left"), b = emitter(source.instance(), "right");
+    check(!ParticleLook3D{}.receives_shadow && a.get<ParticleEmitter3D>()->system.desc.look.receives_shadow &&
+              b.get<ParticleEmitter3D>()->system.desc.look.receives_shadow,
+          "shadow reception default or authoring lost");
+    check(world.components().patch_field(a, "ParticleEmitter3D", "receives_shadow", false) &&
+              !a.get<ParticleEmitter3D>()->system.desc.look.receives_shadow &&
+              b.get<ParticleEmitter3D>()->system.desc.look.receives_shadow,
+          "shadow edit leaked to sibling");
+    check(!ParticleLook3D{}.casts_shadow && ParticleLook3D{}.shadow_cutoff == .5f &&
+              a.get<ParticleEmitter3D>()->system.desc.look.casts_shadow &&
+              b.get<ParticleEmitter3D>()->system.desc.look.shadow_cutoff == .3f,
+          "shadow casting defaults or authored settings lost");
+    check(world.components().patch_field(a, "ParticleEmitter3D", "casts_shadow", false) &&
+              world.components().patch_field(a, "ParticleEmitter3D", "shadow_cutoff", .7f) &&
+              !a.get<ParticleEmitter3D>()->system.desc.look.casts_shadow &&
+              b.get<ParticleEmitter3D>()->system.desc.look.casts_shadow,
+          "casting edit leaked to sibling");
+    check(
+        !world.components().patch_field(a, "ParticleEmitter3D", "shadow_cutoff", std::numeric_limits<f32>::infinity()),
+        "nonfinite shadow cutoff accepted");
+    for (f32 bad : {-1.f, 1.01f}) {
+        a.get_mut<ParticleEmitter3D>()->system.desc.look.shadow_cutoff = bad;
+        check(!validate_particles3d(world).empty(), "out of range shadow cutoff accepted");
+    }
+    a.get_mut<ParticleEmitter3D>()->system.desc.look.shadow_cutoff = .7f;
     const auto descriptor_count = world.components().descriptors().size();
     register_builtin_editor_components(world);
     check(world.components().descriptors().size() == descriptor_count, "particle registration not idempotent");
@@ -118,6 +142,14 @@ void cpu() {
     check(copy.ok() && emitter(copy, "left").get<ParticleEmitter3D>()->system.count() == 0 &&
               !emitter(copy, "left").get<ParticleEmitter3D>()->emitting,
           "particle overrides or fresh simulation lost on save");
+    check(!emitter(copy, "left").get<ParticleEmitter3D>()->system.desc.look.receives_shadow &&
+              emitter(copy, "right").get<ParticleEmitter3D>()->system.desc.look.receives_shadow,
+          "shadow reception overrides lost on save/load");
+    check(!emitter(copy, "left").get<ParticleEmitter3D>()->system.desc.look.casts_shadow &&
+              emitter(copy, "left").get<ParticleEmitter3D>()->system.desc.look.shadow_cutoff == .7f &&
+              emitter(copy, "right").get<ParticleEmitter3D>()->system.desc.look.casts_shadow &&
+              emitter(copy, "right").get<ParticleEmitter3D>()->system.desc.look.shadow_cutoff == .3f,
+          "casting settings lost on save/load");
     auto& desc = b.get_mut<ParticleEmitter3D>()->system.desc;
     desc.max_particles = UINT32_MAX;
     check(!validate_particles3d(world).empty(), "huge capacity accepted");

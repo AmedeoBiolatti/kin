@@ -1,5 +1,11 @@
 # Interactive performance examples
 
+For a new 3D game, start from `camp_walk` or `projectile_range`: both use `SceneSession3D` for loading, frame stages,
+physics and rendering. Configure with `cmake --preset 3d`. The renderer viewers and timing workloads in this directory
+use the direct APIs so that they can isolate rendering costs; Summit integrates its existing simulation with the frame
+stages. See [the 3D guide](../docs/rendering_3d.md#owning-a-3d-scene-session) for the normal session lifecycle.
+For Lua gameplay, start from [Lua 3D range](#lua-3d-range), which uses the same session and frame stages.
+
 The experimental 3D [industrial yard](industrial_yard/README.md) adds a shared Kin/Godot Forward+ workload for independent
 objects, PBR material variation, distributed motion, real skinning, transparency and overlapping spot shadows. Its serial
 runner enforces RAM limits and measures a complete 1,440-frame interior/exterior route at 720p and 1440p, with feature controls.
@@ -712,8 +718,9 @@ supplies, pushes the crate and checks stale-handle rejection, ownership counts,
 collision updates and preservation of living particles. `--list-actions` exposes the
 existing named keyboard/mouse actions. Rebind them through `InputMap`; example-local
 `InputMapper::settings` configures gamepad buttons, dead zone and look sensitivity.
-The shared platform `InputMap` still covers keyboard/mouse; this example does not add
-a second engine input framework. Its CPU mapper tests cover rebinding/edge semantics,
+The shared platform `InputMap` binds gamepads too (buttons, triggers, stick halves);
+this example predates that and keeps its own mapper for its look sensitivity and
+settings file. Its CPU mapper tests cover rebinding/edge semantics,
 and GPU gameplay tests drive identical routes with scripted, keyboard and synthetic
 pad commands through the same systems.
 
@@ -958,3 +965,26 @@ On X11, prefix that command with `SDL_VIDEO_X11_SCALING_FACTOR=2` to emulate a
 200% display content scale; append a PNG path to capture the result.
 When capturing headlessly without `--frames`, the app runs through the requested
 capture frame automatically.
+
+## Lua 3D range
+
+`lua_range` uses `SceneSession3D` with Lua gameplay. Its C++ host owns services,
+fixed stepping, presentation, reload and report forwarding. WASD moves the authored
+survivor, Space jumps, Shift sprints, C crouches, E launches a crate, F plays the
+pickup action, R reloads and Escape exits. Lua PostPhysics and Audio systems read
+contact/character events and action markers through the same native stages as C++.
+Headless runs automatically walk, jump, launch and play an action, reporting those
+events and the player's position. Lua explicitly prepares an eight-slot crate pool,
+then acquires and returns leases without reloading the prefab. The report includes
+pool acquisition, reuse and exhaustion counts.
+
+```sh
+cmake --build build --target lua_range
+build/bin/lua_range --headless --frames=240 --seed=7 --mute --report=/tmp/lua-range.json
+```
+
+For a rendered headless capture, set `KIN_RENDER_BACKEND=gpu` and add
+`--screenshot=/tmp/lua-range.png` on a machine with a usable 3D GPU backend.
+
+Requires `KIN_EXPERIMENTAL_3D=ON`. Scene/script and existing CC0 art are under
+`summit/content`. See [Lua gameplay in 3D](../docs/rendering_3d.md#lua-gameplay-in-a-3d-scene).

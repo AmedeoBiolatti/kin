@@ -1,12 +1,16 @@
+#include "../scripting/lua_scene3d.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <kin/assets/content.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
+#include <kin/platform/log.hpp>
 #include <kin/scene/scene_frame3d.hpp>
 #include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
+#include <kin/scripting/script_engine.hpp>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -43,28 +47,37 @@ struct SceneRequestState3D {
     mutable std::mutex mutex;
     SceneRequestStatus3D status = SceneRequestStatus3D::Pending;
     ScenePrefab3D prefab;
+    ScenePreparedPrefab3D prepared;
+    ScenePrefabPool3D pool;
     std::string error;
-    void finish(SceneRequestStatus3D next, ScenePrefab3D value = {}, std::string_view message = {}) {
+    void finish(SceneRequestStatus3D next, ScenePrefab3D value = {}, std::string_view message = {},
+                ScenePreparedPrefab3D prepared_value = {}, ScenePrefabPool3D pool_value = {}) {
         std::lock_guard lock(mutex);
         if (status != SceneRequestStatus3D::Pending)
             return;
         prefab = value;
+        prepared = prepared_value;
+        pool = pool_value;
         error = message;
         status = next;
     }
 };
+enum class SceneOperationKind3D { Spawn, Despawn, Preload, CreatePool, ReleasePrepared, ReleasePool };
 struct SceneOperation3D {
     std::shared_ptr<SceneRequestState3D> result = std::make_shared<SceneRequestState3D>();
     std::filesystem::path path;
     SceneSpawn3D options;
     ScenePreparedPrefab3D prepared;
     ScenePrefabPool3D pool;
-    bool destroy = false, enqueued = false;
+    SceneOperationKind3D kind = SceneOperationKind3D::Spawn;
+    ScenePrefabPoolOptions3D pool_options;
+    bool enqueued = false;
     ScenePrefab3D prefab;
     SceneRequest3D source;
     void cancel(const char* reason) {
         result->finish(SceneRequestStatus3D::Cancelled, {}, reason);
         options = {};
+        pool_options = {};
         path.clear();
         source = {}; // release constructor captures even in an unflushed buffer
     }
@@ -221,6 +234,18 @@ ScenePrefab3D SceneRequest3D::prefab() const {
     std::lock_guard lock(_state->mutex);
     return _state->prefab;
 }
+ScenePreparedPrefab3D SceneRequest3D::prepared() const {
+    if (!_state)
+        return {};
+    std::lock_guard lock(_state->mutex);
+    return _state->prepared;
+}
+ScenePrefabPool3D SceneRequest3D::pool() const {
+    if (!_state)
+        return {};
+    std::lock_guard lock(_state->mutex);
+    return _state->pool;
+}
 std::string SceneRequest3D::error() const {
     if (!_state)
         return "invalid scene request";
@@ -294,7 +319,7 @@ SceneRequest3D SceneCommands3D::spawn(EcsCommandBuffer& buffer, const std::files
 }
 SceneRequest3D SceneCommands3D::despawn(EcsCommandBuffer& buffer, ScenePrefab3D prefab) const {
     auto op = std::make_shared<detail::SceneOperation3D>();
-    op->destroy = true;
+    op->kind = detail::SceneOperationKind3D::Despawn;
     op->prefab = prefab;
     return submit(buffer, std::move(op));
 }
@@ -313,8 +338,35 @@ SceneRequest3D SceneCommands3D::spawn(EcsCommandBuffer& buffer, ScenePrefabPool3
 }
 SceneRequest3D SceneCommands3D::despawn(EcsCommandBuffer& buffer, SceneRequest3D spawn) const {
     auto op = std::make_shared<detail::SceneOperation3D>();
-    op->destroy = true;
+    op->kind = detail::SceneOperationKind3D::Despawn;
     op->source = std::move(spawn);
+    return submit(buffer, std::move(op));
+}
+
+SceneRequest3D SceneCommands3D::preload(EcsCommandBuffer& buffer, const std::filesystem::path& path) const {
+    auto op = std::make_shared<detail::SceneOperation3D>();
+    op->kind = detail::SceneOperationKind3D::Preload;
+    op->path = path;
+    return submit(buffer, std::move(op));
+}
+SceneRequest3D SceneCommands3D::create_pool(EcsCommandBuffer& buffer, ScenePreparedPrefab3D prefab,
+                                            ScenePrefabPoolOptions3D options) const {
+    auto op = std::make_shared<detail::SceneOperation3D>();
+    op->kind = detail::SceneOperationKind3D::CreatePool;
+    op->prepared = prefab;
+    op->pool_options = std::move(options);
+    return submit(buffer, std::move(op));
+}
+SceneRequest3D SceneCommands3D::release(EcsCommandBuffer& buffer, ScenePreparedPrefab3D prefab) const {
+    auto op = std::make_shared<detail::SceneOperation3D>();
+    op->kind = detail::SceneOperationKind3D::ReleasePrepared;
+    op->prepared = prefab;
+    return submit(buffer, std::move(op));
+}
+SceneRequest3D SceneCommands3D::release(EcsCommandBuffer& buffer, ScenePrefabPool3D pool) const {
+    auto op = std::make_shared<detail::SceneOperation3D>();
+    op->kind = detail::SceneOperationKind3D::ReleasePool;
+    op->pool = pool;
     return submit(buffer, std::move(op));
 }
 
@@ -329,6 +381,14 @@ struct BoolScope {
 bool same_options(const ViewOptions3D& a, const ViewOptions3D& b) {
     return a.samples == b.samples && a.background == b.background && a.hdr == b.hdr && a.exposure == b.exposure &&
            a.bloom == b.bloom && a.bloom_threshold == b.bloom_threshold && a.pick == b.pick;
+}
+bool runtime_script_field(std::string_view component, std::string_view field) {
+    if (component == "Transform3D" && (field == "position" || field == "rotation"))
+        return true;
+    constexpr std::string_view configuration[] = {
+        "Transform3D", "ModelRenderer3D", "SkinnedMeshRenderer3D", "ModelMaterials3D",         "AnimatorAsset3D",
+        "Collider3D",  "RigidBody3D",     "CharacterController3D", "CharacterAnimationLink3D", "ParticleEmitter3D"};
+    return std::ranges::find(configuration, component) == std::end(configuration);
 }
 struct SourceStamp {
     std::optional<std::filesystem::file_time_type> time;
@@ -402,6 +462,17 @@ struct SceneSession3D::Data {
         std::map<u64, Prepared> prepared;
         std::map<u64, Pool> pools;
         std::shared_ptr<detail::SceneCommandQueue3D> commands = std::make_shared<detail::SceneCommandQueue3D>();
+
+        std::unique_ptr<ScriptEngine> script;
+        EcsCommandBuffer script_commands;
+        std::optional<Color> script_background;
+        bool script_entered = false, script_callback = false;
+        ~State() {
+            commands->active = false;
+            world.components().set_field_patch_handler({});
+            script_commands.clear();
+            script.reset(); // Lua systems/VM close while the world and services are still alive
+        }
 
         SceneSession3DContext context() {
             return {world,
@@ -605,6 +676,15 @@ struct SceneSession3D::Data {
         watches[path] = stamp(path);
     }
     void watch(State& state, const std::filesystem::path& source) { watch(state.watches, source); }
+    void watch_new_script_sources(State& state) {
+        if (!state.script)
+            return;
+        for (const auto& source : state.script->script_dependencies()) {
+            const auto path = (assets.root() / source).lexically_normal();
+            if (!state.watches.contains(path))
+                watch(state, source);
+        }
+    }
 
     void gather(State& state) {
         watch(state, state.asset.scene_path());
@@ -656,6 +736,9 @@ struct SceneSession3D::Data {
         });
         for (const auto& source : state.dependencies)
             watch(state, source);
+        if (state.script)
+            for (const auto& source : state.script->script_dependencies())
+                watch(state, source);
     }
 
     // Live batches contribute only their own bindings. Existing stamps stay
@@ -697,17 +780,122 @@ struct SceneSession3D::Data {
             watch(state, c->texture_asset.id);
     }
 
+    ScriptFrameContext script_context(f32 dt = 0) const { return {dt, options.scripts.input, options.scripts.app}; }
+    bool flush_script(State& state) {
+        std::string error;
+        if (state.script_commands.flush(state.world, error))
+            return true;
+        errors.push_back("script commands: " + error);
+        return false;
+    }
+    void exit_script(State& state) {
+        if (!state.script || !state.script_entered)
+            return;
+        state.script_entered = false;
+        if (!state.script->call_on_exit(script_context()))
+            KIN_LOG_ERROR_F("script", state.script->last_error(),
+                            (LogFields{{.name = "scene", .value = state.asset.scene_path().string()}}));
+        state.script_commands.clear();
+    }
+    bool load_script(State& state) {
+        const auto path = state.asset.scene()->script;
+        if (path.empty())
+            return true;
+        state.world.component<ScriptOwned>("ScriptOwned");
+        auto* target = &state;
+        const auto weak = std::weak_ptr(state.commands);
+        state.script = std::make_unique<ScriptEngine>([&, target, weak](sol::state& lua) {
+            scripting_detail::bind_lua_scene3d(
+                lua, {.world = &target->world,
+                      .asset_root = assets.root(),
+                      .physics = target->physics.get(),
+                      .bodies = target->bodies.get(),
+                      .commands = SceneCommands3D{target->commands},
+                      .queries = SceneQueries3D{target->commands},
+                      .callback_commands = [target]() -> EcsCommandBuffer* {
+                          return target->script_callback ? &target->script_commands : nullptr;
+                      },
+                      .active =
+                          [weak] {
+                              const auto queue = weak.lock();
+                              return queue && queue->active && queue->owner == std::this_thread::get_id();
+                          },
+                      .pool_stats = [target](ScenePrefabPool3D handle) -> std::optional<ScenePrefabPoolStats3D> {
+                          const auto* identity = target->world.raw().get<SceneIdentity3D>();
+                          if (!identity || handle.session != identity->session ||
+                              handle.generation != identity->generation || !target->pools.contains(handle.id))
+                              return std::nullopt;
+                          const auto& pool = target->pools.at(handle.id);
+                          size_t active = 0;
+                          for (auto id : pool.slots)
+                              if (!target->spawned.at(id).inactive)
+                                  ++active;
+                          return ScenePrefabPoolStats3D{pool.slots.size(), active,      pool.slots.size() - active,
+                                                        pool.acquired,     pool.reused, pool.exhausted};
+                      },
+                      .entity =
+                          [target](std::string_view id) {
+                              const auto found = target->asset.instance().by_authored_id.find(std::string(id));
+                              return found == target->asset.instance().by_authored_id.end()
+                                         ? SceneEntity3D{}
+                                         : checked_scene_entity(target->world, found->second);
+                          }});
+            if (options.scripts.bind)
+                options.scripts.bind(lua);
+        });
+        if (!state.script->load_file(assets.root(), path) ||
+            !state.script->call_on_load(
+                {.world = &state.world,
+                 .components = options.scripts.components,
+                 .script_path = assets.root() / path,
+                 .clear_entities =
+                     [target] {
+                         std::vector<EcsEntity> entities;
+                         target->world.query<ScriptOwned>().each_entity(
+                             [&](EcsEntity e, const ScriptOwned&) { entities.push_back(e); });
+                         for (auto e : entities)
+                             if (e.alive())
+                                 e.destroy();
+                     },
+                 .set_background = [target](Color color) { target->script_background = color; },
+                 .mark_render_dirty = [target] { target->rendering->clear_collection_cache(); }})) {
+            errors.push_back("scene script: " + state.script->last_error());
+            return false;
+        }
+        return true;
+    }
+    bool bind_world(State& state, bool preserve_watches = false) {
+        if (options.limits.max_entities && state.world.entities().all().size() > options.limits.max_entities)
+            throw std::runtime_error("initialization exceeds scene entity limit");
+        append(errors, resolve_render3d_assets(state.world, assets, options.particle_limits));
+        if (!errors.empty())
+            return false;
+        if (state.bodies)
+            append(errors, resolve_physics3d_assets(state.world, collision_assets));
+        if (!errors.empty())
+            return false;
+        const auto previous = preserve_watches ? state.watches : decltype(state.watches){};
+        gather(state);
+        for (const auto& [path, source] : previous)
+            state.watches[path] = source;
+        if (!errors.empty())
+            return false;
+        verify_physics(state);
+        return errors.empty() && collect(state);
+    }
+
     bool collect(State& state) {
         SceneFrame3D frame{state.world,
                            *state.rendering,
                            {.particles = options.particle_limits, .bodies = state.bodies.get(), .renderer = &renderer}};
+        // An authored SceneEnvironment3D replaces the game's view options except `pick`, which collect keeps.
         auto view_options = options.view;
         if (!frame.collect(state.scene, &view_options)) {
             append(errors, frame.diagnostics());
             return false;
         }
-        // Picking is controlled by the game even when environment settings replace the view options.
-        view_options.pick = view_options.pick || options.view.pick;
+        if (state.script_background)
+            view_options.background = *state.script_background;
         if (options.compose) {
             auto context = state.context();
             options.compose(context, state.scene);
@@ -808,9 +996,8 @@ SceneSession3D::SceneSession3D(Renderer3D& renderer, Assets3D& assets, SceneSess
          !config.physics->temp_memory_bytes || config.physics->collision_steps <= 0))
         throw std::invalid_argument("scene session requires positive physics capacities");
     if (config.physics && (!std::isfinite(config.physics->gravity.x) || !std::isfinite(config.physics->gravity.y) ||
-                           !std::isfinite(config.physics->gravity.z) || !std::isfinite(config.bodies.fixed_dt) ||
-                           config.bodies.fixed_dt <= 0 || config.bodies.max_steps <= 0))
-        throw std::invalid_argument("scene session requires finite gravity and positive physics stepping options");
+                           !std::isfinite(config.physics->gravity.z)))
+        throw std::invalid_argument("scene session requires finite gravity");
     if (bool(config.audio) != bool(config.audio_catalog))
         throw std::invalid_argument("scene session audio requires both an engine and a catalog");
 }
@@ -838,8 +1025,6 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
             append(d.errors, candidate->asset.diagnostics());
             return false;
         }
-        if (!candidate->asset.scene()->script.empty())
-            throw std::runtime_error("SceneSession3D requires a C++ scene; use ScriptScene for Lua scene lifecycle");
         if (refresh_all_assets) {
             d.assets.clear();
             d.collision_assets.clear();
@@ -866,11 +1051,13 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
             invalidate.operator()<SkinnedMeshRenderer3D>();
         }
         candidate->rendering = std::make_unique<WorldRenderState3D>(candidate->world);
-        if (!instantiate_scene3d(candidate->asset, candidate->world, d.assets,
-                                 {.particles = d.options.particle_limits, .update_scene_header = true})) {
+        // This host owns script execution. The additive instantiate_scene3d
+        // helper still rejects scripts for callers without a Lua lifecycle.
+        if (!candidate->asset.instantiate(candidate->world)) {
             append(d.errors, candidate->asset.diagnostics());
             return false;
         }
+        append(d.errors, resolve_render3d_assets(candidate->world, d.assets, d.options.particle_limits));
         if (!d.errors.empty())
             return false;
         if (d.options.physics) {
@@ -884,23 +1071,7 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
             auto context = candidate->context();
             d.options.initialize(context);
         }
-        if (d.options.limits.max_entities && candidate->world.entities().all().size() > d.options.limits.max_entities)
-            throw std::runtime_error("initialization exceeds scene entity limit");
-        // Bind any authored references added by initialization, before physics.
-        append(d.errors, resolve_render3d_assets(candidate->world, d.assets, d.options.particle_limits));
-        if (!d.errors.empty())
-            return false;
-        if (candidate->bodies)
-            append(d.errors, resolve_physics3d_assets(candidate->world, d.collision_assets));
-        if (!d.errors.empty())
-            return false;
-        d.gather(*candidate);
-        if (!d.errors.empty())
-            return false;
-        d.verify_physics(*candidate);
-        if (!d.errors.empty())
-            return false;
-        if (!d.collect(*candidate))
+        if (!d.load_script(*candidate) || !d.bind_world(*candidate))
             return false;
         d.pending = std::move(candidate);
         return true;
@@ -919,13 +1090,40 @@ bool SceneSession3D::activate() {
         d.errors.push_back("no prepared scene to activate");
         return false;
     }
-    d.current = std::move(d.pending);
-    ++d.generation;
-    d.current->world.raw().set(SceneIdentity3D{d.identity, d.generation});
-    {
-        std::lock_guard lock(d.current->commands->mutex);
-        d.current->commands->active = true;
+    BoolScope busy(d.editing);
+    auto candidate = std::move(d.pending);
+    candidate->world.raw().set(SceneIdentity3D{d.identity, d.generation + 1});
+    candidate->commands->active = true;
+    try {
+        if (candidate->script) {
+            candidate->world.components().set_field_patch_handler(
+                [state = candidate.get()](EcsEntity entity, std::string_view component, std::string_view field,
+                                          const ComponentFieldValue&, std::string& error) -> std::optional<bool> {
+                    const auto id = state->world.entities().authored_id(entity);
+                    if (id && state->asset.instance().by_authored_id.contains(*id) &&
+                        !runtime_script_field(component, field)) {
+                        error = "configure loaded 3D bindings in on_load, before on_enter";
+                        return false;
+                    }
+                    return std::nullopt;
+                });
+            BoolScope callback(candidate->script_callback);
+            if (!candidate->script->call_on_enter(d.script_context())) {
+                d.errors = {"scene script: " + candidate->script->last_error()};
+                return false;
+            }
+            if (!d.flush_script(*candidate) || !d.bind_world(*candidate, true))
+                return false;
+            candidate->script_entered = true;
+        }
+    } catch (const std::exception& error) {
+        d.errors = {"scene activation: " + std::string(error.what())};
+        return false;
     }
+    if (d.current)
+        d.exit_script(*d.current);
+    d.current = std::move(candidate);
+    ++d.generation;
     d.current->world.components().set_field_patch_handler(
         [this](EcsEntity entity, std::string_view component, std::string_view field, const ComponentFieldValue& value,
                std::string& error) -> std::optional<bool> {
@@ -939,6 +1137,8 @@ bool SceneSession3D::activate() {
                 error = "live edit exceeds 64 KiB text budget";
                 return false;
             }
+            if (_data->in_frame && runtime_script_field(component, field))
+                return std::nullopt;
             const SceneFieldEdit3D change{entity, std::string(component), std::string(field), value};
             if (edit(std::span(&change, 1)))
                 return true;
@@ -976,7 +1176,10 @@ void SceneSession3D::unload() {
     auto& d = *_data;
     if (d.current || d.pending)
         ++d.generation;
+    BoolScope busy(d.editing);
     d.pending.reset();
+    if (d.current)
+        d.exit_script(*d.current);
     d.current.reset();
     d.assets.trim();
     d.collision_assets.trim();
@@ -1207,10 +1410,9 @@ bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
                 (!selected || c->priority > priority || (c->priority == priority && entity.id() < selected))) {
                 priority = c->priority;
                 selected = entity.id();
-                new_options = c->view;
+                new_options = scene3d_view_options(c->view, d.options.view);
             }
         });
-        new_options.pick = new_options.pick || d.options.view.pick;
         if (d.renderer.available() && !same_options(new_options, active.options)) {
             new_view = d.renderer.create_view(d.options.viewport, new_options);
             require(bool(new_view), "edited scene view creation failed");
@@ -1573,6 +1775,11 @@ ScenePreparedPrefab3D SceneSession3D::preload(const std::filesystem::path& path)
     d.errors.clear();
     if (!d.gameplay_boundary())
         return {};
+    return preload_now(path);
+}
+ScenePreparedPrefab3D SceneSession3D::preload_now(const std::filesystem::path& path) {
+    auto& d = *_data;
+    d.errors.clear();
     auto& state = *d.current;
     if (state.prepared.size() >= d.options.max_preloaded_prefabs) {
         configuration_error("preloaded prefab budget exceeded");
@@ -1632,6 +1839,11 @@ bool SceneSession3D::release(ScenePreparedPrefab3D prefab) {
     d.errors.clear();
     if (!d.gameplay_boundary())
         return false;
+    return release_now(prefab);
+}
+bool SceneSession3D::release_now(ScenePreparedPrefab3D prefab) {
+    auto& d = *_data;
+    d.errors.clear();
     auto& state = *d.current;
     if (prefab.session != d.identity || prefab.generation != d.generation || !state.prepared.contains(prefab.id))
         return configuration_error("preloaded prefab is stale or foreign");
@@ -1654,6 +1866,11 @@ ScenePrefabPool3D SceneSession3D::create_pool(ScenePreparedPrefab3D prefab, Scen
     d.errors.clear();
     if (!d.gameplay_boundary())
         return {};
+    return create_pool_now(prefab, std::move(options));
+}
+ScenePrefabPool3D SceneSession3D::create_pool_now(ScenePreparedPrefab3D prefab, ScenePrefabPoolOptions3D options) {
+    auto& d = *_data;
+    d.errors.clear();
     auto& state = *d.current;
     if (prefab.session != d.identity || prefab.generation != d.generation || !state.prepared.contains(prefab.id)) {
         configuration_error("preloaded prefab is stale or foreign");
@@ -1688,7 +1905,7 @@ ScenePrefabPool3D SceneSession3D::create_pool(ScenePreparedPrefab3D prefab, Scen
         auto instance = spawn_prepared(prefab, {.configure = pool.options.reset});
         if (!instance) {
             auto errors = d.errors;
-            release(result);
+            release_now(result);
             d.errors = std::move(errors);
             return {};
         }
@@ -1837,6 +2054,11 @@ bool SceneSession3D::release(ScenePrefabPool3D handle) {
     d.errors.clear();
     if (!d.gameplay_boundary())
         return false;
+    return release_now(handle);
+}
+bool SceneSession3D::release_now(ScenePrefabPool3D handle) {
+    auto& d = *_data;
+    d.errors.clear();
     auto& state = *d.current;
     if (handle.session != d.identity || handle.generation != d.generation || !state.pools.contains(handle.id))
         return configuration_error("prefab pool is stale or foreign");
@@ -1985,8 +2207,20 @@ void SceneSession3D::drain_commands(bool systems_succeeded) {
             continue;
         }
         ScenePrefab3D prefab;
+        ScenePreparedPrefab3D prepared;
+        ScenePrefabPool3D pool;
         bool ok;
-        if (op->destroy) {
+        if (op->kind == detail::SceneOperationKind3D::Preload) {
+            prepared = preload_now(op->path);
+            ok = bool(prepared);
+        } else if (op->kind == detail::SceneOperationKind3D::CreatePool) {
+            pool = create_pool_now(op->prepared, std::move(op->pool_options));
+            ok = bool(pool);
+        } else if (op->kind == detail::SceneOperationKind3D::ReleasePrepared) {
+            ok = release_now(op->prepared);
+        } else if (op->kind == detail::SceneOperationKind3D::ReleasePool) {
+            ok = release_now(op->pool);
+        } else if (op->kind == detail::SceneOperationKind3D::Despawn) {
             auto target = op->prefab;
             if (op->source.status() != SceneRequestStatus3D::Invalid)
                 target = op->source.prefab();
@@ -2007,7 +2241,8 @@ void SceneSession3D::drain_commands(bool systems_succeeded) {
                     error += '\n';
                 error += message;
             }
-        op->result->finish(ok ? SceneRequestStatus3D::Succeeded : SceneRequestStatus3D::Failed, prefab, error);
+        op->result->finish(ok ? SceneRequestStatus3D::Succeeded : SceneRequestStatus3D::Failed, prefab, error, prepared,
+                           pool);
         d.errors.clear();
         // Release constructor captures and capacity before the next request.
         op.reset();
@@ -2026,6 +2261,22 @@ bool SceneSession3D::step(f32 dt) {
     }
     try {
         auto& state = *d.current;
+        if (state.script) {
+            BoolScope callback(state.script_callback);
+            if (!state.script->call_update(d.script_context(dt))) {
+                state.script_commands.clear();
+                drain_commands(false);
+                d.errors = {"scene script: " + state.script->last_error()};
+                return false;
+            }
+            if (!d.flush_script(state)) {
+                state.script_commands.clear();
+                drain_commands(false);
+                return false;
+            }
+            // Newly required modules join explicit polling without acknowledging older changes.
+            d.watch_new_script_sources(state);
+        }
         SceneFrame3D driver{state.world,
                             *state.rendering,
                             {.particles = d.options.particle_limits,
@@ -2074,7 +2325,9 @@ bool SceneSession3D::step(f32 dt) {
             }
             return false;
         };
-        if (!state.world.run_frame(dt, hooks)) {
+        const bool ran = state.world.run_frame(dt, hooks);
+        d.watch_new_script_sources(state);
+        if (!ran) {
             drain_commands(false);
             d.errors.push_back(state.world.systems().last_error());
             return false;
@@ -2086,6 +2339,49 @@ bool SceneSession3D::step(f32 dt) {
         return false;
     }
 }
+bool SceneSession3D::collect_actions(InputActionContext& actions) const {
+    auto& d = *_data;
+    if (d.editing || d.in_frame) {
+        d.errors = {"script action collection requires a scene between frames"};
+        return false;
+    }
+    BoolScope busy(d.editing);
+    if (!d.current || !d.current->script)
+        return true;
+    try {
+        if (!d.current->script->call_collect_actions(actions)) {
+            d.errors = {"scene script: " + d.current->script->last_error()};
+            return false;
+        }
+        d.watch_new_script_sources(*d.current);
+        return true;
+    } catch (const std::exception& error) {
+        d.errors = {"script dependencies: " + std::string(error.what())};
+    }
+    return false;
+}
+bool SceneSession3D::write_report(JsonWriter& report) const {
+    auto& d = *_data;
+    if (d.editing || d.in_frame) {
+        d.errors = {"script reporting requires a scene between frames"};
+        return false;
+    }
+    BoolScope busy(d.editing);
+    if (!d.current || !d.current->script)
+        return true;
+    try {
+        if (!d.current->script->call_write_report(report)) {
+            d.errors = {"scene script: " + d.current->script->last_error()};
+            return false;
+        }
+        d.watch_new_script_sources(*d.current);
+        return true;
+    } catch (const std::exception& error) {
+        d.errors = {"script dependencies: " + std::string(error.what())};
+    }
+    return false;
+}
+
 bool SceneSession3D::collect() {
     if (_data->editing || _data->in_frame)
         return configuration_error("recursive scene collection during a callback");

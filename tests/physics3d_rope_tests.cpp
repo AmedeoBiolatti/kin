@@ -1057,6 +1057,41 @@ void test_ecs_rope_waits_for_its_anchor() {
     CHECK(bodies.rope_of(holder).valid());
 }
 
+// A segment is the rope's: destroying, reshaping or switching it from outside is refused (destroyed, it left rope_points
+// reading a dead body at the origin), while rays, pushes and the rope's own calls still reach it.
+void test_segments_belong_to_the_rope() {
+    World3D world(serial());
+    const Body3D floor = add_floor(world);
+    const RopeHandle3D rope = world.create_rope(hanging({0.0f, 6.0f, 0.0f}, 4.0f));
+    for (int i = 0; i < 10; ++i) {
+        world.step(dt);
+    }
+    const Body3D seg = world.rope_segment_body(rope, 5);
+    CHECK(world.owner_of(seg) == BodyOwner3D::Rope);
+    CHECK(world.owner_of(floor) == BodyOwner3D::None);
+    const std::vector<RopePoint3D> before = world.rope_points(rope);
+    CHECK(!world.destroy_body(seg));
+    CHECK(world.contains(seg) && world.body_count() == 17);
+    CHECK(!world.set_shape(seg, Shape3D::sphere(0.1f)));
+    CHECK(!world.set_motion(seg, Body3DMotion::Kinematic));
+    CHECK(world.motion(seg) == Body3DMotion::Dynamic);
+    const std::vector<RopePoint3D> after = world.rope_points(rope);
+    CHECK(after.size() == before.size());
+    for (std::size_t i = 0; i < after.size() && i < before.size(); ++i) {
+        CHECK(length(after[i].position - before[i].position) == 0.0f);
+    }
+    // A ray across segment 5's middle names it, and an impulse moves it.
+    const auto hit = world.raycast({1.0f, 4.625f, 0.0f}, {-1.0f, 4.625f, 0.0f});
+    CHECK(hit.has_value() && hit->body == seg && world.owner_of(hit->body) == BodyOwner3D::Rope);
+    world.add_impulse(seg, {0.5f, 0.0f, 0.0f});
+    world.step(dt);
+    CHECK(world.linear_velocity(seg).x > 0.0f);
+    // The rope's own calls are not refused: a new length reshapes every segment, and destroy_rope takes them.
+    world.set_rope_length(rope, 3.0f);
+    CHECK_NEAR(world.rope_state(rope).rest_length, 3.0f, 1e-5f);
+    world.destroy_rope(rope);
+    CHECK(!world.contains(seg) && world.body_count() == 1);
+}
 
 } // namespace
 
@@ -1087,6 +1122,7 @@ int main(int argc, char** argv) {
     test_ecs_rope();
     test_ecs_rope_breaks_with_an_event();
     test_ecs_rope_waits_for_its_anchor();
+    test_segments_belong_to_the_rope();
     if (failures != 0) {
         std::fprintf(stderr, "physics3d_rope_tests: %d check(s) failed\n", failures);
         return 1;

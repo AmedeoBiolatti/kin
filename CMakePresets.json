@@ -9,14 +9,15 @@
     {
       "name": "ship",
       "displayName": "Shipping (Ninja)",
-      "description": "Games for players: KIN_SHIPPING, Release, no tests. On Windows, run from a Visual Studio developer prompt.",
+      "description": "Games for players: KIN_SHIPPING, Release, no tests, no experimental 3D engine. On Windows, run from a Visual Studio developer prompt.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-ship",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "KIN_SHIPPING": "ON",
         "KIN_BUILD_TESTS": "OFF",
-        "KIN_BUILD_BENCHMARKS": "OFF"
+        "KIN_BUILD_BENCHMARKS": "OFF",
+        "KIN_EXPERIMENTAL_3D": "OFF"
       }
     },
     {
@@ -41,6 +42,16 @@
         "CMAKE_BUILD_TYPE": "Release",
         "KIN_EXPERIMENTAL_3D": "OFF"
       }
+    },
+    {
+      "name": "3d",
+      "displayName": "Experimental 3D engine and samples",
+      "inherits": "2d",
+      "binaryDir": "${sourceDir}/build-3d",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON"
+      },
+      "description": "Release build with the experimental 3D renderer, physics, samples and tests."
     }
   ],
   "buildPresets": [
@@ -58,6 +69,11 @@
       "name": "2d",
       "configurePreset": "2d",
       "jobs": 1
+    },
+    {
+      "name": "3d",
+      "configurePreset": "3d",
+      "jobs": 4
     }
   ],
   "testPresets": [
@@ -72,6 +88,16 @@
       },
       "environment": {
         "KIN_RENDER_BACKEND": "sdl"
+      }
+    },
+    {
+      "name": "3d",
+      "configurePreset": "3d",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
       }
     }
   ]

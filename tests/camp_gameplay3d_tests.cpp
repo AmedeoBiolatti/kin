@@ -97,11 +97,11 @@ void visibility(Renderer3D& renderer,Assets3D& assets) {
     const auto owned=camp::state(*session.world()).supplies;
     check(session.despawn(owned[1])&&session.despawn(owned[2]),"visibility fixture setup failed");
     for(int i=0;i<10;++i)check(session.step(1.f/60),"visibility grounding failed");
-    check(camp::state(*session.world()).nearby==0&&session.resolve(owned[0].root).get<PointLight3D>()->color.x>1,"visible supply was not highlighted");
+    check(camp::state(*session.world()).nearby==0&&session.resolve(owned[0].root).get<PointLight3D>()->color.r>1,"visible supply was not highlighted");
     const auto wall_shape=Shape3D::box({.06f,.5f,.5f});
     auto wall=session.physics()->create_body({.shape=wall_shape,.motion=Body3DMotion::Static,.position={1.3f,.5f,1.2f}});
     camp::submit(*session.world(),{.interact=true});check(session.step(1.f/60),"hand occlusion step failed");
-    check(camp::state(*session.world()).nearby<0&&camp::state(*session.world()).collected==0&&session.alive(owned[0])&&session.resolve(owned[0].root).get<PointLight3D>()->color.x<1,"unmapped wall did not block collection/clear highlight");
+    check(camp::state(*session.world()).nearby<0&&camp::state(*session.world()).collected==0&&session.alive(owned[0])&&session.resolve(owned[0].root).get<PointLight3D>()->color.r<1,"unmapped wall did not block collection/clear highlight");
     session.physics()->destroy_body(wall);check(session.step(1.f/60)&&camp::state(*session.world()).nearby==0,"cleared hand occlusion did not restore selection");
     const auto camera_position=session.entity("camera").get<Transform3D>()->position;
     const auto supply_position=session.resolve(owned[0].root).get<Transform3D>()->position+Vec3f{0,.3f,0};

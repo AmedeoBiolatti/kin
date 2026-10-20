@@ -225,6 +225,10 @@ public:
     ModelData3D read(const Sink& sink) {
         _sink = &sink;
         build_skins();
+        if (_out.skeletons.size() > 1)
+            unsupported("multiple distinct skin palettes are unsupported; export one palette with identical joint "
+                        "order and inverse bind matrices, or split the model",
+                        _label);
         const cgltf_scene* scene = _data->scene ? _data->scene : _data->scenes_count ? &_data->scenes[0] : nullptr;
         build_node_skeleton(scene);
         if (scene) {
@@ -246,6 +250,8 @@ public:
             _node_joint.clear();
         }
         build_clips();
+        if (_out.node_skeleton > 0 && _node_parts > 0)
+            unsupported("mixed skin and plain-node animation requires multiple poses; split the model", _label);
         return std::move(_out);
     }
 
@@ -255,10 +261,25 @@ private:
         u32 skeleton = 0;
         std::vector<u32> remap; // the file's joint index to the skeleton's
     };
+    // What makes two of a file's skins the same skeleton: the joints, in the file's order, and their inverse bind
+    // matrices (Blender writes one skin a mesh object over one armature: all equal).
+    struct SkinKey {
+        std::vector<const cgltf_node*> joints;
+        std::vector<f32> binds;
+        std::size_t skin = 0; // the file's index of the skin that was made
+        bool operator==(const SkinKey& other) const { return joints == other.joints && binds == other.binds; }
+    };
 
     void note(const char* what, const std::string& detail) const {
         KIN_LOG_WARN_F("render", what,
                        (LogFields{{.name = "model", .value = _label}, {.name = "detail", .value = detail}}));
+    }
+    void unsupported(const char* what, const std::string& detail) {
+        note(what, detail);
+        const std::string issue = std::string(what) + ": " + detail;
+        _out.asset_diagnostics.push_back(issue);
+        if (_issues)
+            _issues->push_back(issue);
     }
 
     // --- skins
@@ -268,16 +289,31 @@ private:
             const cgltf_skin& skin = _data->skins[si];
             const std::size_t n = skin.joints_count;
             if (n == 0 || n > max_skin_joints) {
-                note("3D: a skin is not used (its meshes are drawn static)",
-                     std::string{skin.name ? skin.name : "skin"} + " has " + std::to_string(n) + " joints, " +
-                         (n == 0 ? "none" : "more than the " + std::to_string(max_skin_joints) + " a skin can have"));
+                unsupported(
+                    "3D: a skin is not used (its meshes are drawn static)",
+                    std::string{skin.name ? skin.name : "skin"} + " has " + std::to_string(n) + " joints, " +
+                        (n == 0 ? "none" : "more than the " + std::to_string(max_skin_joints) + " a skin can have"));
                 continue;
             }
             const cgltf_accessor* binds = skin.inverse_bind_matrices;
             if (const char* why = !binds ? nullptr : binds->type != cgltf_type_mat4 ? "not MAT4" : unreadable(binds)) {
-                note("3D: a skin is not used (its meshes are drawn static)",
-                     std::string{skin.name ? skin.name : "skin"} + ": its inverse bind matrices cannot be read (" +
-                         why + ")");
+                unsupported("3D: a skin is not used (its meshes are drawn static)",
+                            std::string{skin.name ? skin.name : "skin"} +
+                                ": its inverse bind matrices cannot be read (" + why + ")");
+                continue;
+            }
+            // The same joints with the same inverse bind matrices as an earlier skin: one skeleton, so that a character
+            // exported as several mesh objects (each with its own skin) is posed whole. A skin that only shares some
+            // joints keeps its own skeleton and receives the shared nodes' channels too.
+            SkinKey key;
+            key.joints.assign(skin.joints, skin.joints + n);
+            key.binds.resize(n * 16, 0.0f);
+            for (std::size_t j = 0; j < std::min<std::size_t>(n, binds->count); ++j) {
+                cgltf_accessor_read_float(binds, j, key.binds.data() + j * 16, 16);
+            }
+            key.skin = si;
+            if (const auto same = std::find(_skin_keys.begin(), _skin_keys.end(), key); same != _skin_keys.end()) {
+                _skins[si] = _skins[same->skin];
                 continue;
             }
             // The joint above each, among the skin's own: the nearest ancestor node that is one. A plain node between
@@ -303,9 +339,10 @@ private:
                 }
             }
             if (nodes.size() > max_skin_joints) {
-                note("3D: a skin has non-joint nodes between joints: their placing is ignored",
-                     std::string{skin.name ? skin.name : "skin"} + " would have " + std::to_string(nodes.size()) +
-                         " joints with them, more than the " + std::to_string(max_skin_joints) + " a skin can have");
+                unsupported("3D: a skin has non-joint nodes between joints: their placing is ignored",
+                            std::string{skin.name ? skin.name : "skin"} + " would have " +
+                                std::to_string(nodes.size()) + " joints with them, more than the " +
+                                std::to_string(max_skin_joints) + " a skin can have");
                 for (std::size_t j = n; j < nodes.size(); ++j) {
                     index.erase(nodes[j]);
                 }
@@ -340,7 +377,7 @@ private:
                 }
             }
             if (order.size() != count) {
-                note("3D: a skin is not used (its joints form a loop)", skin.name ? skin.name : "skin");
+                unsupported("3D: a skin is not used (its joints form a loop)", skin.name ? skin.name : "skin");
                 continue;
             }
             SkinInfo info;
@@ -375,6 +412,7 @@ private:
                 if (!_joint_of.count(node)) {
                     _joint_of[node] = {static_cast<i32>(si), static_cast<i32>(k)};
                 }
+                _animation_joints[node].push_back({static_cast<u32>(_out.skeletons.size()), static_cast<u32>(k)});
             }
             // Where the roots hang: the nodes above them (the first root's parent; the others should agree).
             bool first_root = true;
@@ -387,14 +425,15 @@ private:
                     sk.root_transform = world;
                     first_root = false;
                 } else if (std::memcmp(world.m, sk.root_transform.m, sizeof(world.m)) != 0) {
-                    note("3D: a skin's roots hang from different places: the first root's is used for all",
-                         skin.name ? skin.name : "skin");
+                    unsupported("3D: a skin's roots hang from different places: the first root's is used for all",
+                                skin.name ? skin.name : "skin");
                 }
             }
             info.ok = true;
             info.skeleton = static_cast<u32>(_out.skeletons.size());
             _out.skeletons.push_back(std::move(sk));
             _skins[si] = std::move(info);
+            _skin_keys.push_back(std::move(key));
         }
     }
 
@@ -434,8 +473,9 @@ private:
             return;
         }
         if (marked > max_skin_joints) {
-            note("3D: animations move more nodes than a skeleton can have: those nodes are not animated",
-                 std::to_string(marked) + " nodes with those above them, more than " + std::to_string(max_skin_joints));
+            unsupported("3D: animations move more nodes than a skeleton can have: those nodes are not animated",
+                        std::to_string(marked) + " nodes with those above them, more than " +
+                            std::to_string(max_skin_joints));
             return;
         }
         // Parents first: from each root down, in the file's order of children (marked nodes are closed upward, so a
@@ -500,10 +540,13 @@ private:
             for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
                 const cgltf_primitive& primitive = node->mesh->primitives[p];
                 if (primitive.type != cgltf_primitive_type_triangles) {
+                    unsupported("only TRIANGLES primitives are supported; triangulate before export", name);
                     continue; // points and lines are not drawn
                 }
                 const bool bound = own_info && own_info->ok && attribute(primitive, cgltf_attribute_type_joints) &&
                                    attribute(primitive, cgltf_attribute_type_weights);
+                if (own && !bound)
+                    unsupported("skinned primitives require a supported skin, JOINTS_0 and WEIGHTS_0", name);
                 MeshData3D data = mesh_data(primitive, bound ? own_info : nullptr, name);
                 if (data.vertices.empty()) {
                     continue;
@@ -552,7 +595,7 @@ private:
     // through `info`'s table, the weights renormalised; a vertex with no usable influence goes to joint 0. False when
     // cgltf cannot read them.
     bool read_skin(const cgltf_primitive& primitive, const SkinInfo& info, std::size_t count, const char* name,
-                   std::vector<MeshSkinVertex3D>& out) const {
+                   std::vector<MeshSkinVertex3D>& out) {
         const cgltf_accessor* joints = attribute(primitive, cgltf_attribute_type_joints);
         const cgltf_accessor* weights = attribute(primitive, cgltf_attribute_type_weights);
         out.assign(count, {});
@@ -596,28 +639,108 @@ private:
             out[i] = v;
         }
         if (none > 0 || bad > 0) {
-            note("3D: a skinned mesh has vertices with no usable weights or joints past the skin: bound to joint 0 or "
-                 "dropped",
-                 std::string{name} + ": " + std::to_string(none) + " vertices without weights, " + std::to_string(bad) +
-                     " influences past the joints");
+            unsupported(
+                "3D: a skinned mesh has vertices with no usable weights or joints past the skin: bound to joint 0 or "
+                "dropped",
+                std::string{name} + ": " + std::to_string(none) + " vertices without weights, " + std::to_string(bad) +
+                    " influences past the joints");
         }
         return true;
     }
 
+    // --- texture coordinates
+    // A material's placing of its textures on the mesh: the TEXCOORD set they sample and the KHR_texture_transform
+    // they apply to it. The mesh holds one set of texture coordinates, so the transform is applied to them as they are
+    // read, which a material can only have when all of its textures agree on it.
+    struct UvTransform {
+        f32 offset[2] = {0.0f, 0.0f};
+        f32 rotation = 0.0f;
+        f32 scale[2] = {1.0f, 1.0f};
+        cgltf_int texcoord = 0;
+
+        bool operator==(const UvTransform& other) const {
+            return offset[0] == other.offset[0] && offset[1] == other.offset[1] && rotation == other.rotation &&
+                   scale[0] == other.scale[0] && scale[1] == other.scale[1] && texcoord == other.texcoord;
+        }
+        bool identity() const { return *this == UvTransform{.texcoord = texcoord}; }
+        // As the extension's reference shader: scale, then rotate, then offset.
+        Vec2f apply(Vec2f uv) const {
+            const f32 c = std::cos(rotation), s = std::sin(rotation);
+            const f32 u = uv.x * scale[0], v = uv.y * scale[1];
+            return {c * u - s * v + offset[0], s * u + c * v + offset[1]};
+        }
+    };
+
+    static UvTransform uv_transform_of(const cgltf_texture_view& view) {
+        UvTransform t;
+        t.texcoord = view.texcoord;
+        if (view.has_transform) {
+            t.offset[0] = view.transform.offset[0];
+            t.offset[1] = view.transform.offset[1];
+            t.rotation = view.transform.rotation;
+            t.scale[0] = view.transform.scale[0];
+            t.scale[1] = view.transform.scale[1];
+            if (view.transform.has_texcoord) {
+                t.texcoord = view.transform.texcoord;
+            }
+        }
+        return t;
+    }
+
+    // The placing all of `m`'s textures share, or null for none to apply (no material, no textures, TEXCOORD_0 with no
+    // transform, or textures that disagree: said once for the material, and its coordinates are read as they are).
+    const UvTransform* uv_transform(const cgltf_material* m) {
+        if (!m) {
+            return nullptr;
+        }
+        const auto found = _uv_transforms.find(m);
+        if (found != _uv_transforms.end()) {
+            return found->second ? &*found->second : nullptr;
+        }
+        std::optional<UvTransform> shared;
+        bool agree = true;
+        const cgltf_texture_view* views[] = {
+            m->has_pbr_metallic_roughness ? &m->pbr_metallic_roughness.base_color_texture : nullptr,
+            m->has_pbr_metallic_roughness ? &m->pbr_metallic_roughness.metallic_roughness_texture : nullptr,
+            &m->normal_texture, &m->occlusion_texture, &m->emissive_texture};
+        for (const cgltf_texture_view* view : views) {
+            if (!view || !view->texture) {
+                continue;
+            }
+            const UvTransform t = uv_transform_of(*view);
+            if (!shared) {
+                shared = t;
+            } else if (!(*shared == t)) {
+                agree = false;
+            }
+        }
+        if (!agree) {
+            unsupported(
+                "3D: a material's textures place themselves differently (KHR_texture_transform or TEXCOORD sets): "
+                "its coordinates are used as they are",
+                m->name ? m->name : "material");
+            shared.reset();
+        } else if (shared && shared->texcoord == 0 && shared->identity()) {
+            shared.reset();
+        }
+        const auto& kept = _uv_transforms.emplace(m, shared).first->second;
+        return kept ? &*kept : nullptr;
+    }
+
     // Why a primitive's geometry cannot be read, or null. cgltf hands back zeros, or nothing, for compressed and sparse
-    // data: read anyway, the mesh would be a heap of vertices at the origin.
-    static const char* refusal(const cgltf_primitive& primitive, bool skinned) {
+    // data: read anyway, the mesh would be a heap of vertices at the origin. `uvs` is the texture coordinate set that
+    // is read.
+    static const char* refusal(const cgltf_primitive& primitive, const cgltf_accessor* uvs, bool skinned) {
         if (primitive.has_draco_mesh_compression) {
             return "Draco compression (KHR_draco_mesh_compression) is not read";
         }
         const cgltf_accessor* positions = attribute(primitive, cgltf_attribute_type_position);
         const cgltf_accessor* normals = attribute(primitive, cgltf_attribute_type_normal);
-        const cgltf_accessor* uvs = attribute(primitive, cgltf_attribute_type_texcoord);
         const cgltf_accessor* colors = attribute(primitive, cgltf_attribute_type_color);
         if (positions->type != cgltf_type_vec3 || (normals && normals->type != cgltf_type_vec3) ||
             (uvs && uvs->type != cgltf_type_vec2) ||
             (colors && colors->type != cgltf_type_vec3 && colors->type != cgltf_type_vec4)) {
-            return "an attribute has the wrong number of components (POSITION and NORMAL are VEC3, TEXCOORD_0 VEC2, "
+            return "an attribute has the wrong number of components (POSITION and NORMAL are VEC3, TEXCOORD VEC2, "
                    "COLOR_0 VEC3 or VEC4)";
         }
         const cgltf_accessor* used[] = {positions,
@@ -636,25 +759,46 @@ private:
     }
 
     // A primitive left out: logged and, for a model, kept with its asset diagnostics.
-    void refuse(const char* name, const std::string& why) const {
+    void refuse(const char* name, const std::string& why) {
         note("3D: a mesh primitive is left out (its geometry cannot be read)", std::string{name} + ": " + why);
+        _out.asset_diagnostics.push_back("model geometry could not be read: " + std::string{name} + ": " + why);
         if (_issues) {
             _issues->push_back("model geometry could not be read: " + std::string{name} + ": " + why);
         }
     }
 
-    MeshData3D mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name) const {
+    MeshData3D mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name) {
         MeshData3D data;
+        if (primitive.targets_count)
+            unsupported("morph target geometry is unsupported; bake the deformation before export", name);
         const cgltf_accessor* positions = attribute(primitive, cgltf_attribute_type_position);
         if (!positions) {
             return data;
         }
-        if (const char* why = refusal(primitive, skin != nullptr)) {
+        // The texture coordinates the material samples: its set, transformed as it says, else TEXCOORD_0 as it is.
+        const UvTransform* placing = uv_transform(primitive.material);
+        const cgltf_accessor* uvs = attribute(primitive, cgltf_attribute_type_texcoord);
+        if (!uvs && !placing && primitive.material) {
+            const auto& m = *primitive.material;
+            if (m.pbr_metallic_roughness.base_color_texture.texture ||
+                m.pbr_metallic_roughness.metallic_roughness_texture.texture || m.normal_texture.texture ||
+                m.occlusion_texture.texture || m.emissive_texture.texture)
+                unsupported("textured primitives require their TEXCOORD set", name);
+        }
+        if (placing && placing->texcoord != 0) {
+            if (const cgltf_accessor* set =
+                    attribute_index(primitive, cgltf_attribute_type_texcoord, placing->texcoord)) {
+                uvs = set;
+            } else {
+                unsupported("3D: a material samples a TEXCOORD set its mesh does not have: TEXCOORD_0 is used",
+                            std::string{name} + ": TEXCOORD_" + std::to_string(placing->texcoord));
+            }
+        }
+        if (const char* why = refusal(primitive, uvs, skin != nullptr)) {
             refuse(name, why);
             return data;
         }
         const cgltf_accessor* normals = attribute(primitive, cgltf_attribute_type_normal);
-        const cgltf_accessor* uvs = attribute(primitive, cgltf_attribute_type_texcoord);
         const cgltf_accessor* colors = attribute(primitive, cgltf_attribute_type_color);
         data.vertices.resize(positions->count);
         bool read = true;
@@ -663,8 +807,12 @@ private:
             read = cgltf_accessor_read_float(positions, i, &v.position.x, 3) && read;
             if (normals)
                 read = cgltf_accessor_read_float(normals, i, &v.normal.x, 3) && read;
-            if (uvs)
+            if (uvs) {
                 read = cgltf_accessor_read_float(uvs, i, &v.uv.x, 2) && read;
+                if (placing) {
+                    v.uv = placing->apply(v.uv);
+                }
+            }
             if (colors) {
                 cgltf_float c[4] = {1, 1, 1, 1};
                 read = cgltf_accessor_read_float(colors, i, c, cgltf_num_components(colors->type)) && read;
@@ -674,9 +822,10 @@ private:
         if (skin) {
             read = read_skin(primitive, *skin, data.vertices.size(), name, data.skin) && read;
             if (attribute_index(primitive, cgltf_attribute_type_joints, 1)) {
-                note("3D: a skinned mesh has more than four influences a vertex: the strongest four of JOINTS_0 are "
-                     "used",
-                     name);
+                unsupported(
+                    "3D: a skinned mesh has more than four influences a vertex: the strongest four of JOINTS_0 are "
+                    "used",
+                    name);
             }
         }
         // cgltf_accessor_read_index has no failure to report: refusal() has seen that the indices' data is there.
@@ -745,8 +894,9 @@ private:
                     morph = true;
                     continue;
                 }
-                const auto found = channel.target_node ? _joint_of.find(channel.target_node) : _joint_of.end();
-                if (found == _joint_of.end() || !_skins[static_cast<std::size_t>(found->second.first)].ok) {
+                const auto found =
+                    channel.target_node ? _animation_joints.find(channel.target_node) : _animation_joints.end();
+                if (found == _animation_joints.end()) {
                     // A node that is no joint: the node skeleton's, if it has it.
                     const auto plain = channel.target_node ? _node_joint.find(channel.target_node) : _node_joint.end();
                     if (plain == _node_joint.end()) {
@@ -763,20 +913,19 @@ private:
                     read_channel(channel, node_clip->channels[static_cast<std::size_t>(plain->second)]);
                     continue;
                 }
-                // The skeleton this joint belongs to is the first skin that has it.
-                const SkinInfo& info = _skins[static_cast<std::size_t>(found->second.first)];
-                const std::size_t joint = static_cast<std::size_t>(found->second.second);
-                auto it = clip_of.find(info.skeleton);
-                if (it == clip_of.end()) {
-                    AnimClip3D clip;
-                    clip.name = name;
-                    clip.skeleton = info.skeleton;
-                    clip.channels.resize(_out.skeletons[info.skeleton].joint_count());
-                    _out.clips.push_back(std::move(clip));
-                    it = clip_of.emplace(info.skeleton, _out.clips.size() - 1).first;
+                // One glTF node can belong to several skins with different joint lists or inverse binds.
+                for (const auto& [skeleton, joint] : found->second) {
+                    auto it = clip_of.find(skeleton);
+                    if (it == clip_of.end()) {
+                        AnimClip3D clip;
+                        clip.name = name;
+                        clip.skeleton = skeleton;
+                        clip.channels.resize(_out.skeletons[skeleton].joint_count());
+                        _out.clips.push_back(std::move(clip));
+                        it = clip_of.emplace(skeleton, _out.clips.size() - 1).first;
+                    }
+                    read_channel(channel, _out.clips[it->second].channels[joint]);
                 }
-                JointChannels3D& channels = _out.clips[it->second].channels[joint];
-                read_channel(channel, channels);
             }
             for (const auto& [skeleton, at] : clip_of) {
                 _out.clips[at].duration = _out.clips[at].key_duration();
@@ -788,7 +937,7 @@ private:
                 note("3D: an animation moves no joint of a skin and no node a part hangs from: it is left out", name);
             }
             if (morph) {
-                note("3D: morph target weights are not supported: those channels are ignored", name);
+                unsupported("3D: morph target weights are not supported: those channels are ignored", name);
             }
             if (other && (!clip_of.empty() || node_clip)) {
                 note("3D: an animation moves nodes no part of the model hangs from: those channels are ignored", name);
@@ -799,7 +948,7 @@ private:
         }
     }
 
-    void read_channel(const cgltf_animation_channel& channel, JointChannels3D& out) const {
+    void read_channel(const cgltf_animation_channel& channel, JointChannels3D& out) {
         const cgltf_animation_sampler& sampler = *channel.sampler;
         const Interpolation3D mode = sampler.interpolation == cgltf_interpolation_type_step ? Interpolation3D::Step
                                      : sampler.interpolation == cgltf_interpolation_type_cubic_spline
@@ -808,12 +957,12 @@ private:
         const std::size_t keys = sampler.input->count;
         const std::size_t per_key = mode == Interpolation3D::CubicSpline ? 3 : 1;
         if (sampler.output->count < keys * per_key) {
-            note("3D: an animation channel has fewer values than keys: ignored", _label);
+            unsupported("3D: an animation channel has fewer values than keys: ignored", _label);
             return;
         }
         for (const cgltf_accessor* accessor : {sampler.input, sampler.output}) {
             if (const char* why = unreadable(accessor)) {
-                note("3D: an animation channel's keys cannot be read: ignored", _label + ": " + why);
+                unsupported("3D: an animation channel's keys cannot be read: ignored", _label + ": " + why);
                 return;
             }
         }
@@ -853,9 +1002,12 @@ private:
     ModelData3D _out;
     std::vector<SkinInfo> _skins;
     std::map<const cgltf_node*, std::pair<i32, i32>>
-        _joint_of;                                // a joint node: its skin (the file's) and its index in it
+        _joint_of; // a joint node: its skin (the file's) and its index in it
+    std::map<const cgltf_node*, std::vector<std::pair<u32, u32>>> _animation_joints;
     std::map<const cgltf_node*, i32> _node_joint; // a node of the node skeleton: its joint
     std::size_t _node_parts = 0;                  // parts that hang from one
+    std::vector<SkinKey> _skin_keys;              // the skins made, to fold the same again into them
+    std::map<const cgltf_material*, std::optional<UvTransform>> _uv_transforms; // by material, once looked at
 };
 
 // Parses glTF bytes (and loads the buffers they name) into cgltf's data; null with `error` set when it does not read.
@@ -884,6 +1036,22 @@ std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> parse_gltf(std::string_view b
             const char* uri = data->buffers[i].uri;
             if (uri && std::strncmp(uri, "data:", 5) != 0 && outside_content(path, uri)) {
                 refused = std::string{"a buffer it names is outside its content (not read): "} + uri;
+            }
+        }
+        // An extension the file says a reader must implement (extensionsRequired) that this one does not: refused
+        // whole, rather than read as if it were not there. The ones read: unlit and emissive strength (materials),
+        // quantized attributes (cgltf reads every component type), texture transforms (applied to the coordinates as
+        // they are read), KTX2 textures (read where their format can be sampled, said as it fails otherwise).
+        // Compressed geometry (Draco, meshopt) is not read, so a file that requires it is refused here too.
+        static constexpr const char* implemented[] = {"KHR_materials_emissive_strength", "KHR_materials_unlit",
+                                                      "KHR_mesh_quantization", "KHR_texture_basisu",
+                                                      "KHR_texture_transform"};
+        for (cgltf_size i = 0; i < data->extensions_required_count && refused.empty(); ++i) {
+            const char* name = data->extensions_required[i];
+            const bool known = name && std::any_of(std::begin(implemented), std::end(implemented),
+                                                   [&](const char* it) { return std::strcmp(it, name) == 0; });
+            if (!known) {
+                refused = std::string{"it requires an extension kin does not implement: "} + (name ? name : "");
             }
         }
     }
@@ -1296,6 +1464,8 @@ bool read_model_data(std::string_view bytes, const std::filesystem::path& path, 
     GltfReader reader{owned.get(), path.string()};
     out = reader.read([&](ModelPartData3D&& part, const cgltf_material*) { parts.parts.push_back(std::move(part)); });
     out.parts = std::move(parts.parts);
+    if (error)
+        error->clear();
     return true;
 }
 
@@ -1319,11 +1489,11 @@ Mat4f Model3D::part_transform(std::size_t part, std::span<const Mat4f> node_matr
     return node_matrices[static_cast<std::size_t>(p.node)] * p.node_offset;
 }
 
-Model3D Renderer3D::load_model(const std::filesystem::path& path, std::string* error) {
-    return load_model(path, MeshOptions3D{}, error);
+Model3D Renderer3D::load_model(const std::filesystem::path& path) {
+    return load_model(path, MeshOptions3D{});
 }
 
-Model3D Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error) {
+Model3D Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options) {
     _errors.clear();
     std::string why;
     auto result = load_model_shared(path, options, &why, nullptr);
@@ -1332,8 +1502,6 @@ Model3D Renderer3D::load_model(const std::filesystem::path& path, const MeshOpti
         result = {};
     } else
         _errors.clear();
-    if (error)
-        *error = diagnostics3d_text(_errors);
     return result;
 }
 
@@ -1356,6 +1524,10 @@ Model3D Renderer3D::load_model_shared(const std::filesystem::path& path, const M
             why = diagnostics3d_text(model.asset_diagnostics);
         KIN_LOG_WARN_F("render", "3D: model not loaded",
                        (LogFields{{.name = "path", .value = path.string()}, {.name = "reason", .value = why}}));
+        // Failed assets cannot retain drawable fragments through the direct loader either.
+        Model3D rejected;
+        rejected.asset_diagnostics = std::move(model.asset_diagnostics);
+        model = std::move(rejected);
     }
     if (error) {
         *error = why;

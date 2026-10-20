@@ -29,6 +29,10 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
     ModelData3D data;
     if (!read_model_data(*bytes, path, data, &why))
         return {};
+    if (!data.asset_diagnostics.empty()) {
+        why = diagnostics3d_text(data.asset_diagnostics);
+        return {};
+    }
     Model3D model;
     model.source_files.push_back(path.lexically_normal());
     bool first = true;
@@ -163,58 +167,49 @@ Assets3D::Stats Assets3D::stats() const {
     return s;
 }
 
-AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path, std::string* error) {
-    return load_model(path, MeshOptions3D{}, error);
+AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path) {
+    return load_model(path, MeshOptions3D{});
 }
 
 const Diagnostics3D& Assets3D::diagnostics() const {
     return _data->errors;
 }
 
-AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options,
-                                          std::string* error) {
+AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options) {
     _data->errors.clear();
     std::string why;
     auto result = load_model_impl(path, options, &why);
     if (!result)
         fail3d(_data->errors, "Assets3D::load_model(" + path.string() + ")", why.empty() ? "model load failed" : why);
-    if (error)
-        *error = diagnostics3d_text(_data->errors);
     return result;
 }
-Texture Assets3D::load_texture(const std::filesystem::path& path, bool nearest, bool srgb, std::string* error) {
+Texture Assets3D::load_texture(const std::filesystem::path& path, bool nearest, bool srgb) {
     _data->errors.clear();
     std::string why;
     auto result = load_texture_impl(path, nearest, srgb, &why);
     if (!result)
         fail3d(_data->errors, "Assets3D::load_texture(" + path.string() + ")",
                why.empty() ? "texture load failed" : why);
-    if (error)
-        *error = diagnostics3d_text(_data->errors);
     return result;
 }
-MaterialShader3D Assets3D::load_material_shader(const std::filesystem::path& path, std::string* error) {
+MaterialShader3D Assets3D::load_material_shader(const std::filesystem::path& path) {
     _data->errors.clear();
     std::string why;
     auto result = load_material_shader_impl(path, &why);
     if (!result)
         fail3d(_data->errors, "Assets3D::load_material_shader(" + path.string() + ")",
                why.empty() ? "shader load failed" : why);
-    if (error)
-        *error = diagnostics3d_text(_data->errors);
     return result;
 }
 AssetHandle<MaterialBinding3D> Assets3D::load_materials(const std::filesystem::path& path,
                                                         const std::shared_ptr<const Model3D>& model,
-                                                        std::string_view variant, std::string* error) {
+                                                        std::string_view variant) {
     _data->errors.clear();
     std::string why;
     auto result = load_materials_impl(path, model, variant, &why);
     if (!result)
         fail3d(_data->errors, "Assets3D::load_materials(" + path.string() + ")",
                why.empty() ? "material load failed" : why);
-    if (error)
-        *error = diagnostics3d_text(_data->errors);
     return result;
 }
 

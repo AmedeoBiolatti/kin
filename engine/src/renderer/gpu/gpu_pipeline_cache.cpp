@@ -1,8 +1,7 @@
 #include "gpu_pipeline_cache.hpp"
 
-#include <kin/platform/log.hpp>
-
 #include <cstddef>
+#include <kin/platform/log.hpp>
 #include <string>
 
 namespace kin::gpu {
@@ -10,8 +9,8 @@ namespace kin::gpu {
 namespace {
 
 void set_blend(SDL_GPUColorTargetBlendState& blend, GpuBlendMode mode) {
-    blend.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
-                             SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
+    blend.color_write_mask =
+        SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
     switch (mode) {
     case GpuBlendMode::Replace:
         blend.enable_blend = false;
@@ -122,7 +121,8 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     SDL_GPUVertexBufferDescription vb{};
     vb.slot = 0;
     SDL_GPUVertexBufferDescription vbs[2]{};
-    SDL_GPUVertexAttribute attrs[7]{}; // at most five in the first buffer, whichever layout, and the skin's two in a second
+    SDL_GPUVertexAttribute
+        attrs[7]{}; // at most five in the first buffer, whichever layout, and the skin's two in a second
     u32 attr_count = 0;
     u32 slot = 0;
     const auto attribute = [&](SDL_GPUVertexElementFormat format, u32 offset) {
@@ -195,6 +195,8 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
 
     SDL_GPUColorTargetBlendState blend_state{};
     set_blend(blend_state, key.blend);
+    blend_state.color_write_mask = key.write_mask;
+    blend_state.enable_color_write_mask = true;
     const bool stencil_write = stencil == GpuStencilOp::Increment || stencil == GpuStencilOp::Decrement;
     if (stencil_write) {
         blend_state.color_write_mask = 0; // only the stencil changes
@@ -269,9 +271,10 @@ SDL_GPUGraphicsPipeline* GpuPipelineCache::get(const GpuPipelineKey& key) {
     }
     // Made on first use: worth seeing when it lands mid-game (tens of ms on a
     // cold driver cache).
-    KIN_LOG_DEBUG_F("render", "pipeline created",
-                    (LogFields{{.name = "ms", .value = std::to_string(static_cast<f64>(SDL_GetTicksNS() - start_ns) / 1e6)},
-                               {.name = "pipelines", .value = std::to_string(_entries.size() + 1)}}));
+    KIN_LOG_DEBUG_F(
+        "render", "pipeline created",
+        (LogFields{{.name = "ms", .value = std::to_string(static_cast<f64>(SDL_GetTicksNS() - start_ns) / 1e6)},
+                   {.name = "pipelines", .value = std::to_string(_entries.size() + 1)}}));
     _entries.push_back(Entry{key, pipeline});
     return pipeline;
 }

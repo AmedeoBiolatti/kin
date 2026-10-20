@@ -39,6 +39,7 @@ public:
                                         .max_contact_constraints = 128,
                                         .temp_memory_bytes = 1024 * 1024,
                                         .single_threaded = true,
+                                        .contact_events = true,
                                         .max_events = 128};
         options.max_runtime_entities = 24;
         options.max_runtime_prefabs = 24;

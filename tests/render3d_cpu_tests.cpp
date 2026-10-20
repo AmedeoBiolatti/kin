@@ -9,6 +9,7 @@
 #include <iostream>
 #include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
 #include <limits>
 #include <memory>
 #include <set>
@@ -355,6 +356,153 @@ void test_particle_wind_field() {
            2e-3); // a wind without a direction is still turbulent, as velocity() says
 }
 
+// The catch-up cap: an update runs at most max_catch_up of steps (30), whatever it is given; the rest is dropped and
+// counted in skipped_time(), which is not state. A non-finite or negative dt is no time at all. Frames under the cap
+// (60 and 144 Hz, ragged ones) still reach one state.
+void test_particle_catch_up_cap() {
+    const auto stream = [](u64 seed) {
+        ParticleSystem3D s{seed};
+        s.desc.rate = 300.0f;
+        s.desc.lifetime = {0.5f, 2.0f};
+        s.desc.speed = {1.0f, 3.0f};
+        s.desc.gravity = {0.0f, -9.8f, 0.0f};
+        s.desc.drag = 0.5f;
+        s.desc.max_particles = 4000;
+        return s;
+    };
+    const Wind3D wind{.direction = {1.0f, 0.0f, 0.0f}, .speed = 3.0f, .gust_strength = 0.5f, .turbulence = 0.5f};
+    static_assert(ParticleSystem3D::max_catch_up == 0.25);
+    {
+        // A 60 s pause: 30 steps run (a quarter second of simulated time), 59.75 s dropped, the state the one a quarter
+        // second gives.
+        ParticleSystem3D paused = stream(7), quarter = stream(7);
+        paused.update(60.0, &wind);
+        quarter.update(0.25, &wind);
+        assert(std::abs(paused.time() - 0.25) < 1e-9);
+        assert(std::abs(paused.skipped_time() - 59.75) < 1e-9);
+        assert(quarter.skipped_time() == 0.0);
+        assert(paused.state_hash() == quarter.state_hash() && paused.count() == quarter.count() && paused.count() > 0);
+        // Just over the cap: the overflow alone is dropped.
+        ParticleSystem3D over = stream(7);
+        over.update(0.26, &wind);
+        assert(std::abs(over.skipped_time() - 0.01) < 1e-9 && std::abs(over.time() - 0.25) < 1e-9);
+        assert(over.state_hash() == quarter.state_hash());
+    }
+    {
+        // Non-finite and negative: ignored, nothing stepped, nothing counted.
+        ParticleSystem3D s = stream(7);
+        s.update(1.0 / 60.0, &wind);
+        const u64 before = s.state_hash();
+        const f64 time = s.time();
+        for (const f64 bad : {std::numeric_limits<f64>::infinity(), -std::numeric_limits<f64>::infinity(),
+                              std::numeric_limits<f64>::quiet_NaN(), -1.0, 0.0}) {
+            s.update(bad, &wind);
+            assert(s.state_hash() == before && s.time() == time && s.skipped_time() == 0.0);
+        }
+        // A huge finite dt: one capped update, then it runs on as usual.
+        s.update(std::numeric_limits<f64>::max(), &wind);
+        assert(std::abs(s.time() - (time + 0.25)) < 1e-9 && std::isfinite(s.skipped_time()) &&
+               s.skipped_time() > 1e300);
+        s.update(1.0 / 60.0, &wind);
+        assert(s.time() > time + 0.25);
+        // clear() resets the count.
+        s.clear();
+        assert(s.skipped_time() == 0.0 && s.time() == 0.0);
+    }
+    {
+        // Frames below the cap: 60 Hz, 144 Hz and ragged frames of 1 to 50 ms give one state, nothing skipped.
+        const auto run = [&](const auto& dt_of, f64 total) {
+            ParticleSystem3D s = stream(7);
+            f64 t = 0.0;
+            for (int i = 0; t < total - 1e-12; ++i) {
+                const f64 dt = std::min(dt_of(i), total - t);
+                s.update(dt, &wind);
+                t += dt;
+            }
+            assert(s.skipped_time() == 0.0);
+            return s;
+        };
+        Lcg lcg{11};
+        std::vector<f64> ragged;
+        for (int i = 0; i < 200; ++i)
+            ragged.push_back(0.001 + 0.049 * static_cast<f64>(lcg.unit()));
+        const ParticleSystem3D a = run([](int) { return 1.0 / 60.0; }, 3.0);
+        const ParticleSystem3D b = run([](int) { return 1.0 / 144.0; }, 3.0);
+        const ParticleSystem3D c = run([&](int i) { return ragged[static_cast<std::size_t>(i) % ragged.size()]; }, 3.0);
+        assert(a.count() > 100 && a.state_hash() == b.state_hash() && a.state_hash() == c.state_hash());
+    }
+    std::cerr << "particles: a 60 s update runs 30 steps and skips 59.75 s; inf, NaN and negative dts are no time\n";
+}
+
+// The game clock sums exactly: 216,000 frames of 1/60 s at speed 1 from 20:00 are 21:00 (in f32 `hours` they were
+// 20:49), 864,000 of 1/240 s too; setting `hours` by hand is continued from; the hours never read 24.0.
+void test_time_of_day_clock_exact() {
+    for (const auto [fps, frames] : {std::pair{60, 216000}, std::pair{240, 864000}}) {
+        TimeOfDay3D day{.hours = 20.0f, .day_of_year = 100.0f, .speed = 1.0f};
+        const f32 dt = 1.0f / static_cast<f32>(fps);
+        for (int i = 0; i < frames; ++i)
+            kin::advance(day, dt);
+        // The f32 dt is not exactly 1/fps: the exact sum of what was given is the target.
+        const f64 want = 20.0 + static_cast<f64>(frames) * static_cast<f64>(dt) / 3600.0;
+        std::cerr << "time of day: " << frames << " frames at " << fps << " fps from 20.0 h: " << day.hours << " h\n";
+        assert(std::abs(static_cast<f64>(day.hours) - want) < 1e-4 && std::abs(want - 21.0) < 1e-5);
+        assert(day.day_of_year == 100.0f);
+    }
+    // Set by the game between frames: the sum starts over from the set value.
+    TimeOfDay3D day{.hours = 20.0f, .speed = 1.0f};
+    for (int i = 0; i < 6000; ++i)
+        kin::advance(day, 1.0f / 60.0f);
+    day.hours = 5.0f;
+    kin::advance(day, 3600.0f);
+    assert(std::abs(day.hours - 6.0f) < 1e-4f);
+    // Wrapping, as before: a game hour a second from 23.5 at the year's end.
+    TimeOfDay3D wrap{.hours = 23.5f, .day_of_year = 365.0f, .speed = 3600.0f};
+    kin::advance(wrap, 1.0f);
+    assert(std::abs(wrap.hours - 0.5f) < 1e-4f && wrap.day_of_year == 1.0f);
+    kin::advance(wrap, -2.0f);
+    assert(std::abs(wrap.hours - 22.5f) < 1e-4f && wrap.day_of_year == 365.0f);
+    // A hair under 24 h reads under 24, not 24.0 (f32 would round up); the day has not turned.
+    TimeOfDay3D edge{.hours = 23.0f, .day_of_year = 10.0f, .speed = 1.0f};
+    kin::advance(edge, 3599.999f);
+    assert(edge.hours < 24.0f && edge.hours > 23.9999f && edge.day_of_year == 10.0f);
+    kin::advance(edge, 1.0f);
+    assert(edge.hours < 0.001f && edge.day_of_year == 11.0f);
+    // Very long finite steps stay bounded, in either direction.
+    TimeOfDay3D huge{.hours = 8.0f, .speed = 1e30f};
+    kin::advance(huge, 1e30f);
+    assert(huge.hours >= 0 && huge.hours < 24 && huge.day_of_year >= 1 && huge.day_of_year <= 365);
+    kin::advance(huge, -1e30f);
+    assert(huge.hours >= 0 && huge.hours < 24 && huge.day_of_year >= 1 && huge.day_of_year <= 365);
+    // Not a number: nothing moves.
+    TimeOfDay3D still{.hours = 8.0f, .speed = 1.0f};
+    kin::advance(still, std::numeric_limits<f32>::quiet_NaN());
+    kin::advance(still, std::numeric_limits<f32>::infinity());
+    assert(still.hours == 8.0f);
+    still.speed = std::numeric_limits<f32>::infinity();
+    kin::advance(still, 1.0f);
+    assert(still.hours == 8.0f);
+}
+
+// The poles: polar day at +90 in June and polar night at -90, the reverse in December (f32 cos(90 degrees) is -4e-8,
+// which used to turn the decision round); a latitude past 90 is a pole.
+void test_sun_times_at_the_poles() {
+    const auto times = [](f32 day, f32 latitude) { return sun_times({.day_of_year = day, .latitude = latitude}); };
+    assert(times(172.0f, 90.0f).polar_day && !times(172.0f, 90.0f).polar_night);
+    assert(times(172.0f, -90.0f).polar_night && !times(172.0f, -90.0f).polar_day);
+    assert(times(355.0f, 90.0f).polar_night && !times(355.0f, 90.0f).polar_day);
+    assert(times(355.0f, -90.0f).polar_day && !times(355.0f, -90.0f).polar_night);
+    const SunTimes3D day = times(172.0f, 90.0f), night = times(355.0f, 90.0f);
+    assert(day.sunrise == 0.0f && day.sunset == 24.0f && night.sunrise == -1.0f && night.sunset == -1.0f);
+    // Past the pole: clamped to it.
+    assert(times(172.0f, 95.0f).polar_day && times(172.0f, -1000.0f).polar_night);
+    // Just short of it: the same answers, by the general formula.
+    assert(times(172.0f, 89.999f).polar_day && times(355.0f, 89.999f).polar_night &&
+           times(172.0f, -89.999f).polar_night);
+    // Away from them, nothing changed: London in June rises and sets.
+    const SunTimes3D london = times(172.0f, 51.5f);
+    assert(!london.polar_day && !london.polar_night && london.sunrise > 3.5f && london.sunrise < 3.9f);
+}
+
 } // namespace
 
 int main() {
@@ -362,7 +510,11 @@ int main() {
     test_changed_ranges();
     test_layout_revision();
     test_particle_wind_field();
+    test_particle_catch_up_cap();
+    test_time_of_day_clock_exact();
+    test_sun_times_at_the_poles();
     std::cout << "render3d on the CPU: instance batch bounds exact after scattered, spanning and broken edits, a tight "
                  "change history past 16 edits, "
-                 "particle wind within 1e-3 m/s of Wind3D::velocity\n";
+                 "particle wind within 1e-3 m/s of Wind3D::velocity, particle catch-up capped at 30 steps, the game "
+                 "clock exact over an hour of frames, polar day and night at the poles\n";
 }

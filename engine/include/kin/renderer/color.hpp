@@ -79,6 +79,19 @@ struct LinearRgb {
     friend constexpr LinearRgb operator*(LinearRgb c, f32 scale) { return {c.r * scale, c.g * scale, c.b * scale}; }
     friend constexpr LinearRgb operator*(f32 scale, LinearRgb c) { return c * scale; }
     friend constexpr LinearRgb operator*(LinearRgb a, LinearRgb b) { return {a.r * b.r, a.g * b.g, a.b * b.b}; }
+    friend constexpr LinearRgb operator/(LinearRgb c, f32 scale) { return {c.r / scale, c.g / scale, c.b / scale}; }
+    constexpr LinearRgb& operator+=(LinearRgb c) {
+        r += c.r;
+        g += c.g;
+        b += c.b;
+        return *this;
+    }
+    constexpr LinearRgb& operator*=(f32 scale) {
+        r *= scale;
+        g *= scale;
+        b *= scale;
+        return *this;
+    }
     constexpr LinearColor with_alpha(f32 alpha = 1.0f) const { return {r, g, b, alpha}; }
 };
 

@@ -2,6 +2,8 @@
 #include <array>
 #include <cmath>
 #include <kin/render3d/ik3d.hpp>
+#include <span>
+#include <vector>
 
 namespace kin {
 
@@ -120,7 +122,15 @@ void update_world_below(const Skeleton3D& skeleton, const Pose3D& pose, std::spa
     if (joint < 0 || static_cast<std::size_t>(joint) >= n) {
         return;
     }
-    std::array<u8, max_skin_joints> dirty{};
+    // Which joints are below `joint` (a parent comes first, so one pass finds them). On the stack for a skeleton a
+    // skin can have; a bigger one (programmatic, not for skinning) takes the heap, so the array is never overrun.
+    std::array<u8, max_skin_joints> small{};
+    std::vector<u8> big;
+    std::span<u8> dirty = small;
+    if (n > small.size()) {
+        big.assign(n, 0);
+        dirty = big;
+    }
     const auto recompute = [&](std::size_t i) {
         const Mat4f local = i < pose.joints.size() ? pose.joints[i].matrix() : skeleton.rest[i].matrix();
         const i32 p = skeleton.parents[i];

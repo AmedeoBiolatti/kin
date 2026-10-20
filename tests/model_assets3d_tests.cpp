@@ -150,12 +150,14 @@ void embedded_and_outside_images(Renderer3D& r3d) {
     write_model("embedded.gltf",
                 "data:image/png;base64," + skin_fixtures::base64(std::vector<std::uint8_t>(png.begin(), png.end())));
     std::string error;
-    const Model3D embedded = r3d.load_model(scratch.path / "embedded.gltf", &error);
+    const Model3D embedded = r3d.load_model(scratch.path / "embedded.gltf");
+    error = kin::diagnostics3d_text(r3d.diagnostics());
     check(embedded && embedded.parts[0].material.texture && embedded.parts[0].material.normal &&
               embedded.asset_diagnostics.empty(),
           "data: URI image not decoded");
     Assets3D library{r3d, scratch.path};
-    const auto shared = library.load_model("embedded.gltf", &error);
+    const auto shared = library.load_model("embedded.gltf");
+    error = kin::diagnostics3d_text(library.diagnostics());
     check(shared && shared->parts[0].material.texture, "data: URI image not decoded through the library");
 
     // scratch/content is the content root, and is mounted again as a pack at scratch/virtual.
@@ -180,7 +182,8 @@ void embedded_and_outside_images(Renderer3D& r3d) {
     check(!find_content_root({}, 2, root_argv).empty(), "test content root not found");
     // Whether the model's image was read; when it was not, it is not listed as a dependency and a diagnostic says so.
     const auto texture_of = [&](const std::filesystem::path& file) {
-        const Model3D model = r3d.load_model(scratch.path / file, &error);
+        const Model3D model = r3d.load_model(scratch.path / file);
+        error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             check(!r3d.diagnostics().empty(), "missing model diagnostic");
             return false;
@@ -193,7 +196,8 @@ void embedded_and_outside_images(Renderer3D& r3d) {
         return read;
     };
     Assets3D rooted{r3d, scratch.path / "content"};
-    const auto escapes_shared = rooted.load_model("models/escapes.gltf", &error);
+    const auto escapes_shared = rooted.load_model("models/escapes.gltf");
+    error = kin::diagnostics3d_text(rooted.diagnostics());
     const bool textured = texture_of("content/models/textured.gltf"),
                packed_textured = texture_of("virtual/models/textured.gltf");
     const bool loose = texture_of("loose/loose.gltf");
@@ -258,7 +262,8 @@ void node_pose(Renderer2D& renderer, Renderer3D& r3d) {
     Scratch scratch;
     std::ofstream{scratch.path / "arm.gltf", std::ios::binary} << json;
     std::string error;
-    const Model3D model = r3d.load_model(scratch.path / "arm.gltf", &error);
+    const Model3D model = r3d.load_model(scratch.path / "arm.gltf");
+    error = kin::diagnostics3d_text(r3d.diagnostics());
     check(model && model.parts.size() == 2 && model.node_skeleton == 0 && model.skeletons.size() == 1,
           "node-animated model not loaded");
     check(model.parts[0].node == 0 && model.parts[1].node == 1, "parts do not hang from their animated nodes");
@@ -311,9 +316,11 @@ void gpu_assets(Renderer2D& renderer) {
     const std::filesystem::path fixtures{KIN_TEST_MODELS};
     Assets3D assets{r3d, fixtures};
     std::string error = "stale";
-    auto a = assets.load_model("shared-a.gltf", &error);
+    auto a = assets.load_model("shared-a.gltf");
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(a && error.empty(), "shared model A failed");
-    auto alias = assets.load_model("./shared-a.gltf", &error);
+    auto alias = assets.load_model("./shared-a.gltf");
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(a.shared() == alias.shared() && assets.stats().model_hits == 1, "path alias not reused");
     auto b = assets.load_model("shared-b.gltf");
     auto filtered = assets.load_model("shared-filtered.gltf");
@@ -386,9 +393,11 @@ void gpu_assets(Renderer2D& renderer) {
 
     Scratch scratch;
     Assets3D retry{r3d, scratch.path};
-    check(!retry.load_model("late.glb", &error) && !error.empty(), "missing asset not diagnosed");
+    check(!retry.load_model("late.glb") && !kin::diagnostics3d_text(retry.diagnostics()).empty(),
+          "missing asset not diagnosed");
     std::filesystem::copy_file(fixtures / "parts.glb", scratch.path / "late.glb");
-    auto repaired = retry.load_model("late.glb", &error);
+    auto repaired = retry.load_model("late.glb");
+    error = kin::diagnostics3d_text(retry.diagnostics());
     check(repaired && error.empty(), "failed load was cached or error stayed stale");
     // Existing consumers keep their old version after explicit invalidation.
     auto before_clear = repaired.shared();

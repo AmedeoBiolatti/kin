@@ -56,6 +56,10 @@ layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none
 void main() {
     // gl_InstanceIndex counts from 0: SDL_GPU's first_instance is left at 0
     // (backends disagree whether it adds to it), so the draw says where it starts.
+    // The one exception is the GPU cut's indirect draws (cluster_args.comp), whose
+    // arguments carry the copy's slot as the first instance with first.x 0: that
+    // relies on the instance index including it, which Vulkan and Metal do and
+    // Direct3D 12 does not, so the renderer keeps the cut on the CPU there.
 #ifdef KIN_VELOCITY
     const uint at = instance_at(draw.first.x + uint(gl_InstanceIndex));
     Instance instance = instances[at];

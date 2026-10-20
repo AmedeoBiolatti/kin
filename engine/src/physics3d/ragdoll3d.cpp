@@ -113,7 +113,7 @@ RagdollHandle3D RagdollSet::create(const RagdollDesc& desc, std::span<const Mat4
     const auto fail = [&]() {
         for (const Body3D b : s.bodies) {
             if (b.valid()) {
-                _world->destroy_body(b);
+                _world->owner_destroy_body(b);
             }
         }
         s.alive = false;
@@ -178,8 +178,10 @@ RagdollHandle3D RagdollSet::create(const RagdollDesc& desc, std::span<const Mat4
         if (!s.bodies[i].valid()) {
             return fail();
         }
+        // The ragdoll's own: the game cannot destroy, reshape or switch a bone under it.
+        _world->set_owner(s.bodies[i], BodyOwner3D::Ragdoll);
         // Animated to begin with: kinematic bodies at the pose.
-        _world->set_motion(s.bodies[i], Body3DMotion::Kinematic);
+        _world->owner_set_motion(s.bodies[i], Body3DMotion::Kinematic);
     }
 
     for (std::size_t i = 0; i < n; ++i) {
@@ -241,7 +243,7 @@ void RagdollSet::destroy(RagdollHandle3D h) {
     }
     for (std::size_t i = s->bodies.size(); i-- > 0;) {
         if (s->bodies[i].valid() && _world->contains(s->bodies[i])) {
-            _world->destroy_body(s->bodies[i]);
+            _world->owner_destroy_body(s->bodies[i]);
         }
     }
     s->alive = false;
@@ -297,7 +299,7 @@ void RagdollSet::apply_motion(Slot& s, bool keep_velocity) {
         if (want != (s.dynamic[i] != 0)) {
             const Vec3f v = _world->linear_velocity(body);
             const Vec3f w = _world->angular_velocity(body);
-            if (_world->set_motion(body, want ? Body3DMotion::Dynamic : Body3DMotion::Kinematic)) {
+            if (_world->owner_set_motion(body, want ? Body3DMotion::Dynamic : Body3DMotion::Kinematic)) {
                 s.dynamic[i] = want ? 1 : 0;
                 if (want && keep_velocity) {
                     _world->set_linear_velocity(body, v);
@@ -567,7 +569,7 @@ void RagdollSet::pose(RagdollHandle3D h, std::vector<RagdollBonePose3D>& out) co
     }
 }
 
-RagdollPlace3D RagdollSet::place(RagdollHandle3D h, Vec3f up, Layer3DMask mask, f32 max_distance) const {
+RagdollPlace3D RagdollSet::place(RagdollHandle3D h, Vec3f up, Layer3DMask mask, f32 max_distance, Body3D ignore) const {
     RagdollPlace3D out;
     const Slot* s = find(h);
     if (s == nullptr || !finite3(up) || length(up) < 1.0e-6f) {
@@ -582,6 +584,7 @@ RagdollPlace3D RagdollSet::place(RagdollHandle3D h, Vec3f up, Layer3DMask mask, 
     const Quatf rotation = _world->rotation(root);
     QueryFilter3D filter;
     filter.mask = mask;
+    filter.ignore = ignore;
     const std::vector<RayHit3D> hits = _world->raycast_all(position + u * 0.2f, position - u * std::max(max_distance, 0.0f), filter);
     for (const RayHit3D& hit : hits) {
         if (std::find(s->bodies.begin(), s->bodies.end(), hit.body) != s->bodies.end()) {

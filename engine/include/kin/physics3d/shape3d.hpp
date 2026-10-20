@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace kin {
 
@@ -81,6 +82,18 @@ public:
     // The box that holds the shape in its own space.
     Vec3f bounds_min() const;
     Vec3f bounds_max() const;
+
+    // The shape as bytes, for a bake cache (kin/assets/bake_cache.hpp; PhysicsAssets3D::set_bake_cache uses it): Jolt's
+    // binary state of the shape and its children, behind a header with the kind, the length and a checksum. Appended
+    // to `out`; false for an invalid shape. restore_binary makes it back: a shape that collides as this one does, to
+    // the bit. The bytes are for this build's Jolt (binary_version()): not portable between Jolt versions, nor
+    // between machines of another kind (a cache keys them with the version and stays on one machine).
+    bool save_binary(std::vector<u8>& out) const;
+    // The shape save_binary wrote, of `kind`; invalid for bytes that are not exactly one such shape (short, too long,
+    // corrupt (the checksum is checked before Jolt reads a byte), of another version or another kind).
+    static Shape3D restore_binary(std::span<const u8> bytes, Shape3DKind kind);
+    // What save_binary's bytes depend on besides the shape: their layout's version and Jolt's version and build features.
+    static u64 binary_version();
 
     friend bool operator==(const Shape3D& a, const Shape3D& b) { return a._data == b._data; }
 

@@ -55,20 +55,18 @@ public:
     // transforms and skins, each with an empty mesh handle that keeps its vertex/index counts, bounds and joint count,
     // and the model's skeletons, clips and bounds. No GPU memory; parts keep the default material, and only the model's
     // own file is a source (its images are not decoded).
-    AssetHandle<Model3D> load_model(const std::filesystem::path& path, std::string* error = nullptr);
-    AssetHandle<Model3D> load_model(const std::filesystem::path& path, const MeshOptions3D& options,
-                                    std::string* error = nullptr);
+    AssetHandle<Model3D> load_model(const std::filesystem::path& path);
+    AssetHandle<Model3D> load_model(const std::filesystem::path& path, const MeshOptions3D& options);
     // Shares the same role/filter-aware texture cache as imported glTF maps.
-    Texture load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true,
-                         std::string* error = nullptr);
+    Texture load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true);
     // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials
     // naming a shader still bind.
-    MaterialShader3D load_material_shader(const std::filesystem::path& path, std::string* error = nullptr);
+    MaterialShader3D load_material_shader(const std::filesystem::path& path);
     // Patches imported materials without cloning any model/mesh. Empty variant
     // selects the base layer. Invalidate changed sources explicitly before rebinding.
     AssetHandle<MaterialBinding3D> load_materials(const std::filesystem::path& path,
                                                   const std::shared_ptr<const Model3D>& model,
-                                                  std::string_view variant = {}, std::string* error = nullptr);
+                                                  std::string_view variant = {});
     // Forget expired weak entries; no live resource is unloaded.
     void trim();
     // Forget all model/texture lookups. Existing handles, batches and scenes
@@ -79,8 +77,7 @@ public:
     void invalidate(const std::filesystem::path& source);
     Stats stats() const;
     const std::filesystem::path& root() const;
-    // Last load's diagnostic, including cache hits (which clear it). Optional
-    // legacy output strings are snapshots of this report, not another channel.
+    // Last load's diagnostic, including cache hits (which clear it).
     const Diagnostics3D& diagnostics() const;
 
 private:

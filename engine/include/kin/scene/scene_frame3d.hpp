@@ -41,6 +41,9 @@ public:
     // Clears draws/settings, applies authored settings and collects the world.
     // Caller owns the destination and view options; add custom draws afterwards
     // and submit with its own Renderer3D/View3D. No view is allocated here.
+    // An authored SceneEnvironment3D sets the picture in `view` (samples,
+    // background, hdr, exposure, bloom); `view->pick` is the caller's and
+    // survives it (scene3d_view_options), the same as SceneSession3DOptions::view.pick.
     bool collect(Scene3D& scene, ViewOptions3D* view = nullptr);
     const std::vector<std::string>& diagnostics() const { return _errors; }
 

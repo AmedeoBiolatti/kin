@@ -211,6 +211,8 @@ public:
     bool blending() const { return !_base.blend.empty(); }
     void set_speed(f32 speed) { _base.speed = speed; }
     f32 speed() const { return _base.speed; }
+    // Changes base wrapping without restarting its clock or an action.
+    void set_loop(bool loop) { _base.loop = loop; }
     // The base clip's time (a blend's: its phase, 0 to 1) and the clip (null: none, or a blend), and the one it is
     // fading from (null when not fading, or when that is a blend).
     f32 time() const { return _base.time; }

@@ -23,6 +23,7 @@
 #include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
 #include <kin/render3d/camera3d.hpp>
+#include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
 #include <span>
 #include <vector>
@@ -110,8 +111,14 @@ struct ParticleLook3D {
     bool soft = false;
     f32 soft_distance = 0.5f;
     // The share of the scene's light that tints the particle (0: its colour as it is, glowing; 1: times ambient plus
-    // half the sun and the fill, see particle_light_tint): so that snow is not white at night.
+    // half the sun and the fill, plus half the point/spot irradiance at the sprite centre).
     f32 lit = 0.0f;
+    // Opt-in reception of the scene's sun, moon and point/spot shadow maps. Affects direct light only;
+    // ignored with lit == 0.
+    bool receives_shadow = false;
+    // Cast the visible quad's alpha-tested silhouette into existing shadow maps (independent of lit).
+    bool casts_shadow = false;
+    f32 shadow_cutoff = 0.5f; // intrinsic texture/procedural alpha times particle alpha, in [0,1]
     bool fogged = true; // Scene3D::fog applies (as it does to meshes; an additive particle is dimmed by it, not mixed)
     // Back to front within the batch (alpha and premultiplied; additive needs no order). Batches are ordered by their
     // depth.
@@ -123,7 +130,7 @@ struct ParticleSprite3D {
     Vec3f position{};
     f32 size = 1.0f;     // the quad's width (its height too, but for Stretched, where the length is the streak's)
     f32 rotation = 0.0f; // radians
-    Vec3f colour{1.0f, 1.0f, 1.0f}; // linear, times the look's tint
+    LinearRgb colour{1.0f, 1.0f, 1.0f}; // linear, times the look's tint
     f32 alpha = 1.0f;
     Vec3f velocity{}; // world units per second (Stretched only)
     f32 frame = 0.0f; // flipbook frame, fractional between two
@@ -155,8 +162,8 @@ struct ParticleDesc3D {
     f32 wind_influence = 1.0f; // how much of the wind's velocity the air carries here (0: still air)
     // Over a life (t = age / lifetime).
     f32 size_start = 1.0f, size_mid = 1.0f, size_end = 1.0f; // scale of `size` at t = 0, 0.5, 1 (piecewise linear)
-    Vec3f colour_start{1.0f, 1.0f, 1.0f};
-    Vec3f colour_end{1.0f, 1.0f, 1.0f};
+    LinearRgb colour_start{1.0f, 1.0f, 1.0f};
+    LinearRgb colour_end{1.0f, 1.0f, 1.0f};
     f32 alpha_start = 1.0f, alpha_end = 0.0f;
     f32 fade_in = 0.0f;          // share of the life over which alpha rises from 0 (no pop at birth)
     f32 colour_variation = 0.0f; // each particle's brightness is 1 - this * its random number
@@ -188,7 +195,8 @@ struct Particle3D {
 // A simulation in fixed steps (`step` seconds, 1/120): update(dt) takes whole steps out of the time it has been given,
 // so the state after T seconds does not depend on how T was cut into frames, and a saved state restores to the same
 // future. Particles are drawn from `sprites()`. Deterministic: a particle's randoms are a hash of the seed, its birth
-// number and the purpose, so the same seed and calls give the same particles on every machine.
+// number and the purpose, so the same seed and calls give the same particles on every machine. An update runs at most
+// `max_catch_up` seconds of steps (30): time past that, a pause or a stall, is dropped and counted in `skipped_time()`.
 class ParticleSystem3D {
 public:
     explicit ParticleSystem3D(u64 seed = 1) : _seed(seed) {}
@@ -200,6 +208,10 @@ public:
     f32 rate_scale = 1.0f; // times `desc.rate`: a smooth intensity
 
     static constexpr f64 step = 1.0 / 120.0;
+    // The most simulated time one update() runs (30 steps): a 60 s pause does not cost 7,200 steps, and a frame's
+    // worth of catch-up stays bounded. Time past it is dropped, not kept: the system falls behind the game's clock by
+    // that much, and `skipped_time()` says how much.
+    static constexpr f64 max_catch_up = 0.25;
 
     void set_seed(u64 seed) { _seed = seed; }
     u64 seed() const { return _seed; }
@@ -207,8 +219,13 @@ public:
     // `count` particles now, at the emitter (a burst), or at a world point.
     void burst(u32 count);
     void burst_at(Vec3f position, u32 count);
-    // Takes `dt` seconds (any size; whole steps of `step` are run, the rest kept). `wind` is the air's (null: none).
+    // Takes `dt` seconds (whole steps of `step` are run, the rest kept; at most `max_catch_up` of steps an update, the
+    // time beyond it dropped into `skipped_time()`; a negative, NaN or infinite `dt` is ignored). `wind` is the air's
+    // (null: none).
     void update(f64 dt, const Wind3D* wind = nullptr);
+    // Simulated seconds dropped by the catch-up cap since the last clear() (not simulation state: neither hashed nor
+    // saved; restore() leaves it).
+    f64 skipped_time() const { return _skipped_time; }
     // The state a viewer shows now: the particles as sprites (with the unfinished step's motion carried on).
     void sprites(std::vector<ParticleSprite3D>& out) const;
     std::span<const Particle3D> particles() const { return _particles; }
@@ -237,12 +254,13 @@ private:
     f64 _carry = 0.0;       // births not yet whole
     f64 _accumulated = 0.0; // time given and not yet stepped
     f64 _time = 0.0;
+    f64 _skipped_time = 0.0; // dropped by the catch-up cap: a statistic, not state
     u32 _dropped = 0;
 };
 
-// What `lit` tints a particle with: ambient (the sky's and the ground's, averaged) plus half of the sun and half of the
-// fill.
-Vec3f particle_light_tint(const Lights3D& lights);
+// The global part of `lit`: ambient (sky and ground averaged), half the sun and half the fill.
+// The renderer also adds half the selected point/spot irradiance at each sprite centre.
+LinearRgb particle_light_tint(const Lights3D& lights);
 // The soft-particle fade the shader applies: 0 at the surface, 1 `distance` or more in front of it (a smoothstep).
 f32 soft_particle_fade(f32 gap, f32 distance);
 // The procedural disc's alpha at radius `r` (0 at the centre, 1 at the edge) for a `softness` and a `ring` (see
@@ -276,7 +294,7 @@ struct WeatherLayer3D {
     f32 flutter_rate = 0.5f;        // Hz
     f32 size_min = 0.03f, size_max = 0.05f; // widths, m
     f32 edge_fade = 0.2f; // share of the box's sides over which a particle fades in and out as it wraps
-    Vec3f colour{0.75f, 0.8f, 0.9f};
+    LinearRgb colour{0.75f, 0.8f, 0.9f};
     f32 alpha = 0.35f;
     f32 splash = 0.0f;       // with a ground: the share of the drops that splash where they meet it (0: none)
     f32 splash_size = 0.12f; // m across at the end

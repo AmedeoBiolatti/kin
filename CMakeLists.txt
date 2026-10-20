@@ -54,7 +54,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # 3D views drawn inside the 2D frame (kin/render3d, SDL_GPU only). Experimental:
 # the API may change in any release (docs/3d_plan.md). Declared before the
 # dependencies, which fetch Jolt Physics (kin/physics3d) only when it is on.
-option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" ON)
+# A 2D build does not fetch the 3D dependencies or compile their shaders.
+option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" OFF)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(dependencies)
 include(kin_embed)

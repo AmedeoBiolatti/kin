@@ -81,14 +81,23 @@ void resources() {
     Assets3D assets{renderer, root};
     assert(!assets.load_model("missing.glb") &&
            diagnostics3d_text(assets.diagnostics()).find("missing.glb") != std::string::npos);
-    std::string legacy;
-    assert(!assets.load_model("missing.glb", &legacy) && legacy == diagnostics3d_text(assets.diagnostics()));
+    PhysicsAssets3D collisions{root};
+    assert(!collisions.load_collider("missing.kincollider") && !collisions.diagnostics().empty());
+    const auto collision_error = collisions.diagnostics();
+    collisions.stats();
+    collisions.trim();
+    assert(collisions.diagnostics() == collision_error);
+    std::ofstream(root / "box.kincollider") << R"({"schema":"kin.collider3d/1","shape":{"kind":"box"}})";
+    auto collision = collisions.load_collider("box.kincollider");
+    assert(collision && collisions.diagnostics().empty());
+    assert(!collisions.load_collider("missing.kincollider"));
+    assert(collisions.load_collider("box.kincollider") && collisions.diagnostics().empty()); // cache hit resets too
     auto valid = assets.load_model("parts.glb");
     assert(valid && assets.diagnostics().empty());
     assert(!assets.load_texture("missing.png") && !assets.diagnostics().empty());
     std::ofstream(root / "corrupt.png") << "not an image";
-    assert(!assets.load_texture("corrupt.png", false, true, &legacy) &&
-           legacy == diagnostics3d_text(assets.diagnostics()));
+    assert(!assets.load_texture("corrupt.png", false, true) &&
+           diagnostics3d_text(assets.diagnostics()).find("corrupt.png") != std::string::npos);
     assert(assets.load_model("parts.glb") && assets.diagnostics().empty()); // cache hit resets errors too
     assert(!assets.load_material_shader("missing.spv") && !assets.diagnostics().empty());
     assert(!assets.load_materials("missing.kinmaterials", valid.shared()) && !assets.diagnostics().empty());
@@ -111,7 +120,8 @@ void resources() {
     assert(!renderer.render(view, invalid) && renderer.diagnostics() == invalid.overlay().diagnostics());
     assert(!renderer.load_environment(root / "missing.hdr") && !renderer.diagnostics().empty());
     assert(!renderer.compile_material_shader(root / "missing.frag") && !renderer.diagnostics().empty());
-    assert(!renderer.load_model(root / "missing.glb", &legacy) && legacy == diagnostics3d_text(renderer.diagnostics()));
+    assert(!renderer.load_model(root / "missing.glb") &&
+           diagnostics3d_text(renderer.diagnostics()).find("missing.glb") != std::string::npos);
     std::ofstream(root / "bad.kinscene")
         << R"({"entities":[{"id":"bad","components":{"Transform3D":{},"ModelRenderer3D":{"asset":"missing.glb"}}}]})";
     kin::EcsWorld world;

@@ -265,6 +265,129 @@ void test_probe() {
     CHECK(world.probe_grips(bad).empty());
 }
 
+// A ledge whose top is another body (a face of thin slabs with the rock behind them, a mountain of boxes): found when the held
+// face runs up to the top and ends there; not across a gap, not on a top the face rises past, not on a roof over a wall.
+Body3D add_block(World3D& w, Vec3f lo, Vec3f hi, u64 user_id) {
+    return w.create_body({.shape = Shape3D::box((hi - lo) * 0.5f), .motion = Body3DMotion::Static, .position = (lo + hi) * 0.5f,
+                          .user_id = user_id});
+}
+
+// The best ledge candidate on `body` of a probe from (0, y, 0.7) at the face z = 0 (none: body invalid).
+GripCandidate3D ledge_on(const World3D& w, Body3D body, f32 y = 2.7f, f32 search = 0.5f) {
+    GripProbeDesc3D p;
+    p.origin = {0.0f, y, 0.7f};
+    p.direction = {0.0f, 0.0f, -1.0f};
+    p.reach = 0.8f;
+    p.ledge_search_height = search;
+    for (const GripCandidate3D& c : w.probe_grips(p)) {
+        if (c.ledge && c.body == body) {
+            return c;
+        }
+    }
+    return {};
+}
+
+void test_ledge_across_bodies() {
+    // Flush: a slab 6 cm thick (thinner than the 10 cm the ledge ray looks behind the face) and the block behind it, their
+    // tops level. The hand holds the slab, the lip is on its face, and what is stood on is the block.
+    {
+        World3D w(serial());
+        const Body3D slab = add_block(w, {-2.0f, 0.0f, -0.06f}, {2.0f, 3.0f, 0.0f}, 1);
+        const Body3D block = add_block(w, {-2.0f, 0.0f, -3.06f}, {2.0f, 3.0f, -0.06f}, 2);
+        const GripCandidate3D c = ledge_on(w, slab);
+        CHECK(c.body == slab && c.kind == GripKind3D::Ledge && c.ledge_body == block);
+        CHECK_NEAR(c.point.y, 3.0, 1e-3);
+        CHECK_NEAR(c.point.z, 0.0, 1e-3);
+        CHECK(c.clear);
+        CHECK_NEAR(c.ledge_top.y, 3.005, 0.01);
+        CHECK_NEAR(c.ledge_top.z, -0.35, 0.02);
+    }
+    // The block's top 3 cm under the slab's: the face ends within 5 cm of it, still its ledge (at the top found).
+    {
+        World3D w(serial());
+        const Body3D slab = add_block(w, {-2.0f, 0.0f, -0.06f}, {2.0f, 3.0f, 0.0f}, 1);
+        const Body3D block = add_block(w, {-2.0f, 0.0f, -3.06f}, {2.0f, 2.97f, -0.06f}, 2);
+        const GripCandidate3D c = ledge_on(w, slab);
+        CHECK(c.body == slab && c.ledge_body == block);
+        CHECK_NEAR(c.point.y, 2.97, 1e-3);
+    }
+    // Not when the slab rises 20 cm past the block's top (a parapet: that top is not the face's edge), nor across a gap of
+    // 30 cm between the slab and the block (the ray falls into it), nor when the slab ends 20 cm under the block's top (the
+    // face has a gap; the block's own face up there has its own ledge).
+    {
+        World3D w(serial());
+        const Body3D slab = add_block(w, {-2.0f, 0.0f, -0.06f}, {2.0f, 3.0f, 0.0f}, 1);
+        add_block(w, {-2.0f, 0.0f, -3.06f}, {2.0f, 2.8f, -0.06f}, 2);
+        CHECK(!ledge_on(w, slab).body.valid());
+    }
+    {
+        World3D w(serial());
+        const Body3D slab = add_block(w, {-2.0f, 0.0f, -0.06f}, {2.0f, 3.0f, 0.0f}, 1);
+        add_block(w, {-2.0f, 0.0f, -3.36f}, {2.0f, 3.0f, -0.36f}, 2);
+        CHECK(!ledge_on(w, slab).body.valid());
+    }
+    {
+        World3D w(serial());
+        const Body3D slab = add_block(w, {-2.0f, 0.0f, -0.06f}, {2.0f, 2.8f, 0.0f}, 1);
+        add_block(w, {-2.0f, 0.0f, -3.06f}, {2.0f, 3.0f, -0.06f}, 2);
+        CHECK(!ledge_on(w, slab, 2.6f).body.valid());
+    }
+    // A roof 2 m over a wall (out over its face, or set back from it as a terrace): a ledge search tall enough to start over
+    // it meets the roof's top first, which is not the wall's ledge. Without the roof the same search finds the wall's own top.
+    for (int roof = 0; roof < 3; ++roof) {
+        World3D w(serial());
+        const Body3D wall = add_block(w, {-2.0f, 0.0f, -2.0f}, {2.0f, 3.0f, 0.0f}, 1);
+        if (roof == 1) add_block(w, {-2.0f, 5.0f, -1.0f}, {2.0f, 5.2f, 1.6f}, 3);
+        if (roof == 2) add_block(w, {-2.0f, 5.0f, -1.5f}, {2.0f, 5.2f, -0.04f}, 3);
+        const GripCandidate3D c = ledge_on(w, wall, 2.7f, 2.6f);
+        if (roof == 0) {
+            CHECK(c.body == wall && c.ledge_body == wall);
+            CHECK_NEAR(c.point.y, 3.0, 1e-3);
+        } else {
+            CHECK(!c.body.valid());
+        }
+    }
+    // Climbed: up the slab's face the hands find the lip and take it, and the pull-up stands the character on the block.
+    {
+        Rig r(serial(), climber(), {0.0f, 0.0f, 0.7f}, {}, false);
+        r.world.create_body({.shape = Shape3D::box({20.0f, 0.5f, 20.0f}), .motion = Body3DMotion::Static, .position = {0.0f, -0.5f, 0.0f}});
+        const Body3D slab = add_block(r.world, {-2.0f, 0.0f, -0.06f}, {2.0f, 3.0f, 0.0f}, 1);
+        const Body3D block = add_block(r.world, {-2.0f, 0.0f, -3.06f}, {2.0f, 3.0f, -0.06f}, 2);
+        r.step(30);
+        climb_to_top(r);
+        TraversalState3D t = r.trav();
+        CHECK(t.held == 2 && t.grips[0].ledge && t.grips[1].ledge);
+        CHECK(t.grips[0].body == slab);
+        CHECK_NEAR(t.grips[0].point.y, 3.0, 2e-3);
+        r.tin.pull_up = true;
+        r.step(62);
+        t = r.trav();
+        CHECK(t.mode == TraversalMode3D::Walking && r.count(CharacterEventKind3D::MantleFinished) == 1);
+        r.step(30);
+        CHECK(r.state().ground == CharacterGround3D::OnGround && r.state().ground_body == block);
+        CHECK_NEAR(r.state().position.y, 3.0, 0.02);
+    }
+}
+
+// Pushed while hanging (World3D::add_character_impulse): the swing takes it, the grips hold, and it settles back.
+void test_pushed_while_hanging() {
+    Rig r;
+    grab_wall(r);
+    r.step(90);
+    CHECK(r.trav().mode == TraversalMode3D::Hanging && r.trav().held == 2);
+    const Vec3f at = r.state().position;
+    r.world.add_character_impulse(r.hero, {70.0f * 2.0f, 0.0f, 0.0f});
+    r.step();
+    CHECK(r.state().position.x > at.x + 0.02f);
+    CHECK(r.trav().mode == TraversalMode3D::Hanging);
+    r.step(20);
+    CHECK(r.state().position.x > at.x + 0.1f);
+    r.step(240);
+    CHECK(r.trav().mode == TraversalMode3D::Hanging && r.trav().held == 2);
+    CHECK_NEAR(r.state().position.x, at.x, 0.02);
+    CHECK(r.count(CharacterEventKind3D::Fell) == 0);
+}
+
 // --- grips and hanging -----------------------------------------------------------------------------------------------
 
 void test_climb_and_mantle() {
@@ -1792,6 +1915,8 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "-t" && i + 1 < argc) { trace_climb(argv[i + 1]); return 0; }
     }
     test_probe();
+    test_ledge_across_bodies();
+    test_pushed_while_hanging();
     test_climb_and_mantle();
     test_phases_and_latch();
     test_two_hands_one_hand_and_drain();

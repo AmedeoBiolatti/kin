@@ -7,6 +7,7 @@
 #include <kin/ecs/render3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
 #include <string_view>
+#include <unordered_map>
 
 namespace kin {
 
@@ -301,6 +302,7 @@ void WorldRenderState3D::animate(f32 dt) {
             a.player.set_blend_parameter(a.params.get_float(want.blend->parameter));
         }
         a.player.set_speed(a.speed);
+        a.player.set_loop(a.loop);
         a.player.set_root_motion(a.apply_root_motion || a.remove_root_motion, a.root_motion_axes);
         // Layers over the base, as data: the clip by name and the mask by its joint, looked up when they change.
         a.applied_layers.resize(a.layers.size());
@@ -352,6 +354,9 @@ void WorldRenderState3D::animate(f32 dt) {
                 k.target_valid = false;
                 if (k.target.kind == IKTarget3D::Kind::World) {
                     k.target_valid = true;
+                } else if (k.target.kind == IKTarget3D::Kind::SceneEntity) {
+                    const auto target = _ecs ? k.target.scene_entity.resolve(*_ecs) : EcsEntity{};
+                    k.target_valid = target && target.has<WorldTransform3D>();
                 } else if (k.target.kind == IKTarget3D::Kind::Entity) {
                     k.target_valid =
                         ecs.is_alive(k.target.entity) && ecs.entity(k.target.entity).get<WorldTransform3D>() != nullptr;
@@ -412,6 +417,12 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pos
             if (k.target.kind == IKTarget3D::Kind::World) {
                 target_world = k.target.position;
                 has_target = true;
+            } else if (k.target.kind == IKTarget3D::Kind::SceneEntity) {
+                const auto target = _ecs ? k.target.scene_entity.resolve(*_ecs) : EcsEntity{};
+                if (const auto* t = target ? target.get<WorldTransform3D>() : nullptr) {
+                    target_world = t->matrix.apply(k.target.position);
+                    has_target = true;
+                }
             } else if (k.target.kind == IKTarget3D::Kind::Entity && ecs.is_alive(k.target.entity)) {
                 if (const WorldTransform3D* t = ecs.entity(k.target.entity).get<WorldTransform3D>()) {
                     target_world = t->matrix.apply(k.target.position);
@@ -647,10 +658,27 @@ void WorldRenderState3D::propagate_transforms() {
 
 void WorldRenderState3D::clear_collection_cache() {
     _buckets.clear();
+    _bucket_lookup.clear();
+    _bucket_lookup_dirty = false;
 }
 
 void WorldRenderState3D::collect(Scene3D& scene) {
     prepare_joint_attachments();
+    auto& by_mesh = _bucket_lookup;
+    if (_bucket_lookup_dirty) {
+        by_mesh.clear();
+        for (std::size_t i = 0; i < _buckets.size(); ++i)
+            by_mesh[_buckets[i].mesh.backend().get()].push_back(i);
+        _bucket_lookup_dirty = false;
+    }
+    const auto bucket_for = [&](const Mesh3D& mesh, const Material3D& material) -> Bucket& {
+        auto& candidates = by_mesh[mesh.backend().get()];
+        for (const auto index : candidates)
+            if (_buckets[index].material == material)
+                return _buckets[index];
+        candidates.push_back(_buckets.size());
+        return _buckets.emplace_back(Bucket{mesh, material, {}, {}});
+    };
     for (Bucket& bucket : _buckets) {
         bucket.instances.clear();
     }
@@ -665,24 +693,16 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                 if (!r.visible || !r.mesh.valid()) {
                     continue;
                 }
-                if (!last || !(last->mesh == r.mesh) || !(last->material == r.material)) {
-                    last = nullptr;
-                    for (Bucket& bucket : _buckets) {
-                        if (bucket.mesh == r.mesh && bucket.material == r.material) {
-                            last = &bucket;
-                            break;
-                        }
-                    }
-                    if (!last) {
-                        last = &_buckets.emplace_back(Bucket{r.mesh, r.material, {}, {}});
-                    }
-                }
                 const auto placement =
                     draw_placement(it.entity(i), world[i], it.is_set(2) ? &presentation[i] : nullptr);
+                if (!placement)
+                    continue;
+                if (!last || !(last->mesh == r.mesh) || !(last->material == r.material)) {
+                    last = &bucket_for(r.mesh, r.material);
+                }
                 // The entity's id when none is given, as for models: pick names the entity and TAA matches its frames
                 // by it.
-                if (placement)
-                    last->instances.push_back({*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu)});
+                last->instances.push_back({*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu)});
             }
         }
     });
@@ -726,18 +746,15 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             const auto& material = binding ? binding->materials[index] : part.material;
             if (!part.mesh || part.mesh.skinned() || part.skin >= 0)
                 continue;
-            auto found = std::find_if(_buckets.begin(), _buckets.end(), [&](const auto& bucket) {
-                return bucket.mesh == part.mesh && bucket.material == material;
-            });
-            if (found == _buckets.end())
-                found = _buckets.emplace(_buckets.end(), Bucket{part.mesh, material, {}, {}});
-            found->instances.push_back(
-                {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint,
-                 id});
+            bucket_for(part.mesh, material)
+                .instances.push_back(
+                    {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint,
+                     id});
         }
     });
     // A bucket is a reuse aid for live draws, never a resident asset cache.
-    std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); });
+    if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))
+        _bucket_lookup_dirty = true;
     // Keep the authoring path cheap for small buckets. Larger eligible buckets reuse
     // fixed CPU records instead of copying them into Scene3D every frame. This cap
     // covers the extra live records, independent of the renderer's GPU table budget.
@@ -747,17 +764,17 @@ void WorldRenderState3D::collect(Scene3D& scene) {
     for (Bucket& bucket : _buckets) {
         const auto& material = bucket.material;
         const std::size_t bytes = bucket.instances.size() * sizeof(MeshInstance3D);
-        const bool eligible = bucket.instances.size() >= min_records && !bucket.mesh.skinned() &&
+        const std::size_t minimum = bucket.batch || bucket.spare ? min_records / 2 : min_records;
+        const bool eligible = bucket.instances.size() >= minimum && !bucket.mesh.skinned() &&
                               (material.blend == Blend3D::Opaque || material.blend == Blend3D::Mask) &&
                               !material.wireframe && !material.shader.backend() && retained_batches < max_batches &&
                               bytes <= record_budget - retained_bytes;
         if (!eligible) {
             bucket.batch = {};
+            bucket.spare = {};
             scene.draw_instanced(bucket.mesh, bucket.instances, material);
             continue;
         }
-        retained_bytes += bytes;
-        ++retained_batches;
         const auto rebuild = [&] {
             std::vector<InstanceGroup3D> groups;
             // Consecutive source ranges preserve draw order. Bounds follow edits;
@@ -770,7 +787,13 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             }
             bucket.batch = InstanceBatch3D(bucket.mesh, bucket.instances, std::move(groups));
         };
+        const bool spare_usable = bucket.spare && bucket.spare.instances().size() == bucket.instances.size() &&
+                                  bucket.spare.lifetime().use_count() == 1;
+        if (spare_usable && (!bucket.batch || bucket.batch.instances().size() != bucket.instances.size() ||
+                             bucket.batch.lifetime().use_count() > 1))
+            std::swap(bucket.batch, bucket.spare);
         if (!bucket.batch || bucket.batch.instances().size() != bucket.instances.size()) {
+            std::swap(bucket.batch, bucket.spare);
             rebuild();
         } else {
             const auto previous = bucket.batch.instances();
@@ -789,6 +812,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                 // A separately collected scene must keep its snapshot. The usual
                 // clear/collect/render loop owns no old handle and edits in place.
                 if (shared) {
+                    std::swap(bucket.batch, bucket.spare);
                     rebuild();
                     break;
                 }
@@ -798,6 +822,15 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                 bucket.batch.update(static_cast<u32>(first),
                                     std::span<const MeshInstance3D>(bucket.instances).subspan(first, i - first));
             }
+        }
+        retained_bytes += bytes;
+        ++retained_batches;
+        const auto spare_bytes = bucket.spare.instances().size_bytes();
+        if (bucket.spare && retained_batches < max_batches && spare_bytes <= record_budget - retained_bytes) {
+            retained_bytes += spare_bytes;
+            ++retained_batches;
+        } else {
+            bucket.spare = {};
         }
         scene.draw_instanced(bucket.batch, material);
     }
@@ -885,7 +918,8 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                            binding ? std::span<const Material3D>{binding->materials} : std::span<const Material3D>{});
     });
     // Meshes no longer drawn are let go.
-    std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); });
+    if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))
+        _bucket_lookup_dirty = true;
 }
 
 } // namespace kin

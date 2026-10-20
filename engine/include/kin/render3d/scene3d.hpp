@@ -229,14 +229,20 @@ struct DirectionalShadow3D {
     f32 distance = 0.0f; // how far from the camera they reach; 0: Lights3D::shadow_distance
 };
 
+// Optional light from below, using the same enabled/settings pattern as other features.
+struct GroundAmbient3D {
+    bool enabled = false;
+    LinearRgb color{0.25f, 0.25f, 0.28f};
+};
+
 struct Lights3D {
     DirectionalLight3D sun{};
     // A second sun that casts no shadow, to lift the far side (black: none).
     DirectionalLight3D fill{.direction = {0.6f, 0.4f, -0.5f}, .color = {0.0f, 0.0f, 0.0f}};
     LinearRgb ambient{0.25f, 0.25f, 0.28f}; // light from everywhere, linear
     // With it, ambient light comes from the sky above (`ambient`) to the
-    // ground below (this), by which way a face looks; without, from all round.
-    std::optional<LinearRgb> ground_ambient{};
+    // ground below (ground_ambient.color), by which way a face looks; disabled, from all round.
+    GroundAmbient3D ground_ambient{};
     // Light from all round, from a picture (Renderer3D::load_environment):
     // surfaces take their diffuse light from it by their normal and reflect
     // it by roughness, in place of `ambient` (which is then not used; sun,

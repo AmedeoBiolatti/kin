@@ -66,3 +66,23 @@ float kin_fog_row(float s) {
     const float c = min(sqrt(h * h + 0.000625), 1.0);
     return clamp(log(c * 40.0) * 0.2710850307, 0.0, 1.0) * float(KIN_FOG_ROWS - 1);
 }
+
+// Instantiate beside the pass's uniform block. Reading its rows directly avoids copying a 3 KiB array into a
+// function parameter at every fragment or particle corner.
+#define KIN_FOG_TABLE_READER(FUNCTION, SKY, TABLE) \
+vec3 FUNCTION(vec3 dir) { \
+    const vec3 v = normalize(vec3(dir.x, max(dir.y, 0.0), dir.z) + vec3(1e-6, 0.0, 0.0)); \
+    const float x = kin_fog_row(v.y); \
+    const int i = min(int(x), KIN_FOG_ROWS - 2); \
+    const float w = x - float(i); \
+    const int k = i * 4; \
+    const float mu = dot(v, (SKY).sun.xyz); \
+    vec3 light = kin_rayleigh_phase(mu) * mix(TABLE[k].rgb, TABLE[k + 4].rgb, w) + \
+                 kin_mie_phase(mu, (SKY).shape.y) * mix(TABLE[k + 1].rgb, TABLE[k + 5].rgb, w); \
+    if ((SKY).shape.w > 0.0) { \
+        const float mu_moon = dot(v, (SKY).moon.xyz); \
+        light += kin_rayleigh_phase(mu_moon) * mix(TABLE[k + 2].rgb, TABLE[k + 6].rgb, w) + \
+                 kin_mie_phase(mu_moon, (SKY).shape.y) * mix(TABLE[k + 3].rgb, TABLE[k + 7].rgb, w); \
+    } \
+    return light + (SKY).night.rgb; \
+}

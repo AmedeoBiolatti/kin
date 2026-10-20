@@ -11,18 +11,20 @@ layout(location = 3) in vec2 vLocal;
 layout(location = 4) in float vDepth;
 layout(location = 5) in vec4 vFog;
 layout(location = 6) in float vMix;
+#ifdef KIN_PARTICLE_LIGHTS
+layout(location = 7) in vec3 vLocalLight;
+#endif
 
 layout(set = 2, binding = 0) uniform sampler2D uTexture; // white without one
 #ifdef KIN_SOFT
 layout(set = 2, binding = 1) uniform sampler2D uDepth;   // the pre-pass's depth (reverse Z), read by texel
 #endif
 
-layout(set = 3, binding = 0) uniform ParticleFrag {
-    vec4 tint;      // rgb: the light's tint (linear), w: unused
-    vec4 flags;     // x: encode to sRGB, y: decode the texture, z: blend (0 alpha, 1 additive, 2 premultiplied), w: 1 with a texture
-    vec4 disc;      // x: the procedural disc's softness, y: its ring, z: the soft fade's distance (0: none)
-    vec4 unproject; // the inverse projection's entries e f g h: a depth's view-space z = (e d + f) / (g d + h)
-} frag;
+#include "kin_particle_frag_uniforms.inc.glsl"
+
+#ifdef KIN_PARTICLE_SHADOWS
+#include "kin_particle_shadow.inc.glsl"
+#endif
 
 layout(location = 0) out vec4 FragColor;
 
@@ -41,31 +43,7 @@ float smooth01(float x) {
 }
 
 void main() {
-    // The picture, or a soft disc (with a ring, if asked): alpha 0 outside the disc's edge.
-    vec4 tex = vec4(1.0);
-    float shape = 1.0;
-    if (frag.flags.w > 0.5) {
-        tex = texture(uTexture, vUV0);
-        if (vMix > 0.0) {
-            tex = mix(tex, texture(uTexture, vUV1), vMix);
-        }
-        if (frag.flags.y > 0.5) {
-            tex.rgb = decode(tex.rgb);
-        }
-    } else {
-        const float r = length(vLocal);
-        const float s = clamp(frag.disc.x, 0.0, 1.0);
-        const float inner = 1.0 - s;
-        float a = r <= inner ? 1.0 : 1.0 - smooth01((r - inner) / max(s, 1e-4));
-        if (r > 1.0) {
-            a = 0.0;
-        }
-        if (frag.disc.y > 0.0) {
-            const float width = clamp(frag.disc.y, 0.01, 1.0);
-            a *= smooth01((r - (1.0 - width)) / width);
-        }
-        shape = a;
-    }
+#include "kin_particle_sample.inc.glsl"
     float fade = 1.0;
 #ifdef KIN_SOFT
     if (frag.disc.z > 0.0) {
@@ -78,7 +56,13 @@ void main() {
     }
 #endif
     const float k = vColour.a * shape * fade;
+#ifdef KIN_PARTICLE_SHADOWS
+    vec3 colour = tex.rgb * vColour.rgb * particle_shadow_tint();
+#elif defined(KIN_PARTICLE_LIGHTS)
+    vec3 colour = tex.rgb * vColour.rgb * (frag.tint.rgb + vLocalLight);
+#else
     vec3 colour = tex.rgb * vColour.rgb * frag.tint.rgb;
+#endif
     float alpha;
     if (frag.flags.z > 1.5) {
         // Premultiplied: the texel is colour * alpha already; the particle's alpha scales both.
@@ -109,4 +93,12 @@ void main() {
         }
     }
     FragColor = vec4(colour, frag.flags.z > 0.5 && frag.flags.z < 1.5 ? 0.0 : alpha);
+#ifdef KIN_REACTIVE
+    // Match actual contribution, including alpha-zero premultiplied emission,
+    // fog attenuation, the atlas/disc and soft intersections. Invisible sprite
+    // corners must not erase another sprite's rejection mark.
+    if (all(equal(FragColor, vec4(0.0))))
+        discard;
+    FragColor = vec4(2.0, 0.0, 0.0, 0.0);
+#endif
 }

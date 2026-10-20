@@ -18,7 +18,8 @@ bool SceneAssetRuntime::instantiate3d(EcsWorld& world, Assets3D& assets, const S
     if (ecs_is_deferred(world.raw().c_ptr()) || ecs_stage_is_readonly(world.raw().c_ptr()))
         return fail3d(_diagnostics, "instantiate_scene3d", "requires a writable world between ECS iterations");
     if (!scene()->script.empty())
-        return fail3d(_diagnostics, "instantiate_scene3d", "requires a C++ scene; use ScriptScene for Lua lifecycle");
+        return fail3d(_diagnostics, "instantiate_scene3d",
+                      "scripted 3D scenes require SceneSession3D for Lua lifecycle");
     if (!instantiate(world, {.update_scene_header = false}))
         return false;
     try {

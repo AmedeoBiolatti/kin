@@ -241,35 +241,67 @@ Vec3f masked(Vec3f v, const RootMotionAxes3D& axes) {
 RootMotion3D extract_root_motion(const AnimClip3D& clip, const Skeleton3D& skeleton, f32 from, f32 to, bool loop,
                                  const RootMotionAxes3D& axes) {
     RootMotion3D motion;
-    if (skeleton.root_joint() < 0 || !(clip.duration > 0.0f)) {
+    if (skeleton.root_joint() < 0 || !(clip.duration > 0.0f) || !std::isfinite(clip.duration) || !std::isfinite(from) ||
+        !std::isfinite(to)) {
         return motion;
     }
-    const f32 t0 = clip_time(clip, from, loop);
-    const f32 t1 = clip_time(clip, to, loop);
-    // Wrapped: forward, the end's motion from t0 then the start's to t1; backward (a negative speed), the start's from
-    // t0 then the end's to t1. Without a wrap, going backwards within a clip is just negative motion.
-    const bool forward = to > from;
-    const bool wrapped = loop && (forward ? t1 < t0 : t1 > t0);
-    if (wrapped) {
-        const JointPose3D a = root_at(clip, skeleton, t0, false);
-        const JointPose3D end = root_at(clip, skeleton, clip.duration, false);
-        const JointPose3D start = root_at(clip, skeleton, 0.0f, false);
-        const JointPose3D b = root_at(clip, skeleton, t1, false);
-        // Where the root leaves the clip and where it comes back in.
-        const JointPose3D& leave = forward ? end : start;
-        const JointPose3D& enter = forward ? start : end;
-        motion.translation = masked((leave.translation - a.translation) + (b.translation - enter.translation), axes);
+    if (!loop) {
+        const JointPose3D a = root_at(clip, skeleton, clip_time(clip, from, false), false);
+        const JointPose3D b = root_at(clip, skeleton, clip_time(clip, to, false), false);
+        motion.translation = masked(b.translation - a.translation, axes);
         if (axes.rotation) {
-            motion.rotation =
-                ((b.rotation * enter.rotation.conjugate()) * (leave.rotation * a.rotation.conjugate())).normalized();
+            motion.rotation = (b.rotation * a.rotation.conjugate()).normalized();
         }
         return motion;
     }
+    // Looping: the clip's cycle each time is in (floor(time / duration)), and the times within it. The ends a step
+    // crosses, going forward, are the end of the clip then its start, as many times as it crosses: from `a` to the end,
+    // whole cycles from the start to the end, and from the start to `b`. Backward (a negative speed) the same the other
+    // way round. A step within one cycle, forward or backward, is just the motion between its two times.
+    const f64 cycle0 = std::floor(static_cast<f64>(from) / clip.duration);
+    const f64 cycle1 = std::floor(static_cast<f64>(to) / clip.duration);
+    const auto within = [&](f32 time) {
+        f64 value = std::fmod(static_cast<f64>(time), clip.duration);
+        if (value < 0.0)
+            value += clip.duration;
+        return std::min(static_cast<f32>(value), clip.duration);
+    };
+    const f32 t0 = within(from), t1 = within(to);
     const JointPose3D a = root_at(clip, skeleton, t0, false);
     const JointPose3D b = root_at(clip, skeleton, t1, false);
-    motion.translation = masked(b.translation - a.translation, axes);
+    if (cycle1 == cycle0) {
+        motion.translation = masked(b.translation - a.translation, axes);
+        if (axes.rotation) {
+            motion.rotation = (b.rotation * a.rotation.conjugate()).normalized();
+        }
+        return motion;
+    }
+    const bool forward = cycle1 > cycle0;
+    const f64 crossings = std::fabs(cycle1 - cycle0); // ends crossed: whole cycles in between are one fewer
+    const JointPose3D end = root_at(clip, skeleton, clip.duration, false);
+    const JointPose3D start = root_at(clip, skeleton, 0.0f, false);
+    // Where the root leaves the clip and where it comes back in.
+    const JointPose3D& leave = forward ? end : start;
+    const JointPose3D& enter = forward ? start : end;
+    const f64 whole = crossings - 1.0;
+    motion.translation =
+        masked((leave.translation - a.translation) + (leave.translation - enter.translation) * static_cast<f32>(whole) +
+                   (b.translation - enter.translation),
+               axes);
     if (axes.rotation) {
-        motion.rotation = (b.rotation * a.rotation.conjugate()).normalized();
+        // The whole cycles' turn, repeated by squaring (a step of many cycles stays cheap).
+        const Quatf cycle = (leave.rotation * enter.rotation.conjugate()).normalized();
+        Quatf turned{};
+        Quatf power = cycle;
+        for (f64 n = whole; n >= 1.0; n = std::floor(n * 0.5)) {
+            if (std::fmod(n, 2.0) >= 1.0) {
+                turned = (power * turned).normalized();
+            }
+            power = (power * power).normalized();
+        }
+        motion.rotation =
+            ((b.rotation * enter.rotation.conjugate()) * turned * (leave.rotation * a.rotation.conjugate()))
+                .normalized();
     }
     return motion;
 }

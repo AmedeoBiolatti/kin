@@ -35,8 +35,10 @@ void main() {
     if (params.a.z < 1.5) {
         c = aces(c * params.a.y);
     }
-    if ((params.a.z < 0.5 || params.a.z > 2.5) && alpha > 0.0) {
-        c = encode(partial ? c : c / alpha) * alpha;
+    if (params.a.z < 0.5 || params.a.z > 2.5) {
+        // Alpha 0 with colour: an additive glow over the transparent background (the additive blend adds colour and
+        // leaves the coverage), encoded as the same glow over geometry is. encode(0) is 0: an empty pixel stays empty.
+        c = alpha > 0.0 ? encode(partial ? c : c / alpha) * alpha : encode(c);
     } else if (partial) {
         c *= alpha;
     }

@@ -48,6 +48,7 @@ kin_add_test(kin_ecs_render_tests kin-ecs-render SOURCES ecs_render_tests.cpp)
 kin_add_test(kin_ecs_animation_tests kin-ecs-animation SOURCES ecs_animation_tests.cpp)
 kin_add_test(kin_particle_tests kin-particles SOURCES particle_tests.cpp)
 kin_add_test(kin_pathfinding_tests kin-pathfinding SOURCES pathfinding_tests.cpp)
+kin_add_test(kin_navmesh3d_tests kin-navmesh3d SOURCES navmesh3d_tests.cpp)
 kin_add_test(kin_hex_tests kin-hex SOURCES hex_tests.cpp)
 kin_add_test(kin_path_server_tests kin-path-server SOURCES path_server_tests.cpp)
 kin_add_test(kin_physics_tests kin-physics SOURCES physics_tests.cpp)
@@ -111,6 +112,14 @@ if(KIN_GLSLC)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
 if(KIN_EXPERIMENTAL_3D)
+    kin_add_test(kin_model_profile3d_tests kin-model-profile3d SOURCES model_profile3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    add_test(NAME kin-model-profile3d-gpu COMMAND kin_model_profile3d_tests gpu)
+    set_tests_properties(kin-model-profile3d-gpu PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_script_scene3d_tests kin-script-scene3d SOURCES script_scene3d_tests.cpp script_scene3d_advanced_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    add_test(NAME kin-script-scene3d-gpu COMMAND kin_script_scene3d_tests gpu)
+    set_tests_properties(kin-script-scene3d-gpu PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_errors3d_tests kin-errors3d SOURCES errors3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
     kin_add_test(kin_scene_frame3d_tests kin-scene-frame3d SOURCES scene_frame3d_tests.cpp
@@ -160,6 +169,8 @@ if(KIN_EXPERIMENTAL_3D)
     kin_add_test(kin_particle_assets3d_tests kin-particle-assets3d SOURCES particle_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    kin_add_test(kin_particle_shadow_tests kin-particle-shadows3d SOURCES particle_shadow_cast3d_tests.cpp)
+    set_tests_properties(kin-particle-shadows3d PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
     add_test(NAME kin-particle-assets3d-cpu COMMAND kin_particle_assets3d_tests cpu)
     set_tests_properties(kin-particle-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_physics3d_asset_tests kin-physics3d-assets SOURCES physics3d_asset_tests.cpp
@@ -200,6 +211,9 @@ if(KIN_EXPERIMENTAL_3D)
     kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
                     KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    # Some 230 GPU tests: a few minutes on lavapipe here, longer on a CI runner, so
+    # it has its own limit (a TIMEOUT property takes precedence over ctest --timeout).
+    set_tests_properties(kin-render3d PROPERTIES TIMEOUT 1800)
 endif()
 kin_add_test(kin_isometric_demo_tests kin-isometric-demo SOURCES isometric_demo_tests.cpp)
 kin_add_test(kin_tilemap_tests kin-tilemap SOURCES tilemap_tests.cpp)

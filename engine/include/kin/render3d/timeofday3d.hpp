@@ -19,7 +19,7 @@ namespace kin {
 
 struct TimeOfDay3D {
     f32 hours = 12.0f;        // solar time, 0 to 24
-    f32 day_of_year = 172.0f; // 1 to 365 (80: the March equinox, 172: the June solstice)
+    f32 day_of_year = 172.0f; // 1 to 365 (81: the March equinox, 172: the June solstice, 264: the September equinox)
     f32 latitude = 45.0f;     // degrees, north positive
     f32 axial_tilt = 23.44f;  // the planet's, degrees (0: the sun stays over the equator all year)
     f32 moon_phase = 0.5f;    // 0 new, 0.25 first quarter, 0.5 full
@@ -31,6 +31,11 @@ struct TimeOfDay3D {
     // as the game set them) once it is above the horizon and bright enough, its strength fading in over its first 8
     // degrees and with its light. Off, apply() leaves them as they are (the sun casts while it shines, the moon never).
     bool shadows = false;
+    // advance()'s own: the clock summed exactly (f64; `hours` is f32, and a frame at speed 1 is below its resolution
+    // in the evening) and the `hours` it last wrote, so that it notices when the game sets `hours` itself and starts
+    // again from that. Not authored, not for setting: leave them alone.
+    f64 clock = -1.0;
+    f32 clock_hours = -1.0f;
 };
 
 // What a time of day makes of the sky.
@@ -47,7 +52,7 @@ struct SkyState3D {
     LinearRgb moon_color{};       // its light on the ground (the fill light): a bluish white times moon_light
     LinearRgb ambient{};          // the sky's light from above (Lights3D::ambient), over pi
     LinearRgb ground_ambient{};   // and the ground's from below
-    Vec3f fog_color{};            // the sky's colour at the horizon away from the sun
+    LinearRgb fog_color{};        // the sky's colour at the horizon away from the sun
     f32 fog_density = 0.0f;       // a suggestion for Fog3D::density: a visibility of 24 km over the haze
     f32 daylight = 1.0f;          // 0 at night to 1 by day (the sun's light on the ground, as a fraction of its noon)
 };
@@ -69,7 +74,8 @@ struct SunTimes3D {
 };
 SunTimes3D sun_times(const TimeOfDay3D& time);
 // Steps the clock by `dt` real seconds: `speed` game seconds each, hours wrapping at 24 into the next day (365 days a
-// year).
+// year). Exact over any number of frames (an f64 sum behind the f32 `hours`: an hour of frames at 60 fps is an hour,
+// not 0.82 of one); a NaN or infinite `dt` or `speed` changes nothing.
 void advance(TimeOfDay3D& time, f32 dt);
 
 } // namespace kin

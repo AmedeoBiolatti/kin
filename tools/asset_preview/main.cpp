@@ -46,10 +46,9 @@ class Preview final : public Scene {
             if (!size || *size > 32u * 1024u * 1024u)
                 throw std::runtime_error("model missing or exceeds the preview's 32 MiB source limit");
             _assets->clear(); // old handles remain live until the candidate is valid
-            std::string error;
-            auto candidate = _assets->load_model(_options.model, &error);
+            auto candidate = _assets->load_model(_options.model);
             if (!candidate)
-                throw std::runtime_error(error);
+                throw std::runtime_error(diagnostics3d_text(_assets->diagnostics()));
             if (candidate->parts.size() > 256 || candidate->skeletons.size() > 16)
                 throw std::runtime_error("preview supports at most 256 parts and 16 skeletons");
             const auto bounds = candidate->bounds;
@@ -71,9 +70,9 @@ class Preview final : public Scene {
             }
             std::shared_ptr<const MaterialBinding3D> binding;
             if (!sidecar.empty()) {
-                auto loaded = _assets->load_materials(sidecar, candidate.shared(), _options.variant, &error);
+                auto loaded = _assets->load_materials(sidecar, candidate.shared(), _options.variant);
                 if (!loaded)
-                    throw std::runtime_error(error);
+                    throw std::runtime_error(diagnostics3d_text(_assets->diagnostics()));
                 binding = loaded.shared();
             } else if (!_options.variant.empty())
                 throw std::runtime_error("a material variant requires a .kinmaterials sidecar");

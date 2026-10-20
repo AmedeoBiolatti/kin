@@ -191,9 +191,11 @@ private:
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
-    u32 _taa_read = 0;                 // which of the two holds the last frame
-    u32 _taa_frame = 0;                // frames drawn with it, for the jitter
-    bool _taa_valid = false;           // the history holds a picture to blend
+    u32 _taa_read = 0;       // which of the two holds the last frame
+    u32 _taa_frame = 0;      // frames drawn with it, for the jitter
+    bool _taa_valid = false; // the history holds a picture to blend
+    u64 _taa_effect_key = 0;
+    bool _taa_reactive = false;        // the last motion buffer includes transient coverage
     bool _taa_reset_asked = false;     // View3D::reset_history()
     bool _taa_ortho = false;           // the camera's kind when it was made
     std::array<Mat4f, 2> _taa_prior{}; // the scene's and the overlay's view-projections last frame (no jitter)
@@ -250,7 +252,7 @@ public:
 
 private:
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder };
+    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder, Reactive, ReactiveWire };
     enum class Unlit : u8 { Off, Colour, Textured };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
@@ -275,7 +277,8 @@ private:
     // the second target too, masked), with the soft-particle fragment shader or not. Null where the shaders were not
     // made.
     SDL_GPUGraphicsPipeline* particle_pipeline(SDL_GPUTextureFormat format, u32 samples, ParticleBlend3D blend,
-                                               bool soft, bool velocity) const;
+                                               bool soft, bool velocity, bool reactive = false, bool local = false,
+                                               bool shadows = false) const;
     // The camera's turn into the pre-pass's velocity target, over the pre-pass's depth.
     SDL_GPUGraphicsPipeline* sky_velocity_pipeline(SDL_GPUTextureFormat depth) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
@@ -343,7 +346,8 @@ private:
     void match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs, bool skinned);
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
-                                  const TemporalAA3D& taa, bool reset, Vec2f jitter, RenderDebugStats3D& stats);
+                                  const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive, bool reject,
+                                  RenderDebugStats3D& stats);
 
     // render()'s stages, in the order they run, over a FrameCtx (defined in the .cpp)
     // that holds what they share. Each records into the frame's command buffer; any
@@ -381,7 +385,7 @@ private:
     bool main_pass(FrameCtx& ctx);       // false: the pass could not begin (2D is resumed already)
     void resolve_history(FrameCtx& ctx); // the temporal resolve
     void pick_pass(FrameCtx& ctx);
-    void push_frame_uniforms(FrameCtx& ctx, u32 s);
+    void push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot = 0, bool record_history = true);
     // Lights3D::sky_lights_scene: the sky drawn into a small panorama and filtered, when it has moved enough.
     void sky_environment(FrameCtx& ctx);
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
@@ -389,7 +393,11 @@ private:
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to
     // the instance buffer; draw_particles() then records them into the main pass.
     void prepare_particles(FrameCtx& ctx);
-    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass);
+    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false);
+    bool reactive_pass(FrameCtx& ctx);
+    SDL_GPUGraphicsPipeline* particle_cast_pipeline() const;
+    bool draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass, const Mat4f& light_view, bool local,
+                               u32 cascade = 0);
     void resume_2d();
     // `buffer` as a storage buffer of at least `bytes` (grown to twice its size, and not under `minimum`).
     void ensure_buffer(std::shared_ptr<GpuBuffer>& buffer, u32 bytes, u32 minimum,
@@ -449,9 +457,16 @@ private:
     GpuShader _particle_vertex_shader; // particle.vert
     GpuShader _particle_shader;        // particle.frag
     GpuShader _particle_soft_shader;   // particle_soft.frag
+    GpuShader _reactive_shader, _particle_reactive_shader, _particle_soft_reactive_shader;
+    GpuShader _particle_light_vertex, _particle_light_shader, _particle_soft_light_shader;
+    GpuShader _particle_reactive_light_shader, _particle_soft_reactive_light_shader;
+    GpuShader _particle_shadow_vertex, _particle_shadow_shader, _particle_soft_shadow_shader;
+    GpuShader _particle_reactive_shadow_shader, _particle_soft_reactive_shadow_shader;
+    GpuShader _particle_cast_shader;
     bool _particles_available = false;
     bool _soft_particles_available = false;
     bool _particles_warned = false;
+    bool _particle_shadows_warned = false;
     bool _particles_overflow_warned = false;
     std::shared_ptr<GpuBuffer> _particle_buffer; // the frame's sprites, batch by batch (GpuParticle3D); grows
     struct ParticleBatch {
@@ -463,6 +478,16 @@ private:
         bool soft = false; // reads the depth
     };
     std::vector<ParticleBatch> _particle_batches;
+    struct ParticleCastBatch {
+        ParticleLook3D look;
+        u32 first = 0, count = 0;
+        Vec3f centre{};
+        f32 radius = 0;
+    };
+    std::vector<ParticleCastBatch> _particle_cast_batches;
+    std::vector<ParticleSprite3D> _particle_cast_sprites;
+    std::shared_ptr<GpuBuffer> _particle_cast_buffer;
+    u32 _particle_cast_idle = 0;
     std::vector<ParticleSprite3D> _weather_sprites; // the weather's, made each render
     std::vector<WeatherBatch3D> _weather_batches;
     std::vector<f32> _weather_key, _weather_key_now; // what _weather_sprites were made from (and this render's)

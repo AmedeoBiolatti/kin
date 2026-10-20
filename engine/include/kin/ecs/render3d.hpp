@@ -168,11 +168,12 @@ struct SkinnedMeshRenderer3D {
 // What a constraint aims at: a point of the world, a point carried by another entity (its WorldTransform3D of the
 // current frame, so it follows it; an entity that is gone or has no WorldTransform3D counts as no target), or nothing.
 struct IKTarget3D {
-    enum class Kind : u8 { None, World, Entity };
+    enum class Kind : u8 { None, World, Entity, SceneEntity };
     Kind kind = Kind::None;
     // World: the point. Entity: an offset in that entity's own space (a hold's grip point).
     Vec3f position{};
     flecs::entity_t entity = 0;
+    SceneEntity3D scene_entity; // scene generation and pool lease checked every animation/solve
 };
 
 enum class IKKind3D : u8 {
@@ -242,6 +243,10 @@ struct IKConstraint3D {
     }
     IKConstraint3D& set_target(flecs::entity entity, Vec3f local_offset = {}) {
         target = {IKTarget3D::Kind::Entity, local_offset, entity.id()};
+        return *this;
+    }
+    IKConstraint3D& set_scene_target(SceneEntity3D entity, Vec3f local_offset = {}) {
+        target = {IKTarget3D::Kind::SceneEntity, local_offset, 0, entity};
         return *this;
     }
     IKConstraint3D& clear_target() {
@@ -389,6 +394,12 @@ struct Animator3D {
         }
         return nullptr;
     }
+    const IKConstraint3D* find_ik(std::string_view name) const {
+        for (const auto& constraint : ik_constraints)
+            if (constraint.name == name)
+                return &constraint;
+        return nullptr;
+    }
     // The constraint called `name`; one is made (a two-bone with no joints, which does nothing) when there is none, so
     // that `animator.ik("left_hand").set_target(...)` is always valid.
     IKConstraint3D& ik(std::string_view name) {
@@ -489,11 +500,11 @@ public:
 
 private:
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
-    static void solve_ik(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
-                         const flecs::world& ecs, u64 epoch);
+    void solve_ik(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
+                  const flecs::world& ecs, u64 epoch);
     // The clips' pose with the constraints solved and the override applied, in animator.ik_pose / ik_world.
-    static void solve_pose(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
-                           const flecs::world& ecs, u64 epoch);
+    void solve_pose(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
+                    const flecs::world& ecs, u64 epoch);
     void prepare_joint_attachments();
     std::optional<Mat4f> draw_placement(flecs::entity entity, const WorldTransform3D& world,
                                         const RenderTransform3D* presentation) const;
@@ -524,8 +535,11 @@ private:
         Material3D material;
         std::vector<MeshInstance3D> instances;
         InstanceBatch3D batch; // bounded automatic retention for substantial opaque/masked buckets
+        InstanceBatch3D spare; // another live collected scene, or the previous count
     };
     std::vector<Bucket> _buckets; // kept between frames, emptied each collect
+    std::unordered_map<const IMeshBackend3D*, std::vector<std::size_t>> _bucket_lookup;
+    bool _bucket_lookup_dirty = false;
     u64 _epoch =
         0; // advanced by animate() and propagate_transforms(): what the game's ground query said is good until it moves
 };

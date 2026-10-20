@@ -60,8 +60,22 @@ void register_particle3d_components(EcsWorld& world) {
     DESC(size_start);
     DESC(size_mid);
     DESC(size_end);
-    DESC(colour_start);
-    DESC(colour_end);
+    const auto rgb = [&](const char* name, LinearRgb ParticleDesc3D::*member) {
+        b.property<Vec3f>(
+            name,
+            [member](const auto& e) {
+                const auto c = e.system.desc.*member;
+                return Vec3f{c.r, c.g, c.b};
+            },
+            [member](auto& e, const Vec3f& c) {
+                if (!vector(c) || c.x < 0 || c.y < 0 || c.z < 0)
+                    return false;
+                e.system.desc.*member = {c.x, c.y, c.z};
+                return true;
+            });
+    };
+    rgb("colour_start", &ParticleDesc3D::colour_start);
+    rgb("colour_end", &ParticleDesc3D::colour_end);
     DESC(alpha_start);
     DESC(alpha_end);
     DESC(fade_in);
@@ -85,6 +99,9 @@ void register_particle3d_components(EcsWorld& world) {
     LOOK(soft);
     LOOK(soft_distance);
     LOOK(lit);
+    LOOK(receives_shadow);
+    LOOK(casts_shadow);
+    LOOK(shadow_cutoff);
     LOOK(fogged);
     LOOK(sort);
 #undef LOOK
@@ -198,6 +215,9 @@ void require(bool valid, const char* why) {
 bool positive(Vec3f v) {
     return vector(v) && v.x >= 0 && v.y >= 0 && v.z >= 0;
 }
+bool positive(LinearRgb c) {
+    return scalar(c.r) && scalar(c.g) && scalar(c.b) && c.r >= 0 && c.g >= 0 && c.b >= 0;
+}
 bool unit(f32 v) {
     return scalar(v) && v >= 0 && v <= 1;
 }
@@ -230,8 +250,8 @@ void validate(const ParticleEmitter3D& e) {
     require(f64(d.rate) * e.system.rate_scale * ParticleSystem3D::step <= 1e6,
             "particle birth rate exceeds step budget");
     require(unit(d.alpha_start) && unit(d.alpha_end) && unit(d.fade_in) && unit(d.colour_variation) && unit(d.bounce) &&
-                unit(l.softness) && unit(l.ring) && unit(l.lit),
-            "particle alpha/fade/bounce/softness/ring/lit must be in [0,1]");
+                unit(l.softness) && unit(l.ring) && unit(l.lit) && unit(l.shadow_cutoff),
+            "particle alpha/fade/bounce/softness/ring/lit/shadow cutoff must be in [0,1]");
     require(vector(l.axis) && ((l.facing != ParticleFacing3D::Axis && l.facing != ParticleFacing3D::Flat) ||
                                length_squared(l.axis) > 1e-12f),
             "axis/flat particles require a nonzero finite axis");
@@ -299,7 +319,8 @@ std::vector<std::string> resolve_particles3d_assets(EcsWorld& world, Assets3D& a
         if (!path.empty()) {
             std::string error;
             try {
-                texture = assets.load_texture(path, entity.get<ParticleEmitter3D>()->texture_nearest, true, &error);
+                texture = assets.load_texture(path, entity.get<ParticleEmitter3D>()->texture_nearest, true);
+                error = kin::diagnostics3d_text(assets.diagnostics());
             } catch (const std::exception& failure) {
                 error = failure.what();
             }

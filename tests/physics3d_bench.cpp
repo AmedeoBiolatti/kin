@@ -7,6 +7,15 @@
 // triangles, 100 shape casts, 100 overlaps, the step with contact events on and off for 500 bodies, and the ECS system's
 // overhead (WorldPhysicsState3D::step against World3D::step) for 500 dynamic bodies.
 //
+// With the argument `ecs`: the ECS system's fixed cost alone (WorldPhysicsState3D::step less World3D::step for the same bodies): 500 awake
+// bodies drifting with nothing to hit (the like for like measure of the system for awake bodies), 500 dynamic boxes falling and settling,
+// the same asleep (nothing touched: what a frame costs when the bodies are left alone), asleep with 10% of the entities gaining or losing a
+// tag each step (the bound set is read again), asleep with 10% of the transforms set to what they are each step, and a level of 500 static
+// boxes with 20 dynamic ones. The falling row is the world's own jitter as much as the system's, and the settling row is not like for like:
+// the system's pile falls asleep a few dozen steps after the raw world's (the entities' transforms round a hair differently: `ecs awake`
+// prints how many are awake as it settles), so its difference is mostly the world's own steps. `ecs asleep` and `ecs settle` run one case
+// alone and long, for a profiler.
+//
 // With the argument `climbing`: the cost of P2d (grab and climb): one grip probe (World3D::probe_grips: a fan of seven sphere sweeps
 // and the rays that refine them) in the climb level (tests/climb_level.hpp) with 500 dynamic boxes round it, a hand that is asked
 // to grab and finds nothing (two probes a step, per character), and 1, 10 and 100 characters hanging by both hands from a long wall
@@ -136,6 +145,32 @@ Shape3D hill_mesh(int n) {
     return Shape3D::triangle_mesh(v, idx);
 }
 
+// The same pile as make_pile(world, 500), made of entities: the yard (a floor and four walls) and 500 dynamic boxes. `boxes` gets the boxes.
+void make_ecs_pile(kin::EcsWorld& ecs, std::vector<flecs::entity>& boxes) {
+    const f32 half = 7.0f;
+    Collider3D floor;
+    floor.half_extents = {half + 2.0f, 0.5f, half + 2.0f};
+    ecs.raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor).set(RigidBody3D{.motion = Body3DMotion::Static, .friction = 0.5f});
+    Collider3D wx;
+    wx.half_extents = {0.5f, 20.0f, half + 1.0f};
+    Collider3D wz;
+    wz.half_extents = {half + 1.0f, 20.0f, 0.5f};
+    for (const f32 sgn : {-1.0f, 1.0f}) {
+        ecs.raw().entity().set(Transform3D{.position = {sgn * (half + 0.5f), 20.0f, 0.0f}}).set(wx);
+        ecs.raw().entity().set(Transform3D{.position = {0.0f, 20.0f, sgn * (half + 0.5f)}}).set(wz);
+    }
+    Collider3D box;
+    box.half_extents = {0.4f, 0.3f, 0.35f};
+    Lcg rng;
+    for (int i = 0; i < 500; ++i) {
+        const f32 x = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
+        const f32 z = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
+        const f32 y = 1.0f + 0.7f * static_cast<f32>(i / 80);
+        const Quatf q = Quatf::axis_angle({rng.next() + 0.1f, rng.next(), rng.next()}, rng.next() * 360.0f);
+        boxes.push_back(ecs.raw().entity().set(Transform3D{.position = {x, y, z}, .rotation = q}).set(box).set(RigidBody3D{.friction = 0.4f}));
+    }
+}
+
 int queries() {
     World3DConfig cfg;
     cfg.max_bodies = 4096;
@@ -246,29 +281,10 @@ int queries() {
             kin::EcsWorld ecs;
             World3D world(cfg);
             WorldPhysicsState3D bodies{ecs, world};
-            const f32 half = 7.0f;
-            Collider3D floor;
-            floor.half_extents = {half + 2.0f, 0.5f, half + 2.0f};
-            ecs.raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor).set(RigidBody3D{.motion = Body3DMotion::Static, .friction = 0.5f});
-            Collider3D wx;
-            wx.half_extents = {0.5f, 20.0f, half + 1.0f};
-            Collider3D wz;
-            wz.half_extents = {half + 1.0f, 20.0f, 0.5f};
-            for (const f32 sgn : {-1.0f, 1.0f}) {
-                ecs.raw().entity().set(Transform3D{.position = {sgn * (half + 0.5f), 20.0f, 0.0f}}).set(wx);
-                ecs.raw().entity().set(Transform3D{.position = {0.0f, 20.0f, sgn * (half + 0.5f)}}).set(wz);
-            }
-            Collider3D box;
-            box.half_extents = {0.4f, 0.3f, 0.35f};
-            Lcg rng;
-            for (int i = 0; i < 500; ++i) {
-                const f32 x = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
-                const f32 z = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
-                const f32 y = 1.0f + 0.7f * static_cast<f32>(i / 80);
-                const Quatf q = Quatf::axis_angle({rng.next() + 0.1f, rng.next(), rng.next()}, rng.next() * 360.0f);
-                ecs.raw().entity().set(Transform3D{.position = {x, y, z}, .rotation = q}).set(box).set(RigidBody3D{.friction = 0.4f});
-            }
+            std::vector<flecs::entity> boxes;
+            make_ecs_pile(ecs, boxes);
             bodies.sync_bodies();
+            world.optimize_broad_phase(); // as make_pile does for the raw world: the two steps differ by the system's work alone
             const auto run = [&](int frames) {
                 Window w;
                 for (int i = 0; i < frames; ++i) {
@@ -286,6 +302,199 @@ int queries() {
         }
         std::printf("ECS, 500 dynamic bodies, one thread: World3D::step %.3f / %.3f ms (steps 0-120 / 120-360), WorldPhysicsState3D::step %.3f / %.3f ms, overhead %.3f / %.3f ms\n",
                     raw_a.mean, raw_b.mean, ecs_a.mean, ecs_b.mean, ecs_a.mean - raw_a.mean, ecs_b.mean - raw_b.mean);
+    }
+    return 0;
+}
+
+struct Tagged3DBench {}; // toggled on entities to make the ECS system re-read which entities have bodies
+
+// The ECS system's own cost: its step less the world's, for the same bodies. `touch` runs before each timed step, outside the timer.
+int ecs_overhead(const std::string& only) {
+    World3DConfig cfg;
+    cfg.max_bodies = 4096;
+    cfg.max_body_pairs = 262144;
+    cfg.max_contact_constraints = 65536;
+    cfg.single_threaded = true;
+    constexpr f32 dt = 1.0f / 60.0f;
+    std::printf("%-46s %10s %10s %10s %8s\n", "500 boxes, one thread", "world ms", "system ms", "overhead", "awake");
+    const auto report = [](const char* what, double raw, double ecs, int awake) {
+        std::printf("%-46s %10.3f %10.3f %10.3f %8d\n", what, raw, ecs, ecs - raw, awake);
+    };
+    // 500 bodies awake and drifting (no gravity, never asleep, no contacts): the world's step is the same in both, so the difference is the
+    // system's work for awake bodies alone.
+    {
+        const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+        World3D raw(cfg);
+        for (int i = 0; i < 500; ++i) {
+            Body3DDesc d;
+            d.shape = box;
+            d.position = {static_cast<f32>(i % 25) * 2.0f, 5.0f, static_cast<f32>(i / 25) * 2.0f};
+            d.linear_velocity = {0.1f, 0.0f, 0.0f};
+            d.gravity_factor = 0.0f;
+            d.allow_sleeping = false;
+            raw.create_body(d);
+        }
+        raw.optimize_broad_phase();
+        time_steps(raw, 60);
+        const double raw_ms = time_steps(raw, 240).mean;
+        kin::EcsWorld ecs;
+        World3D world(cfg);
+        WorldPhysicsState3D bodies{ecs, world};
+        Collider3D collider;
+        collider.half_extents = {0.4f, 0.3f, 0.35f};
+        RigidBody3D body;
+        body.gravity_factor = 0.0f;
+        body.allow_sleeping = false;
+        body.linear_velocity = {0.1f, 0.0f, 0.0f};
+        for (int i = 0; i < 500; ++i) {
+            ecs.raw().entity().set(Transform3D{.position = {static_cast<f32>(i % 25) * 2.0f, 5.0f, static_cast<f32>(i / 25) * 2.0f}}).set(collider).set(body);
+        }
+        bodies.sync_bodies();
+        world.optimize_broad_phase();
+        for (int i = 0; i < 60; ++i) {
+            bodies.step(dt);
+        }
+        double sum = 0.0;
+        for (int i = 0; i < 240; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            bodies.step(dt);
+            sum += since_ms(t0);
+        }
+        report("awake, drifting (no gravity, no contacts)", raw_ms, sum / 240, world.active_body_count());
+    }
+    // The pile: falling (steps 0-120), settling (120-360), asleep (600-840).
+    {
+        World3D raw(cfg);
+        make_pile(raw, 500);
+        const double a = time_steps(raw, 120).mean;
+        const double b = time_steps(raw, 240).mean;
+        time_steps(raw, 240);
+        const double c = time_steps(raw, 240).mean;
+        kin::EcsWorld ecs;
+        World3D world(cfg);
+        WorldPhysicsState3D bodies{ecs, world};
+        std::vector<flecs::entity> boxes;
+        make_ecs_pile(ecs, boxes);
+        bodies.sync_bodies();
+        world.optimize_broad_phase(); // as make_pile does for the raw world
+        const auto run = [&](int frames, auto&& touch) {
+            double sum = 0.0;
+            for (int i = 0; i < frames; ++i) {
+                touch(i);
+                const auto t0 = std::chrono::steady_clock::now();
+                bodies.step(dt);
+                sum += since_ms(t0);
+            }
+            return sum / frames;
+        };
+        const auto none = [](int) {};
+        if (only == "asleep") {
+            // For a profiler: the asleep pile alone, a long time.
+            run(600, none);
+            report("dynamic, asleep, 20000 steps", c, run(20000, none), world.active_body_count());
+            return 0;
+        }
+        if (only == "awake") {
+            // How many bodies are awake as the pile settles, raw world against system: the same, or the system keeps some awake.
+            World3D raw2(cfg);
+            make_pile(raw2, 500);
+            for (int i = 0; i < 360; ++i) {
+                raw2.step(dt);
+                bodies.step(dt);
+                if (i % 30 == 29) {
+                    std::printf("step %3d: awake raw %d, system %d\n", i + 1, raw2.active_body_count(), world.active_body_count());
+                }
+            }
+            return 0;
+        }
+        if (only == "settle") {
+            // For a profiler: the pile falling and settling, several times over.
+            run(360, none);
+            for (int again = 0; again < 5; ++again) {
+                kin::EcsWorld ecs2;
+                World3D world2(cfg);
+                WorldPhysicsState3D bodies2{ecs2, world2};
+                std::vector<flecs::entity> boxes2;
+                make_ecs_pile(ecs2, boxes2);
+                bodies2.sync_bodies();
+                world2.optimize_broad_phase();
+                for (int i = 0; i < 360; ++i) {
+                    bodies2.step(dt);
+                }
+            }
+            return 0;
+        }
+        const double ea = run(120, none);
+        report("dynamic, steps 0-120 (falling)", a, ea, world.active_body_count());
+        const double eb = run(240, none);
+        report("dynamic, steps 120-360 (settling)", b, eb, world.active_body_count());
+        run(240, none);
+        const double ec = run(240, none);
+        report("dynamic, steps 600-840 (asleep)", c, ec, world.active_body_count());
+        // Asleep, 10% of the entities (50 a step, in turn) gain a tag or lose it again.
+        const double ed = run(240, [&](int i) {
+            for (int k = 0; k < 50; ++k) {
+                flecs::entity e = boxes[static_cast<std::size_t>((i * 50 + k) % 500)];
+                if (e.has<Tagged3DBench>()) {
+                    e.remove<Tagged3DBench>();
+                } else {
+                    e.add<Tagged3DBench>();
+                }
+            }
+        });
+        report("asleep, 10% gain or lose a tag each step", c, ed, world.active_body_count());
+        // Asleep, 10% of the transforms set to what they are (a write that changes nothing).
+        const double ee = run(240, [&](int i) {
+            for (int k = 0; k < 50; ++k) {
+                flecs::entity e = boxes[static_cast<std::size_t>((i * 50 + k) % 500)];
+                e.set(*e.get<Transform3D>());
+            }
+        });
+        report("asleep, 10% of transforms set (no change)", c, ee, world.active_body_count());
+    }
+    // A level: 500 static boxes (a grid on the floor) and 20 dynamic ones that fall on it and sleep.
+    {
+        World3D raw(cfg);
+        raw.create_body({.shape = Shape3D::box({40.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0.0f, -0.5f, 0.0f}});
+        for (int i = 0; i < 500; ++i) {
+            raw.create_body({.shape = Shape3D::box({0.4f, 0.2f, 0.4f}), .motion = Body3DMotion::Static,
+                             .position = {-30.0f + 2.0f * static_cast<f32>(i % 30), 0.2f, -20.0f + 2.0f * static_cast<f32>(i / 30)}});
+        }
+        for (int i = 0; i < 20; ++i) {
+            raw.create_body({.shape = Shape3D::box({0.3f, 0.3f, 0.3f}), .position = {-30.0f + 3.0f * static_cast<f32>(i), 1.5f, 0.0f}});
+        }
+        raw.optimize_broad_phase();
+        time_steps(raw, 360);
+        const double rawms = time_steps(raw, 240).mean;
+        kin::EcsWorld ecs;
+        World3D world(cfg);
+        WorldPhysicsState3D bodies{ecs, world};
+        Collider3D floor;
+        floor.half_extents = {40.0f, 0.5f, 40.0f};
+        ecs.raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor).set(RigidBody3D{.motion = Body3DMotion::Static});
+        Collider3D slab;
+        slab.half_extents = {0.4f, 0.2f, 0.4f};
+        for (int i = 0; i < 500; ++i) {
+            ecs.raw().entity().set(Transform3D{.position = {-30.0f + 2.0f * static_cast<f32>(i % 30), 0.2f, -20.0f + 2.0f * static_cast<f32>(i / 30)}})
+                .set(slab).set(RigidBody3D{.motion = Body3DMotion::Static});
+        }
+        Collider3D crate;
+        crate.half_extents = {0.3f, 0.3f, 0.3f};
+        for (int i = 0; i < 20; ++i) {
+            ecs.raw().entity().set(Transform3D{.position = {-30.0f + 3.0f * static_cast<f32>(i), 1.5f, 0.0f}}).set(crate).set(RigidBody3D{});
+        }
+        bodies.sync_bodies();
+        world.optimize_broad_phase();
+        for (int i = 0; i < 360; ++i) {
+            bodies.step(dt);
+        }
+        double sum = 0.0;
+        for (int i = 0; i < 240; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            bodies.step(dt);
+            sum += since_ms(t0);
+        }
+        report("level: 500 static + 20 dynamic, asleep", rawms, sum / 240, world.active_body_count());
     }
     return 0;
 }
@@ -685,6 +894,9 @@ int ropes() {
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "queries") {
         return queries();
+    }
+    if (argc > 1 && std::string(argv[1]) == "ecs") {
+        return ecs_overhead(argc > 2 ? argv[2] : "");
     }
     if (argc > 1 && std::string(argv[1]) == "characters") {
         return characters();

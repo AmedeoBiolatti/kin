@@ -96,6 +96,9 @@ struct ModelData3D {
     std::vector<Skeleton3D> skeletons;
     std::vector<AnimClip3D> clips;
     i32 node_skeleton = -1; // as Model3D::node_skeleton
+    // Parsing can retain unsupported content for inspection. Asset loaders reject
+    // this whole model when nonempty; tools must check before calling it drawable.
+    std::vector<std::string> asset_diagnostics;
 };
 
 class Model3D {
@@ -103,9 +106,10 @@ public:
     std::vector<ModelPart3D> parts;
     Bounds3D bounds{}; // round all of it, in the model's space (skinned and animated parts at rest)
     // glTF skins as skeletons, and glTF animations as clips (an animation of two skins is two clips of the same name).
-    // Empty for a model that is not skinned. A skin with more than max_skin_joints joints is not kept (logged), and its
-    // meshes are drawn as static meshes. Animator3D and draw_skinned(Model3D) pose skeletons[0] only: parts on another
-    // skin are not drawn there (logged once). A plain node between two of a skin's joints is a joint of its skeleton
+    // Asset loading requires a single distinct skin palette. Identical joint lists/inverse binds share one palette;
+    // different palettes, oversized skins and mixed skin/plain-node animation are rejected with diagnostics.
+    // Animator3D and draw_skinned(Model3D) pose skeletons[0]. A plain node between two of a skin's joints is a joint
+    // of its skeleton
     // too (no vertex is bound to it), so a skeleton can have more joints than the file's skin lists. The node skeleton
     // (node_skeleton), when there is one, comes after the skins, and its clips after theirs.
     std::vector<Skeleton3D> skeletons;
@@ -181,7 +185,8 @@ private:
 
 // Reads the geometry, skins and animations of a glTF (.gltf with embedded buffers, or .glb) held in `bytes`; the files
 // its buffers name are looked for beside `path` through kin's content folder or pack. No GPU, no materials or textures.
-// False, with why in `error`, when it does not read; problems with one skin or clip are logged and that part left out.
+// False, with why in `error`, when it does not read. A successful parse can retain unsupported content for tools:
+// check out.asset_diagnostics before using it as drawable content. Asset loaders reject these diagnostics as a whole.
 bool read_model_data(std::string_view bytes, const std::filesystem::path& path, ModelData3D& out,
                      std::string* error = nullptr);
 
@@ -197,10 +202,6 @@ public:
     // place, so rebind players and anything else that points into it (a skeleton, a clip) after poll() returns true.
     bool poll();
     const Diagnostics3D& diagnostics() const { return _errors; }
-    const std::string& error() const {
-        static const std::string empty;
-        return _errors.empty() ? empty : _errors.front();
-    }
 
 private:
     bool load();

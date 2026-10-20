@@ -2,7 +2,7 @@
 
 Experimental 3D C++ types now end in `3D`. Shared colour and math types (`Color`, `LinearRgb`, `Vec3f`, `Quatf`) remain dimension-independent. ECS `PointLight3D` and `SpotLight3D` describe entity-mounted lights; the renderer takes positioned `PointLightSource3D` and `SpotLightSource3D` records.
 
-Light RGB inputs (`color`, `ambient`, `ground_ambient`, and the time-of-day light outputs) use `LinearRgb`: three float channels named `r`, `g`, `b`, with no alpha or implicit vector/sRGB conversion. Values above one retain HDR energy. Material, vertex and instance tints continue to use sRGB `Color`.
+All 3D light, sky, fog, time-of-day, particle and weather RGB inputs and outputs use `LinearRgb`: three float channels named `r`, `g`, `b`, with no alpha or implicit vector/sRGB conversion. Values above one retain HDR energy. Material, vertex and instance tints continue to use sRGB `Color`.
 
 ```cpp
 scene.lights.sun.color = kin::to_linear_rgb(kin::Color::rgb(255, 220, 180));
@@ -10,7 +10,30 @@ scene.lights.sun.color = scene.lights.sun.color * 3.0f;
 scene.lights.ambient = kin::LinearRgb{0.25f, 0.25f, 0.28f};
 ```
 
-`to_linear_rgb` uses the existing sRGB transfer function. `linear_rgb(LinearColor)` explicitly drops alpha from an already-linear colour; `rgb.with_alpha(a)` supplies alpha for existing `LinearColor` APIs. Scene and prefab RGB triples keep their linear floating-point representation, including HDR values. Geometry directions remain `Vec3f`.
+`to_linear_rgb` uses the existing sRGB transfer function. `linear_rgb(LinearColor)` explicitly drops alpha from an already-linear colour; `rgb.with_alpha(a)` supplies alpha for existing `LinearColor` APIs. Scene and prefab RGB triples keep their linear floating-point representation, including HDR values. Geometry directions and scattering coefficient calculations remain `Vec3f`. Public sky/fog colour functions and `particle_light_tint` return `LinearRgb`; `fog_apply` also accepts a `LinearRgb` surface colour. Use `.r/.g/.b` for colour channels and `mix` to blend them. Scene/prefab RGB fields and particle recipes keep their existing names and linear triples; their shared field codec still uses numeric `{x,y,z}` tables in Lua.
+
+`Lights3D::ground_ambient` now uses `GroundAmbient3D { enabled, color }`, matching the other optional visual features. Replace optional assignment/reset with:
+
+```cpp
+scene.lights.ground_ambient = {.enabled=true, .color={0.1f, 0.08f, 0.06f}};
+scene.lights.ground_ambient.enabled = false; // retain the configured colour
+```
+
+Resource loads on `Renderer3D`, `Assets3D` and `PhysicsAssets3D` no longer take an error-output string. Check the returned handle, then copy `diagnostics3d_text(owner.diagnostics())` when needed. Successful calls, including cache hits, clear earlier diagnostics; observation does not. `ModelFile3D::error()` has also been removed in favour of `diagnostics()`. Constructor/precondition errors and stateless CPU validators retain their documented contracts.
+
+## Custom material shaders
+
+Recompile custom material GLSL against the current `kin_material.inc.glsl` to
+receive scene fog through `kin_output` and spot/moon lighting and local shadows
+through `kin_lit`. `kin_output` also applies the material's alpha cutoff;
+`kin_output_unfogged` explicitly bypasses fog while keeping encoding,
+premultiplication and cutoff handling. Writing `FragColor` directly remains a
+shader-owned output path.
+
+Fragment samplers 0–11 and uniform slots 0–3 are reserved. Slot 2 retains the
+four parameter vec4s as its prefix and appends fog data; slot 3 supplies local
+lights. Existing compiled shaders retain their parameter layout and original
+shading behavior. No scene/prefab or C++ material layout change is required.
 
 ## Type names
 

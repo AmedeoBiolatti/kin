@@ -1,7 +1,8 @@
 #pragma once
 
 // The ropes of one World3D (kin/physics3d/rope3d.hpp). Internal: the world's Impl owns one and calls it from step(), the hash and
-// the saved state. A rope is capsule bodies and point constraints made through the world's public calls.
+// the saved state. A rope is capsule bodies and point constraints made through the world's public calls; the bodies are marked
+// as its own (BodyOwner3D::Rope) and destroyed and reshaped by the world's owner calls.
 
 #include <kin/physics3d/world3d.hpp>
 
@@ -41,6 +42,10 @@ public:
     void post_step(f32 sub_dt, std::span<const ConstraintEvent3D> broke);
 
     std::vector<RopeEvent3D> drain_events() { return std::move(_events); }
+    void drain_events(std::vector<RopeEvent3D>& output) {
+        output.swap(_events);
+        clear_events();
+    }
     void clear_events() { _events.clear(); }
 
     void save_header(std::vector<u8>& out) const;

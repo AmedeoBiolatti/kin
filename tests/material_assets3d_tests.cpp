@@ -160,9 +160,12 @@ void material_gpu(Renderer2D& renderer) {
           "per-instance material colors not rendered");
     renderer.present();
     std::string error;
-    const auto ghost = assets.load_materials("colors.kinmaterials", model, "ghost", &error);
-    const auto glow = assets.load_materials("colors.kinmaterials", model, "glow", &error);
-    const auto mask = assets.load_materials("colors.kinmaterials", model, "mask", &error);
+    const auto ghost = assets.load_materials("colors.kinmaterials", model, "ghost");
+    error = kin::diagnostics3d_text(assets.diagnostics());
+    const auto glow = assets.load_materials("colors.kinmaterials", model, "glow");
+    error = kin::diagnostics3d_text(assets.diagnostics());
+    const auto mask = assets.load_materials("colors.kinmaterials", model, "mask");
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(ghost && glow && mask && ghost->materials[0].blend == Blend3D::Alpha && !ghost->materials[0].casts_shadow &&
               mask->materials[0].alpha_cutoff == .4f && mask->materials[0].blend == Blend3D::Mask &&
               glow->materials[0].emissive == 2 && glow->materials[0].blend == Blend3D::Additive,
@@ -174,13 +177,16 @@ void material_gpu(Renderer2D& renderer) {
         write(
             scratch.path / "shader.kinmaterials",
             R"({"schema":"kin.materials3d/1","material":{"shader":"custom.spv","shader_params":[0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]},"variants":{"plain":{"material":{"shader":null}}}})");
-        auto shaded = assets.load_materials("shader.kinmaterials", model, {}, &error);
+        auto shaded = assets.load_materials("shader.kinmaterials", model, {});
+        error = kin::diagnostics3d_text(assets.diagnostics());
         check(shaded && shaded->materials[0].shader && shaded->materials[0].shader_params[5] == 1,
               "shader material did not bind");
-        auto shared = assets.load_material_shader("custom.spv", &error);
+        auto shared = assets.load_material_shader("custom.spv");
+        error = kin::diagnostics3d_text(assets.diagnostics());
         check(shared == shaded->materials[0].shader && assets.load_material_shader("./custom.spv") == shared,
               "shader source aliases not shared");
-        const auto plain = assets.load_materials("shader.kinmaterials", model, "plain", &error);
+        const auto plain = assets.load_materials("shader.kinmaterials", model, "plain");
+        error = kin::diagnostics3d_text(assets.diagnostics());
         check(plain && !plain->materials[0].shader, "plain variant did not clear custom shader");
         auto view = r3d.create_view({64, 64});
         Scene3D probe;
@@ -200,18 +206,20 @@ void material_gpu(Renderer2D& renderer) {
         }
         const auto old = shaded->materials[0].shader;
         assets.invalidate("custom.spv");
-        auto rebound = assets.load_materials("shader.kinmaterials", model, {}, &error);
+        auto rebound = assets.load_materials("shader.kinmaterials", model, {});
+        error = kin::diagnostics3d_text(assets.diagnostics());
         check(rebound && rebound.shared() != shaded.shared() && rebound->materials[0].shader != old && old,
               "shader dependency invalidation lost retained handles");
         write(scratch.path / "broken.spv", "bad");
         write(scratch.path / "header.spv", std::string(20, 'x'));
         const auto entries = assets.stats().shader_entries;
-        check(!assets.load_material_shader("broken.spv", &error) && !error.empty() &&
-                  !assets.load_material_shader("missing.spv", &error) &&
-                  !assets.load_material_shader("header.spv", &error) && assets.stats().shader_entries == entries,
+        check(!assets.load_material_shader("broken.spv") && !assets.diagnostics().empty() &&
+                  !assets.load_material_shader("missing.spv") && !assets.load_material_shader("header.spv") &&
+                  assets.stats().shader_entries == entries,
               "failed shader cached or missing error");
         Assets3D uncached{r3d, scratch.path, {.shaders = 0}};
-        const auto one = uncached.load_materials("shader.kinmaterials", model, {}, &error);
+        const auto one = uncached.load_materials("shader.kinmaterials", model, {});
+        error = kin::diagnostics3d_text(uncached.diagnostics());
         check(one && uncached.stats().shader_entries == 0 && uncached.stats().shader_loads == 1,
               "disabled shader cache duplicated one binding's shader");
     }
@@ -221,20 +229,23 @@ void material_gpu(Renderer2D& renderer) {
         "texture":{"asset":"shared pixel.png","filter":"nearest"},
         "normal":{"asset":"shared pixel.png","filter":"nearest"},
         "occlusion":{"asset":"shared pixel.png","filter":"nearest"}}})");
-    auto maps = assets.load_materials("maps.kinmaterials", model, {}, &error);
+    auto maps = assets.load_materials("maps.kinmaterials", model, {});
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(maps && maps->materials[0].texture == model->parts[0].material.texture &&
               maps->materials[0].normal == model->parts[0].material.normal &&
               maps->materials[0].normal == maps->materials[0].occlusion &&
               maps->materials[0].texture != maps->materials[0].normal,
           "texture sharing lost role/filter semantics");
-    auto filtered = assets.load_texture("shared pixel.png", false, true, &error);
+    auto filtered = assets.load_texture("shared pixel.png", false, true);
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(filtered && filtered != maps->materials[0].texture, "different filters incorrectly shared");
 
     auto parts = assets.load_model("parts.glb").shared();
     write(scratch.path / "parts.kinmaterials", R"({"schema":"kin.materials3d/1","material":{"roughness":0.9},
       "parts":[{"part":0,"material":{"metallic":0.4}}],"variants":{"wet":{"material":{"roughness":0.2},
       "parts":[{"part":1,"material":{"emissive":3}}]}}})");
-    auto layered = assets.load_materials("parts.kinmaterials", parts, "wet", &error);
+    auto layered = assets.load_materials("parts.kinmaterials", parts, "wet");
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(layered && layered->materials.size() == parts->parts.size() && layered->materials[0].metallic == .4f &&
               layered->materials[0].roughness == .2f && layered->materials[1].emissive == 3 &&
               layered->materials[2].emissive == parts->parts[2].material.emissive,
@@ -252,20 +263,23 @@ void material_gpu(Renderer2D& renderer) {
     named_model->parts[0].name = "unique";
     write(scratch.path / "names.kinmaterials",
           R"({"schema":"kin.materials3d/1","parts":[{"part":"unique","material":{"metallic":0.8}}]})");
-    auto named = assets.load_materials("names.kinmaterials", named_model, {}, &error);
+    auto named = assets.load_materials("names.kinmaterials", named_model, {});
+    error = kin::diagnostics3d_text(assets.diagnostics());
     check(named && named->materials[0].metallic == .8f, "unique name selector failed");
     named_model->parts[1].name = "unique";
     assets.invalidate("names.kinmaterials");
-    check(!assets.load_materials("names.kinmaterials", named_model, {}, &error) &&
-              error.find("ambiguous") != std::string::npos,
+    check(!assets.load_materials("names.kinmaterials", named_model, {}) &&
+              kin::diagnostics3d_text(assets.diagnostics()).find("ambiguous") != std::string::npos,
           "ambiguous part name accepted");
     for (const auto* rules : {R"({"schema":"kin.materials3d/1","parts":[{"part":99,"material":{}}]})",
                               R"({"schema":"kin.materials3d/1","parts":[{"part":"missing","material":{}}]})"}) {
         write(scratch.path / "bad.kinmaterials", rules);
         assets.invalidate("bad.kinmaterials");
-        check(!assets.load_materials("bad.kinmaterials", parts, {}, &error) && !error.empty(), "bad selector accepted");
+        check(!assets.load_materials("bad.kinmaterials", parts, {}) &&
+                  !kin::diagnostics3d_text(assets.diagnostics()).empty(),
+              "bad selector accepted");
     }
-    check(!assets.load_materials("colors.kinmaterials", model, "unknown", &error), "unknown variant accepted");
+    check(!assets.load_materials("colors.kinmaterials", model, "unknown"), "unknown variant accepted");
 
     // Activated session registry edits validate/bind transactionally. Standalone
     // registry worlds retain their explicit binding contract above.
@@ -361,7 +375,8 @@ void material_gpu(Renderer2D& renderer) {
         SceneSession3D packed_session{r3d, packed_assets, options};
         check(packed_session.load("test.kinscene"), "packed material references failed");
 #ifdef KIN_TEST_MATERIAL_SHADER
-        const auto packed_shader = packed_assets.load_materials("shader.kinmaterials", model, {}, &error);
+        const auto packed_shader = packed_assets.load_materials("shader.kinmaterials", model, {});
+        error = kin::diagnostics3d_text(packed_assets.diagnostics());
         check(packed_shader && packed_shader->materials[0].shader, "packed shader reference failed");
 #endif
     }

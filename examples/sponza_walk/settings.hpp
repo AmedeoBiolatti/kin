@@ -339,7 +339,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         l.fill.color = kin::LinearRgb{0.55f, 0.6f, 0.75f} * s.fill_intensity;
     l.ambient = s.ambient ? reference_ambient * s.ambient_intensity : LinearRgb{};
     if (s.ground)
-        l.ground_ambient = kin::LinearRgb{0.12f, 0.1f, 0.085f} * s.ground_intensity;
+        l.ground_ambient = {true, kin::LinearRgb{0.12f, 0.1f, 0.085f} * s.ground_intensity};
     l.environment = environment;
     l.environment_intensity = s.environment_intensity;
     l.environment_rotation = s.environment_rotation;
@@ -462,7 +462,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
                  .sun_anisotropy = s.fog_anisotropy};
     l.sky_lights_scene = s.sky_lights;
     if (s.tod) {
-        const Vec3f own_fog = scene.fog.colour;
+        const LinearRgb own_fog = scene.fog.colour;
         const bool moon = s.sky_moon;
         kin::apply(
             {.hours = s.tod_hours, .day_of_year = s.tod_day, .latitude = s.tod_latitude, .shadows = s.moon_shadow}, l,

@@ -266,8 +266,16 @@ if(KIN_EXPERIMENTAL_3D)
     set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
     set(PROFILER_IN_DISTRIBUTION OFF CACHE BOOL "" FORCE)
     set(ENABLE_OBJECT_STREAM OFF CACHE BOOL "" FORCE)
-    # Matches kin's own MSVC runtime choice (static) above.
-    set(USE_STATIC_MSVC_RUNTIME_LIBRARY ON CACHE BOOL "" FORCE)
+    # The same MSVC runtime as kin's own targets: the static one only in a shipping
+    # build (CMAKE_MSVC_RUNTIME_LIBRARY in the top-level CMakeLists.txt), else the
+    # DLL runtime CMake defaults to. Jolt's own default is ON on MSVC, which would
+    # link a /MT Jolt into a /MD kin (LNK2038) in a plain developer build. When OFF
+    # Jolt leaves CMAKE_MSVC_RUNTIME_LIBRARY alone, so it inherits kin's setting.
+    if(KIN_SHIPPING AND MSVC)
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY ON CACHE BOOL "" FORCE)
+    else()
+        set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+    endif()
     FetchContent_Declare(JoltPhysics
         GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
         GIT_TAG v5.5.0

@@ -37,8 +37,10 @@ void main() {
     if (params.a.z < 1.5) {
         c = aces(c * params.a.y);
     }
-    if ((params.a.z < 0.5 || params.a.z > 2.5) && alpha > 0.0) {
-        c = encode(partial ? c : c / alpha) * alpha;
+    if (params.a.z < 0.5 || params.a.z > 2.5) {
+        // As view_output.frag's: a glow over the transparent background (alpha 0, colour not 0) is encoded too; the
+        // dither scales with the coverage, so it gets none.
+        c = alpha > 0.0 ? encode(partial ? c : c / alpha) * alpha : encode(c);
         c += (noise(gl_FragCoord.xy) + noise(gl_FragCoord.xy + vec2(5.0, 3.0)) - 1.0) * (alpha / 255.0);
     } else if (partial) {
         c *= alpha;

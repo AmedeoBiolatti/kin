@@ -957,7 +957,8 @@ private:
         MeshOptions3D mesh_options;
         mesh_options.levels = static_cast<u32>(_options.lod_levels);
         mesh_options.clusters = _options.lod_clusters;
-        _model = _r3d->load_model(_model_path, mesh_options, &error);
+        _model = _r3d->load_model(_model_path, mesh_options);
+        error = kin::diagnostics3d_text(_r3d->diagnostics());
         if (!_model) {
             fail(ctx, "could not load " + _model_path.string() + ": " + error);
             return false;
@@ -1235,7 +1236,8 @@ private:
         if (!_env_tried[i]) {
             _env_tried[i] = true;
             std::string error;
-            _environments[i] = _r3d->load_environment(_hdri_files[i], &error);
+            _environments[i] = _r3d->load_environment(_hdri_files[i]);
+            error = kin::diagnostics3d_text(_r3d->diagnostics());
             if (!_environments[i])
                 std::cerr << "sponza_walk: " << _hdri_files[i].string() << ": " << error << '\n';
         }
@@ -2433,8 +2435,8 @@ private:
             out << "    \"fill\": {\"direction\": " << json_vec(l.fill.direction)
                 << ", \"color\": " << json_light(l.fill.color) << "},\n";
         out << "    \"ambient\": " << json_light(l.ambient);
-        if (l.ground_ambient)
-            out << ",\n    \"ground_ambient\": " << json_light(*l.ground_ambient);
+        if (l.ground_ambient.enabled)
+            out << ",\n    \"ground_ambient\": " << json_light(l.ground_ambient.color);
         if (_s.environment > 0 && std::size_t(_s.environment) <= _hdri_files.size()) {
             out << ",\n    \"environment\": {\"file\": \"hdri/"
                 << _hdri_files[std::size_t(_s.environment - 1)].filename().string()

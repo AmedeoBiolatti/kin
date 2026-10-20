@@ -6,7 +6,6 @@
 #include "gpu_geometry_batch.hpp" // GpuBlendMode
 
 #include <SDL3/SDL.h>
-
 #include <vector>
 
 namespace kin::gpu {
@@ -43,6 +42,9 @@ struct GpuPipelineKey {
     // `extra_write` false masks every channel, so a blended or wireframe draw leaves it as it is.
     SDL_GPUTextureFormat extra_format = SDL_GPU_TEXTUREFORMAT_INVALID;
     bool extra_write = false;
+    // A coverage pass can update R while retaining the motion in BA.
+    SDL_GPUColorComponentFlags write_mask =
+        SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
 
     friend bool operator==(const GpuPipelineKey&, const GpuPipelineKey&) = default;
 };
@@ -62,13 +64,18 @@ public:
     // The 2D path's: no depth test, no culling, one sample. `depth_stencil`:
     // the format of the stencil attached to the pass (INVALID: none), which
     // `stencil` tests or writes.
-    SDL_GPUGraphicsPipeline* get(SDL_GPUShader* vertex, SDL_GPUShader* fragment,
-                                 GpuBlendMode blend, SDL_GPUTextureFormat target_format,
+    SDL_GPUGraphicsPipeline* get(SDL_GPUShader* vertex, SDL_GPUShader* fragment, GpuBlendMode blend,
+                                 SDL_GPUTextureFormat target_format,
                                  GpuVertexLayout layout = GpuVertexLayout::Triangles,
                                  SDL_GPUTextureFormat depth_stencil = SDL_GPU_TEXTUREFORMAT_INVALID,
                                  GpuStencilOp stencil = GpuStencilOp::None) {
-        return get(GpuPipelineKey{.vertex = vertex, .fragment = fragment, .blend = blend, .format = target_format,
-                                  .layout = layout, .depth_stencil = depth_stencil, .stencil = stencil});
+        return get(GpuPipelineKey{.vertex = vertex,
+                                  .fragment = fragment,
+                                  .blend = blend,
+                                  .format = target_format,
+                                  .layout = layout,
+                                  .depth_stencil = depth_stencil,
+                                  .stencil = stencil});
     }
 
     // How many pipelines are made.
@@ -82,8 +89,7 @@ public:
     // Calls fn(vertex, fragment, blend, format, layout) for each pipeline made
     // without a depth-stencil target (those with one are made when a clip or
     // a 3D view first needs them).
-    template<typename Fn>
-    void for_each(Fn&& fn) const {
+    template <typename Fn> void for_each(Fn&& fn) const {
         for (const Entry& e : _entries) {
             if (e.key.depth_stencil == SDL_GPU_TEXTUREFORMAT_INVALID) {
                 fn(e.key.vertex, e.key.fragment, e.key.blend, e.key.format, e.key.layout);

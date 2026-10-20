@@ -22,7 +22,7 @@ set(KIN_SPIRV_DIR "" CACHE PATH "Already-compiled .spv files to use instead of g
 # Shaders may #include the engine's (kin_material.inc.glsl: custom 3D material
 # shaders): glslc finds them here, and a rebuild follows their change.
 set(KIN_SHADER_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../engine/shaders" CACHE INTERNAL "")
-file(GLOB _KIN_SHADER_INCLUDES "${KIN_SHADER_INCLUDE_DIR}/*.inc.glsl")
+file(GLOB _KIN_SHADER_INCLUDES CONFIGURE_DEPENDS "${KIN_SHADER_INCLUDE_DIR}/*.inc.glsl")
 
 set(_KIN_EMBED_GENERATOR "${CMAKE_CURRENT_LIST_DIR}/kin_embed_generate.cmake")
 

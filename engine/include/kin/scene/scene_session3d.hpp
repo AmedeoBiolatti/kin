@@ -8,10 +8,18 @@
 #include <kin/scene/scene_asset_runtime.hpp>
 #include <kin/scene/scene_entity3d.hpp>
 
+namespace sol {
+class state;
+}
 namespace kin {
 
 class AudioEngine;
 class AudioCatalog;
+class App;
+class Input;
+class JsonWriter;
+class InputActionContext;
+class ScriptComponentRegistry;
 
 struct ScenePrefab3D {
     u64 session = 0, generation = 0, id = 0;
@@ -74,7 +82,9 @@ enum class SceneRequestStatus3D { Invalid, Pending, Succeeded, Failed, Cancelled
 class SceneRequest3D {
 public:
     SceneRequestStatus3D status() const;
-    ScenePrefab3D prefab() const; // populated only for a successful spawn
+    ScenePrefab3D prefab() const;           // populated only for a successful spawn
+    ScenePreparedPrefab3D prepared() const; // successful preload
+    ScenePrefabPool3D pool() const;         // successful create_pool
     std::string error() const;
 
 private:
@@ -94,6 +104,11 @@ public:
     SceneRequest3D spawn(EcsCommandBuffer&, ScenePrefabPool3D, SceneSpawn3D = {}) const;
     SceneRequest3D despawn(EcsCommandBuffer&, ScenePrefab3D) const;
     SceneRequest3D despawn(EcsCommandBuffer&, SceneRequest3D spawn) const;
+    // Explicit preparation, executed at the same owner-thread boundaries as spawn.
+    SceneRequest3D preload(EcsCommandBuffer&, const std::filesystem::path&) const;
+    SceneRequest3D create_pool(EcsCommandBuffer&, ScenePreparedPrefab3D, ScenePrefabPoolOptions3D = {}) const;
+    SceneRequest3D release(EcsCommandBuffer&, ScenePreparedPrefab3D) const;
+    SceneRequest3D release(EcsCommandBuffer&, ScenePrefabPool3D) const;
 
 private:
     explicit SceneCommands3D(std::weak_ptr<detail::SceneCommandQueue3D> queue) : _queue(std::move(queue)) {}
@@ -166,14 +181,26 @@ struct SceneSession3DContext {
     SceneQueries3D queries;
 };
 
+struct SceneScriptOptions3D {
+    // Optional application/input services for Lua callbacks. These and the
+    // component registry outlive the session. Missing input reads false.
+    App* app = nullptr;
+    Input* input = nullptr;
+    const ScriptComponentRegistry* components = nullptr;
+    // Applied to every fresh VM after the stock ECS and scene3d bindings.
+    std::function<void(sol::state&)> bind;
+};
+
 struct SceneSession3DOptions {
     Vec2i viewport{960, 540};
-    // The scene's SceneEnvironment3D replaces these, but `pick` is the game's: true keeps a pick pass in every render
-    // (one more pass over the opaque meshes) for pick(). Off by default.
+    // The scene's SceneEnvironment3D replaces these (scene3d_view_options), but `pick` is the game's: true keeps a
+    // pick pass in every render (one more pass over the opaque meshes) for pick(). Off by default.
     ViewOptions3D view;
     // No physics world/scratch pool allocated unless requested. Tune capacities
     // for the game; a transactional replacement briefly owns two physics worlds.
     std::optional<World3DConfig> physics;
+    // The bridge's debug drawing. Its `fixed_dt`/`max_steps` are for WorldPhysicsState3D::advance(), which the session
+    // never calls: step(dt) steps the physics once by dt (the engine's fixed step), so they are not read here.
     WorldPhysicsState3DConfig bodies;
     ColliderAssetLimits3D collision_limits;
     ParticleLimits3D particle_limits;
@@ -201,6 +228,7 @@ struct SceneSession3DOptions {
     // SceneCamera3D. Both outlive the session; the host still calls audio.update(dt) once a frame.
     AudioEngine* audio = nullptr;
     const AudioCatalog* audio_catalog = nullptr;
+    SceneScriptOptions3D scripts;
 };
 
 enum class SceneSession3DReload { Unchanged, Activated, Failed };
@@ -211,7 +239,7 @@ struct SceneFieldEdit3D {
     ComponentFieldValue value;
 };
 
-// Authored C++ 3D scene ownership and transactional replacement. The renderer
+// Authored 3D scene ownership and transactional replacement. The renderer
 // and renderer-scoped Assets3D must outlive this object and retained handles.
 // Synchronous, renderer-thread-only. No background jobs or implicit file polling.
 // Headless with a renderer that has no 3D (Renderer3D::available() false: a server,
@@ -219,8 +247,9 @@ struct SceneFieldEdit3D {
 // (Assets3D::load_model); there is no view, and render() and pick() fail with
 // "no renderer".
 // Owns an isolated ECS world, optional physics, render state and view per scene.
-// Scene assets with a Lua script are rejected: use ScriptScene for its context
-// lifecycle instead of silently omitting script execution.
+// Optional Lua uses the same frame stages and deferred prefab commands as C++.
+// on_load runs in preparation; on_enter must succeed before replacement commits.
+// update runs before ECS Input; on_exit is best-effort cleanup on unload/replacement.
 class SceneSession3D {
 public:
     SceneSession3D(Renderer3D& renderer, Assets3D& assets, SceneSession3DOptions options = {});
@@ -298,6 +327,8 @@ public:
     // stages; earlier committed work is not rolled back. Custom stepping can
     // instead use the accessors.
     bool step(f32 dt);
+    bool collect_actions(InputActionContext&) const;
+    bool write_report(JsonWriter&) const;
     // Clears internal draws, propagates transforms, applies authored settings,
     // clocks/weather, collects meshes/lights/ropes and calls compose. Recreates
     // the view only if its options changed; render also submits the frame.
@@ -325,6 +356,10 @@ public:
     const std::vector<std::string>& diagnostics() const;
 
 private:
+    ScenePreparedPrefab3D preload_now(const std::filesystem::path&);
+    ScenePrefabPool3D create_pool_now(ScenePreparedPrefab3D, ScenePrefabPoolOptions3D);
+    bool release_now(ScenePreparedPrefab3D);
+    bool release_now(ScenePrefabPool3D);
     ScenePrefab3D spawn_now(const std::filesystem::path&, SceneSpawn3D, const PrefabAsset* = nullptr, u64 prepared = 0);
     ScenePrefab3D spawn_prepared(ScenePreparedPrefab3D, SceneSpawn3D);
     ScenePrefab3D acquire_pool(ScenePrefabPool3D, SceneSpawn3D);

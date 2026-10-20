@@ -284,7 +284,8 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         auto [entry, added] = textures.try_emplace(std::tuple{path, reference.nearest, srgb});
         if (added) {
             std::string error;
-            entry->second = assets.load_texture(path, reference.nearest, srgb, &error);
+            entry->second = assets.load_texture(path, reference.nearest, srgb);
+            error = kin::diagnostics3d_text(assets.diagnostics());
             require(bool(entry->second), "texture '" + path.string() + "': " + error);
             result.source_files.push_back(path);
         }
@@ -296,7 +297,8 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         auto [entry, added] = shaders.try_emplace(path);
         if (added) {
             std::string error;
-            entry->second = assets.load_material_shader(path, &error);
+            entry->second = assets.load_material_shader(path);
+            error = kin::diagnostics3d_text(assets.diagnostics());
             require(bool(entry->second), error);
             result.source_files.push_back(path);
         }

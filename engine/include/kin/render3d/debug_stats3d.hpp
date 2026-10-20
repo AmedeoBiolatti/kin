@@ -72,6 +72,7 @@ struct RenderDebugStats3D : RenderStats3D {
     // geometry pass for it: ao_draws is 0); false with the pre-pass (ambient occlusion, contact shadows, occlusion
     // culling, an opaque mesh with a custom shader) or without temporal anti-aliasing.
     bool taa_main_velocity = false;
+    u32 taa_reactive_draws = 0; // transient coverage draws; no extra targets, zero without TAA/effects
     // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal
     // anti-aliasing and occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered
     // buffer too), in bytes, and how many feature groups of them this render gave back: a feature that has not been
@@ -99,7 +100,7 @@ struct RenderDebugStats3D : RenderStats3D {
     bool lights_variant = false;
     u32 environment_prefilters = 0; // environments filtered by this render (once each)
     // Sky, fog and the sky's image-based light (P3a): the sky pass ran; meshes were drawn with the fog's shader
-    // variants (custom shaders are not fogged); with Lights3D::sky_lights_scene the environment was made again this
+    // variants (or custom kin_output); with Lights3D::sky_lights_scene the environment was made again this
     // render (the sky moved past Sky3D::light_threshold and light_interval renders had passed), how many times so far,
     // and the CPU time spent recording the last one.
     bool sky_drawn = false;
@@ -115,6 +116,10 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 particles_submitted = 0;
     u32 particle_batches = 0;
     u32 particle_soft = 0;
+    u32 particle_shadow_batches = 0; // batches sampling shadow maps; excludes TAA coverage replays
+    u32 particle_shadow_submitted = 0, particle_shadow_dropped = 0; // caster upload, independently capped
+    u32 particle_shadow_draws = 0, particle_shadow_instances = 0;   // shadow passes; repeated per light/cascade
+    u64 particle_shadow_bytes = 0; // caster GPU buffer, released after the ordinary idle interval
     u32 weather_particles = 0;
     f64 particle_cpu_ms = 0.0;
     // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is

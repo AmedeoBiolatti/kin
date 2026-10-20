@@ -5,6 +5,7 @@
 
 #include <kin/core/jobs.hpp>
 #include <kin/physics3d/world3d.hpp>
+#include <kin/physics3d/debug_draw3d.hpp>
 
 #include <algorithm>
 #include <array>
@@ -47,6 +48,7 @@ void run(World3D& world, int frames) {
 World3DConfig serial() {
     World3DConfig c;
     c.single_threaded = true;
+    c.contact_events = true;
     return c;
 }
 
@@ -1022,6 +1024,7 @@ void test_events_sensor() {
 // A pile with events: every step's batch hashed in order, to compare runs.
 std::vector<u64> pile_event_hashes(World3DConfig config, int count, int frames, bool persist, std::size_t* total = nullptr) {
     config.persist_events = persist;
+    config.contact_events = true;
     World3D world(config);
     build_pile(world, count);
     std::vector<u64> hashes;
@@ -1076,12 +1079,33 @@ void test_events_deterministic() {
     std::size_t without_persist = 0;
     pile_event_hashes(serial(), 120, 60, false, &without_persist);
     CHECK(with_persist > without_persist);
+    // Two collision steps: Jolt reports a pair once a collision step, so a step holds two records of one pair and kind with
+    // different points and speeds, and the one the event carries must not depend on which thread's record came first.
+    {
+        World3DConfig cfg = serial();
+        cfg.collision_steps = 2;
+        const std::vector<u64> two_steps = pile_event_hashes(cfg, 120, 60, true);
+        CHECK(two_steps == pile_event_hashes(cfg, 120, 60, true));
+        JobSystem one({.workers = 1, .max_background = 1});
+        World3DConfig cfg_one;
+        cfg_one.jobs = &one;
+        cfg_one.collision_steps = 2;
+        CHECK(pile_event_hashes(cfg_one, 120, 60, true) == two_steps);
+        JobSystem four({.workers = 4, .max_background = 4});
+        World3DConfig cfg_four;
+        cfg_four.jobs = &four;
+        cfg_four.collision_steps = 2;
+        for (int run = 0; run < 3; ++run) {
+            CHECK(pile_event_hashes(cfg_four, 120, 60, true) == two_steps);
+        }
+    }
 }
 
 
 // Pairs with many sub shapes (compound bodies on a triangle mesh floor): one Begin a pair, its data from the lowest sub
 // shape pair, so the same on every worker count and run.
 std::vector<u64> compound_event_hashes(World3DConfig config, int frames, std::size_t* begins = nullptr) {
+    config.contact_events = true;
     World3D world(config);
     std::vector<Vec3f> v;
     std::vector<u32> idx;
@@ -1688,6 +1712,494 @@ void test_set_shape() {
     CHECK(world.shape(box).bounds_max().y > 0.7f);
 }
 
+// Past a capacity Jolt drops contacts for the step and says so only in what PhysicsSystem::Update returns: the step reports
+// it, last_step() keeps it, and the world counts the step.
+void test_step_report_capacity() {
+    // Room for 4 contact constraints (the fewest that keep Jolt's manifold table at its 4 buckets) and 8 balls resting apart
+    // on the floor: each ball and the floor are one manifold, one contact constraint.
+    World3DConfig cfg = serial();
+    cfg.max_contact_constraints = 4;
+    World3D world(cfg);
+    add_floor(world);
+    const auto balls = [](World3D& w) {
+        for (int i = 0; i < 8; ++i) {
+            w.create_body({.shape = Shape3D::sphere(0.5f), .position = {2.0f * static_cast<f32>(i) - 7.0f, 0.5f, 0.0f}});
+        }
+    };
+    balls(world);
+    CHECK(!world.last_step().any() && world.overflowed_steps() == 0);
+    const StepReport3D report = world.step(dt);
+    CHECK(report.contact_constraints_full);
+    CHECK(!report.body_pair_cache_full);
+    CHECK(world.last_step().contact_constraints_full);
+    CHECK(world.overflowed_steps() == 1);
+    // The default capacities hold the same scene.
+    World3D roomy(serial());
+    add_floor(roomy);
+    balls(roomy);
+    CHECK(!roomy.step(dt).any());
+    CHECK(!roomy.last_step().any() && roomy.overflowed_steps() == 0);
+}
+
+// A kinematic body made dynamic falls with the mass it was made with (it was refused: only a dynamic body kept a mass).
+void test_kinematic_becomes_dynamic() {
+    World3D world(serial());
+    const Body3D box = world.create_body({.shape = Shape3D::box({0.5f, 0.5f, 0.5f}), .motion = Body3DMotion::Kinematic,
+                                          .position = {0.0f, 10.0f, 0.0f}, .density = 500.0f});
+    CHECK(near(world.mass(box), 500.0f, 0.5f));
+    run(world, 5);
+    CHECK(near(world.position(box).y, 10.0f, 1e-6f)); // gravity does nothing to a kinematic body
+    CHECK(world.set_motion(box, Body3DMotion::Dynamic));
+    CHECK(world.motion(box) == Body3DMotion::Dynamic);
+    run(world, 30);
+    // Half a second of free fall: about 1.27 m down, at 4.9 m/s.
+    CHECK(world.position(box).y < 9.0f);
+    CHECK(world.linear_velocity(box).y < -4.0f);
+    CHECK(near(world.mass(box), 500.0f, 0.5f));
+    CHECK(world.set_motion(box, Body3DMotion::Kinematic));
+    // A kinematic mesh has no mass to be dynamic with; a static body cannot be switched at all.
+    const std::array<Vec3f, 3> tri = {Vec3f{0, 0, 0}, {1, 0, 0}, {0, 0, 1}};
+    const std::array<u32, 3> idx = {0, 1, 2};
+    const Body3D mesh = world.create_body({.shape = Shape3D::triangle_mesh(tri, idx), .motion = Body3DMotion::Kinematic,
+                                           .position = {5.0f, 0.0f, 0.0f}});
+    CHECK(mesh.valid() && world.mass(mesh) == 0.0f);
+    CHECK(!world.set_motion(mesh, Body3DMotion::Dynamic));
+    CHECK(world.motion(mesh) == Body3DMotion::Kinematic);
+    const Body3D wall = world.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static, .position = {-5, 0, 0}});
+    CHECK(!world.set_motion(wall, Body3DMotion::Dynamic));
+}
+
+// Live changes of what a body was made with: mass, gravity factor, dampings, friction, restitution.
+void test_live_body_settings() {
+    const Shape3D box = Shape3D::box({0.5f, 0.5f, 0.5f});
+    // A raised gravity factor falls faster: twice the speed after the same time (the speed is exact, g dt a step).
+    {
+        World3D world(serial());
+        const Body3D plain = world.create_body({.shape = box, .position = {0, 50, 0}});
+        const Body3D heavy = world.create_body({.shape = box, .position = {5, 50, 0}});
+        CHECK(near(world.gravity_factor(heavy), 1.0f, 0.0f));
+        CHECK(world.set_gravity_factor(heavy, 2.0f));
+        CHECK(near(world.gravity_factor(heavy), 2.0f, 0.0f));
+        run(world, 30);
+        CHECK(near(world.linear_velocity(plain).y, -9.81f * 30.0f * dt, 1e-3f));
+        CHECK(near(world.linear_velocity(heavy).y, 2.0f * world.linear_velocity(plain).y, 1e-3f));
+        CHECK(world.position(heavy).y < world.position(plain).y - 1.0f);
+        // 0 floats: a body asleep on the floor whose gravity is taken away is woken and stays where it is, or rises (< 0).
+        World3D rest(serial());
+        add_floor(rest);
+        const Body3D b = rest.create_body({.shape = box, .position = {0, 0.5f, 0}});
+        run(rest, 180);
+        CHECK(!rest.is_active(b));
+        CHECK(rest.set_gravity_factor(b, -0.5f));
+        CHECK(rest.is_active(b));
+        run(rest, 60);
+        CHECK(rest.position(b).y > 1.5f);
+    }
+    // Damping slows: the same speed, damped from the first step on, is (1 - c dt)^60 of itself after a second; spin likewise.
+    {
+        World3DConfig cfg = serial();
+        cfg.gravity = {};
+        World3D world(cfg);
+        const Body3D d = world.create_body({.shape = box, .linear_velocity = {10, 0, 0}, .angular_velocity = {0, 5, 0}});
+        const Body3D u = world.create_body({.shape = box, .position = {0, 5, 0}, .linear_velocity = {10, 0, 0},
+                                            .angular_velocity = {0, 5, 0}});
+        CHECK(world.set_linear_damping(d, 1.0f) && world.set_angular_damping(d, 2.0f));
+        CHECK(near(world.linear_damping(d), 1.0f, 0.0f) && near(world.angular_damping(d), 2.0f, 0.0f));
+        run(world, 60);
+        CHECK(world.linear_velocity(d).x < 4.0f && world.linear_velocity(d).x > 3.0f);
+        CHECK(world.angular_velocity(d).y < 1.0f);
+        CHECK(near(world.linear_velocity(u).x, 10.0f, 1e-3f) && near(world.angular_velocity(u).y, 5.0f, 1e-3f));
+        // Back to none: the speed it has is kept from then on.
+        CHECK(world.set_linear_damping(d, 0.0f));
+        const f32 kept = world.linear_velocity(d).x;
+        run(world, 30);
+        CHECK(near(world.linear_velocity(d).x, kept, 1e-4f));
+    }
+    // Mass: an equal impulse moves a body of twice the mass at half the speed, and an equal angular impulse turns it at half
+    // the rate (the inertia scales with it). A mass added for a step stays on top and goes with the step.
+    {
+        World3DConfig cfg = serial();
+        cfg.gravity = {};
+        World3D world(cfg);
+        const Body3D a = world.create_body({.shape = box, .mass = 10.0f});
+        const Body3D b = world.create_body({.shape = box, .position = {5, 0, 0}, .mass = 10.0f});
+        CHECK(world.set_mass(b, 20.0f));
+        CHECK(near(world.mass(b), 20.0f, 0.0f));
+        world.add_impulse(a, {10, 0, 0});
+        world.add_impulse(b, {10, 0, 0});
+        world.add_angular_impulse(a, {0, 1, 0});
+        world.add_angular_impulse(b, {0, 1, 0});
+        run(world, 1);
+        CHECK(near(world.linear_velocity(a).x, 1.0f, 1e-4f));
+        CHECK(near(world.linear_velocity(b).x, 0.5f, 1e-4f));
+        CHECK(near(world.angular_velocity(b).y, 0.5f * world.angular_velocity(a).y, 1e-4f));
+        world.set_added_mass(b, 20.0f);
+        CHECK(world.set_mass(b, 30.0f));
+        world.add_impulse(b, {50, 0, 0}); // over 30 + 20 this step
+        run(world, 1);
+        CHECK(near(world.linear_velocity(b).x, 0.5f + 1.0f, 1e-4f));
+        world.add_impulse(b, {30, 0, 0}); // over 30 alone: the added mass went with the step
+        run(world, 1);
+        CHECK(near(world.linear_velocity(b).x, 2.5f, 1e-4f));
+        // A kinematic body keeps the mass for when it becomes dynamic; a kinematic mesh has none to set.
+        const Body3D k = world.create_body({.shape = box, .motion = Body3DMotion::Kinematic, .position = {0, 9, 0}, .mass = 1.0f});
+        CHECK(world.set_mass(k, 4.0f) && world.set_motion(k, Body3DMotion::Dynamic));
+        world.add_impulse(k, {0, 0, 8});
+        run(world, 1);
+        CHECK(near(world.linear_velocity(k).z, 2.0f, 1e-4f));
+        const std::array<Vec3f, 3> tri = {Vec3f{0, 0, 0}, {1, 0, 0}, {0, 0, 1}};
+        const std::array<u32, 3> idx = {0, 1, 2};
+        const Body3D mesh = world.create_body({.shape = Shape3D::triangle_mesh(tri, idx), .motion = Body3DMotion::Kinematic,
+                                               .position = {9, 9, 9}});
+        CHECK(!world.set_mass(mesh, 5.0f) && world.mass(mesh) == 0.0f);
+    }
+    // Restitution changes a bounce: set on the ball after it was made, or on the (static) floor (a contact takes the larger).
+    {
+        const auto bounce = [](bool on_floor) {
+            World3D world(serial());
+            const Body3D floor = add_floor(world, 0.5f, 0.0f);
+            const f32 r = 0.25f;
+            const Body3D ball = world.create_body({.shape = Shape3D::sphere(r), .position = {0.0f, 2.0f + r, 0.0f}});
+            CHECK(world.set_restitution(on_floor ? floor : ball, 0.8f));
+            CHECK(near(world.restitution(on_floor ? floor : ball), 0.8f, 0.0f));
+            f32 peak = 0.0f;
+            bool bounced = false;
+            for (int i = 0; i < 240; ++i) {
+                const f32 before = world.linear_velocity(ball).y;
+                world.step(dt);
+                const f32 after = world.linear_velocity(ball).y;
+                bounced = bounced || (before < -1.0f && after > 0.0f);
+                if (bounced) {
+                    peak = std::max(peak, world.position(ball).y - r);
+                    if (after < 0.0f) {
+                        break;
+                    }
+                }
+            }
+            return peak;
+        };
+        CHECK(near(bounce(false), 0.64f * 2.0f, 0.15f));
+        CHECK(near(bounce(true), 0.64f * 2.0f, 0.15f));
+    }
+    // Friction of a static slope set to 0 under a crate asleep on it: the crate is woken and slides (sqrt(1 x 0) = 0).
+    {
+        World3D world(serial());
+        const Quatf tilt = Quatf::axis_angle({0, 0, 1}, 20.0f);
+        const Body3D slope = world.create_body({.shape = Shape3D::box({10.0f, 0.5f, 3.0f}), .motion = Body3DMotion::Static,
+                                                .rotation = tilt, .friction = 1.0f});
+        const Vec3f n = tilt.rotate({0, 1, 0});
+        const Body3D crate = world.create_body({.shape = box, .position = n * 1.01f, .rotation = tilt, .friction = 1.0f});
+        run(world, 240);
+        const Vec3f at = world.position(crate);
+        CHECK(!world.is_active(crate));
+        CHECK(world.set_friction(slope, 0.0f));
+        CHECK(near(world.friction(slope), 0.0f, 0.0f) && near(world.friction(crate), 1.0f, 0.0f));
+        CHECK(world.is_active(crate));
+        run(world, 60);
+        CHECK(length(world.position(crate) - at) > 1.0f);
+    }
+    // Refused: a static body for what needs motion (friction and restitution do apply to it), a character's own body, a
+    // dead handle, numbers that are not finite or out of range. Nothing changes.
+    {
+        World3D world(serial());
+        const Body3D floor = add_floor(world);
+        CHECK(!world.set_mass(floor, 10.0f) && !world.set_gravity_factor(floor, 2.0f));
+        CHECK(!world.set_linear_damping(floor, 1.0f) && !world.set_angular_damping(floor, 1.0f));
+        CHECK(world.gravity_factor(floor) == 0.0f && world.linear_damping(floor) == 0.0f && world.mass(floor) == 0.0f);
+        CHECK(world.set_friction(floor, 0.9f) && world.set_restitution(floor, 0.1f));
+        const Body3D ball = world.create_body({.shape = Shape3D::sphere(0.3f), .position = {0, 3, 0}, .mass = 2.0f,
+                                               .friction = 0.4f, .restitution = 0.2f, .linear_damping = 0.1f});
+        for (const f32 bad : {std::nanf(""), INFINITY, -1.0f}) {
+            CHECK(!world.set_mass(ball, bad) && !world.set_linear_damping(ball, bad) && !world.set_angular_damping(ball, bad));
+            CHECK(!world.set_friction(ball, bad) && !world.set_restitution(ball, bad));
+        }
+        CHECK(!world.set_mass(ball, 0.0f));
+        CHECK(!world.set_gravity_factor(ball, std::nanf("")) && world.set_gravity_factor(ball, -1.0f));
+        CHECK(world.set_gravity_factor(ball, 1.0f));
+        CHECK(world.mass(ball) == 2.0f && world.friction(ball) == 0.4f && world.restitution(ball) == 0.2f);
+        CHECK(near(world.linear_damping(ball), 0.1f, 0.0f));
+        const Body3D capsule = world.character(world.create_character({})).body;
+        CHECK(world.owner_of(capsule) == BodyOwner3D::Character);
+        CHECK(!world.set_mass(capsule, 5.0f) && !world.set_gravity_factor(capsule, 0.0f) && !world.set_friction(capsule, 0.0f));
+        CHECK(!world.set_restitution(capsule, 1.0f) && !world.set_linear_damping(capsule, 1.0f));
+        CHECK(!world.set_angular_damping(capsule, 1.0f));
+        const Body3D gone = world.create_body({.shape = box, .position = {9, 9, 9}});
+        CHECK(world.destroy_body(gone));
+        CHECK(!world.set_mass(gone, 1.0f) && !world.set_friction(gone, 1.0f) && world.friction(gone) == 0.0f);
+        // Not in the hash (the body's setup, as its shape is): an awake body's damping changes nothing the hash reads until a
+        // step has used it.
+        const Body3D moving = world.create_body({.shape = box, .position = {20, 3, 0}, .linear_velocity = {1, 0, 0}});
+        world.step(dt);
+        const u64 before = world.state_hash();
+        CHECK(world.set_linear_damping(moving, 5.0f) && world.state_hash() == before);
+    }
+}
+
+// Bodies waking and falling asleep (World3DConfig::activation_events).
+void test_activation_events() {
+    const Shape3D box = Shape3D::box({0.5f, 0.5f, 0.5f});
+    World3DConfig cfg = serial();
+    cfg.activation_events = true;
+    World3D world(cfg);
+    add_floor(world);
+    // Made awake: it woke. Then it settles and falls asleep, once; a static body is never reported.
+    const Body3D b = world.create_body({.shape = box, .position = {0, 0.55f, 0}, .user_id = 5});
+    std::vector<ActivationEvent3D> seen = world.drain_activation_events();
+    CHECK(seen.size() == 1 && seen[0].body == b && seen[0].active && seen[0].user_id == 5);
+    run(world, 240);
+    CHECK(!world.is_active(b));
+    seen = world.drain_activation_events();
+    CHECK(seen.size() == 1 && seen[0].body == b && !seen[0].active);
+    // A push wakes it at the call (in call order with the other calls); deactivate() puts it to sleep likewise.
+    const Body3D asleep = world.create_body({.shape = box, .position = {3, 0.5f, 0}, .start_active = false});
+    CHECK(world.activation_events().empty());
+    world.add_impulse(asleep, {0, 100, 0});
+    world.activate(b);
+    world.deactivate(b);
+    CHECK(world.activation_events().size() == 3);
+    seen = world.drain_activation_events();
+    CHECK(seen[0].body == asleep && seen[0].active && seen[1].body == b && seen[1].active && seen[2].body == b && !seen[2].active);
+    // Woken by the simulation (something lands on it): reported by the step.
+    run(world, 240);
+    world.drain_activation_events();
+    const Body3D drop = world.create_body({.shape = Shape3D::box({0.3f, 0.3f, 0.3f}), .position = {0, 3, 0}});
+    world.drain_activation_events();
+    bool woke = false;
+    for (int i = 0; i < 120 && !woke; ++i) {
+        world.step(dt);
+        for (const ActivationEvent3D& e : world.drain_activation_events()) {
+            woke = woke || (e.body == b && e.active);
+        }
+    }
+    CHECK(woke);
+    (void)drop;
+    // Off (the default): none, ever.
+    World3D quiet(serial());
+    add_floor(quiet);
+    quiet.create_body({.shape = box, .position = {0, 0.55f, 0}});
+    run(quiet, 240);
+    CHECK(quiet.activation_events().empty() && quiet.drain_activation_events().empty());
+    // The same with no workers and with four: the same events in the same order (a pile settling).
+    const auto settle = [](World3DConfig c) {
+        c.activation_events = true;
+        World3D w(c);
+        build_pile(w, 120);
+        std::vector<std::pair<u32, bool>> out;
+        for (int i = 0; i < 400; ++i) {
+            w.step(dt);
+            for (const ActivationEvent3D& e : w.drain_activation_events()) {
+                out.push_back({e.body.index, e.active});
+            }
+        }
+        return out;
+    };
+    const auto alone = settle(serial());
+    CHECK(std::count_if(alone.begin(), alone.end(), [](const auto& e) { return !e.second; }) > 20);
+    {
+        JobSystem four({.workers = 4, .max_background = 4});
+        World3DConfig c;
+        c.jobs = &four;
+        CHECK(settle(c) == alone);
+    }
+    // A restore drops what waits, as it does the other events.
+    const std::vector<u8> saved = world.save_state();
+    world.activate(b);
+    CHECK(!world.activation_events().empty() || world.is_active(b));
+    CHECK(world.restore_state(saved));
+    CHECK(world.activation_events().empty());
+}
+
+// A stream cut short is refused with the world as it was. Jolt's own restore puts the bodies back as it reads and stops where
+// the bytes end, and the rope's length and the character's stance were put back before it: the check comes first.
+// A static body moved, reshaped or made a sensor wakes what rests on it (Jolt does not): a crate asleep on a slab that goes
+// away falls. The same for a kinematic slab reshaped.
+void test_changed_static_wakes() {
+    // The slab spans x in [-0.25, 3.75]; the crate (x in [-0.5, 0.5]) rests on its edge, asleep.
+    const auto asleep_on_slab = [](World3D& world, Body3DMotion motion, Body3D& slab, Body3D& crate) {
+        add_floor(world);
+        slab = world.create_body({.shape = Shape3D::box({2.0f, 0.25f, 2.0f}), .motion = motion, .position = {1.75f, 2.0f, 0.0f}});
+        crate = add_box(world, {0.0f, 2.75f, 0.0f});
+        run(world, 180);
+        CHECK(!world.is_active(crate) && near(world.position(crate).y, 2.75f, 0.02f));
+    };
+    const auto fallen = [](World3D& world, Body3D crate) {
+        run(world, 60);
+        return world.position(crate).y < 2.5f;
+    };
+    const Quatf upright = Quatf::axis_angle({0, 0, 1}, 90.0f); // the slab on its side: x in [1.5, 2], under nothing
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        world.set_position(slab, {10.0f, 2.0f, 0.0f});
+        CHECK(fallen(world, crate));
+    }
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        world.set_rotation(slab, upright);
+        CHECK(fallen(world, crate));
+    }
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        world.teleport(slab, {10.0f, 2.0f, 0.0f}, {});
+        CHECK(fallen(world, crate));
+    }
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        world.follow_transform(slab, {10.0f, 2.0f, 0.0f}, {}, dt);
+        CHECK(fallen(world, crate));
+    }
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        CHECK(world.set_shape(slab, Shape3D::box({0.5f, 0.25f, 2.0f}))); // x in [1.25, 2.25]
+        CHECK(fallen(world, crate));
+    }
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        world.set_sensor(slab, true);
+        CHECK(fallen(world, crate));
+    }
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Kinematic, slab, crate);
+        CHECK(world.set_shape(slab, Shape3D::box({0.5f, 0.25f, 2.0f})));
+        CHECK(fallen(world, crate));
+    }
+    // A static body nothing rests on is moved for the cost of a broad phase query: the hash is as without the move elsewhere.
+    {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        const u64 before = world.state_hash();
+        const Body3D far = world.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static, .position = {30, 1, 0}});
+        world.set_position(far, {40, 1, 0});
+        world.destroy_body(far);
+        run(world, 1);
+        CHECK(!world.is_active(crate));
+        CHECK(world.state_hash() == before);
+    }
+}
+
+// A restore puts each body's motion type and added mass back (both change the step; the motion type is in the hash).
+void test_restore_motion_and_added_mass() {
+    World3D world(serial());
+    add_floor(world);
+    const Body3D box = add_box(world, {0.0f, 5.0f, 0.0f});
+    const Body3D other = add_box(world, {3.0f, 5.0f, 0.0f});
+    run(world, 10);
+    const std::vector<u8> saved = world.save_state();
+    // A sideways push on `other` (in the air for all of this) every step: how far it gets depends on its mass.
+    const auto hashes = [&](int frames) {
+        std::vector<u64> out;
+        for (int i = 0; i < frames; ++i) {
+            world.add_force(other, {400.0f, 0.0f, 0.0f});
+            world.step(dt);
+            out.push_back(world.state_hash());
+        }
+        return out;
+    };
+    const std::vector<u64> plain = hashes(30);
+    // The motion type changed after the save: the restore changes it back.
+    CHECK(world.restore_state(saved));
+    CHECK(world.set_motion(box, Body3DMotion::Kinematic));
+    CHECK(world.motion(box) == Body3DMotion::Kinematic);
+    const u64 at_save = [&] {
+        World3D same(serial());
+        add_floor(same);
+        add_box(same, {0.0f, 5.0f, 0.0f});
+        add_box(same, {3.0f, 5.0f, 0.0f});
+        run(same, 10);
+        return same.state_hash();
+    }();
+    CHECK(world.state_hash() != at_save);
+    CHECK(world.restore_state(saved));
+    CHECK(world.motion(box) == Body3DMotion::Dynamic);
+    CHECK(world.state_hash() == at_save);
+    CHECK(hashes(30) == plain);
+    // An added mass given before the save (the step takes it off): the restore puts it back for the step after it.
+    CHECK(world.restore_state(saved));
+    world.set_added_mass(other, 80.0f);
+    const std::vector<u8> heavy = world.save_state();
+    const std::vector<u64> weighted = hashes(30);
+    CHECK(weighted != plain);
+    CHECK(world.added_mass(other) == 0.0f);
+    CHECK(world.restore_state(heavy));
+    CHECK(world.added_mass(other) == 80.0f);
+    CHECK(hashes(30) == weighted);
+    // And one given after the save is taken off by the restore.
+    world.set_added_mass(other, 80.0f);
+    CHECK(world.restore_state(saved));
+    CHECK(world.added_mass(other) == 0.0f);
+    CHECK(hashes(30) == plain);
+}
+
+void test_debug_large_hull_face() {
+    constexpr int sides = 80;
+    std::vector<Vec3f> vertices;
+    for (const float y : {-1.0f, 1.0f})
+        for (int i = 0; i < sides; ++i) {
+            const float angle = 6.28318530718f * static_cast<float>(i) / sides;
+            vertices.push_back({10.0f * std::cos(angle), y, 10.0f * std::sin(angle)});
+        }
+    const auto hull = Shape3D::convex_hull(vertices);
+    CHECK(hull.valid());
+    DebugDraw3D debug;
+    debug.shape(hull, {}, {}, colors::white);
+    u32 top = 0, bottom = 0;
+    for (const auto& edge : debug.lines()) {
+        CHECK(std::isfinite(edge.a.x) && std::isfinite(edge.a.y) && std::isfinite(edge.a.z));
+        CHECK(std::isfinite(edge.b.x) && std::isfinite(edge.b.y) && std::isfinite(edge.b.z));
+        top += near(edge.a.y, 1.0f, .001f) && near(edge.b.y, 1.0f, .001f);
+        bottom += near(edge.a.y, -1.0f, .001f) && near(edge.b.y, -1.0f, .001f);
+    }
+    CHECK(!debug.truncated() && top >= sides && bottom >= sides);
+}
+
+void test_restore_cut_short_changes_nothing() {
+    World3D world(serial());
+    build_pile(world, 60);
+    RopeDesc3D rope;
+    rope.start = RopeAnchor3D::at({14.0f, 6.0f, 0.0f});
+    rope.end = RopeAnchor3D::free();
+    rope.length = 3.0f;
+    const RopeHandle3D r = world.create_rope(rope);
+    CharacterDesc3D cd;
+    cd.position = {14.0f, 0.0f, 6.0f};
+    const Character3D c = world.create_character(cd);
+    CHECK(r.valid() && c.valid());
+    run(world, 30);
+    const std::vector<u8> saved = world.save_state();
+    // The world goes on: the pile falls further, the rope is longer, the character crouches (and keeps wanting to).
+    world.set_rope_length(r, 4.0f);
+    CharacterInput3D crouch;
+    crouch.crouch = true;
+    world.set_character_input(c, crouch);
+    CHECK(world.set_character_crouch(c, true));
+    run(world, 30);
+    const u64 before = world.state_hash();
+    CHECK(near(world.rope_state(r).rest_length, 4.0f, 1e-5f) && world.character(c).crouching);
+    const std::vector<u8> cut(saved.begin(), saved.end() - 64);
+    CHECK(!world.restore_state(cut));
+    CHECK(world.state_hash() == before);
+    CHECK(near(world.rope_state(r).rest_length, 4.0f, 1e-5f));
+    CHECK(world.character(c).crouching);
+    // The whole stream restores: it was the cut that was refused.
+    CHECK(world.restore_state(saved));
+    CHECK(near(world.rope_state(r).rest_length, 3.0f, 1e-5f));
+    CHECK(!world.character(c).crouching);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1739,6 +2251,14 @@ int main(int argc, char** argv) {
     test_constraint_collide_connected();
     test_body_helpers();
     test_set_shape();
+    test_step_report_capacity();
+    test_kinematic_becomes_dynamic();
+    test_live_body_settings();
+    test_activation_events();
+    test_changed_static_wakes();
+    test_restore_motion_and_added_mass();
+    test_restore_cut_short_changes_nothing();
+    test_debug_large_hull_face();
     if (failures != 0) {
         std::fprintf(stderr, "physics3d_tests: %d check(s) failed\n", failures);
         return 1;

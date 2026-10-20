@@ -78,11 +78,11 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_EXPERIMENTAL_3D=ON
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKIN_EXPERIMENTAL_3D=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
@@ -203,7 +203,7 @@ jobs:
         env:
           CC: gcc-13
           CXX: g++-13
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
 
       - name: Build
         run: cmake --build build --parallel 4
@@ -211,4 +211,4 @@ jobs:
       - name: Test
         # Renderer and particle-shadow suites set longer TIMEOUT properties
         # in tests/CMakeLists.txt, which take precedence over this default.
-        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-(renderer|render3d|particle-shadows3d)$' --output-on-failure --timeout 300
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-(renderer|render3d|script-scene3d(-gpu)?|model-profile3d(-gpu)?|particle-shadows3d)$' --output-on-failure --timeout 300

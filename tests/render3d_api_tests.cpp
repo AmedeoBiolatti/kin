@@ -2,8 +2,15 @@
 #include <cmath>
 #include <kin/render3d/debug3d.hpp>
 #include <kin/render3d/debug_stats3d.hpp>
+#include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/sky3d.hpp>
 #include <kin/render3d/stats3d.hpp>
+#include <kin/render3d/timeofday3d.hpp>
+#ifdef KIN_EXPERIMENTAL_3D
+#include <kin/physics3d/assets3d.hpp>
+#include <kin/render3d/assets3d.hpp>
+#endif
 #include <type_traits>
 
 template <class T>
@@ -34,6 +41,29 @@ static_assert(!std::is_assignable_v<decltype(kin::DirectionalLight3D::color)&, k
 static_assert(std::is_same_v<decltype(kin::PointLightSource3D::color), kin::LinearRgb>);
 static_assert(std::is_same_v<decltype(kin::SpotLightSource3D::color), kin::LinearRgb>);
 static_assert(std::is_same_v<decltype(kin::Lights3D::ambient), kin::LinearRgb>);
+
+static_assert(std::is_same_v<decltype(kin::Sky3D::ground_color), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::Sky3D::moon_color), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::Fog3D::colour), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::SkyState3D::fog_color), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::ParticleDesc3D::colour_start), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::ParticleSprite3D::colour), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::WeatherLayer3D::colour), kin::LinearRgb>);
+static_assert(std::is_same_v<decltype(kin::sky_radiance({}, {}, {})), kin::LinearRgb>);
+static_assert(!std::is_assignable_v<decltype(kin::Sky3D::ground_color)&, kin::Vec3f>);
+#ifdef KIN_EXPERIMENTAL_3D
+template <class T>
+concept LegacyModelError = requires(T& owner, std::string* error) { owner.load_model("a", error); };
+template <class T>
+concept LegacyColliderError =
+    requires(T& owner, std::string* error) { owner.load_collider("a", kin::Vec3f{1, 1, 1}, error); };
+static_assert(!LegacyModelError<kin::Assets3D> && !LegacyModelError<kin::Renderer3D>);
+static_assert(!LegacyColliderError<kin::PhysicsAssets3D>);
+template <class T>
+concept LegacyErrorAccessor = requires(T& owner) { owner.error(); };
+static_assert(!LegacyErrorAccessor<kin::ModelFile3D>);
+
+#endif
 
 static_assert(std::is_same_v<decltype(kin::mix({0, 0, 0}, {255, 255, 255}, 0.5f)), kin::Color>);
 

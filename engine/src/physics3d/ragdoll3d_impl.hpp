@@ -1,10 +1,12 @@
 #pragma once
 
 // The ragdolls of one World3D (kin/physics3d/ragdoll3d.hpp). Internal: the world's Impl owns one and calls it from step(), the
-// hash and the saved state. Written over the world's public body and constraint calls: a ragdoll is ordinary bodies.
+// hash and the saved state. Written over the world's public body and constraint calls: a ragdoll is ordinary bodies, marked
+// as its own (BodyOwner3D::Ragdoll) and destroyed and switched by the world's owner calls.
 
 #include <kin/physics3d/world3d.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <span>
 #include <vector>
@@ -33,7 +35,7 @@ public:
     void set_subtree(RagdollHandle3D h, i32 bone, f32 weight);
     RagdollState3D state(RagdollHandle3D h) const;
     void pose(RagdollHandle3D h, std::vector<RagdollBonePose3D>& out) const;
-    RagdollPlace3D place(RagdollHandle3D h, Vec3f up, Layer3DMask mask, f32 max_distance) const;
+    RagdollPlace3D place(RagdollHandle3D h, Vec3f up, Layer3DMask mask, f32 max_distance, Body3D ignore) const;
 
     // Before the world's step: blends advance, bodies change between kinematic and dynamic, kinematic ones follow the
     // targets. After it: settling, events.
@@ -45,15 +47,24 @@ public:
         _batch = 0;
         return std::move(_events);
     }
+    void drain_events(std::vector<RagdollEvent3D>& output) {
+        output.swap(_events);
+        clear_events();
+    }
     void clear_events() {
         _events.clear();
         _batch = 0;
     }
-    void cap_events(std::size_t limit) {
-        if (_events.size() > limit) {
-            _events.erase(_events.begin(), _events.end() - static_cast<std::ptrdiff_t>(limit));
-            _batch = 0;
+    // Keeps the first `limit` and says how many went: the newest are dropped, as the world's contact events are
+    // (World3DConfig::max_events). What is kept is sorted already, so the next batch starts after it.
+    std::size_t cap_events(std::size_t limit) {
+        if (_events.size() <= limit) {
+            return 0;
         }
+        const std::size_t dropped = _events.size() - limit;
+        _events.resize(limit);
+        _batch = std::min(_batch, _events.size());
+        return dropped;
     }
 
     // State: the slot table and each live ragdoll's own state (bytes for the hash and the saved state).

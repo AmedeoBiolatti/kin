@@ -433,6 +433,26 @@ Shape3D capsule_shape(f32 radius, f32 height) {
     return shape;
 }
 
+namespace {
+
+// A top found on another body than the one held is the held face's edge when that face runs up to it and ends there (a wall
+// of thin slabs with the rock behind them, a mountain of boxes): a ray into the face `seam` under the top's height meets
+// the held body first, at the surface's plane, and one `seam` over it does not. A roof or a terrace above a wall, with a gap
+// between the wall's end and its top, is not the wall's ledge; nor is the top of something the held face rises past.
+bool held_face_ends_at(const World3D& world, Body3D body, Vec3f lip, Vec3f across, Vec3f up, f32 inset,
+                       const QueryFilter3D& filter) {
+    constexpr f32 seam = 0.05f; // how far under the top the held face must reach (and how far over it it must not)
+    constexpr f32 out = 0.1f;   // the rays start this far out of the plane
+    const auto meets_held = [&](f32 height) {
+        const Vec3f at = lip + up * height;
+        const std::optional<RayHit3D> hit = world.raycast(at + across * out, at - across * inset, filter);
+        return hit && hit->body == body && hit->fraction > 0.0f;
+    };
+    return meets_held(-seam) && !meets_held(seam);
+}
+
+} // namespace
+
 LedgeInfo find_ledge(const World3D& world, Body3D body, Vec3f point, Vec3f normal, Vec3f up, f32 search_up,
                      f32 search_down, Layer3DMask mask, Body3D ignore) {
     LedgeInfo ledge;
@@ -453,12 +473,17 @@ LedgeInfo find_ledge(const World3D& world, Body3D body, Vec3f point, Vec3f norma
         return ledge;
     }
     const std::optional<RayHit3D> hit = world.raycast(from, to, filter);
-    if (!hit || hit->body != body || hit->fraction < 1.0e-3f || dot(hit->normal, up) < 0.7f) {
+    if (!hit || hit->fraction < 1.0e-3f || dot(hit->normal, up) < 0.7f) {
+        return ledge;
+    }
+    // The held body's own top; or another body's, when the held face ends at it (the body stood on is then that one).
+    const Vec3f lip = point + up * dot(hit->point - point, up);
+    if (hit->body != body && !held_face_ends_at(world, body, lip, across, up, inset, filter)) {
         return ledge;
     }
     ledge.found = true;
     ledge.top = hit->point;
-    ledge.lip = point + up * dot(hit->point - point, up);
+    ledge.lip = lip;
     ledge.across = across;
     ledge.body = hit->body;
     return ledge;

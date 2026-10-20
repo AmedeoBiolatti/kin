@@ -103,26 +103,26 @@ public:
     View3D create_view(Vec2i size, const ViewOptions3D& options = {});
     // A glTF 2.0 model (.glb or .gltf, read through the content folder or
     // pack): its meshes, materials and textures (mipmapped). Empty with diagnostics()
-    // when it can't be read or 3D isn't available. `error` is a legacy report snapshot.
-    Model3D load_model(const std::filesystem::path& path, std::string* error = nullptr);
+    // when it can't be read or 3D isn't available.
+    Model3D load_model(const std::filesystem::path& path);
     // The same, each of its meshes made with `options` (levels of detail).
-    Model3D load_model(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error = nullptr);
+    Model3D load_model(const std::filesystem::path& path, const MeshOptions3D& options);
     // An environment (render3d/environment3d.hpp) from a picture: `size` pixels
     // of linear RGB floats, rows top to bottom, 2:1 equirectangular. Filtered
     // on the GPU (with compute) the first time a render uses it; empty where
     // 3D or compute isn't available.
     Environment3D create_environment(Vec2i size, std::span<const f32> rgb);
     // One from a Radiance .hdr file, read through the content folder or pack.
-    // Empty with diagnostics() when it can't be read; `error` mirrors the report.
-    Environment3D load_environment(const std::filesystem::path& path, std::string* error = nullptr);
+    // Empty with diagnostics() when it can't be read.
+    Environment3D load_environment(const std::filesystem::path& path);
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom
     // shaders). Empty where 3D isn't available or the shader is refused.
     MaterialShader3D create_material_shader(std::span<const u8> spirv);
     // The same from GLSL source, compiled now by glslc (development: see
     // kin/renderer/shader_compiler.hpp; shipped games load SPIR-V). Empty,
-    // with glslc's messages in diagnostics() when it doesn't compile; `error` mirrors the report.
-    MaterialShader3D compile_material_shader(const std::filesystem::path& source, std::string* error = nullptr);
+    // with glslc's messages in diagnostics() when it doesn't compile.
+    MaterialShader3D compile_material_shader(const std::filesystem::path& source);
     // Gives `view` a new size (its texture changes); false when it can't.
     bool resize(View3D& view, Vec2i size);
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
@@ -156,7 +156,7 @@ public:
     // waits; GPU-only counts require Scene3D::debug.stats_readback during render.
     const RenderDebugStats3D& debug_stats() const { return _stats; }
     // Last runtime operation's failure. Success clears it; capability/stat
-    // queries do not. Optional legacy error strings mirror this same report.
+    // queries do not.
     const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:

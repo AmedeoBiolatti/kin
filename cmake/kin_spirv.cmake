@@ -17,7 +17,7 @@ endif()
 
 get_filename_component(root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 if(NOT DEFINED KIN_EXPERIMENTAL_3D)
-    set(KIN_EXPERIMENTAL_3D ON)
+    set(KIN_EXPERIMENTAL_3D OFF)
 endif()
 include("${CMAKE_CURRENT_LIST_DIR}/kin_gpu_shaders.cmake")
 file(GLOB game_sources "${root}/games/*/shaders/*.glsl")

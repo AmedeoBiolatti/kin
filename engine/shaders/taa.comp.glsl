@@ -18,13 +18,13 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uCurrent; // this frame, or in sharpen mode the result so far; linear, premultiplied
 layout(set = 0, binding = 1) uniform sampler2D uHistory;
-layout(set = 0, binding = 2) uniform sampler2D uMotion;  // B, A: velocity in picture units (the pre-pass's)
+layout(set = 0, binding = 2) uniform sampler2D uMotion;  // BA: opaque velocity; R > 1: transient coverage after shading
 layout(set = 0, binding = 3) uniform sampler2D uPastMotion; // the same, of the last frame
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uResult;
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // the picture's width and height, and 1 over them
     vec4 params; // x: history weight, y: 1 when there is no history, z: 1 to sharpen instead, w: sharpness
-    vec4 jitter; // xy: this frame's offset in pixels (the picture is drawn that far right and down), zw: 0
+    vec4 jitter; // xy: jitter in pixels, z: changed inputs require rejecting transient coverage
 } params;
 
 vec3 compress(vec3 c) {
@@ -118,9 +118,14 @@ void main() {
     const bool jittered = dot(params.jitter.xy, params.jitter.xy) > 0.0;
     vec3 filtered = vec3(0.0);
     float filtered_alpha = 0.0, filtered_weight = 0.0;
+    bool transient = false;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const vec4 c = fetch(p + ivec2(x, y));
+            if (params.jitter.z > 0.5) {
+                const ivec2 pixel = clamp(p + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
+                transient = transient || texelFetch(uMotion, pixel, 0).r > 1.5;
+            }
             const vec3 compressed = compress(c.rgb);
             const vec2 away = vec2(x, y) - params.jitter.xy;
             const float near = jittered ? exp(-6.0 * dot(away, away)) : (x == 0 && y == 0 ? 1.0 : 0.0);
@@ -134,6 +139,24 @@ void main() {
             high = max(high, q);
             alpha_low = min(alpha_low, c.a);
             alpha_high = max(alpha_high, c.a);
+        }
+    }
+    if (params.jitter.z > 0.5) {
+        // Catmull-Rom history reads a 4x4 footprint, not just its nearest pixel.
+        // Reject the old footprint as well: this is what removes the trail when
+        // an emitter moves, fades out, wraps or disappears entirely.
+        const ivec2 base = ivec2(floor(past * params.sizes.xy - 0.5));
+        for (int y = -1; y <= 2 && !transient; ++y) {
+            for (int x = -1; x <= 2; ++x) {
+                const ivec2 pixel = clamp(base + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
+                transient = transient || texelFetch(uPastMotion, pixel, 0).r > 1.5;
+            }
+        }
+        if (transient) {
+            // Keep spatial reconstruction of the jittered sample, without a
+            // fictitious single velocity for several transparent layers.
+            imageStore(uResult, p, vec4(expand(filtered / filtered_weight), filtered_alpha / filtered_weight));
+            return;
         }
     }
     const vec3 mean = sum / 9.0;

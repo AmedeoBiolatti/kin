@@ -10,6 +10,8 @@
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/scene/scene_frame3d.hpp>
+#include <kin/scene/scene_loader3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
 #include <limits>
 #include <stdexcept>
@@ -400,7 +402,7 @@ void gpu_session(Renderer2D& renderer) {
     check(!session.load("bad.kinscene"), "bad view settings accepted");
     preserved();
     write(scratch.path / "bad.kinscene", R"({"schema":"kin.scene/1","script":"logic.lua","entities":[]})");
-    check(!session.load("bad.kinscene"), "Lua script silently ignored");
+    check(!session.load("bad.kinscene"), "missing Lua script accepted");
     preserved();
     fail = true;
     check(!session.reload(), "failed game initialization accepted");
@@ -709,7 +711,8 @@ void headless() {
     {
         const auto path = content / "kenney-character/survivor.glb";
         std::string error;
-        const auto model = assets.load_model("kenney-character/survivor.glb", &error).shared();
+        const auto model = assets.load_model("kenney-character/survivor.glb").shared();
+        error = kin::diagnostics3d_text(assets.diagnostics());
         check(model && error.empty() && !model->skeletons.empty() && !model->clips.empty(),
               "CPU model lost its skeleton or clips");
         ModelData3D data;
@@ -732,7 +735,8 @@ void headless() {
         check(model->bounds.max.y > model->bounds.min.y &&
                   assets.load_model("kenney-character/survivor.glb").shared() == model,
               "CPU model bounds/sharing");
-        check(!assets.load_model("kenney-character/absent.glb", &error) && !error.empty(),
+        check(!assets.load_model("kenney-character/absent.glb") &&
+                  !kin::diagnostics3d_text(assets.diagnostics()).empty(),
               "missing CPU model accepted");
     }
 
@@ -900,6 +904,44 @@ void gpu_pick(Renderer2D& renderer) {
           "pick without a pick pass did not say why");
     renderer.present();
 }
+// The same over a game-owned world (SceneFrame3D::collect, no session): the authored SceneEnvironment3D sets the
+// picture (samples) and the game's `pick` survives it, so a view made from the collected options can be picked.
+void gpu_frame_pick(Renderer2D& renderer) {
+    Scratch scratch;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", scratch.path / "parts.glb");
+    write(scratch.path / "pick.kinscene", R"({"schema":"kin.scene/1","entities":[
+      {"id":"camera","components":{"Transform3D":{"position":[0,0,8]},"SceneCamera3D":{"fov":60}}},
+      {"id":"environment","components":{"SceneEnvironment3D":{"samples":1}}},
+      {"id":"box","components":{"Transform3D":{},"ModelRenderer3D":{"asset":"parts.glb"}}}]})");
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    kin::EcsWorld world;
+    register_builtin_editor_components(world);
+    WorldRenderState3D rendering{world};
+    SceneAssetRuntime level;
+    check(level.load(scratch.path / "pick.kinscene", scratch.path, world.components()), "frame pick scene failed");
+    check(instantiate_scene3d(level, world, assets), "frame pick scene binding failed");
+    SceneFrame3D frame{world, rendering};
+    Scene3D scene;
+    ViewOptions3D options{.samples = 4, .pick = true};
+    const auto ok = [&](bool result, const char* message) {
+        if (!result)
+            for (const auto& e : frame.diagnostics())
+                std::cerr << e << '\n';
+        check(result, message);
+    };
+    ok(frame.collect(scene, &options), "frame pick collection failed");
+    check(options.samples == 1 && options.pick, "the environment did not set the picture or took the game's pick");
+    auto view = r3d.create_view({160, 120}, options);
+    check(bool(view), "frame pick view creation failed");
+    renderer.clear();
+    check(r3d.render(view, scene), "frame pick render failed");
+    const auto box = level.instance().by_authored_id.at("box");
+    const auto centre = r3d.pick(view, {80, 60});
+    check(centre.hit && centre.id == u32(box.id() & 0xffffffffu), "frame pick did not name the box");
+    check(!r3d.pick(view, {2, 2}).hit, "frame background pick named something");
+    renderer.present();
+}
 // The CPU cost of a frame of a session with about 500 entities, printed (no assertion: a machine's speed is not a
 // test): 20 groups with 10 children each, 100 static and 200 dynamic bodies (a grid of boxes that falls, lands and
 // sleeps), 8 particle emitters, 600 steps and collections after a warm-up. The tail of the run is the steady state of
@@ -1036,6 +1078,7 @@ int main(int argc, char** argv) {
         gpu_session(renderer);
         gpu_prepared_requests(renderer);
         gpu_pick(renderer);
+        gpu_frame_pick(renderer);
         gpu_frame_cost(renderer);
         std::cout << "Transactional scene lifecycle, reload, budgets and ownership checks passed\n";
     } catch (const std::exception& error) {

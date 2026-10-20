@@ -386,6 +386,19 @@ void test_root_motion() {
     m = extract_root_motion(clip, sk, 0.5f, -0.5f, true, {.x = true, .y = false, .z = true, .rotation = true});
     assert(close(m.translation, {-2.0f, 0, 0}, 1e-5f)); // 1 -> 0 (-1) and 4 -> 3 (-1)
     assert(close(m.rotation, rz(-45), 1e-4f));          // 22.5 -> 0, then 90 -> 67.5
+    // A frame can cross several complete cycles, in either direction, including equal wrapped times.
+    for (const auto [from, to] :
+         {std::pair{0.5f, 8.5f}, std::pair{8.5f, 0.5f}, std::pair{1.5f, 8.5f}, std::pair{-8.5f, -1.5f}}) {
+        m = extract_root_motion(clip, sk, from, to, true, {.rotation = true});
+        assert(close(m.translation, {2.0f * (to - from), 0, 0}, 1e-4f));
+        assert(close(m.rotation, rz(45.0f * (to - from)), 1e-4f));
+    }
+    // The number of complete cycles is not capped or converted to an overflowing integer.
+    // An exact half turn keeps this a cycle-count test, independent of trigonometric rounding.
+    auto many = clip;
+    many.channels[0].rotation.values.back() = Quatf{0, 0, 1, 0};
+    m = extract_root_motion(many, sk, 0, std::ldexp(2.0f, 40), true, {.rotation = true});
+    assert(close(m.rotation, Quatf{}, 1e-4f));
     // Not looping: held at the end, no motion past it.
     m = extract_root_motion(clip, sk, 1.5f, 3.0f, false);
     assert(close(m.translation, {1.0f, 0, 0}));
@@ -879,6 +892,59 @@ void test_loader_skins_and_clips() {
     // Not glTF at all: refused, with why.
     ModelData3D none;
     assert(!read_model_data("this is not a model", "x.gltf", none, &error) && !error.empty());
+}
+
+// Exporters may give two skins the same joints in a different order. Both skeletons must receive every shared
+// channel; identical skins should collapse to a single skeleton instead.
+void test_loader_shared_skin_channels() {
+    for (const bool reversed : {false, true}) {
+        auto fixture = skin_fixtures::make_gltf({});
+        auto& json = fixture.json;
+        const auto start = json.find("\"skins\":[") + 9;
+        const auto stop = json.find("}],", start) + 1;
+        std::string duplicate = json.substr(start, stop - start);
+        if (reversed) {
+            const auto joints = duplicate.find("[1,2]");
+            assert(joints != std::string::npos);
+            duplicate.replace(joints, 5, "[2,1]");
+        }
+        json.insert(stop, "," + duplicate);
+        const auto data = read(fixture);
+        assert(data.skeletons.size() == (reversed ? 2u : 1u));
+        assert(data.clips.size() == data.skeletons.size());
+        for (const auto& clip : data.clips) {
+            const auto& sk = data.skeletons[clip.skeleton];
+            const auto joint = sk.find("joint1");
+            assert(joint >= 0 && !clip.channels[joint].rotation.empty() && !clip.channels[joint].translation.empty());
+            Pose3D posed;
+            sample_clip(clip, sk, 0.5f, false, posed);
+            assert(!close(posed.joints[joint].rotation, Quatf{}));
+        }
+    }
+}
+
+void test_loader_texture_transform() {
+    const std::array<float, 15> floats{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1};
+    std::vector<std::uint8_t> bytes(sizeof floats);
+    std::memcpy(bytes.data(), floats.data(), sizeof floats);
+    const std::string json = R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+        "nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"TEXCOORD_0":1},"material":0}]}],
+        "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0,"extensions":{
+            "KHR_texture_transform":{"offset":[0.25,0.5],"scale":[2,3],"rotation":1.5707963267948966}}}}}],
+        "textures":[{"source":0}],"images":[{"uri":"unused.png"}],
+        "bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":24}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+            {"bufferView":1,"componentType":5126,"count":3,"type":"VEC2"}],
+        "buffers":[{"byteLength":60,"uri":"data:application/octet-stream;base64,)" +
+                             skin_fixtures::base64(bytes) + "\"}]}";
+    ModelData3D data;
+    std::string error;
+    assert(read_model_data(json, "texture-transform.gltf", data, &error));
+    assert(data.parts.size() == 1 && data.parts[0].mesh.vertices.size() == 3);
+    const auto& vertices = data.parts[0].mesh.vertices;
+    assert(close(vertices[0].uv.x, .25f) && close(vertices[0].uv.y, .5f));
+    assert(close(vertices[1].uv.x, .25f) && close(vertices[1].uv.y, 2.5f));
+    assert(close(vertices[2].uv.x, -2.75f) && close(vertices[2].uv.y, .5f));
 }
 
 void test_loader_skin_limits() {
@@ -2508,6 +2574,22 @@ void test_ik_two_bone_orientation() {
 
 // A look-at turns the head's aim axis to the target; the weights share the turn, limits hold, the weight scales it, a
 // target going round behind never flips the head, and smoothing approaches.
+void test_ik_large_skeleton() {
+    Skeleton3D sk;
+    sk.parents.assign(300, 0);
+    sk.parents[0] = -1;
+    sk.rest.resize(300);
+    sk.inverse_bind.resize(300);
+    sk.rest.back().translation = {0, 0, 1};
+    Pose3D pose = sk.rest_pose();
+    std::vector<Mat4f> world(300);
+    compute_world_matrices(sk, pose, world);
+    const std::array<LookAtJoint3D, 1> chain{{{.joint = 0, .weight = 1}}};
+    assert(solve_look_at(sk, pose, world, chain, {1, 0, 1}).solved);
+    const Vec3f want = normalize(Vec3f{1, 0, 1});
+    assert(close(world.back().apply({0, 0, 0}), want, 1e-4f));
+}
+
 void test_ik_look_at() {
     const std::vector<LookAtJoint3D> chain = {{.joint = biped::spine, .weight = 0.2f},
                                               {.joint = biped::neck, .weight = 0.3f},
@@ -5012,6 +5094,8 @@ int main() {
     test_mesh_skin_data();
     test_loader_skins_and_clips();
     test_loader_skin_limits();
+    test_loader_shared_skin_channels();
+    test_loader_texture_transform();
     test_loader_refuses_unreadable_geometry();
     test_loader_keeps_nodes_between_joints();
     test_loader_refuses_hostile_files();
@@ -5026,6 +5110,7 @@ int main() {
     test_ik_two_bone_scaled_and_turned();
     test_ik_two_bone_orientation();
     test_ik_look_at();
+    test_ik_large_skeleton();
     test_ik_foot_placement();
     test_ik_fabrik();
     test_ik_order_and_bad_input();

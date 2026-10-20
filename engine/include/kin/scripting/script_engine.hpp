@@ -16,6 +16,29 @@ namespace kin {
 
 class JsonWriter;
 class ScriptScene;
+class ScriptComponentRegistry;
+
+struct ScriptOwned {
+    i32 marker = 1;
+};
+
+// Borrowed scene services for native hosts sharing the Lua ECS API. The world
+// and callback captures outlive the engine; registered Lua systems are removed
+// before its VM closes. ScriptScene supplies these services automatically.
+struct ScriptSceneBindings {
+    EcsWorld* world = nullptr;
+    const ScriptComponentRegistry* components = nullptr;
+    std::filesystem::path script_path;
+    std::function<void()> clear_entities;
+    std::function<void(Color)> set_background;
+    std::function<void()> mark_render_dirty;
+};
+
+struct ScriptFrameContext {
+    f32 dt = 0;
+    Input* input = nullptr; // absent input reads false (CPU-only/native hosts)
+    App* app = nullptr;     // quit() reports an error when no app was supplied
+};
 
 class ScriptEngine {
 public:
@@ -31,9 +54,13 @@ public:
     bool load_file(const std::filesystem::path& asset_root, const std::filesystem::path& script_path);
 
     bool call_on_load(ScriptScene& scene);
+    bool call_on_load(ScriptSceneBindings bindings);
     bool call_on_enter(SceneContext& ctx);
     bool call_on_exit(SceneContext& ctx);
     bool call_update(SceneContext& ctx);
+    bool call_on_enter(ScriptFrameContext ctx);
+    bool call_on_exit(ScriptFrameContext ctx);
+    bool call_update(ScriptFrameContext ctx);
     bool call_collect_actions(InputActionContext& actions) const;
     bool call_write_report(JsonWriter& json) const;
 

@@ -106,6 +106,10 @@ public:
     TraversalInput3D traversal_input(Character3D c) const;
     TraversalState3D traversal(Character3D c) const;
     void set_traversal_resource(Character3D c, f32 value);
+    // From outside, for the next step (World3D::add_character_impulse, set_character_velocity): an impulse adds up, a velocity
+    // replaces what it had and the impulses added before it. A dead or disabled character or a non-finite vector: nothing.
+    void add_impulse(Character3D c, Vec3f impulse);
+    void set_velocity(Character3D c, Vec3f velocity);
     // A disabled character is skipped by update() and its body collides with nothing (a ragdoll has taken its place).
     void set_enabled(Character3D c, bool enabled);
     bool enabled(Character3D c) const;
@@ -115,12 +119,20 @@ public:
 
     std::span<const CharacterEvent3D> events() const { return _events; }
     std::vector<CharacterEvent3D> drain_events() { return std::move(_events); }
+    void drain_events(std::vector<CharacterEvent3D>& output) {
+        output.swap(_events);
+        clear_events();
+    }
     void clear_events() { _events.clear(); }
-    // Keeps the newest `limit` (events that nobody drains must not grow without end).
-    void cap_events(std::size_t limit) {
-        if (_events.size() > limit) {
-            _events.erase(_events.begin(), _events.end() - static_cast<std::ptrdiff_t>(limit));
+    // Keeps the first `limit` (events that nobody drains must not grow without end) and says how many went: the newest
+    // are dropped, as the world's contact events are (World3DConfig::max_events).
+    std::size_t cap_events(std::size_t limit) {
+        if (_events.size() <= limit) {
+            return 0;
         }
+        const std::size_t dropped = _events.size() - limit;
+        _events.resize(limit);
+        return dropped;
     }
 
     // State: for state_hash() (these bytes), save_state() and restore_state().
@@ -148,6 +160,8 @@ public:
             std::vector<std::pair<u32, bool>> touched;
             TravData trav;
             bool disabled = false;
+            bool external_set = false;
+            Vec3f external_velocity, external_impulse;
         };
         std::vector<One> slots;
     };
@@ -192,12 +206,21 @@ private:
         std::vector<CharacterContact3D> contacts;
         // Grab and climb (TraversalDesc3D::enabled): what the limbs hold, the resource, the mode.
         TravData trav;
+        // Given from outside for the next step (set_velocity, add_impulse in N s), which takes and clears them. Saved and
+        // hashed while there are some (a bit of the slot's flag byte: a world that never has any hashes as before).
+        bool external_set = false;
+        Vec3f external_velocity{};
+        Vec3f external_impulse{};
+        bool has_external() const { return external_set || external_impulse != Vec3f{}; }
     };
 
     Slot* find(Character3D c) { return c.index < _slots.size() && _slots[c.index].alive && _slots[c.index].generation == c.generation ? &_slots[c.index] : nullptr; }
     const Slot* find(Character3D c) const { return const_cast<CharacterSet*>(this)->find(c); }
 
     void update_one(u32 index, Slot& s, f32 dt);
+    // Puts what was given from outside into the velocity the step starts from (walking: the controller's own; hanging: the
+    // swing; mantling: nothing) and clears it.
+    void take_external(Slot& s);
     // Grab and climb. Called at the start of a step of a character with traversal on: takes the grips, the resource and
     // the hanging or mantling move. True when it moved the character itself (hanging, mantling); false leaves the step to
     // the walking controller (which it may have given a jump off or a fall to do). The events go in `traversal_events_`.

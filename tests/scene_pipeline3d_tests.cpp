@@ -45,7 +45,8 @@ SceneSession3DOptions options() {
                                     .max_body_pairs = 32,
                                     .max_contact_constraints = 32,
                                     .temp_memory_bytes = 1024 * 1024,
-                                    .single_threaded = true};
+                                    .single_threaded = true,
+                                    .contact_events = true};
     return options;
 }
 void pipeline(Renderer2D& renderer) {

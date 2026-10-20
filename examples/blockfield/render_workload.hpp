@@ -122,7 +122,7 @@ struct Materials {
 inline void configure(Scene3D& scene, const Features& f, f32 time, f32 extent) {
     scene.lights.sun = {.direction = {-0.5f, 1.0f, 0.35f}, .color = {0.7f, 0.65f, 0.55f}};
     scene.lights.ambient = {0.12f, 0.14f, 0.18f};
-    scene.lights.ground_ambient = kin::LinearRgb{0.04f, 0.035f, 0.03f};
+    scene.lights.ground_ambient = {true, kin::LinearRgb{0.04f, 0.035f, 0.03f}};
     scene.lights.shadow_resolution = f.shadow_resolution;
     scene.lights.shadow_cascades = 1;
     scene.lights.shadow_area = f.shadows ? Bounds3D{{-extent, -1, -extent}, {extent, 100, extent}} : Bounds3D{};

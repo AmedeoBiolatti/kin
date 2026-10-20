@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/scene3d.hpp>
 
@@ -46,52 +47,61 @@ void register_render3d_components(EcsWorld& world) {
             .field("remove_root_motion", &Animator3D::remove_root_motion);
     if (!registry.find("AnimatorAsset3D"))
         registry.native<AnimatorAsset3D>("AnimatorAsset3D").field("asset", &AnimatorAsset3D::asset);
-    if (!registry.find("PointLight3D"))
-        registry.native<PointLight3D>("PointLight3D")
-            .property<Vec3f>(
-                "color", [](const PointLight3D& light) { return Vec3f{light.color.r, light.color.g, light.color.b}; },
-                [](PointLight3D& light, const Vec3f& color) {
-                    if (color.x < 0 || color.y < 0 || color.z < 0)
+    const auto light_fields = [&]<class T>(const char* name) {
+        if (registry.find(name))
+            return;
+        auto b = registry.native<T>(name);
+        b.template property<Vec3f>(
+             "color", [](const T& v) { return Vec3f{v.color.r, v.color.g, v.color.b}; },
+             [](T& v, const Vec3f& c) {
+                 if (c.x < 0 || c.y < 0 || c.z < 0)
+                     return false;
+                 v.color = {c.x, c.y, c.z};
+                 return true;
+             })
+            .field("radius", &T::radius)
+            .units("m")
+            .field("size", &T::size)
+            .units("m")
+            .field("enabled", &T::enabled);
+        b.template property<bool>(
+            "shadows", [](const T& v) { return v.shadow.enabled; },
+            [](T& v, const bool& value) {
+                v.shadow.enabled = value;
+                return true;
+            });
+        b.template property<u32>(
+            "shadow_resolution", [](const T& v) { return v.shadow.resolution; },
+            [](T& v, const u32& value) {
+                if (value && (value < 64 || value > 8192))
+                    return false;
+                v.shadow.resolution = value;
+                return true;
+            });
+        const auto scalar = [&](const char* field, f32 LightShadow3D::*member, bool positive = false) {
+            b.template property<f32>(
+                field, [member](const T& v) { return v.shadow.*member; },
+                [member, positive](T& v, const f32& value) {
+                    if (!std::isfinite(value) || value < 0 || (positive && value == 0))
                         return false;
-                    light.color = {color.x, color.y, color.z};
-                    return true;
-                })
-            .field("radius", &PointLight3D::radius)
-            .units("m")
-            .field("size", &PointLight3D::size)
-            .units("m")
-            .field("enabled", &PointLight3D::enabled)
-            .property<bool>(
-                "shadows", [](const PointLight3D& light) { return light.shadow.enabled; },
-                [](PointLight3D& light, const bool& enabled) {
-                    light.shadow.enabled = enabled;
+                    v.shadow.*member = value;
                     return true;
                 });
-    if (!registry.find("SpotLight3D"))
-        registry.native<SpotLight3D>("SpotLight3D")
-            .property<Vec3f>(
-                "color", [](const SpotLight3D& light) { return Vec3f{light.color.r, light.color.g, light.color.b}; },
-                [](SpotLight3D& light, const Vec3f& color) {
-                    if (color.x < 0 || color.y < 0 || color.z < 0)
-                        return false;
-                    light.color = {color.x, color.y, color.z};
-                    return true;
-                })
-            .field("radius", &SpotLight3D::radius)
-            .units("m")
-            .field("size", &SpotLight3D::size)
-            .units("m")
-            .field("enabled", &SpotLight3D::enabled)
-            .field("inner_angle", &SpotLight3D::inner_angle)
-            .units("degrees")
-            .field("outer_angle", &SpotLight3D::outer_angle)
-            .units("degrees")
-            .property<bool>(
-                "shadows", [](const SpotLight3D& light) { return light.shadow.enabled; },
-                [](SpotLight3D& light, const bool& enabled) {
-                    light.shadow.enabled = enabled;
-                    return true;
-                });
+        };
+        scalar("shadow_bias", &LightShadow3D::bias);
+        scalar("shadow_normal_offset", &LightShadow3D::normal_offset);
+        scalar("shadow_near", &LightShadow3D::near_plane, true);
+        scalar("shadow_distance", &LightShadow3D::distance);
+        scalar("shadow_softness", &LightShadow3D::softness);
+        if constexpr (std::is_same_v<T, SpotLight3D>) {
+            b.field("inner_angle", &T::inner_angle)
+                .units("degrees")
+                .field("outer_angle", &T::outer_angle)
+                .units("degrees");
+        }
+    };
+    light_fields.template operator()<PointLight3D>("PointLight3D");
+    light_fields.template operator()<SpotLight3D>("SpotLight3D");
 }
 
 void register_physics3d_components(EcsWorld& world) {

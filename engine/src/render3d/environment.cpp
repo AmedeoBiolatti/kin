@@ -27,7 +27,7 @@ Environment3D Renderer3D::create_environment(Vec2i size, std::span<const f32> rg
     return backend ? Environment3D{std::move(backend), size} : Environment3D{};
 }
 
-Environment3D Renderer3D::load_environment(const std::filesystem::path& path, std::string* error) {
+Environment3D Renderer3D::load_environment(const std::filesystem::path& path) {
     _errors.clear();
     std::string why;
     Environment3D environment;
@@ -58,8 +58,6 @@ Environment3D Renderer3D::load_environment(const std::filesystem::path& path, st
         fail3d(_errors, "Renderer3D::load_environment(" + path.string() + ")", why);
     else
         _errors.clear();
-    if (error)
-        *error = diagnostics3d_text(_errors);
     return environment;
 }
 
@@ -75,7 +73,7 @@ MaterialShader3D Renderer3D::create_material_shader(std::span<const u8> spirv) {
     return shader;
 }
 
-MaterialShader3D Renderer3D::compile_material_shader(const std::filesystem::path& source, std::string* error) {
+MaterialShader3D Renderer3D::compile_material_shader(const std::filesystem::path& source) {
     _errors.clear();
     std::string why;
     MaterialShader3D shader;
@@ -95,8 +93,6 @@ MaterialShader3D Renderer3D::compile_material_shader(const std::filesystem::path
         fail3d(_errors, "Renderer3D::compile_material_shader(" + source.string() + ")", why);
     else
         _errors.clear();
-    if (error)
-        *error = diagnostics3d_text(_errors);
     return shader;
 }
 

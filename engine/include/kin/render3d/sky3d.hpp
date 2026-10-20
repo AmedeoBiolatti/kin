@@ -43,7 +43,7 @@ struct Sky3D {
     f32 intensity = 1.0f;
     // The ground below the horizon: its colour (a linear albedo, lit by the sun and sky as a horizontal surface is).
     // The sky's colour reaches it over the 9 degrees under the horizon, so there is no seam.
-    Vec3f ground_color{0.20f, 0.18f, 0.16f};
+    LinearRgb ground_color{0.20f, 0.18f, 0.16f};
     // The sun disc: its angular diameter in degrees (the real sun is 0.53; a little more reads better in a game's
     // field of view) and its radiance as a multiple of the sun's light (HDR: above 1 feeds bloom).
     f32 sun_size = 0.8f;
@@ -58,9 +58,9 @@ struct Sky3D {
     Vec3f moon_direction{0.3f, 0.7f, -0.6f};
     f32 moon_size = 1.4f;
     f32 moon_light = 0.0f;
-    Vec3f moon_color{0.78f, 0.84f, 1.0f};
+    LinearRgb moon_color{0.78f, 0.84f, 1.0f};
     // The night sky's own faint light (airglow), added to the sky.
-    Vec3f night_color{0.0006f, 0.0009f, 0.0020f};
+    LinearRgb night_color{0.0006f, 0.0009f, 0.0020f};
 
     // --- Image-based light from the sky (Lights3D::sky_lights_scene) ---
     // The environment is made again when a sky parameter (the sun's direction, its light, the haze, the colours) has
@@ -86,7 +86,7 @@ struct Fog3D {
     f32 base_height = 0.0f;    // world y where `height_density` is measured
     f32 start = 0.0f;          // nothing nearer than this is fogged
     f32 max_opacity = 1.0f;    // the most any pixel is fogged (below 1, the far sky and ground show through)
-    Vec3f colour{0.62f, 0.68f, 0.76f}; // linear
+    LinearRgb colour{0.62f, 0.68f, 0.76f}; // linear
     // Take the colour from the sky in the view's direction (the horizon colour for rays that look down), so far
     // geometry melts into the sky; `colour` is then unused. Needs the procedural sky's settings (it uses them whether
     // or not Scene3D::sky is enabled). With SkyMode3D::Image `colour` is used all the same (the panorama is not read
@@ -122,21 +122,21 @@ f32 air_mass(f32 sin_elevation);
 
 // The sun's light after the atmosphere, per colour: sun_intensity * transmittance, going to 0 as the sun sinks past the
 // horizon. What Lights3D::sun.color should be for this sun.
-Vec3f sky_sun_light(const Sky3D& sky, Vec3f sun_direction);
+LinearRgb sky_sun_light(const Sky3D& sky, Vec3f sun_direction);
 // The fraction of the sun's light that gets through to the ground, per colour (no horizon cut-off).
-Vec3f sky_sun_transmittance(const Sky3D& sky, Vec3f sun_direction);
+LinearRgb sky_sun_transmittance(const Sky3D& sky, Vec3f sun_direction);
 // The atmosphere's light along `direction` (rays that look below the horizon get the horizon's): sun and moon
 // scattering and the night's own light, times `intensity`. Linear; no sun disc, moon disc, stars or ground.
-Vec3f sky_radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction);
+LinearRgb sky_radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction);
 // What the sky pass shows along `direction` without the discs and stars: sky_radiance above the horizon, going over
 // the horizon to the ground's light below it.
-Vec3f sky_color(const Sky3D& sky, Vec3f sun_direction, Vec3f direction);
+LinearRgb sky_color(const Sky3D& sky, Vec3f sun_direction, Vec3f direction);
 // The ground's colour as it is lit: ground_color times the horizontal light of the sun and the sky.
-Vec3f sky_ground_light(const Sky3D& sky, Vec3f sun_direction);
+LinearRgb sky_ground_light(const Sky3D& sky, Vec3f sun_direction);
 // The light a diffuse surface facing `normal` takes from sky_color's whole sphere, over pi (what a white one shows
 // with no sun and no other light): a cosine-weighted sum over `samples_u` by `samples_v` directions. What
 // Lights3D::sky_lights_scene lights a white sphere with, to within the environment's filtering.
-Vec3f sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 samples_u = 64, u32 samples_v = 32);
+LinearRgb sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 samples_u = 64, u32 samples_v = 32);
 
 namespace sky_model {
 // The sky's light as the GPU's fog reads it (Fog3D::colour_from_sky): from a table made once for each sky and sun, not
@@ -162,7 +162,7 @@ struct FogTable3D {
     bool update(const Sky3D& sky, Vec3f sun_direction);
     // The sky's light along `direction` read from the rows (made for `sky` and `sun_direction`): what the GPU's fog
     // takes for sky_radiance.
-    Vec3f radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const;
+    LinearRgb radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const;
 };
 } // namespace sky_model
 
@@ -174,9 +174,9 @@ f32 fog_optical_depth(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance
 // 1 - e^-tau, at most max_opacity.
 f32 fog_opacity(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance);
 // The fog's colour along `direction` (unit): the fixed one or the sky's, and the sun's in-scattering.
-Vec3f fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f direction);
+LinearRgb fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f direction);
 // `color` (a surface's) as seen through the fog at `distance`.
-Vec3f fog_apply(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f eye,
-                Vec3f direction, f32 distance, Vec3f color);
+LinearRgb fog_apply(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f eye,
+                    Vec3f direction, f32 distance, LinearRgb color);
 
 } // namespace kin

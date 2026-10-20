@@ -662,7 +662,9 @@ void test_partial_ragdoll() {
 
 void test_projectile_starts_ragdoll() {
     // The game's rule: a body hit hard enough starts the ragdoll with the impulse at the bone. The ragdoll then moves.
-    Rig rig({0.0f, 0.0f, 0.0f});
+    auto cfg = serial();
+    cfg.contact_events = true;
+    Rig rig({0.0f, 0.0f, 0.0f}, cfg);
     rig.set_targets({0.0f, 0.0f, 0.0f});
     const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f), .motion = Body3DMotion::Dynamic,
                                                .position = {0.0f, 1.3f, 3.0f}, .linear_velocity = {0.0f, 0.0f, -15.0f},
@@ -1289,6 +1291,47 @@ void test_hands_on_a_rope_by_ik() {
     CHECK(left < 0.05f && right < 0.05f);
 }
 
+// A bone is the ragdoll's: destroying, reshaping or switching it from outside is refused (the ragdoll would go on driving a
+// dead or changed body), while the ragdoll's own switching and destroy_ragdoll still reach it.
+void test_bones_belong_to_the_ragdoll() {
+    Rig rig({0.0f, 0.0f, 0.0f});
+    const Body3D bone = rig.bodies[0];
+    CHECK(rig.world.owner_of(bone) == BodyOwner3D::Ragdoll);
+    CHECK(rig.world.owner_of(rig.floor) == BodyOwner3D::None);
+    const Vec3f at = rig.world.position(bone);
+    CHECK(!rig.world.destroy_body(bone));
+    CHECK(rig.world.contains(bone) && rig.world.body_count() == 18);
+    CHECK(!rig.world.set_shape(bone, Shape3D::sphere(0.1f)));
+    CHECK(!rig.world.set_motion(bone, Body3DMotion::Dynamic));
+    CHECK(rig.world.motion(bone) == Body3DMotion::Kinematic); // still Animated
+    CHECK(near(rig.world.position(bone), at, 0.0f));
+    // Started, the ragdoll makes its bones dynamic itself.
+    rig.world.start_ragdoll(rig.ragdoll);
+    rig.step();
+    CHECK(rig.world.motion(bone) == Body3DMotion::Dynamic);
+    rig.world.destroy_ragdoll(rig.ragdoll);
+    CHECK(!rig.world.contains(bone) && rig.world.body_count() == 1);
+}
+
+// Past max_events the newest are dropped, as the world's contact events are: two ragdolls started in one step with room for
+// one event keep the first ragdoll's Started (the second's was kept when the oldest were dropped). Contact events are off, so
+// the count is the ragdoll's alone.
+void test_events_cap_keeps_the_first() {
+    World3DConfig cfg = serial();
+    cfg.max_events = 1;
+    cfg.contact_events = false;
+    Rig rig({0.0f, 0.0f, 0.0f}, cfg);
+    const RagdollHandle3D second = rig.world.create_ragdoll(rig.desc, rig.bone_world({3.0f, 0.0f, 0.0f}));
+    CHECK(second.valid());
+    rig.world.start_ragdoll(second);
+    rig.world.start_ragdoll(rig.ragdoll);
+    rig.step();
+    const std::span<const RagdollEvent3D> events = rig.world.ragdoll_events();
+    CHECK(events.size() == 1);
+    CHECK(!events.empty() && events[0].ragdoll == rig.ragdoll && events[0].kind == RagdollEventKind3D::Started);
+    CHECK(rig.world.dropped_events() == 1);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1328,6 +1371,8 @@ int main(int argc, char** argv) {
     test_ecs_determinism();
     test_interpolation_of_the_pose();
     test_hands_on_a_rope_by_ik();
+    test_bones_belong_to_the_ragdoll();
+    test_events_cap_keeps_the_first();
     if (failures != 0) {
         std::fprintf(stderr, "physics3d_ragdoll_tests: %d check(s) failed\n", failures);
         return 1;

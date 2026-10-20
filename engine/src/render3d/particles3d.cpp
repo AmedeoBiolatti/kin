@@ -160,8 +160,8 @@ Vec3f Wind3D::displacement(Vec3f position, f64 t0, f64 t1) const {
 
 // ---- Small shared functions ----
 
-Vec3f particle_light_tint(const Lights3D& lights) {
-    const LinearRgb ground = lights.ground_ambient.value_or(lights.ambient);
+LinearRgb particle_light_tint(const Lights3D& lights) {
+    const LinearRgb ground = (lights.ground_ambient.enabled ? lights.ground_ambient.color : lights.ambient);
     const LinearRgb light = (lights.ambient + ground) * 0.5f + lights.sun.color * 0.5f + lights.fill.color * 0.5f;
     return {light.r, light.g, light.b};
 }
@@ -499,6 +499,7 @@ void ParticleSystem3D::clear() {
     _carry = 0.0;
     _accumulated = 0.0;
     _time = 0.0;
+    _skipped_time = 0.0;
     _dropped = 0;
 }
 
@@ -614,8 +615,14 @@ void ParticleSystem3D::burst_at(Vec3f position, u32 count) {
 }
 
 void ParticleSystem3D::update(f64 dt, const Wind3D* wind) {
-    if (dt > 0.0) {
+    if (std::isfinite(dt) && dt > 0.0) { // NaN and infinity: no time (an infinite one would never be stepped through)
         _accumulated += dt;
+    }
+    // The catch-up cap: more than `max_catch_up` of steps owed (a pause, a stall, a huge dt) is dropped and counted,
+    // so an update is bounded at 30 steps. A frame of a running game owes far less and never reaches it.
+    if (_accumulated > max_catch_up) {
+        _skipped_time += _accumulated - max_catch_up;
+        _accumulated = max_catch_up;
     }
     // A hair under a step counts as one: the frame lengths 1/60 and 1/144 add up to whole steps only to rounding.
     while (_accumulated >= step - 1e-9) {
@@ -646,7 +653,7 @@ void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
         s.size = p.size * size_over_life(desc, t);
         s.rotation = p.rotation + p.spin * acc;
         const f32 shade = 1.0f - desc.colour_variation * p.random;
-        s.colour = lerp(desc.colour_start, desc.colour_end, t) * shade;
+        s.colour = mix(desc.colour_start, desc.colour_end, t) * shade;
         s.alpha = alpha_over_life(desc, t);
         s.velocity = p.velocity;
         if (desc.frames_per_life > 0.0f && frames > 1) {
@@ -848,8 +855,8 @@ void Weather3D::apply(Lights3D& lights, Fog3D& fog, const Fog3D& base_fog) const
         lights.sun.color = lights.sun.color * sun;
         lights.fill.color = lights.fill.color * sun;
         lights.ambient = lights.ambient * amb;
-        if (lights.ground_ambient) {
-            lights.ground_ambient = *lights.ground_ambient * amb;
+        if (lights.ground_ambient.enabled) {
+            lights.ground_ambient.color *= amb;
         }
     }
     fog = base_fog;
@@ -858,8 +865,8 @@ void Weather3D::apply(Lights3D& lights, Fog3D& fog, const Fog3D& base_fog) const
         fog.density += effects.fog_density * w;
         fog.height_density += effects.fog_height_density * w;
         fog.sun_scatter *= 1.0f - effects.sun_scatter_dim * w;
-        const f32 grey = (fog.colour.x + fog.colour.y + fog.colour.z) / 3.0f;
-        fog.colour = lerp(fog.colour, Vec3f{grey, grey, grey}, effects.fog_grey * w);
+        const f32 grey = (fog.colour.r + fog.colour.g + fog.colour.b) / 3.0f;
+        fog.colour = mix(fog.colour, LinearRgb{grey, grey, grey}, effects.fog_grey * w);
     }
 }
 

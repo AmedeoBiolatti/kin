@@ -18,7 +18,10 @@ set(_kin_gpu_shader_names_3D
     hiz_reduce.comp mesh_skinned.vert mesh_skinned_velocity.vert shadow_skinned.vert shadow_mask_skinned.vert
     prepass_skinned.vert prepass_velocity_skinned.vert mesh_fog.frag mesh_velocity_fog.frag mesh_light.frag
     mesh_light_fog.frag mesh_velocity_light.frag mesh_velocity_light_fog.frag sky.frag sky_velocity.frag
-    sky_velocity_only.frag sky_env.frag view_output_dither.frag particle.vert particle.frag particle_soft.frag)
+    sky_velocity_only.frag sky_env.frag view_output_dither.frag particle.vert particle.frag particle_soft.frag
+    taa_reactive.frag particle_reactive.frag particle_soft_reactive.frag particle_light.vert
+    particle_light.frag particle_soft_light.frag particle_reactive_light.frag particle_soft_reactive_light.frag particle_shadow.vert particle_shadow.frag
+    particle_soft_shadow.frag particle_reactive_shadow.frag particle_soft_reactive_shadow.frag particle_cast.frag)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

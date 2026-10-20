@@ -28,7 +28,8 @@
 //
 // Providers share one interface (probe, attach, move, detach; GripProvider3D below): the generic surface (any collider
 // that is grippable, subject to its SurfaceMaterial3D and the layer mask), the ledge (an edge found by a ray down past
-// the top, with the capsule's clearance over it) and the authored hold (HoldDesc3D on a body). A rope would be another.
+// the top, with the capsule's clearance over it; the top may be another body's when the held face ends at it) and the
+// authored hold (HoldDesc3D on a body). A rope would be another.
 //
 // Determinism: a pure function of (state, commands, dt). The state is in World3D::state_hash(), save_state() and
 // restore_state() (a restored world repeats the exact trajectory); the number of workers makes no difference to it.
@@ -180,7 +181,8 @@ struct GripCandidate3D {
     // A snapped hold, or a ledge: shimmy and slip work on the surface only (see GripState3D::fixed).
     bool fixed = false;
     // Ledge: the edge's top, where the feet would stand (the capsule's bottom) when the hand is at the lip, and whether the
-    // capsule fits over it. The body that is stood on may not be the one held (`ledge_body`).
+    // capsule fits over it. The body that is stood on may not be the one held (`ledge_body`): a top on another body counts
+    // when the held face runs up to within 5 cm of it and ends there (docs/physics_3d.md "Grab and climb").
     bool ledge = false;
     Vec3f ledge_top{};
     bool clear = false;

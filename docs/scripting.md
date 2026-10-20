@@ -1,10 +1,14 @@
 # Scripting
 
-Kin runs Lua 5.4 (through sol2) in two hosts:
+Kin runs Lua 5.4 (through sol2) in these hosts:
 
 - **`ScriptScene`** (`kin/scripting/script_scene.hpp`): a scene written in Lua.
   The script gets the scene's ECS world, input and rendering, and can register
   ECS systems ([systems](ecs_systems.md#registering-lua-systems)).
+- **`SceneSession3D`**: authored 3D scenes use the shared Lua ECS API and native
+  frame stages, with checked physics, prepared prefab pools, animation/IK, and
+  traversal, ragdoll and rope controls. See the
+  [3D Lua workflow](rendering_3d.md#lua-gameplay-in-a-3d-scene) and `examples/lua_range`.
 - **`LuaScript`** (`kin/scripting/lua_script.hpp`): a script for code that does
   not live in the ECS, such as a game's rules, AI, balance formulas or level
   logic, run by plain C++. It knows nothing of scenes or entities: the host

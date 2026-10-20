@@ -8,12 +8,15 @@
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/platform/log.hpp>
 #include <kin/render3d/mesh3d.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -38,6 +41,7 @@ bool near(Vec3f a, Vec3f b, f32 eps) { return near(a.x, b.x, eps) && near(a.y, b
 World3DConfig serial() {
     World3DConfig c;
     c.single_threaded = true;
+    c.contact_events = true;
     return c;
 }
 
@@ -120,7 +124,12 @@ void test_scale_offset_and_compound() {
     right.radius = 0.5f;
     right.offset = {1, 0, 0};
     compound.children = {left, right};
+    // The same compound with an offset of its own (Jolt wraps the placed compound in a decorated shape).
+    // Copy before set(), which takes the collider's owned children.
+    Collider3D placed = compound;
+    placed.offset = {0, 0, 3};
     world.entity().set(Transform3D{.position = {20, 1, 0}}).set(compound);
+    world.entity().set(Transform3D{.position = {30, 1, 0}}).set(placed);
     bodies.sync_bodies();
     const auto top = [&](f32 x) { return physics.raycast({x, 10, 0}, {x, -5, 0}); };
     CHECK(top(0.0f) && near(top(0.0f)->point.y, 2.0f, 1e-3f));
@@ -130,6 +139,16 @@ void test_scale_offset_and_compound() {
     const auto r = top(21.0f);
     CHECK(l && l->sub_shape == 0 && near(l->point.y, 1.5f, 1e-3f));
     CHECK(r && r->sub_shape == 1 && near(r->point.y, 1.5f, 1e-3f));
+    // The offset compound's children are told apart too, by every query.
+    const auto pl = physics.raycast({29, 10, 3}, {29, -5, 3});
+    const auto pr = physics.raycast({31, 10, 3}, {31, -5, 3});
+    CHECK(pl && pl->sub_shape == 0 && near(pl->point.y, 1.5f, 1e-3f));
+    CHECK(pr && pr->sub_shape == 1 && near(pr->point.y, 1.5f, 1e-3f));
+    CHECK(!physics.raycast({31, 10, 0}, {31, -5, 0}));
+    const auto cast = physics.shape_cast(Shape3D::sphere(0.1f), {31, 10, 3}, {}, {0, -15, 0});
+    CHECK(cast && cast->sub_shape == 1);
+    const auto over = physics.overlap(Shape3D::sphere(0.1f), {31, 1, 3}, {});
+    CHECK(over.size() == 1 && over[0].sub_shape == 1);
 }
 
 void test_dynamic_writes_back() {
@@ -381,6 +400,32 @@ void test_interpolation() {
     bodies.step(dt);
     CHECK(physics.position(bodies.body_of(crate)).y < at.y);
     CHECK(near(physics.position(bodies.body_of(crate)).y, at.y + physics.linear_velocity(bodies.body_of(crate)).y * dt, 0.01f));
+}
+
+// Game code moving a dynamic entity is a teleport: the interpolation starts again from there (no lerp across the jump).
+void test_teleported_entity_interpolates_from_there() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    const flecs::entity crate = add_crate(world, {0, 10, 0});
+    for (int i = 0; i < 6; ++i) {
+        bodies.step(dt);
+    }
+    crate.get_mut<Transform3D>()->position = {8, 7, 0};
+    bodies.step(dt);
+    const Vec3f after = physics.position(bodies.body_of(crate));
+    CHECK(near(after.x, 8.0f, 1e-5f) && after.y < 7.0f && after.y > 6.9f);
+    bodies.interpolate(0.0f);
+    CHECK(near(crate.get<Transform3D>()->position, {8, 7, 0}, 1e-5f));
+    bodies.interpolate(0.5f);
+    CHECK(near(crate.get<Transform3D>()->position, {8, 0.5f * (7.0f + after.y), 0}, 1e-5f));
+    bodies.interpolate(1.0f);
+    CHECK(near(crate.get<Transform3D>()->position, after, 1e-6f));
+    // The interpolated pose is not read as a move: the body goes on falling from where it is.
+    bodies.step(dt);
+    CHECK(physics.position(bodies.body_of(crate)).y < after.y && near(physics.position(bodies.body_of(crate)).x, 8.0f, 1e-5f));
 }
 
 // --- debug lines ---
@@ -1184,6 +1229,404 @@ void test_traversal_hands_ik() {
     CHECK(!a.params.get_bool("hanging"));
 }
 
+// --- refusals and rollback ---------------------------------------------------------------------------------------------------
+
+// The warnings that the bridge logs (category physics3d) while it lives, counted by a piece of their text.
+struct Warnings {
+    std::vector<LogEvent> events;
+    LoggerConfig saved = logger_config();
+    Warnings() { set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events}); }
+    ~Warnings() { set_logger_config(saved); }
+    std::ptrdiff_t count(std::string_view text) const {
+        return std::ranges::count_if(events, [&](const LogEvent& e) {
+            return e.level == LogLevel::Warn && e.category == "physics3d" && e.message.find(text) != std::string::npos;
+        });
+    }
+};
+
+void test_refused_bodies_are_tried_once() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    Warnings warnings;
+
+    // A dynamic triangle mesh is refused by the world. Ten steps ask it once, not ten times (each ask cooks the mesh and warns).
+    const Collider3D triangles = collider_triangles_from_mesh_data(std::make_shared<MeshData3D>(meshes::box({2, 2, 2})));
+    flecs::entity wall = world.entity().set(Transform3D{.position = {0, 3, 0}}).set(triangles).set(RigidBody3D{});
+    for (int i = 0; i < 10; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(bodies.body_count() == 0 && physics.body_count() == 0);
+    CHECK(warnings.count("no valid body") == 1);
+    // Changing what it was refused for asks again, and it works as a static body.
+    wall.set(RigidBody3D{.motion = Body3DMotion::Static});
+    bodies.step(dt);
+    CHECK(bodies.body_count() == 1 && physics.body_count() == 1 && warnings.count("no valid body") == 1);
+    // Refused again as dynamic: one more warning, however many steps follow.
+    wall.set(RigidBody3D{});
+    for (int i = 0; i < 5; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(bodies.body_count() == 0 && warnings.count("no valid body") == 2);
+    // Naming the entity asks again, and so does rebuild.
+    const std::array<kin::EcsId, 1> named{wall.id()};
+    bodies.sync_entities(named);
+    CHECK(warnings.count("no valid body") == 3);
+    bodies.rebuild(wall);
+    bodies.sync_bodies();
+    bodies.sync_bodies();
+    CHECK(warnings.count("no valid body") == 4);
+    // Losing the collider and getting it back is a new attempt.
+    wall.remove<Collider3D>();
+    bodies.sync_bodies();
+    wall.set(triangles);
+    bodies.sync_bodies();
+    bodies.sync_bodies();
+    CHECK(warnings.count("no valid body") == 5);
+
+    // A character shorter than its width: once, then made when the descriptor is mended.
+    CharacterDesc3D squat;
+    squat.radius = 0.5f;
+    squat.height = 0.6f;
+    flecs::entity dwarf = add_character(world, {20, 1, 0}, squat);
+    for (int i = 0; i < 10; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(bodies.character_count() == 0 && warnings.count("no valid character") == 1);
+    CharacterController3D mended = *dwarf.get<CharacterController3D>();
+    mended.desc.height = 1.8f;
+    dwarf.set(mended);
+    bodies.step(dt);
+    CHECK(bodies.character_count() == 1 && warnings.count("no valid character") == 1);
+
+    // A rope with no thickness likewise.
+    Rope3D thin;
+    thin.length = 2.0f;
+    thin.radius = 0.0f;
+    flecs::entity rope = world.entity().set(Transform3D{.position = {30, 5, 0}}).set(thin);
+    for (int i = 0; i < 10; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(!bodies.rope_of(rope).valid() && warnings.count("no valid rope") == 1);
+    thin.radius = 0.04f;
+    rope.set(thin);
+    bodies.step(dt);
+    CHECK(bodies.rope_of(rope).valid() && warnings.count("no valid rope") == 1);
+
+    // A world with no room refuses for that reason, not for the components: it is asked again when there is room.
+    World3DConfig tiny = serial();
+    tiny.max_bodies = 1;
+    World3D small(tiny);
+    kin::EcsWorld ecs2;
+    WorldPhysicsState3D crowd{ecs2, small};
+    const flecs::entity first = add_crate(ecs2.raw(), {0, 1, 0});
+    const flecs::entity second = add_crate(ecs2.raw(), {5, 1, 0});
+    for (int i = 0; i < 3; ++i) {
+        crowd.step(dt);
+    }
+    CHECK(crowd.body_count() == 1 && crowd.body_of(first).valid() && !crowd.body_of(second).valid());
+    first.destruct();
+    crowd.step(dt);
+    CHECK(crowd.body_count() == 1 && crowd.body_of(second).valid());
+}
+
+void test_rotated_collider_under_skewed_scale() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    Warnings warnings;
+
+    // A beam 2 m long along X, turned to Z, on an entity stretched along Z: the scale would have to be applied after the turn
+    // (6 m), which a shape scaled in its own axes and then turned cannot be. It is refused (as the asset cooker refuses it).
+    Collider3D beam = box_collider({1.0f, 0.1f, 0.1f});
+    beam.rotation = Quatf::axis_angle({0, 1, 0}, 90.0f);
+    world.entity().set(Transform3D{.position = {0, 10, 0}, .scale = {1, 1, 3}}).set(beam);
+    Collider3D compound;
+    compound.kind = Collider3D::Kind::Compound;
+    compound.children = {beam};
+    world.entity().set(Transform3D{.position = {0, 20, 0}, .scale = {1, 1, 3}}).set(compound);
+    bodies.sync_bodies();
+    bodies.sync_bodies();
+    CHECK(bodies.body_count() == 0 && physics.body_count() == 0);
+    CHECK(warnings.count("uniform parent scale") == 2);
+
+    // Under a scale that is the same on every axis it is made: 2 m times 2 is 4 m long, along Z.
+    world.entity().set(Transform3D{.position = {0, 10, 0}, .scale = {2, 2, 2}}).set(beam);
+    // Not turned, a stretched box is as it was: 0.1 times 3 along Z.
+    world.entity().set(Transform3D{.position = {5, 10, 0}, .scale = {1, 1, 3}}).set(box_collider({1.0f, 0.1f, 0.1f}));
+    bodies.sync_bodies();
+    CHECK(bodies.body_count() == 2 && physics.body_count() == 2);
+    const auto turned = physics.raycast({0, 10, -5}, {0, 10, 5});
+    CHECK(turned && near(turned->point.z, -2.0f, 0.05f));
+    const auto stretched = physics.raycast({5, 10, -5}, {5, 10, 5});
+    CHECK(stretched && near(stretched->point.z, -0.3f, 0.05f));
+    CHECK(warnings.count("uniform parent scale") == 2);
+}
+
+void test_resync_after_restore() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    const flecs::entity crate = add_crate(world, {10, 20, 0});
+    const flecs::entity hero = add_character(world, {0, 0.5f, 0});
+    for (int i = 0; i < 60; ++i) {
+        bodies.step(dt);
+    }
+    const Body3D body = bodies.body_of(crate);
+    const Character3D handle = bodies.character_of(hero);
+    const std::vector<u8> saved = physics.save_state();
+    const Vec3f at = physics.position(body);
+    const Vec3f stood = physics.character(handle).position;
+    CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f) && near(hero.get<Transform3D>()->position, stood, 1e-6f));
+
+    // On: the crate falls further and the hero walks away.
+    press(hero, {0, 1});
+    for (int i = 0; i < 30; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(crate.get<Transform3D>()->position.y < at.y - 0.3f && hero.get<Transform3D>()->position.x > stood.x + 1.0f);
+
+    // Rolled back: the world is where it was, the entities say where it had got to.
+    CHECK(physics.restore_state(saved));
+    CHECK(near(physics.position(body), at, 1e-6f) && near(physics.character(handle).position, stood, 1e-6f));
+    CHECK(crate.get<Transform3D>()->position.y < at.y - 0.3f && hero.get<Transform3D>()->position.x > stood.x + 1.0f);
+    bodies.resync_from_world();
+    CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f));
+    CHECK(near(hero.get<Transform3D>()->position, stood, 1e-6f));
+    CHECK(hero.get<CharacterController3D>()->state.ground == CharacterGround3D::OnGround);
+    // Interpolation has no history from before the rollback.
+    bodies.interpolate(0.0f);
+    CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f) && near(hero.get<Transform3D>()->position, stood, 1e-6f));
+    bodies.interpolate(0.5f);
+    CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f) && near(hero.get<Transform3D>()->position, stood, 1e-6f));
+    // And the step goes on from there: the entities are not read as a move by game code.
+    bodies.step(dt);
+    CHECK(physics.position(body).y < at.y && near(physics.position(body).y, at.y + physics.linear_velocity(body).y * dt, 0.01f));
+    CHECK(near(crate.get<Transform3D>()->position, physics.position(body), 1e-6f));
+}
+
+void test_resync_of_a_sleeping_body() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    const flecs::entity box = world.entity()
+                                  .set(Transform3D{.position = {0, 3, 0}})
+                                  .set(box_collider({0.5f, 0.5f, 0.5f}))
+                                  .set(RigidBody3D{.gravity_factor = 0.0f});
+    bodies.step(dt);
+    const Body3D body = bodies.body_of(box);
+    physics.deactivate(body);
+    CHECK(!physics.is_active(body));
+    const std::vector<u8> asleep = physics.save_state();
+    const Vec3f rest = physics.position(body);
+
+    // Kicked awake and away, then rolled back to sleep: step() writes only the awake bodies to the entities.
+    physics.add_impulse(body, {0, 5000.0f, 0});
+    for (int i = 0; i < 20; ++i) {
+        bodies.step(dt);
+    }
+    CHECK(physics.is_active(body) && box.get<Transform3D>()->position.y > rest.y + 0.5f);
+    CHECK(physics.restore_state(asleep));
+    CHECK(!physics.is_active(body) && near(physics.position(body), rest, 1e-6f));
+    CHECK(box.get<Transform3D>()->position.y > rest.y + 0.5f);
+    bodies.resync_from_world();
+    CHECK(near(box.get<Transform3D>()->position, rest, 1e-6f));
+    bodies.step(dt);
+    CHECK(!physics.is_active(body) && near(box.get<Transform3D>()->position, rest, 1e-6f));
+}
+
+// Which entities have bodies is read again only when it can have changed, so every way it can change is checked after a run of quiet
+// steps (the frames that read nothing again): a new entity, a removed component, a destroyed entity, a raw write to a motion (no
+// modified()), disabling, a character component, a body the world lost, rebuild(), and a static entity moved or given a parent long
+// after its pose was last taken.
+void test_bound_set_follows_changes_after_quiet_steps() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    const flecs::entity crate = add_crate(world, {0, 40, 0});
+    const flecs::entity wall = world.entity().set(Transform3D{.position = {5, 1, 0}}).set(box_collider({0.5f, 1, 0.5f}));
+    const auto quiet = [&](int n) {
+        for (int i = 0; i < n; ++i) {
+            bodies.step(dt);
+        }
+    };
+    quiet(5);
+    CHECK(bodies.body_count() == 3 && physics.body_count() == 3);
+    const Body3D crate_body = bodies.body_of(crate);
+
+    // A new entity.
+    const flecs::entity late = add_crate(world, {2, 30, 0});
+    quiet(1);
+    CHECK(bodies.body_of(late).valid() && bodies.body_count() == 4 && bodies.body_of(crate) == crate_body);
+    quiet(5);
+
+    // A removed component, and it coming back.
+    const Body3D wall_body = bodies.body_of(wall);
+    wall.remove<Collider3D>();
+    quiet(1);
+    CHECK(!physics.contains(wall_body) && !bodies.body_of(wall).valid() && bodies.body_count() == 3);
+    wall.set(box_collider({0.5f, 1, 0.5f}));
+    quiet(1);
+    CHECK(bodies.body_of(wall).valid() && bodies.body_count() == 4);
+    quiet(5);
+
+    // A motion changed by a plain write, without modified(): rebuilt at the next step.
+    CHECK(physics.motion(bodies.body_of(crate)) == Body3DMotion::Dynamic);
+    crate.get_mut<RigidBody3D>()->motion = Body3DMotion::Kinematic;
+    quiet(1);
+    CHECK(physics.motion(bodies.body_of(crate)) == Body3DMotion::Kinematic && !physics.contains(crate_body));
+    quiet(5);
+
+    // Disabled and enabled again.
+    late.disable();
+    quiet(1);
+    CHECK(!bodies.body_of(late).valid() && bodies.body_count() == 3);
+    late.enable();
+    quiet(1);
+    CHECK(bodies.body_of(late).valid() && bodies.body_count() == 4);
+    quiet(5);
+
+    // A body the world lost: made again.
+    const Body3D lost = bodies.body_of(late);
+    CHECK(physics.destroy_body(lost));
+    quiet(1);
+    CHECK(bodies.body_of(late).valid() && physics.contains(bodies.body_of(late)) && bodies.body_count() == 4);
+    quiet(5);
+
+    // rebuild() after a quiet run.
+    const Body3D before = bodies.body_of(late);
+    bodies.rebuild(late);
+    quiet(1);
+    CHECK(bodies.body_of(late).valid() && !physics.contains(before));
+    quiet(5);
+
+    // A character component on an entity with a body: the capsule is the body now.
+    late.set(CharacterController3D{});
+    quiet(1);
+    CHECK(bodies.character_count() == 1 && bodies.body_count() == 3);
+    late.remove<CharacterController3D>();
+    quiet(1);
+    CHECK(bodies.character_count() == 0 && bodies.body_of(late).valid() && bodies.body_count() == 4);
+    quiet(5);
+
+    // A static entity moved by a plain write, long after its pose was last taken; then given a parent.
+    CHECK(near(physics.position(bodies.body_of(wall)), {5, 1, 0}, 1e-4f));
+    wall.get_mut<Transform3D>()->position = {9, 1, 0};
+    quiet(1);
+    CHECK(near(physics.position(bodies.body_of(wall)), {9, 1, 0}, 1e-4f));
+    quiet(5);
+    const flecs::entity mount = world.entity().set(Transform3D{.position = {0, 0, 10}});
+    wall.child_of(mount);
+    quiet(1);
+    CHECK(near(physics.position(bodies.body_of(wall)), {9, 1, 10}, 1e-4f));
+    quiet(5);
+    mount.get_mut<Transform3D>()->position = {0, 0, 20};
+    quiet(1);
+    CHECK(near(physics.position(bodies.body_of(wall)), {9, 1, 20}, 1e-4f));
+    wall.remove(flecs::ChildOf, mount);
+    quiet(1);
+    CHECK(near(physics.position(bodies.body_of(wall)), {9, 1, 0}, 1e-4f));
+    wall.get_mut<Transform3D>()->position = {3, 1, 0};
+    quiet(1);
+    CHECK(near(physics.position(bodies.body_of(wall)), {3, 1, 0}, 1e-4f));
+}
+
+void test_inherited_body_settings_follow_source_changes() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    world.component<RigidBody3D>().add(flecs::OnInstantiate, flecs::Inherit);
+    const auto prefab = world.prefab().set(RigidBody3D{.motion = Body3DMotion::Kinematic});
+    const auto child = world.entity().is_a(prefab).set(Transform3D{.position = {0, 5, 0}})
+                           .set(box_collider({0.5f, 0.5f, 0.5f}));
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    for (int i = 0; i < 3; ++i)
+        bodies.step(dt);
+    CHECK(!child.owns<RigidBody3D>() && physics.motion(bodies.body_of(child)) == Body3DMotion::Kinematic);
+
+    // This source isn't part of the body's structural query: its move must not leave a borrowed pointer behind.
+    struct Moved {};
+    prefab.add<Moved>();
+    prefab.get_mut<RigidBody3D>()->motion = Body3DMotion::Dynamic;
+    bodies.step(dt);
+    CHECK(physics.motion(bodies.body_of(child)) == Body3DMotion::Dynamic);
+
+    prefab.remove<RigidBody3D>();
+    for (int i = 0; i < 3; ++i)
+        bodies.step(dt);
+    CHECK(physics.motion(bodies.body_of(child)) == Body3DMotion::Static);
+    prefab.set(RigidBody3D{.motion = Body3DMotion::Kinematic});
+    bodies.step(dt);
+    CHECK(physics.motion(bodies.body_of(child)) == Body3DMotion::Kinematic);
+}
+
+// Events reach the singletons, in the order of events(), in step and in advance, the same bits as the vector game code reads.
+void test_event_singletons_match_events() {
+    kin::EcsWorld ecs;
+    flecs::world& world = ecs.raw();
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    add_floor(world);
+    for (int i = 0; i < 6; ++i) {
+        add_crate(world, {static_cast<f32>(i) * 1.5f, 0.6f + 0.1f * static_cast<f32>(i), 0});
+    }
+    std::size_t seen = 0;
+    for (int i = 0; i < 90; ++i) {
+        bodies.step(dt);
+        const PhysicsContacts3D* singleton = world.get<PhysicsContacts3D>();
+        CHECK(singleton != nullptr && singleton->events.size() == bodies.events().size());
+        if (singleton != nullptr && singleton->events.size() == bodies.events().size()) {
+            for (std::size_t k = 0; k < singleton->events.size(); ++k) {
+                CHECK(singleton->events[k].a == bodies.events()[k].a && singleton->events[k].b == bodies.events()[k].b &&
+                      singleton->events[k].kind == bodies.events()[k].kind);
+            }
+        }
+        seen += bodies.events().size();
+    }
+    CHECK(seen > 0);
+    // advance(): one step, several, none.
+    std::size_t total = 0;
+    for (const f32 frame : {dt, 2.5f * dt, 0.3f * dt, 3.0f * dt}) {
+        const i32 steps = bodies.advance(frame);
+        const PhysicsContacts3D* singleton = world.get<PhysicsContacts3D>();
+        if (steps == 0) {
+            CHECK(bodies.events().empty());
+        } else {
+            CHECK(singleton != nullptr && singleton->events.size() == bodies.events().size());
+        }
+        total += bodies.events().size();
+    }
+    (void)total;
+}
+
+// World3D::shape(body) is the handle the body was made with, or last given by set_shape, and is equal to it.
+void test_shape_of_a_body_is_its_handle() {
+    World3D physics(serial());
+    const Shape3D box = Shape3D::box({1, 2, 3});
+    const Shape3D ball = Shape3D::sphere(0.5f);
+    const Body3D body = physics.create_body({.shape = box, .position = {0, 5, 0}});
+    CHECK(physics.shape(body) == box && physics.shape(body).kind() == Shape3DKind::Box);
+    CHECK(physics.set_shape(body, ball));
+    CHECK(physics.shape(body) == ball && physics.shape(body).kind() == Shape3DKind::Sphere);
+    CharacterDesc3D desc;
+    desc.position = {10, 1, 0};
+    const Character3D hero = physics.create_character(desc);
+    // A character's own body has no handle of the game's: Jolt's shape, wrapped.
+    CHECK(physics.shape(physics.character(hero).body).valid());
+    physics.destroy_body(body);
+    CHECK(!physics.shape(body).valid());
+    // The slot is used again: it has the new body's shape, not the old one's.
+    const Body3D again = physics.create_body({.shape = box, .position = {0, 5, 0}});
+    CHECK(physics.shape(again) == box && !physics.shape(body).valid());
+}
+
 } // namespace
 
 int main() {
@@ -1196,6 +1639,7 @@ int main() {
     test_events_routed();
     test_scene_determinism();
     test_interpolation();
+    test_teleported_entity_interpolates_from_there();
     test_debug_lines();
     test_debug_mesh_and_height_field_caps();
     test_foot_placement_over_physics();
@@ -1209,6 +1653,14 @@ int main() {
     test_traversal_entities();
     test_traversal_entities_events();
     test_traversal_hands_ik();
+    test_refused_bodies_are_tried_once();
+    test_rotated_collider_under_skewed_scale();
+    test_resync_after_restore();
+    test_resync_of_a_sleeping_body();
+    test_bound_set_follows_changes_after_quiet_steps();
+    test_inherited_body_settings_follow_source_changes();
+    test_event_singletons_match_events();
+    test_shape_of_a_body_is_its_handle();
     if (failures != 0) {
         std::fprintf(stderr, "physics3d_ecs_tests: %d check(s) failed\n", failures);
         return 1;

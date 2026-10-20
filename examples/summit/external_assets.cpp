@@ -19,7 +19,8 @@ ExternalAssets::ExternalAssets(Assets3D& assets, const SummitLevel& level, bool 
             continue;
         std::string error;
         _models[i] =
-            assets.load_model(std::filesystem::path("kenney-survival") / (std::string(prop_names[i]) + ".glb"), &error);
+            assets.load_model(std::filesystem::path("kenney-survival") / (std::string(prop_names[i]) + ".glb"));
+        error = kin::diagnostics3d_text(assets.diagnostics());
         if (!_models[i]) {
             std::fprintf(stderr, "summit: asset %s: %s\n", prop_names[i], error.c_str());
             continue;

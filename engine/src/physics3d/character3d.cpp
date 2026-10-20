@@ -315,6 +315,9 @@ Character3D CharacterSet::create(const CharacterDesc3D& d) {
     s.touched.clear();
     s.contacts.clear();
     s.trav = {};
+    s.external_set = false;
+    s.external_velocity = {};
+    s.external_impulse = {};
     if (d.traversal.enabled) {
         s.trav.resource.max = std::max(0.0f, d.traversal.resource.max);
         s.trav.resource.value = s.trav.resource.max;
@@ -429,6 +432,10 @@ void CharacterSet::teleport(Character3D c, Vec3f feet) {
     s->air_time = 0.0f;
     s->coyote = 0.0f;
     s->jump_buffer = 0.0f;
+    // A teleport stops it: a velocity or impulses given before it are dropped (those given after it count).
+    s->external_set = false;
+    s->external_velocity = {};
+    s->external_impulse = {};
     if (s->desc.traversal.enabled) {
         // Taken somewhere else: nothing it held is within reach any more. The resource and the command stay.
         const Resource3D resource = s->trav.resource;
@@ -580,6 +587,9 @@ void CharacterSet::set_enabled(Character3D c, bool enabled) {
     s->air_time = 0.0f;
     s->jumped = false;
     s->ground = CharacterGround3D::InAir;
+    s->external_set = false;
+    s->external_velocity = {};
+    s->external_impulse = {};
     s->trav.mode = TraversalMode3D::Walking;
     s->trav.swing = {};
     s->trav.swing_velocity = {};
@@ -592,6 +602,62 @@ void CharacterSet::set_enabled(Character3D c, bool enabled) {
 bool CharacterSet::enabled(Character3D c) const {
     const Slot* s = find(c);
     return s != nullptr && !s->disabled;
+}
+
+void CharacterSet::add_impulse(Character3D c, Vec3f impulse) {
+    Slot* s = find(c);
+    if (s == nullptr || s->disabled || !finite(impulse)) {
+        return;
+    }
+    s->external_impulse += impulse;
+}
+
+void CharacterSet::set_velocity(Character3D c, Vec3f velocity) {
+    Slot* s = find(c);
+    if (s == nullptr || s->disabled || !finite(velocity)) {
+        return;
+    }
+    // A velocity replaces: what was pushed before it is gone, as a body's velocity set after an impulse is.
+    s->external_set = true;
+    s->external_velocity = velocity;
+    s->external_impulse = {};
+}
+
+void CharacterSet::take_external(Slot& s) {
+    const Vec3f up = s.up;
+    // (set_character_desc does not check the mass: none, no push.)
+    const Vec3f dv = s.desc.mass > 0.0f && std::isfinite(s.desc.mass) ? s.external_impulse / s.desc.mass : Vec3f{};
+    TravData& t = s.trav;
+    if (s.desc.traversal.enabled && t.mode == TraversalMode3D::Mantling) {
+        // A pull-up is a set move over the edge: nothing from outside changes it.
+    } else if (s.desc.traversal.enabled && t.mode == TraversalMode3D::Hanging) {
+        // Hanging: the swing about the hang place takes it (the grips' spring brings it back), and so does the speed it has if
+        // it lets go this step. The place's own motion (a platform) is the part of the last velocity the swing is not.
+        const Vec3f place_motion = s.velocity - t.swing_velocity;
+        if (s.external_set) {
+            s.velocity = s.external_velocity;
+            t.swing_velocity = s.external_velocity - place_motion;
+        }
+        s.velocity += dv;
+        t.swing_velocity += dv;
+    } else {
+        // Walking: the controller's own velocity, in its three parts: along up, across it in the world, across it over the
+        // ground (in the frame of the ground's velocity that the last step measured it in).
+        if (s.external_set) {
+            const Vec3f ground = s.ch->IsSupported() ? from_jolt(s.ch->GetGroundVelocity()) : Vec3f{};
+            s.velocity = s.external_velocity;
+            s.vertical = dot(s.external_velocity, up);
+            s.control = s.external_velocity;
+            s.relative = s.external_velocity - ground;
+        }
+        s.velocity += dv;
+        s.vertical += dot(dv, up);
+        s.control += dv;
+        s.relative += dv;
+    }
+    s.external_set = false;
+    s.external_velocity = {};
+    s.external_impulse = {};
 }
 
 void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
@@ -634,6 +700,12 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
     const OwnBodyFilter body_filter(ch.GetInnerBodyID(), _env);
     const JPH::BroadPhaseLayerFilter& bp_filter_ref = _env.system->GetDefaultBroadPhaseLayerFilter(d.layer);
 
+    // --- what was given from outside since the last step (set_velocity, add_impulse): the velocity the step starts from
+    const bool external = s.has_external();
+    if (external) {
+        take_external(s);
+    }
+
     // --- grab and climb: the grips, the resource and, while it hangs or mantles, the move itself
     if (d.traversal.enabled) {
         _traversal_events.clear();
@@ -674,6 +746,9 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
     const f32 ground_vertical = dot(ground_velocity, up);
     const bool moving_toward = vertical_previous - ground_vertical < 0.1f;
     const bool standing = on_ground && moving_toward;
+    // Launched: what came from outside sends it away from the ground it is on. That is a jump that was not asked for: it is
+    // not standing, is not put back on the floor, makes no jump of its own this step and has no coyote time after it.
+    const bool launched = external && on_ground && !moving_toward;
 
     // --- jump: a press (rising edge), buffered if asked; allowed on the ground or inside the coyote time
     const bool pressed = s.input.jump && !s.prev_jump;
@@ -687,6 +762,9 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
         s.coyote = d.coyote_seconds;
     } else {
         s.coyote = std::max(0.0f, s.coyote - dt);
+    }
+    if (launched) {
+        s.coyote = 0.0f;
     }
     const bool wants_jump = pressed || s.jump_buffer > 0.0f;
     const bool jump = wants_jump && (standing || s.coyote > 0.0f);
@@ -718,7 +796,8 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
     f32 vertical_cmd = 0.0f;
     Vec3f vel;
     const bool supported = ch.IsSupported();
-    if (standing || supported) {
+    // Launched, it is in the air from this step on: the ground does not brake what sent it off.
+    if (standing || (supported && !launched)) {
         // On the ground (or against a slope too steep to stand on, which it still pushes off with its feet): the ground's
         // own velocity, plus a velocity along its surface (the speed is held on a slope as it is on the flat: along the
         // surface, not across the plan), approached at the acceleration. Gravity is not added while it stands: the
@@ -869,8 +948,8 @@ void CharacterSet::update_one(u32 index, Slot& s, f32 dt) {
     // stair is not "moving away from the ground"); otherwise the less of what it achieved and what it asked for: a
     // ceiling stops a jump (achieved is less), but rolling over the edge of a step shoots it up faster than it asked
     // and it must not carry that into the air as a hop (asked is less).
-    s.vertical = supported_now && !jump ? dot(from_jolt(ch.GetGroundVelocity()), up)
-                                        : std::min(dot(s.control, up), vertical_cmd);
+    s.vertical = supported_now && !jump && !launched ? dot(from_jolt(ch.GetGroundVelocity()), up)
+                                                     : std::min(dot(s.control, up), vertical_cmd);
     s.air_time = supported_now ? 0.0f : s.air_time + dt;
 
     // --- events: in the order of the kinds, for this character
@@ -969,8 +1048,10 @@ void CharacterSet::save_header(std::vector<u8>& bytes) const {
     out.u32v(static_cast<u32>(_slots.size()));
     for (const Slot& s : _slots) {
         out.u32v(s.generation);
-        // 0 free slot, 1 a character, 2 a character handed over to a ragdoll (a world with none hashes as before).
-        out.bytes.push_back(s.alive ? (s.disabled ? 2 : 1) : 0);
+        // 0 free slot, 1 a character, 2 a character handed over to a ragdoll (a world with none hashes as before); 4 added while
+        // a velocity or an impulse waits for the next step (its bytes are at the end of the character's).
+        const bool external = s.alive && s.has_external();
+        out.bytes.push_back(s.alive ? static_cast<u8>((s.disabled ? 2 : 1) | (external ? 4 : 0)) : 0);
         if (!s.alive) {
             continue;
         }
@@ -1015,6 +1096,11 @@ void CharacterSet::save_header(std::vector<u8>& bytes) const {
         if (s.desc.traversal.enabled) {
             save_trav(out, s.trav);
         }
+        if (external) {
+            out.b(s.external_set);
+            out.vec(s.external_velocity);
+            out.vec(s.external_impulse);
+        }
     }
 }
 
@@ -1032,10 +1118,12 @@ std::unique_ptr<CharacterSet::Parsed> CharacterSet::parse_header(const u8*& curs
         if (end - in.p < 1) {
             return nullptr;
         }
+        bool external = false;
         {
             const u8 flag = *in.p++;
-            o.alive = flag != 0;
-            o.disabled = flag == 2;
+            o.alive = (flag & 3u) != 0;
+            o.disabled = (flag & 3u) == 2;
+            external = (flag & 4u) != 0;
         }
         if (in.failed || o.generation != _slots[i].generation || o.alive != _slots[i].alive) {
             return nullptr;
@@ -1102,6 +1190,14 @@ std::unique_ptr<CharacterSet::Parsed> CharacterSet::parse_header(const u8*& curs
                 return nullptr;
             }
         }
+        if (external) {
+            o.external_set = in.b();
+            o.external_velocity = in.vec();
+            o.external_impulse = in.vec();
+            if (in.failed) {
+                return nullptr;
+            }
+        }
     }
     cursor = in.p;
     return parsed;
@@ -1164,6 +1260,9 @@ bool CharacterSet::restore(Parsed& parsed, JPH::StateRecorder& in) {
         if (s.desc.traversal.enabled) {
             s.trav = o.trav;
         }
+        s.external_set = o.external_set;
+        s.external_velocity = o.external_velocity;
+        s.external_impulse = o.external_impulse;
         // Up is a property of the Jolt character that its own state does not carry.
         s.ch->SetUp(to_jolt(s.up));
         s.ch->RestoreState(in);

@@ -27,6 +27,13 @@
 //    a dynamic entity's Transform3D between steps, the body is moved there (velocities kept).
 //  * Determinism: bodies are made and destroyed in ascending entity id order, so body numbers, the step and the events
 //    are the same in two runs that do the same things.
+//  * A body, character, ragdoll or rope that the world refuses (a dynamic TriangleMesh, a hull of fewer than four points, a
+//    character shorter than its width, a rotated collider under a scale that differs between axes) is warned about once and
+//    not tried again at every step: it is tried again when its components change, when `sync_entities` names it, after
+//    `rebuild(entity)`, when its components go and come back, and, if the world was full, when it has room.
+//  * Rollback: `World3D::restore_state` puts the bodies back but not the entities. Call `resync_from_world()` right after it
+//    (and after any `teleport` of bodies made outside this system) to bring Transform3D and the interpolation history to
+//    the world's poses, sleeping bodies included.
 //  * Characters (kin/physics3d/character3d.hpp): an entity with Transform3D and CharacterController3D has a capsule
 //    controller, made after the bodies of the same sync in ascending entity id order (and it gets no body from a
 //    Collider3D). The game sets `input` each step (and `facing`); the system sends it, steps the world (which updates
@@ -349,7 +356,8 @@ public:
     // step() does it itself first; call it to have the bodies before the first step (to query them).
     void sync_bodies();
     // Reconcile only these entity IDs (including recently destroyed IDs).
-    // Keeps unrelated bindings/rebuild requests intact. Empty means no work.
+    // Keeps unrelated bindings/rebuild requests intact. Empty means no work. A named entity whose body, character,
+    // ragdoll or rope was refused before is tried again.
     void sync_entities(std::span<const EcsId> entities);
     // One fixed step of `dt`: sync_bodies, entities to bodies, World3D::step, bodies to entities, events.
     void step(f32 dt);
@@ -361,8 +369,15 @@ public:
     // (0: the one before, 1: the last: what step() leaves). For drawing between fixed steps; opt-in, call it
     // after advance() with alpha().
     void interpolate(f32 alpha);
+    // Writes the Transform3D of every dynamic and kinematic body, the feet of every character, and the pose override and
+    // state of every ragdoll and rope from the world as it is now, awake or asleep, and makes that the pose that
+    // interpolate() lerps from. Call it right after World3D::restore_state (a rollback), whose restored bodies the step
+    // would not write back while they sleep and whose awake ones would otherwise be interpolated from before the
+    // rollback. It moves nothing in the world and does not touch the fixed-step accumulator (alpha() is the caller's).
+    void resync_from_world();
 
-    // Destroys the entity's body and makes it again at the next sync from the components as they are now.
+    // Destroys the entity's body and makes it again at the next sync from the components as they are now (a refused one
+    // is tried again then).
     void rebuild(flecs::entity entity);
 
     struct BodyEdit {
@@ -439,6 +454,10 @@ private:
         flecs::entity_t entity = 0;
         Body3D body{};
         Body3DMotion motion = Body3DMotion::Static;
+        // Owned components stay valid until the structure-only query changes. Borrowed sources can move independently.
+        const Transform3D* local = nullptr;
+        const RigidBody3D* rigid = nullptr;
+        bool inherited_rigid = false;
         // The entity's Transform3D as this system last wrote it (dynamic) or the world pose last sent (kinematic, static).
         Vec3f last_position{};
         Quatf last_rotation{};
@@ -447,10 +466,43 @@ private:
         Quatf rotation{}, previous_rotation{};
         Vec3f scale{1.0f, 1.0f, 1.0f}; // the world scale at creation
         bool rebuild = false;
+        // A static or kinematic body whose entity has no parent: the entity's own Transform3D that the pose above was made from. A step
+        // that finds it the same makes no matrix and decomposes nothing (a level has thousands of colliders that never move). Cleared
+        // when the bound set is read again (an entity that gains a parent has changed archetype).
+        bool stamped = false;
+        Vec3f stamp_position{};
+        Quatf stamp_rotation{};
+        Vec3f stamp_scale{1.0f, 1.0f, 1.0f};
+        // What step() has found out about the entity since the bound set was last read (-1: not asked): whether it has a parent, and
+        // whether it owns its Transform3D (it can only change with the archetype).
+        i8 parented = -1;
+        i8 owns_transform = -1;
     };
 
     void create_body(flecs::entity entity, Bound& out, u64 user_id = 0);
-    void write_back(Bound& b, Vec3f position, Quatf rotation);
+    // `in_step`: called by step() just after the sync, so what is known of the entity (its parent, its owning its transform) is up to date.
+    void write_back(Bound& b, Vec3f position, Quatf rotation, bool in_step = false);
+
+    // What the world refused, with a hash of the components it was refused for: asked again only when the hash changes
+    // (or the world was short of room and has more now, or the entity is named by sync_entities, rebuilt, or lost the
+    // components).
+    enum class Made : u8 { Body, Character, Ragdoll, Rope };
+    struct Refused {
+        flecs::entity_t entity = 0;
+        Made what = Made::Body;
+        u64 stamp = 0;
+        i64 spare = -1; // spare body slots at the time when few (the refusal may be for room); -1: room was no matter
+    };
+    std::vector<Refused> _refused; // ascending (entity, what)
+    // The first entry not before (entity, what): the one for it when its key matches.
+    std::vector<Refused>::iterator find_refused(flecs::entity_t entity, Made what);
+    i64 spare_bodies() const;
+    // Whether the same refusal stands: nothing changed since, so the world is not asked again.
+    bool refused_before(flecs::entity_t entity, Made what, u64 stamp);
+    void refuse(flecs::entity_t entity, Made what, u64 stamp);
+    void forgive(flecs::entity_t entity, Made what);
+    // Drops the refusals of entities no longer wanted (components gone) so that a return is tried afresh.
+    void prune_refused(Made what, const std::vector<flecs::entity>& wanted);
 
     struct BoundCharacter {
         flecs::entity_t entity = 0;
@@ -495,23 +547,43 @@ private:
     void ropes_to_world();
     void ropes_from_world();
 
+    // Which entities have a body, character, ragdoll or rope is read again only when it can have changed: a sync after the entities
+    // that match a query came, went or moved between tables (`changed()` of the cached query, which looks at the structure and not
+    // at component values), after `rebuild`, with a refusal of that kind to be asked again, or with a body the world lost or
+    // whose motion changed. Anything else is a frame in which no entity gained or lost a component: nothing to sort or merge.
+    bool bodies_stand();
+    bool characters_stand();
+    bool ragdolls_stand();
+    bool ropes_stand();
+    void reconcile_bodies();
+    bool has_refused(Made what) const;
+
     flecs::world _ecs;
     World3D& _physics;
     WorldPhysicsState3DConfig _config;
-    flecs::query<const Transform3D, const Collider3D, const RigidBody3D*> _query;
-    flecs::query<const Transform3D, const CharacterController3D> _character_query;
-    flecs::query<const Transform3D, const SkinnedMeshRenderer3D, const Ragdoll3D> _ragdoll_query;
-    flecs::query<const Rope3D> _rope_query;
+    flecs::query<> _query;           // Transform3D and Collider3D, structure only
+    flecs::query<> _character_query; // Transform3D and CharacterController3D
+    flecs::query<const Transform3D, const SkinnedMeshRenderer3D, const Ragdoll3D> _ragdoll_query; // read only to see that there is none
+    flecs::query<> _rope_query;      // Rope3D
+    std::vector<flecs::entity> _wanted; // the sync passes' gather, kept for its room
+    bool _force_sync = true;     // the next sync reads every kind again (a new system, rebuild())
+    bool _body_components_dirty = true;
+    bool _ropes_waiting = false; // a rope is waiting for the body of an entity it is fixed to
     std::vector<Bound> _bound; // ascending entity id
     std::vector<BoundCharacter> _characters; // ascending entity id
     std::vector<ContactEvent3D> _events;
     std::vector<CharacterEvent3D> _character_events;
+    std::vector<ContactEvent3D> _advance_events;
+    std::vector<CharacterEvent3D> _advance_character_events;
     std::vector<BoundRagdoll> _ragdolls; // ascending entity id
     std::vector<BoundRope> _ropes;       // ascending entity id
     std::vector<RagdollEvent3D> _ragdoll_events;
     std::vector<RopeEvent3D> _rope_events;
+    std::vector<RagdollEvent3D> _native_ragdoll_events;
+    std::vector<RopeEvent3D> _native_rope_events;
     std::vector<Mesh3D> _rope_meshes;      // the tubes of the last collect_ropes
     std::vector<Mat4f> _pose_scratch;
+    Pose3D _rest_scratch; // a skeleton's rest pose for a ragdoll with no clip to follow, reused
     f32 _accumulator = 0.0f;
     DebugDraw3D _debug;
     Mesh3D _debug_mesh; // the lines of the last collect_debug, kept so the GPU is done with them before they go

@@ -70,41 +70,26 @@ void register_scene3d_settings(EcsWorld& world) {
             value.member = field;                                                                                      \
             return true;                                                                                               \
         })
+#define RGB_SETTING(name, member)                                                                                      \
+    builder.property<Vec3f>(                                                                                           \
+        name,                                                                                                          \
+        [](const auto& value) {                                                                                        \
+            const auto c = value.member;                                                                               \
+            return Vec3f{c.r, c.g, c.b};                                                                               \
+        },                                                                                                             \
+        [](auto& value, const Vec3f& c) {                                                                              \
+            if (c.x < 0 || c.y < 0 || c.z < 0)                                                                         \
+                return false;                                                                                          \
+            value.member = {c.x, c.y, c.z};                                                                            \
+            return true;                                                                                               \
+        })
         SETTING("sun_direction", lights.sun.direction);
-        builder.property<Vec3f>(
-            "sun_color",
-            [](const auto& value) {
-                return Vec3f{value.lights.sun.color.r, value.lights.sun.color.g, value.lights.sun.color.b};
-            },
-            [](auto& value, const Vec3f& color) {
-                if (color.x < 0 || color.y < 0 || color.z < 0)
-                    return false;
-                value.lights.sun.color = {color.x, color.y, color.z};
-                return true;
-            });
+        RGB_SETTING("sun_color", lights.sun.color);
         SETTING("fill_direction", lights.fill.direction);
-        builder.property<Vec3f>(
-            "fill_color",
-            [](const auto& value) {
-                return Vec3f{value.lights.fill.color.r, value.lights.fill.color.g, value.lights.fill.color.b};
-            },
-            [](auto& value, const Vec3f& color) {
-                if (color.x < 0 || color.y < 0 || color.z < 0)
-                    return false;
-                value.lights.fill.color = {color.x, color.y, color.z};
-                return true;
-            });
-        builder.property<Vec3f>(
-            "ambient",
-            [](const auto& value) {
-                return Vec3f{value.lights.ambient.r, value.lights.ambient.g, value.lights.ambient.b};
-            },
-            [](auto& value, const Vec3f& color) {
-                if (color.x < 0 || color.y < 0 || color.z < 0)
-                    return false;
-                value.lights.ambient = {color.x, color.y, color.z};
-                return true;
-            });
+        RGB_SETTING("fill_color", lights.fill.color);
+        RGB_SETTING("ambient", lights.ambient);
+        RGB_SETTING("ground_ambient", lights.ground_ambient.color);
+        SETTING("ground_ambient_enabled", lights.ground_ambient.enabled);
         SETTING("environment_intensity", lights.environment_intensity);
         SETTING("environment_rotation", lights.environment_rotation);
         SETTING("sky_lights_scene", lights.sky_lights_scene);
@@ -113,15 +98,46 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("shadow_resolution", lights.shadow_resolution);
         SETTING("shadow_cascades", lights.shadow_cascades);
         SETTING("shadow_distance", lights.shadow_distance);
+        SETTING("sun_shadow_strength", lights.sun_shadow_strength);
+        SETTING("shadow_bias", lights.shadow_bias);
+        SETTING("shadow_normal_offset", lights.shadow_normal_offset);
+        SETTING("shadow_receiver_plane_bias", lights.shadow_receiver_plane_bias);
+        SETTING("fill_shadow", lights.fill_shadow.enabled);
+        SETTING("fill_shadow_strength", lights.fill_shadow.strength);
+        SETTING("fill_shadow_cascades", lights.fill_shadow.cascades);
+        SETTING("fill_shadow_resolution", lights.fill_shadow.resolution);
+        SETTING("fill_shadow_distance", lights.fill_shadow.distance);
         SETTING("cache_shadows", lights.cache_shadows);
         SETTING("max_shadowed_spots", lights.max_shadowed_spots);
         SETTING("max_shadowed_points", lights.max_shadowed_points);
         SETTING("local_shadow_resolution", lights.local_shadow_resolution);
         SETTING("sky_enabled", sky.enabled);
+        builder.property<std::string>(
+            "sky_mode",
+            [](const auto& v) { return std::string(v.sky.mode == SkyMode3D::Image ? "image" : "procedural"); },
+            [](auto& v, const std::string& mode) {
+                if (mode == "image")
+                    v.sky.mode = SkyMode3D::Image;
+                else if (mode == "procedural")
+                    v.sky.mode = SkyMode3D::Procedural;
+                else
+                    return false;
+                return true;
+            });
         SETTING("sky_turbidity", sky.turbidity);
         SETTING("sky_intensity", sky.intensity);
         SETTING("sky_sun_intensity", sky.sun_intensity);
-        SETTING("sky_ground_color", sky.ground_color);
+        RGB_SETTING("sky_ground_color", sky.ground_color);
+        SETTING("sky_sun_size", sky.sun_size);
+        SETTING("sky_sun_disc", sky.sun_disc);
+        RGB_SETTING("sky_night_color", sky.night_color);
+        SETTING("sky_moon", sky.moon);
+        SETTING("sky_moon_direction", sky.moon_direction);
+        SETTING("sky_moon_size", sky.moon_size);
+        SETTING("sky_moon_light", sky.moon_light);
+        RGB_SETTING("sky_moon_color", sky.moon_color);
+        SETTING("sky_light_threshold", sky.light_threshold);
+        SETTING("sky_light_interval", sky.light_interval);
         SETTING("sky_stars", sky.stars);
         SETTING("sky_star_brightness", sky.star_brightness);
         SETTING("fog_enabled", fog.enabled);
@@ -131,7 +147,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("fog_base_height", fog.base_height);
         SETTING("fog_start", fog.start);
         SETTING("fog_max_opacity", fog.max_opacity);
-        SETTING("fog_color", fog.colour);
+        RGB_SETTING("fog_color", fog.colour);
         SETTING("fog_color_from_sky", fog.colour_from_sky);
         SETTING("fog_sun_scatter", fog.sun_scatter);
         SETTING("fog_sun_anisotropy", fog.sun_anisotropy);
@@ -143,6 +159,14 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("contact_distance", contact_shadows.distance);
         SETTING("contact_thickness", contact_shadows.thickness);
         SETTING("contact_intensity", contact_shadows.intensity);
+        SETTING("contact_steps", contact_shadows.steps);
+        SETTING("lod_enabled", lod.enabled);
+        SETTING("lod_error_pixels", lod.error_pixels);
+        SETTING("lod_bias", lod.bias);
+        SETTING("lod_max_cluster_triangles", lod.max_cluster_triangles);
+        SETTING("occlusion_culling", lod.occlusion.enabled);
+        SETTING("occlusion_depth_margin", lod.occlusion.depth_margin);
+        SETTING("occlusion_pixel_margin", lod.occlusion.pixel_margin);
         SETTING("taa_enabled", taa.enabled);
         SETTING("taa_blend", taa.blend);
         SETTING("taa_sharpness", taa.sharpness);
@@ -153,6 +177,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("bloom", view.bloom);
         SETTING("bloom_threshold", view.bloom_threshold);
 #undef SETTING
+#undef RGB_SETTING
     }
     if (!registry.find("TimeOfDay3D"))
         registry.native<TimeOfDay3D>("TimeOfDay3D")
@@ -215,6 +240,19 @@ std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene,
                 if (const auto* vector = std::get_if<Vec3f>(&field.value))
                     valid &= detail::field_value_matches_kind(*vector, ComponentFieldKind::Vec3f);
             }
+        const auto rgb_valid = [](LinearRgb c) {
+            return std::isfinite(c.r) && std::isfinite(c.g) && std::isfinite(c.b) && c.r >= 0 && c.g >= 0 && c.b >= 0;
+        };
+        valid &= rgb_valid(settings.lights.sun.color) && rgb_valid(settings.lights.fill.color) &&
+                 rgb_valid(settings.lights.ambient) && rgb_valid(settings.lights.ground_ambient.color) &&
+                 rgb_valid(settings.sky.ground_color) && rgb_valid(settings.sky.moon_color) &&
+                 rgb_valid(settings.sky.night_color) && rgb_valid(settings.fog.colour);
+        valid &= settings.sky.mode <= SkyMode3D::Image && settings.sky.turbidity >= 1 && settings.sky.turbidity <= 20 &&
+                 settings.sky.sun_intensity >= 0 && settings.sky.intensity >= 0 && settings.sky.sun_size >= 0 &&
+                 settings.sky.sun_size <= 180 && settings.sky.sun_disc >= 0 && settings.sky.star_brightness >= 0 &&
+                 settings.sky.moon_size >= 0 && settings.sky.moon_size <= 180 && settings.sky.moon_light >= 0 &&
+                 settings.sky.light_threshold >= 0 &&
+                 (!settings.sky.moon || length_squared(settings.sky.moon_direction) > 1e-12f);
         valid &= settings.fog.density >= 0 && settings.fog.height_density >= 0 && settings.fog.height_falloff >= 0 &&
                  settings.fog.start >= 0 && settings.fog.max_opacity >= 0 && settings.fog.max_opacity <= 1 &&
                  std::abs(settings.fog.sun_anisotropy) < 1 && settings.lights.environment_intensity >= 0 &&
@@ -222,6 +260,14 @@ std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene,
                  settings.lights.max_shadowed_spots <= 8 && settings.lights.max_shadowed_points <= 2 &&
                  settings.lights.shadow_resolution >= 64 && settings.lights.shadow_resolution <= 8192 &&
                  settings.lights.local_shadow_resolution >= 64 && settings.lights.local_shadow_resolution <= 8192 &&
+                 settings.lights.sun_shadow_strength >= 0 && settings.lights.sun_shadow_strength <= 1 &&
+                 settings.lights.shadow_bias >= 0 && settings.lights.shadow_normal_offset >= 0 &&
+                 settings.lights.fill_shadow.strength >= 0 && settings.lights.fill_shadow.strength <= 1 &&
+                 settings.lights.fill_shadow.cascades >= 1 && settings.lights.fill_shadow.cascades <= 4 &&
+                 (settings.lights.fill_shadow.resolution == 0 ||
+                  (settings.lights.fill_shadow.resolution >= 64 && settings.lights.fill_shadow.resolution <= 8192)) &&
+                 settings.lights.fill_shadow.distance >= 0 && settings.lod.error_pixels > 0 && settings.lod.bias > 0 &&
+                 settings.lod.max_cluster_triangles > 0 && settings.lod.occlusion.depth_margin >= 0 &&
                  settings.view.exposure >= 0 && settings.view.bloom >= 0 && settings.view.bloom_threshold >= 0 &&
                  settings.ambient_occlusion.radius > 0 && settings.ambient_occlusion.intensity >= 0 &&
                  settings.contact_shadows.distance >= 0 && settings.contact_shadows.thickness > 0 &&
@@ -243,8 +289,9 @@ std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene,
             scene.ambient_occlusion = settings.ambient_occlusion;
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;
+            scene.lod = settings.lod;
             if (view)
-                *view = settings.view;
+                *view = scene3d_view_options(settings.view, *view);
         }
     }
     return errors;

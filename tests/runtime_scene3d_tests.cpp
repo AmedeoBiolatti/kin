@@ -292,7 +292,7 @@ void projectile_game(Renderer2D& renderer) {
     SceneSession3DOptions options;options.viewport={160,120};options.view.samples=1;options.warm_up=false;
     options.max_pending_commands=24;options.max_runtime_entities=24;options.max_runtime_prefabs=24;
     options.physics=World3DConfig{.max_bodies=32,.max_body_pairs=128,.max_contact_constraints=128,
-        .temp_memory_bytes=1024*1024,.single_threaded=true,.max_events=128};
+        .temp_memory_bytes=1024*1024,.single_threaded=true,.contact_events=true,.max_events=128};
     options.initialize=[](auto& context){projectile_range::install(context);};
     SceneSession3D session{r3d,assets,options};check(session.load("scenes/projectile-range.kinscene"),"projectile level failed");
     check(projectile_range::prepare(session),"projectile preload/pool preparation failed");

@@ -74,7 +74,8 @@ struct LedgeInfo {
 };
 
 // Looks for the body's top edge between `search_down` below and `search_up` above `point`: a ray down just inside the
-// surface. `body` must be the one the hand is on.
+// surface. `body` must be the one the hand is on. The top it meets first may be another body's when the held face runs up
+// to within 5 cm of it and ends there (`body` in the result is the one stood on).
 LedgeInfo find_ledge(const World3D& world, Body3D body, Vec3f point, Vec3f normal, Vec3f up, f32 search_up,
                      f32 search_down, Layer3DMask mask, Body3D ignore);
 

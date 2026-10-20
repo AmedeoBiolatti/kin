@@ -10,8 +10,11 @@ GpuMeshBufferPage::~GpuMeshBufferPage() {
 GpuMeshBufferPool::~GpuMeshBufferPool() {
     if (_device && *_device) {
         for (const auto& batch : _batches) {
-            SDL_WaitForGPUFences(*_device, true, &batch.fence, 1);
-            SDL_ReleaseGPUFence(*_device, batch.fence);
+            // Released only once signalled: when the wait fails (a lost device) the fence is left, as
+            // wait_for_readback leaves its own, rather than handed back to SDL while the GPU may still be using it.
+            if (SDL_WaitForGPUFences(*_device, true, &batch.fence, 1)) {
+                SDL_ReleaseGPUFence(*_device, batch.fence);
+            }
         }
     }
 }

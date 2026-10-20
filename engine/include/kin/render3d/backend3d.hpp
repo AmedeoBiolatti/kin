@@ -51,9 +51,13 @@ struct RendererCapabilities3D {
     // says so once.
     bool particles = false;
     bool soft_particles = false;
+    bool particle_shadows = false; // optional particle shadow-map casting and reception
     // Whether Scene3D::draw_skinned can draw (the skinning vertex shaders could be made); else skinned copies are not
     // drawn.
     bool skinning = false;
+    // The device is a software rasteriser (Mesa's llvmpipe/lavapipe, SwiftShader, Direct3D's WARP): every picture is
+    // right, no timing means anything. Tests compare milliseconds only where this is false.
+    bool software = false;
 };
 
 struct ViewOptions3D {

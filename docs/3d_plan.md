@@ -1647,7 +1647,8 @@ small meshes should keep the setting off, or give levels only to meshes of a few
 the file has no normals): 8.0 to 8.2 s at load for 4 levels (the whole model load, levels included; the no-level load was not timed separately), 8.5 s for 6; the whole
 `kin_reference` run peaks at 2.74 GB (4 levels) and 2.85 GB (6) against **1.62 GB with no levels** (+1.1 GB, of which the
 levels' own vertices, 36 bytes a vertex of 12.8 M, are 0.45 GB and are also kept on the GPU: 9.7 M triangles with all levels
-against 5.15 M). A first version that simplified the 14.9 M vertices with all nine attributes peaked at 6.6 GB and was
+against 5.15 M). *(2026-10-19: these figures predate the sharing of zero-normal vertices between a flat mesh's levels; a 2 M-triangle
+soup with 4 levels then took 168 MB less resident and 325 MB less at peak, so the kiln's +1.1 GB is smaller now; not re-measured.)* A first version that simplified the 14.9 M vertices with all nine attributes peaked at 6.6 GB and was
 killed by the OOM killer: the simplifier's per-vertex state with attributes and `Permissive` was the cause. A flat
 unindexed mesh is now welded by position, simplified on positions alone (no attribute state), and each level gets vertices
 of its own with the triangle's flat normal and the UV and colour of the corner it replaces (`MeshLodChain3D::extra_vertices`);
@@ -2082,7 +2083,7 @@ Sponza 260 k triangles in 103 meshes; numbers from each step's results):
 
 | Step | Costs | Gains | Default | Use it for |
 |---|---|---|---|---|
-| **G3a** levels of detail (`MeshOptions3D::levels`, `Lod3D`) | build time (kiln 8 s for 4 levels) and memory (+1.1 GB resident, all levels' triangles on the GPU); a draw a level; the crowd with everything on is 8 to 11% slower | kiln 4.3 to 0.3 (6 levels) or 0.8 ms (4); the crowd 0.4 to 1.1 M of 1.5 to 2.6 M triangles, GPU level; picture within 0.1 to 0.2 mean levels | off; meshes keep one level unless asked | a big mesh seen from far (whole-mesh levels), many copies of meshes of thousands of triangles; not small meshes |
+| **G3a** levels of detail (`MeshOptions3D::levels`, `Lod3D`) | build time (kiln 8 s for 4 levels) and memory (+1.1 GB resident, all levels' triangles on the GPU; measured before 2026-10-19's shared zero-normal vertices for flat levels, which took 168 MB off a 2 M-triangle soup: less now, not re-measured); a draw a level; the crowd with everything on is 8 to 11% slower | kiln 4.3 to 0.3 (6 levels) or 0.8 ms (4); the crowd 0.4 to 1.1 M of 1.5 to 2.6 M triangles, GPU level; picture within 0.1 to 0.2 mean levels | off; meshes keep one level unless asked | a big mesh seen from far (whole-mesh levels), many copies of meshes of thousands of triangles; not small meshes |
 | **G3b** clusters, CPU cut (`MeshOptions3D::clusters`) | 5 s and 1.5 GB at load for the kiln; the cut on the CPU 0.4 to 0.9 ms of `render()` | kiln 4.3 to 0.25 to 0.9 ms GPU: near parts fine, far parts coarse inside one mesh; no cracks | off | one huge mesh (hundreds of thousands to millions of triangles) seen near and far; not Sponza or a helmet |
 | **G3c** the cut in compute (`Lod3D::gpu_culling`) | 62 MB of indices and 7 MB of table for the kiln, the gathered buffer (48 MB), about 0.05 ms of GPU for six compute passes | `render()` 0.4 to 0.9 ms down to 0.03 to 0.08; GPU level with the CPU cut, cheaper with cascades; the picture is the CPU cut's byte for byte | on, wherever clusters and the selection are on and the device can | always with G3b |
 | **G3d** occlusion culling (`Lod3D::occlusion`) | 0.05 to 0.18 ms of GPU where little is hidden (0 to 0.07 with a pre-pass), 0.03 to 0.06 ms of CPU, +48 MB (the second gathered buffer) | 0.1 to 0.23 ms (12 to 19%) where a wall hides hundreds of heavy copies; the camera's triangles down 70 to 98% on the kiln and the dense scene; the picture is the one without it | off | hundreds of heavy clustered copies behind walls, with ambient occlusion or temporal anti-aliasing on; not the kiln, not Sponza |
@@ -9646,3 +9647,466 @@ were inspected. Camp peak RSS **208.68 MiB**; final regression process-tree peak
 Functional checks only; the allocation guard does not measure all native/driver
 allocations. Records and source/binary hashes:
 `/home/bamedeo/kin-bench/interactions/validation.json`. Uncommitted.
+
+### Review remediation (2026-10-20)
+
+This pass addresses the build/CI blockers, correctness fixes and performance changes
+listed below on `exp/3d-rendering`, preserving the work already uncommitted here.
+
+- Experimental 3D defaults off, both shipping presets pin it off, and the new `3d`
+  preset and relevant CI jobs opt in. Jolt follows kin's MSVC runtime selection.
+  Renderer tests have a 1,800-second timeout; software GPUs still run the functional
+  comparisons but do not assert hardware rendering throughput.
+- Contacts have a total payload ordering across collision substeps. Offset/scale
+  wrappers preserve compound child IDs in ray and overlap results. Static body edits
+  wake neighbours, gameplay teleports reset interpolation, and rollback restores
+  motion type and temporary mass. The private save layout changed; older blobs are
+  rejected. Convex-face debug drawing uses the actual face size.
+- Additive output at zero alpha is encoded, contact shadows respect sun strength,
+  D3D12 takes the CPU cluster-cut fallback, and failed mesh-pool fence waits retain
+  the fence. Authored environments preserve caller-owned picking and expose LOD and
+  additional shadow settings.
+- Equivalent skins share a palette, and animation channels fan out to every skin
+  using a joint. Texture transforms are applied where representable by Material3D;
+  incompatible transforms report diagnostics. Root motion retains multiple loops,
+  IK supports skeletons above 256 joints, particle catch-up is bounded, and the clock
+  accumulates in double precision with bounded wrapping.
+- Collection retains two reusable snapshots with threshold hysteresis and a shared
+  16 MiB / 128-batch budget. A persistent mesh lookup narrows material comparisons.
+  Physics event drains/publication reuse storage; owned body component reads are
+  cached after structural reconciliation. Inherited reads resolve their source so
+  prefab moves and component additions/removals cannot leave stale pointers.
+  Contacts default off and event consumers opt in. Fogged particles read the shared
+  sky-colour table. Rendering docs lead with SceneSession3D.
+
+The App/Input/gamepad changes are isolated in `feat/gamepad-input`, based on
+`origin/main` (`d307186`), at `../gamepad-input`. Their uncommitted changes were
+removed from this worktree. The main checkout's localization changes were left
+untouched. Neither branch has been committed or pushed by this remediation.
+
+Validation (Linux, GCC 15, Release): the complete 3D build passes **132/132 CTest
+cases** on the NVIDIA RTX 4080 Laptop GPU (190.32 seconds). The full renderer suite
+also passes on lavapipe / llvmpipe LLVM 21.1.8 (276.49 seconds), including the former
+timing failure: about 35 ms for compute submission against 4 ms for the CPU cut,
+with the image/geometry checks still active. CTest reports the 1,800-second timeout.
+The 2D-only build passes **69/69** cases and excludes Jolt, meshoptimizer, model
+sources and 3D shader targets. The separate gamepad branch builds from its main
+base and passes **2/2** platform/UI tests with SDL's dummy drivers. The 158-file 3D
+format check and both worktrees' diff checks pass. Windows/MSVC, D3D12 and Metal
+have not been executed locally; these are functional checks, not throughput claims.
+
+Remaining review work: public sky/fog/time-of-day/particle colour types and legacy
+error forms still need API consolidation. Frame phases still repeat transform and
+particle scans where late edits can occur; reducing them needs explicit change
+tracking that preserves those phase contracts. Arbitrary new instance counts still
+rebuild fixed-size retained batches, although two live snapshots and alternating
+counts now reuse storage. The high-level skinned-model path still accepts one distinct
+palette; import channel fan-out does not add a multi-palette drawing API. Specialized
+tool/benchmark/external-world examples retain their direct paths, and optional
+ground-ambient authoring remains separate from the new LOD/shadow fields.
+
+### Lua 3D scene workflow (2026-10-20)
+
+`SceneSession3D` now executes an authored scene's optional Lua script through the
+existing `ScriptEngine` ECS API. Borrowed scene services and a nullable app/input
+frame context let both hosts share bindings without constructing another
+`ScriptScene` or adding a second frame loop. The 2D host keeps its callback order.
+Lua systems are removed while their VM and borrowed world are still alive.
+
+Preparation runs `on_load` after initial art binding and the C++ initializer;
+activation runs `on_enter` against candidate physics before replacing the live
+world. Failed loading/enter retains the old world, VM and generation. Update runs
+before ECS Input, systems use the existing phases, and best-effort exit runs on
+replacement/unload. Reports and action lists forward through the session. Script
+and module dependencies, including modules first required by systems/reports/action
+collection, join explicit reload polling without acknowledging older changes.
+Changes between preparation and activation remain detectable.
+
+The initial `scene3d` API exposes checked authored-entity handles, filtered
+raycasts, dynamic-body impulses and deferred path-based prefab spawn/despawn.
+Requests retain completion/cancellation status; prefab root handles become stale
+after despawn/replacement. Native lifecycle work uses the same scheduler buffers
+and phase boundaries as C++. Failed callbacks/systems discard their uncommitted
+requests. Earlier native/gameplay effects are not rolled back. Body/resource
+configuration belongs in load, before binding; runtime pose and game-component
+patches remain available. Reports/actions/exit cannot submit native mutations.
+
+`lua_range` provides a small host plus Lua gameplay, using Summit's existing CC0
+crate art and the normal runtime/headless/report paths. Space launches, R reloads
+and Escape exits; automatic launches also exercise headless runs. Documentation
+now links the workflow from the 3D, scripting and examples entry points. CI's
+lavapipe job includes the CPU and GPU Lua workflow tests; the normal matrix skips
+the GPU-only test when a GPU backend is unavailable.
+
+Validation (Linux, GCC 15, Release): **135/135 CTest cases** pass with the NVIDIA
+RTX 4080 Laptop GPU in **109.06 seconds**, including the full renderer suite
+(93.56 seconds) and new CPU/GPU Lua workflows. The new workflow also passes on
+lavapipe. The shared scripting refactor's 2D-only build passes **69/69** cases
+with dummy SDL drivers (4.67 seconds). Checks cover exactly-once physics, Lua ECS
+phases, input, stale handles, runtime errors/command cancellation, failed reloads,
+module polling, packed content and absent physics/app/input services. The GPU
+example runs 240 frames, reporting three launches, three ray hits, one retired
+prefab and zero spawn failures; its capture was inspected. The 162-file format
+check and diff check pass. Records/capture:
+`/home/bamedeo/kin-bench/scripting-workflow`. Changes remain uncommitted in the 3D
+worktree; the main checkout and separate gamepad branch were not changed here.
+
+This closes the first Lua gameplay slice, not C++ API parity. Character controls,
+contact-event iteration, animation controls, prepared prefabs/pools and further
+shape queries still need bindings or explicit host extensions. Raw ECS deletion
+of managed prefab members remains outside the supported native lifecycle.
+Windows/MSVC, D3D12 and Metal were not executed locally.
+
+### Supported model content and navigation clearance (2026-10-20)
+
+The asset contract now rejects models needing multiple distinct skin palettes,
+instead of accepting a model whose later palettes disappear in whole-model/ECS
+drawing. Identical joint order and inverse bind matrices still share one palette
+across mesh objects. Oversized/unsupported skins, invalid influences, morph
+geometry/channels, mixed skin/plain-node poses and incompatible texture-coordinate
+placements also reject the whole asset. Missing UV sets are diagnosed. Direct GPU
+loads retain no drawable fragments on rejection, failed assets are not cached, and
+polling retains the last good asset. CPU-only Assets3D applies the same structural
+checks; image decoding/device upload still belongs to a GPU load.
+
+`ModelData3D::asset_diagnostics` preserves these issues for low-level inspection.
+A successful `read_model_data` parse can still contain unsupported/repaired data;
+tools must check those diagnostics before treating it as a drawable asset.
+`docs/gltf_profile3d.md` publishes `kin-gltf/1`: supported containers, material/UV,
+palette/influence and animation limits, a Blender export recipe, source references,
+real-export preview commands and the acceptance-test matrix. This is a tested file
+contract, not a claim that every Blender version was invoked. The current 3D guide
+links it and no longer describes unsupported skin/morph data as usable fallbacks.
+
+Navigation dimensions now affect construction. Height clips source obstacle
+triangles against the entire vertical floor footprint, including partial/slanted
+ceilings and embedded walls; headroom includes uphill rise across the radius in
+the original region. Radius removes triangles near original or headroom-created
+borders. Disconnected layers do not erode each other in projection. Connectivity,
+regions, vertices and the search tree are rebuilt, so every query uses the same
+filtered geometry. The algorithm discards whole triangles conservatively; it does
+not subdivide/clip the walk surface. Author sufficiently fine floor geometry and
+include walls/ceilings; both dimensions zero preserve point-agent construction.
+The authoring guide documents this tradeoff and the 1e-5-unit support tolerance.
+
+Validation (Linux, GCC 15, Release): the full 3D build passes **137/137 CTest cases**
+on the NVIDIA RTX 4080 Laptop GPU in **164.19 seconds**, including the renderer
+suite (148.89 seconds), profile CPU/GPU cases, existing Camp assets and gameplay.
+The 2D-only build passes **69/69** cases (2.80 seconds). The final profile cases,
+including embedded JPEG coverage, pass again on NVIDIA (0.49 seconds) and lavapipe
+(0.24 seconds). Clearance regressions cover doorway radius, ceiling height,
+partial/sloping ceilings, walls, slope headroom, stacked layers, alternative up
+axes and repeatability. The 166-file format check and diff check pass. The documented
+preview path loads the shipped survivor's Walk clip, reports no reload error or
+diagnostics, and its 960x640 capture was inspected. CI includes the new profile
+cases in its lavapipe job. Records/capture/task patch:
+`/home/bamedeo/kin-bench/content-profile`. Changes remain uncommitted; the main
+checkout and separate gamepad branch were not changed. Windows/MSVC, D3D12 and
+Metal were not executed locally. Distinct-palette drawing remains outside the
+supported profile rather than partially implemented.
+
+### Industrial yard — current defaults under shared load (2026-10-20)
+
+Fresh Medium factory comparison of the current GCC 15 Release Kin build (`-O2`
+renderer, automatic defaults) and the preserved Godot 4.7.2 release Vulkan Forward+
+build. The user explicitly chose **measure under current load**. Both use the same
+recipe SHA-256 `c6b40a7b21ff8613f12be5d4a644fbe9ad6f00a33251465c446c1bf97ce6d87e`,
+8,000 props (800 moving in 64 groups), 128 six-joint robots, 512 smoke cards,
+16 point lights and four nominal 1024² D32 spot shadows. AO/TAA/contact and
+sun/point shadows are off. No retired renderer environment switches are enabled.
+
+Four alternating-order pairs per resolution, 300 warmup and 1,440 measured frames
+per run: **16 runs / 23,040 measured frames**. Both engines use four worker threads,
+CPU affinity 0–15 and Vulkan on the RTX 4080 Laptop GPU. Only one benchmark app
+runs at once; other desktop CPU work is left running. Existing RSS ceilings
+(512 MiB Kin / 1,024 MiB Godot) and available-RAM guards remain active.
+
+Medians of four per-run statistics; RSS is the maximum process peak across four runs:
+
+| Resolution | Kin p50 / p95 ms | Godot Forward+ p50 / p95 ms | Kin / Godot peak RSS MiB |
+| --- | ---: | ---: | ---: |
+| 720p | 9.166 / 12.332 | 14.819 / 20.883 | 138.6 / 560.9 |
+| 1440p | 9.364 / 12.876 | 14.638 / 21.813 | 146.2 / 561.5 |
+
+Kin has lower p50 and p95 in all eight pairs; aggregate p50 is 38.1% / 36.0%
+lower at 720p / 1440p and p95 is about 41% lower at both. **These are shared-load
+observations, not a controlled before/after comparison with October 16.** Background
+work averages 5.4–15.1 logical CPU equivalents across individual runs. Kin p50
+ranges 5.183–10.902 ms at 720p and 6.109–11.645 ms at 1440p; Godot ranges
+11.812–18.887 ms and 12.812–21.276 ms. No foreign GPU application beyond the
+compositor is sampled, but clocks remain unlocked. GPU temperatures span 77–90°C;
+software power-cap flags appear in 12/16 streams and thermal-slowdown flags in
+15/16. These process-lifetime sensor samples do not attribute individual frame costs.
+
+All eight pairs pass full-route populations, features, motion and skin checks.
+Every measured frame has positive main/shadow work; Kin uploads all 768 joint
+matrices and retains four shadow maps. Interior/exterior captures were inspected;
+short preflight timings are excluded. Main/shadow work counts retain the prior
+fixture differences (4,208.5 / 592 median main draws and 14,509 / 4,107 shadow
+draws). The fixture matches geometry/features rather than pixels; BRDF, environment,
+shadows, culling and batching differ. Full-frame intervals include native C++
+versus GDScript updates. RSS excludes dedicated VRAM. This procedural benchmark
+does not exercise the new Lua workflow, glTF profile or navigation clearance.
+
+The original Godot editor/template directory is absent. The preserved executable
+and exported pack hashes match the previous manifest; all four current Godot
+sources byte-match that pack’s archived source. No fresh export is claimed.
+The Kin target is up to date, five recipe tests pass, and source/binary/recipe
+identities are verified again after measurement. No engine or harness code is
+changed for this rerun. Raw frames, reports, captures, telemetry, per-run ranges,
+validation, provenance, analysis and `results.md` / `findings.json` are in
+`/home/bamedeo/kin-bench/industrial-yard-rerun-2026-10-20/`.
+
+### Lua character, contact and animation gameplay (2026-10-20)
+
+The basic Lua gameplay surface now drives native `CharacterInput3D` commands,
+reads checked character state and filtered rigid/character event snapshots, sets
+animation parameters/triggers and base playback options, and starts/cancels/observes
+authored one-shot actions. It uses the existing `SceneSession3D` stages and the
+shared ECS access diagnostics; no additional simulation loop or event history is
+introduced. Physics commands feed the next native Physics stage. Queries/events
+read synchronized state, while missing physics leaves animation usable.
+
+Playback handles contain a checked actor and native token, retaining no world,
+model or entity. Replacement, destruction and superseded playback cannot redirect
+an old handle. Contact mapping checks native body identity instead of trusting
+user IDs. Contact/character rows are Lua copies of the last batch; PostPhysics is
+the current-step consumer phase. Animation snapshots copy the native bounded
+16-marker batch and report overflow. Consume in Audio, with one gameplay owner;
+check copied action markers again after a handler cancels/replaces their playback.
+Invalid options/nonfinite values report Lua errors, stale targets fail without
+mutation, and reports/exit cannot invoke gameplay mutations. Immediate successful
+writes follow the existing non-rollback callback contract.
+
+Changing `Animator3D::loop` now updates live base playback through
+`AnimationPlayer3D::set_loop` without restarting its clock or action. The previous
+renderer only read the flag while selecting a different clip. The regression
+turns looping off during playback, reaches the clip end, then re-enables wrapping
+and checks that the existing time continues.
+
+`lua_range` now includes the authored CC0 survivor: WASD movement, Space jump,
+Shift sprint, C crouch, E crate launch, F pickup action, R reload and Escape exit.
+Headless autoplay uses these same Lua/native commands, with PostPhysics contacts
+and Audio marker handling. The inspected 300-frame NVIDIA capture/report records
+299 fixed steps, four launches, nine contact begins, three landings, two jumps,
+one pickup marker, completed playback and zero spawn failures.
+
+Validation (Linux, GCC 15, Release): **137 distinct CTest cases pass** across the
+appropriate backend profiles: **135/135** in the NVIDIA GPU run (200.33 seconds,
+including the renderer suite in 98.61 seconds) plus the two ordinary 2D
+platform/example cases under SDL's software driver. The software run also includes
+the CPU Lua case (3/3, 1.67 seconds). The final CPU/GPU Lua cases pass again on
+lavapipe (2/2). With 3D disabled, **69/69** cases pass (5.75 seconds). Coverage
+includes native walking/forward steering/sprinting/jumping/crouching, fresh contact
+batches, unmapped bodies with reused user IDs, snapshots, parameter types/triggers,
+pause, loop edits, action masks/lifecycle, marker cancellation, stale/replaced
+actors, invalid input, missing physics, and the prior reload/prefab/input tests.
+The 166-file format check and diff check pass. Source and executable identities
+match after validation.
+
+An initial broad run forced X11/GPU onto all tests and failed the existing 2D
+`kin-platform` (segfault) and `kin-examples` (UI input assertion) cases. The platform
+case passed under GDB; both cases pass three repeated runs and the final run with
+the normal software test driver. These failures are retained in the records;
+platform/input code was not changed. Windows/MSVC, D3D12 and Metal were not run.
+Records, captures, before snapshots and the isolated task patch are in
+`/home/bamedeo/kin-bench/lua-gameplay3d/`. Changes remain uncommitted; the main
+checkout and separate gamepad worktree were not changed.
+
+This closes the basic Lua character/contact/animation slice. Prepared prefab pools,
+further shape queries, IK target controls and traversal/ragdoll/rope bindings remain
+explicit host extensions or later work. It does not claim full C++ API parity.
+
+
+### 2026-10-20 — Lua resources, queries and advanced character controls
+
+Lua now queues explicit prefab preparation, fixed-capacity pool creation, resource
+release and prepared/pooled spawning through the session's native command queue.
+Request results expose generation-scoped prepared/pool handles; pool stats are
+snapshots. Enter/update/system failures, scene replacement, exhaustion and the
+native entity/resource budgets retain the existing lifecycle rules. The Lua range
+prepares eight slots, acquires/returns leases and reports reuse/exhaustion.
+
+Added reusable convex query shapes, bounded all-ray/overlap queries (1..256 hits
+with overflow), nearest shape sweeps, named IK target controls and snapshots,
+traversal commands/resource/grips, ragdoll hand-over/blending/subtrees/recovery and
+events, and rope length/reeling/polyline/sampling/tension/break events. Lua handles
+never expose native body ownership. Scene IK targets check the scene generation
+and pool lease in both native animation and solving; a recycled entity cannot
+retarget an old constraint.
+
+The new stationary ragdoll test exposed a native recovery bug: the disabled
+controller capsule could be queried as the handed-over character's own ground,
+lifting it each frame (the failing fixture reached y=23.85 after 20 steps). Ground
+placement now accepts an additional ignored body; the ECS follow and recovery
+paths exclude their own controller capsule even with all layers selected. The
+same Lua fixture now grabs/releases a wall, observes a rope break, reels another
+rope, and completes clearance-tested ragdoll recovery.
+
+Validation: 16 distinct targeted CTest cases pass across the CPU and NVIDIA Vulkan
+profiles (11 CPU cases; the GPU pipeline case skips under SDL dummy and passes
+with the other five GPU/lifecycle cases on NVIDIA). Both Lua CPU/GPU cases also
+pass on lavapipe. With 3D disabled, 69/69 cases pass. The 169-file format check and
+diff check pass. The 300-frame NVIDIA Lua range capture was inspected: three pool
+acquisitions, one reuse, zero exhaustion/failures, two jumps and one action marker.
+The first headless capture used SDL_Renderer and was blank; rerunning with
+KIN_RENDER_BACKEND=gpu exercises the actual 3D backend and produces the picture.
+
+Construction descriptors for traversal, ragdolls and ropes still use native host
+initialization; authored .kinanimator assets supply IK chains. Custom native pool
+callbacks and physics-solver callbacks remain C++ APIs. This adds gameplay
+controls rather than claiming full Lua/C++ API parity. Windows/MSVC, D3D12 and
+Metal were not tested locally. Records, before snapshots and an isolated task
+patch are in /home/bamedeo/kin-bench/lua-advanced3d/. Changes are uncommitted.
+
+### 2026-10-20 — 3D API consistency
+
+Completed the native `LinearRgb` migration for sky, fog, time-of-day outputs,
+particles, weather and their CPU colour functions. Directions and scattering
+coefficients remain vectors; surface byte tints remain sRGB `Color`. Explicit
+channel conversion at the field codec keeps authored RGB triples and Lua
+`{x,y,z}` tables compatible. GPU packing and the CPU reference calculations keep
+their existing arithmetic.
+
+Resource loads on `Renderer3D`, `Assets3D` and `PhysicsAssets3D` now report through
+`diagnostics()` alone; removed the public error-output arguments and
+`ModelFile3D::error()`. Collider loads now follow the same success/cache-hit reset
+and observation rules. Stateless parsers, construction preconditions, query
+misses and deferred request results keep their documented contracts. Migrated
+the engine glue, examples, tools and tests. Asset-preview regression testing
+caught a missed sidecar diagnostic copy during this migration; both failed
+geometry and failed material reloads now retain the last good model and show
+the current error.
+
+`GroundAmbient3D` separates `enabled` from its configured colour. Scene settings
+can author that pair, the remaining sky/moon controls and every local-light
+shadow field. Inactive colour edits stay inactive, HDR values survive save/load,
+and collection preserves the authored values and game-owned picking options.
+The C++ changes are breaking within the experimental API; see
+[the migration guide](3d_api_migration.md). Scene/prefab schemas are unchanged.
+
+The configured xc121 consumer required the matching loader/ground-light changes
+in four experimental 3D files. Its factory workload was captured three times
+before and after rebuilding (seed 7, two chunks, one district): zero changed
+pixels at 960x540, identical reports and state hash 10876677744634340785. The
+baseline is the saved pre-migration binary, not a reconstructed historical build.
+
+Validation: all 137 distinct CTest cases pass across NVIDIA Vulkan and the normal
+SDL app-test profile; six targeted model/material/scene/Lua cases also pass on
+lavapipe. With 3D disabled, 69/69 pass. The initial forced-GPU sweep passed 133/135:
+the preview diagnostic regression was fixed and its test plus both model-profile
+cases passed again. The unrelated runtime pacing test's half-second headless
+limit includes GPU initialization; Vulkan startup exceeded it under shared load,
+while its normal SDL profile passes. The full renderer suite passes (151 seconds).
+The 300-frame Lua range has three acquisitions, one reuse, no exhaustion or
+spawn failures, two jumps and one action marker. Its screenshot and a reference
+scene exercising the migrated JSON colour readers were inspected. The 169-file
+format check, all 37 changed C++ files, diff checks and full configured build pass.
+
+Windows/MSVC, D3D12 and Metal were not tested locally. Records, before snapshots,
+separate Kin/consumer patches and validation metadata are in
+/home/bamedeo/kin-bench/api-consistency3d/. Changes are uncommitted.
+
+### 2026-10-20 — Rendering feature interactions
+
+Moving/fading/wrapping particles, weather, blended/additive/wireframe meshes and
+custom materials now reject incompatible TAA history over both their current
+and previous footprints. The renderer replays coverage into the existing
+normals target after shading, preserving opaque motion and adding no texture.
+Coverage is retained even while paused, so subsequent removal works; unchanged
+inputs keep temporal smoothing. Texture revisions, lighting, cameras, geometry
+and skin changes participate in invalidation. Invisible/occluded sprites leave
+background AA alone, while alpha-zero premultiplied emission remains covered.
+Custom fragment code uses conservative triangle coverage. TAA off adds no
+coverage pass; the extra draws are visible in `debug_stats().taa_reactive_draws`.
+
+Lit particles receive selected point/spot irradiance at their centres, using
+the mesh lights' attenuation, cone and budgets, with the existing isotropic
+half-light approximation. Separate variants preserve the ordinary shader path
+for batches without local lighting. Particles still do not receive shadows.
+Custom `kin_lit` now receives spot/moon lighting and local shadows;
+`kin_output` applies scene fog and material cutoff. The explicit
+`kin_output_unfogged` bypass keeps the other output contracts. The parameter
+prefix remains compatible with existing binaries, and every pushed block stays
+below 4 KiB. Recompile shaders to use the new helpers. Drawing the sky also
+restores mesh frame uniforms before subsequent blended geometry.
+
+Warm-up prepares the new coverage and particle-light pipelines too: the first
+visible render makes none after warming, including soft/local-lit particles,
+weather and MSAA. Wire coverage uses the visible pass's line rasterization and
+depth bias. The shared pipeline write mask preserves stencil-only operations.
+
+Validation: 134/134 CTest cases pass on NVIDIA Vulkan, with the remaining three
+app tests passing under SDL (137 distinct cases). The full renderer suite passes
+in 163 seconds under shared load. Seven targeted renderer filters also pass on
+lavapipe, including the 40-case transient TAA matrix, stationary/MSAA particles,
+local-light formula checks, custom materials, sky uniforms and warm-up. With 3D
+disabled, 69/69 pass. The transient matrix differs from current-frame spatial
+references by at most one byte level; custom stock/helper comparisons match
+exactly, and particle lighting matches independent CPU formulas within one level.
+Removing the previous-footprint rejection deliberately fails the removal test
+(61 levels), confirming the regression detects trails. The mutation was restored.
+Eleven ordinary particle/stock mesh shaders compile to identical SPIR-V, and the
+169-file format check and diff checks pass.
+
+The factory remains pixel-identical at 960x540 across three runs per version,
+with identical reports and state hash 10876677744634340785. Its saved binary
+loads custom SPIR-V from disk, so the baseline was isolated with shaders compiled
+against the task-start include snapshots; only its asset-root literal was
+relocated, with executable code unchanged. A mixed-version capture was rejected.
+Windows/MSVC, D3D12 and Metal were not tested locally. Particles still do not
+receive shadows; roof-aware weather, geometry-hit splashes and volumetric local
+light scattering remain outside these changes.
+
+See [rendering](rendering_3d.md) and [shader migration](3d_api_migration.md).
+Task records and source snapshots are in
+/home/bamedeo/kin-bench/render-interactions3d/. Changes are uncommitted.
+
+
+### Optional particle shadow reception and casting (2026-10-20)
+
+`ParticleLook3D` now has independent `receives_shadow` and `casts_shadow`
+switches, both off by default, plus `shadow_cutoff` (0.5, range [0,1]). Reception
+requires `lit > 0` and attenuates direct sun/cascade, moon, spot and point light
+without darkening ambient light or the unlit share. The mesh shadow sampling
+helpers are shared, including PCF, strengths, biases and distance/cascade blends.
+
+Casting uses the visible quad's orientation and intrinsic alpha silhouette,
+including textures, procedural discs/rings and interpolated flipbook frames.
+It works independently of lighting and excludes fog and soft-intersection fade
+from occlusion. It is alpha-tested shadowing, without translucent volume
+transmission. Off-camera sprites and weather can cast onto visible receivers.
+A separate 1,048,576-sprite stream bounds uploads, reports drops and per-map
+work, and releases its GPU buffer after 120 idle renders. Shadow caches include
+movement, fading, cutoff/frame/texture edits and removal. Warm-up prepares both
+options. Authored components expose both flags and cutoff through scene/prefab
+save/load, editing and Lua field access, with finite/range validation.
+
+Validation: the full NVIDIA Vulkan renderer suite passes in 134 seconds under
+shared load, including the reception formula matrix (maximum one byte level),
+30 HDR/blend shadow/TAA configurations, stationary edge stability, and warm-up
+with zero pipelines created on the first visible frame. A new casting test
+covers five light configurations, silhouette masks, alpha/cutoff/frame and
+texture revisions, off-camera casters, stream overflow and idle release.
+Its 20 moving-caster HDR/TAA/MSAA configurations match fresh shadow maps exactly;
+weather also matches fresh maps, and moving/removing particle shadows on particle
+receivers match spatial references exactly. Stationary shadows retain temporal
+smoothing. All four targeted lavapipe runs pass (casting, receiving, warm-up,
+and stationary/TAA/MSAA particles). Deliberately removing reception or casting
+fails the corresponding regression; both shader mutations were restored.
+
+Twenty existing particle/stock-mesh shader variants remain byte-identical in
+SPIR-V with the options off. The factory remains pixel-identical at 960x540 in
+three runs per version, with identical reports and state hash
+10876677744634340785; its three runtime custom shaders also remain byte-identical.
+Combined coverage includes 138 distinct passing tests: 135 on Vulkan and three
+app tests under SDL. In the parallel GPU run, the legacy 2D `kin-scene` test
+stalled and was terminated; isolated GPU and SDL reruns both passed. The other
+133 cases in that run passed. The final casting oracle uses a separate renderer,
+so fresh-map reference draws cannot reset the cache under test. With 3D disabled,
+69/69 tests pass. The 170-file format check and diff checks pass. Windows/MSVC,
+D3D12 and Metal were not tested locally.
+
+See [particle rendering](rendering_3d.md). Task snapshots, logs, shader identity
+checks, mutation results and the isolated patch are in
+/home/bamedeo/kin-bench/particle-shadows3d/. Changes are uncommitted.

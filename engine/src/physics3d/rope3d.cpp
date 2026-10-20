@@ -177,7 +177,7 @@ RopeHandle3D RopeSet::create(const RopeDesc3D& d) {
     const auto fail = [&]() {
         for (const Body3D b : s.segs) {
             if (b.valid()) {
-                _world->destroy_body(b);
+                _world->owner_destroy_body(b);
             }
         }
         s.alive = false;
@@ -210,6 +210,8 @@ RopeHandle3D RopeSet::create(const RopeDesc3D& d) {
         if (!s.segs[k].valid()) {
             return fail();
         }
+        // The rope's own: the game cannot destroy or reshape a segment under it (rope_points would read a dead body).
+        _world->set_owner(s.segs[k], BodyOwner3D::Rope);
         // A hand never takes hold of a segment as a surface: the rope's own provider finds the point along it.
         SurfaceMaterial3D material;
         material.grippable = false;
@@ -270,7 +272,7 @@ void RopeSet::destroy(RopeHandle3D h) {
             _by_body[b.index] = {};
         }
         if (_world->contains(b)) {
-            _world->destroy_body(b);
+            _world->owner_destroy_body(b);
         }
     }
     s->alive = false;
@@ -502,7 +504,7 @@ void RopeSet::fit(Slot& s, f32 new_length, bool relay) {
     const f32 half = std::max(0.5f * seg - s.desc.radius, 0.002f);
     const Shape3D shape = Shape3D::capsule(half, s.desc.radius);
     for (u32 k = 0; k < n; ++k) {
-        _world->set_shape(s.segs[k], shape);
+        _world->owner_set_shape(s.segs[k], shape);
         if (relay) {
             _world->set_position(s.segs[k], (next[k] + next[k + 1]) * 0.5f);
             _world->set_rotation(s.segs[k], rotations[k]);
@@ -600,8 +602,10 @@ void RopeSet::pre_step(f32 dt) {
         const Quatf turn = _world->rotation(anchor.body);
         const Vec3f where = tip - turn.rotate(anchor.point);
         if (!s.hoisting) {
-            if (_world->motion(anchor.body) != Body3DMotion::Dynamic) {
-                continue; // someone else's kinematic body: left alone
+            // Someone else's kinematic body, or a ragdoll's bone or another rope's segment (set_motion refuses those: theirs to
+            // switch): left alone.
+            if (_world->motion(anchor.body) != Body3DMotion::Dynamic || _world->owner_of(anchor.body) != BodyOwner3D::None) {
+                continue;
             }
             s.hoisting = true;
             _world->set_motion(anchor.body, Body3DMotion::Kinematic);

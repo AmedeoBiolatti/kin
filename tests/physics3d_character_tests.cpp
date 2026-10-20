@@ -1052,6 +1052,210 @@ void test_teleport() {
     CHECK_NEAR(s.position.x, 20.0, 0.01);
 }
 
+// Pushed from outside: add_character_impulse and set_character_velocity (character3d.hpp "Pushed from outside").
+void test_impulse_and_velocity() {
+    const f32 g = 9.81f;
+    // An impulse up launches it: the velocity changes by J / m, it leaves the ground (not a jump of its own) and comes back.
+    {
+        World3D world(serial());
+        add_floor(world);
+        const Character3D c = make(world, {0, 0, 0});
+        run(world, 30);
+        world.drain_character_events();
+        const f32 mass = 70.0f, v = 6.0f;
+        world.add_character_impulse(c, {0.0f, mass * v * 0.5f, 0.0f});
+        world.add_character_impulse(c, {0.0f, mass * v * 0.5f, 0.0f}); // impulses add up until the step
+        Range y;
+        f32 air = 0.0f;
+        int air_steps = 0;
+        bool left = false, by_jump = true, landed = false;
+        for (int i = 0; i < 180; ++i) {
+            world.step(dt);
+            const CharacterState3D s = world.character(c);
+            y.add(s.position.y);
+            air = std::max(air, s.air_time);
+            air_steps += s.ground != CharacterGround3D::OnGround ? 1 : 0;
+            if (i == 0) {
+                CHECK_NEAR(s.vertical_speed, v - g * dt, 0.05);
+                CHECK(!s.jumped);
+            }
+            for (const CharacterEvent3D& e : world.drain_character_events()) {
+                if (e.kind == CharacterEventKind3D::LeftGround) {
+                    left = true;
+                    by_jump = e.jumped;
+                }
+                landed = landed || e.kind == CharacterEventKind3D::Landed;
+            }
+        }
+        const f32 apex = v * v / (2.0f * g);
+        if (verbose) std::printf("launch at %.1f m/s: apex %.3f (analytic %.3f), %d steps in the air\n", v, y.hi, apex, air_steps);
+        CHECK(air > 0.0f && left && !by_jump && landed);
+        // As a jump: the discrete step loses about v dt / 2 off the continuous apex. Used once: no second launch.
+        CHECK(y.hi < apex + 0.01f && y.hi > apex - v * dt * 0.5f - 0.02f);
+        CHECK_NEAR(static_cast<f32>(air_steps) * dt, 2.0f * v / g, 0.1f);
+        CHECK(world.character(c).ground == CharacterGround3D::OnGround);
+    }
+    // A shove along the ground slides it and the ground's braking (deceleration x ground_friction) stops it: v^2 / 2a, the
+    // discrete steps a little short of it. It stays on the ground. On ice it goes much further.
+    for (const f32 friction : {1.0f, 0.05f}) {
+        World3D world(serial());
+        add_floor(world);
+        CharacterDesc3D d;
+        d.ground_friction = friction;
+        const Character3D c = make(world, {0, 0, 0}, d);
+        run(world, 30);
+        const f32 x0 = world.character(c).position.x;
+        world.add_character_impulse(c, {70.0f * 5.0f, 0.0f, 0.0f});
+        world.step(dt);
+        const f32 braking = 40.0f * friction;
+        CHECK_NEAR(world.character(c).velocity.x, 5.0f - braking * dt, 0.02);
+        bool grounded = true;
+        for (int i = 0; i < 300; ++i) {
+            world.step(dt);
+            grounded = grounded && world.character(c).ground == CharacterGround3D::OnGround;
+        }
+        const CharacterState3D s = world.character(c);
+        const f32 slide = s.position.x - x0, expected = 25.0f / (2.0f * braking);
+        if (verbose) std::printf("shove at friction %.2f: slid %.3f (v^2/2a %.3f)\n", friction, slide, expected);
+        CHECK(grounded);
+        CHECK(slide < expected + 0.01f && slide > expected - 5.0f * dt - 0.01f);
+        CHECK_NEAR(length(s.velocity), 0.0, 1e-3);
+    }
+    // A knock back in the air keeps its speed across `up` until it lands (no air drag; no wish to steer by).
+    {
+        World3D world(serial());
+        add_floor(world);
+        const Character3D c = make(world, {0, 0, 0});
+        run(world, 30);
+        world.add_character_impulse(c, {70.0f * 3.0f, 70.0f * 4.0f, 0.0f});
+        world.step(dt);
+        for (int i = 0; i < 20; ++i) {
+            world.step(dt);
+            CHECK(world.character(c).ground == CharacterGround3D::InAir);
+            CHECK_NEAR(world.character(c).velocity.x, 3.0, 1e-3);
+        }
+    }
+    // set_character_velocity replaces the velocity it has (a fall here) and the impulses given before it; impulses given
+    // after it add to it. Then the step goes on from it (gravity).
+    {
+        const auto falling = [](World3D& world) {
+            add_floor(world);
+            const Character3D c = make(world, {0, 10, 0});
+            run(world, 30); // falling at about 5 m/s
+            return c;
+        };
+        World3D a(serial()), b(serial()), c(serial());
+        const Character3D ca = falling(a), cb = falling(b), cc = falling(c);
+        CHECK(a.character(ca).vertical_speed < -4.0f);
+        const Vec3f v{1.0f, 4.0f, 0.0f};
+        a.set_character_velocity(ca, v);
+        b.add_character_impulse(cb, {0.0f, -700.0f, 300.0f});
+        b.set_character_velocity(cb, v);
+        c.set_character_velocity(cc, v);
+        c.add_character_impulse(cc, {0.0f, 0.0f, 140.0f});
+        a.step(dt);
+        b.step(dt);
+        c.step(dt);
+        const CharacterState3D sa = a.character(ca);
+        CHECK_NEAR(sa.velocity.x, 1.0, 1e-4);
+        CHECK_NEAR(sa.velocity.y, 4.0 - g * dt, 1e-3);
+        CHECK_NEAR(sa.velocity.z, 0.0, 1e-6);
+        CHECK(a.state_hash() == b.state_hash());
+        CHECK_NEAR(c.character(cc).velocity.z, 2.0, 1e-4);
+        CHECK_NEAR(c.character(cc).velocity.y, sa.velocity.y, 1e-6);
+        // Set on the ground: a launch pad. Up and along, it leaves the ground as fast as it was set.
+        World3D pad(serial());
+        add_floor(pad);
+        const Character3D p = make(pad, {0, 0, 0});
+        run(pad, 30);
+        pad.set_character_input(p, forward_x()); // walking: the set velocity replaces the walk too
+        run(pad, 30);
+        pad.set_character_velocity(p, {0.0f, 8.0f, 6.0f});
+        pad.step(dt);
+        const CharacterState3D sp = pad.character(p);
+        CHECK(sp.ground == CharacterGround3D::InAir);
+        CHECK_NEAR(sp.vertical_speed, 8.0 - g * dt, 0.01);
+        CHECK(sp.velocity.z > 5.8f && sp.velocity.x < 1.0f); // across up the wish steers at air_acceleration only
+    }
+    // Deterministic: the same pushes give the same hashes, step for step; a waiting push is in the hash and in a saved state.
+    {
+        const auto run_pushed = [](World3D& world, std::vector<u64>& hashes) {
+            add_floor(world);
+            const Character3D c = make(world, {0, 0, 0});
+            for (int f = 0; f < 120; ++f) {
+                if (f % 7 == 3) world.add_character_impulse(c, {35.0f * static_cast<f32>(f % 3), 20.0f, -12.0f});
+                if (f == 50) world.set_character_velocity(c, {0.0f, 6.0f, 2.0f});
+                world.step(dt);
+                hashes.push_back(world.state_hash());
+            }
+        };
+        World3D a(serial()), b(serial());
+        std::vector<u64> ha, hb;
+        run_pushed(a, ha);
+        run_pushed(b, hb);
+        CHECK(ha == hb);
+        World3D w(serial());
+        add_floor(w);
+        const Character3D c = make(w, {0, 0, 0});
+        run(w, 20);
+        const u64 resting = w.state_hash();
+        w.add_character_impulse(c, {0.0f, 400.0f, 0.0f});
+        CHECK(w.state_hash() != resting);
+        const std::vector<u8> saved = w.save_state();
+        const u64 at_save = w.state_hash();
+        std::vector<u64> first;
+        for (int f = 0; f < 60; ++f) {
+            w.step(dt);
+            first.push_back(w.state_hash());
+        }
+        CHECK(w.restore_state(saved));
+        CHECK(w.state_hash() == at_save);
+        std::vector<u64> second;
+        for (int f = 0; f < 60; ++f) {
+            w.step(dt);
+            second.push_back(w.state_hash());
+        }
+        CHECK(first == second);
+        // Taken by the step: once it is used the hash is a world's without one (a teleport drops one that waits).
+        World3D x(serial()), y(serial());
+        add_floor(x);
+        add_floor(y);
+        const Character3D cx = make(x, {0, 0, 0}), cy = make(y, {0, 0, 0});
+        run(x, 20);
+        run(y, 20);
+        x.add_character_impulse(cx, {0.0f, 400.0f, 0.0f});
+        x.teleport_character(cx, {1.0f, 0.0f, 0.0f});
+        y.teleport_character(cy, {1.0f, 0.0f, 0.0f});
+        CHECK(x.state_hash() == y.state_hash());
+    }
+    // Dead or disabled characters, and numbers that are not finite: nothing.
+    {
+        World3D world(serial());
+        add_floor(world);
+        const Character3D c = make(world, {0, 0, 0});
+        const Character3D gone = make(world, {3, 0, 0});
+        world.destroy_character(gone);
+        run(world, 20);
+        const u64 before = world.state_hash();
+        world.add_character_impulse(gone, {0.0f, 500.0f, 0.0f});
+        world.set_character_velocity(gone, {0.0f, 5.0f, 0.0f});
+        world.add_character_impulse(Character3D{}, {0.0f, 500.0f, 0.0f});
+        world.add_character_impulse(c, {std::nanf(""), 0.0f, 0.0f});
+        world.add_character_impulse(c, {0.0f, INFINITY, 0.0f});
+        world.set_character_velocity(c, {0.0f, std::nanf(""), 0.0f});
+        CHECK(world.state_hash() == before);
+        world.set_character_enabled(c, false);
+        const u64 disabled = world.state_hash();
+        world.add_character_impulse(c, {0.0f, 500.0f, 0.0f});
+        world.set_character_velocity(c, {0.0f, 5.0f, 0.0f});
+        CHECK(world.state_hash() == disabled);
+        // Re-enabled, nothing was kept for it.
+        world.set_character_enabled(c, true);
+        run(world, 10);
+        CHECK(world.character(c).position.y < 0.05f);
+    }
+}
+
 void test_character_order() {
     // Two characters walking toward each other: the one with the lower number moves first, so it gets the room; swap
     // the creation order and the other wins. (A step in the other order would flip each case.)
@@ -1420,6 +1624,7 @@ int main(int argc, char** argv) {
     test_handles_and_bodies();
     test_teleport();
     test_character_order();
+    test_impulse_and_velocity();
     test_hash_sees_characters();
     test_determinism();
     test_save_restore_characters();

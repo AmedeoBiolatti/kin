@@ -1,8 +1,10 @@
-#include <kin/scripting/script_engine.hpp>
-
 #include "lua_l10n.hpp"
 #include "lua_paths.hpp"
+#include "lua_scene_context.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <filesystem>
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/dialogue/dialogue.hpp>
@@ -11,14 +13,10 @@
 #include <kin/ecs/time.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scripting/script_engine.hpp>
 #include <kin/scripting/script_scene.hpp>
-
-#include <sol/sol.hpp>
-
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
 #include <optional>
+#include <sol/sol.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -28,7 +26,48 @@
 
 namespace kin {
 
+struct ScriptEngineHost : ScriptSceneBindings {
+    std::vector<SystemId> systems;
+    bool closing = false;
+    EcsWorld& ecs() const {
+        if (closing)
+            throw std::runtime_error("script state is closing");
+        return *world;
+    }
+    const ScriptComponentRegistry* script_components() const { return components; }
+    std::filesystem::path resolved_script_path() const { return script_path; }
+    void clear_script_entities() const {
+        if (clear_entities)
+            clear_entities();
+    }
+    void set_clear_color(Color color) const {
+        if (set_background)
+            set_background(color);
+    }
+    void mark_render_cache_dirty(std::string_view) const {
+        if (mark_render_dirty)
+            mark_render_dirty();
+    }
+    void clear_systems() {
+        if (world && !systems.empty()) {
+            const auto registered = world->systems().snapshots();
+            for (const auto& id : systems)
+                if (std::ranges::any_of(registered, [&](const auto& entry) { return entry.id == id; }))
+                    world->systems().remove(id);
+        }
+        systems.clear();
+    }
+};
+
+namespace scripting_detail {
+thread_local EcsCommandBuffer* script_commands = nullptr;
+EcsCommandBuffer* current_script_commands() {
+    return script_commands;
+}
+} // namespace scripting_detail
+
 struct ScriptEngine::Impl {
+    std::unique_ptr<ScriptEngineHost> host;
     sol::state lua;
     std::filesystem::path asset_root;
     std::vector<std::filesystem::path> dependencies;
@@ -133,8 +172,8 @@ ScriptComponentKind component_kind(std::string_view name) {
     return ScriptComponentKind::Unknown;
 }
 
-const ScriptComponentRegistry::ComponentEntry* script_component_entry(const ScriptScene* scene,
-                                                                        std::string_view name) {
+const ScriptComponentRegistry::ComponentEntry* script_component_entry(const ScriptEngineHost* scene,
+                                                                      std::string_view name) {
     const ScriptComponentRegistry* registry = scene ? scene->script_components() : nullptr;
     return registry ? registry->find(name) : nullptr;
 }
@@ -457,7 +496,7 @@ void write_lua_report_value(JsonWriter& json, const sol::object& value, i32 dept
 }
 
 struct ScriptEntityApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
     EcsEntity entity;
 
     EcsId id() const {
@@ -781,7 +820,7 @@ std::optional<ScriptCommandTarget> command_target_from_lua(const sol::object& ob
 }
 
 struct ScriptCommandBufferApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
     EcsCommandBuffer* commands = nullptr;
 
     bool valid() const {
@@ -893,7 +932,7 @@ private:
 };
 
 struct ScriptSystemContextApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
     EcsCommandBuffer* commands_ptr = nullptr;
     f32 delta_time = 0.0f;
     std::string id;
@@ -922,7 +961,7 @@ struct ScriptSystemContextApi {
 };
 
 struct ScriptSceneApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
 
     ScriptEntityApi entity(sol::optional<std::string> name) {
         EcsEntity created = name ? scene->ecs().entity(*name) : scene->ecs().entity();
@@ -999,9 +1038,7 @@ struct ScriptSceneApi {
         scene->clear_script_entities();
     }
 
-    void set_clear_color(i32 r, i32 g, i32 b) {
-        scene->render_config().clear_color = script_color(r, g, b);
-    }
+    void set_clear_color(i32 r, i32 g, i32 b) { scene->set_clear_color(script_color(r, g, b)); }
 
     void mark_render_cache_dirty() {
         scene->mark_render_cache_dirty("script api");
@@ -1040,29 +1077,47 @@ struct ScriptSceneApi {
             .reads = query_descriptor.reads,
             .writes = query_descriptor.writes,
         });
-        return !scene->ecs().systems().register_task(std::move(system_descriptor),
-                                                     [scene = scene, plan = std::move(plan), run = std::move(run), access = std::move(access)](SystemContext& ctx) mutable {
-                                                         for (EcsEntity entity : scene->ecs().query_entities(plan)) {
-                                                             const ScriptSystemAccessContext* previous = current_script_system_access;
-                                                             current_script_system_access = access.get();
-                                                             ScriptSystemContextApi system_context{
-                                                                 .scene = scene,
-                                                                 .commands_ptr = ctx.commands,
-                                                                 .delta_time = ctx.dt,
-                                                                 .id = std::string{ctx.system_id},
-                                                                 .phase_name = std::string{system_phase_name(ctx.phase)},
-                                                                 .parallel = ctx.running_parallel,
-                                                             };
-                                                             sol::protected_function_result result =
-                                                                 run(ScriptEntityApi{scene, entity}, ctx.dt, system_context);
-                                                             current_script_system_access = previous;
-                                                             if (!result.valid()) {
-                                                                 sol::error error = result;
-                                                                 throw std::runtime_error("system '" + access->system_id + "' entity=" + std::to_string(entity.id()) + ": " + error.what());
-                                                             }
-                                                         }
-                                                     })
-                    .empty();
+        const bool registered =
+            !scene->ecs()
+                 .systems()
+                 .register_task(std::move(system_descriptor),
+                                [scene = scene, plan = std::move(plan), run = std::move(run),
+                                 access = std::move(access)](SystemContext& ctx) mutable {
+                                    for (EcsEntity entity : scene->ecs().query_entities(plan)) {
+                                        const ScriptSystemAccessContext* previous = current_script_system_access;
+                                        auto* previous_commands = scripting_detail::script_commands;
+                                        struct Reset {
+                                            const ScriptSystemAccessContext* access;
+                                            EcsCommandBuffer* commands;
+                                            ~Reset() {
+                                                current_script_system_access = access;
+                                                scripting_detail::script_commands = commands;
+                                            }
+                                        } reset{previous, previous_commands};
+                                        current_script_system_access = access.get();
+                                        scripting_detail::script_commands = ctx.commands;
+                                        ScriptSystemContextApi system_context{
+                                            .scene = scene,
+                                            .commands_ptr = ctx.commands,
+                                            .delta_time = ctx.dt,
+                                            .id = std::string{ctx.system_id},
+                                            .phase_name = std::string{system_phase_name(ctx.phase)},
+                                            .parallel = ctx.running_parallel,
+                                        };
+                                        sol::protected_function_result result =
+                                            run(ScriptEntityApi{scene, entity}, ctx.dt, system_context);
+                                        current_script_system_access = previous;
+                                        if (!result.valid()) {
+                                            sol::error error = result;
+                                            throw std::runtime_error("system '" + access->system_id + "' entity=" +
+                                                                     std::to_string(entity.id()) + ": " + error.what());
+                                        }
+                                    }
+                                })
+                 .empty();
+        if (registered)
+            scene->systems.emplace_back(id);
+        return registered;
     }
 
 private:
@@ -1156,41 +1211,29 @@ private:
 struct ScriptInputApi {
     Input* input = nullptr;
 
-    bool pressed(std::string_view action) const {
-        return input->pressed(action);
-    }
+    bool pressed(std::string_view action) const { return input && input->pressed(action); }
 
-    bool held(std::string_view action) const {
-        return input->held(action);
-    }
+    bool held(std::string_view action) const { return input && input->held(action); }
 
-    bool released(std::string_view action) const {
-        return input->released(action);
-    }
+    bool released(std::string_view action) const { return input && input->released(action); }
 };
 
 struct ScriptAppApi {
     App* app = nullptr;
 
     void quit() {
+        if (!app)
+            throw std::runtime_error("script host has no application");
         app->quit();
     }
 };
 
 struct ScriptContextApi {
-    SceneContext* ctx = nullptr;
+    ScriptFrameContext ctx;
 
-    f32 dt() const {
-        return ctx->dt;
-    }
-
-    ScriptInputApi input() const {
-        return ScriptInputApi{&ctx->input};
-    }
-
-    ScriptAppApi app() const {
-        return ScriptAppApi{&ctx->app};
-    }
+    f32 dt() const { return ctx.dt; }
+    ScriptInputApi input() const { return ScriptInputApi{ctx.input}; }
+    ScriptAppApi app() const { return ScriptAppApi{ctx.app}; }
 };
 
 struct ScriptActionsApi {
@@ -1285,6 +1328,10 @@ struct ScriptDialoguePlayerApi {
 
 } // namespace
 
+void scripting_detail::script_component_access(std::string_view component, bool write) {
+    warn_undeclared_script_access(write ? "write" : "read", component);
+}
+
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     : _impl(std::make_unique<Impl>()) {
     _impl->lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
@@ -1298,7 +1345,12 @@ ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     }
 }
 
-ScriptEngine::~ScriptEngine() = default;
+ScriptEngine::~ScriptEngine() {
+    if (_impl->host) {
+        _impl->host->closing = true;
+        _impl->host->clear_systems();
+    }
+}
 
 bool ScriptEngine::load_file(const std::filesystem::path& path) {
     const std::filesystem::path absolute = normalized_dependency_path(path);
@@ -1389,19 +1441,43 @@ void ScriptEngine::record_dependency(const std::filesystem::path& path) {
 }
 
 bool ScriptEngine::call_on_load(ScriptScene& scene) {
-    return call_optional("on_load", ScriptSceneApi{&scene});
+    return call_on_load({.world = &scene.ecs(),
+                         .components = scene.script_components(),
+                         .script_path = scene.resolved_script_path(),
+                         .clear_entities = [&scene] { scene.clear_script_entities(); },
+                         .set_background = [&scene](Color c) { scene.render_config().clear_color = c; },
+                         .mark_render_dirty = [&scene] { scene.mark_render_cache_dirty("script api"); }});
+}
+
+bool ScriptEngine::call_on_load(ScriptSceneBindings bindings) {
+    if (!bindings.world || (_impl->host && _impl->host->world != bindings.world)) {
+        _last_error = "script bindings require one live world per Lua state";
+        return false;
+    }
+    if (!_impl->host)
+        _impl->host = std::make_unique<ScriptEngineHost>();
+    _impl->host->clear_systems();
+    static_cast<ScriptSceneBindings&>(*_impl->host) = std::move(bindings);
+    return call_optional("on_load", ScriptSceneApi{_impl->host.get()});
 }
 
 bool ScriptEngine::call_on_enter(SceneContext& ctx) {
-    return call_optional("on_enter", ScriptContextApi{&ctx});
+    return call_on_enter(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
-
 bool ScriptEngine::call_on_exit(SceneContext& ctx) {
-    return call_optional("on_exit", ScriptContextApi{&ctx});
+    return call_on_exit(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
-
 bool ScriptEngine::call_update(SceneContext& ctx) {
-    return call_optional("update", ScriptContextApi{&ctx});
+    return call_update(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
+}
+bool ScriptEngine::call_on_enter(ScriptFrameContext ctx) {
+    return call_optional("on_enter", ScriptContextApi{ctx});
+}
+bool ScriptEngine::call_on_exit(ScriptFrameContext ctx) {
+    return call_optional("on_exit", ScriptContextApi{ctx});
+}
+bool ScriptEngine::call_update(ScriptFrameContext ctx) {
+    return call_optional("update", ScriptContextApi{ctx});
 }
 
 bool ScriptEngine::call_collect_actions(InputActionContext& actions) const {

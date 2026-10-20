@@ -43,7 +43,7 @@ f32 mie_phase(f32 mu, f32 g) {
 }
 
 // kin_scatter: one light's scattering along the unit ray `v` (above the horizon), `l` toward the light, `e` its light.
-Vec3f scatter(f32 tau_m, f32 g, Vec3f v, Vec3f l, f32 e) {
+LinearRgb scatter(f32 tau_m, f32 g, Vec3f v, Vec3f l, f32 e) {
     using namespace sky_model;
     const f32 mv = air_mass(v.y);
     const f32 ms = air_mass(l.y);
@@ -60,7 +60,8 @@ Vec3f scatter(f32 tau_m, f32 g, Vec3f v, Vec3f l, f32 e) {
         const Vec3f weight = rayleigh_zenith * pr + splat(tau_m * height_ratio * pm * qm / q);
         sum += weight * exp3(-(along + toward)) * dw;
     }
-    return sum * (mv * pi * e);
+    const auto rgb = sum * (mv * pi * e);
+    return {rgb.x, rgb.y, rgb.z};
 }
 
 Vec3f up_clamped(Vec3f v) {
@@ -81,24 +82,25 @@ f32 air_mass(f32 sin_elevation) {
 }
 } // namespace sky_model
 
-Vec3f sky_sun_transmittance(const Sky3D& sky, Vec3f sun_direction) {
+LinearRgb sky_sun_transmittance(const Sky3D& sky, Vec3f sun_direction) {
     using namespace sky_model;
     const f32 m = air_mass(normalize(sun_direction).y);
-    return exp3(-(rayleigh_zenith + splat(mie_extinction * mie_tau(sky)) + ozone_zenith) * m);
+    const auto rgb = exp3(-(rayleigh_zenith + splat(mie_extinction * mie_tau(sky)) + ozone_zenith) * m);
+    return {rgb.x, rgb.y, rgb.z};
 }
 
-Vec3f sky_sun_light(const Sky3D& sky, Vec3f sun_direction) {
+LinearRgb sky_sun_light(const Sky3D& sky, Vec3f sun_direction) {
     const f32 cut = smoothstep(-0.01f, 0.04f, normalize(sun_direction).y);
     return sky_sun_transmittance(sky, sun_direction) * (sky.sun_intensity * cut);
 }
 
-Vec3f sky_radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) {
+LinearRgb sky_radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) {
     using namespace sky_model;
     const Vec3f v = up_clamped(normalize(direction));
     const Vec3f sun = normalize(sun_direction);
     const f32 tau_m = mie_tau(sky);
     const f32 twilight_sun = sky.sun_intensity * std::exp(-std::max(-sun.y, 0.0f) / twilight);
-    Vec3f light = scatter(tau_m, mie_anisotropy, v, sun, twilight_sun);
+    LinearRgb light = scatter(tau_m, mie_anisotropy, v, sun, twilight_sun);
     if (sky.moon && sky.moon_light > 0.0f) {
         const Vec3f moon = normalize(sky.moon_direction);
         light +=
@@ -107,15 +109,15 @@ Vec3f sky_radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) {
     return light * (brightness * sky.intensity) + sky.night_color;
 }
 
-Vec3f sky_ground_light(const Sky3D& sky, Vec3f sun_direction) {
+LinearRgb sky_ground_light(const Sky3D& sky, Vec3f sun_direction) {
     const Vec3f sun = normalize(sun_direction);
-    const Vec3f horizontal = sky_sun_light(sky, sun) * std::max(sun.y, 0.0f);
+    const LinearRgb horizontal = sky_sun_light(sky, sun) * std::max(sun.y, 0.0f);
     return sky.ground_color * (horizontal + sky_radiance(sky, sun, {0.0f, 1.0f, 0.0f}));
 }
 
-Vec3f sky_color(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) {
+LinearRgb sky_color(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) {
     const Vec3f v = normalize(direction);
-    const Vec3f radiance = sky_radiance(sky, sun_direction, v);
+    const LinearRgb radiance = sky_radiance(sky, sun_direction, v);
     if (v.y >= 0.0f) {
         return radiance;
     }
@@ -123,14 +125,14 @@ Vec3f sky_color(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) {
     return radiance + (sky_ground_light(sky, sun_direction) - radiance) * t;
 }
 
-Vec3f sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 samples_u, u32 samples_v) {
+LinearRgb sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 samples_u, u32 samples_v) {
     // The cosine-weighted average of the sphere of directions about `normal`: stratified in (u, v) over the disc,
     // lifted to the hemisphere (Malley), so each sample has the same weight.
     const Vec3f n = normalize(normal);
     const Vec3f helper = std::abs(n.y) < 0.999f ? Vec3f{0.0f, 1.0f, 0.0f} : Vec3f{1.0f, 0.0f, 0.0f};
     const Vec3f tx = normalize(cross(helper, n));
     const Vec3f ty = cross(n, tx);
-    Vec3f sum{};
+    LinearRgb sum{};
     for (u32 j = 0; j < samples_v; ++j) {
         for (u32 i = 0; i < samples_u; ++i) {
             const f32 r = std::sqrt((static_cast<f32>(j) + 0.5f) / static_cast<f32>(samples_v));
@@ -218,19 +220,19 @@ bool FogTable3D::update(const Sky3D& sky, Vec3f sun_direction) {
     return true;
 }
 
-Vec3f FogTable3D::radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const {
+LinearRgb FogTable3D::radiance(const Sky3D& sky, Vec3f sun_direction, Vec3f direction) const {
     const Vec3f v = up_clamped(normalize(direction));
     const f32 x = coordinate(v.y);
     const u32 i = std::min(static_cast<u32>(x), rows - 2);
     const f32 w = x - static_cast<f32>(i);
     const auto at = [&](u32 k) {
         const u32 a = i * 16 + k, b = a + 16;
-        return Vec3f{values[a] + (values[b] - values[a]) * w, values[a + 1] + (values[b + 1] - values[a + 1]) * w,
-                     values[a + 2] + (values[b + 2] - values[a + 2]) * w};
+        return LinearRgb{values[a] + (values[b] - values[a]) * w, values[a + 1] + (values[b + 1] - values[a + 1]) * w,
+                         values[a + 2] + (values[b + 2] - values[a + 2]) * w};
     };
     const Vec3f sun = length_squared(sun_direction) > 0.0f ? normalize(sun_direction) : Vec3f{0.0f, 1.0f, 0.0f};
     const f32 mu = dot(v, sun);
-    Vec3f light = at(0) * rayleigh_phase(mu) + at(4) * mie_phase(mu, mie_anisotropy);
+    LinearRgb light = at(0) * rayleigh_phase(mu) + at(4) * mie_phase(mu, mie_anisotropy);
     if (sky.moon && sky.moon_light > 0.0f) {
         const Vec3f moon =
             length_squared(sky.moon_direction) > 0.0f ? normalize(sky.moon_direction) : Vec3f{0.0f, 1.0f, 0.0f};
@@ -269,26 +271,26 @@ f32 fog_opacity(const Fog3D& fog, Vec3f eye, Vec3f direction, f32 distance) {
     return std::min(1.0f - std::exp(-fog_optical_depth(fog, eye, direction, distance)), fog.max_opacity);
 }
 
-Vec3f fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f direction) {
+LinearRgb fog_color(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f direction) {
     // An image sky's panorama is not read for the fog: the fixed colour stands in for it, as on the GPU.
-    Vec3f c = fog.colour_from_sky && sky.mode == SkyMode3D::Procedural ? sky_radiance(sky, sun_direction, direction)
-                                                                       : fog.colour;
+    LinearRgb c = fog.colour_from_sky && sky.mode == SkyMode3D::Procedural ? sky_radiance(sky, sun_direction, direction)
+                                                                           : fog.colour;
     if (fog.sun_scatter > 0.0f) {
         const f32 g = fog.sun_anisotropy;
         const f32 mu = dot(normalize(direction), normalize(sun_direction));
-        c += Vec3f{sun_light.r, sun_light.g, sun_light.b} *
+        c += sun_light *
              (fog.sun_scatter * (1.0f - g * g) / std::pow(std::max(1.0f + g * g - 2.0f * g * mu, 1e-4f), 1.5f));
     }
     return c;
 }
 
-Vec3f fog_apply(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f eye,
-                Vec3f direction, f32 distance, Vec3f color) {
+LinearRgb fog_apply(const Fog3D& fog, const Sky3D& sky, Vec3f sun_direction, LinearRgb sun_light, Vec3f eye,
+                    Vec3f direction, f32 distance, LinearRgb color) {
     const f32 opacity = fog_opacity(fog, eye, direction, distance);
     if (opacity <= 0.0f) {
         return color;
     }
-    const Vec3f fc = fog_color(fog, sky, sun_direction, sun_light, direction);
+    const LinearRgb fc = fog_color(fog, sky, sun_direction, sun_light, direction);
     return color + (fc - color) * opacity;
 }
 
@@ -346,8 +348,7 @@ SkyState3D evaluate(const TimeOfDay3D& time, const Sky3D& base) {
 
     Sky3D sky = base;
     sky.moon = false;
-    const Vec3f sun_color = sky_sun_light(sky, s.sun_direction);
-    s.sun_color = {sun_color.x, sun_color.y, sun_color.z};
+    s.sun_color = sky_sun_light(sky, s.sun_direction);
     // Moonlight: a full moon is a tenth of a noon sun's light by kin's artistic scale (the real ratio, 1 in 400000,
     // would be black), going out as the moon sets and with the phase.
     const f32 moon_up = smoothstep(-0.01f, 0.05f, s.moon_direction.y);
@@ -357,10 +358,8 @@ SkyState3D evaluate(const TimeOfDay3D& time, const Sky3D& base) {
     sky.moon = s.moon_light > 0.0f;
     sky.moon_direction = s.moon_direction;
     sky.moon_light = s.moon_light;
-    const Vec3f ambient = sky_irradiance(sky, s.sun_direction, {0.0f, 1.0f, 0.0f});
-    s.ambient = {ambient.x, ambient.y, ambient.z};
-    const Vec3f ground_ambient = sky_irradiance(sky, s.sun_direction, {0.0f, -1.0f, 0.0f});
-    s.ground_ambient = {ground_ambient.x, ground_ambient.y, ground_ambient.z};
+    s.ambient = sky_irradiance(sky, s.sun_direction, {0.0f, 1.0f, 0.0f});
+    s.ground_ambient = sky_irradiance(sky, s.sun_direction, {0.0f, -1.0f, 0.0f});
     // The fog's colour: the sky at the horizon, away from the sun.
     Vec3f away{-s.sun_direction.x, 0.0f, -s.sun_direction.z};
     if (length_squared(away) < 1e-6f) {
@@ -383,7 +382,7 @@ SkyState3D apply(const TimeOfDay3D& time, Lights3D& lights, Sky3D& sky, Fog3D& f
     lights.fill.direction = s.moon_direction;
     lights.fill.color = s.moon_color;
     lights.ambient = s.ambient;
-    lights.ground_ambient = s.ground_ambient;
+    lights.ground_ambient = {true, s.ground_ambient};
     if (time.shadows) {
         const auto smooth = [](f32 a, f32 b, f32 x) {
             const f32 t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
@@ -405,8 +404,13 @@ SunTimes3D sun_times(const TimeOfDay3D& time) {
     SunTimes3D out;
     const f32 d2r = pi / 180.0f;
     const f32 dec = declination_of(time) * d2r;
-    const f32 phi = time.latitude * d2r;
-    const f32 cos_h = (std::sin(-0.833f * d2r) - std::sin(phi) * std::sin(dec)) / (std::cos(phi) * std::cos(dec));
+    const f32 phi = std::clamp(time.latitude, -90.0f, 90.0f) * d2r;
+    const f32 limb = std::sin(-0.833f * d2r); // the upper limb on the horizon: refraction and the sun's radius
+    const f32 cos_phi = std::cos(phi);
+    // At a pole the sun keeps one height all day: up or down by the sign of sin(phi) sin(dec) against the limb, which
+    // is the formula's limit as cos(phi) goes to 0 (in f32, cos(90 degrees) is -4e-8: its sign would say the opposite).
+    const f32 cos_h = std::abs(cos_phi) < 1e-6f ? (std::sin(phi) * std::sin(dec) > limb ? -2.0f : 2.0f)
+                                                : (limb - std::sin(phi) * std::sin(dec)) / (cos_phi * std::cos(dec));
     if (cos_h <= -1.0f) {
         out.polar_day = true;
         out.sunrise = 0.0f;
@@ -422,21 +426,27 @@ SunTimes3D sun_times(const TimeOfDay3D& time) {
 }
 
 void advance(TimeOfDay3D& time, f32 dt) {
-    time.hours += dt * time.speed / 3600.0f;
-    while (time.hours >= 24.0f) {
-        time.hours -= 24.0f;
-        time.day_of_year += 1.0f;
-        if (time.day_of_year > 365.0f) {
-            time.day_of_year -= 365.0f;
-        }
+    if (!std::isfinite(dt) || !std::isfinite(time.speed) || !std::isfinite(time.hours) ||
+        !std::isfinite(time.day_of_year)) {
+        return;
     }
-    while (time.hours < 0.0f) {
-        time.hours += 24.0f;
-        time.day_of_year -= 1.0f;
-        if (time.day_of_year < 1.0f) {
-            time.day_of_year += 365.0f;
-        }
-    }
+    // `hours` is f32: a frame at speed 1 (4.6e-6 h at 60 fps) is below its resolution in the evening (1.9e-6 h at 20
+    // h), and summing there makes the clock's speed a function of the frame rate. The sum is kept exactly in `clock`,
+    // taken up again from `hours` whenever the game has set it (it is not what advance() last wrote).
+    f64 clock = time.hours == time.clock_hours ? time.clock : static_cast<f64>(time.hours);
+    clock += static_cast<f64>(dt) * static_cast<f64>(time.speed) / 3600.0;
+    const f64 days = std::floor(clock / 24.0);
+    clock = std::fmod(clock, 24.0);
+    if (clock < 0.0)
+        clock += 24.0;
+    f64 day = std::fmod(static_cast<f64>(time.day_of_year) - 1.0 + std::fmod(days, 365.0), 365.0);
+    if (day < 0.0)
+        day += 365.0;
+    time.day_of_year = static_cast<f32>(day + 1.0);
+    time.clock = clock;
+    // Rounded to f32, a clock a hair under 24 would read 24.0: kept under it.
+    time.hours = std::min(static_cast<f32>(clock), std::nextafter(24.0f, 0.0f));
+    time.clock_hours = time.hours;
 }
 
 } // namespace kin

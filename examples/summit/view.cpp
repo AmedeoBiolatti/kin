@@ -1022,7 +1022,7 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         _pending_dust_size.clear();
         _dust.update(f64(dt), &air);
         // The ground's colour: snow's white above the line.
-        _dust.desc.colour_start = e.snow_share > 0.5f ? Vec3f{0.85f, 0.88f, 0.94f} : Vec3f{0.62f, 0.55f, 0.45f};
+        _dust.desc.colour_start = e.snow_share > 0.5f ? LinearRgb{0.85f, 0.88f, 0.94f} : LinearRgb{0.62f, 0.55f, 0.45f};
         scene.draw_particles(_dust);
         // Breath: a puff each few seconds above a third of the way up (cold air), faster when sprinting or tired.
         const Player& pl = game.player(player);

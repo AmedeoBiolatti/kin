@@ -25,14 +25,28 @@ struct SceneEnvironment3D {
     AmbientOcclusion3D ambient_occlusion;
     ContactShadows3D contact_shadows;
     TemporalAA3D taa;
+    Lod3D lod;
+    // The picture (samples, background, hdr, exposure, bloom). `pick` is not
+    // authored and never applied: picking is the game's (see scene3d_view_options).
     ViewOptions3D view;
     bool enabled = true;
     i32 priority = 0;
 };
 
+// The view options a scene is rendered with: the environment's picture settings
+// with the game's `pick` (a pick pass is the game's choice, whatever the
+// environment holds). The one policy of apply_scene3d_settings, SceneFrame3D
+// and SceneSession3D.
+inline ViewOptions3D scene3d_view_options(ViewOptions3D environment, const ViewOptions3D& game) {
+    environment.pick = game.pick;
+    return environment;
+}
+
 // Call after propagate_transforms(), before collecting local lights/draws.
 // Applies each selected camera/environment atomically after validation.
-// Optional view options are for create_view; this does no GPU work.
+// Optional view options are for create_view; this does no GPU work. The
+// environment replaces them except `pick`, which stays as passed
+// (scene3d_view_options).
 // With `only`, validate/apply that entity even when disabled (editor preflight).
 std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view = nullptr,
                                                 EcsEntity only = {});

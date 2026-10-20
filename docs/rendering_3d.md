@@ -14,20 +14,31 @@ SDL_Renderer (and in headless runs without `KIN_RENDER_BACKEND=gpu`) meshes
 come back empty and a view shows only its background, so a game still runs
 and its state can still be tested.
 
+For a game, use `SceneSession3D` to own the world, scene lifecycle, frame stages and view. The
+[camp walkthrough](#owning-a-3d-scene-session) shows loading, authored components, physics and error reporting;
+`examples/camp_walk` and `examples/projectile_range` are the starting points.
+For Lua gameplay, use the [3D Lua workflow](#lua-gameplay-in-a-3d-scene) and `examples/lua_range`.
+
 ```cpp
-#include <kin/render3d/renderer3d.hpp>
+#include <kin/scene/scene_session3d.hpp>
 
-kin::Renderer3D r3d{renderer};
-kin::Mesh3D crate = r3d.create_mesh(kin::meshes::box({1, 1, 1}));
-kin::View3D view = r3d.create_view({640, 360}, {.samples = 4});
-
-// each frame
-kin::Scene3D scene;
-scene.camera = kin::Camera3D::orbit({0, 0, 0}, angle, 30.0f, 4.0f);
-scene.draw(crate, kin::Mat4f::rotation_y(angle), {.color = kin::Color::rgb(200, 140, 80)});
-r3d.render(view, scene);                                 // after the 2D drawn so far
-renderer.draw_texture(view.texture(), {0, 0, 640, 360}); // laid in like a render target
+kin::Renderer3D renderer3d{renderer2d};
+kin::Assets3D assets{renderer3d, content_root};
+kin::SceneSession3DOptions options;
+options.viewport = {960, 540};
+kin::SceneSession3D session{renderer3d, assets, options};
+if (!session.load("scenes/camp.kinscene")) {
+    // Display session.diagnostics().
+}
+// Each fixed step: check session.step(dt).
+// Each rendered frame, composite after a successful render:
+if (session.render())
+    renderer2d.draw_texture(session.view()->texture(), {0, 0, 960, 540});
 ```
+
+`SceneFrame3D` integrates the same stages with a game-owned ECS world. The direct `Scene3D::draw` and
+`Renderer3D::render` APIs support embedded views, renderer tools and the benchmark examples below.
+Configure with `cmake --preset 3d` to include the experimental engine; ordinary and shipping builds leave it out.
 
 ## Conventions
 
@@ -44,6 +55,26 @@ The maths is in `kin/core/math3d.hpp`: `Vec3f`, `Vec4f`, `Quatf`
 `scaling`, `rotation`, `look_at`, `perspective`, `orthographic`, `inverse`),
 and `project`, `unproject` and `screen_ray` between the world and 2D draw
 coordinates.
+
+## Colour types and authored quality
+
+All native 3D RGB settings and colour-function results use `LinearRgb` (`r,g,b`):
+lights, sky ground/moon/night colours, fog, time of day, particles and weather.
+HDR values above one remain linear. Directions, positions and velocities use
+`Vec3f`; surface/texture byte tints still use sRGB `Color`. No implicit conversion
+connects these types. See [the API migration](3d_api_migration.md).
+
+`SceneEnvironment3D` includes `ground_ambient` and `ground_ambient_enabled`, every
+public LOD setting, and the full procedural sky controls. Additional sky fields
+are `sky_mode` (`procedural`/`image`), `sky_sun_size`, `sky_sun_disc`,
+`sky_night_color`, `sky_moon`, `sky_moon_direction`, `sky_moon_size`,
+`sky_moon_light`, `sky_moon_color`, `sky_light_threshold` and `sky_light_interval`.
+An image sky still needs a runtime environment-map handle, set on the active
+`SceneEnvironment3D::lights.environment` during host initialization. `PointLight3D` and
+`SpotLight3D` expose `shadow_resolution`, `shadow_bias`, `shadow_normal_offset`,
+`shadow_near`, `shadow_distance` and `shadow_softness` alongside `shadows`.
+These values survive save/load, inspection, patches and collection. RGB file
+fields stay linear triples; HDR colours are never encoded as byte tints.
 
 ## Automatic rendering paths
 
@@ -84,6 +115,7 @@ process). A `kin::BakeCache` (`kin/assets/bake_cache.hpp`) keeps each build in a
 
 kin::BakeCache bake{kin::user_data_dir("my-game") / "kin" / "bake"}; // the game's folder; 1 GiB at most by default
 r3d.set_bake_cache(&bake);        // levels and clusters, for create_mesh, load_model and Assets3D
+collisions.set_bake_cache(&bake); // cooked collision shapes (physics_3d.md)
 ```
 
 With a cache set, `create_mesh` with `clusters` or `levels > 1` looks the build up under its key and restores it, else builds it and
@@ -111,11 +143,14 @@ opaque/masked mesh and static-model buckets. Keep using ordinary ECS components 
 no hand-built `InstanceBatch3D`, static marker or renderer flags are required. Buckets of 256 or more copies use fixed
 records, with conservative bounds for consecutive 256-copy ranges from 512 copies upward. Source order is preserved;
 this is not a spatial sort. Unchanged records keep their revision; changed runs update only those records and bounds.
-Small buckets, blended/custom/wireframe/skinned materials and budget overflow use ordinary streamed submissions.
+A retained bucket stays eligible down to 128 copies, avoiding oscillation at 256. Two reusable batches preserve
+independent collected scenes and alternate counts without recreating their records on every collection. Other count
+changes create a new batch. Small buckets, blended/custom/wireframe/skinned materials and budget overflow use ordinary
+streamed submissions.
 
 The collector keeps at most 128 automatic batches and **16 MiB of instance-record payload** per render state, in addition
 to its existing collection scratch. Group/edit metadata and allocator overhead are extra. Separate scenes keep snapshot
-semantics: an edit makes a new batch if an older collected scene still owns the old records. Such scene-owned snapshots
+semantics: an edit reuses an unshared spare batch, or creates one if older collected scenes still own both record sets. Such scene-owned snapshots
 are outside the collector's live-record budget. Clear old scenes to release them; `clear_collection_cache()` drops the
 collector's handles. Collection still visits the current ECS records each frame, so writes through ordinary component
 pointers remain visible. GPU tables retain their separate 32 MiB cap and feature/capability fallbacks below; enabling
@@ -421,7 +456,7 @@ Lights: `scene.lights.sun` (`direction`, toward the light; `color`, linear,
 above 1 is brighter: what a white surface facing it shows, so a Lambert
 surface of albedo a shows a times `color`; a glossy surface adds its highlight), `scene.lights.fill` (a second sun that casts no
 shadow, black by default), `scene.lights.ambient` (with
-`ground_ambient`, the light from below where it differs: faces between take
+`ground_ambient.enabled`, using `ground_ambient.color` for light from below: faces between take
 a mix by how far they face up), and point lights
 (`scene.add_light({position, color, radius, size})`: muzzle flashes, explosions,
 lamps). A point light falls off with the square of the distance, as light
@@ -579,7 +614,9 @@ to be a thin occluder the ray passes behind, so a distant plate in front casts
 nothing). The result fades over the last 40% of `distance` and near the
 screen's edge, goes through the occlusion's depth-aware blur, and is read by
 `mesh.frag`, which multiplies **only the sun's term** by it, after the shadow
-map's: the fill, ambient light, environment and point lights are untouched.
+map's and faded with `Lights3D::sun_shadow_strength` as the map's shadow is (at
+0 the march does not run): the fill, ambient light, environment and point
+lights are untouched.
 `distance` (units) is how far toward the sun to look; `thickness` (units) how
 deep an occluder is assumed to be (smaller: fewer false shadows from near
 things, thin shadows may thin out; larger: the reverse); `intensity` 0..1;
@@ -660,16 +697,32 @@ draws one sample a pixel whatever `ViewOptions3D::samples` asks
   own, resolved, then clipped at white and encoded (`view_output.frag` mode 3);
   what it loses is MSAA's resolve in encoded values (edges are averaged in linear light,
   as an HDR view's are), and the extra RGBA16F targets.
-- **Not covered:** blended, additive and wireframe meshes have no velocity
-  (they take the opaque mesh's behind them: sparks and glass trail a little, the clip keeps it
-  short); a camera cut needs `reset_history()`; a pan of exactly half pixels a
+- **Particles and transparency:** changing particles/weather, blended/additive
+  and wireframe meshes, and custom materials reject incompatible history in
+  their current and previous footprints. These layers have several contributing
+  surfaces, so the renderer keeps the opaque motion and reconstructs the current
+  jittered samples where a single velocity would be wrong. A disappeared or
+  wrapped particle leaves no history trail. Unchanged inputs retain normal
+  temporal smoothing; camera/geometry/skin motion, colour and material changes,
+  flipbooks and uploaded texture revisions trigger rejection. Render-target
+  textures stay conservative because their writes are not versioned.
+  Coverage respects opaque/overlay depth, texture alpha, procedural sprite
+  edges, alpha-zero premultiplied emission, fog and soft intersections. Custom
+  materials use a conservative triangle footprint, since arbitrary fragment
+  code can generate its own alpha. The extra coverage pass reuses the normals
+  target after AO/contact shading, preserves motion, and allocates no new
+  texture. It runs each frame containing these effects, including paused frames,
+  so a later removal still has its previous footprint. History rejection is
+  disabled when inputs are unchanged. The pass is absent with TAA off;
+  `debug_stats().taa_reactive_draws` counts its draws separately.
+- **Not covered:** a camera cut needs `reset_history()`; a pan of exactly half pixels a
   frame lines the jitter up with the motion and leaves part of each pixel
   unvisited (rates that don't repeat are fine); thin detail in a pan
   is softer than MSAA's. The occlusion's and contact shadows' per-pixel noise
   is fixed, not varied by frame: left.
 - Without RGBA16F as target and storage, or without what the pre-pass needs, it is off with
   one line in the log. `debug_stats()` has `taa_dispatches` (0 when off, 2 with
-  sharpening), `taa_reset`, `taa_jitter` and `samples`.
+  sharpening), `taa_reset`, `taa_jitter`, `taa_reactive_draws` and `samples`.
   See the plan's G2d results for numbers.
 
 ### Levels of detail
@@ -737,15 +790,16 @@ height density is closed: `kin::fog_optical_depth` is the same arithmetic on the
 sky's in that direction (so far geometry melts into it at the horizon, whatever the time of day), plus the sun's light times a lobe of
 `sun_anisotropy` (`sun_scatter`). The meshes read the sky's colour from a table made on the CPU when the sky or the sun's height
 changes (`sky_model::FogTable3D`: the scattering split by its phase functions, 48 elevations crowded at the horizon, within a third of a
-level of `sky_radiance` and the same at and under the horizon), not the integral per fragment; the sky pass reuses its own, the particles
-integrate per vertex. Applied to everything the main pass shades through the stock shader (opaque, cut-out, skinned,
-instanced, clustered, blended, additive); the overlay (a gun in the hand) is not fogged and custom material shaders are not.
+level of `sky_radiance` and the same at and under the horizon), not the integral per fragment; the sky pass reuses its own, and particles
+read the table per vertex. Applied to everything the main pass shades through the stock shader (opaque, cut-out, skinned,
+instanced, clustered, blended, additive) and custom shaders using `kin_output`; the overlay (a gun in the hand) is not fogged.
 The sky gets the height fog from `start` to infinity (the limit of a mesh's as it recedes), not the distance term, which an infinite
 ray would make total. With `SkyMode3D::Image`, `colour_from_sky` takes `colour` everywhere (the panorama is not read for the fog):
 set it to the panorama's horizon. `kin_fog.inc.glsl` holds the fog for a pass of your own. `debug_stats().fog_applied`.
 
 **Time of day** (`TimeOfDay3D`): `hours` (solar time), `day_of_year`, `latitude`, `axial_tilt`, `moon_phase`, `speed` (game seconds a
-second for `advance(day, dt)`). `evaluate()` is a pure function of them (and the sky's haze and sun intensity): sun and moon
+second for `advance(day, dt)`; the clock is summed exactly behind the f32 `hours`, so an hour of frames is an hour at any frame rate,
+and setting `hours` yourself is noticed and continued from). `evaluate()` is a pure function of them (and the sky's haze and sun intensity): sun and moon
 directions, the sun's colour, the moonlight, ambient and ground ambient (the sky's cosine-weighted light), a fog colour and density
 suggestion; `apply()` writes them into the lights, the sky's moon and the fog's colour (not the haze, the stars or the density, which are
 looks); `sun_times()` gives sunrise and sunset. North is -z, east +x. As a component: put a `TimeOfDay3D` on an entity and call
@@ -858,7 +912,9 @@ flipbook over the life. The simulation runs in fixed steps of 1/120 s taken out 
 (seed, birth number, purpose): the same seed and the same calls make the same particles whatever the frame lengths were, `state_hash()` is
 a hash of all of it, and `save()` / `restore()` take the state to bytes and back for a rollback. A ground height (visual only: no
 physics) kills or bounces. The wind is read at every particle's own place each step, 32 at a time: the gust and turbulence sines run in f32
-turns by a polynomial (arithmetic only, so the same bits on every machine; within 1e-5 m/s of `Wind3D::velocity`) in loops the compiler
+turns by a polynomial (arithmetic only, so the same bits on every machine; within 1e-5 m/s of `Wind3D::velocity` near the origin, the
+error growing with the distance from it as the f32 turn counts coarsen: about 1e-3 of the turbulence speed at 10 km; the CPU test
+asserts 2e-3 m/s over a 36 m box 100 m out) in loops the compiler
 makes vector code of, the drag's `exp` is taken once a step, and a system without drag, influence or wind never looks for the air (20,000
 particles in gusts and turbulence: 0.6 ms an `update(1/60)`, from 16 ms; `kin_render3d_bench wind`). ECS: `ParticleEmitter3D` holds a system and is stepped at its entity's place by
 `WorldRenderState3D::simulate_particles(dt, wind)` and drawn by `collect()`; a `Weather3D` component is the game's weather
@@ -882,10 +938,62 @@ velocity then comes from it too; a scene without a soft batch makes none. The su
 
 **Light and fog.** The fog is `kin_fog.inc.glsl`'s, evaluated in the vertex shader at each corner and interpolated (the particle is small,
 the closed form smooth), so a particle takes the fog a mesh at the same place takes, to a level of 255 (tested); `fogged = false` leaves
-it out. `lit` (0 to 1) tints the particle by `kin::particle_light_tint(lights)`: ambient (sky and ground averaged) plus half the sun and half
-the fill, which is what a lit white ball shows; 0 shows its own colour (fire, sparks, glows). With `TimeOfDay3D::apply` it follows the
-day: snow is not white at night. No shadows fall on particles, and no spot or point light reaches them (the tint is the sun, the fill and the
-ambient light only).
+it out. `lit` (0 to 1) tints the particle by ambient (sky and ground averaged), half the sun and fill
+(`kin::particle_light_tint(lights)`), plus half the point/spot irradiance at the sprite centre.
+Local lights use the same radius, source size, spot cone and selection budgets as meshes;
+the isotropic approximation has no surface normal. The renderer selects a separate shader
+only for batches with `lit > 0` and selected local lights. Zero shows the particle's own
+colour (fire, sparks, glows). With `TimeOfDay3D::apply`, snow is not white at night.
+Set `look.receives_shadow = true` on a lit batch to receive sun/cascade, moon,
+point and spot shadow maps. The default is false; `lit = 0` ignores the option.
+Shadow reception attenuates only direct illumination: ambient light, the
+unlit share and fog retain their existing behavior. Irradiance remains the
+isotropic centre-lighting approximation, while visibility is sampled at each
+fragment's world position, so a shadow can cross a large sprite. Bias, cascade
+transitions, directional strengths and local shadow distance fading use the
+same sampling helpers and settings as mesh materials. Configure the light's
+normal shadow settings as well (`shadow_area` for sun/moon;
+`light.shadow.enabled` for point/spot); a request without active maps uses the
+ordinary particle path.
+
+```cpp
+sparks.desc.look.lit = 1.0f;
+sparks.desc.look.receives_shadow = true;
+scene.weather.snow.look.receives_shadow = true;
+```
+
+Set `look.casts_shadow = true` independently to cast into those maps, even
+with `lit = 0`. The caster uses the same camera-facing, axis, flat or stretched
+quad, rotation, texture alpha, procedural disc/ring and interpolated flipbook
+frame as the visible sprite. `look.shadow_cutoff` (default `0.5`, range `[0,1]`)
+alpha-tests intrinsic opacity: texture/procedural alpha times particle alpha.
+Zero opacity never casts. Fog and soft-particle intersection fading affect the
+visible sprite only. Shadows are binary silhouettes filtered by the light's
+normal PCF; translucent or coloured volume transmission is not simulated.
+
+```cpp
+sparks.desc.look.casts_shadow = true;
+sparks.desc.look.shadow_cutoff = 0.3f;
+scene.weather.snow.look.casts_shadow = true;
+```
+
+`capabilities().particle_shadows` reports casting and reception availability.
+Reception adds fragment shadow reads without extra targets or caster draws;
+casting adds draws to the configured maps. Disabled/unlit reception keeps its
+existing shaders. Warm-up includes both options. The shadow caches track
+moving/fading particles, texture revisions, look edits and removal, including
+casters outside the colour frustum. TAA invalidation includes shadow casters
+when shading particle receivers; still shadow edges keep temporal smoothing.
+Soft particles, flipbooks, fog, HDR, MSAA and all particle blend modes share
+the same visible output and coverage paths.
+
+Casting has a separate stream capped at 1,048,576 sprites per render, independent
+of the colour stream's culling and limit. A batch outside a light's frustum costs
+no caster draw. Its GPU buffer is allocated on demand and released after 120
+idle renders. `debug_stats()` exposes `particle_shadow_batches` (batches receiving
+maps), `particle_shadow_submitted` / `particle_shadow_dropped` (unique uploaded
+casters), `particle_shadow_draws` / `particle_shadow_instances` (including repeats
+per light/cascade), and `particle_shadow_bytes` (allocated caster GPU buffer).
 
 **Weather** (`Weather3D`, four `WeatherLayer3D`: rain, snow, dust, mist). A layer is `max_particles` in a box `box` round the camera of
 which the first `intensity` share are shown (one at a time: smooth); each one's place is a formula of its number and `weather.time`
@@ -902,9 +1010,11 @@ weather: the same wind.
 
 `debug_stats()` has `particles_submitted`, `particles_drawn` (after the view's cull and the 1,048,576 sprites a frame it takes), `particle_batches`,
 `particle_soft`, `weather_particles`, `particles_dropped` and `particle_cpu_ms`. `capabilities().particles` and `soft_particles`. Not done:
-particles lit by spot lights, depth-hit splashes (the ground is one height), the velocity of a particle for TAA (a moving particle ghosts under
-TAA; use MSAA for rain), collisions with anything, GPU-simulated particles (the CPU writes the instance buffer each frame), a sort across
+depth-hit splashes (the ground is one height), collisions with anything,
+GPU-simulated particles (the CPU writes the instance buffer each frame), a sort across
 batches, and rain that stops under a roof (it falls through Sponza's nave).
+Moving particles and weather work with TAA through the transient-history rejection
+described above; this does not require per-particle identifiers or a second velocity.
 
 Harness: `kin_reference` JSON `weather` and `particles`, options `--rain`, `--snow`, `--wind`, `--no-weather`, `--no-particles`, `--soft`,
 `--particles N`; scenes `rain_street`, `snow_valley`, `particles_soft`, `particles_blend`, `particles_budget`. Sponza Walk's "Particles and
@@ -933,11 +1043,16 @@ times the base texture), `kin_normal()` (unit, on the viewer's side, bent by
 the normal map), `kin_view()`, `kin_position()`, `kin_uv()`,
 `kin_metallic_roughness()`, `kin_occlusion()`, `kin_emissive(base)`,
 `kin_lit(base, normal, metallic, roughness, occlusion)` (kin's lighting: sun
-with its shadow, fill, point lights, ambient or environment; call it for a
+with its shadow, fill/moon, point and spot lights with local shadows, ambient or environment; call it for a
 lit surface, skip it for an unlit one), `kin_output(colour, alpha)` (encoded
-for the target, premultiplied: write `FragColor` with it), `kin_param(i)`, and
-the raw `frame`, `material` uniforms and samplers for anything else. It
-declares nothing else: samplers 0 to 7 and uniform buffers 0 to 2 are kin's.
+for the target, premultiplied, with scene fog and material alpha cutoff: write `FragColor` with it),
+`kin_output_unfogged(colour, alpha)` (the same output contract with fog bypassed),
+`kin_param(i)`, and the raw `frame`, `material` uniforms and samplers for anything else.
+Samplers 0 to 11 and fragment uniform buffers 0 to 3 are kin's. Slot 2 starts
+with the four parameter vec4s and then holds fog data; slot 3 holds local lights.
+Each block stays below SDL_GPU's 4 KiB limit. Recompile custom shaders against
+the current include to get fog, spot/moon lighting and local shadows. Existing
+compiled shaders retain the parameter prefix and their original shading behavior.
 The blend mode, depth and culling are the material's, as ever; the shadow and
 pick passes draw the material as if it had no shader.
 
@@ -963,9 +1078,8 @@ ownership interface; `.shared()` also supplies the `shared_ptr<const Model3D>` e
 
 ```cpp
 kin::Assets3D art{r3d, kin::content_root()}; // r3d/Renderer2D outlive the art
-std::string error;
-auto tree = art.load_model("props/tree.glb", &error);
-if (!tree) { /* show/log error and choose a fallback */ }
+auto tree = art.load_model("props/tree.glb");
+if (!tree) { /* show art.diagnostics() and choose a fallback */ }
 else {
     const auto transform = tree->placement({
         .position = {4, 0, -8},
@@ -1030,9 +1144,14 @@ light, `BLEND` as alpha, `MASK` as a cut-out (`alphaCutoff`), double-sided and
 map (and its scale), occlusion map (and its strength) and emissive map.
 `scene.draw(model, transform)` draws its parts. A `kin::ModelFile3D` keeps one
 loaded and `poll()` loads it again when the file changes. Skins and animations
-are read too (see Skinned meshes below). Not read yet: morph targets (their
-animation channels are ignored, with a line in the log), texture transforms,
-second UV sets, `KHR_materials_*` other than unlit and emissive strength.
+are read too (see Skinned meshes below). The [tested glTF/export profile](gltf_profile3d.md)
+defines supported content and the export recipe. Morph geometry/channels, multiple
+distinct skin palettes and mixed skin/plain-node animation reject the whole asset.
+Texture transforms and a selected UV set are supported when all of a material's
+maps agree on that placement; incompatible per-map placements reject the asset.
+Other `KHR_materials_*` extensions are outside the profile; an unsupported required
+extension rejects the file. Models do not import glTF cameras or lights into the
+Kin scene.
 
 Images embedded as base64 `data:` URIs (Blender's "glTF Embedded" export) load
 as a `.glb`'s do. An image that is a KTX2 or DDS file (a `.ktx2` file,
@@ -1047,10 +1166,12 @@ log and in `Model3D::asset_diagnostics`, rather than loading as zeros. A file
 named by an absolute path is never read, and a model under the content root or
 in a mounted pack cannot leave it with `..` (`../textures/` from `models/`
 still reads; a loose model opened from elsewhere keeps `..`). A file not read
-is missing: a buffer fails the model, an image is a missing texture. Nodes nest
+fails the model, a buffer and an image alike: an image that cannot be read or
+decoded is a line in `Model3D::asset_diagnostics`, and `valid()` needs them
+empty (`Renderer3D::load_model` then returns no model). Nodes nest
 at most 512 deep. A plain node between two of a skin's joints is kept as a joint
 of the skeleton that no vertex is bound to, so the joints below it rest where
-their inverse bind matrices say (logged and dropped as before if that would take
+their inverse bind matrices say (the asset is rejected if that would take
 the skin past 256 joints).
 
 ### Animated nodes
@@ -1151,20 +1272,28 @@ not owned: a `Model3D`'s stay put as long as the `Model3D` is not copied or chan
 place, so rebind a player after it returns true).
 Measured: about 2 us for a 24-joint character's `update` and matrices, 4.5 us with a crossfade.
 
-**Loading.** The glTF reader takes skins (joints, `inverseBindMatrices`) and
-animations (translation, rotation, scale channels; `weights` channels are ignored), and
-`JOINTS_0` (u8 or u16) and `WEIGHTS_0` (float, normalised u8 or u16): four influences a
-vertex, the weights renormalised to sum 1 (a vertex with none is bound to joint 0, an
-influence naming a joint past the skin is dropped; both are logged). Joints are put parents-first
-whatever order the file listed them in, and the vertices' indices follow. A skin with more
-than 256 joints is not used (logged): its meshes are drawn as static meshes. A skinned
-mesh's node placing is ignored (as glTF says); the joint matrices place it, and the transform you pass
-to `draw_skinned` is the model's. A mesh on a node under a joint (a sword in a hand) with no skin of its
-own is bound to that joint with all its weight, so it follows. `Animator3D` and `draw_skinned(model, ...)` pose `skeletons[0]` only: a
-model with several skins loads, but its parts on any other skin are not drawn there (logged once for each model). `Model3D::skeletons`, `Model3D::clips`
-(an animation of two skins is two clips of one name; one that moves plain nodes too has one more, of the node skeleton: see
-Animated nodes above), `ModelPart3D::skin`, `Model3D::find_clip`; or read
-the same without a GPU with `read_model_data` (for tools and tests).
+**Loading.** Asset loaders accept one distinct skin palette per file, with at
+most 256 joints including intermediate nodes. Equivalent skins with identical
+joint order and inverse bind matrices share that palette. Distinct palettes,
+including reordered or different bind matrices and unused distinct skins, reject
+the whole model before it becomes a usable asset; split the export into models.
+`Animator3D` and `draw_skinned(model, ...)` pose `skeletons[0]`.
+
+`JOINTS_0` (u8/u16) and `WEIGHTS_0` (float or normalized u8/u16) supply at most
+four influences per vertex. Finite positive sums are normalized; missing usable
+weights, out-of-range joints, extra influence sets and oversized skins are asset
+errors, rather than a partly static character. Translation/rotation/scale clips
+support Linear, Step and CubicSpline. Morph targets/channels and models needing
+both a skin pose and a separate visible plain-node pose are rejected. Plain-node
+animation by itself remains supported. A rigid mesh under a joint is attached to
+that palette with full weight and follows it normally.
+
+The low-level `read_model_data` keeps parsing results for inspection/tools,
+including multiple skeletons and recoverable partial data. A true parse result is
+not an asset acceptance result: check `ModelData3D::asset_diagnostics` too. Both
+CPU-only `Assets3D` and GPU loaders reject those diagnostics, failed loads are not
+cached, and `ModelFile3D` keeps its last good model after a rejected reload. The
+[profile and acceptance tests](gltf_profile3d.md) cover both paths.
 
 **Meshes.** `MeshData3D::skin` is a parallel stream (four joint indices and four
 weights a vertex), empty for a mesh that is not skinned; `validate`, `append` and `bounds`
@@ -1663,6 +1792,9 @@ on its way to the 2D frame; an HDR 2D pipeline gets it linear and tonemaps
 it with everything else. Over a transparent `background` a partly covered
 pixel (an MSAA edge, a faint glow) is exposed and tonemapped as its own colour,
 then given its coverage again, so an edge has the colour of what it belongs to.
+An additive glow (a `Blend3D::Additive` mesh, an additive particle) over the
+transparent background adds its colour and leaves the coverage at 0; it is
+encoded like the same glow over geometry, so it is as bright.
 `bloom` (its strength; it turns `hdr` on) glows
 round what is brighter than `bloom_threshold`: emissive materials past 1,
 lit by strong lights. The glow belongs to the view, so 2D drawn over it
@@ -1673,7 +1805,9 @@ no rendering each frame. `resize(view, size)` gives it a new size and texture.
 `view.reset_history()` drops the history temporal anti-aliasing keeps.
 
 `Renderer3D::capabilities()` says what the device has (depth bits, most
-samples); `stats()` summarizes the last render (draw calls, instances, culled
+samples, which passes; `software` for a software rasteriser such as lavapipe,
+whose pictures are right and whose milliseconds mean nothing: tests compare
+timings only where it is false); `stats()` summarizes the last render (draw calls, instances, culled
 copies, shadow draws/casters, lights, triangles and CPU recording time).
 `debug_stats()` adds per-cascade counts and renderer implementation counters.
 
@@ -1752,7 +1886,10 @@ passes and copies; a cut that passes it is cut short, never written out of bound
 `scene.debug.stats_readback` reads them back at the end of `render()` (waiting for the GPU, as `pick` does: for tools and tests) into `debug_stats()`
 (`clusters_drawn`, `triangles`, `cluster_overflow`, `cluster_triangles_all`); without it the GPU-only counters are 0, `triangles` excludes GPU-selected geometry (`triangles_complete` is false), and `draws`, `shadow_draws` count the multi-draws.
 `Renderer3D::read_cluster_picks` lists the clusters it chose. `debug_stats().cluster_gpu` says which cut a render made.
-`scene.debug.gpu_culling = false` selects the CPU cut. Alpha-blended copies are never cut.
+`scene.debug.gpu_culling = false` selects the CPU cut. Alpha-blended copies are never cut. The cut runs on the Vulkan and Metal drivers
+only: its indirect draws carry the copy's slot as the argument's first instance and the vertex shader reads `instances[first + gl_InstanceIndex]`,
+which Vulkan's `gl_InstanceIndex` and Metal's `instance_id` include and Direct3D 12's `SV_InstanceID` does not (SDL_GPU promises nothing), so on
+any other driver `gpu_driven_clusters` (and `occlusion_culling`) is false and the CPU cuts, with one line in the log.
 
 **Occlusion culling** (`scene.lod.occlusion = {.enabled = true}`; off by default; `RendererCapabilities3D::occlusion_culling`). Clusters hidden
 behind other geometry are not drawn. It needs the selection, the GPU cut and clustered meshes (else it is ignored, with one line in the log), and the picture
@@ -1785,6 +1922,7 @@ kin::SceneSession3DOptions options;
 options.viewport = {960, 540};
 options.view.samples = 1;
 // Optional: no physics world or scratch pool exists by default.
+// Set contact_events = true in the configuration when gameplay consumes PhysicsContacts3D.
 options.physics = kin::World3DConfig{
     .max_bodies = 256, .max_body_pairs = 1024,
     .max_contact_constraints = 1024, .temp_memory_bytes = 2 * 1024 * 1024};
@@ -1837,8 +1975,8 @@ collects local lights/models/ropes, then calls `compose`. `render()` collects an
 Custom gameplay ordering can use `world()`, `bodies()` and `rendering()` directly instead
 of `step`. The host remains responsible for input, fixed-step scheduling, compositing,
 UI and scene-stack enter/suspend/resume policies. A host `Scene::world()` can
-return `session.world()` for the existing inspection tools. Lua-authored scenes are
-explicitly rejected; continue using `ScriptScene` for its Lua context and callbacks.
+return `session.world()` for the existing inspection tools. Scenes with a `script`
+use the Lua workflow below through the same session and frame stages.
 
 Audio is opt-in: give `options.audio` and `options.audio_catalog` (both outlive the
 session) and each `step` runs the ECS audio bridge after the Audio phase's systems, so
@@ -1898,6 +2036,324 @@ Authored collision recipes and character settings use the same component registr
 see [physics authoring](physics_3d.md#authored-collision-and-characters). Physics-enabled
 sessions cook these CPU assets before body creation, watch their sources, and retain
 the active world on failed reload. `camp_walk` hosts the playable authored camp.
+
+### Lua gameplay in a 3D scene
+
+`SceneSession3D` loads the optional `script` in a `.kinscene`, relative to the
+content root, including scripts and `require` modules in mounted `.kinpak` files.
+It reuses the Lua ECS API (`scene:authored`, `get`, `patch`, queries and
+`register_system`) and the session's native stages. Do not also construct a
+`ScriptScene` or run another ECS/physics frame loop for that world.
+
+```json
+{"schema":"kin.scene/1", "script":"scripts/game.lua", "entities":[]}
+```
+
+```cpp
+options.scripts.input = &context.input;
+options.scripts.app = &context.app;
+// Optional scripts.bind adds host APIs to every fresh VM.
+// Optional scripts.components supplies legacy typed component glue.
+// Ordinary registered native/data components use the shared registry already.
+```
+
+These services and custom binding captures outlive the session. Missing input
+reads false; `ctx.app:quit()` without an app reports a Lua error. Forward
+`session.collect_actions(actions)` and `session.write_report(json)` from the host,
+checking their boolean results. They run between frames. The host still owns
+fixed stepping and view compositing.
+
+```lua
+local crate
+function on_load(scene)
+    crate = scene:authored("crate")
+    -- Configure asset/collider/body fields before native bodies bind.
+end
+function update(ctx)
+    if ctx.input:pressed("launch") then
+        scene3d.impulse(scene3d.entity("crate"), {x=0,y=6,z=0})
+    end
+end
+function collect_actions(actions) actions:add("launch") end
+function write_report() return {height=crate:get("Transform3D").position.y} end
+```
+
+Lifecycle and failures:
+
+- `on_load(scene)` runs in preparation after initial asset binding and the C++
+  initializer, before body synchronization. Configure entities and register
+  systems here. Native `scene3d` gameplay operations need activation.
+- `on_enter(ctx)` runs against the candidate's bound physics during activation.
+  Enter and validation must succeed before replacing the old world. Existing
+  bindings are configured in load; enter can query physics, apply impulses and
+  queue prefabs. Cancelled preparations never call enter.
+- `update(ctx)` runs once per `step(dt)`, before ECS Input. Lua systems run at
+  their declared phases; physics, animation, particles and audio advance through
+  the same native stage boundaries as C++.
+- `on_exit(ctx)` runs once on successful replacement/unload while old services
+  live. Cleanup errors are logged and cannot veto teardown. Exit, reports and
+  action collection cannot submit native prefab commands or impulses.
+- Failed load/enter preserves the current world and VM. Failed update/system
+  execution returns false with Lua diagnostics and cancels its uncommitted
+  commands. Earlier gameplay/native effects are not rolled back. Custom bindings
+  must avoid external side effects in preparation/enter when those effects need
+  transactional replacement.
+
+Runtime position/rotation and game-component writes use the reflected API.
+Resource, collider/body setup, scale and particle capacity changes belong in
+load-time configuration or explicit between-frame edits/reloads. Use the native
+3D lifecycle for managed prefabs rather than deleting their members through the
+raw ECS API.
+
+The global `scene3d` table exposes checked gameplay operations:
+
+| Function | Result |
+|---|---|
+| `available()` / `physics_available()` | Active scene / usable physics |
+| `entity(authored_id)` | Checked scene-generation handle with `id` and `alive()` |
+| `raycast(from, to[, {mask, sensors, ignore}])` | `nil` for a miss, otherwise `{entity, position, normal, fraction, sub_shape}`; entity is absent for unmapped native obstacles |
+| `impulse(entity, vector)` | `true` for a live ordinary dynamic body, `false` for a stale/unavailable/non-dynamic target |
+| `spawn(path_or_prepared_or_pool[, {position, rotation, scale, parent}])` | Deferred prefab request |
+| `preload(path)` | Deferred preparation request; successful result is `request.prepared` |
+| `create_pool(prepared[, {capacity=16}])` | Deferred fixed-capacity pool request; successful result is `request.pool` |
+| `pool_stats(pool)` | Snapshot `{capacity, active, available, acquired, reused, exhausted}`, or `nil` for a stale pool |
+| `release(prepared_or_pool)` | Deferred release request; release pools before their prepared prefab |
+| `despawn(prefab_or_spawn_request)` | Deferred despawn request |
+| `character_input(entity, command)` | Replace the controller command; `false` for a stale entity or absent native character |
+| `character_state(entity)` | Last synchronized controller state, or `nil` |
+| `contact_events([entity])` | Snapshot of the last native rigid-body contact batch, optionally filtered to either side |
+| `character_events([entity])` | Snapshot of the last native character event batch, optionally filtered to that character |
+| `set_animation(entity, options)` | Set base playback options; `false` for a stale/missing animator or unknown clip |
+| `set_animation_parameter(entity, name, value)` | Set a boolean or finite numeric state-machine/blend parameter |
+| `trigger_animation(entity, name)` | Set a trigger consumed by the authored state machine |
+| `animation_state(entity)` | Playback configuration, current machine state, base time and `finished`, or `nil` |
+| `play_action(entity, name[, mode])` | Checked playback handle, or `nil` for missing/invalid/busy actions; mode is `if_idle` (default) or `replace` |
+| `cancel_action(action[, fade_seconds])` | Cancel that playback only; default `-1` uses its configured fade-out |
+| `action_status(action)` | `playing`, `finishing`, `completed`, `cancelled` or `superseded` |
+| `action_event_valid(action)` | Whether a marker from that playback still belongs to the actor's current action |
+| `animation_events(entity)` | Marker snapshot array and dropped-marker count, returned as two Lua values |
+| `shape({kind, ...})` | Reusable immutable convex query shape |
+| `raycast_all(from, to[, options])` | Bounded hit array and overflow flag |
+| `shape_cast(shape, position, displacement[, options])` | Nearest sweep hit or `nil`; also includes `shape_position` and `penetration` |
+| `overlap(shape, position[, options])` | Bounded overlap array and overflow flag |
+| `set_ik(entity, name, options)` / `ik_state(entity, name)` | Control an existing constraint / read its weight and target state |
+| `traversal_input(entity, command)` / `traversal_state(entity)` | Replace traversal commands / read native grips, mode and resource |
+| `set_traversal_resource(entity, value)` | Set the character's native resource (clamped to its configured maximum) |
+| `start_ragdoll(entity[, options])` / `hand_over_to_ragdoll(entity[, options])` | Start body simulation / hand over a character controller |
+| `blend_ragdoll(entity, alpha, seconds)` / `ragdoll_get_up(entity, seconds)` | Blend body influence / return to animation without clearance testing |
+| `animate_ragdoll(entity)` / `set_ragdoll_subtree(entity, joint, weight)` | Restore animation / set a named subtree's body influence |
+| `recover_from_ragdoll(entity[, options])` | Clearance-tested recovery result `{recovered, blocked, place}`, or `nil` |
+| `ragdoll_state(entity)` / `ragdoll_events([entity])` | Native mode/body snapshot / non-consuming event batch |
+| `rope_state(entity)` / `rope_points(entity)` | Native length/tension state / copied polyline |
+| `rope_closest_point(entity, position)` / `rope_point_at(entity, segment, fraction)` | Closest sample / sample a one-based segment |
+| `set_rope_length(entity, length)` / `reel_rope(entity, length, speed)` | Set the next Physics stage's target length, instantly / at metres per second |
+| `rope_events([entity])` | Non-consuming break-event snapshot |
+
+Vectors are finite `{x,y,z}` tables; optional rotations are unit `{x,y,z,w}`
+quaternions. Prefab paths stay relative to the content root. Queries read the
+last synchronized physics state and never step or synchronize it. Unavailable
+physics queries, invalid arguments and stale ignore filters report Lua errors.
+Handles expose no mutable body IDs and retain no world.
+
+`character_input` replaces the whole `CharacterInput3D`, with defaults for omitted
+fields; it does not patch the previous command. `move` is `{x,y}` (right/forward),
+`forward` is a world `{x,y,z}` direction (default -Z), and `jump`, `crouch`, `sprint`
+are booleans. The native controller clamps movement length to one. Jump is a held
+level with native edge detection. Submit each fixed step, including a neutral command
+when movement stops. Commands persist until replaced. The call does not step physics:
+`update`/Input/PrePhysics commands affect that frame's native Physics stage; commands
+submitted after Physics affect the next one.
+
+```lua
+local player, action
+function on_enter(ctx) player = scene3d.entity("player") end
+function update(ctx)
+    local right = ctx.input:held("right") and 1 or 0
+    local left = ctx.input:held("left") and 1 or 0
+    assert(scene3d.character_input(player, {
+        move={x=right-left,y=0}, jump=ctx.input:held("jump")
+    }))
+    if ctx.input:pressed("interact") then
+        action = scene3d.play_action(player, "pickup") or action
+    end
+end
+```
+
+Character state includes `position`, `velocity`, `up`, `ground`, `ground_entity`,
+`ground_normal`, `ground_velocity`, `ground_speed`, `vertical_speed`, `crouching`,
+`stand_blocked`, `air_time`, `height` and `jumped`. Ground is `on_ground`,
+`on_steep_slope`, `sliding` or `in_air`; `ground_entity` is absent for an unmapped
+native obstacle. No physics service gives `false` for character input and `nil`
+for character state, while animation remains available.
+
+Read contacts once in a PostPhysics system to react to the current step.
+`contact_events` requires the host to enable `World3DConfig::contact_events`;
+otherwise its batch is empty. Persist records additionally require `persist_events`.
+Character events do not require this option. Both event functions report a Lua
+error without an active physics service or with a stale filter handle. They never
+drain native events or retain a history. Rows and their nested vectors are copies;
+editing a Lua snapshot cannot edit the simulation.
+
+Contact rows contain `a`, `b`, `kind` (`begin`, `persist`, `end`), `sensor`,
+`position`, `normal`, `closing_speed` and `point_count`. The normal points from
+native side a to b; filtering does not swap sides. Character rows contain
+`character`, `other`, `kind`, `sensor`, `position`, `normal`, `speed`, `jumped`,
+`hand` and `reason`. Kinds use snake_case native event names, including `landed`,
+`left_ground`, `hit_head`, `contact_begin` and `contact_end`; traversal reason codes
+are the native numeric values. Entity fields are checked scene handles, absent
+when their original native binding is gone or unmapped. A reused user ID does not
+retarget an old event to a different body or pooled lease.
+
+`set_animation` accepts `clip`, `speed`, `loop`, `playing`, `fade_seconds`, retaining
+unspecified fields. It checks all options before applying them; invalid/nonfinite
+values and unknown options raise a Lua error. Explicit clip selection requires a
+compatible model clip and no authored state machine. For a machine, set parameters
+and triggers instead. Changing `loop` updates the current base playback without
+restarting its clock or its action. `CharacterAnimationLink3D` still writes its configured
+locomotion parameters during Physics; use other parameter names or an appropriately
+ordered system when providing an override. Animation mutation methods require an
+active enter/update callback or system, like impulses. Declare writes to `Animator3D`
+or `CharacterController3D` in systems that mutate them, and reads for their snapshots.
+Successful immediate gameplay writes are not rolled back if a later callback fails.
+
+Actions use the existing authored `.kinanimator` definitions and one native action
+slot. Base locomotion continues underneath. Handles contain a checked actor and one
+playback token, retain no actor/model/world, and cannot cancel a different actor's
+action. Replacing playback supersedes its old handle; destroying/replacing the actor
+also makes old handles superseded. Cancellation returns `false` when it cannot affect
+that playback. A new action or reload does not reuse an old playback identity.
+
+Read animation markers once in an Audio system, after native Animation. Register
+one owner for each actor's gameplay marker handling; a native dispatcher may also
+drain the batch. `animation_events` is a non-consuming snapshot of the current batch,
+not a queue. Rows contain `channel`, `name`, `value` and, for action markers, `action`.
+The native batch is bounded to 16 entries and reports overflow through the second
+return value. Markers from superseded/cancelled actions are omitted. If an earlier
+handler cancels/replaces an action, check each copied marker's ownership before use:
+
+```lua
+local events, dropped = scene3d.animation_events(player)
+for _, event in ipairs(events) do
+    if not event.action or scene3d.action_event_valid(event.action) then
+        -- Handle the marker. This handler may cancel/replace an action.
+    end
+end
+```
+
+Requests have `status` (`pending`, `succeeded`, `failed`, `cancelled`, `invalid`),
+`error`, `prefab`, `prepared` and `pool`. The last two are `nil` until their
+respective preparation operation succeeds. Read `prefab.root` after spawn success; its checked handle becomes
+stale after despawn/replacement. Lua systems submit through their scheduler
+command buffer, including failure/discard rules. Enter/update use the host's
+buffer. Commands execute at the normal Physics/PostPhysics/Animation/final
+boundaries; submission does not imply that binding/capacity checks succeeded.
+
+Script/module sources join explicit `changed_sources()` / `reload_if_changed()`.
+Reload creates a fresh world and VM, resetting script locals; failed reloads keep
+the last good version. Poll between frames; no background watcher is added.
+Changes after preparation remain detectable after activation.
+
+Build `lua_range`: WASD moves, Space jumps, Shift sprints, C crouches, E launches,
+F plays the pickup action, R reloads and Escape exits. The C++ host in
+`examples/lua_range/main.cpp` owns services/presentation; gameplay is
+`scripts/lua-range.lua` and `scenes/lua-range.kinscene` under Summit content,
+sharing its existing CC0 crate and survivor art. Headless runs automatically walk,
+jump, launch crates and play an action; the report includes contacts and markers.
+The script prepares and warms an eight-slot crate pool, then acquires/returns
+leases; the report includes reuse and exhaustion counts.
+
+Prepare explicitly, wait for successful request completion, then acquire instances:
+
+```lua
+local loading, warming, pool
+function on_enter(ctx) loading = scene3d.preload("prefabs/crate.kinprefab") end
+function update(ctx)
+    if loading.status == "failed" then error(loading.error) end
+    if loading.status == "succeeded" and not warming then
+        warming = scene3d.create_pool(loading.prepared, {capacity=8})
+    end
+    if warming and warming.status == "failed" then error(warming.error) end
+    if warming and warming.status == "succeeded" then pool = warming.pool end
+    if pool and ctx.input:pressed("launch") then
+        local request = scene3d.spawn(pool, {position={x=0,y=2,z=0}})
+        -- Retain the request; scene3d.despawn(request) returns its lease.
+    end
+end
+```
+
+Preparation and warm-up may load assets and allocate; ordinary pooled acquisition
+uses the native fixed hierarchy and already bound assets. Capacity defaults to 16;
+Lua accepts integer capacities 1..10000, further constrained by the host's
+prefab/entity/pool budgets. Exhaustion fails the request instead of growing the
+pool. Pool instances support ordinary rigid bodies, fixed scale and no external
+parent; controllers, ragdolls and ropes use ordinary spawning. Release destroys
+active leases too. Reload/unload invalidates all resources; failed callbacks and
+prepared scene replacement cancel uncommitted resource commands exactly like
+spawn/despawn. Do not release a prepared prefab until its pools are released. Lua pools use
+the fixed prefab recipe; custom native reset/release callbacks use the host API.
+
+Query shapes accept `box` with positive `half_extents`, `sphere` with positive
+`radius`, `capsule`/`cylinder` with `half_height` and `radius`, or `convex_hull`
+with 4..256 nondegenerate `points`. Construct once and reuse; shapes need no active
+physics service. Query options share `mask`, `sensors`, and a checked `ignore`
+entity. Sweeps additionally accept `rotation` and `initial_overlap`; overlaps
+accept `rotation`. `raycast_all` and `overlap` accept integer `capacity` 1..256
+(default 32) and return two values: hit array, overflow flag. Hits retain native
+ordering and expose checked entity handles only for mapped bodies. Snapshots do
+not remain live query results. Invalid input raises a Lua error; a miss gives
+`nil` or an empty array. No query advances simulation.
+
+`set_ik` patches an existing named constraint; unknown constraints return `false`.
+Options are `target` (world vector, checked scene entity, or `false` to clear),
+`offset` (entity-local), `weight` (0..1), `fade_seconds`, `pole_position` or
+`pole_direction` (model space), `match_rotation`, `target_rotation` (world unit
+quaternion), and `rotation_weight` (0..1). Unspecified fields stay unchanged;
+all options validate before mutation. Scene targets check scene generation and
+pool lease on every native animation/solve: recycling a target fades the old grip
+out and never follows its replacement. `ik_state` includes `weight`,
+`current_weight`, `target_valid`, `has_last_target` and optional `last_target`.
+Target validity updates during native Animation; the solved pose and last target
+update during IK/collection, as in C++.
+
+Traversal commands replace `grab` (boolean limb entries 1..4), `reach` (world
+vector), `pull_up`, `jump_off` and `drop`, with neutral defaults for omitted
+fields. They persist until replaced; native edge rules and phase ordering are
+unchanged. State includes `enabled`, `mode` (`walking`, `hanging`, `mantling`),
+`limb_count`, `held`, copied `grips`, mantle/swing/anchor data and `resource`.
+Grips include phase, kind, checked obstacle `entity`, position/normal/surface
+frame, strength, reach/slip progress, surface tag, drain, fixed/ledge and quality.
+Traversal events arrive through `character_events`; resource writes affect the
+next physics step.
+
+Ragdoll start options are `blend_seconds`, optional `velocity`, `impulse_bone`
+(native zero-based bone index, default -1), `impulse`, and optional world
+`impulse_point`. An impulse requires a valid bone index; invalid bone indices
+raise an error before changing mode. Hand-over accepts the same impulse fields plus `inherit_velocity`
+(default true), with a default 0.1-second blend, and uses the character's velocity.
+Recovery accepts `get_up_seconds`, `max_ground_distance`, `mask`, and
+`allowed_penetration`. Its `place` includes `found`, position/rotation, `face_down`,
+`lying` and `height`. Use clearance-tested recovery for a controller; the low-level
+get-up blend deliberately performs no clearance test. State includes mode
+(`animated`, `ragdoll`, `blend`, `get_up`), alpha/target alpha, dynamic/awake body
+counts, maximum speed, settled and frozen. Events are `started`, `settled`,
+`recovered` or `blocked`, with checked `entity` when still mapped.
+
+Rope state includes segment count, rest/target/current length, broken state, both
+anchor force vectors and tensions. Points contain position/tangent. Closest-point
+results additionally contain a one-based segment, segment fraction `t`, whole-rope
+`along` and distance. `rope_point_at` uses a segment and fraction 0..1. Native
+minimum-length clamping still applies. Break rows contain `kind="broke"`, checked
+`entity`, native joint index (0 start anchor; segment count end anchor), and force.
+Ragdoll/rope event calls are snapshots of the current native batch, not drains;
+read once in PostPhysics. A helper-generated `blocked` event is available immediately
+after recovery and until the next native Physics stage. Missing native components/services return `false` for
+controls and `nil` for state; event/query calls without physics raise Lua errors.
+
+Authored `.kinanimator` files define IK chains; native host initialization still
+supplies traversal descriptors and ragdoll/rope construction where there is no
+authored schema. These bindings control existing native gameplay components;
+they do not expose arbitrary Lua callbacks inside physics solvers or duplicate
+native simulations. Declare component reads/writes for Lua systems as above.
 
 ### C++ runtime prefab gameplay
 
@@ -2393,7 +2849,7 @@ maps and other variants. Different sampling or color-space requirements have sep
 entries. Texture paths are file paths, not percent-encoded glTF URIs. Model3D UVs and
 tangents must suit the maps; the importer supplies the existing tangent generation.
 
-`Assets3D::load_materials(path, model, variant, &error)` returns an existing-style
+`Assets3D::load_materials(path, model, variant)` returns an existing-style
 `AssetHandle<MaterialBinding3D>`. The binding owns one material value per part and
 shared texture handles, with a weak model identity. It never clones or pins geometry.
 Bindings for the same file/model/variant share a weak cache entry; its default metadata
@@ -2454,7 +2910,8 @@ Other field names follow the native descriptor: `surface_only`, `spread`,
 `velocity_min/max`, `drag`, `wind_influence`, `size_start/mid/end`, `alpha_start/end`,
 `fade_in`, `colour_variation`, `frames_per_life`, `frame_random`, `ground`,
 `ground_height`, `bounce`, `axis`, `stretch_min`, `atlas_columns/rows/frames`,
-`blend_frames`, `softness`, `ring`, `soft`, `soft_distance`, `lit`, `fogged`, `sort`.
+`blend_frames`, `softness`, `ring`, `soft`, `soft_distance`, `lit`,
+`receives_shadow`, `casts_shadow`, `shadow_cutoff`, `fogged`, `sort`.
 The component also exposes `seed`, `rate_scale`, `enabled` and `emitting`.
 
 Optional `texture` is an asset reference relative to the common content root;
@@ -2477,6 +2934,11 @@ Set `emitting=false` to stop automatic births while existing particles finish vi
 `enabled=false` also hides the batch (particles continue aging). Bursts/clears use
 `entity.get_mut<ParticleEmitter3D>()->system.burst(count)` / `.clear()`. Bursts respect
 the native `max_particles` cap, including while automatic emission is stopped.
+
+`ParticleEmitter3D` exposes `receives_shadow` and `casts_shadow` (both default
+false), and `shadow_cutoff` (default `0.5`, range `[0,1]`), through scene/prefab
+fields, save/load, inspector edits and Lua field access. Reception needs `lit > 0`;
+casting is independent of lighting, just like the native `ParticleLook3D` settings.
 
 `ParticleLimits3D` defaults to 128 emitters, 20,000 configured particles per emitter
 and 65,536 across the scene. The sum includes disabled/stopped emitters. Configure
@@ -2913,10 +3375,18 @@ if (!kin::instantiate_scene3d(level, world, assets)) {
 kin::SceneFrame3D frame{world, rendering};
 // Each fixed update: frame.step(dt), checking frame.diagnostics() on failure.
 kin::Scene3D scene;
-kin::ViewOptions3D options;
+kin::ViewOptions3D options{.pick = true}; // pick is the game's; the rest the scene's
 // Each render: frame.collect(scene, &options), then custom draws and the game's
 // own Renderer3D::render(view, scene). The game owns/reuses/resizes its View3D.
 ```
+
+`collect` fills `options` from the scene's `SceneEnvironment3D` (samples,
+background, HDR, exposure, bloom) and keeps `options.pick` as the game set it:
+a pick pass is the game's choice, not an authored one, on this path as in the
+session (`scene3d_view_options` is the one rule). Make the view from the
+collected options, and again when they change; `Renderer3D::pick(view, pixel)`
+then names the mesh under a pixel by its `MeshInstance3D::id` (an entity's low
+32 bits, or the renderer's own `id`).
 
 `SceneAssetRuntime` still loads `.kinscene`/`.kinprefab` through the shared
 registry. `instantiate_scene3d` binds only the new instance's models, materials,
@@ -2925,7 +3395,8 @@ binds collider assets too. It neither creates nor steps native physics. Empty
 instances do not bind unrelated entities. Additive loads preserve the world's
 scene header by default; `update_scene_header` explicitly opts into replacing it.
 Authored IDs must be unique in the destination world. Register native components
-before loading. Lua scenes use `ScriptScene` instead.
+before loading. Scripted 3D scenes use `SceneSession3D`, which owns Lua execution;
+the additive helper refuses them rather than omitting their lifecycle.
 
 Call `level.clear(world)` to remove the instance while the world is alive. Its
 entity descendants are owned with it: detach game-owned children first. A failed
@@ -2995,11 +3466,14 @@ if (!r3d.render(view, scene)) {
 ```
 
 Stop or choose a fallback after a failed load; do not dereference the failed
-handle. `Renderer3D`, `Assets3D`, `SceneFrame3D` and `SceneSession3D` report the
+handle. `Renderer3D`, `Assets3D`, `PhysicsAssets3D`, `SceneFrame3D` and `SceneSession3D` report the
 last attempted operation. Successful operations clear old errors; observing
 capabilities, counters or current state does not clear them. A valid pick with
 no hit is an ordinary empty result with no error. Diagnostic references remain
-valid until the next operation on their owner. Calls belong on the owner thread.
+valid until the next operation on their owner. Calls belong on the owner thread. Resource operations have one diagnostic channel;
+legacy error-output parameters and `ModelFile3D::error()` are removed. Stateless
+CPU validators and parsers retain their documented result/output contracts; a
+query miss or a stale checked handle is distinct from an operational load failure.
 
 `Scene3D` is a command accumulator: it retains only the first rejected submission
 until `clear()`. Invalid material counts, insufficient poses, index ranges and
@@ -3016,7 +3490,7 @@ false and preserves records, bounds and revisions; a successful update clears
 its last error. Diagnostic storage lives with the shared batch data, adding no
 fields to every retained draw handle. Asset load failure leaves existing asset
 handles valid. Model3D-file reload failure keeps the last good model and reports
-through `diagnostics()`; `error()` remains a compatibility snapshot.
+through `diagnostics()`.
 Missing required meshes or texture maps fail the load instead of returning a
 partially loaded model as a successful result.
 

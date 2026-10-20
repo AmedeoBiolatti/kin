@@ -9,6 +9,18 @@ releases may change APIs.
 
 ### Added
 
+- Tested `kin-gltf/1` export profile with CPU/GPU asset acceptance regressions.
+  Reject distinct skin palettes, oversized/unsupported skins, morphs, mixed poses
+  and incompatible UV placements as whole assets; preserve last-good reloads.
+  Navmesh construction now applies agent height and radius with conservative
+  whole-triangle headroom and boundary clearance, including slope margins.
+
+- Lua gameplay in `SceneSession3D`: transactional script loading/module reloads,
+  shared ECS queries/systems, input/app services, checked 3D raycasts/impulses and
+  deferred prefab spawn/despawn. Lua shares native phases and command cancellation.
+  Add `lua_range`, CPU/GPU/content-pack regressions and lavapipe CI coverage.
+  Existing 2D `ScriptScene` keeps its callback order.
+
 - Separate the compact 20-field `RenderStats3D` game summary from explicit
   `RenderDebugStats3D` implementation instrumentation via `debug_stats()`.
   Move forced LOD, CPU/GPU cluster comparison, blocking readback and frozen TAA
@@ -42,10 +54,23 @@ releases may change APIs.
 - 3D audio in the ECS: `AudioEmitter` and `AudioOneShot` are placed by `WorldTransform3D` (with `offset_3d`),
   the listener comes from the `AudioListener` entity or the active `SceneCamera3D`, and `SceneSession3D` runs
   the audio systems in its Audio phase when `SceneSession3DOptions::audio` is set.
+- `World3D::add_character_impulse` and `set_character_velocity`: wind, knock-backs and launch pads push the
+  capsule, braked by the controller on the ground, carried in the air, launching it when sent upward.
+- Live body settings: `World3D::set_mass`, `set_gravity_factor`, `set_linear_damping`, `set_angular_damping`,
+  `set_friction` and `set_restitution` with getters, refusing owned (character, ragdoll, rope) bodies and waking
+  what a change can unsettle. They are setup, not part of `state_hash`/`save_state`.
+- Grab and climb finds a ledge whose top is a neighbouring body when the held face ends there (not across a gap,
+  under a parapet or below a roof). Added `World3D::shape_cast_all` (vector and bounded forms) and opt-in
+  `World3DConfig::activation_events` (bodies falling asleep and waking, as events).
+- Navigation meshes: `kin/pathfinding/navmesh3d.hpp` builds a triangle navmesh from a soup or a `MeshData3D`
+  (welding, slope limit, edge adjacency, regions) with `nearest`, `find_path` (A* corridor plus funnel string
+  pulling, within about 1% of the shortest path), `raycast`, `region_of` and `random_point`; deterministic,
+  CPU only, in the 2D-only build too. `kin_navmesh3d_tests` checks optimality against a visibility graph.
 - `kin::BakeCache` (kin/assets/bake_cache.hpp): an opt-in folder of baked results keyed by a hash of their
   inputs, with atomic writes, checksummed entries and least-recently-used eviction. `Renderer3D::set_bake_cache`
   restores cluster hierarchies and level-of-detail chains byte-identical instead of rebuilding them;
-  `kin_reference --bake-cache DIR` uses it.
+  `PhysicsAssets3D::set_bake_cache` restores cooked hull and triangle-mesh colliders through the new
+  `Shape3D::save_binary`/`restore_binary`. `kin_reference --bake-cache DIR` uses it.
 - GPU-compressed textures: KTX2 and DDS readers (kin/assets/texture_file.hpp) for BC1/3/4/5/7 and ASTC 4x4,
   refusing supercompressed, cube, array, 3D and malformed files with a reason; `Renderer2D::create_texture_compressed`
   uploads the file's own mip chain (SDL_GPU), `Assets3D::load_texture` reads `.ktx2`/`.dds`, and glTF images in
@@ -594,6 +619,11 @@ releases may change APIs.
   `--gpu-pass-markers`. Remove `kin_reference --ab` and stale experiment counters.
 
 
+- Experimental 3D physics: `World3D::save_state` blobs carry their length and a checksum, and
+  `restore_state` checks the whole blob before touching the world (a short or corrupt blob
+  changes nothing and returns false); blobs saved before this are refused. Kinematic bodies
+  report their mass, so they can become dynamic later with `set_motion`, and `state_hash` of a
+  world with kinematic bodies changes.
 - Experimental 3D models: the glTF reader refuses what it cannot read correctly instead of
   loading it silently wrong: Draco/meshopt-compressed and sparse accessors (they read as zeros),
   absolute paths and `..` that leaves the content root or the mounted pack, nodes nested over
@@ -625,17 +655,39 @@ releases may change APIs.
   - Particle wind is evaluated per 1/120 s step with the sines' time phases precomputed and
     a vectorised polynomial sine (20k particles with gusts and turbulence: 16 ms to 0.57 ms
     per update; the wind field agrees with `Wind3D::velocity` to 1.4e-5 m/s).
+  - The ECS physics bridge re-reads its bound set only when flecs reports a structural change
+    (or a rebuild, refusal, motion change or lost body asks for it), stamps static and
+    kinematic transforms, and reuses event vectors when publishing singletons (500 resting bodies:
+    0.085 ms to 0.038 ms a step of bridge overhead). `SceneSession3D::step` skips the editor
+    hook's transform propagation and particle-budget check when no later-phase system ran.
   - Animation blends in place into the player's scratch poses and caches the animator's
-    state/layer keys (five times fewer allocations in the skeleton tests).
+    state/layer keys (five times fewer allocations in the skeleton tests). `World3D::shape`
+    returns the stored handle without allocating; Summit turns `contact_events` off.
   - Clustered meshes release their welded CPU vertices after upload (`MeshClusterBuild3D`
     holds them only while a mesh is made; `MeshClusters3D` is the hierarchy alone), and flat
     unindexed meshes' LOD levels index shared zero-normal vertices instead of three per
     triangle per level (a 2 M-triangle soup with 4 levels: -168 MB resident, -325 MB peak;
     the levels then ignore a normal map, as flat clusters do). Benchmarks
-    `kin_render3d_bench` (batch edits, wind) is added.
+    `kin_render3d_bench` (batch edits, wind) and `kin_physics3d_bench ecs` are added.
 
 ### Fixed
 
+- Experimental 3D review: ordinary and shipping builds leave `KIN_EXPERIMENTAL_3D` off;
+  the `3d` preset and CI opt in explicitly. Jolt follows kin's MSVC runtime selection.
+  Renderer tests have a software-GPU timeout and reserve timing comparisons for hardware GPUs.
+- Experimental 3D physics: deterministic contact payload ordering, compound child IDs through
+  offset wrappers, waking neighbours after static-body edits, teleport interpolation resets,
+  rollback motion types and temporary masses, and arbitrary convex-face debug drawing.
+  Contact recording now defaults off; games consuming contact events must opt in.
+- Experimental 3D rendering and scenes: transparent additive output is encoded, contact shadows
+  respect sun strength, indirect cluster draws use the CPU fallback on D3D12, failed mesh-pool
+  fence waits retain the fence, and authored environments preserve caller-owned picking.
+  LOD and additional shadow settings can be authored. Collected scenes reuse two retained
+  snapshots with threshold hysteresis; particles use the existing fog-colour table.
+- Experimental 3D assets and simulation: equivalent skins share a palette and animation channels
+  reach every skin that uses a joint; supported texture transforms are applied and incompatible
+  transforms produce diagnostics. Root motion retains multiple loops, IK handles larger skeletons,
+  particle catch-up is bounded, and the time-of-day clock accumulates in double precision.
 - Experimental 3D renderer: `pick()` before the first render or after a resize read an
   uncleared target; TAA gave a re-made mesh the history of the mesh freed at the same address
   (keyed by serial now); readback fence waits were released unchecked (a failed wait keeps the
@@ -647,8 +699,17 @@ releases may change APIs.
   tonemapped premultiplied colour over partial alpha (dark fringes on HDR edges); TAA blended
   black where a history sample was NaN; the environment filter spread a NaN texel.
 - Experimental 3D animation: root motion wrapped the wrong way at negative speed; a model with
-  several skins drew only the first skin's parts (the rest pose and one warning now); an
+  several skins drew only the first skin's parts (distinct unposed skins are diagnosed); an
   `Animator3D` kept pointing at a model that `ModelFile3D::poll` had replaced.
+- Experimental 3D physics: Jolt's capacity flags (manifold cache, body pairs, contact
+  constraints) were discarded: `World3D::step` returns a `StepReport3D`, logged once; the ECS
+  bridge re-cooked a refused body every step (once now, until its components change) and had
+  no way back from `restore_state` (`WorldPhysicsState3D::resync_from_world`); rope and ragdoll
+  bodies could be destroyed or reshaped from outside (`owner_of`; refused); a kinematic body
+  could not become dynamic; a rotated collider on an entity with a non-uniform scale is refused
+  (as the asset cooker refuses it) instead of being made the wrong size; capped event lists
+  kept the last events instead of the first; the ECS bridge, scene sessions and
+  particles compile without FMA contraction so a step is the same on GCC and Clang.
 - Experimental 3D: `SceneSession3D`'s error for a lifecycle request made while a replacement
   scene is prepared says the request is cancelled, not held.
 

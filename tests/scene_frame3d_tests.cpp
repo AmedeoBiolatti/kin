@@ -131,23 +131,70 @@ void external_frame() {
     }
     assert(rejected);
     world.raw().entity().set(Transform3D{.position = {0, 3, 8}}).set(SceneCamera3D{});
-    world.raw().entity().set(SceneEnvironment3D{.view = {.samples = 1}});
+    const auto environment = world.raw().entity().set(SceneEnvironment3D{.view = {.samples = 1, .hdr = true}});
     Scene3D scene;
-    ViewOptions3D view;
+    // The environment sets the picture; `pick` is the game's and survives it (the session's rule too).
+    ViewOptions3D view{.samples = 4, .hdr = false, .pick = true};
     scene.debug = {.force_level = 2, .gpu_culling = false, .stats_readback = true, .freeze_jitter = true};
     assert(frame.collect(scene, &view) && scene.camera.position == Vec3f(0, 3, 8) && view.samples == 1);
+    assert(view.hdr && view.pick);
     assert(scene.debug.force_level == -1 && scene.debug.gpu_culling && !scene.debug.stats_readback &&
            !scene.debug.freeze_jitter);
+    // Nor does an environment turn it on: a game that did not ask for a pick pass does not pay for one.
+    environment.get_mut<SceneEnvironment3D>()->view.pick = true;
+    view.pick = false;
+    assert(frame.collect(scene, &view) && view.samples == 1 && !view.pick);
+    assert(scene3d_view_options({.samples = 8, .pick = true}, {.samples = 2, .pick = false}).samples == 8 &&
+           !scene3d_view_options({.samples = 8, .pick = true}, {.samples = 2, .pick = false}).pick);
 }
 
 // Existing scene/prefab RGB triples keep their linear/HDR meaning through
 // reflected edits and collection, including checks on malformed edits.
+void retained_snapshots() {
+    struct MeshBackend final : IMeshBackend3D {};
+    Mesh3D mesh{std::make_shared<MeshBackend>(), 3, 3, {{-1, -1, -1}, {1, 1, 1}}};
+    kin::EcsWorld world;
+    register_render3d_components(world);
+    WorldRenderState3D rendering{world};
+    SceneFrame3D frame{world, rendering};
+    std::vector<flecs::entity> entities;
+    for (int i = 0; i < 300; ++i)
+        entities.push_back(world.raw().entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = mesh}));
+    Scene3D a, b;
+    assert(frame.collect(a) && a.draws().size() == 1 && a.draws()[0].batch);
+    const auto first = a.draws()[0].batch.identity();
+    entities[0].set(Transform3D{.position = {1, 0, 0}});
+    assert(frame.collect(b) && b.draws()[0].batch);
+    const auto second = b.draws()[0].batch.identity();
+    assert(first != second && a.draws()[0].batch.instances()[0].transform.m[12] == 0);
+    for (int i = 2; i < 8; ++i) {
+        entities[0].set(Transform3D{.position = {static_cast<float>(i), 0, 0}});
+        assert(frame.collect(a) && a.draws()[0].batch.identity() == first);
+        assert(b.draws()[0].batch.instances()[0].transform.m[12] == i - 1);
+        assert(frame.collect(b) && b.draws()[0].batch.identity() == second);
+    }
+    b.clear();
+    for (int i = 256; i < 300; ++i)
+        entities[i].set(MeshRenderer3D{.mesh = mesh, .visible = false});
+    assert(frame.collect(a));
+    const auto at256 = a.draws()[0].batch.identity();
+    entities[255].set(MeshRenderer3D{.mesh = mesh, .visible = false});
+    assert(frame.collect(a) && a.draws()[0].batch);
+    const auto at255 = a.draws()[0].batch.identity();
+    for (int i = 0; i < 8; ++i) {
+        entities[255].set(MeshRenderer3D{.mesh = mesh, .visible = true});
+        assert(frame.collect(a) && a.draws()[0].batch.identity() == at256);
+        entities[255].set(MeshRenderer3D{.mesh = mesh, .visible = false});
+        assert(frame.collect(a) && a.draws()[0].batch.identity() == at255);
+    }
+}
+
 void light_fields() {
     kin::EcsWorld world;
     register_render3d_components(world);
     WorldRenderState3D rendering{world};
     const auto lamp = world.entity("lamp").set(Transform3D{}).set(PointLight3D{});
-    const auto environment = world.entity("environment").set(SceneEnvironment3D{});
+    auto environment = world.entity("environment").set(SceneEnvironment3D{});
     auto& fields = world.components();
     assert(fields.patch_field(lamp, "PointLight3D", "color", Vec3f{4.0f, 0.5f, 0.125f}));
     assert(fields.patch_field(environment, "SceneEnvironment3D", "sun_color", Vec3f{2.0f, 1.0f, 0.25f}));
@@ -165,6 +212,16 @@ void light_fields() {
     assert(frame.collect(scene) && scene.lights.points.size() == 1);
     assert(scene.lights.points.front().color == lamp.get<PointLight3D>()->color);
     assert((scene.lights.sun.color == LinearRgb{2.0f, 1.0f, 0.25f}));
+    assert(fields.patch_field(environment, "SceneEnvironment3D", "lod_enabled", true));
+    assert(fields.patch_field(environment, "SceneEnvironment3D", "lod_error_pixels", 2.5f));
+    assert(fields.patch_field(environment, "SceneEnvironment3D", "sun_shadow_strength", .4f));
+    assert(fields.patch_field(environment, "SceneEnvironment3D", "fill_shadow", true));
+    for (int i = 0; i < 2; ++i) {
+        assert(frame.collect(scene) && scene.lod.enabled && scene.lod.error_pixels == 2.5f);
+        assert(scene.lights.sun_shadow_strength == .4f && scene.lights.fill_shadow.enabled);
+    }
+    environment.get_mut<SceneEnvironment3D>()->lod.bias = -1;
+    assert(!frame.collect(scene) && !frame.diagnostics().empty());
 }
 
 struct RuntimeState {
@@ -225,5 +282,6 @@ int main() {
     loader();
     external_frame();
     light_fields();
+    retained_snapshots();
     runtime();
 }

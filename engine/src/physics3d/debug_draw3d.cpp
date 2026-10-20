@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <vector>
 
 namespace kin {
 
@@ -123,8 +124,9 @@ void DebugDraw3D::jolt_shape(const void* erased, Vec3f com, Quatf q, Color color
     }
     case JPH::EShapeSubType::ConvexHull: {
         const auto* hull = static_cast<const JPH::ConvexHullShape*>(shape);
-        std::array<JPH::uint, 64> face{};
+        std::vector<JPH::uint> face;
         for (JPH::uint f = 0; f < hull->GetNumFaces(); ++f) {
+            face.resize(hull->GetNumVerticesInFace(f));
             const JPH::uint n = hull->GetFaceVertices(f, static_cast<JPH::uint>(face.size()), face.data());
             for (JPH::uint i = 0; i < n; ++i) {
                 const Vec3f a = com + q.rotate(from_jolt(hull->GetPoint(face[i])));

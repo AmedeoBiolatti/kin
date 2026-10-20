@@ -2,7 +2,7 @@
 
 `kin/physics3d` is rigid body physics for kin's experimental 3D work, on
 [Jolt Physics](https://github.com/jrouwe/JoltPhysics) 5.5.0 (MIT). It exists only with
-`KIN_EXPERIMENTAL_3D` (on by default; the build without it never fetches Jolt). The Box2D module
+`KIN_EXPERIMENTAL_3D` (off by default; `cmake --preset 3d` enables it, and the build without it never fetches Jolt). The Box2D module
 (`kin/physics`, 2D) is separate and unchanged. The API may change in any release; the plan and
 measurements are in [3d_plan.md](3d_plan.md) ("P2a - Jolt core - results", "P2b - queries, events, constraints, debug draw, ECS
 - results").
@@ -63,8 +63,10 @@ bodies.sync_bodies();
 ```
 
 An asset reference takes precedence over the component's primitive/programmatic shape.
-`PhysicsAssets3D::load_collider(path, scale, &error)` returns an existing-style
-`AssetHandle<CookedCollider3D>`. The cache shares immutable cooked shapes by normalized
+`PhysicsAssets3D::load_collider(path, scale)` returns an existing-style
+`AssetHandle<CookedCollider3D>`. A failed load returns an empty handle and contextual
+`diagnostics()` on the library; success (including a cache hit) clears prior errors.
+The cache shares immutable cooked shapes by normalized
 path and effective world scale. It owns only bounded weak lookup metadata (128 entries
 by default); scene bindings and bodies own live resources. Temporary geometry is
 discarded after cooking. `clear`, `trim` and `invalidate(source)` do not invalidate
@@ -77,6 +79,17 @@ within one model are limited to 16 MiB, and each recipe to 32,768 input vertices
 triangles. Each model allows 256 parts / 4,096 nodes / 64 hierarchy levels. These are
 authoring/cooking bounds, not a total live physics-memory budget. Configure them through
 the asset library or `SceneSession3DOptions::collision_limits`.
+
+**Bake cache.** `collisions.set_bake_cache(&bake)` (a `kin::BakeCache`, the renderer's or its own: see
+[Baked cache](rendering_3d.md#baked-cache)) keeps the shape cooked for each recipe with a convex hull or a triangle mesh
+(`Shape3D::save_binary`), and later runs restore it instead of cooking (primitives cook faster than a file is read, so they
+are not kept). The recipe and its geometry are still read and checked on every load (the budgets, the `source_files` that
+`invalidate` and the session's watcher use): the key is what cooking reads, each node's kind, sizes, placement and scale, the
+hull points and triangles as read, the load's scale and the limits, with Jolt's version and build features. An edited recipe or
+model is another key, never a stale shape. A restored shape collides as the cooked one does, to the bit (tested: the same ray
+hits and the same `state_hash()` after a body falls on each for 60 steps). `stats().baked` counts the restored shapes, `cooks`
+the cooked ones; a corrupt bake is refused and cooked again. A 16,200-triangle inline mesh: 19.8 ms cooked, 8.3 ms restored
+(most of it the recipe's JSON). Off unless set.
 
 `read_model_geometry3d` reads only model-space positions and indices, applying glTF
 node transforms. It loads no materials, images, animation or GPU objects. It preflights
@@ -148,8 +161,16 @@ for (;;) {                                       // the engine's fixed step
   step), `collision_steps` per `step()`, capacities (`max_bodies`, `max_body_pairs`,
   `max_contact_constraints`), `temp_memory_bytes`, `jobs` (a `kin::JobSystem*`, null is
   `default_job_system()`), `single_threaded`.
+* **Capacities.** Past `max_body_pairs` or `max_contact_constraints` Jolt drops, for that step, the contacts that did not
+  fit (bodies sink into each other or through the floor). `step()` returns a `StepReport3D` (`manifold_cache_full`,
+  `body_pair_cache_full`, `contact_constraints_full`; `any()`), `last_step()` keeps it, `overflowed_steps()` counts the steps
+  that overflowed since the world was made, and the log says it once a world for each kind, with the field to raise. Which
+  contacts go depends on the worker threads, so such a step is not deterministic across worker counts. Jolt 5.5 does not
+  say how many pairs or constraints a step used (its contact manager is private), so there is no reading to size by: size
+  for the busiest scene and watch the report.
 * `Body3DDesc`: shape, motion (`Static`, `Kinematic`, `Dynamic`), position, rotation, velocities,
-  `mass` or `density` (a dynamic body's mass is `mass` if above zero, else `density * volume`),
+  `mass` or `density` (a dynamic or kinematic body's mass is `mass` if above zero, else `density * volume`; a kinematic body
+  has it for when `set_motion` makes it dynamic, a mesh or height field has none),
   friction (a contact uses `sqrt(a * b)`), restitution (the larger of the two), damping, gravity
   factor, layer, `sensor`, `allow_sleeping`, `continuous` (swept against static geometry),
   `start_active`, `user_id` (yours; hashed).
@@ -166,10 +187,42 @@ for (;;) {                                       // the engine's fixed step
   dynamic one gets the velocities that reach the target in `dt` and still collides on the way, a static one is placed),
   `set_layer`, `set_sensor` / `is_sensor` after creation, `set_shape(body, shape)` (a crouch, a different size: build a shape of the
   new size; a dynamic body keeps its mass and takes the new shape's inertia; a mesh is refused for it), `bodies()` (the live ones by
-  number). `user_id` is the per-body user data (a `u64`, hashed; `set_user_id`).
+  number), `set_motion(body, Kinematic or Dynamic)` (velocities kept; a kinematic body becomes dynamic with the mass it was made
+  with; refused for a static body, a motion of `Static`, and a mesh, height field or shape of no volume made dynamic). `user_id` is
+  the per-body user data (a `u64`, hashed; `set_user_id`).
 * Reading: `position` (the body's origin), `centre_of_mass_position`, `rotation`, velocities, `mass`,
   `motion`, `layer`, `user_id`, `shape`, `is_active`; `activate` / `deactivate`; `contains`,
   `body_count`, `active_body_count`. `destroy_body` wakes what overlaps the body (Jolt does not).
+* **Sleep as events.** With `World3DConfig::activation_events` on (off by default: no listener is given to Jolt),
+  `activation_events()` / `drain_activation_events()` list the bodies that woke or fell asleep (`ActivationEvent3D {body,
+  user_id, active}`): a body made awake, pushed, `activate()`d or woken by a contact; one that settles or is `deactivate()`d.
+  Between steps they come in the order of the calls; what Jolt's simulation changes in a step comes as one group by body
+  number (its jobs find them in any order); the list is capped by `max_events` and a restore drops it, as the contact events.
+  A character's capsule never sleeps and is not reported.
+* **Live settings.** What `Body3DDesc` gave, changed without making the body again: `set_mass` (above 0; a dynamic body, or a
+  kinematic one that can have a mass, not a mesh or height field; the inertia is the shape's at that mass, and a
+  `set_added_mass` for the step stays on top), `set_gravity_factor` (any finite number: 0 floats, below 0 rises),
+  `set_linear_damping` / `set_angular_damping` (0 or more; dynamic and kinematic bodies), `set_friction` / `set_restitution`
+  (0 or more; every body, a static one too: a floor that freezes over), with the getters `gravity_factor`, `linear_damping`,
+  `angular_damping`, `friction`, `restitution`. The next step uses them (Jolt combines the two bodies' frictions for every
+  contact at every step). Each returns false, changing nothing, for a dead handle, a number out of range or not finite (said
+  once a world in the log), a static body where there is no motion to change, and an owned body (below: the ragdoll's or
+  rope's descriptor owns these numbers). A change that can end a rest wakes: a mass or gravity factor wakes the body, a
+  friction the body or, for a static or kinematic one, what touches it (a crate asleep on a slope that turns to ice slides).
+  Like a shape, a layer and the gravity they are the body's setup, not its state: `state_hash()` and `save_state()` do not
+  carry them, and a restore needs them as they were when it was saved.
+
+```cpp
+world.set_friction(ice_sheet, 0.02f);           // static: what rests on it is woken
+world.set_gravity_factor(balloon, -0.2f);       // rises
+world.set_mass(crate, world.mass(crate) * 2);   // the same push moves it half as fast
+```
+* **Owned bodies.** A character's capsule, a ragdoll's bones and a rope's segments belong to it: `owner_of(body)` says which
+  (`BodyOwner3D::None`, `Character`, `Ragdoll`, `Rope`), so a game can tell what a ray hit. `destroy_body`, `set_shape`,
+  `set_motion` and the live settings above refuse them (false, and a line in the log once a world for each kind of owner):
+  destroying a rope's segment would leave the rope reading a dead body (its tube collapsing to the origin), switching a bone
+  would fight the ragdoll's own modes. Destroy the rope or ragdoll instead. Queries, events, forces and the other calls take a
+  ragdoll's or rope's bodies as any body; a character's capsule refuses every call that changes it (the character moves it).
 
 ## Shapes
 
@@ -189,6 +242,12 @@ for (;;) {                                       // the engine's fixed step
 `volume()`, `centre_of_mass()` and `bounds_min()` / `bounds_max()` are in the shape's own space (a
 body's origin). A factory that cannot build returns an invalid handle (`valid()` false).
 
+`shape.save_binary(bytes)` appends Jolt's binary state of the shape and its children behind a header (the kind, the length
+and a checksum); `Shape3D::restore_binary(bytes, kind)` makes the same shape back, or an invalid handle for bytes that are
+short, long, corrupt (checked before Jolt reads them), of another kind or of another `Shape3D::binary_version()` (Jolt's
+version and build features). They are for caches on one machine (PhysicsAssets3D's bake cache), not for shipped content or
+the network.
+
 ## Layers
 
 A body is in one of 32 layers (`layers3d::Static` 0, `Dynamic` 1, `Kinematic` 2, `Character` 3,
@@ -206,11 +265,16 @@ platform). Keep the order of the calls that change the world the same between ru
 numbered in creation order with freed numbers reused last in, first out.
 
 * `state_hash()`: FNV-1a 64 over each body, in number order: number, generation, user id, motion,
-  layer, awake, position, rotation, velocities; floats bit for bit (NaNs as one NaN, -0 apart from
+  pending temporary mass when nonzero, layer, awake, position, rotation, velocities; floats bit for bit (NaNs as one NaN, -0 apart from
   +0). The same on every platform. Feed it to a lockstep check, or per frame to a test.
 * `save_state()` / `restore_state(bytes)`: the dynamic state, contacts included, for a rollback; the
-  restored world steps to the same bits. It needs the same set of bodies (none created or destroyed
-  since) and returns false otherwise.
+  restored world steps to the same bits, including motion types and pending temporary masses. It needs the same set of bodies (none created or destroyed
+  since) and returns false otherwise. A restore is all or nothing: the bytes end with their length and a
+  check of them, read (one more pass over the bytes, at save and at restore) before anything is touched, so
+  a stream that was cut short or damaged is refused with the world as it was. (Jolt's own restore changes
+  the bodies as it reads, and the ropes, ragdolls and characters must be put in their saved shapes, anchors
+  and motion types before it, so the check cannot be left to the end.) Older save layouts are refused;
+  this rollback format is private to the current engine version.
 
 ## Threads
 
@@ -230,6 +294,7 @@ that a ray meant for floors and walls does not stop at a trigger volume.
 | `raycast(from, to, filter)` | the first hit: body, user id, point, unit normal (out of the body; a mesh's front side), fraction, distance, sub shape (the index of the compound child that was hit) |
 | `raycast_all(from, to, filter)` | every hit (a body once for each sub shape the ray crosses), nearest first; ties by body number, then sub shape |
 | `shape_cast(shape, position, rotation, displacement, filter)` | the first thing the swept shape meets: fraction (time of impact), where the shape is then, the point on the hit body, the normal toward the shape, penetration (above 0 when it started overlapping, fraction 0). Not for meshes or height fields |
+| `shape_cast_all(shape, position, rotation, displacement, filter)` | every body the swept shape meets, **once each at its first time of impact** (a compound or mesh body at the earliest of its sub shapes), by fraction, ties by body number then native sub-shape key (`ShapeHit3D::sub_shape_id`); the same fields as `shape_cast` |
 | `overlap(shape, position, rotation, filter)` | the bodies it overlaps, one entry each, **sorted by body number**, with the deepest contact |
 | `point_inside(point, filter)` | bodies whose solid contains the point, by body number |
 | `closest_point(point, max_distance, filter)` | the nearest surface within the distance (a point inside a solid is at distance 0) |
@@ -239,7 +304,8 @@ Order never depends on pointers or hash maps: the same world answers the same in
 
 ### Bounded query results
 
-`raycast_all(from, to, std::span<RayHit3D>, filter)` and
+`raycast_all(from, to, std::span<RayHit3D>, filter)`,
+`shape_cast_all(shape, position, rotation, displacement, std::span<ShapeHit3D>, filter)` and
 `overlap(shape, position, rotation, std::span<OverlapHit3D>, filter)` write directly into
 caller-owned storage. Their `BoundedQueryResult3D` contains `count`, `overflow` and `valid`.
 Use only `[0,count)`; the unused portion stays untouched. Invalid geometry/input gives
@@ -247,7 +313,9 @@ Use only `[0,count)`; the unused portion stays untouched. Invalid geometry/input
 zero count with overflow means at least one accepted hit existed.
 
 Ray results keep the nearest hits, ties by body number then opaque `sub_shape_id`,
-matching the existing vector overload's prefix. Overlap results keep the lowest body
+matching the existing vector overload's prefix; shape cast results likewise keep the earliest
+bodies, one entry each, as the vector form orders them (a body that had to make room for an earlier
+one counts as omitted). Overlap results keep the lowest body
 numbers, one per body, with its deepest contact; equal penetration uses the lowest
 native sub-shape key. Overflow reports omitted hits/bodies, including when capacity
 is exactly zero; it does not report a total count. A full buffer with no omitted hit
@@ -268,15 +336,22 @@ is insufficient. It rejects stale/native-only bodies without creating a result l
 after the step, into `ContactEvent3D`s: `a` and `b` (the body with the lower number first), their user ids, `kind` (`Begin`,
 `Persist`, `End`), `sensor`, the mean contact `point`, the `normal` from a to b, `closing_speed` (along it, before the solver ran) and
 the manifold's point count. Each step's batch is sorted by (a, b, kind), batches in step order; they wait in `events()` until
-`drain_events()` takes them (`dropped_events()` counts what `max_events` pushed out).
+`drain_events()` takes them. Past `max_events` waiting, the newest are dropped (what came first is kept: dropping the oldest
+would move the whole list for every event) and `dropped_events()` counts them; the character and ragdoll events follow the same
+rule, each list on its own, into the same count.
 
 * One `Begin` and one `End` for a body pair however many sub shapes (compound children, mesh triangles) touch.
 * A pair that **falls asleep together is still touching**: Jolt drops such contacts, but no `End` is reported and no second `Begin`
   when they wake and still touch. `End` comes when a woken body leaves, or a body is destroyed (the next step reports it).
 * Sensors give `Begin` and `End` with `sensor = true`. A static sensor only sees awake bodies; a kinematic sensor that is awake sees
   sleeping ones too (Jolt's rule). A kinematic body at rest sleeps like any other.
-* `World3DConfig::contact_events` (default on; off installs nothing), `persist_events` (a `Persist` for every touching pair each
-  step: for tools; costs a record a pair a step).
+* `World3DConfig::contact_events` (default off; set it to true to receive contacts; off records nothing, while the contact filter of collision groups and
+  `collide_connected` keeps working: a game that drains the events and throws them away should turn them off, as Summit does),
+  `persist_events` (a `Persist` for every touching pair each step: for tools; costs a
+  record a pair a step).
+  `world.drain_events(output)` exchanges storage with a reusable vector; the ECS bridge uses this form so steady
+  contact streams do not discard and regrow their event buffers every step.
+
 * A constraint can break (below); `drain_constraint_events()` reports them.
 
 ## Constraints
@@ -287,7 +362,8 @@ world); handles are `{index, generation}`. Kinds: `Fixed`, `Distance` (min and m
 `Cone` (a swing cone and twist limits: a shoulder), `Slider` (axis, limits in metres, friction, motor). `set_constraint_motor(c, mode,
 target, max_force)` (velocity or position) for hinge and slider. `break_force` / `break_torque` (0: never): above it in a step the
 constraint is disabled and reported (the force is the last collision step's impulse over its length: an estimate). Bodies a
-constraint joins do **not** collide with each other unless `collide_connected` is set (a door and its post, links of a chain).
+constraint joins do **not** collide with each other unless `collide_connected` is set (a door and its post, links of a chain),
+with contact events on or off.
 `constraint_info` gives the anchors and axis as they are now and the hinge angle, slider position or distance. Constraints go with
 their bodies when one is destroyed. They are in `state_hash()`, `save_state()` and `restore_state()` (which needs the same set).
 
@@ -328,7 +404,11 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
   initial velocities. An entity with Transform3D and Collider3D has a body: a static one without RigidBody3D.
 * Bodies are made, in **ascending entity id order**, at the next `sync_bodies()` / `step()` / `advance()`, where the entity is in the
   world with its **world scale applied** to the collider's sizes, and destroyed when the entity, its Collider3D or its Transform3D
-  goes. Body numbers and so the step are the same in two runs that do the same. A body's user id is the entity's id.
+  goes. Body numbers and so the step are the same in two runs that do the same. A body's user id is the entity's id. Which entities
+  have a body, character, ragdoll or rope is read again only when it can have changed (an entity with the components came, went or
+  moved archetype, `rebuild`, a refusal to ask again, a body the world lost, a changed `motion`): a frame with none of those has no
+  gather, sort or merge, only a check of each body. `World3D::shape(body)` is the handle the body was made with (or `set_shape` last
+  gave), so `==` holds and the debug view asks for every body every frame without allocating.
 * **Bodies are world level.** A dynamic body of an entity with a parent is not carried by the parent: it is where the simulation
   puts it, and the entity's Transform3D (its place from the parent as it is now) is rewritten after each step; the parent moving
   leaves the body behind. A kinematic body follows its entity (parents included) and a static one is moved when its entity is.
@@ -336,6 +416,24 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
   that changes a dynamic entity's Transform3D between steps moves the body there (velocities kept). `interpolate(alpha)` (opt-in,
   call after `advance()` with `alpha()`) writes the pose between the last two steps.
 * Changing a live body's components does nothing until `rebuild(entity)`; changing `RigidBody3D::motion` rebuilds by itself.
+* **Refusals are remembered.** A body, character, ragdoll or rope that the world refuses (a dynamic `TriangleMesh`, a hull of fewer
+  than four points, a character shorter than its width, a rope with no thickness) is warned about **once**, with the entity id, and
+  not cooked and asked for again at every step. It is tried again when its components change (a hash of the collider, the
+  body's settings and the world scale for a body; of the descriptor for the others), when `sync_entities` names it, after
+  `rebuild(entity)`, when its components go and come back, and, if the world was nearly out of body slots, when it has more.
+  Grip tuning in `CharacterController3D::desc.traversal` is not part of the hash: `rebuild(entity)` reads it again.
+* **A turned collider needs an even scale.** `Collider3D::rotation` (the collider's or a compound child's) under an entity (or
+  parent collider) scale that is not the same on every axis is refused, with the message of the asset cooker ("rotated collider
+  children require uniform parent scale"): the shape is scaled along its own axes and turned after, which is not the entity's
+  scale applied to a turned shape (a 2 m beam turned to Z on an entity stretched three times along Z would stay 2 m, not 6). Not
+  turned, or under a uniform scale, nothing changes; a ready `Shape3D` is never scaled, so turning one is fine.
+* **After a rollback**, call `resync_from_world()` right after `World3D::restore_state(bytes)`. `restore_state` puts the bodies,
+  characters, ragdolls and ropes back but not the entities: `step()` writes only the awake dynamic bodies, so a sleeping one
+  would keep the `Transform3D` from before the rollback, and an awake one would be interpolated from it. `resync_from_world()`
+  writes the `Transform3D` of every dynamic and kinematic body, the feet and `state` of every character, the pose override and
+  `state` of every ragdoll and the points of every rope from the world as it is, and makes that the pose that `interpolate()`
+  starts from. It moves nothing in the world, leaves the fixed-step accumulator (`alpha()`) to the caller, and is also the call
+  after any other change made straight to bodies (a `teleport`).
 * The events of the last `step()` (all the steps of one `advance()`) are in `events()` and on the ECS world as the singleton
   `PhysicsContacts3D`. `body_of(entity)`, and the `PhysicsBody3D` component on the entity, name its body.
   `SceneSession3D::step()` advances native physics after the Physics phase, so PostPhysics systems read contacts and
@@ -394,6 +492,27 @@ for (const kin::CharacterEvent3D& e : world.drain_character_events()) { /* Lande
 * **Events.** `Landed` (`speed`: how fast it was falling, `body`: the ground), `LeftGround` (`jumped`), `HitHead` (`speed` going up),
   `ContactBegin` / `ContactEnd` (the body and its user id; `sensor` for a trigger volume). Each step's batch is in character order, then in
   the order of the kinds.
+* **Pushed from outside.** `add_character_impulse(c, impulse)` (N s: the velocity changes by impulse / `mass`; impulses add up
+  until the next step) and `set_character_velocity(c, v)` (m/s in the world, the ground's motion included: it replaces the
+  velocity the character has and the impulses given before it; impulses given after it add to it). The next step takes them into
+  the velocity it starts from, BEFORE the command is applied, and clears them. From there it is the controller's own speed and
+  the command works on it as on any: on the ground the part across `up` is braked toward the wish at `acceleration` or
+  `deceleration` x `ground_friction` (a shove of v slides about v^2 / 2a and stops; far on ice); in the air it is kept until the
+  landing (no drag; `air_acceleration` steers it toward the wish) and gravity acts along -up. A push into the ground it stands
+  on is held by it; one that sends it away from the ground at 0.1 m/s or more **launches** it: it leaves the ground as after a
+  jump (no stick to the floor, no ground braking that step, no coyote time, no jump of its own that step, `LeftGround` with
+  `jumped` false), so an impulse of m v up reaches v^2 / 2g. A steady push weaker than the braking (a force under `mass` x
+  `deceleration` x `ground_friction`) does not move a character that stands, nor slow one that walks: it holds its ground, and
+  drifts once it is in the air. Hanging (grab and climb), the push goes into the swing (the grips' spring brings it back) and
+  into what it falls with if it lets go; mantling, it is dropped. A teleport drops a push that waits; a dead or disabled
+  character, or a vector that is not finite, takes none. A push that waits is in `state_hash()` and `save_state()` (a world that
+  never has one hashes as before).
+
+```cpp
+world.add_character_impulse(hero, wind_force * dt);           // a force (N) for this step: F dt, every step it blows
+world.add_character_impulse(hero, blast_direction * 400.0f);   // a knock back
+world.set_character_velocity(hero, {0.0f, 12.0f, 3.0f});       // a launch pad: off the ground at 12 m/s up
+```
 
 ### Entities
 
@@ -464,8 +583,16 @@ const kin::TraversalState3D t = world.traversal(hero);  // mode, the grips, the 
 * **Providers** share one interface (`GripProvider3D`: `probe`, `attach`, `move`, `detach`; `grip_provider(kind)`): the *surface*
   (any collider whose material is grippable and whose normal is not floor-like), the *ledge* (a ray down just inside the surface finds
   the top edge within `ledge_search_height` of the hit; the hand goes to the lip; `clear` says the capsule fits over it and has a floor
-  to stand on; the underside of a ledge counts: the edge is on the hand's side) and the authored *hold* (`HoldDesc3D`: quality, drain,
+  to stand on; the underside of a ledge counts: the edge is on the hand's side; the top may be another body's, see below) and the
+  authored *hold* (`HoldDesc3D`: quality, drain,
   `snap` to a point of the body, `slide`; taken from the front, not the side the sweep grazed). A rope would be another provider.
+* **Ledges across bodies.** The ray's first hit is the top: an upward face (normal within about 45 degrees of `up`) of the held
+  body, or of another body when the held face runs up to it and ends there: a ray into the face 5 cm under the top's height meets
+  the held body first, at the surface's plane, and one 5 cm over it does not. So a wall of thin slabs with the rock behind them,
+  or a mountain of boxes whose top is the next box, has its edge where the face ends, and the pull-up stands the character on
+  the body of the top (`GripCandidate3D::ledge_body`, `MantleStarted`'s body; the move is in that body's space). A roof or a
+  terrace above the wall's end, a top that the held face rises past (a parapet) and a top behind a gap are not the face's
+  ledge. The grip is still on the held body (the hand's anchor moves with it).
 * **Surface materials.** `SurfaceMaterial3D {grippable, grip, slip, drain, tag}` on a body: `grippable` false takes it out (a smooth
   wall; its holds are bodies of their own); `slip` (x `slip_speed` m/s) slides a held grip down the surface and lets it go after
   `slip_release_seconds` or at the end of the surface; `drain` multiplies the resource's drain while a hand holds it; `tag` is yours
@@ -522,7 +649,9 @@ where the character is every N frames (to write checkpoints from) and the events
 ### Limits
 
 The probe's casts stop at the first thing they meet: a grippable thing exactly flush behind a smooth wall cannot be seen (the lip of the
-test level stands 20 cm out); a ledge is found on the body that was hit (a top made of another body is not). A hand takes the aimed
+test level stands 20 cm out). A ledge's top is the first thing the ray down meets: a roof over the wall's own top hides it, and a top on
+another body counts only when the held face ends within 5 cm of it (a capstone that carries the face on above the held body has its own
+ledge: reach for its face). A grip stays on its body: a hand moving up a face does not cross onto the next body. A hand takes the aimed
 point, not "the best hold": reach and the command are the game's. No feet on the wall: the legs dangle (the `fall` pose, or a clip), and
 P1b's foot placement is not active while it hangs. Two grips on one hold are allowed more than 0.2 m apart. Ropes, ladders as a mode of
 their own, and a mantle that is interrupted are not built. The keyboard and mouse path of the viewer is not exercised by any test.
@@ -558,7 +687,8 @@ world.ragdoll_get_up(r, 0.8f);                          // blend back to the cli
   limits and hinges where a name matches the override table (knee, elbow: for a character facing +Z in a T pose; another rig brings
   its own), bones shorter than 2 cm and named ones skipped (a bone's parent is the nearest one with a body), from the joint called
   `pelvis` down. Neighbours never collide with each other (joined: `collide_connected` false); all the bones of one ragdoll are in a
-  collision group and skip each other too unless `self_collision` is set (then only neighbours skip).
+  collision group and skip each other too unless `self_collision` is set (then only neighbours skip). The bones are the ragdoll's
+  (`owner_of` says `Ragdoll`): `destroy_body`, `set_shape` and `set_motion` refuse them; `destroy_ragdoll` takes them.
 * **States.** `Animated`: kinematic bodies that follow the targets (so characters and projectiles can hit them; `animated_bodies`
   false parks them: no collisions, asleep, until the ragdoll starts; a character's own movement leaves a parked body alone too, as it does any body set to collide with nothing, `set_no_collisions`: found by Summit, whose second player's capsule was held by the first one's T-pose arms). `Ragdoll`: dynamic, the pose is the bodies', blending in over
   `blend_seconds` (smoothstep). `Blend`: dynamic, a held share (`blend_ragdoll(alpha, seconds)`; 0 reached means Animated again).
@@ -619,7 +749,9 @@ and a facing: choosing the clip (face up or face down), pose matching and the ch
 `kin/physics3d/rope3d.hpp`, `World3D::create_rope`, `rope_points`, `rope_closest_point`, `rope_tension`, `reel_rope`, ECS `Rope3D`,
 `WorldPhysicsState3D::collect_ropes`: a chain of capsule segments joined by ball joints (point constraints), between two anchors or
 hanging from one. A rope is ordinary bodies and constraints (in the rope's collision group: its segments never meet each other
-unless `self_collision`), so grips, loads, queries and events already see it.
+unless `self_collision`), so grips, loads, queries and events already see it. The segments are the rope's (`owner_of` says
+`Rope`): `destroy_body`, `set_shape` and `set_motion` refuse them, as the rope would go on reading a dead or reshaped body;
+`destroy_rope` and `set_rope_length` are the calls for that.
 
 ```cpp
 kin::RopeDesc3D desc;
@@ -652,7 +784,8 @@ world.rope_points(rope); world.rope_tension(rope, kin::RopeEnd3D::Start);
   lift a heavy load by constraint correction (the solver moves the light segments and not it: a 40 kg crate rose a third of
   the way in 5 s, a crate on the floor not at all), so while the rope is reeled in the anchored body is KINEMATIC and put
   where the chain's end is each step, and dynamic again (at rest) when the length is reached, the reel is stopped or it turns
-  to pay out; the state (hoisting) is in the hash and the saved state. A body that was kinematic already is left alone.
+  to pay out; the state (hoisting) is in the hash and the saved state. A body that was kinematic already is left alone, and so
+  is a ragdoll's bone or another rope's segment (theirs to switch).
   Mass per metre is for the length the rope was made at.
 * **Tension.** `rope_anchor_force` / `rope_tension(end)`: the anchor constraint's impulse of the last collision step over its length,
   smoothed over a quarter of a second (a single step's reading wanders by a tenth: the solver's residual and a load's bounce),
@@ -702,7 +835,9 @@ not reach the rest of the engine. Its licence is installed beside games with the
 texts ([third_party_notices.md](third_party_notices.md)).
 
 Queries cost 1 to 8 microseconds against a 2000 body pile and 1 to 7 against a 100,000 triangle mesh; contact events add under 1 % to
-a 500 body step (persist events 6 %); the entity system adds 0.2 to 0.3 ms a step for 500 bodies. Table in the plan ("P2b").
+a 500 body step (persist events 6 %); the entity system adds about 0.04 ms a step for 500 bodies asleep, or for 500 static ones beside 20
+dynamic, 0.08 ms for 500 awake, and 0.07 ms when a tenth of the entities change archetype each step (`kin_physics3d_bench ecs`; before the
+bound set was read only when it can have changed: 0.09, 0.13, 0.14 and 0.08). Table in the plan ("P2b").
 A character costs about 2 to 5 microseconds a step in the test level (100 of them 0.2 ms alone, 0.7 ms beside a heap of 500 boxes
 they wake); `kin_physics3d_bench characters`, table in the plan ("P2c"). A grip probe is about 14 to 16 microseconds, a hanging
 character 4 to 5 microseconds a step; `kin_physics3d_bench climbing`, table in the plan ("P2d"). A ragdoll of 17 bodies costs about 0.01

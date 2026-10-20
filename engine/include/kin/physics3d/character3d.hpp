@@ -24,6 +24,15 @@
 //    set_gravity; or set explicitly: a wall, a ceiling, a planet), the force |world gravity| x gravity_scale along
 //    -up. The up vector turns smoothly (CharacterDesc3D::up_blend_rate), so walking onto a wall is a turn, not a jump.
 //  * The feet are the origin: position() is the point under the middle of the capsule's base.
+//  * Pushed from outside (World3D::add_character_impulse, set_character_velocity): what was given since the last step goes
+//    into the velocity the next step starts from, before the command is applied (a velocity first, replacing, then the
+//    impulses / mass), and is cleared. From there it is the controller's own speed and the command works on it as on any:
+//    on the ground the part across `up` is braked toward the wish at acceleration or deceleration x ground_friction (a
+//    shove slides and stops, far on ice); in the air it is kept (air_acceleration steers it toward the wish) and gravity
+//    acts along -up. A push toward the ground it stands on is held by it; one that sends it away from the ground at 0.1 m/s
+//    or more launches it (it leaves the ground as after a jump: no stick to the floor, no coyote time, no jump of its own
+//    that step). Hanging (grab and climb), it is the swing's (the grips' spring brings it back) and what it falls with if
+//    it lets go; mantling, it is dropped.
 //  * It has a body in the world (a kinematic capsule in its layer, never asleep) so that the rest of the physics sees
 //    it: dynamic bodies are stopped by it, sensors report it, queries hit it (ignore it with `body`). It counts in
 //    World3D::body_count() and is in bodies(); do not destroy, move or reshape it through the body calls.
