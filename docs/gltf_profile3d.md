@@ -98,7 +98,9 @@ It can return true and retain multiple skeletons or repaired data. Check its
 checks these diagnostics on CPU and GPU; failed assets are never cached.
 GPU loading stages the complete decoded geometry before creating meshes, so
 large models temporarily retain that geometry alongside source and texture
-buffers. CPU-only models do not decode images or upload resources. Geometry/skin/UV checks
+buffers. External buffers retain their content owners: packed spans and loose-file
+storage are passed to cgltf without a second buffer copy. CPU-only models do
+not decode images or upload resources. Geometry/skin/UV checks
 apply there; texture decoding and device-format/upload checks require a GPU load.
 
 ## Navigation geometry
@@ -114,8 +116,11 @@ follow nearby floor connectivity, so distant ramps do not project a balcony's
 border onto lower floors. Boundary-only contact with a stair riser does not
 block a tread's headroom. Uphill rise
 across the radius adds a conservative margin from nearby connected slopes,
-without propagating it across steps or to distant doors. Both dimensions zero request point-agent
-navigation; changing either dimension requires rebuilding.
+including the underside tilt of a soffit over steps, without spreading a
+margin to distant doors. With step joining enabled, construction uses at least
+`max_step_height` of vertical clearance to remove hidden lower supports. Set
+both dimensions and `max_step_height` to zero for point-agent navigation;
+changing any clearance dimension requires rebuilding.
 
 Clearance removes whole triangles. With a positive `max_step_height`, construction
 first conforms mismatched step edges and narrow tread strips; an upper tread may

@@ -1,3 +1,5 @@
+#include <kin/physics3d/shape3d.hpp>
+
 #include "jolt_runtime.hpp"
 
 #include <Jolt/Core/Factory.h>
@@ -21,7 +23,6 @@
 #include <cmath>
 #include <cstring>
 #include <kin/assets/bake_cache.hpp>
-#include <kin/physics3d/shape3d.hpp>
 #include <mutex>
 #include <string_view>
 
@@ -29,10 +30,29 @@ namespace kin {
 
 namespace physics3d_detail {
 
+#ifdef JPH_ENABLE_ASSERTS
+namespace {
+JPH::AssertFailedFunction previous_assert = nullptr;
+bool jolt_assert(const char* expression, const char* message, const char* file, JPH::uint line) {
+    // Jolt reports recoverable capacity exhaustion twice: this assertion and
+    // Update's return value. World3D consumes the latter as StepReport3D and
+    // logs it once per world, including in Debug. Preserve every other assert.
+    if (std::strcmp(expression, "errors == EPhysicsUpdateError::None") == 0 &&
+        std::string_view{file}.ends_with("PhysicsSystem.cpp"))
+        return false;
+    return previous_assert ? previous_assert(expression, message, file, line) : true;
+}
+} // namespace
+#endif
+
 void ensure_jolt_runtime() {
     static std::once_flag once;
     std::call_once(once, [] {
         JPH::RegisterDefaultAllocator();
+#ifdef JPH_ENABLE_ASSERTS
+        previous_assert = JPH::AssertFailed;
+        JPH::AssertFailed = jolt_assert;
+#endif
 
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();

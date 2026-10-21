@@ -138,8 +138,8 @@ Agent dimensions affect construction. A nonzero `agent_height` discards floor
 triangles whose vertical prism intersects any input geometry above the supporting
 surface, including small/sloping ceilings and vertical walls. The test covers the
 whole triangle footprint, not just its vertices or centroid. With a nonzero radius,
-headroom includes the nearby slope rise across that radius, without spreading
-the margin across step joins or distant parts of the level. Local slope searches
+headroom includes nearby floor slopes and ceiling tilt across that radius,
+without spreading the margin to distant parts of the level. Local slope searches
 run only when an overhead obstacle could make that margin relevant. A nonzero `agent_radius` then discards triangles within that
 horizontal distance of a walkable boundary, including boundaries made by headroom
 rejection. Different disconnected layers do not erode each other merely because

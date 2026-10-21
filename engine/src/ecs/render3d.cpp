@@ -145,6 +145,9 @@ void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
         entity.get_mut<ParticleEmitter3D>();
     _emitters.each([&](flecs::entity entity, const WorldTransform3D& world, const ParticleEmitter3D&) {
         auto* emitter = entity.get_mut<ParticleEmitter3D>(); // all owned now, no structural change
+        emitter->previous_sprites.clear();
+        emitter->system.sprites(emitter->previous_sprites);
+        emitter->sampled = true;
         emitter->system.transform = world.matrix;
         const bool native_emitting = emitter->system.emitting;
         emitter->system.emitting = native_emitting && emitter->enabled && emitter->emitting;
@@ -767,7 +770,7 @@ const PoseOverride3D& WorldRenderState3D::pose_override_for(flecs::entity entity
 }
 
 void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentation, const PosePresentation3D& poses,
-                                 const IKPresentation3D& ik) {
+                                 const IKPresentation3D& ik, f32 alpha) {
     struct Guard {
         const Presentation3D*& value;
         ~Guard() { value = nullptr; }
@@ -939,7 +942,28 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         if (!draw_placement(entity, world, nullptr))
             return;
         if (emitter.enabled && emitter.system.count() > 0) {
-            (void)scene.draw_particles(emitter.system, entity.id());
+            if (!emitter.sampled || alpha >= 1) {
+                (void)scene.draw_particles(emitter.system, entity.id());
+                return;
+            }
+            _particle_sprites.clear();
+            emitter.system.sprites(_particle_sprites);
+            const auto& previous = emitter.previous_sprites;
+            std::size_t before = 0;
+            for (auto& sprite : _particle_sprites) {
+                while (before < previous.size() && previous[before].id < sprite.id)
+                    ++before;
+                if (before < previous.size() && previous[before].id == sprite.id) {
+                    const auto& old = previous[before];
+                    sprite.position = lerp(old.position, sprite.position, alpha);
+                    sprite.rotation = std::lerp(old.rotation, sprite.rotation, alpha);
+                    sprite.size = std::lerp(old.size, sprite.size, alpha);
+                    sprite.alpha = std::lerp(old.alpha, sprite.alpha, alpha);
+                } else {
+                    sprite.alpha *= alpha;
+                }
+            }
+            (void)scene.draw_particles(emitter.system.desc.look, _particle_sprites, entity.id());
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).

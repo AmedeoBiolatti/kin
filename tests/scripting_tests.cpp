@@ -104,6 +104,7 @@ end
 
     kin::ScriptScene scene = make_scene(dir, "scene.lua", false);
     assert(scene.script_loaded());
+    assert(scene.last_script_error().empty());
     assert(scene.render_config().clear_color == kin::Color::rgb(red, 2, 3));
     assert(scene.ecs().count<kin::ScriptOwned>() == 1);
     assert((scene.ecs().count<kin::Transform2D, kin::RectRenderer>() == 1));
@@ -119,6 +120,7 @@ end
     assert(rect->order == 3);
 
     scene.update(fixture.ctx);
+    assert(scene.last_script_error().empty());
     kin::InputActionContext actions{"script"};
     scene.collect_actions(actions);
     const auto flattened = actions.flattened_actions();

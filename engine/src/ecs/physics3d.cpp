@@ -453,6 +453,8 @@ void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out, u64 user
     const Transform3D* local = entity.get<Transform3D>();
     out.last_position = desc.motion == Body3DMotion::Dynamic ? local->position : pose.position;
     out.last_rotation = desc.motion == Body3DMotion::Dynamic ? local->rotation : pose.rotation;
+    out.presentation_position = local->position;
+    out.presentation_rotation = local->rotation;
 }
 
 bool WorldPhysicsState3D::sync_selected(EcsId id) const {
@@ -642,6 +644,7 @@ void WorldPhysicsState3D::sync_bodies() {
         for (Bound& b : _bound) {
             const flecs::entity entity{_ecs, b.entity};
             b.local = entity.owns<Transform3D>() ? entity.get<Transform3D>() : nullptr;
+            b.parented = entity.parent().is_valid() ? 1 : 0;
             b.rigid = entity.owns<RigidBody3D>() ? entity.get<RigidBody3D>() : nullptr;
             // A prefab can move, gain or lose RigidBody3D without changing the instance's table or this query's terms.
             b.inherited_rigid = !entity.owns<RigidBody3D>() && entity.has(flecs::IsA, flecs::Wildcard);
@@ -826,6 +829,8 @@ void WorldPhysicsState3D::sync_characters() {
         c.scale = pose.scale;
         c.last_position = e.get<Transform3D>()->position;
         c.position = c.previous_position = pose.position;
+        c.rotation = c.previous_rotation = pose.rotation;
+        c.last_rotation = e.get<Transform3D>()->rotation;
         if (c.character.valid()) {
             forgive(e.id(), Made::Character);
             _characters.push_back(c);
@@ -878,6 +883,8 @@ void WorldPhysicsState3D::characters_to_world(f32) {
             const Placed p = decompose(world_matrix(e));
             _physics.teleport_character(c.character, p.position);
             c.position = c.previous_position = p.position;
+            c.rotation = c.previous_rotation = p.rotation;
+            c.last_rotation = t->rotation;
             c.last_position = t->position;
             c.hands.clear();
         }
@@ -896,6 +903,7 @@ void WorldPhysicsState3D::characters_from_world() {
         }
         const CharacterState3D state = _physics.character(c.character);
         c.previous_position = c.position;
+        c.previous_rotation = c.rotation;
         c.position = state.position;
         write_character(c, state.position);
         CharacterController3D* controller = e.get_mut<CharacterController3D>();
@@ -921,6 +929,8 @@ void WorldPhysicsState3D::characters_from_world() {
                 }
             }
         }
+        c.rotation = decompose(world_matrix(e)).rotation;
+        c.last_rotation = e.get<Transform3D>()->rotation;
         // The animator, when the entity has the link.
         bool sampled_hands = false;
         const CharacterAnimationLink3D* link = e.get<CharacterAnimationLink3D>();
@@ -1108,6 +1118,25 @@ void WorldPhysicsState3D::write_back(Bound& b, Vec3f position, Quatf rotation, b
     }
     b.last_position = t->position;
     b.last_rotation = t->rotation;
+    b.presentation_position = t->position;
+    b.presentation_rotation = t->rotation;
+}
+
+Status3D WorldPhysicsState3D::teleport(flecs::entity entity, Vec3f position, Quatf rotation) {
+    if (!entity.is_valid() || entity.world().c_ptr() != _ecs.c_ptr() || !entity.is_alive() ||
+        !std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z) ||
+        !std::isfinite(rotation.x) || !std::isfinite(rotation.y) || !std::isfinite(rotation.z) ||
+        !std::isfinite(rotation.w))
+        return status3d(false, {"invalid physics teleport target or pose"});
+    auto b = std::ranges::lower_bound(_bound, entity.id(), {}, &Bound::entity);
+    if (b == _bound.end() || b->entity != entity.id() || !_physics.contains(b->body))
+        return status3d(false, {"entity has no bound rigid body"});
+    _physics.teleport(b->body, position, rotation);
+    b->position = b->previous_position = _physics.position(b->body);
+    b->rotation = b->previous_rotation = _physics.rotation(b->body);
+    write_back(*b, b->position, b->rotation);
+    b->stamped = false;
+    return status3d(true, {});
 }
 
 void WorldPhysicsState3D::step(f32 dt) {
@@ -1163,6 +1192,8 @@ void WorldPhysicsState3D::step(f32 dt) {
             }
             b.last_position = p.position;
             b.last_rotation = p.rotation;
+            b.presentation_position = local->position;
+            b.presentation_rotation = local->rotation;
         }
     }
 
@@ -1283,11 +1314,8 @@ std::optional<Mat4f> WorldPhysicsState3D::render_transform(flecs::entity entity,
         const auto b = std::ranges::lower_bound(_bound, entity.id(), {}, &Bound::entity);
         if (b != _bound.end() && b->entity == entity.id() && b->motion != Body3DMotion::Static) {
             // A gameplay edit since the last step is a teleport, not a render lerp.
-            const auto authoritative = world_matrix(entity);
-            const auto simulated = Mat4f::trs(b->position, b->rotation, b->scale);
-            for (u32 i = 0; i < 16; ++i)
-                if (std::abs(authoritative.m[i] - simulated.m[i]) > 1e-4f)
-                    return authoritative * relative;
+            if (local->position != b->presentation_position || local->rotation != b->presentation_rotation)
+                return world_matrix(entity) * relative;
             return Mat4f::trs(lerp(b->previous_position, b->position, alpha),
                               slerp(b->previous_rotation, b->rotation, alpha), b->scale) *
                    relative;
@@ -1295,8 +1323,10 @@ std::optional<Mat4f> WorldPhysicsState3D::render_transform(flecs::entity entity,
         const auto c = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
         if (c != _characters.end() && c->entity == entity.id()) {
             auto pose = decompose(world_matrix(entity));
-            if (length_squared(pose.position - c->position) < 1e-8f)
+            if (local->position == c->last_position && local->rotation == c->last_rotation) {
                 pose.position = lerp(c->previous_position, c->position, alpha);
+                pose.rotation = slerp(c->previous_rotation, c->rotation, alpha);
+            }
             return Mat4f::trs(pose.position, pose.rotation, pose.scale) * relative;
         }
         relative = local->matrix() * relative;
@@ -1315,7 +1345,8 @@ void WorldPhysicsState3D::prepare_presentation(f32 alpha) {
             _presentation_roots.emplace_back(id, *pose);
     };
     for (const auto& b : _bound)
-        if (b.motion != Body3DMotion::Static)
+        if (b.motion != Body3DMotion::Static &&
+            (b.previous_position != b.position || b.previous_rotation != b.rotation || b.parented > 0))
             seed(b.entity);
     for (const auto& c : _characters)
         seed(c.entity);
@@ -1370,6 +1401,16 @@ void WorldPhysicsState3D::interpolate(f32 alpha) {
     }
     for (BoundCharacter& c : _characters) {
         write_character(c, lerp(c.previous_position, c.position, alpha));
+        const flecs::entity e{_ecs, c.entity};
+        if (e.is_valid() && e.is_alive()) {
+            auto* transform = e.get_mut<Transform3D>();
+            const auto world_rotation = slerp(c.previous_rotation, c.rotation, alpha);
+            transform->rotation =
+                e.parent().is_valid()
+                    ? decompose(parent_matrix(e).inverse() * Mat4f::trs({}, world_rotation, c.scale)).rotation
+                    : world_rotation;
+            c.last_rotation = transform->rotation;
+        }
     }
     for (BoundRagdoll& r : _ragdolls) {
         write_pose_override(r, alpha);
@@ -1399,6 +1440,8 @@ void WorldPhysicsState3D::resync_from_world() {
         }
         const CharacterState3D state = _physics.character(c.character);
         c.position = c.previous_position = state.position;
+        c.rotation = c.previous_rotation = decompose(world_matrix(e)).rotation;
+        c.last_rotation = e.get<Transform3D>()->rotation;
         write_character(c, state.position);
         if (CharacterController3D* controller = e.get_mut<CharacterController3D>()) {
             controller->state = state;
@@ -2166,7 +2209,7 @@ void WorldPhysicsState3D::ropes_from_world() {
         }
         c->state = _physics.rope_state(r.rope);
         if (r.sampled)
-            r.previous = c->sampled;
+            r.previous.swap(c->sampled);
         else
             r.previous.clear();
         r.sampled = true;

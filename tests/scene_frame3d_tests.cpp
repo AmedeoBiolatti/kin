@@ -281,9 +281,38 @@ void runtime() {
         assert(server_state.enters == 1 && server_state.updates == 2 && server_state.exits == 1);
     }
 }
+void particle_presentation() {
+    kin::EcsWorld world;
+    register_render3d_components(world);
+    WorldRenderState3D rendering{world};
+    SceneFrame3D frame{world, rendering};
+    auto entity = world.entity("moving-particles").set(Transform3D{}).set(ParticleEmitter3D{});
+    auto* emitter = entity.get_mut<ParticleEmitter3D>();
+    emitter->system.desc.rate = 0;
+    emitter->system.desc.gravity = {};
+    emitter->system.desc.velocity_min = emitter->system.desc.velocity_max = {6, 0, 0};
+    emitter->system.burst(1);
+    std::vector<ParticleSprite3D> previous, current;
+    emitter->system.sprites(previous);
+    assert(frame.step(1.f / 60));
+    emitter->system.sprites(current);
+    assert(previous.size() == 1 && current.size() == 1 && current[0].position.x > previous[0].position.x);
+    const auto hash = emitter->system.state_hash();
+    Scene3D scene;
+    for (float alpha : {-.5f, 0.f, .5f, 1.f, 1.5f}) {
+        assert(frame.collect(scene, nullptr, alpha));
+        assert(scene.particle_sprites().size() == 1);
+        const auto expected = lerp(previous[0].position, current[0].position, std::clamp(alpha, 0.f, 1.f));
+        assert(length(scene.particle_sprites()[0].position - expected) < 1e-5f);
+        assert(emitter->system.state_hash() == hash);
+    }
+    assert(!frame.collect(scene, nullptr, std::numeric_limits<float>::infinity()));
+}
+
 } // namespace
 
 int main() {
+    particle_presentation();
     loader();
     external_frame();
     light_fields();

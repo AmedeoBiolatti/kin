@@ -461,6 +461,9 @@ public:
     flecs::entity entity_of_body(Body3D body) const;
     // The body of an entity (invalid when it has none yet).
     Body3D body_of(flecs::entity entity) const;
+    // Place a bound rigid body in world space without sweeping; clear velocity
+    // and start its presentation segment at the destination (also kinematic).
+    Status3D teleport(flecs::entity entity, Vec3f position, Quatf rotation);
 
     // Draws the world's debug lines (the shapes, constraints, contacts) into `scene` as a wireframe, if
     // config().debug_draw. Add your own with debug() first (rays, sweeps) and they are drawn too.
@@ -487,8 +490,8 @@ private:
         bool inherited_rigid = false;
         // The entity's Transform3D as this system last wrote it (dynamic) or the world pose last sent (kinematic,
         // static).
-        Vec3f last_position{};
-        Quatf last_rotation{};
+        Vec3f last_position{}, presentation_position{};
+        Quatf last_rotation{}, presentation_rotation{};
         // The body's pose after the last step and before it (interpolation), in the world.
         Vec3f position{}, previous_position{};
         Quatf rotation{}, previous_rotation{};
@@ -558,6 +561,7 @@ private:
         Vec3f last_position{};
         // The feet after the last step and before it (interpolation).
         Vec3f position{}, previous_position{};
+        Quatf rotation{}, previous_rotation{}, last_rotation{};
         Vec3f scale{1.0f, 1.0f, 1.0f};
         std::vector<HandHistory> hands; // allocated only for traversal-linked animators
         bool rebuild = false;

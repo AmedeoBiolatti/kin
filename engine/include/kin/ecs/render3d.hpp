@@ -158,6 +158,9 @@ struct ParticleEmitter3D {
     ComponentAssetRef texture_asset; // empty: procedural disc, or a C++ texture
     bool texture_nearest = false;
     std::string bound_texture; // runtime-only; empty refs clear only authored bindings
+    // Presentation history, sampled before the last fixed update; not authored.
+    std::vector<ParticleSprite3D> previous_sprites;
+    bool sampled = false;
 };
 
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the
@@ -490,7 +493,7 @@ public:
     // Optional collection-only hand target sampling; does not replace authored targets.
     using IKPresentation3D = std::function<std::optional<IKTargetPose3D>(const IKConstraint3D&)>;
     void collect(Scene3D& scene, const Presentation3D& presentation = {}, const PosePresentation3D& poses = {},
-                 const IKPresentation3D& ik = {});
+                 const IKPresentation3D& ik = {}, f32 alpha = 1);
     // Release reusable mesh/material buckets after bulk removal. ECS-owned
     // handles remain intact; the next collect rebuilds active buckets.
     void clear_collection_cache();
@@ -554,6 +557,7 @@ private:
     flecs::query<const WorldTransform3D, const PointLight3D, const RenderTransform3D*> _point_lights;
     flecs::query<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*> _spot_lights;
     flecs::query<const WorldTransform3D, const ParticleEmitter3D> _emitters;
+    std::vector<ParticleSprite3D> _particle_sprites;
     flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
     Pose3D _rest_pose;                // a skeleton's rest pose for a model with no animator, reused

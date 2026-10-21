@@ -97,7 +97,9 @@ void main() {
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0));
     vPrevious = (draw.prior * previous_world).xyw;
-    vIndependent = length(world.xyz - previous_world.xyz);
+    const vec4 old_in_current = draw.current * previous_world;
+    vIndependent = old_in_current.w > 0.0 && vCurrent.z > 0.0
+        ? length(vCurrent.xy / vCurrent.z - old_in_current.xy / old_in_current.w) : 2.0;
 #else
     // The same expressions as prepass_velocity.vert's, so the velocity is the pre-pass's to the last bit.
     mat4 before = previous[at];
@@ -106,7 +108,9 @@ void main() {
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * vec4(aPos, 1.0);
     vPrevious = (draw.prior * previous_world).xyw;
-    vIndependent = length(world.xyz - previous_world.xyz);
+    const vec4 old_in_current = draw.current * previous_world;
+    vIndependent = old_in_current.w > 0.0 && vCurrent.z > 0.0
+        ? length(vCurrent.xy / vCurrent.z - old_in_current.xy / old_in_current.w) : 2.0;
 #endif
 #endif
 }

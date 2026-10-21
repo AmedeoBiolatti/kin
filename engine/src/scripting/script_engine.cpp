@@ -815,7 +815,9 @@ struct ScriptCommandTarget {
 
 std::optional<ScriptCommandTarget> command_target_from_lua(const sol::object& object) {
     if (object.is<ScriptEntityApi>()) {
-        ScriptEntityApi entity = object.as<ScriptEntityApi>();
+        const auto& entity = object.as<const ScriptEntityApi&>();
+        if (!entity.alive())
+            throw std::runtime_error("command target entity or 3D lease is stale");
         return ScriptCommandTarget{.id = entity.id()};
     }
     if (object.is<ScriptDeferredEntityApi>()) {
@@ -1339,14 +1341,8 @@ struct ScriptDialoguePlayerApi {
 // Check self without changing legacy argument conversions (including numeric
 // colours). Sol2's unchecked member thunk dereferences a missing receiver.
 template <class C> C& script_self(const sol::stack_object& value, bool property = false) {
-    if (!value.is<C>()) {
-        lua_State* state = value.lua_state();
-        luaL_where(state, 1);
-        std::string message = lua_tostring(state, -1);
-        lua_pop(state, 1);
-        message += property ? "invalid property receiver" : "invalid method receiver; call the method with ':'";
-        throw std::runtime_error(message);
-    }
+    if (!value.is<C>())
+        throw std::runtime_error(property ? "invalid property receiver" : "invalid method receiver; call the method with ':'");
     return value.as<C&>();
 }
 template <class Method, class C, class... A> decltype(auto) script_invoke(Method method, C& self, A&&... args) {
@@ -1391,6 +1387,19 @@ void scripting_detail::script_component_access(std::string_view component, bool 
 
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     : _impl(std::make_unique<Impl>()) {
+    _impl->lua.set_exception_handler([](lua_State* state, sol::optional<const std::exception&>, sol::string_view what) {
+        lua_Debug caller{};
+        int level = 1;
+        while (lua_getstack(state, level, &caller)) {
+            lua_getinfo(state, "l", &caller);
+            if (caller.currentline > 0) break;
+            ++level;
+        }
+        luaL_where(state, level);
+        lua_pushlstring(state, what.data(), what.size());
+        lua_concat(state, 2);
+        return 1;
+    });
     _impl->lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
     sol::table package = _impl->lua.create_table();
     package["loaded"] = _impl->lua.create_table();

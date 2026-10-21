@@ -710,7 +710,8 @@ draws one sample a pixel whatever `ViewOptions3D::samples` asks
   appearance changes and unversioned render-target textures reject their affected
   footprints; motion elsewhere does not reject the entire transparent scene.
   Receiving particles record shadowed irradiance, so a redrawn moving shadow
-  rejects changed pixels while the rest of the receiver keeps its history.
+  lowers history confidence where illumination changed. Redrawing an identical
+  shadow map with caching disabled does not change its content revision.
   Stationary coverage uses the normal history weight; moving composites cap it
   at 0.6 because independently moving overlapping layers have several velocities.
   Coverage respects depth, texture alpha, procedural edges, alpha-zero emission,
@@ -3618,7 +3619,8 @@ See [the 3D API migration guide](3d_api_migration.md) for `LinearRgb` light inpu
 
 Call `session.step(fixed_dt)` from the fixed update and
 `session.render(accumulator / fixed_dt)` once per displayed frame. The session
-interpolates dynamic/kinematic bodies, characters and their child draw placements without
+interpolates dynamic/kinematic bodies, character positions and rotations,
+particle sprites and child draw placements without
 writing gameplay transforms or advancing physics. Joint attachments use the
 same root placement. Linked traversal hands sample moving holds and rope
 polylines at that alpha, including hand rotation and surface clearance.
@@ -3636,7 +3638,9 @@ History retains the nearest 65,536 visible sprites per view; additional sprites 
 spatial reconstruction. Overlapping independently moving translucent layers
 share the foremost contributing velocity, so history confidence is capped.
 Blended mesh and particle coverage reject history where opaque geometry behind them moves
-independently of the camera, including the following frame's old footprint.
+independently of the camera beyond a fraction of the projected pixel footprint,
+including the following frame's old footprint. The threshold follows projected pixel size,
+not world units.
 Static geometry at different depths retains history during camera translation
 and rotation. The existing motion/normal target carries the marker; there is
 no extra opaque-motion target or fullscreen copy. Lit particles record local

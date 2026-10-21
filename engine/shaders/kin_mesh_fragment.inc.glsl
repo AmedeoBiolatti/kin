@@ -35,6 +35,6 @@ void main() {
     }
     FragColor = kin_output(c, alpha);
 #ifdef KIN_VELOCITY
-    FragVelocity = vec4(0.0, vIndependent > 1e-5 ? 4.0 : 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
+    FragVelocity = vec4(0.0, vIndependent > 0.25 * length(fwidth(vCurrent.xy / vCurrent.z)) ? 4.0 : 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
 #endif
 }

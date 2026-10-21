@@ -21,7 +21,7 @@ void main() {
     vec2 normal = octahedral(kin_prepass_normal());
     // Carry independent geometry motion in the normal's unused range. AO
     // decodes the offset; transparent coverage preserves G for the resolve.
-    if (vIndependent > 1e-5)
+    if (vIndependent > 0.25 * length(fwidth(vCurrent.xy / vCurrent.z)))
         normal.y += 4.0;
     FragNormalVelocity = vec4(normal, kin_velocity(vCurrent, vPrevious, vFresh));
 }

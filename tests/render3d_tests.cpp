@@ -17748,7 +17748,6 @@ void test_gpu_taa_live_transparency() {
         if (lacks(r3d.capabilities().temporal_aa && r3d.capabilities().particles, "TAA particles"))
             return;
         const auto box = make_box(r3d, {1, 1, 1});
-        const auto unrelated = make_box(r3d, {.2f, .2f, .2f});
         std::vector<kin::u8> pixels(32 * 32 * 4, 255);
         for (int y = 0; y < 32; ++y)
             for (int x = 0; x < 32; ++x)
@@ -17776,7 +17775,7 @@ void test_gpu_taa_live_transparency() {
                 // Adding an unrelated earlier draw must not change the stable
                 // transparent draw's appearance/history identity.
                 if (mode == 3 && frame % 2)
-                    (void)scene.draw(unrelated, Mat4f::translation({-3, 3, 0}), {.unlit = true});
+                    (void)scene.draw(box, Mat4f::translation({-3, 3, 0}), {.unlit = true});
                 (void)scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
                 // Unrelated motion used to reject every transparent pixel.
                 (void)scene.draw(box, Mat4f::translation({-3, .1f * frame, 1}), {.unlit = true});

@@ -347,6 +347,24 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     write(source.path / "prop.kinprefab", pooled_prefab);
     write(source.path / "logic.lua", R"lua(
       local ticks, prepared, pool, spawned, old, old_id, editor = 0
+      function on_load(scene)
+        scene:authored('crate'):patch('TestStats', {ticks=0})
+        assert(scene:register_system('lease-commands', {phase='post_physics', all={'TestStats'},
+          writes={'TestStats'}}, function(e, dt, ctx)
+          if ticks==6 and e:id()~=old_id then
+            assert(ctx.commands.valid)
+            for _, action in ipairs({'destroy','remove','patch','add'}) do
+              local ok, message=pcall(function()
+                if action=='destroy' then ctx.commands:destroy(old)
+                elseif action=='remove' then ctx.commands:remove(old,'TestStats')
+                elseif action=='patch' then ctx.commands:patch(old,'TestStats',{ticks=99})
+                else ctx.commands:add(old,'TestStats') end
+              end)
+              assert(not ok and message:find('stale') and message:find('logic.lua'))
+            end
+          end
+        end))
+      end
       function update(ctx)
         ticks=ticks+1
         if ticks==1 then prepared=scene3d.preload('prop.kinprefab')

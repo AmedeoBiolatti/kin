@@ -3509,10 +3509,13 @@ void GpuRenderer3D::match_particles(FrameCtx& ctx, u32 total) {
         return nullptr;
     };
     _particle_history_now.clear();
-    const auto farther = [&](const auto& a, const auto& b) {
-        const auto distance = [&](const auto& record) { return length_squared(record.centre - scene.camera.position); };
-        return std::tuple{distance(a), a.source, a.id} < std::tuple{distance(b), b.source, b.id};
+    struct Candidate {
+        f32 distance;
+        u32 batch, original;
     };
+    std::vector<Candidate> candidates;
+    if (total > history_budget)
+        candidates.reserve(total);
     ensure_buffer(_particle_previous, total * 64u, min_particle_buffer);
     const std::function<void(std::span<u8>)> previous = [&](std::span<u8> out) {
         u32 at = 0;
@@ -3542,19 +3545,28 @@ void GpuRenderer3D::match_particles(FrameCtx& ctx, u32 total) {
                 std::memcpy(out.data() + std::size_t(at) * 64, data, 64);
                 const GpuView3D::ParticleHistory record{batch.source, id,       batch.look_key, quad,
                                                         p.position,   p.colour, p.alpha,        p.frame};
-                if (_particle_history_now.size() < history_budget) {
+                if (total <= history_budget)
                     _particle_history_now.push_back(record);
-                    if (total > history_budget && _particle_history_now.size() == history_budget)
-                        std::make_heap(_particle_history_now.begin(), _particle_history_now.end(), farther);
-                } else if (farther(record, _particle_history_now.front())) {
-                    std::pop_heap(_particle_history_now.begin(), _particle_history_now.end(), farther);
-                    _particle_history_now.back() = record;
-                    std::push_heap(_particle_history_now.begin(), _particle_history_now.end(), farther);
-                }
+                else
+                    candidates.push_back({length_squared(p.position - scene.camera.position), b, original});
             }
         }
     };
     _device->upload_storage_buffer(_particle_previous->handle(), 0, total * 64u, nullptr, true, &previous);
+    if (!candidates.empty()) {
+        const auto less = [](const Candidate& a, const Candidate& b) {
+            return std::tuple{a.distance, a.batch, a.original} < std::tuple{b.distance, b.batch, b.original};
+        };
+        std::nth_element(candidates.begin(), candidates.begin() + history_budget, candidates.end(), less);
+        for (u32 i = 0; i < history_budget; ++i) {
+            const auto c = candidates[i];
+            const auto& batch = _particle_batches[c.batch];
+            const auto& sprite = _particle_source[c.batch][c.original];
+            _particle_history_now.push_back({batch.source, sprite.id ? sprite.id : u64(c.original) + 1, batch.look_key,
+                                             particle_quad(sprite, batch.look, scene.camera), sprite.position,
+                                             sprite.colour, sprite.alpha, sprite.frame});
+        }
+    }
 }
 
 void GpuRenderer3D::upload_particles(FrameCtx& ctx, u32 total) {
@@ -4931,7 +4943,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
         LocalCache& cache = _local_cache[view.cache];
         const auto* particles = particle_cast_view(view.view_projection);
-        bool cacheable = cache_on && (!particles || !particles->unstable);
+        bool cacheable = (cache_on || ctx.taa) && (!particles || !particles->unstable);
         if (cacheable) {
             std::vector<u8>& bytes = _local_payload;
             bytes.clear();
@@ -4976,16 +4988,19 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 }
             }
             if (cacheable) {
-                if (cache.valid && cache.payload == bytes) {
+                if (cache_on && cache.valid && cache.payload == bytes) {
                     view.cached = true;
                     ++stats.local_shadow_cached;
                     continue;
                 }
+                if (!cache.valid || cache.payload != bytes)
+                    ++cache.revision;
                 cache.payload.swap(bytes);
                 cache.valid = true;
             }
         }
         if (!cacheable) {
+            ++cache.revision;
             cache.valid = false;
         }
         view.drawn = true;
@@ -5249,7 +5264,6 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
         if (!draw_particle_shadows(ctx, pass, view.view_projection, true))
             _local_cache[view.cache].valid = false;
         SDL_EndGPURenderPass(pass);
-        ++_local_cache[view.cache].revision;
     }
 }
 
@@ -7762,7 +7776,7 @@ template <class Consume> bool GpuRenderer3D::visit_shadow_copy_bytes(Consume&& c
 bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
     ShadowCache& c = _shadow_cache;
     c.eligible = false;
-    if (!ctx.scene.lights.cache_shadows) {
+    if (!ctx.scene.lights.cache_shadows && !ctx.taa) {
         c.valid = false;
         c.prev_key.clear();
         return false;
@@ -7905,7 +7919,7 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
             return true;
         });
         if (same && at == c.copies.size()) {
-            return true;
+            return ctx.scene.lights.cache_shadows;
         }
         c.valid = false;
         c.backoff =
@@ -7915,10 +7929,25 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
 }
 
 void GpuRenderer3D::shadow_drawn(FrameCtx& ctx, bool complete) {
-    if (complete)
-        ++_shadow_revision;
-    static_cast<void>(ctx);
     ShadowCache& c = _shadow_cache;
+    if (complete) {
+        if (c.eligible) {
+            u64 content = 1469598103934665603ull;
+            taa_hash(content, c.scratch.data(), c.scratch.size());
+            visit_shadow_copy_bytes([&](const void* bytes, std::size_t size) {
+                taa_hash(content, bytes, size);
+                return true;
+            });
+            _shadow_revision = content;
+        } else {
+            ++_shadow_revision; // untraceable render-target inputs
+        }
+    }
+    if (!ctx.scene.lights.cache_shadows) {
+        c.valid = false;
+        c.prev_key.clear();
+        return;
+    }
     if (!c.eligible || !complete) {
         c.valid = false;
         c.prev_key.clear();
@@ -8061,11 +8090,10 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
     }
 }
 
-// AO/contact shading has consumed the normals. Reuse their RG for local
-// coverage/irradiance and BA for the contributing layer's reprojection motion.
+// AO/contact shading has consumed the normals. Reuse R for coverage/irradiance,
+// preserve the opaque motion marker in G, and write layer reprojection in BA.
 // Replaying coverage also works with a velocity pre-pass and arbitrary custom
-// fragment shaders without changing their ABI. Preserve opaque motion only when
-// blended mesh coverage needs to detect independently moving layers.
+// fragment shaders without changing their ABI.
 bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     auto* view = ctx.view;
     // Revisions belong to each view's history, not just the renderer's current
@@ -8117,12 +8145,12 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     std::vector<u64> identities(_refs.size());
     for (u32 r = 0; r < _refs.size(); ++r) {
         const auto& ref = _refs[r];
+        if (pass_of(ref.draw->material) == Pass::Opaque)
+            continue;
         u64 identity = mix64(ref.mesh->serial * 2 + ref.scene);
         auto& offset = mesh_offsets[identity];
         const auto first = offset;
         offset += ref.draw->count;
-        if (pass_of(ref.draw->material) == Pass::Opaque)
-            continue;
         bool identified = true;
         for (u32 i = 0; i < ref.draw->count; ++i) {
             identified &= ref.instances[i].id != 0;

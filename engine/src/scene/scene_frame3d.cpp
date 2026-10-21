@@ -132,10 +132,11 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
     _running = true;
     _errors.clear();
     try {
-        if (!std::isfinite(alpha) || alpha < 0 || alpha > 1) {
-            _errors = {"render interpolation alpha must be finite and in [0,1]"};
+        if (!std::isfinite(alpha)) {
+            _errors = {"render interpolation alpha must be finite"};
             return false;
         }
+        alpha = std::clamp(alpha, 0.f, 1.f);
         if (!validate())
             return false;
         scene.clear();
@@ -170,7 +171,7 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         _rendering.apply_time_of_day(scene);
         const auto fog = scene.fog;
         _rendering.apply_weather(scene, fog);
-        _rendering.collect(scene, presentation, poses, ik);
+        _rendering.collect(scene, presentation, poses, ik, alpha);
         if (_options.bodies && _options.renderer && _options.renderer->available())
             _options.bodies->collect_ropes(*_options.renderer, scene, alpha);
         _errors = scene.diagnostics();

@@ -637,6 +637,8 @@ void test_agent_clearance() {
             if (up[i].y - up[i - 1].y > .15f)
                 ++steps;
         assert(steps == 4);
+        for (std::size_t i = 1; i < up.size(); ++i)
+            assert(up[i].x >= up[i - 1].x - 1e-5f); // no backward nosing jog
         assert(bytes_of(mesh) ==
                bytes_of(build(noses, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f})));
     }
@@ -894,9 +896,118 @@ void test_cost() {
                 ms(t2, t3), ms(t2, t3) * 10.0, static_cast<double>(corners) / 100.0);
 }
 
+Soup stair_fixture(bool nose = false, f32 width = 2) {
+    Soup soup = grid(20, int(std::round(width / .1f)), .1f, 0, {-2, 0, 0});
+    for (int k = 0; k < 4; ++k) {
+        const float cell = k % 2 ? .1f : .25f;
+        soup.append(
+            grid(int(std::round(1 / cell)), int(std::round(width / cell)), cell, (k + 1) * .2f, {float(k), 0, 0}));
+        if (nose)
+            soup.append({{{k - .03f, (k + 1) * .2f, 0},
+                          {k - .03f, (k + 1) * .2f, width},
+                          {float(k), (k + 1) * .2f, width},
+                          {float(k), (k + 1) * .2f, 0}},
+                         {0, 1, 2, 0, 2, 3}});
+    }
+    soup.append(grid(20, int(std::round(width / .1f)), .1f, .8f, {4, 0, 0}));
+    return soup;
+}
+void test_step_seams_and_soffits() {
+    // A nose extends a drop-off toward the lower tread. Radius erosion must
+    // reach across the joined riser as well as along each individual tread.
+    auto drop = grid(20, 40, .1f, 0, {-2, 0, 0});
+    drop.append(grid(20, 20, .1f, .2f, {0, 0, 1}));
+    drop.append({{{-.03f, .2f, 1}, {-.03f, .2f, 3}, {0, .2f, 3}, {0, .2f, 1}}, {0, 1, 2, 0, 2, 3}});
+    const auto clearance = build(drop, {.agent_radius = .3f, .agent_height = 1.8f, .max_step_height = .25f});
+    assert(!kin::nearest(clearance, {-.35f, 0, 1.05f}, {.002f, .002f, .002f}));
+    assert(kin::nearest(clearance, {-.6f, 0, 1.05f}, {.002f, .002f, .002f}));
+    // Crossings should follow the rerouted corridor, not aim every riser at
+    // the final destination. This unobstructed route has a 6.025 m chord.
+    const auto wide =
+        build(stair_fixture(false, 4), {.agent_radius = .3f, .agent_height = 1.8f, .max_step_height = .25f});
+    const auto across = kin::find_path(wide, {-.865620136f, 0, 2.50231123f}, {5.0229063f, .8f, 1.22923446f});
+    assert(!across.empty());
+    float horizontal = 0;
+    for (std::size_t i = 1; i < across.size(); ++i) {
+        const auto d = across[i] - across[i - 1];
+        horizontal += std::hypot(d.x, d.z);
+    }
+    if (!(horizontal < 6.08f))
+        std::fprintf(stderr, "stair route horizontal=%g\n", horizontal);
+    assert(horizontal < 6.08f);
+
+    for (bool nose : {false, true}) {
+        for (float angle : {0.f, 5.f, 30.f, 45.f}) {
+            auto soup = stair_fixture(nose);
+            const auto turn = kin::Quatf::axis_angle({0, 1, 0}, angle);
+            for (auto& point : soup.vertices)
+                point = turn.rotate(point);
+            for (float radius : {0.f, .1f, .3f, .4f}) {
+                const auto mesh = build(soup, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f});
+                assert(mesh.region_count() == 1);
+                const auto path = kin::find_path(mesh, turn.rotate({-1, 0, 1}), turn.rotate({5, .8f, 1}));
+                assert(!path.empty());
+                if (radius == 0) {
+                    const auto inverse = kin::Quatf::axis_angle({0, 1, 0}, -angle);
+                    for (const auto& tri : mesh.triangles)
+                        for (u32 edge = 0; edge < 3; ++edge) {
+                            const auto a = inverse.rotate(mesh.vertices[tri.vertices[edge]]);
+                            const auto b = inverse.rotate(mesh.vertices[tri.vertices[(edge + 1) % 3]]);
+                            const auto middle = (a + b) * .5f;
+                            const bool seam = std::abs(middle.x - std::round(middle.x)) < 1e-4f ||
+                                              (nose && std::abs(middle.x + .03f - std::round(middle.x + .03f)) < 1e-4f);
+                            if (seam && middle.x > -.04f && middle.x < 4.01f && middle.z > .01f && middle.z < 1.99f &&
+                                std::abs(a.x - b.x) < 1e-4f && std::abs(a.y - b.y) < 1e-4f)
+                                assert(tri.neighbors[edge] != kin::nav_none);
+                        }
+                }
+                for (const auto& tri : mesh.triangles)
+                    for (u32 e = 0; e < 3; ++e)
+                        if (tri.neighbors[e] != kin::nav_none) {
+                            const auto& partner = mesh.triangles[tri.neighbors[e]];
+                            assert(std::ranges::find(partner.neighbors, u32(&tri - mesh.triangles.data())) !=
+                                   partner.neighbors.end());
+                        }
+            }
+        }
+    }
+    // A single large roof triangle can extend below the current floor at
+    // its far corner; classify its clipped overhead, not its lowest vertex.
+    auto long_roof = stair_fixture();
+    long_roof.append({{{-10, .05f, -1}, {-10, .05f, 3}, {20, 6.05f, 3}, {20, 6.05f, -1}}, {0, 2, 1, 0, 3, 2}});
+    for (float radius : {.3f, .4f})
+        assert(kin::find_path(build(long_roof, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f}),
+                              {-.5f, 0, 1}, {5, .8f, 1})
+                   .empty());
+    assert(!kin::find_path(build(long_roof, {.agent_radius = .1f, .agent_height = 1.8f, .max_step_height = .25f}),
+                           {-.5f, 0, 1}, {5, .8f, 1})
+                .empty());
+    auto stairs = stair_fixture();
+    auto roof = grid(16, 8, .5f, 0, {-2, 0, -1});
+    for (auto& p : roof.vertices)
+        p.y = 2.05f + .2f * std::clamp(p.x, -1.f, 4.f);
+    for (std::size_t i = 0; i < roof.indices.size(); i += 3)
+        std::swap(roof.indices[i + 1], roof.indices[i + 2]);
+    stairs.append(roof);
+    for (float radius : {0.f, .1f})
+        assert(!kin::find_path(build(stairs, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f}),
+                               {-1, 0, 1}, {5, .8f, 1})
+                    .empty());
+    // The cylinder reaches the next tread before its centre crosses the riser.
+    // Clearance measured only vertically over the centre incorrectly accepts it.
+    for (float radius : {.3f, .4f})
+        assert(kin::find_path(build(stairs, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f}),
+                              {-1, 0, 1}, {5, .8f, 1})
+                   .empty());
+    assert(!kin::find_path(build(stair_fixture(), {.agent_radius = .4f, .agent_height = 1.8f, .max_step_height = .25f}),
+                           {-1, 0, 1}, {5, .8f, 1})
+                .empty());
+}
+
 } // namespace
 
 int main() {
+    test_step_seams_and_soffits();
     test_grid_with_hole_adjacency();
     test_path_around_the_hole();
     test_slopes();

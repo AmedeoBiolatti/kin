@@ -1551,6 +1551,8 @@ void test_resync_of_a_sleeping_body() {
     CHECK(near(box.get<Transform3D>()->position, rest, 1e-6f));
     bodies.step(dt);
     CHECK(!physics.is_active(body) && near(box.get<Transform3D>()->position, rest, 1e-6f));
+    bodies.prepare_presentation(.5f);
+    CHECK(!bodies.presentation_transform(box)); // no interpolation segment, no root seed
 }
 
 // Which entities have bodies is read again only when it can have changed, so every way it can change is checked after a
@@ -1744,9 +1746,77 @@ void test_shape_of_a_body_is_its_handle() {
     CHECK(physics.shape(again) == box && !physics.shape(body).valid());
 }
 
+void test_sleeping_child_keeps_world_pose() {
+    kin::EcsWorld ecs;
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    const auto parent = ecs.raw()
+                            .entity()
+                            .set(Transform3D{})
+                            .set(box_collider({.1f, .1f, .1f}))
+                            .set(RigidBody3D{.motion = Body3DMotion::Kinematic});
+    const auto child = ecs.raw()
+                           .entity()
+                           .child_of(parent)
+                           .set(Transform3D{.position = {0, 10, 0}})
+                           .set(box_collider({.1f, .1f, .1f}))
+                           .set(RigidBody3D{.gravity_factor = 0});
+    bodies.step(dt);
+    physics.deactivate(bodies.body_of(child));
+    parent.get_mut<Transform3D>()->position.x = 2;
+    bodies.step(dt);
+    bodies.prepare_presentation(.5f);
+    const auto shown = bodies.presentation_transform(child);
+    CHECK(shown && near(shown->apply({}), physics.position(bodies.body_of(child)), 1e-5f));
+}
+void test_character_rotation_presentation() {
+    kin::EcsWorld ecs;
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    const auto hero = add_character(ecs.raw(), {0, 5, 0});
+    bodies.step(dt);
+    const auto before = hero.get<Transform3D>()->rotation;
+    hero.get_mut<CharacterController3D>()->facing = Quatf::axis_angle({0, 1, 0}, 90.f);
+    bodies.step(dt);
+    const auto after = hero.get<Transform3D>()->rotation;
+    const auto hash = physics.state_hash();
+    for (f32 alpha : {0.f, .5f, 1.f}) {
+        const auto pose = bodies.render_transform(hero, alpha);
+        CHECK(pose.has_value());
+        if (pose)
+            CHECK(near(pose->apply_vector({0, 0, 1}), slerp(before, after, alpha).rotate({0, 0, 1}), 1e-4f));
+    }
+    CHECK(hash == physics.state_hash());
+}
+void test_kinematic_teleport_does_not_sweep() {
+    kin::EcsWorld ecs;
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    const auto platform = ecs.raw()
+                              .entity()
+                              .set(Transform3D{.position = {-5, 4, 0}})
+                              .set(box_collider({.4f, .4f, .4f}))
+                              .set(RigidBody3D{.motion = Body3DMotion::Kinematic});
+    bodies.sync_bodies();
+    CHECK(bodies.teleport(platform, {5, 4, 0}, {}));
+    const auto body = bodies.body_of(platform);
+    CHECK(near(physics.linear_velocity(body), {}, 1e-5f));
+    bodies.step(dt);
+    CHECK(near(physics.position(body), {5, 4, 0}, 1e-5f));
+    CHECK(near(physics.linear_velocity(body), {}, 1e-5f));
+    const auto view = bodies.render_transform(platform, 0);
+    CHECK(view && near(view->apply({}), {5, 4, 0}, 1e-5f));
+    platform.get_mut<Transform3D>()->position.x += .1f;
+    bodies.step(dt);
+    CHECK(physics.linear_velocity(body).x > 1); // ordinary motion still sweeps
+}
+
 } // namespace
 
 int main() {
+    test_sleeping_child_keeps_world_pose();
+    test_character_rotation_presentation();
+    test_kinematic_teleport_does_not_sweep();
     test_disabled_contacts_readable();
     test_bodies_in_entity_order();
     test_scale_offset_and_compound();

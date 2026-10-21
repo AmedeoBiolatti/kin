@@ -217,9 +217,9 @@ for (;;) {                                       // the engine's fixed step
   carry them, and a restore needs them as they were when it was saved.
 
 ```cpp
-world.set_friction(ice_sheet, 0.02f);           // static: what rests on it is woken
-world.set_gravity_factor(balloon, -0.2f);       // rises
-world.set_mass(crate, world.mass(crate) * 2);   // the same push moves it half as fast
+if (!world.set_friction(ice_sheet, 0.02f)) return report_invalid_body(ice_sheet);           // static: what rests on it is woken
+if (!world.set_gravity_factor(balloon, -0.2f)) return report_invalid_body(balloon);       // rises
+if (!world.set_mass(crate, world.mass(crate) * 2)) return report_invalid_body(crate);   // the same push moves it half as fast
 ```
 * **Owned bodies.** A character's capsule, a ragdoll's bones and a rope's segments belong to it: `owner_of(body)` says which
   (`BodyOwner3D::None`, `Character`, `Ragdoll`, `Rope`), so a game can tell what a ray hit. `destroy_body`, `set_shape`,
@@ -464,7 +464,7 @@ const kin::Character3D hero = world.create_character(desc);
 ...each fixed step:
 world.set_character_input(hero, {.move = {0, 1}, .forward = camera.forward(), .jump = pressed, .sprint = held});
 const auto step_report = world.step(dt);
-if (step_report.any()) return report_physics_failure(step_report);                                  // characters first (in number order), then the world
+if (step_report.any()) return report_physics_failure(step_report); // characters first, then the world
 const kin::CharacterState3D s = world.character(hero);   // position (feet), velocity, ground, ground_body, ground_speed, ...
 for (const kin::CharacterEvent3D& e : world.drain_character_events()) { /* Landed, LeftGround, HitHead, ContactBegin, ContactEnd */ }
 ```

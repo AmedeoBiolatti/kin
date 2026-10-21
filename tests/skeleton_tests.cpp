@@ -1527,7 +1527,8 @@ void test_loader_node_animation() {
         set_logger_config(before);
         assert(ok && deep.parts.size() == 1 && deep.parts[0].node == -1 && deep.skeletons.empty() &&
                deep.clips.empty());
-        assert(logged(events, "model rejected: animated node hierarchy exceeds the joint limit; split the model",
+        assert(logged(events,
+                      "model profile violation: animated node hierarchy exceeds the joint limit; split the model",
                       "300 nodes"));
     }
 }

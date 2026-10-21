@@ -44,6 +44,7 @@ public:
     // An authored SceneEnvironment3D sets the picture in `view` (samples,
     // background, hdr, exposure, bloom); `view->pick` is the caller's and
     // survives it (scene3d_view_options), the same as SceneSession3DOptions::view.pick.
+    // Finite alpha is clamped to [0,1]; NaN/infinity return failure.
     Status3D collect(Scene3D& scene, ViewOptions3D* view = nullptr, f32 alpha = 1);
     const std::vector<std::string>& diagnostics() const { return _errors; }
 

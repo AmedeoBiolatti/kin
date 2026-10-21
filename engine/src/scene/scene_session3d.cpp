@@ -20,6 +20,20 @@
 
 namespace kin {
 namespace {
+std::vector<flecs::entity> children_of(flecs::entity entity) {
+    std::vector<flecs::entity> children;
+    entity.children([&](flecs::entity child) { children.push_back(child); });
+    return children;
+}
+// Validation may throw. Finish Flecs iteration before inspecting components
+// so an expected configuration failure cannot strand a locked table.
+template <class T, class F> void inspect_components(flecs::world& world, F&& inspect) {
+    std::vector<flecs::entity> entities;
+    world.each([&](flecs::entity entity, const T&) { entities.push_back(entity); });
+    for (auto entity : entities)
+        if (const auto* value = entity.get<T>())
+            inspect(entity, *value);
+}
 struct SceneIdentity3D {
     u64 session = 0, generation = 0;
 };
@@ -642,10 +656,10 @@ struct SceneSession3D::Data {
             const auto parent = entity.parent.empty() ? 0 : record.local.at(entity.parent).id;
             if (e.parent().id() != parent)
                 throw std::runtime_error("pool hierarchy was reparented");
-            e.raw().children([&](flecs::entity child) {
+            for (auto child : children_of(e.raw())) {
                 if (std::ranges::none_of(record.members, [&](auto h) { return h.id == child.id(); }))
                     throw std::runtime_error("pool slot has an unmanaged child");
-            });
+            }
         }
     }
     void renew(State& state, State::Spawned& record) {
@@ -694,7 +708,7 @@ struct SceneSession3D::Data {
         for (const auto& source : state.asset.prefab_sources())
             watch(state, source);
         const auto models = [&]<class T>() {
-            state.world.raw().each([&](flecs::entity, const T& renderer) {
+            inspect_components<T>(state.world.raw(), [&](flecs::entity, const T& renderer) {
                 if (!renderer.asset.id.empty())
                     watch(state, renderer.asset.id);
                 if (renderer.model) {
@@ -708,27 +722,27 @@ struct SceneSession3D::Data {
         };
         models.operator()<ModelRenderer3D>();
         models.operator()<SkinnedMeshRenderer3D>();
-        state.world.raw().each([&](flecs::entity, const Collider3D& collider) {
+        inspect_components<Collider3D>(state.world.raw(), [&](flecs::entity, const Collider3D& collider) {
             if (!collider.asset.id.empty())
                 watch(state, collider.asset.id);
             if (collider.asset_binding)
                 for (const auto& source : collider.asset_binding->source_files)
                     watch(state, source);
         });
-        state.world.raw().each([&](flecs::entity, const ParticleEmitter3D& emitter) {
+        inspect_components<ParticleEmitter3D>(state.world.raw(), [&](flecs::entity, const ParticleEmitter3D& emitter) {
             if (!emitter.texture_asset.id.empty())
                 watch(state, emitter.texture_asset.id);
             if (!emitter.bound_texture.empty())
                 watch(state, emitter.bound_texture);
         });
-        state.world.raw().each([&](flecs::entity, const ModelMaterials3D& material) {
+        inspect_components<ModelMaterials3D>(state.world.raw(), [&](flecs::entity, const ModelMaterials3D& material) {
             if (!material.asset.id.empty())
                 watch(state, material.asset.id);
             if (material.binding)
                 for (const auto& source : material.binding->source_files)
                     watch(state, source);
         });
-        state.world.raw().each([&](flecs::entity, const AnimatorAsset3D& animator) {
+        inspect_components<AnimatorAsset3D>(state.world.raw(), [&](flecs::entity, const AnimatorAsset3D& animator) {
             if (!animator.asset.id.empty())
                 watch(state, animator.asset.id);
             if (animator.configuration)
@@ -1306,7 +1320,9 @@ struct SceneSession3D::Data::EditTransaction {
         auto& entry = stage(entity, true);
         entry.pose = true;
         entry.move |= move;
-        entity.raw().children([&](flecs::entity child) { descendants(EcsEntity{child}, true); });
+        for (auto child : children_of(entity.raw())) {
+            descendants(EcsEntity{child}, true);
+        }
     }
 
     void stage_edits() {
@@ -1763,10 +1779,10 @@ ScenePrefab3D SceneSession3D::spawn_now(const std::filesystem::path& path, Scene
         for (auto e : instance.entities) {
             require(bool(e), "spawn configuration destroyed a prefab entity");
             require(e.parent().id() == parents.at(e.id()), "spawn configuration reparented a prefab entity");
-            e.raw().children([&](flecs::entity child) {
+            for (auto child : children_of(e.raw())) {
                 require(std::ranges::binary_search(ids, EcsId(child.id())),
                         "spawn configuration created an unmanaged child");
-            });
+            }
             require(!e.has<SceneCamera3D>() && !e.has<SceneEnvironment3D>(),
                     "runtime object prefabs cannot replace scene camera/environment settings");
             if (const auto* t = e.get<Transform3D>()) {
@@ -2182,11 +2198,11 @@ bool SceneSession3D::release_now(ScenePrefabPool3D handle) {
         for (auto id : pool.slots)
             for (auto h : state.spawned.at(id).members)
                 if (auto e = state.world.entities().resolve(h))
-                    e.raw().children([&](flecs::entity child) {
+                    for (auto child : children_of(e.raw())) {
                         const auto owner = state.owners.find(child.id());
                         if (owner == state.owners.end() || owner->second != id)
                             throw std::runtime_error("pool release would destroy a foreign child; detach it first");
-                    });
+                    }
     };
     BoolScope busy(d.editing);
     try {
@@ -2257,13 +2273,13 @@ bool SceneSession3D::despawn_now(ScenePrefab3D prefab) {
         add_record(prefab.id);
         for (size_t i = 0; i < queue.size(); ++i)
             if (auto e = state.world.entities().resolve(queue[i]))
-                e.raw().children([&](flecs::entity child) {
+                for (auto child : children_of(e.raw())) {
                     const auto owner = state.owners.find(child.id());
                     if (owner == state.owners.end())
                         throw std::runtime_error(
                             "despawn would destroy an authored/unmanaged child; detach it explicitly");
                     add_record(owner->second);
-                });
+                }
         std::vector<EcsId> ids;
         ids.reserve(members.size());
         for (const auto& [id, h] : members)

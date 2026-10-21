@@ -26,27 +26,29 @@
 namespace kin {
 namespace {
 
-// cgltf reads the file's other files (buffers, images) through these: kin's
-// content folder or pack, as the model itself.
-cgltf_result read_file(const cgltf_memory_options*, const cgltf_file_options*, const char* path, cgltf_size* size,
-                       void** data) {
-    const auto bytes = view_content_file(std::filesystem::path{path});
-    if (!bytes) {
+// cgltf only reads these buffers. Keep the content owners alive until its
+// parsed data is released, including loose-file strings and mapped pack spans.
+struct GltfFiles {
+    std::vector<ContentBytes> contents;
+};
+cgltf_result read_file(const cgltf_memory_options*, const cgltf_file_options* options, const char* path,
+                       cgltf_size* size, void** data) {
+    auto bytes = view_content_file(std::filesystem::path{path});
+    if (!bytes)
         return cgltf_result_file_not_found;
-    }
-    void* copy = std::malloc(bytes->bytes.size() ? bytes->bytes.size() : 1);
-    if (!copy) {
-        return cgltf_result_out_of_memory;
-    }
-    std::memcpy(copy, bytes->bytes.data(), bytes->bytes.size());
-    *size = bytes->bytes.size();
-    *data = copy;
+    auto& files = *static_cast<GltfFiles*>(options->user_data);
+    files.contents.push_back(std::move(*bytes));
+    const auto view = files.contents.back().bytes;
+    *size = view.size();
+    *data = const_cast<std::byte*>(view.data());
     return cgltf_result_success;
 }
-
-void release_file(const cgltf_memory_options*, const cgltf_file_options*, void* data) {
-    std::free(data);
-}
+void release_file(const cgltf_memory_options*, const cgltf_file_options*, void*) {}
+struct GltfFree {
+    std::shared_ptr<GltfFiles> files;
+    void operator()(cgltf_data* data) const { cgltf_free(data); }
+};
+using GltfData = std::unique_ptr<cgltf_data, GltfFree>;
 
 const char* describe(cgltf_result result) {
     switch (result) {
@@ -292,17 +294,18 @@ private:
             const std::size_t n = skin.joints_count;
             if (n == 0 || n > max_skin_joints) {
                 unsupported(
-                    "model rejected: unsupported skin; export at most 256 joints with readable MAT4 inverse binds",
+                    "model profile violation: unsupported skin; export at most 256 joints with readable MAT4 inverse "
+                    "binds",
                     std::string{skin.name ? skin.name : "skin"} + " has " + std::to_string(n) + " joints, " +
                         (n == 0 ? "none" : "more than the " + std::to_string(max_skin_joints) + " a skin can have"));
                 continue;
             }
             const cgltf_accessor* binds = skin.inverse_bind_matrices;
             if (const char* why = !binds ? nullptr : binds->type != cgltf_type_mat4 ? "not MAT4" : unreadable(binds)) {
-                unsupported(
-                    "model rejected: unsupported skin; export at most 256 joints with readable MAT4 inverse binds",
-                    std::string{skin.name ? skin.name : "skin"} + ": its inverse bind matrices cannot be read (" + why +
-                        ")");
+                unsupported("model profile violation: unsupported skin; export at most 256 joints with readable MAT4 "
+                            "inverse binds",
+                            std::string{skin.name ? skin.name : "skin"} +
+                                ": its inverse bind matrices cannot be read (" + why + ")");
                 continue;
             }
             // The same joints with the same inverse bind matrices as an earlier skin: one skeleton, so that a character
@@ -345,7 +348,7 @@ private:
                 }
             }
             if (nodes.size() > max_skin_joints) {
-                unsupported("model rejected: intermediary skin nodes exceed the joint limit; simplify the rig",
+                unsupported("model profile violation: intermediary skin nodes exceed the joint limit; simplify the rig",
                             std::string{skin.name ? skin.name : "skin"} + " would have " +
                                 std::to_string(nodes.size()) + " joints with them, more than the " +
                                 std::to_string(max_skin_joints) + " a skin can have");
@@ -383,7 +386,7 @@ private:
                 }
             }
             if (order.size() != count) {
-                unsupported("model rejected: skin joints form a loop; export an acyclic rig",
+                unsupported("model profile violation: skin joints form a loop; export an acyclic rig",
                             skin.name ? skin.name : "skin");
                 continue;
             }
@@ -432,7 +435,7 @@ private:
                     sk.root_transform = world;
                     first_root = false;
                 } else if (std::memcmp(world.m, sk.root_transform.m, sizeof(world.m)) != 0) {
-                    unsupported("model rejected: skin roots use different spaces; export a common root",
+                    unsupported("model profile violation: skin roots use different spaces; export a common root",
                                 skin.name ? skin.name : "skin");
                 }
             }
@@ -480,7 +483,7 @@ private:
             return;
         }
         if (marked > max_skin_joints) {
-            unsupported("model rejected: animated node hierarchy exceeds the joint limit; split the model",
+            unsupported("model profile violation: animated node hierarchy exceeds the joint limit; split the model",
                         std::to_string(marked) + " nodes with those above them, more than " +
                             std::to_string(max_skin_joints));
             return;
@@ -794,7 +797,7 @@ private:
                     attribute_index(primitive, cgltf_attribute_type_texcoord, placing->texcoord)) {
                 uvs = set;
             } else {
-                unsupported("model rejected: material requires a missing TEXCOORD set; export that UV set",
+                unsupported("model profile violation: material requires a missing TEXCOORD set; export that UV set",
                             std::string{name} + ": TEXCOORD_" + std::to_string(placing->texcoord));
             }
         }
@@ -826,9 +829,9 @@ private:
         if (skin) {
             read = read_skin(primitive, *skin, data.vertices.size(), name, data.skin) && read;
             if (attribute_index(primitive, cgltf_attribute_type_joints, 1)) {
-                unsupported(
-                    "model rejected: more than four skin influences per vertex; limit weights to four before export",
-                    name);
+                unsupported("model profile violation: more than four skin influences per vertex; limit weights to four "
+                            "before export",
+                            name);
             }
         }
         // cgltf_accessor_read_index has no failure to report: refusal() has seen that the indices' data is there.
@@ -940,7 +943,8 @@ private:
                 note("3D: an animation moves no joint of a skin and no node a part hangs from: it is left out", name);
             }
             if (morph) {
-                unsupported("model rejected: morph target animation is unsupported; bake it before export", name);
+                unsupported("model profile violation: morph target animation is unsupported; bake it before export",
+                            name);
             }
             if (other && (!clip_of.empty() || node_clip)) {
                 note("3D: an animation moves nodes no part of the model hangs from: those channels are ignored", name);
@@ -960,12 +964,12 @@ private:
         const std::size_t keys = sampler.input->count;
         const std::size_t per_key = mode == Interpolation3D::CubicSpline ? 3 : 1;
         if (sampler.output->count < keys * per_key) {
-            unsupported("model rejected: animation channel has fewer values than keys", _label);
+            unsupported("model profile violation: animation channel has fewer values than keys", _label);
             return;
         }
         for (const cgltf_accessor* accessor : {sampler.input, sampler.output}) {
             if (const char* why = unreadable(accessor)) {
-                unsupported("model rejected: animation channel keys cannot be read", _label + ": " + why);
+                unsupported("model profile violation: animation channel keys cannot be read", _label + ": " + why);
                 return;
             }
         }
@@ -1014,14 +1018,15 @@ private:
 };
 
 // Parses glTF bytes (and loads the buffers they name) into cgltf's data; null with `error` set when it does not read.
-std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> parse_gltf(std::string_view bytes, const std::filesystem::path& path,
-                                                              std::string& error) {
+GltfData parse_gltf(std::string_view bytes, const std::filesystem::path& path, std::string& error) {
+    auto files = std::make_shared<GltfFiles>();
     cgltf_options options{};
+    options.file.user_data = files.get();
     options.file.read = read_file;
     options.file.release = release_file;
     cgltf_data* data = nullptr;
     cgltf_result result = cgltf_parse(&options, bytes.data(), bytes.size(), &data);
-    std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> owned{data, cgltf_free};
+    GltfData owned{data, GltfFree{files}};
     // Refused before a buffer is read: nodes nested deeper than the reader may recurse, and a buffer outside the
     // model's content (outside_content; as a missing buffer would, the model does not load).
     std::string refused;
@@ -1355,7 +1360,8 @@ static bool read_model_geometry3d_impl(const std::filesystem::path& path, ModelG
         struct Files {
             u64 remaining;
             std::vector<std::filesystem::path> sources;
-        } files{limits.buffer_bytes, {path.lexically_normal()}};
+            GltfFiles views;
+        } files{limits.buffer_bytes, {path.lexically_normal()}, {}};
         cgltf_options options{};
         options.file.user_data = &files;
         options.file.read = [](const cgltf_memory_options* memory, const cgltf_file_options* options, const char* file,
@@ -1366,7 +1372,9 @@ static bool read_model_geometry3d_impl(const std::filesystem::path& path, ModelG
                 return cgltf_result_io_error;
             context.remaining -= *bytes;
             context.sources.push_back(std::filesystem::path(file).lexically_normal());
-            return read_file(memory, options, file, size, data);
+            auto borrowed = *options;
+            borrowed.user_data = &context.views;
+            return read_file(memory, &borrowed, file, size, data);
         };
         options.file.release = release_file;
         cgltf_data* data = nullptr;

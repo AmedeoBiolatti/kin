@@ -68,7 +68,7 @@
     {
       "name": "2d",
       "configurePreset": "2d",
-      "jobs": 1
+      "jobs": 4
     },
     {
       "name": "3d",
@@ -84,7 +84,7 @@
         "outputOnFailure": true
       },
       "execution": {
-        "jobs": 1
+        "jobs": 2
       },
       "environment": {
         "KIN_RENDER_BACKEND": "sdl"

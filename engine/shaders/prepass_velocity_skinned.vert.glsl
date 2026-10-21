@@ -46,7 +46,9 @@ void main() {
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0));
     vPrevious = (draw.prior * previous_world).xyw;
-    vIndependent = length(world.xyz - previous_world.xyz);
+    const vec4 old_in_current = draw.current * previous_world;
+    vIndependent = old_in_current.w > 0.0 && vCurrent.z > 0.0
+        ? length(vCurrent.xy / vCurrent.z - old_in_current.xy / old_in_current.w) : 2.0;
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;

@@ -314,3 +314,11 @@ bridge now drains native constraint break events each step; consume its
 
 Raw ECS query values track physical entities. For a pooled actor, cache a token
 from `scene3d.handle(e)` and resolve that token when accessing the current lease.
+
+Finite presentation alpha now clamps to [0,1]; non-finite alpha still fails.
+Character rotation and simulated particle sprites follow the same fixed-step
+fraction as meshes. Collection leaves their authoritative state unchanged.
+For an instantaneous rigid-body move use
+`WorldPhysicsState3D::teleport(entity, world_position, world_rotation)` and check
+its status. This clears velocity and interpolation history, including for
+kinematic bodies. Ordinary kinematic transform animation continues to sweep.

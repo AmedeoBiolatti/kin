@@ -254,7 +254,7 @@ jobs:
           - name: Linux GPU (lavapipe, Debug)
             build_type: Debug
             examples: 'OFF'
-            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton)$'
+            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|scene-session3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton)$'
     runs-on: ubuntu-24.04
     env:
       SDL_VIDEO_DRIVER: x11

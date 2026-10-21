@@ -9,6 +9,21 @@ releases may change APIs.
 
 ### Fixed
 
+- Interpolate character rotation and particle sprites with the fixed-step frame;
+  clamp finite presentation alpha and skip unchanged sleeping-body roots. Add
+  an explicit bridge teleport for kinematics and reuse rope readback buffers.
+- Preserve Lua caller locations through `pcall`, reject expired command targets,
+  and validate on-load errors in receiver regressions.
+- Restore recoverable Jolt capacity reporting in Debug; keep other Jolt asserts
+  active. Validate session descendants outside Flecs iteration locks.
+- Separate shadow content revisions from redraws, keep anonymous glass identities
+  independent of opaque culling, and express opaque motion tolerance in pixels.
+  Select bounded particle history with compact linear-time candidates.
+- Preserve rotated stair seams and test cylinder headroom under stair soffits;
+  keep query allocator storage off small thread stacks.
+- Retain glTF buffer owners without a second loose-file copy, report profile
+  violations consistently during inspection, and enforce smoke-test exit codes.
+
 - Repair short-edge stair seam triangulation, exact-position welding, mixed-grid
   nosings and stairs on continuous floors. Recheck new joins against blocking walls.
 - Retain lit-particle TAA under 1% fire flicker; preserve opaque motion through
